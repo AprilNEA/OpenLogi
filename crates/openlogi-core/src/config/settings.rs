@@ -348,6 +348,79 @@ impl From<VerticalScrollSensitivity> for f32 {
     }
 }
 
+/// Host-synthesized touchpad scrolling responsiveness on OpenLogi's `1..=100`
+/// scale.
+///
+/// This is the touchpad counterpart of [`VerticalScrollSensitivity`]: while
+/// raw-XY gesture capture is armed the firmware stops translating two-finger
+/// motion, so OpenLogi synthesizes the scroll itself and this scales that
+/// synthesized distance on both axes.
+#[nutype(
+    const_fn,
+    validate(greater_or_equal = SENSITIVITY_MIN, less_or_equal = SENSITIVITY_MAX),
+    derive(
+        Debug,
+        Clone,
+        Copy,
+        PartialEq,
+        Eq,
+        PartialOrd,
+        Ord,
+        TryFrom,
+        Into,
+        Display,
+        Serialize,
+        Deserialize
+    )
+)]
+pub struct TouchpadScrollSensitivity(u8);
+
+impl TouchpadScrollSensitivity {
+    /// Lowest selectable sensitivity.
+    pub const MIN: Self = match Self::try_new(SENSITIVITY_MIN) {
+        Ok(value) => value,
+        Err(_) => panic!("valid minimum touchpad scroll sensitivity"),
+    };
+    /// Highest selectable sensitivity.
+    pub const MAX: Self = match Self::try_new(SENSITIVITY_MAX) {
+        Ok(value) => value,
+        Err(_) => panic!("valid maximum touchpad scroll sensitivity"),
+    };
+    /// Out-of-the-box sensitivity. At this value scrolling runs at 1×.
+    pub const DEFAULT: Self = match Self::try_new(SENSITIVITY_DEFAULT) {
+        Ok(value) => value,
+        Err(_) => panic!("valid default touchpad scroll sensitivity"),
+    };
+
+    /// Round and clamp a floating-point slider value into the valid range.
+    #[must_use]
+    pub fn from_rounded(value: f32) -> Self {
+        let raw = rounded_sensitivity(value);
+        let Ok(value) = Self::try_new(raw) else {
+            unreachable!("clamped touchpad scroll sensitivity is always valid")
+        };
+        value
+    }
+
+    /// Scroll-distance multiplier relative to [`Self::DEFAULT`].
+    #[must_use]
+    pub fn scroll_multiplier(self) -> f64 {
+        f64::from(self.into_inner()) / f64::from(Self::DEFAULT.into_inner())
+    }
+}
+
+impl Default for TouchpadScrollSensitivity {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl From<TouchpadScrollSensitivity> for f32 {
+    fn from(sensitivity: TouchpadScrollSensitivity) -> Self {
+        Self::from(sensitivity.into_inner())
+    }
+}
+
 /// Thumb-wheel responsiveness on OpenLogi's `1..=100` scale.
 #[nutype(
     const_fn,

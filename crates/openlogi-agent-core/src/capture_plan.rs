@@ -15,8 +15,8 @@ use openlogi_core::binding::{Action, Binding, ButtonId, GestureDirection, defaul
 use openlogi_core::bindings::{
     button_bindings_for, hidpp_gesture_maps_for, oshook_gestures_for, touchpad_bindings_for,
 };
-use openlogi_core::config::{Config, ThumbwheelSensitivity};
-use openlogi_core::device_order::PhysicalDeviceKey;
+use openlogi_core::config::{Config, ThumbwheelSensitivity, TouchpadScrollSensitivity};
+use openlogi_core::device_order::{DeviceStableId, PhysicalDeviceKey};
 use openlogi_hid::DeviceRoute;
 use openlogi_hid::session::gesture::{
     CaptureSessionMode, CaptureSpec, DIVERTABLE_STANDARD_BUTTONS, GESTURE_SOURCE_BUTTONS,
@@ -68,6 +68,13 @@ pub struct DispatchPlan {
     /// Effective one-shot actions for all raw-touchpad gestures. The
     /// dispatcher snapshots this map on the first frame of a stroke.
     pub touchpad_bindings: BTreeMap<ButtonId, Action>,
+    /// Speed of the two-finger scrolling OpenLogi synthesizes while this
+    /// device's raw-touchpad capture is armed.
+    pub touchpad_scroll_sensitivity: TouchpadScrollSensitivity,
+    /// Whether that synthesized scrolling runs opposite the system scroll
+    /// preference. Software-applied device-level `invert_scroll`: the pad
+    /// has no native HID++ wheel-inversion mode to push it into.
+    pub touchpad_scroll_inverted: bool,
 }
 
 /// One device's independently versioned hardware target and dispatch plan.
@@ -109,7 +116,10 @@ pub(crate) fn hidpp_side_gesture_maps_for(
         .collect()
 }
 
-/// Build one device's plan from the config (per-app effective for `app`).
+/// Build one device's plan with journal-less touchpad options — a test
+/// convenience; production always resolves a probed journal identity through
+/// [`plan_for_device_with_touchpad`].
+#[cfg(test)]
 #[must_use]
 pub fn plan_for_device(
     config: &Config,
@@ -215,6 +225,10 @@ pub fn plan_for_device_with_touchpad(
             .is_some_and(|binding| binding.click_action() != default_binding(*button))
     });
     let thumbwheel_sensitivity = config.thumbwheel_sensitivity(config_key);
+    // Link-scoped scroll inversion resolves against the route this session
+    // serves; `route` moves into the capture target below, so derive the key
+    // before the struct literal.
+    let route_key = DeviceStableId::from_parts(Some(&route), 0, None, [0; 4]).route_key();
     DeviceCapturePlan {
         target: CaptureTarget {
             physical_key,
@@ -243,6 +257,11 @@ pub fn plan_for_device_with_touchpad(
             side_gesture_bindings,
             thumbwheel_sensitivity,
             touchpad_bindings: touchpad_bindings_for(config, config_key, app),
+            touchpad_scroll_sensitivity: config.touchpad_scroll_sensitivity(config_key),
+            touchpad_scroll_inverted: config
+                .devices
+                .get(config_key)
+                .is_some_and(|device| device.effective_invert_scroll(&route_key)),
         },
     }
 }
@@ -274,6 +293,8 @@ pub fn touchpad_recovery_plan(
             side_gesture_bindings: BTreeMap::new(),
             thumbwheel_sensitivity: ThumbwheelSensitivity::DEFAULT,
             touchpad_bindings: BTreeMap::new(),
+            touchpad_scroll_sensitivity: TouchpadScrollSensitivity::DEFAULT,
+            touchpad_scroll_inverted: false,
         },
     }
 }
@@ -616,6 +637,8 @@ mod tests {
     fn touchpad_capture_requires_both_opt_in_and_a_stable_probed_identity() {
         let mut cfg = Config::default();
         cfg.set_touchpad_gestures_enabled("unit:12345678", true);
+        cfg.set_touchpad_scroll_sensitivity("unit:12345678", Some(TouchpadScrollSensitivity::MAX));
+        cfg.set_invert_scroll("unit:12345678", true);
 
         let unsupported = plan_for_device(&cfg, "unit:12345678", route(), None, 0, true);
         assert!(!unsupported.target.spec.capture_touchpad);
@@ -637,6 +660,11 @@ mod tests {
             supported.target.spec.touchpad_journal_id.as_deref(),
             Some("unit:12345678")
         );
+        assert_eq!(
+            supported.dispatch.touchpad_scroll_sensitivity,
+            TouchpadScrollSensitivity::MAX
+        );
+        assert!(supported.dispatch.touchpad_scroll_inverted);
     }
 
     #[test]
@@ -706,11 +734,8 @@ mod tests {
         );
 
         assert_eq!(plan.target.spec.mode, CaptureSessionMode::TouchpadRecovery);
-        assert!(plan.dispatch.bindings.is_empty());
-        assert!(plan.dispatch.gesture_bindings.is_empty());
-        assert!(plan.target.spec.divert_buttons.is_empty());
-        assert!(!plan.target.spec.capture_thumbwheel);
-        assert!(plan.dispatch.touchpad_bindings.is_empty());
         assert!(!plan.target.spec.capture_touchpad);
+        assert!(!plan.target.spec.capture_thumbwheel);
+        assert!(plan.target.spec.divert_buttons.is_empty());
     }
 }

@@ -35,7 +35,7 @@ use crate::features::pointer::smartshift::SmartShiftPanel;
 use crate::features::profiles::{
     AppCatalogPicker, ProfileIconCache, action_ring_profile_scope_bar, button_profile_scope_bar,
 };
-use crate::features::touchpad::gesture_panel;
+use crate::features::touchpad::{TouchpadScrollPanel, gesture_panel};
 use crate::state::{AppState, DeviceRecord, StateEvent};
 use crate::ui::battery::BatteryIndicator;
 use crate::ui::components::{PanelCard, Toggle};
@@ -92,6 +92,7 @@ pub(super) struct DetailPanels<'a> {
     pub keyboard_model: &'a gpui::Entity<FunctionRowView>,
     pub dpi_panel: &'a gpui::Entity<DpiPanel>,
     pub smartshift_panel: &'a gpui::Entity<SmartShiftPanel>,
+    pub touchpad_scroll_panel: &'a gpui::Entity<TouchpadScrollPanel>,
     pub lighting_panel: &'a gpui::Entity<LightingPanel>,
     pub camera_preview: &'a gpui::Entity<CameraPreview>,
     pub camera_controls: &'a gpui::Entity<CameraControlsPanel>,
@@ -117,7 +118,10 @@ pub(super) fn detail_content(
         DetailTab::Buttons => {
             buttons_tab(panels.mouse_model, profile_icons, app_catalog, cx).into_any_element()
         }
-        DetailTab::Gestures => gestures_tab(profile_icons, app_catalog, cx).into_any_element(),
+        DetailTab::Gestures => {
+            gestures_tab(panels.touchpad_scroll_panel, profile_icons, app_catalog, cx)
+                .into_any_element()
+        }
         DetailTab::ActionsRing => {
             action_ring_tab(panels.action_ring, profile_icons, app_catalog, cx).into_any_element()
         }
@@ -269,6 +273,7 @@ fn buttons_tab(
 /// Gestures tab: the same device/per-app profile scope as mouse bindings,
 /// followed by the capability-specific touchpad controls.
 fn gestures_tab(
+    touchpad_scroll_panel: &gpui::Entity<TouchpadScrollPanel>,
     profile_icons: &ProfileIconCache,
     app_catalog: &gpui::Entity<AppCatalogPicker>,
     cx: &mut Context<AppView>,
@@ -278,7 +283,10 @@ fn gestures_tab(
         .w_full()
         .min_h_0()
         .children(button_profile_scope_bar(profile_icons, app_catalog, cx))
-        .child(tab_body(ContentWidth::Medium, gesture_panel(cx)))
+        .child(tab_body(
+            ContentWidth::Medium,
+            gesture_panel(touchpad_scroll_panel, cx),
+        ))
 }
 
 fn tab_body(
@@ -387,6 +395,52 @@ struct ScrollingFacts {
     hires: HiresWheel,
 }
 
+/// The invert-direction row, for the wheel's native HID++ inversion mode.
+/// A raw-touchpad device inverts through the scrolling OpenLogi synthesizes —
+/// that control lives on the Gestures tab, where the touchpad capability
+/// already gates the page.
+fn inversion_row(inverted: bool, wheel_supported: bool, pal: Palette) -> gpui::Div {
+    let description = if wheel_supported {
+        tr!("Reverse this mouse's scroll wheel. Your trackpad keeps the system scroll direction.")
+    } else {
+        tr!("This device does not report native HID++ scroll inversion support.")
+    };
+    h_flex()
+        .justify_between()
+        .items_center()
+        .gap_4()
+        .child(
+            v_flex()
+                .child(
+                    div()
+                        .text_body()
+                        .text_color(pal.text_primary)
+                        .child(tr!("Invert scroll direction")),
+                )
+                .child(
+                    div()
+                        .text_caption()
+                        .text_color(pal.text_muted)
+                        .child(description),
+                ),
+        )
+        .child(
+            Toggle::new("invert-scroll-toggle")
+                .selected(inverted)
+                .disabled(!wheel_supported)
+                .label((!wheel_supported).then(|| tr!("Unavailable")))
+                .on_change(|inverted, _window, cx| {
+                    AppState::update(cx, |state, cx| {
+                        let key = state.current_record().map(DeviceRecord::device_key);
+                        state.commit_invert_scroll(*inverted);
+                        if let Some(key) = key {
+                            cx.emit(StateEvent::DeviceConfigChanged(key));
+                        }
+                    });
+                }),
+        )
+}
+
 /// Where the device offers hi-res wheel control.
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
 enum HiresWheel {
@@ -410,7 +464,10 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
         hires,
     } = AppState::try_read(cx).map_or_else(ScrollingFacts::default, |state| ScrollingFacts {
         inverted: state.current_invert_scroll(),
-        inversion_supported: state.current_scroll_inversion_supported(),
+        inversion_supported: state
+            .current_record()
+            .and_then(|record| record.capabilities)
+            .is_some_and(|capabilities| capabilities.scroll_inversion),
         resolution: state.current_scroll_resolution(),
         hires: if state.current_hires_wheel_supported() {
             HiresWheel::Here
@@ -420,45 +477,7 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
             HiresWheel::Nowhere
         },
     });
-    let inversion_description = if inversion_supported {
-        tr!("Reverse this mouse's scroll wheel. Your trackpad keeps the system scroll direction.")
-    } else {
-        tr!("This device does not report native HID++ scroll inversion support.")
-    };
-    let inversion_row = h_flex()
-        .justify_between()
-        .items_center()
-        .gap_4()
-        .child(
-            v_flex()
-                .child(
-                    div()
-                        .text_body()
-                        .text_color(pal.text_primary)
-                        .child(tr!("Invert scroll direction")),
-                )
-                .child(
-                    div()
-                        .text_caption()
-                        .text_color(pal.text_muted)
-                        .child(inversion_description),
-                ),
-        )
-        .child(
-            Toggle::new("invert-scroll-toggle")
-                .selected(inverted)
-                .disabled(!inversion_supported)
-                .label((!inversion_supported).then(|| tr!("Unavailable")))
-                .on_change(|inverted, _window, cx| {
-                    AppState::update(cx, |state, cx| {
-                        let key = state.current_record().map(DeviceRecord::device_key);
-                        state.commit_invert_scroll(*inverted);
-                        if let Some(key) = key {
-                            cx.emit(StateEvent::DeviceConfigChanged(key));
-                        }
-                    });
-                }),
-        );
+    let inversion_row = inversion_row(inverted, inversion_supported, pal);
     let resolution_description = match hires {
         HiresWheel::Here => match resolution {
             None => tr!("OpenLogi does not change the wheel resolution."),

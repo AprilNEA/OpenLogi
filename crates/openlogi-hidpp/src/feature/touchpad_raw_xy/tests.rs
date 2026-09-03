@@ -63,7 +63,10 @@ fn decodes_dual_xy_event() {
     payload[14] = 0x22; // area2
     payload[15] = 0x50 | 0x03; // FID2=5, NUMFING=3
 
-    let TouchpadRawEvent::DualXy(frame) = decode_event(0, &payload).unwrap();
+    let TouchpadRawEvent::DualXy(frame) = decode_event(0, &payload).expect("sub-id 0 decodes")
+    else {
+        unreachable!("sub-id 0 is always a DualXy frame")
+    };
     assert_eq!(frame.timestamp, 0x1234);
 
     assert_eq!(frame.touch1.contact_type, 0);
@@ -88,7 +91,11 @@ fn decodes_dual_xy_event() {
 
 #[test]
 fn ignores_unknown_event_sub_id() {
-    assert!(decode_event(1, &[0; 16]).is_none());
+    assert!(decode_event(2, &[0; 16]).is_none());
+    assert!(matches!(
+        decode_event(1, &[0; 16]),
+        Some(TouchpadRawEvent::GestureHandledByDevice { .. })
+    ));
 }
 
 #[test]

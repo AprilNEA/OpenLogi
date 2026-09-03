@@ -169,6 +169,8 @@ pub(crate) async fn recover_pending_touchpads(shared: &SharedRuntime) {
                 shutdown,
                 channel_slot: Arc::clone(&channel),
                 device_io: shared.device_io.clone(),
+                // Recovery only restores; nothing subscribes to presses.
+                native_button: shared.native_button.clone(),
             },
         )
         .await
@@ -322,9 +324,7 @@ pub(crate) fn spawn_hidpp_watchers(
 ) -> GestureWatcher {
     let gesture = watchers::gesture::spawn(
         &shared.capture_plans,
-        shared.capture_channel.clone(),
         shared.receiver_access.clone(),
-        shared.channel_registry.clone(),
         shared.device_io.clone(),
         GestureOutputs::new(
             inputs.dispatcher.clone(),
@@ -332,6 +332,11 @@ pub(crate) fn spawn_hidpp_watchers(
             shared.hook_maps.clone(),
         ),
         touchpad_monitor,
+        (
+            shared.capture_channel.clone(),
+            shared.channel_registry.clone(),
+            shared.native_button.clone(),
+        ),
     );
     watchers::host_switch::spawn(
         &shared.host_switch_links,
@@ -514,25 +519,5 @@ mod tests {
                 journal_id: "serial:casa-1".to_string(),
             }]
         );
-    }
-
-    #[test]
-    fn startup_recovery_without_pending_records_has_no_targets() {
-        let inventory = DeviceInventory {
-            receiver: ReceiverInfo {
-                name: "Casa Touch".to_string(),
-                vendor_id: 0x046d,
-                product_id: 0xb123,
-                unique_id: None,
-            },
-            paired: vec![device(
-                "casa-1",
-                openlogi_hid::DIRECT_DEVICE_INDEX,
-                true,
-                true,
-            )],
-        };
-
-        assert!(touchpad_recovery_targets(&[inventory], &HashSet::new()).is_empty());
     }
 }

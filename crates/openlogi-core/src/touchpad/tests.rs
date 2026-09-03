@@ -217,13 +217,148 @@ fn spread_dominance_commits_pinch_in_and_out() {
 }
 
 #[test]
-fn common_two_finger_motion_is_left_to_native_scrolling() {
+fn drifting_four_finger_pinch_beats_the_swipe_gate() {
+    let mut recognizer = TouchpadGestureRecognizer::default();
+    recognizer.update(&frame(
+        0,
+        vec![
+            contact(1, 20_000, 40_000),
+            contact(2, 80_000, 40_000),
+            contact(3, 20_000, 60_000),
+            contact(4, 80_000, 60_000),
+        ],
+    ));
+    // The hand drifts 10 mm down while closing (centroid travel ≈ spread
+    // change), the shape real pinches take when the wrist pivots — the swipe
+    // gate would otherwise claim it as TouchpadFourFingerSwipeDown.
+    assert_eq!(
+        recognizer.update(&frame(
+            60_000,
+            vec![
+                contact(1, 34_000, 52_000),
+                contact(2, 66_000, 52_000),
+                contact(3, 34_000, 68_000),
+                contact(4, 66_000, 68_000),
+            ],
+        )),
+        GestureRecognition::Gesture(ButtonId::TouchpadFourFingerPinchIn)
+    );
+}
+
+#[test]
+fn two_finger_comotion_streams_scroll_deltas() {
     let mut recognizer = TouchpadGestureRecognizer::default();
     recognizer.update(&translated_frame(0, 2, 0, 0));
+    assert_eq!(
+        recognizer.update(&translated_frame(8_000, 2, 2_000, 1_500)),
+        GestureRecognition::Pending
+    );
+
+    // Activation happens past the tap travel; the first delta carries only
+    // that frame's motion, never the pre-activation travel.
+    assert_eq!(
+        recognizer.update(&translated_frame(16_000, 2, 5_000, 3_000)),
+        GestureRecognition::Scroll {
+            dx_um: 3_000,
+            dy_um: 1_500
+        }
+    );
+    assert_eq!(
+        recognizer.update(&translated_frame(24_000, 2, 7_000, 4_000)),
+        GestureRecognition::Scroll {
+            dx_um: 2_000,
+            dy_um: 1_000
+        }
+    );
+    // A scrolled stroke travelled far past the tap limits.
+    assert_eq!(recognizer.end(), None);
+}
+
+#[test]
+fn two_finger_scroll_waits_for_comotion_to_dominate_spread_change() {
+    let mut recognizer = TouchpadGestureRecognizer::default();
+    recognizer.update(&frame(
+        0,
+        vec![contact(1, 40_000, 50_000), contact(2, 60_000, 50_000)],
+    ));
+
+    // The centroid passes the tap travel (3.5 mm), but the fingers also
+    // spread 4.5 mm apart: spread change dominates, so the stroke is a zoom
+    // chord in the making, not scrolling.
+    assert_eq!(
+        recognizer.update(&frame(
+            20_000,
+            vec![contact(1, 39_000, 50_000), contact(2, 68_000, 50_000)],
+        )),
+        GestureRecognition::Pending
+    );
+    assert_eq!(recognizer.end(), None);
+}
+
+#[test]
+fn a_scrolling_stroke_never_reclassifies_as_a_pinch() {
+    let mut recognizer = TouchpadGestureRecognizer::default();
+    recognizer.update(&frame(
+        0,
+        vec![contact(1, 60_000, 50_000), contact(2, 70_000, 50_000)],
+    ));
+    recognizer.update(&frame(
+        8_000,
+        vec![contact(1, 62_000, 50_000), contact(2, 72_000, 50_000)],
+    ));
+    assert_eq!(
+        recognizer.update(&frame(
+            16_000,
+            vec![contact(1, 65_000, 50_000), contact(2, 75_000, 50_000)],
+        )),
+        GestureRecognition::Scroll {
+            dx_um: 3_000,
+            dy_um: 0
+        }
+    );
+
+    // Spreading 20 mm apart with a still centroid would satisfy the pinch
+    // gate; the scroll claim is sticky, so the stroke only streams a zero
+    // delta and never fires a zoom.
+    assert_eq!(
+        recognizer.update(&frame(
+            24_000,
+            vec![contact(1, 55_000, 50_000), contact(2, 85_000, 50_000)],
+        )),
+        GestureRecognition::Scroll { dx_um: 0, dy_um: 0 }
+    );
+    assert_eq!(recognizer.end(), None);
+}
+
+#[test]
+fn two_finger_scroll_stops_when_one_finger_lifts() {
+    let mut recognizer = TouchpadGestureRecognizer::default();
+    recognizer.update(&frame(
+        0,
+        vec![contact(1, 60_000, 50_000), contact(2, 70_000, 50_000)],
+    ));
+    recognizer.update(&frame(
+        8_000,
+        vec![contact(1, 62_000, 50_000), contact(2, 72_000, 50_000)],
+    ));
+    assert_eq!(
+        recognizer.update(&frame(
+            16_000,
+            vec![contact(1, 65_000, 50_000), contact(2, 75_000, 50_000)],
+        )),
+        GestureRecognition::Scroll {
+            dx_um: 3_000,
+            dy_um: 0
+        }
+    );
 
     assert_eq!(
-        recognizer.update(&translated_frame(20_000, 2, 5_000, 0)),
-        GestureRecognition::NativeScroll
+        recognizer.update(&frame(24_000, vec![contact(1, 68_000, 50_000)],)),
+        GestureRecognition::Pending
+    );
+    assert_eq!(
+        recognizer.update(&frame(32_000, vec![contact(1, 74_000, 50_000)],)),
+        GestureRecognition::Pending
     );
     assert_eq!(recognizer.end(), None);
 }
@@ -276,4 +411,184 @@ fn cancellation_suppresses_frames_until_the_stroke_ends() {
         recognizer.update(&translated_frame(260_000, 3, 15_000, 0)),
         GestureRecognition::Gesture(ButtonId::TouchpadThreeFingerSwipeRight)
     );
+}
+
+#[test]
+fn a_lifted_and_relanded_finger_resumes_as_a_fresh_stroke() {
+    let mut recognizer = TouchpadGestureRecognizer::default();
+    recognizer.update(&frame(
+        0,
+        vec![contact(1, 60_000, 50_000), contact(2, 70_000, 50_000)],
+    ));
+    recognizer.update(&frame(
+        8_000,
+        vec![contact(1, 62_000, 50_000), contact(2, 72_000, 50_000)],
+    ));
+    assert_eq!(
+        recognizer.update(&frame(
+            16_000,
+            vec![contact(1, 65_000, 50_000), contact(2, 75_000, 50_000)],
+        )),
+        GestureRecognition::Scroll {
+            dx_um: 3_000,
+            dy_um: 0
+        }
+    );
+
+    // One finger lifts mid-scroll, then lands again beside the survivor:
+    // the recognizer must rebase and keep streaming instead of freezing
+    // until the silence watchdog ends the stroke.
+    assert_eq!(
+        recognizer.update(&frame(24_000, vec![contact(1, 68_000, 50_000)],)),
+        GestureRecognition::Pending
+    );
+    assert_eq!(
+        recognizer.update(&frame(
+            32_000,
+            vec![contact(1, 68_000, 50_000), contact(3, 78_000, 50_000)],
+        )),
+        GestureRecognition::Pending
+    );
+    // 3.5 mm past the re-anchored start re-activates the scroll.
+    assert_eq!(
+        recognizer.update(&frame(
+            40_000,
+            vec![contact(1, 71_500, 50_000), contact(3, 81_500, 50_000)],
+        )),
+        GestureRecognition::Scroll {
+            dx_um: 3_500,
+            dy_um: 0
+        }
+    );
+}
+
+fn button_frame(timestamp_us: u64, contacts: Vec<TouchContact>) -> TouchFrame {
+    TouchFrame::new(timestamp_us, true, contacts).expect("test contacts have unique ids")
+}
+
+#[test]
+fn releasing_the_button_hands_the_contacts_back_to_gestures() {
+    let mut recognizer = TouchpadGestureRecognizer::default();
+    recognizer.update(&button_frame(
+        0,
+        vec![contact(1, 50_000, 50_000), contact(2, 70_000, 50_000)],
+    ));
+    assert_eq!(
+        recognizer.update(&button_frame(
+            8_000,
+            vec![contact(1, 54_000, 50_000), contact(2, 74_000, 50_000)],
+        )),
+        GestureRecognition::Pending
+    );
+
+    // The button lifts while both fingers stay down: the same co-motion is
+    // a scroll stroke again, starting from its own activation travel.
+    assert_eq!(
+        recognizer.update(&frame(
+            16_000,
+            vec![contact(1, 90_000, 50_000), contact(2, 110_000, 50_000)],
+        )),
+        GestureRecognition::Pending
+    );
+    assert_eq!(
+        recognizer.update(&frame(
+            24_000,
+            vec![contact(1, 94_000, 50_000), contact(2, 114_000, 50_000)],
+        )),
+        GestureRecognition::Scroll {
+            dx_um: 4_000,
+            dy_um: 0
+        }
+    );
+}
+
+#[test]
+fn a_button_held_stroke_never_taps_or_gestures() {
+    let mut recognizer = TouchpadGestureRecognizer::default();
+    recognizer.update(&button_frame(
+        0,
+        vec![contact(1, 50_000, 50_000), contact(2, 70_000, 50_000)],
+    ));
+    recognizer.update(&button_frame(
+        80_000,
+        vec![contact(1, 50_500, 50_000), contact(2, 70_500, 50_000)],
+    ));
+    assert_eq!(recognizer.end(), None);
+}
+
+#[test]
+fn a_touch_shorter_than_thirty_milliseconds_is_not_a_tap() {
+    let mut recognizer = TouchpadGestureRecognizer::default();
+    recognizer.update(&frame(
+        0,
+        vec![contact(1, 50_000, 50_000), contact(2, 70_000, 50_000)],
+    ));
+    recognizer.update(&frame(
+        20_000,
+        vec![contact(1, 50_000, 50_000), contact(2, 70_000, 50_000)],
+    ));
+    assert_eq!(recognizer.end(), None);
+}
+
+#[test]
+fn two_fingers_spread_apart_do_not_tap() {
+    let mut recognizer = TouchpadGestureRecognizer::default();
+    recognizer.update(&frame(
+        0,
+        vec![contact(1, 30_000, 50_000), contact(2, 70_000, 50_000)],
+    ));
+    recognizer.update(&frame(
+        80_000,
+        vec![contact(1, 30_500, 50_000), contact(2, 70_500, 50_000)],
+    ));
+    // 40 mm apart: a pinch attempt, not a tap.
+    assert_eq!(recognizer.end(), None);
+}
+
+#[test]
+fn a_four_finger_tap_spans_wider_than_two_fingers_may() {
+    let mut recognizer = TouchpadGestureRecognizer::default();
+    recognizer.update(&frame(
+        0,
+        vec![
+            contact(1, 20_000, 50_000),
+            contact(2, 40_000, 50_000),
+            contact(3, 60_000, 50_000),
+            contact(4, 80_000, 50_000),
+        ],
+    ));
+    recognizer.update(&frame(
+        80_000,
+        vec![
+            contact(1, 20_500, 50_000),
+            contact(2, 40_500, 50_000),
+            contact(3, 60_500, 50_000),
+            contact(4, 80_500, 50_000),
+        ],
+    ));
+    assert_eq!(recognizer.end(), Some(ButtonId::TouchpadFourFingerTap));
+}
+
+#[test]
+fn contacts_surviving_a_button_release_cannot_tap() {
+    let mut recognizer = TouchpadGestureRecognizer::default();
+    // A click-drag: button held, two contacts, then the button lifts while
+    // both fingers stay down for a short, still moment before liftoff.
+    recognizer.update(&button_frame(
+        0,
+        vec![contact(1, 50_000, 50_000), contact(2, 70_000, 50_000)],
+    ));
+    recognizer.update(&button_frame(
+        80_000,
+        vec![contact(1, 50_500, 50_000), contact(2, 70_500, 50_000)],
+    ));
+    recognizer.update(&frame(
+        100_000,
+        vec![contact(1, 50_500, 50_000), contact(2, 70_500, 50_000)],
+    ));
+    // Lifting within the tap window after a short hold must not click: the
+    // stroke never saw these fingers land. (That the same stale contacts can
+    // still scroll is covered by
+    // `releasing_the_button_hands_the_contacts_back_to_gestures`.)
+    assert_eq!(recognizer.end(), None);
 }

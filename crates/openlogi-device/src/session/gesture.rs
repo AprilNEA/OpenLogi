@@ -270,6 +270,10 @@ pub struct CaptureSessionRequest {
     pub channel_slot: CaptureChannel,
     /// Host sleep/wake gate that prevents device I/O while suspended.
     pub device_io: DeviceIoGate,
+    /// Live native left-button state from the OS hook, polled rather than
+    /// channeled — the hook's tap callback cannot block. Drives the
+    /// touchpad's press-toggle handoff.
+    pub native_button: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Run the capture mode selected by `request.spec` on `route`, forwarding each
@@ -336,7 +340,9 @@ async fn run_capture_session_on(
         shutdown,
         channel_slot,
         device_io,
+        native_button,
     } = request;
+    let mut native_button = native_button;
     if !device_io.allows_io() {
         return Err(GestureError::Hid(BackendError::Backend(
             "host device I/O is suspended".into(),
@@ -406,6 +412,15 @@ async fn run_capture_session_on(
         wireless,
         shutdown,
         device_io,
+        (
+            &mut native_button,
+            &TouchpadNativePress {
+                chan: &chan,
+                slot: device_index,
+                spec: &spec,
+                journal: touchpad_journal.as_ref(),
+            },
+        ),
     )
     .await;
 
@@ -568,6 +583,19 @@ struct ArmedControls {
     touchpad: Option<ArmedTouchpad>,
 }
 
+impl ArmedControls {
+    /// A fresh listener for the armed touchpad's raw reports, `None` while
+    /// disarmed (the native-press toggle rebinds after each switch).
+    fn touchpad_touch_listener(
+        &self,
+    ) -> Option<hidpp::async_channel::Receiver<hidpp::feature::touchpad_raw_xy::TouchpadRawEvent>>
+    {
+        self.touchpad
+            .as_ref()
+            .map(|touchpad| touchpad.feature.listen())
+    }
+}
+
 struct ArmedThumbwheel {
     wheel: Thumbwheel,
     info: Option<ThumbwheelInfo>,
@@ -603,6 +631,12 @@ impl ArmedTouchpad {
         sink: &mpsc::UnboundedSender<CapturedInput>,
     ) {
         let hidpp::feature::touchpad_raw_xy::TouchpadRawEvent::DualXy(report) = event else {
+            if let hidpp::feature::touchpad_raw_xy::TouchpadRawEvent::GestureHandledByDevice {
+                payload,
+            } = event
+            {
+                tracing::debug!(?payload, "firmware handled a gesture itself");
+            }
             return;
         };
         for event in self.stream.push(report, std::time::Instant::now()) {
@@ -830,18 +864,101 @@ async fn finish_liveness_ping(
 /// Keep a capture session alive and reapply its volatile diversions whenever
 /// the device announces a reconnect. Returns only the typed reason capture
 /// stopped; restoration performs a fresh registry lookup after monitoring.
+/// What the native-press toggle needs to re-arm the touchpad after a press.
+struct TouchpadNativePress<'a> {
+    chan: &'a Arc<HidppChannel>,
+    slot: u8,
+    spec: &'a CaptureSpec,
+    journal: Option<&'a Arc<dyn TouchpadJournalStore>>,
+}
+
+/// In the handoff regime, a native press hands the pad back to its firmware:
+/// disarm raw reporting while the button holds (the assist only exists with
+/// raw off), re-arm when it lifts. The press starts seconds before an assist
+/// finger lands, so the disarm's milliseconds never race the takeover.
+async fn toggle_native_press(
+    context: &mut CaptureMonitor<'_>,
+    rearm: &TouchpadNativePress<'_>,
+    held: bool,
+) {
+    if held != context.armed.touchpad.is_some() {
+        return;
+    }
+    if held {
+        context.armed.disarm_touchpad().await;
+        context.flush_touchpad_end();
+        info!(
+            index = context.device_index,
+            "native button press — pad returned to firmware"
+        );
+    } else {
+        let Ok(device) = Device::new(Arc::clone(rearm.chan), rearm.slot).await else {
+            warn!(
+                index = context.device_index,
+                "touchpad re-arm after press failed — device unreachable"
+            );
+            return;
+        };
+        let mut unused = ArmedControls::default();
+        if let Err(error) = arm_touchpad(
+            &device,
+            rearm.chan,
+            rearm.slot,
+            rearm.spec,
+            rearm.journal,
+            &mut unused,
+        )
+        .await
+        {
+            warn!(%error, "touchpad re-arm after press failed");
+            return;
+        }
+        // Move the freshly armed touchpad into the live controls; its
+        // listener attaches on the next loop's touchpad_events refresh.
+        if let Some(touchpad) = unused.touchpad.take() {
+            context.armed.touchpad = Some(touchpad);
+        }
+    }
+}
+
+/// A reconnect broadcast arrived mid-session: drop any half-decoded control
+/// reports and reapply the volatile diversions.
+async fn on_wireless_reconnect(
+    context: &mut CaptureMonitor<'_>,
+    device_io: &DeviceIoGate,
+    broadcast: &hidpp::feature::wireless_device_status::WirelessDeviceStatusBroadcast,
+) {
+    info!(?broadcast, "device reconnected — re-arming control capture");
+    *context.accum.lock().unwrap_or_else(PoisonError::into_inner) = CaptureAccum::default();
+    context.armed.rearm(device_io).await;
+}
+
+/// One liveness round completed: restart the session when the channel went
+/// all-silent.
+async fn liveness_restart_due(
+    context: &CaptureMonitor<'_>,
+    liveness: &mut CaptureLiveness,
+) -> bool {
+    if finish_liveness_ping(context, liveness).await == LivenessDecision::Restart {
+        warn!(
+            index = context.device_index,
+            "capture channel stopped delivering — restarting session on a fresh channel"
+        );
+        true
+    } else {
+        false
+    }
+}
+
 async fn monitor_capture(
     mut context: CaptureMonitor<'_>,
     wireless: Option<WirelessDeviceStatusFeature>,
     shutdown: oneshot::Receiver<()>,
     mut device_io: DeviceIoGate,
+    native_press: (&std::sync::atomic::AtomicBool, &TouchpadNativePress<'_>),
 ) -> (CaptureStop, Option<GestureError>) {
     let mut wake_events = wireless.as_ref().map(EmittingFeature::listen);
-    let touchpad_events = context
-        .armed
-        .touchpad
-        .as_ref()
-        .map(|touchpad| touchpad.feature.listen());
+    let mut touchpad_events = context.armed.touchpad_touch_listener();
     let mut shutdown = std::pin::pin!(shutdown);
     let mut liveness =
         CaptureLiveness::new(tokio::time::Instant::now(), context.activity.generation());
@@ -849,11 +966,13 @@ async fn monitor_capture(
         tokio::time::Instant::now() + TOUCHPAD_RAW_MODE_POLL,
         TOUCHPAD_RAW_MODE_POLL,
     );
+    let mut native_press_ticker = tokio::time::interval(std::time::Duration::from_millis(16));
+    native_press_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut last_native_press = false;
     loop {
-        // Keep passive listeners and raw-mode ownership intact through sleep.
-        // In particular, do not restore or verify controls during DarkWake.
-        // A deliberate shutdown may time out while suspended; the durable
-        // touchpad journal lets the next launch complete restoration.
+        // Keep listeners and raw-mode ownership intact through sleep — never
+        // restore or verify during DarkWake; the journal lets a timed-out
+        // shutdown's successor restore.
         if let Some(stop) = wait_for_capture_io(&context, &mut device_io, &mut liveness).await {
             return (stop, None);
         }
@@ -862,16 +981,14 @@ async fn monitor_capture(
         tokio::select! {
             biased;
 
-            allowed = device_io.changed() => {
-                match allowed {
-                    Some(true) => liveness.record_activity(
-                        tokio::time::Instant::now(),
-                        context.activity.generation(),
-                    ),
-                    Some(false) => {}
-                    None => return (context.stop(), None),
-                }
-            }
+            allowed = device_io.changed() => match allowed {
+                Some(true) => liveness.record_activity(
+                    tokio::time::Instant::now(),
+                    context.activity.generation(),
+                ),
+                Some(false) => {}
+                None => return (context.stop(), None),
+            },
             transition = wait_for_channel_change(context.registry, context.shared) => {
                 info!(index = context.device_index, "inventory replaced or removed capture channel — restarting session");
                 return (transition, None);
@@ -881,35 +998,37 @@ async fn monitor_capture(
                     Some(events) => events.recv().await,
                     None => std::future::pending().await,
                 }
-            } => {
-                match event {
-                    Ok(event) => context.push_touchpad_event(event),
-                    Err(error) => {
-                        return context.stop_with_error(GestureError::Hidpp(format!(
-                            "touchpad event stream closed: {error}"
-                        )));
-                    }
+            } => match event {
+                Ok(event) => context.push_touchpad_event(event),
+                Err(error) => {
+                    return context.stop_with_error(GestureError::Hidpp(format!(
+                        "touchpad event stream closed: {error}"
+                    )));
                 }
-            }
+            },
             () = async {
                 if context.armed.touchpad.is_some() {
                     tokio::time::sleep(std::time::Duration::from_millis(8)).await;
                 } else {
                     std::future::pending::<()>().await;
                 }
-            } => {
-                context.flush_touchpad_end();
-            }
+            } => context.flush_touchpad_end(),
             _ = raw_mode_ticker.tick(), if context.armed.touchpad.is_some() => {
                 if let Some(error) = context.raw_mode_error().await {
                     return context.stop_with_error(error);
                 }
             }
+            _ = native_press_ticker.tick() => {
+                let held = native_press.0.load(std::sync::atomic::Ordering::Relaxed);
+                if held != last_native_press {
+                    last_native_press = held;
+                    toggle_native_press(&mut context, native_press.1, held).await;
+                    touchpad_events = context.armed.touchpad_touch_listener();
+                }
+            }
+            // Prefer the typed channel transition when it fires on the same
+            // turn: teardown must not write through an obsolete transport.
             _ = &mut shutdown => {
-                // Shutdown and inventory replacement can become ready on the
-                // same turn. Prefer the typed channel transition so teardown
-                // never blindly writes through a transport already known to
-                // be obsolete.
                 return (context.stop(), None);
             }
             event = async {
@@ -922,10 +1041,7 @@ async fn monitor_capture(
                     wake_events = None;
                     continue;
                 };
-                info!(?broadcast, "device reconnected — re-arming control capture");
-                *context.accum.lock().unwrap_or_else(PoisonError::into_inner) =
-                    CaptureAccum::default();
-                context.armed.rearm(&device_io).await;
+                on_wireless_reconnect(&mut context, &device_io, &broadcast).await;
             }
             generation = context.activity.changed_after(activity_generation) => {
                 liveness.record_activity(tokio::time::Instant::now(), generation);
@@ -934,8 +1050,7 @@ async fn monitor_capture(
                 if !context.ping_due(&mut liveness) {
                     continue;
                 }
-                if finish_liveness_ping(&context, &mut liveness).await == LivenessDecision::Restart {
-                    warn!(index = context.device_index, "capture channel stopped delivering — restarting session on a fresh channel");
+                if liveness_restart_due(&context, &mut liveness).await {
                     return (context.stop(), None);
                 }
             }

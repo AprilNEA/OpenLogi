@@ -943,8 +943,8 @@ fn hook_maps_publish_selection_and_preserve_learned_thumbwheel_polarity() {
             .insert("a".to_owned(), true);
     }
 
-    // Config/app rebuilds replace binding maps but hardware observations must
-    // remain in the same atomically published snapshot.
+    // Config/app rebuilds replace binding maps but hardware observations
+    // must remain in the same atomically published snapshot.
     orch.reload_config(Config::default());
     let maps = orch.shared.hook_maps.read().expect("hook maps");
     assert_eq!(maps.selected_device.as_deref(), Some("a"));

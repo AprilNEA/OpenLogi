@@ -42,6 +42,10 @@ Thumbwheel = "AppExpose"
 # Raw-touchpad gesture capture is a separate, default-off device setting.
 [devices."unit:11121314".touchpad_gestures]
 enabled = true
+# While capture is armed the firmware stops translating two-finger motion, so
+# OpenLogi synthesizes that scroll itself. Optional speed override on the
+# app-wide 1..=100 scale; 14 (omitted) is the native-feel 1x.
+scroll_sensitivity = 20
 
 # Touchpad triggers use the normal binding map and accept one Action each.
 [devices."unit:11121314".bindings]

@@ -1,5 +1,6 @@
 //! Resolve captured HID++ inputs against the active per-device plan.
 
+mod momentum;
 mod wheel;
 
 use std::collections::{BTreeMap, HashMap};
@@ -7,12 +8,16 @@ use std::time::Instant;
 
 use openlogi_core::binding::{Action, Binding, ButtonId, GestureDirection, default_binding};
 use openlogi_core::config::ThumbwheelSensitivity;
-use openlogi_core::touchpad::{GestureRecognition, TouchFrame, TouchpadGestureRecognizer};
+use openlogi_core::touchpad::{
+    GestureRecognition, TouchContact, TouchFrame, TouchpadGestureRecognizer,
+};
 use openlogi_hid::CapturedInput;
+use openlogi_hid::thumbwheel::WheelResolution;
 use tracing::debug;
 
+use self::momentum::TouchpadMomentum;
 use self::wheel::{ScrollScale, WheelAccumulators, WheelOutput, WheelRotation};
-use super::GestureOutputs;
+use super::{GestureOutputs, TouchpadScrollTuning};
 use crate::capture_plan::DispatchPlan;
 use crate::runtime::hook::SharedHookMaps;
 use crate::runtime::{HidppSessionId, PressToken};
@@ -93,11 +98,68 @@ impl SessionWheels {
     }
 }
 
+use openlogi_inject::{DockSwipeMotion, DockSwipePhase};
+
+/// One routed outcome of feeding a frame (or a stroke boundary) to a
+/// session's touchpad runtime.
+#[derive(Debug, Default, PartialEq)]
+enum TouchpadOutput {
+    /// Nothing to dispatch for this frame.
+    #[default]
+    Idle,
+    /// A committed gesture trigger with its resolved action.
+    Action { trigger: ButtonId, action: Action },
+    /// One synthesized two-finger scroll frame: the centroid's travel in
+    /// micrometres.
+    Scroll { dx_um: i64, dy_um: i64 },
+    /// The scroll stream closed, carrying the exit velocity (centroid
+    /// micrometres per second, an exponential average over the stroke) that
+    /// seeds momentum on a clean end; a cancellation carries none.
+    ScrollEnd {
+        exit_velocity_um_per_s: Option<(f64, f64)>,
+    },
+}
+
+/// Time constant of the exit-velocity filter's release phase: how long a
+/// slowdown before lift-off still contributes to the glide.
+const VELOCITY_RELEASE_TAU_S: f64 = 0.2;
+
+/// Everything one touchpad frame (or stroke boundary) produces: the routed
+/// scroll/action output plus a DockSwipe stream step, which may accompany
+/// either — a committed swipe opens its stream instead of routing an action,
+/// while an unrelated scroll frame routes and leaves the stream untouched.
+#[derive(Debug, Default, PartialEq)]
+struct TouchpadOutcome {
+    routed: TouchpadOutput,
+    stream: SwipeOutput,
+}
+
+/// How long tap synthesis stays suppressed after a glide ends, however it
+/// ended — a touch landing to stop the glide must not fire a tap. Options+
+/// runs the same 500 ms window from its scroll-inertia stop.
+const TAP_SUPPRESSION_AFTER_GLIDE: std::time::Duration = std::time::Duration::from_millis(500);
+
 #[derive(Default)]
 struct TouchpadRuntime {
     recognizer: TouchpadGestureRecognizer,
     frozen_bindings: Option<BTreeMap<ButtonId, Action>>,
     frozen_actions_enabled: bool,
+    /// Whether this stroke already opened its scroll stream, so the next
+    /// delta knows to continue rather than begin one.
+    scroll_streaming: bool,
+    /// Smoothed centroid velocity over the stroke, micrometres per second:
+    /// fast-attack, slow-release with a ~200 ms time constant — a brief
+    /// slowdown before lift-off must not kill a glide, but a deliberate
+    /// stop-and-hold must.
+    scroll_velocity_um_per_s: (f64, f64),
+    /// Timestamp of the last frame seen this stroke, the dt baseline for the
+    /// velocity filter — recorded on every frame, so the first streamed
+    /// delta (which already spans one frame of travel) gets a real dt too.
+    last_frame_us: Option<u64>,
+    /// A committed swipe streaming its DockSwipe animation, if any.
+    stream: Option<ActiveSwipe>,
+    /// Until when tap resolution stays suppressed, armed when a glide ends.
+    taps_suppressed_until: Option<std::time::Instant>,
 }
 
 impl TouchpadRuntime {
@@ -106,38 +168,165 @@ impl TouchpadRuntime {
         frame: &TouchFrame,
         current_bindings: &BTreeMap<ButtonId, Action>,
         actions_enabled: bool,
-    ) -> Option<(ButtonId, Action)> {
+        native_streaming: bool,
+    ) -> TouchpadOutcome {
         if self.frozen_bindings.is_none() {
             self.frozen_bindings = Some(current_bindings.clone());
             self.frozen_actions_enabled = actions_enabled;
+        }
+        let mut outcome = TouchpadOutcome::default();
+        let timestamp_us = frame.timestamp_us;
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "frame timestamps stay far below 2^53 microseconds"
+        )]
+        let dt_us = self.last_frame_us.map_or(f64::NAN, |previous| {
+            (timestamp_us.saturating_sub(previous)) as f64
+        });
+        self.last_frame_us = Some(timestamp_us);
+        // A pressed button owns the pad however many contacts it holds: any
+        // scroll stream it cut into must not glide on lift.
+        if frame.button {
+            self.scroll_velocity_um_per_s = (0.0, 0.0);
         }
         match self.recognizer.update(frame) {
             GestureRecognition::Gesture(trigger)
                 if self.frozen_actions_enabled && actions_enabled =>
             {
-                self.action(trigger)
+                if let Some((trigger, action)) = self.action(trigger) {
+                    match (native_streaming, native_stream_plan(trigger, &action)) {
+                        // DockSwipe End commits the action; Began waits for
+                        // first non-zero travel, so a streaming trigger holds
+                        // its discrete dispatch back as the fallback.
+                        (true, Some(motion)) => {
+                            self.stream = Some(ActiveSwipe::new(frame, motion, (trigger, action)));
+                        }
+                        (_, _) => {
+                            outcome.routed = TouchpadOutput::Action { trigger, action };
+                        }
+                    }
+                }
             }
-            GestureRecognition::Pending
-            | GestureRecognition::NativeScroll
-            | GestureRecognition::Gesture(_) => None,
+            GestureRecognition::Scroll { dx_um, dy_um } => {
+                // Scrolling replaces the firmware translation the capture
+                // switched off, so it flows regardless of action bindings.
+                self.scroll_streaming = true;
+                self.track_scroll_velocity(dt_us, dx_um, dy_um);
+                outcome.routed = TouchpadOutput::Scroll { dx_um, dy_um };
+            }
+            GestureRecognition::Pending | GestureRecognition::Gesture(_) => {}
         }
+        if let Some(swipe) = &mut self.stream
+            && let Some(step) = swipe.advance(frame)
+        {
+            outcome.stream = step;
+        }
+        outcome
     }
 
-    fn end(&mut self, actions_enabled: bool) -> Option<(ButtonId, Action)> {
+    fn end(&mut self, actions_enabled: bool) -> TouchpadOutcome {
+        let suppressed = match self.taps_suppressed_until {
+            Some(until) if std::time::Instant::now() < until => true,
+            _ => {
+                self.taps_suppressed_until = None;
+                false
+            }
+        };
         let action = self
             .recognizer
             .end()
-            .filter(|_| self.frozen_actions_enabled && actions_enabled)
+            .filter(|_| !suppressed && self.frozen_actions_enabled && actions_enabled)
             .and_then(|trigger| self.action(trigger));
+        let terminal = self.close_scroll_stream(true);
+        let stream = self
+            .stream
+            .take()
+            .map_or(SwipeOutput::Idle, |swipe| swipe.finish(SwipeEnd::AtRelease));
         self.frozen_bindings = None;
         self.frozen_actions_enabled = false;
-        action
+        TouchpadOutcome {
+            routed: terminal.unwrap_or_else(|| {
+                action.map_or(TouchpadOutput::Idle, |(trigger, action)| {
+                    TouchpadOutput::Action { trigger, action }
+                })
+            }),
+            stream,
+        }
     }
 
-    fn cancel(&mut self) {
+    /// Cancel the stroke but not a running animation: dropped-frame cancels
+    /// fire mid-stroke, and the real end still arrives as `TouchpadEnd`.
+    fn cancel(&mut self) -> TouchpadOutcome {
+        let terminal = self.close_scroll_stream(false);
         self.recognizer.cancel();
         self.frozen_bindings = None;
         self.frozen_actions_enabled = false;
+        TouchpadOutcome {
+            routed: terminal.unwrap_or(TouchpadOutput::Idle),
+            stream: SwipeOutput::Idle,
+        }
+    }
+
+    /// Terminate both the stroke and a running animation — the
+    /// session-scoped teardown path.
+    fn terminate(&mut self) -> TouchpadOutcome {
+        let outcome = self.cancel();
+        TouchpadOutcome {
+            routed: outcome.routed,
+            stream: self
+                .stream
+                .take()
+                .map_or(SwipeOutput::Idle, |swipe| swipe.finish(SwipeEnd::Cancelled)),
+        }
+    }
+
+    /// Terminate an open scroll stream, if any. Scrolling travelled past the
+    /// tap limits, so a scrolled stroke can never also resolve a tap and the
+    /// two outcomes never compete. A cancellation discards the velocity —
+    /// momentum must not grow out of a stroke the stream rejected.
+    fn close_scroll_stream(&mut self, ended: bool) -> Option<TouchpadOutput> {
+        let velocity = self.scroll_velocity_um_per_s;
+        self.scroll_velocity_um_per_s = (0.0, 0.0);
+        self.last_frame_us = None;
+        self.scroll_streaming.then(|| {
+            self.scroll_streaming = false;
+            TouchpadOutput::ScrollEnd {
+                exit_velocity_um_per_s: ended.then_some(velocity),
+            }
+        })
+    }
+
+    /// Fold one frame's delta into the exit-velocity filter.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "per-frame deltas stay far below 2^53 micrometres"
+    )]
+    fn track_scroll_velocity(&mut self, dt_us: f64, dx: i64, dy: i64) {
+        if !dt_us.is_finite() || dt_us <= 0.0 {
+            return;
+        }
+        let seconds = dt_us / 1_000_000.0;
+        let raw = (dx as f64 / seconds, dy as f64 / seconds);
+        // Release weight normalized by the actual frame gap: a fixed
+        // per-frame factor made the memory span cadence-dependent — a ~1 s
+        // hold before lift still glided at 130 Hz. τ ≈ 200 ms.
+        let release = (-seconds / VELOCITY_RELEASE_TAU_S).exp();
+        let attack = 1.0 - release;
+        let smoothed = &mut self.scroll_velocity_um_per_s;
+        for (smoothed, raw) in [(&mut smoothed.0, raw.0), (&mut smoothed.1, raw.1)] {
+            // A same-axis reversal is new intent, not noise — adopt it at
+            // once instead of averaging against the stale direction.
+            if *smoothed * raw < 0.0 || raw.abs() > smoothed.abs() {
+                *smoothed = raw;
+            } else {
+                *smoothed = *smoothed * release + raw * attack;
+            }
+        }
+    }
+
+    /// Close the failed stream and recover its suppressed discrete action.
+    fn begin_failed(&mut self) -> Option<(ButtonId, Action)> {
+        self.stream.take().map(|swipe| swipe.fallback)
     }
 
     fn action(&self, trigger: ButtonId) -> Option<(ButtonId, Action)> {
@@ -147,6 +336,153 @@ impl TouchpadRuntime {
             .cloned()
             .map(|action| (trigger, action))
     }
+
+    /// Suppress tap resolution for `window`, from a glide that just ended.
+    fn suppress_taps(&mut self, window: std::time::Duration) {
+        self.taps_suppressed_until = Some(std::time::Instant::now() + window);
+    }
+}
+
+#[derive(Debug, Default, PartialEq)]
+enum SwipeOutput {
+    #[default]
+    Idle,
+    /// `progress` is the opening frame's travel; later frames stream deltas.
+    Begin {
+        motion: DockSwipeMotion,
+        progress: f64,
+    },
+    Advance {
+        motion: DockSwipeMotion,
+        delta: f64,
+    },
+    Finish {
+        motion: DockSwipeMotion,
+        end: SwipeEnd,
+    },
+}
+
+/// Release lets the injector's sign rule commit or spring back; an abort always springs back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SwipeEnd {
+    AtRelease,
+    Cancelled,
+}
+
+struct ActiveSwipe {
+    motion: DockSwipeMotion,
+    opened: bool,
+    /// The action suppressed at commit, dispatched if Began fails.
+    fallback: (ButtonId, Action),
+    contact_ids: Box<[u8]>,
+    centroid_um: (i64, i64),
+}
+
+impl ActiveSwipe {
+    fn new(frame: &TouchFrame, motion: DockSwipeMotion, fallback: (ButtonId, Action)) -> Self {
+        Self {
+            motion,
+            opened: false,
+            fallback,
+            contact_ids: frame.contacts().iter().map(|c| c.id).collect(),
+            centroid_um: frame_centroid(frame.contacts()),
+        }
+    }
+
+    /// An unopened stream posted nothing, so it ends without a Finish.
+    fn finish(self, end: SwipeEnd) -> SwipeOutput {
+        if self.opened {
+            SwipeOutput::Finish {
+                motion: self.motion,
+                end,
+            }
+        } else {
+            SwipeOutput::Idle
+        }
+    }
+
+    /// Defer Began until non-zero travel because vertical DockSwipe ignores zero-progress Began.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "centroid deltas are bounded by the pad size; f64 precision is ample"
+    )]
+    fn advance(&mut self, frame: &TouchFrame) -> Option<SwipeOutput> {
+        let contact_ids: Vec<u8> = frame.contacts().iter().map(|c| c.id).collect();
+        let centroid = frame_centroid(frame.contacts());
+        let mut delta = 0.0;
+        if contact_ids.as_slice() == &*self.contact_ids {
+            let (dx, dy) = (
+                centroid.0 - self.centroid_um.0,
+                centroid.1 - self.centroid_um.1,
+            );
+            // Window y grows downward, but vertical DockSwipe progress is positive upward.
+            let raw = match self.motion {
+                DockSwipeMotion::Horizontal => dx,
+                DockSwipeMotion::Vertical => -dy,
+            };
+            let travel = match self.motion {
+                DockSwipeMotion::Horizontal => HORIZONTAL_PAD_TRAVEL_UM,
+                DockSwipeMotion::Vertical => VERTICAL_PAD_TRAVEL_UM,
+            };
+            delta = raw as f64 / travel;
+        }
+        self.contact_ids = contact_ids.into_boxed_slice();
+        self.centroid_um = centroid;
+        if delta == 0.0 {
+            return None;
+        }
+        if !self.opened {
+            self.opened = true;
+            return Some(SwipeOutput::Begin {
+                motion: self.motion,
+                progress: delta,
+            });
+        }
+        Some(SwipeOutput::Advance {
+            motion: self.motion,
+            delta,
+        })
+    }
+}
+
+/// One pad-width of travel equals one progress unit; the constants mirror the
+/// target Casa Touch pad (2775 × 1786 @ 600 dpi ≈ 117 × 76 mm) until real
+/// geometry is plumbed through.
+const HORIZONTAL_PAD_TRAVEL_UM: f64 = 117_000.0;
+const VERTICAL_PAD_TRAVEL_UM: f64 = 75_600.0;
+
+/// Stream a committed swipe only when the bound action lives on the trigger's
+/// axis; anything else keeps the discrete dispatch.
+fn native_stream_plan(trigger: ButtonId, action: &Action) -> Option<DockSwipeMotion> {
+    let motion = match trigger {
+        ButtonId::TouchpadThreeFingerSwipeRight
+        | ButtonId::TouchpadFourFingerSwipeRight
+        | ButtonId::TouchpadThreeFingerSwipeLeft
+        | ButtonId::TouchpadFourFingerSwipeLeft => DockSwipeMotion::Horizontal,
+        ButtonId::TouchpadThreeFingerSwipeUp
+        | ButtonId::TouchpadFourFingerSwipeUp
+        | ButtonId::TouchpadThreeFingerSwipeDown
+        | ButtonId::TouchpadFourFingerSwipeDown => DockSwipeMotion::Vertical,
+        _ => return None,
+    };
+    let action_fits = match motion {
+        DockSwipeMotion::Horizontal => {
+            matches!(action, Action::NextDesktop | Action::PreviousDesktop)
+        }
+        DockSwipeMotion::Vertical => matches!(
+            action,
+            Action::MissionControl | Action::AppExpose | Action::ShowDesktop
+        ),
+    };
+    action_fits.then_some(motion)
+}
+
+fn frame_centroid(contacts: &[TouchContact]) -> (i64, i64) {
+    let count = i64::try_from(contacts.len()).unwrap_or(1);
+    let sum = contacts.iter().fold((0_i64, 0_i64), |(sx, sy), contact| {
+        (sx + i64::from(contact.x_um), sy + i64::from(contact.y_um))
+    });
+    (sum.0 / count, sum.1 / count)
 }
 
 #[derive(Default)]
@@ -157,8 +493,16 @@ impl SessionTouchpads {
         self.0.entry(session.clone()).or_default()
     }
 
-    fn cancel_session(&mut self, session: &HidppSessionId) {
-        self.0.remove(session);
+    fn begin_failed(&mut self, session: &HidppSessionId) -> Option<(ButtonId, Action)> {
+        self.0
+            .get_mut(session)
+            .and_then(TouchpadRuntime::begin_failed)
+    }
+
+    fn cancel_session(&mut self, session: &HidppSessionId) -> TouchpadOutcome {
+        self.0
+            .remove(session)
+            .map_or_else(TouchpadOutcome::default, |mut runtime| runtime.terminate())
     }
 }
 
@@ -170,6 +514,8 @@ pub(super) struct InputDispatcher {
     wheels: SessionWheels,
     gesture_presses: GesturePresses,
     touchpads: SessionTouchpads,
+    /// The one running scroll-momentum tail. A new touch replaces it.
+    momentum: Option<TouchpadMomentum>,
 }
 
 impl InputDispatcher {
@@ -181,6 +527,16 @@ impl InputDispatcher {
             wheels: SessionWheels::default(),
             gesture_presses: GesturePresses::default(),
             touchpads: SessionTouchpads::default(),
+            momentum: None,
+        }
+    }
+
+    /// Kill the scroll-momentum tail, if one is gliding. The thread posts its
+    /// own terminal zero-delta end on the next tick, keeping the momentum
+    /// phase machine single-ownered.
+    fn stop_momentum(&mut self) {
+        if let Some(momentum) = self.momentum.take() {
+            momentum.stop();
         }
     }
 
@@ -201,10 +557,15 @@ impl InputDispatcher {
 
     /// Cancel every input lifecycle retained for one capture session.
     pub(super) fn cancel_session(&mut self, session: &HidppSessionId) {
+        self.stop_momentum();
         self.outputs.cancel_session(session);
         self.wheels.cancel_session(session);
         self.gesture_presses.cancel_session(session);
-        self.touchpads.cancel_session(session);
+        // The terminated swipe animation springs back (its stream step is
+        // the outcome's only live half); the routed side is a dead terminal
+        // with no momentum and nothing to post.
+        let outcome = self.touchpads.cancel_session(session);
+        Self::execute_touchpad_stream(session.epoch(), &outcome.stream, session.device_key());
     }
 
     /// Route one captured input from `session` to its bound action or
@@ -266,54 +627,78 @@ impl InputDispatcher {
                 increments,
                 resolution,
             } => {
-                let Some(rotation) = WheelRotation::from_increments(increments) else {
-                    return;
-                };
-                let button = rotation.button();
-                let configuration = WheelConfiguration::for_plan(plan);
-                let action = configuration.action(rotation);
-                let wheels = self.wheels.for_session(session);
-                match wheels.advance(
-                    rotation,
-                    action,
-                    ScrollScale::new(resolution, configuration.sensitivity),
-                    Instant::now(),
-                ) {
-                    WheelOutput::Idle => {}
-                    WheelOutput::Scroll(delta) => self.outputs.post_scroll(session, delta),
-                    WheelOutput::FireAction => {
-                        debug!(key, ?button, action = %action.label(), "thumb wheel → action");
-                        self.outputs.actions.dispatch(action, Some(key));
-                    }
-                }
+                self.dispatch_scroll(session, plan, increments, resolution, key);
             }
             CapturedInput::ThumbwheelDirection { .. } => {
                 unreachable!("thumb-wheel direction reports return before dispatch")
             }
             CapturedInput::TouchpadFrame(frame) => {
-                Self::dispatch_touchpad_frame(
-                    &mut self.touchpads,
-                    &self.outputs,
-                    session,
-                    key,
+                // Touch re-lands, or the glide decayed out since the last
+                // frame: either way the tail is over, and the stopping
+                // touch must not resolve into a tap.
+                if let Some(momentum) = self.momentum.take() {
+                    momentum.stop();
+                    self.touchpads
+                        .for_session(session)
+                        .suppress_taps(TAP_SUPPRESSION_AFTER_GLIDE);
+                }
+                let tuning = TouchpadScrollTuning::from_plan(plan);
+                let native_streaming = openlogi_inject::dock_swipe_supported();
+                let outcome = self.touchpads.for_session(session).update(
                     &frame,
                     &plan.touchpad_bindings,
                     touchpad_actions_enabled,
+                    native_streaming,
+                );
+                Self::execute_touchpad_outcome(
+                    &self.outputs,
+                    &mut self.touchpads,
+                    tuning,
+                    session,
+                    outcome,
+                    key,
                 );
             }
             CapturedInput::TouchpadEnd => {
-                Self::end_touchpad_stroke(
-                    &mut self.touchpads,
-                    &self.outputs,
-                    session,
-                    key,
-                    touchpad_actions_enabled,
-                );
+                self.end_touchpad_stroke(session, plan, key, touchpad_actions_enabled);
             }
             CapturedInput::TouchpadCancel => {
-                self.touchpads.for_session(session).cancel();
+                self.cancel_touchpad_stroke(session, plan, key);
             }
             CapturedInput::TouchpadDroppedFrames(_) => {}
+        }
+    }
+
+    /// Route one thumb-wheel rotation through the per-session accumulator:
+    /// post the scaled scroll, or fire the bound action once its travel
+    /// crosses the threshold.
+    fn dispatch_scroll(
+        &mut self,
+        session: &HidppSessionId,
+        plan: &DispatchPlan,
+        increments: i16,
+        resolution: WheelResolution,
+        key: &str,
+    ) {
+        let Some(rotation) = WheelRotation::from_increments(increments) else {
+            return;
+        };
+        let button = rotation.button();
+        let configuration = WheelConfiguration::for_plan(plan);
+        let action = configuration.action(rotation);
+        let wheels = self.wheels.for_session(session);
+        match wheels.advance(
+            rotation,
+            action,
+            ScrollScale::new(resolution, configuration.sensitivity),
+            Instant::now(),
+        ) {
+            WheelOutput::Idle => {}
+            WheelOutput::Scroll(delta) => self.outputs.post_scroll(session, delta),
+            WheelOutput::FireAction => {
+                debug!(key, ?button, action = %action.label(), "thumb wheel → action");
+                self.outputs.actions.dispatch(action, Some(key));
+            }
         }
     }
 
@@ -363,42 +748,119 @@ impl InputDispatcher {
             .dispatch_hidpp_button_pulse(session, button, binding);
     }
 
-    fn dispatch_touchpad_frame(
-        touchpads: &mut SessionTouchpads,
-        outputs: &GestureOutputs,
-        session: &HidppSessionId,
-        key: &str,
-        frame: &TouchFrame,
-        bindings: &BTreeMap<ButtonId, Action>,
-        actions_enabled: bool,
-    ) {
-        let action = touchpads
-            .for_session(session)
-            .update(frame, bindings, actions_enabled);
-        Self::dispatch_touchpad_action(outputs, key, action);
+    /// Cancel one touchpad stroke: stop any gliding tail, spring back an
+    /// open swipe animation, and route the cancelled scroll terminal.
+    fn cancel_touchpad_stroke(&mut self, session: &HidppSessionId, plan: &DispatchPlan, key: &str) {
+        self.stop_momentum();
+        let tuning = TouchpadScrollTuning::from_plan(plan);
+        let outcome = self.touchpads.for_session(session).cancel();
+        Self::execute_touchpad_stream(session.epoch(), &outcome.stream, key);
+        Self::route_touchpad_output(&self.outputs, tuning, key, outcome.routed);
     }
 
+    /// End one touchpad stroke: execute the swipe stream's release step,
+    /// route the terminal (a tap that survived the scroll travel limits),
+    /// and, when the lift-off was fast enough, hand the exit velocity to a
+    /// momentum tail.
     fn end_touchpad_stroke(
-        touchpads: &mut SessionTouchpads,
-        outputs: &GestureOutputs,
+        &mut self,
         session: &HidppSessionId,
+        plan: &DispatchPlan,
         key: &str,
         actions_enabled: bool,
     ) {
-        let action = touchpads.for_session(session).end(actions_enabled);
-        Self::dispatch_touchpad_action(outputs, key, action);
+        let tuning = TouchpadScrollTuning::from_plan(plan);
+        let outcome = self.touchpads.for_session(session).end(actions_enabled);
+        let exit_velocity = match &outcome.routed {
+            TouchpadOutput::ScrollEnd {
+                exit_velocity_um_per_s,
+                ..
+            } => *exit_velocity_um_per_s,
+            _ => None,
+        };
+        Self::execute_touchpad_stream(session.epoch(), &outcome.stream, key);
+        Self::route_touchpad_output(&self.outputs, tuning, key, outcome.routed);
+        if let Some(exit_velocity) = exit_velocity {
+            // Replacing the handle does not stop the old tail (dropping it
+            // never does) — without this, two glides stack their deltas.
+            self.stop_momentum();
+            self.momentum = TouchpadMomentum::start(tuning, exit_velocity);
+        }
     }
 
-    fn dispatch_touchpad_action(
+    fn execute_touchpad_outcome(
         outputs: &GestureOutputs,
+        touchpads: &mut SessionTouchpads,
+        tuning: TouchpadScrollTuning,
+        session: &HidppSessionId,
+        outcome: TouchpadOutcome,
         key: &str,
-        action: Option<(ButtonId, Action)>,
     ) {
-        let Some((trigger, action)) = action else {
-            return;
-        };
-        debug!(key, %trigger, action = %action.label(), "touchpad gesture → action");
-        outputs.actions.dispatch(&action, Some(key));
+        let owner = session.epoch();
+        match &outcome.stream {
+            SwipeOutput::Begin { motion, progress } => {
+                if openlogi_inject::post_dock_swipe(
+                    owner,
+                    *motion,
+                    DockSwipePhase::Began,
+                    *progress,
+                ) {
+                    debug!(key, ?motion, "touchpad swipe → native DockSwipe animation");
+                } else {
+                    tracing::warn!(key, ?motion, "native dock swipe failed to begin");
+                    if let Some((trigger, action)) = touchpads.begin_failed(session) {
+                        debug!(key, %trigger, action = %action.label(), "touchpad swipe → discrete fallback");
+                        outputs.actions.dispatch(&action, Some(key));
+                    }
+                }
+            }
+            stream => Self::execute_touchpad_stream(owner, stream, key),
+        }
+        Self::route_touchpad_output(outputs, tuning, key, outcome.routed);
+    }
+
+    /// Use the capture-session epoch as the global DockSwipe owner.
+    fn execute_touchpad_stream(owner: u64, stream: &SwipeOutput, key: &str) {
+        match *stream {
+            SwipeOutput::Idle => {}
+            SwipeOutput::Begin { .. } => unreachable!("handled by execute_touchpad_outcome"),
+            SwipeOutput::Advance { motion, delta } => {
+                openlogi_inject::post_dock_swipe(owner, motion, DockSwipePhase::Changed, delta);
+            }
+            SwipeOutput::Finish {
+                motion,
+                end: SwipeEnd::AtRelease,
+            } => {
+                openlogi_inject::post_dock_swipe(owner, motion, DockSwipePhase::End, 0.0);
+            }
+            SwipeOutput::Finish {
+                motion,
+                end: SwipeEnd::Cancelled,
+            } => {
+                debug!(key, ?motion, "touchpad swipe animation cancelled");
+                openlogi_inject::post_dock_swipe(owner, motion, DockSwipePhase::Cancel, 0.0);
+            }
+        }
+    }
+
+    fn route_touchpad_output(
+        outputs: &GestureOutputs,
+        tuning: TouchpadScrollTuning,
+        key: &str,
+        outcome: TouchpadOutput,
+    ) {
+        match outcome {
+            TouchpadOutput::Action { trigger, action } => {
+                debug!(key, %trigger, action = %action.label(), "touchpad gesture → action");
+                outputs.actions.dispatch(&action, Some(key));
+            }
+            TouchpadOutput::Scroll { dx_um, dy_um } => {
+                super::post_touchpad_scroll(tuning, dx_um, dy_um);
+            }
+            // The terminal's exit velocity was consumed above; idle posts
+            // nothing.
+            TouchpadOutput::Idle | TouchpadOutput::ScrollEnd { .. } => {}
+        }
     }
 }
 

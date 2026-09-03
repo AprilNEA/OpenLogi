@@ -40,6 +40,12 @@ bitflags::bitflags! {
         const MAJOR_MINOR = 1 << 5;
         /// Report 8-bit width and height bytes instead of area.
         const WIDTH_HEIGHT_8BIT = 1 << 6;
+        /// Undocumented bit 7. Logi Options+ arms capture as `0xC1` (RAW |
+        /// WIDTH_HEIGHT_8BIT plus this bit) and its agent has no host-side
+        /// defence against the firmware's native click layer — the phantom
+        /// button events that kill captured drags — so this bit is the probe
+        /// for the firmware itself stopping that translation.
+        const DIVERT_NATIVE_GESTURES = 1 << 7;
     }
 }
 
@@ -88,7 +94,8 @@ pub struct TouchpadInfo {
 }
 
 impl TouchpadInfo {
-    fn from_payload(payload: &[u8; 16]) -> Result<Self, Hidpp20Error> {
+    /// Decode the feature's 16-byte information payload.
+    pub fn from_payload(payload: &[u8; 16]) -> Result<Self, Hidpp20Error> {
         Ok(Self {
             x_size: u16::from_be_bytes([payload[0], payload[1]]),
             y_size: u16::from_be_bytes([payload[2], payload[3]]),
@@ -134,5 +141,21 @@ impl TouchpadRawXyFeature {
     pub async fn set_raw_report_state(&self, flags: RawReportFlags) -> Result<(), Hidpp20Error> {
         self.endpoint.call(2, [flags.bits(), 0, 0]).await?;
         Ok(())
+    }
+
+    /// Retrieves the firmware's per-gesture handling bitmap.
+    ///
+    /// The four bytes say, per gesture handling, whether the firmware keeps
+    /// translating it into HID events or stands down for the host. Decoded
+    /// from a production agent's `apply_gesture_states` write, the layout is
+    /// a pack of 2-bit fields: `byte0` bits 4–5 and `byte1` bits 0–1 govern
+    /// one-finger taps (set per the tap-to-click setting), `byte2` bits 0–3
+    /// the secondary-click trigger, `byte2` bits 4–5 the three-finger
+    /// tap-and-hold drag, `byte3` bits 6–7 the one-finger double-tap-and-hold
+    /// drag, and the remaining bits — including the click-hold handling that
+    /// drags with assist fingers — ride through at their device defaults.
+    pub async fn get_gestures_handling_output(&self) -> Result<[u8; 4], Hidpp20Error> {
+        let payload = self.endpoint.call_long(3, [0; 16]).await?.extend_payload();
+        Ok([payload[0], payload[1], payload[2], payload[3]])
     }
 }

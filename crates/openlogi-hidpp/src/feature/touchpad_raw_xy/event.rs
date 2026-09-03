@@ -65,6 +65,14 @@ pub enum TouchpadRawEvent {
     /// Only reported while raw reporting is enabled (see
     /// [`set_raw_report_state`](super::TouchpadRawXyFeature::set_raw_report_state)).
     DualXy(DualXyData),
+    /// The firmware handled a gesture itself (`fn=1`,
+    /// "onGestureHandledByDevice" in Options+). Payload carries the
+    /// gesture's raw bytes; surfaced for arbitration diagnostics rather than
+    /// recognition.
+    GestureHandledByDevice {
+        /// The event payload after the sub-id, verbatim.
+        payload: [u8; 15],
+    },
 }
 
 /// Extracts a 14-bit coordinate from a high byte (low 6 bits) and a low byte.
@@ -72,36 +80,47 @@ fn coord14(high: u8, low: u8) -> u16 {
     (u16::from(high & 0x3f) << 8) | u16::from(low)
 }
 
-/// Decodes the `0x6100` event payload by its sub-id (default report layout).
+/// Decodes the `0x6100` event payload by its sub-id.
 pub(super) fn decode_event(sub_id: u8, payload: &[u8; 16]) -> Option<TouchpadRawEvent> {
     match sub_id {
-        0 => Some(TouchpadRawEvent::DualXy(DualXyData {
-            timestamp: u16::from_be_bytes([payload[0], payload[1]]),
-            touch1: TouchPoint {
-                contact_type: payload[2] >> 6,
-                contact_status: payload[4] >> 6,
-                x: coord14(payload[2], payload[3]),
-                y: coord14(payload[4], payload[5]),
-                finger_id: payload[8] >> 4,
-                z: payload[6],
-                area: payload[7],
-            },
-            touch2: TouchPoint {
-                contact_type: payload[9] >> 6,
-                contact_status: payload[11] >> 6,
-                x: coord14(payload[9], payload[10]),
-                y: coord14(payload[11], payload[12]),
-                finger_id: payload[15] >> 4,
-                z: payload[13],
-                area: payload[14],
-            },
-            // Byte 8 carries frame-level flags alongside touch 1's finger id.
-            button: payload[8] & (1 << 2) != 0,
-            spurious: payload[8] & (1 << 1) != 0,
-            end_of_frame: payload[8] & 1 != 0,
-            finger_count: payload[15] & 0x0f,
-        })),
+        0 => Some(TouchpadRawEvent::DualXy(decode_dual_xy(payload))),
+        1 => {
+            let mut notification = [0u8; 15];
+            notification.copy_from_slice(&payload[1..]);
+            Some(TouchpadRawEvent::GestureHandledByDevice {
+                payload: notification,
+            })
+        }
         _ => None,
+    }
+}
+
+fn decode_dual_xy(payload: &[u8; 16]) -> DualXyData {
+    DualXyData {
+        timestamp: u16::from_be_bytes([payload[0], payload[1]]),
+        touch1: TouchPoint {
+            contact_type: payload[2] >> 6,
+            contact_status: payload[4] >> 6,
+            x: coord14(payload[2], payload[3]),
+            y: coord14(payload[4], payload[5]),
+            finger_id: payload[8] >> 4,
+            z: payload[6],
+            area: payload[7],
+        },
+        touch2: TouchPoint {
+            contact_type: payload[9] >> 6,
+            contact_status: payload[11] >> 6,
+            x: coord14(payload[9], payload[10]),
+            y: coord14(payload[11], payload[12]),
+            finger_id: payload[15] >> 4,
+            z: payload[13],
+            area: payload[14],
+        },
+        // Byte 8 carries frame-level flags alongside touch 1's finger id.
+        button: payload[8] & (1 << 2) != 0,
+        spurious: payload[8] & (1 << 1) != 0,
+        end_of_frame: payload[8] & 1 != 0,
+        finger_count: payload[15] & 0x0f,
     }
 }
 

@@ -379,7 +379,9 @@ fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEvent> {
     // Skip events OpenLogi itself synthesised, so a remapped click or inverted
     // scroll we posted doesn't re-enter the hook as real input. Gate the field
     // read to events we synthesize — keeping the FFI call off the high-rate
-    // pointer-move stream.
+    // pointer-move stream of real hardware. The drag-handoff's synthesized
+    // drag events must be in that set too: without the tag check they fall
+    // into the armed-motion suppression and the hook eats its own synthesis.
     let can_be_synthetic = matches!(
         etype,
         CGEventType::LeftMouseDown
@@ -389,6 +391,7 @@ fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEvent> {
             | CGEventType::OtherMouseDown
             | CGEventType::OtherMouseUp
             | CGEventType::ScrollWheel
+            | CGEventType::LeftMouseDragged
     );
     if can_be_synthetic
         && event.get_integer_value_field(EventField::EVENT_SOURCE_USER_DATA)
