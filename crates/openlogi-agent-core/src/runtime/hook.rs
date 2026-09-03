@@ -478,6 +478,9 @@ pub fn start(
                     HELD_KEYS.with_borrow_mut(HashSet::clear);
                     dispatcher.cancel_hook_thread_buttons();
                     scroll.cancel_hooks();
+                    // The published press must not outlive the tap: a stuck
+                    // hold keeps the touchpad disarmed until the next click.
+                    native_button.store(false, std::sync::atomic::Ordering::Relaxed);
                     EventDisposition::PassThrough
                 }
                 MouseEvent::Scroll {
