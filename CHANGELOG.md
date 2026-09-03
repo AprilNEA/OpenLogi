@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(core)* add keyboard backlight key slots and display-brightness actions
+- *(inject)* post display-brightness keys on macOS and Linux
+
 ## [0.8.3] - 2026-08-30
 
 ### Fixed

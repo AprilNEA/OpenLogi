@@ -187,6 +187,15 @@ pub enum Action {
     /// cancellation and shutdown. Dispatchers without a release context must
     /// degrade this action to a balanced tap rather than leave keys held.
     HoldShortcut(KeyCombo),
+    /// Increase display brightness. Fired through the same dedicated
+    /// media-key mechanism as the volume actions (macOS: the NX system-defined
+    /// brightness key; Linux: `KEY_BRIGHTNESSUP`; Windows has no key event for
+    /// display brightness, so its injector logs and skips). Appended here
+    /// because the serde variant index is the wire format (see the stability
+    /// contract above).
+    BrightnessUp,
+    /// Decrease display brightness. Counterpart to [`Action::BrightnessUp`].
+    BrightnessDown,
 }
 
 /// One step in a [`Action::Workflow`]. A workflow is a `Vec<WorkflowStep>`
@@ -269,6 +278,8 @@ macro_rules! for_each_unit_action {
             Screenshot "Screenshot" "actions.screenshot" System Camera,
             CaptureRegion "Capture Region" "actions.capture_region" System Camera,
             Sleep "Sleep" "actions.sleep" System Monitor,
+            BrightnessUp "Brightness Up" "actions.brightness_up" System Monitor,
+            BrightnessDown "Brightness Down" "actions.brightness_down" System Monitor,
             ShowActionsRing "Actions Ring" "action_ring.actions_ring" System Grid,
             // Media
             PlayPause "Play / Pause" "actions.play_pause" Media Play,
