@@ -4,6 +4,8 @@
 //! clamped to the display it came up on, so a ring raised near a screen edge
 //! stays whole instead of being cut off.
 
+use std::sync::Arc;
+
 use gpui::{
     Bounds, Context, Hsla, InteractiveElement, IntoElement, ParentElement, Pixels, Point, Render,
     SharedString, Size, StatefulInteractiveElement as _, Styled, Window,
@@ -14,21 +16,17 @@ use openlogi_core::binding::{Action, ActionRingSlot};
 use openlogi_ipc::ActionRingInvocation;
 use openlogi_ui::action_icons::RING_CANCEL_ICON;
 use openlogi_ui::color;
-use std::sync::Arc;
 use tokio::sync::mpsc;
+use tracing::warn;
 
 use crate::agent::OverlayCommand;
 use crate::platform;
-use crate::session::{ClickAwaySession, ShowingRing};
+use crate::session::ClickAwaySession;
 
-pub(crate) const WINDOW_SIZE: f32 = 360.0;
+pub(crate) const WINDOW_SIZE: f32 = 324.0;
 pub(crate) const SLOT_SIZE: f32 = 54.0;
 pub(crate) const RADIUS: f32 = 122.0;
 
-/// The ring's own neutral scale. It floats over whatever is on the desktop, so
-/// unlike the settings app it cannot take its surfaces from the OS appearance —
-/// it commits to a dark panel and rides its own contrast. Only the accent is
-/// shared (`openlogi_ui::color`); these greys are local by nature.
 const PANEL: Hsla = neutral(0.06, 0.82);
 const SLOT_RESTING: Hsla = neutral(0.16, 0.98);
 const CANCEL_RESTING: Hsla = neutral(0.20, 0.98);
@@ -45,47 +43,91 @@ const fn neutral(lightness: f32, alpha: f32) -> Hsla {
     }
 }
 
-/// The accent deepened for the dark panel: the brand lightness sits too close to
-/// the white glyph a selected slot carries, so the fill drops to `0.48` and the
-/// ring around it rises to `0.78`. Both keep the brand hue and saturation.
 const SELECTED_FILL_L: f32 = 0.48;
 const SELECTED_BORDER_L: f32 = 0.78;
 
 pub(crate) struct RingView {
-    invocation: ActionRingInvocation,
+    invocation: Option<ActionRingInvocation>,
     commands: mpsc::UnboundedSender<OverlayCommand>,
     hovered: Option<ActionRingSlot>,
-    /// Publishes click-away identity for exactly this view's lifetime.
-    _showing: ShowingRing,
+    live_session: Arc<ClickAwaySession>,
+    persistent: bool,
 }
 
 impl RingView {
-    /// Open a view on `invocation`, reporting interactions through `commands`.
     pub(crate) fn new(
         invocation: ActionRingInvocation,
         commands: mpsc::UnboundedSender<OverlayCommand>,
-        live: &Arc<ClickAwaySession>,
+        live_session: Arc<ClickAwaySession>,
     ) -> Self {
-        let showing = live.showing(invocation.session_id);
         Self {
-            invocation,
+            invocation: Some(invocation),
             commands,
             hovered: None,
-            _showing: showing,
+            live_session,
+            persistent: false,
         }
     }
 
-    /// The ring session this view is showing.
-    pub(crate) const fn session_id(&self) -> u64 {
-        self.invocation.session_id
+    pub(crate) fn idle(
+        commands: mpsc::UnboundedSender<OverlayCommand>,
+        live_session: Arc<ClickAwaySession>,
+    ) -> Self {
+        Self {
+            invocation: None,
+            commands,
+            hovered: None,
+            live_session,
+            persistent: true,
+        }
     }
 
-    /// Report this ring cancelled. The window is closed by the caller, which
-    /// is the only one holding the handle.
+    pub(crate) fn current_session(&self) -> Option<u64> {
+        self.invocation
+            .as_ref()
+            .map(|invocation| invocation.session_id)
+    }
+
+    pub(crate) fn install(&mut self, invocation: ActionRingInvocation, cx: &mut Context<Self>) {
+        self.hovered = None;
+        self.invocation = Some(invocation);
+        cx.notify();
+    }
+
+    pub(crate) fn hide(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let session_id = self.current_session();
+        self.hovered = None;
+        self.invocation = None;
+        if let Some(session_id) = session_id {
+            self.live_session.clear_if(session_id);
+        }
+        cx.notify();
+        if self.persistent {
+            if !platform::hide_window(window) {
+                warn!("could not hide warm Actions Ring window");
+            }
+        } else {
+            window.remove_window();
+        }
+    }
+
+    pub(crate) fn dismiss(
+        &mut self,
+        session_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !session_targets(session_id, self.current_session()) {
+            return false;
+        }
+        self.hide(window, cx);
+        true
+    }
+
     pub(crate) fn cancel(&self) {
-        let _ = self.commands.send(OverlayCommand::Cancel {
-            session_id: self.invocation.session_id,
-        });
+        if let Some(session_id) = self.current_session() {
+            let _ = self.commands.send(OverlayCommand::Cancel { session_id });
+        }
     }
 
     fn slot_element(
@@ -93,11 +135,12 @@ impl RingView {
         slot: ActionRingSlot,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        let presentation = self.invocation.slots.get(&slot)?;
+        let invocation = self.invocation.as_ref()?;
+        let presentation = invocation.slots.get(&slot)?;
         let icon_path = presentation.icon.asset_path();
         let selected = self.hovered == Some(slot);
         let (left, top) = slot.placement(WINDOW_SIZE, RADIUS, SLOT_SIZE);
-        let session_id = self.invocation.session_id;
+        let session_id = invocation.session_id;
         let activate = self.commands.clone();
         Some(
             div()
@@ -135,26 +178,31 @@ impl RingView {
                         cx.notify();
                     }
                 }))
-                .on_click(move |_, window, cx| {
+                .on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
                     let _ = activate.send(OverlayCommand::Activate { session_id, slot });
-                    window.remove_window();
-                })
+                    this.dismiss(session_id, window, cx);
+                }))
                 .into_any_element(),
         )
     }
 }
 
+#[must_use]
+const fn session_targets(session_id: u64, open_session: Option<u64>) -> bool {
+    matches!(open_session, Some(open) if open == session_id)
+}
+
 impl Render for RingView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let session_id = self.invocation.session_id;
+        let Some(invocation) = self.invocation.clone() else {
+            return div().id("ring-root-idle").size_full();
+        };
+        let session_id = invocation.session_id;
         let root_commands = self.commands.clone();
         let center_commands = self.commands.clone();
         let hovered_label = self.hovered.and_then(|slot| {
-            let presentation = self.invocation.slots.get(&slot)?;
-            // User-authored labels render verbatim: passing them through the
-            // localization table would translate any label that happens to
-            // collide with a known key ("Copy" → "Copier" under fr).
+            let presentation = invocation.slots.get(&slot)?;
             let label = if presentation.literal {
                 presentation.label.clone()
             } else if let Some(key) = Action::translation_key_for_label(&presentation.label) {
@@ -173,16 +221,8 @@ impl Render for RingView {
             .id("ring-root")
             .relative()
             .size_full()
-            .child(
-                div()
-                    .absolute()
-                    .left(px(18.0))
-                    .top(px(18.0))
-                    .size(px(WINDOW_SIZE - 36.0))
-                    .rounded_full()
-                    .bg(PANEL)
-                    .shadow_lg(),
-            )
+            .rounded_full()
+            .bg(PANEL)
             .children(slots)
             .child(
                 div()
@@ -199,11 +239,11 @@ impl Render for RingView {
                     .text_color(CANCEL_GLYPH)
                     .cursor_pointer()
                     .child(svg().path(RING_CANCEL_ICON).size(px(20.0)).flex_none())
-                    .on_click(move |_, window, cx| {
+                    .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
                         let _ = center_commands.send(OverlayCommand::Cancel { session_id });
-                        window.remove_window();
-                    }),
+                        this.dismiss(session_id, window, cx);
+                    })),
             )
             .when_some(hovered_label, |ring, label| {
                 ring.child(
@@ -218,44 +258,138 @@ impl Render for RingView {
                         .child(label),
                 )
             })
-            .on_click(move |_, window, _| {
+            .on_click(cx.listener(move |this, _, window, cx| {
                 let _ = root_commands.send(OverlayCommand::Cancel { session_id });
-                window.remove_window();
-            })
+                this.dismiss(session_id, window, cx);
+            }))
     }
+}
+
+#[cfg(any(target_os = "windows", test))]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "monitor-sized logical coordinates retain sufficient precision as GPUI f32 pixels"
+)]
+fn cursor_in_logical_display(
+    cursor: (f64, f64),
+    native_origin: (f64, f64),
+    native_size: (f64, f64),
+    logical_bounds: &Bounds<Pixels>,
+) -> Option<Point<Pixels>> {
+    let logical_width = f64::from(logical_bounds.size.width.as_f32());
+    let logical_height = f64::from(logical_bounds.size.height.as_f32());
+    if native_size.0 <= 0.0 || native_size.1 <= 0.0 || logical_width <= 0.0 || logical_height <= 0.0
+    {
+        return None;
+    }
+    let scale_x = native_size.0 / logical_width;
+    let scale_y = native_size.1 / logical_height;
+    if !scale_x.is_finite() || !scale_y.is_finite() || scale_x <= 0.0 || scale_y <= 0.0 {
+        return None;
+    }
+    Some(point(
+        logical_bounds.origin.x + px(((cursor.0 - native_origin.0) / scale_x) as f32),
+        logical_bounds.origin.y + px(((cursor.1 - native_origin.1) / scale_y) as f32),
+    ))
 }
 
 #[expect(
     clippy::cast_possible_truncation,
-    reason = "native cursor coordinates are screen-sized and exactly usable as GPUI f32 pixels"
+    reason = "native display coordinates are monitor-sized and retain sufficient precision as GPUI f32 pixels"
 )]
-pub(crate) fn ring_window_options(cx: &mut gpui::App) -> WindowOptions {
+fn platform_cursor_placement(
+    x: f64,
+    y: f64,
+) -> Option<(gpui::DisplayId, Point<Pixels>, Bounds<Pixels>)> {
+    let display = platform::display_containing(x, y)?;
+    Some((
+        gpui::DisplayId::from(display.id),
+        point(
+            px((x - display.origin.0) as f32),
+            px((y - display.origin.1) as f32),
+        ),
+        Bounds::new(
+            Point::default(),
+            Size::new(px(display.size.0 as f32), px(display.size.1 as f32)),
+        ),
+    ))
+}
+
+#[cfg(target_os = "windows")]
+#[expect(
+    unsafe_code,
+    clippy::cast_possible_truncation,
+    reason = "Win32 monitor lookup consumes i32 device pixels and GPUI DisplayId mirrors the HMONITOR value"
+)]
+fn native_cursor_placement(
+    cx: &mut gpui::App,
+    x: f64,
+    y: f64,
+) -> Option<(gpui::DisplayId, Point<Pixels>, Bounds<Pixels>)> {
+    use windows_sys::Win32::{
+        Foundation::POINT as NativePoint,
+        Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint},
+    };
+
+    let cursor = NativePoint {
+        x: x.round() as i32,
+        y: y.round() as i32,
+    };
+    // SAFETY: MonitorFromPoint consumes a by-value POINT and does not dereference caller-owned pointers.
+    let monitor = unsafe { MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST) };
+    if monitor.is_null() {
+        return platform_cursor_placement(x, y);
+    }
+    let display_id = gpui::DisplayId::from(u64::try_from(monitor as usize).ok()?);
+    let logical_bounds = cx
+        .displays()
+        .into_iter()
+        .find(|display| display.id() == display_id)?
+        .bounds();
+
+    let mut monitor_info = MONITORINFO {
+        cbSize: u32::try_from(std::mem::size_of::<MONITORINFO>()).ok()?,
+        ..Default::default()
+    };
+    // SAFETY: monitor is a non-null HMONITOR returned by MonitorFromPoint, and monitor_info is a valid writable MONITORINFO with cbSize initialized.
+    if unsafe { GetMonitorInfoW(monitor, &raw mut monitor_info) } == 0 {
+        return None;
+    }
+    let native_origin = (
+        f64::from(monitor_info.rcMonitor.left),
+        f64::from(monitor_info.rcMonitor.top),
+    );
+    let native_size = (
+        f64::from(monitor_info.rcMonitor.right - monitor_info.rcMonitor.left),
+        f64::from(monitor_info.rcMonitor.bottom - monitor_info.rcMonitor.top),
+    );
+    let center = cursor_in_logical_display((x, y), native_origin, native_size, &logical_bounds)?;
+    Some((display_id, center, logical_bounds))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn native_cursor_placement(
+    _cx: &mut gpui::App,
+    x: f64,
+    y: f64,
+) -> Option<(gpui::DisplayId, Point<Pixels>, Bounds<Pixels>)> {
+    platform_cursor_placement(x, y)
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "native cursor coordinates are screen-sized and retain sufficient precision as GPUI f32 pixels"
+)]
+pub(crate) fn ring_window_options(cx: &mut gpui::App, show: bool) -> WindowOptions {
     let cursor = openlogi_hook::cursor_position();
     let size = Size::new(px(WINDOW_SIZE), px(WINDOW_SIZE));
-    // GPUI window bounds are display-relative (`display.bounds()` zeroes every
-    // origin) while the hook reports the cursor in global coordinates, so the
-    // cursor's display must be resolved natively and the cursor translated into
-    // that display's space. Feeding the global point straight into the clamp
-    // pins a ring triggered on a secondary display to the primary one's edge.
-    let native_display = cursor
+    let native_placement = cursor
         .as_ref()
-        .and_then(|cursor| platform::display_containing(cursor.x, cursor.y));
+        .and_then(|cursor| native_cursor_placement(cx, cursor.x, cursor.y));
     let (display_id, center, display_bounds) =
-        if let (Some(cursor), Some(display)) = (&cursor, native_display) {
-            (
-                Some(gpui::DisplayId::from(display.id)),
-                point(
-                    px((cursor.x - display.origin.0) as f32),
-                    px((cursor.y - display.origin.1) as f32),
-                ),
-                Some(Bounds::new(
-                    Point::default(),
-                    Size::new(px(display.size.0 as f32), px(display.size.1 as f32)),
-                )),
-            )
+        if let Some((display_id, center, display_bounds)) = native_placement {
+            (Some(display_id), center, Some(display_bounds))
         } else {
-            // No cursor or no native lookup (non-macOS): GPUI's own display
-            // list, centering on the display when the cursor is unknown.
             let cursor_point = cursor
                 .as_ref()
                 .map(|cursor| point(px(cursor.x as f32), px(cursor.y as f32)));
@@ -281,7 +415,7 @@ pub(crate) fn ring_window_options(cx: &mut gpui::App) -> WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         titlebar: None,
         focus: false,
-        show: true,
+        show,
         kind: WindowKind::PopUp,
         is_movable: false,
         is_resizable: false,
@@ -308,6 +442,28 @@ pub(crate) fn clamp_window_origin(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_target_requires_the_open_session() {
+        assert!(session_targets(12, Some(12)));
+        assert!(!session_targets(11, Some(12)));
+        assert!(!session_targets(12, None));
+    }
+
+    #[test]
+    fn windows_mixed_dpi_secondary_cursor_maps_to_gpui_space() {
+        let logical_bounds =
+            Bounds::new(point(px(1280.0), px(0.0)), Size::new(px(1280.0), px(720.0)));
+        assert_eq!(
+            cursor_in_logical_display(
+                (2880.0, 540.0),
+                (1920.0, 0.0),
+                (1920.0, 1080.0),
+                &logical_bounds,
+            ),
+            Some(point(px(1920.0), px(360.0)))
+        );
+    }
 
     #[test]
     fn overlay_origin_is_clamped_to_the_display() {
