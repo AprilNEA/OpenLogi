@@ -319,7 +319,7 @@ impl Armed {
                     }
                 }
                 _ = hook_retry.tick(), if running.should_retry_hook() => {
-                    running.apply_accessibility(Hook::has_accessibility()).await;
+                    running.retry_hook().await;
                 }
                 Some(device_key) = running.inputs.triggers.recv() => {
                     running.begin_action_ring(device_key.as_deref()).await;
@@ -439,6 +439,18 @@ impl Running {
         #[cfg(not(target_os = "macos"))]
         {
             false
+        }
+    }
+
+    /// Retry a missing hook using the last stable Accessibility observation.
+    /// A fresh native probe can transiently return `false` while the permission
+    /// service settles; feeding that sample into `apply_accessibility` would
+    /// poison the cached state and disable this retry path.
+    async fn retry_hook(&mut self) {
+        #[cfg(target_os = "macos")]
+        {
+            let accessibility_granted = self.accessibility_granted;
+            self.apply_accessibility(accessibility_granted).await;
         }
     }
 
