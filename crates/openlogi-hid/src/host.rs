@@ -191,6 +191,29 @@ pub async fn dump_reprog_controls(
     device::dump_reprog_controls(&*native_backend(), route).await
 }
 
+/// Read the HID++ `0x8100` `OnboardProfiles` descriptor and current mode of
+/// the device `route` reaches — the gaming-line counterpart to
+/// [`dump_reprog_controls`] for devices without `0x1b04`.
+pub async fn dump_onboard_profiles(
+    route: &DeviceRoute,
+) -> Result<device::OnboardProfilesInfo, WriteError> {
+    device::dump_onboard_profiles(&*native_backend(), route).await
+}
+
+/// Read the HID++ `0x8110` `MouseButtonSpy` button count of the device
+/// `route` reaches.
+pub async fn dump_mouse_button_count(route: &DeviceRoute) -> Result<u8, WriteError> {
+    device::dump_mouse_button_count(&*native_backend(), route).await
+}
+
+/// Open the device `route` reaches for live `0x8110` `MouseButtonSpy`
+/// watching — see [`device::open_mouse_button_spy`].
+pub async fn open_mouse_button_spy(
+    route: &DeviceRoute,
+) -> Result<Arc<device::MouseButtonSpyFeature>, WriteError> {
+    device::open_mouse_button_spy(&*native_backend(), route).await
+}
+
 /// Read the raw battery report of the device `route` reaches.
 pub async fn read_battery_raw(route: &DeviceRoute) -> Result<String, WriteError> {
     device::read_battery_raw(&*native_backend(), route).await

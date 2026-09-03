@@ -10,6 +10,8 @@ use hidpp::{
         DeviceEntityFirmwareInfo, DeviceEntityType, DeviceInformationFeature,
     },
     feature::feature_set::FeatureSetFeature,
+    feature::mouse_button_spy::MouseButtonSpyFeature,
+    feature::onboard_profiles::OnboardProfilesFeature,
     feature::unified_battery::UnifiedBatteryFeature,
     protocol::v20::Hidpp20Error,
 };
@@ -138,6 +140,81 @@ pub async fn dump_reprog_controls(
             entries.push(control.into());
         }
         Ok(entries)
+    })
+    .await
+}
+
+/// Snapshot of the HID++ `0x8100` `OnboardProfiles` descriptor + current
+/// mode — the G-series gaming-line counterpart to [`dump_reprog_controls`]'s
+/// `0x1b04` probe, used by `openlogi diag mouse-buttons` to scope button-remap
+/// support for devices (e.g. G502 X PLUS) that don't expose `0x1b04`.
+#[derive(Debug, Clone, Copy)]
+pub struct OnboardProfilesInfo {
+    /// Memory layout and profile geometry reported by `getDescription`.
+    pub description: hidpp::feature::onboard_profiles::ProfilesDescription,
+    /// The device's current onboard/host mode, from `getMode`.
+    pub mode: hidpp::feature::onboard_profiles::OnboardMode,
+}
+
+/// Read the device's `0x8100` `OnboardProfiles` descriptor and current mode.
+/// Diagnostics-only: OpenLogi never writes onboard profile memory or mode.
+pub async fn dump_onboard_profiles(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+) -> Result<OnboardProfilesInfo, WriteError> {
+    let index = route.device_index();
+    with_route(backend, route, move |channel| async move {
+        let mut device = Device::new(Arc::clone(&channel), index)
+            .await
+            .map_err(|_| WriteError::DeviceUnreachable { index })?;
+        let feature = open_feature::<OnboardProfilesFeature>(&mut device).await?;
+        let description = feature.get_description().await.map_err(|e| {
+            classify_hidpp_error(e, HidppOperation::DumpFeatures, OnboardProfilesFeature::ID)
+        })?;
+        let mode = feature.get_mode().await.map_err(|e| {
+            classify_hidpp_error(e, HidppOperation::DumpFeatures, OnboardProfilesFeature::ID)
+        })?;
+        Ok(OnboardProfilesInfo { description, mode })
+    })
+    .await
+}
+
+/// Read the device's `0x8110` `MouseButtonSpy` button count — how many
+/// physical buttons the spy tracks, independent of `0x1b04`.
+pub async fn dump_mouse_button_count(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+) -> Result<u8, WriteError> {
+    let index = route.device_index();
+    with_route(backend, route, move |channel| async move {
+        let mut device = Device::new(Arc::clone(&channel), index)
+            .await
+            .map_err(|_| WriteError::DeviceUnreachable { index })?;
+        let feature = open_feature::<MouseButtonSpyFeature>(&mut device).await?;
+        feature.get_mouse_button_count().await.map_err(|e| {
+            classify_hidpp_error(e, HidppOperation::DumpFeatures, MouseButtonSpyFeature::ID)
+        })
+    })
+    .await
+}
+
+/// Opens the device's `0x8110` `MouseButtonSpy` feature for live event
+/// watching (`openlogi diag mouse-buttons --watch`).
+///
+/// The returned feature holds its own channel handle (via its
+/// `FeatureEndpoint`), so it keeps working after this call returns — the
+/// caller is responsible for `start_spy`/`stop_spy` and for listening via
+/// [`hidpp::feature::EmittingFeature::listen`].
+pub async fn open_mouse_button_spy(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+) -> Result<Arc<MouseButtonSpyFeature>, WriteError> {
+    let index = route.device_index();
+    with_route(backend, route, move |channel| async move {
+        let mut device = Device::new(Arc::clone(&channel), index)
+            .await
+            .map_err(|_| WriteError::DeviceUnreachable { index })?;
+        open_feature::<MouseButtonSpyFeature>(&mut device).await
     })
     .await
 }

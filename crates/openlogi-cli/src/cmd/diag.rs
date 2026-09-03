@@ -15,6 +15,7 @@ pub mod controls;
 pub mod dpi;
 pub mod features;
 pub mod lighting;
+pub mod mouse_buttons;
 pub mod smartshift;
 pub mod wheel;
 
@@ -24,6 +25,8 @@ pub enum DiagCmd {
     Features(features::FeaturesArgs),
     /// Dump HID++ 0x1b04 reprogrammable controls and capability flags.
     Controls(controls::ControlsArgs),
+    /// Probe HID++ 0x8100/0x8110 (G-series gaming-mouse button remap).
+    MouseButtons(mouse_buttons::MouseButtonsArgs),
     /// Read the raw battery report (0x1004 or 0x1000 fields).
     Battery(battery::BatteryArgs),
     /// Read DPI → write a small delta → read back → restore → report.
@@ -41,6 +44,7 @@ impl DiagCmd {
         match self {
             Self::Features(args) => features::run(args).await,
             Self::Controls(args) => controls::run(args).await,
+            Self::MouseButtons(args) => mouse_buttons::run(args).await,
             Self::Battery(args) => battery::run(args).await,
             Self::Dpi(args) => dpi::run(args).await,
             Self::Smartshift(args) => smartshift::run(args).await,
