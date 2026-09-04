@@ -6,7 +6,7 @@ paths:
   - "crates/openlogi-camera/**"
   - "crates/openlogi-agent/src/tray.rs"
   - "crates/openlogi-agent/src/status_item.rs"
-  - "crates/openlogi-agent-core/src/watchers/camera.rs"
+  - "crates/openlogi-agent-core/src/watchers/camera/macos.rs"
   - "crates/openlogi-hook/src/macos.rs"
   - "crates/openlogi-inject/src/inject/macos.rs"
   - "crates/openlogi-hid/src/permissions.rs"
@@ -24,7 +24,7 @@ files; **keep this table in sync when you add or move one**:
 |---|---|
 | `openlogi-agent/src/status_item.rs` | safe `objc2` wrappers over `NSStatusItem` / `NSMenu` / `NSMenuItem` |
 | `openlogi-agent/src/tray.rs` | the menu-bar semantics, `MenuTarget` + `ResumeTarget` (`define_class!`), the Accessory `NSApplication` loop, `NSWorkspace` resume notifications |
-| `openlogi-agent-core/src/watchers/camera.rs` | the CoreMediaIO "camera is running" property read |
+| `openlogi-agent-core/src/watchers/camera/macos.rs` | the CoreMediaIO "camera is running" property read |
 | `openlogi-camera/src/capture.rs` | `AVCaptureSession` capture + the `define_class!` frame delegate, and the Camera TCC prompt |
 | `openlogi-camera/src/macos.rs` | `AVCaptureDevice` enumeration (`class!` + `msg_send!`) |
 | `openlogi-camera/src/uvc.rs`, `.../uvc/iokit.rs` | IOKit USB / UVC control transfers; every `unsafe` in the macOS UVC backend lives in `iokit.rs` |
@@ -176,7 +176,7 @@ its single user. The current set, all deliberate:
   (`AVMediaTypeVideo`, `CMSampleBufferGetImageBuffer`, the `CVPixelBuffer`
   accessors, `CFRunLoopRunInMode`, `dispatch_queue_create`) — AVFoundation has no
   typed framework crate in the tree.
-- `openlogi-agent-core/src/watchers/camera.rs`: the CoreMediaIO property API —
+- `openlogi-agent-core/src/watchers/camera/macos.rs`: the CoreMediaIO property API —
   same reason.
 - `openlogi-inject`: the `AXUIElement` subset it navigates with, plus
   `CFRetain`/`CFRelease`, and the `dlopen`/`dlsym`-resolved private SPIs
