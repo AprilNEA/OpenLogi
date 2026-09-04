@@ -226,11 +226,12 @@ impl AssetResolver {
                 continue;
             };
             // Hotspot metadata in whichever schema this depot cached:
-            // `core_metadata.json` (newer) or `metadata.json` (older).
-            let Some(&meta_name) = METADATA_FILES.iter().find(|n| dir.join(n).exists()) else {
-                continue;
-            };
-            let meta_path = dir.join(meta_name);
+            // `core_metadata.json` (newer) or `metadata.json` (older). Camera
+            // depots ship none of these — their `image_metadata` is a per-PID
+            // `metadata_<pid>.json` carrying marker-less settings slots, and no
+            // hotspot consumer reads it — so a missing file must not fail the
+            // depot: the render below is what decides whether this root hits.
+            let meta_name = METADATA_FILES.iter().find(|n| dir.join(n).exists());
 
             // Pick the colour variant matching this device's HID++
             // extended_model_id byte. Logi calibrates the assignment
@@ -286,12 +287,14 @@ impl AssetResolver {
                 continue;
             };
 
-            let metadata = match Metadata::load_from(&meta_path) {
-                Ok(m) => m,
-                Err(e) => {
+            let metadata = if let Some(&meta_name) = meta_name {
+                Metadata::load_from(&dir.join(meta_name)).unwrap_or_else(|e| {
                     warn!(depot, root = %root.display(), file = meta_name, error = ?e, "device metadata unparseable — rendering image without hotspots");
                     Metadata::default()
-                }
+                })
+            } else {
+                debug!(depot, root = %root.display(), "depot ships no hotspot metadata — rendering image without hotspots");
+                Metadata::default()
             };
             let (png_width, png_height) = match read_png_dimensions(&image_path) {
                 Ok(dims) => dims,
