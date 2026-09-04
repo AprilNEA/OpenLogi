@@ -217,11 +217,16 @@ pub struct AppSettings {
     #[serde(default)]
     pub smooth_scroll: bool,
     /// Distance every wheel tick animates while [`Self::smooth_scroll`] is
-    /// active, as a multiple of the native line distance (≈10 px on macOS).
-    /// Synthetic continuous output never receives the OS wheel-acceleration
-    /// curve, so without a step above 1× smooth scrolling travels *shorter*
-    /// than the raw wheel; the default reproduces the widely-shipped 90 px
-    /// commercial step.
+    /// active, as a multiple of the platform's native wheel step: a line
+    /// (≈10 px) on macOS, a whole wheel notch on Windows and Linux. The
+    /// default is per platform. On macOS, synthetic continuous output never
+    /// receives the OS wheel-acceleration curve, so without a step above 1×
+    /// smooth scrolling travels *shorter* than the raw wheel; the hook's
+    /// input already carries that curve, and 4 lands at parity with the
+    /// widely-shipped 90 px commercial step. Windows and Linux emit whole
+    /// notches, so they default to 1: a tick travels as far as it does
+    /// natively, and acceleration adds distance on fast spins. Diverted
+    /// HID++ wheels on macOS receive raw counts and may want a larger value.
     #[serde(default)]
     pub smooth_scroll_step: SmoothScrollStep,
     /// How long one wheel tick's smooth animation runs. Longer durations
@@ -474,9 +479,16 @@ fn rounded_sensitivity(value: f32) -> u8 {
 
 const SMOOTH_SCROLL_STEP_MIN: u8 = 1;
 const SMOOTH_SCROLL_STEP_MAX: u8 = 20;
-const SMOOTH_SCROLL_STEP_DEFAULT: u8 = 9;
+/// Out-of-the-box step. On macOS a step is one native line (≈10 px) and the
+/// event-tap hook reports wheel distance with the OS acceleration curve
+/// already applied; 4 was measured at parity with the 90 px commercial
+/// reference there. On Windows and Linux a step is a whole native notch
+/// (several lines), so 1 keeps a tick's native distance and leaves the extra
+/// travel on fast spins to acceleration.
+const SMOOTH_SCROLL_STEP_DEFAULT: u8 = if cfg!(target_os = "macos") { 4 } else { 1 };
 
-/// Per-tick smooth-scroll amplitude in native wheel lines.
+/// Per-tick smooth-scroll amplitude in native wheel steps: lines on macOS,
+/// whole notches on Windows and Linux.
 #[nutype(
     const_fn,
     validate(greater_or_equal = SMOOTH_SCROLL_STEP_MIN, less_or_equal = SMOOTH_SCROLL_STEP_MAX),
@@ -498,7 +510,7 @@ const SMOOTH_SCROLL_STEP_DEFAULT: u8 = 9;
 pub struct SmoothScrollStep(u8);
 
 impl SmoothScrollStep {
-    /// Smallest selectable step: one native line per tick.
+    /// Smallest selectable step: one native wheel step per tick.
     pub const MIN: Self = match Self::try_new(SMOOTH_SCROLL_STEP_MIN) {
         Ok(value) => value,
         Err(_) => panic!("valid minimum smooth-scroll step"),
@@ -508,7 +520,9 @@ impl SmoothScrollStep {
         Ok(value) => value,
         Err(_) => panic!("valid maximum smooth-scroll step"),
     };
-    /// Out-of-the-box step (≈90 px per tick on macOS).
+    /// Out-of-the-box step for this platform: 4 on macOS, whose hook input
+    /// already carries the OS acceleration curve, 1 on Windows and Linux,
+    /// where a step is a whole native notch.
     pub const DEFAULT: Self = match Self::try_new(SMOOTH_SCROLL_STEP_DEFAULT) {
         Ok(value) => value,
         Err(_) => panic!("valid default smooth-scroll step"),
