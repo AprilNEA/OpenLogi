@@ -226,12 +226,21 @@ impl AssetResolver {
                 continue;
             };
             // Hotspot metadata in whichever schema this depot cached:
-            // `core_metadata.json` (newer) or `metadata.json` (older). Camera
-            // depots ship none of these — their `image_metadata` is a per-PID
-            // `metadata_<pid>.json` carrying marker-less settings slots, and no
-            // hotspot consumer reads it — so a missing file must not fail the
-            // depot: the render below is what decides whether this root hits.
+            // `core_metadata.json` (newer) or `metadata.json` (older).
+            //
+            // Two different situations look the same on disk, and only the
+            // registry tells them apart. A depot that *publishes* hotspot
+            // metadata but has none in this root is a stale or half-synced
+            // cache: skip the root so the next one (or the synthetic fallback)
+            // serves the device, rather than a render with no hotspots. A depot
+            // that publishes none at all — cameras, whose `image_metadata` is a
+            // per-PID `metadata_<pid>.json` of marker-less settings slots that
+            // no hotspot consumer reads — legitimately resolves from its render
+            // alone.
             let meta_name = METADATA_FILES.iter().find(|n| dir.join(n).exists());
+            if meta_name.is_none() && entry.preferred_file(&METADATA_FILES).is_some() {
+                continue;
+            }
 
             // Pick the colour variant matching this device's HID++
             // extended_model_id byte. Logi calibrates the assignment
