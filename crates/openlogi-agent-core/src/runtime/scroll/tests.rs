@@ -224,7 +224,7 @@ fn synthetic_frame_interval_ticks_coalesce_and_cap_at_max_gain() {
             .map(|motion| motion.pulses.len())
             .sum::<usize>(),
         2,
-        "the 16 ms burst coalesces into one pulse per frame interval"
+        "the 16 ms burst merges into one pulse per frame interval"
     );
     engine.advance_due(base + Duration::from_millis(300), &mut |frame| {
         frames.push(frame);
@@ -529,5 +529,111 @@ fn free_spin_burst_keeps_the_pulse_count_bounded() {
         frames.push(frame);
     });
     assert_delta(cumulative(&frames), wheel(0.0, 60.0));
+    assert!(engine.active.is_empty());
+}
+
+#[test]
+fn a_tick_merged_past_the_pulse_cap_keeps_its_own_duration() {
+    let base = Instant::now();
+    let mut engine = ScrollEngine::default();
+    let mut frames = Vec::new();
+    let long_glide = tuning(1.0, 1000, 1.0);
+    // Fill the source to the cap with a steady stream, let it glide for a
+    // while, then land one more tick. It merges into the newest pulse, which
+    // by now is well into its animation.
+    for millis in (0..=512).step_by(8) {
+        engine.impulse(
+            source(),
+            wheel(0.0, 0.1),
+            base + Duration::from_millis(millis),
+            long_glide,
+            &mut |frame| frames.push(frame),
+        );
+    }
+    let motion = engine.active.get(&source()).expect("source is live");
+    assert_eq!(motion.pulses.len(), MAX_PULSES);
+    let before = cumulative(&frames);
+    engine.impulse(
+        source(),
+        wheel(0.0, 10.0),
+        base + Duration::from_millis(900),
+        long_glide,
+        &mut |frame| frames.push(frame),
+    );
+    let motion = engine.active.get(&source()).expect("source is live");
+    // The merged tick starts from rest at its own arrival and animates for
+    // its own full duration instead of finishing at the older pulse's
+    // deadline (1512 ms).
+    assert_eq!(motion.pulses.len(), MAX_PULSES);
+    assert_eq!(motion.ends_at(), Some(base + Duration::from_millis(1900)));
+    // Nothing of the new tick's 10 lines was emitted at its own timestamp —
+    // only the glide the older pulses had accumulated since 512 ms.
+    let at_arrival = cumulative(&frames).minus(before);
+    assert!(at_arrival.y < 10.0 * 0.5, "{} jumped ahead", at_arrival.y);
+
+    engine.advance_due(base + Duration::from_millis(2000), &mut |frame| {
+        frames.push(frame);
+    });
+    assert_delta(cumulative(&frames), wheel(0.0, 65.0 * 0.1 + 10.0));
+    assert!(engine.active.is_empty());
+}
+
+#[test]
+fn a_live_duration_change_applies_to_a_tick_merged_within_the_frame() {
+    let base = Instant::now();
+    let mut engine = ScrollEngine::default();
+    let mut frames = Vec::new();
+    engine.impulse(source(), wheel(0.0, 1.0), base, neutral(), &mut |frame| {
+        frames.push(frame);
+    });
+    // Reloaded to a 500 ms glide 4 ms later: the tick merges into the
+    // frame's pulse yet animates for the new duration from its own arrival.
+    engine.impulse(
+        source(),
+        wheel(0.0, 1.0),
+        base + Duration::from_millis(4),
+        tuning(1.0, 500, 1.0),
+        &mut |frame| frames.push(frame),
+    );
+    let motion = engine.active.get(&source()).expect("source is live");
+    assert_eq!(motion.pulses.len(), 1);
+    assert_eq!(motion.ends_at(), Some(base + Duration::from_millis(504)));
+
+    engine.advance_due(base + Duration::from_millis(600), &mut |frame| {
+        frames.push(frame);
+    });
+    assert_delta(cumulative(&frames), wheel(0.0, 2.0));
+    assert!(engine.active.is_empty());
+}
+
+#[test]
+fn acceleration_windows_are_kept_per_axis() {
+    let base = Instant::now();
+    let mut engine = ScrollEngine::default();
+    let mut frames = Vec::new();
+    // The same vertical ramp as `synthetic_fast_ticks_gain_amplitude_deterministically`
+    // (169/14 total), interleaved with one slow horizontal tick: its own axis
+    // window holds a single tick, so it gains nothing from the fast vertical
+    // stream sharing the source.
+    for millis in (0..=70).step_by(10) {
+        engine.impulse(
+            source(),
+            wheel(0.0, 1.0),
+            base + Duration::from_millis(millis),
+            tuning(1.0, 100, 7.0),
+            &mut |frame| frames.push(frame),
+        );
+    }
+    engine.impulse(
+        source(),
+        wheel(1.0, 0.0),
+        base + Duration::from_millis(72),
+        tuning(1.0, 100, 7.0),
+        &mut |frame| frames.push(frame),
+    );
+    engine.advance_due(base + Duration::from_millis(300), &mut |frame| {
+        frames.push(frame);
+    });
+    assert_delta(cumulative(&frames), wheel(1.0, 169.0 / 14.0));
     assert!(engine.active.is_empty());
 }

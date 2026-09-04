@@ -37,8 +37,9 @@ const ACCEL_RATE_MS: f64 = 30.0;
 const ACCEL_WINDOW_MAX_TICKS: usize = 128;
 /// Ratio of the pulse curve's viscous tail to its damped-force head.
 const PULSE_TAIL_RATIO: f64 = 3.0;
-/// Upper bound on in-flight pulses per source; free-spin bursts coalesce into
-/// the newest pulse past this, keeping frame evaluation O(1)-ish.
+/// Upper bound on in-flight pulses per source; free-spin bursts merge into
+/// the newest pulse past this (see [`ActiveMotion::add_tick`]), keeping frame
+/// evaluation O(1)-ish.
 const MAX_PULSES: usize = 64;
 
 /// Normalized two-phase pulse: a damped-force head (`u − 1 + e^(−u)`) blending
@@ -118,6 +119,14 @@ impl WheelDelta {
         }
     }
 
+    /// Scale each axis by its own factor.
+    fn scale_axes(self, factors: Self) -> Self {
+        Self {
+            x: self.x * factors.x,
+            y: self.y * factors.y,
+        }
+    }
+
     fn with_vertical_scale(self, factor: f64) -> Option<Self> {
         let y = self.y * factor;
         y.is_finite().then_some(Self { x: self.x, y })
@@ -188,6 +197,12 @@ struct Pulse {
     amplitude: WheelDelta,
     started_at: Instant,
     duration: Duration,
+    /// Arrival of the first tick this pulse absorbed. The frame-window merge
+    /// in [`ActiveMotion::add_tick`] is measured from here rather than from
+    /// `started_at`, which a merge moves forward — so a steady stream still
+    /// hands off to a fresh pulse one frame after each pulse began instead of
+    /// restarting the same pulse forever.
+    anchor: Instant,
 }
 
 impl Pulse {
@@ -220,9 +235,11 @@ struct ActiveMotion {
     settled: WheelDelta,
     emitted: WheelDelta,
     next_frame: Instant,
-    /// Trailing [`ACCEL_WINDOW`] of accepted ticks — `(arrival, raw wheel
-    /// distance)` — from which [`accel_gain`] derives the source's rate.
-    recent_ticks: VecDeque<(Instant, f64)>,
+    /// Trailing [`ACCEL_WINDOW`] of accepted ticks — `(arrival, unsigned raw
+    /// wheel distance per axis)` — from which [`accel_gain`] derives each
+    /// axis's own rate, so a fast spin on one axis never accelerates slow
+    /// movement on the other.
+    recent_ticks: VecDeque<(Instant, WheelDelta)>,
 }
 
 impl ActiveMotion {
@@ -236,15 +253,17 @@ impl ActiveMotion {
         };
         let gain = motion.windowed_gain(impulse, at, tuning.max_gain);
         motion.pulses.push(Pulse {
-            amplitude: impulse.scale(tuning.step * gain),
+            amplitude: impulse.scale(tuning.step).scale_axes(gain),
             started_at: at,
             duration: tuning.duration,
+            anchor: at,
         });
         motion
     }
 
-    /// Record one tick in the rate window and return its amplitude gain.
-    fn windowed_gain(&mut self, impulse: WheelDelta, at: Instant, max_gain: f64) -> f64 {
+    /// Record one tick in the rate window and return each axis's amplitude
+    /// gain.
+    fn windowed_gain(&mut self, impulse: WheelDelta, at: Instant, max_gain: f64) -> WheelDelta {
         while self
             .recent_ticks
             .front()
@@ -252,33 +271,61 @@ impl ActiveMotion {
         {
             self.recent_ticks.pop_front();
         }
-        self.recent_ticks
-            .push_back((at, impulse.x.abs() + impulse.y.abs()));
+        self.recent_ticks.push_back((
+            at,
+            WheelDelta {
+                x: impulse.x.abs(),
+                y: impulse.y.abs(),
+            },
+        ));
         if self.recent_ticks.len() > ACCEL_WINDOW_MAX_TICKS {
             self.recent_ticks.pop_front();
         }
-        let window_ticks = self.recent_ticks.iter().map(|(_, ticks)| ticks).sum();
-        accel_gain(window_ticks, max_gain)
+        let window_ticks = self
+            .recent_ticks
+            .iter()
+            .fold(WheelDelta::ZERO, |sum, (_, ticks)| sum.plus(*ticks));
+        WheelDelta {
+            x: accel_gain(window_ticks.x, max_gain),
+            y: accel_gain(window_ticks.y, max_gain),
+        }
     }
 
     /// Superpose one tick's pulse and evaluate the position at its timestamp.
+    ///
+    /// Ticks landing within one frame of the newest pulse's first tick, or
+    /// arriving once the source already holds [`MAX_PULSES`], merge into that
+    /// pulse — but never by inheriting its clock. The merge settles whatever
+    /// the pulse has delivered so far and restarts its remainder together
+    /// with the new tick from `at`, with the tick's own duration: position is
+    /// continuous, net distance is conserved, and the tick neither starts
+    /// partially progressed nor ends at an older pulse's deadline. Live
+    /// duration changes therefore take effect on the very next tick.
     fn add_tick(&mut self, impulse: WheelDelta, at: Instant, tuning: MotionTuning) -> MotionUpdate {
         let gain = self.windowed_gain(impulse, at, tuning.max_gain);
-        let amplitude = impulse.scale(tuning.step * gain);
-        let coalesce = self.pulses.len() >= MAX_PULSES
-            || self.pulses.last().is_some_and(|pulse| {
-                at.saturating_duration_since(pulse.started_at) < FRAME_INTERVAL
-            });
-        if coalesce && let Some(last) = self.pulses.last_mut() {
-            last.amplitude = last.amplitude.plus(amplitude);
-            if last.amplitude.is_zero() {
+        let amplitude = impulse.scale(tuning.step).scale_axes(gain);
+        let merge = self.pulses.len() >= MAX_PULSES
+            || self
+                .pulses
+                .last()
+                .is_some_and(|pulse| at.saturating_duration_since(pulse.anchor) < FRAME_INTERVAL);
+        if merge && let Some(last) = self.pulses.last_mut() {
+            let delivered = last.position_at(at);
+            self.settled = self.settled.plus(delivered);
+            let remainder = last.amplitude.minus(delivered).plus(amplitude);
+            if remainder.is_zero() {
                 self.pulses.pop();
+            } else {
+                last.amplitude = remainder;
+                last.started_at = at;
+                last.duration = tuning.duration;
             }
         } else {
             self.pulses.push(Pulse {
                 amplitude,
                 started_at: at,
                 duration: tuning.duration,
+                anchor: at,
             });
         }
         let update = self.evaluate(at);
