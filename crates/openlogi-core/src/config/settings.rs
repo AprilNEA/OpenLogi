@@ -208,8 +208,11 @@ pub struct AppSettings {
     /// active, as a multiple of the native line distance (≈10 px on macOS).
     /// Synthetic continuous output never receives the OS wheel-acceleration
     /// curve, so without a step above 1× smooth scrolling travels *shorter*
-    /// than the raw wheel; the default reproduces the widely-shipped 90 px
-    /// commercial step.
+    /// than the raw wheel. The default is per platform: the macOS hook's
+    /// input already carries the OS curve, so it defaults to 4; raw-count
+    /// hooks default to 9, reproducing the widely-shipped 90 px commercial
+    /// step. Diverted HID++ wheels on macOS receive raw counts and may want
+    /// the larger value.
     #[serde(default)]
     pub smooth_scroll_step: SmoothScrollStep,
     /// How long one wheel tick's smooth animation runs. Longer durations
@@ -462,7 +465,12 @@ fn rounded_sensitivity(value: f32) -> u8 {
 
 const SMOOTH_SCROLL_STEP_MIN: u8 = 1;
 const SMOOTH_SCROLL_STEP_MAX: u8 = 20;
-const SMOOTH_SCROLL_STEP_DEFAULT: u8 = 9;
+/// Out-of-the-box step. The macOS event-tap hook reports wheel distance with
+/// the OS acceleration curve already applied, so it needs a smaller step than
+/// the raw-count paths (Windows/Linux hooks, diverted HID++ wheels) to land on
+/// the same felt travel; 4 was measured at parity with the 90 px commercial
+/// reference on macOS, 9 reproduces it on raw ticks.
+const SMOOTH_SCROLL_STEP_DEFAULT: u8 = if cfg!(target_os = "macos") { 4 } else { 9 };
 
 /// Per-tick smooth-scroll amplitude in native wheel lines.
 #[nutype(
@@ -496,7 +504,8 @@ impl SmoothScrollStep {
         Ok(value) => value,
         Err(_) => panic!("valid maximum smooth-scroll step"),
     };
-    /// Out-of-the-box step (≈90 px per tick on macOS).
+    /// Out-of-the-box step for this platform: 4 on macOS, whose hook input
+    /// already carries the OS acceleration curve, 9 on raw-count paths.
     pub const DEFAULT: Self = match Self::try_new(SMOOTH_SCROLL_STEP_DEFAULT) {
         Ok(value) => value,
         Err(_) => panic!("valid default smooth-scroll step"),
