@@ -106,9 +106,32 @@ fn node_info(info: &DeviceInfo) -> NodeInfo {
             usage_id: info.usage_id,
             name: info.name.clone(),
             manufacturer: info.manufacturer.clone(),
-            serial_number: info.serial_number.clone(),
+            serial_number: serial_number(info),
         }
     }
+}
+
+/// The node's serial, as the HID stack reports it.
+#[cfg(not(target_os = "windows"))]
+fn serial_number(info: &DeviceInfo) -> Option<String> {
+    info.serial_number.clone()
+}
+
+/// The node's serial, falling back to its parent device instance.
+///
+/// Windows reads this from the HID interface's own string descriptor, which a
+/// device may leave empty — a Litra Glow does. The USB node above the HID
+/// collections still records it, and that is the difference between a light
+/// whose settings persist and one whose settings last until the process exits.
+#[cfg(target_os = "windows")]
+fn serial_number(info: &DeviceInfo) -> Option<String> {
+    if let Some(serial) = info.serial_number.clone().filter(|s| !s.is_empty()) {
+        return Some(serial);
+    }
+    let async_hid::DeviceId::UncPath(path) = &info.id else {
+        return None;
+    };
+    windows_serial::serial_from_parent(&path.to_string())
 }
 
 /// Bitmask of leased HID++ software ids (`1..=15`; bit `N` means id `N` is taken).
@@ -130,6 +153,9 @@ mod windows;
 // channel in `windows` when async-hid's async write path fails.
 #[cfg(target_os = "windows")]
 mod windows_hid;
+// Serial recovery for a HID node whose own descriptor carries none.
+#[cfg(target_os = "windows")]
+mod windows_serial;
 #[cfg(target_os = "windows")]
 use windows::WindowsHidppChannel;
 #[cfg(test)]
