@@ -52,6 +52,9 @@ interprocess = { version = "2", features = ["tokio"] }
 # opentelemetry_sdk 0.30 into the graph (GHSA-w9wp-h8wv-79jx).
 tarpc = { version = "0.38", features = ["serde1", "serde-transport", "serde-transport-bincode", "tokio1"] }
 windows-sys = "0.61"
+# Registry reads/writes on Windows: the agent's HKCU-Run autostart and the
+# camera watcher's consent-store probe.
+winreg = "0.55"
 tokio = { version = "1", default-features = false, features = ["rt", "macros", "sync", "time"] }
 futures-lite = "2"
 serde = { version = "1", features = ["derive"] }

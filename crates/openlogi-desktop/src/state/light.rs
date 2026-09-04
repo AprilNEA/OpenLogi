@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use openlogi_core::config::LightSettings;
+use openlogi_core::config::{CAMERA_AUTOMATION_SUPPORTED, LightSettings};
 use openlogi_core::hid::{DeviceRoute, LightCommand, WriteError};
 use tracing::debug;
 
@@ -11,7 +11,7 @@ use super::device_key::DeviceKey;
 use super::device_runtime::DeviceRuntimeState;
 
 const fn camera_policy_applies(light: LightSettings) -> bool {
-    cfg!(target_os = "macos") && light.auto_camera
+    CAMERA_AUTOMATION_SUPPORTED && light.auto_camera
 }
 
 /// Result state of the latest standalone-light command for one device.
@@ -461,7 +461,7 @@ impl AppState {
         };
         let previous = self.light_for(&runtime_key);
         let camera_mode_changed =
-            cfg!(target_os = "macos") && previous.auto_camera != light.auto_camera;
+            CAMERA_AUTOMATION_SUPPORTED && previous.auto_camera != light.auto_camera;
         let effective_enabled = if camera_policy_applies(light) {
             if camera_mode_changed {
                 self.lighting.camera_active
