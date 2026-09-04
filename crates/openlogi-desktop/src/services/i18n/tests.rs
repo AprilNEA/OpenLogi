@@ -13,7 +13,11 @@ fn typed_translation_keys_resolve() {
     let covered = |key: &str| rust_i18n::t!(key) != key;
     assert!(covered("app.settings"), "desktop catalog is not wired up");
 
-    for b in ButtonId::ALL.into_iter().chain(ButtonId::KEYBOARD_KEYS) {
+    for b in ButtonId::ALL
+        .into_iter()
+        .chain(ButtonId::KEYBOARD_KEYS)
+        .chain(ButtonId::GAMING_BUTTONS)
+    {
         assert!(
             covered(b.translation_key()),
             "no catalog key for ButtonId::{b:?}"

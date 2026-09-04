@@ -128,6 +128,14 @@ pub struct Capabilities {
     /// device's `0x1b04` control table.
     #[serde(default)]
     pub haptic_panel: bool,
+    /// G-line button remapping — HID++ `0x8100 OnboardProfiles` *and*
+    /// `0x8110 MouseButtonSpy` are both present. Both are required: `0x8110`
+    /// alone gives no way to confirm the device is an onboard-profile gaming
+    /// mouse (some non-gaming devices might report it for other reasons),
+    /// and `0x8100` alone carries no capture-side event stream. Implies
+    /// [`Self::buttons`] — see [`Self::from_feature_ids`].
+    #[serde(default)]
+    pub gaming_buttons: bool,
 }
 
 impl Capabilities {
@@ -144,8 +152,13 @@ impl Capabilities {
         // out so they don't earn a tab the panel can't drive.
         const LIGHTING: [u16; 3] = [0x8080, 0x8070, 0x8081];
         let has = |family: &[u16]| ids.iter().any(|id| family.contains(id));
+        // 0x1b04 and 0x8100+0x8110 are the two button-remap mechanisms this
+        // codebase implements; a device reports one family or the other, but
+        // `buttons` is the union so the Buttons/Actions-Ring tab gate (which
+        // only checks `buttons`) works unmodified for either.
+        let gaming_buttons = ids.contains(&0x8100) && ids.contains(&0x8110);
         Self {
-            buttons: has(&BUTTONS),
+            buttons: has(&BUTTONS) || gaming_buttons,
             pointer: has(&POINTER),
             lighting: has(&LIGHTING),
             scroll_inversion: false,
@@ -153,6 +166,7 @@ impl Capabilities {
             thumbwheel: ids.contains(&0x2150),
             haptic_feedback: ids.contains(&0x19b0),
             haptic_panel: false,
+            gaming_buttons,
         }
     }
 
@@ -173,6 +187,11 @@ impl Capabilities {
                 thumbwheel: false,
                 haptic_feedback: false,
                 haptic_panel: false,
+                // An unprobed device must never be presumed a gaming mouse —
+                // this flag drives a distinct capture backend selection
+                // (`spy_buttons_for_model`), unlike `buttons`/`pointer`
+                // above which just gate generic UI panels.
+                gaming_buttons: false,
             },
             DeviceKind::Keyboard => Self {
                 lighting: true,
@@ -478,6 +497,7 @@ mod tests {
                     thumbwheel: false,
                     haptic_feedback: false,
                     haptic_panel: false,
+                    gaming_buttons: false,
                 }),
             }],
         }
@@ -548,6 +568,7 @@ mod tests {
                 thumbwheel: true,
                 haptic_feedback: false,
                 haptic_panel: false,
+                gaming_buttons: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
@@ -564,6 +585,7 @@ mod tests {
                 thumbwheel: false,
                 haptic_feedback: false,
                 haptic_panel: false,
+                gaming_buttons: false,
             }
         );
         // No driving features → nothing offered.
@@ -571,6 +593,33 @@ mod tests {
             Capabilities::from_feature_ids(&[0x0000, 0x0003]),
             Capabilities::default()
         );
+    }
+
+    #[test]
+    fn gaming_buttons_requires_both_0x8100_and_0x8110() {
+        use super::Capabilities;
+        // Neither feature present.
+        let neither = Capabilities::from_feature_ids(&[0x0003]);
+        assert!(!neither.gaming_buttons);
+        assert!(!neither.buttons);
+
+        // 0x8110 alone — no way to confirm this is a gaming onboard-profile
+        // mouse, so it must not imply gaming_buttons or buttons.
+        let spy_only = Capabilities::from_feature_ids(&[0x0003, 0x8110]);
+        assert!(!spy_only.gaming_buttons);
+        assert!(!spy_only.buttons);
+
+        // 0x8100 alone — same reasoning.
+        let profiles_only = Capabilities::from_feature_ids(&[0x0003, 0x8100]);
+        assert!(!profiles_only.gaming_buttons);
+        assert!(!profiles_only.buttons);
+
+        // Both present — a G-series gaming mouse (e.g. G502 X PLUS): implies
+        // buttons so the existing tab gate (`caps.buttons`) shows the
+        // Buttons/Actions Ring tabs without any GUI-side change.
+        let both = Capabilities::from_feature_ids(&[0x0003, 0x8100, 0x8110]);
+        assert!(both.gaming_buttons);
+        assert!(both.buttons);
     }
 
     #[test]

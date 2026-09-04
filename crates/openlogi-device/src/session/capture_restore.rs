@@ -9,6 +9,7 @@ use hidpp::channel::HidppChannel;
 use thiserror::Error;
 
 use crate::backend::BackendError;
+use crate::mouse_button_spy::MouseButtonSpy;
 use crate::reprog_controls::{self, ReprogControlsV4};
 use crate::thumbwheel::Thumbwheel;
 use crate::{ChannelRegistry, DeviceRoute, SharedChannel};
@@ -135,6 +136,14 @@ pub struct PendingCaptureRestore {
     retired_policy: RetiredChannelPolicy,
     reprog: Option<ReprogRestore>,
     thumb_index: Option<u8>,
+    /// `0x8110` feature index, present when the session armed the spy.
+    /// Unlike a failed `reprog`/`thumb` restore, a failed
+    /// `stopMouseButtonSpy` leaves the button working exactly as it always
+    /// did — the spy is a tap, not a divert, so it never intercepted
+    /// anything to begin with. This still goes through the same restore
+    /// path for one restore authority and battery hygiene: while armed, the
+    /// spy reports every button press, including left click.
+    spy_index: Option<u8>,
 }
 
 impl fmt::Debug for PendingCaptureRestore {
@@ -149,6 +158,7 @@ impl fmt::Debug for PendingCaptureRestore {
                     .map_or(0, |reprog| reprog.controls.len()),
             )
             .field("has_thumbwheel", &self.thumb_index.is_some())
+            .field("has_spy", &self.spy_index.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -158,8 +168,9 @@ impl PendingCaptureRestore {
         retired: &SharedChannel,
         reprog: Option<ReprogRestore>,
         thumb_index: Option<u8>,
+        spy_index: Option<u8>,
     ) -> Option<Self> {
-        if reprog.is_none() && thumb_index.is_none() {
+        if reprog.is_none() && thumb_index.is_none() && spy_index.is_none() {
             return None;
         }
         Some(Self {
@@ -168,6 +179,7 @@ impl PendingCaptureRestore {
             retired_policy: RetiredChannelPolicy::ReplacementOnly,
             reprog,
             thumb_index,
+            spy_index,
         })
     }
 
@@ -225,8 +237,12 @@ impl PendingCaptureRestore {
             }
         }
         if let Some(feature_index) = self.thumb_index {
-            let thumbwheel = Thumbwheel::new(channel, device_index, feature_index);
+            let thumbwheel = Thumbwheel::new(channel.clone(), device_index, feature_index);
             restored &= restore_result(thumbwheel.undivert().await, "thumb wheel");
+        }
+        if let Some(feature_index) = self.spy_index {
+            let spy = MouseButtonSpy::new(channel, device_index, feature_index);
+            restored &= restore_result(spy.stop_reporting().await, "mouse button spy");
         }
         restored
     }

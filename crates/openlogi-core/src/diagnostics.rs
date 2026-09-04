@@ -323,10 +323,11 @@ impl DiagnosticsReport {
             );
             let caps = match d.capabilities {
                 Some(c) => format!(
-                    "buttons={}, pointer={}, lighting={}",
+                    "buttons={}, pointer={}, lighting={}, gaming_buttons={}",
                     yes_no(c.buttons),
                     yes_no(c.pointer),
                     yes_no(c.lighting),
+                    yes_no(c.gaming_buttons),
                 ),
                 None => "not probed".to_string(),
             };
@@ -597,6 +598,7 @@ mod tests {
                         thumbwheel: false,
                         haptic_feedback: false,
                         haptic_panel: false,
+                        gaming_buttons: false,
                     }),
                     dpi: Some("1600 dpi (range 200–8000, 5 steps)".to_string()),
                     config_key: "4082d".to_string(),

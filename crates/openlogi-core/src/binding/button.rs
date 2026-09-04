@@ -73,10 +73,30 @@ pub enum ButtonId {
     /// Tilting the main wheel right — `0x1b04` CID `0x005d` ("Right Scroll"),
     /// Logi metadata slot `SLOT_NAME_RIGHT_SCROLL_BUTTON`. Counterpart to
     /// [`ButtonId::WheelTiltLeft`].
+    WheelTiltRight,
+    /// The G-series "DPI Shift" thumb paddle — a shift-layer modifier that
+    /// lowers DPI/slows the cursor while held on stock firmware. Captured
+    /// over HID++ `0x8110` `MouseButtonSpy` (see
+    /// `openlogi_device::session::gesture::spy`); the firmware's own
+    /// DPI-shift effect happens regardless of any OpenLogi binding — the spy
+    /// is a tap, not a divert, and cannot suppress it.
+    DpiShift,
+    /// The G-series "Profile Cycling" button. Captured over `0x8110`; the
+    /// firmware still cycles its onboard profile on press regardless of any
+    /// OpenLogi binding, for the same reason as [`ButtonId::DpiShift`].
+    ProfileCycle,
+    /// One of the G-series "DPI up/down" button pair. Captured over `0x8110`;
+    /// physical up-vs-down assignment is unconfirmed on hardware (see
+    /// `openlogi_device::session::gesture::spy::SPY_BUTTON_MAPS`'s doc
+    /// comment) and may need swapping with [`ButtonId::DpiDown`] once
+    /// verified.
+    DpiUp,
+    /// The other of the G-series "DPI up/down" button pair — see
+    /// [`ButtonId::DpiUp`].
     ///
     /// Declared last: the TOML config and any serialized form encode the
     /// variant identifier / index, so new buttons are append-only.
-    WheelTiltRight,
+    DpiDown,
 }
 
 impl ButtonId {
@@ -113,6 +133,21 @@ impl ButtonId {
         ButtonId::KeyMute,
         ButtonId::KeyVolumeDown,
         ButtonId::KeyVolumeUp,
+    ];
+
+    /// The G-series gaming buttons captured over HID++ `0x8110`
+    /// `MouseButtonSpy`. Kept out of [`ButtonId::ALL`] for the same reason as
+    /// [`ButtonId::KEYBOARD_KEYS`]: `ALL` seeds every mouse's defaults and the
+    /// mouse popover trigger list, and these controls don't exist on the
+    /// MX line. `button_bindings_for` inserts every *stored* binding
+    /// regardless of `ALL` membership, so an unbound gaming button is simply
+    /// absent from the map — never captured, stays native (or in this case,
+    /// stays whatever the on-device firmware already does with it).
+    pub const GAMING_BUTTONS: [ButtonId; 4] = [
+        ButtonId::DpiShift,
+        ButtonId::ProfileCycle,
+        ButtonId::DpiUp,
+        ButtonId::DpiDown,
     ];
 
     /// Whether this button is one the OS hook (macOS `CGEventTap` / Linux evdev)
@@ -166,6 +201,10 @@ impl ButtonId {
             ButtonId::KeyVolumeDown => "Volume Down Key",
             ButtonId::KeyVolumeUp => "Volume Up Key",
             ButtonId::HapticPanel => "Haptic Panel",
+            ButtonId::DpiShift => "DPI Shift",
+            ButtonId::ProfileCycle => "Profile Cycle",
+            ButtonId::DpiUp => "DPI Up",
+            ButtonId::DpiDown => "DPI Down",
         }
     }
 
@@ -195,6 +234,10 @@ impl ButtonId {
             ButtonId::KeyVolumeDown => "keyboard.volume_down_key",
             ButtonId::KeyVolumeUp => "keyboard.volume_up_key",
             ButtonId::HapticPanel => "actions.haptic_panel",
+            ButtonId::DpiShift => "actions.dpi_shift",
+            ButtonId::ProfileCycle => "actions.profile_cycle",
+            ButtonId::DpiUp => "actions.dpi_up",
+            ButtonId::DpiDown => "actions.dpi_down",
         }
     }
 }

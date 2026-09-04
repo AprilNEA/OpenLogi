@@ -22,6 +22,7 @@ mod device_io;
 pub mod backend;
 pub mod backlight;
 pub mod inventory;
+pub mod mouse_button_spy;
 pub mod pairing;
 pub mod reprog_controls;
 pub mod session;

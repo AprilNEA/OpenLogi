@@ -32,7 +32,8 @@ use tracing::{debug, info, warn};
 
 use crate::action_ring::ActionRingSessionSpec;
 use crate::capture_plan::{
-    DeviceCapturePlan, SharedCapturePlans, hidpp_side_gesture_maps_for, plan_for_device,
+    DeviceCaptureIdentity, DeviceCapturePlan, SharedCapturePlans, hidpp_side_gesture_maps_for,
+    plan_for_device,
 };
 use crate::hardware::DeviceOp;
 use crate::observable::ObservableState;
@@ -49,6 +50,13 @@ use crate::{DpiCycleState, DpiCycles};
 /// fallback agrees with the GUI carousel — see [`openlogi_core::device_order`]).
 struct AgentDevice {
     config_key: String,
+    /// `DeviceModelInfo::config_key()` for a receiver-paired/HID++ device —
+    /// what `capture_plan::spy_buttons_for_model` keys its lookup on. The
+    /// standalone-device constructor below instead fills this with
+    /// `display_name`, which can never match a `SPY_BUTTON_MAPS` entry — a
+    /// latent mismatch, harmless today because standalone enumeration is
+    /// Litra-only (never `Capabilities::gaming_buttons`), but real once a
+    /// gaming device is ever reachable through the standalone/raw-HID path.
     model_key: String,
     route: Option<DeviceRoute>,
     slot: u8,
@@ -444,9 +452,12 @@ impl Orchestrator {
                     .or_else(|| PhysicalDeviceKey::parse(&dev.config_key))?;
                 Some(plan_for_device(
                     &self.config,
-                    physical_key,
-                    &dev.config_key,
-                    route,
+                    DeviceCaptureIdentity {
+                        physical_key,
+                        config_key: &dev.config_key,
+                        model_key: &dev.model_key,
+                        route,
+                    },
                     self.current_app.as_deref(),
                     rearm_generation,
                     self.os_mouse_hook_available,

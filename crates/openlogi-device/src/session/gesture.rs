@@ -18,6 +18,7 @@
 //! defaults (click bound, rotation rebound, or sensitivity changed).
 
 mod liveness;
+mod spy;
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -37,9 +38,13 @@ use tracing::{debug, info, warn};
 
 use crate::backend::{BackendError, HidBackend};
 use crate::channel::route::{DeviceRoute, open_route_channel};
+use crate::mouse_button_spy::{MouseButtonMask, MouseButtonSpyEvent};
 use crate::{ChannelRegistry, DeviceIoGate, SharedChannel};
 
 use liveness::{CaptureLiveness, ChannelActivity, LivenessDecision, PingOutcome};
+use spy::{ArmedSpy, spy_edges};
+
+pub use spy::spy_buttons_for_model;
 
 #[cfg(test)]
 use super::capture_restore::undivert_change;
@@ -212,6 +217,17 @@ pub struct CaptureSpec {
     /// [`DIVERTABLE_STANDARD_BUTTONS`] and non-gesturing
     /// [`GESTURE_SOURCE_BUTTONS`] whose binding leaves the default.
     pub divert_buttons: Vec<(u16, ButtonId)>,
+    /// `0x8110 MouseButtonSpy`-owned buttons to capture: the device model's
+    /// full spy-owned map (see `spy::SPY_BUTTON_MAPS`) when at least one of
+    /// them leaves its default binding, empty otherwise. The spy is
+    /// all-or-nothing on the device, so this changes only on the
+    /// empty↔armed transition, not on every binding edit within it.
+    /// Independent of the three fields above: a device reports `0x1b04` or
+    /// `0x8100`/`0x8110`, so in practice at most one of the two mechanisms is
+    /// ever non-empty, but nothing here assumes that. `&'static` because the
+    /// source data (`spy::SPY_BUTTON_MAPS`) never changes at runtime — no
+    /// need to allocate a fresh `Vec` on every capture-plan rebuild.
+    pub spy_buttons: &'static [(u8, ButtonId)],
 }
 
 /// Capture the controls selected by `spec` on `route` until `shutdown`
@@ -390,6 +406,7 @@ async fn run_capture_session_on(
             registry,
             shared: &shared,
             activity: &activity,
+            sink: &sink,
         },
         wireless,
         shutdown,
@@ -483,6 +500,9 @@ struct ArmedControls {
     /// `0x2150` accessor and the information read while diverting it, present
     /// when the thumb wheel is diverted.
     thumb: Option<ArmedThumbwheel>,
+    /// `0x8110` accessor and its captured buttons, present when the spy is
+    /// armed.
+    spy: Option<ArmedSpy>,
 }
 
 struct ArmedThumbwheel {
@@ -526,6 +546,7 @@ impl ArmedControls {
             reprog,
             reporting,
             thumb,
+            spy,
             ..
         } = self;
         let reprog =
@@ -534,6 +555,7 @@ impl ArmedControls {
             retired,
             reprog,
             thumb.as_ref().map(|thumb| thumb.wheel.feature_index()),
+            spy.as_ref().map(|spy| spy.spy.feature_index()),
         )
     }
 
@@ -567,6 +589,11 @@ impl ArmedControls {
         {
             warn!(?error, "thumb-wheel re-divert after wake failed");
         }
+        if let Some(spy) = self.spy.as_ref()
+            && let Err(error) = spy.spy.start_reporting().await
+        {
+            warn!(?error, "mouse button spy re-start after wake failed");
+        }
     }
 }
 
@@ -578,6 +605,7 @@ fn log_capture_active(device_index: u8, armed: &ArmedControls, wake_rearm: bool)
         dpi_buttons = armed.dpi_cids.len(),
         buttons = armed.button_cids.len(),
         thumbwheel = armed.thumb.is_some(),
+        spy_buttons = armed.spy.as_ref().map_or(0, |spy| spy.buttons.len()),
         wake_rearm,
         "control capture active"
     );
@@ -592,6 +620,17 @@ struct CaptureMonitor<'a> {
     registry: Option<&'a ChannelRegistry>,
     shared: &'a SharedChannel,
     activity: &'a ChannelActivity,
+    sink: &'a mpsc::UnboundedSender<CapturedInput>,
+}
+
+/// Poll `receiver` for its next event, or pend forever while it is `None` —
+/// an unarmed source has nothing to poll but must not busy-loop the
+/// `select!` it feeds.
+async fn poll_optional<T>(receiver: Option<&async_channel::Receiver<T>>) -> Option<T> {
+    match receiver {
+        Some(events) => events.recv().await.ok(),
+        None => std::future::pending().await,
+    }
 }
 
 /// Keep a capture session alive and reapply its volatile diversions whenever
@@ -604,6 +643,16 @@ async fn monitor_capture(
     mut device_io: DeviceIoGate,
 ) -> CaptureStop {
     let mut wake_events = wireless.as_ref().map(EmittingFeature::listen);
+    // Borrow the receiver `arm_controls_into` already registered via
+    // `listen()` before it started the spy — not a fresh `.listen()` here,
+    // which would reopen the drop-on-early-press race this is guarding
+    // against (see `ArmedSpy`'s doc comment).
+    let mut spy_events = context
+        .armed
+        .spy
+        .as_ref()
+        .map(|armed_spy| &armed_spy.events);
+    let mut spy_mask = MouseButtonMask::default();
     let mut shutdown = std::pin::pin!(shutdown);
     let mut liveness =
         CaptureLiveness::new(tokio::time::Instant::now(), context.activity.generation());
@@ -646,12 +695,7 @@ async fn monitor_capture(
                 // be obsolete.
                 return stop_for_current_publication(context.registry, context.shared);
             }
-            event = async {
-                match wake_events.as_ref() {
-                    Some(events) => events.recv().await.ok(),
-                    None => std::future::pending().await,
-                }
-            } => {
+            event = poll_optional(wake_events.as_ref()) => {
                 let Some(WirelessDeviceStatusEvent::StatusBroadcast(broadcast)) = event else {
                     wake_events = None;
                     continue;
@@ -659,7 +703,15 @@ async fn monitor_capture(
                 info!(?broadcast, "device reconnected — re-arming control capture");
                 *context.accum.lock().unwrap_or_else(PoisonError::into_inner) =
                     CaptureAccum::default();
+                spy_mask = MouseButtonMask::default();
                 context.armed.rearm(&device_io).await;
+            }
+            event = poll_optional(spy_events) => {
+                if !handle_spy_event(event, context.armed, context.sink, &mut spy_mask) {
+                    // The receiver's sender was dropped (the spy feature went
+                    // away) — stop polling a permanently-closed channel.
+                    spy_events = None;
+                }
             }
             generation = context.activity.changed_after(activity_generation) => {
                 liveness.record_activity(tokio::time::Instant::now(), generation);
@@ -698,6 +750,25 @@ async fn monitor_capture(
     }
 }
 
+/// Handle one polled `0x8110` spy event: emit the mask's edges and advance
+/// `spy_mask`. Returns `false` when `event` is `None` (the receiver's sender
+/// was dropped), telling the caller to stop polling a closed channel.
+fn handle_spy_event(
+    event: Option<MouseButtonSpyEvent>,
+    armed: &ArmedControls,
+    sink: &mpsc::UnboundedSender<CapturedInput>,
+    spy_mask: &mut MouseButtonMask,
+) -> bool {
+    let Some(MouseButtonSpyEvent::Buttons(mask)) = event else {
+        return false;
+    };
+    if let Some(armed_spy) = armed.spy.as_ref() {
+        spy_edges(*spy_mask, mask, armed_spy.buttons, sink);
+    }
+    *spy_mask = mask;
+    true
+}
+
 /// Resolve features off the device's root and divert the controls `spec`
 /// selects: the gesture sources (raw-XY), DPI/ModeShift buttons and rebindable
 /// standard buttons over `0x1b04`, and the thumb wheel over `0x2150`. The
@@ -727,6 +798,7 @@ async fn arm_controls(
         && armed.dpi_cids.is_empty()
         && armed.button_cids.is_empty()
         && armed.thumb.is_none()
+        && armed.spy.is_none()
     {
         debug!(slot, "no capturable controls — idle session");
     }
@@ -833,6 +905,30 @@ async fn arm_controls_into(
         {
             return Err(GestureError::Hidpp(format!("{error:?}")));
         }
+    }
+
+    if !spec.spy_buttons.is_empty()
+        && let Some(info) = device
+            .root()
+            .get_feature(crate::mouse_button_spy::FEATURE_ID)
+            .await
+            .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?
+    {
+        let ms = crate::mouse_button_spy::MouseButtonSpy::new(Arc::clone(chan), slot, info.index);
+        // Listen before starting: the feature's emitter never buffers, so a
+        // receiver created only after startMouseButtonSpy is acknowledged
+        // could silently miss any press that lands in the gap.
+        let events = ms.listen();
+        // Register ownership before the write, same as every other arm here:
+        // a transport error cannot prove whether the firmware accepted it.
+        armed.spy = Some(ArmedSpy {
+            spy: ms.clone(),
+            buttons: spec.spy_buttons,
+            events,
+        });
+        ms.start_reporting()
+            .await
+            .map_err(|error| GestureError::Hidpp(format!("{error:?}")))?;
     }
     Ok(())
 }

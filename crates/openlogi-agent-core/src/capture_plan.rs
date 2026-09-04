@@ -17,7 +17,7 @@ use openlogi_core::config::{Config, ThumbwheelSensitivity};
 use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_hid::DeviceRoute;
 use openlogi_hid::session::gesture::{
-    CaptureSpec, DIVERTABLE_STANDARD_BUTTONS, GESTURE_SOURCE_BUTTONS,
+    CaptureSpec, DIVERTABLE_STANDARD_BUTTONS, GESTURE_SOURCE_BUTTONS, spy_buttons_for_model,
 };
 use tokio::sync::watch;
 
@@ -94,17 +94,51 @@ pub(crate) fn hidpp_side_gesture_maps_for(
         .collect()
 }
 
+/// Whether `button`'s stored binding leaves its default — the general-case
+/// half of the `0x1b04` divert-list predicate below (everything except its
+/// `HapticPanel` special case, which does not apply to `0x8110` spy
+/// buttons), reused as the whole predicate for the spy arm. A `LongPress`
+/// binding is always non-default (its short-press action alone might equal
+/// the default, but the binding as a whole is a real customization).
+fn is_bound_nondefault(bindings: &BTreeMap<ButtonId, Binding>, button: ButtonId) -> bool {
+    bindings.get(&button).is_some_and(|binding| {
+        matches!(binding, Binding::LongPress(_))
+            || binding.click_action() != default_binding(button)
+    })
+}
+
+/// A device's identity and route — the facts [`plan_for_device`] needs about
+/// *which* device it's planning for, grouped so the function stays under the
+/// arg-count lint rather than growing a ninth positional parameter.
+pub struct DeviceCaptureIdentity<'a> {
+    /// Identity used to serialize firmware ownership even when the config
+    /// entry carrying this device's settings is adopted or renamed.
+    pub physical_key: PhysicalDeviceKey,
+    /// The user-config namespace — can change on adoption/rename.
+    pub config_key: &'a str,
+    /// The device *model's* identity (`DeviceModelInfo::config_key()`),
+    /// distinct from `config_key` — selects a `0x8110` spy button map, since
+    /// the mapping is inherent to the hardware model, not the user's config.
+    pub model_key: &'a str,
+    /// HID++ route the session opens.
+    pub route: DeviceRoute,
+}
+
 /// Build one device's plan from the config (per-app effective for `app`).
 #[must_use]
 pub fn plan_for_device(
     config: &Config,
-    physical_key: PhysicalDeviceKey,
-    config_key: &str,
-    route: DeviceRoute,
+    device: DeviceCaptureIdentity<'_>,
     app: Option<&str>,
     rearm_generation: u64,
     os_mouse_hook_available: bool,
 ) -> DeviceCapturePlan {
+    let DeviceCaptureIdentity {
+        physical_key,
+        config_key,
+        model_key,
+        route,
+    } = device;
     let bindings = button_bindings_for(config, Some(config_key), app);
     // Gesture-mode OS-hook controls normally stay native so the hook sees the
     // press. macOS Back/Forward are the exception below: HID++ owns their
@@ -184,6 +218,16 @@ pub fn plan_for_device(
                     .collect(),
                 divert_gesture_buttons,
                 divert_buttons,
+                // Arm the spy only when the user actually bound one of the
+                // model's gaming buttons — an untouched device must never be
+                // told to stream events (the spy reports every press,
+                // including left click, while armed).
+                spy_buttons: spy_buttons_for_model(model_key)
+                    .filter(|map| {
+                        map.iter()
+                            .any(|&(_, button)| is_bound_nondefault(&bindings, button))
+                    })
+                    .unwrap_or(&[]),
             },
             rearm_generation,
         },
@@ -211,6 +255,12 @@ mod tests {
         }
     }
 
+    /// Test shim keeping the pre-existing 6-parameter call sites unchanged.
+    /// `model_key` is fixed to a value with no [`spy_buttons_for_model`]
+    /// entry — none of these tests target a G-series device, so every plan
+    /// built through this shim gets an empty `spy_buttons`, matching the
+    /// pre-spy behavior exactly. [`plan_for_device_with_model`] below is for
+    /// the spy-specific tests that need a real model key.
     fn plan_for_device(
         config: &Config,
         config_key: &str,
@@ -219,12 +269,35 @@ mod tests {
         rearm_generation: u64,
         os_mouse_hook_available: bool,
     ) -> DeviceCapturePlan {
+        plan_for_device_with_model(
+            config,
+            config_key,
+            "not-a-gaming-model",
+            route,
+            app,
+            rearm_generation,
+            os_mouse_hook_available,
+        )
+    }
+
+    fn plan_for_device_with_model(
+        config: &Config,
+        config_key: &str,
+        model_key: &str,
+        route: DeviceRoute,
+        app: Option<&str>,
+        rearm_generation: u64,
+        os_mouse_hook_available: bool,
+    ) -> DeviceCapturePlan {
         super::plan_for_device(
             config,
-            PhysicalDeviceKey::parse("receiver:cafe:slot:2")
-                .expect("fixture should be a physical key"),
-            config_key,
-            route,
+            DeviceCaptureIdentity {
+                physical_key: PhysicalDeviceKey::parse("receiver:cafe:slot:2")
+                    .expect("fixture should be a physical key"),
+                config_key,
+                model_key,
+                route,
+            },
             app,
             rearm_generation,
             os_mouse_hook_available,
@@ -582,5 +655,59 @@ mod tests {
         } else {
             assert!(plan.dispatch.side_gesture_bindings.is_empty());
         }
+    }
+
+    #[test]
+    fn unbound_gaming_model_arms_no_spy_buttons() {
+        let cfg = Config::default();
+        let plan = plan_for_device_with_model(&cfg, "2b042", "04099", route(), None, 0, true);
+        assert!(
+            plan.target.spec.spy_buttons.is_empty(),
+            "an untouched G-series device must never be told to stream spy events"
+        );
+    }
+
+    #[test]
+    fn one_bound_gaming_button_arms_the_full_model_map() {
+        let mut cfg = Config::default();
+        cfg.set_binding(
+            "2b042",
+            ButtonId::ProfileCycle,
+            Binding::Single(Action::MissionControl),
+        );
+        let plan = plan_for_device_with_model(&cfg, "2b042", "04099", route(), None, 0, true);
+        assert_eq!(
+            plan.target.spec.spy_buttons,
+            [
+                (5, ButtonId::DpiShift),
+                (9, ButtonId::ProfileCycle),
+                (10, ButtonId::DpiUp),
+                (11, ButtonId::DpiDown),
+            ],
+            "binding one gaming button must arm the model's whole spy map, not just the bound one"
+        );
+
+        // Binding a second gaming button must not change the spec — this is
+        // what keeps the spy from restarting on every binding edit.
+        let mut cfg2 = cfg.clone();
+        cfg2.set_binding("2b042", ButtonId::DpiUp, Binding::Single(Action::Undo));
+        let plan2 = plan_for_device_with_model(&cfg2, "2b042", "04099", route(), None, 0, true);
+        assert_eq!(plan.target.spec.spy_buttons, plan2.target.spec.spy_buttons);
+    }
+
+    #[test]
+    fn non_gaming_model_never_arms_spy_buttons() {
+        let mut cfg = Config::default();
+        cfg.set_binding(
+            "2b042",
+            ButtonId::ProfileCycle,
+            Binding::Single(Action::MissionControl),
+        );
+        // "2b042" is a real (non-gaming) model key used elsewhere in this
+        // file's fixtures; a ProfileCycle binding on it is meaningless data
+        // (the device has no such control), which is exactly the point: the
+        // spy only arms for a model `spy_buttons_for_model` actually knows.
+        let plan = plan_for_device(&cfg, "2b042", route(), None, 0, true);
+        assert!(plan.target.spec.spy_buttons.is_empty());
     }
 }

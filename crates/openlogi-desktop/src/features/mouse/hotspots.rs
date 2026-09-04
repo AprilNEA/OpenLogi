@@ -68,11 +68,28 @@ impl Hotspot {
     }
 }
 
+/// Which optional controls the synthetic silhouette should offer, derived
+/// from the device's measured [`openlogi_core::device::Capabilities`]. A
+/// plain `bool` parameter stopped being enough once a second independent
+/// fact joined `thumbwheel` — see `.claude/rules/rust.md` on boolean-blind
+/// parameters.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FallbackControls {
+    /// A horizontal thumb wheel is available — mirrors `Capabilities::thumbwheel`.
+    pub thumbwheel: bool,
+    /// The device reports HID++ `0x8100`+`0x8110` (a G-series gaming mouse
+    /// captured through the spy tap, not `0x1b04`). These devices have
+    /// neither a "ModeShift" DPI-toggle button nor a dedicated MX-style
+    /// gesture button — [`ButtonId::DpiToggle`] and [`ButtonId::GestureButton`]
+    /// are dropped from the silhouette in favor of the gaming-only buttons.
+    pub gaming_buttons: bool,
+}
+
 /// Fallback hotspot layout for the no-asset path (synthetic silhouette).
 /// Primary L/R click are intentionally absent — Logi doesn't expose them
 /// as remappable and we follow the same rule everywhere.
 #[must_use]
-pub fn default_hotspots(thumbwheel: bool) -> Vec<Hotspot> {
+pub fn default_hotspots(controls: FallbackControls) -> Vec<Hotspot> {
     let mut hotspots = vec![
         Hotspot {
             id: ButtonId::MiddleClick.into(),
@@ -95,22 +112,57 @@ pub fn default_hotspots(thumbwheel: bool) -> Vec<Hotspot> {
             w: 40.,
             h: 60.,
         },
-        Hotspot {
+    ];
+    if controls.gaming_buttons {
+        // Approximate placement — this is generic silhouette art, not a claim
+        // about this specific model's shape. A thumb paddle for the DPI Shift
+        // modifier, and a cluster behind the wheel for the profile/DPI trio,
+        // mirroring where these controls sit on a G502 X PLUS.
+        hotspots.push(Hotspot {
+            id: ButtonId::DpiShift.into(),
+            x: 8.,
+            y: 340.,
+            w: 44.,
+            h: 50.,
+        });
+        hotspots.push(Hotspot {
+            id: ButtonId::ProfileCycle.into(),
+            x: 175.,
+            y: 230.,
+            w: 70.,
+            h: 26.,
+        });
+        hotspots.push(Hotspot {
+            id: ButtonId::DpiUp.into(),
+            x: 175.,
+            y: 258.,
+            w: 34.,
+            h: 26.,
+        });
+        hotspots.push(Hotspot {
+            id: ButtonId::DpiDown.into(),
+            x: 211.,
+            y: 258.,
+            w: 34.,
+            h: 26.,
+        });
+    } else {
+        hotspots.push(Hotspot {
             id: ButtonId::DpiToggle.into(),
             x: 175.,
             y: 230.,
             w: 70.,
             h: 40.,
-        },
-        Hotspot {
+        });
+        hotspots.push(Hotspot {
             id: ButtonId::GestureButton.into(),
             x: 8.,
             y: 380.,
             w: 44.,
             h: 80.,
-        },
-    ];
-    if thumbwheel {
+        });
+    }
+    if controls.thumbwheel {
         hotspots.push(Hotspot {
             id: MouseControlId::ThumbwheelRotation,
             x: 8.,
@@ -141,22 +193,25 @@ mod tests {
     #[test]
     fn fallback_thumbwheel_is_capability_gated() {
         assert!(
-            !default_hotspots(false)
+            !default_hotspots(FallbackControls::default())
                 .iter()
                 .any(|hotspot| { hotspot.id == MouseControlId::ThumbwheelRotation })
         );
         assert_eq!(
-            default_hotspots(true)
-                .iter()
-                .filter(|hotspot| hotspot.id == MouseControlId::ThumbwheelRotation)
-                .count(),
+            default_hotspots(FallbackControls {
+                thumbwheel: true,
+                ..Default::default()
+            })
+            .iter()
+            .filter(|hotspot| hotspot.id == MouseControlId::ThumbwheelRotation)
+            .count(),
             1
         );
     }
 
     #[test]
     fn default_hotspots_expose_the_gesture_button() {
-        let hotspots = default_hotspots(false);
+        let hotspots = default_hotspots(FallbackControls::default());
         assert!(
             hotspots
                 .iter()
@@ -167,7 +222,7 @@ mod tests {
 
     #[test]
     fn default_hotspots_omit_primary_clicks() {
-        let hotspots = default_hotspots(false);
+        let hotspots = default_hotspots(FallbackControls::default());
         assert!(
             !hotspots.iter().any(|h| {
                 matches!(
@@ -177,5 +232,34 @@ mod tests {
             }),
             "primary clicks are not remappable and must stay out of the model"
         );
+    }
+
+    #[test]
+    fn gaming_buttons_replace_dpi_toggle_and_gesture_button() {
+        let hotspots = default_hotspots(FallbackControls {
+            gaming_buttons: true,
+            ..Default::default()
+        });
+        for stale in [ButtonId::DpiToggle, ButtonId::GestureButton] {
+            assert!(
+                !hotspots
+                    .iter()
+                    .any(|h| h.id == MouseControlId::Button(stale)),
+                "{stale:?} does not exist on a gaming mouse and must not be an offered hotspot"
+            );
+        }
+        for expected in [
+            ButtonId::DpiShift,
+            ButtonId::ProfileCycle,
+            ButtonId::DpiUp,
+            ButtonId::DpiDown,
+        ] {
+            assert!(
+                hotspots
+                    .iter()
+                    .any(|h| h.id == MouseControlId::Button(expected)),
+                "{expected:?} must be a mappable hotspot on a gaming mouse"
+            );
+        }
     }
 }

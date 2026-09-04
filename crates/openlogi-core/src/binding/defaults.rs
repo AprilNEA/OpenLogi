@@ -80,6 +80,14 @@ pub fn default_binding(button: ButtonId) -> Action {
         | ButtonId::KeyMute
         | ButtonId::KeyVolumeDown
         | ButtonId::KeyVolumeUp => Action::None,
+        // Gaming buttons stay on their native on-device behavior (DPI
+        // shift/cycle) until the user explicitly binds them; an unbound one
+        // is never armed on the `0x8110` spy (see `capture_plan`), so a
+        // `None` default keeps the projection total without capturing
+        // anything — same reasoning as the keyboard arm above.
+        ButtonId::DpiShift | ButtonId::ProfileCycle | ButtonId::DpiUp | ButtonId::DpiDown => {
+            Action::None
+        }
     }
 }
 

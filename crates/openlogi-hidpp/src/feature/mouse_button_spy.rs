@@ -44,8 +44,10 @@ impl MouseButtonIndex {
 /// The 16-bit button-state bitmask carried by the spy's button event.
 ///
 /// Bit 0 is button 1 — libratbag's convention for the sibling `0x8100`
-/// button-binding bitmask; unverified against this feature's own events on
-/// real hardware.
+/// button-binding bitmask, confirmed correct on real hardware (a Logitech
+/// G502 X PLUS): pressing left/right/middle click alone produced masks
+/// `0x0001`/`0x0002`/`0x0004` respectively, with clean edge-consistent
+/// down/up pairs for all 11 buttons and no cross-talk.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct MouseButtonMask(u16);

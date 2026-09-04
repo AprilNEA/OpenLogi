@@ -5,7 +5,7 @@
 
 use openlogi_core::binding::ButtonId;
 
-use super::hotspots::{Hotspot, MOUSE_MODEL_SIZE, MouseControlId};
+use super::hotspots::{FallbackControls, Hotspot, MOUSE_MODEL_SIZE, MouseControlId};
 use super::leader_lines::{Label, Side};
 use crate::services::assets::ResolvedAsset;
 
@@ -203,9 +203,9 @@ pub fn labels_from_hotspots(
 }
 
 /// Label positions for the synthetic fallback silhouette.
-pub fn default_labels(thumbwheel: bool, distribution: LabelDistribution) -> Vec<Label> {
+pub fn default_labels(controls: FallbackControls, distribution: LabelDistribution) -> Vec<Label> {
     labels_from_hotspots(
-        &super::hotspots::default_hotspots(thumbwheel),
+        &super::hotspots::default_hotspots(controls),
         MOUSE_MODEL_SIZE.1,
         distribution,
     )
@@ -251,15 +251,21 @@ mod tests {
     #[test]
     fn default_labels_include_capability_gated_thumbwheel() {
         assert!(
-            !default_labels(false, LabelDistribution::LeftOnly)
+            !default_labels(FallbackControls::default(), LabelDistribution::LeftOnly)
                 .iter()
                 .any(|label| label.id == MouseControlId::ThumbwheelRotation)
         );
         assert_eq!(
-            default_labels(true, LabelDistribution::LeftOnly)
-                .iter()
-                .filter(|label| label.id == MouseControlId::ThumbwheelRotation)
-                .count(),
+            default_labels(
+                FallbackControls {
+                    thumbwheel: true,
+                    ..Default::default()
+                },
+                LabelDistribution::LeftOnly
+            )
+            .iter()
+            .filter(|label| label.id == MouseControlId::ThumbwheelRotation)
+            .count(),
             1
         );
     }
@@ -303,7 +309,10 @@ mod tests {
 
     #[test]
     fn labels_track_hotspots_and_avoid_crossing() {
-        let hotspots = default_hotspots(true);
+        let hotspots = default_hotspots(FallbackControls {
+            thumbwheel: true,
+            ..Default::default()
+        });
         let labels =
             labels_from_hotspots(&hotspots, MOUSE_MODEL_SIZE.1, LabelDistribution::LeftOnly);
         assert_eq!(labels.len(), hotspots.len());
@@ -360,7 +369,10 @@ mod tests {
 
     #[test]
     fn a_two_sided_layout_uses_both_sides() {
-        let hotspots = default_hotspots(true);
+        let hotspots = default_hotspots(FallbackControls {
+            thumbwheel: true,
+            ..Default::default()
+        });
         let labels =
             labels_from_hotspots(&hotspots, MOUSE_MODEL_SIZE.1, LabelDistribution::BothSides);
 
