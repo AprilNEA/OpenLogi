@@ -364,6 +364,44 @@ impl ReversalCooldown {
     }
 }
 
+/// Both axes' reversal state for one source, kept apart from its pulses: a
+/// pulse can finish well inside [`REVERSAL_COOLDOWN`] (the 80 ms minimum
+/// and the 360 ms default both do), and an opposing tick arriving after the
+/// animation ended but while the OS curve is still hot must still be cooled.
+/// The state is dropped once no tick has arrived for a full cooldown — by
+/// then any flip is cold and starts fresh, which is exactly unscaled.
+#[derive(Default)]
+struct SourceCooldown {
+    x: ReversalCooldown,
+    y: ReversalCooldown,
+    last_tick: Option<Instant>,
+}
+
+impl SourceCooldown {
+    fn attenuate(&mut self, impulse: WheelDelta, at: Instant) -> WheelDelta {
+        self.last_tick = Some(at);
+        let cooled = WheelDelta {
+            x: self.x.attenuate(impulse.x, at),
+            y: self.y.attenuate(impulse.y, at),
+        };
+        if cooled != impulse {
+            tracing::trace!(
+                raw_x = impulse.x,
+                raw_y = impulse.y,
+                cooled_x = cooled.x,
+                cooled_y = cooled.y,
+                "reversal cooldown attenuated a tick"
+            );
+        }
+        cooled
+    }
+
+    fn is_expired(&self, at: Instant) -> bool {
+        self.last_tick
+            .is_none_or(|last| at.saturating_duration_since(last) >= REVERSAL_COOLDOWN)
+    }
+}
+
 /// A source exists in the state map only while it has in-flight pulses.
 ///
 /// Overlapping pulses superpose: the source's position is the settled distance
@@ -383,8 +421,6 @@ struct ActiveMotion {
     /// axis's own rate, so a fast spin on one axis never accelerates slow
     /// movement on the other.
     recent_ticks: VecDeque<(Instant, WheelDelta)>,
-    reversal_x: ReversalCooldown,
-    reversal_y: ReversalCooldown,
 }
 
 impl ActiveMotion {
@@ -395,10 +431,7 @@ impl ActiveMotion {
             emitted: WheelDelta::ZERO,
             next_frame: at + FRAME_INTERVAL,
             recent_ticks: VecDeque::new(),
-            reversal_x: ReversalCooldown::default(),
-            reversal_y: ReversalCooldown::default(),
         };
-        let impulse = motion.cooled(impulse, at, tuning);
         let gain = motion.windowed_gain(impulse, at, tuning.max_gain);
         motion.pulses.push(Pulse {
             amplitude: impulse.scale(tuning.step).scale_axes(gain),
@@ -439,28 +472,6 @@ impl ActiveMotion {
         }
     }
 
-    /// Attenuate quick direction reversals of pre-accelerated input; raw
-    /// sources pass through untouched.
-    fn cooled(&mut self, impulse: WheelDelta, at: Instant, tuning: MotionTuning) -> WheelDelta {
-        if !tuning.preaccelerated {
-            return impulse;
-        }
-        let cooled = WheelDelta {
-            x: self.reversal_x.attenuate(impulse.x, at),
-            y: self.reversal_y.attenuate(impulse.y, at),
-        };
-        if cooled != impulse {
-            tracing::trace!(
-                raw_x = impulse.x,
-                raw_y = impulse.y,
-                cooled_x = cooled.x,
-                cooled_y = cooled.y,
-                "reversal cooldown attenuated a tick"
-            );
-        }
-        cooled
-    }
-
     /// Superpose one tick's pulse and evaluate the position at its timestamp.
     ///
     /// Ticks landing within one frame of the newest pulse's first tick merge
@@ -475,7 +486,6 @@ impl ActiveMotion {
     /// unconditionally; that is the one place the model approximates, and it
     /// still conserves distance and continuity.
     fn add_tick(&mut self, impulse: WheelDelta, at: Instant, tuning: MotionTuning) -> MotionUpdate {
-        let impulse = self.cooled(impulse, at, tuning);
         let gain = self.windowed_gain(impulse, at, tuning.max_gain);
         let amplitude = impulse.scale(tuning.step).scale_axes(gain);
         let merge = self.pulses.len() >= MAX_PULSES
@@ -634,6 +644,9 @@ impl OutputStream {
 #[derive(Default)]
 struct ScrollEngine {
     active: HashMap<ScrollSource, ActiveMotion>,
+    /// Reversal state of pre-accelerated sources; outlives `active` entries
+    /// (see [`SourceCooldown`]).
+    cooldowns: HashMap<ScrollSource, SourceCooldown>,
     output: OutputStream,
 }
 
@@ -646,6 +659,7 @@ impl ScrollEngine {
         tuning: MotionTuning,
         emit: &mut impl FnMut(ScrollFrame),
     ) {
+        let impulse = self.cooled(&source, impulse, at, tuning);
         let update = match self.active.entry(source) {
             Entry::Occupied(mut entry) => {
                 let update = entry.get_mut().add_tick(impulse, at, tuning);
@@ -662,6 +676,27 @@ impl ScrollEngine {
         if let Some(update) = update {
             self.emit_update(update, emit);
         }
+    }
+
+    /// Attenuate quick direction reversals of pre-accelerated input; raw
+    /// sources pass through untouched. Expired state is dropped on the way
+    /// so the map only ever holds sources that ticked within one cooldown.
+    fn cooled(
+        &mut self,
+        source: &ScrollSource,
+        impulse: WheelDelta,
+        at: Instant,
+        tuning: MotionTuning,
+    ) -> WheelDelta {
+        self.cooldowns
+            .retain(|_, cooldown| !cooldown.is_expired(at));
+        if !tuning.preaccelerated {
+            return impulse;
+        }
+        self.cooldowns
+            .entry(source.clone())
+            .or_default()
+            .attenuate(impulse, at)
     }
 
     fn advance_due(&mut self, at: Instant, emit: &mut impl FnMut(ScrollFrame)) {
@@ -691,12 +726,14 @@ impl ScrollEngine {
     }
 
     fn cancel_source(&mut self, source: &ScrollSource, emit: &mut impl FnMut(ScrollFrame)) {
+        self.cooldowns.remove(source);
         if self.active.remove(source).is_some() && self.active.is_empty() {
             self.output.cancel(emit);
         }
     }
 
     fn cancel_all(&mut self, emit: &mut impl FnMut(ScrollFrame)) {
+        self.cooldowns.clear();
         self.active.clear();
         self.output.cancel(emit);
     }

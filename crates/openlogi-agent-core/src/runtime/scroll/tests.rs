@@ -717,13 +717,14 @@ fn quick_reversal_of_preaccelerated_input_restarts_cold() {
 }
 
 #[test]
-fn leisurely_reversal_skips_the_ramp_but_still_compresses() {
+fn leisurely_reversal_starts_fresh_and_unscaled() {
     let base = Instant::now();
     let mut engine = ScrollEngine::default();
     let mut frames = Vec::new();
     // The opposing tick arrives a full cooldown after the departed
-    // direction's last tick — already cold, so the ramp passes it whole —
-    // but at 5 lines it exceeds the knee: 3 + 2/4 = 3.5 at burst start.
+    // direction's last tick: the OS curve is cold again, the source's
+    // reversal state has expired, and the tick passes whole — not even the
+    // knee compression applies to a flip that is not a corrective flick.
     for (millis, delta) in [(0, -5.0), (50, -5.0), (460, 5.0)] {
         engine.impulse(
             source(),
@@ -736,7 +737,43 @@ fn leisurely_reversal_skips_the_ramp_but_still_compresses() {
     engine.advance_due(base + Duration::from_millis(700), &mut |frame| {
         frames.push(frame);
     });
-    assert_delta(cumulative(&frames), wheel(0.0, -10.0 + 3.5));
+    assert_delta(cumulative(&frames), wheel(0.0, -10.0 + 5.0));
+    assert!(engine.active.is_empty());
+}
+
+#[test]
+fn reversal_cooldown_outlives_a_finished_animation() {
+    let base = Instant::now();
+    let mut engine = ScrollEngine::default();
+    let mut frames = Vec::new();
+    // A 100 ms pulse finishes long before the 400 ms cooldown does. The
+    // source is retired at the frame that completes it, yet an opposing tick
+    // 168 ms after the departed direction's last tick still ramps: it passes
+    // 168/400 of its magnitude (below the knee, so the ramp alone applies).
+    for (millis, delta) in [(0, -5.0), (50, -5.0)] {
+        engine.impulse(
+            source(),
+            wheel(0.0, delta),
+            base + Duration::from_millis(millis),
+            preaccelerated(),
+            &mut |frame| frames.push(frame),
+        );
+    }
+    engine.advance_due(base + Duration::from_millis(200), &mut |frame| {
+        frames.push(frame);
+    });
+    assert!(engine.active.is_empty(), "animation finished and retired");
+    engine.impulse(
+        source(),
+        wheel(0.0, 4.0),
+        base + Duration::from_millis(218),
+        preaccelerated(),
+        &mut |frame| frames.push(frame),
+    );
+    engine.advance_due(base + Duration::from_millis(400), &mut |frame| {
+        frames.push(frame);
+    });
+    assert_delta(cumulative(&frames), wheel(0.0, -10.0 + 4.0 * 0.42));
     assert!(engine.active.is_empty());
 }
 
