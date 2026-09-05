@@ -395,10 +395,13 @@ pub fn post_scroll(delta: ScrollDelta) {
 
 /// Lifecycle phase of one synthetic smooth-scroll frame.
 ///
-/// macOS forwards this state to the scroll-wheel event so applications see a
-/// balanced continuous gesture. Linux and Windows have no equivalent field;
-/// there the phase is retained by the runtime contract but only the frame's
-/// distance is injected.
+/// Part of the runtime contract — the motion engine emits a balanced
+/// lifecycle — but no backend forwards it today: injected frames carry only
+/// distance. macOS deliberately posts *phaseless* continuous events (matching
+/// wheel semantics); stamping `kCGScrollWheelEventScrollPhase` instead
+/// declares a trackpad gesture, which enables rubber-band overscroll and
+/// WebKit gesture latching that breaks JS-scrolled sites. Linux and Windows
+/// have no equivalent field.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SmoothScrollPhase {
     /// First output frame of a new animation.
@@ -413,11 +416,11 @@ pub enum SmoothScrollPhase {
 
 /// Synthesise one frame of a finite smooth-scroll animation.
 ///
-/// On macOS wheel ticks become continuous pixel events at ten points per tick,
-/// matching the line/point relationship carried in native continuous events.
-/// Other platforms preserve fractional wheel ticks through their native
-/// high-resolution output. Non-finite distance is rejected at this I/O
-/// boundary; zero-distance terminal frames remain meaningful on macOS.
+/// On macOS wheel ticks become phaseless continuous pixel events at ten
+/// points per tick, matching the line/point relationship carried in native
+/// continuous events. Other platforms preserve fractional wheel ticks through
+/// their native high-resolution output. Non-finite distance is rejected at
+/// this I/O boundary, and zero-distance frames are dropped everywhere.
 pub fn post_smooth_scroll(delta: ScrollDelta, phase: SmoothScrollPhase) {
     if !delta.is_finite() {
         return;
