@@ -14,6 +14,7 @@ use std::time::{Instant, SystemTime};
 
 use futures_lite::StreamExt as _;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
+use openlogi_hid::inventory::events::HidppEventSource;
 use openlogi_hid::{ChannelRegistry, DeviceIoGate};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -61,6 +62,14 @@ pub enum InventoryEvent {
     /// set/route/online state looks unchanged across the gap, so the agent
     /// re-applies volatile settings on the next snapshot (#189).
     SystemWake,
+    /// A device's `WirelessDeviceStatus` feature (`0x1d4b`) broadcast a
+    /// reconnection — the firmware explicitly asking the host to reconfigure
+    /// it after a nap. A nap can be too short for any reconciliation to have
+    /// observed the device offline, so the agent must not rely on an
+    /// offline→online transition in the snapshot that follows: it re-applies
+    /// volatile settings on the next snapshot, like [`Self::SystemWake`] but
+    /// with the shorter link-race confirm budget.
+    DeviceWake,
 }
 
 /// The watcher's cross-pass memory, factored out of the I/O loop so the
@@ -376,7 +385,17 @@ impl InventoryWorker {
             ReconcileTrigger::HidEvent(source) => {
                 debug!(?source, "HID++ lifecycle event — reconciling inventory");
                 tokio::time::sleep(HID_EVENT_SETTLE).await;
-                while self.hid_events.try_recv().is_ok() {}
+                // The settle drain coalesces a burst into one reconciliation,
+                // but a `0x1d4b` reconnect broadcast anywhere in the burst
+                // still means a device asked to be reconfigured — that intent
+                // must survive the drain.
+                let mut device_wake = source == HidppEventSource::WirelessDeviceStatus;
+                while let Ok(drained) = self.hid_events.try_recv() {
+                    device_wake |= drained == HidppEventSource::WirelessDeviceStatus;
+                }
+                if device_wake && self.events.send(InventoryEvent::DeviceWake).is_err() {
+                    return false;
+                }
             }
             ReconcileTrigger::SystemResume => {
                 info!("system resume — replaying settings on a settled inventory");
