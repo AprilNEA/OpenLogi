@@ -39,7 +39,7 @@ pub use settings::{
 
 use crate::binding::{
     Action, ActionRingConfig, ActionRingIcon, ActionRingSlot, Binding, ButtonId, GestureDirection,
-    GestureResponseTime, RingAction, default_binding, default_binding_for, default_gesture_binding,
+    GestureResponse, RingAction, default_binding, default_binding_for, default_gesture_binding,
 };
 use crate::device_order::PhysicalDeviceKey;
 use crate::hid::Dpi;
@@ -53,7 +53,7 @@ use settings::GestureOwner;
 /// direction. Pre-v7 explicit default pairs are migrated in device and
 /// per-application profiles so they remain native rather than becoming a
 /// reversal (see `Config::migrate_thumbwheel_native_direction`). It also adds
-/// per-control `gesture_response_times`.
+/// per-control `gesture_responses` containing both hold and travel thresholds.
 ///
 /// v6 adds threshold-based `{ short = ..., long = ... }` button bindings.
 ///
@@ -1033,33 +1033,33 @@ impl Config {
             .thumbwheel_sensitivity = sensitivity;
     }
 
-    /// The effective gesture response time for one control on `device_key`.
-    /// An unset control retains [`GestureResponseTime::default`].
+    /// The effective gesture response for one control on `device_key`.
+    /// An unset control retains [`GestureResponse::default`].
     #[must_use]
-    pub fn gesture_response_time(&self, device_key: &str, button: ButtonId) -> GestureResponseTime {
+    pub fn gesture_response(&self, device_key: &str, button: ButtonId) -> GestureResponse {
         self.devices
             .get(device_key)
-            .map_or_else(GestureResponseTime::default, |device| {
+            .map_or_else(GestureResponse::default, |device| {
                 device
-                    .gesture_response_times
+                    .gesture_responses
                     .get(&button)
                     .copied()
                     .unwrap_or_default()
             })
     }
 
-    /// Set one gesture control's response time on `device_key`.
-    pub fn set_gesture_response_time(
+    /// Set one gesture control's response on `device_key`.
+    pub fn set_gesture_response(
         &mut self,
         device_key: &str,
         button: ButtonId,
-        responsiveness: GestureResponseTime,
+        response: GestureResponse,
     ) {
         self.devices
             .entry(device_key.to_string())
             .or_default()
-            .gesture_response_times
-            .insert(button, responsiveness);
+            .gesture_responses
+            .insert(button, response);
     }
 }
 

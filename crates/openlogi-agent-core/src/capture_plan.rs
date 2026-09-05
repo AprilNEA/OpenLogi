@@ -11,9 +11,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use openlogi_core::binding::{
-    Action, Binding, ButtonId, GestureDirection, GestureResponseTime, default_binding,
-};
+use openlogi_core::binding::{Action, Binding, ButtonId, GestureDirection, default_binding};
 use openlogi_core::bindings::{button_bindings_for, hidpp_gesture_maps_for, oshook_gestures_for};
 use openlogi_core::config::{Config, ThumbwheelSensitivity};
 use openlogi_core::device_order::PhysicalDeviceKey;
@@ -180,9 +178,11 @@ pub fn plan_for_device(
             .is_some_and(|binding| binding.click_action() != default_binding(*button))
     });
     let thumbwheel_sensitivity = config.thumbwheel_sensitivity(config_key);
-    let gesture_response_times = gesture_bindings
+    let gesture_responses = gesture_bindings
         .keys()
-        .map(|&button| (button, config.gesture_response_time(config_key, button)))
+        .copied()
+        .chain(divert_gesture_buttons.iter().map(|&(_, button)| button))
+        .map(|button| (button, config.gesture_response(config_key, button)))
         .collect();
     DeviceCapturePlan {
         target: CaptureTarget {
@@ -197,7 +197,7 @@ pub fn plan_for_device(
                     .map(|(cid, _)| cid)
                     .collect(),
                 divert_gesture_buttons,
-                gesture_response_times,
+                gesture_responses,
                 divert_buttons,
             },
             rearm_generation,
@@ -214,7 +214,7 @@ pub fn plan_for_device(
 
 #[cfg(test)]
 mod tests {
-    use openlogi_core::binding::{Binding, GestureResponseTime, LongPressBinding};
+    use openlogi_core::binding::{Binding, GestureResponse, LongPressBinding};
     use openlogi_hid::reprog_controls::{GESTURE_BUTTON_CID, HAPTIC_PANEL_CID};
 
     use super::*;
@@ -291,27 +291,27 @@ mod tests {
     }
 
     #[test]
-    fn plan_carries_each_gesture_controls_response_time() {
+    fn plan_carries_each_gesture_controls_response() {
         let mut cfg = Config::default();
         cfg.set_gesture_mode("2b042", ButtonId::GestureButton, true);
         cfg.set_gesture_mode("2b042", ButtonId::HapticPanel, true);
-        cfg.set_gesture_response_time("2b042", ButtonId::HapticPanel, GestureResponseTime::FAST);
+        cfg.set_gesture_response("2b042", ButtonId::HapticPanel, GestureResponse::FAST);
 
-        let plan = plan_for_device(&cfg, "2b042", route(), None, 0);
+        let plan = plan_for_device(&cfg, "2b042", route(), None, 0, true);
 
         assert_eq!(
             plan.target
                 .spec
-                .gesture_response_times
+                .gesture_responses
                 .get(&ButtonId::HapticPanel),
-            Some(&GestureResponseTime::FAST)
+            Some(&GestureResponse::FAST)
         );
         assert_eq!(
             plan.target
                 .spec
-                .gesture_response_times
+                .gesture_responses
                 .get(&ButtonId::GestureButton),
-            Some(&GestureResponseTime::BALANCED)
+            Some(&GestureResponse::BALANCED)
         );
     }
 
@@ -626,6 +626,7 @@ mod tests {
         cfg.set_gesture_mode("2b042", ButtonId::Back, true);
         cfg.set_gesture_mode("2b042", ButtonId::Forward, true);
         cfg.set_gesture_mode("2b042", ButtonId::MiddleClick, true);
+        cfg.set_gesture_response("2b042", ButtonId::Forward, GestureResponse::FAST);
 
         let plan = plan_for_device(&cfg, "2b042", route(), None, 0, true);
         if cfg!(target_os = "macos") {
@@ -645,6 +646,11 @@ mod tests {
             assert_eq!(
                 plan.target.spec.divert_gesture_buttons, expected,
                 "every known Back/Forward CID must be requested as a HID++ raw-XY gesture source"
+            );
+            assert_eq!(
+                plan.target.spec.gesture_responses.get(&ButtonId::Forward),
+                Some(&GestureResponse::FAST),
+                "the HID++ side-button path must carry its per-device response"
             );
             assert!(
                 !plan
@@ -666,6 +672,7 @@ mod tests {
         } else {
             assert!(plan.dispatch.side_gesture_bindings.is_empty());
             assert!(plan.target.spec.divert_gesture_buttons.is_empty());
+            assert!(plan.target.spec.gesture_responses.is_empty());
         }
     }
 

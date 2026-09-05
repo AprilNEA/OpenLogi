@@ -6,7 +6,7 @@
 //! known, so the entry's `links` table doubles as a route index.
 
 #[cfg(test)]
-use crate::binding::{Action, ButtonId, GestureResponseTime};
+use crate::binding::{Action, ButtonId, GestureResponse};
 use crate::config::{Config, DeviceConfig};
 #[cfg(test)]
 use crate::config::{LightSettings, Lighting, LinkConfig};
@@ -394,7 +394,7 @@ fn fold_maps(device: &mut DeviceConfig, legacy: &mut DeviceConfig, route_key: &s
     fold_map_field!(disabled_gestures);
     fold_map_field!(per_app_bindings);
     fold_map_field!(camera_profiles);
-    fold_map_field!(gesture_response_times);
+    fold_map_field!(gesture_responses);
 }
 
 #[cfg(test)]
@@ -926,19 +926,19 @@ mod tests {
     }
 
     #[test]
-    fn gesture_response_times_merge_per_control() {
+    fn gesture_responses_merge_per_control() {
         let mut config = Config::default();
         let legacy = DeviceConfig {
-            gesture_response_times: std::collections::BTreeMap::from([(
+            gesture_responses: std::collections::BTreeMap::from([(
                 ButtonId::HapticPanel,
-                GestureResponseTime::FAST,
+                GestureResponse::FAST,
             )]),
             ..DeviceConfig::default()
         };
         let canonical_entry = DeviceConfig {
-            gesture_response_times: std::collections::BTreeMap::from([(
+            gesture_responses: std::collections::BTreeMap::from([(
                 ButtonId::GestureButton,
-                GestureResponseTime::DELIBERATE,
+                GestureResponse::DELIBERATE,
             )]),
             ..DeviceConfig::default()
         };
@@ -952,14 +952,14 @@ mod tests {
         let canonical = PhysicalDeviceKey::parse("unit:6be9d300").expect("valid");
         config.adopt_route(&canonical, "receiver:82839805:slot:1", None);
 
-        let response_times = &config.devices["unit:6be9d300"].gesture_response_times;
+        let response_times = &config.devices["unit:6be9d300"].gesture_responses;
         assert_eq!(
             response_times.get(&ButtonId::HapticPanel),
-            Some(&GestureResponseTime::FAST)
+            Some(&GestureResponse::FAST)
         );
         assert_eq!(
             response_times.get(&ButtonId::GestureButton),
-            Some(&GestureResponseTime::DELIBERATE)
+            Some(&GestureResponse::DELIBERATE)
         );
     }
 
