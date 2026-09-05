@@ -31,6 +31,9 @@ openlogi-device = { version = "0.8.3", path = "../openlogi-device" }
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { workspace = true, features = [
     "Win32_Devices_HumanInterfaceDevice",
+    # CM_Locate_DevNodeW / CM_Get_Parent / CM_Get_Device_IDW, for the parent-node
+    # serial fallback in transport/windows_serial.rs.
+    "Win32_Devices_DeviceAndDriverInstallation",
     "Win32_Foundation",
     # CreateFileW's signature references PSECURITY_ATTRIBUTES, so it is only
     # exposed when Win32_Security is also enabled.

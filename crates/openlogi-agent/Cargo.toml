@@ -55,7 +55,7 @@ objc2-foundation = { workspace = true, features = ["NSString", "NSData", "NSArra
 zbus = "5"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-winreg = "0.55"
+winreg = { workspace = true }
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",

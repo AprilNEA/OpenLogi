@@ -15,7 +15,7 @@ use gpui_component::{
     v_flex,
 };
 use openlogi_core::{
-    config::LightSettings,
+    config::{CAMERA_AUTOMATION_SUPPORTED, LightSettings},
     device::{LightCapabilities, LightValueRange, LightValueUnit},
 };
 
@@ -234,9 +234,11 @@ impl Render for LightPanel {
                     },
                     pal,
                 ));
-                #[cfg(target_os = "macos")]
-                let panel = panel.child(camera_automation(settings, pal));
-                panel.child(div().h(px(1.)).w_full().bg(pal.border.opacity(0.55)))
+                panel
+                    .when(CAMERA_AUTOMATION_SUPPORTED, |panel| {
+                        panel.child(camera_automation(settings, pal))
+                    })
+                    .child(div().h(px(1.)).w_full().bg(pal.border.opacity(0.55)))
             })
             .when_some(brightness, |panel, (range, slider)| {
                 let value = range
@@ -352,7 +354,9 @@ fn light_emblem(enabled: bool, pal: Palette) -> impl IntoElement {
         .child(Icon::new(icon).size_7().text_color(icon_color))
 }
 
-#[cfg(target_os = "macos")]
+/// The "auto-on with camera" row. Only rendered where
+/// [`CAMERA_AUTOMATION_SUPPORTED`] holds, so a platform with no camera-use
+/// provider never offers a switch that cannot do anything.
 fn camera_automation(current: LightSettings, pal: Palette) -> impl IntoElement {
     h_flex()
         .w_full()

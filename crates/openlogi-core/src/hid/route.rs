@@ -136,6 +136,19 @@ impl DeviceRoute {
         }
     }
 
+    /// Whether this route addresses a HID++ device.
+    ///
+    /// [`Self::RawHid`] is a standalone vendor-protocol device — a Litra light —
+    /// and must never reach HID++ channel code, so anything that opens a HID++
+    /// session, diverts a control, or plans input capture asks this first. The
+    /// route carries the distinction the device's kind and feature table cannot:
+    /// a light is offline-probed like any other device, and `kind` is identity
+    /// only.
+    #[must_use]
+    pub const fn speaks_hidpp(&self) -> bool {
+        !matches!(self, Self::RawHid { .. })
+    }
+
     /// The HID++ device index features are addressed at for this route: the
     /// pairing slot for a Bolt device, the self-index for a direct one.
     #[must_use]
