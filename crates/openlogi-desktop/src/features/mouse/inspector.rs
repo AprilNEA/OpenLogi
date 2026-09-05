@@ -14,7 +14,7 @@ use gpui_component::{
     scroll::ScrollableElement as _, v_flex,
 };
 use openlogi_core::binding::{
-    Action, ButtonId, GestureDirection, GestureResponseTime, default_binding,
+    Action, ButtonId, GestureDirection, GestureResponse, default_binding,
 };
 
 use super::hotspots::MouseControlId;
@@ -319,7 +319,7 @@ fn gesture_inspector(
             picker.view,
             pal,
         ))
-        .child(gesture_response_time_control(button, pal, cx))
+        .child(gesture_response_control(button, pal, cx))
         .child(current_action_card(&current, picker, pal))
         .child(
             control_button("inspector-single-action")
@@ -347,32 +347,32 @@ fn gesture_inspector(
         })
 }
 
-/// Per-control response-time presets. Keeping this beside the selected
+/// Per-control response presets. Keeping this beside the selected
 /// control's direction bindings makes the scope explicit where the user is
 /// likely to notice gesture latency.
-fn gesture_response_time_control(
+fn gesture_response_control(
     button: ButtonId,
     pal: Palette,
     cx: &Context<MouseModelView>,
 ) -> impl IntoElement {
-    let current = AppState::try_read(cx).map_or_else(GestureResponseTime::default, |state| {
-        state.gesture_response_time(button)
+    let current = AppState::try_read(cx).map_or_else(GestureResponse::default, |state| {
+        state.gesture_response(button)
     });
-    let presets = GestureResponseTime::PRESETS;
+    let presets = GestureResponse::PRESETS;
     v_flex()
         .gap_2()
         .child(editor_section(tr!("actions.gesture_response"), pal))
         .child(
-            ButtonGroup::new((ElementId::from("gesture-response-time"), button.label()))
+            ButtonGroup::new((ElementId::from("gesture-response"), button.label()))
                 .w_full()
                 .outline()
                 .children(presets.map(|preset| {
                     let (id, label) = match preset {
-                        GestureResponseTime::FAST => (0_u64, tr!("actions.gesture_response_fast")),
-                        GestureResponseTime::BALANCED => {
+                        GestureResponse::FAST => (0_u64, tr!("actions.gesture_response_fast")),
+                        GestureResponse::BALANCED => {
                             (1_u64, tr!("actions.gesture_response_balanced"))
                         }
-                        GestureResponseTime::DELIBERATE => {
+                        GestureResponse::DELIBERATE => {
                             (2_u64, tr!("actions.gesture_response_deliberate"))
                         }
                         _ => unreachable!("only named presets are rendered"),
@@ -391,7 +391,7 @@ fn gesture_response_time_control(
                         return;
                     };
                     AppState::update_bindings(cx, |state| {
-                        state.commit_gesture_response_time(button, preset);
+                        state.commit_gesture_response(button, preset);
                     });
                 }),
         )

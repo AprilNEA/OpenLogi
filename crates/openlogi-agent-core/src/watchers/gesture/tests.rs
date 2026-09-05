@@ -1,7 +1,5 @@
 use super::*;
-use openlogi_core::binding::{
-    Action, Binding, ButtonId, GestureDirection, GestureResponseTime,
-};
+use openlogi_core::binding::{Action, Binding, ButtonId, GestureDirection, GestureResponse};
 use openlogi_core::config::ThumbwheelSensitivity;
 use openlogi_hid::DeviceRoute;
 
@@ -558,7 +556,7 @@ fn wheel_configuration_changes_refresh_without_rearming_hardware() {
 }
 
 #[test]
-fn responsiveness_changes_restart_the_capture_session() {
+fn gesture_response_changes_restart_the_capture_session() {
     let mut config = openlogi_core::config::Config::default();
     let balanced = crate::capture_plan::plan_for_device(
         &config,
@@ -571,11 +569,7 @@ fn responsiveness_changes_restart_the_capture_session() {
     );
     let mut session = live_session_from_plan(7, balanced.clone());
 
-    config.set_gesture_response_time(
-        "mouse-a",
-        ButtonId::GestureButton,
-        GestureResponseTime::FAST,
-    );
+    config.set_gesture_response("mouse-a", ButtonId::GestureButton, GestureResponse::FAST);
     let fast = crate::capture_plan::plan_for_device(
         &config,
         physical_key(),

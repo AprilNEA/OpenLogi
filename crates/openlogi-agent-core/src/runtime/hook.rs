@@ -11,8 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use openlogi_core::binding::{
-    Action, Binding, ButtonId, GestureDirection, GestureResponseTime, SwipeAccumulator,
-    default_binding,
+    Action, Binding, ButtonId, GestureDirection, GestureResponse, SwipeAccumulator, default_binding,
 };
 use openlogi_core::config::{KeyModifiers, KeyTrigger};
 use openlogi_hook::{
@@ -48,12 +47,12 @@ pub struct HookMaps {
     /// Entries survive map rebuilds because they are hardware observations,
     /// not configuration.
     pub(crate) thumbwheel_positive_is_forward: BTreeMap<String, bool>,
-    /// Click-versus-swipe timing for each OS-hook gesture control on the
+    /// Click-versus-swipe response for each OS-hook gesture control on the
     /// selected device profile. Native button events do not reliably identify
     /// one peripheral behind a shared receiver, so this intentionally follows
     /// the same selected-profile boundary as [`Self::bindings`] and
-    /// [`Self::gestures`]. HID++ capture plans carry physical-device timing.
-    pub gesture_response_times: BTreeMap<ButtonId, GestureResponseTime>,
+    /// [`Self::gestures`]. HID++ capture plans carry physical-device responses.
+    pub gesture_responses: BTreeMap<ButtonId, GestureResponse>,
 }
 
 /// Shared, atomically-published [`HookMaps`], threaded between the config owner
@@ -136,13 +135,13 @@ impl HoldState {
     }
 
     /// Store the token returned by the accepted lifecycle `Down`.
-    fn begin(&mut self, button: ButtonId, press: PressToken, responsiveness: GestureResponseTime) {
+    fn begin(&mut self, button: ButtonId, press: PressToken, response: GestureResponse) {
         self.current = Some(GestureHold {
             button,
             started_at: Instant::now(),
             press,
         });
-        self.swipe = SwipeAccumulator::new(responsiveness);
+        self.swipe = SwipeAccumulator::new(response);
         self.swipe.begin();
     }
 
@@ -268,21 +267,21 @@ fn handle_button(
     // `try_read` only: a blocking read on the tap thread freezes every pointer
     // event while a config rebuild holds the write lock. Fail open if unavailable.
     if pressed {
-        let responsiveness = hooks
+        let response = hooks
             .try_read()
             .ok()
-            .and_then(|maps| maps.gesture_response_times.get(&id).copied());
+            .and_then(|maps| maps.gesture_responses.get(&id).copied());
         // A refused begin — a second gesture button pressed mid-hold — falls
         // through to the single-action path: the first hold wins and this press
         // still means its plain click.
-        let admission = responsiveness.map(|_| HOLD.with_borrow_mut(|h| h.prepare_begin(id)));
+        let admission = response.map(|_| HOLD.with_borrow_mut(|h| h.prepare_begin(id)));
         if let Some(HoldAdmission::Begin | HoldAdmission::Replace(_)) = &admission {
             if let Some(HoldAdmission::Replace(stale)) = &admission {
                 dispatcher.cancel_stale_hook_press(stale);
             }
             if let Some(press) = dispatcher.try_hook_button_down(id, None) {
                 HOLD.with_borrow_mut(|h| {
-                    h.begin(id, press, responsiveness.unwrap_or_default());
+                    h.begin(id, press, response.unwrap_or_default());
                 });
                 return EventDisposition::Suppress;
             }

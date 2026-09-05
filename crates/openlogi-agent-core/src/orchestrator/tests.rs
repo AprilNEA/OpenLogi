@@ -6,7 +6,7 @@ use super::{
     pick_current, plan_reapply, reapply_targets, stable_id,
 };
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{Action, Binding, ButtonId, GestureResponseTime};
+use openlogi_core::binding::{Action, Binding, ButtonId, GestureResponse};
 use openlogi_core::config::{
     Config, DeviceConfig, LightSettings, LinkConfig, ScrollResolution, VerticalScrollSensitivity,
 };
@@ -29,27 +29,27 @@ fn orchestrator(config: Config) -> Orchestrator {
 }
 
 #[test]
-fn os_hook_gesture_timing_follows_the_selected_device_profile() {
+fn os_hook_gesture_response_follows_the_selected_device_profile() {
     let first = "receiver:bolt:slot:1";
     let second = "receiver:bolt:slot:2";
     let mut config = Config::default();
-    config.set_gesture_mode(first, ButtonId::Back, true);
-    config.set_gesture_mode(second, ButtonId::Back, true);
-    config.set_gesture_response_time(first, ButtonId::Back, GestureResponseTime::FAST);
-    config.set_gesture_response_time(second, ButtonId::Back, GestureResponseTime::DELIBERATE);
+    config.set_gesture_mode(first, ButtonId::MiddleClick, true);
+    config.set_gesture_mode(second, ButtonId::MiddleClick, true);
+    config.set_gesture_response(first, ButtonId::MiddleClick, GestureResponse::FAST);
+    config.set_gesture_response(second, ButtonId::MiddleClick, GestureResponse::DELIBERATE);
     let orch = orchestrator(config);
 
     assert_eq!(
         orch.hook_maps_for(Some(first), None)
-            .gesture_response_times
-            .get(&ButtonId::Back),
-        Some(&GestureResponseTime::FAST)
+            .gesture_responses
+            .get(&ButtonId::MiddleClick),
+        Some(&GestureResponse::FAST)
     );
     assert_eq!(
         orch.hook_maps_for(Some(second), None)
-            .gesture_response_times
-            .get(&ButtonId::Back),
-        Some(&GestureResponseTime::DELIBERATE)
+            .gesture_responses
+            .get(&ButtonId::MiddleClick),
+        Some(&GestureResponse::DELIBERATE)
     );
 }
 

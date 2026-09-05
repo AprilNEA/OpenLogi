@@ -271,10 +271,10 @@ impl Orchestrator {
     }
 
     /// Build the OS-hook callback's maps for the selected device `key` and
-    /// foreground `app`. Bindings, gestures, and response times deliberately
+    /// foreground `app`. Bindings, gestures, and responses deliberately
     /// share that selection: a native event identifies its HID sender, but a
     /// receiver sender does not identify one pairing slot. HID++ capture plans
-    /// are the physical-device path and retain their own response times.
+    /// are the physical-device path and retain their own responses.
     ///
     /// All hook maps are published under one lock so `rebuild` and
     /// `set_current_app` cannot expose a half-populated profile.
@@ -296,16 +296,16 @@ impl Orchestrator {
                 gestures.remove(button);
             }
         }
-        let gesture_response_times = key.map_or_else(BTreeMap::new, |key| {
+        let gesture_responses = key.map_or_else(BTreeMap::new, |key| {
             gestures
                 .keys()
-                .map(|&button| (button, self.config.gesture_response_time(key, button)))
+                .map(|&button| (button, self.config.gesture_response(key, button)))
                 .collect()
         });
         HookMaps {
             bindings,
             gestures,
-            gesture_response_times,
+            gesture_responses,
             selected_device: key.map(str::to_owned),
             ..HookMaps::default()
         }
