@@ -1,7 +1,7 @@
 //! Live control capture for one device: divert the device's gesture sources
 //! (the MX dedicated gesture button and/or the MX Master 4 haptic panel), the
 //! DPI/ModeShift button, and the thumb wheel over HID++ and turn their events
-//! into [`CapturedInput`] the GUI can dispatch.
+//! into [`CapturedInput`] the agent can dispatch.
 //!
 //! [`run_capture_session`] holds a single HID++ channel open for one device,
 //! enables diversion on whichever of those controls it exposes, registers one
@@ -10,15 +10,16 @@
 //! its input-report stream, so all captured controls share this session.
 //!
 //! The session is transport-only — it has no opinion on what an input *does*.
-//! The GUI maps each [`CapturedInput`] to the user's bound action and dispatches
+//! The agent maps each [`CapturedInput`] to the user's bound action and dispatches
 //! it, mirroring how the CGEventTap hook handles the side buttons. The thumb
-//! wheel is special: diverting it stops native horizontal scroll, so the GUI
+//! wheel is special: diverting it stops native horizontal scroll, so the agent
 //! re-synthesises scroll from the [`CapturedInput::Scroll`] deltas — the wheel
 //! is therefore only diverted when the user's thumbwheel config leaves its
 //! defaults (click bound, rotation rebound, or sensitivity changed).
 
 mod liveness;
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use hidpp::{
@@ -31,7 +32,7 @@ use hidpp::{
     },
     protocol::v20,
 };
-use openlogi_core::binding::{ButtonId, GestureDirection, SwipeAccumulator};
+use openlogi_core::binding::{ButtonId, GestureDirection, GestureResponse, SwipeAccumulator};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
@@ -122,8 +123,14 @@ enum HoldState {
 }
 
 /// Begin a hold for `cid`, its swipe accumulator started fresh.
-fn begin_hold(cid: u16, button: ButtonId, overlap: bool, skip_first_raw_xy: bool) -> HoldState {
-    let mut swipe = SwipeAccumulator::default();
+fn begin_hold(
+    cid: u16,
+    button: ButtonId,
+    response: GestureResponse,
+    overlap: bool,
+    skip_first_raw_xy: bool,
+) -> HoldState {
+    let mut swipe = SwipeAccumulator::new(response);
     swipe.begin();
     HoldState::Holding {
         cid,
@@ -136,10 +143,12 @@ fn begin_hold(cid: u16, button: ButtonId, overlap: bool, skip_first_raw_xy: bool
 
 /// Movement + button state accumulated across messages. Lives behind a `Mutex`
 /// because the channel's read thread invokes the listener by shared reference.
-#[derive(Default)]
 struct CaptureAccum {
     /// The hold owning raw-XY motion, if any (see [`HoldState`]).
     hold: HoldState,
+    /// Per-control response snapshot for this capture epoch. The held source's
+    /// value is copied into the hold's accumulator when its lifecycle begins.
+    gesture_responses: BTreeMap<ButtonId, GestureResponse>,
     /// The armed gesture sources held in the last event, for edge detection:
     /// a source not previously held that becomes the holder is a fresh touch
     /// (the haptic panel's first sample is then a contact jump to discard).
@@ -151,13 +160,44 @@ struct CaptureAccum {
     buttons_down: Vec<u16>,
 }
 
-#[cfg(test)]
+impl Default for CaptureAccum {
+    fn default() -> Self {
+        Self::new(BTreeMap::new())
+    }
+}
+
 impl CaptureAccum {
-    /// Test-only seam mirroring [`SwipeAccumulator::backdate_hold_for_test`]
-    /// for the current hold. A no-op while idle.
+    fn new(gesture_responses: BTreeMap<ButtonId, GestureResponse>) -> Self {
+        Self {
+            hold: HoldState::default(),
+            gesture_responses,
+            gestures_down: Vec::new(),
+            dpi_down: false,
+            buttons_down: Vec::new(),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_response(response: GestureResponse) -> Self {
+        Self::new(
+            GESTURE_SOURCE_BUTTONS
+                .into_iter()
+                .map(|(_, button)| (button, response))
+                .collect(),
+        )
+    }
+
+    #[cfg(test)]
     fn backdate_hold_for_test(&mut self) {
         if let HoldState::Holding { swipe, .. } = &mut self.hold {
             swipe.backdate_hold_for_test();
+        }
+    }
+
+    #[cfg(test)]
+    fn backdate_hold_by_for_test(&mut self, elapsed: std::time::Duration) {
+        if let HoldState::Holding { swipe, .. } = &mut self.hold {
+            swipe.backdate_hold_by_for_test(elapsed);
         }
     }
 }
@@ -208,6 +248,8 @@ pub struct CaptureSpec {
     /// Standard-button CIDs requested as raw-XY gesture sources. A control is
     /// armed only when its HID++ capability flags advertise raw-XY support.
     pub divert_gesture_buttons: Vec<(u16, ButtonId)>,
+    /// Click-versus-swipe response keyed by gesture-source control.
+    pub gesture_responses: BTreeMap<ButtonId, GestureResponse>,
     /// Buttons to divert as plain presses (no raw-XY): the
     /// [`DIVERTABLE_STANDARD_BUTTONS`] and non-gesturing
     /// [`GESTURE_SOURCE_BUTTONS`] whose binding leaves the default.
@@ -310,7 +352,7 @@ async fn run_capture_session_on(
         *slot = Some(shared.clone());
     }
 
-    let accum = Arc::new(Mutex::new(CaptureAccum::default()));
+    let accum = Arc::new(Mutex::new(CaptureAccum::new(spec.gesture_responses)));
     let reprog_index = armed.reprog.as_ref().map(ReprogControlsV4::feature_index);
     let gesture_cids = armed.gesture_cids.clone();
     let gesture_button_set = armed.gesture_button_cids.clone();
@@ -904,8 +946,8 @@ pub(crate) async fn enumerate_controls(
 }
 
 /// Update `acc` and emit on a decoded `0x1b04` event: preserve physical button
-/// edges, and commit a gesture swipe the instant it crosses the threshold
-/// (mid-swipe, like Options+) rather than on release.
+/// edges, commit a qualifying swipe mid-motion after its time gate, or classify
+/// accumulated qualifying travel when the control is released.
 fn handle_reprog_with_gesture_buttons(
     acc: &mut CaptureAccum,
     event: RawControlEvent,
@@ -955,10 +997,10 @@ fn handle_reprog_with_gesture_buttons(
                     if let HoldState::Holding {
                         button, mut swipe, ..
                     } = previous
-                        && swipe.end()
+                        && let Some(direction) = swipe.finish()
                     {
-                        debug!(%button, "gesture click");
-                        let _ = sink.send(CapturedInput::Gesture(button, GestureDirection::Click));
+                        debug!(%button, ?direction, "gesture completed");
+                        let _ = sink.send(CapturedInput::Gesture(button, direction));
                     }
                     // ...and the first still-held source begins (or takes
                     // over) the hold. A source not down in the previous event
@@ -969,6 +1011,10 @@ fn handle_reprog_with_gesture_buttons(
                         Some(&(cid, button)) => begin_hold(
                             cid,
                             button,
+                            acc.gesture_responses
+                                .get(&button)
+                                .copied()
+                                .unwrap_or_default(),
                             held.len() > 1,
                             cid == reprog_controls::HAPTIC_PANEL_CID
                                 && !acc.gestures_down.contains(&cid),
