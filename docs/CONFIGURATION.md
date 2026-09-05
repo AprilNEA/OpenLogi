@@ -63,15 +63,16 @@ Common device fields are:
 
 - `custom_name`, `enabled`, `dpi`, `dpi_presets`, thumb-wheel sensitivity,
   scroll inversion, and scroll resolution
-- `gesture_response_times`: per-control click-versus-swipe gates from `80`
-  through `300` milliseconds. The GUI offers Fast (`110`), Balanced/default
-  (`160`), and Deliberate (`200`) independently for each gesture-mode control;
-  advanced users may enter another value in this range. A held gesture whose
-  travel qualifies before release dispatches its swipe direction once the gate
-  has elapsed, even if its last motion sample arrived earlier; otherwise release
-  dispatches that control's independent `Click` binding. Dedicated HID++
-  gesture controls use the physical device's timing. Middle/Back/Forward
-  gestures captured by the OS hook use the currently selected device profile,
+- `gesture_responses`: per-control click-versus-swipe settings. The GUI offers
+  Fast (`110` ms, `30` raw-XY travel), Balanced/default (`160`, `40`), and
+  Deliberate (`200`, `50`) independently for each gesture-mode control.
+  Advanced users may set `hold_ms` from `80` through `300` and
+  `travel_threshold` from `20` through `80`. A held gesture whose travel
+  qualifies before release dispatches its swipe direction once the gate has
+  elapsed, even if its last motion sample arrived earlier; otherwise release
+  dispatches that control's independent `Click` binding. Dedicated gesture
+  controls and macOS Back/Forward gestures use physical-device HID++ capture.
+  Gestures captured by the OS hook use the currently selected device profile,
   matching their binding map; a shared receiver does not expose the originating
   pairing slot to the native event hook.
 - `bindings`: a button maps to one action, an independent short/long action

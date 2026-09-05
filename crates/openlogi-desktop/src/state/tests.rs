@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use openlogi_camera::Camera;
 use openlogi_core::binding::{
-    Action, ActionRingIcon, ActionRingSlot, Binding, ButtonId, GestureResponseTime, RingAction,
+    Action, ActionRingIcon, ActionRingSlot, Binding, ButtonId, GestureResponse, RingAction,
 };
 use openlogi_core::config::{
     Config, DeviceIdentity, LightSettings, Lighting, ScrollResolution, ThumbwheelSensitivity,
@@ -703,32 +703,32 @@ fn a_gesture_button_stays_one_when_the_scope_returns_to_the_default_profile() {
 }
 
 #[test]
-fn gesture_response_time_is_saved_per_control_on_the_selected_device() {
+fn gesture_response_is_saved_per_control_on_the_selected_device() {
     let mut state = state_with_a_known_mouse();
     assert_eq!(
-        state.gesture_response_time(ButtonId::HapticPanel),
-        GestureResponseTime::BALANCED
+        state.gesture_response(ButtonId::HapticPanel),
+        GestureResponse::BALANCED
     );
     assert_eq!(
-        state.gesture_response_time(ButtonId::GestureButton),
-        GestureResponseTime::BALANCED
+        state.gesture_response(ButtonId::GestureButton),
+        GestureResponse::BALANCED
     );
 
-    state.commit_gesture_response_time(ButtonId::HapticPanel, GestureResponseTime::FAST);
+    state.commit_gesture_response(ButtonId::HapticPanel, GestureResponse::FAST);
 
     assert_eq!(
-        state.gesture_response_time(ButtonId::HapticPanel),
-        GestureResponseTime::FAST
+        state.gesture_response(ButtonId::HapticPanel),
+        GestureResponse::FAST
     );
     assert_eq!(
-        state.gesture_response_time(ButtonId::GestureButton),
-        GestureResponseTime::BALANCED
+        state.gesture_response(ButtonId::GestureButton),
+        GestureResponse::BALANCED
     );
     assert_eq!(
         state
             .config
-            .gesture_response_time(KNOWN_MOUSE_KEY, ButtonId::HapticPanel),
-        GestureResponseTime::FAST
+            .gesture_response(KNOWN_MOUSE_KEY, ButtonId::HapticPanel),
+        GestureResponse::FAST
     );
 }
 

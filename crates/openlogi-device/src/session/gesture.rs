@@ -32,7 +32,7 @@ use hidpp::{
     },
     protocol::v20,
 };
-use openlogi_core::binding::{ButtonId, GestureDirection, GestureResponseTime, SwipeAccumulator};
+use openlogi_core::binding::{ButtonId, GestureDirection, GestureResponse, SwipeAccumulator};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
@@ -126,11 +126,11 @@ enum HoldState {
 fn begin_hold(
     cid: u16,
     button: ButtonId,
-    response_time: GestureResponseTime,
+    response: GestureResponse,
     overlap: bool,
     skip_first_raw_xy: bool,
 ) -> HoldState {
-    let mut swipe = SwipeAccumulator::new(response_time);
+    let mut swipe = SwipeAccumulator::new(response);
     swipe.begin();
     HoldState::Holding {
         cid,
@@ -146,9 +146,9 @@ fn begin_hold(
 struct CaptureAccum {
     /// The hold owning raw-XY motion, if any (see [`HoldState`]).
     hold: HoldState,
-    /// Per-control timing snapshot for this capture epoch. The held source's
+    /// Per-control response snapshot for this capture epoch. The held source's
     /// value is copied into the hold's accumulator when its lifecycle begins.
-    gesture_response_times: BTreeMap<ButtonId, GestureResponseTime>,
+    gesture_responses: BTreeMap<ButtonId, GestureResponse>,
     /// The armed gesture sources held in the last event, for edge detection:
     /// a source not previously held that becomes the holder is a fresh touch
     /// (the haptic panel's first sample is then a contact jump to discard).
@@ -167,10 +167,10 @@ impl Default for CaptureAccum {
 }
 
 impl CaptureAccum {
-    fn new(gesture_response_times: BTreeMap<ButtonId, GestureResponseTime>) -> Self {
+    fn new(gesture_responses: BTreeMap<ButtonId, GestureResponse>) -> Self {
         Self {
             hold: HoldState::default(),
-            gesture_response_times,
+            gesture_responses,
             gestures_down: Vec::new(),
             dpi_down: false,
             buttons_down: Vec::new(),
@@ -178,11 +178,11 @@ impl CaptureAccum {
     }
 
     #[cfg(test)]
-    fn with_response_time(responsiveness: GestureResponseTime) -> Self {
+    fn with_response(response: GestureResponse) -> Self {
         Self::new(
             GESTURE_SOURCE_BUTTONS
                 .into_iter()
-                .map(|(_, button)| (button, responsiveness))
+                .map(|(_, button)| (button, response))
                 .collect(),
         )
     }
@@ -248,8 +248,8 @@ pub struct CaptureSpec {
     /// Standard-button CIDs requested as raw-XY gesture sources. A control is
     /// armed only when its HID++ capability flags advertise raw-XY support.
     pub divert_gesture_buttons: Vec<(u16, ButtonId)>,
-    /// Click-versus-swipe timing keyed by gesture-source control.
-    pub gesture_response_times: BTreeMap<ButtonId, GestureResponseTime>,
+    /// Click-versus-swipe response keyed by gesture-source control.
+    pub gesture_responses: BTreeMap<ButtonId, GestureResponse>,
     /// Buttons to divert as plain presses (no raw-XY): the
     /// [`DIVERTABLE_STANDARD_BUTTONS`] and non-gesturing
     /// [`GESTURE_SOURCE_BUTTONS`] whose binding leaves the default.
@@ -352,7 +352,7 @@ async fn run_capture_session_on(
         *slot = Some(shared.clone());
     }
 
-    let accum = Arc::new(Mutex::new(CaptureAccum::new(spec.gesture_response_times)));
+    let accum = Arc::new(Mutex::new(CaptureAccum::new(spec.gesture_responses)));
     let reprog_index = armed.reprog.as_ref().map(ReprogControlsV4::feature_index);
     let gesture_cids = armed.gesture_cids.clone();
     let gesture_button_set = armed.gesture_button_cids.clone();
@@ -948,10 +948,6 @@ pub(crate) async fn enumerate_controls(
 /// Update `acc` and emit on a decoded `0x1b04` event: preserve physical button
 /// edges, commit a qualifying swipe mid-motion after its time gate, or classify
 /// accumulated qualifying travel when the control is released.
-#[expect(
-    clippy::too_many_lines,
-    reason = "the two raw event variants update one gesture state machine and splitting them would obscure their shared lifecycle"
-)]
 fn handle_reprog_with_gesture_buttons(
     acc: &mut CaptureAccum,
     event: RawControlEvent,
@@ -1015,7 +1011,7 @@ fn handle_reprog_with_gesture_buttons(
                         Some(&(cid, button)) => begin_hold(
                             cid,
                             button,
-                            acc.gesture_response_times
+                            acc.gesture_responses
                                 .get(&button)
                                 .copied()
                                 .unwrap_or_default(),

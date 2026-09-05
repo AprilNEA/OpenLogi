@@ -11,7 +11,7 @@ use super::settings::{
     ThumbwheelSensitivity, deserialize_gesture_owner,
 };
 use crate::binding::{
-    Action, ActionRingConfig, Binding, ButtonId, GestureDirection, GestureResponseTime,
+    Action, ActionRingConfig, Binding, ButtonId, GestureDirection, GestureResponse,
 };
 use crate::device::{Capabilities, DeviceKind, DeviceModelInfo, LightCapabilities};
 use crate::hid::Dpi;
@@ -272,11 +272,11 @@ pub struct DeviceConfig {
     /// [`Self::dpi`]. `None` means "never set — leave the keyboard alone".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fn_lock: Option<bool>,
-    /// Per-control click-versus-swipe timing, so the dedicated Gesture Button
-    /// and Haptic Panel can use different presets. An absent control uses
-    /// [`GestureResponseTime::default`]. Added in schema v7.
+    /// Per-control click-versus-swipe timing and travel, so the dedicated
+    /// Gesture Button and Haptic Panel can use different presets. An absent control uses
+    /// [`GestureResponse::default`]. Added in schema v7.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub gesture_response_times: BTreeMap<ButtonId, GestureResponseTime>,
+    pub gesture_responses: BTreeMap<ButtonId, GestureResponse>,
 }
 
 impl DeviceConfig {
@@ -377,7 +377,7 @@ impl Default for DeviceConfig {
             scroll_resolution: None,
             host_switch_targets: Vec::new(),
             fn_lock: None,
-            gesture_response_times: BTreeMap::new(),
+            gesture_responses: BTreeMap::new(),
         }
     }
 }
@@ -463,7 +463,7 @@ struct RawDeviceConfig {
     #[serde(default)]
     disabled_gestures: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
     #[serde(default)]
-    gesture_response_times: BTreeMap<ButtonId, GestureResponseTime>,
+    gesture_responses: BTreeMap<ButtonId, GestureResponse>,
     /// Legacy v1 per-button single bindings.
     #[serde(default)]
     button_bindings: BTreeMap<ButtonId, Action>,
@@ -560,7 +560,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             scroll_resolution: raw.scroll_resolution,
             host_switch_targets: raw.host_switch_targets,
             fn_lock: raw.fn_lock,
-            gesture_response_times: raw.gesture_response_times,
+            gesture_responses: raw.gesture_responses,
         }
     }
 }
@@ -568,7 +568,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
 #[cfg(test)]
 mod tests {
     use super::DeviceConfig;
-    use crate::binding::{ButtonId, GestureResponseTime};
+    use crate::binding::{ButtonId, GestureResponse};
 
     #[test]
     fn host_switch_targets_round_trip_as_physical_keys() -> Result<(), Box<dyn std::error::Error>> {
@@ -589,61 +589,72 @@ mod tests {
     }
 
     #[test]
-    fn gesture_response_time_supports_per_control_values_and_implicit_defaults()
+    fn gesture_response_supports_per_control_values_and_implicit_defaults()
     -> Result<(), Box<dyn std::error::Error>> {
         let default = DeviceConfig::default();
-        assert!(default.gesture_response_times.is_empty());
-        assert!(!toml::to_string(&default)?.contains("gesture_response_time"));
+        assert!(default.gesture_responses.is_empty());
+        assert!(!toml::to_string(&default)?.contains("gesture_response"));
 
-        let fast: DeviceConfig =
-            toml::from_str("[gesture_response_times]\nHapticPanel = 110\nGestureButton = 200\n")?;
+        let fast: DeviceConfig = toml::from_str(
+            "[gesture_responses]\n\
+             HapticPanel = { hold_ms = 110, travel_threshold = 30 }\n\
+             GestureButton = { hold_ms = 200, travel_threshold = 50 }\n",
+        )?;
         assert_eq!(
-            fast.gesture_response_times.get(&ButtonId::HapticPanel),
-            Some(&GestureResponseTime::FAST)
+            fast.gesture_responses.get(&ButtonId::HapticPanel),
+            Some(&GestureResponse::FAST)
         );
         assert_eq!(
-            fast.gesture_response_times.get(&ButtonId::GestureButton),
-            Some(&GestureResponseTime::DELIBERATE)
+            fast.gesture_responses.get(&ButtonId::GestureButton),
+            Some(&GestureResponse::DELIBERATE)
         );
         let serialized = toml::to_string(&fast)?;
-        assert!(serialized.contains("HapticPanel = 110"));
-        assert!(serialized.contains("GestureButton = 200"));
+        assert!(serialized.contains("hold_ms = 110"));
+        assert!(serialized.contains("travel_threshold = 30"));
 
         let custom: DeviceConfig = toml::from_str(
-            "[gesture_response_times]\nHapticPanel = 80\nGestureButton = 137\nBack = 300\n",
+            "[gesture_responses]\n\
+             HapticPanel = { hold_ms = 80, travel_threshold = 20 }\n\
+             GestureButton = { hold_ms = 137, travel_threshold = 47 }\n\
+             Back = { hold_ms = 300, travel_threshold = 80 }\n",
         )?;
         assert_eq!(
             custom
-                .gesture_response_times
+                .gesture_responses
                 .get(&ButtonId::HapticPanel)
                 .copied()
-                .map(u16::from),
-            Some(80),
-            "the inclusive minimum must be accepted"
+                .map(GestureResponse::hold_duration),
+            Some(std::time::Duration::from_millis(80)),
+            "the inclusive hold-time minimum must be accepted"
         );
         assert_eq!(
             custom
-                .gesture_response_times
+                .gesture_responses
                 .get(&ButtonId::GestureButton)
                 .copied()
-                .map(u16::from),
-            Some(137),
-            "a non-preset custom value must be accepted"
+                .map(GestureResponse::travel_threshold),
+            Some(47),
+            "a non-preset custom threshold must be accepted"
         );
         assert_eq!(
             custom
-                .gesture_response_times
+                .gesture_responses
                 .get(&ButtonId::Back)
                 .copied()
-                .map(u16::from),
-            Some(300),
-            "the inclusive maximum must be accepted"
+                .map(GestureResponse::travel_threshold),
+            Some(80),
+            "the inclusive travel maximum must be accepted"
         );
 
-        toml::from_str::<DeviceConfig>("[gesture_response_times]\nHapticPanel = 79\n")
-            .expect_err("response times below the supported range must be rejected");
-        toml::from_str::<DeviceConfig>("[gesture_response_times]\nHapticPanel = 301\n")
-            .expect_err("response times above the supported range must be rejected");
+        for invalid in [
+            "[gesture_responses]\nHapticPanel = { hold_ms = 79, travel_threshold = 30 }\n",
+            "[gesture_responses]\nHapticPanel = { hold_ms = 301, travel_threshold = 30 }\n",
+            "[gesture_responses]\nHapticPanel = { hold_ms = 160, travel_threshold = 19 }\n",
+            "[gesture_responses]\nHapticPanel = { hold_ms = 160, travel_threshold = 81 }\n",
+        ] {
+            toml::from_str::<DeviceConfig>(invalid)
+                .expect_err("out-of-range gesture responses must be rejected");
+        }
         Ok(())
     }
 }

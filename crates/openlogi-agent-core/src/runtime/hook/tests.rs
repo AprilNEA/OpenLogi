@@ -35,7 +35,7 @@ fn attributed_sources_still_follow_the_device_policy() {
 fn accumulate_tags_a_committed_swipe_with_the_held_press() {
     let mut hold = HoldState::default();
     let press = token(1, ButtonId::Back);
-    hold.begin(ButtonId::Back, press.clone(), GestureResponseTime::BALANCED);
+    hold.begin(ButtonId::Back, press.clone(), GestureResponse::BALANCED);
     hold.swipe.backdate_hold_for_test();
 
     assert_eq!(
@@ -58,7 +58,7 @@ fn a_same_button_repress_restarts_the_stale_hold() {
         hold.prepare_begin(ButtonId::Back),
         HoldAdmission::Begin
     ));
-    hold.begin(ButtonId::Back, old, GestureResponseTime::BALANCED);
+    hold.begin(ButtonId::Back, old, GestureResponse::BALANCED);
 
     let replacement = token(2, ButtonId::Back);
     assert!(
@@ -68,7 +68,7 @@ fn a_same_button_repress_restarts_the_stale_hold() {
     hold.begin(
         ButtonId::Back,
         replacement.clone(),
-        GestureResponseTime::BALANCED,
+        GestureResponse::BALANCED,
     );
     hold.swipe.backdate_hold_for_test();
     assert_eq!(
@@ -83,7 +83,7 @@ fn an_aged_hold_yields_to_a_new_buttons_press() {
     hold.begin(
         ButtonId::Back,
         token(1, ButtonId::Back),
-        GestureResponseTime::BALANCED,
+        GestureResponse::BALANCED,
     );
     hold.backdate_for_test();
 
@@ -95,7 +95,7 @@ fn an_aged_hold_yields_to_a_new_buttons_press() {
     hold.begin(
         ButtonId::Forward,
         replacement.clone(),
-        GestureResponseTime::BALANCED,
+        GestureResponse::BALANCED,
     );
     hold.swipe.backdate_hold_for_test();
     assert_eq!(
@@ -108,7 +108,7 @@ fn an_aged_hold_yields_to_a_new_buttons_press() {
 fn begin_is_first_wins_while_a_hold_is_active() {
     let mut hold = HoldState::default();
     let first = token(1, ButtonId::Back);
-    hold.begin(ButtonId::Back, first.clone(), GestureResponseTime::BALANCED);
+    hold.begin(ButtonId::Back, first.clone(), GestureResponse::BALANCED);
     hold.swipe.backdate_hold_for_test();
     assert!(
         matches!(hold.prepare_begin(ButtonId::Forward), HoldAdmission::Refuse),
@@ -127,7 +127,7 @@ fn begin_is_first_wins_while_a_hold_is_active() {
 fn end_matches_the_held_button_and_returns_its_token() {
     let mut hold = HoldState::default();
     let press = token(1, ButtonId::Back);
-    hold.begin(ButtonId::Back, press.clone(), GestureResponseTime::BALANCED);
+    hold.begin(ButtonId::Back, press.clone(), GestureResponse::BALANCED);
     assert_eq!(hold.end(ButtonId::Forward), None);
     assert_eq!(
         hold.end(ButtonId::Back),
@@ -139,10 +139,13 @@ fn end_matches_the_held_button_and_returns_its_token() {
 fn fast_preset_classifies_completed_travel_on_release() {
     let mut hold = HoldState::default();
     let press = token(1, ButtonId::Back);
-    hold.begin(ButtonId::Back, press.clone(), GestureResponseTime::FAST);
-    assert_eq!(hold.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0), None);
+    hold.begin(ButtonId::Back, press.clone(), GestureResponse::FAST);
+    assert_eq!(
+        hold.accumulate(GestureResponse::FAST.travel_threshold(), 0),
+        None
+    );
     hold.swipe
-        .backdate_hold_by_for_test(GestureResponseTime::FAST.hold_duration());
+        .backdate_hold_by_for_test(GestureResponse::FAST.hold_duration());
 
     assert_eq!(
         hold.end(ButtonId::Back),
