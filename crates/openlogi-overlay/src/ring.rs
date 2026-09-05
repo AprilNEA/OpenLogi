@@ -17,6 +17,7 @@ use gpui::{
     WindowBackgroundAppearance, WindowKind, WindowOptions, div, prelude::FluentBuilder as _, px,
     svg,
 };
+use openlogi_core::action_ring::geometry::{CANCEL_DIAMETER, RADIUS, SLOT_DIAMETER};
 use openlogi_core::binding::{Action, ActionRingSlot};
 use openlogi_ipc::ActionRingInvocation;
 use openlogi_ui::action_icons::RING_CANCEL_ICON;
@@ -28,15 +29,11 @@ use tokio::sync::mpsc;
 use crate::agent::OverlayCommand;
 use crate::session::{ClickAwaySession, ShowingRing};
 
-/// Ring geometry. The radius is the mouse travel to any slot, so it is kept
-/// as tight as the slots allow: eight 48 pt slots on an 84 pt radius leave a
-/// 16 pt gap between neighbours, which is enough for the desktop to read
-/// through and for a slot's hover edge to be unambiguous. The window is the
-/// ring plus room for the hover label under it and the slot shadows.
+/// The window is the ring (`openlogi_core::action_ring::geometry`) plus room
+/// for the hover label under it and the slot shadows.
 pub(crate) const WINDOW_SIZE: f32 = 300.0;
-pub(crate) const SLOT_SIZE: f32 = 48.0;
-pub(crate) const RADIUS: f32 = 84.0;
-const CANCEL_SIZE: f32 = 36.0;
+pub(crate) const SLOT_SIZE: f32 = SLOT_DIAMETER;
+const CANCEL_SIZE: f32 = CANCEL_DIAMETER;
 const SLOT_GLYPH: f32 = 20.0;
 const CANCEL_GLYPH_SIZE: f32 = 16.0;
 
