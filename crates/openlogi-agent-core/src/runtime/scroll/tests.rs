@@ -579,15 +579,17 @@ fn a_tick_merged_past_the_pulse_cap_keeps_its_own_duration() {
 }
 
 #[test]
-fn a_live_duration_change_applies_to_a_tick_merged_within_the_frame() {
+fn a_live_duration_change_gives_the_next_tick_its_own_pulse() {
     let base = Instant::now();
     let mut engine = ScrollEngine::default();
     let mut frames = Vec::new();
     engine.impulse(source(), wheel(0.0, 1.0), base, neutral(), &mut |frame| {
         frames.push(frame);
     });
-    // Reloaded to a 500 ms glide 4 ms later: the tick merges into the
-    // frame's pulse yet animates for the new duration from its own arrival.
+    // Reloaded to a 500 ms glide 4 ms later: inside the frame window, yet the
+    // tick must not merge into (and re-time) motion accepted under the old
+    // duration. It animates on its own for the new duration; the first
+    // pulse still ends at its original 100 ms.
     engine.impulse(
         source(),
         wheel(0.0, 1.0),
@@ -596,8 +598,14 @@ fn a_live_duration_change_applies_to_a_tick_merged_within_the_frame() {
         &mut |frame| frames.push(frame),
     );
     let motion = engine.active.get(&source()).expect("source is live");
-    assert_eq!(motion.pulses.len(), 1);
-    assert_eq!(motion.ends_at(), Some(base + Duration::from_millis(504)));
+    assert_eq!(motion.pulses.len(), 2);
+    assert_eq!(
+        motion.pulses.iter().map(Pulse::ends_at).collect::<Vec<_>>(),
+        [
+            base + Duration::from_millis(100),
+            base + Duration::from_millis(504)
+        ]
+    );
 
     engine.advance_due(base + Duration::from_millis(600), &mut |frame| {
         frames.push(frame);

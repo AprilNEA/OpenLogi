@@ -293,22 +293,25 @@ impl ActiveMotion {
 
     /// Superpose one tick's pulse and evaluate the position at its timestamp.
     ///
-    /// Ticks landing within one frame of the newest pulse's first tick, or
-    /// arriving once the source already holds [`MAX_PULSES`], merge into that
-    /// pulse — but never by inheriting its clock. The merge settles whatever
-    /// the pulse has delivered so far and restarts its remainder together
-    /// with the new tick from `at`, with the tick's own duration: position is
-    /// continuous, net distance is conserved, and the tick neither starts
-    /// partially progressed nor ends at an older pulse's deadline. Live
-    /// duration changes therefore take effect on the very next tick.
+    /// Ticks landing within one frame of the newest pulse's first tick merge
+    /// into that pulse when both run the same duration — but never by
+    /// inheriting its clock. The merge settles whatever the pulse has
+    /// delivered so far and restarts its remainder together with the new tick
+    /// from `at`: position is continuous, net distance is conserved, and the
+    /// tick neither starts partially progressed nor ends at an older pulse's
+    /// deadline. A tick accepted under a freshly reloaded duration gets its
+    /// own pulse instead, so a reload never re-times motion accepted under
+    /// the previous configuration. Only the [`MAX_PULSES`] bound merges
+    /// unconditionally; that is the one place the model approximates, and it
+    /// still conserves distance and continuity.
     fn add_tick(&mut self, impulse: WheelDelta, at: Instant, tuning: MotionTuning) -> MotionUpdate {
         let gain = self.windowed_gain(impulse, at, tuning.max_gain);
         let amplitude = impulse.scale(tuning.step).scale_axes(gain);
         let merge = self.pulses.len() >= MAX_PULSES
-            || self
-                .pulses
-                .last()
-                .is_some_and(|pulse| at.saturating_duration_since(pulse.anchor) < FRAME_INTERVAL);
+            || self.pulses.last().is_some_and(|pulse| {
+                pulse.duration == tuning.duration
+                    && at.saturating_duration_since(pulse.anchor) < FRAME_INTERVAL
+            });
         if merge && let Some(last) = self.pulses.last_mut() {
             let delivered = last.position_at(at);
             self.settled = self.settled.plus(delivered);
