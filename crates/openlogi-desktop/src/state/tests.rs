@@ -1346,25 +1346,27 @@ fn light_write_failure_reaches_the_gui_state() {
         .clone();
     let requested = LightSettings::new(false, 50, None);
     state.commit_light(requested);
-    let Ok(crate::services::ipc::Command::SetLight(
-        _,
-        openlogi_core::hid::LightCommand::Power(false),
-        _,
-        request_id,
-    )) = receiver.try_recv()
-    else {
-        panic!("expected the power command");
-    };
+    // Switching off writes the values first and closes with power, so that the
+    // device is never handed a value after being told to go dark.
     let Ok(crate::services::ipc::Command::SetLight(
         _,
         openlogi_core::hid::LightCommand::BrightnessPercent(50),
         _,
-        brightness_request_id,
+        request_id,
     )) = receiver.try_recv()
     else {
         panic!("expected the brightness command");
     };
-    assert_eq!(brightness_request_id, request_id);
+    let Ok(crate::services::ipc::Command::SetLight(
+        _,
+        openlogi_core::hid::LightCommand::Power(false),
+        _,
+        power_request_id,
+    )) = receiver.try_recv()
+    else {
+        panic!("expected the power command");
+    };
+    assert_eq!(power_request_id, request_id);
     assert_eq!(state.light(), requested);
     assert_eq!(state.config.light(&key), None);
     assert!(matches!(
@@ -1414,15 +1416,17 @@ fn superseded_light_write_keeps_prior_successes_for_reconciliation() {
         .config_key
         .clone();
 
+    // Switching off leads with the values and closes with power; switching on
+    // below is the mirror image.
     state.commit_light(LightSettings::new(false, 40, None));
-    let (first_power, first_request_id) = next_light_command(&mut receiver);
-    let (first_brightness, first_brightness_request_id) = next_light_command(&mut receiver);
-    assert_eq!(first_power, openlogi_core::hid::LightCommand::Power(false));
+    let (first_brightness, first_request_id) = next_light_command(&mut receiver);
+    let (first_power, first_power_request_id) = next_light_command(&mut receiver);
     assert_eq!(
         first_brightness,
         openlogi_core::hid::LightCommand::BrightnessPercent(40)
     );
-    assert_eq!(first_brightness_request_id, first_request_id);
+    assert_eq!(first_power, openlogi_core::hid::LightCommand::Power(false));
+    assert_eq!(first_power_request_id, first_request_id);
 
     state.commit_light(LightSettings::new(true, 60, None));
     let (second_power, second_request_id) = next_light_command(&mut receiver);
