@@ -688,6 +688,12 @@ fn short_msg(marker: u8) -> HidppMessage {
     HidppMessage::Short([0xff, marker, 0x10, marker, marker, marker])
 }
 
+/// A request with [`short_msg`]'s header for `marker` but its own payload —
+/// a different question that the wire answers under the same header.
+fn same_header_msg(marker: u8, payload: u8) -> HidppMessage {
+    HidppMessage::Short([0xff, marker, 0x10, payload, payload, payload])
+}
+
 /// A lease that reports its release to `free`, standing in for the transport's
 /// table entry and OS lock.
 struct RecordingLease {
@@ -734,6 +740,10 @@ fn pending_len(channel: &HidppChannel) -> usize {
     channel.pending_messages.lock().unwrap().messages.len()
 }
 
+fn stale_len(channel: &HidppChannel) -> usize {
+    channel.pending_messages.lock().unwrap().stale.len()
+}
+
 /// A request with the same header as one still in flight waits for it. Two
 /// such requests get replies nothing on the wire tells apart, and a wireless
 /// receiver can answer them out of order: on a Bolt-connected MX Master 4,
@@ -749,14 +759,17 @@ fn a_request_waits_while_the_same_header_is_in_flight() {
         handle.park_writes();
         let channel = channel_with_reader(raw).await;
 
-        let mut first = Box::pin(channel.send(short_msg(0x10), |_| true));
+        let first_reply = short_msg(0x11);
+        let mut first =
+            Box::pin(channel.send(short_msg(0x10), move |candidate| *candidate == first_reply));
         assert!(futures::poll!(first.as_mut()).is_pending());
         assert_eq!(handle.written_reports().len(), 1);
         assert_eq!(pending_len(&channel), 1);
 
-        // Same device/feature/function bytes as `first`: must not reach the
-        // wire, and must not be registered, while `first` is pending.
-        let mut same_header = Box::pin(channel.send(short_msg(0x10), |_| true));
+        // Same device/feature/function bytes as `first`, different payload:
+        // must not reach the wire, and must not be registered, while `first`
+        // is pending.
+        let mut same_header = Box::pin(channel.send(same_header_msg(0x10, 0xa2), |_| true));
         for _ in 0..5 {
             assert!(futures::poll!(same_header.as_mut()).is_pending());
             futures_timer::Delay::new(Duration::from_millis(5)).await;
@@ -769,17 +782,199 @@ fn a_request_waits_while_the_same_header_is_in_flight() {
         assert_eq!(pending_len(&channel), 1);
 
         // A different header is unaffected.
-        let mut other = Box::pin(channel.send(short_msg(0x20), |_| true));
+        let other_reply = short_msg(0x21);
+        let mut other =
+            Box::pin(channel.send(short_msg(0x20), move |candidate| *candidate == other_reply));
         assert!(futures::poll!(other.as_mut()).is_pending());
         assert_eq!(handle.written_reports().len(), 2);
         assert_eq!(pending_len(&channel), 2);
 
-        // Cancelling `first` frees its header: the parked request registers
-        // and writes.
+        // Cancelling `first` unanswered does not free its header yet: its
+        // reply is still expected, and would answer the parked request.
         drop(first);
+        assert_eq!(pending_len(&channel), 1);
+        assert_eq!(stale_len(&channel), 1);
         assert!(futures::poll!(same_header.as_mut()).is_pending());
+        assert_eq!(
+            handle.written_reports().len(),
+            2,
+            "the parked request went out while a reply with its header was outstanding"
+        );
+
+        // The late reply is discarded, and only then does the parked request
+        // register and write.
+        handle.send_incoming(first_reply).await;
+        for _ in 0..20 {
+            if handle.written_reports().len() == 3 {
+                break;
+            }
+            assert!(futures::poll!(same_header.as_mut()).is_pending());
+            futures_timer::Delay::new(Duration::from_millis(5)).await;
+        }
         assert_eq!(handle.written_reports().len(), 3);
+        assert_eq!(stale_len(&channel), 0);
         assert_eq!(pending_len(&channel), 2);
+    });
+}
+
+/// A request that timed out unanswered keeps its header reserved until its
+/// reply lands: the reply is discarded, and the next request with that header
+/// — which nothing on the wire could tell it from — gets its own.
+#[test]
+fn a_reply_landing_after_a_timeout_cannot_answer_the_next_same_header_request() {
+    futures::executor::block_on(async {
+        let (raw, handle) = MockRawHidChannel::new();
+        let channel = channel_with_reader(raw).await;
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let listener_events = Arc::clone(&events);
+        channel.add_msg_listener(move |msg, matched| {
+            listener_events.lock().unwrap().push((msg, matched));
+        });
+
+        // Both requests share a header and accept any reply, as two root
+        // `getFeature` calls for different features do.
+        let err = channel
+            .send_with_timeout(short_msg(0x10), |_| true, Duration::from_millis(25))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ChannelError::Timeout));
+        assert_pending_empty(&channel);
+        assert_eq!(stale_len(&channel), 1);
+
+        let mut second = Box::pin(channel.send(same_header_msg(0x10, 0xa2), |_| true));
+        for _ in 0..5 {
+            assert!(futures::poll!(second.as_mut()).is_pending());
+            futures_timer::Delay::new(Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            handle.written_reports().len(),
+            1,
+            "the second request went out with a reply to the first still expected"
+        );
+
+        // The first request's reply arrives late: discarded, not matched.
+        let late_reply = short_msg(0x11);
+        handle.send_incoming(late_reply).await;
+        wait_for_event_count(&events, 1).await;
+        assert_eq!(events.lock().unwrap()[0], (late_reply, false));
+
+        // Now the second request goes out and is answered by its own reply.
+        let second_reply = short_msg(0x12);
+        handle.queue_response(second_reply);
+        assert_eq!(second.await.unwrap(), second_reply);
+        assert_eq!(handle.written_reports().len(), 2);
+        assert_pending_empty(&channel);
+        assert_eq!(stale_len(&channel), 0);
+    });
+}
+
+/// A reply that never comes must not block its header for good: the
+/// reservation lapses after [`STALE_REPLY_GRACE`].
+#[test]
+fn an_unanswered_header_frees_after_the_grace() {
+    futures::executor::block_on(async {
+        let (raw, handle) = MockRawHidChannel::new();
+        let channel = channel_with_reader(raw).await;
+
+        let abandoned = Instant::now();
+        let err = channel
+            .send_with_timeout(short_msg(0x10), |_| true, Duration::from_millis(25))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ChannelError::Timeout));
+        assert_eq!(stale_len(&channel), 1);
+
+        let second_reply = short_msg(0x12);
+        handle.queue_response(second_reply);
+        let actual = channel
+            .send_with_timeout(
+                same_header_msg(0x10, 0xa2),
+                |_| true,
+                STALE_REPLY_GRACE + Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(actual, second_reply);
+        let waited = abandoned.elapsed();
+        assert!(
+            waited >= STALE_REPLY_GRACE,
+            "the second request went out {waited:?} after the first was abandoned"
+        );
+        assert_eq!(handle.written_reports().len(), 2);
+        assert_pending_empty(&channel);
+        assert_eq!(stale_len(&channel), 0);
+    });
+}
+
+/// Re-asking an abandoned request byte for byte — what a feature-table read
+/// does when the link drops a report — does not wait for the grace: the
+/// outstanding reply answers the re-ask as well as its own would. Whichever
+/// comes first is taken, and the other is then discarded rather than handed
+/// to a later, different request with the same header.
+#[test]
+fn an_identical_re_ask_takes_the_outstanding_reply() {
+    futures::executor::block_on(async {
+        let (raw, handle) = MockRawHidChannel::new();
+        let channel = channel_with_reader(raw).await;
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let listener_events = Arc::clone(&events);
+        channel.add_msg_listener(move |msg, matched| {
+            listener_events.lock().unwrap().push((msg, matched));
+        });
+
+        let err = channel
+            .send_with_timeout(short_msg(0x10), |_| true, Duration::from_millis(25))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ChannelError::Timeout));
+        assert_eq!(stale_len(&channel), 1);
+
+        // The identical re-ask goes straight out, adopting the owed reply.
+        let mut retry = Box::pin(channel.send(short_msg(0x10), |_| true));
+        assert!(futures::poll!(retry.as_mut()).is_pending());
+        assert_eq!(handle.written_reports().len(), 2, "the re-ask waited");
+        assert_eq!(pending_len(&channel), 1);
+        assert_eq!(stale_len(&channel), 0);
+
+        // The first send's reply lands late and answers the re-ask; the
+        // re-ask's own reply is now the one owed.
+        let first_reply = short_msg(0x11);
+        handle.send_incoming(first_reply).await;
+        assert_eq!(retry.await.unwrap(), first_reply);
+        assert_pending_empty(&channel);
+        assert_eq!(stale_len(&channel), 1);
+
+        // A different question under the same header waits for it...
+        let mut other = Box::pin(channel.send(same_header_msg(0x10, 0xa2), |_| true));
+        for _ in 0..5 {
+            assert!(futures::poll!(other.as_mut()).is_pending());
+            futures_timer::Delay::new(Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            handle.written_reports().len(),
+            2,
+            "the other request went out early"
+        );
+
+        // ...and goes out once it has been discarded.
+        let retry_reply = short_msg(0x12);
+        handle.send_incoming(retry_reply).await;
+        wait_for_event_count(&events, 2).await;
+        assert_eq!(events.lock().unwrap()[1], (retry_reply, false));
+        let other_reply = short_msg(0x13);
+        handle.queue_response(other_reply);
+        for _ in 0..20 {
+            if handle.written_reports().len() == 3 {
+                break;
+            }
+            assert!(futures::poll!(other.as_mut()).is_pending());
+            futures_timer::Delay::new(Duration::from_millis(5)).await;
+        }
+        assert_eq!(other.await.unwrap(), other_reply);
+        assert_eq!(handle.written_reports().len(), 3);
+        assert_pending_empty(&channel);
+        assert_eq!(stale_len(&channel), 0);
     });
 }
 
