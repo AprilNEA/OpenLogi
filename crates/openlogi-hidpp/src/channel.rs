@@ -11,6 +11,7 @@
 //! waits until that request is answered, times out, or is cancelled.
 
 use std::{
+    any::Any,
     collections::{HashMap, VecDeque},
     sync::{
         Arc, Mutex, Weak,
@@ -106,15 +107,16 @@ pub enum SwIdPolicy {
     /// requests for a single exclusive user of a node. The counter is this
     /// policy's own; the id `0` slot is skipped in the wrap.
     Rotating(AtomicU8),
-    /// A fixed id owned process-wide: `free(id)` runs exactly once when this
-    /// policy is dropped, handing the lease back to the allocator — so
-    /// concurrent opens of one HID node never share a correlation id.
+    /// A fixed id held for the channel's lifetime, so concurrent opens of one
+    /// HID node never share a correlation id. The `lease` is whatever the
+    /// allocator hands out to back it — an entry in a table, an OS file lock —
+    /// and is dropped with the policy, which is when the id goes back.
     /// (OpenLogi local addition.)
     Leased {
         /// The leased id every request carries.
         id: RequestSwId,
-        /// Returns the id to the allocator on drop.
-        free: fn(u8),
+        /// Owns the lease; dropping it returns the id to the allocator.
+        lease: Box<dyn Any + Send + Sync>,
     },
 }
 
@@ -130,14 +132,6 @@ impl Default for SwIdPolicy {
     /// Fixed id `1`, matching the protocol's conventional default.
     fn default() -> Self {
         Self::Fixed(RequestSwId(U4::from_lo(0x01)))
-    }
-}
-
-impl Drop for SwIdPolicy {
-    fn drop(&mut self) {
-        if let Self::Leased { id, free } = self {
-            free(id.get().to_lo());
-        }
     }
 }
 

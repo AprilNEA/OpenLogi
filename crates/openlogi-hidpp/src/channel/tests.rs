@@ -688,10 +688,23 @@ fn short_msg(marker: u8) -> HidppMessage {
     HidppMessage::Short([0xff, marker, 0x10, marker, marker, marker])
 }
 
+/// A lease that reports its release to `free`, standing in for the transport's
+/// table entry and OS lock.
+struct RecordingLease {
+    id: u8,
+    free: fn(u8),
+}
+
+impl Drop for RecordingLease {
+    fn drop(&mut self) {
+        (self.free)(self.id);
+    }
+}
+
 fn leased_policy(id: u8, free: fn(u8)) -> SwIdPolicy {
     SwIdPolicy::Leased {
         id: RequestSwId::new(U4::from_lo(id)).unwrap(),
-        free,
+        lease: Box::new(RecordingLease { id, free }),
     }
 }
 
