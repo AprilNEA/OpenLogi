@@ -17,7 +17,7 @@ use tracing::{debug, warn};
 use crate::ChannelRegistry;
 use crate::backend::{BackendError, HidBackend, NodeId, NodeInfo};
 use crate::channel::route::{DeviceRoute, find_receiver, is_receiver_pid};
-use ledger::NodeLedger;
+use ledger::{NodeLedger, SettledNode};
 
 mod cache;
 pub mod events;
@@ -32,7 +32,7 @@ pub mod standalone;
 use cache::{CACHE_MISS_GRACE, CacheKey, CacheOutcome, Cached};
 use events::{ChannelEventSubscriptions, EventNotifier, EventSubscriptionHandle};
 use persist::{ProbeCacheSnapshot, ProbeCacheStore};
-use probe::{NodeProbe, probe_one};
+use probe::{NodeProbe, ProbeVerdict, probe_one};
 
 /// How long to wait for device-arrival event bursts before assuming the
 /// receiver has finished reporting. MX Master 4 (and other devices that may
@@ -324,6 +324,22 @@ fn routes_for_inventories(inventories: &[DeviceInventory]) -> Vec<DeviceRoute> {
                 .filter_map(|paired| DeviceRoute::device_route_for(inventory, paired.slot))
         })
         .collect()
+}
+
+/// Fold one probe into the ledger. A deferred probe never touched the node,
+/// so it is replayed without a failure on the ledger's count; its verdict
+/// still fails `all_healthy`, which brings the one-shot retry round again.
+fn settle_probe<Node: Eq + Hash + Clone>(
+    ledger: &mut NodeLedger<Node>,
+    node: &Node,
+    verdict: ProbeVerdict,
+    inventory: Option<DeviceInventory>,
+) -> SettledNode {
+    if verdict.is_deferred() {
+        ledger.defer(node)
+    } else {
+        ledger.settle(node, verdict.is_healthy(), inventory)
+    }
 }
 
 fn settle_unhealthy_node<Node: Eq + Hash + Clone>(
@@ -764,9 +780,7 @@ impl Enumerator {
             all_complete &= probe.verdict.is_complete();
             all_healthy &= probe.verdict.is_healthy();
             outcomes.extend(probe.outcomes);
-            let settled = self
-                .ledger
-                .settle(&node, probe.verdict.is_healthy(), probe.inventory);
+            let settled = settle_probe(&mut self.ledger, &node, probe.verdict, probe.inventory);
             // Every node waits for the ledger's consecutive-failure threshold,
             // receivers included. One full-budget timeout is not evidence of
             // dead delivery: [`RECEIVER_PROBE_BUDGET`] leaves barely a second
