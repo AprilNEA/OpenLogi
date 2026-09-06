@@ -689,6 +689,44 @@ impl RawHidChannel for AsyncHidChannel {
         self.device_io.ensure_allowed()?;
         let mut w = self.writer.lock().await;
         self.device_io.ensure_allowed()?;
+        if self.info.product_id == 0x0af7 {
+            let mut frame = [0_u8; 64];
+            frame[0] = 0x51;
+            let payload = src.get(2..).unwrap_or_default();
+            let feature_index = payload.first().copied().unwrap_or_default();
+            if feature_index >= 4 {
+                let sub_function = payload.get(1).copied().unwrap_or_default();
+                let params = payload.get(2..).unwrap_or_default();
+                let sub_length = 3 + params.len();
+                let frame_length = 5 + sub_length;
+                if frame_length > 63 || 10 + params.len() > frame.len() {
+                    return Err("Centurion frame exceeds report size".into());
+                }
+                frame[1] = u8::try_from(frame_length)?;
+                frame[3] = 0x03;
+                frame[4] = 0x1d;
+                frame[5] = u8::try_from(sub_length >> 8)? & 0x0f;
+                frame[6] = u8::try_from(sub_length & 0xff)?;
+                frame[8] = feature_index;
+                frame[9] = sub_function;
+                frame[10..10 + params.len()].copy_from_slice(params);
+            } else {
+                if payload.len() + 1 > 63 || 3 + payload.len() > frame.len() {
+                    return Err("Centurion frame exceeds report size".into());
+                }
+                frame[1] = u8::try_from(payload.len() + 1)?;
+                frame[3..3 + payload.len()].copy_from_slice(payload);
+            }
+            return match w.write_output_report(&frame).await {
+                Ok(()) => Ok(src.len()),
+                Err(error) => {
+                    if matches!(error, async_hid::HidError::Disconnected) {
+                        self.mark_disconnected();
+                    }
+                    Err(error.into())
+                }
+            };
+        }
         match w.write_output_report(src).await {
             Ok(()) => Ok(src.len()),
             Err(e) => {
@@ -703,6 +741,44 @@ impl RawHidChannel for AsyncHidChannel {
     async fn read_report(&self, buf: &mut [u8]) -> Result<usize, Box<dyn Error + Send + Sync>> {
         let result = {
             let mut r = self.reader.lock().await;
+            if self.info.product_id == 0x0af7 {
+                let mut frame = [0_u8; 64];
+                loop {
+                    let len = r.read_input_report(&mut frame).await?;
+                    if len < 3 || frame[0] != 0x51 {
+                        continue;
+                    }
+                    let payload_len = usize::from(frame[1])
+                        .saturating_sub(1)
+                        .min(len.saturating_sub(3))
+                        .min(61);
+                    let payload = &frame[3..3 + payload_len];
+                    if payload.first() == Some(&0x03)
+                        && payload.get(1).is_some_and(|function| {
+                            (function >> 4) == 0x01 && (function & 0x0f) != 0
+                        })
+                    {
+                        continue;
+                    }
+                    let hidpp_payload = if payload.len() >= 7
+                        && payload[0] == 0x03
+                        && (payload[1] & 0xf0) == 0x10
+                    {
+                        &payload[5..]
+                    } else {
+                        payload
+                    };
+                    let copy_len = hidpp_payload.len().min(buf.len().saturating_sub(2));
+                    if buf.len() < 2 {
+                        return Err("HID++ destination buffer too small".into());
+                    }
+                    buf[0] = hidpp::channel::LONG_REPORT_ID;
+                    buf[1] = 0xff;
+                    buf[2..2 + copy_len].copy_from_slice(&hidpp_payload[..copy_len]);
+                    buf[2 + copy_len..].fill(0);
+                    return Ok(20);
+                }
+            }
             r.read_input_report(buf).await
         };
         match result {

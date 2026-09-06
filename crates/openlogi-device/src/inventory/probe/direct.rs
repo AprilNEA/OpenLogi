@@ -118,7 +118,7 @@ pub(super) async fn probe_direct(
         };
         return NodeProbe {
             inventory: Some(inventory),
-            verdict: ProbeVerdict::Healthy { complete: true },
+            verdict: ProbeVerdict::healthy_when(walk_succeeded),
             outcomes: vec![outcome],
         };
     }

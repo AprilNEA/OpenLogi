@@ -266,20 +266,22 @@ impl RawHidChannel for WindowsHidppChannel {
                 let params = payload.get(2..).unwrap_or_default();
                 let sub_length = 3 + params.len();
                 let frame_length = 5 + sub_length;
-                frame[1] = u8::try_from(frame_length).expect("Centurion frame fits 64-byte report");
+                if frame_length > 63 || 10 + params.len() > frame.len() {
+                    return Err("Centurion frame exceeds report size".into());
+                }
+                frame[1] = u8::try_from(frame_length)?;
                 frame[3] = 0x03;
                 frame[4] = 0x1d;
-                frame[5] = u8::try_from(sub_length >> 8)
-                    .expect("Centurion sub-frame high byte fits u8")
-                    & 0x0f;
-                frame[6] = u8::try_from(sub_length & 0xff)
-                    .expect("Centurion sub-frame low byte fits u8");
+                frame[5] = u8::try_from(sub_length >> 8)? & 0x0f;
+                frame[6] = u8::try_from(sub_length & 0xff)?;
                 frame[8] = feature_index;
                 frame[9] = sub_function;
                 frame[10..10 + params.len()].copy_from_slice(params);
             } else {
-                frame[1] = u8::try_from(payload.len() + 1)
-                    .expect("Centurion direct frame fits 64-byte report");
+                if payload.len() + 1 > 63 || 3 + payload.len() > frame.len() {
+                    return Err("Centurion frame exceeds report size".into());
+                }
+                frame[1] = u8::try_from(payload.len() + 1)?;
                 frame[3..3 + payload.len()].copy_from_slice(payload);
             }
 
@@ -344,6 +346,47 @@ impl RawHidChannel for WindowsHidppChannel {
         }
 
         let mut reader = self.long.reader.lock().await;
+        if self.info.product_id == 0x0af7 {
+            let mut frame = [0_u8; 64];
+            loop {
+                let len = match reader.read_input_report(&mut frame).await {
+                    Ok(len) => len,
+                    Err(async_hid::HidError::Disconnected) => {
+                        return self.park_disconnected().await;
+                    }
+                    Err(error) => return Err(error.into()),
+                };
+                if len < 3 || frame[0] != 0x51 || buf.len() < 2 {
+                    continue;
+                }
+                let payload_len = usize::from(frame[1])
+                    .saturating_sub(1)
+                    .min(len.saturating_sub(3))
+                    .min(61);
+                let payload = &frame[3..3 + payload_len];
+                if payload.first() == Some(&0x03)
+                    && payload.get(1).is_some_and(|function| {
+                        (function >> 4) == 0x01 && (function & 0x0f) != 0
+                    })
+                {
+                    continue;
+                }
+                let hidpp_payload = if payload.len() >= 7
+                    && payload[0] == 0x03
+                    && (payload[1] & 0xf0) == 0x10
+                {
+                    &payload[5..]
+                } else {
+                    payload
+                };
+                let copy_len = hidpp_payload.len().min(buf.len().saturating_sub(2));
+                buf[0] = LONG_REPORT_ID;
+                buf[1] = 0xff;
+                buf[2..2 + copy_len].copy_from_slice(&hidpp_payload[..copy_len]);
+                buf[2 + copy_len..].fill(0);
+                return Ok(20);
+            }
+        }
         match reader.read_input_report(buf).await {
             Ok(len) => Ok(len),
             Err(async_hid::HidError::Disconnected) => self.park_disconnected().await,
