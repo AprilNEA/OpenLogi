@@ -17,7 +17,7 @@ use tracing::{debug, warn};
 use crate::ChannelRegistry;
 use crate::backend::{BackendError, HidBackend, NodeId, NodeInfo};
 use crate::channel::route::{DeviceRoute, find_receiver, is_receiver_pid};
-use ledger::NodeLedger;
+use ledger::{NodeLedger, SettledNode};
 
 mod cache;
 pub mod events;
@@ -351,6 +351,22 @@ fn routes_for_inventories(inventories: &[DeviceInventory]) -> Vec<DeviceRoute> {
         .collect()
 }
 
+/// Fold one probe into the ledger. A deferred probe never touched the node,
+/// so it is replayed without a failure on the ledger's count; its verdict
+/// still fails `all_healthy`, which brings the one-shot retry round again.
+fn settle_probe<Node: Eq + Hash + Clone>(
+    ledger: &mut NodeLedger<Node>,
+    node: &Node,
+    verdict: ProbeVerdict,
+    inventory: Option<DeviceInventory>,
+) -> SettledNode {
+    match verdict {
+        ProbeVerdict::Deferred => ledger.defer(node),
+        ProbeVerdict::AliveButIncomplete => ledger.settle_arrival_replay_failure(node),
+        verdict => ledger.settle(node, verdict.is_healthy(), inventory),
+    }
+}
+
 fn settle_unhealthy_node<Node: Eq + Hash + Clone>(
     ledger: &mut NodeLedger<Node>,
     node: &Node,
@@ -360,18 +376,6 @@ fn settle_unhealthy_node<Node: Eq + Hash + Clone>(
     *all_complete = false;
     *all_healthy = false;
     ledger.settle(node, false, None).inventory
-}
-
-fn settle_probe<Node: Eq + Hash + Clone>(
-    ledger: &mut NodeLedger<Node>,
-    node: &Node,
-    verdict: ProbeVerdict,
-    inventory: Option<DeviceInventory>,
-) -> ledger::SettledNode {
-    match verdict {
-        ProbeVerdict::AliveButIncomplete => ledger.settle_arrival_replay_failure(node),
-        verdict => ledger.settle(node, verdict.is_healthy(), inventory),
-    }
 }
 
 /// Enumerate all Logitech HID++ receivers visible to the current process and

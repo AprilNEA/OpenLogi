@@ -63,11 +63,12 @@ struct RegisterPhase {
 /// each device by index under this process's own software id.
 ///
 /// `None` when another process still holds the phase after
-/// [`RECEIVER_REGISTER_LOCK_WAIT`]: the caller settles a failed probe —
-/// "couldn't check" — and the ledger replays its last snapshot and retries
-/// next tick. Proceeding unlocked instead would restore the very race the lock
-/// exists for. The lock directory being unusable is different: nothing can
-/// arbitrate, so the phase runs as it did before locks existed.
+/// [`RECEIVER_REGISTER_LOCK_WAIT`]: the caller settles a
+/// [`ProbeVerdict::Deferred`] probe — the ledger replays its last snapshot
+/// without counting a failure, and the one-shot retry re-probes. Proceeding
+/// unlocked instead would restore the very race the lock exists for. The lock
+/// directory being unusable is different: nothing can arbitrate, so the phase
+/// runs as it did before locks existed.
 async fn lock_receiver_registers(info: &NodeInfo) -> Option<RegisterPhase> {
     match host_lock::lock_within(
         &host_lock::node_lock_name(&info.id),
@@ -87,7 +88,7 @@ async fn lock_receiver_registers(info: &NodeInfo) -> Option<RegisterPhase> {
     }
 }
 
-/// One node probe's verdict about its own trustworthiness. Three-valued on
+/// One node probe's verdict about its own trustworthiness. An enum on
 /// purpose: the old `healthy`/`complete` bool pair could also express
 /// "couldn't check, but the check is complete", which no probe path means —
 /// the invariant lived in a comment at every construction site.
@@ -101,6 +102,13 @@ pub(super) enum ProbeVerdict {
     /// can produce an authoritative device list failed. The ledger may replay
     /// its last-good snapshot briefly, but must eventually reopen the channel.
     AliveButIncomplete,
+    /// The node was not checked at all: another OpenLogi process held its
+    /// receiver register phase, so this probe skipped the node's I/O and has
+    /// no evidence either way. The ledger replays the last-good snapshot
+    /// without counting a failure — a channel that was never asked cannot
+    /// have failed, and must not be retired for it — while the one-shot
+    /// retry re-probes as it would after a failure.
+    Deferred,
     /// The node produced an authoritative inventory — the only verdict that
     /// counts as stability evidence. `complete` reports whether every expected
     /// device was seen, which is what lets the one-shot retry stop early.
@@ -126,6 +134,11 @@ impl ProbeVerdict {
         matches!(self, Self::Healthy { .. })
     }
 
+    /// The node was never asked this tick: another process held it.
+    pub(super) fn is_deferred(self) -> bool {
+        matches!(self, Self::Deferred)
+    }
+
     /// Every expected device was seen (the one-shot retry's stop signal).
     pub(super) fn is_complete(self) -> bool {
         matches!(self, Self::Healthy { complete: true })
@@ -143,8 +156,7 @@ pub(super) struct NodeProbe {
 }
 
 impl NodeProbe {
-    /// A probe that got no answer at all (budget timeout), or that deferred to
-    /// another process's register phase on the same receiver.
+    /// A probe that got no answer at all (budget timeout).
     pub(super) fn failed() -> Self {
         Self {
             inventory: None,
@@ -159,6 +171,16 @@ impl NodeProbe {
         Self {
             inventory: None,
             verdict: ProbeVerdict::AliveButIncomplete,
+            outcomes: Vec::new(),
+        }
+    }
+
+    /// A probe that never ran: another process held the receiver's register
+    /// phase for longer than it was willing to wait.
+    pub(super) fn deferred() -> Self {
+        Self {
+            inventory: None,
+            verdict: ProbeVerdict::Deferred,
             outcomes: Vec::new(),
         }
     }
@@ -218,7 +240,7 @@ async fn probe_bolt_receiver(
     subscriptions: Option<&EventSubscriptionHandle>,
 ) -> NodeProbe {
     let Some(register_phase) = lock_receiver_registers(&info).await else {
-        return NodeProbe::failed();
+        return NodeProbe::deferred();
     };
     let unique_id = bolt.get_unique_id().await.ok();
     let pairing_count = bolt.count_pairings().await.ok();
@@ -318,7 +340,7 @@ async fn probe_unifying_receiver(
     // request timeouts enabling notifications and triggering arrivals on a
     // channel that has already stopped delivering receiver replies.
     let Some(register_phase) = lock_receiver_registers(&info).await else {
-        return NodeProbe::failed();
+        return NodeProbe::deferred();
     };
     let pairing_count = match timeout(RECEIVER_OPERATION_TIMEOUT, unifying.count_pairings()).await {
         Ok(Ok(count)) => count,
