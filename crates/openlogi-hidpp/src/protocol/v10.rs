@@ -226,8 +226,8 @@ impl HidppChannel {
     /// `sub_register` goes out as the first parameter, and only a reply that
     /// repeats it as its first data byte is accepted. The receiver's
     /// pairing-information register (`0xB5`) keys every paired slot through
-    /// one address, so the header alone cannot tell the slots' replies apart —
-    /// see [`is_rap_response`]. The returned data starts with the echoed byte,
+    /// one address, so the header alone cannot tell the slots' replies apart
+    /// (the matcher is `is_rap_response`). The returned data starts with the echoed byte,
     /// the same layout [`Self::read_long_register`] returns.
     pub async fn read_long_sub_register(
         &self,
