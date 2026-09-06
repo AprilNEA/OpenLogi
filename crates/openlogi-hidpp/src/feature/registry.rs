@@ -33,6 +33,7 @@ use crate::{
         fn_inversion::{FnInversionMultiHostFeature, FnInversionWithDefaultStateFeature},
         gestures2::Gestures2Feature,
         haptic_feedback::HapticFeedbackFeature,
+        headset_audio_sidetone::HeadsetAudioSidetoneFeature,
         hires_wheel::HiResWheelFeature,
         hosts_info::HostsInfoFeature,
         illumination::IlluminationFeature,
@@ -264,6 +265,9 @@ static KNOWN_FEATURES: LazyLock<HashMap<u16, KnownFeature>> = LazyLock::new(|| {
     0x8123 "ForceFeedback",
     0x8300 "Sidetone" => SidetoneFeature,
     0x8310 "Equalizer" => EqualizerFeature,
+    0x0602 "HeadsetMicSnr",
+    0x0604 "HeadsetAudioSidetone" => HeadsetAudioSidetoneFeature,
+    0x0636 "HeadsetOnboardEq",
     0x8320 "HeadsetOut",
     }
 });
