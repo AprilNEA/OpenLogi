@@ -19,9 +19,11 @@ pub const DISPLAY_LIFETIME: Duration = Duration::from_secs(15);
 /// The ring's shape, in points. The overlay draws the real ring from these and
 /// the settings app draws its preview from them, so the preview shows the ring
 /// the user will actually get. The radius is the mouse travel to any slot, so
-/// it is as tight as the slots allow: eight slots of [`SLOT_DIAMETER`] on
-/// [`RADIUS`] leave a 16 pt gap between neighbours — enough for the desktop to
-/// read through and for a slot's hover edge to be unambiguous.
+/// it is as tight as the slots allow: eight slots of
+/// [`SLOT_DIAMETER`](crate::action_ring::geometry::SLOT_DIAMETER) on
+/// [`RADIUS`](crate::action_ring::geometry::RADIUS) leave a 16 pt gap between
+/// neighbours — enough for the desktop to read through and for a slot's hover
+/// edge to be unambiguous.
 pub mod geometry {
     /// Diameter of each of the eight slot buttons.
     pub const SLOT_DIAMETER: f32 = 48.0;

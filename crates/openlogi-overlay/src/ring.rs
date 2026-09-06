@@ -9,14 +9,14 @@
 //! slots fly out from the cursor to their places on the ring, so the motion
 //! itself says where the ring came from.
 
-#[cfg(any(not(target_os = "windows"), test))]
-use gpui::{Bounds, Pixels, Point, Size, point};
 use gpui::{
     Animation, AnimationExt as _, Context, Hsla, InteractiveElement, IntoElement, ParentElement,
     Render, SharedString, StatefulInteractiveElement as _, Styled, Window,
     WindowBackgroundAppearance, WindowKind, WindowOptions, div, prelude::FluentBuilder as _, px,
     svg,
 };
+#[cfg(any(not(target_os = "windows"), test))]
+use gpui::{Bounds, Pixels, Point, Size, point};
 use openlogi_core::action_ring::geometry::{CANCEL_DIAMETER, RADIUS, SLOT_DIAMETER};
 use openlogi_core::binding::{Action, ActionRingSlot};
 use openlogi_ipc::ActionRingInvocation;
