@@ -1,4 +1,4 @@
-//! The agent's macOS AppKit loop, menu-bar item, and resume notifications.
+//! The agent's macOS AppKit loop, menu-bar item, and activity gate.
 //!
 //! The always-on agent hosts the menu bar (the GUI is on-demand). The item
 //! carries GUI-directed actions ("Show Main Window", Settings, About, Check for
@@ -15,11 +15,14 @@
 
 #![expect(
     unsafe_code,
-    reason = "objc2 calls: super-init, action targets, and selector-based workspace notifications"
+    reason = "objc2 calls: super-init, action targets, selector-based workspace notifications, and the CoreGraphics display-list read"
 )]
 
 use std::cell::RefCell;
-use std::sync::{Mutex, PoisonError};
+use std::fmt;
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
@@ -36,12 +39,16 @@ use objc2_app_kit::{
     NSWorkspaceSessionDidBecomeActiveNotification, NSWorkspaceSessionDidResignActiveNotification,
     NSWorkspaceWillSleepNotification,
 };
-use objc2_core_graphics::{CGDisplayIsAsleep, CGMainDisplayID};
+use objc2_core_foundation::{CFBoolean, CFString, CFType};
+use objc2_core_graphics::{
+    CGDirectDisplayID, CGDisplayIsAsleep, CGError, CGEventSource, CGEventSourceStateID,
+    CGEventType, CGGetActiveDisplayList, CGSessionCopyCurrentDictionary,
+};
 use objc2_foundation::{NSNotification, NSString};
 use openlogi_core::brand::{self, DeeplinkCommand};
 use openlogi_core::config::AppIcon;
 use openlogi_hid::DeviceIoSignal;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::shutdown::{self, ShutdownRequestSender};
 use crate::status_item;
@@ -115,15 +122,163 @@ pub fn relocalize() {
     });
 }
 
-struct ActivityTargetIvars {
+/// What the suspend sources hold, and since when.
+///
+/// The instant matters: a level read can only discharge a suspension by
+/// proving something happened *after* the suspension was recorded.
+struct Suspension {
+    held: u8,
+    since: Instant,
+}
+
+/// The activity state the workspace observers and the reconciler share.
+///
+/// One domain fact — may the agent touch hardware — with one transition
+/// authority: every writer goes through [`ActivitySources::suspend_from`] /
+/// [`ActivitySources::resume_from`], so the published [`DeviceIoSignal`] can
+/// never drift from the recorded suspend sources.
+struct ActivitySources {
     signal: DeviceIoSignal,
-    suspended_by: Mutex<u8>,
+    suspension: Mutex<Suspension>,
+    /// Signalled on every change to `suspension` so the reconciler parks
+    /// rather than polls while the gate is open.
+    reconcile: Condvar,
+}
+
+struct ActivityTargetIvars {
+    sources: Arc<ActivitySources>,
 }
 
 const SYSTEM_SLEEP: u8 = 1 << 0;
 const SCREEN_SLEEP: u8 = 1 << 1;
 const SESSION_INACTIVE: u8 = 1 << 2;
 const STARTUP: u8 = 1 << 3;
+
+/// Log-facing names for the suspend sources. A "device I/O paused" line that
+/// does not say which lifecycle event produced it cannot be diagnosed from a
+/// user's log.
+const SOURCE_NAMES: [(u8, &str); 4] = [
+    (SYSTEM_SLEEP, "system-sleep"),
+    (SCREEN_SLEEP, "screens-asleep"),
+    (SESSION_INACTIVE, "session-inactive"),
+    (STARTUP, "startup"),
+];
+
+/// A set of suspend sources, rendered as `screens-asleep+session-inactive`.
+struct Sources(u8);
+
+impl fmt::Display for Sources {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.0 == 0 {
+            return f.write_str("none");
+        }
+        let mut separator = "";
+        for (source, name) in SOURCE_NAMES {
+            if self.0 & source != 0 {
+                f.write_str(separator)?;
+                f.write_str(name)?;
+                separator = "+";
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The shortest interval macOS lets the display be configured to blank after
+/// (`pmset displaysleep 1`). Any HID input wakes a sleeping display, so input
+/// newer than this rules out every display-sleep *timeout* — which is all the
+/// proof there is when nothing has reported the display asleep.
+const DISPLAY_SLEEP_IDLE_FLOOR: Duration = Duration::from_secs(60);
+
+/// How often the reconciler re-reads the levels while a suspension it could
+/// discharge is outstanding.
+///
+/// Short, because the startup hold fails closed: until it is discharged the
+/// agent does no device I/O at all, so a launch into a live session must
+/// recover in seconds. It costs the missed-wake case nothing to be early — the
+/// relative proof below only accepts input that arrived *after* the suspension
+/// was recorded, so an early tick is a stricter test, not a racier one.
+const RECONCILE_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Whether `held` is a suspension a level read may discharge.
+///
+/// `SYSTEM_SLEEP` deliberately is not: the process runs during a maintenance
+/// DarkWake, and opening HID there is exactly what promoted an invisible wake
+/// into a full display wake (#656). A system sleep is cleared only by the wake
+/// notification that pairs with it.
+const fn reconcilable(held: u8) -> bool {
+    held != 0 && held & SYSTEM_SLEEP == 0
+}
+
+/// One reading of every level the owner can check its notification bookkeeping
+/// against. Taken as a value so the decision below is pure and testable
+/// without a display.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ActivityLevels {
+    /// `kCGSSessionOnConsoleKey`, trustworthy in both directions: it is the
+    /// level whose edges `NSWorkspaceSessionDidBecomeActive` /
+    /// `…DidResignActive` announce.
+    on_console: bool,
+    /// `CGDisplayIsAsleep` across the active display list — trustworthy only
+    /// when it says *asleep*. See [`displays_report_asleep`].
+    displays_report_asleep: bool,
+    /// How long the HID system has been idle.
+    idle: Duration,
+}
+
+/// Which of `held`'s sources `levels` prove are over, given how long `held` has
+/// stood.
+///
+/// Never returns `SYSTEM_SLEEP`; see [`reconcilable`].
+fn discharged_by(held: u8, held_for: Duration, levels: ActivityLevels) -> u8 {
+    if !levels.on_console {
+        // Another user owns the console. Nothing resumes into their session —
+        // which is also what keeps this from fighting the input hook that
+        // follows the same gate.
+        return 0;
+    }
+    // The console level is direct proof, so it discharges the session source on
+    // its own — exactly as `SessionDidBecomeActive` does, and like that
+    // notification it says nothing about the display.
+    let mut cleared = SESSION_INACTIVE;
+    if display_is_proven_awake(held, held_for, levels) {
+        cleared |= SCREEN_SLEEP | STARTUP;
+    }
+    cleared & held
+}
+
+/// Whether the display can be *proved* on. There is no reading that proves it
+/// off-and-on again, so this is deliberately one-directional: unproven keeps
+/// the gate closed.
+fn display_is_proven_awake(held: u8, held_for: Duration, levels: ActivityLevels) -> bool {
+    if levels.displays_report_asleep {
+        // The one direction `CGDisplayIsAsleep` is trustworthy in.
+        return false;
+    }
+    if held & SCREEN_SLEEP == 0 {
+        // Nothing has reported this display asleep, so the only thing that
+        // could have blanked it is an idle timeout — and input newer than the
+        // shortest timeout macOS allows rules that out. This is the startup
+        // case: a relaunched agent has no notification history at all.
+        return levels.idle < DISPLAY_SLEEP_IDLE_FLOOR;
+    }
+    // The display *was* reported asleep when this source was recorded, so the
+    // idle floor proves nothing — a hot corner blanks the display a second
+    // after the user's last keystroke. Only input that arrived after the
+    // suspension can have woken it, because any HID input wakes a sleeping
+    // display.
+    levels.idle < held_for
+}
+
+/// What [`ActivityTarget::finish_startup`] left behind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StartupDisplay {
+    /// The display was proved awake; the startup hold is lifted.
+    Awake,
+    /// The display could not be proved awake, so the startup hold still keeps
+    /// the gate closed and the reconciler has to lift it later.
+    Unproven,
+}
 
 define_class!(
     // SAFETY: NSObject has no subclassing requirements, and `ActivityTarget`
@@ -151,7 +306,9 @@ define_class!(
 
         #[unsafe(method(workspaceScreensDidWake:))]
         fn workspace_screens_did_wake(&self, _notification: &NSNotification) {
-            self.resume_from(SYSTEM_SLEEP | SCREEN_SLEEP);
+            // A real screen wake is direct proof of a live display, so it also
+            // discharges a startup hold no level read could.
+            self.resume_from(SYSTEM_SLEEP | SCREEN_SLEEP | STARTUP);
         }
 
         #[unsafe(method(workspaceSessionDidBecomeActive:))]
@@ -168,51 +325,276 @@ impl ActivityTarget {
         // in tests and any future caller cannot accidentally start open.
         let _ = signal.suspend();
         let this = Self::alloc().set_ivars(ActivityTargetIvars {
-            signal,
-            suspended_by: Mutex::new(STARTUP),
+            sources: Arc::new(ActivitySources {
+                signal,
+                suspension: Mutex::new(Suspension {
+                    held: STARTUP,
+                    since: Instant::now(),
+                }),
+                reconcile: Condvar::new(),
+            }),
         });
         // SAFETY: `init` initializes our freshly allocated NSObject subclass.
         unsafe { msg_send![super(this), init] }
     }
 
-    fn finish_startup(&self, display_asleep: bool) {
-        if display_asleep {
-            self.suspend_from(SCREEN_SLEEP);
+    /// The shared state behind the observers — also what the reconciler holds.
+    fn sources(&self) -> &Arc<ActivitySources> {
+        &self.ivars().sources
+    }
+
+    /// Release the startup hold if `levels` prove the display is on.
+    ///
+    /// An unproven display keeps the gate closed. That is the fail-safe
+    /// direction — a relaunched agent that guesses "awake" starts probing HID
+    /// behind a dark panel — and it is the direction the old
+    /// `CGDisplayIsAsleep(CGMainDisplayID())` snapshot got wrong (#952).
+    fn finish_startup(&self, levels: ActivityLevels) -> StartupDisplay {
+        if self.sources().discharge(levels) & STARTUP == 0 {
+            StartupDisplay::Unproven
+        } else {
+            StartupDisplay::Awake
         }
-        self.resume_from(STARTUP);
     }
 
     fn suspend_from(&self, source: u8) {
-        let changed = {
-            let mut suspended_by = self
-                .ivars()
-                .suspended_by
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            let was_allowed = *suspended_by == 0;
-            *suspended_by |= source;
-            was_allowed && self.ivars().signal.suspend()
-        };
-        if changed {
-            info!("display/session suspended — pausing device I/O");
-        }
+        self.sources().suspend_from(source);
     }
 
     fn resume_from(&self, sources: u8) {
-        let changed = {
-            let mut suspended_by = self
-                .ivars()
-                .suspended_by
+        self.sources().resume_from(sources);
+    }
+}
+
+impl ActivitySources {
+    /// Record `source` and close the hardware gate.
+    fn suspend_from(&self, source: u8) {
+        let (changed, held) = {
+            let mut suspension = self
+                .suspension
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
-            let was_suspended = *suspended_by != 0;
-            *suspended_by &= !sources;
-            was_suspended && *suspended_by == 0 && self.ivars().signal.resume()
+            let was_allowed = suspension.held == 0;
+            if source & !suspension.held != 0 {
+                // A newly recorded source restarts the clock the relative proof
+                // in `display_is_proven_awake` measures input against.
+                suspension.since = Instant::now();
+            }
+            suspension.held |= source;
+            (was_allowed && self.signal.suspend(), suspension.held)
         };
+        self.reconcile.notify_all();
         if changed {
-            info!("display/session resumed — enabling device I/O");
+            info!(source = %Sources(source), "display/session suspended — pausing device I/O");
+        } else {
+            debug!(
+                source = %Sources(source),
+                held = %Sources(held),
+                "additional display/session suspend source"
+            );
         }
     }
+
+    /// Clear `sources`; once nothing is left holding it, reopen the gate.
+    fn resume_from(&self, sources: u8) {
+        let (changed, cleared, held) = {
+            let mut suspension = self
+                .suspension
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let cleared = suspension.held & sources;
+            let was_suspended = suspension.held != 0;
+            suspension.held &= !sources;
+            (
+                was_suspended && suspension.held == 0 && self.signal.resume(),
+                cleared,
+                suspension.held,
+            )
+        };
+        self.reconcile.notify_all();
+        if changed {
+            info!(cleared = %Sources(cleared), "display/session resumed — enabling device I/O");
+        } else if cleared != 0 {
+            debug!(
+                cleared = %Sources(cleared),
+                held = %Sources(held),
+                "display/session partially resumed — device I/O still paused"
+            );
+        }
+    }
+
+    /// Discharge every held source `levels` prove is over, and report which.
+    /// The one place a level read is allowed to move the gate.
+    fn discharge(&self, levels: ActivityLevels) -> u8 {
+        self.discharge_at(levels, Instant::now())
+    }
+
+    /// [`Self::discharge`] with an explicit `now`, so the time-dependent half
+    /// of the decision is testable.
+    fn discharge_at(&self, levels: ActivityLevels, now: Instant) -> u8 {
+        let (held, held_for) = {
+            let suspension = self
+                .suspension
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            (
+                suspension.held,
+                now.saturating_duration_since(suspension.since),
+            )
+        };
+        let cleared = discharged_by(held, held_for, levels);
+        if cleared != 0 {
+            self.resume_from(cleared);
+        }
+        cleared
+    }
+
+    /// Start the process-lifetime reconciler thread.
+    ///
+    /// Owned by the production launch sequence rather than by
+    /// [`install_activity_observer`], so the unit tests drive
+    /// [`ActivitySources::discharge_at`] directly with no live thread racing
+    /// them.
+    fn start_reconciler(self: &Arc<Self>) {
+        let sources = Arc::clone(self);
+        let spawned = thread::Builder::new()
+            .name("openlogi-activity-reconcile".into())
+            .spawn(move || sources.reconcile_forever());
+        if let Err(error) = spawned {
+            warn!(
+                %error,
+                "could not start the display/session reconciler — a dropped wake notification or an unproven launch would pause device I/O until the agent restarts"
+            );
+        }
+    }
+
+    /// Park until a discharge-able suspension has stood for
+    /// [`RECONCILE_INTERVAL`], then check it against the levels.
+    ///
+    /// Both an open gate and a system sleep park on the condvar, so this
+    /// performs no timed work and issues no CoreGraphics call in either state.
+    fn reconcile_forever(&self) -> ! {
+        loop {
+            let outstanding = {
+                let mut suspension = self
+                    .suspension
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                while !reconcilable(suspension.held) {
+                    suspension = self
+                        .reconcile
+                        .wait(suspension)
+                        .unwrap_or_else(PoisonError::into_inner);
+                }
+                let (suspension, _) = self
+                    .reconcile
+                    .wait_timeout_while(suspension, RECONCILE_INTERVAL, |suspension| {
+                        reconcilable(suspension.held)
+                    })
+                    .unwrap_or_else(PoisonError::into_inner);
+                reconcilable(suspension.held)
+            };
+            if !outstanding {
+                continue;
+            }
+            // Read the levels outside the lock: these are window-server round
+            // trips, and nothing else may block on them.
+            let levels = read_levels();
+            let missed = self.discharge(levels) & (SCREEN_SLEEP | SESSION_INACTIVE);
+            if missed != 0 {
+                warn!(
+                    cleared = %Sources(missed),
+                    idle_secs = levels.idle.as_secs_f64(),
+                    "the display/session levels disagreed with the last notification — a wake notification never arrived; reconciled"
+                );
+            }
+        }
+    }
+}
+
+/// Read every level once.
+///
+/// Window-server state only: no HID, no Bluetooth, nothing that could promote a
+/// maintenance DarkWake into a full display wake (#656).
+fn read_levels() -> ActivityLevels {
+    ActivityLevels {
+        on_console: session_is_on_console(),
+        displays_report_asleep: displays_report_asleep(),
+        idle: seconds_since_last_input(),
+    }
+}
+
+/// Whether this GUI session currently owns the console.
+///
+/// `kCGSessionOnConsoleKey` (`<CoreGraphics/CGSession.h>`: "an indication of
+/// whether the session is on a console") is the level whose edges
+/// `NSWorkspaceSessionDidBecomeActive` / `…DidResignActive` announce, so a
+/// fast-user-switched-away agent reads `false` here and never reconciles its
+/// way back into another user's session. No session dictionary at all means no
+/// Quartz GUI session, which is likewise not a state to resume into.
+fn session_is_on_console() -> bool {
+    let Some(session) = CGSessionCopyCurrentDictionary() else {
+        return false;
+    };
+    // SAFETY: `CGSession.h` documents the session dictionary as a map from the
+    // `kCGSession*Key` CFStrings to CoreFoundation values.
+    let keyed = unsafe { session.cast_unchecked::<CFString, CFType>() };
+    keyed
+        .get(&CFString::from_static_str("kCGSSessionOnConsoleKey"))
+        .as_deref()
+        .and_then(CFType::downcast_ref::<CFBoolean>)
+        .is_some_and(CFBoolean::value)
+}
+
+/// Whether every display this session drives reports itself asleep.
+///
+/// `CGDisplayIsAsleep` (`<CoreGraphics/CGDisplayConfiguration.h>`: "true if the
+/// display is asleep (and is therefore not drawable)") has **false negatives**
+/// on this hardware: on a clamshell Mac whose only online display is external
+/// it answered `false` for the whole of a 2.5 h blank, while
+/// `NSWorkspaceScreensDidSleep` reported the transition correctly (#952).
+/// Widening the read past `CGMainDisplayID` does not fix that — with the lid
+/// shut the external panel is both the main and the only online display — and
+/// there is nothing to read instead: on Apple Silicon `IODisplayWrangler`
+/// carries no `IOPowerManagement` dictionary.
+///
+/// So this is used in one direction only, as a fast definite "the user can see
+/// nothing". An empty list (headless, or screen-shared) and a failed query both
+/// prove nothing and read as `false`; the caller then has to find its proof in
+/// the idle timer.
+fn displays_report_asleep() -> bool {
+    const MAX_DISPLAYS: u32 = 16;
+    let mut displays: [CGDirectDisplayID; MAX_DISPLAYS as usize] = [0; MAX_DISPLAYS as usize];
+    let mut count: u32 = 0;
+    // SAFETY: the write is bounded by the capacity passed as `max_displays`,
+    // and `count` reports how many entries CoreGraphics actually filled.
+    let status =
+        unsafe { CGGetActiveDisplayList(MAX_DISPLAYS, displays.as_mut_ptr(), &raw mut count) };
+    if status != CGError::Success {
+        return false;
+    }
+    let count = usize::try_from(count).unwrap_or(0).min(displays.len());
+    let active = &displays[..count];
+    !active.is_empty() && active.iter().all(|&display| CGDisplayIsAsleep(display))
+}
+
+/// How long the HID system has been idle.
+///
+/// Reads the hardware event state rather than the combined session state, so
+/// events another process synthesizes cannot stand in for a user being at the
+/// machine.
+fn seconds_since_last_input() -> Duration {
+    // `kCGAnyInputEventType` is `(uint32_t)(~0)` in `CGEventTypes.h`; objc2
+    // generates the `CGEventType` newtype but not that constant.
+    const ANY_INPUT: CGEventType = CGEventType(u32::MAX);
+
+    let seconds = CGEventSource::seconds_since_last_event_type(
+        CGEventSourceStateID::HIDSystemState,
+        ANY_INPUT,
+    );
+    // A value CoreGraphics cannot express as a duration proves nothing, so it
+    // reads as "idle forever" and leaves the gate closed.
+    Duration::try_from_secs_f64(seconds).unwrap_or(Duration::MAX)
 }
 
 define_class!(
@@ -320,7 +702,9 @@ fn gui_is_running() -> bool {
 /// next launch — a no-restart live toggle would need a main-thread hop from the
 /// IPC reload path (deferred; it can't be verified headlessly).
 /// `device_io_signal` closes the hardware gate while the display/session is
-/// asleep and reopens it only for a user-visible resume.
+/// away and reopens it only once the user can be shown to be back — announced
+/// by a wake notification, or, when one never arrives, proved from the
+/// window-server levels by the reconciler this loop starts.
 pub fn run_app_loop(
     show_in_menu_bar: bool,
     app_icon: AppIcon,
@@ -344,10 +728,17 @@ pub fn run_app_loop(
     // AppKit documents that an app launched into an inactive session receives
     // `NSWorkspaceSessionDidResignActiveNotification` between its will- and
     // did-finish-launching notifications. Finish that lifecycle while STARTUP
-    // still holds the hardware gate closed, then snapshot display sleep before
-    // permitting the core's initial inventory scan.
+    // still holds the hardware gate closed, then try to prove the display is on
+    // before permitting the core's initial inventory scan.
     app.finishLaunching();
-    activity_target.finish_startup(CGDisplayIsAsleep(CGMainDisplayID()));
+    if activity_target.finish_startup(read_levels()) == StartupDisplay::Unproven {
+        info!(
+            "display state unproven at launch — device I/O stays paused until input or a screen wake proves it"
+        );
+    }
+    // Only now, with the launch sequence's own attempt made, does the
+    // reconciler start: it must never race `finish_startup` for the gate.
+    activity_target.sources().start_reconciler();
     info!(show_in_menu_bar, "agent AppKit loop started");
 
     app.run();
@@ -360,6 +751,13 @@ pub fn run_app_loop(
 /// `NSWorkspaceDidWakeNotification` is deliberately not registered: macOS
 /// emits it for maintenance DarkWake, where opening BLE HID is exactly what can
 /// promote an otherwise invisible wake into a full display wake (#656).
+///
+/// These notifications are edges over window-server state, and the workspace
+/// center guarantees neither delivery nor pairing: a screens-asleep or
+/// session-inactive edge whose partner never arrives would otherwise pause
+/// device I/O until the agent restarts, and a relaunched agent has no history
+/// at all. `run_app_loop` therefore also starts
+/// [`ActivitySources::start_reconciler`], which proves those levels back.
 fn install_activity_observer(signal: DeviceIoSignal) -> Retained<ActivityTarget> {
     let target = ActivityTarget::new(signal);
     let workspace = NSWorkspace::sharedWorkspace();
@@ -507,12 +905,28 @@ mod tests {
     // so one test's session-inactive event cannot suspend the other test's gate.
     static WORKSPACE_NOTIFICATIONS: Mutex<()> = Mutex::new(());
 
+    /// The user is at the machine: on console, no display reports itself
+    /// asleep, and input a moment ago.
+    const PRESENT: ActivityLevels = ActivityLevels {
+        on_console: true,
+        displays_report_asleep: false,
+        idle: Duration::from_millis(200),
+    };
+
+    /// On console, but nothing has been touched for long enough that no level
+    /// can rule display sleep out.
+    const IDLE: ActivityLevels = ActivityLevels {
+        on_console: true,
+        displays_report_asleep: false,
+        idle: Duration::from_mins(30),
+    };
+
     #[test]
     fn overlapping_suspend_sources_all_clear_before_device_io_resumes() {
         let _notifications = WORKSPACE_NOTIFICATIONS.lock().unwrap();
         let (signal, gate) = device_io_channel();
         let target = install_activity_observer(signal);
-        target.finish_startup(false);
+        assert_eq!(target.finish_startup(PRESENT), StartupDisplay::Awake);
         let workspace = NSWorkspace::sharedWorkspace();
         let center = workspace.notificationCenter();
 
@@ -569,14 +983,18 @@ mod tests {
         let target = install_activity_observer(signal);
         assert!(!gate.allows_io(), "startup must fail closed");
 
-        target.finish_startup(true);
+        assert_eq!(target.finish_startup(IDLE), StartupDisplay::Unproven);
         assert!(
             !gate.allows_io(),
-            "an initially sleeping display must retain the suspension",
+            "an unproven display must retain the startup hold",
         );
 
         let workspace = NSWorkspace::sharedWorkspace();
         let center = workspace.notificationCenter();
+        // A screen wake is direct proof of a live display, so it discharges the
+        // startup hold no level read could — #952 relaunched the agent every few
+        // minutes for the whole of display sleep, and each relaunch has to stay
+        // paused until the display really comes back.
         // SAFETY: AppKit exports the name as an immutable process-lifetime constant.
         let screen_wake = unsafe { NSWorkspaceScreensDidWakeNotification };
         // SAFETY: `workspace` is live, matches the registration filter, and
@@ -586,5 +1004,250 @@ mod tests {
 
         // SAFETY: This is the same live target registered with `center` above.
         unsafe { center.removeObserver(&target) };
+    }
+
+    /// Every test below builds a bare [`ActivityTarget`] rather than calling
+    /// [`install_activity_observer`], so it neither registers on the
+    /// process-global workspace notification center nor is disturbed by what
+    /// another test posts there.
+    fn present_target() -> (Retained<ActivityTarget>, openlogi_hid::DeviceIoGate) {
+        let (signal, gate) = device_io_channel();
+        let target = ActivityTarget::new(signal);
+        assert_eq!(target.finish_startup(PRESENT), StartupDisplay::Awake);
+        assert!(gate.allows_io());
+        (target, gate)
+    }
+
+    /// The reported failure: a screens-asleep edge arrives, its wake never
+    /// does, and nothing else is ever delivered. Input that arrived *after* the
+    /// suspension proves the display came back, because any HID input wakes a
+    /// sleeping display.
+    #[test]
+    fn a_screen_sleep_whose_wake_never_arrives_is_reconciled_by_input_after_it() {
+        let (target, gate) = present_target();
+        let slept_at = Instant::now();
+        target.suspend_from(SCREEN_SLEEP);
+        assert!(!gate.allows_io());
+
+        // Two seconds later, with the last input from before the display slept.
+        let levels = ActivityLevels {
+            idle: Duration::from_secs(10),
+            ..PRESENT
+        };
+        target
+            .sources()
+            .discharge_at(levels, slept_at + Duration::from_secs(2));
+        assert!(
+            !gate.allows_io(),
+            "input older than the suspension proves nothing",
+        );
+
+        // The user is working: input newer than the suspension itself.
+        let levels = ActivityLevels {
+            idle: Duration::from_millis(500),
+            ..PRESENT
+        };
+        target
+            .sources()
+            .discharge_at(levels, slept_at + Duration::from_secs(2));
+        assert!(gate.allows_io());
+    }
+
+    /// The trap an absolute idle floor falls into: a hot corner blanks the
+    /// display a second after the last keystroke, so recent input is not proof
+    /// that the display is on. Only input *after* the suspension is.
+    #[test]
+    fn a_forced_display_sleep_is_not_reconciled_by_input_that_preceded_it() {
+        let (target, gate) = present_target();
+        let slept_at = Instant::now();
+        target.suspend_from(SCREEN_SLEEP);
+
+        // Idle 6 s, suspension 5 s old: the input is one second older than the
+        // display sleep — and well inside `DISPLAY_SLEEP_IDLE_FLOOR`.
+        let levels = ActivityLevels {
+            idle: Duration::from_secs(6),
+            ..PRESENT
+        };
+        assert!(levels.idle < DISPLAY_SLEEP_IDLE_FLOOR);
+        target
+            .sources()
+            .discharge_at(levels, slept_at + Duration::from_secs(5));
+        assert!(
+            !gate.allows_io(),
+            "the idle floor must not discharge a display sleep that was reported",
+        );
+    }
+
+    /// The same hazard on the session half: `SessionDidResignActive` without
+    /// the `SessionDidBecomeActive` that should follow the unlock handoff. The
+    /// console level is trustworthy in both directions, so it needs no input.
+    #[test]
+    fn a_session_resign_whose_activation_never_arrives_is_reconciled_from_the_console_level() {
+        let (target, gate) = present_target();
+        target.suspend_from(SESSION_INACTIVE);
+        assert!(!gate.allows_io());
+
+        let elsewhere = ActivityLevels {
+            on_console: false,
+            ..IDLE
+        };
+        target.sources().discharge(elsewhere);
+        assert!(!gate.allows_io(), "another user still owns the console");
+
+        // Back on console — and still idle, which must not matter here: no
+        // display sleep was ever reported.
+        target.sources().discharge(IDLE);
+        assert!(
+            gate.allows_io(),
+            "an unpaired session-inactive edge must not outlive the console level that set it",
+        );
+    }
+
+    /// #656 non-regression: the process runs during a maintenance DarkWake, so
+    /// a level read must never be the thing that reopens the gate after a
+    /// system sleep — however present the user looks.
+    #[test]
+    fn reconciliation_never_clears_a_system_sleep_suspension() {
+        let (target, gate) = present_target();
+        target.suspend_from(SYSTEM_SLEEP);
+        target.suspend_from(SCREEN_SLEEP);
+
+        assert!(!reconcilable(SYSTEM_SLEEP | SCREEN_SLEEP));
+        target.sources().discharge(PRESENT);
+        assert!(
+            !gate.allows_io(),
+            "only the paired wake notification may clear a system sleep",
+        );
+
+        // The ordinary, user-visible resume still works.
+        target.resume_from(SYSTEM_SLEEP | SCREEN_SLEEP);
+        assert!(gate.allows_io());
+    }
+
+    /// #952's relaunch loop: `CGDisplayIsAsleep` answered "awake" throughout a
+    /// 2.5 h blank, so every relaunched agent resumed device I/O behind a dark
+    /// panel. The hold now stays until something proves otherwise.
+    #[test]
+    fn an_unproven_startup_display_keeps_device_io_paused_until_input_proves_it() {
+        let (signal, gate) = device_io_channel();
+        let target = ActivityTarget::new(signal);
+        assert!(!gate.allows_io(), "startup must fail closed");
+
+        assert_eq!(target.finish_startup(IDLE), StartupDisplay::Unproven);
+        assert!(!gate.allows_io());
+
+        // Still nothing: a display that reports itself asleep is definite.
+        let asleep = ActivityLevels {
+            displays_report_asleep: true,
+            ..PRESENT
+        };
+        target.sources().discharge(asleep);
+        assert!(!gate.allows_io());
+
+        // The user touches the machine, which is what wakes a sleeping display.
+        target.sources().discharge(PRESENT);
+        assert!(gate.allows_io());
+    }
+
+    #[test]
+    fn an_unproven_startup_display_does_not_mask_a_second_suspend_source() {
+        let (signal, gate) = device_io_channel();
+        let target = ActivityTarget::new(signal);
+        assert_eq!(target.finish_startup(IDLE), StartupDisplay::Unproven);
+
+        target.suspend_from(SESSION_INACTIVE);
+        target.resume_from(STARTUP);
+        assert!(
+            !gate.allows_io(),
+            "an inactive session must outlive the startup hold",
+        );
+
+        target.resume_from(SESSION_INACTIVE);
+        assert!(gate.allows_io());
+    }
+
+    #[test]
+    fn only_input_newer_than_the_shortest_display_sleep_timeout_proves_a_launch_display() {
+        let fresh = |idle| ActivityLevels { idle, ..PRESENT };
+        let no_history = STARTUP;
+        let irrelevant = Duration::ZERO;
+
+        assert!(display_is_proven_awake(
+            no_history,
+            irrelevant,
+            fresh(Duration::ZERO)
+        ));
+        assert!(display_is_proven_awake(
+            no_history,
+            irrelevant,
+            fresh(Duration::from_secs(59))
+        ));
+        // `pmset displaysleep 1` is the shortest blank macOS allows, so idle
+        // time at or past the floor can no longer rule display sleep out.
+        assert!(!display_is_proven_awake(
+            no_history,
+            irrelevant,
+            fresh(DISPLAY_SLEEP_IDLE_FLOOR)
+        ));
+        // #952's relaunches landed between ~1 and ~150 minutes into the blank.
+        assert!(!display_is_proven_awake(
+            no_history,
+            irrelevant,
+            fresh(Duration::from_mins(150))
+        ));
+        // An unreadable idle timer reads as "idle forever" — fail closed.
+        assert!(!display_is_proven_awake(
+            no_history,
+            irrelevant,
+            fresh(Duration::MAX)
+        ));
+    }
+
+    #[test]
+    fn a_display_that_reports_itself_asleep_is_never_proven_awake() {
+        let asleep = ActivityLevels {
+            displays_report_asleep: true,
+            ..PRESENT
+        };
+        assert!(!display_is_proven_awake(STARTUP, Duration::ZERO, asleep));
+        assert!(!display_is_proven_awake(
+            SCREEN_SLEEP,
+            Duration::from_secs(60),
+            asleep
+        ));
+        assert_eq!(discharged_by(STARTUP, Duration::ZERO, asleep), 0);
+    }
+
+    #[test]
+    fn nothing_is_discharged_while_another_user_owns_the_console() {
+        let elsewhere = ActivityLevels {
+            on_console: false,
+            ..PRESENT
+        };
+        for held in [STARTUP, SCREEN_SLEEP, SESSION_INACTIVE] {
+            assert_eq!(discharged_by(held, Duration::from_secs(60), elsewhere), 0);
+        }
+    }
+
+    #[test]
+    fn only_a_system_sleep_is_beyond_the_reach_of_a_level_read() {
+        assert!(!reconcilable(0), "an open gate has nothing to reconcile");
+        assert!(reconcilable(STARTUP));
+        assert!(reconcilable(SCREEN_SLEEP));
+        assert!(reconcilable(SESSION_INACTIVE));
+        assert!(reconcilable(SCREEN_SLEEP | SESSION_INACTIVE));
+        assert!(!reconcilable(SYSTEM_SLEEP));
+        assert!(!reconcilable(SYSTEM_SLEEP | SCREEN_SLEEP));
+        assert!(!reconcilable(SYSTEM_SLEEP | STARTUP));
+    }
+
+    #[test]
+    fn suspend_sources_render_every_bit_for_the_log() {
+        assert_eq!(Sources(0).to_string(), "none");
+        assert_eq!(Sources(SCREEN_SLEEP).to_string(), "screens-asleep");
+        assert_eq!(
+            Sources(SYSTEM_SLEEP | SESSION_INACTIVE | STARTUP).to_string(),
+            "system-sleep+session-inactive+startup",
+        );
     }
 }
