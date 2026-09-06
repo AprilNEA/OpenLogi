@@ -5,7 +5,9 @@
 use std::sync::Arc;
 
 use hidpp::channel::HidppChannel;
-use openlogi_core::device::{DeviceInventory, DeviceKind, PairedDevice, ReceiverInfo};
+use openlogi_core::device::{
+    DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports, PairedDevice, ReceiverInfo,
+};
 use tracing::debug;
 
 use super::{NodeProbe, PassContext, ProbeVerdict};
@@ -83,6 +85,43 @@ pub(super) async fn probe_direct(
     // empty probe and reject a real mouse as a receiver's secondary interface.
     // Settle it as a transient failure and keep the node's cache entry, so the
     // last-good inventory is replayed while the link recovers.
+    if info.product_id == 0x0af7 {
+        let inventory = DeviceInventory {
+            receiver: ReceiverInfo {
+                name: "PRO X 2 LIGHTSPEED Wireless Gaming Headset".to_string(),
+                vendor_id: info.vendor_id,
+                product_id: info.product_id,
+                unique_id: None,
+            },
+            paired: vec![PairedDevice {
+                slot: DIRECT_DEVICE_INDEX,
+                codename: Some("PRO X 2 LIGHTSPEED".to_string()),
+                wpid: None,
+                kind: DeviceKind::Headset,
+                online: true,
+                battery: probe.battery,
+                model_info: probe.model_info.or(Some(DeviceModelInfo {
+                    entity_count: 1,
+                    serial_number: None,
+                    unit_id: [0x0a, 0xf7, 0x00, 0x01],
+                    transports: DeviceTransports {
+                        usb: true,
+                        equad: false,
+                        btle: false,
+                        bluetooth: false,
+                    },
+                    model_ids: [0x0af7, 0, 0],
+                    extended_model_id: 0,
+                })),
+                capabilities,
+            }],
+        };
+        return NodeProbe {
+            inventory: Some(inventory),
+            verdict: ProbeVerdict::Healthy { complete: true },
+            outcomes: vec![outcome],
+        };
+    }
     if !walk_succeeded {
         debug!(
             vid = format_args!("{:04x}", info.vendor_id),

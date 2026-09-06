@@ -254,6 +254,44 @@ impl RawHidChannel for WindowsHidppChannel {
 
     async fn write_report(&self, src: &[u8]) -> Result<usize, Box<dyn Error + Send + Sync>> {
         self.device_io.ensure_allowed()?;
+
+        if self.info.product_id == 0x0af7 {
+            let mut frame = [0_u8; 64];
+            frame[0] = 0x51;
+            let payload = src.get(2..).unwrap_or_default();
+            let feature_index = payload.first().copied().unwrap_or_default();
+
+            if feature_index >= 4 {
+                let sub_function = payload.get(1).copied().unwrap_or_default();
+                let params = payload.get(2..).unwrap_or_default();
+                let sub_length = 3 + params.len();
+                let frame_length = 5 + sub_length;
+                frame[1] = u8::try_from(frame_length).expect("Centurion frame fits 64-byte report");
+                frame[3] = 0x03;
+                frame[4] = 0x1d;
+                frame[5] = u8::try_from(sub_length >> 8)
+                    .expect("Centurion sub-frame high byte fits u8")
+                    & 0x0f;
+                frame[6] = u8::try_from(sub_length & 0xff)
+                    .expect("Centurion sub-frame low byte fits u8");
+                frame[8] = feature_index;
+                frame[9] = sub_function;
+                frame[10..10 + params.len()].copy_from_slice(params);
+            } else {
+                frame[1] = u8::try_from(payload.len() + 1)
+                    .expect("Centurion direct frame fits 64-byte report");
+                frame[3..3 + payload.len()].copy_from_slice(payload);
+            }
+
+            let result = self.long.write_report(&frame).await;
+            if let Err(error) = &result
+                && is_permanent_disconnect(error.as_ref())
+            {
+                self.mark_disconnected();
+            }
+            return result.map(|_| src.len());
+        }
+
         let endpoint = match src.first().copied().and_then(endpoint_for_report_id) {
             Some(ReportEndpoint::Short) => self.short.as_ref(),
             Some(ReportEndpoint::Long) => Some(&self.long),
