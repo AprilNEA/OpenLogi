@@ -375,8 +375,10 @@ impl RawHidChannel for WindowsHidppChannel {
 
             if len >= 3 && cent_buf[0] == 0x51 {
                     let cpl_len = cent_buf[1] as usize;
-                    let payload_len = cpl_len.saturating_sub(1);
-                    let inner = &cent_buf[3..3 + payload_len.min(61)];
+                    // Bounded by both declared CPL length and actual read bytes len to prevent reading stale buffer
+                    let available_payload = len.saturating_sub(3);
+                    let payload_len = cpl_len.saturating_sub(1).min(available_payload).min(61);
+                    let inner = &cent_buf[3..3 + payload_len];
 
                     // Skip pure ACK frames from bridge: [bridge_idx = 3, func_sw = 0x1d, ...]
                     if inner.first() == Some(&0x03) && inner.get(1).map_or(false, |f| (f >> 4) == 0x01 && (f & 0x0F) != 0) {

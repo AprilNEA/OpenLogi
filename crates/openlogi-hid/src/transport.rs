@@ -541,6 +541,56 @@ impl RawHidChannel for AsyncHidChannel {
         if !self.device_io.allows_io() {
             return Err(device_io_error());
         }
+
+        // Special handling for Centurion headsets (e.g. PRO X 2 LIGHTSPEED, PID 0x0AF7):
+        // Translate HID++ messages into 64-byte Centurion CPL frames (Report ID 0x51).
+        if self.info.product_id == 0x0af7 {
+            let mut centurion_frame = [0u8; 64];
+            centurion_frame[0] = 0x51;
+            let payload = if src.len() > 2 { &src[2..] } else { &[] };
+            let feat_idx = payload.first().copied().unwrap_or(0);
+            if feat_idx >= 4 {
+                let sub_func_sw = payload.get(1).copied().unwrap_or(0);
+                let params = if payload.len() > 2 { &payload[2..] } else { &[] };
+                let sub_len = 3 + params.len();
+                let layer3_len = 2 + 2 + sub_len;
+                centurion_frame[1] = (layer3_len + 1).min(63) as u8;
+                centurion_frame[2] = 0x00;
+                centurion_frame[3] = 0x03; // bridge_idx = 3
+                centurion_frame[4] = 0x1d; // sendFragment
+                centurion_frame[5] = ((sub_len >> 8) & 0x0F) as u8;
+                centurion_frame[6] = (sub_len & 0xFF) as u8;
+                centurion_frame[7] = 0x00;
+                centurion_frame[8] = feat_idx;
+                centurion_frame[9] = sub_func_sw;
+                if !params.is_empty() {
+                    let copy_len = params.len().min(50);
+                    centurion_frame[10..10 + copy_len].copy_from_slice(&params[..copy_len]);
+                }
+            } else {
+                centurion_frame[1] = (payload.len() + 1).min(63) as u8;
+                centurion_frame[2] = 0x00;
+                if !payload.is_empty() {
+                    let copy_len = payload.len().min(61);
+                    centurion_frame[3..3 + copy_len].copy_from_slice(&payload[..copy_len]);
+                }
+            }
+
+            let mut w = self.writer.lock().await;
+            if !self.device_io.allows_io() {
+                return Err(device_io_error());
+            }
+            return match w.write_output_report(&centurion_frame).await {
+                Ok(()) => Ok(src.len()),
+                Err(e) => {
+                    if matches!(e, async_hid::HidError::Disconnected) {
+                        self.mark_disconnected();
+                    }
+                    Err(e.into())
+                }
+            };
+        }
+
         let mut w = self.writer.lock().await;
         if !self.device_io.allows_io() {
             return Err(device_io_error());
@@ -557,6 +607,52 @@ impl RawHidChannel for AsyncHidChannel {
     }
 
     async fn read_report(&self, buf: &mut [u8]) -> Result<usize, Box<dyn Error + Send + Sync>> {
+        if self.info.product_id == 0x0af7 {
+            let mut cent_buf = [0u8; 64];
+            loop {
+                let result = {
+                    let mut r = self.reader.lock().await;
+                    r.read_input_report(&mut cent_buf).await
+                };
+                let len = match result {
+                    Ok(n) => n,
+                    Err(async_hid::HidError::Disconnected) => {
+                        self.mark_disconnected();
+                        std::future::pending().await
+                    }
+                    Err(e) => return Err(e.into()),
+                };
+
+                if len >= 3 && cent_buf[0] == 0x51 {
+                    let cpl_len = cent_buf[1] as usize;
+                    let available_payload = len.saturating_sub(3);
+                    let payload_len = cpl_len.saturating_sub(1).min(available_payload).min(61);
+                    let inner = &cent_buf[3..3 + payload_len];
+
+                    // Skip pure ACK frames from bridge
+                    if inner.first() == Some(&0x03) && inner.get(1).map_or(false, |f| (f >> 4) == 0x01 && (f & 0x0F) != 0) {
+                        continue;
+                    }
+
+                    // Check if this is a bridge MessageEvent response
+                    let sub_inner = if inner.len() >= 7 && inner[0] == 0x03 && (inner[1] & 0xF0) == 0x10 {
+                        &inner[5..]
+                    } else {
+                        inner
+                    };
+
+                    buf[0] = hidpp::channel::LONG_REPORT_ID;
+                    buf[1] = 0xff;
+                    let copy_len = sub_inner.len().min(buf.len().saturating_sub(2));
+                    buf[2..2 + copy_len].copy_from_slice(&sub_inner[..copy_len]);
+                    if buf.len() > 2 + copy_len {
+                        buf[2 + copy_len..].fill(0);
+                    }
+                    return Ok(20);
+                }
+            }
+        }
+
         let result = {
             let mut r = self.reader.lock().await;
             r.read_input_report(buf).await
