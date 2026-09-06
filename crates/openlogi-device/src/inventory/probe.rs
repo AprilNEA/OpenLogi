@@ -28,6 +28,7 @@ use super::events::EventSubscriptionHandle;
 use super::mappings::{map_kind, map_unifying_kind, resolve_device_kind};
 use crate::backend::NodeInfo;
 use crate::channel::route::DIRECT_DEVICE_INDEX;
+use crate::host_lock;
 
 use super::cache::{CacheKey, CacheOutcome, Cached, is_stale, probe_or_reuse, seen};
 use super::features::ProbedFeatures;
@@ -36,6 +37,29 @@ use super::{
     UNIFYING_CACHED_SLOT_PROBE, UNIFYING_SLOT_PROBE, UNIFYING_TRIGGER_ATTEMPT_TIMEOUT,
     UNIFYING_TRIGGER_RETRY_DELAY,
 };
+
+/// How long a receiver probe waits for another OpenLogi process to finish its
+/// register phase on the same node before proceeding unlocked. A full phase —
+/// the 1.5 s arrival drain plus six slot reads — takes about 2 s; past this the
+/// holder is presumed stuck and probing unlocked is the pre-lock behaviour.
+const RECEIVER_REGISTER_LOCK_WAIT: Duration = Duration::from_secs(5);
+
+/// Serialise a receiver's register phase across OpenLogi processes.
+///
+/// HID++ 1.0 register replies carry no software id, and an empty-slot error
+/// reply carries no sub-register either, so a second process probing the same
+/// receiver at the same time takes this probe's replies — most visibly its
+/// empty-slot errors, which turn the one paired slot into "unreadable". Both
+/// probes then fail, and the agent retires a channel that was fine. The lock
+/// is held for the register phase only; the feature walks that follow address
+/// each device by index under this process's own software id.
+async fn lock_receiver_registers(info: &NodeInfo) -> Option<host_lock::HostLock> {
+    host_lock::lock_within(
+        &host_lock::node_lock_name(&info.id),
+        RECEIVER_REGISTER_LOCK_WAIT,
+    )
+    .await
+}
 
 /// One node probe's verdict about its own trustworthiness. Three-valued on
 /// purpose: the old `healthy`/`complete` bool pair could also express
@@ -166,6 +190,7 @@ async fn probe_bolt_receiver(
     arrival_drain: Duration,
     subscriptions: Option<&EventSubscriptionHandle>,
 ) -> NodeProbe {
+    let register_phase = lock_receiver_registers(&info).await;
     let unique_id = bolt.get_unique_id().await.ok();
     let pairing_count = bolt.count_pairings().await.ok();
     debug!(?pairing_count, "receiver reports pairing count");
@@ -189,6 +214,7 @@ async fn probe_bolt_receiver(
             identities.push(identity);
         }
     }
+    drop(register_phase);
 
     // Phase 2 — walk each occupied slot's feature table concurrently. Every walk
     // addresses its own device index, so responses route by index (no
@@ -262,6 +288,7 @@ async fn probe_unifying_receiver(
     // it first and stop immediately on failure instead of spending two more
     // request timeouts enabling notifications and triggering arrivals on a
     // channel that has already stopped delivering receiver replies.
+    let register_phase = lock_receiver_registers(&info).await;
     let pairing_count = match timeout(RECEIVER_OPERATION_TIMEOUT, unifying.count_pairings()).await {
         Ok(Ok(count)) => count,
         Ok(Err(error)) => {
@@ -301,6 +328,7 @@ async fn probe_unifying_receiver(
         return NodeProbe::arrival_replay_failed();
     };
     debug!(events = connections.len(), "drained device-arrival events");
+    drop(register_phase);
 
     // The receiver can re-broadcast the same 0x41 for a slot more than once per
     // trigger, so keep one connection per slot — otherwise the device is listed
