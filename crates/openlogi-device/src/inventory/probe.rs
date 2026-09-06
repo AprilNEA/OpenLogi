@@ -924,7 +924,7 @@ pub(super) fn assemble_unifying_device(
 /// receiver, so it reads even while the device is offline (e.g. moved to BT).
 async fn read_codename_unifying(channel: &HidppChannel, slot: u8) -> Option<String> {
     let response = channel
-        .read_long_register(0xFF, 0xB5, [0x40 + slot - 1, 0x00, 0x00])
+        .read_long_sub_register(0xFF, 0xB5, 0x40 + slot - 1, [0x00, 0x00])
         .await
         .ok()?;
     parse_codename_unifying(&response)
@@ -951,7 +951,7 @@ async fn read_codename(channel: &HidppChannel, slot: u8) -> Option<String> {
     // 0xFF = receiver device index, 0xB5 = ReceiverInfo register,
     // 0x60+slot = DeviceCodename sub-register, 0x01 = first chunk.
     let response = channel
-        .read_long_register(0xFF, 0xB5, [0x60 + slot, 0x01, 0x00])
+        .read_long_sub_register(0xFF, 0xB5, 0x60 + slot, [0x01, 0x00])
         .await
         .ok()?;
     let len = usize::from(response[2]).min(13);

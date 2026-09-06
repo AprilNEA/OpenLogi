@@ -104,14 +104,33 @@ impl From<Message> for HidppMessage {
     }
 }
 
-fn is_rap_response(device: u8, msg_type: MessageType, address: u8, msg: &HidppMessage) -> bool {
+/// Whether `msg` answers the RAP request `(device, msg_type, address)`.
+///
+/// `echo` narrows the match to replies whose first data byte repeats that
+/// value. Sub-register reads need it: every slot of the receiver's `0xB5`
+/// register is asked through the same `(device, sub id, address)` header and
+/// differs only in the sub-register byte, which the receiver repeats as the
+/// first byte of its reply. Without the check, one slot's read is satisfied by
+/// any other slot's reply — including one requested by another process sharing
+/// the node, which is how a phantom "slot 3" appeared in inventories whenever
+/// two OpenLogi processes probed a Bolt receiver at once. Error replies carry
+/// no data byte and are matched on the header alone.
+fn is_rap_response(
+    device: u8,
+    msg_type: MessageType,
+    address: u8,
+    echo: Option<u8>,
+    msg: &HidppMessage,
+) -> bool {
     let raw: [u8; 4] = match msg {
         HidppMessage::Short(d) => [d[0], d[1], d[2], d[3]],
         HidppMessage::Long(d) => [d[0], d[1], d[2], d[3]],
     };
 
     raw[0] == device
-        && ((raw[1] == msg_type.into() && raw[2] == address)
+        && ((raw[1] == msg_type.into()
+            && raw[2] == address
+            && echo.is_none_or(|echo| raw[3] == echo))
             || (raw[1] == MessageType::Error.into()
                 && raw[2] == msg_type.into()
                 && raw[3] == address))
@@ -138,7 +157,7 @@ impl HidppChannel {
                     data,
                 )
                 .into(),
-                move |raw| is_rap_response(device, MessageType::GetRegister, address, raw),
+                move |raw| is_rap_response(device, MessageType::GetRegister, address, None, raw),
             )
             .await?,
         );
@@ -176,7 +195,7 @@ impl HidppChannel {
                     data,
                 )
                 .into(),
-                move |raw| is_rap_response(device, MessageType::SetRegister, address, raw),
+                move |raw| is_rap_response(device, MessageType::SetRegister, address, None, raw),
             )
             .await?,
         );
@@ -198,6 +217,41 @@ impl HidppChannel {
         address: u8,
         parameters: [u8; 3],
     ) -> Result<[u8; 16], Hidpp10Error> {
+        self.read_long_register_matching(device, address, parameters, None)
+            .await
+    }
+
+    /// Reads one sub-register of a long register using HID++1.0/RAP.
+    ///
+    /// `sub_register` goes out as the first parameter, and only a reply that
+    /// repeats it as its first data byte is accepted. The receiver's
+    /// pairing-information register (`0xB5`) keys every paired slot through
+    /// one address, so the header alone cannot tell the slots' replies apart —
+    /// see [`is_rap_response`]. The returned data starts with the echoed byte,
+    /// the same layout [`Self::read_long_register`] returns.
+    pub async fn read_long_sub_register(
+        &self,
+        device: u8,
+        address: u8,
+        sub_register: u8,
+        parameters: [u8; 2],
+    ) -> Result<[u8; 16], Hidpp10Error> {
+        self.read_long_register_matching(
+            device,
+            address,
+            [sub_register, parameters[0], parameters[1]],
+            Some(sub_register),
+        )
+        .await
+    }
+
+    async fn read_long_register_matching(
+        &self,
+        device: u8,
+        address: u8,
+        parameters: [u8; 3],
+        echo: Option<u8>,
+    ) -> Result<[u8; 16], Hidpp10Error> {
         let mut data = [address, 0x00, 0x00, 0x00];
         data[1..].copy_from_slice(&parameters);
 
@@ -211,7 +265,9 @@ impl HidppChannel {
                     data,
                 )
                 .into(),
-                move |raw| is_rap_response(device, MessageType::GetLongRegister, address, raw),
+                move |raw| {
+                    is_rap_response(device, MessageType::GetLongRegister, address, echo, raw)
+                },
             )
             .await?,
         );
@@ -250,7 +306,9 @@ impl HidppChannel {
                     data,
                 )
                 .into(),
-                move |raw| is_rap_response(device, MessageType::SetLongRegister, address, raw),
+                move |raw| {
+                    is_rap_response(device, MessageType::SetLongRegister, address, None, raw)
+                },
             )
             .await?,
         );
@@ -371,4 +429,65 @@ pub enum Hidpp10Error {
     /// Indicates that a received response is not fully supported.
     #[error("the received response from the device is (partly) unsupported")]
     UnsupportedResponse,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use futures::join;
+
+    use super::MessageType;
+    use crate::channel::{
+        HidppMessage,
+        tests::{MockRawHidChannel, channel_with_reader},
+    };
+
+    /// A long RAP reply from the receiver for register `address` whose first
+    /// data byte is `first` — the sub-register echo for `0xB5` reads.
+    fn long_register_reply(address: u8, first: u8) -> HidppMessage {
+        let mut data = [0u8; 19];
+        data[0] = 0xff;
+        data[1] = MessageType::GetLongRegister.into();
+        data[2] = address;
+        data[3] = first;
+        data[4] = 0xaa;
+        HidppMessage::Long(data)
+    }
+
+    #[test]
+    fn sub_register_read_ignores_another_sub_registers_reply() {
+        futures::executor::block_on(async {
+            let (raw, handle) = MockRawHidChannel::new();
+            let channel = Arc::new(channel_with_reader(raw).await);
+            // Arrives on the request's write: slot 3's pairing information,
+            // as a second reader of the same node produces while this read is
+            // pending. Matching on the header alone would accept it.
+            handle.queue_response(long_register_reply(0xb5, 0x53));
+
+            let read = channel.read_long_sub_register(0xff, 0xb5, 0x52, [0, 0]);
+            let inject = handle.send_incoming(long_register_reply(0xb5, 0x52));
+            let (result, ()) = join!(read, inject);
+
+            let data = result.expect("the reply echoing the sub-register answers the read");
+            assert_eq!(data[0], 0x52, "slot 2's read must not take slot 3's reply");
+        });
+    }
+
+    #[test]
+    fn plain_register_read_matches_on_the_header_alone() {
+        futures::executor::block_on(async {
+            let (raw, handle) = MockRawHidChannel::new();
+            let channel = Arc::new(channel_with_reader(raw).await);
+            // Registers without a sub-register carry data in the first byte, so
+            // the plain read must keep accepting whatever that byte holds.
+            handle.queue_response(long_register_reply(0x02, 0x00));
+
+            let data = channel
+                .read_long_register(0xff, 0x02, [0, 0, 0])
+                .await
+                .expect("a header match answers a plain register read");
+            assert_eq!(data[0], 0x00);
+        });
+    }
 }
