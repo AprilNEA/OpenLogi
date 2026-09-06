@@ -15,7 +15,7 @@
 
 #![expect(
     unsafe_code,
-    reason = "objc2 calls: super-init, action targets, selector-based workspace notifications, and the CoreGraphics display-list read"
+    reason = "objc2 calls: super-init, action targets, selector-based workspace notifications, the CoreGraphics display-list read, and the IOKit registry read of the system capability set"
 )]
 
 use std::cell::RefCell;
@@ -39,12 +39,16 @@ use objc2_app_kit::{
     NSWorkspaceSessionDidBecomeActiveNotification, NSWorkspaceSessionDidResignActiveNotification,
     NSWorkspaceWillSleepNotification,
 };
-use objc2_core_foundation::{CFBoolean, CFString, CFType};
+use objc2_core_foundation::{CFBoolean, CFNumber, CFRetained, CFString, CFType};
 use objc2_core_graphics::{
     CGDirectDisplayID, CGDisplayIsAsleep, CGError, CGEventSource, CGEventSourceStateID,
     CGEventType, CGGetActiveDisplayList, CGSessionCopyCurrentDictionary,
 };
 use objc2_foundation::{NSNotification, NSString};
+use objc2_io_kit::{
+    IOObjectRelease, IORegistryEntryCreateCFProperty, IOServiceGetMatchingService,
+    IOServiceMatching, kIOMainPortDefault, kIOPMSystemCapabilityGraphics,
+};
 use openlogi_core::brand::{self, DeeplinkCommand};
 use openlogi_core::config::AppIcon;
 use openlogi_hid::DeviceIoSignal;
@@ -210,6 +214,25 @@ const fn reconcilable(held: u8) -> bool {
     held != 0 && held & SYSTEM_SLEEP == 0
 }
 
+/// What power management's system capability set says about graphics.
+///
+/// The system runs code in three states, and only one of them can be showing
+/// the user anything: full wake, a DarkWake (the CPU is up, the panels are
+/// not), and sleep. The window-server levels below cannot tell the first two
+/// apart — see [`system_graphics`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SystemGraphics {
+    /// The capability set carries `kIOPMSystemCapabilityGraphics`: this is a
+    /// full wake, so the other levels are worth reading.
+    Up,
+    /// The capability set was read and the graphics bit is clear: a DarkWake.
+    /// Nothing is on screen, whatever else the levels say.
+    Down,
+    /// The property could not be read, so it proves nothing either way and
+    /// must not be allowed to hold the gate closed on its own.
+    Unknown,
+}
+
 /// One reading of every level the owner can check its notification bookkeeping
 /// against. Taken as a value so the decision below is pure and testable
 /// without a display.
@@ -222,6 +245,8 @@ struct ActivityLevels {
     /// `CGDisplayIsAsleep` across the active display list — trustworthy only
     /// when it says *asleep*. See [`displays_report_asleep`].
     displays_report_asleep: bool,
+    /// Whether the system as a whole has graphics. See [`system_graphics`].
+    graphics: SystemGraphics,
     /// How long the HID system has been idle.
     idle: Duration,
 }
@@ -235,6 +260,16 @@ fn discharged_by(held: u8, held_for: Duration, levels: ActivityLevels) -> u8 {
         // Another user owns the console. Nothing resumes into their session —
         // which is also what keeps this from fighting the input hook that
         // follows the same gate.
+        return 0;
+    }
+    if levels.graphics == SystemGraphics::Down {
+        // A DarkWake: the machine is running with the panels off, so *nothing*
+        // is visible and no level below can prove otherwise. The console level
+        // still reads true, the idle timer still counts from whatever the user
+        // did before the lid shut, and — after a lid-close display
+        // reconfiguration — `CGDisplayIsAsleep` reports the re-enumerated
+        // display awake. This is the necessary condition all three of those
+        // are missing.
         return 0;
     }
     // The console level is direct proof, so it discharges the session source on
@@ -504,6 +539,7 @@ impl ActivitySources {
             if missed != 0 {
                 warn!(
                     cleared = %Sources(missed),
+                    graphics = ?levels.graphics,
                     idle_secs = levels.idle.as_secs_f64(),
                     "the display/session levels disagreed with the last notification — a wake notification never arrived; reconciled"
                 );
@@ -514,13 +550,65 @@ impl ActivitySources {
 
 /// Read every level once.
 ///
-/// Window-server state only: no HID, no Bluetooth, nothing that could promote a
-/// maintenance DarkWake into a full display wake (#656).
+/// Window-server state and one IORegistry property: no HID, no Bluetooth,
+/// nothing that could promote a maintenance DarkWake into a full display wake
+/// (#656).
 fn read_levels() -> ActivityLevels {
     ActivityLevels {
         on_console: session_is_on_console(),
         displays_report_asleep: displays_report_asleep(),
+        graphics: system_graphics(),
         idle: seconds_since_last_input(),
+    }
+}
+
+/// Whether the system is running with graphics, read from `IOPMrootDomain`'s
+/// `System Capabilities` property.
+///
+/// The bit values are public — `<IOKit/pwr_mgt/IOPM.h>` declares
+/// `kIOPMSystemCapabilityCPU/Graphics/Audio/Network`, and `objc2-io-kit`
+/// generates them — but the registry key that carries the current set is not
+/// in any SDK header. This is nonetheless an ordinary IORegistry read
+/// (`IOServiceGetMatchingService` + `IORegistryEntryCreateCFProperty`, the same
+/// pair `ioreg` uses), not a private SPI call, and it needs no entitlement.
+/// A missing or unreadable key is therefore [`SystemGraphics::Unknown`] rather
+/// than a hard "no": a macOS that renames it must degrade to the levels this
+/// call supplements, never wedge the gate shut.
+///
+/// It is the only reading that separates a DarkWake from a full wake. `pmset`'s
+/// own log draws the same line — a `DarkWake` line carries `[CDNP]` where a
+/// `FullWake` carries `[CDNVA]`, the `V` being video.
+fn system_graphics() -> SystemGraphics {
+    // SAFETY: the class name is a NUL-terminated C string literal; the
+    // dictionary comes back owned, and `IOServiceGetMatchingService` consumes
+    // exactly the one reference passed to it.
+    let Some(matching) = (unsafe { IOServiceMatching(c"IOPMrootDomain".as_ptr()) }) else {
+        return SystemGraphics::Unknown;
+    };
+    // SAFETY: `CFMutableDictionary` is a `CFDictionary` subclass, which is the
+    // type IOKit's matching API is declared against.
+    let matching = unsafe { CFRetained::cast_unchecked(matching) };
+    // SAFETY: `kIOMainPortDefault` is IOKit's process-lifetime default port
+    // constant.
+    let root = unsafe { IOServiceGetMatchingService(kIOMainPortDefault, Some(matching)) };
+    if root == 0 {
+        return SystemGraphics::Unknown;
+    }
+    let key = CFString::from_static_str("System Capabilities");
+    // SAFETY: `root` is a live registry entry handle, the key is a CFString,
+    // and the default allocator with no options is what the API documents.
+    let value = unsafe { IORegistryEntryCreateCFProperty(root, Some(&key), None, 0) }
+        .and_then(|value| value.downcast_ref::<CFNumber>().and_then(CFNumber::as_i64));
+    IOObjectRelease(root);
+    match value {
+        Some(capabilities) => {
+            if capabilities & i64::from(kIOPMSystemCapabilityGraphics) == 0 {
+                SystemGraphics::Down
+            } else {
+                SystemGraphics::Up
+            }
+        }
+        None => SystemGraphics::Unknown,
     }
 }
 
@@ -549,14 +637,17 @@ fn session_is_on_console() -> bool {
 /// Whether every display this session drives reports itself asleep.
 ///
 /// `CGDisplayIsAsleep` (`<CoreGraphics/CGDisplayConfiguration.h>`: "true if the
-/// display is asleep (and is therefore not drawable)") has **false negatives**
-/// on this hardware: on a clamshell Mac whose only online display is external
-/// it answered `false` for the whole of a 2.5 h blank, while
-/// `NSWorkspaceScreensDidSleep` reported the transition correctly (#952).
-/// Widening the read past `CGMainDisplayID` does not fix that — with the lid
-/// shut the external panel is both the main and the only online display — and
-/// there is nothing to read instead: on Apple Silicon `IODisplayWrangler`
-/// carries no `IOPowerManagement` dictionary.
+/// display is asleep (and is therefore not drawable)") is right about an
+/// ordinary idle blank — a display that times out leaves the active list and
+/// reports `true`. What it misses is a display **reconfiguration**: closing the
+/// lid re-enumerates the external panel under a fresh `CGDirectDisplayID`, and
+/// that new id reported `false` through every DarkWake of a 2.5 h clamshell
+/// blank while `NSWorkspaceScreensDidSleep` had reported the transition
+/// correctly (#952). Widening the read past `CGMainDisplayID` does not fix that
+/// — with the lid shut the external panel is both the main and the only online
+/// display — and there is nothing to read instead: on Apple Silicon
+/// `IODisplayWrangler` carries no `IOPowerManagement` dictionary. That case is
+/// what [`system_graphics`] covers.
 ///
 /// So this is used in one direction only, as a fast definite "the user can see
 /// nothing". An empty list (headless, or screen-shared) and a failed query both
@@ -731,8 +822,12 @@ pub fn run_app_loop(
     // still holds the hardware gate closed, then try to prove the display is on
     // before permitting the core's initial inventory scan.
     app.finishLaunching();
-    if activity_target.finish_startup(read_levels()) == StartupDisplay::Unproven {
+    let levels = read_levels();
+    if activity_target.finish_startup(levels) == StartupDisplay::Unproven {
         info!(
+            graphics = ?levels.graphics,
+            displays_report_asleep = levels.displays_report_asleep,
+            idle_secs = levels.idle.as_secs_f64(),
             "display state unproven at launch — device I/O stays paused until input or a screen wake proves it"
         );
     }
@@ -910,6 +1005,7 @@ mod tests {
     const PRESENT: ActivityLevels = ActivityLevels {
         on_console: true,
         displays_report_asleep: false,
+        graphics: SystemGraphics::Up,
         idle: Duration::from_millis(200),
     };
 
@@ -918,6 +1014,7 @@ mod tests {
     const IDLE: ActivityLevels = ActivityLevels {
         on_console: true,
         displays_report_asleep: false,
+        graphics: SystemGraphics::Up,
         idle: Duration::from_mins(30),
     };
 
@@ -1218,6 +1315,67 @@ mod tests {
         assert_eq!(discharged_by(STARTUP, Duration::ZERO, asleep), 0);
     }
 
+    /// The hole the levels above cannot see: a lid close puts the machine into
+    /// a DarkWake seconds after the user was last at it, and the agent that
+    /// relaunches there reads every window-server level as "the user is here" —
+    /// on console, no display reporting itself asleep (the external panel
+    /// re-enumerates under a fresh id and reports awake), and input well inside
+    /// the idle floor. Only the capability set says otherwise.
+    #[test]
+    fn a_darkwake_proves_nothing_however_present_every_other_level_looks() {
+        let darkwake = ActivityLevels {
+            graphics: SystemGraphics::Down,
+            idle: Duration::from_secs(27),
+            ..PRESENT
+        };
+        assert!(darkwake.idle < DISPLAY_SLEEP_IDLE_FLOOR);
+
+        for held in [
+            STARTUP,
+            SCREEN_SLEEP,
+            SESSION_INACTIVE,
+            STARTUP | SCREEN_SLEEP,
+        ] {
+            assert_eq!(
+                discharged_by(held, Duration::from_secs(2), darkwake),
+                0,
+                "a DarkWake must discharge nothing",
+            );
+        }
+
+        // The same launch in a full wake is the case the idle floor is for.
+        let full_wake = ActivityLevels {
+            graphics: SystemGraphics::Up,
+            ..darkwake
+        };
+        assert_eq!(
+            discharged_by(STARTUP, Duration::from_secs(2), full_wake),
+            STARTUP,
+        );
+    }
+
+    /// An unreadable capability set is not evidence of a DarkWake. If a future
+    /// macOS drops the key, the gate has to keep working off the levels that
+    /// remain rather than latching shut for the process's lifetime.
+    #[test]
+    fn an_unreadable_capability_set_neither_proves_nor_blocks_anything() {
+        let unknown = |levels: ActivityLevels| ActivityLevels {
+            graphics: SystemGraphics::Unknown,
+            ..levels
+        };
+
+        assert_eq!(
+            discharged_by(STARTUP, Duration::from_secs(2), unknown(PRESENT)),
+            STARTUP,
+            "recent input must still prove a launch display",
+        );
+        assert_eq!(
+            discharged_by(STARTUP, Duration::from_secs(2), unknown(IDLE)),
+            0,
+            "and a long-idle launch must still prove nothing",
+        );
+    }
+
     #[test]
     fn nothing_is_discharged_while_another_user_owns_the_console() {
         let elsewhere = ActivityLevels {
@@ -1227,6 +1385,27 @@ mod tests {
         for held in [STARTUP, SCREEN_SLEEP, SESSION_INACTIVE] {
             assert_eq!(discharged_by(held, Duration::from_secs(60), elsewhere), 0);
         }
+    }
+
+    /// The startup path is the one that opened the gate 43 times in a lid-close
+    /// relaunch loop, so pin it at the entry point rather than only at
+    /// [`discharged_by`].
+    #[test]
+    fn a_launch_into_a_darkwake_keeps_the_startup_hold() {
+        let (signal, gate) = device_io_channel();
+        let target = ActivityTarget::new(signal);
+        let darkwake = ActivityLevels {
+            graphics: SystemGraphics::Down,
+            idle: Duration::from_secs(27),
+            ..PRESENT
+        };
+
+        assert_eq!(target.finish_startup(darkwake), StartupDisplay::Unproven);
+        assert!(!gate.allows_io());
+
+        // The full wake that follows is what lifts it.
+        target.sources().discharge(PRESENT);
+        assert!(gate.allows_io());
     }
 
     #[test]

@@ -54,6 +54,7 @@ objc2-app-kit = { workspace = true, features = ["NSStatusBar", "NSStatusItem", "
 objc2-core-foundation = { workspace = true, features = ["CFDictionary", "CFNumber", "CFString"] }
 objc2-core-graphics = { workspace = true, features = ["CGDirectDisplay", "CGDisplayConfiguration", "CGError", "CGEventSource", "CGEventTypes", "CGSession", "libc"] }
 objc2-foundation = { workspace = true, features = ["NSString", "NSData", "NSArray", "NSNotification"] }
+objc2-io-kit = { workspace = true, features = ["std", "libc", "pwr_mgt"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = "5"

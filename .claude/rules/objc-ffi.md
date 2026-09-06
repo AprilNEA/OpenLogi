@@ -23,7 +23,7 @@ files; **keep this table in sync when you add or move one**:
 | File | What it carries |
 |---|---|
 | `openlogi-agent/src/status_item.rs` | safe `objc2` wrappers over `NSStatusItem` / `NSMenu` / `NSMenuItem` |
-| `openlogi-agent/src/tray.rs` | the menu-bar semantics, `MenuTarget` + `ActivityTarget` (`define_class!`), the Accessory `NSApplication` loop, the `NSWorkspace` display/session notifications, and the CoreGraphics levels that prove them back — `CGSessionCopyCurrentDictionary`, `CGGetActiveDisplayList` / `CGDisplayIsAsleep`, and `CGEventSourceSecondsSinceLastEventType` |
+| `openlogi-agent/src/tray.rs` | the menu-bar semantics, `MenuTarget` + `ActivityTarget` (`define_class!`), the Accessory `NSApplication` loop, the `NSWorkspace` display/session notifications, and the levels that prove them back — `CGSessionCopyCurrentDictionary`, `CGGetActiveDisplayList` / `CGDisplayIsAsleep`, `CGEventSourceSecondsSinceLastEventType`, and the `IOPMrootDomain` capability read (`IOServiceMatching` / `IOServiceGetMatchingService` / `IORegistryEntryCreateCFProperty`) that tells a DarkWake from a full wake |
 | `openlogi-agent-core/src/watchers/camera.rs` | the CoreMediaIO "camera is running" property read |
 | `openlogi-camera/src/capture.rs` | `AVCaptureSession` capture + the `define_class!` frame delegate, and the Camera TCC prompt |
 | `openlogi-camera/src/macos.rs` | `AVCaptureDevice` enumeration (`class!` + `msg_send!`) |
@@ -219,8 +219,15 @@ under a `SAFETY` comment. Where it currently lives on macOS:
   `setTarget:` (raw selector; the target is a *weak* reference, which is why the
   tray keeps `MenuTarget` alive for the app's lifetime).
 - `agent/tray.rs` — `msg_send![super(this), init]`, the notification-center
-  `addObserver:selector:name:object:`, and the `NSWorkspace*Notification` name
-  statics.
+  `addObserver:selector:name:object:`, the `NSWorkspace*Notification` name
+  statics, the `CGGetActiveDisplayList` out-parameter and the
+  `CGSessionCopyCurrentDictionary` key cast, and the IOKit registry read
+  (`kIOMainPortDefault` is an extern static, and the matching/property calls
+  are `unsafe fn`s because their pointer arguments are untyped). The
+  `kIOPMSystemCapability*` bit values are generated constants from
+  `objc2-io-kit`, not hand-written discriminants; only the registry *key*
+  (`"System Capabilities"`) is undocumented, which is why an unreadable
+  property is modelled as a third state rather than a `false`.
 - `hook/macos.rs` — the whole tap (Core Graphics / Core Foundation C APIs),
   the `NSWorkspace` activation-observer registration and typed notification
   payload, `AXIsProcessTrusted[WithOptions]` and the two extern statics they

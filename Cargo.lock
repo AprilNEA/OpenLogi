@@ -5392,6 +5392,7 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-core-graphics",
  "objc2-foundation 0.3.2",
+ "objc2-io-kit",
  "opener",
  "openlogi-agent-core",
  "openlogi-core",
