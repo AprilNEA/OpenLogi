@@ -35,10 +35,18 @@ use super::{
 };
 
 /// How long a receiver probe waits for another OpenLogi process to finish its
-/// register phase on the same node before proceeding unlocked. A full phase —
-/// the 1.5 s arrival drain plus six slot reads — takes about 2 s; past this the
-/// holder is presumed stuck and probing unlocked is the pre-lock behaviour.
+/// register phase on the same node. A full phase — the 1.5 s arrival drain
+/// plus six slot reads — takes about 2 s; a holder still going past this is
+/// failing its own probe, one request timeout at a time, and this probe
+/// defers to it rather than joining it unlocked (see
+/// [`lock_receiver_registers`]).
 const RECEIVER_REGISTER_LOCK_WAIT: Duration = Duration::from_secs(5);
+
+/// Holds a receiver's register phase for this process — or nothing, when the
+/// host cannot arbitrate the phase at all.
+struct RegisterPhase {
+    _lock: Option<host_lock::HostLock>,
+}
 
 /// Serialise a receiver's register phase across OpenLogi processes.
 ///
@@ -49,12 +57,30 @@ const RECEIVER_REGISTER_LOCK_WAIT: Duration = Duration::from_secs(5);
 /// probes then fail, and the agent retires a channel that was fine. The lock
 /// is held for the register phase only; the feature walks that follow address
 /// each device by index under this process's own software id.
-async fn lock_receiver_registers(info: &NodeInfo) -> Option<host_lock::HostLock> {
-    host_lock::lock_within(
+///
+/// `None` when another process still holds the phase after
+/// [`RECEIVER_REGISTER_LOCK_WAIT`]: the caller settles a failed probe —
+/// "couldn't check" — and the ledger replays its last snapshot and retries
+/// next tick. Proceeding unlocked instead would restore the very race the lock
+/// exists for. The lock directory being unusable is different: nothing can
+/// arbitrate, so the phase runs as it did before locks existed.
+async fn lock_receiver_registers(info: &NodeInfo) -> Option<RegisterPhase> {
+    match host_lock::lock_within(
         &host_lock::node_lock_name(&info.id),
         RECEIVER_REGISTER_LOCK_WAIT,
     )
     .await
+    {
+        Ok(Some(lock)) => Some(RegisterPhase { _lock: Some(lock) }),
+        Ok(None) => {
+            debug!(
+                node = %info.id,
+                "another OpenLogi process still holds this receiver's register phase — deferring the probe"
+            );
+            None
+        }
+        Err(_) => Some(RegisterPhase { _lock: None }),
+    }
 }
 
 /// One node probe's verdict about its own trustworthiness. Three-valued on
@@ -109,7 +135,8 @@ pub(super) struct NodeProbe {
 }
 
 impl NodeProbe {
-    /// A probe that got no answer at all (budget timeout).
+    /// A probe that got no answer at all (budget timeout), or that deferred to
+    /// another process's register phase on the same receiver.
     pub(super) fn failed() -> Self {
         Self {
             inventory: None,
@@ -152,7 +179,9 @@ async fn probe_bolt_receiver(
     now: Instant,
     subscriptions: Option<&EventSubscriptionHandle>,
 ) -> NodeProbe {
-    let register_phase = lock_receiver_registers(&info).await;
+    let Some(register_phase) = lock_receiver_registers(&info).await else {
+        return NodeProbe::failed();
+    };
     let unique_id = bolt.get_unique_id().await.ok();
     let pairing_count = bolt.count_pairings().await.ok();
     debug!(?pairing_count, "receiver reports pairing count");
@@ -249,7 +278,9 @@ async fn probe_unifying_receiver(
     // it first and stop immediately on failure instead of spending two more
     // request timeouts enabling notifications and triggering arrivals on a
     // channel that has already stopped delivering receiver replies.
-    let register_phase = lock_receiver_registers(&info).await;
+    let Some(register_phase) = lock_receiver_registers(&info).await else {
+        return NodeProbe::failed();
+    };
     let pairing_count = match unifying.count_pairings().await {
         Ok(count) => count,
         Err(error) => {

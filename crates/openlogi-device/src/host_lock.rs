@@ -74,27 +74,25 @@ pub fn try_lock(name: &str) -> io::Result<Option<HostLock>> {
 
 /// Take the exclusive lock `name`, re-trying for at most `budget`.
 ///
-/// `None` when the lock stayed held past the budget or the directory is
-/// unusable. Bounded on purpose: a caller that cannot get the lock proceeds
-/// without it — the pre-lock behaviour — instead of hanging on a holder that
-/// is itself stuck.
-pub async fn lock_within(name: &str, budget: Duration) -> Option<HostLock> {
+/// `Ok(None)` when the lock stayed held past the budget: the holder is still
+/// at whatever the lock guards, and the caller must not join it — defer or
+/// fail, never proceed unlocked. Bounded on purpose all the same, so a holder
+/// that is itself stuck cannot hang the caller. `Err` when the lock directory
+/// is unusable, which is the one case where there is nothing to wait for:
+/// callers fall back to whatever they did before locks existed.
+pub async fn lock_within(name: &str, budget: Duration) -> io::Result<Option<HostLock>> {
     let deadline = Instant::now() + budget;
     loop {
         match try_lock(name) {
-            Ok(Some(lock)) => return Some(lock),
+            Ok(Some(lock)) => return Ok(Some(lock)),
             Ok(None) if Instant::now() < deadline => tokio::time::sleep(POLL).await,
             Ok(None) => {
-                debug!(
-                    name,
-                    ?budget,
-                    "host lock still held past the budget — proceeding unlocked"
-                );
-                return None;
+                debug!(name, ?budget, "host lock still held past the budget");
+                return Ok(None);
             }
             Err(error) => {
-                debug!(name, %error, "host lock unusable — proceeding unlocked");
-                return None;
+                debug!(name, %error, "host lock unusable");
+                return Err(error);
             }
         }
     }
@@ -154,7 +152,10 @@ mod tests {
             drop(held);
         });
         assert!(
-            lock_within(&name, Duration::from_secs(2)).await.is_some(),
+            lock_within(&name, Duration::from_secs(2))
+                .await
+                .unwrap()
+                .is_some(),
             "a lock released inside the budget is taken"
         );
         release.await.unwrap();
@@ -169,6 +170,7 @@ mod tests {
         assert!(
             lock_within(&name, Duration::from_millis(50))
                 .await
+                .unwrap()
                 .is_none(),
             "a lock held past the budget is not taken"
         );
