@@ -437,6 +437,7 @@ impl Orchestrator {
         self.devices
             .iter()
             .filter(|dev| dev.online && self.config.device_enabled(&dev.config_key))
+            .filter(|dev| dev.kind != openlogi_core::device::DeviceKind::Headset)
             .filter_map(|dev| {
                 let route = dev.route.clone()?;
                 let identity = DeviceIdentity::from_parts(dev.serial.as_deref(), dev.unit_id);

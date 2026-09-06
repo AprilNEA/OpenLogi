@@ -79,12 +79,6 @@ pub const RECEIVERS: &[ReceiverDescriptor] = &[
         ReceiverProtocol::Unifying,
     ),
     ReceiverDescriptor::logitech(0xc548, ReceiverBrand::Bolt, ReceiverProtocol::Bolt),
-    // Lightspeed gaming headset receiver / dongle for PRO X 2 LIGHTSPEED.
-    ReceiverDescriptor::logitech(
-        0x0af7,
-        ReceiverBrand::Lightspeed,
-        ReceiverProtocol::Unifying,
-    ),
     // Lightspeed receiver, verified with a PRO X SUPERLIGHT 2 DEX (WPID 0x40b8).
     ReceiverDescriptor::logitech(
         0xc54d,
@@ -127,10 +121,6 @@ mod tests {
         assert_eq!(receiver.brand, ReceiverBrand::Lightspeed);
         assert_eq!(receiver.protocol, ReceiverProtocol::Unifying);
 
-        let headset_receiver =
-            find_receiver(LOGITECH_VENDOR_ID, 0x0af7).expect("0af7 headset receiver");
-        assert_eq!(headset_receiver.brand, ReceiverBrand::Lightspeed);
-        assert_eq!(headset_receiver.protocol, ReceiverProtocol::Unifying);
     }
 
     #[test]

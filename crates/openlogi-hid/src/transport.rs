@@ -165,7 +165,7 @@ const HIDPP_LONG_COLLECTIONS: [(u16, u16, bool); 4] = [
     (0xff00, 0x0002, false),
     (0xff43, 0x0202, true),
     (0xff43, 0x0602, false),
-    (0xff13, 0x0001, true),
+    (0xffa0, 0x0001, true),
 ];
 
 /// Whether `(usage_page, usage_id)` is one of the HID++ long-report collections.
@@ -291,6 +291,11 @@ fn is_hidpp_candidate(
     usage_id: u16,
     receiver_child: bool,
 ) -> bool {
+    if vendor_id == LOGITECH_VENDOR_ID && product_id == 0x0af7 {
+        // PRO X 2 LIGHTSPEED uses FFA0/0001 for Centurion HID++
+        return usage_page == 0xffa0 && usage_id == 0x0001;
+    }
+
     vendor_id == LOGITECH_VENDOR_ID
         && is_hidpp_long_collection(usage_page, usage_id)
         && !matches_litra(vendor_id, product_id, usage_page, usage_id)

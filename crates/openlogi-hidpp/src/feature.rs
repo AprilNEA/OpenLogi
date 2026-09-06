@@ -14,6 +14,7 @@ pub mod backlight;
 pub mod battery_status;
 pub mod battery_voltage;
 pub mod brightness_control;
+pub mod centurion_battery_soc;
 pub mod change_host;
 pub mod color_led_effects;
 pub mod crown;
