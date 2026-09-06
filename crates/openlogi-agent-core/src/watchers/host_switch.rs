@@ -410,6 +410,7 @@ mod tests {
             HostSwitchLink {
                 keyboard: route(1),
                 targets: vec![route(2)],
+                monitor_inputs: BTreeMap::new(),
             },
             retry_at,
         ));
