@@ -1,6 +1,14 @@
 //! Implements basic messaging across HID and HID++ channels.
 //!
-//! This includes mapping incoming messages to previously sent requests.
+//! This includes mapping incoming messages to previously sent requests. A
+//! reply is matched to the oldest pending request whose predicate accepts it,
+//! and every predicate keys on the report's first three bytes — device,
+//! feature (or HID++1.0 sub id), function and software id (or register
+//! address). Two requests sharing those bytes therefore get replies nothing on
+//! the wire can tell apart, and a wireless receiver may answer them out of
+//! order (a retransmitted radio packet completes after a later one). The
+//! channel never lets that happen: a request whose key is already in flight
+//! waits until that request is answered, times out, or is cancelled.
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -163,8 +171,9 @@ pub struct HidppChannel {
     /// the read thread and released the raw transport.
     sw_id_policy: SwIdPolicy,
 
-    /// All sent messages that are waiting for a response.
-    pending_messages: Arc<Mutex<VecDeque<PendingMessage>>>,
+    /// All sent messages that are waiting for a response, and the requests
+    /// parked behind one that shares their header.
+    pending_messages: Arc<Mutex<PendingQueue>>,
 
     /// The request ID assigned to the next pending message.
     pending_message_id: AtomicU64,
@@ -212,10 +221,56 @@ impl Drop for HidppChannel {
     }
 }
 
+/// The bytes every reply is matched on before any predicate runs: device
+/// index, feature index (HID++1.0: sub id), and function/software id
+/// (HID++1.0: register address) — the first three payload bytes of every
+/// report, on both report kinds. Two requests that share them get replies
+/// nothing on the wire can tell apart.
+type CorrelationKey = (u8, u8, u8);
+
+/// The requests awaiting a reply, plus the requests parked because one of
+/// those shares their [`CorrelationKey`].
+#[derive(Default)]
+struct PendingQueue {
+    /// Sent messages waiting for a response, oldest first.
+    messages: VecDeque<PendingMessage>,
+
+    /// Woken whenever a message leaves `messages`, so a parked request can
+    /// re-check whether its key is free.
+    key_waiters: Vec<oneshot::Sender<()>>,
+}
+
+impl PendingQueue {
+    /// Whether a request with `key` is awaiting its reply.
+    fn key_in_flight(&self, key: CorrelationKey) -> bool {
+        self.messages.iter().any(|message| message.key == key)
+    }
+
+    /// Removes the request with `id`, if still pending, and wakes parked
+    /// requests so they re-check their keys.
+    fn remove(&mut self, id: u64) -> Option<PendingMessage> {
+        let pos = self.messages.iter().position(|message| message.id == id)?;
+        let removed = self.messages.remove(pos);
+        self.wake_key_waiters();
+        removed
+    }
+
+    fn wake_key_waiters(&mut self) {
+        for waiter in self.key_waiters.drain(..) {
+            // A parked request that was cancelled meanwhile has dropped its
+            // receiver; nothing to wake.
+            let _ = waiter.send(());
+        }
+    }
+}
+
 /// Represents a message that was sent and is waiting for a response.
 struct PendingMessage {
     /// Unique ID used to remove this request when its waiter goes away.
     id: u64,
+
+    /// The header bytes this request's reply will carry.
+    key: CorrelationKey,
 
     /// The predicate that has to match for an incoming message to be classified
     /// as the response.
@@ -232,28 +287,56 @@ struct PendingMessage {
 /// deadline cancels [`HidppChannel::send_with_timeout`] during its write.
 struct PendingRequest {
     id: u64,
-    pending_messages: Arc<Mutex<VecDeque<PendingMessage>>>,
+    pending_messages: Arc<Mutex<PendingQueue>>,
     receiver: oneshot::Receiver<HidppMessage>,
 }
 
 impl PendingRequest {
-    fn register(
+    /// Registers the request once no pending request shares its `key`.
+    ///
+    /// Until then the request is parked and woken each time a pending message
+    /// leaves the queue. The check and the registration happen under one lock,
+    /// so two parked requests woken together cannot both slip in.
+    async fn register_when_key_free(
         id: u64,
-        pending_messages: Arc<Mutex<VecDeque<PendingMessage>>>,
+        pending_messages: Arc<Mutex<PendingQueue>>,
+        key: CorrelationKey,
         response_predicate: impl Fn(&HidppMessage) -> bool + Send + 'static,
     ) -> Self {
         let (sender, receiver) = oneshot::channel();
-        let request = Self {
+        let message = PendingMessage {
+            id,
+            key,
+            response_predicate: Box::new(response_predicate),
+            sender,
+        };
+        let mut message = Some(message);
+        loop {
+            let parked = {
+                let mut queue = lock(&pending_messages);
+                if !queue.key_in_flight(key) {
+                    if let Some(message) = message.take() {
+                        queue.messages.push_back(message);
+                    }
+                    break;
+                }
+                let (wake, parked) = oneshot::channel();
+                queue.key_waiters.push(wake);
+                parked
+            };
+            let (dev, feat, func) = key;
+            trace!(
+                dev,
+                feat, func, "hidpp request parked — same header in flight"
+            );
+            // A dropped waker only means the queue changed; re-check either way.
+            let _ = parked.await;
+        }
+        Self {
             id,
             pending_messages,
             receiver,
-        };
-        lock(&request.pending_messages).push_back(PendingMessage {
-            id,
-            response_predicate: Box::new(response_predicate),
-            sender,
-        });
-        request
+        }
     }
 
     async fn receive(mut self) -> Option<HidppMessage> {
@@ -263,10 +346,7 @@ impl PendingRequest {
 
 impl Drop for PendingRequest {
     fn drop(&mut self) {
-        let mut pending = lock(&self.pending_messages);
-        if let Some(pos) = pending.iter().position(|message| message.id == self.id) {
-            pending.remove(pos);
-        }
+        lock(&self.pending_messages).remove(self.id);
     }
 }
 
@@ -344,7 +424,7 @@ impl HidppChannel {
         }
 
         let raw_channel_rc = Arc::new(raw);
-        let pending_messages_rc = Arc::new(Mutex::new(VecDeque::<PendingMessage>::new()));
+        let pending_messages_rc = Arc::new(Mutex::new(PendingQueue::default()));
         let message_listeners_rc = Arc::new(Mutex::new(HashMap::<u32, MessageListener>::new()));
 
         let (close_sender, close_receiver) = oneshot::channel::<()>();
@@ -475,6 +555,12 @@ impl HidppChannel {
     /// response that still arrives later reaches message listeners as an
     /// unmatched message.
     ///
+    /// A request whose header — device, feature, function and software id —
+    /// is already in flight goes out only once that request is answered,
+    /// cancelled, or times out: their replies would be indistinguishable, and
+    /// a receiver may deliver them out of order. The wait counts against
+    /// `timeout`.
+    ///
     /// [`Self::send`] uses this with [`SEND_RESPONSE_TIMEOUT`], which suits
     /// requests to a device that may be asleep. Requests that should fail
     /// faster — e.g. probing a receiver that answers immediately or not at
@@ -498,18 +584,21 @@ impl HidppChannel {
 
         let pending_id = self.pending_message_id.fetch_add(1, Ordering::SeqCst);
         let observation = RequestObservation::new(self.observer.as_deref(), pending_id);
-        let pending_request = PendingRequest::register(
-            pending_id,
-            Arc::clone(&self.pending_messages),
-            response_predicate,
-        );
 
-        // The deadline covers the write as well: `write_report` has no
-        // bounded-time contract of its own, so a wedged device could otherwise
-        // park `send` forever before the response wait even starts.
+        // The deadline covers the wait for an identical in-flight header and
+        // the write as well: `write_report` has no bounded-time contract of its
+        // own, so a wedged device could otherwise park `send` forever before
+        // the response wait even starts.
         let completion = {
             let mut request = std::pin::pin!(
                 async move {
+                    let pending_request = PendingRequest::register_when_key_free(
+                        pending_id,
+                        Arc::clone(&self.pending_messages),
+                        (dev, feat, func),
+                        response_predicate,
+                    )
+                    .await;
                     if let Err(error) = self.write_hidpp_report(msg, Some(pending_id)).await {
                         return PendingRequestCompletion::WriteFailed(error);
                     }
@@ -562,11 +651,13 @@ impl HidppChannel {
 
         let pending_id = self.pending_message_id.fetch_add(1, Ordering::SeqCst);
         let observation = RequestObservation::new(self.observer.as_deref(), pending_id);
-        let pending_request = PendingRequest::register(
+        let pending_request = PendingRequest::register_when_key_free(
             pending_id,
             Arc::clone(&self.pending_messages),
+            (dev, feat, func),
             response_predicate,
-        );
+        )
+        .await;
 
         let completion = if let Err(error) = self.write_hidpp_report(msg, Some(pending_id)).await {
             drop(pending_request);
@@ -693,7 +784,7 @@ impl HidppChannel {
 /// lets the channel shut down — see [`RawHidChannel::read_report`].
 async fn read_loop(
     raw_channel: &dyn RawHidChannel,
-    pending_messages: &Mutex<VecDeque<PendingMessage>>,
+    pending_messages: &Mutex<PendingQueue>,
     message_listeners: &Mutex<HashMap<u32, MessageListener>>,
     observer: Option<&dyn ChannelObserver>,
     mut close: oneshot::Receiver<()>,
@@ -727,13 +818,17 @@ async fn read_loop(
         let mut matched_id = None;
         let pending_count;
         {
-            let mut msgs = lock(pending_messages);
-            pending_count = msgs.len();
-            if let Some(pos) = msgs.iter().position(|elem| (elem.response_predicate)(&msg))
-                && let Some(waiting) = msgs.remove(pos)
+            let mut queue = lock(pending_messages);
+            pending_count = queue.messages.len();
+            if let Some(waiting) = queue
+                .messages
+                .iter()
+                .position(|elem| (elem.response_predicate)(&msg))
+                .and_then(|pos| queue.messages.remove(pos))
             {
                 matched_id = Some(waiting.id);
                 let _ = waiting.sender.send(msg);
+                queue.wake_key_waiters();
             }
         }
 

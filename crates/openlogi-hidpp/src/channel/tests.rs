@@ -155,7 +155,7 @@ fn send_write_through_starts_response_timeout_after_write_completes() {
         assert!(futures::poll!(send.as_mut()).is_pending());
         futures_timer::Delay::new(Duration::from_millis(50)).await;
         assert!(futures::poll!(send.as_mut()).is_pending());
-        assert_eq!(channel.pending_messages.lock().unwrap().len(), 1);
+        assert_eq!(channel.pending_messages.lock().unwrap().messages.len(), 1);
 
         handle.release_writes();
         assert_eq!(send.await.unwrap(), response);
@@ -223,7 +223,7 @@ fn cancelled_send_removes_pending_before_a_late_response() {
         ));
 
         assert!(futures::poll!(send.as_mut()).is_pending());
-        assert_eq!(channel.pending_messages.lock().unwrap().len(), 1);
+        assert_eq!(channel.pending_messages.lock().unwrap().messages.len(), 1);
 
         drop(send);
         assert_pending_empty(&channel);
@@ -839,7 +839,84 @@ fn raw_report(msg: HidppMessage) -> Vec<u8> {
 }
 
 fn assert_pending_empty(channel: &HidppChannel) {
-    assert!(channel.pending_messages.lock().unwrap().is_empty());
+    assert!(channel.pending_messages.lock().unwrap().messages.is_empty());
+}
+
+fn pending_len(channel: &HidppChannel) -> usize {
+    channel.pending_messages.lock().unwrap().messages.len()
+}
+
+/// A request with the same header as one still in flight waits for it. Two
+/// such requests get replies nothing on the wire tells apart, and a wireless
+/// receiver can answer them out of order: on a Bolt-connected MX Master 4,
+/// three startup sessions resolving features through root `getFeature` at once
+/// had the thumbwheel's index handed to the wheel session and vice versa,
+/// which pinned the wrong features for the rest of the session.
+#[test]
+fn a_request_waits_while_the_same_header_is_in_flight() {
+    futures::executor::block_on(async {
+        let (raw, handle) = MockRawHidChannel::new();
+        // Writes park, so the first request stays in flight for as long as the
+        // test wants.
+        handle.park_writes();
+        let channel = channel_with_reader(raw).await;
+
+        let mut first = Box::pin(channel.send(short_msg(0x10), |_| true));
+        assert!(futures::poll!(first.as_mut()).is_pending());
+        assert_eq!(handle.written_reports().len(), 1);
+        assert_eq!(pending_len(&channel), 1);
+
+        // Same device/feature/function bytes as `first`: must not reach the
+        // wire, and must not be registered, while `first` is pending.
+        let mut same_header = Box::pin(channel.send(short_msg(0x10), |_| true));
+        for _ in 0..5 {
+            assert!(futures::poll!(same_header.as_mut()).is_pending());
+            futures_timer::Delay::new(Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            handle.written_reports().len(),
+            1,
+            "the second request went out early"
+        );
+        assert_eq!(pending_len(&channel), 1);
+
+        // A different header is unaffected.
+        let mut other = Box::pin(channel.send(short_msg(0x20), |_| true));
+        assert!(futures::poll!(other.as_mut()).is_pending());
+        assert_eq!(handle.written_reports().len(), 2);
+        assert_eq!(pending_len(&channel), 2);
+
+        // Cancelling `first` frees its header: the parked request registers
+        // and writes.
+        drop(first);
+        assert!(futures::poll!(same_header.as_mut()).is_pending());
+        assert_eq!(handle.written_reports().len(), 3);
+        assert_eq!(pending_len(&channel), 2);
+    });
+}
+
+/// Two same-header requests issued together are answered in order, each by
+/// its own reply — the serialisation costs nothing but the wait.
+#[test]
+fn same_header_requests_are_answered_in_order() {
+    futures::executor::block_on(async {
+        let (raw, handle) = MockRawHidChannel::new();
+        let channel = Arc::new(channel_with_reader(raw).await);
+        let first_reply = short_msg(0x31);
+        let second_reply = short_msg(0x32);
+        handle.queue_response(first_reply);
+        handle.queue_response(second_reply);
+
+        let (first, second) = futures::join!(
+            channel.send(short_msg(0x30), |_| true),
+            channel.send(short_msg(0x30), |_| true),
+        );
+
+        assert_eq!(first.unwrap(), first_reply);
+        assert_eq!(second.unwrap(), second_reply);
+        assert_eq!(handle.written_reports().len(), 2);
+        assert_pending_empty(&channel);
+    });
 }
 
 async fn wait_for_event_count(events: &Arc<Mutex<Vec<(HidppMessage, bool)>>>, count: usize) {
