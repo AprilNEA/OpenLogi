@@ -57,35 +57,45 @@ impl Scan {
             (Self::NoneHolding, Self::NoneHolding) => Self::NoneHolding,
         }
     }
-}
 
-/// Report whether any client currently holds a camera. The error is a Win32
-/// status: either no hive exposed the store, or an entry within one could not
-/// be read and its client's state is therefore unknown.
-pub(super) fn camera_in_use() -> Result<bool, i32> {
-    let mut scan: Option<Scan> = None;
-    let mut open_error = None;
-    for hive in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
-        match RegKey::predef(hive).open_subkey_with_flags(WEBCAM_CONSENT_SUBKEY, KEY_READ) {
-            Ok(store) => {
-                let store_scan = scan_store(&store);
-                if matches!(store_scan, Scan::Holding) {
-                    return Ok(true);
-                }
-                scan = Some(scan.map_or(store_scan, |prev| prev.merge(store_scan)));
-            }
-            // A hive that simply has no consent store says nothing either way;
-            // a machine policy hiding one is a read failure.
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => open_error = Some(status_of(&error)),
+    /// The watcher's answer for this scan. `Unreadable` becomes an error, which
+    /// is what makes the watcher retain its last state instead of acting on a
+    /// reading it does not have.
+    const fn answer(self) -> Result<bool, i32> {
+        match self {
+            Self::Holding => Ok(true),
+            Self::NoneHolding => Ok(false),
+            Self::Unreadable(status) => Err(status),
         }
     }
-    match scan {
-        Some(Scan::Holding) => Ok(true),
-        Some(Scan::NoneHolding) => Ok(false),
-        Some(Scan::Unreadable(status)) => Err(status),
-        None => Err(open_error.unwrap_or(-1)),
+}
+
+/// Report whether any client currently holds a camera.
+///
+/// Every hive's scan reaches the answer through the same merge, so a hive that
+/// could not be read cannot be silently outvoted by one that could: `HKLM` is
+/// where services and other accounts are recorded, and answering from `HKCU`
+/// alone would switch a linked light off while one of them is on a call.
+pub(super) fn camera_in_use() -> Result<bool, i32> {
+    let mut scan = Scan::NoneHolding;
+    for hive in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
+        let hive_scan =
+            match RegKey::predef(hive).open_subkey_with_flags(WEBCAM_CONSENT_SUBKEY, KEY_READ) {
+                Ok(store) => scan_store(&store),
+                // A hive with no consent store is silence, not failure: the store
+                // is the Capability Access Manager's own bookkeeping, so its
+                // absence means nothing was ever recorded there.
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                // Anything else — an ACL, a policy hiding the key — leaves that
+                // hive's clients unaccounted for.
+                Err(error) => Scan::Unreadable(status_of(&error)),
+            };
+        if matches!(hive_scan, Scan::Holding) {
+            return Ok(true);
+        }
+        scan = scan.merge(hive_scan);
     }
+    scan.answer()
 }
 
 /// Scan one consent store, including the non-packaged clients nested one level
@@ -212,6 +222,28 @@ mod tests {
                 .unreadable_status(),
             None
         );
+    }
+
+    #[test]
+    fn a_readable_hive_does_not_speak_for_one_that_failed() {
+        // HKCU readable and idle, HKLM unreadable. HKLM is where services and
+        // other accounts are recorded, so answering "no camera in use" from
+        // HKCU alone can switch a light off while one of them is on a call.
+        assert_eq!(
+            Scan::NoneHolding.merge(Scan::Unreadable(5)).answer(),
+            Err(5)
+        );
+        // Unless the readable hive established use, which nothing contradicts.
+        assert_eq!(Scan::Holding.merge(Scan::Unreadable(5)).answer(), Ok(true));
+    }
+
+    #[test]
+    fn silence_from_every_hive_is_an_answer_rather_than_a_failure() {
+        // A hive with no consent store contributes nothing, and the aggregate
+        // of nothing but silence is silence — the store is the Capability
+        // Access Manager's own bookkeeping, so its absence everywhere means
+        // nothing was recorded, not that a read failed.
+        assert_eq!(Scan::NoneHolding.answer(), Ok(false));
     }
 
     #[test]
