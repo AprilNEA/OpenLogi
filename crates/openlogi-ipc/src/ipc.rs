@@ -61,7 +61,8 @@ pub use succession::Identity;
 /// v28: `Action::HoldShortcut` appended for lifecycle-held keyboard output.
 /// v29: `Agent::declare_client` + [`ClientKind`] appended — typed demand for
 ///      the macOS dormancy gate.
-pub const PROTOCOL_VERSION: u32 = 29;
+/// v30: `Agent::set_sidetone` + `Agent::read_sidetone` appended.
+pub const PROTOCOL_VERSION: u32 = 30;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -560,4 +561,8 @@ pub trait Agent {
     /// arms only on [`ClientKind::Gui`]. The takeover probe never declares —
     /// it speaks only [`Agent::protocol_version`] — and so never arms.
     async fn declare_client(kind: ClientKind);
+    /// Read the current headset audio sidetone level (percentage 0..=100) from `route`.
+    async fn read_sidetone(route: DeviceRoute) -> Result<u8, WriteError>;
+    /// Apply a headset audio sidetone level (percentage 0..=100) to `route`.
+    async fn set_sidetone(route: DeviceRoute, level: u8) -> Result<(), WriteError>;
 }

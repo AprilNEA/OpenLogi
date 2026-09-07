@@ -49,7 +49,9 @@ impl SharedChannel {
         self.route == *route
     }
 
-    pub(crate) fn channel(&self) -> &Arc<HidppChannel> {
+    /// Returns the underlying HID++ channel.
+    #[must_use]
+    pub fn channel(&self) -> &Arc<HidppChannel> {
         &self.channel
     }
 

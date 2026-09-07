@@ -290,6 +290,24 @@ impl Agent for AgentServer {
         let _ = self.demand.send(kind);
     }
 
+    async fn read_sidetone(self, _: Context, route: DeviceRoute) -> Result<u8, WriteError> {
+        self.shared
+            .device(&route)
+            .run(openlogi_core::hid::HidppOperation::ReadSidetone, |c| async move {
+                openlogi_hid::write::get_sidetone_level_on_channel(c.channel(), route.device_index()).await
+            })
+            .await
+    }
+
+    async fn set_sidetone(self, _: Context, route: DeviceRoute, level: u8) -> Result<(), WriteError> {
+        self.shared
+            .device(&route)
+            .run(openlogi_core::hid::HidppOperation::WriteSidetone, |c| async move {
+                openlogi_hid::write::set_sidetone_level_on_channel(c.channel(), route.device_index(), level).await
+            })
+            .await
+    }
+
     async fn action_ring_hover(
         self,
         _: Context,

@@ -299,6 +299,20 @@ impl AppState {
         }
         true
     }
+
+    /// Read sidetone level from the agent over IPC.
+    pub fn read_sidetone(
+        &self,
+        route: openlogi_core::hid::DeviceRoute,
+        reply: tokio::sync::oneshot::Sender<Result<u8, openlogi_core::hid::WriteError>>,
+    ) {
+        self.send_ipc(crate::services::ipc::Command::ReadSidetone(route, reply));
+    }
+
+    /// Set sidetone level via the agent over IPC.
+    pub fn set_sidetone(&self, route: openlogi_core::hid::DeviceRoute, level: u8) {
+        self.send_ipc(crate::services::ipc::Command::SetSidetone(route, level));
+    }
     /// Persist the in-memory config and — only if the write actually landed —
     /// have the agent reload it. `what` names the setting for the failure log.
     ///

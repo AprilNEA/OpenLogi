@@ -1,10 +1,8 @@
 //! `openlogi diag battery` — dump the device's raw battery report.
 //!
-//! Prints exactly what the firmware returns (unified `0x1004` fields, or legacy
-//! `0x1000` `discharge_level`/`next_level`/`status`). Run it once on battery and
-//! once with the charger plugged in to see how the device reports while charging
-//! — e.g. an MX2S returns `discharge_level=0` mid-charge, which is the device's
-//! own limitation, not a bug in the read path.
+//! Prints exactly what the firmware returns (unified `0x1004` fields, legacy
+//! `0x1000` fields, or Centurion `0x0104` fields). Run it once on battery and
+//! once with the charger plugged in to see how the device reports while charging.
 
 use anyhow::{Context, Result};
 use clap::Args;
@@ -20,8 +18,8 @@ pub struct BatteryArgs {
 }
 
 pub async fn run(args: BatteryArgs) -> Result<()> {
-    // 0x1004 UnifiedBattery / 0x1000 BatteryStatus — pick a device with either.
-    let (route, name) = select_device(args.device.as_deref(), &[0x1000, 0x1004]).await?;
+    // 0x1004 UnifiedBattery / 0x1000 BatteryStatus / 0x0104 CenturionBatterySoc — pick a device with any.
+    let (route, name) = select_device(args.device.as_deref(), &[0x1000, 0x1004, 0x0104]).await?;
     println!("device: {name} ({route})");
 
     let line = openlogi_hid::read_battery_raw(&route)

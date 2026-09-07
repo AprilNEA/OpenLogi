@@ -485,6 +485,7 @@ pub(super) fn preferred_direct_codename(marketing_name: Option<&str>, os_name: &
 /// case it's neither a receiver nor a direct device we recognise) — healthy
 /// only if that rejection rests on a completed feature walk, so a device
 /// that merely failed to answer is settled as a failed probe instead.
+#[expect(clippy::too_many_lines, reason = "direct probe handles both standard direct devices and Centurion headset routing")]
 async fn probe_direct(
     channel: Arc<HidppChannel>,
     info: &NodeInfo,

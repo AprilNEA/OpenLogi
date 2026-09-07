@@ -196,6 +196,16 @@ pub async fn read_battery_raw(route: &DeviceRoute) -> Result<String, WriteError>
     device::read_battery_raw(&*native_backend(), route).await
 }
 
+/// Read the headset audio sidetone level (percentage 0..=100) of the device `route` reaches.
+pub async fn get_sidetone_level(route: &DeviceRoute) -> Result<u8, WriteError> {
+    device::get_sidetone_level(&*native_backend(), route).await
+}
+
+/// Set the headset audio sidetone level (percentage 0..=100) of the device `route` reaches.
+pub async fn set_sidetone_level(route: &DeviceRoute, level: u8) -> Result<(), WriteError> {
+    device::set_sidetone_level(&*native_backend(), route, level).await
+}
+
 /// An enumerator over this host's HID stack, with a memory-only probe cache.
 ///
 /// One-shot callers (the CLI) want exactly this: nothing to warm-start from and
