@@ -89,7 +89,9 @@ pub(super) fn candidate_manifest_bases(
     if !candidates.iter().any(|c: &String| c.eq_ignore_ascii_case(depot)) {
         candidates.push(depot.to_string());
     }
-    if let Some((stem, _)) = depot.split_once("_ext")
+    if let Some((stem, suffix)) = depot.rsplit_once("_ext")
+        && !suffix.is_empty()
+        && suffix.chars().all(|c| c.is_ascii_digit())
         && !candidates.iter().any(|c: &String| c.eq_ignore_ascii_case(stem))
     {
         candidates.push(stem.to_string());
