@@ -2,11 +2,11 @@
 //!
 //! On macOS production is supervised-only: `launchctl kickstart` the
 //! registered service, register it on demand when absent (registration *is*
-//! the supervised start), and stop there — a login item the user switched
-//! off stays off, and a bundle whose registration fails needs its install
-//! fixed, not an unmanaged shadow agent. Only dev profiles (which never
-//! register) fall through to the direct launch (`open -g -n` / `disclaim`),
-//! which elsewhere is the only path.
+//! the supervised start), rebuild a registration launchd has no job for, and
+//! stop there — a login item the user switched off stays off, and a bundle
+//! whose registration fails needs its install fixed, not an unmanaged shadow
+//! agent. Only dev profiles (which never register) fall through to the direct
+//! launch (`open -g -n` / `disclaim`), which elsewhere is the only path.
 
 use std::path::PathBuf;
 
@@ -38,7 +38,8 @@ pub(super) fn spawn_agent() {
     // supervised rungs below; direct launch is reserved for dev profiles.
     #[cfg(target_os = "macos")]
     {
-        if kickstart_registered_agent() {
+        let kickstart = kickstart_registered_agent();
+        if kickstart == Kickstart::Started {
             return;
         }
         // Second rung: on a fresh install this reflex outruns the
@@ -47,9 +48,19 @@ pub(super) fn spawn_agent() {
         // profiles never register implicitly (a login item into `target/`
         // goes stale).
         if !openlogi_core::paths::is_dev_profile() {
-            match crate::platform::registration::ensure_registered() {
+            // A record whose job launchd no longer has still reports
+            // `Enabled`, so plain convergence would leave it alone and every
+            // kickstart from here on answers "Could not find service" — the
+            // agent would stay down for the rest of the session. Say what
+            // launchctl saw so the registration can rebuild the job.
+            let registered = if kickstart == Kickstart::NoSuchJob {
+                crate::platform::registration::reregister_missing_job()
+            } else {
+                crate::platform::registration::ensure_registered()
+            };
+            match registered {
                 Ok(()) => {
-                    if kickstart_registered_agent() {
+                    if kickstart_registered_agent() == Kickstart::Started {
                         return;
                     }
                 }
@@ -112,19 +123,38 @@ fn launch_agent(path: &std::path::Path) -> std::io::Result<()> {
     disclaim::Command::new(path).spawn().map(|_| ())
 }
 
-/// `launchctl kickstart` the agent's registered launchd service. Returns
-/// whether the start was handed to launchd — `false` (not registered, user
-/// switched it off in Login Items, or launchctl itself failed) lets the caller
-/// try registration before deciding whether its profile permits direct launch.
+/// What `launchctl kickstart` made of the agent's registered launchd service.
 #[cfg(target_os = "macos")]
-fn kickstart_registered_agent() -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kickstart {
+    /// launchd took the start request.
+    Started,
+    /// launchd has no job under that label — the registration record
+    /// `SMAppService` reads outlived the job itself, so only re-registering
+    /// can produce something startable again.
+    NoSuchJob,
+    /// Nothing to kickstart (not registered, or the user switched it off in
+    /// Login Items), or launchctl itself failed.
+    Unavailable,
+}
+
+/// `launchctl`'s exit status for "Could not find service": the label is not in
+/// the domain at all, as opposed to a job that exists and refused to start.
+#[cfg(target_os = "macos")]
+const LAUNCHCTL_SERVICE_NOT_FOUND: i32 = 113;
+
+/// `launchctl kickstart` the agent's registered launchd service. Anything but
+/// [`Kickstart::Started`] lets the caller converge the registration before
+/// deciding whether its profile permits direct launch.
+#[cfg(target_os = "macos")]
+fn kickstart_registered_agent() -> Kickstart {
     use crate::platform::registration;
 
     if registration::status() != registration::ServiceStatus::Enabled {
-        return false;
+        return Kickstart::Unavailable;
     }
     let Some(uid) = current_uid() else {
-        return false;
+        return Kickstart::Unavailable;
     };
     let target = format!("gui/{uid}/{}", registration::agent_service_label());
     match std::process::Command::new("/bin/launchctl")
@@ -134,7 +164,7 @@ fn kickstart_registered_agent() -> bool {
     {
         Ok(out) if out.status.success() => {
             info!(%target, "agent not running — kickstarted the registered service");
-            true
+            Kickstart::Started
         }
         Ok(out) => {
             warn!(
@@ -143,12 +173,24 @@ fn kickstart_registered_agent() -> bool {
                 stderr = %String::from_utf8_lossy(&out.stderr).trim(),
                 "launchctl kickstart failed"
             );
-            false
+            failed_kickstart(out.status.code())
         }
         Err(e) => {
             warn!(error = %e, "could not run launchctl");
-            false
+            Kickstart::Unavailable
         }
+    }
+}
+
+/// Read a failed `launchctl kickstart` exit code: only "could not find
+/// service" says the job is gone rather than unstartable, and only that
+/// warrants rebuilding the registration.
+#[cfg(target_os = "macos")]
+fn failed_kickstart(code: Option<i32>) -> Kickstart {
+    if code == Some(LAUNCHCTL_SERVICE_NOT_FOUND) {
+        Kickstart::NoSuchJob
+    } else {
+        Kickstart::Unavailable
     }
 }
 
@@ -210,6 +252,21 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+
+    #[test]
+    fn only_a_missing_service_asks_for_a_new_registration() {
+        // 113 is launchctl's "Could not find service": the label is not in the
+        // domain, which the registration can repair. Every other failure is a
+        // job that exists and did not start — re-registering would restart a
+        // working service for nothing.
+        assert_eq!(
+            failed_kickstart(Some(LAUNCHCTL_SERVICE_NOT_FOUND)),
+            Kickstart::NoSuchJob
+        );
+        assert_eq!(failed_kickstart(Some(1)), Kickstart::Unavailable);
+        // Killed by a signal: no exit code at all.
+        assert_eq!(failed_kickstart(None), Kickstart::Unavailable);
+    }
 
     #[test]
     fn helper_bundle_resolves_only_the_packaged_layout() {

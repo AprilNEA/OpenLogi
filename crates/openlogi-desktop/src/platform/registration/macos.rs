@@ -24,30 +24,66 @@ pub(super) fn status() -> ServiceStatus {
 enum EnsureAction {
     /// The service is absent — register it.
     Register,
-    /// The service is registered but a different executable registered it —
-    /// unregister-then-register, the dance Apple requires after an update.
+    /// The service is registered but the registration cannot be used as it
+    /// stands — unregister-then-register, the dance Apple requires after an
+    /// update and the only way to rebuild a job launchd has dropped.
     Reregister,
 }
 
-/// The pure convergence rule behind [`ensure_registered`] (which is what the
-/// tests below pin down).
+/// What launchd itself last said about the job, which is the one fact
+/// [`ServiceStatus`] cannot carry: `SMAppService` reads the Background Task
+/// Management record, not the launchd domain, and the two can disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LaunchdJob {
+    /// Nothing observed — the ordinary convergence call.
+    Unobserved,
+    /// Something removed the job (a `launchctl bootout` / `unload`, from a
+    /// cleanup tool or by hand) while the record survived it.
+    Missing,
+}
+
+/// The pure convergence rule behind [`ensure_registered`] and
+/// [`reregister_missing_job`] (which is what the tests below pin down).
 ///
 /// - Absent (`NotRegistered`) → register. `NotFound` also attempts it, so a
 ///   broken bundle surfaces an informative framework error instead of
 ///   silence.
 /// - `Enabled` with a stale version marker → re-register.
+/// - `Enabled` with no job left in launchd → re-register: registering again
+///   returns `kSMErrorAlreadyRegistered` against the surviving record and
+///   submits nothing, so the dance is what puts a startable job back.
 /// - `RequiresApproval` → nothing, ever: the user's System Settings choice
-///   outranks the update path too.
-fn ensure_action(status: ServiceStatus, stale: bool) -> Option<EnsureAction> {
+///   outranks the update and repair paths too.
+fn ensure_action(status: ServiceStatus, stale: bool, job: LaunchdJob) -> Option<EnsureAction> {
     match status {
         ServiceStatus::NotRegistered | ServiceStatus::NotFound => Some(EnsureAction::Register),
-        ServiceStatus::Enabled if stale => Some(EnsureAction::Reregister),
+        ServiceStatus::Enabled if stale || job == LaunchdJob::Missing => {
+            Some(EnsureAction::Reregister)
+        }
         ServiceStatus::Enabled | ServiceStatus::RequiresApproval => None,
     }
 }
 
 pub(super) fn ensure_registered() -> Result<(), String> {
-    match ensure_action(backend::status(), registration_is_stale()) {
+    converge(LaunchdJob::Unobserved)
+}
+
+/// Rebuild a registration whose launchd job is gone: the service still reports
+/// [`ServiceStatus::Enabled`], so nothing else here would touch it, yet every
+/// `launchctl kickstart` answers "Could not find service" and the agent can
+/// never be started again.
+///
+/// # Errors
+///
+/// The framework's error description, as for [`ensure_registered`].
+pub fn reregister_missing_job() -> Result<(), String> {
+    converge(LaunchdJob::Missing)
+}
+
+/// Apply [`ensure_action`] and record the version that registered, so the next
+/// update is recognised as stale.
+fn converge(job: LaunchdJob) -> Result<(), String> {
+    match ensure_action(backend::status(), registration_is_stale(), job) {
         Some(EnsureAction::Register) => {
             backend::register()?;
             tracing::info!("registered the agent service with launchd");
@@ -55,7 +91,14 @@ pub(super) fn ensure_registered() -> Result<(), String> {
         Some(EnsureAction::Reregister) => {
             backend::unregister()?;
             backend::register()?;
-            tracing::info!("re-registered the agent service (executable changed)");
+            match job {
+                LaunchdJob::Missing => {
+                    tracing::info!("re-registered the agent service (launchd had no job for it)");
+                }
+                LaunchdJob::Unobserved => {
+                    tracing::info!("re-registered the agent service (executable changed)");
+                }
+            }
         }
         None => return Ok(()),
     }
@@ -191,13 +234,19 @@ mod tests {
     #[test]
     fn an_absent_service_is_registered() {
         assert_eq!(
-            ensure_action(ServiceStatus::NotRegistered, false),
+            ensure_action(ServiceStatus::NotRegistered, false, LaunchdJob::Unobserved),
             Some(EnsureAction::Register)
         );
         // A fresh install has no marker, which reads as stale — that must
         // still be a plain register, not an unregister dance.
         assert_eq!(
-            ensure_action(ServiceStatus::NotRegistered, true),
+            ensure_action(ServiceStatus::NotRegistered, true, LaunchdJob::Unobserved),
+            Some(EnsureAction::Register)
+        );
+        // Nothing to unregister when the record is gone too, however the
+        // caller learned that launchd has no job.
+        assert_eq!(
+            ensure_action(ServiceStatus::NotRegistered, false, LaunchdJob::Missing),
             Some(EnsureAction::Register)
         );
     }
@@ -207,29 +256,63 @@ mod tests {
         // NotFound means a broken or bare bundle; attempting the register
         // surfaces an informative framework error instead of silence.
         assert_eq!(
-            ensure_action(ServiceStatus::NotFound, false),
+            ensure_action(ServiceStatus::NotFound, false, LaunchdJob::Unobserved),
             Some(EnsureAction::Register)
         );
     }
 
     #[test]
     fn a_current_registration_is_left_alone() {
-        assert_eq!(ensure_action(ServiceStatus::Enabled, false), None);
+        assert_eq!(
+            ensure_action(ServiceStatus::Enabled, false, LaunchdJob::Unobserved),
+            None
+        );
     }
 
     #[test]
     fn an_update_reregisters() {
         assert_eq!(
-            ensure_action(ServiceStatus::Enabled, true),
+            ensure_action(ServiceStatus::Enabled, true, LaunchdJob::Unobserved),
+            Some(EnsureAction::Reregister)
+        );
+    }
+
+    #[test]
+    fn a_job_launchd_lost_is_reregistered() {
+        // The record outlived its launchd job (a `bootout` / `unload` from a
+        // cleanup tool or by hand). The version marker is current, so nothing
+        // else here would act — and registering again would return
+        // `kSMErrorAlreadyRegistered` without submitting a job, leaving every
+        // kickstart to answer "Could not find service".
+        assert_eq!(
+            ensure_action(ServiceStatus::Enabled, false, LaunchdJob::Missing),
             Some(EnsureAction::Reregister)
         );
     }
 
     #[test]
     fn a_system_settings_disable_is_never_overridden() {
-        // Not on a normal launch, and not by the update path either: the
-        // user's Login Items choice outranks both.
-        assert_eq!(ensure_action(ServiceStatus::RequiresApproval, false), None);
-        assert_eq!(ensure_action(ServiceStatus::RequiresApproval, true), None);
+        // Not on a normal launch, not by the update path, and not by the
+        // repair either: the user's Login Items choice outranks all three.
+        assert_eq!(
+            ensure_action(
+                ServiceStatus::RequiresApproval,
+                false,
+                LaunchdJob::Unobserved
+            ),
+            None
+        );
+        assert_eq!(
+            ensure_action(
+                ServiceStatus::RequiresApproval,
+                true,
+                LaunchdJob::Unobserved
+            ),
+            None
+        );
+        assert_eq!(
+            ensure_action(ServiceStatus::RequiresApproval, false, LaunchdJob::Missing),
+            None
+        );
     }
 }
