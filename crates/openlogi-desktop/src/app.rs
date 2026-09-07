@@ -81,6 +81,8 @@ enum DetailTab {
     Lighting,
     /// Live webcam preview (UVC cameras only).
     Camera,
+    /// Headset audio controls.
+    Audio,
     /// Standalone light controls driven by a raw-HID device driver.
     Light,
     /// Device info and configuration.
@@ -148,6 +150,9 @@ impl DetailTab {
         if caps.lighting {
             tabs.push(Self::Lighting);
         }
+        if caps.sidetone {
+            tabs.push(Self::Audio);
+        }
         if record.light_capabilities.is_some() {
             tabs.push(Self::Light);
         }
@@ -171,6 +176,7 @@ impl DetailTab {
             Self::Pointer => tr!("device.pointer"),
             Self::Lighting | Self::Light => tr!("device.lighting"),
             Self::Camera => tr!("camera.camera"),
+            Self::Audio => "Audio".into(),
             Self::Device => tr!("device.device"),
         }
     }
@@ -189,6 +195,7 @@ pub struct AppView {
     camera_preview: Entity<CameraPreview>,
     camera_controls: Entity<CameraControlsPanel>,
     light_panel: Entity<LightPanel>,
+    audio_panel: Entity<crate::features::audio::AudioPanel>,
     profile_icons: ProfileIconCache,
     app_catalog: Entity<AppCatalogPicker>,
     /// Redraw the profile picker after discovery, filtering, or expansion changes.
@@ -262,6 +269,7 @@ impl AppView {
         let camera_preview = cx.new(CameraPreview::new);
         let camera_controls = cx.new(CameraControlsPanel::new);
         let light_panel = cx.new(LightPanel::new);
+        let audio_panel = cx.new(crate::features::audio::AudioPanel::new);
         let profile_icons = ProfileIconCache::default();
         let app_catalog = cx.new(|cx| AppCatalogPicker::new(profile_icons.clone(), window, cx));
         let app_catalog_obs = cx.observe(&app_catalog, |_, _, cx| cx.notify());
@@ -329,6 +337,7 @@ impl AppView {
             camera_preview,
             camera_controls,
             light_panel,
+            audio_panel,
             profile_icons,
             app_catalog,
             _app_catalog_obs: app_catalog_obs,
@@ -647,6 +656,7 @@ impl AppView {
                         camera_preview: &self.camera_preview,
                         camera_controls: &self.camera_controls,
                         light_panel: &self.light_panel,
+                        audio_panel: &self.audio_panel,
                     },
                     &self.profile_icons,
                     &self.app_catalog,

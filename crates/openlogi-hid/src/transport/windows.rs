@@ -365,20 +365,18 @@ impl RawHidChannel for WindowsHidppChannel {
                     .min(61);
                 let payload = &frame[3..3 + payload_len];
                 if payload.first() == Some(&0x03)
-                    && payload.get(1).is_some_and(|function| {
-                        (function >> 4) == 0x01 && (function & 0x0f) != 0
-                    })
+                    && payload
+                        .get(1)
+                        .is_some_and(|function| (function >> 4) == 0x01 && (function & 0x0f) != 0)
                 {
                     continue;
                 }
-                let hidpp_payload = if payload.len() >= 7
-                    && payload[0] == 0x03
-                    && (payload[1] & 0xf0) == 0x10
-                {
-                    &payload[5..]
-                } else {
-                    payload
-                };
+                let hidpp_payload =
+                    if payload.len() >= 7 && payload[0] == 0x03 && (payload[1] & 0xf0) == 0x10 {
+                        &payload[5..]
+                    } else {
+                        payload
+                    };
                 let copy_len = hidpp_payload.len().min(buf.len().saturating_sub(2));
                 buf[0] = LONG_REPORT_ID;
                 buf[1] = 0xff;

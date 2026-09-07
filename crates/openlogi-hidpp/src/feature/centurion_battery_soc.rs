@@ -47,9 +47,6 @@ impl CenturionBatterySocFeature {
             _ => CenturionChargingStatus::Discharging,
         };
 
-        Ok(CenturionBatteryInfo {
-            percentage,
-            status,
-        })
+        Ok(CenturionBatteryInfo { percentage, status })
     }
 }

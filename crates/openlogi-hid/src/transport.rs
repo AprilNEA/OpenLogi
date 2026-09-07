@@ -739,12 +739,15 @@ impl RawHidChannel for AsyncHidChannel {
     }
 
     async fn read_report(&self, buf: &mut [u8]) -> Result<usize, Box<dyn Error + Send + Sync>> {
-        let result = {
+        let result = 'read: {
             let mut r = self.reader.lock().await;
             if self.info.product_id == 0x0af7 {
                 let mut frame = [0_u8; 64];
                 loop {
-                    let len = r.read_input_report(&mut frame).await?;
+                    let len = match r.read_input_report(&mut frame).await {
+                        Ok(len) => len,
+                        Err(error) => break 'read Err(error),
+                    };
                     if len < 3 || frame[0] != 0x51 {
                         continue;
                     }

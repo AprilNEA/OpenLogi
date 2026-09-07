@@ -80,48 +80,10 @@ pub(super) async fn probe_direct(
     // whose headset is off.
     let is_peripheral =
         probe.battery.is_some() || probe.unlinked || caps.buttons || caps.pointer || caps.lighting;
-    // A walk that never completed says nothing about what this node is: the
-    // discriminator below would read "no battery, no config feature" off an
-    // empty probe and reject a real mouse as a receiver's secondary interface.
-    // Settle it as a transient failure and keep the node's cache entry, so the
-    // last-good inventory is replayed while the link recovers.
     if info.product_id == 0x0af7 {
-        let inventory = DeviceInventory {
-            receiver: ReceiverInfo {
-                name: "PRO X 2 LIGHTSPEED Wireless Gaming Headset".to_string(),
-                vendor_id: info.vendor_id,
-                product_id: info.product_id,
-                unique_id: None,
-            },
-            paired: vec![PairedDevice {
-                slot: DIRECT_DEVICE_INDEX,
-                codename: Some("PRO X 2 LIGHTSPEED".to_string()),
-                wpid: None,
-                kind: DeviceKind::Headset,
-                online: true,
-                battery: probe.battery,
-                model_info: probe.model_info.or(Some(DeviceModelInfo {
-                    entity_count: 1,
-                    serial_number: None,
-                    unit_id: [0x0a, 0xf7, 0x00, 0x01],
-                    transports: DeviceTransports {
-                        usb: true,
-                        equad: false,
-                        btle: false,
-                        bluetooth: false,
-                    },
-                    model_ids: [0x0af7, 0, 0],
-                    extended_model_id: 0,
-                })),
-                capabilities,
-            }],
-        };
-        return NodeProbe {
-            inventory: Some(inventory),
-            verdict: ProbeVerdict::healthy_when(walk_succeeded),
-            outcomes: vec![outcome],
-        };
+        return assemble_centurion_headset_probe(info, probe, outcome);
     }
+    // An incomplete walk is a transient failure, not evidence of a non-peripheral.
     if !walk_succeeded {
         debug!(
             vid = format_args!("{:04x}", info.vendor_id),
@@ -183,5 +145,106 @@ pub(super) async fn probe_direct(
         inventory: Some(inventory),
         verdict: ProbeVerdict::Healthy { complete: true },
         outcomes: vec![outcome],
+    }
+}
+
+/// Assemble inventory for Centurion-bridged headsets (such as PRO X 2 LIGHTSPEED).
+fn assemble_centurion_headset_probe(
+    info: &NodeInfo,
+    probe: crate::inventory::features::ProbedFeatures,
+    outcome: CacheOutcome,
+) -> NodeProbe {
+    let capabilities = probe.capabilities;
+    let walk_succeeded = capabilities.is_some();
+    let inventory = DeviceInventory {
+        receiver: ReceiverInfo {
+            name: "PRO X 2 LIGHTSPEED Wireless Gaming Headset".to_string(),
+            vendor_id: info.vendor_id,
+            product_id: info.product_id,
+            unique_id: None,
+        },
+        paired: vec![PairedDevice {
+            slot: DIRECT_DEVICE_INDEX,
+            codename: Some("PRO X 2 LIGHTSPEED".to_string()),
+            wpid: None,
+            kind: DeviceKind::Headset,
+            online: true,
+            battery: probe.battery,
+            model_info: probe.model_info.or(Some(DeviceModelInfo {
+                entity_count: 1,
+                serial_number: None,
+                // A model identifier is not a physical device identity.
+                unit_id: [0; 4],
+                transports: DeviceTransports {
+                    usb: true,
+                    equad: false,
+                    btle: false,
+                    bluetooth: false,
+                },
+                model_ids: [0x0af7, 0, 0],
+                extended_model_id: 0,
+            })),
+            capabilities,
+        }],
+    };
+    NodeProbe {
+        inventory: Some(inventory),
+        verdict: ProbeVerdict::healthy_when(walk_succeeded),
+        outcomes: vec![outcome],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::NodeId;
+    use crate::inventory::features::ProbedFeatures;
+    use openlogi_core::device::Capabilities;
+
+    fn info() -> NodeInfo {
+        NodeInfo {
+            id: NodeId::from("centurion-test".to_string()),
+            vendor_id: 0x046d,
+            product_id: 0x0af7,
+            usage_page: 0xffa0,
+            usage_id: 1,
+            name: "PRO X 2".into(),
+            manufacturer: None,
+            serial_number: None,
+        }
+    }
+
+    #[test]
+    fn centurion_fallback_identifies_model_not_physical_unit() {
+        let probe = ProbedFeatures {
+            capabilities: Some(Capabilities::default()),
+            ..ProbedFeatures::default()
+        };
+        let result = assemble_centurion_headset_probe(&info(), probe, CacheOutcome::Unkeyed);
+        assert_eq!(result.verdict, ProbeVerdict::Healthy { complete: true });
+        let model = result
+            .inventory
+            .unwrap()
+            .paired
+            .remove(0)
+            .model_info
+            .unwrap();
+        assert_eq!(model.unit_id, [0; 4]);
+        assert_eq!(model.model_ids, [0x0af7, 0, 0]);
+
+        let reported = DeviceModelInfo {
+            unit_id: [1, 2, 3, 4],
+            ..model
+        };
+        let probe = ProbedFeatures {
+            model_info: Some(reported.clone()),
+            ..ProbedFeatures::default()
+        };
+        let result = assemble_centurion_headset_probe(&info(), probe, CacheOutcome::Unkeyed);
+        assert_eq!(result.verdict, ProbeVerdict::Failed);
+        assert_eq!(
+            result.inventory.unwrap().paired[0].model_info,
+            Some(reported)
+        );
     }
 }

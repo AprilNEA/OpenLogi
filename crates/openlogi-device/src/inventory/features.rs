@@ -165,19 +165,23 @@ pub(super) async fn read_battery(
         }
         BatteryProbe::Centurion(feature_index) => {
             let feature = CenturionBatterySocFeature::new(Arc::clone(channel), slot, feature_index);
-            feature.get_battery_info().await.ok().map(|info| BatteryInfo {
-                percentage: info.percentage,
-                level: legacy_battery_level_from_percentage(info.percentage),
-                status: match info.status {
-                    CenturionChargingStatus::Discharging => {
-                        openlogi_core::device::BatteryStatus::Discharging
-                    }
-                    CenturionChargingStatus::Recharging => {
-                        openlogi_core::device::BatteryStatus::Charging
-                    }
-                    CenturionChargingStatus::Full => openlogi_core::device::BatteryStatus::Full,
-                },
-            })
+            feature
+                .get_battery_info()
+                .await
+                .ok()
+                .map(|info| BatteryInfo {
+                    percentage: info.percentage,
+                    level: legacy_battery_level_from_percentage(info.percentage),
+                    status: match info.status {
+                        CenturionChargingStatus::Discharging => {
+                            openlogi_core::device::BatteryStatus::Discharging
+                        }
+                        CenturionChargingStatus::Recharging => {
+                            openlogi_core::device::BatteryStatus::Charging
+                        }
+                        CenturionChargingStatus::Full => openlogi_core::device::BatteryStatus::Full,
+                    },
+                })
         }
     };
     reading.map_or(BatteryRead::Unavailable, BatteryRead::Reading)

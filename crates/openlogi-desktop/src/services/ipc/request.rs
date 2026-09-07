@@ -187,6 +187,26 @@ impl Request for SetSmartShift {
     }
 }
 
+/// Apply a headset sidetone level now.
+pub struct SetSidetone {
+    pub route: DeviceRoute,
+    pub level: u8,
+}
+
+impl Request for SetSidetone {
+    type Answer = Result<(), WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .set_sidetone(context::current(), self.route.clone(), self.level)
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
+        log_rejection("sidetone", outcome);
+    }
+}
+
 /// Report a standalone-light write to the state that made it. `key` and
 /// `request_id` identify that edit, so a slow failure cannot overwrite the
 /// status of a newer slider release.
@@ -269,6 +289,26 @@ impl Request for ReadDpi {
     async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
         client
             .read_dpi(context::current(), self.route.clone())
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
+        let _ = self.reply.send(or_unavailable(outcome));
+    }
+}
+
+/// Read a headset sidetone level; answer goes back over `reply`.
+pub struct ReadSidetone {
+    pub route: DeviceRoute,
+    pub reply: oneshot::Sender<Result<u8, WriteError>>,
+}
+
+impl Request for ReadSidetone {
+    type Answer = Result<u8, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .read_sidetone(context::current(), self.route.clone())
             .await
     }
 
@@ -527,9 +567,11 @@ commands! {
     SetLight,
     SetLightManualPower,
     SetSmartShift,
+    SetSidetone,
     SetFnLock,
     ReadDpi,
     ReadSmartShift,
+    ReadSidetone,
     ReadFnLock,
     ReloadConfig,
     RequestAccessibilityPrompt,

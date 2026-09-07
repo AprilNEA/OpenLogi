@@ -25,6 +25,7 @@ mod hires_wheel;
 mod lighting;
 mod litra;
 mod pointer_scaling;
+mod sidetone;
 mod smartshift;
 
 pub use backlight::{get_backlight, get_backlight_on, set_backlight_enabled};
@@ -55,6 +56,10 @@ pub use litra::{
     litra_model_for_route, matches_litra,
 };
 pub use pointer_scaling::{PointerScaling, get_pointer_scaling, set_pointer_scaling};
+pub use sidetone::{
+    get_sidetone_level, get_sidetone_level_on_channel, set_sidetone_level,
+    set_sidetone_level_on_channel,
+};
 pub use smartshift::{
     get_smartshift_status, get_smartshift_status_on, set_smartshift, set_smartshift_on,
     set_smartshift_sensitivity, toggle_smartshift, toggle_smartshift_on,

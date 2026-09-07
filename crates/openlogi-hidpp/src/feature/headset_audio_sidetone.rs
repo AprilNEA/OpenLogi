@@ -20,18 +20,10 @@ impl HeadsetAudioSidetoneFeature {
 
         let level = if version > 1 {
             // Version > 1: [mic_count, mic_id, reserved, level, ...]
-            if payload.len() > 3 {
-                payload[3]
-            } else {
-                0
-            }
+            if payload.len() > 3 { payload[3] } else { 0 }
         } else {
             // Version <= 1: [mic_count, mic_id, level, ...]
-            if payload.len() > 2 {
-                payload[2]
-            } else {
-                0
-            }
+            if payload.len() > 2 { payload[2] } else { 0 }
         };
 
         Ok(level)
