@@ -54,7 +54,14 @@ pub(super) fn permissions_page(has_camera: bool) -> SettingPage {
                 tr!("permissions.bluetooth"),
                 tr!("permissions.bluetooth_permission_description"),
                 Permission::Bluetooth,
-                |_| permissions::bluetooth(),
+                |cx| match AppState::try_global(cx)
+                    .map(|state| state.read(cx))
+                    .and_then(AppState::agent_status)
+                {
+                    Some(status) if status.bluetooth_granted => PermissionStatus::Granted,
+                    Some(_) => PermissionStatus::Denied,
+                    None => PermissionStatus::Unknown,
+                },
             ));
         // Camera access is only worth asking for once a Logitech webcam is
         // actually connected — it then appears on the main page, and granting
@@ -195,20 +202,18 @@ fn permission_field(
     cx: &App,
 ) -> gpui::Div {
     let pal = theme::palette(cx);
-    // "Not determined" means never requested — Bluetooth deliberately never is
-    // (BLE mice go through IOHIDManager) — so don't label it "Unknown".
-    let never_requested = matches!(status, PermissionStatus::Unknown)
-        && matches!(permission, Permission::Bluetooth | Permission::Camera);
+    // Camera stays "Not requested" until this process has asked AVFoundation.
+    let never_requested =
+        matches!(status, PermissionStatus::Unknown) && matches!(permission, Permission::Camera);
     let status_el = if never_requested {
         badge(tr!("permissions.not_requested"), theme::STATUS_OFFLINE, pal)
     } else {
         status_badge(status, pal)
     };
-    let prompts_here = never_requested && matches!(permission, Permission::Camera);
-    let action_label = if prompts_here {
-        tr!("permissions.grant")
-    } else {
+    let action_label = if matches!(status, PermissionStatus::Granted) {
         tr!("common.open")
+    } else {
+        tr!("permissions.grant")
     };
 
     h_flex()
@@ -231,21 +236,38 @@ fn permission_field(
                 .focus_visible(move |s| s.bg(pal.control_hover))
                 .child(action_label)
                 .on_click(move |_, _, cx| {
-                    // Accessibility must be prompted in the agent (it owns the
-                    // hook); prompting in the GUI would authorize the wrong
-                    // binary. Other panes just deep-link to System Settings.
-                    if matches!(permission, Permission::Accessibility)
-                        && let Some(state) = crate::state::AppState::try_global(cx)
-                    {
-                        state.read(cx).request_accessibility_prompt();
-                    }
-                    // The Camera pane only lists an app after its first
-                    // AVFoundation request, so a deep link can't grant it.
-                    if prompts_here {
-                        crate::features::camera::request_camera_access(cx);
+                    if matches!(permission, Permission::Camera) {
+                        if never_requested {
+                            crate::features::camera::request_camera_access(cx);
+                        } else {
+                            permissions::open_pane(permission);
+                        }
                         return;
                     }
-                    permissions::open_pane(permission);
+                    if matches!(status, PermissionStatus::Granted) {
+                        permissions::open_pane(permission);
+                        return;
+                    }
+                    // The agent owns these grants; prompting here would
+                    // authorize the GUI instead of OpenLogi Agent.
+                    if let Some(state) = crate::state::AppState::try_global(cx) {
+                        match permission {
+                            Permission::Accessibility => {
+                                state.read(cx).request_accessibility_prompt(true);
+                            }
+                            Permission::InputMonitoring => {
+                                state.read(cx).request_input_monitoring_prompt(true);
+                            }
+                            Permission::Bluetooth => {
+                                state.read(cx).request_bluetooth_prompt(true);
+                            }
+                            Permission::Camera => {
+                                permissions::open_pane(permission);
+                            }
+                        }
+                    } else {
+                        permissions::open_pane(permission);
+                    }
                 }),
         )
 }

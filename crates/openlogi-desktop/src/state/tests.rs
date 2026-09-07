@@ -248,6 +248,7 @@ fn snapshot_candidate(profile: &DeviceProfile) -> AgentSnapshot {
             agent_version: "synthetic-profile-test".to_string(),
             input_monitoring_granted: true,
             hid_open_failures: false,
+            bluetooth_granted: false,
         },
         inventory: profile.inventories.clone(),
         standalone: profile.standalone.clone(),

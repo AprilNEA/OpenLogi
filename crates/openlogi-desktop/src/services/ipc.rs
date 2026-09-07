@@ -117,7 +117,19 @@ pub enum Command {
     /// Ask the agent to fire the macOS Accessibility prompt. The agent owns the
     /// CGEventTap, so the system dialog must name (and authorize) the *agent*
     /// binary, not the GUI — prompting locally would grant the wrong process.
-    RequestAccessibilityPrompt,
+    RequestAccessibilityPrompt {
+        /// Open the System Settings pane if the agent reports the grant was
+        /// refused (or the agent is unreachable).
+        fallback_to_pane: bool,
+    },
+    /// Ask the agent to fire the macOS Input Monitoring prompt.
+    RequestInputMonitoringPrompt {
+        fallback_to_pane: bool,
+    },
+    /// Ask the agent to fire the macOS Bluetooth prompt.
+    RequestBluetoothPrompt {
+        fallback_to_pane: bool,
+    },
     /// Pairing (agent-owned, since it opens the receiver): begin a session,
     /// pair a discovered device by address, or cancel. Events stream back via
     /// the separate [`IpcClient::pairing`] long-poll, not these commands.
@@ -584,10 +596,40 @@ async fn handle(
                 }
             }
         }
-        Command::RequestAccessibilityPrompt => client
-            .request_accessibility_prompt(ctx)
-            .await
-            .map_err(|_| ())?,
+        Command::RequestAccessibilityPrompt { fallback_to_pane } => {
+            client
+                .request_accessibility_prompt(ctx)
+                .await
+                .map_err(|_| ())?;
+            if fallback_to_pane {
+                #[cfg(target_os = "macos")]
+                {
+                    let status = client.status(ctx).await.map_err(|_| ())?;
+                    if !status.accessibility_granted {
+                        openlogi_permissions::open_pane(
+                            openlogi_permissions::Permission::Accessibility,
+                        );
+                    }
+                }
+            }
+        }
+        Command::RequestInputMonitoringPrompt { fallback_to_pane } => {
+            let granted = client
+                .request_input_monitoring_prompt(ctx)
+                .await
+                .map_err(|_| ())?;
+            if !granted && fallback_to_pane {
+                #[cfg(target_os = "macos")]
+                openlogi_permissions::open_pane(openlogi_permissions::Permission::InputMonitoring);
+            }
+        }
+        Command::RequestBluetoothPrompt { fallback_to_pane } => {
+            let granted = client.request_bluetooth_prompt(ctx).await.map_err(|_| ())?;
+            if !granted && fallback_to_pane {
+                #[cfg(target_os = "macos")]
+                openlogi_permissions::open_pane(openlogi_permissions::Permission::Bluetooth);
+            }
+        }
         Command::StartPairing(selector) => {
             pairing_command_result(update_tx, client.start_pairing(ctx, selector).await)?;
         }
@@ -714,6 +756,24 @@ fn reply_disconnected(update_tx: &mpsc::UnboundedSender<GuiUpdate>, cmd: Command
                     .to_string(),
             })));
         }
+        Command::RequestAccessibilityPrompt { fallback_to_pane } => {
+            if fallback_to_pane {
+                #[cfg(target_os = "macos")]
+                openlogi_permissions::open_pane(openlogi_permissions::Permission::Accessibility);
+            }
+        }
+        Command::RequestInputMonitoringPrompt { fallback_to_pane } => {
+            if fallback_to_pane {
+                #[cfg(target_os = "macos")]
+                openlogi_permissions::open_pane(openlogi_permissions::Permission::InputMonitoring);
+            }
+        }
+        Command::RequestBluetoothPrompt { fallback_to_pane } => {
+            if fallback_to_pane {
+                #[cfg(target_os = "macos")]
+                openlogi_permissions::open_pane(openlogi_permissions::Permission::Bluetooth);
+            }
+        }
         _ => {}
     }
 }
@@ -735,6 +795,7 @@ mod tests {
                     agent_version: "test".to_string(),
                     input_monitoring_granted: true,
                     hid_open_failures: false,
+                    bluetooth_granted: false,
                 },
                 inventory: Vec::new(),
                 standalone: Vec::new(),

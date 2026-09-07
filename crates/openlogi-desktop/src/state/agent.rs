@@ -25,6 +25,8 @@ pub(super) struct AgentSession {
     link: AgentLink,
     foreground: ForegroundApps,
     last_ready_inventory: Vec<DeviceInventory>,
+    #[cfg(target_os = "macos")]
+    permission_prompts_started: bool,
     #[cfg(all(target_os = "macos", debug_assertions))]
     monitor_events: std::collections::VecDeque<openlogi_ipc::MonitorEvent>,
     #[cfg(all(target_os = "macos", debug_assertions))]
@@ -37,6 +39,8 @@ impl Default for AgentSession {
             link: AgentLink::Connecting,
             foreground: ForegroundApps::default(),
             last_ready_inventory: Vec::new(),
+            #[cfg(target_os = "macos")]
+            permission_prompts_started: false,
             #[cfg(all(target_os = "macos", debug_assertions))]
             monitor_events: std::collections::VecDeque::new(),
             #[cfg(all(target_os = "macos", debug_assertions))]
@@ -122,8 +126,45 @@ impl AppState {
     /// CGEventTap, so the system dialog must name and authorize the *agent*
     /// binary; prompting in the GUI process (as the pre-split build did) would
     /// grant the wrong binary and the hook would never install.
-    pub fn request_accessibility_prompt(&self) {
-        self.send_ipc(crate::services::ipc::Command::RequestAccessibilityPrompt);
+    pub fn request_accessibility_prompt(&self, fallback_to_pane: bool) {
+        self.send_ipc(crate::services::ipc::Command::RequestAccessibilityPrompt {
+            fallback_to_pane,
+        });
+    }
+
+    /// Ask the agent to fire the macOS Input Monitoring prompt.
+    pub fn request_input_monitoring_prompt(&self, fallback_to_pane: bool) {
+        self.send_ipc(
+            crate::services::ipc::Command::RequestInputMonitoringPrompt { fallback_to_pane },
+        );
+    }
+
+    /// Ask the agent to fire the macOS Bluetooth prompt.
+    pub fn request_bluetooth_prompt(&self, fallback_to_pane: bool) {
+        self.send_ipc(crate::services::ipc::Command::RequestBluetoothPrompt { fallback_to_pane });
+    }
+
+    /// After the first Ready snapshot of this GUI session, ask the agent to
+    /// raise native sheets for any permission it does not yet hold. Does not
+    /// open System Settings.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn start_missing_agent_permission_prompts(
+        &mut self,
+        status: &openlogi_ipc::AgentStatus,
+    ) {
+        if self.agent.permission_prompts_started {
+            return;
+        }
+        self.agent.permission_prompts_started = true;
+        if !status.accessibility_granted {
+            self.request_accessibility_prompt(false);
+        }
+        if !status.input_monitoring_granted {
+            self.request_input_monitoring_prompt(false);
+        }
+        if !status.bluetooth_granted {
+            self.request_bluetooth_prompt(false);
+        }
     }
     /// The agent connection state the render path branches on.
     #[must_use]
@@ -146,6 +187,10 @@ impl AppState {
     pub fn set_agent_link(&mut self, link: AgentLink) -> bool {
         if self.agent.link == link {
             return false;
+        }
+        #[cfg(target_os = "macos")]
+        if !matches!(link, AgentLink::Ready(_)) {
+            self.agent.permission_prompts_started = false;
         }
         self.agent.link = link;
         true

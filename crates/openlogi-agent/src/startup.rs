@@ -245,6 +245,8 @@ pub(crate) enum WatcherEvent {
     Accessibility(bool),
     /// The Input Monitoring grant flipped.
     InputMonitoring(bool),
+    /// The Bluetooth grant flipped.
+    Bluetooth(bool),
     /// A watcher's channel closed (its thread died). Emitted once; the
     /// source then leaves the merge, so a dead watcher cannot busy-wake the
     /// loop.
@@ -259,6 +261,7 @@ pub(crate) enum Watcher {
     App,
     Accessibility,
     InputMonitoring,
+    Bluetooth,
 }
 
 /// Spawn the per-source state watchers at arming, merged into one tagged
@@ -311,6 +314,11 @@ pub(crate) fn spawn_state_watchers(
             Watcher::InputMonitoring,
             WatcherEvent::InputMonitoring,
         ),
+        tagged(
+            watchers::bluetooth::spawn(Duration::from_millis(1200)),
+            Watcher::Bluetooth,
+            WatcherEvent::Bluetooth,
+        ),
     ]);
     (streams, inventory.refresh)
 }
@@ -322,4 +330,5 @@ pub(crate) fn spawn_state_watchers(
 fn seed_permission_facts(observable: &ObservableState) {
     observable.set_accessibility_and_hook(Hook::has_accessibility(), false);
     observable.set_input_monitoring_granted(openlogi_hid::permissions::has_access());
+    observable.set_bluetooth_granted(openlogi_hid::permissions::has_bluetooth_access());
 }

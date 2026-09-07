@@ -137,8 +137,9 @@ pub(super) fn attention_footer(cx: &App) -> impl IntoElement {
         .child(accessibility_status(pal))
 }
 
-/// Accessibility affordance that requests the grant on click (the native
-/// prompt + System Settings, via [`super::request_accessibility`]).
+/// Accessibility affordance that requests the grant on click (the agent's
+/// native prompt, via [`super::request_accessibility`]; System Settings only
+/// if the grant is still missing afterwards).
 #[cfg(target_os = "macos")]
 fn accessibility_status(pal: Palette) -> impl IntoElement {
     // Scoped here rather than at module level: these traits' only user is this

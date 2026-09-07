@@ -63,7 +63,10 @@ pub use succession::Identity;
 ///      the macOS dormancy gate.
 /// v30: `Agent::read_wheel` and `Agent::read_backlight` appended.
 /// v31: `Capabilities::dpi_gestures` appended.
-pub const PROTOCOL_VERSION: u32 = 31;
+/// v32: `AgentStatus::bluetooth_granted` appended;
+///      `Agent::request_input_monitoring_prompt` and
+///      `Agent::request_bluetooth_prompt` appended.
+pub const PROTOCOL_VERSION: u32 = 32;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -120,6 +123,8 @@ pub struct AgentStatus {
     /// node. Paired with [`Self::input_monitoring_granted`] it distinguishes
     /// a missing grant from an exclusive open or a stale permission session.
     pub hid_open_failures: bool,
+    /// Whether the agent process holds CoreBluetooth authorization.
+    pub bluetooth_granted: bool,
 }
 
 /// Status and inventory as one poll result. Kept together so the GUI never
@@ -566,4 +571,10 @@ pub trait Agent {
     async fn read_wheel(route: DeviceRoute) -> Result<ScrollWheelMode, WriteError>;
     /// Read the current keyboard-backlight state from `route`.
     async fn read_backlight(route: DeviceRoute) -> Result<BacklightState, WriteError>;
+    /// Prompt for Input Monitoring from the agent, so the system dialog names
+    /// the agent — the process that opens HID — rather than the GUI.
+    async fn request_input_monitoring_prompt() -> bool;
+    /// Prompt for Bluetooth from the agent, so the system dialog names the
+    /// agent rather than the GUI.
+    async fn request_bluetooth_prompt() -> bool;
 }

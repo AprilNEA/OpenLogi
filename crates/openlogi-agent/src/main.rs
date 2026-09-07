@@ -21,6 +21,8 @@ mod lifecycle;
 mod logging;
 mod overlay;
 mod pairing;
+#[cfg(target_os = "macos")]
+mod permissions_macos;
 #[cfg(target_os = "linux")]
 mod resume_linux;
 #[cfg(target_os = "windows")]

@@ -54,6 +54,7 @@ impl ObservableState {
                     agent_version,
                     input_monitoring_granted: openlogi_hid::permissions::has_access(),
                     hid_open_failures: false,
+                    bluetooth_granted: openlogi_hid::permissions::has_bluetooth_access(),
                 },
                 inventory: Vec::new(),
                 standalone: Vec::new(),
@@ -191,6 +192,18 @@ impl ObservableState {
                 return false;
             }
             snapshot.status.input_monitoring_granted = granted;
+            true
+        });
+    }
+
+    /// Publish a Bluetooth authorization change, as observed by
+    /// [`watchers::bluetooth`](crate::watchers::bluetooth).
+    pub fn set_bluetooth_granted(&self, granted: bool) {
+        self.update(|snapshot| {
+            if snapshot.status.bluetooth_granted == granted {
+                return false;
+            }
+            snapshot.status.bluetooth_granted = granted;
             true
         });
     }
@@ -510,5 +523,19 @@ mod tests {
 
         state.set_accessibility_and_hook(true, false);
         assert!(rx.has_changed().unwrap());
+    }
+
+    #[test]
+    fn a_bluetooth_grant_change_is_news() {
+        let state = state();
+        state.set_bluetooth_granted(false);
+        let rx = state.subscribe();
+
+        state.set_bluetooth_granted(false);
+        assert!(!rx.has_changed().unwrap());
+
+        state.set_bluetooth_granted(true);
+        assert!(rx.has_changed().unwrap());
+        assert!(state.snapshot().status.bluetooth_granted);
     }
 }
