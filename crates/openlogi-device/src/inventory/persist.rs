@@ -7,22 +7,18 @@
 //! fully probed once keeps its identity across restarts, even on transports
 //! where a fresh walk is slow or failing (see `BOLT_SLOT_PROBE`).
 //!
-//! Only Bolt identities are persisted, because only they are keyed on the
-//! device's *own* identity (the pairing-register unit id), which no re-pairing
-//! can silently reassign. A `CacheKey::UnifyingSlot` is `receiver + slot`: a
-//! different device paired into that slot while the agent is down would
-//! inherit the previous occupant's probe on warm start. A `CacheKey::Direct`
-//! is an OS-runtime node id with no cross-boot stability. Loaded entries
-//! restart the elapsed refresh window, so the regular self-healing pass
-//! re-walks them on schedule; until (and unless) that walk succeeds, the
-//! persisted data serves exactly like an in-memory cache hit.
+//! Bolt and Unifying identities are persisted because both are keyed on the
+//! device's *own* unit id from their pairing registers, which no re-pairing can
+//! silently reassign. A `CacheKey::Direct` is an OS-runtime node id with no
+//! cross-boot stability. Loaded entries have no runtime channel association.
+//! The first live channel adopts them without repeating the immutable
+//! feature-table walk; a replacement channel validates them once before reuse.
 //!
 //! *Where* a snapshot is kept is the host's business, not this module's: the
 //! enumerator writes through a [`ProbeCacheStore`]; `openlogi-hid` supplies
 //! the file-backed one every native build uses.
 
 use std::collections::HashMap;
-use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -33,9 +29,9 @@ use super::features::{BatteryProbe, ProbedFeatures};
 
 /// Bumped when the persisted shape changes; a mismatched snapshot is discarded
 /// (the cache is a warm-start optimization, not data anyone must keep).
-/// v2 dropped the `UnifyingSlot` key (slot-keyed, so not re-pair-safe).
-/// v3 adds event-capable feature indexes discovered by the immutable walk.
-const SCHEMA_VERSION: u32 = 3;
+/// v4 combines physical Unifying unit ids with event-capable feature indexes.
+/// Both development branches used v3 for different shapes; neither is reused.
+const SCHEMA_VERSION: u32 = 4;
 
 impl ProbeCacheError {
     /// Report why a store could not keep a snapshot.
@@ -89,16 +85,18 @@ struct PersistedEntry {
     events: EventFeatureIndices,
 }
 
-/// The persistable subset of [`CacheKey`] — Bolt only (see the module docs).
+/// The persistable subset of [`CacheKey`] (see the module docs).
 #[derive(Clone, Copy, Serialize, Deserialize)]
 enum PersistedKey {
     Bolt { unit_id: [u8; 4] },
+    Unifying { unit_id: [u8; 4] },
 }
 
 fn persistable(key: &CacheKey) -> Option<PersistedKey> {
     match key {
         CacheKey::Bolt { unit_id } => Some(PersistedKey::Bolt { unit_id: *unit_id }),
-        CacheKey::UnifyingSlot { .. } | CacheKey::Direct(_) => None,
+        CacheKey::Unifying { unit_id } => Some(PersistedKey::Unifying { unit_id: *unit_id }),
+        CacheKey::Direct(_) => None,
     }
 }
 
@@ -112,6 +110,7 @@ pub(super) fn is_persistable(key: &CacheKey) -> bool {
 fn runtime_key(key: PersistedKey) -> CacheKey {
     match key {
         PersistedKey::Bolt { unit_id } => CacheKey::Bolt { unit_id },
+        PersistedKey::Unifying { unit_id } => CacheKey::Unifying { unit_id },
     }
 }
 
@@ -180,12 +179,8 @@ impl ProbeCacheSnapshot {
                     Cached {
                         probe: entry.probe,
                         battery: entry.battery,
+                        channel: None,
                         events: entry.events,
-                        // Restart the refresh clock: the entry serves
-                        // immediately as a cache hit, and the periodic
-                        // self-healing re-walk decides when it is due for a
-                        // fresh read.
-                        probed_at: Instant::now(),
                     },
                 )
             })
@@ -196,7 +191,6 @@ impl ProbeCacheSnapshot {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::time::Instant;
 
     use openlogi_core::device::{
         BatteryInfo, BatteryLevel, BatteryStatus, DeviceModelInfo, DeviceTransports,
@@ -211,7 +205,7 @@ mod tests {
     /// the whole point of the snapshot — but only the parts that are actually
     /// immutable, and only for keys a re-pair cannot silently reassign.
     #[test]
-    fn a_snapshot_keeps_bolt_identity_and_drops_the_volatile_reading() {
+    fn a_snapshot_keeps_receiver_identities_and_drops_volatile_readings() {
         let model = DeviceModelInfo {
             entity_count: 1,
             serial_number: Some("TESTSERIAL01".into()),
@@ -237,28 +231,33 @@ mod tests {
                     ..Default::default()
                 },
                 battery: Some(BatteryProbe::Unified(9)),
+                channel: None,
                 events: EventFeatureIndices {
                     wireless_status: Some(7),
                     unified_battery: Some(9),
                 },
-                probed_at: Instant::now(),
             },
         );
+        let unifying_key = CacheKey::Unifying {
+            unit_id: [0x11, 0x22, 0x33, 0x44],
+        };
         cache.insert(
-            CacheKey::UnifyingSlot {
-                receiver_uid: "DA2699E1".into(),
-                slot: 2,
-            },
+            unifying_key.clone(),
             Cached {
-                probe: ProbedFeatures::default(),
+                probe: ProbedFeatures {
+                    model_info: Some(DeviceModelInfo {
+                        unit_id: [0x11, 0x22, 0x33, 0x44],
+                        ..model.clone()
+                    }),
+                    ..Default::default()
+                },
                 battery: None,
+                channel: None,
                 events: EventFeatureIndices::default(),
-                probed_at: Instant::now(),
             },
         );
 
         let snapshot = ProbeCacheSnapshot::of(&cache);
-        let restored_after = Instant::now();
         let restored = snapshot.into_entries();
 
         let bolt = restored
@@ -285,16 +284,12 @@ mod tests {
             "the battery *reading* is volatile — restoring it would resurrect a stale value"
         );
         assert!(
-            bolt.probed_at >= restored_after,
-            "a restored entry restarts the refresh clock"
+            bolt.channel.is_none(),
+            "a restored entry must not retain a runtime channel"
         );
         assert!(
-            !restored.contains_key(&CacheKey::UnifyingSlot {
-                receiver_uid: "DA2699E1".into(),
-                slot: 2,
-            }),
-            "unifying entries are slot-keyed, so a re-pair while the agent is \
-             down could hand them to a different device — never persisted"
+            restored.contains_key(&unifying_key),
+            "a Unifying unit id is a physical identity and survives restart"
         );
     }
 
@@ -302,9 +297,24 @@ mod tests {
     /// not read. Re-probing is always correct; guessing is not.
     #[test]
     fn a_foreign_schema_yields_a_cold_start() {
-        let mut snapshot = ProbeCacheSnapshot::of(&HashMap::new());
-        snapshot.version = SCHEMA_VERSION + 1;
-
-        assert!(snapshot.into_entries().is_empty());
+        let cache = HashMap::from([(
+            CacheKey::Bolt {
+                unit_id: [1, 2, 3, 4],
+            },
+            Cached {
+                probe: ProbedFeatures::default(),
+                battery: None,
+                events: EventFeatureIndices::default(),
+                channel: None,
+            },
+        )]);
+        assert_eq!(ProbeCacheSnapshot::of(&cache).into_entries().len(), 1);
+        // Both pre-merge branches used v3 with incompatible entry shapes.
+        // A future schema is equally unsafe to adopt without validation.
+        for version in [SCHEMA_VERSION - 1, SCHEMA_VERSION + 1] {
+            let mut snapshot = ProbeCacheSnapshot::of(&cache);
+            snapshot.version = version;
+            assert!(snapshot.into_entries().is_empty());
+        }
     }
 }

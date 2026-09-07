@@ -1,5 +1,4 @@
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Weak};
 
 use hidpp::channel::HidppChannel;
 use openlogi_core::device::{BatteryInfo, BatteryStatus};
@@ -8,17 +7,6 @@ use super::events::{EventFeatureIndices, EventSubscriptionHandle};
 use super::features::{BatteryProbe, ProbedFeatures, probe_features, read_battery};
 use crate::backend::NodeId;
 
-/// How long a device's probe is reused before a fresh read.
-/// The expensive part of a probe (the `enumerate_features` feature-table walk)
-/// reads *immutable* data — model, capabilities, marketing type — so it never
-/// needs re-reading for a known device; the periodic full probe is kept only as
-/// a self-healing pass (e.g. a firmware update reshuffling the feature table).
-/// The volatile battery does NOT ride this window: cache hits re-read it every
-/// reconciliation through the memoized feature index (see [`read_battery`]).
-/// Elapsed time rather than scan count preserves cache freshness now that
-/// event-driven scans are intentionally irregular.
-pub(super) const REFRESH_INTERVAL: Duration = Duration::from_secs(30);
-
 /// Stable identity used to memoize a device's probe across `enumerate` ticks.
 /// Keyed on the device's *own* identity (never its slot) so a re-paired or
 /// moved device can't inherit another device's cached probe.
@@ -26,11 +14,8 @@ pub(super) const REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 pub(super) enum CacheKey {
     /// Bolt: the unit id from the pairing register (cheap, read every tick).
     Bolt { unit_id: [u8; 4] },
-    /// Unifying: keyed on the full receiver serial number + pairing slot.
-    /// Using the complete serial (not just a prefix) avoids collisions between
-    /// two receivers whose serials share a common prefix (e.g. "DA2699E1" and
-    /// "DA2604F2" share "DA2").
-    UnifyingSlot { receiver_uid: String, slot: u8 },
+    /// Unifying: the unit id from the extended pairing register.
+    Unifying { unit_id: [u8; 4] },
     /// Direct (Bluetooth/USB): the OS-assigned HID node id (macOS registry-entry
     /// id, Linux dev path, Windows interface path). Unique *per node*, so two
     /// units of the same model never collide, and stable while connected so the
@@ -43,7 +28,13 @@ pub(super) enum CacheKey {
 /// device's memoized data.
 pub(super) const CACHE_MISS_GRACE: u8 = 3;
 
-/// A memoized probe result plus the instant it was taken.
+/// A memoized immutable probe result and the channel generation that produced
+/// (or last validated) it.
+///
+/// `None` is a persisted warm-start entry. The first live channel adopts it
+/// without a feature-table walk. A replacement channel validates it once
+/// before reuse, preventing runtime feature indexes from leaking across
+/// reconnects without periodically interrupting live control capture.
 #[derive(Clone)]
 pub(super) struct Cached {
     pub(super) probe: ProbedFeatures,
@@ -54,7 +45,25 @@ pub(super) struct Cached {
     pub(super) battery: Option<BatteryProbe>,
     /// Event-capable feature indexes found by the same immutable table walk.
     pub(super) events: EventFeatureIndices,
-    pub(super) probed_at: Instant,
+    pub(super) channel: Option<Weak<HidppChannel>>,
+}
+
+impl Cached {
+    fn belongs_to(&self, channel: &Arc<HidppChannel>) -> bool {
+        self.channel.as_ref().is_some_and(|cached| {
+            cached
+                .upgrade()
+                .is_some_and(|cached| Arc::ptr_eq(&cached, channel))
+        })
+    }
+
+    fn bind_to(&mut self, channel: &Arc<HidppChannel>) {
+        self.channel = Some(Arc::downgrade(channel));
+    }
+
+    pub(super) fn needs_validation(&self, channel: &Arc<HidppChannel>) -> bool {
+        self.channel.is_some() && !self.belongs_to(channel)
+    }
 }
 
 /// The legacy `0x1000` battery feature (MX2S-era mice) reports `discharge_level
@@ -95,13 +104,17 @@ fn hold_percentage_while_charging(
 }
 
 /// What a probed device contributes to the cache this tick. The key lets stale
-/// entries be evicted; `Fresh` (a full probe) and `Update` (a cache hit whose
-/// volatile battery was re-read) also carry the value to insert. `Unkeyed` is a
-/// device we can't (or won't) cache — an all-zero unit id, or a rejected
-/// non-peripheral — so its key is neither inserted nor kept alive.
+/// entries be evicted; `Fresh` (a full probe), `Update` (a cache hit whose
+/// volatile battery was re-read), and `Bind` (runtime channel association
+/// only) also carry the value to insert. `Unkeyed` is a device we can't (or
+/// won't) cache — an all-zero unit id, or a rejected non-peripheral — so its
+/// key is neither inserted nor kept alive.
 pub(super) enum CacheOutcome {
     Fresh(CacheKey, Cached),
     Update(CacheKey, Cached),
+    /// Associate immutable data with a runtime channel without claiming that
+    /// volatile device I/O succeeded.
+    Bind(CacheKey, Cached),
     Seen(CacheKey),
     Unkeyed,
 }
@@ -111,13 +124,9 @@ pub(super) fn seen(id: Option<CacheKey>) -> CacheOutcome {
     id.map_or(CacheOutcome::Unkeyed, CacheOutcome::Seen)
 }
 
-/// Whether `cached` is stale enough that the device should be re-probed.
-pub(super) fn is_stale(cached: &Cached, now: Instant) -> bool {
-    now.saturating_duration_since(cached.probed_at) >= REFRESH_INTERVAL
-}
-
-/// Decide a device's probe: reuse a fresh cache, or (online + miss/stale)
-/// re-probe — but keep the last-known immutable data if the re-probe fails
+/// Decide a device's probe: reuse a cache associated with this channel, or
+/// (online + miss/replacement channel) re-probe — but keep the last-known
+/// immutable data if the re-probe fails
 /// rather than overwriting it with an empty default. An unprobed offline device
 /// with no cache yields a default probe. Returns the probe plus its cache
 /// contribution (only a *successful* probe is cached).
@@ -127,13 +136,13 @@ pub(super) async fn probe_or_reuse(
     id: Option<CacheKey>,
     cached: Option<&Cached>,
     online: bool,
-    now: Instant,
     subscriptions: Option<&EventSubscriptionHandle>,
 ) -> (ProbedFeatures, CacheOutcome) {
     if let (Some(cached), Some(subscriptions)) = (cached, subscriptions) {
         subscriptions.register_device(index, cached.events);
     }
-    if online && cached.is_none_or(|c| is_stale(c, now)) {
+    let channel_replaced = cached.is_some_and(|c| c.needs_validation(channel));
+    if online && (cached.is_none() || channel_replaced) {
         let (mut fresh, battery, events) = probe_features(channel, index, subscriptions).await;
         if let (Some(reading), Some(probe)) = (fresh.battery.take(), battery) {
             fresh.battery = Some(hold_percentage_while_charging(
@@ -150,19 +159,25 @@ pub(super) async fn probe_or_reuse(
             }
             // A first-sight probe whose identity reads failed is served but not
             // memoized: caching it would pin a wrong (all-zero unit or
-            // serial-less) config key for `REFRESH_INTERVAL` (#482). The next
-            // reconciliation re-probes instead.
+            // serial-less) config key for this channel's lifetime (#482). The
+            // next tick re-probes instead.
             if fresh.identity_incomplete && cached.is_none() {
                 return (fresh, seen(id));
             }
             // Same reasoning for a capability read that failed part-way: the
-            // walk understates the device, and memoizing that hides a panel in
-            // the GUI for `REFRESH_INTERVAL`. A previous complete walk
-            // outranks this partial one, so defer to it and re-probe next
-            // reconciliation.
+            // walk understates the device, and memoizing it would hide a panel
+            // for this channel's lifetime. A previous complete walk outranks
+            // this partial one and is rebound to the new channel.
             if fresh.capabilities_incomplete {
                 if let Some(c) = cached {
                     keep_known_capabilities(&mut fresh, &c.probe);
+                    if let Some(key) = id {
+                        let mut value = c.clone();
+                        value.probe = fresh.clone();
+                        value.battery = battery.or(c.battery);
+                        value.bind_to(channel);
+                        return (fresh, CacheOutcome::Bind(key, value));
+                    }
                 }
                 return (fresh, seen(id));
             }
@@ -171,8 +186,8 @@ pub(super) async fn probe_or_reuse(
                     let value = Cached {
                         probe: fresh.clone(),
                         battery,
+                        channel: Some(Arc::downgrade(channel)),
                         events,
-                        probed_at: now,
                     };
                     (fresh, CacheOutcome::Fresh(key, value))
                 }
@@ -182,9 +197,14 @@ pub(super) async fn probe_or_reuse(
         // Re-probe failed: don't cache the failure. Fall back to the last-known
         // data so a transient glitch doesn't drop the device or its battery.
         // No battery re-read either — the device just proved unresponsive.
-        return match cached {
-            Some(c) => (c.probe.clone(), seen(id)),
-            None => (fresh, seen(id)),
+        return match (cached, id) {
+            (Some(c), Some(key)) => {
+                let mut value = c.clone();
+                value.bind_to(channel);
+                (c.probe.clone(), CacheOutcome::Bind(key, value))
+            }
+            (Some(c), None) => (c.probe.clone(), CacheOutcome::Unkeyed),
+            (None, id) => (fresh, seen(id)),
         };
     }
     match cached {
@@ -202,7 +222,16 @@ pub(super) async fn probe_or_reuse(
                     hold_percentage_while_charging(battery, c.probe.battery.as_ref(), probe);
                 let mut entry = c.clone();
                 entry.probe.battery = Some(battery);
+                entry.bind_to(channel);
                 return (entry.probe.clone(), CacheOutcome::Update(key, entry));
+            }
+            if online
+                && c.channel.is_none()
+                && let Some(key) = id
+            {
+                let mut entry = c.clone();
+                entry.bind_to(channel);
+                return (entry.probe.clone(), CacheOutcome::Bind(key, entry));
             }
             (c.probe.clone(), seen(id))
         }
@@ -305,5 +334,115 @@ mod hold_tests {
             BatteryProbe::Unified(0),
         );
         assert_eq!(live.percentage, 0);
+    }
+}
+
+#[cfg(test)]
+mod channel_generation_tests {
+    use std::sync::Arc;
+
+    use openlogi_core::device::Capabilities;
+
+    use super::{CacheKey, CacheOutcome, Cached, ProbedFeatures, probe_or_reuse};
+    use crate::channel::scripted::{ScriptedRawHidChannel, feature_error, scripted_channel};
+
+    fn reject_feature_request(request: &[u8]) -> Option<Vec<u8>> {
+        let _report_id = request.first()?;
+        Some(feature_error(request, 2))
+    }
+
+    async fn rejecting_channel() -> (
+        Arc<hidpp::channel::HidppChannel>,
+        crate::channel::scripted::ScriptedRawHidHandle,
+    ) {
+        let (raw, handle) = ScriptedRawHidChannel::with_responder(reject_feature_request);
+        (scripted_channel(raw).await, handle)
+    }
+
+    fn cached_for(channel: &Arc<hidpp::channel::HidppChannel>) -> Cached {
+        Cached {
+            probe: ProbedFeatures {
+                capabilities: Some(Capabilities::default()),
+                ..ProbedFeatures::default()
+            },
+            battery: None,
+            events: super::EventFeatureIndices::default(),
+            channel: Some(Arc::downgrade(channel)),
+        }
+    }
+
+    #[tokio::test]
+    async fn immutable_probe_is_reused_for_the_whole_channel_generation() {
+        let (channel, handle) = rejecting_channel().await;
+        let cached = cached_for(&channel);
+        let id = CacheKey::Bolt { unit_id: [1; 4] };
+
+        for _ in 0..32 {
+            let (_, outcome) =
+                probe_or_reuse(&channel, 1, Some(id.clone()), Some(&cached), true, None).await;
+            assert!(matches!(outcome, CacheOutcome::Seen(_)));
+        }
+
+        assert!(
+            handle.written_reports().is_empty(),
+            "time alone must never trigger another feature-table walk"
+        );
+    }
+
+    #[tokio::test]
+    async fn replacement_channel_is_validated_once_even_when_probe_fails() {
+        let (old_channel, _) = rejecting_channel().await;
+        let cached = cached_for(&old_channel);
+        let (replacement, handle) = rejecting_channel().await;
+        let id = CacheKey::Bolt { unit_id: [2; 4] };
+
+        let (_, outcome) =
+            probe_or_reuse(&replacement, 1, Some(id.clone()), Some(&cached), true, None).await;
+        let rebound = match outcome {
+            CacheOutcome::Bind(key, rebound) => {
+                assert_eq!(key, id);
+                rebound
+            }
+            _ => panic!("a cached fallback must bind to the replacement channel"),
+        };
+        assert!(!rebound.needs_validation(&replacement));
+        assert!(!handle.written_reports().is_empty());
+
+        let writes_after_validation = handle.written_reports().len();
+        let (_, outcome) =
+            probe_or_reuse(&replacement, 1, Some(id), Some(&rebound), true, None).await;
+        assert!(matches!(outcome, CacheOutcome::Seen(_)));
+        assert_eq!(
+            handle.written_reports().len(),
+            writes_after_validation,
+            "a failed validation must not become a two-second retry loop"
+        );
+    }
+
+    #[tokio::test]
+    async fn persisted_cache_adoption_does_not_claim_live_io() {
+        let (channel, handle) = rejecting_channel().await;
+        let cached = Cached {
+            probe: ProbedFeatures::default(),
+            battery: None,
+            events: super::EventFeatureIndices::default(),
+            channel: None,
+        };
+        let id = CacheKey::Bolt { unit_id: [3; 4] };
+
+        let (_, outcome) =
+            probe_or_reuse(&channel, 1, Some(id.clone()), Some(&cached), true, None).await;
+        let rebound = match outcome {
+            CacheOutcome::Bind(key, rebound) => {
+                assert_eq!(key, id);
+                rebound
+            }
+            _ => panic!("adoption without live I/O must not claim a volatile update"),
+        };
+        assert!(!rebound.needs_validation(&channel));
+        assert!(
+            handle.written_reports().is_empty(),
+            "warm-start adoption should not repeat the immutable probe"
+        );
     }
 }

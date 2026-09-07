@@ -4,7 +4,7 @@ use std::{
     collections::{HashMap, HashSet, hash_map::Entry},
     hash::Hash,
     sync::Arc,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use futures_concurrency::future::Join as _;
@@ -40,9 +40,9 @@ use probe::{NodeProbe, probe_one};
 /// ping; we err on the side of waiting.
 const ARRIVAL_DRAIN: Duration = Duration::from_millis(1500);
 
-/// Maximum number of pairing slots a Bolt receiver supports. We iterate this
-/// range to surface paired-but-offline devices that won't fire arrival events.
-const MAX_BOLT_SLOTS: u8 = 6;
+/// Maximum number of pairing slots a receiver supports. We iterate this range
+/// to surface paired-but-offline devices that won't fire arrival events.
+const MAX_RECEIVER_SLOTS: u8 = 6;
 
 /// Upper bound on probing one HID node. `hidpp`'s request/response has no
 /// timeout of its own, so without this a single unresponsive (e.g. asleep)
@@ -693,7 +693,6 @@ impl Enumerator {
     async fn enumerate_reporting_completeness(
         &mut self,
     ) -> Result<(Vec<DeviceInventory>, bool, bool), InventoryError> {
-        let now = Instant::now();
         let backend = Arc::clone(&self.backend);
         let candidates = backend.enumerate_hidpp().await?;
         debug!(count = candidates.len(), "HID++ candidate interfaces");
@@ -729,7 +728,7 @@ impl Enumerator {
                     };
                     let probe = timeout(
                         budget,
-                        probe_one(info, Arc::clone(&channel), cache, now, events.as_ref()),
+                        probe_one(info, Arc::clone(&channel), cache, events.as_ref()),
                     )
                     .await;
                     (node, channel, probe, budget, receiver)
@@ -845,7 +844,7 @@ impl Enumerator {
                     self.cache_dirty |= persist::is_persistable(&key);
                     self.cache.insert(key, cached);
                 }
-                CacheOutcome::Update(key, cached) => {
+                CacheOutcome::Update(key, cached) | CacheOutcome::Bind(key, cached) => {
                     seen_keys.insert(key.clone());
                     self.cache.insert(key, cached);
                 }
