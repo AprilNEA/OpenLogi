@@ -249,34 +249,38 @@ fn build_devices_keeps_serial_backed_standalone_lights_beside_hidpp_devices() {
 
 /// A standalone light enumerates like any other device and, once it reports a
 /// serial, resolves a physical key — so nothing upstream stops it reaching the
-/// HID++ capture planner. Its route is the one fact that rules it out: a raw
-/// route cannot carry a control divert, and a plan built for one leaves the
-/// gesture watcher opening a session the device rejects, over and over.
+/// HID++ planners. Its route is the one fact that rules it out: a raw route
+/// cannot carry a control divert or a DPI feature write, and a plan built for
+/// one leaves the gesture watcher opening a session the device rejects, over
+/// and over.
+///
+/// Drive the published projections rather than the route predicate alone, so
+/// deleting either planner's filter fails here.
 #[test]
-fn a_standalone_light_gets_no_hidpp_capture_plan() {
-    assert!(
-        !DeviceRoute::RawHid {
-            vendor_id: 0x046d,
-            product_id: 0xc900,
-            usage_page: 0xff43,
-            usage_id: 0x0202,
-            identity: "serial:glow-1".to_string(),
-        }
-        .speaks_hidpp()
+fn a_standalone_light_is_left_out_of_both_hidpp_planners() {
+    let mut orch = orchestrator(Config::default());
+    orch.devices = vec![raw_light_dev("light"), dev("mouse", 1, true)];
+    orch.rebuild();
+
+    let plans = orch.shared.capture_plans.borrow().clone();
+    assert_eq!(
+        plans.len(),
+        1,
+        "only the HID++ device can carry a capture session"
     );
     assert!(
-        DeviceRoute::Direct {
-            vendor_id: 0x046d,
-            product_id: 0xb023,
-        }
-        .speaks_hidpp()
+        plans.iter().all(|plan| plan.target.route.speaks_hidpp()),
+        "no capture plan may name a raw route"
+    );
+
+    let cycles = orch.shared.dpi_cycle.read().expect("dpi cycle lock");
+    assert!(
+        !cycles.by_key.contains_key("light"),
+        "a light has no route that can carry a DPI feature write"
     );
     assert!(
-        DeviceRoute::Bolt {
-            receiver_uid: "d0289db2".to_string(),
-            slot: 1,
-        }
-        .speaks_hidpp()
+        cycles.by_key.contains_key("mouse"),
+        "the HID++ device still gets its cycle"
     );
 }
 
