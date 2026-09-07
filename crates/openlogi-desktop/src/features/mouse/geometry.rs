@@ -230,9 +230,9 @@ fn map_slot_name(name: &str) -> Option<MouseControlId> {
         }
         "SLOT_NAME_BACK_BUTTON" => Some(MouseControlId::Button(ButtonId::Back)),
         "SLOT_NAME_FORWARD_BUTTON" => Some(MouseControlId::Button(ButtonId::Forward)),
-        "SLOT_NAME_MODESHIFT_BUTTON" | "SLOT_NAME_DPI_BUTTON" => {
-            Some(MouseControlId::Button(ButtonId::DpiToggle))
-        }
+        "SLOT_NAME_MODESHIFT_BUTTON"
+        | "SLOT_NAME_DPI_BUTTON"
+        | "SLOT_NAME_CHANGE_POINTER_SPEED" => Some(MouseControlId::Button(ButtonId::DpiToggle)),
         "SLOT_NAME_THUMBWHEEL" => Some(MouseControlId::ThumbwheelRotation),
         "SLOT_NAME_GESTURE_BUTTON" => Some(MouseControlId::Button(ButtonId::GestureButton)),
         // The MX Master 4 Haptic Sense Panel. Logi names the slot after its
@@ -281,6 +281,33 @@ mod tests {
         assert_eq!(
             map_slot_name("SLOT_NAME_DPI_BUTTON"),
             Some(MouseControlId::Button(ButtonId::DpiToggle))
+        );
+    }
+
+    #[test]
+    fn mx_ergo_s_metadata_maps_all_six_rebindable_controls() {
+        let mapped: Vec<_> = [
+            "SLOT_NAME_MIDDLE_BUTTON",
+            "SLOT_NAME_SCROLL_LEFT",
+            "SLOT_NAME_SCROLL_RIGHT",
+            "SLOT_NAME_FORWARD_BUTTON",
+            "SLOT_NAME_BACK_BUTTON",
+            "SLOT_NAME_CHANGE_POINTER_SPEED",
+        ]
+        .into_iter()
+        .filter_map(map_slot_name)
+        .collect();
+
+        assert_eq!(
+            mapped,
+            vec![
+                MouseControlId::Button(ButtonId::MiddleClick),
+                MouseControlId::Button(ButtonId::WheelTiltLeft),
+                MouseControlId::Button(ButtonId::WheelTiltRight),
+                MouseControlId::Button(ButtonId::Forward),
+                MouseControlId::Button(ButtonId::Back),
+                MouseControlId::Button(ButtonId::DpiToggle),
+            ]
         );
     }
 
