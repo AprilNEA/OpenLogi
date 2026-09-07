@@ -38,7 +38,7 @@ fn unknown_offline_receiver_slots_do_not_create_gallery_cards() {
 
 #[test]
 fn offline_unifying_unit_id_resolves_the_known_physical_device() {
-    let unit_id = [0x29, 0x16, 0xdb, 0xbe];
+    let unit_id = [0x11, 0x22, 0x33, 0x44];
     let model = DeviceModelInfo {
         entity_count: 0,
         serial_number: None,
@@ -53,7 +53,7 @@ fn offline_unifying_unit_id_resolves_the_known_physical_device() {
     };
     let mut config = Config::default();
     config.set_device_identity(
-        "unit:2916dbbe",
+        "unit:11223344",
         DeviceIdentity {
             display_name: "Ergo M575".into(),
             kind: DeviceKind::Trackball,
@@ -79,7 +79,7 @@ fn offline_unifying_unit_id_resolves_the_known_physical_device() {
     );
 
     assert_eq!(list.len(), 1);
-    assert_eq!(list[0].config_key, "unit:2916dbbe");
+    assert_eq!(list[0].config_key, "unit:11223344");
     assert_eq!(list[0].display_name, "Ergo M575");
     assert!(!list[0].online);
 }
@@ -87,7 +87,7 @@ fn offline_unifying_unit_id_resolves_the_known_physical_device() {
 #[test]
 fn adopted_offline_receiver_route_uses_its_persisted_identity() {
     let route_key = "receiver:da2699e1:slot:2";
-    let canonical = PhysicalDeviceKey::parse("serial:2540zae0hzr8")
+    let canonical = PhysicalDeviceKey::parse("serial:testserial01")
         .expect("the test key is a physical identity");
     let mut config = Config::default();
     config.set_device_identity(
@@ -99,7 +99,7 @@ fn adopted_offline_receiver_route_uses_its_persisted_identity() {
             light_capabilities: None,
             model_info: Some(DeviceModelInfo {
                 entity_count: 4,
-                serial_number: Some("2540ZAE0HZR8".into()),
+                serial_number: Some("TESTSERIAL01".into()),
                 unit_id: [0; 4],
                 transports: DeviceTransports::default(),
                 model_ids: [0xb03e, 0, 0],

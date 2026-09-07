@@ -1938,8 +1938,9 @@ dpi = 1600
 fn custom_device_aliases_migrate_to_identity_keys_and_links() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("config.toml");
-    let original = r#"
-schema_version = 6
+    let original = format!(
+        r#"
+schema_version = {SCHEMA_VERSION}
 selected_device = "device:serial:abc123"
 
 [device_aliases]
@@ -1980,8 +1981,9 @@ hires_wheel = false
 thumbwheel = false
 haptic_feedback = false
 haptic_panel = false
-"#;
-    fs::write(&path, original).expect("write custom config");
+"#
+    );
+    fs::write(&path, &original).expect("write custom config");
 
     let (config, mut file) = ConfigFile::load_from_path(&path).expect("load custom config");
     assert_eq!(config.selected_device.as_deref(), Some("serial:abc123"));
@@ -2001,7 +2003,8 @@ haptic_panel = false
 
     file.save(&config).expect("save migrated config");
     assert_eq!(
-        fs::read(path.with_file_name("config.toml.v6.bak")).expect("read migration backup"),
+        fs::read(path.with_file_name(format!("config.toml.v{SCHEMA_VERSION}.bak")))
+            .expect("read migration backup"),
         original.as_bytes(),
         "same-schema custom migrations still preserve their original source"
     );
