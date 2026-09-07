@@ -453,7 +453,7 @@ fn a_same_report_swap_to_the_panel_still_discards_its_contact_jump() {
 }
 
 #[test]
-fn quick_tap_is_a_click_even_while_the_cursor_moves() {
+fn dedicated_quick_swipe_is_not_misclassified_as_click() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut acc = CaptureAccum::default();
 
@@ -472,12 +472,12 @@ fn quick_tap_is_a_click_even_while_the_cursor_moves() {
         next_gesture(&mut rx),
         Ok(CapturedInput::Gesture(
             ButtonId::GestureButton,
-            GestureDirection::Click
+            GestureDirection::Right
         ))
     );
     assert!(
         next_gesture(&mut rx).is_err(),
-        "a quick tap emits exactly one click"
+        "a quick swipe emits exactly one direction, without a release click"
     );
 }
 
@@ -579,6 +579,89 @@ fn a_quick_panel_tap_is_a_click() {
 }
 
 #[test]
+fn dedicated_swipe_commits_immediately_and_ignores_opposite_recovery() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    handle_reprog(&mut acc, press(), GESTURE, &[], &[], &tx);
+    handle_reprog(
+        &mut acc,
+        RawControlEvent::RawXy { dx: -120, dy: 5 },
+        GESTURE,
+        &[],
+        &[],
+        &tx,
+    );
+    assert_eq!(
+        next_gesture(&mut rx),
+        Ok(CapturedInput::Gesture(
+            ButtonId::GestureButton,
+            GestureDirection::Left,
+        )),
+        "a deliberate dedicated-button swipe must not wait 160 ms"
+    );
+    handle_reprog(
+        &mut acc,
+        RawControlEvent::RawXy { dx: 300, dy: 0 },
+        GESTURE,
+        &[],
+        &[],
+        &tx,
+    );
+    handle_reprog(&mut acc, release(), GESTURE, &[], &[], &tx);
+    assert!(
+        next_gesture(&mut rx).is_err(),
+        "recovery and release must not emit another action"
+    );
+}
+
+#[test]
+fn side_button_raw_xy_still_waits_for_the_hold_gate() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    let cid = 0x0056;
+    let buttons = [(cid, ButtonId::Forward)];
+    handle_reprog_with_gesture_buttons(
+        &mut acc,
+        RawControlEvent::DivertedButtons([cid, 0, 0, 0]),
+        &[],
+        &[],
+        &buttons,
+        &[],
+        &tx,
+    );
+    handle_reprog_with_gesture_buttons(
+        &mut acc,
+        RawControlEvent::RawXy { dx: -120, dy: 5 },
+        &[],
+        &[],
+        &buttons,
+        &[],
+        &tx,
+    );
+    assert!(
+        next_gesture(&mut rx).is_err(),
+        "ordinary buttons retain click-drift protection"
+    );
+    acc.backdate_hold_for_test();
+    handle_reprog_with_gesture_buttons(
+        &mut acc,
+        RawControlEvent::RawXy { dx: -1, dy: 0 },
+        &[],
+        &[],
+        &buttons,
+        &[],
+        &tx,
+    );
+    assert_eq!(
+        next_gesture(&mut rx),
+        Ok(CapturedInput::Gesture(
+            ButtonId::Forward,
+            GestureDirection::Left,
+        ))
+    );
+}
+
+#[test]
 fn the_panels_first_raw_xy_sample_after_contact_is_discarded() {
     // Real-hardware probe finding: the panel's first raw-XY sample after
     // contact is a large position jump (up to thousands of units), not a
@@ -587,7 +670,6 @@ fn the_panels_first_raw_xy_sample_after_contact_is_discarded() {
     let mut acc = CaptureAccum::default();
 
     handle_reprog(&mut acc, panel_press(), PANEL, &[], &[], &tx);
-    acc.backdate_hold_for_test();
     // The contact jump — leftward, far past every threshold.
     handle_reprog(
         &mut acc,

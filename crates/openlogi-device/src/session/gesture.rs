@@ -124,7 +124,11 @@ enum HoldState {
 /// Begin a hold for `cid`, its swipe accumulator started fresh.
 fn begin_hold(cid: u16, button: ButtonId, overlap: bool, skip_first_raw_xy: bool) -> HoldState {
     let mut swipe = SwipeAccumulator::default();
-    swipe.begin();
+    if button.is_hidpp_gesture_source() {
+        swipe.begin_dedicated();
+    } else {
+        swipe.begin();
+    }
     HoldState::Holding {
         cid,
         button,
@@ -1051,7 +1055,7 @@ fn handle_raw_xy(
         return;
     }
     // Commit the instant a clean direction emerges (mid-swipe, once per hold);
-    // the accumulator gates on hold duration internally and drops travel that
+    // the accumulator applies the control's timing policy and drops travel that
     // arrives outside a hold.
     if let Some(direction) = swipe.accumulate(i32::from(dx), i32::from(dy)) {
         debug!(?direction, %button, "gesture committed");

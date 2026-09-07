@@ -15,8 +15,8 @@ pub const GESTURE_SWIPE_THRESHOLD: i32 = 50;
 pub const GESTURE_SWIPE_DEADZONE: i32 = 40;
 /// Minimum time a gesture button must be held before its travel can commit to a
 /// swipe. Distinguishes a deliberate hold-and-swipe from a quick click whose
-/// cursor happened to be moving. Shared by both gesture paths (the HID++ thumb
-/// pad and the OS-hook Middle/Back/Forward).
+/// cursor happened to be moving. Applies to ordinary buttons used for gestures;
+/// dedicated gesture controls use distance alone for immediate recognition.
 pub const GESTURE_HOLD_FOR_SWIPE: std::time::Duration = std::time::Duration::from_millis(160);
 
 /// Classify the *running* raw-XY travel of a held gesture button into a
@@ -69,14 +69,13 @@ pub fn detect_swipe(dx: i32, dy: i32) -> Option<GestureDirection> {
 /// dedicated gesture button (`openlogi-hid`'s `0x1b04` raw-XY divert) and the OS-hook
 /// Middle/Back/Forward buttons (`openlogi-agent-core`'s CGEventTap). A gesture
 /// button's hold accumulates travel; the instant the dominant axis commits a
-/// direction — after the button has been held [`GESTURE_HOLD_FOR_SWIPE`], so a
-/// quick click whose cursor drifted doesn't count — [`Self::accumulate`] returns
-/// that direction exactly once, like Logitech Options+. A hold that never
+/// direction — after the hold gate for ordinary buttons, or immediately for
+/// dedicated gesture controls — [`Self::accumulate`] returns
+/// that direction exactly once. A hold that never
 /// commits is a plain click, reported by [`Self::end`].
 ///
-/// The two paths differ only in *what identifies the held control* (a
-/// [`ButtonId`](super::ButtonId) for the OS hook, a diverted CID for the HID++ gesture control), so each owns
-/// that and embeds this for the shared travel logic. Keeping the logic in one
+/// Capture layers identify the held control and select its timing policy,
+/// then embed this state machine for the shared travel logic. Keeping it in one
 /// place is deliberate: the two copies it replaced had already drifted apart
 /// (one resolved a swipe only on release), which mis-fired the click.
 #[derive(Debug, Default)]
@@ -84,6 +83,8 @@ pub struct SwipeAccumulator {
     /// When the current hold began, or `None` when not holding. Gates a
     /// deliberate swipe against a quick click whose cursor happened to move.
     held_since: Option<Instant>,
+    /// Minimum duration for this hold, selected by the physical control type.
+    min_hold: std::time::Duration,
     /// Accumulated raw-XY travel since the hold began (saturating, so an
     /// arbitrarily long hold can never overflow).
     dx: i32,
@@ -96,7 +97,18 @@ pub struct SwipeAccumulator {
 impl SwipeAccumulator {
     /// Begin a fresh hold, resetting the travel accumulator and commit state.
     pub fn begin(&mut self) {
+        self.begin_with_min_hold(GESTURE_HOLD_FOR_SWIPE);
+    }
+
+    /// Begin a dedicated gesture-control hold. Distance and direction gates
+    /// still apply, but a deliberate swipe need not wait for a click-drift timer.
+    pub fn begin_dedicated(&mut self) {
+        self.begin_with_min_hold(std::time::Duration::ZERO);
+    }
+
+    fn begin_with_min_hold(&mut self, min_hold: std::time::Duration) {
         self.held_since = Some(Instant::now());
+        self.min_hold = min_hold;
         self.dx = 0;
         self.dy = 0;
         self.fired = false;
@@ -111,7 +123,7 @@ impl SwipeAccumulator {
 
     /// Feed a pointer-move / raw-XY delta into the current hold. Returns
     /// `Some(direction)` exactly once per hold — the instant travel commits, and
-    /// only after the hold passes [`GESTURE_HOLD_FOR_SWIPE`] — and `None` while
+    /// only after the selected hold gate passes — and `None` while
     /// still too short, already committed, or not holding.
     pub fn accumulate(&mut self, dx: i32, dy: i32) -> Option<GestureDirection> {
         if self.fired || self.held_since.is_none() {
@@ -121,7 +133,7 @@ impl SwipeAccumulator {
         self.dy = self.dy.saturating_add(dy);
         let held_long_enough = self
             .held_since
-            .is_some_and(|t| t.elapsed() >= GESTURE_HOLD_FOR_SWIPE);
+            .is_some_and(|t| t.elapsed() >= self.min_hold);
         if held_long_enough && let Some(dir) = detect_swipe(self.dx, self.dy) {
             self.fired = true;
             return Some(dir);
@@ -211,6 +223,45 @@ mod tests {
     }
 
     // ── SwipeAccumulator (the shared mid-swipe state machine) ─────────────────
+
+    #[test]
+    fn dedicated_swipe_commits_first_direction_without_waiting() {
+        let mut acc = SwipeAccumulator::default();
+        acc.begin_dedicated();
+        assert_eq!(acc.accumulate(-60, 0), Some(GestureDirection::Left));
+        // Recovery motion during the same press must never reverse the action.
+        assert_eq!(acc.accumulate(200, 0), None);
+        assert!(!acc.end());
+        acc.begin_dedicated();
+        assert_eq!(acc.accumulate(60, 0), Some(GestureDirection::Right));
+    }
+
+    #[test]
+    fn dedicated_hold_preserves_distance_diagonal_and_click_checks() {
+        let mut acc = SwipeAccumulator::default();
+        acc.begin_dedicated();
+        assert_eq!(acc.accumulate(2, -1), None);
+        assert!(acc.end(), "small drift remains a click");
+        acc.begin_dedicated();
+        assert_eq!(acc.accumulate(60, 60), None);
+        assert!(acc.end(), "a diagonal must not commit a direction");
+        acc.begin_dedicated();
+        assert_eq!(acc.accumulate(-24, 0), None);
+        assert_eq!(acc.accumulate(-24, 0), None);
+        assert_eq!(acc.accumulate(-2, 0), Some(GestureDirection::Left));
+    }
+
+    #[test]
+    fn ordinary_begin_restores_hold_gate_after_dedicated_hold() {
+        let mut acc = SwipeAccumulator::default();
+        acc.begin_dedicated();
+        assert_eq!(acc.accumulate(60, 0), Some(GestureDirection::Right));
+        acc.end();
+        acc.begin();
+        assert_eq!(acc.accumulate(-60, 0), None);
+        acc.backdate_hold_for_test();
+        assert_eq!(acc.accumulate(0, 0), Some(GestureDirection::Left));
+    }
 
     #[test]
     fn accumulator_commits_a_direction_once_after_the_hold_gate() {
