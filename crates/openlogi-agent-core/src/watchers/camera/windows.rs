@@ -29,60 +29,130 @@ const LAST_USED_START: &str = "LastUsedTimeStart";
 /// long as the client holds the device, which is the in-use signal.
 const LAST_USED_STOP: &str = "LastUsedTimeStop";
 
-/// Report whether any client currently holds a camera. The error is the failing
-/// Win32 status from the last hive that could not be opened; a hive that opens
-/// answers on its own, so a machine policy hiding `HKLM` still reports normally.
+/// What one scan of a consent store learned.
+///
+/// A client that cannot be read is not a client that is idle: reporting it as
+/// idle lets a transient registry failure switch a linked light off while its
+/// camera is still running. Keeping the two apart lets the watcher retain its
+/// last state instead, which is what its error path exists for.
+#[derive(Clone, Copy)]
+enum Scan {
+    /// A client holds the camera. No unreadable entry can contradict that.
+    Holding,
+    /// Every entry read cleanly, and none holds the camera.
+    NoneHolding,
+    /// An entry could not be read, so "none holds" is not a fact.
+    Unreadable(i32),
+}
+
+impl Scan {
+    /// Combine two scans of the same store, or two stores of the same host.
+    /// Evidence of use outranks a failure, which outranks silence.
+    fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Holding, _) | (_, Self::Holding) => Self::Holding,
+            (Self::Unreadable(status), _) | (_, Self::Unreadable(status)) => {
+                Self::Unreadable(status)
+            }
+            (Self::NoneHolding, Self::NoneHolding) => Self::NoneHolding,
+        }
+    }
+}
+
+/// Report whether any client currently holds a camera. The error is a Win32
+/// status: either no hive exposed the store, or an entry within one could not
+/// be read and its client's state is therefore unknown.
 pub(super) fn camera_in_use() -> Result<bool, i32> {
-    let mut last_error = None;
-    let mut read_any = false;
+    let mut scan: Option<Scan> = None;
+    let mut open_error = None;
     for hive in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
         match RegKey::predef(hive).open_subkey_with_flags(WEBCAM_CONSENT_SUBKEY, KEY_READ) {
             Ok(store) => {
-                read_any = true;
-                if store_has_active_client(&store) {
+                let store_scan = scan_store(&store);
+                if matches!(store_scan, Scan::Holding) {
                     return Ok(true);
                 }
+                scan = Some(scan.map_or(store_scan, |prev| prev.merge(store_scan)));
             }
-            Err(error) => last_error = Some(status_of(&error)),
+            // A hive that simply has no consent store says nothing either way;
+            // a machine policy hiding one is a read failure.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => open_error = Some(status_of(&error)),
         }
     }
-    if read_any {
-        Ok(false)
+    match scan {
+        Some(Scan::Holding) => Ok(true),
+        Some(Scan::NoneHolding) => Ok(false),
+        Some(Scan::Unreadable(status)) => Err(status),
+        None => Err(open_error.unwrap_or(-1)),
+    }
+}
+
+/// Scan one consent store, including the non-packaged clients nested one level
+/// below it.
+fn scan_store(store: &RegKey) -> Scan {
+    let direct = scan_clients(store);
+    if matches!(direct, Scan::Holding) {
+        return Scan::Holding;
+    }
+    let nested = match store.open_subkey_with_flags(NON_PACKAGED_SUBKEY, KEY_READ) {
+        Ok(non_packaged) => scan_clients(&non_packaged),
+        // Not every store has non-packaged clients.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Scan::NoneHolding,
+        Err(error) => Scan::Unreadable(status_of(&error)),
+    };
+    direct.merge(nested)
+}
+
+/// Scan every immediate child of `parent`.
+fn scan_clients(parent: &RegKey) -> Scan {
+    let mut scan = Scan::NoneHolding;
+    for name in parent.enum_keys() {
+        let entry = match name {
+            Ok(name) => match parent.open_subkey_with_flags(&name, KEY_READ) {
+                Ok(client) => scan_client(&client),
+                // A client that exited between the enumeration and the open
+                // took its entry with it, and holds nothing.
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Scan::NoneHolding,
+                Err(error) => Scan::Unreadable(status_of(&error)),
+            },
+            Err(error) => Scan::Unreadable(status_of(&error)),
+        };
+        if matches!(entry, Scan::Holding) {
+            return Scan::Holding;
+        }
+        scan = scan.merge(entry);
+    }
+    scan
+}
+
+/// Scan one client entry.
+fn scan_client(client: &RegKey) -> Scan {
+    let started = match usage_stamp(client, LAST_USED_START) {
+        Ok(stamp) => stamp,
+        Err(status) => return Scan::Unreadable(status),
+    };
+    let stopped = match usage_stamp(client, LAST_USED_STOP) {
+        Ok(stamp) => stamp,
+        Err(status) => return Scan::Unreadable(status),
+    };
+    if holds_camera(started, stopped) {
+        Scan::Holding
     } else {
-        Err(last_error.unwrap_or(-1))
+        Scan::NoneHolding
     }
 }
 
-/// Whether any client under one consent store holds the camera, including the
-/// non-packaged clients nested one level below it.
-fn store_has_active_client(store: &RegKey) -> bool {
-    if any_client_holds_camera(store) {
-        return true;
+/// One usage stamp, or zero when the value is simply absent — a grouping key
+/// such as `NonPackaged` carries neither stamp, and neither does a client that
+/// has been granted the permission but never opened a camera. Any other
+/// failure means the entry could not be read.
+fn usage_stamp(client: &RegKey, name: &str) -> Result<u64, i32> {
+    match client.get_value::<u64, _>(name) {
+        Ok(stamp) => Ok(stamp),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(status_of(&error)),
     }
-    store
-        .open_subkey_with_flags(NON_PACKAGED_SUBKEY, KEY_READ)
-        .is_ok_and(|non_packaged| any_client_holds_camera(&non_packaged))
-}
-
-/// Whether any immediate child of `parent` holds the camera. A child that
-/// cannot be opened or carries no usage stamps is skipped: the store also holds
-/// grouping keys such as `NonPackaged`, which the caller walks separately.
-fn any_client_holds_camera(parent: &RegKey) -> bool {
-    parent
-        .enum_keys()
-        .filter_map(Result::ok)
-        .filter_map(|name| parent.open_subkey_with_flags(name, KEY_READ).ok())
-        .any(|client| client_holds_camera(&client))
-}
-
-/// Read one client's usage stamps. A missing stamp reads as zero, which is also
-/// what a grouping key such as `NonPackaged` — it carries only `Value` and
-/// `LastSetTime` — and a never-used client both look like.
-fn client_holds_camera(client: &RegKey) -> bool {
-    holds_camera(
-        client.get_value::<u64, _>(LAST_USED_START).unwrap_or(0),
-        client.get_value::<u64, _>(LAST_USED_STOP).unwrap_or(0),
-    )
 }
 
 /// A client is holding the camera when it has started a session that has no
@@ -101,7 +171,58 @@ fn status_of(error: &io::Error) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::holds_camera;
+    use super::{Scan, holds_camera};
+
+    impl Scan {
+        fn is_holding(self) -> bool {
+            matches!(self, Self::Holding)
+        }
+
+        fn unreadable_status(self) -> Option<i32> {
+            match self {
+                Self::Unreadable(status) => Some(status),
+                _ => None,
+            }
+        }
+    }
+
+    #[test]
+    fn use_outranks_a_failure_which_outranks_silence() {
+        // The order matters in both directions: merge is called with the
+        // running total on either side depending on which entry came first.
+        assert!(Scan::Holding.merge(Scan::Unreadable(5)).is_holding());
+        assert!(Scan::Unreadable(5).merge(Scan::Holding).is_holding());
+        assert!(Scan::Holding.merge(Scan::NoneHolding).is_holding());
+        assert_eq!(
+            Scan::NoneHolding
+                .merge(Scan::Unreadable(5))
+                .unreadable_status(),
+            Some(5)
+        );
+        assert_eq!(
+            Scan::Unreadable(5)
+                .merge(Scan::NoneHolding)
+                .unreadable_status(),
+            Some(5)
+        );
+        assert!(!Scan::NoneHolding.merge(Scan::NoneHolding).is_holding());
+        assert_eq!(
+            Scan::NoneHolding
+                .merge(Scan::NoneHolding)
+                .unreadable_status(),
+            None
+        );
+    }
+
+    #[test]
+    fn an_unreadable_entry_does_not_read_as_an_idle_one() {
+        // The distinction this type exists for: a client whose entry could not
+        // be read must not answer "no camera in use", or a transient registry
+        // failure switches a linked light off mid-call.
+        let unreadable = Scan::NoneHolding.merge(Scan::Unreadable(5));
+        assert!(!unreadable.is_holding());
+        assert!(unreadable.unreadable_status().is_some());
+    }
 
     /// An arbitrary acquisition stamp; only zero versus non-zero is read.
     const STARTED: u64 = 133_000_000_000_000_000;
