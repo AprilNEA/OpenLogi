@@ -54,6 +54,49 @@ pub(super) fn variant_image_for(
         .map(str::to_string)
 }
 
+/// Helper that checks variants against candidate model IDs, including the depot name and
+/// any stripped `_ext\d+` stem (e.g. for depots like `pro_keyboard_ext1`).
+pub(super) fn find_variant_in_manifest<'a, F>(
+    manifest: &DepotManifest,
+    entry: &'a openlogi_assets::DeviceEntry,
+    depot: &'a str,
+    ext: u8,
+    lookup: F,
+) -> Option<String>
+where
+    F: Fn(&DepotManifest, &str, u8) -> Option<String>,
+{
+    let candidates = candidate_manifest_bases(entry, depot);
+    for base in candidates {
+        if let Some(res) = lookup(manifest, &base, ext) {
+            return Some(res);
+        }
+    }
+    None
+}
+
+/// Enumerate candidate manifest bases: model IDs, the depot name, and any stripped `_ext\d+` stem.
+pub(super) fn candidate_manifest_bases(
+    entry: &openlogi_assets::DeviceEntry,
+    depot: &str,
+) -> Vec<String> {
+    let mut candidates = Vec::new();
+    for id in entry.model_id_candidates() {
+        if !candidates.iter().any(|c: &String| c.eq_ignore_ascii_case(id)) {
+            candidates.push(id.to_string());
+        }
+    }
+    if !candidates.iter().any(|c: &String| c.eq_ignore_ascii_case(depot)) {
+        candidates.push(depot.to_string());
+    }
+    if let Some((stem, _)) = depot.split_once("_ext")
+        && !candidates.iter().any(|c: &String| c.eq_ignore_ascii_case(stem))
+    {
+        candidates.push(stem.to_string());
+    }
+    candidates
+}
+
 /// Like [`variant_image_for`] but returns the `device_buttons_image`
 /// resource (typically `side_*.png`) — that's the view Logi calibrates
 /// the assignment markers against, so the mouse-model render uses it.
