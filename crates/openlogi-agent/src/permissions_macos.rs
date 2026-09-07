@@ -11,6 +11,7 @@
 )]
 
 use std::cell::RefCell;
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -36,6 +37,12 @@ thread_local! {
     /// Held only while [`request_bluetooth`] is polling authorization.
     static BLUETOOTH_MANAGER: RefCell<Option<Retained<AnyObject>>> = const { RefCell::new(None) };
 }
+
+/// One in-flight Bluetooth sheet at a time. Overlapping auto + Settings
+/// Grant requests share the main-thread manager slot; without this lock the
+/// second call would replace the first manager and either cleanup could
+/// drop the other while it is still polling.
+static BLUETOOTH_PROMPT: Mutex<()> = Mutex::new(());
 
 /// Request Input Monitoring so HID inventory can succeed.
 ///
@@ -101,6 +108,9 @@ fn create_central_manager() -> Option<Retained<AnyObject>> {
 }
 
 fn request_bluetooth_access() -> bool {
+    let _guard = BLUETOOTH_PROMPT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     match bluetooth_authorization() {
         3 => return true,
         1 | 2 => return false,

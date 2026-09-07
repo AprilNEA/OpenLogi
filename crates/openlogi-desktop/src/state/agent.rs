@@ -20,13 +20,65 @@ impl SnapshotChanges {
     }
 }
 
+/// Sheets already raised in this GUI session for agent-owned permissions.
+#[cfg(any(test, target_os = "macos"))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct PermissionPromptFlags {
+    accessibility: bool,
+    input_monitoring: bool,
+    bluetooth: bool,
+}
+
+/// One agent-owned permission the GUI should ask for next.
+#[cfg(any(test, target_os = "macos"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentPermissionPrompt {
+    Accessibility,
+    InputMonitoring,
+    Bluetooth,
+}
+
+/// Decide which missing agent permissions to prompt for on this Ready snapshot.
+///
+/// Input Monitoring Allow relaunches the agent. A Bluetooth request queued
+/// behind that sheet is dropped, and a fast successor reconnect never leaves
+/// Ready long enough to reset a one-shot flag. So Bluetooth is only asked
+/// once Input Monitoring is already granted; the next Ready continues.
+#[cfg(any(test, target_os = "macos"))]
+fn next_agent_permission_prompts(
+    status: &openlogi_ipc::AgentStatus,
+    already: PermissionPromptFlags,
+) -> (PermissionPromptFlags, Vec<AgentPermissionPrompt>) {
+    let mut already = already;
+    let mut prompts = Vec::new();
+    if !status.accessibility_granted && !already.accessibility {
+        already.accessibility = true;
+        prompts.push(AgentPermissionPrompt::Accessibility);
+    }
+    if !status.input_monitoring_granted {
+        if !already.input_monitoring {
+            already.input_monitoring = true;
+            prompts.push(AgentPermissionPrompt::InputMonitoring);
+        }
+        return (already, prompts);
+    }
+    if !status.bluetooth_granted && !already.bluetooth {
+        already.bluetooth = true;
+        prompts.push(AgentPermissionPrompt::Bluetooth);
+    }
+    (already, prompts)
+}
+
 /// Agent-owned observations accepted by the GUI for this process session.
 pub(super) struct AgentSession {
     link: AgentLink,
     foreground: ForegroundApps,
     last_ready_inventory: Vec<DeviceInventory>,
+    /// Which agent-owned permission sheets this GUI session has already
+    /// asked for. Reset on any non-Ready link so a successor agent can
+    /// finish what an Input Monitoring relaunch dropped.
     #[cfg(target_os = "macos")]
-    permission_prompts_started: bool,
+    permission_prompts: PermissionPromptFlags,
     #[cfg(all(target_os = "macos", debug_assertions))]
     monitor_events: std::collections::VecDeque<openlogi_ipc::MonitorEvent>,
     #[cfg(all(target_os = "macos", debug_assertions))]
@@ -40,7 +92,7 @@ impl Default for AgentSession {
             foreground: ForegroundApps::default(),
             last_ready_inventory: Vec::new(),
             #[cfg(target_os = "macos")]
-            permission_prompts_started: false,
+            permission_prompts: PermissionPromptFlags::default(),
             #[cfg(all(target_os = "macos", debug_assertions))]
             monitor_events: std::collections::VecDeque::new(),
             #[cfg(all(target_os = "macos", debug_assertions))]
@@ -144,26 +196,32 @@ impl AppState {
         self.send_ipc(crate::services::ipc::Command::RequestBluetoothPrompt { fallback_to_pane });
     }
 
-    /// After the first Ready snapshot of this GUI session, ask the agent to
-    /// raise native sheets for any permission it does not yet hold. Does not
-    /// open System Settings.
+    /// After a Ready snapshot, ask the agent to raise native sheets for any
+    /// permission it does not yet hold. Does not open System Settings.
+    ///
+    /// Bluetooth waits until Input Monitoring is already granted: an Allow on
+    /// that sheet relaunches the agent and would drop a Bluetooth RPC queued
+    /// behind it. The successor Ready then continues with whatever is still
+    /// missing.
     #[cfg(target_os = "macos")]
     pub(crate) fn start_missing_agent_permission_prompts(
         &mut self,
         status: &openlogi_ipc::AgentStatus,
     ) {
-        if self.agent.permission_prompts_started {
-            return;
-        }
-        self.agent.permission_prompts_started = true;
-        if !status.accessibility_granted {
-            self.request_accessibility_prompt(false);
-        }
-        if !status.input_monitoring_granted {
-            self.request_input_monitoring_prompt(false);
-        }
-        if !status.bluetooth_granted {
-            self.request_bluetooth_prompt(false);
+        let (next, prompts) = next_agent_permission_prompts(status, self.agent.permission_prompts);
+        self.agent.permission_prompts = next;
+        for prompt in prompts {
+            match prompt {
+                AgentPermissionPrompt::Accessibility => {
+                    self.request_accessibility_prompt(false);
+                }
+                AgentPermissionPrompt::InputMonitoring => {
+                    self.request_input_monitoring_prompt(false);
+                }
+                AgentPermissionPrompt::Bluetooth => {
+                    self.request_bluetooth_prompt(false);
+                }
+            }
         }
     }
     /// The agent connection state the render path branches on.
@@ -190,7 +248,7 @@ impl AppState {
         }
         #[cfg(target_os = "macos")]
         if !matches!(link, AgentLink::Ready(_)) {
-            self.agent.permission_prompts_started = false;
+            self.agent.permission_prompts = PermissionPromptFlags::default();
         }
         self.agent.link = link;
         true
@@ -218,5 +276,88 @@ impl AppState {
 
     pub(super) fn foreground(&self) -> &ForegroundApps {
         &self.agent.foreground
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use openlogi_ipc::{AgentStatus, InventoryHealth, PROTOCOL_VERSION};
+
+    use super::{AgentPermissionPrompt, PermissionPromptFlags, next_agent_permission_prompts};
+
+    fn status(accessibility: bool, input_monitoring: bool, bluetooth: bool) -> AgentStatus {
+        AgentStatus {
+            accessibility_granted: accessibility,
+            hook_installed: false,
+            launch_at_login: false,
+            inventory: InventoryHealth::Scanning,
+            protocol_version: PROTOCOL_VERSION,
+            agent_version: String::new(),
+            input_monitoring_granted: input_monitoring,
+            hid_open_failures: false,
+            bluetooth_granted: bluetooth,
+        }
+    }
+
+    #[test]
+    fn first_ready_asks_accessibility_and_input_monitoring_but_not_bluetooth() {
+        let (flags, prompts) = next_agent_permission_prompts(
+            &status(false, false, false),
+            PermissionPromptFlags::default(),
+        );
+        assert_eq!(
+            prompts,
+            [
+                AgentPermissionPrompt::Accessibility,
+                AgentPermissionPrompt::InputMonitoring
+            ]
+        );
+        assert!(flags.accessibility);
+        assert!(flags.input_monitoring);
+        assert!(!flags.bluetooth);
+    }
+
+    #[test]
+    fn input_monitoring_relaunch_ready_asks_only_bluetooth() {
+        let already = PermissionPromptFlags {
+            accessibility: true,
+            input_monitoring: true,
+            bluetooth: false,
+        };
+        let (flags, prompts) = next_agent_permission_prompts(&status(true, true, false), already);
+        assert_eq!(prompts, [AgentPermissionPrompt::Bluetooth]);
+        assert!(flags.bluetooth);
+    }
+
+    #[test]
+    fn denied_input_monitoring_does_not_queue_bluetooth() {
+        let already = PermissionPromptFlags {
+            accessibility: true,
+            input_monitoring: true,
+            bluetooth: false,
+        };
+        let (flags, prompts) = next_agent_permission_prompts(&status(true, false, false), already);
+        assert!(prompts.is_empty());
+        assert!(!flags.bluetooth);
+    }
+
+    #[test]
+    fn already_granted_input_monitoring_asks_bluetooth_immediately() {
+        let (_, prompts) = next_agent_permission_prompts(
+            &status(true, true, false),
+            PermissionPromptFlags::default(),
+        );
+        assert_eq!(prompts, [AgentPermissionPrompt::Bluetooth]);
+    }
+
+    #[test]
+    fn already_asked_bluetooth_is_not_asked_again() {
+        let already = PermissionPromptFlags {
+            accessibility: true,
+            input_monitoring: true,
+            bluetooth: true,
+        };
+        let (_, prompts) = next_agent_permission_prompts(&status(true, true, false), already);
+        assert!(prompts.is_empty());
     }
 }

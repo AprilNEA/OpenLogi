@@ -62,6 +62,11 @@ const RECONNECT_DELAY: Duration = Duration::from_millis(250);
 /// start plus a worst-case first enumeration is ~6 s).
 const UNREACHABLE_AFTER: Duration = Duration::from_secs(15);
 
+/// How long Grant may wait for the Accessibility watcher to observe Allow
+/// before treating the sheet as refused and opening System Settings.
+#[cfg(target_os = "macos")]
+const ACCESSIBILITY_FALLBACK_WAIT: Duration = Duration::from_secs(60);
+
 /// Request deadline for a held `observe`, above the agent's own
 /// [`OBSERVE_HOLD`]: tarpc cancels a handler whose deadline passes, so a
 /// shorter one would kill the hold instead of waiting it out.
@@ -604,8 +609,11 @@ async fn handle(
             if fallback_to_pane {
                 #[cfg(target_os = "macos")]
                 {
-                    let status = client.status(ctx).await.map_err(|_| ())?;
-                    if !status.accessibility_granted {
+                    // The RPC returns as soon as the sheet is shown. Observable
+                    // Accessibility state lags the user's answer by a watcher
+                    // tick, so opening Settings from this snapshot would cover
+                    // the sheet or race an Allow.
+                    if !wait_for_accessibility_grant(client).await? {
                         openlogi_permissions::open_pane(
                             openlogi_permissions::Permission::Accessibility,
                         );
@@ -706,6 +714,51 @@ fn send_light_result(
 /// the caller reconnects; the inner application `Result` is returned for the reply.
 fn rpc_result<T>(r: Result<T, tarpc::client::RpcError>) -> Result<T, ()> {
     r.map_err(|_| ())
+}
+
+/// Poll `poll` until it reports granted or `timeout` elapses. Used by the
+/// Accessibility fallback so System Settings opens only after the watcher
+/// has had a chance to observe Allow, not on the stale snapshot the prompt
+/// RPC returns with.
+#[cfg(any(test, target_os = "macos"))]
+async fn wait_until_granted<F, Fut>(
+    mut poll: F,
+    timeout: Duration,
+    interval: Duration,
+) -> Result<bool, ()>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<bool, ()>>,
+{
+    let deadline = Instant::now() + timeout;
+    loop {
+        if poll().await? {
+            return Ok(true);
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+        tokio::time::sleep(interval).await;
+    }
+}
+
+/// Wait until the agent's Accessibility watcher reports a grant, or until
+/// [`ACCESSIBILITY_FALLBACK_WAIT`]. Each status read uses a fresh deadline
+/// so a long wait cannot expire the tarpc context mid-poll.
+#[cfg(target_os = "macos")]
+async fn wait_for_accessibility_grant(client: &AgentClient) -> Result<bool, ()> {
+    wait_until_granted(
+        || {
+            let client = client.clone();
+            async move {
+                let status = client.status(context::current()).await.map_err(|_| ())?;
+                Ok(status.accessibility_granted)
+            }
+        },
+        ACCESSIBILITY_FALLBACK_WAIT,
+        Duration::from_millis(400),
+    )
+    .await
 }
 
 /// Reply to a read command that the agent is unreachable; writes are
@@ -881,5 +934,46 @@ mod tests {
             panic!("a reload that never reached the agent must be reported as failed");
         };
         assert!(!error.message.is_empty(), "the notice needs a reason");
+    }
+
+    #[test]
+    fn accessibility_wait_resolves_once_granted() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("test runtime");
+        let granted = rt.block_on(async {
+            let mut n = 0;
+            wait_until_granted(
+                || {
+                    n += 1;
+                    let hit = n >= 3;
+                    async move { Ok(hit) }
+                },
+                Duration::from_secs(2),
+                Duration::from_millis(5),
+            )
+            .await
+            .unwrap()
+        });
+        assert!(granted);
+    }
+
+    #[test]
+    fn accessibility_wait_times_out_when_never_granted() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("test runtime");
+        let granted = rt.block_on(async {
+            wait_until_granted(
+                || async { Ok(false) },
+                Duration::from_millis(40),
+                Duration::from_millis(5),
+            )
+            .await
+            .unwrap()
+        });
+        assert!(!granted);
     }
 }
