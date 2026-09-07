@@ -187,6 +187,16 @@ fn agent_launch_plist(channel: Channel) -> Result<plist::Dictionary> {
         plist::Value::String(format!("{nested}/Contents/MacOS/{}", helper.binary)),
     );
     root.insert("KeepAlive".into(), plist::Value::Dictionary(keep_alive));
+    // A supervised successor waits for a legacy or manually launched Agent
+    // to release the singleton. Losing the lock and exiting cleanly here
+    // would leave this service down after the predecessor later crashes.
+    root.insert(
+        "ProgramArguments".into(),
+        plist::Value::Array(vec![
+            plist::Value::String(helper.binary.to_owned()),
+            plist::Value::String("--launchd".into()),
+        ]),
+    );
     Ok(root)
 }
 

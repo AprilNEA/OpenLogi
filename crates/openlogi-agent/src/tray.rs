@@ -19,22 +19,20 @@
 )]
 
 use std::cell::RefCell;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 
-use dispatch2::DispatchQueue;
+use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject};
 use objc2::{
     AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel,
 };
 use objc2_app_kit::NSStatusItem;
-#[cfg(test)]
-use objc2_app_kit::NSWorkspaceDidWakeNotification;
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSImage, NSRunningApplication, NSWorkspace,
-    NSWorkspaceScreensDidSleepNotification, NSWorkspaceScreensDidWakeNotification,
-    NSWorkspaceSessionDidBecomeActiveNotification, NSWorkspaceSessionDidResignActiveNotification,
-    NSWorkspaceWillSleepNotification,
+    NSWorkspaceDidWakeNotification, NSWorkspaceScreensDidSleepNotification,
+    NSWorkspaceScreensDidWakeNotification, NSWorkspaceSessionDidBecomeActiveNotification,
+    NSWorkspaceSessionDidResignActiveNotification, NSWorkspaceWillSleepNotification,
 };
 use objc2_core_graphics::{CGDisplayIsAsleep, CGMainDisplayID};
 use objc2_foundation::{NSNotification, NSString};
@@ -111,14 +109,26 @@ pub fn relocalize() {
 }
 
 struct ActivityTargetIvars {
+    activity: Arc<ActivityGate>,
+}
+
+struct ActivityGate {
     signal: DeviceIoSignal,
-    suspended_by: Mutex<u8>,
+    state: Mutex<ActivityState>,
+}
+
+struct ActivityState {
+    suspended_by: u8,
+    display_probe: Option<u8>,
 }
 
 const SYSTEM_SLEEP: u8 = 1 << 0;
 const SCREEN_SLEEP: u8 = 1 << 1;
 const SESSION_INACTIVE: u8 = 1 << 2;
 const STARTUP: u8 = 1 << 3;
+const WAKE_VALIDATION: u8 = 1 << 4;
+const DISPLAY_PROBE_DELAY_NANOS: i64 = 750_000_000;
+const REQUIRED_VISIBLE_DISPLAY_SAMPLES: u8 = 2;
 
 define_class!(
     // SAFETY: NSObject has no subclassing requirements, and `ActivityTarget`
@@ -131,27 +141,34 @@ define_class!(
     impl ActivityTarget {
         #[unsafe(method(workspaceWillSleep:))]
         fn workspace_will_sleep(&self, _notification: &NSNotification) {
-            self.suspend_from(SYSTEM_SLEEP);
+            self.ivars().activity.suspend_from(SYSTEM_SLEEP);
         }
 
         #[unsafe(method(workspaceScreensDidSleep:))]
         fn workspace_screens_did_sleep(&self, _notification: &NSNotification) {
-            self.suspend_from(SCREEN_SLEEP);
+            self.ivars().activity.suspend_from(SCREEN_SLEEP);
         }
 
         #[unsafe(method(workspaceSessionDidResignActive:))]
         fn workspace_session_did_resign_active(&self, _notification: &NSNotification) {
-            self.suspend_from(SESSION_INACTIVE);
+            self.ivars().activity.suspend_from(SESSION_INACTIVE);
+        }
+
+        #[unsafe(method(workspaceDidWake:))]
+        fn workspace_did_wake(&self, _notification: &NSNotification) {
+            self.ivars().activity.request_display_reconciliation();
         }
 
         #[unsafe(method(workspaceScreensDidWake:))]
         fn workspace_screens_did_wake(&self, _notification: &NSNotification) {
-            self.resume_from(SYSTEM_SLEEP | SCREEN_SLEEP);
+            self.ivars().activity.confirm_visible_display();
         }
 
         #[unsafe(method(workspaceSessionDidBecomeActive:))]
         fn workspace_session_did_become_active(&self, _notification: &NSNotification) {
-            self.resume_from(SYSTEM_SLEEP | SESSION_INACTIVE);
+            self.ivars()
+                .activity
+                .resume_from(SYSTEM_SLEEP | SESSION_INACTIVE);
         }
     }
 );
@@ -163,30 +180,26 @@ impl ActivityTarget {
         // in tests and any future caller cannot accidentally start open.
         let _ = signal.suspend();
         let this = Self::alloc().set_ivars(ActivityTargetIvars {
-            signal,
-            suspended_by: Mutex::new(STARTUP),
+            activity: Arc::new(ActivityGate {
+                signal,
+                state: Mutex::new(ActivityState {
+                    suspended_by: STARTUP,
+                    display_probe: None,
+                }),
+            }),
         });
         // SAFETY: `init` initializes our freshly allocated NSObject subclass.
         unsafe { msg_send![super(this), init] }
     }
+}
 
-    fn finish_startup(&self, display_asleep: bool) {
-        if display_asleep {
-            self.suspend_from(SCREEN_SLEEP);
-        }
-        self.resume_from(STARTUP);
-    }
-
+impl ActivityGate {
     fn suspend_from(&self, source: u8) {
         let changed = {
-            let mut suspended_by = self
-                .ivars()
-                .suspended_by
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            let was_allowed = *suspended_by == 0;
-            *suspended_by |= source;
-            was_allowed && self.ivars().signal.suspend()
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            let was_allowed = state.suspended_by == 0;
+            state.suspended_by |= source;
+            was_allowed && self.signal.suspend()
         };
         if changed {
             info!("display/session suspended — pausing device I/O");
@@ -195,17 +208,106 @@ impl ActivityTarget {
 
     fn resume_from(&self, sources: u8) {
         let changed = {
-            let mut suspended_by = self
-                .ivars()
-                .suspended_by
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            let was_suspended = *suspended_by != 0;
-            *suspended_by &= !sources;
-            was_suspended && *suspended_by == 0 && self.ivars().signal.resume()
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            let was_suspended = state.suspended_by != 0;
+            state.suspended_by &= !sources;
+            was_suspended && state.suspended_by == 0 && self.signal.resume()
         };
         if changed {
             info!("display/session resumed — enabling device I/O");
+        }
+    }
+
+    /// Validate a generic system wake before touching HID. macOS sends
+    /// `NSWorkspaceDidWakeNotification` for maintenance DarkWake as well as a
+    /// real user wake, so one notification cannot safely reopen the gate.
+    fn request_display_reconciliation(self: &Arc<Self>) {
+        if self.begin_display_probe() {
+            self.schedule_display_probe();
+        }
+    }
+
+    fn begin_display_probe(&self) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.display_probe.is_some() {
+            return false;
+        }
+
+        let was_allowed = state.suspended_by == 0;
+        state.suspended_by |= WAKE_VALIDATION;
+        state.display_probe = Some(0);
+        if was_allowed && self.signal.suspend() {
+            info!("system wake pending display confirmation — pausing device I/O");
+        }
+        true
+    }
+
+    fn schedule_display_probe(self: &Arc<Self>) {
+        let activity = Arc::clone(self);
+        let when = DispatchTime::NOW.time(DISPLAY_PROBE_DELAY_NANOS);
+        let _ = DispatchQueue::main().after(when, move || activity.run_display_probe());
+    }
+
+    fn run_display_probe(self: Arc<Self>) {
+        let display_asleep = CGDisplayIsAsleep(CGMainDisplayID());
+        if self.observe_display_sample(display_asleep) {
+            self.schedule_display_probe();
+        }
+    }
+
+    /// Apply one CoreGraphics display-state sample. Two separated visible
+    /// samples are required because the first value can still describe the
+    /// pre-transition state while macOS enters or leaves DarkWake.
+    fn observe_display_sample(&self, display_asleep: bool) -> bool {
+        let (changed, sample_again) = {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            let Some(visible_samples) = state.display_probe.as_mut() else {
+                return false;
+            };
+
+            if display_asleep {
+                let was_allowed = state.suspended_by == 0;
+                state.suspended_by |= SCREEN_SLEEP;
+                state.suspended_by &= !(STARTUP | WAKE_VALIDATION);
+                state.display_probe = None;
+                (was_allowed && self.signal.suspend(), false)
+            } else {
+                *visible_samples = visible_samples.saturating_add(1);
+                if *visible_samples < REQUIRED_VISIBLE_DISPLAY_SAMPLES {
+                    (false, true)
+                } else {
+                    let was_suspended = state.suspended_by != 0;
+                    state.suspended_by &=
+                        !(STARTUP | SYSTEM_SLEEP | SCREEN_SLEEP | WAKE_VALIDATION);
+                    state.display_probe = None;
+                    (
+                        was_suspended && state.suspended_by == 0 && self.signal.resume(),
+                        false,
+                    )
+                }
+            }
+        };
+
+        if changed {
+            if display_asleep {
+                info!("display reconciliation confirmed sleep — pausing device I/O");
+            } else {
+                info!("display reconciliation confirmed wake — enabling device I/O");
+            }
+        }
+        sample_again
+    }
+
+    fn confirm_visible_display(&self) {
+        let changed = {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            state.display_probe = None;
+            let was_suspended = state.suspended_by != 0;
+            state.suspended_by &= !(STARTUP | SYSTEM_SLEEP | SCREEN_SLEEP | WAKE_VALIDATION);
+            was_suspended && state.suspended_by == 0 && self.signal.resume()
+        };
+        if changed {
+            info!("visible display wake confirmed — enabling device I/O");
         }
     }
 }
@@ -285,6 +387,7 @@ fn quit_agent() -> ! {
             .output();
     }
     crate::overlay::evict_on_quit();
+    crate::launchd_handoff::mark_user_quit();
     info!("menu-bar Quit — exiting agent");
     #[expect(
         clippy::exit,
@@ -343,9 +446,14 @@ pub fn run_app_loop(
     // `NSWorkspaceSessionDidResignActiveNotification` between its will- and
     // did-finish-launching notifications. Finish that lifecycle while STARTUP
     // still holds the hardware gate closed, then snapshot display sleep before
-    // permitting the core's initial inventory scan.
+    // permitting the core's initial inventory scan. The delayed two-sample
+    // reconciliation avoids trusting CoreGraphics while a DarkWake transition
+    // is still settling.
     app.finishLaunching();
-    activity_target.finish_startup(CGDisplayIsAsleep(CGMainDisplayID()));
+    activity_target
+        .ivars()
+        .activity
+        .request_display_reconciliation();
     info!(show_in_menu_bar, "agent AppKit loop started");
 
     app.run();
@@ -357,9 +465,10 @@ pub fn run_app_loop(
 }
 
 /// Observe display/session sleep and user-visible resume transitions. Generic
-/// `NSWorkspaceDidWakeNotification` is deliberately not registered: macOS
-/// emits it for maintenance DarkWake, where opening BLE HID is exactly what can
-/// promote an otherwise invisible wake into a full display wake (#656).
+/// `NSWorkspaceDidWakeNotification` is a fallback for macOS occasionally
+/// dropping `NSWorkspaceScreensDidWakeNotification`; it only starts a delayed
+/// CoreGraphics confirmation and therefore does not open HID during maintenance
+/// DarkWake (#656).
 fn install_activity_observer(signal: DeviceIoSignal) -> Retained<ActivityTarget> {
     let target = ActivityTarget::new(signal);
     let workspace = NSWorkspace::sharedWorkspace();
@@ -370,6 +479,8 @@ fn install_activity_observer(signal: DeviceIoSignal) -> Retained<ActivityTarget>
     let screen_sleep = unsafe { NSWorkspaceScreensDidSleepNotification };
     // SAFETY: AppKit exports each name as an immutable process-lifetime constant.
     let session_inactive = unsafe { NSWorkspaceSessionDidResignActiveNotification };
+    // SAFETY: AppKit exports each name as an immutable process-lifetime constant.
+    let system_wake = unsafe { NSWorkspaceDidWakeNotification };
     // SAFETY: AppKit exports each name as an immutable process-lifetime constant.
     let screen_wake = unsafe { NSWorkspaceScreensDidWakeNotification };
     // SAFETY: AppKit exports each name as an immutable process-lifetime constant.
@@ -393,6 +504,12 @@ fn install_activity_observer(signal: DeviceIoSignal) -> Retained<ActivityTarget>
             &target,
             sel!(workspaceSessionDidResignActive:),
             Some(session_inactive),
+            Some(&workspace),
+        );
+        center.addObserver_selector_name_object(
+            &target,
+            sel!(workspaceDidWake:),
+            Some(system_wake),
             Some(&workspace),
         );
         center.addObserver_selector_name_object(
@@ -507,12 +624,22 @@ mod tests {
     // so one test's session-inactive event cannot suspend the other test's gate.
     static WORKSPACE_NOTIFICATIONS: Mutex<()> = Mutex::new(());
 
+    fn finish_visible_startup(target: &ActivityTarget) {
+        let activity = &target.ivars().activity;
+        assert!(activity.begin_display_probe());
+        assert!(
+            activity.observe_display_sample(false),
+            "the first visible sample must keep the startup gate closed",
+        );
+        assert!(!activity.observe_display_sample(false));
+    }
+
     #[test]
     fn overlapping_suspend_sources_all_clear_before_device_io_resumes() {
         let _notifications = WORKSPACE_NOTIFICATIONS.lock().unwrap();
         let (signal, gate) = device_io_channel();
         let target = install_activity_observer(signal);
-        target.finish_startup(false);
+        finish_visible_startup(&target);
         let workspace = NSWorkspace::sharedWorkspace();
         let center = workspace.notificationCenter();
 
@@ -533,8 +660,8 @@ mod tests {
         unsafe { center.postNotificationName_object(session_inactive, Some(&workspace)) };
         assert!(!gate.allows_io());
 
-        // `DidWake` is a maintenance/system wake and intentionally has no
-        // observer, so posting it must leave the gate closed.
+        // Generic `DidWake` may describe DarkWake. Its observer must keep the
+        // gate closed until the display probe confirms a visible wake.
         // SAFETY: AppKit exports the name as an immutable process-lifetime constant.
         let darkwake = unsafe { NSWorkspaceDidWakeNotification };
         // SAFETY: `workspace` is live and notification delivery is synchronous.
@@ -569,7 +696,9 @@ mod tests {
         let target = install_activity_observer(signal);
         assert!(!gate.allows_io(), "startup must fail closed");
 
-        target.finish_startup(true);
+        let activity = &target.ivars().activity;
+        assert!(activity.begin_display_probe());
+        assert!(!activity.observe_display_sample(true));
         assert!(
             !gate.allows_io(),
             "an initially sleeping display must retain the suspension",
@@ -586,5 +715,56 @@ mod tests {
 
         // SAFETY: This is the same live target registered with `center` above.
         unsafe { center.removeObserver(&target) };
+    }
+
+    #[test]
+    fn startup_requires_two_visible_samples_before_device_io_begins() {
+        let (signal, gate) = device_io_channel();
+        let target = ActivityTarget::new(signal);
+        let activity = &target.ivars().activity;
+
+        assert!(activity.begin_display_probe());
+        assert!(activity.observe_display_sample(false));
+        assert!(
+            !gate.allows_io(),
+            "one transition-time sample must not open HID during DarkWake",
+        );
+        assert!(!activity.observe_display_sample(false));
+        assert!(gate.allows_io());
+    }
+
+    #[test]
+    fn delayed_display_probe_recovers_a_missed_screen_wake() {
+        let (signal, gate) = device_io_channel();
+        let target = ActivityTarget::new(signal);
+        finish_visible_startup(&target);
+        let activity = &target.ivars().activity;
+
+        activity.suspend_from(SYSTEM_SLEEP | SCREEN_SLEEP);
+        assert!(!gate.allows_io());
+        assert!(activity.begin_display_probe());
+        assert!(activity.observe_display_sample(false));
+        assert!(!gate.allows_io());
+        assert!(!activity.observe_display_sample(false));
+        assert!(
+            gate.allows_io(),
+            "a confirmed visible wake must recover even without ScreensDidWake",
+        );
+    }
+
+    #[test]
+    fn darkwake_probe_keeps_device_io_suspended() {
+        let (signal, gate) = device_io_channel();
+        let target = ActivityTarget::new(signal);
+        finish_visible_startup(&target);
+        let activity = &target.ivars().activity;
+
+        activity.suspend_from(SYSTEM_SLEEP | SCREEN_SLEEP);
+        assert!(activity.begin_display_probe());
+        assert!(!activity.observe_display_sample(true));
+        assert!(
+            !gate.allows_io(),
+            "an asleep display must never reopen HID during DarkWake",
+        );
     }
 }

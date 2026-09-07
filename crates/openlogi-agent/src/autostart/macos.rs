@@ -11,8 +11,9 @@
 //! job loaded from one of those files keeps serving the current session
 //! (killing a live agent for a file migration helps nobody) and disappears at
 //! the next login, when its plist is no longer there to load; if the GUI has
-//! registered the service meanwhile, the freshly started duplicate loses the
-//! singleton lock and exits cleanly.
+//! registered the service meanwhile, the supervised successor waits behind the
+//! singleton lock and takes over after an abnormal exit. Explicit Quit leaves
+//! a one-shot marker so the successor stays stopped too (`launchd_handoff`).
 
 use std::io;
 use std::path::PathBuf;
