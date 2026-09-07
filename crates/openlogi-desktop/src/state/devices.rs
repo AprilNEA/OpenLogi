@@ -7,7 +7,7 @@ use openlogi_camera::Camera;
 use openlogi_core::config::{Config, DeviceIdentity, canonical_device_key};
 use openlogi_core::device::{
     BatteryInfo, Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports,
-    LightCapabilities, StandaloneDevice,
+    LightCapabilities, PairedDevice, StandaloneDevice,
 };
 use openlogi_core::device_order::{
     DeviceIdentity as RouteIdentity, DeviceStableId, PhysicalDeviceKey,
@@ -161,82 +161,11 @@ pub(super) fn build_device_list(
 ) -> Vec<DeviceRecord> {
     let mut list = Vec::new();
     for inv in inventories {
-        for paired in &inv.paired {
-            let route = DeviceRoute::device_route_for(inv, paired.slot);
-            let (model_key, asset, model_info, codename, serial_number, unit_id) =
-                if let Some(model) = paired.model_info.as_ref() {
-                    let asset = cache.resolve(model, paired.codename.as_deref());
-                    (
-                        model.config_key(),
-                        asset,
-                        Some(model.clone()),
-                        paired.codename.clone(),
-                        model.serial_number.clone(),
-                        model.unit_id,
-                    )
-                } else {
-                    // No HID++ 2.0 model info — HID++ 1.0 device or feature walk
-                    // timed out. Surface the device anyway using the wpid (or slot
-                    // as a last-resort model key) so it appears in the gallery
-                    // with a stable display fallback.
-                    let key = paired.wpid.map_or_else(
-                        || format!("slot{}", paired.slot),
-                        |w| format!("wpid{w:04x}"),
-                    );
-                    (key, None, None, paired.codename.clone(), None, [0u8; 4])
-                };
-            let stable_id = DeviceStableId::from_parts(
-                route.as_ref(),
-                paired.slot,
-                serial_number.as_deref(),
-                unit_id,
-            );
-            let identity = RouteIdentity::from_parts(serial_number.as_deref(), unit_id);
-            let (config_key, persistent) = config
-                .resolve_device_key(&stable_id, paired.online.then_some(&identity))
-                .map_or_else(
-                    || (stable_id.runtime_key(), false),
-                    |key| (key.into_string(), true),
-                );
-            let canonical_key =
-                canonical_device_key(&stable_id, paired.online.then_some(&identity))
-                    .map(PhysicalDeviceKey::into_string);
-            let route_key = stable_id.route_key();
-
-            let display_name = asset
-                .as_ref()
-                .map(|a| a.display_name.clone())
-                .or_else(|| paired.codename.as_deref().map(prettify_codename))
-                .unwrap_or_else(|| {
-                    tr!("device.receiver_slot_number", number => paired.slot.to_string())
-                        .to_string()
-                });
-            let kind = effective_kind(paired.kind, asset.as_ref().and_then(|a| a.kind));
-            list.push(DeviceRecord {
-                config_key,
-                canonical_key,
-                persistent,
-                route_key,
-                model_key,
-                model_name: display_name.clone(),
-                display_name,
-                asset,
-                model_info,
-                codename,
-                serial_number,
-                unit_id,
-                driver_id: None,
-                registry_model_id: None,
-                route,
-                capture_id: None,
-                kind,
-                capabilities: paired.capabilities,
-                light_capabilities: None,
-                slot: paired.slot,
-                online: paired.online,
-                battery: paired.battery.clone(),
-            });
-        }
+        list.extend(
+            inv.paired
+                .iter()
+                .filter_map(|paired| paired_record(inv, paired, cache, config)),
+        );
     }
     append_standalone(&mut list, standalone, cache, config);
     #[cfg(debug_assertions)]
@@ -266,6 +195,126 @@ pub(super) fn build_device_list(
     apply_custom_names(&mut list, config);
     sort_device_list(&mut list);
     list
+}
+
+/// Build one receiver/direct inventory record, or suppress an unknown offline
+/// receiver pairing until it has been observed online once.
+fn paired_record(
+    inventory: &DeviceInventory,
+    paired: &PairedDevice,
+    cache: &AssetResolver,
+    config: &Config,
+) -> Option<DeviceRecord> {
+    let route = DeviceRoute::device_route_for(inventory, paired.slot);
+    let (model_key, asset, model_info, codename, serial_number, unit_id) =
+        if let Some(model) = paired.model_info.as_ref() {
+            let asset = cache.resolve(model, paired.codename.as_deref());
+            (
+                model.config_key(),
+                asset,
+                Some(model.clone()),
+                paired.codename.clone(),
+                model.serial_number.clone(),
+                model.unit_id,
+            )
+        } else {
+            // No HID++ 2.0 model info — HID++ 1.0 device or feature walk
+            // timed out. Surface an online device using WPID (or slot as the
+            // last-resort model key) so it remains actionable.
+            let key = paired.wpid.map_or_else(
+                || format!("slot{}", paired.slot),
+                |wpid| format!("wpid{wpid:04x}"),
+            );
+            (key, None, None, paired.codename.clone(), None, [0; 4])
+        };
+    let stable_id = DeviceStableId::from_parts(
+        route.as_ref(),
+        paired.slot,
+        serial_number.as_deref(),
+        unit_id,
+    );
+    let identity = RouteIdentity::from_parts(serial_number.as_deref(), unit_id);
+    // Receiver pairing registers retain a physical unit id while the mouse
+    // sleeps or uses Bluetooth. That identity is authoritative even when
+    // offline; all-zero identities remain excluded by `config_key()`.
+    let physical_identity = identity.config_key().is_some().then_some(&identity);
+    let (config_key, persistent) = config
+        .resolve_device_key(&stable_id, physical_identity)
+        .map_or_else(
+            || (stable_id.runtime_key(), false),
+            |key| (key.into_string(), true),
+        );
+    let canonical_key =
+        canonical_device_key(&stable_id, physical_identity).map(PhysicalDeviceKey::into_string);
+    let route_key = stable_id.route_key();
+
+    // A receiver can retain pairings OpenLogi has never observed. An offline
+    // slot with no persisted device entry has neither actionable settings nor
+    // reliable presentation metadata and used to render as anonymous `Slot N`
+    // cards. Known devices remain visible for continuity.
+    let receiver_route = matches!(
+        route.as_ref(),
+        Some(DeviceRoute::Bolt { .. } | DeviceRoute::Unifying { .. })
+    );
+    if receiver_route && !paired.online && !config.devices.contains_key(&config_key) {
+        return None;
+    }
+
+    let display_name = asset
+        .as_ref()
+        .map(|asset| asset.display_name.clone())
+        .or_else(|| paired.codename.as_deref().map(prettify_codename))
+        .unwrap_or_else(|| {
+            tr!("device.receiver_slot_number", number => paired.slot.to_string()).to_string()
+        });
+    let kind = effective_kind(paired.kind, asset.as_ref().and_then(|asset| asset.kind));
+    let record = DeviceRecord {
+        config_key,
+        canonical_key,
+        persistent,
+        route_key,
+        model_key,
+        model_name: display_name.clone(),
+        display_name,
+        asset,
+        model_info,
+        codename,
+        serial_number,
+        unit_id,
+        driver_id: None,
+        registry_model_id: None,
+        route,
+        capture_id: None,
+        kind,
+        capabilities: paired.capabilities,
+        light_capabilities: None,
+        slot: paired.slot,
+        online: paired.online,
+        battery: paired.battery.clone(),
+    };
+    Some(hydrate_offline_linked_record(record, cache, config))
+}
+
+/// Restore persisted model metadata for an offline sighting attributed to a
+/// known physical device through its recorded route link.
+fn hydrate_offline_linked_record(
+    record: DeviceRecord,
+    cache: &AssetResolver,
+    config: &Config,
+) -> DeviceRecord {
+    // A receiver continues to enumerate its paired slot after the device
+    // switches to another transport or goes to sleep. That sighting often has
+    // neither model info nor a WPID, but `resolve_device_key` can still
+    // attribute the route to the physical device previously adopted online.
+    // Never guess by model name: two devices of the same model stay distinct.
+    if record.online {
+        return record;
+    }
+    let Some(identity) = config.device_identity(&record.config_key) else {
+        return record;
+    };
+    let known = offline_record(&record.config_key, identity, cache);
+    adopt_transient_record(&known, record)
 }
 
 fn apply_custom_names(list: &mut [DeviceRecord], config: &Config) {

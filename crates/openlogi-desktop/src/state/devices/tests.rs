@@ -9,11 +9,133 @@ use std::collections::HashSet;
 
 use super::{
     Camera, Capabilities, DeviceIdentity, DeviceKind, DeviceModelInfo, DeviceRecord,
-    DeviceTransports, append_offline_known, build_device_list, direct_key_prefix, effective_kind,
-    fold_by_inventory_key, offline_record, pick_initial_device,
+    DeviceTransports, PhysicalDeviceKey, append_offline_known, build_device_list,
+    direct_key_prefix, effective_kind, fold_by_inventory_key, offline_record, pick_initial_device,
 };
 use crate::state::inventory::adopt_routes;
 use openlogi_core::hid::Dpi;
+
+#[test]
+fn unknown_offline_receiver_slots_do_not_create_gallery_cards() {
+    let mut slot_one = paired_device_no_model_info(1, Some(0x4051));
+    slot_one.online = false;
+    let mut slot_two = paired_device_no_model_info(2, None);
+    slot_two.online = false;
+
+    let list = build_device_list(
+        &[inventory_with(vec![slot_one, slot_two])],
+        &[],
+        &AssetResolver::new(),
+        &Config::default(),
+        &[],
+    );
+
+    assert!(
+        list.is_empty(),
+        "never-seen offline pairings must not render as anonymous Slot cards"
+    );
+}
+
+#[test]
+fn offline_unifying_unit_id_resolves_the_known_physical_device() {
+    let unit_id = [0x29, 0x16, 0xdb, 0xbe];
+    let model = DeviceModelInfo {
+        entity_count: 0,
+        serial_number: None,
+        unit_id,
+        transports: DeviceTransports {
+            equad: true,
+            btle: true,
+            ..DeviceTransports::default()
+        },
+        model_ids: [0xb027, 0x4051, 0],
+        extended_model_id: 0,
+    };
+    let mut config = Config::default();
+    config.set_device_identity(
+        "unit:2916dbbe",
+        DeviceIdentity {
+            display_name: "Ergo M575".into(),
+            kind: DeviceKind::Trackball,
+            capabilities: Capabilities::presumed_from_kind(DeviceKind::Trackball),
+            light_capabilities: None,
+            model_info: Some(model.clone()),
+            codename: Some("Ergo M575".into()),
+            driver_id: None,
+            registry_model_id: None,
+        },
+    );
+    let mut paired = paired_device_no_model_info(3, Some(0x4051));
+    paired.online = false;
+    paired.kind = DeviceKind::Trackball;
+    paired.model_info = Some(model);
+
+    let list = build_device_list(
+        &[inventory_with(vec![paired])],
+        &[],
+        &AssetResolver::new(),
+        &config,
+        &[],
+    );
+
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].config_key, "unit:2916dbbe");
+    assert_eq!(list[0].display_name, "Ergo M575");
+    assert!(!list[0].online);
+}
+
+#[test]
+fn adopted_offline_receiver_route_uses_its_persisted_identity() {
+    let route_key = "receiver:da2699e1:slot:2";
+    let canonical = PhysicalDeviceKey::parse("serial:2540zae0hzr8")
+        .expect("the test key is a physical identity");
+    let mut config = Config::default();
+    config.set_device_identity(
+        canonical.as_str(),
+        DeviceIdentity {
+            display_name: "MX Ergo S".into(),
+            kind: DeviceKind::Trackball,
+            capabilities: Capabilities::presumed_from_kind(DeviceKind::Trackball),
+            light_capabilities: None,
+            model_info: Some(DeviceModelInfo {
+                entity_count: 4,
+                serial_number: Some("2540ZAE0HZR8".into()),
+                unit_id: [0; 4],
+                transports: DeviceTransports::default(),
+                model_ids: [0xb03e, 0, 0],
+                extended_model_id: 0,
+            }),
+            codename: Some("MX Ergo S".into()),
+            driver_id: None,
+            registry_model_id: None,
+        },
+    );
+    assert!(config.adopt_route(&canonical, route_key, None));
+
+    let mut paired = paired_device_no_model_info(2, None);
+    paired.codename = Some("MX Ergo S".into());
+    paired.kind = DeviceKind::Mouse;
+    paired.online = false;
+    let list = build_device_list(
+        &[inventory_with(vec![paired])],
+        &[],
+        &AssetResolver::new(),
+        &config,
+        &[],
+    );
+
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].config_key, canonical.as_str());
+    assert_eq!(list[0].display_name, "MX Ergo S");
+    assert_eq!(list[0].kind, DeviceKind::Trackball);
+    assert_eq!(
+        list[0].model_info.as_ref().map(|info| info.model_ids[0]),
+        Some(0xb03e)
+    );
+    assert_eq!(list[0].route_key, route_key);
+    assert!(list[0].route.is_some());
+    assert!(!list[0].online);
+}
 
 fn paired_device_no_model_info(slot: u8, wpid: Option<u16>) -> PairedDevice {
     PairedDevice {
