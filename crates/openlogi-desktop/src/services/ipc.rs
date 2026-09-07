@@ -607,18 +607,12 @@ async fn handle(
                 .await
                 .map_err(|_| ())?;
             if fallback_to_pane {
+                // The RPC returns as soon as the sheet is shown. Do not wait
+                // here: this loop is the only command+observe pump, and a
+                // declined or unanswered sheet would stall DPI, pairing, and
+                // snapshots for the full fallback window.
                 #[cfg(target_os = "macos")]
-                {
-                    // The RPC returns as soon as the sheet is shown. Observable
-                    // Accessibility state lags the user's answer by a watcher
-                    // tick, so opening Settings from this snapshot would cover
-                    // the sheet or race an Allow.
-                    if !wait_for_accessibility_grant(client).await? {
-                        openlogi_permissions::open_pane(
-                            openlogi_permissions::Permission::Accessibility,
-                        );
-                    }
-                }
+                spawn_accessibility_fallback_wait(client.clone());
             }
         }
         Command::RequestInputMonitoringPrompt { fallback_to_pane } => {
@@ -740,6 +734,21 @@ where
         }
         tokio::time::sleep(interval).await;
     }
+}
+
+/// Wait for the Accessibility watcher off the command path, then open
+/// System Settings only if the grant never arrives. Spawned so Grant cannot
+/// stall the serialized IPC loop while the sheet is pending.
+#[cfg(target_os = "macos")]
+fn spawn_accessibility_fallback_wait(client: AgentClient) {
+    tokio::spawn(async move {
+        match wait_for_accessibility_grant(&client).await {
+            Ok(true) => {}
+            Ok(false) | Err(()) => {
+                openlogi_permissions::open_pane(openlogi_permissions::Permission::Accessibility);
+            }
+        }
+    });
 }
 
 /// Wait until the agent's Accessibility watcher reports a grant, or until
