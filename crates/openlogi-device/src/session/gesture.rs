@@ -114,9 +114,8 @@ enum HoldState {
         /// A second armed source is held alongside the holder. Overlap motion
         /// could belong to either control — dropped until the overlap ends.
         overlap: bool,
-        /// The hold's next raw-XY sample must be dropped: the haptic panel's
-        /// first sample after contact is an absolute position jump, not a
-        /// delta (see [`reprog_controls::HAPTIC_PANEL_CID`]).
+        /// Drop the hold's first report when the device's control table
+        /// identifies a source with a stale initial raw-XY sample.
         skip_first_raw_xy: bool,
     },
 }
@@ -138,15 +137,45 @@ fn begin_hold(cid: u16, button: ButtonId, overlap: bool, skip_first_raw_xy: bool
     }
 }
 
+/// Hardware-specific first-report handling, derived from the live control table.
+#[derive(Clone, Copy, Default)]
+enum FirstRawXyPolicy {
+    #[default]
+    PanelOnly,
+    /// MX Master 4 exposes the vendor-specific haptic panel. Hardware traces
+    /// show stale initial travel on its dedicated gesture button as well.
+    HapticDevice,
+}
+
+impl FirstRawXyPolicy {
+    fn from_control_ids(cids: impl IntoIterator<Item = u16>) -> Self {
+        if cids
+            .into_iter()
+            .any(|cid| cid == reprog_controls::HAPTIC_PANEL_CID)
+        {
+            Self::HapticDevice
+        } else {
+            Self::PanelOnly
+        }
+    }
+
+    fn skips(self, cid: u16) -> bool {
+        cid == reprog_controls::HAPTIC_PANEL_CID
+            || (matches!(self, Self::HapticDevice) && cid == reprog_controls::GESTURE_BUTTON_CID)
+    }
+}
+
 /// Movement + button state accumulated across messages. Lives behind a `Mutex`
 /// because the channel's read thread invokes the listener by shared reference.
 #[derive(Default)]
 struct CaptureAccum {
+    /// Device policy retained when capture state is reset after a reconnect.
+    first_raw_xy_policy: FirstRawXyPolicy,
     /// The hold owning raw-XY motion, if any (see [`HoldState`]).
     hold: HoldState,
     /// The armed gesture sources held in the last event, for edge detection:
     /// a source not previously held that becomes the holder is a fresh touch
-    /// (the haptic panel's first sample is then a contact jump to discard).
+    /// (a source covered by the device policy then drops its initial sample).
     gestures_down: Vec<u16>,
     /// Whether any DPI/ModeShift control was held in the last event — for
     /// rising-edge press detection.
@@ -314,7 +343,7 @@ async fn run_capture_session_on(
         *slot = Some(shared.clone());
     }
 
-    let accum = Arc::new(Mutex::new(CaptureAccum::default()));
+    let accum = Arc::new(Mutex::new(armed.capture_accum()));
     let reprog_index = armed.reprog.as_ref().map(ReprogControlsV4::feature_index);
     let gesture_cids = armed.gesture_cids.clone();
     let gesture_button_set = armed.gesture_button_cids.clone();
@@ -470,6 +499,8 @@ fn thumbwheel_input(
 /// to the firmware on teardown.
 #[derive(Default)]
 struct ArmedControls {
+    /// Initial-report quirk discovered from the complete device control table.
+    first_raw_xy_policy: FirstRawXyPolicy,
     /// `0x1b04` accessor, present when the device exposes it.
     reprog: Option<ReprogControlsV4>,
     /// The gesture-source CIDs diverted with raw-XY reporting: the
@@ -510,6 +541,13 @@ impl ArmedThumbwheel {
 }
 
 impl ArmedControls {
+    fn capture_accum(&self) -> CaptureAccum {
+        CaptureAccum {
+            first_raw_xy_policy: self.first_raw_xy_policy,
+            ..CaptureAccum::default()
+        }
+    }
+
     /// Build the one-time polarity fact learned while arming the thumb wheel.
     fn thumbwheel_direction(&self) -> Option<CapturedInput> {
         let positive_is_forward = self
@@ -662,7 +700,7 @@ async fn monitor_capture(
                 };
                 info!(?broadcast, "device reconnected — re-arming control capture");
                 *context.accum.lock().unwrap_or_else(PoisonError::into_inner) =
-                    CaptureAccum::default();
+                    context.armed.capture_accum();
                 context.armed.rearm(&device_io).await;
             }
             generation = context.activity.changed_after(activity_generation) => {
@@ -755,6 +793,8 @@ async fn arm_controls_into(
     {
         let rc = ReprogControlsV4::new(Arc::clone(chan), slot, info.index);
         let controls = enumerate_controls(&rc).await?;
+        armed.first_raw_xy_policy =
+            FirstRawXyPolicy::from_control_ids(controls.iter().map(|control| control.cid));
         // Register an accessor before the first divert, so a failure on any
         // divert (including the first) can become a restore capability.
         armed.reprog = Some(rc.clone());
@@ -966,7 +1006,7 @@ fn handle_reprog_with_gesture_buttons(
                     }
                     // ...and the first still-held source begins (or takes
                     // over) the hold. A source not down in the previous event
-                    // is a fresh touch, so the panel's contact-jump discard
+                    // is a fresh touch, so the device's first-report discard
                     // applies; one that was already held has had its jump
                     // dropped during the overlap.
                     match held.first() {
@@ -974,8 +1014,7 @@ fn handle_reprog_with_gesture_buttons(
                             cid,
                             button,
                             held.len() > 1,
-                            cid == reprog_controls::HAPTIC_PANEL_CID
-                                && !acc.gestures_down.contains(&cid),
+                            acc.first_raw_xy_policy.skips(cid) && !acc.gestures_down.contains(&cid),
                         ),
                         None => HoldState::Idle,
                     }
@@ -1048,7 +1087,7 @@ fn handle_raw_xy(
     if *overlap {
         return;
     }
-    // The haptic panel's first sample after contact is a position jump;
+    // A stale first sample can carry pre-press travel or a contact jump;
     // summing it would commit a bogus direction instantly.
     if *skip_first_raw_xy {
         *skip_first_raw_xy = false;

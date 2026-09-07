@@ -703,11 +703,113 @@ fn the_panels_first_raw_xy_sample_after_contact_is_discarded() {
 }
 
 #[test]
+fn haptic_device_dedicated_button_ignores_stale_first_motion() {
+    // Two leftward holds captured on an MX Master 4: the first packet carries
+    // rightward travel from before the press, followed by actual left motion.
+    let armed = ArmedControls {
+        first_raw_xy_policy: FirstRawXyPolicy::from_control_ids(BOTH.iter().copied()),
+        ..ArmedControls::default()
+    };
+    for samples in [
+        vec![(2041, -74), (-21, -5), (-21, -4), (-25, -4)],
+        vec![(252, 34), (-37, -4), (-23, -2)],
+    ] {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        // This factory is also used after reconnect: each fresh capture must
+        // retain the hardware policy while discarding the previous hold.
+        let mut acc = armed.capture_accum();
+        handle_reprog(&mut acc, press(), GESTURE, &[], &[], &tx);
+        for (dx, dy) in samples {
+            handle_reprog(
+                &mut acc,
+                RawControlEvent::RawXy { dx, dy },
+                GESTURE,
+                &[],
+                &[],
+                &tx,
+            );
+        }
+        assert_eq!(
+            next_gesture(&mut rx),
+            Ok(CapturedInput::Gesture(
+                ButtonId::GestureButton,
+                GestureDirection::Left,
+            ))
+        );
+        assert!(next_gesture(&mut rx).is_err(), "one action per hold");
+    }
+}
+
+#[test]
+fn haptic_device_dedicated_takeover_only_discards_on_a_fresh_press() {
+    for overlaps in [false, true] {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut acc = ArmedControls {
+            first_raw_xy_policy: FirstRawXyPolicy::from_control_ids(BOTH.iter().copied()),
+            ..ArmedControls::default()
+        }
+        .capture_accum();
+        handle_reprog(&mut acc, panel_press(), BOTH, &[], &[], &tx);
+        if overlaps {
+            handle_reprog(&mut acc, both_press(), BOTH, &[], &[], &tx);
+            handle_reprog(
+                &mut acc,
+                RawControlEvent::RawXy { dx: 2041, dy: -74 },
+                BOTH,
+                &[],
+                &[],
+                &tx,
+            );
+        }
+        handle_reprog(&mut acc, press(), BOTH, &[], &[], &tx);
+        assert_eq!(
+            next_gesture(&mut rx),
+            Ok(CapturedInput::Gesture(
+                ButtonId::HapticPanel,
+                GestureDirection::Click
+            ))
+        );
+        if !overlaps {
+            handle_reprog(
+                &mut acc,
+                RawControlEvent::RawXy { dx: 2041, dy: -74 },
+                BOTH,
+                &[],
+                &[],
+                &tx,
+            );
+            assert!(
+                next_gesture(&mut rx).is_err(),
+                "fresh press drops stale sample"
+            );
+        }
+        handle_reprog(
+            &mut acc,
+            RawControlEvent::RawXy { dx: -120, dy: -5 },
+            BOTH,
+            &[],
+            &[],
+            &tx,
+        );
+        assert_eq!(
+            next_gesture(&mut rx),
+            Ok(CapturedInput::Gesture(
+                ButtonId::GestureButton,
+                GestureDirection::Left
+            ))
+        );
+    }
+}
+
+#[test]
 fn the_dedicated_buttons_first_sample_is_not_discarded() {
-    // The discard is a panel quirk: the dedicated button's raw-XY stream is
-    // relative from the first sample, which must keep committing as-is.
+    // Devices without a haptic panel keep their first dedicated-button delta.
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let mut acc = CaptureAccum::default();
+    let mut acc = ArmedControls {
+        first_raw_xy_policy: FirstRawXyPolicy::from_control_ids(GESTURE.iter().copied()),
+        ..ArmedControls::default()
+    }
+    .capture_accum();
 
     handle_reprog(&mut acc, press(), GESTURE, &[], &[], &tx);
     acc.backdate_hold_for_test();
