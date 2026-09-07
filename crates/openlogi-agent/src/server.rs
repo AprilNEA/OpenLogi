@@ -317,6 +317,28 @@ impl Agent for AgentServer {
         let _ = self.demand.send(kind);
     }
 
+    async fn request_input_monitoring_prompt(self, _: Context) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            crate::permissions_macos::request_input_monitoring().await
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            true
+        }
+    }
+
+    async fn request_bluetooth_prompt(self, _: Context) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            crate::permissions_macos::request_bluetooth().await
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            true
+        }
+    }
+
     async fn action_ring_hover(
         self,
         _: Context,

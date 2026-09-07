@@ -132,7 +132,7 @@ impl Booted {
     #[cfg(target_os = "macos")]
     async fn gate(mut self) -> Option<Wanted> {
         if self.launch_at_login {
-            return Some(Wanted(self));
+            return Some(Wanted { booted: self });
         }
         info!("launch_at_login is off — dormant until a client demands arming");
         // The deadline is absolute: a served-but-not-arming client does not
@@ -144,7 +144,7 @@ impl Booted {
                 Some(kind) = self.core.demand.recv() => match kind {
                     ClientKind::Gui => {
                         info!("GUI connected — arming");
-                        return Some(Wanted(self));
+                        return Some(Wanted { booted: self });
                     }
                     kind => info!(client = ?kind, "served while dormant — not arming"),
                 },
@@ -184,19 +184,24 @@ impl Booted {
     /// was asked for, so the gate passes unconditionally.
     #[cfg(not(target_os = "macos"))]
     fn gate(self) -> Wanted {
-        Wanted(self)
+        Wanted { booted: self }
     }
 }
 
 /// A booted agent whose dormancy question is settled: somebody wants it
 /// running. [`Booted::gate`] is the only producer, so an agent that never
 /// consulted the gate cannot arm.
-struct Wanted(Booted);
+struct Wanted {
+    booted: Booted,
+}
 
 impl Wanted {
-    /// The arming point: the tray may show, the overlay may start,
-    /// permissions may prompt, devices may open.
+    /// The arming point: the tray may show, the overlay may start, devices
+    /// may open. macOS permission sheets wait for the GUI — a login arm must
+    /// not raise them, and a GUI-demand arm uses the same path so there is
+    /// only one prompt owner.
     fn arm(self) -> Armed {
+        let Self { booted } = self;
         let Booted {
             core,
             signals,
@@ -205,10 +210,11 @@ impl Wanted {
             #[cfg(target_os = "macos")]
             armed_tx,
             ..
-        } = self.0;
+        } = booted;
         #[cfg(target_os = "macos")]
         let _ = armed_tx.send(());
         overlay::spawn();
+        #[cfg(not(target_os = "macos"))]
         prompt_missing_accessibility(capture_mouse_events);
 
         let Core {
@@ -270,12 +276,6 @@ impl Armed {
     /// told to leave (low-frequency by contract — [`startup::WatcherEvent`]).
     async fn run(self) {
         let Self { mut running } = self;
-        #[cfg(target_os = "macos")]
-        if request_input_monitoring_and_schedule_relaunch().await {
-            running
-                .shut_down("Input Monitoring permission relaunch", None)
-                .await;
-        }
 
         // HID++ watchers need no Accessibility — start them up front.
         running.restart_hidpp_watchers();
@@ -354,6 +354,9 @@ impl Running {
             WatcherEvent::Accessibility(granted) => self.apply_accessibility(granted).await,
             WatcherEvent::InputMonitoring(granted) => {
                 self.observable.set_input_monitoring_granted(granted);
+            }
+            WatcherEvent::Bluetooth(granted) => {
+                self.observable.set_bluetooth_granted(granted);
             }
             // Watcher thread death — without a snapshot the GUI would scan
             // forever.
@@ -549,39 +552,14 @@ impl Running {
 }
 
 /// Prompt for Accessibility when the enabled mouse hook needs it.
+///
+/// macOS never prompts here: the GUI owns the request after Ready so a
+/// login-item start cannot raise (or poison) the sheet.
+#[cfg(not(target_os = "macos"))]
 fn prompt_missing_accessibility(capture_mouse_events: bool) {
     // With the hook disabled the agent needs no Accessibility at all, so the
     // opt-out also silences that prompt.
     if capture_mouse_events && !Hook::has_accessibility() {
         Hook::prompt_accessibility();
     }
-}
-
-/// Request Input Monitoring before starting the HID inventory on macOS.
-///
-/// The agent (not the GUI) owns every HID++ device open, so it must be the
-/// binary the user authorizes. A newly granted permission requires a process
-/// relaunch before macOS lets the agent open HID devices.
-#[cfg(target_os = "macos")]
-async fn request_input_monitoring_and_schedule_relaunch() -> bool {
-    // Without this, macOS never registers a decision at all:
-    // `IOHIDDeviceOpen` is silently denied, the permission never appears in
-    // System Settings for the user to grant, and no HID++ device is ever
-    // discovered. Wait for the blocking consent dialog before starting the
-    // inventory so it cannot cache the pre-grant access state.
-    if !openlogi_hid::permissions::has_access() {
-        let access_after_prompt = tokio::task::spawn_blocking(|| {
-            openlogi_hid::permissions::request_access();
-            openlogi_hid::permissions::has_access()
-        })
-        .await;
-        match access_after_prompt {
-            Ok(true) => return crate::binary_watch::schedule_after_input_monitoring_grant(),
-            Ok(false) => {}
-            Err(e) => {
-                warn!(error = %e, "Input Monitoring permission request task failed");
-            }
-        }
-    }
-    false
 }

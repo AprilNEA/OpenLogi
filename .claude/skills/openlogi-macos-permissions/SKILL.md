@@ -47,8 +47,8 @@ operations use the CLI's identity instead.
 
 | Identity | Binary | Needs |
 |---|---|---|
-| `org.openlogi.agent` | `…/Contents/Library/LoginItems/OpenLogi Agent.app` | **Input Monitoring** (opens HID) and **Accessibility** (owns the event tap) |
-| `org.openlogi.openlogi` | `…/Contents/MacOS/openlogi-desktop` | Camera only. It is a pure IPC client and needs neither of the above. |
+| `org.openlogi.agent` | `…/Contents/Library/LoginItems/OpenLogi Agent.app` | **Input Monitoring** (opens HID), **Accessibility** (owns the event tap), and **Bluetooth** (CoreBluetooth sheet names this helper) |
+| `org.openlogi.openlogi` | `…/Contents/MacOS/openlogi-desktop` | Camera only. It is a pure IPC client and must not prompt for the three agent permissions. |
 | `openlogi` | `…/Contents/MacOS/openlogi` (embedded CLI) | Input Monitoring only when `list` falls back to direct HID or a hardware diagnostic accesses HID directly |
 | `org.openlogi.overlay` | `…/LoginItems/OpenLogiOverlay.app` | Nothing |
 
@@ -138,32 +138,46 @@ every grant on that machine is being ignored.
   app in System Settings**, so an app that only ever calls this cannot be
   granted: the user has no row to tick.
 - `IOHIDRequestAccess` — prompts. **Blocks the calling thread** until the user
-  answers, so it must not run on the async runtime. It is also not real-time:
-  after a grant or revoke the calling process keeps seeing the old answer until
-  it restarts. That is why the agent calls
-  `binary_watch::relaunch_after_input_monitoring_grant()`.
+  answers, so it must not run on the async runtime. Its **return value** is the
+  grant decision. `IOHIDCheckAccess` in the same process can stay stale after
+  Allow, so a relaunch must follow that bool — not a follow-up check. That is
+  why the agent calls `binary_watch::relaunch_after_input_monitoring_grant()`.
 - `IOHIDDeviceOpen` — **denial is silent**. There is no TCC-specific error, so
   the transport pairs every open failure with
   `openlogi_hid::permissions::has_access()` and says which case it is (§1).
   Keep it that way: a bare `Failed to open device` is not reportable.
+- `+[CBManager authorization]` — queries only. **Never prompts.**
+- Creating `CBCentralManager` (`initWithDelegate:nil queue:nil`) — prompts.
+  The native Don't Allow / OK sheet names the process that created the
+  manager. Poll `authorization` until `allowedAlways` (3) or
+  restricted/denied (1/2).
 
 ## 6. Invariants — do not break these
 
-1. **Only the agent holds the long-running app's HID/input permissions.** Any UI
-   that reports permission state must read it from the agent over IPC, never by
-   querying its own process. Direct CLI diagnostics are a separate, explicit
-   identity and must not be used to infer the agent's grant.
-2. **Every helper launch establishes its own responsible process** (§4), and the
+1. **Only the agent holds the long-running app's HID/input/Bluetooth
+   permissions.** Any UI that reports Accessibility, Input Monitoring, or
+   Bluetooth state must read it from the agent over IPC, never by querying
+   the GUI process (including `openlogi_permissions::bluetooth()`). Direct
+   CLI diagnostics are a separate, explicit identity and must not be used to
+   infer the agent's grant.
+2. **Never prompt the three agent permissions at arming.** Login-item start
+   and GUI-demand arm must not raise Accessibility, Input Monitoring, or
+   Bluetooth sheets. The GUI requests missing grants over IPC after its first
+   Ready snapshot.
+3. **Prompt via the official APIs** (`AXIsProcessTrustedWithOptions`,
+   `IOHIDRequestAccess`, `CBCentralManager` init) so the native macOS sheet
+   appears. Do not call those APIs from the GUI process.
+4. **Every helper launch establishes its own responsible process** (§4), and the
    spawn result is checked — a silently failed `disclaim` leaves the agent
    running under the GUI's identity, which is invisible until a user reports it.
-3. **TCC matches the full designated requirement.** A bundle-identifier or
+5. **TCC matches the full designated requirement.** A bundle-identifier or
    signing-identity change can invalidate every existing grant. The
    `Verify production bundle identities` step in `.github/workflows/build.yml`
    is load-bearing; do not weaken it.
-4. **Sign inside-out.** The helper needs its own stable designated requirement
+6. **Sign inside-out.** The helper needs its own stable designated requirement
    so its grant survives updates; `--deep` cannot give it one. See
    `xtask/src/commands/macos/bundle/signing.rs`.
-5. **Prompt from the process that needs the permission**, not from whichever
+7. **Prompt from the process that needs the permission**, not from whichever
    process happens to be running. A TCC grant is scoped to the identity that
    asked.
 

@@ -3,6 +3,7 @@
 //! over channels to a consumer (the agent's orchestrator, or the GUI).
 
 pub mod accessibility;
+pub mod bluetooth;
 pub mod camera;
 mod capture_session;
 pub mod foreground_app;

@@ -284,6 +284,14 @@ impl Agent for TestAgent {
             0x1982,
         )
     }
+
+    async fn request_input_monitoring_prompt(self, _: TarpcContext) -> bool {
+        unreachable!("profile capture must not prompt")
+    }
+
+    async fn request_bluetooth_prompt(self, _: TarpcContext) -> bool {
+        unreachable!("profile capture must not prompt")
+    }
 }
 
 async fn test_connection(agent: TestAgent) -> Connection {
@@ -348,6 +356,7 @@ fn fixture_agent() -> TestAgent {
             agent_version: "/private/Agent.app".to_string(),
             input_monitoring_granted: false,
             hid_open_failures: true,
+            bluetooth_granted: false,
         },
         inventory: profile.inventories.clone(),
         standalone: profile.standalone.clone(),

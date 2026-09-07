@@ -6,6 +6,7 @@ paths:
   - "crates/openlogi-camera/**"
   - "crates/openlogi-agent/src/tray.rs"
   - "crates/openlogi-agent/src/status_item.rs"
+  - "crates/openlogi-agent/src/permissions_macos.rs"
   - "crates/openlogi-agent-core/src/watchers/camera.rs"
   - "crates/openlogi-hook/src/macos.rs"
   - "crates/openlogi-inject/src/inject/macos.rs"
@@ -24,13 +25,14 @@ files; **keep this table in sync when you add or move one**:
 |---|---|
 | `openlogi-agent/src/status_item.rs` | safe `objc2` wrappers over `NSStatusItem` / `NSMenu` / `NSMenuItem` |
 | `openlogi-agent/src/tray.rs` | the menu-bar semantics, `MenuTarget` + `ResumeTarget` (`define_class!`), the Accessory `NSApplication` loop, `NSWorkspace` resume notifications |
+| `openlogi-agent/src/permissions_macos.rs` | Input Monitoring prompt (via `openlogi-hid`) and the Bluetooth prompt (`CBCentralManager` alloc/init on the AppKit main queue) |
 | `openlogi-agent-core/src/watchers/camera.rs` | the CoreMediaIO "camera is running" property read |
 | `openlogi-camera/src/capture.rs` | `AVCaptureSession` capture + the `define_class!` frame delegate, and the Camera TCC prompt |
 | `openlogi-camera/src/macos.rs` | `AVCaptureDevice` enumeration (`class!` + `msg_send!`) |
 | `openlogi-camera/src/uvc.rs`, `.../uvc/iokit.rs` | IOKit USB / UVC control transfers; every `unsafe` in the macOS UVC backend lives in `iokit.rs` |
 | `openlogi-desktop/src/platform/registration/macos.rs` | `SMAppService` registration of the agent's launchd service (the login-item side of the agent lifecycle; the GUI must own it — the API resolves the plist against the calling app's bundle) |
 | `openlogi-desktop/src/platform/os.rs` | `NSProcessInfo` OS version + the `NSAppearance` titlebar sync |
-| `openlogi-hid/src/permissions.rs` | `IOHIDCheckAccess` / `IOHIDRequestAccess` (the prompting half of Input Monitoring) |
+| `openlogi-hid/src/permissions.rs` | `IOHIDCheckAccess` / `IOHIDRequestAccess` (Input Monitoring) and a query-only `+[CBManager authorization]` read for the agent watcher |
 | `openlogi-hook/src/macos.rs` | the CGEventTap (on `core-graphics`, see below), the `NSWorkspace` frontmost-app read, the Accessibility-trust check/prompt, and the HID sender-id lookup |
 | `openlogi-inject/src/inject/macos.rs` | CGEvent synthesis, media-key `NSEvent`s, raw `AXUIElement` navigation, and the `dlopen`'d private SPIs |
 | `openlogi-overlay/src/platform.rs` | the Actions Ring helper's window policy: accessory activation, non-activating panel, the `NSEvent` global click-away monitor (`block2`), and `CGGetActiveDisplayList` / `CGDisplayBounds` |
@@ -110,8 +112,8 @@ is its own framework call, so "the TCC layer" is just this table:
 | Permission | Crate | Symbol | Read / prompt |
 |---|---|---|---|
 | Accessibility | `objc2-application-services` (`HIServices` + `AXUIElement`) | `AXIsProcessTrusted` / `AXIsProcessTrustedWithOptions` | both in `openlogi-hook` |
-| Input Monitoring / Post Event | `objc2-io-kit` (`hidsystem`) | `IOHIDCheckAccess` / `IOHIDRequestAccess` | read in `openlogi-permissions`, prompt in `openlogi-hid` |
-| Bluetooth | `objc2` class lookup (see below) | `+[CBManager authorization]` | `openlogi-permissions` |
+| Input Monitoring / Post Event | `objc2-io-kit` (`hidsystem`) | `IOHIDCheckAccess` / `IOHIDRequestAccess` | read in `openlogi-permissions` and `openlogi-hid`, prompt in `openlogi-hid` |
+| Bluetooth | `objc2` class lookup (see below) | `+[CBManager authorization]` / `CBCentralManager` init | read in `openlogi-permissions` and `openlogi-hid`, prompt in `openlogi-agent/src/permissions_macos.rs` |
 | Camera / microphone | `openlogi-camera` (`capture.rs`) | `+[AVCaptureDevice authorizationStatusForMediaType:]` / `requestAccessForMediaType:` | `openlogi-camera` |
 | Screen Recording (unused) | `objc2-core-graphics` | `CGPreflightScreenCaptureAccess` | — |
 | Full Disk Access (unused) | — | no API; only a probe of a protected path | — |
@@ -131,15 +133,16 @@ Rules:
   **Umbrella-feature trap:** a leaf feature is not enough — `AXUIElement` also
   needs `HIServices`, or the symbols silently don't exist.
 - **Checking never prompts; prompting belongs to whoever owns the resource.**
-  The agent raises the Accessibility prompt (it owns the tap) and calls
-  `IOHIDRequestAccess` before opening HID; the GUI only reads status and
-  deep-links to System Settings (`open_pane`). Never call the prompting half from
-  the GUI — the grant would land on the wrong code-signing identity (issue #214,
-  see `disclaim`). This split is also why the ready-made permission crates don't
-  fit: they model one app asking for itself. `permission-flow` additionally
-  brings its own onboarding UI and links the Swift runtime into every downstream
-  binary; `macos-accessibility-client` is a raw-`extern` wrapper where this file
-  requires typed bindings.
+  The agent raises Accessibility, Input Monitoring, and Bluetooth when the GUI
+  asks over IPC (it owns the tap, HID, and CoreBluetooth session). Arming never
+  prompts. The GUI only reads those three from the agent and deep-links to
+  System Settings (`open_pane`) when a grant is already denied. Never call the
+  prompting half from the GUI — the grant would land on the wrong code-signing
+  identity (issue #214, see `disclaim`). This split is also why the ready-made
+  permission crates don't fit: they model one app asking for itself.
+  `permission-flow` additionally brings its own onboarding UI and links the
+  Swift runtime into every downstream binary; `macos-accessibility-client` is a
+  raw-`extern` wrapper where this file requires typed bindings.
 - **TCC matches the full Designated Requirement, not the bundle ID** ([TN3127]).
   Re-signing one bundle ID with a different *kind* of certificate leaves a record
   that can never match again, and toggling the checkbox does not rewrite the
@@ -229,6 +232,8 @@ under a `SAFETY` comment. Where it currently lives on macOS:
 - `permissions/macos.rs` — the CoreBluetooth force-link and the `CBManager`
   class-method send. `IOHIDCheckAccess` needs none: `objc2-io-kit` exposes it as
   a safe fn, in `openlogi-permissions` and `openlogi-hid` alike.
+- `agent/permissions_macos.rs` — the CoreBluetooth force-link, the
+  `CBCentralManager` alloc/init (main-queue only), and the authorization send.
 - `overlay/platform.rs` — `NSEvent::removeMonitor` and the
   `CGGetActiveDisplayList` / `CGDisplayBounds` pair.
 - `desktop/platform/os.rs` — reading AppKit's `NSAppearanceName` statics to set

@@ -314,6 +314,8 @@ impl Runtime {
             let (changes, auto_download, asset_source, models) =
                 AppState::update(cx, |state, cx| {
                     let changes = state.apply_agent_snapshot(snapshot, &self.cache, &self.cams);
+                    #[cfg(target_os = "macos")]
+                    state.start_missing_agent_permission_prompts(&snapshot.status);
                     for event in &changes.events {
                         cx.emit(event.clone());
                     }
