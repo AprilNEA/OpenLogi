@@ -123,9 +123,7 @@ fn kickstart_registered_agent() -> bool {
     if registration::status() != registration::ServiceStatus::Enabled {
         return false;
     }
-    let Some(uid) = current_uid() else {
-        return false;
-    };
+    let uid = current_uid();
     let target = format!("gui/{uid}/{}", registration::agent_service_label());
     match std::process::Command::new("/bin/launchctl")
         .arg("kickstart")
@@ -152,15 +150,19 @@ fn kickstart_registered_agent() -> bool {
     }
 }
 
-/// The current user's uid, read from the home directory's owner: `launchctl`
-/// addresses the per-user launchd domain as `gui/<uid>`, and std exposes no
-/// direct getuid.
+/// The current process's real uid: `launchctl` addresses the per-user launchd
+/// domain as `gui/<uid>`. Do not infer it from `$HOME` or the home directory's
+/// owner — a stale environment in a second user session can otherwise target
+/// another user's bootstrap domain.
 #[cfg(target_os = "macos")]
-fn current_uid() -> Option<u32> {
-    use std::os::unix::fs::MetadataExt as _;
-
-    let home = openlogi_core::paths::home_dir().ok()?;
-    std::fs::metadata(home).ok().map(|meta| meta.uid())
+#[expect(
+    unsafe_code,
+    reason = "libc provides the process uid without a safe std wrapper"
+)]
+fn current_uid() -> u32 {
+    // SAFETY: `getuid` takes no arguments, dereferences no pointers, and
+    // returns the real uid of this process.
+    unsafe { libc::getuid() }
 }
 
 /// The `.app` root of a packaged helper binary, `None` for a bare dev binary.

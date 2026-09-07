@@ -19,7 +19,7 @@
 )]
 
 use std::cell::RefCell;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
@@ -43,6 +43,7 @@ use openlogi_core::config::AppIcon;
 use openlogi_hid::DeviceIoSignal;
 use tracing::{info, warn};
 
+use crate::lifecycle::HookStopRequest;
 use crate::status_item;
 
 /// The installed menu-bar item plus the action target its menu items weakly
@@ -112,6 +113,7 @@ pub fn relocalize() {
 
 struct ActivityTargetIvars {
     signal: DeviceIoSignal,
+    hook_stop: Arc<HookStopRequest>,
     suspended_by: Mutex<u8>,
 }
 
@@ -157,13 +159,16 @@ define_class!(
 );
 
 impl ActivityTarget {
-    fn new(signal: DeviceIoSignal) -> Retained<Self> {
+    fn new(signal: DeviceIoSignal, hook_stop: Arc<HookStopRequest>) -> Retained<Self> {
         // `main` closes the gate before spawning the core thread; repeat the
         // idempotent close here so the target's STARTUP source is self-contained
         // in tests and any future caller cannot accidentally start open.
-        let _ = signal.suspend();
+        if signal.suspend() {
+            hook_stop.request_stop();
+        }
         let this = Self::alloc().set_ivars(ActivityTargetIvars {
             signal,
+            hook_stop,
             suspended_by: Mutex::new(STARTUP),
         });
         // SAFETY: `init` initializes our freshly allocated NSObject subclass.
@@ -189,6 +194,7 @@ impl ActivityTarget {
             was_allowed && self.ivars().signal.suspend()
         };
         if changed {
+            self.ivars().hook_stop.request_stop();
             info!("display/session suspended — pausing device I/O");
         }
     }
@@ -322,6 +328,7 @@ pub fn run_app_loop(
     show_in_menu_bar: bool,
     app_icon: AppIcon,
     device_io_signal: DeviceIoSignal,
+    hook_stop: Arc<HookStopRequest>,
 ) -> ! {
     let Some(mtm) = MainThreadMarker::new() else {
         warn!("agent AppKit loop not started off the main thread — exiting");
@@ -334,7 +341,7 @@ pub fn run_app_loop(
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 
-    let activity_target = install_activity_observer(device_io_signal);
+    let activity_target = install_activity_observer(device_io_signal, hook_stop);
     // Bind the status item (+ its target/menu) so they outlive `run()` — the
     // menu items only weakly reference the target. `None` when hidden.
     let _tray = show_in_menu_bar.then(|| install_status_item(mtm, app_icon));
@@ -360,8 +367,11 @@ pub fn run_app_loop(
 /// `NSWorkspaceDidWakeNotification` is deliberately not registered: macOS
 /// emits it for maintenance DarkWake, where opening BLE HID is exactly what can
 /// promote an otherwise invisible wake into a full display wake (#656).
-fn install_activity_observer(signal: DeviceIoSignal) -> Retained<ActivityTarget> {
-    let target = ActivityTarget::new(signal);
+fn install_activity_observer(
+    signal: DeviceIoSignal,
+    hook_stop: Arc<HookStopRequest>,
+) -> Retained<ActivityTarget> {
+    let target = ActivityTarget::new(signal, hook_stop);
     let workspace = NSWorkspace::sharedWorkspace();
     let center = workspace.notificationCenter();
     // SAFETY: AppKit exports each name as an immutable process-lifetime constant.
@@ -505,7 +515,7 @@ mod tests {
     #[test]
     fn overlapping_suspend_sources_all_clear_before_device_io_resumes() {
         let (signal, gate) = device_io_channel();
-        let target = install_activity_observer(signal);
+        let target = install_activity_observer(signal, Arc::new(HookStopRequest::default()));
         target.finish_startup(false);
         let workspace = NSWorkspace::sharedWorkspace();
         let center = workspace.notificationCenter();
@@ -559,7 +569,7 @@ mod tests {
     #[test]
     fn startup_stays_suspended_when_the_display_is_already_asleep() {
         let (signal, gate) = device_io_channel();
-        let target = install_activity_observer(signal);
+        let target = install_activity_observer(signal, Arc::new(HookStopRequest::default()));
         assert!(!gate.allows_io(), "startup must fail closed");
 
         target.finish_startup(true);
