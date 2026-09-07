@@ -137,6 +137,61 @@ async fn restore_retries_when_inventory_changes_during_an_awaited_write() {
 }
 
 #[tokio::test]
+async fn pending_restore_never_sends_cached_feature_indices_to_another_transport() {
+    let bluetooth = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xb027,
+    };
+    let receiver = DeviceRoute::Unifying {
+        receiver_uid: "receiver-a".into(),
+        slot: 3,
+    };
+    let (retired_raw, retired_handle) = ScriptedRawHidChannel::with_responder(|_| None);
+    let retired = SharedChannel::new(scripted_channel(retired_raw).await, bluetooth.clone());
+    let pending = PendingCaptureRestore::new(
+        &retired,
+        ReprogRestore::new(
+            0x22,
+            vec![ArmedReporting {
+                cid: reprog_controls::GESTURE_BUTTON_CID,
+                original: reporting(false, None),
+            }],
+        ),
+        None,
+    )
+    .expect("a captured control owns a restore token");
+    assert_eq!(pending.route(), &bluetooth);
+    let registry = ChannelRegistry::default();
+    let (receiver_raw, receiver_handle) =
+        ScriptedRawHidChannel::with_responder(|request| Some(request.to_vec()));
+    registry.replace_node(
+        NodeId::from("receiver-node".to_owned()),
+        [receiver],
+        scripted_channel(receiver_raw).await,
+    );
+
+    let CaptureSessionOutcome::RestorePending(pending) = pending.retry(&registry).await else {
+        panic!("the absent Bluetooth route must retain its own teardown debt");
+    };
+    assert!(receiver_handle.written_reports().is_empty());
+    assert!(retired_handle.written_reports().is_empty());
+
+    let (returning_raw, returning_handle) =
+        ScriptedRawHidChannel::with_responder(|request| Some(request.to_vec()));
+    registry.replace_node(
+        NodeId::from("bluetooth-node".to_owned()),
+        [bluetooth],
+        scripted_channel(returning_raw).await,
+    );
+    assert!(matches!(
+        pending.retry(&registry).await,
+        CaptureSessionOutcome::Restored
+    ));
+    assert_eq!(returning_handle.written_reports().len(), 1);
+    assert!(receiver_handle.written_reports().is_empty());
+}
+
+#[tokio::test]
 async fn failed_setup_rollback_returns_its_restore_capability() {
     let route = DeviceRoute::Direct {
         vendor_id: 0x046d,

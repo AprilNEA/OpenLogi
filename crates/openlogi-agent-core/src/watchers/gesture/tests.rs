@@ -104,24 +104,54 @@ fn suspended_device_io_disables_retry_deadlines() {
     let restart_after = HashMap::from([(physical_key(), retry_at)]);
 
     assert_eq!(
-        next_deadline(
-            ReceiverRequestState::default(),
-            true,
-            &HashMap::new(),
-            &restart_after,
-        ),
+        next_deadline(ReceiverRequestState::default(), true, None, &restart_after,),
         Some(retry_at),
     );
     assert_eq!(
-        next_deadline(
-            ReceiverRequestState::default(),
-            false,
-            &HashMap::new(),
-            &restart_after,
-        ),
+        next_deadline(ReceiverRequestState::default(), false, None, &restart_after,),
         None,
         "capture retries must stay dormant until visible resume",
     );
+}
+
+#[test]
+fn elapsed_restart_delay_does_not_spin_while_native_restore_is_pending() {
+    let now = Instant::now();
+    let plan = plan();
+    let mut restart_after = HashMap::from([(physical_key(), now)]);
+    let restore_at = now + RETRY_DELAY;
+
+    retain_restart_delays(&mut restart_after, &[plan], now);
+
+    assert_eq!(
+        next_deadline(
+            ReceiverRequestState::default(),
+            true,
+            Some(restore_at),
+            &restart_after,
+        ),
+        Some(restore_at),
+        "only the paced restore retry should wake the manager"
+    );
+    assert_eq!(
+        next_deadline(ReceiverRequestState::default(), true, None, &restart_after),
+        None,
+        "a parked transport must not leave a permanently ready deadline"
+    );
+}
+
+#[test]
+fn restart_delay_remains_until_due_but_is_removed_with_its_plan() {
+    let now = Instant::now();
+    let plan = plan();
+    let mut restart_after = HashMap::from([(physical_key(), now + RETRY_DELAY)]);
+    retain_restart_delays(&mut restart_after, &[plan], now);
+    assert_eq!(
+        restart_after.get(&physical_key()),
+        Some(&(now + RETRY_DELAY))
+    );
+    retain_restart_delays(&mut restart_after, &[], now);
+    assert!(restart_after.is_empty());
 }
 
 #[tokio::test]

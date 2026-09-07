@@ -82,7 +82,9 @@ pub enum CaptureSessionOutcome {
     /// Every diverted control was restored before the session returned.
     Restored,
     /// Firmware restoration is incomplete. The caller must retain this token
-    /// and retry it before arming a successor for the same physical device.
+    /// and retry it before arming a successor on the same route. A manager may
+    /// park it while that physical device is captured through another route,
+    /// but must not retry it until that successor has also finished teardown.
     RestorePending(PendingCaptureRestore),
 }
 
@@ -154,6 +156,15 @@ impl fmt::Debug for PendingCaptureRestore {
 }
 
 impl PendingCaptureRestore {
+    /// Route whose feature indices and reporting state this token owns.
+    ///
+    /// Restoration must never retarget these cached protocol values to a
+    /// different transport, even when it reaches the same physical device.
+    #[must_use]
+    pub fn route(&self) -> &DeviceRoute {
+        &self.route
+    }
+
     pub(crate) fn new(
         retired: &SharedChannel,
         reprog: Option<ReprogRestore>,
