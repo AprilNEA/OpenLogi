@@ -459,24 +459,39 @@ fn prompt_missing_accessibility(capture_mouse_events: bool) {
 /// binary the user authorizes. A newly granted permission requires a process
 /// relaunch before macOS lets the agent open HID devices.
 #[cfg(target_os = "macos")]
-async fn request_input_monitoring() {
+pub(crate) async fn request_input_monitoring() {
     // Without this, macOS never registers a decision at all:
     // `IOHIDDeviceOpen` is silently denied, the permission never appears in
     // System Settings for the user to grant, and no HID++ device is ever
     // discovered. Wait for the blocking consent dialog before starting the
     // inventory so it cannot cache the pre-grant access state.
-    if !openlogi_hid::permissions::has_access() {
-        let access_after_prompt = tokio::task::spawn_blocking(|| {
-            openlogi_hid::permissions::request_access();
-            openlogi_hid::permissions::has_access()
-        })
-        .await;
-        match access_after_prompt {
-            Ok(true) => binary_watch::relaunch_after_input_monitoring_grant(),
-            Ok(false) => {}
-            Err(e) => {
-                warn!(error = %e, "Input Monitoring permission request task failed");
-            }
+    if !openlogi_hid::permissions::has_access()
+        && matches!(request_input_monitoring_access().await, Some(true))
+    {
+        binary_watch::relaunch_after_input_monitoring_change();
+    }
+}
+
+/// Refresh Input Monitoring after the user returns from System Settings.
+///
+/// Unlike startup, this deliberately requests unconditionally: the running
+/// process can retain either the old granted or denied answer after a manual
+/// checkbox change, and only a successor can observe the authoritative state.
+#[cfg(target_os = "macos")]
+pub(crate) async fn refresh_input_monitoring() {
+    if request_input_monitoring_access().await.is_some() {
+        binary_watch::relaunch_after_input_monitoring_change();
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn request_input_monitoring_access() -> Option<bool> {
+    let requested = tokio::task::spawn_blocking(openlogi_hid::permissions::request_access).await;
+    match requested {
+        Ok(granted) => Some(granted),
+        Err(e) => {
+            warn!(error = %e, "Input Monitoring permission request task failed");
+            None
         }
     }
 }

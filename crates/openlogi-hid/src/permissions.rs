@@ -23,12 +23,12 @@ mod macos {
         )
     }
 
-    pub(super) fn request_access() {
+    pub(super) fn request_access() -> bool {
         // Unlike `AXIsProcessTrustedWithOptions`, `IOHIDRequestAccess` blocks
         // the calling thread until the user answers the consent dialog (or
         // returns immediately if the status is already determined) — callers
         // must run this off the async runtime.
-        let _granted = IOHIDRequestAccess(IOHIDRequestType::ListenEvent);
+        IOHIDRequestAccess(IOHIDRequestType::ListenEvent)
     }
 }
 
@@ -48,10 +48,12 @@ pub fn has_access() -> bool {
 /// under System Settings → Privacy & Security → Input Monitoring.
 ///
 /// Blocks the calling thread until the user responds — run it off the async
-/// runtime (e.g. `tokio::task::spawn_blocking`). No-op off macOS.
-pub fn request_access() {
+/// runtime (e.g. `tokio::task::spawn_blocking`). Returns `true` off macOS,
+/// where there is no privacy gate.
+#[must_use]
+pub fn request_access() -> bool {
     cfg_select! {
-        target_os = "macos" => { macos::request_access(); }
-        _ => {}
+        target_os = "macos" => { macos::request_access() }
+        _ => { true }
     }
 }

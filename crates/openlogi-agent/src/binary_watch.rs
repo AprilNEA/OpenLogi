@@ -35,7 +35,7 @@ use tracing::{info, warn};
 mod relaunch;
 
 #[cfg(target_os = "macos")]
-pub use relaunch::relaunch_after_input_monitoring_grant;
+pub use relaunch::relaunch_after_input_monitoring_change;
 
 /// How often to stat the executable: one `metadata` call per tick — noise next
 /// to the 2 s HID enumerate — while keeping the update-to-restart window short.

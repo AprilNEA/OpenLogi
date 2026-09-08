@@ -141,7 +141,7 @@ every grant on that machine is being ignored.
   answers, so it must not run on the async runtime. It is also not real-time:
   after a grant or revoke the calling process keeps seeing the old answer until
   it restarts. That is why the agent calls
-  `binary_watch::relaunch_after_input_monitoring_grant()`.
+  `binary_watch::relaunch_after_input_monitoring_change()`.
 - `IOHIDDeviceOpen` — **denial is silent**. There is no TCC-specific error, so
   the transport pairs every open failure with
   `openlogi_hid::permissions::has_access()` and says which case it is (§1).

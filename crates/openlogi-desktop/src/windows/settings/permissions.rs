@@ -1,7 +1,7 @@
 //! Permissions settings page (macOS / Linux).
 
 #[cfg(target_os = "macos")]
-use super::{App, AppState, InteractiveElement, Permission};
+use super::{App, AppState, Entity, InteractiveElement, Permission, SettingsView};
 use super::{IconName, Palette, SettingPage};
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use super::{
@@ -21,7 +21,10 @@ use openlogi_permissions as permissions;
         reason = "`has_camera` only gates a macOS/Linux row; elsewhere the page is empty"
     )
 )]
-pub(super) fn permissions_page(has_camera: bool) -> SettingPage {
+pub(super) fn permissions_page(
+    has_camera: bool,
+    #[cfg(target_os = "macos")] view: Entity<SettingsView>,
+) -> SettingPage {
     let page = SettingPage::new(tr!("permissions.permissions"))
         .icon(IconName::Info)
         .resettable(false);
@@ -48,7 +51,7 @@ pub(super) fn permissions_page(has_camera: bool) -> SettingPage {
                     }
                 },
             ))
-            .item(input_monitoring_item())
+            .item(input_monitoring_item(view))
             .item(permission_item(
                 "perm-bluetooth",
                 tr!("permissions.bluetooth"),
@@ -108,7 +111,7 @@ pub(super) fn permissions_page(has_camera: bool) -> SettingPage {
 }
 
 #[cfg(target_os = "macos")]
-fn input_monitoring_item() -> SettingItem {
+fn input_monitoring_item(view: Entity<SettingsView>) -> SettingItem {
     SettingItem::new(
         tr!("permissions.input_monitoring"),
         SettingField::render(move |_, _, cx| {
@@ -131,6 +134,7 @@ fn input_monitoring_item() -> SettingItem {
                 "perm-input-monitoring",
                 badge,
                 Permission::InputMonitoring,
+                Some(view.clone()),
                 cx,
             ));
             let pal = theme::palette(cx);
@@ -159,7 +163,9 @@ fn permission_item(
 ) -> SettingItem {
     SettingItem::new(
         title,
-        SettingField::render(move |_, _, cx| permission_field(id, status(cx), permission, cx)),
+        SettingField::render(move |_, _, cx| {
+            permission_field(id, status(cx), permission, None, cx)
+        }),
     )
     .description(description)
 }
@@ -192,6 +198,7 @@ fn permission_field(
     id: &'static str,
     status: PermissionStatus,
     permission: Permission,
+    settings_view: Option<Entity<SettingsView>>,
     cx: &App,
 ) -> gpui::Div {
     let pal = theme::palette(cx);
@@ -238,6 +245,13 @@ fn permission_field(
                         && let Some(state) = crate::state::AppState::try_global(cx)
                     {
                         state.read(cx).request_accessibility_prompt();
+                    }
+                    if matches!(permission, Permission::InputMonitoring)
+                        && let Some(view) = settings_view.as_ref()
+                    {
+                        view.update(cx, |this, _| {
+                            this.input_monitoring_return_pending = true;
+                        });
                     }
                     // The Camera pane only lists an app after its first
                     // AVFoundation request, so a deep link can't grant it.
