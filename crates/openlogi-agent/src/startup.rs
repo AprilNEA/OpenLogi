@@ -184,6 +184,7 @@ pub(crate) fn spawn_hidpp_watchers(shared: &SharedRuntime, inputs: &InputService
     );
     watchers::host_switch::spawn(
         &shared.host_switch_links,
+        &shared.host_switch_inventory,
         shared.channel_pool.clone(),
         shared.receiver_access.clone(),
         shared.device_io.clone(),

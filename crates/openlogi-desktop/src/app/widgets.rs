@@ -65,7 +65,7 @@ pub(super) fn main_window_title(show_device: bool, cx: &Context<AppView>) -> Sha
         )
 }
 
-pub(super) fn status_badge(online: bool, pal: Palette) -> impl IntoElement {
+pub(crate) fn status_badge(online: bool, pal: Palette) -> impl IntoElement {
     let label = if online {
         tr!("device.connected")
     } else {
@@ -120,7 +120,7 @@ pub(super) fn route_label(route: Option<&DeviceRoute>) -> String {
     }
 }
 
-pub(super) fn kind_label(kind: DeviceKind) -> String {
+pub(crate) fn kind_label(kind: DeviceKind) -> String {
     match kind {
         DeviceKind::Mouse => tr!("device.mouse").to_string(),
         DeviceKind::Keyboard => tr!("device.keyboard").to_string(),

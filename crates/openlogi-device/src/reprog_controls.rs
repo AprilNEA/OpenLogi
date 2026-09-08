@@ -136,6 +136,30 @@ impl CtrlIdInfo {
     }
 }
 
+/// Resolve one Easy-Switch control to its zero-based host channel.
+///
+/// Firmware is inconsistent about whether the stable control ID or the
+/// current task ID carries the channel identity, so both are authoritative.
+#[must_use]
+pub(crate) fn host_switch_channel(info: CtrlIdInfo) -> Option<u8> {
+    [
+        (control_ids::HOST_SWITCH_CHANNEL_1.0, 0),
+        (control_ids::HOST_SWITCH_CHANNEL_2.0, 1),
+        (control_ids::HOST_SWITCH_CHANNEL_3.0, 2),
+    ]
+    .into_iter()
+    .find_map(|(cid, host)| (info.cid == cid).then_some(host))
+    .or_else(|| {
+        [
+            (task_ids::HOST_SWITCH_CHANNEL_1.0, 0),
+            (task_ids::HOST_SWITCH_CHANNEL_2.0, 1),
+            (task_ids::HOST_SWITCH_CHANNEL_3.0, 2),
+        ]
+        .into_iter()
+        .find_map(|(task, host)| (info.task_id == task).then_some(host))
+    })
+}
+
 impl From<CidInfo> for CtrlIdInfo {
     fn from(info: CidInfo) -> Self {
         Self {

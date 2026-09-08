@@ -132,6 +132,15 @@ device = "Прылада"
 manage_this_device = "Кіраваць гэтай прыладай"
 usb = "USB"
 
+[easy_switch]
+easy_switch = "Easy-Switch"
+linked_devices = "Звязаныя прылады"
+press_host_key_description = "Націсніце клавішу хоста на гэтай клавіятуры, каб перамясціць выбраныя прылады на той жа канал."
+no_compatible_devices = "Сумяшчальныя прылады Easy-Switch не знойдзены."
+before_switching = "Перад пераключэннем"
+pair_channels_description = "Спалучыце кожную звязаную прыладу з адпаведным каналам Easy-Switch на кожным камп'ютары."
+enable_same_links_description = "Уключыце тыя ж сувязі ў OpenLogi на кожным камп'ютары, які можа пачаць пераключэнне."
+
 [profiles]
 active_profile = "Актыўны профіль"
 default_profile = "Прадвызначаны профіль"

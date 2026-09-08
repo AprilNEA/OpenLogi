@@ -22,6 +22,8 @@ use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use super::events::{EventFeatureIndices, EventSubscriptionHandle};
+use crate::reprog_controls::{self, CtrlIdInfo};
+
 use super::mappings::{
     legacy_battery_level_from_percentage, map_battery_level, map_battery_status, map_device_type,
     map_legacy_battery_status, map_voltage_battery_status, normalize_serial_number,
@@ -214,7 +216,7 @@ pub(super) async fn probe_features(
     // for capability derivation instead of discarding it.
     let mut battery_probe = None;
     let mut event_features = EventFeatureIndices::default();
-    let mut probe_haptic_controls = false;
+    let mut reprog_probe = ReprogControlProbePlan::default();
     let mut capabilities = match device.enumerate_features().await {
         Ok(Some(features)) => {
             let ids: Vec<u16> = features.iter().map(|f| f.id).collect();
@@ -225,7 +227,8 @@ pub(super) async fn probe_features(
                 // battery/identity snapshot that will be published.
                 subscriptions.register_device(slot, event_features);
             }
-            probe_haptic_controls = ids.contains(&0x19b0) || ids.contains(&0x19c0);
+            reprog_probe.haptic_panel = ids.contains(&0x19b0) || ids.contains(&0x19c0);
+            reprog_probe.host_switch_controls = should_probe_host_switch_controls(&ids);
             Some(Capabilities::from_feature_ids(&ids))
         }
         Ok(None) => None,
@@ -240,7 +243,7 @@ pub(super) async fn probe_features(
     };
     let mut capabilities_incomplete = false;
     if let Some(caps) = capabilities.as_mut() {
-        capabilities_incomplete = probe_extra_capabilities(&device, caps, probe_haptic_controls)
+        capabilities_incomplete = probe_extra_capabilities(&device, caps, reprog_probe)
             .await
             .is_err();
     }
@@ -318,7 +321,7 @@ pub(super) async fn probe_features(
 async fn probe_extra_capabilities(
     device: &Device,
     caps: &mut Capabilities,
-    probe_haptic_controls: bool,
+    reprog_probe: ReprogControlProbePlan,
 ) -> Result<(), ()> {
     if let Some(feature) = device.get_feature::<HiResWheelFeature>() {
         caps.scroll_inversion = feature
@@ -335,30 +338,60 @@ async fn probe_extra_capabilities(
     {
         caps.thumbwheel = feature.has_thumbwheel().await.unwrap_or(false);
     }
-    if probe_haptic_controls && let Some(feature) = device.get_feature::<ReprogControlsFeature>() {
-        match has_haptic_panel(&feature).await {
-            Some(found) => caps.haptic_panel = found,
-            None => return Err(()),
-        }
+    if reprog_probe.is_required() {
+        let Some(feature) = device.get_feature::<ReprogControlsFeature>() else {
+            return Err(());
+        };
+        probe_reprog_controls(&feature, caps, reprog_probe)
+            .await
+            .ok_or(())?;
     }
     Ok(())
 }
 
-/// Whether the device exposes a divertable haptic panel, or `None` when a read
-/// failed part-way through the ~40-entry control walk.
+#[derive(Debug, Clone, Copy, Default)]
+struct ReprogControlProbePlan {
+    haptic_panel: bool,
+    host_switch_controls: bool,
+}
+
+impl ReprogControlProbePlan {
+    const fn is_required(self) -> bool {
+        self.haptic_panel || self.host_switch_controls
+    }
+}
+
+fn should_probe_host_switch_controls(ids: &[u16]) -> bool {
+    ids.contains(&0x1814) && ids.contains(&ReprogControlsFeature::ID)
+}
+
+/// Fill the capabilities derived from the reprogrammable-control table, or
+/// return `None` when a read failed part-way through the walk.
 ///
 /// The distinction matters because the answer is memoized for `REFRESH_INTERVAL`:
-/// reporting a lost reply as `false` hides the Actions Ring binding for half a
-/// minute on a device that has the panel.
-async fn has_haptic_panel(feature: &ReprogControlsFeature) -> Option<bool> {
+/// reporting a lost reply as `false` can hide a supported Actions Ring panel
+/// or Easy-Switch controls for half a minute.
+async fn probe_reprog_controls(
+    feature: &ReprogControlsFeature,
+    caps: &mut Capabilities,
+    plan: ReprogControlProbePlan,
+) -> Option<()> {
     let count = feature.get_count().await.ok()?;
     for index in 0..count {
         let info = feature.get_cid_info(index).await.ok()?;
-        if info.cid == control_ids::HAPTIC_PANEL {
-            return Some(info.flags.is_divertable());
+        if plan.haptic_panel && info.cid == control_ids::HAPTIC_PANEL {
+            caps.haptic_panel = info.flags.is_divertable();
+        }
+        if plan.host_switch_controls && is_reportable_host_switch_control(info.into()) {
+            caps.host_switch_controls = true;
         }
     }
-    Some(false)
+    Some(())
+}
+
+fn is_reportable_host_switch_control(info: CtrlIdInfo) -> bool {
+    reprog_controls::host_switch_channel(info).is_some()
+        && (info.is_divertable() || info.supports_analytics_events())
 }
 
 #[cfg(test)]
@@ -368,7 +401,12 @@ mod tests {
         battery_voltage::BatteryVoltageFeature, unified_battery::UnifiedBatteryFeature,
     };
 
-    use super::{BatteryProbe, battery_feature_index};
+    use crate::reprog_controls::CtrlIdInfo;
+
+    use super::{
+        BatteryProbe, battery_feature_index, is_reportable_host_switch_control,
+        should_probe_host_switch_controls,
+    };
 
     #[test]
     fn battery_index_is_one_based_in_the_enumerated_table() {
@@ -414,5 +452,31 @@ mod tests {
     fn no_battery_feature_means_no_index() {
         assert_eq!(battery_feature_index([0x0001, 0x2201, 0x1b04]), None);
         assert_eq!(battery_feature_index([]), None);
+    }
+
+    #[test]
+    fn host_switch_controls_require_the_reportable_control_table() {
+        assert!(should_probe_host_switch_controls(&[0x1814, 0x1b04]));
+        assert!(!should_probe_host_switch_controls(&[0x1814, 0x1b00]));
+        assert!(!should_probe_host_switch_controls(&[0x1b04]));
+    }
+
+    #[test]
+    fn only_reportable_easy_switch_controls_mark_an_initiator() {
+        let host_control = CtrlIdInfo {
+            cid: 0x00d1,
+            task_id: 0x00ae,
+            flags: 1 << 10,
+        };
+        assert!(is_reportable_host_switch_control(host_control));
+        assert!(!is_reportable_host_switch_control(CtrlIdInfo {
+            flags: 0,
+            ..host_control
+        }));
+        assert!(!is_reportable_host_switch_control(CtrlIdInfo {
+            cid: 0x00c4,
+            task_id: 0,
+            ..host_control
+        }));
     }
 }

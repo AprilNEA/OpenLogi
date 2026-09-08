@@ -13,6 +13,7 @@ fn shared_runtime() -> SharedRuntime {
     let (_, capture_plans) = tokio::sync::watch::channel(Arc::new(Vec::new()));
     let (_, keyboard_spec) = tokio::sync::watch::channel(None);
     let (_, host_switch_links) = tokio::sync::watch::channel(Arc::new(Vec::new()));
+    let (_, host_switch_inventory) = tokio::sync::watch::channel(Arc::new(Vec::new()));
     SharedRuntime {
         hook_maps: Arc::new(RwLock::new(HookMaps::default())),
         keyboard_bindings: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
@@ -31,6 +32,7 @@ fn shared_runtime() -> SharedRuntime {
         capture_rearm_generation: Arc::new(0.into()),
         receiver_access: ReceiverAccess::default(),
         host_switch_links,
+        host_switch_inventory,
     }
 }
 
