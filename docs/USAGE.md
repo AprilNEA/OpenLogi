@@ -10,6 +10,7 @@ openlogi diag features        # dump every HID++ feature the active device repor
 openlogi diag controls        # dump reprogrammable controls and capability flags
 openlogi diag dpi             # read → write → read-back → restore DPI (smoke test)
 openlogi diag smartshift      # toggle SmartShift and restore (smoke test)
+openlogi diag power-mode      # toggle performance/endurance and restore (smoke test)
 openlogi diag lighting ff0000 # solid colour for a wired RGB keyboard (any RRGGBB hex)
 ```
 

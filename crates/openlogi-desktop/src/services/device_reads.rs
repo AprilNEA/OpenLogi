@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{Context, Subscription};
-use openlogi_core::hid::{DeviceRoute, DpiInfo, SmartShiftStatus, WriteError};
+use openlogi_core::hid::{DeviceRoute, DpiInfo, PowerModeState, SmartShiftStatus, WriteError};
 use swr_core::{
     MaybeSend, MaybeSync, QueryOptions, QueryState, Retry, RetryPolicy, Runtime, SwrClient,
 };
@@ -13,11 +13,14 @@ use swr_gpui::Query;
 use tokio::sync::mpsc;
 
 use super::ipc::Command;
-use crate::state::{AppState, DeviceKey, DpiStatus, Load, SmartShiftLoad, StateEvent};
+use crate::state::{
+    AppState, DeviceKey, DpiStatus, Load, PowerModeLoad, SmartShiftLoad, StateEvent,
+};
 
 const ROOT: &str = "device-read";
 const DPI: &str = "dpi";
 const SMARTSHIFT: &str = "smartshift";
+const POWER_MODE: &str = "power-mode";
 
 /// Preserve the old budget: one initial attempt and two retries.
 const READ_RETRY_POLICY: RetryPolicy = RetryPolicy {
@@ -49,6 +52,7 @@ pub(crate) struct DeviceReads {
     next_generation: u64,
     dpi: BTreeMap<DeviceKey, DeviceRead<DpiInfo>>,
     smartshift: BTreeMap<DeviceKey, DeviceRead<SmartShiftStatus>>,
+    power_mode: BTreeMap<DeviceKey, DeviceRead<PowerModeState>>,
 }
 
 impl DeviceReads {
@@ -274,6 +278,7 @@ impl DeviceReads {
     pub(crate) fn remove(&mut self, key: &DeviceKey) {
         self.remove_dpi(key);
         self.remove_smartshift(key);
+        self.remove_power_mode(key);
     }
 
     pub(crate) fn remove_dpi(&mut self, key: &DeviceKey) {
@@ -296,6 +301,7 @@ impl DeviceReads {
             .dpi
             .keys()
             .chain(self.smartshift.keys())
+            .chain(self.power_mode.keys())
             .filter(|key| !present(key.as_str()))
             .cloned()
             .collect();
@@ -364,6 +370,155 @@ impl DeviceReads {
         read.load = load;
         true
     }
+
+    /// Start an initial power-mode query unless this route is already watched.
+    pub(crate) fn ensure_power_mode(
+        &mut self,
+        key: DeviceKey,
+        route: DeviceRoute,
+        commands: mpsc::UnboundedSender<Command>,
+        cx: &mut Context<AppState>,
+    ) {
+        if self
+            .power_mode
+            .get(&key)
+            .is_some_and(|read| read.route == route)
+        {
+            return;
+        }
+        self.subscribe_power_mode(key, route, false, commands, cx);
+    }
+
+    /// Replace the active power-mode query with a write-confirming re-read.
+    pub(crate) fn confirm_power_mode(
+        &mut self,
+        key: DeviceKey,
+        route: DeviceRoute,
+        commands: mpsc::UnboundedSender<Command>,
+        cx: &mut Context<AppState>,
+    ) {
+        self.subscribe_power_mode(key, route, true, commands, cx);
+    }
+
+    fn subscribe_power_mode(
+        &mut self,
+        key: DeviceKey,
+        route: DeviceRoute,
+        preserve_data: bool,
+        commands: mpsc::UnboundedSender<Command>,
+        cx: &mut Context<AppState>,
+    ) {
+        let Some((client, runtime)) = self.cache() else {
+            return;
+        };
+        let previous = self.power_mode.remove(&key);
+        let had_previous = previous.is_some();
+        drop(previous);
+        if preserve_data {
+            // A confirming read keeps the optimistic write visible as stale
+            // data while invalidation starts the replacement query.
+            client.invalidate(query_key(POWER_MODE, &key));
+        } else if had_previous {
+            self.clear::<PowerModeState>(POWER_MODE, &key);
+        }
+        let generation = self.take_generation();
+        let fetch_route = route.clone();
+        let fetcher = Retry::new(
+            runtime,
+            move |_| {
+                let commands = commands.clone();
+                let route = fetch_route.clone();
+                read_ipc(move |reply| Command::ReadPowerMode(route, reply), commands)
+            },
+            READ_RETRY_POLICY,
+        )
+        .retry_if(|error| !power_mode_error_is_permanent(error));
+        let handle = client.subscribe(
+            query_key(POWER_MODE, &key),
+            fetcher,
+            QueryOptions::immutable(),
+        );
+        let query = Query::new(&client, handle, cx);
+        let load = project_load(query.read(cx), power_mode_error_is_permanent);
+        let observed_key = key.clone();
+        let observer = cx.observe(query.state(), move |state, query_state, cx| {
+            let load = project_load(query_state.read(cx), power_mode_error_is_permanent);
+            if state
+                .device_reads_mut()
+                .update_power_mode(&observed_key, generation, load)
+            {
+                cx.emit(StateEvent::PowerModeChanged(observed_key.clone()));
+            }
+        });
+        self.power_mode.insert(
+            key,
+            DeviceRead {
+                route,
+                generation,
+                load,
+                query,
+                _observer: observer,
+            },
+        );
+    }
+
+    #[must_use]
+    pub(crate) fn power_mode_status(&self, key: &DeviceKey) -> PowerModeLoad {
+        self.power_mode
+            .get(key)
+            .map_or(Load::Unknown, |read| read.load.clone())
+    }
+
+    #[must_use]
+    pub(crate) fn power_mode_load(&self, key: &DeviceKey) -> Option<&PowerModeLoad> {
+        self.power_mode.get(key).map(|read| &read.load)
+    }
+
+    /// Retry an exhausted initial power-mode query.
+    pub(crate) fn retry_power_mode(&mut self, key: &DeviceKey) {
+        let Some(read) = self.power_mode.get_mut(key) else {
+            return;
+        };
+        if !matches!(read.load, Load::Ready(_)) {
+            read.load = Load::Loading;
+        }
+        read.query.revalidate();
+    }
+
+    /// Publish a power-mode write optimistically into swr and the view model.
+    pub(crate) fn set_power_mode_ready(&mut self, key: &DeviceKey, state: PowerModeState) {
+        let value = Arc::new(state);
+        if let Some(client) = &self.client {
+            client.set::<_, Cached<PowerModeState>, WriteError>(
+                query_key(POWER_MODE, key),
+                Some(value.clone()),
+            );
+        }
+        if let Some(read) = self.power_mode.get_mut(key) {
+            read.load = Load::Ready(value);
+        }
+    }
+
+    pub(crate) fn remove_power_mode(&mut self, key: &DeviceKey) {
+        if let Some(read) = self.power_mode.remove(key) {
+            drop(read);
+            self.clear::<PowerModeState>(POWER_MODE, key);
+        }
+    }
+
+    fn update_power_mode(&mut self, key: &DeviceKey, generation: u64, load: PowerModeLoad) -> bool {
+        let Some(read) = self
+            .power_mode
+            .get_mut(key)
+            .filter(|read| read.generation == generation)
+        else {
+            return false;
+        };
+        // A confirmation commonly resolves to the optimistic value already in
+        // `load`; still publish so subscribers re-render from device truth.
+        read.load = load;
+        true
+    }
 }
 
 fn query_key(kind: &'static str, key: &DeviceKey) -> (&'static str, &'static str, String) {
@@ -415,6 +570,10 @@ fn dpi_error_is_permanent(error: &WriteError) -> bool {
 }
 
 fn smartshift_error_is_permanent(error: &WriteError) -> bool {
+    matches!(error, WriteError::FeatureUnsupported { .. })
+}
+
+fn power_mode_error_is_permanent(error: &WriteError) -> bool {
     matches!(error, WriteError::FeatureUnsupported { .. })
 }
 

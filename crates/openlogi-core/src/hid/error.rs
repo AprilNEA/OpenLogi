@@ -133,6 +133,12 @@ pub enum HidppOperation {
     Light,
     /// Play one haptic waveform. Appended last — variant order is wire format.
     PlayHaptic,
+    /// Read the `0x8090` power-mode status and capabilities. Appended last —
+    /// variant order is wire format.
+    ReadPowerMode,
+    /// Write the `0x8090` power mode. Appended last — variant order is wire
+    /// format.
+    WritePowerMode,
 }
 
 /// HID++ feature error kind in a serializable wire-safe form.

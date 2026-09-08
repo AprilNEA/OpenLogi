@@ -22,6 +22,7 @@ use crate::features::lighting::device::LightingPanel;
 use crate::features::lighting::standalone::LightPanel;
 use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
+use crate::features::pointer::power_mode::PowerModePanel;
 use crate::features::pointer::smartshift::SmartShiftPanel;
 use crate::features::profiles::{AppCatalogPicker, ProfileIconCache};
 use crate::services::assets::AssetResolver;
@@ -167,6 +168,7 @@ pub struct AppView {
     keyboard_model: Entity<FunctionRowView>,
     dpi_panel: Entity<DpiPanel>,
     smartshift_panel: Entity<SmartShiftPanel>,
+    power_mode_panel: Entity<PowerModePanel>,
     lighting_panel: Entity<LightingPanel>,
     camera_preview: Entity<CameraPreview>,
     camera_controls: Entity<CameraControlsPanel>,
@@ -191,6 +193,57 @@ pub struct AppView {
 impl Focusable for AppView {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
+    }
+}
+
+/// Whether a state event should re-render the root view. Child entities own
+/// their panels and subscribe directly; this decision covers only what the
+/// root itself draws.
+fn root_event_is_relevant(view: &AppView, event: &StateEvent, cx: &gpui::App) -> bool {
+    let active_key = AppState::try_read(cx)
+        .and_then(AppState::current_record)
+        .map(DeviceRecord::device_key);
+    let on_home = matches!(view.route, Route::Home);
+    match event {
+        StateEvent::AgentChanged | StateEvent::InventoryChanged | StateEvent::DeviceSelected(_) => {
+            true
+        }
+        StateEvent::ForegroundChanged => !on_home,
+        StateEvent::BindingsChanged(key) => {
+            !on_home
+                && matches!(
+                    view.active_tab,
+                    DetailTab::Buttons | DetailTab::ActionsRing | DetailTab::Device
+                )
+                && active_key.as_ref() == Some(key)
+        }
+        StateEvent::DpiChanged(key) => {
+            !on_home && view.active_tab == DetailTab::Device && active_key.as_ref() == Some(key)
+        }
+        StateEvent::LightingChanged(key) => {
+            on_home || (view.active_tab == DetailTab::Light && active_key.as_ref() == Some(key))
+        }
+        StateEvent::DeviceConfigChanged(key) => {
+            on_home
+                || (matches!(view.active_tab, DetailTab::Pointer | DetailTab::Device)
+                    && active_key.as_ref() == Some(key))
+        }
+        StateEvent::CameraChanged => on_home || view.active_tab == DetailTab::Light,
+        // Child entities own these surfaces and subscribe directly. A
+        // language switch already refreshes every window, and the root
+        // caches no localized text.
+        StateEvent::SmartShiftChanged(_)
+        | StateEvent::PowerModeChanged(_)
+        | StateEvent::CameraPermissionChanged
+        | StateEvent::DiagnosticsChanged
+        | StateEvent::LanguageChanged => false,
+        // App-wide settings render in their own window. The root only
+        // cares when a persistence/reload failure opens or closes its
+        // fail-closed configuration-error screen.
+        StateEvent::SettingsChanged => {
+            view.config_issue_visible
+                || AppState::try_read(cx).is_some_and(|state| state.config_issue().is_some())
+        }
     }
 }
 
@@ -229,6 +282,7 @@ impl AppView {
         let keyboard_model = cx.new(FunctionRowView::new);
         let dpi_panel = cx.new(DpiPanel::new);
         let smartshift_panel = cx.new(SmartShiftPanel::new);
+        let power_mode_panel = cx.new(PowerModePanel::new);
         let lighting_panel = cx.new(LightingPanel::new);
         let camera_preview = cx.new(CameraPreview::new);
         let camera_controls = cx.new(CameraControlsPanel::new);
@@ -237,55 +291,7 @@ impl AppView {
         let app_catalog = cx.new(|cx| AppCatalogPicker::new(profile_icons.clone(), window, cx));
         let app_catalog_obs = cx.observe(&app_catalog, |_, _, cx| cx.notify());
         let state_obs = cx.subscribe(&state, |view, _, event: &StateEvent, cx| {
-            let active_key = AppState::try_read(cx)
-                .and_then(AppState::current_record)
-                .map(DeviceRecord::device_key);
-            let on_home = matches!(view.route, Route::Home);
-            let relevant = match event {
-                StateEvent::AgentChanged
-                | StateEvent::InventoryChanged
-                | StateEvent::DeviceSelected(_) => true,
-                StateEvent::ForegroundChanged => !on_home,
-                StateEvent::BindingsChanged(key) => {
-                    !on_home
-                        && matches!(
-                            view.active_tab,
-                            DetailTab::Buttons | DetailTab::ActionsRing | DetailTab::Device
-                        )
-                        && active_key.as_ref() == Some(key)
-                }
-                StateEvent::DpiChanged(key) => {
-                    !on_home
-                        && view.active_tab == DetailTab::Device
-                        && active_key.as_ref() == Some(key)
-                }
-                StateEvent::LightingChanged(key) => {
-                    on_home
-                        || (view.active_tab == DetailTab::Light && active_key.as_ref() == Some(key))
-                }
-                StateEvent::DeviceConfigChanged(key) => {
-                    on_home
-                        || (matches!(view.active_tab, DetailTab::Pointer | DetailTab::Device)
-                            && active_key.as_ref() == Some(key))
-                }
-                StateEvent::CameraChanged => on_home || view.active_tab == DetailTab::Light,
-                // Child entities own these surfaces and subscribe directly. A
-                // language switch already refreshes every window, and the root
-                // caches no localized text.
-                StateEvent::SmartShiftChanged(_)
-                | StateEvent::CameraPermissionChanged
-                | StateEvent::DiagnosticsChanged
-                | StateEvent::LanguageChanged => false,
-                // App-wide settings render in their own window. The root only
-                // cares when a persistence/reload failure opens or closes its
-                // fail-closed configuration-error screen.
-                StateEvent::SettingsChanged => {
-                    view.config_issue_visible
-                        || AppState::try_read(cx)
-                            .is_some_and(|state| state.config_issue().is_some())
-                }
-            };
-            if relevant {
+            if root_event_is_relevant(view, event, cx) {
                 cx.notify();
             }
         });
@@ -297,6 +303,7 @@ impl AppView {
             keyboard_model,
             dpi_panel,
             smartshift_panel,
+            power_mode_panel,
             lighting_panel,
             camera_preview,
             camera_controls,
@@ -603,6 +610,7 @@ impl Render for AppView {
                         keyboard_model: &self.keyboard_model,
                         dpi_panel: &self.dpi_panel,
                         smartshift_panel: &self.smartshift_panel,
+                        power_mode_panel: &self.power_mode_panel,
                         lighting_panel: &self.lighting_panel,
                         camera_preview: &self.camera_preview,
                         camera_controls: &self.camera_controls,

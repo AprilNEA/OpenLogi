@@ -50,6 +50,7 @@ mod tests {
     use cmd::backlight::BacklightAction;
     use cmd::diag::DiagCmd;
     use cmd::diag::lighting::Method;
+    use cmd::diag::power_mode::PowerModeArg;
     use cmd::diag::wheel::ResolutionArg;
 
     /// Clap's own structural validation (arg ID collisions, invalid
@@ -122,6 +123,23 @@ mod tests {
         // silently becoming "no change" downstream.
         let result = Cli::try_parse_from(["openlogi", "diag", "smartshift", "--sensitivity", "0"]);
         result.expect_err("a zero --sensitivity must fail to parse");
+    }
+
+    #[test]
+    fn power_mode_set_value_is_parsed_and_bad_values_rejected() {
+        let cli = Cli::try_parse_from(["openlogi", "diag", "power-mode", "--set", "performance"])
+            .expect("valid power-mode invocation parses");
+        match cli.cmd.expect("subcommand present") {
+            Command::Diag(DiagCmd::PowerMode(args)) => {
+                assert_eq!(args.set, Some(PowerModeArg::Performance));
+                assert!(args.device.is_none());
+            }
+            other => panic!("expected Diag(PowerMode), got {other:?}"),
+        }
+
+        // An unknown mode must fail to parse rather than silently defaulting.
+        Cli::try_parse_from(["openlogi", "diag", "power-mode", "--set", "fast"])
+            .expect_err("an unknown power mode must be rejected");
     }
 
     #[test]

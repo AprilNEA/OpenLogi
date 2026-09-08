@@ -40,8 +40,9 @@ use openlogi_core::device::{
 };
 use openlogi_core::hid::{
     Click, DeviceRoute, Dpi, DpiCapabilities, DpiInfo, HidppFeatureErrorKind, HidppOperation,
-    LightCommand, PasskeyMethod, ReceiverSelector, SmartShiftAutoDisengage, SmartShiftMode,
-    SmartShiftStatus, SmartShiftThreshold, TunableTorque, WriteError,
+    LightCommand, PasskeyMethod, PowerMode, PowerModeState, ReceiverSelector,
+    SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque,
+    WriteError,
 };
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
@@ -97,11 +98,27 @@ fn representative_smartshift_status() -> SmartShiftStatus {
     }
 }
 
+/// The Bolt route every request golden uses.
+fn bolt_f00dcafe() -> DeviceRoute {
+    DeviceRoute::Bolt {
+        receiver_uid: "F00DCAFE".into(),
+        slot: 1,
+    }
+}
+
+fn representative_power_mode_state() -> PowerModeState {
+    PowerModeState {
+        mode: PowerMode::Performance,
+        software_switch: true,
+        hardware_switch: false,
+    }
+}
+
 /// Any golden regeneration must come with a version bump — this is the test
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 29);
+    assert_eq!(PROTOCOL_VERSION, 30);
 }
 
 #[test]
@@ -143,6 +160,19 @@ fn request_variant_order() {
     assert_wire(&AgentRequest::NextPairing {}, "0d");
     assert_wire(&AgentRequest::Snapshot {}, "0e");
     assert_wire(&AgentRequest::PollEventMonitor {}, "0f");
+    assert_wire(
+        &AgentRequest::ReadPowerMode {
+            route: bolt_f00dcafe(),
+        },
+        "1a0008463030444341464501",
+    );
+    assert_wire(
+        &AgentRequest::SetPowerMode {
+            route: bolt_f00dcafe(),
+            mode: PowerMode::Performance,
+        },
+        "1b000846303044434146450101",
+    );
     assert_wire(
         &AgentRequest::SetLight {
             route: DeviceRoute::RawHid {
@@ -514,6 +544,10 @@ fn device_settings_payloads() {
     // is exactly the kind of thing a refactor would "fix".
     let smartshift: Result<SmartShiftStatus, WriteError> = Ok(representative_smartshift_status());
     assert_wire(&smartshift, "0001103c");
+
+    // PowerMode encodes its variant *index* (Endurance=0, Performance=1).
+    let power_mode: Result<PowerModeState, WriteError> = Ok(representative_power_mode_state());
+    assert_wire(&power_mode, "00010100");
 
     // `Rgb` serializes as the same hex string the field used to hold raw, so
     // the pinned bytes are identical to the pre-newtype encoding.

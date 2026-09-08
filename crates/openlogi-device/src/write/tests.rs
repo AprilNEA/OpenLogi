@@ -14,7 +14,8 @@ use crate::write::smartshift::{
 };
 use crate::write::{HidppFeatureErrorKind, HidppOperation};
 use crate::{
-    SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque,
+    PowerMode, SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold,
+    TunableTorque,
 };
 use hidpp::feature::device_information::DeviceEntityType;
 
@@ -461,12 +462,14 @@ fn scripted_response(request: &[u8]) -> Option<Vec<u8>> {
                 0x2201 => 0x05,
                 0x2111 => 0x06,
                 0x8080 => 0x07,
+                0x8090 => 0x08,
                 _ => 0x00,
             };
             false
         }
-        // AdjustableDpi sensor count/current/list.
-        (0x05, 0x00) => {
+        // AdjustableDpi sensor count / ModeStatus getModeStatus: one sensor
+        // and a set performance bit share the same reply byte.
+        (0x05 | 0x08, 0x00) => {
             payload[0] = 1;
             false
         }
@@ -481,6 +484,14 @@ fn scripted_response(request: &[u8]) -> Option<Vec<u8>> {
         // Enhanced SmartShift status.
         (0x06, 0x01) => {
             payload[..3].copy_from_slice(&[u8::from(WheelMode::Ratchet), 10, 33]);
+            false
+        }
+        // ModeStatus setModeStatus ack (the request arrives as a long report).
+        (0x08, 0x01) => false,
+        // ModeStatus getDevConfig — software switch only. A real G305
+        // answers 0x02 in the reply's first byte.
+        (0x08, 0x02) => {
+            payload[0] = 0x02;
             false
         }
         // Raw per-key frame commit expects no reply.
@@ -758,4 +769,49 @@ async fn a_channel_failure_aborts_the_dump_instead_of_blaming_the_firmware() {
         !written.iter().any(|report| is_fw_info_for(report, 2)),
         "the dump stops at the failure rather than timing out per entity"
     );
+}
+
+#[tokio::test]
+async fn power_mode_reads_use_the_supplied_channel() -> Result<(), WriteError> {
+    let (raw, _handle) = ScriptedRawHidChannel::with_responder(scripted_response);
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(
+        channel,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xb35b,
+        },
+    );
+
+    let state = get_power_mode_on(&shared).await?;
+    assert_eq!(state.mode, PowerMode::Performance);
+    assert!(state.software_switch);
+    assert!(!state.hardware_switch);
+    Ok(())
+}
+
+#[tokio::test]
+async fn power_mode_writes_touch_only_changed_mask0() -> Result<(), WriteError> {
+    let (raw, handle) = ScriptedRawHidChannel::with_responder(scripted_response);
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(
+        channel,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xb35b,
+        },
+    );
+
+    set_power_mode_on(&shared, PowerMode::Performance).await?;
+
+    let written = handle.written_reports();
+    let set = written
+        .iter()
+        .find(|report| report.len() >= 8 && report[2] == 0x08 && report[3] >> 4 == 1)
+        .expect("a setModeStatus report was written");
+    // status0 = performance, status1 untouched, changed_mask0 = performance,
+    // changed_mask1 untouched — the G305 answers HID++ InvalidArgument to any
+    // set that touches changed_mask1.
+    assert_eq!(&set[4..8], &[0x01, 0x00, 0x01, 0x00]);
+    Ok(())
 }
