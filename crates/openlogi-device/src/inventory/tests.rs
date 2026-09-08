@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use hidpp::protocol::v10::{Message, MessageHeader};
 use hidpp::receiver::unifying::{Event as UnifyingEvent, decode_notification};
@@ -10,14 +9,14 @@ use openlogi_core::device::{
 };
 
 use super::cache::{
-    CACHE_MISS_GRACE, CacheKey, CacheOutcome, Cached, REFRESH_INTERVAL, backfill_identity,
-    is_stale, keep_known_capabilities,
+    CACHE_MISS_GRACE, CacheKey, CacheOutcome, Cached, backfill_identity, keep_known_capabilities,
 };
 use super::events::EventFeatureIndices;
 use super::features::ProbedFeatures;
 use super::probe::{
-    NodeProbe, ProbeVerdict, assemble_bolt_probe, assemble_unifying_device,
-    parse_codename_unifying, preferred_direct_codename, probe_unifying_slot, unifying_probe_budget,
+    NodeProbe, ProbeVerdict, UnifyingSlotIdentity, assemble_bolt_probe, assemble_unifying_device,
+    parse_codename_unifying, preferred_direct_codename, read_unifying_slot_identity,
+    unifying_probe_budget, walk_unifying_slot,
 };
 use super::{
     ChannelCache, Enumerator, ONESHOT_ATTEMPTS, OneShotScan, ScanPass, UNIFYING_CACHED_SLOT_PROBE,
@@ -32,9 +31,95 @@ fn cache_entry() -> Cached {
     Cached {
         probe: ProbedFeatures::default(),
         battery: None,
+        channel: None,
         events: EventFeatureIndices::default(),
-        probed_at: Instant::now(),
     }
+}
+
+#[tokio::test]
+async fn live_unifying_arrival_survives_unsupported_pairing_registers() {
+    use hidpp::receiver::unifying::Receiver;
+
+    let (raw, handle) = ScriptedRawHidChannel::with_responder(|request| {
+        Some(vec![
+            0x10, request[1], 0x8f, request[2], request[3], 0x02, 0,
+        ])
+    });
+    let mut channel = scripted_channel(raw).await;
+    Arc::get_mut(&mut channel)
+        .expect("unshared test channel")
+        .product_id = 0xc52b;
+    let receiver = Receiver::new(channel).expect("known Unifying receiver");
+    let message = Message::Short(
+        MessageHeader {
+            device_index: 1,
+            sub_id: 0x41,
+        },
+        [0x04, 0x02, 0xb8, 0x40],
+    );
+    let Some(UnifyingEvent::DeviceConnection(arrival)) = decode_notification(&message) else {
+        panic!("expected a device-connection event");
+    };
+
+    let identity = read_unifying_slot_identity(&receiver, Some(&arrival), 1)
+        .await
+        .expect("a live arrival must not disappear when register 0xb5 is unsupported");
+    assert!(identity.online);
+    assert_eq!(identity.wpid, arrival.wpid);
+    assert_eq!(identity.register_kind, DeviceKind::Mouse);
+    assert_eq!(identity.unit_id, [0; 4]);
+    assert!(identity.id.is_none(), "no stable unit id was observed");
+    assert_eq!(handle.written_reports().len(), 1);
+
+    assert!(
+        read_unifying_slot_identity(&receiver, None, 2)
+            .await
+            .is_none(),
+        "an unreadable slot without an arrival is not an observed device"
+    );
+}
+
+#[tokio::test]
+async fn late_arrival_cannot_mark_a_different_paired_device_online() {
+    use hidpp::receiver::unifying::Receiver;
+
+    let (raw, _) = ScriptedRawHidChannel::with_responder(|request| {
+        let mut response = vec![0; 20];
+        response[..5].copy_from_slice(&[0x11, 0xff, 0x83, 0xb5, request[4]]);
+        match request[4] {
+            0x22 => {
+                response[7..9].copy_from_slice(&[0x40, 0x96]);
+                response[11] = 0x08;
+            }
+            0x32 => response[5..9].copy_from_slice(&[1, 2, 3, 4]),
+            _ => return None,
+        }
+        Some(response)
+    });
+    let mut channel = scripted_channel(raw).await;
+    Arc::get_mut(&mut channel)
+        .expect("unshared test channel")
+        .product_id = 0xc52b;
+    let receiver = Receiver::new(channel).expect("known Unifying receiver");
+    let message = Message::Short(
+        MessageHeader {
+            device_index: 3,
+            sub_id: 0x41,
+        },
+        [0x04, 0x02, 0xb8, 0x40],
+    );
+    let Some(UnifyingEvent::DeviceConnection(arrival)) = decode_notification(&message) else {
+        panic!("expected a device-connection event");
+    };
+
+    let identity = read_unifying_slot_identity(&receiver, Some(&arrival), 3)
+        .await
+        .expect("pairing-register identity");
+    assert!(!identity.online);
+    assert_eq!(identity.wpid, 0x4096);
+    assert_eq!(identity.register_kind, DeviceKind::Trackball);
+    assert_eq!(identity.unit_id, [1, 2, 3, 4]);
+    assert!(matches!(identity.id, Some(CacheKey::Unifying { .. })));
 }
 
 #[test]
@@ -48,15 +133,12 @@ fn direct_codename_prefers_hidpp_marketing_name_over_generic_os_name() {
 
 #[test]
 fn cache_dirty_tracks_only_persistable_keys() {
-    // A system whose devices never persist (direct-only, or Unifying) must not
+    // A system whose devices never persist (direct-only) must not
     // rewrite probe-cache.json on every refresh pass: the file's content
     // wouldn't change.
     let mut e = Enumerator::with_backend(ScriptedBackend::new(Vec::new()));
-    let unifying = CacheKey::UnifyingSlot {
-        receiver_uid: "DA2699E1".into(),
-        slot: 1,
-    };
-    e.apply_outcomes(vec![CacheOutcome::Fresh(unifying.clone(), cache_entry())]);
+    let direct = CacheKey::Direct("node-1".to_string().into());
+    e.apply_outcomes(vec![CacheOutcome::Fresh(direct.clone(), cache_entry())]);
     assert!(
         !e.cache_dirty,
         "non-persistable fresh probe dirtied the cache"
@@ -67,10 +149,10 @@ fn cache_dirty_tracks_only_persistable_keys() {
     for _ in 0..=CACHE_MISS_GRACE {
         e.evict_unseen(&nobody);
     }
-    assert!(!e.cache.contains_key(&unifying), "entry should be evicted");
+    assert!(!e.cache.contains_key(&direct), "entry should be evicted");
     assert!(!e.cache_dirty, "non-persistable eviction dirtied the cache");
 
-    // A Bolt probe is what the file stores — that one dirties it.
+    // Receiver probes have physical unit ids and do dirty the snapshot.
     let bolt = CacheKey::Bolt {
         unit_id: [1, 2, 3, 4],
     };
@@ -78,6 +160,15 @@ fn cache_dirty_tracks_only_persistable_keys() {
     assert!(
         e.cache_dirty,
         "persistable fresh probe must dirty the cache"
+    );
+    e.cache_dirty = false;
+    let unifying = CacheKey::Unifying {
+        unit_id: [5, 6, 7, 8],
+    };
+    e.apply_outcomes(vec![CacheOutcome::Fresh(unifying, cache_entry())]);
+    assert!(
+        e.cache_dirty,
+        "a Unifying physical unit id must be persistable"
     );
 }
 
@@ -123,40 +214,26 @@ fn being_seen_resets_the_miss_counter() {
     );
 }
 
-#[test]
-fn cached_probe_is_reused_until_refresh_interval() {
-    let probed_at = Instant::now();
-    let cached = Cached {
-        probe: ProbedFeatures::default(),
-        battery: None,
-        events: EventFeatureIndices::default(),
-        probed_at,
-    };
-    assert!(!is_stale(&cached, probed_at), "same instant is fresh");
-    assert!(
-        !is_stale(&cached, probed_at + Duration::from_secs(29)),
-        "just under the window is still fresh"
-    );
-    assert!(
-        is_stale(&cached, probed_at + REFRESH_INTERVAL),
-        "at the window the probe is refreshed"
-    );
-}
-
-#[test]
-fn unifying_cache_hits_use_only_the_battery_refresh_budget() {
-    let cached = cache_entry();
+#[tokio::test]
+async fn unifying_cache_hits_use_only_the_battery_refresh_budget() {
+    let (raw, _) = ScriptedRawHidChannel::with_responder(|_| None);
+    let channel = scripted_channel(raw).await;
+    let mut cached = cache_entry();
+    cached.channel = Some(Arc::downgrade(&channel));
     assert_eq!(
-        unifying_probe_budget(Some(&cached), cached.probed_at),
+        unifying_probe_budget(Some(&cached), &channel),
         UNIFYING_CACHED_SLOT_PROBE
     );
+
+    let (replacement_raw, _) = ScriptedRawHidChannel::with_responder(|_| None);
+    let replacement = scripted_channel(replacement_raw).await;
     assert_eq!(
-        unifying_probe_budget(Some(&cached), cached.probed_at + REFRESH_INTERVAL),
+        unifying_probe_budget(Some(&cached), &replacement),
         UNIFYING_SLOT_PROBE,
-        "stale entries still get enough time for a full feature walk"
+        "a replacement channel needs enough time for one validation walk"
     );
     assert_eq!(
-        unifying_probe_budget(None, Instant::now()),
+        unifying_probe_budget(None, &channel),
         UNIFYING_SLOT_PROBE,
         "first sight still gets the full feature-walk budget"
     );
@@ -184,9 +261,17 @@ async fn offline_arrival_rebroadcasts_surface_without_probing_the_device() {
     let writes_before = handle.written_reports().len();
 
     let cache = HashMap::new();
-    let (device, _) = probe_unifying_slot(&channel, &event, "SERIAL", &cache, Instant::now(), None)
-        .await
-        .expect("an offline slot still surfaces from its re-broadcast");
+    let identity = UnifyingSlotIdentity {
+        slot: event.index,
+        id: Some(CacheKey::Unifying {
+            unit_id: [1, 2, 3, 4],
+        }),
+        unit_id: [1, 2, 3, 4],
+        online: event.online,
+        register_kind: DeviceKind::Mouse,
+        wpid: event.wpid,
+    };
+    let (device, _) = walk_unifying_slot(&channel, &identity, &cache, None).await;
 
     assert!(!device.online);
     assert_eq!(device.wpid, Some(0x4069));
@@ -203,6 +288,7 @@ fn unifying_arrival_liveness_survives_missing_feature_data() {
         1,
         None,
         0x40b8,
+        [0; 4],
         DeviceKind::Mouse,
         ProbedFeatures::default(),
         true,
@@ -593,8 +679,8 @@ fn probed(model_info: Option<DeviceModelInfo>, identity_incomplete: bool) -> Pro
 }
 
 /// A control-table read that fails half way reads exactly like "no haptic
-/// panel", and the answer is memoized for `REFRESH_INTERVAL` — so the Actions Ring
-/// binding would vanish from the GUI for half a minute on a device that has it.
+/// panel", and the answer is memoized for the channel's lifetime — so the
+/// Actions Ring binding would otherwise vanish until the device reconnects.
 #[test]
 fn an_incomplete_capability_walk_keeps_the_last_complete_answer() {
     let mut fresh = probed(None, false);

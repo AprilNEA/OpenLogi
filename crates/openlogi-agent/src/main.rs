@@ -1,8 +1,8 @@
 //! OpenLogi background agent — headless, always-on.
 //!
 //! Owns the CGEventTap hook and the HID++ device path (gesture capture, DPI,
-//! SmartShift), serves the GUI over a Unix-socket tarpc IPC, reconciles its own
-//! launchd autostart, and (macOS) hosts the menu-bar status item. The async
+//! SmartShift), serves the GUI over a Unix-socket tarpc IPC, reconciles platform
+//! autostart migration, and (macOS) hosts the menu-bar status item. The async
 //! core walks the state machine in `lifecycle` on a tokio runtime; on macOS
 //! the process main thread hosts the AppKit run loop the menu bar requires.
 
@@ -17,6 +17,8 @@
 
 mod autostart;
 mod binary_watch;
+#[cfg(target_os = "macos")]
+mod launchd_handoff;
 mod lifecycle;
 mod logging;
 mod overlay;
@@ -52,26 +54,11 @@ fn main() {
     // racing the GUI's one-shot auto-spawn could otherwise bring up two, and the
     // loser would steal the socket and install a duplicate event tap. Held for
     // the whole process; the OS releases it on exit (crash-recovery is free).
-    let _guard = match openlogi_core::single_instance::acquire("agent.lock") {
-        Ok(g) => g,
-        Err(openlogi_core::single_instance::InstanceError::AlreadyRunning { path }) => {
-            // The holder may be a leftover from before this binary's update —
-            // a pre-self-restart agent never exits on its own, and it would
-            // wedge the (newer) GUI on its connecting screen forever. If it
-            // provably speaks an older protocol, replace it; otherwise exit
-            // as the duplicate we are.
-            let Some(g) = takeover::try_replace_stale() else {
-                info!(path = %path.display(), "another openlogi-agent is already running — exiting");
-                return;
-            };
-            info!("replaced a stale agent — continuing as the new one");
-            g
-        }
-        Err(e) => {
-            warn!(error = %e, "single-instance check failed — exiting");
-            return;
-        }
+    let Some(_guard) = acquire_agent_lock() else {
+        return;
     };
+    #[cfg(target_os = "macos")]
+    launchd_handoff::clear_stale_clean_exit_marker();
 
     // Watch our own executable and restart as the new image when an app update
     // replaces it — see `binary_watch`. Only the lock-holding (real) agent
@@ -153,6 +140,35 @@ fn main() {
         drop(device_io_signal);
         runtime.block_on(lifecycle::run(config, uninstalled));
     }
+}
+
+/// Acquire the process-wide agent lock, including the macOS launchd handoff.
+fn acquire_agent_lock() -> Option<openlogi_core::single_instance::InstanceGuard> {
+    let guard = match openlogi_core::single_instance::acquire("agent.lock") {
+        Ok(g) => g,
+        Err(openlogi_core::single_instance::InstanceError::AlreadyRunning { path }) => {
+            // The holder may be a leftover from before this binary's update —
+            // a pre-self-restart agent never exits on its own, and it would
+            // wedge the (newer) GUI on its connecting screen forever. If it
+            // provably speaks an older protocol, replace it before waiting
+            // for a supervised handoff that could otherwise never happen.
+            if let Some(guard) = takeover::try_replace_stale() {
+                info!("replaced a stale agent — continuing as the new one");
+                return Some(guard);
+            }
+            #[cfg(target_os = "macos")]
+            if launchd_handoff::started_by_launchd() {
+                return launchd_handoff::wait_for_predecessor(&path);
+            }
+            info!(path = %path.display(), "another openlogi-agent is already running — exiting");
+            return None;
+        }
+        Err(e) => {
+            warn!(error = %e, "single-instance check failed — exiting");
+            return None;
+        }
+    };
+    Some(guard)
 }
 
 #[cfg(test)]

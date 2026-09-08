@@ -23,8 +23,10 @@ use tokio::sync::watch;
 
 /// Hardware identity of one HID++ capture session.
 ///
-/// Equality is the rearm contract: changing any field requires restoring the
-/// old firmware diversion before a replacement session may start.
+/// Equality is the rearm contract: changing any field requires the old session
+/// to finish teardown before a replacement may start. Failed restoration on
+/// another route stays parked until that route is used again; it must not
+/// disable capture on the device's newly active transport.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CaptureTarget {
     /// Physical identity used to serialize firmware ownership even when the

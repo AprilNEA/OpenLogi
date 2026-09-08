@@ -365,6 +365,60 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn warm_cache_restores_lifecycle_events_without_another_feature_walk() {
+        use super::super::cache::{CacheKey, CacheOutcome, Cached, probe_or_reuse};
+        use super::super::features::ProbedFeatures;
+        use crate::channel::scripted::{ScriptedRawHidChannel, scripted_channel};
+
+        let (raw, handle) = ScriptedRawHidChannel::with_responder(|_| None);
+        let channel = scripted_channel(raw).await;
+        let cached = Cached {
+            probe: ProbedFeatures::default(),
+            battery: None,
+            channel: None,
+            events: EventFeatureIndices {
+                wireless_status: Some(5),
+                unified_battery: Some(7),
+            },
+        };
+        let state = state(None);
+        let subscriptions = EventSubscriptionHandle {
+            state: Arc::clone(&state),
+        };
+        let (_, outcome) = probe_or_reuse(
+            &channel,
+            3,
+            Some(CacheKey::Unifying {
+                unit_id: [1, 2, 3, 4],
+            }),
+            Some(&cached),
+            true,
+            Some(&subscriptions),
+        )
+        .await;
+
+        assert!(matches!(outcome, CacheOutcome::Bind(..)));
+        assert!(
+            handle.written_reports().is_empty(),
+            "warm start must not re-walk immutable features"
+        );
+        let wireless = v20::Message::Long(
+            v20::MessageHeader {
+                device_index: 3,
+                feature_index: 5,
+                function_id: U4::from_lo(0),
+                software_id: U4::from_lo(0),
+            },
+            [0; 16],
+        )
+        .into();
+        assert_eq!(
+            state.decode(wireless, false),
+            Some(HidppEventSource::WirelessDeviceStatus)
+        );
+    }
+
     #[test]
     fn event_requests_are_bounded_and_coalesced() {
         let (notifier, mut receiver) = event_channel();

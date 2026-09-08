@@ -119,6 +119,18 @@ fn agent_launch_plist_targets_the_channel_helper_and_keeps_alive() {
                     .as_str()
             )
         );
+        let arguments = content
+            .get("ProgramArguments")
+            .and_then(plist::Value::as_array)
+            .unwrap();
+        assert_eq!(
+            arguments
+                .iter()
+                .map(plist::Value::as_string)
+                .collect::<Vec<_>>(),
+            vec![Some("openlogi-agent"), Some("--launchd")],
+            "the supervised Agent must preserve singleton handoff"
+        );
         let keep_alive = content
             .get("KeepAlive")
             .and_then(plist::Value::as_dictionary)

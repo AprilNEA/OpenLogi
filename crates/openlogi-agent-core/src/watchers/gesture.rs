@@ -21,8 +21,9 @@
 //! way regardless.
 
 mod dispatch;
+mod restores;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -38,6 +39,7 @@ use tokio::time::Instant;
 use tracing::{debug, warn};
 
 use self::dispatch::InputDispatcher;
+use self::restores::{PendingRestore, RestoreQueue};
 use super::capture_session::{CaptureSession, CompletionAction, ReconcileAction};
 use crate::capture_plan::{CaptureTarget, DeviceCapturePlan, DispatchPlan, SharedCapturePlans};
 use crate::receiver_access::{ReceiverAccess, ReceiverRequestState, SessionReceiverLease};
@@ -139,14 +141,9 @@ enum SessionEvent {
     Done(SessionDone),
 }
 
-struct PendingRestore {
-    token: PendingCaptureRestore,
-    retry_at: Instant,
-}
-
 struct GestureManagerState {
     sessions: HashMap<PhysicalDeviceKey, RunningSession>,
-    pending_restores: HashMap<PhysicalDeviceKey, PendingRestore>,
+    pending_restores: RestoreQueue<PendingCaptureRestore>,
     restart_after: HashMap<PhysicalDeviceKey, Instant>,
     input_dispatcher: InputDispatcher,
     lease: std::sync::Weak<SessionReceiverLease>,
@@ -283,27 +280,22 @@ fn acquire_session_lease(
 }
 
 async fn retry_pending_restores(
-    pending_restores: &mut HashMap<PhysicalDeviceKey, PendingRestore>,
+    pending_restores: &mut RestoreQueue<PendingCaptureRestore>,
+    due: Vec<PendingRestore<PendingCaptureRestore>>,
     registry: &openlogi_hid::ChannelRegistry,
-    now: Instant,
+    device_io: &DeviceIoGate,
 ) {
-    let keys: Vec<_> = pending_restores
-        .iter()
-        .filter(|(_, pending)| pending.retry_at <= now)
-        .map(|(key, _)| key.clone())
-        .collect();
-    for key in keys {
-        let Some(pending) = pending_restores.remove(&key) else {
+    for pending in due {
+        if !device_io.allows_io() {
+            pending_restores.retain(pending);
             continue;
-        };
+        }
         if let CaptureSessionOutcome::RestorePending(token) = pending.token.retry(registry).await {
-            pending_restores.insert(
-                key,
-                PendingRestore {
-                    token,
-                    retry_at: Instant::now() + RETRY_DELAY,
-                },
-            );
+            pending_restores.retain(PendingRestore {
+                token,
+                retry_at: Instant::now() + RETRY_DELAY,
+                ..pending
+            });
         }
     }
 }
@@ -311,15 +303,14 @@ async fn retry_pending_restores(
 fn next_deadline(
     requests: ReceiverRequestState,
     device_io_allowed: bool,
-    pending_restores: &HashMap<PhysicalDeviceKey, PendingRestore>,
+    restore_deadline: Option<Instant>,
     restart_after: &HashMap<PhysicalDeviceKey, Instant>,
 ) -> Option<Instant> {
     if requests.any() || !device_io_allowed {
         return None;
     }
-    pending_restores
-        .values()
-        .map(|pending| pending.retry_at)
+    restore_deadline
+        .into_iter()
         .chain(restart_after.values().copied())
         .min()
 }
@@ -328,31 +319,50 @@ fn restart_deadline(unexpected: bool, now: Instant) -> Option<Instant> {
     unexpected.then_some(now + RETRY_DELAY)
 }
 
+fn retain_restart_delays(
+    restart_after: &mut HashMap<PhysicalDeviceKey, Instant>,
+    published: &[DeviceCapturePlan],
+    now: Instant,
+) {
+    // An elapsed startup delay no longer constrains capture. Keeping it while
+    // restoration is pending makes the manager's select deadline permanently
+    // ready, spinning instead of waiting for the next bounded restore retry.
+    restart_after.retain(|key, deadline| {
+        *deadline > now
+            && published
+                .iter()
+                .any(|plan| plan.target.physical_key == *key)
+    });
+}
+
 impl GestureManagerState {
     fn new(outputs: GestureOutputs) -> Self {
         Self {
             sessions: HashMap::new(),
-            pending_restores: HashMap::new(),
+            pending_restores: RestoreQueue::default(),
             restart_after: HashMap::new(),
             input_dispatcher: InputDispatcher::new(outputs),
             lease: std::sync::Weak::new(),
         }
     }
 
-    fn deadline(&self, requests: ReceiverRequestState, device_io_allowed: bool) -> Option<Instant> {
+    fn deadline(
+        &self,
+        requests: ReceiverRequestState,
+        device_io_allowed: bool,
+        published: &[DeviceCapturePlan],
+    ) -> Option<Instant> {
+        let busy = self.sessions.keys().cloned().collect();
         next_deadline(
             requests,
             device_io_allowed,
-            &self.pending_restores,
+            self.pending_restores.next_deadline(&busy, published),
             &self.restart_after,
         )
     }
 
     fn expedite_pending_restores(&mut self) {
-        let now = Instant::now();
-        for pending in self.pending_restores.values_mut() {
-            pending.retry_at = now;
-        }
+        self.pending_restores.expedite(Instant::now());
     }
 
     async fn reconcile(
@@ -383,30 +393,38 @@ impl GestureManagerState {
                 .map(|plan| (&plan.target, &plan.dispatch));
             reconcile_session(session, wanted, &mut self.input_dispatcher);
         }
-        self.restart_after.retain(|key, _| {
-            published
-                .iter()
-                .any(|plan| plan.target.physical_key == *key)
-        });
+        retain_restart_delays(&mut self.restart_after, published, now);
 
-        // Firmware ownership outlives the desired plan. Keep the strong lease
-        // through successor spawning so restore→rearm is uninterrupted.
+        // A restore owns route-local feature indices, not the device's other
+        // transports. Park old-route debts during a handoff, including while
+        // its successor drains; never write a stale undivert under live input.
+        // Keep the strong lease through restore→rearm on the same route.
+        let busy: HashSet<_> = self.sessions.keys().cloned().collect();
         let due_restore = self
             .pending_restores
-            .values()
-            .any(|pending| pending.retry_at <= now);
+            .next_deadline(&busy, published)
+            .is_some_and(|deadline| deadline <= now);
         let restore_lease = if due_restore {
             acquire_session_lease(receiver_access, &mut self.lease)
         } else {
             None
         };
         if restore_lease.is_some() {
-            retry_pending_restores(&mut self.pending_restores, &channels.registry, now).await;
+            let due = self.pending_restores.take_due(now, &busy, published);
+            retry_pending_restores(
+                &mut self.pending_restores,
+                due,
+                &channels.registry,
+                &channels.device_io,
+            )
+            .await;
         }
 
         for plan in wanted {
             let key = &plan.target.physical_key;
-            if self.sessions.contains_key(key) || self.pending_restores.contains_key(key) {
+            if self.sessions.contains_key(key)
+                || self.pending_restores.blocks(key, &plan.target.route)
+            {
                 continue;
             }
             if self
@@ -474,13 +492,12 @@ impl GestureManagerState {
                     return false;
                 };
                 if let Some(pending) = done.pending_restore {
-                    self.pending_restores.insert(
-                        key.clone(),
-                        PendingRestore {
-                            token: pending,
-                            retry_at: Instant::now() + RETRY_DELAY,
-                        },
-                    );
+                    self.pending_restores.retain(PendingRestore {
+                        key: key.clone(),
+                        route: pending.route().clone(),
+                        token: pending,
+                        retry_at: Instant::now() + RETRY_DELAY,
+                    });
                 }
                 self.input_dispatcher.cancel_session(&dispatch_session);
                 if device_io_allowed
@@ -549,7 +566,7 @@ async fn manage(
         }
 
         let requests = *receiver_requests.borrow();
-        let deadline = state.deadline(requests, device_io.allows_io());
+        let deadline = state.deadline(requests, device_io.allows_io(), &capture_plans.borrow());
         if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
             reconcile = true;
             continue;

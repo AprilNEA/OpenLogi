@@ -1,5 +1,5 @@
 //! The macOS implementation: `SMAppService` over `objc2-service-management`,
-//! plus the version marker that drives re-registration after an app update.
+//! plus the build marker that drives re-registration after an app update.
 
 use super::ServiceStatus;
 
@@ -35,7 +35,7 @@ enum EnsureAction {
 /// - Absent (`NotRegistered`) → register. `NotFound` also attempts it, so a
 ///   broken bundle surfaces an informative framework error instead of
 ///   silence.
-/// - `Enabled` with a stale version marker → re-register.
+/// - `Enabled` with a stale build marker → re-register.
 /// - `RequiresApproval` → nothing, ever: the user's System Settings choice
 ///   outranks the update path too.
 fn ensure_action(status: ServiceStatus, stale: bool) -> Option<EnsureAction> {
@@ -63,13 +63,46 @@ pub(super) fn ensure_registered() -> Result<(), String> {
     Ok(())
 }
 
-/// Whether the recorded registering version differs from this build. A
-/// missing marker reads as stale, so installs that registered before the
-/// marker existed get their one catch-up re-registration.
+/// Whether the recorded registering build differs from this bundle. A
+/// missing or legacy package-version-only marker reads as stale, so installs
+/// that registered before the build marker existed get their one catch-up
+/// re-registration.
+///
+/// `CARGO_PKG_VERSION` alone is not sufficient: local packages can replace an
+/// installed app several times without changing the release version. launchd
+/// keeps the parent bundle context from the registration that it accepted, so
+/// such an in-place replacement must still perform Apple's unregister/register
+/// update dance. The outer bundle's `CFBundleVersion` is stamped uniquely by
+/// local packaging and is the canonical build identity at runtime.
 fn registration_is_stale() -> bool {
+    let current = current_registration_marker();
     registered_version_path()
         .and_then(|path| std::fs::read_to_string(path).ok())
-        .is_none_or(|recorded| recorded.trim() != env!("CARGO_PKG_VERSION"))
+        .is_none_or(|recorded| recorded.trim() != current)
+}
+
+fn current_registration_marker() -> String {
+    registration_marker(
+        env!("CARGO_PKG_VERSION"),
+        current_bundle_build_version().as_deref(),
+    )
+}
+
+fn registration_marker(package_version: &str, bundle_build_version: Option<&str>) -> String {
+    let build = bundle_build_version.unwrap_or(package_version);
+    format!("{package_version}:{build}")
+}
+
+/// Read the outer app's stamped build number. `NSBundle::mainBundle` is the
+/// registering GUI bundle, not the nested agent bundle.
+fn current_bundle_build_version() -> Option<String> {
+    use objc2_foundation::{NSBundle, NSString};
+
+    let key = NSString::from_str("CFBundleVersion");
+    NSBundle::mainBundle()
+        .objectForInfoDictionaryKey(&key)?
+        .downcast_ref::<NSString>()
+        .map(ToString::to_string)
 }
 
 /// Marker file under the data dir recording which app version last
@@ -88,7 +121,7 @@ fn record_registered_version() {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&path, env!("CARGO_PKG_VERSION"))
+        std::fs::write(&path, current_registration_marker())
     };
     if let Err(error) = write() {
         // Worst case the next launch re-registers once more.
@@ -223,6 +256,19 @@ mod tests {
             ensure_action(ServiceStatus::Enabled, true),
             Some(EnsureAction::Reregister)
         );
+    }
+
+    #[test]
+    fn registration_marker_distinguishes_rebuilds_of_one_release() {
+        assert_ne!(
+            registration_marker("0.8.3", Some("20260904.144728")),
+            registration_marker("0.8.3", Some("20260905.062532"))
+        );
+    }
+
+    #[test]
+    fn unbundled_registration_marker_falls_back_to_package_version() {
+        assert_eq!(registration_marker("0.8.3", None), "0.8.3:0.8.3");
     }
 
     #[test]
