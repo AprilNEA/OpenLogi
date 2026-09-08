@@ -110,19 +110,27 @@ before the official cask autobump lands. Install either `openlogi` or
 
 ### Linux
 
-Download the package for your distribution from the
-[latest release](https://github.com/AprilNEA/OpenLogi/releases/latest):
+Download the installer over HTTPS, inspect it, then run it. Do not pipe it into
+a shell:
 
 ```sh
-# Debian / Ubuntu
-sudo dpkg -i openlogi_*.deb
-
-# Fedora / RHEL
-sudo rpm -i openlogi-*.rpm
-
-# Arch Linux
-sudo pacman -U openlogi-*.pkg.tar.zst
+curl --proto '=https' --proto-redir '=https' --tlsv1.2 \
+  --fail --location --silent --show-error \
+  --retry 3 --retry-connrefused \
+  --output openlogi-install.sh \
+  https://raw.githubusercontent.com/AprilNEA/OpenLogi/master/packaging/linux/install.sh
+less openlogi-install.sh
+sh openlogi-install.sh
+rm openlogi-install.sh
 ```
+
+The script detects apt, dnf, yum, zypper, rpm, or pacman; selects the exact
+`.deb`, `.rpm`, or `.pkg.tar.zst` for the machine; authenticates its detached
+signature with OpenLogi's embedded minisign public key; and verifies its entry
+in the release `SHA256SUMS` before invoking the package manager with `sudo`.
+Install `minisign` through your distribution first. Run the script as your
+normal user, not with `sudo`. It installs the latest release by default. Use
+`--version`, `--package-manager`, `--no-start`, or `--dry-run` when needed.
 
 Packages are published for both `x86_64`/`amd64` and `arm64`/`aarch64`.
 Pre-built packages require GLIBC 2.35 or newer (Ubuntu 22.04 baseline).
@@ -152,15 +160,15 @@ package and udev rules and starts the agent with the graphical session:
 
 All Linux packages install udev rules that grant your user access to
 `/dev/hidraw*`, `/dev/uinput` and your Logitech mouse's `/dev/input/event*`
-node without `sudo`. The NixOS module starts the agent automatically; after a
-`.deb`, `.rpm`, or `.pkg.tar.zst` installation, enable it for your user:
+node without `sudo`. The installer and NixOS module start the agent
+automatically; after a manual package installation, enable it for your user:
 
 ```sh
 systemctl --user enable --now openlogi-agent.service
 ```
 
-See [docs/INSTALL-linux.md](docs/INSTALL-linux.md) for complete NixOS options,
-manual / source installs, and distros without systemd.
+See [docs/INSTALL-linux.md](docs/INSTALL-linux.md) for fixed-version installs,
+complete NixOS options, source installs, and distros without systemd.
 
 ### Windows
 
