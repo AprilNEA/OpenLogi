@@ -232,46 +232,50 @@ impl Render for RingView {
 pub(crate) fn ring_window_options(cx: &mut gpui::App) -> WindowOptions {
     let cursor = openlogi_hook::cursor_position();
     let size = Size::new(px(WINDOW_SIZE), px(WINDOW_SIZE));
-    // GPUI window bounds are display-relative (`display.bounds()` zeroes every
-    // origin) while the hook reports the cursor in global coordinates, so the
-    // cursor's display must be resolved natively and the cursor translated into
-    // that display's space. Feeding the global point straight into the clamp
-    // pins a ring triggered on a secondary display to the primary one's edge.
-    let native_display = cursor
+    // The hook reports native global coordinates. Resolve the cursor's display
+    // and translate both into GPUI's logical coordinate space before clamping.
+    let native_placement = cursor
         .as_ref()
-        .and_then(|cursor| platform::display_containing(cursor.x, cursor.y));
-    let (display_id, center, display_bounds) =
-        if let (Some(cursor), Some(display)) = (&cursor, native_display) {
-            (
-                Some(gpui::DisplayId::from(display.id)),
+        .and_then(|cursor| platform::cursor_placement(cursor.x, cursor.y));
+    let (display_id, center, display_bounds) = if let Some(placement) = native_placement {
+        (
+            Some(gpui::DisplayId::from(placement.display_id)),
+            point(px(placement.center.0 as f32), px(placement.center.1 as f32)),
+            Some(Bounds::new(
                 point(
-                    px((cursor.x - display.origin.0) as f32),
-                    px((cursor.y - display.origin.1) as f32),
+                    px(placement.display_origin.0 as f32),
+                    px(placement.display_origin.1 as f32),
                 ),
-                Some(Bounds::new(
-                    Point::default(),
-                    Size::new(px(display.size.0 as f32), px(display.size.1 as f32)),
-                )),
-            )
-        } else {
-            // No cursor or no native lookup (non-macOS): GPUI's own display
-            // list, centering on the display when the cursor is unknown.
-            let cursor_point = cursor
-                .as_ref()
-                .map(|cursor| point(px(cursor.x as f32), px(cursor.y as f32)));
-            let display = cursor_point
-                .and_then(|cursor| {
-                    cx.displays()
-                        .into_iter()
-                        .find(|display| display.bounds().contains(&cursor))
-                })
-                .or_else(|| cx.primary_display());
-            let center = cursor_point
-                .or_else(|| display.as_ref().map(|display| display.bounds().center()))
-                .unwrap_or_default();
-            let bounds = display.as_ref().map(|display| display.bounds());
-            (display.map(|display| display.id()), center, bounds)
-        };
+                Size::new(
+                    px(placement.display_size.0 as f32),
+                    px(placement.display_size.1 as f32),
+                ),
+            )),
+        )
+    } else {
+        // Linux hook coordinates already match GPUI's global space. A
+        // failed Windows/macOS native conversion cannot safely reuse its
+        // raw point, so center on the primary display instead.
+        let cursor_point = (!platform::native_cursor_placement_requires_primary_fallback())
+            .then(|| {
+                cursor
+                    .as_ref()
+                    .map(|cursor| point(px(cursor.x as f32), px(cursor.y as f32)))
+            })
+            .flatten();
+        let display = cursor_point
+            .and_then(|cursor| {
+                cx.displays()
+                    .into_iter()
+                    .find(|display| display.bounds().contains(&cursor))
+            })
+            .or_else(|| cx.primary_display());
+        let center = cursor_point
+            .or_else(|| display.as_ref().map(|display| display.bounds().center()))
+            .unwrap_or_default();
+        let bounds = display.as_ref().map(|display| display.bounds());
+        (display.map(|display| display.id()), center, bounds)
+    };
     let desired_origin = point(center.x - size.width / 2.0, center.y - size.height / 2.0);
     let origin = display_bounds.map_or(desired_origin, |display_bounds| {
         clamp_window_origin(desired_origin, size, display_bounds)

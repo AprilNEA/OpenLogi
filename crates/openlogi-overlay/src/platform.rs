@@ -1,143 +1,189 @@
-//! Native window policy for the standalone Actions Ring overlay.
+//! Native window policy and cursor geometry for the Actions Ring overlay.
 
-/// Keep the overlay out of the Dock and app switcher.
 #[cfg(target_os = "macos")]
-pub fn configure_application() {
-    use objc2::MainThreadMarker;
-    use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
+mod macos;
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+mod other;
+#[cfg(target_os = "windows")]
+mod windows;
 
-    if let Some(marker) = MainThreadMarker::new() {
-        NSApplication::sharedApplication(marker)
-            .setActivationPolicy(NSApplicationActivationPolicy::Accessory);
-    }
+#[cfg(target_os = "macos")]
+use macos as imp;
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+use other as imp;
+#[cfg(target_os = "windows")]
+use windows as imp;
+
+pub(crate) use imp::ClickAwayMonitor;
+
+/// Apply the platform's process-wide overlay application policy.
+pub(crate) fn configure_application() {
+    imp::configure_application();
 }
 
-/// Make the transparent ring panel borderless and remove its native shadow.
-#[cfg(target_os = "macos")]
-pub fn configure_windows() {
-    use objc2::MainThreadMarker;
-    use objc2_app_kit::{NSApplication, NSWindowStyleMask};
-
-    if let Some(marker) = MainThreadMarker::new() {
-        for window in NSApplication::sharedApplication(marker).windows() {
-            window.setStyleMask(NSWindowStyleMask::NonactivatingPanel);
-            window.setHasShadow(false);
-        }
-    }
+/// Apply native policy to the newly created transparent ring window.
+pub(crate) fn configure_window(window: &gpui::Window) {
+    imp::configure_window(window);
 }
 
-/// No native application policy is required away from macOS.
-#[cfg(not(target_os = "macos"))]
-pub fn configure_application() {}
-
-/// Other GPUI backends need no additional native window configuration here.
-#[cfg(not(target_os = "macos"))]
-pub fn configure_windows() {}
-
-/// Owner of the native click-away event monitor; dropping it removes the
-/// monitor. Create and drop on the main thread.
-#[cfg(target_os = "macos")]
-pub struct ClickAwayMonitor(objc2::rc::Retained<objc2::runtime::AnyObject>);
-
-#[cfg(target_os = "macos")]
-impl Drop for ClickAwayMonitor {
-    #[expect(
-        unsafe_code,
-        reason = "NSEvent::removeMonitor is plain AppKit FFI; the token is exactly what addGlobalMonitor returned"
-    )]
-    fn drop(&mut self) {
-        // SAFETY: `self.0` is the monitor token returned by
-        // `addGlobalMonitorForEventsMatchingMask_handler`, removed only once.
-        unsafe { objc2_app_kit::NSEvent::removeMonitor(&self.0) };
-    }
+/// Watch mouse-down events that land outside this process's windows.
+pub(crate) fn watch_clicks_outside(on_mouse_down: impl Fn() + 'static) -> Option<ClickAwayMonitor> {
+    imp::watch_clicks_outside(on_mouse_down)
 }
 
-/// Invoke `on_mouse_down` for every mouse-down that macOS delivers to *other*
-/// applications, for as long as the returned monitor is held.
+/// A cursor and its display expressed in the coordinate space GPUI expects for
+/// `WindowOptions`.
 ///
-/// Global `NSEvent` monitors never see events routed to this process's own
-/// windows and cannot consume the events they observe — together exactly the
-/// ring's click-away contract: clicks on the ring keep hitting the GPUI
-/// handlers they always did, while a click anywhere else can dismiss the ring
-/// without being swallowed. Must be called on the main thread (returns `None`
-/// off it); the handler runs on the main run loop.
-#[cfg(target_os = "macos")]
-pub fn watch_clicks_outside(on_mouse_down: impl Fn() + 'static) -> Option<ClickAwayMonitor> {
-    use objc2::MainThreadMarker;
-    use objc2_app_kit::{NSEvent, NSEventMask};
-
-    MainThreadMarker::new()?;
-    let handler: block2::RcBlock<dyn Fn(std::ptr::NonNull<NSEvent>)> =
-        block2::RcBlock::new(move |_event| on_mouse_down());
-    NSEvent::addGlobalMonitorForEventsMatchingMask_handler(
-        NSEventMask::LeftMouseDown | NSEventMask::RightMouseDown | NSEventMask::OtherMouseDown,
-        &handler,
-    )
-    .map(ClickAwayMonitor)
+/// Windows uses global logical coordinates because GPUI's Windows backend
+/// scales both the display bounds and the window bounds from that space. macOS
+/// uses display-relative coordinates because its GPUI display bounds are
+/// display-relative. Linux does not construct this type: its existing GPUI
+/// fallback remains responsible for the global-coordinate mapping.
+pub(crate) struct CursorPlacement {
+    /// Native display id, numerically equal to the GPUI `DisplayId`.
+    pub(crate) display_id: u64,
+    /// Cursor position in GPUI logical coordinates.
+    pub(crate) center: (f64, f64),
+    /// Display bounds origin in GPUI logical coordinates.
+    pub(crate) display_origin: (f64, f64),
+    /// Display bounds size in GPUI logical coordinates.
+    pub(crate) display_size: (f64, f64),
 }
 
-/// Away from macOS no global click monitor is available; the ring keeps its
-/// in-window dismissal paths (center ×, slot activation, timeout).
-#[cfg(not(target_os = "macos"))]
-pub struct ClickAwayMonitor(());
-
-#[cfg(not(target_os = "macos"))]
-pub fn watch_clicks_outside(_on_mouse_down: impl Fn() + 'static) -> Option<ClickAwayMonitor> {
-    None
+/// Resolve the native cursor placement for the current platform.
+pub(crate) fn cursor_placement(x: f64, y: f64) -> Option<CursorPlacement> {
+    imp::cursor_placement(x, y)
 }
 
-/// One display's global geometry, in the same top-left-origin global point
-/// space that `openlogi_hook::cursor_position()` reports.
-pub struct CursorDisplay {
-    /// Native display id; on macOS the `CGDirectDisplayID`, numerically equal
-    /// to GPUI's `DisplayId` for the same display.
-    pub id: u64,
-    /// Global origin (top-left corner) of the display, in points.
-    pub origin: (f64, f64),
-    /// Display size in points.
-    pub size: (f64, f64),
-}
-
-/// Find the display whose global bounds contain the point `(x, y)`.
+/// Whether a failed native lookup must fall back to the primary display.
 ///
-/// GPUI's `PlatformDisplay::bounds()` zeroes every display's origin (window
-/// bounds are display-relative), so mapping a global cursor position to its
-/// display has to go through CoreGraphics.
-#[cfg(target_os = "macos")]
-#[expect(
-    unsafe_code,
-    reason = "CGGetActiveDisplayList/CGDisplayBounds are plain C FFI; GPUI exposes no global display bounds"
-)]
-pub fn display_containing(x: f64, y: f64) -> Option<CursorDisplay> {
-    use core_graphics::display::{CGDisplayBounds, CGGetActiveDisplayList};
+/// Windows and macOS hook coordinates are not safe to feed directly into GPUI
+/// when their native display lookup fails. Linux retains its existing
+/// global-coordinate fallback.
+pub(crate) const fn native_cursor_placement_requires_primary_fallback() -> bool {
+    cfg!(any(target_os = "macos", target_os = "windows"))
+}
 
-    const MAX_DISPLAYS: u32 = 32;
-    let mut ids = [0u32; MAX_DISPLAYS as usize];
-    let mut count = 0u32;
-    // SAFETY: the list write is bounded by the capacity we pass; `count`
-    // reports how many entries were actually filled.
-    let result = unsafe { CGGetActiveDisplayList(MAX_DISPLAYS, ids.as_mut_ptr(), &raw mut count) };
-    if result != 0 {
+/// Convert a physical global cursor/display geometry pair into GPUI's global
+/// logical coordinate space.
+///
+/// Kept independent of Win32 so scale and negative-origin cases can be tested
+/// on every host platform.
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn scaled_cursor_placement(
+    display_id: u64,
+    cursor: (f64, f64),
+    display_origin: (f64, f64),
+    display_size: (f64, f64),
+    scale_factor: f64,
+) -> Option<CursorPlacement> {
+    if !valid_geometry(cursor, display_origin, display_size)
+        || !scale_factor.is_finite()
+        || scale_factor <= 0.0
+    {
         return None;
     }
-    ids.iter().take(count as usize).find_map(|&id| {
-        // SAFETY: side-effect-free C getter on an id from the active list.
-        let bounds = unsafe { CGDisplayBounds(id) };
-        let contains = x >= bounds.origin.x
-            && x < bounds.origin.x + bounds.size.width
-            && y >= bounds.origin.y
-            && y < bounds.origin.y + bounds.size.height;
-        contains.then(|| CursorDisplay {
-            id: u64::from(id),
-            origin: (bounds.origin.x, bounds.origin.y),
-            size: (bounds.size.width, bounds.size.height),
-        })
+
+    Some(CursorPlacement {
+        display_id,
+        center: (cursor.0 / scale_factor, cursor.1 / scale_factor),
+        display_origin: (
+            display_origin.0 / scale_factor,
+            display_origin.1 / scale_factor,
+        ),
+        display_size: (display_size.0 / scale_factor, display_size.1 / scale_factor),
     })
 }
 
-/// Away from macOS the GPUI display list already carries global origins, so
-/// there is nothing to resolve natively.
-#[cfg(not(target_os = "macos"))]
-pub fn display_containing(_x: f64, _y: f64) -> Option<CursorDisplay> {
-    None
+#[cfg(any(target_os = "macos", test))]
+fn relative_cursor_placement(
+    display_id: u64,
+    cursor: (f64, f64),
+    display_origin: (f64, f64),
+    display_size: (f64, f64),
+) -> Option<CursorPlacement> {
+    if !valid_geometry(cursor, display_origin, display_size) {
+        return None;
+    }
+
+    Some(CursorPlacement {
+        display_id,
+        center: (cursor.0 - display_origin.0, cursor.1 - display_origin.1),
+        display_origin: (0.0, 0.0),
+        display_size,
+    })
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+fn valid_geometry(
+    cursor: (f64, f64),
+    display_origin: (f64, f64),
+    display_size: (f64, f64),
+) -> bool {
+    cursor.0.is_finite()
+        && cursor.1.is_finite()
+        && display_origin.0.is_finite()
+        && display_origin.1.is_finite()
+        && display_size.0.is_finite()
+        && display_size.1.is_finite()
+        && display_size.0 > 0.0
+        && display_size.1 > 0.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scaling_at_100_percent_is_an_identity_conversion() {
+        let placement =
+            scaled_cursor_placement(7, (2560.0, 1080.0), (0.0, 0.0), (3840.0, 2160.0), 1.0)
+                .expect("valid display geometry");
+
+        assert_eq!(placement.display_id, 7);
+        assert_eq!(placement.center, (2560.0, 1080.0));
+        assert_eq!(placement.display_origin, (0.0, 0.0));
+        assert_eq!(placement.display_size, (3840.0, 2160.0));
+    }
+
+    #[test]
+    fn scaling_125_percent_converts_cursor_and_display_geometry() {
+        let placement =
+            scaled_cursor_placement(11, (2560.0, 1080.0), (0.0, 0.0), (5120.0, 2160.0), 1.25)
+                .expect("valid display geometry");
+
+        assert_eq!(placement.center, (2048.0, 864.0));
+        assert_eq!(placement.display_origin, (0.0, 0.0));
+        assert_eq!(placement.display_size, (4096.0, 1728.0));
+    }
+
+    #[test]
+    fn scaling_150_percent_preserves_negative_monitor_origins() {
+        let placement =
+            scaled_cursor_placement(13, (-1920.0, 810.0), (-3840.0, 0.0), (3840.0, 2160.0), 1.5)
+                .expect("valid display geometry");
+
+        assert_eq!(placement.center, (-1280.0, 540.0));
+        assert_eq!(placement.display_origin, (-2560.0, 0.0));
+        assert_eq!(placement.display_size, (2560.0, 1440.0));
+    }
+
+    #[test]
+    fn relative_placement_keeps_macos_display_coordinates() {
+        let placement =
+            relative_cursor_placement(17, (3000.0, 500.0), (2560.0, 0.0), (2560.0, 1440.0))
+                .expect("valid display geometry");
+
+        assert_eq!(placement.center, (440.0, 500.0));
+        assert_eq!(placement.display_origin, (0.0, 0.0));
+        assert_eq!(placement.display_size, (2560.0, 1440.0));
+    }
+
+    #[test]
+    fn invalid_native_geometry_returns_none_for_primary_fallback() {
+        assert!(
+            scaled_cursor_placement(19, (100.0, 100.0), (0.0, 0.0), (1920.0, 1080.0), 0.0,)
+                .is_none()
+        );
+    }
 }
