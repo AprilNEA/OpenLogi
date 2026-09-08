@@ -21,7 +21,9 @@ use identity::{Channel, Component};
 
 // The rest of the macOS domain reaches these through `bundle::`, which is the
 // module that owns them conceptually even now that the code sits deeper.
-pub(super) use embed::{HELPERS, Helper, agent_service_label, write_agent_launch_plist};
+pub(super) use embed::{
+    HELPERS, Helper, agent_service_label, verify_bundle, write_agent_launch_plist,
+};
 pub(super) use signing::quoted_identity;
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -116,7 +118,7 @@ fn run_with_channel(
     embed::embed_helpers(&root, &release_dir, &app, channel)?;
     embed::write_agent_launch_plist(&app, channel)?;
     embed::embed_cli(&release_dir, &app)?;
-    embed::verify_bundle_binaries(&app, channel)?;
+    embed::verify_bundle(&app, channel)?;
     info_plist::stamp_privacy_usage_descriptions(&app)?;
     // Identity first, then the checks, then signing — a signature seals the
     // `Info.plist` files, so nothing may rewrite them afterwards.

@@ -19,8 +19,12 @@
 //! and Linux only ever start wanted, so their gate passes unconditionally.
 
 use std::sync::Arc;
-#[cfg(target_os = "macos")]
 use std::time::Duration;
+
+#[cfg(target_os = "macos")]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(target_os = "macos")]
+use std::sync::{Mutex as StdMutex, PoisonError, TryLockError};
 
 use futures::StreamExt as _;
 use openlogi_agent_core::event_monitor::EventMonitor;
@@ -31,6 +35,8 @@ use openlogi_agent_core::watchers::foreground_app::ForegroundUpdate;
 use openlogi_agent_core::watchers::inventory::{InventoryEvent, InventoryRefresh};
 use openlogi_core::config::Config;
 use openlogi_hook::Hook;
+#[cfg(target_os = "macos")]
+use openlogi_hook::HookStopHandle;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tracing::{debug, info, warn};
@@ -50,12 +56,101 @@ use crate::{autostart, overlay, server};
 #[cfg(target_os = "macos")]
 const DORMANT_DEADLINE: Duration = Duration::from_secs(60);
 
+/// A failed event-tap install is normally transient (for example while the
+/// session's Accessibility service is settling). Keep trying while the hook
+/// is still wanted instead of waiting for another permission edge.
+const HOOK_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+
+/// An ordered device-I/O edge consumed by the lifecycle loop.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeviceIoTransition {
+    /// The login session became inactive; release its global event tap.
+    Suspended,
+    /// The login session became active; reconcile the event tap prerequisites.
+    Resumed,
+}
+
+#[cfg(target_os = "macos")]
+impl DeviceIoTransition {
+    const fn from_allowed(allowed: bool) -> Self {
+        if allowed {
+            Self::Resumed
+        } else {
+            Self::Suspended
+        }
+    }
+}
+
+/// Non-blocking bridge from the AppKit session callback to the hook owner.
+///
+/// The callback cannot wait for the lifecycle task to receive its watch
+/// notification: that task may be inside native hook setup or an async lock.
+/// A pending bit covers the interval before a newly-created hook registers its
+/// handle; once registered, the request wakes the tap thread directly.
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+pub(crate) struct HookStopRequest {
+    current: StdMutex<Option<HookStopHandle>>,
+    pending: AtomicBool,
+}
+
+#[cfg(target_os = "macos")]
+impl HookStopRequest {
+    fn prepare_install(&self) {
+        self.pending.store(false, Ordering::Release);
+    }
+
+    fn install(&self, handle: &HookStopHandle) {
+        let mut current = self.current.lock().unwrap_or_else(PoisonError::into_inner);
+        *current = Some(handle.clone());
+        if self.pending.swap(false, Ordering::AcqRel) {
+            handle.request_stop();
+        }
+        drop(current);
+
+        // A callback that lost the try_lock race while the slot was being
+        // installed leaves `pending` set. Consume that edge after unlocking;
+        // callbacks arriving later can see and call the installed handle.
+        if self.pending.swap(false, Ordering::AcqRel) {
+            handle.request_stop();
+        }
+    }
+
+    fn clear(&self) {
+        let mut current = self.current.lock().unwrap_or_else(PoisonError::into_inner);
+        *current = None;
+    }
+
+    pub(crate) fn request_stop(&self) {
+        self.pending.store(true, Ordering::Release);
+        match self.current.try_lock() {
+            Ok(current) => self.request_locked(current.as_ref()),
+            Err(TryLockError::Poisoned(error)) => {
+                let current = error.into_inner();
+                self.request_locked(current.as_ref());
+            }
+            Err(TryLockError::WouldBlock) => {}
+        }
+    }
+
+    fn request_locked(&self, current: Option<&HookStopHandle>) {
+        if let Some(handle) = current
+            && self.pending.swap(false, Ordering::AcqRel)
+        {
+            handle.request_stop();
+        }
+    }
+}
+
 /// Walk the whole lifecycle: bootstrap, gate, arm, run. This is the async
 /// core's entry point; `main` only decides which thread it runs on.
 pub(crate) async fn run(
     config: Config,
     uninstalled: UnboundedReceiver<()>,
     #[cfg(target_os = "macos")] armed_tx: std::sync::mpsc::Sender<()>,
+    #[cfg(target_os = "macos")] hook_stop: Arc<HookStopRequest>,
+    device_io_gate: openlogi_hid::DeviceIoGate,
 ) {
     // Reconcile the agent's launch-at-login autostart and clear the legacy GUI
     // LaunchAgent, before `config` moves into the orchestrator.
@@ -66,6 +161,9 @@ pub(crate) async fn run(
         uninstalled,
         #[cfg(target_os = "macos")]
         armed_tx,
+        #[cfg(target_os = "macos")]
+        hook_stop,
+        device_io_gate,
     )
     .await
     else {
@@ -95,6 +193,9 @@ struct Booted {
     /// Releases the main thread's tray loop once the agent arms.
     #[cfg(target_os = "macos")]
     armed_tx: std::sync::mpsc::Sender<()>,
+    #[cfg(target_os = "macos")]
+    hook_stop: Arc<HookStopRequest>,
+    device_io_gate: openlogi_hid::DeviceIoGate,
 }
 
 impl Booted {
@@ -102,6 +203,8 @@ impl Booted {
         config: Config,
         uninstalled: UnboundedReceiver<()>,
         #[cfg(target_os = "macos")] armed_tx: std::sync::mpsc::Sender<()>,
+        #[cfg(target_os = "macos")] hook_stop: Arc<HookStopRequest>,
+        device_io_gate: openlogi_hid::DeviceIoGate,
     ) -> Option<Self> {
         // Read before `config` moves into the orchestrator.
         let capture_mouse_events = config.app_settings.capture_mouse_events;
@@ -117,6 +220,9 @@ impl Booted {
             launch_at_login,
             #[cfg(target_os = "macos")]
             armed_tx,
+            #[cfg(target_os = "macos")]
+            hook_stop,
+            device_io_gate,
         })
     }
 
@@ -186,6 +292,9 @@ impl Wanted {
             capture_mouse_events,
             #[cfg(target_os = "macos")]
             armed_tx,
+            #[cfg(target_os = "macos")]
+            hook_stop,
+            device_io_gate,
             ..
         } = self.0;
         #[cfg(target_os = "macos")]
@@ -202,6 +311,8 @@ impl Wanted {
             ring_haptics,
             demand,
         } = core;
+        let accessibility_granted =
+            observable.read(|snapshot| snapshot.status.accessibility_granted);
         // Closing the channel turns post-arming declarations into no-ops in
         // the server's `declare_client` handler.
         drop(demand);
@@ -217,6 +328,10 @@ impl Wanted {
                 uninstalled,
                 hook: None,
                 capture_mouse_events,
+                accessibility_granted,
+                #[cfg(target_os = "macos")]
+                hook_stop,
+                device_io_gate,
             },
         }
     }
@@ -240,9 +355,13 @@ struct Running {
     signals: ShutdownSignals,
     uninstalled: UnboundedReceiver<()>,
     /// The OS hook, installed once Accessibility is granted and dropped on
-    /// revoke (dropping the handle stops its thread).
+    /// revoke or session inactivation (dropping the handle stops its thread).
     hook: Option<Hook>,
     capture_mouse_events: bool,
+    accessibility_granted: bool,
+    #[cfg(target_os = "macos")]
+    hook_stop: Arc<HookStopRequest>,
+    device_io_gate: openlogi_hid::DeviceIoGate,
 }
 
 impl Armed {
@@ -252,6 +371,9 @@ impl Armed {
         let Self { mut running } = self;
         #[cfg(target_os = "macos")]
         request_input_monitoring().await;
+        let mut device_io_gate = running.device_io_gate.clone();
+        let mut hook_retry = tokio::time::interval(HOOK_RETRY_INTERVAL);
+        hook_retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         // HID++ watchers need no Accessibility — start them up front.
         startup::spawn_hidpp_watchers(&running.shared, &running.inputs);
@@ -262,6 +384,24 @@ impl Armed {
             tokio::select! {
                 Some(event) = watchers.next() => {
                     running.apply_watcher(event, &inventory_refresh).await;
+                }
+                device_io = device_io_gate.changed() => {
+                    #[cfg(target_os = "macos")]
+                    {
+                        match device_io {
+                            Some(allowed) => running
+                                .apply_device_io(DeviceIoTransition::from_allowed(allowed))
+                                .await,
+                            None => running.shut_down("device I/O lifecycle ended"),
+                        }
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    if device_io.is_none() {
+                        break;
+                    }
+                }
+                _ = hook_retry.tick(), if running.should_retry_hook() => {
+                    running.retry_hook().await;
                 }
                 Some(device_key) = running.inputs.triggers.recv() => {
                     running.begin_action_ring(device_key.as_deref()).await;
@@ -338,6 +478,64 @@ impl Running {
         }
     }
 
+    /// Keep the global macOS event tap owned only by the active login session.
+    /// The HID gate already protects device I/O during sleep/session changes,
+    /// but an event tap is a separate machine-wide input path: leaving it live
+    /// in an inactive user's agent lets that agent suppress the active user's
+    /// physical wheel and post the replacement into the wrong session.
+    #[cfg(target_os = "macos")]
+    async fn apply_device_io(&mut self, transition: DeviceIoTransition) {
+        match transition {
+            DeviceIoTransition::Resumed => {
+                self.apply_accessibility(self.accessibility_granted).await;
+            }
+            DeviceIoTransition::Suspended => {
+                self.stop_hook();
+                self.orchestrator
+                    .lock()
+                    .await
+                    .set_os_mouse_hook_available(false);
+                self.observable
+                    .set_accessibility_and_hook(self.accessibility_granted, false);
+                info!("inactive session — OS input hook released");
+            }
+        }
+    }
+
+    /// Whether a missing macOS hook still has all prerequisites and should be
+    /// retried. The Accessibility watcher reports only stable permission
+    /// changes, so a transient install failure needs this independent retry
+    /// path to recover without another session or permission transition.
+    fn should_retry_hook(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            hook_should_retry(
+                hook_should_be_installed(
+                    self.capture_mouse_events,
+                    self.accessibility_granted,
+                    self.device_io_gate.allows_io(),
+                ),
+                self.hook.as_ref().is_some_and(Hook::is_running),
+            )
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            false
+        }
+    }
+
+    /// Retry a missing hook using the last stable Accessibility observation.
+    /// A fresh native probe can transiently return `false` while the permission
+    /// service settles; feeding that sample into `apply_accessibility` would
+    /// poison the cached state and disable this retry path.
+    async fn retry_hook(&mut self) {
+        #[cfg(target_os = "macos")]
+        {
+            let accessibility_granted = self.accessibility_granted;
+            self.apply_accessibility(accessibility_granted).await;
+        }
+    }
+
     /// Fold one inventory-watcher event into the orchestrator.
     async fn apply_inventory(&self, event: InventoryEvent, refresh: &InventoryRefresh) {
         match event {
@@ -399,16 +597,35 @@ impl Running {
     /// observation can claim the hook is installed without the permission it
     /// requires.
     async fn apply_accessibility(&mut self, granted: bool) {
-        if !granted {
+        // Acquire the publication lock before changing the native hook. The
+        // final device-I/O check below must be followed only by synchronous
+        // publication; otherwise a suspend can arrive while this future is
+        // waiting for the lock and leave a newly installed tap armed.
+        let orchestrator = Arc::clone(&self.orchestrator);
+        let mut orchestrator = orchestrator.lock().await;
+
+        self.accessibility_granted = granted;
+        let should_install = hook_should_be_installed(
+            self.capture_mouse_events,
+            granted,
+            self.device_io_gate.allows_io(),
+        );
+        let hook_stopped = self.hook.as_ref().is_some_and(|hook| !hook.is_running());
+        if !should_install || hook_stopped {
             self.stop_hook();
         }
-        if granted && self.hook.is_none() {
+        if should_install && self.hook.is_none() {
+            #[cfg(target_os = "macos")]
+            self.hook_stop.prepare_install();
             self.hook = self.start_hook();
         }
-        self.orchestrator
-            .lock()
-            .await
-            .set_os_mouse_hook_available(self.hook.is_some());
+        // The session callback can publish a suspend while the synchronous
+        // native install is in progress. Never leave a newly created global
+        // tap behind once the gate has closed.
+        if should_install && !self.device_io_gate.allows_io() {
+            self.stop_hook();
+        }
+        orchestrator.set_os_mouse_hook_available(self.hook.is_some());
         self.observable
             .set_accessibility_and_hook(granted, self.hook.is_some());
     }
@@ -429,19 +646,45 @@ impl Running {
             self.inputs.dispatcher.clone(),
             self.inputs.scroll_input.clone(),
             Arc::clone(&self.event_monitor),
+            self.shared.device_io.clone(),
         )
+        .inspect(|hook| {
+            #[cfg(target_os = "macos")]
+            self.hook_stop.install(&hook.stop_handle());
+        })
     }
 
     /// Stop the hook so no new edge can race the lifecycle cancellation.
     fn stop_hook(&mut self) {
+        #[cfg(target_os = "macos")]
+        self.hook_stop.clear();
         self.hook = None;
         self.inputs.dispatcher.cancel_hook_buttons();
         self.inputs.scroll_input.cancel_hooks();
     }
 
     fn shut_down(&mut self, reason: &str) -> ! {
+        #[cfg(target_os = "macos")]
+        self.hook_stop.clear();
         shutdown::release_hook_and_exit(self.hook.take(), &mut self.inputs, reason)
     }
+}
+
+/// The event tap is a global input filter on macOS. It must be active only
+/// when the agent is configured to capture input, has Accessibility, and its
+/// login session is currently allowed to use host I/O.
+const fn hook_should_be_installed(
+    capture_mouse_events: bool,
+    accessibility_granted: bool,
+    device_io_allowed: bool,
+) -> bool {
+    capture_mouse_events && accessibility_granted && device_io_allowed
+}
+
+/// A failed install is retryable only while the hook is still wanted and no
+/// live handle exists.
+const fn hook_should_retry(hook_wanted: bool, hook_running: bool) -> bool {
+    hook_wanted && !hook_running
 }
 
 /// Prompt for Accessibility when the enabled mouse hook needs it.
@@ -478,5 +721,52 @@ async fn request_input_monitoring() {
                 warn!(error = %e, "Input Monitoring permission request task failed");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{hook_should_be_installed, hook_should_retry};
+
+    #[test]
+    fn hook_requires_capture_permission_and_active_session() {
+        assert!(hook_should_be_installed(true, true, true));
+        assert!(!hook_should_be_installed(false, true, true));
+        assert!(!hook_should_be_installed(true, false, true));
+        assert!(!hook_should_be_installed(true, true, false));
+    }
+
+    #[test]
+    fn failed_hook_install_is_retryable_while_prerequisites_hold() {
+        assert!(hook_should_retry(true, false));
+        assert!(!hook_should_retry(true, true));
+        assert!(!hook_should_retry(false, false));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn fast_session_transitions_replay_suspend_before_resume() {
+        use super::DeviceIoTransition::{Resumed, Suspended};
+
+        let (signal, mut gate) = openlogi_hid::device_io_channel();
+        assert!(signal.suspend());
+        assert!(signal.resume());
+
+        assert_eq!(
+            super::DeviceIoTransition::from_allowed(
+                gate.changed()
+                    .await
+                    .expect("the suspended edge should be replayed"),
+            ),
+            Suspended
+        );
+        assert_eq!(
+            super::DeviceIoTransition::from_allowed(
+                gate.changed()
+                    .await
+                    .expect("the resumed edge should follow the suspension"),
+            ),
+            Resumed
+        );
     }
 }
