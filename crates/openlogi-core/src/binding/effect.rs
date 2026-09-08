@@ -129,6 +129,14 @@ pub enum Shortcut {
     PrevTab,
     /// Reload the current page.
     ReloadPage,
+    /// The keyboard's Page Up key.
+    ///
+    /// One physical usage on every OS — included here (rather than lowering
+    /// straight to [`Effect::Key`]) so each backend's `Shortcut -> KeyCombo`
+    /// table and its `Shortcut::ALL` completeness test cover it with the rest.
+    PageUp,
+    /// The keyboard's Page Down key.
+    PageDown,
 }
 
 impl Shortcut {
@@ -240,6 +248,9 @@ impl Action {
             Action::NextTab => Effect::Shortcut(Shortcut::NextTab),
             Action::PrevTab => Effect::Shortcut(Shortcut::PrevTab),
             Action::ReloadPage => Effect::Shortcut(Shortcut::ReloadPage),
+
+            Action::PageUp => Effect::Shortcut(Shortcut::PageUp),
+            Action::PageDown => Effect::Shortcut(Shortcut::PageDown),
 
             Action::MissionControl => Effect::Native(NativeAction::MissionControl),
             Action::AppExpose => Effect::Native(NativeAction::AppExpose),
