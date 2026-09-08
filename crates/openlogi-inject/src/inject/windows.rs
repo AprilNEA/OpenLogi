@@ -5,10 +5,10 @@ use std::mem::size_of;
 use std::sync::{LazyLock, Mutex};
 
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, MOUSEEVENTF_HWHEEL,
-    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
-    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN,
-    MOUSEEVENTF_XUP, MOUSEINPUT, SendInput,
+    GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP,
+    MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
+    MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL,
+    MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, SendInput,
 };
 
 use openlogi_core::binding::{
@@ -108,6 +108,8 @@ fn combo(shortcut: Shortcut) -> Result<KeyCombo, u16> {
         Shortcut::NextTab => "Ctrl+Tab",
         Shortcut::PrevTab => "Ctrl+Shift+Tab",
         Shortcut::ReloadPage => "Ctrl+R",
+        Shortcut::ZoomIn => "Ctrl+=",
+        Shortcut::ZoomOut => "Ctrl+-",
     };
     Ok(parse_shortcut(text))
 }
@@ -118,9 +120,33 @@ fn parse_shortcut(text: &str) -> KeyCombo {
 }
 
 fn press_shortcut(shortcut: Shortcut) {
+    if matches!(shortcut, Shortcut::ZoomIn | Shortcut::ZoomOut) {
+        // Preserve a physically held Ctrl key: only release a modifier we added.
+        // SAFETY: GetAsyncKeyState accepts the documented virtual-key code.
+        let control_down = unsafe { GetAsyncKeyState(i32::from(VK_CONTROL)) } < 0;
+        let delta = if shortcut == Shortcut::ZoomIn {
+            WHEEL_DELTA
+        } else {
+            -WHEEL_DELTA
+        };
+        send_inputs(&zoom_inputs(delta, control_down));
+        return;
+    }
     match combo(shortcut) {
         Ok(combo) => post_custom_shortcut(&combo),
         Err(vk) => post_key(vk, &[]),
+    }
+}
+
+fn zoom_inputs(delta: i32, control_down: bool) -> Vec<INPUT> {
+    if control_down {
+        vec![mouse_input(MOUSEEVENTF_WHEEL, delta)]
+    } else {
+        vec![
+            key_input(VK_CONTROL, false),
+            mouse_input(MOUSEEVENTF_WHEEL, delta),
+            key_input(VK_CONTROL, true),
+        ]
     }
 }
 
@@ -390,9 +416,36 @@ fn mouse_input(flags: u32, data: i32) -> INPUT {
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        INPUT_KEYBOARD, INPUT_MOUSE, KEYEVENTF_KEYUP, MOUSEEVENTF_WHEEL, VK_CONTROL, WHEEL_DELTA,
+        zoom_inputs,
+    };
     use openlogi_core::binding::Shortcut;
 
     use super::{VK_BROWSER_BACK, VK_BROWSER_FORWARD, combo};
+
+    #[test]
+    fn zoom_balances_ctrl_and_preserves_an_existing_hold() {
+        for delta in [WHEEL_DELTA, -WHEEL_DELTA] {
+            let inputs = zoom_inputs(delta, false);
+            assert_eq!(inputs.len(), 3);
+            assert_eq!(inputs[0].r#type, INPUT_KEYBOARD);
+            assert_eq!(inputs[1].r#type, INPUT_MOUSE);
+            assert_eq!(inputs[2].r#type, INPUT_KEYBOARD);
+            // SAFETY: the discriminants above identify the initialized union fields.
+            unsafe {
+                assert_eq!(inputs[0].Anonymous.ki.wVk, VK_CONTROL);
+                assert_eq!(inputs[0].Anonymous.ki.dwFlags, 0);
+                assert_eq!(inputs[1].Anonymous.mi.dwFlags, MOUSEEVENTF_WHEEL);
+                assert_eq!(inputs[1].Anonymous.mi.mouseData.cast_signed(), delta);
+                assert_eq!(inputs[2].Anonymous.ki.wVk, VK_CONTROL);
+                assert_eq!(inputs[2].Anonymous.ki.dwFlags, KEYEVENTF_KEYUP);
+            }
+            let held = zoom_inputs(delta, true);
+            assert_eq!(held.len(), 1, "an existing Ctrl hold must not be released");
+            assert_eq!(held[0].r#type, INPUT_MOUSE);
+        }
+    }
 
     /// Pin a handful of representative `Shortcut -> KeyCombo` rows so an
     /// edit to the table can't silently change what Ctrl+C sends.

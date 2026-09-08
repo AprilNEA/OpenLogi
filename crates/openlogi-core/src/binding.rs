@@ -19,6 +19,7 @@ mod effect;
 mod gesture;
 mod key_combo;
 mod swipe;
+pub use swipe::SwipeStep;
 mod value;
 
 #[cfg(test)]

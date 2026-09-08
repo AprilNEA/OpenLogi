@@ -167,6 +167,7 @@ fn dispatch_input(
             dispatcher.dispatch_hidpp_button_pulse(session, button, bindings.bindings.get(&button));
         }
         CapturedInput::Gesture(..)
+        | CapturedInput::GestureRepeat(..)
         | CapturedInput::Scroll { .. }
         | CapturedInput::ThumbwheelDirection { .. } => {}
     }

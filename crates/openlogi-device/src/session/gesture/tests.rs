@@ -298,6 +298,33 @@ fn release() -> RawControlEvent {
     RawControlEvent::DivertedButtons([0, 0, 0, 0])
 }
 
+#[test]
+fn zoom_motion_repeats_reverse_and_cannot_outlive_the_hid_hold() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    handle_reprog(&mut acc, press(), BOTH, &[], &[], &tx);
+    acc.backdate_hold_for_test();
+    for dy in [-50, -50, 50] {
+        handle_raw_xy(&mut acc, 0, dy, &tx);
+    }
+    handle_reprog(&mut acc, release(), BOTH, &[], &[], &tx);
+    handle_raw_xy(&mut acc, 0, -100, &tx);
+    let mut captured = Vec::new();
+    while let Ok(input) = rx.try_recv() {
+        captured.push(input);
+    }
+    assert_eq!(
+        captured,
+        vec![
+            CapturedInput::ButtonDown(ButtonId::GestureButton),
+            CapturedInput::Gesture(ButtonId::GestureButton, GestureDirection::Up),
+            CapturedInput::GestureRepeat(ButtonId::GestureButton, GestureDirection::Up),
+            CapturedInput::GestureRepeat(ButtonId::GestureButton, GestureDirection::Down),
+            CapturedInput::ButtonUp(ButtonId::GestureButton),
+        ]
+    );
+}
+
 /// Read the next completed gesture while leaving lifecycle assertions to the
 /// dedicated edge tests below.
 fn next_gesture(

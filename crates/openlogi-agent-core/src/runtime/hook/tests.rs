@@ -40,12 +40,20 @@ fn accumulate_tags_a_committed_swipe_with_the_held_press() {
 
     assert_eq!(
         hold.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
-        Some((press.clone(), ButtonId::Back, GestureDirection::Right))
+        Some((
+            press.clone(),
+            ButtonId::Back,
+            SwipeStep::First(GestureDirection::Right)
+        ))
     );
     assert_eq!(
         hold.accumulate(50, 0),
-        None,
-        "commits at most once per hold"
+        Some((
+            press.clone(),
+            ButtonId::Back,
+            SwipeStep::Repeat(GestureDirection::Right)
+        )),
+        "subsequent travel retains the exact press and is tagged as a repeat"
     );
     assert_eq!(hold.end(ButtonId::Back), Some((press, false)));
 }
@@ -69,7 +77,11 @@ fn a_same_button_repress_restarts_the_stale_hold() {
     hold.swipe.backdate_hold_for_test();
     assert_eq!(
         hold.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
-        Some((replacement, ButtonId::Back, GestureDirection::Right))
+        Some((
+            replacement,
+            ButtonId::Back,
+            SwipeStep::First(GestureDirection::Right)
+        ))
     );
 }
 
@@ -88,7 +100,11 @@ fn an_aged_hold_yields_to_a_new_buttons_press() {
     hold.swipe.backdate_hold_for_test();
     assert_eq!(
         hold.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
-        Some((replacement, ButtonId::Forward, GestureDirection::Right))
+        Some((
+            replacement,
+            ButtonId::Forward,
+            SwipeStep::First(GestureDirection::Right)
+        ))
     );
 }
 
@@ -105,7 +121,11 @@ fn begin_is_first_wins_while_a_hold_is_active() {
 
     assert_eq!(
         hold.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
-        Some((first.clone(), ButtonId::Back, GestureDirection::Right))
+        Some((
+            first.clone(),
+            ButtonId::Back,
+            SwipeStep::First(GestureDirection::Right)
+        ))
     );
     assert_eq!(hold.end(ButtonId::Forward), None);
     assert_eq!(hold.end(ButtonId::Back), Some((first, false)));

@@ -129,6 +129,10 @@ pub enum Shortcut {
     PrevTab,
     /// Reload the current page.
     ReloadPage,
+    /// Increase application zoom by one step.
+    ZoomIn,
+    /// Decrease application zoom by one step.
+    ZoomOut,
 }
 
 impl Shortcut {
@@ -269,6 +273,8 @@ impl Action {
             | Action::OpenApplication(_) => Effect::AgentSide,
 
             Action::ScrollUp => Effect::Scroll { dx: 0, dy: 1 },
+            Action::ZoomIn | Action::ZoomInContinuous => Effect::Shortcut(Shortcut::ZoomIn),
+            Action::ZoomOut | Action::ZoomOutContinuous => Effect::Shortcut(Shortcut::ZoomOut),
             Action::ScrollDown => Effect::Scroll { dx: 0, dy: -1 },
             Action::HorizontalScrollLeft => Effect::Scroll { dx: -1, dy: 0 },
             Action::HorizontalScrollRight => Effect::Scroll { dx: 1, dy: 0 },

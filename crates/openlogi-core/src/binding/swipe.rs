@@ -5,7 +5,32 @@
 
 use std::time::Instant;
 
-use super::GestureDirection;
+use super::{Action, GestureDirection};
+
+/// A gesture's initial commitment or subsequent movement while still held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwipeStep {
+    /// The first committed direction; all bound actions may fire.
+    First(GestureDirection),
+    /// Further travel; only continuous gesture actions may fire.
+    Repeat(GestureDirection),
+}
+
+impl SwipeStep {
+    /// Direction of this movement step.
+    #[must_use]
+    pub fn direction(self) -> GestureDirection {
+        match self {
+            Self::First(direction) | Self::Repeat(direction) => direction,
+        }
+    }
+
+    /// Preserve one-shot bindings while allowing movement-driven zoom.
+    #[must_use]
+    pub fn accepts(self, action: &Action) -> bool {
+        matches!(self, Self::First(_)) || action.repeats_on_motion()
+    }
+}
 
 /// Minimum dominant-axis travel (raw-XY units) before a held gesture commits to
 /// a direction. Tuned to match Logitech Options+'s responsiveness.
@@ -129,6 +154,31 @@ impl SwipeAccumulator {
         None
     }
 
+    /// Emit the initial swipe and additional distance-based steps. Reversing
+    /// direction discards leftover travel, so reversing a zoom responds promptly.
+    /// No timer generates repeats: holding still produces no output.
+    pub fn accumulate_repeating(&mut self, dx: i32, dy: i32) -> Option<SwipeStep> {
+        if !self.fired {
+            let direction = self.accumulate(dx, dy)?;
+            self.dx = 0;
+            self.dy = 0;
+            return Some(SwipeStep::First(direction));
+        }
+        self.held_since?;
+        if dx != 0 && self.dx.signum() != dx.signum() {
+            self.dx = 0;
+        }
+        if dy != 0 && self.dy.signum() != dy.signum() {
+            self.dy = 0;
+        }
+        self.dx = self.dx.saturating_add(dx);
+        self.dy = self.dy.saturating_add(dy);
+        let direction = detect_swipe(self.dx, self.dy)?;
+        self.dx = 0;
+        self.dy = 0;
+        Some(SwipeStep::Repeat(direction))
+    }
+
     /// End the current hold. Returns `true` when an in-progress hold ended
     /// without committing a swipe — the caller should fire the plain `Click`
     /// action — and `false` when a swipe already fired mid-motion, or when there
@@ -154,6 +204,33 @@ impl SwipeAccumulator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn continuous_zoom_reverses_and_stops_at_release() {
+        let mut swipe = SwipeAccumulator::default();
+        assert_eq!(swipe.accumulate_repeating(0, -100), None);
+        swipe.begin();
+        assert_eq!(swipe.accumulate_repeating(0, -100), None);
+        swipe.backdate_hold_for_test();
+        let first = swipe.accumulate_repeating(0, -1).unwrap();
+        assert_eq!(first, SwipeStep::First(GestureDirection::Up));
+        assert!(first.accepts(&Action::ZoomIn));
+        assert_eq!(swipe.accumulate_repeating(0, 0), None);
+        assert_eq!(swipe.accumulate_repeating(0, -49), None);
+        let repeat = swipe.accumulate_repeating(0, -1).unwrap();
+        assert!(repeat.accepts(&Action::ZoomInContinuous));
+        assert!(!repeat.accepts(&Action::ZoomIn));
+        assert!(!repeat.accepts(&Action::MissionControl));
+        assert_eq!(swipe.accumulate_repeating(0, -30), None);
+        assert_eq!(
+            swipe.accumulate_repeating(0, 50),
+            Some(SwipeStep::Repeat(GestureDirection::Down))
+        );
+        assert!(!swipe.end(), "zooming must not fire the click binding");
+        assert_eq!(swipe.accumulate_repeating(0, 100), None);
+        swipe.begin();
+        assert!(swipe.end(), "a fresh stationary press remains a click");
+    }
 
     // ── Gesture classification ────────────────────────────────────────────────
 
