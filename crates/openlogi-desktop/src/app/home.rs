@@ -8,12 +8,13 @@ pub(super) use views::device_gallery;
 #[cfg(test)]
 pub(super) use views::ordered_device_indices;
 
-use std::sync::Arc;
+use std::{rc::Rc, sync::Arc};
 
 use gpui::{
-    Anchor, AnyElement, App, AppContext as _, Context, Div, ElementId, Hsla, InteractiveElement,
-    IntoElement, ParentElement, SharedString, StatefulInteractiveElement as _, Styled, Window,
-    canvas, div, fill, img, point, prelude::FluentBuilder as _, px, rgb, svg,
+    Anchor, AnyElement, App, AppContext as _, ClickEvent, Context, Div, ElementId, FocusHandle,
+    Hsla, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Role,
+    SharedString, StatefulInteractiveElement as _, Styled, WeakEntity, Window, canvas, div, fill,
+    img, point, prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
@@ -22,7 +23,7 @@ use gpui_component::{
     dialog::DialogButtonProps,
     h_flex,
     input::InputState,
-    menu::{DropdownMenu as _, PopupMenu, PopupMenuItem},
+    popover::{Popover, PopoverState},
     tooltip::Tooltip,
     v_flex,
 };
@@ -36,10 +37,11 @@ use super::widgets::{
     add_device_button, connectivity_dot, kind_label, route_label, settings_button,
 };
 use crate::features::lighting::visual as light_visual;
+use crate::features::mouse::picker::compact_panel;
 use crate::services::assets::GlowGeometry;
 use crate::state::{AppState, DeviceRecord, StateEvent};
 use crate::ui::battery::{BatteryIndicator, glance_hint};
-use crate::ui::components::control_input;
+use crate::ui::components::{MenuRow, control_input};
 use crate::ui::theme::{self, ContentWidth, HEADER_H, Palette, Typography as _};
 
 /// Home (gallery) top bar: title/count, the persisted layout switcher, Settings,
@@ -339,77 +341,276 @@ pub(super) fn custom_model_subtitle(record: &DeviceRecord) -> Option<SharedStrin
     (record.display_name != record.model_name).then(|| record.model_name.clone().into())
 }
 
-/// The card's action menu — rename, and for an offline device, delete. One
-/// builder serves both the corner menu button and the card's context menu.
-pub(super) fn device_menu(
-    record: &DeviceRecord,
-) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
-    let record_key = record.record_key();
-    let custom_name = if record.display_name == record.model_name {
-        String::new()
-    } else {
-        record.display_name.clone()
-    };
-    let model_name = record.model_name.clone();
-    let display_name = record.display_name.clone();
-    // A live device would simply re-register on the next inventory snapshot,
-    // so deletion is only offered once it is offline.
-    let deletable = record.persistent && !record.online;
-    move |menu, _window, _cx| {
-        let menu = menu.item(
-            PopupMenuItem::new(tr!("common.rename_dialog"))
-                .icon(Icon::empty().path("action-icons/pencil.svg"))
-                .on_click({
-                    let record_key = record_key.clone();
-                    let custom_name = custom_name.clone();
-                    let model_name = model_name.clone();
-                    move |_, window, cx| {
-                        open_rename_dialog(
-                            window,
-                            cx,
-                            record_key.clone(),
-                            custom_name.clone(),
-                            model_name.clone(),
-                        );
-                    }
-                }),
-        );
-        if !deletable {
-            return menu;
+#[derive(Clone)]
+struct DeviceMenuData {
+    record_key: String,
+    custom_name: String,
+    model_name: String,
+    display_name: String,
+    deletable: bool,
+}
+
+impl DeviceMenuData {
+    fn from_record(record: &DeviceRecord) -> Self {
+        Self {
+            record_key: record.record_key(),
+            custom_name: if record.display_name == record.model_name {
+                String::new()
+            } else {
+                record.display_name.clone()
+            },
+            model_name: record.model_name.clone(),
+            display_name: record.display_name.clone(),
+            // A live device would simply re-register on the next inventory
+            // snapshot, so deletion is only offered once it is offline.
+            deletable: record.persistent && !record.online,
         }
-        menu.item(PopupMenuItem::separator()).item(
-            PopupMenuItem::new(tr!("device.delete_device_dialog"))
-                .icon(IconName::Delete)
-                .on_click({
-                    let record_key = record_key.clone();
-                    let display_name = display_name.clone();
-                    move |_, window, cx| {
-                        open_delete_confirmation(
-                            window,
-                            cx,
-                            record_key.clone(),
-                            display_name.clone(),
-                        );
-                    }
-                }),
-        )
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeviceMenuAction {
+    Rename,
+    Delete,
+}
+
+type DeviceMenuActionHandler = Rc<dyn Fn(DeviceMenuAction, &mut Window, &mut App)>;
+
+fn menu_row_action(
+    row: MenuRow,
+    popover: WeakEntity<PopoverState>,
+    action: DeviceMenuAction,
+    on_action: DeviceMenuActionHandler,
+) -> MenuRow {
+    let mouse_popover = popover.clone();
+    let mouse_action = on_action.clone();
+    let keyboard_popover = popover;
+    row.capture_any_mouse_down(move |event, window, cx| {
+        if event.button == MouseButton::Left {
+            cx.stop_propagation();
+            dismiss_device_menu(&mouse_popover, window, cx);
+            mouse_action(action, window, cx);
+        }
+    })
+    .on_click(move |event, window, cx| {
+        if matches!(event, ClickEvent::Keyboard(_)) {
+            dismiss_device_menu(&keyboard_popover, window, cx);
+            on_action(action, window, cx);
+        }
+    })
+}
+
+fn device_menu_action_handler(data: &DeviceMenuData) -> DeviceMenuActionHandler {
+    let data = data.clone();
+    Rc::new(move |action, window, cx| match action {
+        DeviceMenuAction::Rename => open_rename_dialog(
+            window,
+            cx,
+            data.record_key.clone(),
+            data.custom_name.clone(),
+            data.model_name.clone(),
+        ),
+        DeviceMenuAction::Delete => open_delete_confirmation(
+            window,
+            cx,
+            data.record_key.clone(),
+            data.display_name.clone(),
+        ),
+    })
+}
+
+fn dismiss_device_menu(popover: &WeakEntity<PopoverState>, window: &mut Window, cx: &mut App) {
+    if let Some(popover) = popover.upgrade() {
+        popover.update(cx, |state, cx| state.dismiss(window, cx));
+    }
+}
+
+fn device_menu_content(
+    data: DeviceMenuData,
+    pal: Palette,
+    popover: WeakEntity<PopoverState>,
+    on_action: DeviceMenuActionHandler,
+    rename_focus: &FocusHandle,
+) -> impl IntoElement {
+    let rename_row = menu_row_action(
+        MenuRow::new((
+            ElementId::from("device-menu-rename"),
+            data.record_key.clone(),
+        ))
+        .role(Role::MenuItem)
+        .child(
+            h_flex()
+                .items_center()
+                .gap_2()
+                .child(Icon::empty().path("action-icons/pencil.svg").size_4())
+                .child(tr!("common.rename_dialog")),
+        )
+        .track_focus(rename_focus),
+        popover.clone(),
+        DeviceMenuAction::Rename,
+        on_action.clone(),
+    );
+
+    let mut panel = compact_panel(pal).w(px(224.)).child(
+        div()
+            .debug_selector(|| "device-menu-rename-row".into())
+            .child(rename_row),
+    );
+
+    if data.deletable {
+        let delete_row = menu_row_action(
+            MenuRow::new((ElementId::from("device-menu-delete"), data.record_key))
+                .role(Role::MenuItem)
+                .child(
+                    h_flex()
+                        .items_center()
+                        .gap_2()
+                        .child(Icon::new(IconName::Delete).size_4())
+                        .child(tr!("device.delete_device_dialog")),
+                ),
+            popover,
+            DeviceMenuAction::Delete,
+            on_action,
+        );
+        panel = panel
+            .child(
+                div()
+                    .debug_selector(|| "device-menu-separator".into())
+                    .h(px(1.))
+                    .w_full()
+                    .my_1()
+                    .bg(pal.border),
+            )
+            .child(
+                div()
+                    .debug_selector(|| "device-menu-delete-row".into())
+                    .child(delete_row),
+            );
+    }
+
+    panel
+}
+
+fn device_menu_popover<T>(
+    id: impl Into<ElementId>,
+    trigger: T,
+    anchor: Anchor,
+    mouse_button: MouseButton,
+    data: DeviceMenuData,
+    pal: Palette,
+    on_action: DeviceMenuActionHandler,
+) -> impl IntoElement
+where
+    T: gpui_component::Selectable + IntoElement + 'static,
+{
+    let id = id.into();
+    Popover::new(id.clone())
+        .anchor(anchor)
+        .mouse_button(mouse_button)
+        .appearance(false)
+        .trigger(trigger)
+        .content(move |state, window, cx| {
+            let popover = cx.entity().downgrade();
+            let rename_focus = window
+                .use_keyed_state((id.clone(), "rename-focus"), cx, |_, cx| cx.focus_handle())
+                .read(cx)
+                .clone();
+            if state.is_open() {
+                rename_focus.focus(window, cx);
+            }
+            let keyboard_popover = popover.clone();
+            let keyboard_action = on_action.clone();
+            div()
+                .track_focus(&rename_focus)
+                .on_key_down(move |event: &KeyDownEvent, window, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                        dismiss_device_menu(&keyboard_popover, window, cx);
+                        keyboard_action(DeviceMenuAction::Rename, window, cx);
+                    }
+                })
+                .child(device_menu_content(
+                    data.clone(),
+                    pal,
+                    popover,
+                    on_action.clone(),
+                    &rename_focus,
+                ))
+        })
 }
 
 /// The card corner's ellipsis button, opening the same menu the card offers
 /// on right-click.
 pub(super) fn device_menu_button(record: &DeviceRecord, pal: Palette) -> impl IntoElement {
-    Button::new((ElementId::from("device-menu"), record.record_key()))
-        .ghost()
-        .xsmall()
-        .text_color(pal.text_muted)
-        .icon(IconName::Ellipsis)
-        .dropdown_menu_with_anchor(Anchor::TopRight, device_menu(record))
+    let data = DeviceMenuData::from_record(record);
+    let action_handler = device_menu_action_handler(&data);
+    device_menu_button_with_handler(data, pal, action_handler)
+}
+
+fn device_menu_button_with_handler(
+    data: DeviceMenuData,
+    pal: Palette,
+    action_handler: DeviceMenuActionHandler,
+) -> impl IntoElement {
+    device_menu_popover(
+        (
+            ElementId::from("device-menu-popover"),
+            data.record_key.clone(),
+        ),
+        Button::new((ElementId::from("device-menu"), data.record_key.clone()))
+            .ghost()
+            .xsmall()
+            .text_color(pal.text_muted)
+            .icon(IconName::Ellipsis),
+        Anchor::TopRight,
+        MouseButton::Left,
+        data,
+        pal,
+        action_handler,
+    )
+}
+
+/// The device card's right-click action menu, anchored to the card edge and
+/// sharing the same direct-action rows as the corner button.
+pub(super) fn device_context_menu(
+    trigger: BaseButton,
+    record: &DeviceRecord,
+    pal: Palette,
+) -> impl IntoElement {
+    let data = DeviceMenuData::from_record(record);
+    let action_handler = device_menu_action_handler(&data);
+    device_context_menu_with_handler(trigger, data, pal, action_handler)
+}
+
+fn device_context_menu_with_handler(
+    trigger: BaseButton,
+    data: DeviceMenuData,
+    pal: Palette,
+    action_handler: DeviceMenuActionHandler,
+) -> impl IntoElement {
+    device_menu_popover(
+        (
+            ElementId::from("device-context-menu"),
+            data.record_key.clone(),
+        ),
+        trigger,
+        Anchor::TopRight,
+        MouseButton::Right,
+        data,
+        pal,
+        action_handler,
+    )
 }
 
 /// Confirm before forgetting a device: the record, its custom name, and its
 /// per-device settings all go.
-fn open_delete_confirmation(window: &mut Window, cx: &mut App, record_key: String, name: String) {
+pub(super) fn open_delete_confirmation(
+    window: &mut Window,
+    cx: &mut App,
+    record_key: String,
+    name: String,
+) {
     window.open_alert_dialog(cx, move |alert, _, _| {
         alert
             .title(tr!("device.delete_named_device_confirmation", name => name.clone()))
@@ -435,7 +636,7 @@ fn open_delete_confirmation(window: &mut Window, cx: &mut App, record_key: Strin
     });
 }
 
-fn open_rename_dialog(
+pub(super) fn open_rename_dialog(
     window: &mut Window,
     cx: &mut App,
     record_key: String,
@@ -521,6 +722,301 @@ fn connection_summary(record: &DeviceRecord) -> String {
         format!("{route} · {} {}", tr!("device.channel"), record.slot)
     } else {
         route
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::items_after_test_module,
+    reason = "keep the focused home-menu tests beside their production seam"
+)]
+mod tests {
+    use std::{cell::RefCell, rc::Rc};
+
+    use gpui::{Context, Modifiers, MouseButton, Render, TestAppContext, Window, div, point, px};
+    use openlogi_core::device::{Capabilities, DeviceKind};
+
+    use super::*;
+
+    struct DeviceMenuHarness {
+        record: DeviceRecord,
+        actions: Rc<RefCell<Vec<DeviceMenuAction>>>,
+    }
+
+    struct NestedDeviceMenuHarness {
+        record: DeviceRecord,
+        actions: Rc<RefCell<Vec<DeviceMenuAction>>>,
+    }
+
+    impl Render for DeviceMenuHarness {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let actions = self.actions.clone();
+            let data = DeviceMenuData::from_record(&self.record);
+            let action_handler: DeviceMenuActionHandler =
+                Rc::new(move |action, _window, _cx| actions.borrow_mut().push(action));
+            div().size(px(100.)).child(device_menu_button_with_handler(
+                data,
+                theme::palette(cx),
+                action_handler,
+            ))
+        }
+    }
+
+    impl Render for NestedDeviceMenuHarness {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let actions = self.actions.clone();
+            let data = DeviceMenuData::from_record(&self.record);
+            let action_handler: DeviceMenuActionHandler =
+                Rc::new(move |action, _window, _cx| actions.borrow_mut().push(action));
+            let pal = theme::palette(cx);
+            let card = BaseButton::new("device-card-test").size_full().child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .right_0()
+                    .w(px(40.))
+                    .h(px(40.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .debug_selector(|| "device-menu-trigger-test".into())
+                    .child(device_menu_button_with_handler(
+                        data.clone(),
+                        pal,
+                        action_handler,
+                    )),
+            );
+            div()
+                .relative()
+                .size(px(240.))
+                .child(device_context_menu_with_handler(
+                    card,
+                    data,
+                    pal,
+                    Rc::new(|_, _, _| {}),
+                ))
+        }
+    }
+
+    fn test_device_record() -> DeviceRecord {
+        DeviceRecord {
+            config_key: "receiver:test:slot:1".into(),
+            canonical_key: Some("receiver:test:slot:1".into()),
+            persistent: true,
+            route_key: "receiver:test:slot:1".into(),
+            model_key: "test-mouse".into(),
+            model_name: "Test Mouse".into(),
+            display_name: "Test Mouse".into(),
+            asset: None,
+            model_info: None,
+            codename: None,
+            serial_number: None,
+            unit_id: [0; 4],
+            driver_id: None,
+            registry_model_id: None,
+            route: None,
+            capture_id: None,
+            kind: DeviceKind::Mouse,
+            capabilities: Some(Capabilities::default()),
+            light_capabilities: None,
+            slot: 1,
+            online: true,
+            battery: None,
+        }
+    }
+
+    fn add_menu_window(
+        cx: &mut TestAppContext,
+        record: DeviceRecord,
+        actions: Rc<RefCell<Vec<DeviceMenuAction>>>,
+    ) -> &mut gpui::VisualTestContext {
+        cx.add_window_view(move |_, _| DeviceMenuHarness { record, actions })
+            .1
+    }
+
+    fn add_nested_menu_window(
+        cx: &mut TestAppContext,
+        record: DeviceRecord,
+        actions: Rc<RefCell<Vec<DeviceMenuAction>>>,
+    ) -> &mut gpui::VisualTestContext {
+        cx.add_window_view(move |_, _| NestedDeviceMenuHarness { record, actions })
+            .1
+    }
+
+    fn draw(cx: &mut gpui::VisualTestContext) {
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+
+    fn open_menu(cx: &mut gpui::VisualTestContext) {
+        cx.simulate_click(point(px(10.), px(10.)), Modifiers::default());
+        draw(cx);
+        assert!(
+            cx.debug_bounds("device-menu-rename-row").is_some(),
+            "the device menu opens from the ellipsis button"
+        );
+    }
+
+    #[gpui::test]
+    fn device_menu_rename_responds_to_mouse_click(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let actions = Rc::new(RefCell::new(Vec::new()));
+        let visual_cx = add_menu_window(cx, test_device_record(), actions.clone());
+        draw(visual_cx);
+        open_menu(visual_cx);
+        let rename_bounds = visual_cx
+            .debug_bounds("device-menu-rename-row")
+            .expect("the rename row renders in the device menu");
+        visual_cx.simulate_click(rename_bounds.center(), Modifiers::default());
+        draw(visual_cx);
+
+        assert!(
+            visual_cx.debug_bounds("device-menu-rename-row").is_none(),
+            "activating Rename must close the device menu"
+        );
+        assert!(
+            actions.borrow().as_slice() == [DeviceMenuAction::Rename],
+            "clicking Rename must dispatch the rename action"
+        );
+    }
+
+    #[gpui::test]
+    fn device_menu_rename_responds_when_only_mouse_down_reaches_the_row(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let actions = Rc::new(RefCell::new(Vec::new()));
+        let visual_cx = add_menu_window(cx, test_device_record(), actions.clone());
+        draw(visual_cx);
+        open_menu(visual_cx);
+        let rename_bounds = visual_cx
+            .debug_bounds("device-menu-rename-row")
+            .expect("the rename row renders in the device menu");
+
+        visual_cx.simulate_mouse_down(
+            rename_bounds.center(),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        draw(visual_cx);
+
+        assert_eq!(
+            actions.borrow().as_slice(),
+            [DeviceMenuAction::Rename],
+            "the Rename action must not depend on a later Click event"
+        );
+        assert!(visual_cx.debug_bounds("device-menu-rename-row").is_none());
+    }
+
+    #[gpui::test]
+    fn device_menu_rename_supports_keyboard_activation(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let actions = Rc::new(RefCell::new(Vec::new()));
+        let visual_cx = add_menu_window(cx, test_device_record(), actions.clone());
+        draw(visual_cx);
+        open_menu(visual_cx);
+        visual_cx.simulate_keystrokes("enter");
+        draw(visual_cx);
+
+        assert_eq!(
+            actions.borrow().as_slice(),
+            [DeviceMenuAction::Rename],
+            "the focused Rename row must activate from Enter"
+        );
+        assert!(visual_cx.debug_bounds("device-menu-rename-row").is_none());
+    }
+
+    #[gpui::test]
+    fn device_menu_rename_responds_inside_the_real_card_context_menu(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let actions = Rc::new(RefCell::new(Vec::new()));
+        let visual_cx = add_nested_menu_window(cx, test_device_record(), actions.clone());
+        draw(visual_cx);
+
+        let trigger_bounds = visual_cx
+            .debug_bounds("device-menu-trigger-test")
+            .expect("the device card exposes the ellipsis trigger");
+        visual_cx.simulate_click(trigger_bounds.center(), Modifiers::default());
+        draw(visual_cx);
+        let rename_bounds = visual_cx
+            .debug_bounds("device-menu-rename-row")
+            .expect("the device menu opens inside the card context-menu wrapper");
+        visual_cx.simulate_click(rename_bounds.center(), Modifiers::default());
+        draw(visual_cx);
+
+        assert_eq!(
+            actions.borrow().as_slice(),
+            [DeviceMenuAction::Rename],
+            "clicking Rename must work when the ellipsis is nested in the real card button"
+        );
+        assert!(visual_cx.debug_bounds("device-menu-rename-row").is_none());
+    }
+
+    #[gpui::test]
+    fn device_menu_supports_escape_and_outside_dismissal(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let actions = Rc::new(RefCell::new(Vec::new()));
+        let visual_cx = add_menu_window(cx, test_device_record(), actions.clone());
+        draw(visual_cx);
+
+        open_menu(visual_cx);
+        visual_cx.simulate_keystrokes("escape");
+        draw(visual_cx);
+        assert!(visual_cx.debug_bounds("device-menu-rename-row").is_none());
+
+        open_menu(visual_cx);
+        visual_cx.simulate_click(point(px(300.), px(300.)), Modifiers::default());
+        draw(visual_cx);
+        assert!(visual_cx.debug_bounds("device-menu-rename-row").is_none());
+    }
+
+    #[gpui::test]
+    fn device_menu_online_devices_hide_delete(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let visual_cx =
+            add_menu_window(cx, test_device_record(), Rc::new(RefCell::new(Vec::new())));
+        draw(visual_cx);
+        open_menu(visual_cx);
+        assert!(
+            visual_cx.debug_bounds("device-menu-delete-row").is_none(),
+            "online devices must not offer deletion"
+        );
+    }
+
+    #[gpui::test]
+    fn device_menu_offline_persistent_devices_show_delete(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let mut offline_record = test_device_record();
+        offline_record.online = false;
+        let offline_actions = Rc::new(RefCell::new(Vec::new()));
+        let offline_cx = add_menu_window(cx, offline_record, offline_actions.clone());
+        draw(offline_cx);
+        open_menu(offline_cx);
+        let delete_bounds = offline_cx
+            .debug_bounds("device-menu-delete-row")
+            .expect("offline persistent devices must offer deletion");
+        offline_cx.simulate_click(delete_bounds.center(), Modifiers::default());
+        draw(offline_cx);
+        assert_eq!(
+            offline_actions.borrow().as_slice(),
+            [DeviceMenuAction::Delete]
+        );
+        assert!(offline_cx.debug_bounds("device-menu-delete-row").is_none());
+    }
+
+    #[gpui::test]
+    fn device_menu_nonpersistent_devices_hide_delete(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let mut transient_record = test_device_record();
+        transient_record.online = false;
+        transient_record.persistent = false;
+        let transient_actions = Rc::new(RefCell::new(Vec::new()));
+        let transient_cx = add_menu_window(cx, transient_record, transient_actions);
+        draw(transient_cx);
+        open_menu(transient_cx);
+        assert!(
+            transient_cx
+                .debug_bounds("device-menu-delete-row")
+                .is_none(),
+            "non-persistent devices must not offer deletion"
+        );
     }
 }
 

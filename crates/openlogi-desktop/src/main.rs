@@ -55,6 +55,12 @@ fn main() -> Result<()> {
     init_tracing();
 
     #[cfg(debug_assertions)]
+    if std::env::var_os("OPENLOGI_DIALOG_SMOKE").is_some_and(|value| value == "1") {
+        app::dialog_smoke::run();
+        return Ok(());
+    }
+
+    #[cfg(debug_assertions)]
     if std::env::var_os("OPENLOGI_COMPONENT_GALLERY").is_some_and(|value| value == "1") {
         ui::gallery::run();
         return Ok(());
