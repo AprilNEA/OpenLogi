@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use std::sync::{LazyLock, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use openlogi_core::binding::KeyboardUsage;
@@ -330,6 +331,14 @@ pub fn ax_navigate_browser(pid: i32, forward: bool) -> bool {
     }
 }
 
+/// Below this gap since an axis's last non-zero input, a new tick is treated
+/// as part of the same continuous scrolling gesture rather than an isolated
+/// one — mirrors `openlogi-agent-core::runtime::scroll::ANIMATION_DURATION`,
+/// the gesture motion window smooth-scroll already uses. Kept as a separate
+/// constant since this crate does not depend on agent-core; the two should
+/// stay equal.
+const GESTURE_IDLE_GAP: Duration = Duration::from_millis(100);
+
 /// Integer scroll units ready for a platform API.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct QuantizedScroll {
@@ -338,18 +347,44 @@ struct QuantizedScroll {
 }
 
 /// Carries fractional platform units across frames so rounding never changes
-/// the cumulative distance.
+/// the cumulative distance, and tracks each axis's last non-zero input so an
+/// isolated tick after a quiet period is never silently rounded away.
 #[derive(Default)]
 struct ScrollQuantizer {
     residual_x: f64,
     residual_y: f64,
+    last_nonzero_x: Option<Instant>,
+    last_nonzero_y: Option<Instant>,
 }
 
 impl ScrollQuantizer {
     fn quantize(&mut self, delta: ScrollDelta, units_per_input: f64) -> QuantizedScroll {
+        self.quantize_at(delta, units_per_input, Instant::now())
+    }
+
+    /// `quantize` with an explicit clock, so isolation gaps are deterministic
+    /// in tests without a real sleep.
+    fn quantize_at(
+        &mut self,
+        delta: ScrollDelta,
+        units_per_input: f64,
+        now: Instant,
+    ) -> QuantizedScroll {
         QuantizedScroll {
-            x: quantize_axis(&mut self.residual_x, delta.x(), units_per_input),
-            y: quantize_axis(&mut self.residual_y, delta.y(), units_per_input),
+            x: quantize_axis(
+                &mut self.residual_x,
+                &mut self.last_nonzero_x,
+                delta.x(),
+                units_per_input,
+                now,
+            ),
+            y: quantize_axis(
+                &mut self.residual_y,
+                &mut self.last_nonzero_y,
+                delta.y(),
+                units_per_input,
+                now,
+            ),
         }
     }
 }
@@ -358,12 +393,34 @@ impl ScrollQuantizer {
     clippy::cast_possible_truncation,
     reason = "the rounded value is clamped to the i32 range before conversion"
 )]
-fn quantize_axis(residual: &mut f64, input: f64, units_per_input: f64) -> i32 {
+fn quantize_axis(
+    residual: &mut f64,
+    last_nonzero: &mut Option<Instant>,
+    input: f64,
+    units_per_input: f64,
+    now: Instant,
+) -> i32 {
     let exact = input.mul_add(units_per_input, *residual);
     let rounded = exact
         .round()
         .clamp(f64::from(i32::MIN), f64::from(i32::MAX));
     let output = rounded as i32;
+
+    let is_isolated = input != 0.0
+        && last_nonzero.is_none_or(|at| now.saturating_duration_since(at) >= GESTURE_IDLE_GAP);
+    if input != 0.0 {
+        *last_nonzero = Some(now);
+    }
+
+    if output == 0 && is_isolated {
+        // A deliberate, isolated tick must be visible. Bookkeeping proceeds
+        // as if 0 had been emitted, as usual — only the value returned to the
+        // caller for *this* call is a one-time nudge, so it never has to be
+        // "paid back" by reversing the very next tick's direction.
+        *residual = exact;
+        return if input.is_sign_positive() { 1 } else { -1 };
+    }
+
     *residual = exact - f64::from(output);
     output
 }
@@ -499,6 +556,8 @@ fn hid_usage_to_windows(usage: u8) -> Option<u16> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use openlogi_core::scroll::ScrollDelta;
 
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
@@ -531,6 +590,62 @@ mod tests {
         let backward = quantizer.quantize(ScrollDelta::wheel_ticks(-0.25, 0.0), 120.0);
         assert_eq!(forward, QuantizedScroll { x: 30, y: 0 });
         assert_eq!(backward, QuantizedScroll { x: -30, y: 0 });
+    }
+
+    #[test]
+    fn isolated_sub_threshold_tick_after_quiet_period_still_scrolls() {
+        let mut quantizer = ScrollQuantizer::default();
+        let base = Instant::now();
+        // Prime `last_nonzero`, then let it go quiet well past the gesture gap.
+        quantizer.quantize_at(ScrollDelta::wheel_ticks(0.0, 0.2), 1.0, base);
+        let later = base + Duration::from_millis(200);
+        let output = quantizer.quantize_at(ScrollDelta::wheel_ticks(0.0, 0.2), 1.0, later);
+        assert_eq!(
+            output.y, 1,
+            "an isolated tick after a quiet period must be visible"
+        );
+    }
+
+    #[test]
+    fn continuous_sub_threshold_ticks_are_not_each_floored() {
+        let mut quantizer = ScrollQuantizer::default();
+        let base = Instant::now();
+        // Prime `last_nonzero`; this priming call's own output isn't asserted.
+        quantizer.quantize_at(ScrollDelta::wheel_ticks(0.0, 0.2), 1.0, base);
+
+        let continuous_total: i32 = (1..=4)
+            .map(|i| {
+                let now = base + Duration::from_millis(i * 20); // well under the 100ms gesture gap
+                quantizer
+                    .quantize_at(ScrollDelta::wheel_ticks(0.0, 0.2), 1.0, now)
+                    .y
+            })
+            .sum();
+        // Four continuous ticks of 0.2 each (0.8 total) round to 1 - not 4,
+        // which is what flooring every tick would (incorrectly) produce.
+        assert_eq!(continuous_total, 1);
+    }
+
+    #[test]
+    fn continuous_burst_after_an_isolated_tick_is_not_double_counted() {
+        let mut quantizer = ScrollQuantizer::default();
+        let base = Instant::now();
+
+        let isolated = quantizer.quantize_at(ScrollDelta::wheel_ticks(0.0, 0.2), 1.0, base);
+        assert_eq!(isolated.y, 1, "the isolated tick must be visible");
+
+        let continuous_total: i32 = (1..=4)
+            .map(|i| {
+                let now = base + Duration::from_millis(i * 20);
+                quantizer
+                    .quantize_at(ScrollDelta::wheel_ticks(0.0, 0.2), 1.0, now)
+                    .y
+            })
+            .sum();
+        // The continuous burst alone still totals to the mathematically exact
+        // amount for its own 0.8 units (rounds to 1) - the isolated tick's
+        // floor is never paid back against it or double-counted.
+        assert_eq!(continuous_total, 1);
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
