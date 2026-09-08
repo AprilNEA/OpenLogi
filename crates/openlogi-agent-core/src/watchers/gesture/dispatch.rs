@@ -147,7 +147,8 @@ impl InputDispatcher {
             return;
         }
         match input {
-            CapturedInput::Gesture(button, direction) => {
+            CapturedInput::Gesture(button, direction)
+            | CapturedInput::GestureRepeat(button, direction) => {
                 let Some(press) = self.gesture_presses.get(session, button) else {
                     debug!(key, %button, ?direction, "gesture from a canceled button lifecycle — ignored");
                     return;
@@ -157,6 +158,10 @@ impl InputDispatcher {
                     .get(&button)
                     .or_else(|| plan.side_gesture_bindings.get(&button))
                     .and_then(|map| map.get(&direction))
+                    .filter(|action| {
+                        !matches!(input, CapturedInput::GestureRepeat(..))
+                            || action.repeats_on_motion()
+                    })
                 {
                     debug!(key, %button, ?direction, action = %action.label(), "gesture → action");
                     if !self

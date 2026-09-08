@@ -11,7 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use openlogi_core::binding::{
-    Action, Binding, ButtonId, GestureDirection, SwipeAccumulator, default_binding,
+    Action, Binding, ButtonId, GestureDirection, SwipeAccumulator, SwipeStep, default_binding,
 };
 use openlogi_core::config::{KeyModifiers, KeyTrigger};
 use openlogi_hook::{
@@ -138,12 +138,12 @@ impl HoldState {
     }
 
     /// Feed a pointer-move delta into the active hold, tagging a committed swipe
-    /// with its exact press token and held button. Returns one commit per hold,
-    /// or `None` while still too short, already fired, or not holding.
-    fn accumulate(&mut self, dx: i32, dy: i32) -> Option<(PressToken, ButtonId, GestureDirection)> {
+    /// with its exact press token and held button. Subsequent movement is tagged
+    /// separately so ordinary bindings remain one-shot.
+    fn accumulate(&mut self, dx: i32, dy: i32) -> Option<(PressToken, ButtonId, SwipeStep)> {
         let held = self.current.as_ref()?;
         self.swipe
-            .accumulate(dx, dy)
+            .accumulate_repeating(dx, dy)
             .map(|dir| (held.press.clone(), held.button, dir))
     }
 
@@ -364,14 +364,15 @@ fn handle_moved(
     dispatcher: &ActionDispatcher,
 ) -> EventDisposition {
     let commit = HOLD.with_borrow_mut(|h| h.accumulate(delta_x, delta_y));
-    if let Some((press, button, dir)) = commit {
+    if let Some((press, button, step)) = commit {
+        let dir = step.direction();
         let action = hooks.try_read().ok().map(|m| {
             m.gestures
                 .get(&button)
                 .and_then(|dirs| dirs.get(&dir).cloned())
                 .unwrap_or_else(|| resolve_gesture_click(&m.gestures, button))
         });
-        if let Some(action) = action {
+        if let Some(action) = action.filter(|action| step.accepts(action)) {
             info!(button = %button, ?dir, action = %action.label(), "gesture swipe → executing bound action");
             dispatcher.try_dispatch_while_pressed(&press, &action);
         }

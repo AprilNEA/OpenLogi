@@ -87,6 +87,31 @@ Common device fields are:
 
 ## Actions
 
+### Gesture zoom
+
+In Buttons, select a gesture button, choose Up or Down, and pick a zoom action
+from the Browser category. `ZoomIn` and `ZoomOut` fire one step per hold/swipe.
+`ZoomInContinuous` and `ZoomOutContinuous` repeat as the held mouse moves and
+allow reversing direction without releasing. Holding still does not repeat;
+releasing after a swipe does not also fire the click action.
+
+```toml
+[devices."<physical-key>".bindings.GestureButton]
+Up = "ZoomInContinuous"
+Down = "ZoomOutContinuous"
+Left = "PreviousDesktop"
+Right = "NextDesktop"
+Click = "MissionControl"
+```
+
+Windows uses Ctrl+mouse-wheel zoom; macOS uses Cmd+= / Cmd+- and Linux uses
+Ctrl+= / Ctrl+-. The focused application must support these inputs. Continuous
+mode emits repeated zoom steps, not pinch gestures, and uses the existing
+160 ms hold gate and 50-unit swipe threshold. Other gesture actions remain
+one-shot. On a plain button, either zoom mode emits a single step.
+
+### Action values
+
 Action names are the serialized Rust variant names, including `Copy`,
 `BrowserBack`, `PlayPause`, `CycleDpiPresets`, and `ShowActionsRing`.
 Payload actions use a one-key inline table:

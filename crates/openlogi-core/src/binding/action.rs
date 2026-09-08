@@ -187,6 +187,14 @@ pub enum Action {
     /// cancellation and shutdown. Dispatchers without a release context must
     /// degrade this action to a balanced tap rather than leave keys held.
     HoldShortcut(KeyCombo),
+    /// Zoom in one step in the active application.
+    ZoomIn,
+    /// Zoom out one step in the active application.
+    ZoomOut,
+    /// Zoom in repeatedly as a held gesture continues moving.
+    ZoomInContinuous,
+    /// Zoom out repeatedly as a held gesture continues moving.
+    ZoomOutContinuous,
 }
 
 /// One step in a [`Action::Workflow`]. A workflow is a `Vec<WorkflowStep>`
@@ -256,6 +264,10 @@ macro_rules! for_each_unit_action {
             NextTab "Next Tab" "actions.next_tab" Browser NextTab,
             PrevTab "Previous Tab" "actions.previous_tab" Browser PreviousTab,
             ReloadPage "Reload Page" "actions.reload_page" Browser Reload,
+            ZoomIn "Zoom In (one step)" "actions.zoom_in" Browser Search,
+            ZoomOut "Zoom Out (one step)" "actions.zoom_out" Browser Search,
+            ZoomInContinuous "Zoom In (continuous gesture)" "actions.zoom_in_continuous" Browser Search,
+            ZoomOutContinuous "Zoom Out (continuous gesture)" "actions.zoom_out_continuous" Browser Search,
             // Navigation
             MissionControl "Mission Control" "actions.mission_control" Navigation Grid,
             AppExpose "App Exposé" "actions.app_expose" Navigation Layers,
@@ -393,6 +405,12 @@ macro_rules! derive_action_core {
 for_each_unit_action!(derive_action_core);
 
 impl Action {
+    /// Whether additional travel in the same gesture may fire this action.
+    #[must_use]
+    pub fn repeats_on_motion(&self) -> bool {
+        matches!(self, Self::ZoomInContinuous | Self::ZoomOutContinuous)
+    }
+
     /// The chord whose output must remain down until the originating press
     /// ends, or `None` for an instantaneous action.
     #[must_use]

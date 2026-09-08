@@ -31,7 +31,7 @@ use hidpp::{
     },
     protocol::v20,
 };
-use openlogi_core::binding::{ButtonId, GestureDirection, SwipeAccumulator};
+use openlogi_core::binding::{ButtonId, GestureDirection, SwipeAccumulator, SwipeStep};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
@@ -62,6 +62,8 @@ pub enum CapturedInput {
     /// tagged with the source control so dispatch resolves it against that
     /// button's own direction map.
     Gesture(ButtonId, GestureDirection),
+    /// Additional travel during a committed hold, for continuous actions only.
+    GestureRepeat(ButtonId, GestureDirection),
     /// A diverted button's physical down edge.
     ButtonDown(ButtonId),
     /// Thumb-wheel rotation to re-synthesise on the configured scroll axis.
@@ -1050,12 +1052,12 @@ fn handle_raw_xy(
         *skip_first_raw_xy = false;
         return;
     }
-    // Commit the instant a clean direction emerges (mid-swipe, once per hold);
-    // the accumulator gates on hold duration internally and drops travel that
-    // arrives outside a hold.
-    if let Some(direction) = swipe.accumulate(i32::from(dx), i32::from(dy)) {
-        debug!(?direction, %button, "gesture committed");
-        let _ = sink.send(CapturedInput::Gesture(*button, direction));
+    if let Some(step) = swipe.accumulate_repeating(i32::from(dx), i32::from(dy)) {
+        let input = match step {
+            SwipeStep::First(direction) => CapturedInput::Gesture(*button, direction),
+            SwipeStep::Repeat(direction) => CapturedInput::GestureRepeat(*button, direction),
+        };
+        let _ = sink.send(input);
     }
 }
 
