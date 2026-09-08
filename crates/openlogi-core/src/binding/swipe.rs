@@ -18,6 +18,11 @@ pub const GESTURE_SWIPE_DEADZONE: i32 = 40;
 /// cursor happened to be moving. Shared by both gesture paths (the HID++ thumb
 /// pad and the OS-hook Middle/Back/Forward).
 pub const GESTURE_HOLD_FOR_SWIPE: std::time::Duration = std::time::Duration::from_millis(160);
+/// Minimum movement that must arrive *after* the hold gate opens before a
+/// direction can commit. Motion collected during the initial click-grace
+/// window still contributes to the eventual direction, but cannot turn a
+/// mostly-stationary long click into a swipe because of one tiny late sample.
+const GESTURE_POST_HOLD_CONFIRM_THRESHOLD: i32 = 20;
 
 /// Classify the *running* raw-XY travel of a held gesture button into a
 /// directional swipe, the instant it commits — or `None` while it's still too
@@ -88,6 +93,11 @@ pub struct SwipeAccumulator {
     /// arbitrarily long hold can never overflow).
     dx: i32,
     dy: i32,
+    /// Travel received after the hold gate became eligible for a swipe. This
+    /// provides hysteresis between a long click and a deliberate continued
+    /// swipe: pre-gate cursor drift alone cannot arm a direction.
+    post_gate_dx: i32,
+    post_gate_dy: i32,
     /// Set once a direction has committed this hold, so it fires exactly once
     /// and the release isn't then also read as a click.
     fired: bool,
@@ -99,6 +109,8 @@ impl SwipeAccumulator {
         self.held_since = Some(Instant::now());
         self.dx = 0;
         self.dy = 0;
+        self.post_gate_dx = 0;
+        self.post_gate_dy = 0;
         self.fired = false;
     }
 
@@ -122,7 +134,21 @@ impl SwipeAccumulator {
         let held_long_enough = self
             .held_since
             .is_some_and(|t| t.elapsed() >= GESTURE_HOLD_FOR_SWIPE);
-        if held_long_enough && let Some(dir) = detect_swipe(self.dx, self.dy) {
+        if !held_long_enough {
+            return None;
+        }
+
+        self.post_gate_dx = self.post_gate_dx.saturating_add(dx);
+        self.post_gate_dy = self.post_gate_dy.saturating_add(dy);
+        let post_gate_travel = self
+            .post_gate_dx
+            .saturating_abs()
+            .max(self.post_gate_dy.saturating_abs());
+        if post_gate_travel < GESTURE_POST_HOLD_CONFIRM_THRESHOLD {
+            return None;
+        }
+
+        if let Some(dir) = detect_swipe(self.dx, self.dy) {
             self.fired = true;
             return Some(dir);
         }
@@ -236,6 +262,39 @@ mod tests {
         // Once held long enough, the next delta commits.
         acc.backdate_hold_for_test();
         assert!(acc.accumulate(GESTURE_SWIPE_THRESHOLD + 100, 0).is_some());
+    }
+
+    #[test]
+    fn accumulator_does_not_turn_pre_gate_drift_into_a_swipe_from_one_tiny_late_sample() {
+        let mut acc = SwipeAccumulator::default();
+        acc.begin();
+        // Cursor travel during the click-grace window may already exceed the
+        // directional threshold (pressing a thumb button can nudge the mouse).
+        assert_eq!(acc.accumulate(GESTURE_SWIPE_THRESHOLD + 30, 0), None);
+
+        // Once the hold gate opens, one tiny follow-up report must not retroactively
+        // classify all of that earlier drift as a swipe. Releasing is still a click.
+        acc.backdate_hold_for_test();
+        assert_eq!(acc.accumulate(1, 0), None);
+        assert!(
+            acc.end(),
+            "pre-gate drift plus a tiny late sample stays a click"
+        );
+    }
+
+    #[test]
+    fn accumulator_commits_when_motion_continues_after_the_hold_gate() {
+        let mut acc = SwipeAccumulator::default();
+        acc.begin();
+        assert_eq!(acc.accumulate(GESTURE_SWIPE_THRESHOLD + 30, 0), None);
+
+        acc.backdate_hold_for_test();
+        assert_eq!(
+            acc.accumulate(GESTURE_POST_HOLD_CONFIRM_THRESHOLD, 0),
+            Some(GestureDirection::Right),
+            "continued movement after the hold gate confirms the deliberate swipe"
+        );
+        assert!(!acc.end(), "a confirmed swipe must not also emit Click");
     }
 
     #[test]
