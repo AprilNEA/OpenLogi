@@ -502,8 +502,14 @@ mod tests {
     use super::*;
     use openlogi_hid::device_io_channel;
 
+    // Both tests post to the process-wide NSWorkspace notification center.
+    // Keep each observer's entire registration/posting/removal lifetime isolated
+    // so one test's session-inactive event cannot suspend the other test's gate.
+    static WORKSPACE_NOTIFICATIONS: Mutex<()> = Mutex::new(());
+
     #[test]
     fn overlapping_suspend_sources_all_clear_before_device_io_resumes() {
+        let _notifications = WORKSPACE_NOTIFICATIONS.lock().unwrap();
         let (signal, gate) = device_io_channel();
         let target = install_activity_observer(signal);
         target.finish_startup(false);
@@ -558,6 +564,7 @@ mod tests {
 
     #[test]
     fn startup_stays_suspended_when_the_display_is_already_asleep() {
+        let _notifications = WORKSPACE_NOTIFICATIONS.lock().unwrap();
         let (signal, gate) = device_io_channel();
         let target = install_activity_observer(signal);
         assert!(!gate.allows_io(), "startup must fail closed");

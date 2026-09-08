@@ -38,7 +38,7 @@ use tokio::time::Instant;
 use tracing::{debug, warn};
 
 use self::dispatch::InputDispatcher;
-use super::capture_session::{CaptureSession, CompletionAction, ReconcileAction};
+use super::capture_session::{CaptureRecovery, CaptureSession, CaptureSlot, ReconcileAction};
 use crate::capture_plan::{CaptureTarget, DeviceCapturePlan, DispatchPlan, SharedCapturePlans};
 use crate::receiver_access::{ReceiverAccess, ReceiverRequestState, SessionReceiverLease};
 use crate::runtime::hook::SharedHookMaps;
@@ -121,6 +121,7 @@ pub fn spawn(
 }
 
 type RunningSession = CaptureSession<CaptureTarget, DispatchPlan>;
+type GestureSlot = CaptureSlot<CaptureTarget, DispatchPlan, PendingRestore>;
 
 struct CapturedEvent {
     physical_key: PhysicalDeviceKey,
@@ -145,9 +146,7 @@ struct PendingRestore {
 }
 
 struct GestureManagerState {
-    sessions: HashMap<PhysicalDeviceKey, RunningSession>,
-    pending_restores: HashMap<PhysicalDeviceKey, PendingRestore>,
-    restart_after: HashMap<PhysicalDeviceKey, Instant>,
+    slots: HashMap<PhysicalDeviceKey, GestureSlot>,
     input_dispatcher: InputDispatcher,
     lease: std::sync::Weak<SessionReceiverLease>,
 }
@@ -283,27 +282,35 @@ fn acquire_session_lease(
 }
 
 async fn retry_pending_restores(
-    pending_restores: &mut HashMap<PhysicalDeviceKey, PendingRestore>,
+    slots: &mut HashMap<PhysicalDeviceKey, GestureSlot>,
     registry: &openlogi_hid::ChannelRegistry,
     now: Instant,
 ) {
-    let keys: Vec<_> = pending_restores
+    let keys: Vec<_> = slots
         .iter()
-        .filter(|(_, pending)| pending.retry_at <= now)
+        .filter(|(_, slot)| {
+            slot.recovery()
+                .and_then(|recovery| recovery.pending_restore.as_ref())
+                .is_some_and(|pending| pending.retry_at <= now)
+        })
         .map(|(key, _)| key.clone())
         .collect();
     for key in keys {
-        let Some(pending) = pending_restores.remove(&key) else {
+        let Some(GestureSlot::Recovering(mut recovery)) = slots.remove(&key) else {
+            continue;
+        };
+        let Some(pending) = recovery.pending_restore.take() else {
+            slots.insert(key, GestureSlot::Recovering(recovery));
             continue;
         };
         if let CaptureSessionOutcome::RestorePending(token) = pending.token.retry(registry).await {
-            pending_restores.insert(
-                key,
-                PendingRestore {
-                    token,
-                    retry_at: Instant::now() + RETRY_DELAY,
-                },
-            );
+            recovery.pending_restore = Some(PendingRestore {
+                token,
+                retry_at: Instant::now() + RETRY_DELAY,
+            });
+        }
+        if !recovery.is_empty() {
+            slots.insert(key, GestureSlot::Recovering(recovery));
         }
     }
 }
@@ -311,48 +318,55 @@ async fn retry_pending_restores(
 fn next_deadline(
     requests: ReceiverRequestState,
     device_io_allowed: bool,
-    pending_restores: &HashMap<PhysicalDeviceKey, PendingRestore>,
-    restart_after: &HashMap<PhysicalDeviceKey, Instant>,
+    slots: &HashMap<PhysicalDeviceKey, GestureSlot>,
 ) -> Option<Instant> {
     if requests.any() || !device_io_allowed {
         return None;
     }
-    pending_restores
+    slots
         .values()
-        .map(|pending| pending.retry_at)
-        .chain(restart_after.values().copied())
+        .filter_map(GestureSlot::recovery)
+        .flat_map(|recovery| {
+            recovery
+                .pending_restore
+                .as_ref()
+                .map(|pending| pending.retry_at)
+                .into_iter()
+                .chain(recovery.restart_at)
+        })
         .min()
-}
-
-fn restart_deadline(unexpected: bool, now: Instant) -> Option<Instant> {
-    unexpected.then_some(now + RETRY_DELAY)
 }
 
 impl GestureManagerState {
     fn new(outputs: GestureOutputs) -> Self {
         Self {
-            sessions: HashMap::new(),
-            pending_restores: HashMap::new(),
-            restart_after: HashMap::new(),
+            slots: HashMap::new(),
             input_dispatcher: InputDispatcher::new(outputs),
             lease: std::sync::Weak::new(),
         }
     }
 
     fn deadline(&self, requests: ReceiverRequestState, device_io_allowed: bool) -> Option<Instant> {
-        next_deadline(
-            requests,
-            device_io_allowed,
-            &self.pending_restores,
-            &self.restart_after,
-        )
+        next_deadline(requests, device_io_allowed, &self.slots)
     }
 
     fn expedite_pending_restores(&mut self) {
         let now = Instant::now();
-        for pending in self.pending_restores.values_mut() {
-            pending.retry_at = now;
+        for slot in self.slots.values_mut() {
+            if let Some(pending) = slot
+                .recovery_mut()
+                .and_then(|recovery| recovery.pending_restore.as_mut())
+            {
+                pending.retry_at = now;
+            }
         }
+    }
+
+    fn has_pending_restores(&self) -> bool {
+        self.slots.values().any(|slot| {
+            slot.recovery()
+                .is_some_and(|recovery| recovery.pending_restore.is_some())
+        })
     }
 
     async fn reconcile(
@@ -376,55 +390,68 @@ impl GestureManagerState {
         } else {
             published.as_slice()
         };
-        for (key, session) in &mut self.sessions {
+        for (key, slot) in &mut self.slots {
+            let Some(session) = slot.session_mut() else {
+                continue;
+            };
             let wanted = wanted
                 .iter()
                 .find(|plan| plan.target.physical_key == *key)
                 .map(|plan| (&plan.target, &plan.dispatch));
             reconcile_session(session, wanted, &mut self.input_dispatcher);
         }
-        self.restart_after.retain(|key, _| {
-            published
+        self.slots.retain(|key, slot| {
+            let Some(recovery) = slot.recovery_mut() else {
+                return true;
+            };
+            if !published
                 .iter()
                 .any(|plan| plan.target.physical_key == *key)
+            {
+                recovery.restart_at = None;
+            }
+            !recovery.is_empty()
         });
 
         // Firmware ownership outlives the desired plan. Keep the strong lease
         // through successor spawning so restore→rearm is uninterrupted.
-        let due_restore = self
-            .pending_restores
-            .values()
-            .any(|pending| pending.retry_at <= now);
+        let due_restore = self.slots.values().any(|slot| {
+            slot.recovery()
+                .and_then(|recovery| recovery.pending_restore.as_ref())
+                .is_some_and(|pending| pending.retry_at <= now)
+        });
         let restore_lease = if due_restore {
             acquire_session_lease(receiver_access, &mut self.lease)
         } else {
             None
         };
         if restore_lease.is_some() {
-            retry_pending_restores(&mut self.pending_restores, &channels.registry, now).await;
+            retry_pending_restores(&mut self.slots, &channels.registry, now).await;
         }
 
         for plan in wanted {
             let key = &plan.target.physical_key;
-            if self.sessions.contains_key(key) || self.pending_restores.contains_key(key) {
+            if self.slots.get(key).is_some_and(|slot| match slot {
+                GestureSlot::Running(_) => true,
+                GestureSlot::Recovering(recovery) => {
+                    recovery.pending_restore.is_some()
+                        || recovery.restart_at.is_some_and(|deadline| deadline > now)
+                }
+            }) {
                 continue;
             }
-            if self
-                .restart_after
-                .get(key)
-                .is_some_and(|deadline| *deadline > now)
-            {
-                continue;
-            }
-            self.restart_after.remove(key);
             let Some(session_lease) = acquire_session_lease(receiver_access, &mut self.lease)
             else {
-                self.restart_after.insert(key.clone(), now + RETRY_DELAY);
+                self.slots.insert(
+                    key.clone(),
+                    GestureSlot::recovering(None, Some(now + RETRY_DELAY)),
+                );
                 continue;
             };
             let id = HidppSessionId::new(&plan.dispatch.config_key);
             let session = spawn_session(id, plan.clone(), session_lease, channels);
-            self.sessions.insert(key.clone(), session);
+            self.slots
+                .insert(key.clone(), GestureSlot::running(session));
         }
     }
 
@@ -438,7 +465,10 @@ impl GestureManagerState {
         match event {
             SessionEvent::Input(event) => {
                 let key = &event.physical_key;
-                if device_io_allowed && let Some(session) = self.sessions.get_mut(key) {
+                if device_io_allowed
+                    && let Some(session) =
+                        self.slots.get_mut(key).and_then(GestureSlot::session_mut)
+                {
                     reconcile_published_session(
                         key,
                         session,
@@ -447,7 +477,7 @@ impl GestureManagerState {
                         &mut self.input_dispatcher,
                     );
                 }
-                let live = self.sessions.get(key);
+                let live = self.slots.get(key).and_then(GestureSlot::session);
                 let dispatch_context = dispatch_context_for(&event.session, live);
                 if let Some((session, plan)) = dispatch_context {
                     self.input_dispatcher.dispatch(session, plan, event.input);
@@ -466,33 +496,31 @@ impl GestureManagerState {
                 // Completion is queued behind every input the listener
                 // accepted during restoration, so cancellation cannot
                 // overtake the last diverted edge.
-                let Some((CompletionAction::Remove { unexpected }, dispatch_session)) = self
-                    .sessions
-                    .get(key)
-                    .map(|session| (session.completion(&done.session), session.id().clone()))
+                let now = Instant::now();
+                let pending_restore = done.pending_restore.map(|token| PendingRestore {
+                    token,
+                    retry_at: now + RETRY_DELAY,
+                });
+                let restart_at = device_io_allowed.then_some(now + RETRY_DELAY);
+                let Some(slot) = self.slots.get_mut(key) else {
+                    return false;
+                };
+                let Some((dispatch_session, unexpected)) =
+                    slot.complete(&done.session, pending_restore, restart_at)
                 else {
                     return false;
                 };
-                if let Some(pending) = done.pending_restore {
-                    self.pending_restores.insert(
-                        key.clone(),
-                        PendingRestore {
-                            token: pending,
-                            retry_at: Instant::now() + RETRY_DELAY,
-                        },
-                    );
-                }
+                let recovery_finished = slot.recovery().is_some_and(CaptureRecovery::is_empty);
                 self.input_dispatcher.cancel_session(&dispatch_session);
-                if device_io_allowed
-                    && let Some(deadline) = restart_deadline(unexpected, Instant::now())
-                {
-                    self.restart_after.insert(key.clone(), deadline);
+                if unexpected && device_io_allowed {
                     warn!(
                         key = key.as_str(),
                         "capture session ended unexpectedly, delaying re-arm"
                     );
                 }
-                self.sessions.remove(key);
+                if recovery_finished {
+                    self.slots.remove(key);
+                }
                 true
             }
         }
@@ -579,7 +607,7 @@ async fn manage(
             },
             open = wait_for_registry_change(
                 &mut registry_changes,
-                !state.pending_restores.is_empty(),
+                state.has_pending_restores(),
             ) => {
                 if !open {
                     return;
