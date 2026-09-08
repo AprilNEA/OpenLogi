@@ -471,7 +471,7 @@ impl SmartShiftPanel {
                                             &key,
                                             GestureSensitivity::DEFAULT,
                                         );
-                                        cx.emit(StateEvent::SettingsChanged);
+                                        cx.emit(StateEvent::DeviceConfigChanged(key));
                                     });
                                 }
                             }
@@ -541,7 +541,7 @@ impl SmartShiftPanel {
                                             &key,
                                             GestureAxisBias::DEFAULT,
                                         );
-                                        cx.emit(StateEvent::SettingsChanged);
+                                        cx.emit(StateEvent::DeviceConfigChanged(key));
                                     });
                                 }
                             }
@@ -612,7 +612,7 @@ impl SmartShiftPanel {
                                             &key,
                                             ThumbwheelSensitivity::DEFAULT,
                                         );
-                                        cx.emit(StateEvent::SettingsChanged);
+                                        cx.emit(StateEvent::DeviceConfigChanged(key));
                                     });
                                 }
                             }

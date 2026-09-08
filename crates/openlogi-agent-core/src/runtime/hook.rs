@@ -145,6 +145,9 @@ impl HoldState {
             press,
         });
         self.swipe.begin_with_config(sensitivity, axis_bias);
+        // OS pointer deltas have no hardware contact-kick packet — do not
+        // discard the first genuine move as if it were a thumb-press jump.
+        self.swipe.clear_contact_kick_pending();
     }
 
     /// Feed a pointer-move delta into the active hold, tagging a committed swipe

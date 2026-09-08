@@ -1009,17 +1009,29 @@ fn handle_reprog_with_gesture_buttons(
                     // over) the hold. A source not down in the previous event
                     // is a fresh touch, so the panel's contact-jump discard
                     // applies; one that was already held has had its jump
-                    // dropped during the overlap.
+                    // dropped during the overlap — clear the accumulator's
+                    // contact-kick too so the first real post-takeover delta
+                    // is kept.
                     match held.first() {
-                        Some(&(cid, button)) => begin_hold(
-                            cid,
-                            button,
-                            held.len() > 1,
-                            cid == reprog_controls::HAPTIC_PANEL_CID
-                                && !acc.gestures_down.contains(&cid),
-                            acc.sensitivity,
-                            acc.axis_bias,
-                        ),
+                        Some(&(cid, button)) => {
+                            let already_held = acc.gestures_down.contains(&cid);
+                            let mut hold = begin_hold(
+                                cid,
+                                button,
+                                held.len() > 1,
+                                cid == reprog_controls::HAPTIC_PANEL_CID && !already_held,
+                                acc.sensitivity,
+                                acc.axis_bias,
+                            );
+                            if already_held
+                                && let HoldState::Holding {
+                                    ref mut swipe, ..
+                                } = hold
+                            {
+                                swipe.clear_contact_kick_pending();
+                            }
+                            hold
+                        }
                         None => HoldState::Idle,
                     }
                 }
