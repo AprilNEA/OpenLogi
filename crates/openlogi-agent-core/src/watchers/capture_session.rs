@@ -32,27 +32,27 @@ pub(super) enum CompletionAction {
     Remove { unexpected: bool },
 }
 
-enum SessionPhase {
-    Active(oneshot::Sender<()>),
+enum SessionPhase<Stop> {
+    Active(oneshot::Sender<Stop>),
     Draining,
 }
 
 /// One capture epoch, including its hardware identity, dispatch state and
 /// acknowledged teardown phase.
-pub(super) struct CaptureSession<Target, Dispatch> {
+pub(super) struct CaptureSession<Target, Dispatch, Stop = ()> {
     id: HidppSessionId,
     target: Target,
     dispatch: Dispatch,
-    phase: SessionPhase,
+    phase: SessionPhase<Stop>,
 }
 
-impl<Target, Dispatch> CaptureSession<Target, Dispatch> {
+impl<Target, Dispatch, Stop> CaptureSession<Target, Dispatch, Stop> {
     /// Begin tracking an active capture task.
     pub(super) fn active(
         id: HidppSessionId,
         target: Target,
         dispatch: Dispatch,
-        stop: oneshot::Sender<()>,
+        stop: oneshot::Sender<Stop>,
     ) -> Self {
         Self {
             id,
@@ -108,11 +108,15 @@ impl<Target, Dispatch> CaptureSession<Target, Dispatch> {
     }
 }
 
-impl<Target: PartialEq, Dispatch: Clone + PartialEq> CaptureSession<Target, Dispatch> {
+impl<Target: PartialEq, Dispatch: Clone + PartialEq, Stop> CaptureSession<Target, Dispatch, Stop> {
     /// Reconcile against the latest wanted target and dispatch state. A target
     /// change begins teardown exactly once; dispatch-only changes hot-refresh
     /// the plan while preserving the hardware epoch.
-    pub(super) fn reconcile(&mut self, wanted: Option<(&Target, &Dispatch)>) -> ReconcileAction {
+    pub(super) fn reconcile_with(
+        &mut self,
+        wanted: Option<(&Target, &Dispatch)>,
+        stop_for_change: impl FnOnce(&Target, Option<&Target>) -> Stop,
+    ) -> ReconcileAction {
         if !self.is_active() {
             return ReconcileAction::None;
         }
@@ -125,12 +129,20 @@ impl<Target: PartialEq, Dispatch: Clone + PartialEq> CaptureSession<Target, Disp
             self.dispatch.clone_from(dispatch);
             return ReconcileAction::DispatchChanged;
         }
+        let stop_command = stop_for_change(&self.target, wanted.map(|(target, _)| target));
         let SessionPhase::Active(stop) = std::mem::replace(&mut self.phase, SessionPhase::Draining)
         else {
             return ReconcileAction::None;
         };
-        let _ = stop.send(());
+        let _ = stop.send(stop_command);
         ReconcileAction::Retiring
+    }
+}
+
+impl<Target: PartialEq, Dispatch: Clone + PartialEq> CaptureSession<Target, Dispatch> {
+    /// Reconcile a session whose teardown command carries no additional intent.
+    pub(super) fn reconcile(&mut self, wanted: Option<(&Target, &Dispatch)>) -> ReconcileAction {
+        self.reconcile_with(wanted, |_, _| ())
     }
 }
 

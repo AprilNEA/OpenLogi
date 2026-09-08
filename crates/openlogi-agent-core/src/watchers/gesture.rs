@@ -30,8 +30,8 @@ use std::time::Duration;
 use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_core::scroll::ScrollDelta;
 use openlogi_hid::{
-    CaptureChannel, CaptureSessionOutcome, CapturedInput, DeviceIoGate, PendingCaptureRestore,
-    run_capture_session_with_registry_spec,
+    CaptureChannel, CaptureSessionOutcome, CaptureSessionStop, CapturedInput, DeviceIoGate,
+    PendingCaptureRestore, run_capture_session_with_registry_spec,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
@@ -120,7 +120,7 @@ pub fn spawn(
     });
 }
 
-type RunningSession = CaptureSession<CaptureTarget, DispatchPlan>;
+type RunningSession = CaptureSession<CaptureTarget, DispatchPlan, CaptureSessionStop>;
 
 struct CapturedEvent {
     physical_key: PhysicalDeviceKey,
@@ -223,11 +223,24 @@ fn reconcile_session(
     wanted: Option<(&CaptureTarget, &DispatchPlan)>,
     dispatcher: &mut InputDispatcher,
 ) {
-    if session.reconcile(wanted) == ReconcileAction::DispatchChanged {
+    if session.reconcile_with(wanted, stop_for_target_change) == ReconcileAction::DispatchChanged {
         dispatcher.cancel_session(session.id());
         let config_key = session.dispatch().config_key.clone();
         session.rekey(&config_key);
     }
+}
+
+fn stop_for_target_change(
+    current: &CaptureTarget,
+    wanted: Option<&CaptureTarget>,
+) -> CaptureSessionStop {
+    wanted.map_or(CaptureSessionStop::Shutdown, |next| {
+        if next.route == current.route {
+            CaptureSessionStop::Shutdown
+        } else {
+            CaptureSessionStop::Handoff(next.route.clone())
+        }
+    })
 }
 
 /// Reconcile one tracked slot directly against the latest publication. Input
@@ -285,6 +298,7 @@ fn acquire_session_lease(
 async fn retry_pending_restores(
     pending_restores: &mut HashMap<PhysicalDeviceKey, PendingRestore>,
     registry: &openlogi_hid::ChannelRegistry,
+    wanted: &[DeviceCapturePlan],
     now: Instant,
 ) {
     let keys: Vec<_> = pending_restores
@@ -296,7 +310,16 @@ async fn retry_pending_restores(
         let Some(pending) = pending_restores.remove(&key) else {
             continue;
         };
-        if let CaptureSessionOutcome::RestorePending(token) = pending.token.retry(registry).await {
+        let outcome = match wanted.iter().find(|plan| plan.target.physical_key == key) {
+            Some(plan) => {
+                pending
+                    .token
+                    .retry_via(plan.target.route.clone(), registry)
+                    .await
+            }
+            None => pending.token.retry(registry).await,
+        };
+        if let CaptureSessionOutcome::RestorePending(token) = outcome {
             pending_restores.insert(
                 key,
                 PendingRestore {
@@ -401,7 +424,8 @@ impl GestureManagerState {
             None
         };
         if restore_lease.is_some() {
-            retry_pending_restores(&mut self.pending_restores, &channels.registry, now).await;
+            retry_pending_restores(&mut self.pending_restores, &channels.registry, wanted, now)
+                .await;
         }
 
         for plan in wanted {

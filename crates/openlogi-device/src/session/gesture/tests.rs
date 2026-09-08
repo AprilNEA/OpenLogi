@@ -80,6 +80,167 @@ async fn pending_restore_waits_for_a_replacement_then_undiverts_through_it() {
 }
 
 #[tokio::test]
+async fn pending_restore_follows_a_device_to_another_receiver_route() {
+    let retired_route = DeviceRoute::Bolt {
+        receiver_uid: "receiver-a".to_owned(),
+        slot: 4,
+    };
+    let successor_route = DeviceRoute::Bolt {
+        receiver_uid: "receiver-b".to_owned(),
+        slot: 2,
+    };
+    let (retired_raw, retired_handle) = ScriptedRawHidChannel::with_responder(|_| None);
+    let retired_channel = scripted_channel(retired_raw).await;
+    let retired = SharedChannel::new(retired_channel.clone(), retired_route.clone());
+    let pending = PendingCaptureRestore::new(
+        &retired,
+        ReprogRestore::new(
+            0x22,
+            vec![ArmedReporting {
+                cid: reprog_controls::GESTURE_BUTTON_CID,
+                original: reporting(false, None),
+            }],
+        ),
+        None,
+    )
+    .expect("one diverted control should require restoration");
+    let registry = ChannelRegistry::default();
+    registry.replace_node(
+        NodeId::from("receiver-a-node".to_owned()),
+        [retired_route],
+        retired_channel,
+    );
+    let (successor_raw, successor_handle) =
+        ScriptedRawHidChannel::with_responder(|request| Some(request.to_vec()));
+    registry.replace_node(
+        NodeId::from("receiver-b-node".to_owned()),
+        [successor_route.clone()],
+        scripted_channel(successor_raw).await,
+    );
+
+    assert!(matches!(
+        restore_after_stop(
+            CaptureStop::Handoff(successor_route),
+            Some(pending),
+            &retired,
+            Some(&registry),
+        )
+        .await,
+        CaptureSessionOutcome::Restored
+    ));
+    assert!(
+        retired_handle.written_reports().is_empty(),
+        "handoff must not time out against the receiver the device left"
+    );
+    assert_eq!(
+        successor_handle.written_reports().len(),
+        1,
+        "native reporting must be restored before capture arms on the successor route"
+    );
+}
+
+#[tokio::test]
+async fn pending_restore_remembers_a_successor_route_that_appears_later() {
+    let retired_route = DeviceRoute::Bolt {
+        receiver_uid: "receiver-a".to_owned(),
+        slot: 4,
+    };
+    let successor_route = DeviceRoute::Bolt {
+        receiver_uid: "receiver-b".to_owned(),
+        slot: 2,
+    };
+    let (retired_raw, _) = ScriptedRawHidChannel::with_responder(|_| None);
+    let retired = SharedChannel::new(scripted_channel(retired_raw).await, retired_route);
+    let pending = PendingCaptureRestore::new(
+        &retired,
+        ReprogRestore::new(
+            0x22,
+            vec![ArmedReporting {
+                cid: reprog_controls::GESTURE_BUTTON_CID,
+                original: reporting(false, None),
+            }],
+        ),
+        None,
+    )
+    .expect("one diverted control should require restoration");
+    let registry = ChannelRegistry::default();
+
+    let pending = match pending.retry_via(successor_route.clone(), &registry).await {
+        CaptureSessionOutcome::RestorePending(pending) => pending,
+        CaptureSessionOutcome::Restored => {
+            panic!("handoff must remain pending until the successor route is published")
+        }
+    };
+    let (successor_raw, successor_handle) =
+        ScriptedRawHidChannel::with_responder(|request| Some(request.to_vec()));
+    registry.replace_node(
+        NodeId::from("receiver-b-node".to_owned()),
+        [successor_route],
+        scripted_channel(successor_raw).await,
+    );
+
+    assert!(matches!(
+        pending.retry(&registry).await,
+        CaptureSessionOutcome::Restored
+    ));
+    assert_eq!(
+        successor_handle.written_reports().len(),
+        1,
+        "later retries must keep following the elected successor route"
+    );
+}
+
+#[tokio::test]
+async fn pending_handoff_can_follow_the_mouse_back_to_its_original_route() {
+    let retired_route = DeviceRoute::Bolt {
+        receiver_uid: "receiver-a".to_owned(),
+        slot: 4,
+    };
+    let absent_successor_route = DeviceRoute::Bolt {
+        receiver_uid: "receiver-b".to_owned(),
+        slot: 2,
+    };
+    let (retired_raw, retired_handle) =
+        ScriptedRawHidChannel::with_responder(|request| Some(request.to_vec()));
+    let retired_channel = scripted_channel(retired_raw).await;
+    let retired = SharedChannel::new(retired_channel.clone(), retired_route.clone());
+    let pending = PendingCaptureRestore::new(
+        &retired,
+        ReprogRestore::new(
+            0x22,
+            vec![ArmedReporting {
+                cid: reprog_controls::GESTURE_BUTTON_CID,
+                original: reporting(false, None),
+            }],
+        ),
+        None,
+    )
+    .expect("one diverted control should require restoration");
+    let registry = ChannelRegistry::default();
+    registry.replace_node(
+        NodeId::from("receiver-a-node".to_owned()),
+        [retired_route.clone()],
+        retired_channel,
+    );
+
+    let pending = match pending.retry_via(absent_successor_route, &registry).await {
+        CaptureSessionOutcome::RestorePending(pending) => pending,
+        CaptureSessionOutcome::Restored => {
+            panic!("handoff must remain pending while the elected route is absent")
+        }
+    };
+    assert!(matches!(
+        pending.retry_via(retired_route, &registry).await,
+        CaptureSessionOutcome::Restored
+    ));
+    assert_eq!(
+        retired_handle.written_reports().len(),
+        1,
+        "a rapid route switch back must restore through the latest live route"
+    );
+}
+
+#[tokio::test]
 async fn restore_retries_when_inventory_changes_during_an_awaited_write() {
     let route = DeviceRoute::Direct {
         vendor_id: 0x046d,

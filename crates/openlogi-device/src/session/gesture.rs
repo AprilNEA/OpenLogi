@@ -55,6 +55,16 @@ pub use super::capture_restore::{
 use crate::reprog_controls::{self, RawControlEvent, ReprogControlsV4};
 use crate::thumbwheel::{self, Thumbwheel, ThumbwheelInfo, WheelDirection, WheelResolution};
 
+/// Why the capture manager is asking an active gesture session to stop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CaptureSessionStop {
+    /// Capture is no longer wanted, or its controls changed on the same route.
+    Shutdown,
+    /// The same physical device moved to another route. Its firmware state
+    /// must be restored through that route before the successor arms.
+    Handoff(DeviceRoute),
+}
+
 /// One input captured from the active device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CapturedInput {
@@ -235,7 +245,7 @@ pub async fn run_capture_session(
     route: DeviceRoute,
     spec: CaptureSpec,
     sink: mpsc::UnboundedSender<CapturedInput>,
-    shutdown: oneshot::Receiver<()>,
+    shutdown: oneshot::Receiver<CaptureSessionStop>,
     channel_slot: CaptureChannel,
     device_io: DeviceIoGate,
 ) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
@@ -261,7 +271,7 @@ pub async fn run_capture_session_with_registry_spec(
     route: DeviceRoute,
     spec: CaptureSpec,
     sink: mpsc::UnboundedSender<CapturedInput>,
-    shutdown: oneshot::Receiver<()>,
+    shutdown: oneshot::Receiver<CaptureSessionStop>,
     channel_slot: CaptureChannel,
     registry: &ChannelRegistry,
     device_io: DeviceIoGate,
@@ -285,7 +295,7 @@ async fn run_capture_session_on(
     shared: SharedChannel,
     spec: CaptureSpec,
     sink: mpsc::UnboundedSender<CapturedInput>,
-    shutdown: oneshot::Receiver<()>,
+    shutdown: oneshot::Receiver<CaptureSessionStop>,
     channel_slot: CaptureChannel,
     registry: Option<&ChannelRegistry>,
     device_io: DeviceIoGate,
@@ -600,7 +610,7 @@ struct CaptureMonitor<'a> {
 async fn monitor_capture(
     context: CaptureMonitor<'_>,
     wireless: Option<WirelessDeviceStatusFeature>,
-    shutdown: oneshot::Receiver<()>,
+    shutdown: oneshot::Receiver<CaptureSessionStop>,
     mut device_io: DeviceIoGate,
 ) -> CaptureStop {
     let mut wake_events = wireless.as_ref().map(EmittingFeature::listen);
@@ -639,12 +649,17 @@ async fn monitor_capture(
                 info!(index = context.device_index, "inventory replaced or removed capture channel — restarting session");
                 return transition;
             }
-            _ = &mut shutdown => {
+            requested = &mut shutdown => {
                 // Shutdown and inventory replacement can become ready on the
                 // same turn. Prefer the typed channel transition so teardown
                 // never blindly writes through a transport already known to
                 // be obsolete.
-                return stop_for_current_publication(context.registry, context.shared);
+                return match requested {
+                    Ok(CaptureSessionStop::Handoff(route)) => CaptureStop::Handoff(route),
+                    Ok(CaptureSessionStop::Shutdown) | Err(_) => {
+                        stop_for_current_publication(context.registry, context.shared)
+                    }
+                };
             }
             event = async {
                 match wake_events.as_ref() {

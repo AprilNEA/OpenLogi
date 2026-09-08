@@ -57,12 +57,15 @@ impl ReprogRestore {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CaptureStop {
     /// The owner deliberately requested teardown.
     Shutdown,
     /// Inventory removed or replaced the channel that armed capture.
     ChannelChanged,
+    /// The same physical device moved to another route. Restore through the
+    /// successor route instead of timing out against the retired one.
+    Handoff(DeviceRoute),
 }
 
 /// Whether a retry may use the transport on which capture originally ran.
@@ -177,6 +180,30 @@ impl PendingCaptureRestore {
     /// every awaited restore write. A concurrent replacement returns this
     /// token as pending so the new winner is restored on the next attempt.
     pub async fn retry(self, registry: &ChannelRegistry) -> CaptureSessionOutcome {
+        self.retry_current_route(registry).await
+    }
+
+    /// Retry through a newly elected route to the same physical device.
+    ///
+    /// The caller owns physical identity and must only supply a route resolved
+    /// for the device whose firmware this token owns. The route becomes the
+    /// fallback for later retries, so repeated host switches can keep moving
+    /// restoration toward the device's latest live transport.
+    pub async fn retry_via(
+        mut self,
+        route: DeviceRoute,
+        registry: &ChannelRegistry,
+    ) -> CaptureSessionOutcome {
+        self.route = route;
+        // Physical identity elected this route. If a rapid switch returns to
+        // the still-current channel that originally armed capture, restoring
+        // there is now safe; ordinary channel-replacement retries retain the
+        // stricter replacement-only policy.
+        self.retired_policy = RetiredChannelPolicy::CurrentAllowed;
+        self.retry_current_route(registry).await
+    }
+
+    async fn retry_current_route(self, registry: &ChannelRegistry) -> CaptureSessionOutcome {
         let Some(current) = registry.lookup(&self.route) else {
             return CaptureSessionOutcome::RestorePending(self);
         };
@@ -278,6 +305,15 @@ pub(crate) async fn restore_after_stop(
             Some(registry) => pending.retry(registry).await,
             None => CaptureSessionOutcome::RestorePending(pending),
         },
+        CaptureStop::Handoff(route) => {
+            if let Some(registry) = registry {
+                pending.retry_via(route, registry).await
+            } else {
+                let mut pending = pending;
+                pending.route = route;
+                CaptureSessionOutcome::RestorePending(pending)
+            }
+        }
     }
 }
 
