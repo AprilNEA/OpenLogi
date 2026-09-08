@@ -59,10 +59,12 @@ nix build github:AprilNEA/OpenLogi#openlogi
 
 ## Build from source
 
-Pre-built `.deb` and `.rpm` packages are available on the
-[releases page](https://github.com/AprilNEA/OpenLogi/releases/latest) — see
-the main [README](../README.md#linux) for the package-based install. To build
-from source instead, use the stable Rust toolchain:
+Pre-built `.deb`, `.rpm`, and pacman `.pkg.tar.zst` packages are available on
+the [releases page](https://github.com/AprilNEA/OpenLogi/releases/latest) — see
+the main [README](../README.md#linux) for the package-based install. Arch users
+can install [`openlogi-bin`](https://aur.archlinux.org/packages/openlogi-bin)
+from the AUR instead, which tracks releases automatically. To build from source,
+use the stable Rust toolchain:
 
 ```sh
 git clone https://github.com/AprilNEA/OpenLogi
@@ -181,5 +183,5 @@ openlogi-desktop
 
 | Limitation | Status |
 |---|---|
-| Wayland: per-application profile switching | Requires XWayland (`WM_CLASS` lookup uses X11) |
+| Wayland: per-application profile switching | Native on GNOME (bundled extension, `gnome-extensions enable` required) and wlroots compositors; other compositors need XWayland |
 | Button capture: middle / mode-shift / thumbwheel | Side buttons only today |

@@ -48,7 +48,7 @@ OpenLogi にできて Options+ にできないこと：
 
 - Logi Bolt / Unifying レシーバー、Bluetooth、有線で接続されたデバイスに対応し、バッテリー残量と充電状態を表示
 - OS 入力フックによるボタン再マッピング：組み込みアクションカタログ + カスタムキーボードショートカット（TOML で作成）¹
-- アプリごとのプロファイルオーバーレイ（フォーカスで自動切替；macOS + Windows、Linux は X11 / XWayland のみ）
+- アプリごとのプロファイルオーバーレイ（フォーカスで自動切替；macOS + Windows、Linux は GNOME（同梱の Shell 拡張機能）、wlroots 系コンポジタ、または X11 / XWayland）
 - Litra ライト：電源、明るさ、色温度。カメラの使用状況に連動した自動オン / オフも可能
 
 **マウス**
@@ -111,7 +111,9 @@ sudo dpkg -i openlogi_*.deb
 # Fedora / RHEL
 sudo rpm -i openlogi-*.rpm
 
-# Arch Linux
+# Arch Linux — AUR から（システムと一緒に更新されます）:
+paru -S openlogi-bin   # or: yay -S openlogi-bin
+# …またはリリースパッケージを直接インストール:
 sudo pacman -U openlogi-*.pkg.tar.zst
 ```
 

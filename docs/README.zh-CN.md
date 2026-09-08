@@ -48,7 +48,7 @@ OpenLogi 能做、而 Options+ 做不到的事：
 
 - 支持通过 Logi Bolt、Unifying 无线接收器、蓝牙或者有线连接的设备，并显示电池电量与充电状态
 - 经由 OS 输入钩子的按键重映射：内置动作目录 + 自定义键盘快捷键（TOML 编写）¹
-- 按应用的配置叠加层，应用获得焦点时自动切换（macOS + Windows；Linux 仅 X11 / XWayland）
+- 按应用的配置叠加层，应用获得焦点时自动切换（macOS + Windows；Linux 支持 GNOME（随附 Shell 扩展）、wlroots 合成器或 X11 / XWayland）
 - Litra 补光灯：开关、亮度、色温，还可跟随摄像头活动自动开关
 
 **鼠标**
@@ -111,7 +111,9 @@ sudo dpkg -i openlogi_*.deb
 # Fedora / RHEL
 sudo rpm -i openlogi-*.rpm
 
-# Arch Linux
+# Arch Linux — 从 AUR 安装（随系统一同更新）：
+paru -S openlogi-bin   # or: yay -S openlogi-bin
+# …或直接安装发布包：
 sudo pacman -U openlogi-*.pkg.tar.zst
 ```
 

@@ -1,0 +1,43 @@
+# Maintainer: AprilNEA <dev@aprilnea.me>
+# Contributor: Nilesh Kevlani <njkevlani@gmail.com>
+#
+# Template: release.yml's aur-publish job fills @PKGVER@ and the hash
+# placeholders from the release's SHA256SUMS. See README.md in this directory.
+pkgname=openlogi-bin
+pkgver=@PKGVER@
+pkgrel=1
+pkgdesc="Logitech HID++ device control — local-first alternative to Logi Options+"
+arch=('x86_64' 'aarch64')
+url="https://github.com/AprilNEA/OpenLogi"
+license=('Apache-2.0 OR MIT')
+depends=('dbus'
+         'fontconfig'
+         'gcc-libs'
+         'glibc'
+         'hicolor-icon-theme'
+         'libglvnd'
+         'libxcb'
+         'libxkbcommon'
+         'libxkbcommon-x11'
+         'vulkan-icd-loader'
+         'wayland')
+optdepends=('gnome-shell: per-app profile switching on GNOME Wayland (bundled extension)')
+provides=("openlogi=${pkgver}")
+conflicts=('openlogi')
+install=openlogi-bin.install
+# Prebuilt release binaries: keep makepkg from stripping or debug-splitting them.
+options=('!strip' '!debug')
+source_x86_64=("${url}/releases/download/v${pkgver}/openlogi-v${pkgver}-linux-amd64.pkg.tar.zst")
+source_aarch64=("${url}/releases/download/v${pkgver}/openlogi-v${pkgver}-linux-arm64.pkg.tar.zst")
+sha256sums_x86_64=('@SHA256_X86_64@')
+sha256sums_aarch64=('@SHA256_AARCH64@')
+
+package() {
+  cp -a "${srcdir}/usr" "${pkgdir}/usr"
+  # Releases up to v0.8.0 ship the udev rule under /etc; relocate it to the
+  # vendor directory so pacman's udev hook reloads and re-applies it.
+  if [[ -f "${srcdir}/etc/udev/rules.d/70-openlogi.rules" ]]; then
+    install -Dm644 "${srcdir}/etc/udev/rules.d/70-openlogi.rules" \
+      "${pkgdir}/usr/lib/udev/rules.d/70-openlogi.rules"
+  fi
+}

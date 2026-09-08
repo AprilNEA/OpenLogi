@@ -263,6 +263,14 @@ The Nix package uses the same shared resources and is declared in
 `packaging/linux/package.nix`; see the Nix package section above for its build
 commands.
 
+The AUR package `openlogi-bin` repackages the released `.pkg.tar.zst`; its
+template lives in `packaging/arch/openlogi-bin/` and is rendered and pushed by
+`release.yml`'s `aur-publish` job on each stable tag. The job stays skipped
+until the repository variable `AUR_PUBLISH_ENABLED` is `true` and the
+`OP_AUR_SECRET_ITEM` secret references a 1Password item whose
+`AUR_SSH_PRIVATE_KEY` field holds the base64-encoded (unencrypted) AUR SSH key
+— see the template's README for the coordination constraints.
+
 ## Release updater publishing
 
 Tagged releases still attach DMGs and `SHA256SUMS` to GitHub Releases for manual
