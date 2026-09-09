@@ -16,6 +16,7 @@
 use std::fmt;
 
 pub use openlogi_device_registry::LOGITECH_VENDOR_ID;
+pub use openlogi_device_registry::litra::is_litra_bluetooth_product_id;
 pub use openlogi_device_registry::receiver::{
     RECEIVERS, ReceiverBrand, ReceiverDescriptor, ReceiverProtocol, find_receiver,
 };

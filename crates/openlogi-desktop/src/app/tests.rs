@@ -130,6 +130,30 @@ fn connection_icon_matches_route() {
         connection_icon_path(None, None),
         "action-icons/bluetooth.svg"
     );
+    // A raw-HID Litra light has no HID++ transport table at all; its own
+    // product ID is the only signal of which transport it is on.
+    let litra_usb = DeviceRoute::RawHid {
+        vendor_id: 0x046d,
+        product_id: 0xc901,
+        usage_page: 0xff43,
+        usage_id: 0x0202,
+        identity: "serial:beam-1".into(),
+    };
+    let litra_bluetooth = DeviceRoute::RawHid {
+        vendor_id: 0x046d,
+        product_id: 0xb901,
+        usage_page: 0xff43,
+        usage_id: 0x0202,
+        identity: "serial:aa:bb:cc:dd:ee:ff".into(),
+    };
+    assert_eq!(
+        connection_icon_path(Some(&litra_usb), None),
+        "action-icons/usb.svg"
+    );
+    assert_eq!(
+        connection_icon_path(Some(&litra_bluetooth), None),
+        "action-icons/bluetooth.svg"
+    );
 }
 
 fn record(kind: DeviceKind, capabilities: Option<Capabilities>) -> DeviceRecord {

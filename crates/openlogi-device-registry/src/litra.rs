@@ -4,10 +4,14 @@ use crate::LOGITECH_VENDOR_ID;
 
 /// Stable driver-family identifier carried by standalone Litra inventory.
 pub const LITRA_DRIVER_ID: &str = "litra";
-/// Litra Glow product ID.
+/// Litra Glow product ID (USB).
 pub const LITRA_GLOW_PRODUCT_ID: u16 = 0xc900;
-/// Litra Beam product ID.
+/// Litra Beam product ID (USB).
 pub const LITRA_BEAM_PRODUCT_ID: u16 = 0xc901;
+/// Litra Glow product ID (BLT).
+pub const LITRA_GLOW_BLUETOOTH_PRODUCT_ID: u16 = 0xb900;
+/// Litra Beam product ID (BLT).
+pub const LITRA_BEAM_BLUETOOTH_PRODUCT_ID: u16 = 0xb901;
 /// Litra vendor usage page.
 pub const LITRA_USAGE_PAGE: u16 = 0xff43;
 /// Litra vendor usage ID.
@@ -56,9 +60,16 @@ impl LitraDescriptor {
 }
 
 /// All standalone Litra raw-HID identities supported by OpenLogi.
+///
+/// The Bluetooth entries share their USB counterpart's `registry_model_id`:
+/// it is the same physical product and asset artwork, addressed under a
+/// different product ID only because that is how it enumerates over that
+/// transport.
 pub const LITRA_DEVICES: &[LitraDescriptor] = &[
     LitraDescriptor::logitech(LITRA_GLOW_PRODUCT_ID, LitraModel::Glow, "8c900"),
     LitraDescriptor::logitech(LITRA_BEAM_PRODUCT_ID, LitraModel::Beam, "8c901"),
+    LitraDescriptor::logitech(LITRA_GLOW_BLUETOOTH_PRODUCT_ID, LitraModel::Glow, "8c900"),
+    LitraDescriptor::logitech(LITRA_BEAM_BLUETOOTH_PRODUCT_ID, LitraModel::Beam, "8c901"),
 ];
 
 /// Finds a Litra descriptor by its complete writable raw-HID identity.
@@ -81,6 +92,18 @@ pub fn find_litra(
 #[must_use]
 pub fn matches_litra(vendor_id: u16, product_id: u16, usage_page: u16, usage_id: u16) -> bool {
     find_litra(vendor_id, product_id, usage_page, usage_id).is_some()
+}
+
+/// Whether `product_id` is a Litra light's Bluetooth identity rather than its
+/// USB one. Used to pick a connection glyph: a raw-HID Litra route carries no
+/// other signal of which transport it is on, unlike an HID++ device's
+/// measured transport table.
+#[must_use]
+pub fn is_litra_bluetooth_product_id(product_id: u16) -> bool {
+    matches!(
+        product_id,
+        LITRA_GLOW_BLUETOOTH_PRODUCT_ID | LITRA_BEAM_BLUETOOTH_PRODUCT_ID
+    )
 }
 
 #[cfg(test)]
@@ -132,5 +155,28 @@ mod tests {
 
         assert_eq!(beam.model, LitraModel::Beam);
         assert_eq!(beam.registry_model_id, "8c901");
+    }
+
+    #[test]
+    fn a_bluetooth_beam_resolves_to_the_same_model_and_asset_as_its_usb_counterpart() {
+        let usb = find_litra(LOGITECH_VENDOR_ID, 0xc901, 0xff43, 0x0202).expect("USB Litra Beam");
+        let bluetooth =
+            find_litra(LOGITECH_VENDOR_ID, 0xb901, 0xff43, 0x0202).expect("Bluetooth Litra Beam");
+
+        assert_eq!(bluetooth.model, LitraModel::Beam);
+        assert_eq!(
+            bluetooth.registry_model_id, usb.registry_model_id,
+            "same physical product, same asset artwork, regardless of transport"
+        );
+    }
+
+    #[test]
+    fn only_the_bluetooth_product_ids_report_bluetooth() {
+        use super::is_litra_bluetooth_product_id;
+
+        assert!(is_litra_bluetooth_product_id(0xb900));
+        assert!(is_litra_bluetooth_product_id(0xb901));
+        assert!(!is_litra_bluetooth_product_id(0xc900));
+        assert!(!is_litra_bluetooth_product_id(0xc901));
     }
 }
