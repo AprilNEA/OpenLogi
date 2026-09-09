@@ -185,6 +185,7 @@ impl AppState {
     }
 
     /// Ask the agent to fire the macOS Input Monitoring prompt.
+    #[cfg(target_os = "macos")]
     pub fn request_input_monitoring_prompt(&self, fallback_to_pane: bool) {
         self.send_ipc(
             crate::services::ipc::Command::RequestInputMonitoringPrompt { fallback_to_pane },
@@ -192,6 +193,7 @@ impl AppState {
     }
 
     /// Ask the agent to fire the macOS Bluetooth prompt.
+    #[cfg(target_os = "macos")]
     pub fn request_bluetooth_prompt(&self, fallback_to_pane: bool) {
         self.send_ipc(crate::services::ipc::Command::RequestBluetoothPrompt { fallback_to_pane });
     }

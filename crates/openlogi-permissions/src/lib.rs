@@ -16,9 +16,9 @@
 //! **Input Monitoring** (opening HID devices via `IOHIDManager`), and
 //! **Bluetooth** (CoreBluetooth authorization so macOS can name OpenLogi
 //! Agent). The GUI must read those three statuses from the agent over IPC,
-//! never by querying this process. [`bluetooth`] still reports *this*
-//! process's CoreBluetooth state for diagnostics; it is not the agent's
-//! grant.
+//! never by querying this process. The macOS-only `bluetooth` helper still
+//! reports *this* process's CoreBluetooth state for diagnostics; it is not
+//! the agent's grant.
 //!
 //! Accessibility status is not read here: the agent owns the tap, so
 //! `openlogi_hook::has_accessibility` is the source of truth.
