@@ -167,7 +167,7 @@ Rules:
 
 The bundles declare macOS 13.0 (`MACOSX_DEPLOYMENT_TARGET` in the release
 workflows, `LSMinimumSystemVersion` in the `Info.plist` templates under
-`openlogi-desktop/bundle/`), but `objc2` generates every symbol a header
+`crates/openlogi-desktop/bundle/`), but `objc2` generates every symbol a header
 declares regardless of its `API_AVAILABLE(macos(N))`, and Rust has no
 `@available` check. A *function* newer than the floor merely crashes
 when called on an older macOS; an extern *static* — `SMAppServiceErrorDomain`

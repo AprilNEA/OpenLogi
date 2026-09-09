@@ -176,7 +176,8 @@ mod backend {
         benign: core::ffi::c_uint,
     ) -> Result<(), String> {
         result.or_else(|error| {
-            if is_benign(&error.domain().to_string(), error.code(), benign) {
+            let domain = error.domain().to_string();
+            if is_benign(&domain, error.code(), benign) {
                 Ok(())
             } else {
                 Err(error.localizedDescription().to_string())
