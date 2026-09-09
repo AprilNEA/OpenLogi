@@ -428,6 +428,26 @@ mod tests {
             "KEYBOARD_KEY_CIDS and ButtonId::KEYBOARD_KEYS live in different crates \
              and must list the same keys in the same order"
         );
+        // The roster check above projects the CID away, so a wrong CID passes
+        // it. Every neighbour here is a real control, so a single wrong digit
+        // diverts a different key rather than failing loudly.
+        assert_eq!(
+            KEYBOARD_KEY_CIDS,
+            [
+                (0x00e2, ButtonId::KeyBacklightDown),
+                (0x00e3, ButtonId::KeyBacklightUp),
+                (0x00d4, ButtonId::KeySearch),
+                (0x0103, ButtonId::KeyDictation),
+                (0x0108, ButtonId::KeyEmoji),
+                (0x010a, ButtonId::KeyScreenCapture),
+                (0x011c, ButtonId::KeyMicMute),
+                (0x00e5, ButtonId::KeyPlayPause),
+                (0x00e7, ButtonId::KeyMute),
+                (0x00e8, ButtonId::KeyVolumeDown),
+                (0x00e9, ButtonId::KeyVolumeUp),
+            ],
+            "each keyboard key's 0x1b04 control ID is a firmware contract"
+        );
     }
 
     #[test]
