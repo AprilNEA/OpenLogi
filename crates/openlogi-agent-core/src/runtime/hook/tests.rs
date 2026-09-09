@@ -57,6 +57,7 @@ fn test_dispatcher() -> (
             capture: Arc::new(RwLock::new(None)),
             registry: openlogi_hid::ChannelRegistry::default(),
             receiver_access: crate::receiver_access::ReceiverAccess::default(),
+            device_io: openlogi_hid::device_io_channel().1,
             action_ring,
         },
         buttons: owner.input(),
@@ -279,6 +280,7 @@ fn missing_unattributed_release_keeps_the_next_native_pair_balanced() {
     let hooks = Arc::new(RwLock::new(HookMaps {
         bindings: BTreeMap::new(),
         gestures: BTreeMap::from([(ButtonId::Back, BTreeMap::new())]),
+        ..HookMaps::default()
     }));
 
     assert_eq!(
