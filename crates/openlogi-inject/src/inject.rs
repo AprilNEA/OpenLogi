@@ -333,11 +333,18 @@ pub fn ax_navigate_browser(pid: i32, forward: bool) -> bool {
 
 /// Below this gap since an axis's last non-zero input, a new tick is treated
 /// as part of the same continuous scrolling gesture rather than an isolated
-/// one — mirrors `openlogi-agent-core::runtime::scroll::ANIMATION_DURATION`,
-/// the gesture motion window smooth-scroll already uses. Kept as a separate
-/// constant since this crate does not depend on agent-core; the two should
-/// stay equal.
-const GESTURE_IDLE_GAP: Duration = Duration::from_millis(100);
+/// one, and is not entitled to the isolated-tick visibility floor (it may
+/// legitimately emit zero while repaying an earlier floor's debt).
+///
+/// 500ms, not the 100ms of `openlogi-agent-core::runtime::scroll::ANIMATION_DURATION`
+/// this used to mirror: two deliberate taps closer together than that felt
+/// like one gesture to users but were being treated as two independently-
+/// isolated ones, each individually entitled to a guaranteed nonzero output —
+/// which is mathematically incompatible with bounded cumulative amplification
+/// for a sustained sequence of such taps (see design.md Decision 5). 500ms
+/// keeps back-to-back deliberate ticks classified as one gesture while still
+/// guaranteeing near-instant visibility after a genuine pause.
+const GESTURE_IDLE_GAP: Duration = Duration::from_millis(500);
 
 /// Integer scroll units ready for a platform API.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -620,11 +627,12 @@ mod tests {
         let first = quantizer.quantize_at(ScrollDelta::wheel_ticks(0.0, 0.2), 1.0, base);
         assert_eq!(first.y, 1, "the first isolated tick must be visible");
 
-        // A second isolated tick, same direction, well past the gesture gap -
-        // but the first tick's floor already "spent" more than its own 0.2
-        // true magnitude, so this one may legitimately repay that debt with
-        // zero output instead of flooring again (see design.md Decision 4).
-        let later = base + Duration::from_millis(200);
+        // A second, genuinely isolated tick (well past GESTURE_IDLE_GAP), same
+        // direction - but the first tick's floor already "spent" more than
+        // its own 0.2 true magnitude, so this one may legitimately repay that
+        // debt with zero output instead of flooring again (see design.md
+        // Decision 4).
+        let later = base + Duration::from_millis(600);
         let second = quantizer.quantize_at(ScrollDelta::wheel_ticks(0.0, 0.2), 1.0, later);
         assert_eq!(
             second.y, 0,
@@ -641,6 +649,26 @@ mod tests {
     }
 
     #[test]
+    fn a_quick_double_tap_is_treated_as_one_continuous_gesture() {
+        // Reproduces the second AI-review round's exact scenario: two ticks
+        // 200ms apart. Under GESTURE_IDLE_GAP=500ms this pair no longer
+        // qualifies as two separately-isolated ticks - it's one continuous
+        // gesture, where showing 0 while repaying debt is correct by design
+        // (see design.md Decision 5), not a guarantee violation.
+        let mut quantizer = ScrollQuantizer::default();
+        let base = Instant::now();
+        let first = quantizer.quantize_at(ScrollDelta::wheel_ticks(0.0, 0.2), 1.0, base);
+        assert_eq!(first.y, 1, "the first isolated tick must be visible");
+
+        let later = base + Duration::from_millis(200);
+        let second = quantizer.quantize_at(ScrollDelta::wheel_ticks(0.0, 0.2), 1.0, later);
+        assert_eq!(
+            second.y, 0,
+            "a quick follow-up tick within the gesture window may emit zero"
+        );
+    }
+
+    #[test]
     fn slowly_spaced_ticks_stay_within_one_unit_of_true_cumulative_distance() {
         let mut quantizer = ScrollQuantizer::default();
         let base = Instant::now();
@@ -649,11 +677,12 @@ mod tests {
 
         let total: i32 = (0..tick_count)
             .map(|i| {
-                // Every tick is >=100ms apart - a slowly-spaced, deliberate
-                // scrolling gesture where each tick individually qualifies as
-                // isolated. This is the exact scenario the AI review found
-                // amplifying without bound in the pre-revision code.
-                let now = base + Duration::from_millis(u64::from(i) * 150);
+                // Every tick is >=500ms apart (GESTURE_IDLE_GAP) - a
+                // slowly-spaced, deliberate scrolling gesture where each tick
+                // individually qualifies as isolated. This is the exact
+                // scenario the AI review found amplifying without bound in
+                // the pre-revision code.
+                let now = base + Duration::from_millis(u64::from(i) * 600);
                 quantizer
                     .quantize_at(ScrollDelta::wheel_ticks(0.0, per_tick), 1.0, now)
                     .y
@@ -675,9 +704,10 @@ mod tests {
         let base = Instant::now();
 
         for i in 0_u32..25 {
-            // Alternate isolated (>=100ms) and continuous (<100ms) spacing so
-            // both the floor and the debt-repayment clamp get exercised.
-            let gap_ms: u64 = if i % 3 == 0 { 150 } else { 20 };
+            // Alternate isolated (>=500ms, GESTURE_IDLE_GAP) and continuous
+            // (<500ms) spacing so both the floor and the debt-repayment
+            // clamp get exercised.
+            let gap_ms: u64 = if i % 3 == 0 { 600 } else { 20 };
             let now = base + Duration::from_millis(u64::from(i) * gap_ms);
             let output = quantizer.quantize_at(ScrollDelta::wheel_ticks(0.0, 0.2), 1.0, now);
             assert!(
@@ -713,6 +743,52 @@ mod tests {
             saw_negative,
             "a sustained genuine reversal must surface as negative output within a few ticks"
         );
+    }
+
+    #[test]
+    fn swept_magnitudes_and_gaps_never_reverse_and_stay_bounded() {
+        // Property-style sweep, not just the hand-picked examples above: for
+        // every combination of per-tick magnitude and inter-tick gap in the
+        // grid below (including values straddling the 500ms
+        // GESTURE_IDLE_GAP threshold on both sides), run a 60-tick same-
+        // direction sequence and confirm the two properties this design
+        // depends on hold everywhere, not just at the specific numbers used
+        // in the PR's own examples: no output ever opposes the input's
+        // sign, and cumulative output never drifts more than one unit from
+        // the true cumulative distance. Found by direct measurement: the
+        // observed worst case across this whole grid is exactly 1 unit of
+        // excess, at the smallest magnitude/gap combination (0.05, 50ms).
+        let magnitudes = [0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.49, 0.51, 0.6, 0.8, 0.95];
+        let gaps_ms = [50_u64, 90, 150, 300, 499, 500, 501, 600, 900, 1500];
+        let tick_count: u32 = 60;
+
+        for &magnitude in &magnitudes {
+            for &gap_ms in &gaps_ms {
+                let mut quantizer = ScrollQuantizer::default();
+                let base = Instant::now();
+                let mut total = 0_i32;
+
+                for i in 0..tick_count {
+                    let now = base + Duration::from_millis(u64::from(i) * gap_ms);
+                    let output =
+                        quantizer.quantize_at(ScrollDelta::wheel_ticks(0.0, magnitude), 1.0, now);
+                    assert!(
+                        output.y >= 0,
+                        "reversal at magnitude={magnitude} gap_ms={gap_ms} tick={i}: got {}",
+                        output.y
+                    );
+                    total += output.y;
+
+                    let true_cumulative = magnitude * f64::from(i + 1);
+                    let excess = f64::from(total) - true_cumulative.round();
+                    assert!(
+                        excess.abs() <= 1.0,
+                        "excess {excess} exceeded one unit at magnitude={magnitude} \
+                         gap_ms={gap_ms} tick={i} (total={total}, true={true_cumulative})"
+                    );
+                }
+            }
+        }
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
