@@ -163,6 +163,26 @@ Rules:
 
 [TN3127]: https://developer.apple.com/documentation/technotes/tn3127-inside-code-signing-requirements
 
+## Availability: the bindings do not know the deployment floor
+
+The bundles declare macOS 13.0 (`MACOSX_DEPLOYMENT_TARGET` in the release
+workflows, `LSMinimumSystemVersion` in the `Info.plist` templates under
+`openlogi-desktop/bundle/`), but `objc2` generates every symbol a header
+declares regardless of its `API_AVAILABLE(macos(N))`, and Rust has no
+`@available` check. A *function* newer than the floor merely crashes
+when called on an older macOS; an extern *static* — `SMAppServiceErrorDomain`
+is `macos(15.0)` while the rest of `SMAppService` is 13.0 — is bound by dyld
+at load, so the whole binary is refused before `main` (#1279; 0.8.2 and 0.8.3
+would not launch on 13 or 14). CI never runs on the floor release, so nothing
+catches it after the fact.
+
+Before using a generated symbol, read its `API_AVAILABLE` in the SDK header
+(`xcrun --show-sdk-path`). If it is newer than the floor: for a string
+constant, spell the documented value out (the error domain above is the
+literal `"SMAppServiceErrorDomain"` on every release since 13); for a
+function, gate the call on the OS version and resolve it with `dlsym` —
+never import it strongly.
+
 ## Raw `extern` blocks: only where no bindings exist
 
 Typed framework crates are the default; a hand-written `unsafe extern "C"` block
@@ -214,8 +234,8 @@ under a `SAFETY` comment. Where it currently lives on macOS:
 - `desktop/platform/os.rs` — reading AppKit's `NSAppearanceName` statics to set
   `NSApp.appearance`.
 - `desktop/platform/registration/macos.rs` — the `SMAppService` calls (all generated
-  bindings are `unsafe fn`s) and the `SMAppServiceErrorDomain` extern static.
-  Together with `os.rs`, the GUI's entire `unsafe` surface.
+  bindings are `unsafe fn`s). Together with `os.rs`, the GUI's entire `unsafe`
+  surface.
 - `camera/{capture,uvc/iokit}.rs` — the AVFoundation capture FFI and the IOKit
   USB plug-in; `uvc/iokit.rs` deliberately concentrates every `unsafe` of the
   macOS UVC backend so the descriptor parser above it is ordinary safe code.

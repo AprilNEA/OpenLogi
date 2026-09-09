@@ -116,6 +116,15 @@ mod backend {
 
     use super::{ServiceStatus, agent_service_label};
 
+    /// The domain `SMAppService` reports its errors in.
+    ///
+    /// Spelled out on purpose. The framework has used this string since
+    /// macOS 13 but exports it as the `SMAppServiceErrorDomain` symbol only
+    /// from macOS 15, and a binary that imports that symbol is refused by
+    /// dyld on 13 and 14 before `main` runs (#1279). Rust has no availability
+    /// checking to catch that, so the constant must never be linked here.
+    pub(super) const ERROR_DOMAIN: &str = "SMAppServiceErrorDomain";
+
     /// The framework handle for the agent service's embedded plist.
     #[expect(unsafe_code, reason = "plain ObjC class method via objc2 bindings")]
     fn service() -> Retained<SMAppService> {
@@ -162,25 +171,24 @@ mod backend {
     /// Treat exactly one framework error code — the "already in the desired
     /// state" one for the operation — as success. Matched by the framework's
     /// own constants, never bare ints.
-    #[expect(
-        unsafe_code,
-        reason = "reading a framework-provided immutable static NSString"
-    )]
     fn forgive(
         result: Result<(), Retained<NSError>>,
         benign: core::ffi::c_uint,
     ) -> Result<(), String> {
         result.or_else(|error| {
-            // SAFETY: the extern static is an immutable framework-owned
-            // NSString.
-            let domain_matches =
-                &*error.domain() == unsafe { objc2_service_management::SMAppServiceErrorDomain };
-            if domain_matches && isize::try_from(benign).is_ok_and(|code| error.code() == code) {
+            if is_benign(&error.domain().to_string(), error.code(), benign) {
                 Ok(())
             } else {
                 Err(error.localizedDescription().to_string())
             }
         })
+    }
+
+    /// Whether an error in `domain` with `code` is the framework's `benign`
+    /// outcome — and only in the framework's domain: the same small integers
+    /// mean something else entirely as POSIX or OSStatus codes.
+    pub(super) fn is_benign(domain: &str, code: isize, benign: core::ffi::c_uint) -> bool {
+        domain == ERROR_DOMAIN && isize::try_from(benign).is_ok_and(|benign| code == benign)
     }
 }
 
@@ -231,5 +239,29 @@ mod tests {
         // user's Login Items choice outranks both.
         assert_eq!(ensure_action(ServiceStatus::RequiresApproval, false), None);
         assert_eq!(ensure_action(ServiceStatus::RequiresApproval, true), None);
+    }
+
+    #[test]
+    fn only_the_frameworks_own_already_converged_code_is_forgiven() {
+        use objc2_service_management::{kSMErrorAlreadyRegistered, kSMErrorJobNotFound};
+
+        let already = isize::try_from(kSMErrorAlreadyRegistered).unwrap();
+        assert!(backend::is_benign(
+            backend::ERROR_DOMAIN,
+            already,
+            kSMErrorAlreadyRegistered
+        ));
+        // The other operation's benign code is a real failure for this one.
+        assert!(!backend::is_benign(
+            backend::ERROR_DOMAIN,
+            already,
+            kSMErrorJobNotFound
+        ));
+        // ENOMEM is 12 too; a POSIX error must never read as "already registered".
+        assert!(!backend::is_benign(
+            "NSPOSIXErrorDomain",
+            already,
+            kSMErrorAlreadyRegistered
+        ));
     }
 }
