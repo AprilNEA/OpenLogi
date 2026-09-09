@@ -75,7 +75,7 @@ Cosas que hace OpenLogi y Options+ no:
 - Cualquier webcam UVC de Logitech (Brio, StreamCam, la serie C920, …), sin configurar nada
 - Vista previa en directo que solo abre la cámara mientras la miras: al salir, la libera por completo y el LED se apaga
 - Controles de imagen escritos directamente en el hardware UVC: zoom, enfoque, exposición, brillo, contraste, saturación, nitidez, balance de blancos, matiz, antiparpadeo y compensación de poca luz, con modo automático para enfoque, exposición y balance de blancos, de modo que los cambios se aplican en Meet, Zoom, OBS y cualquier otra aplicación que use la cámara
-- Perfiles de un clic: Predeterminado, Streaming y Videollamada integrados, más instantáneas propias; los ajustes se guardan por cámara y se vuelven a escribir en el hardware la próxima vez que la abras
+- Perfiles de un clic: Predeterminado, Transmisión y Videollamada integrados, más instantáneas propias; los ajustes se guardan por cámara y se vuelven a escribir en el hardware la próxima vez que la abras
 
 ¹ En Linux, las acciones de teclas multimedia usan D-Bus MPRIS; unas pocas acciones propias de macOS no tienen equivalente universal en Linux y no hacen nada. Windows asigna las acciones de plataforma a sus equivalentes nativos cuando existen.
 
@@ -115,7 +115,7 @@ Descarga el paquete de tu distribución desde la
 
 ```sh
 # Debian / Ubuntu
-sudo dpkg -i openlogi_*.deb
+sudo dpkg -i openlogi-*.deb
 
 # Fedora / RHEL
 sudo rpm -i openlogi-*.rpm
