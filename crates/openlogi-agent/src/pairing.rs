@@ -53,7 +53,14 @@ enum SessionState {
 struct ActiveSession {
     id: SessionId,
     devices: DeviceCache,
+    phase: ActivePhase,
     _receiver_lease: ExclusiveReceiverLease,
+}
+
+enum ActivePhase {
+    Discovering,
+    /// A selection was admitted or a passkey received; discovery is closed.
+    Pairing,
 }
 
 impl Default for SessionOwner {
@@ -83,6 +90,7 @@ impl SessionOwner {
         self.state = SessionState::Active(ActiveSession {
             id,
             devices: HashMap::new(),
+            phase: ActivePhase::Discovering,
             _receiver_lease: receiver_lease,
         });
         true
@@ -98,13 +106,6 @@ impl SessionOwner {
         match &self.state {
             SessionState::Active(session) => Some(session),
             SessionState::Idle | SessionState::Admitting(_) => None,
-        }
-    }
-
-    fn active_mut(&mut self, id: SessionId) -> Option<&mut ActiveSession> {
-        match &mut self.state {
-            SessionState::Active(session) if session.id == id => Some(session),
-            SessionState::Idle | SessionState::Admitting(_) | SessionState::Active(_) => None,
         }
     }
 
@@ -191,7 +192,7 @@ impl PairingManager {
     /// Pair with a previously discovered device by address.
     pub fn pair(&self, address: [u8; 6]) -> Result<(), PairingCommandError> {
         with_session_owner(&self.session, |owner| {
-            let Some(session) = owner.active() else {
+            let SessionState::Active(session) = &mut owner.state else {
                 warn!(?address, "pair requested without an active session");
                 return Err(PairingCommandError::NoActiveSession);
             };
@@ -205,6 +206,9 @@ impl PairingManager {
                     device,
                 })
                 .map_err(|_| PairingCommandError::WatcherUnavailable)?;
+            // Fence events already queued by the watcher under the same lock
+            // as event acceptance, and only after the command was sent.
+            session.phase = ActivePhase::Pairing;
             self.observable.set_pairing(Some(PairingPhase::Pairing));
             Ok(())
         })
@@ -316,23 +320,29 @@ fn apply_session_event(
     observable: &ObservableState,
 ) -> Option<PairingUpdate> {
     with_session_owner(session, |owner| {
-        if owner.active().map(|session| session.id) != Some(event.session) {
-            return None;
-        }
+        let active = match &mut owner.state {
+            SessionState::Active(active) if active.id == event.session => active,
+            _ => return None,
+        };
         let update = match event.event {
+            PairingEvent::Searching | PairingEvent::DeviceFound(_)
+                if matches!(active.phase, ActivePhase::Pairing) =>
+            {
+                return None;
+            }
             PairingEvent::Searching => PairingUpdate::Searching,
             PairingEvent::DeviceFound(device) => {
                 let found = FoundDevice {
                     address: device.address,
                     name: device.name.clone(),
                 };
-                owner
-                    .active_mut(event.session)?
-                    .devices
-                    .insert(device.address, device);
+                active.devices.insert(device.address, device);
                 PairingUpdate::DeviceFound(found)
             }
-            PairingEvent::Passkey(method) => PairingUpdate::Passkey(method),
+            PairingEvent::Passkey(method) => {
+                active.phase = ActivePhase::Pairing;
+                PairingUpdate::Passkey(method)
+            }
             PairingEvent::Paired { slot } => PairingUpdate::Paired { slot },
             PairingEvent::Failed(error) => PairingUpdate::Failed(error.into()),
         };
