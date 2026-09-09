@@ -167,6 +167,27 @@ Alternatively, toggle **Settings → General → Launch at login** in the GUI �
 writes the unit to `~/.config/systemd/user/openlogi-agent.service`
 automatically.
 
+## Per-app profiles on GNOME/Wayland
+
+Mutter lets no ordinary client see which window is focused, and implements
+neither `wlr-foreign-toplevel` nor a focused-window portal, so per-app profiles
+need a small companion GNOME Shell extension. The packages, the Nix derivation
+and `install.sh` all place it at
+`/usr/share/gnome-shell/extensions/openlogi-frontmost@openlogi.dev/`.
+
+They install it but do not enable it — GNOME loads only extensions the user
+opted into. Log out and back in (Wayland cannot reload the shell in place),
+then:
+
+```sh
+gnome-extensions enable openlogi-frontmost@openlogi.dev
+```
+
+The extension reads only `focus_window.get_wm_class()`; see
+`crates/openlogi-hook/gnome-shell-extension/README.md`. Nothing else needs it —
+button remaps, DPI and SmartShift work without it, and X11/XWayland sessions
+resolve the focused window without any extension at all.
+
 ## Verify the installation
 
 ```sh

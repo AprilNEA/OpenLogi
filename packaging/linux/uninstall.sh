@@ -71,6 +71,37 @@ for size in 1024 512 256 128 64 48 32 16; do
   sudo rm -f "/usr/share/icons/hicolor/${size}x${size}/apps/openlogi.png"
 done
 
+echo "Removing GNOME Shell extension …"
+# Remove only the two files the installer wrote, then the directory itself if
+# nothing else is left in it. `rm -rf` on the whole directory would delete
+# files a distro package or another install method put there while their
+# package manager still records them as present — and even file-by-file,
+# a package installing the identical two filenames at this shared path is
+# indistinguishable by name alone, so check package ownership before removing.
+file_is_package_owned() {
+  path="$1"
+  if command -v dpkg >/dev/null 2>&1 && dpkg -S "$path" >/dev/null 2>&1; then
+    return 0
+  fi
+  if command -v rpm >/dev/null 2>&1 && rpm -qf "$path" >/dev/null 2>&1; then
+    return 0
+  fi
+  if command -v pacman >/dev/null 2>&1 && pacman -Qo "$path" >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
+}
+EXT_DIR="/usr/share/gnome-shell/extensions/openlogi-frontmost@openlogi.dev"
+for file in metadata.json extension.js; do
+  target="$EXT_DIR/$file"
+  if [ -e "$target" ] && file_is_package_owned "$target"; then
+    echo "  $file is owned by a distro package — leaving it for its own uninstaller"
+    continue
+  fi
+  sudo rm -f "$target"
+done
+sudo rmdir "$EXT_DIR" 2>/dev/null || true
+
 if command -v gtk-update-icon-cache >/dev/null 2>&1; then
   sudo gtk-update-icon-cache -qtf /usr/share/icons/hicolor || true
 fi
