@@ -994,3 +994,18 @@ fn contact_without_rotation_or_a_tap_carries_no_input() {
         None
     );
 }
+
+/// A device with no dedicated MX-line gesture button (Lift Vertical and
+/// friends) reports its gesture source at the Virtual Gesture Button CID
+/// instead; it must resolve to the same binding slot (#1199).
+#[test]
+fn virtual_gesture_button_resolves_to_the_gesture_button_binding() {
+    assert_eq!(
+        gesture_source_button(reprog_controls::VIRTUAL_GESTURE_BUTTON_CID),
+        Some(ButtonId::GestureButton)
+    );
+    assert_eq!(
+        gesture_source_button(reprog_controls::GESTURE_BUTTON_CID),
+        Some(ButtonId::GestureButton)
+    );
+}
