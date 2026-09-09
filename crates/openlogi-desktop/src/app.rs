@@ -5,7 +5,7 @@ use gpui::{
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
-    Icon, IconName, TitleBar,
+    Icon, IconName, Root, TitleBar,
     button::{Button, ButtonVariants as _},
     v_flex,
 };
@@ -30,6 +30,8 @@ use crate::ui::theme::{self, ContentWidth, Typography as _};
 
 pub(crate) mod deeplink;
 mod detail;
+#[cfg(debug_assertions)]
+pub(crate) mod dialog_smoke;
 mod home;
 pub(crate) mod menu;
 mod status;
@@ -469,11 +471,24 @@ fn app_title_bar(cx: &App) -> impl IntoElement {
 }
 
 impl Render for AppView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let content = self.render_content(window, cx);
+        // Root owns dialog state, but the application must mount its visual layer.
+        // Keep it outside route/status branches so every main-window state can host a dialog.
+        div()
+            .relative()
+            .size_full()
+            .child(content)
+            .children(Root::render_dialog_layer(window, cx))
+    }
+}
+
+impl AppView {
     #[expect(
         clippy::too_many_lines,
         reason = "root view assembles every screen branch inline"
     )]
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         theme::apply_ui_scale(window, cx);
         let pal = theme::palette(cx);
 

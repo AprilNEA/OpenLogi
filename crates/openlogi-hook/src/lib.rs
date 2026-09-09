@@ -341,6 +341,16 @@ trait HookBackend {
     /// Stop the hook and join its threads.
     fn stop(running: Self::Running);
 
+    /// Build a non-blocking stop request for the hook's owner.
+    ///
+    /// The default is a no-op for backends whose host lifecycle has no need to
+    /// interrupt the worker from another thread. macOS overrides this so its
+    /// session observer can release a global tap before the async lifecycle
+    /// task gets to join it.
+    fn stop_handle(_running: &Self::Running) -> HookStopHandle {
+        HookStopHandle::noop()
+    }
+
     /// Whether the platform worker is still delivering events. Backends whose
     /// workers are joined only during teardown have no separate terminal
     /// state, so their live handle is sufficient by default.
@@ -415,6 +425,34 @@ pub struct Hook {
     inner: Option<<Backend as HookBackend>::Running>,
 }
 
+/// A cloneable, non-blocking request to stop a running hook.
+///
+/// This is intentionally separate from [`Hook::stop`]: a host notification
+/// callback may request release from another thread, but must not wait for the
+/// hook worker to join. The owner still drops the [`Hook`] afterwards so the
+/// full teardown remains synchronous and observable there.
+#[derive(Clone)]
+pub struct HookStopHandle {
+    request: Arc<dyn Fn() + Send + Sync>,
+}
+
+impl HookStopHandle {
+    /// Request that the hook worker detach as soon as its backend permits.
+    pub fn request_stop(&self) {
+        (self.request)();
+    }
+
+    pub(crate) fn new(request: impl Fn() + Send + Sync + 'static) -> Self {
+        Self {
+            request: Arc::new(request),
+        }
+    }
+
+    fn noop() -> Self {
+        Self::new(|| {})
+    }
+}
+
 impl Drop for Hook {
     fn drop(&mut self) {
         self.shutdown();
@@ -438,6 +476,15 @@ impl Hook {
         cb: impl Fn(HookEvent) -> EventDisposition + Send + Sync + 'static,
     ) -> Result<Self, HookError> {
         Backend::start(cb).map(|inner| Self { inner: Some(inner) })
+    }
+
+    /// Return a non-blocking request that can interrupt this hook from another
+    /// thread. The request is a no-op once the hook has already been stopped.
+    #[must_use]
+    pub fn stop_handle(&self) -> HookStopHandle {
+        self.inner
+            .as_ref()
+            .map_or_else(HookStopHandle::noop, Backend::stop_handle)
     }
 
     /// Stop the hook and release OS resources.
