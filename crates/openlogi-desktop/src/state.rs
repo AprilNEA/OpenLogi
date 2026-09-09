@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use gpui::{App, Context, Entity, EventEmitter, Global};
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::config::Config;
-use openlogi_core::device::{DeviceInventory, StandaloneDevice};
+use openlogi_core::device::{DeviceInventory, DeviceKind, StandaloneDevice};
 use openlogi_core::hid::{Dpi, SmartShiftStatus};
 use tokio::sync::mpsc;
 use tracing::warn;
@@ -68,6 +68,7 @@ mod inventory;
 mod light;
 mod lighting;
 mod load;
+mod monitor;
 mod pointer;
 mod scroll;
 mod settings;
@@ -113,6 +114,8 @@ pub(crate) enum StateEvent {
         expect(dead_code, reason = "camera consent polling is macOS-only")
     )]
     CameraPermissionChanged,
+    /// Monitor discovery, monitor assignments, or host-switch initiator changed.
+    MonitorChanged,
     /// Per-device preferences outside the feature-specific events changed.
     DeviceConfigChanged(DeviceKey),
     /// Application-wide preferences changed.
@@ -151,11 +154,66 @@ pub enum AgentLink {
     Ready(openlogi_ipc::AgentStatus),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MonitorDiscovery {
+    Idle,
+    Loading,
+    Ready(Vec<openlogi_monitor::MonitorInfo>),
+    Failed(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostSwitchTargetDevice {
+    pub config_key: String,
+    pub display_name: String,
+    pub kind: openlogi_core::device::DeviceKind,
+    pub online: bool,
+    pub selected: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostSwitchKeyboardDevice {
+    pub config_key: String,
+    pub display_name: String,
+    pub online: bool,
+    pub selected: bool,
+}
+
 /// Inventory snapshots can briefly miss a real device while another HID++
 /// request is in flight. Keep the previous record through this many
 /// consecutive misses so a transient probe timeout does not make the device card
 /// disappear mid-interaction.
 const INVENTORY_MISS_GRACE: u8 = 2;
+
+fn initial_host_switch_keyboard_key(
+    device_list: &[DeviceRecord],
+    config: &Config,
+    current_device: usize,
+) -> Option<String> {
+    if let Some(key) = device_list
+        .get(current_device)
+        .filter(|record| record.kind == DeviceKind::Keyboard)
+        .and_then(DeviceRecord::persistent_config_key)
+    {
+        return Some(key.to_string());
+    }
+    if let Some(key) = config
+        .devices
+        .iter()
+        .find(|(_, device)| {
+            !device.host_switch_targets.is_empty() || !device.host_switch_monitor_inputs.is_empty()
+        })
+        .map(|(key, _)| key)
+    {
+        return Some(key.clone());
+    }
+    let mut keyboard_keys = device_list
+        .iter()
+        .filter(|record| record.kind == DeviceKind::Keyboard)
+        .filter_map(DeviceRecord::persistent_config_key);
+    let only = keyboard_keys.next()?;
+    keyboard_keys.next().is_none().then(|| only.to_string())
+}
 
 pub struct AppState {
     /// Live configuration and its last persisted rollback point.
@@ -172,8 +230,14 @@ pub struct AppState {
     pointer: PointerState,
     /// Standalone-light sequencing and aggregate camera activity.
     lighting: LightingState,
+    /// Keyboard whose Easy-Switch buttons own the monitor/follower bindings
+    /// edited on the monitor-linking page.
+    host_switch_keyboard_key: Option<String>,
+    /// Last user-visible warning from the agent's Easy-Switch follower flow.
+    host_switch_warning: Option<String>,
     /// Sender to the IPC client thread. The agent owns the hook and device I/O.
     ipc_commands: mpsc::UnboundedSender<crate::services::ipc::Command>,
+    monitor_discovery: MonitorDiscovery,
     /// Camera-consent poll started by an in-app macOS prompt. The app-state
     /// entity owns it because permission can resolve after the initiating view
     /// or window closes; dropping the entity at process shutdown cancels it.
@@ -256,6 +320,8 @@ impl AppState {
         let identities_changed =
             config.edit(|config| inventory::persist_identities(config, &device_list));
         let current_device = pick_initial_device(&device_list, config.selected_device());
+        let host_switch_keyboard_key =
+            initial_host_switch_keyboard_key(&device_list, &config, current_device);
         let bindings = BindingState::new(
             &config,
             device_list
@@ -270,7 +336,10 @@ impl AppState {
             action_ring_editing_apps: BTreeMap::new(),
             pointer: PointerState::default(),
             lighting: LightingState::default(),
+            host_switch_keyboard_key,
+            host_switch_warning: None,
             ipc_commands,
+            monitor_discovery: MonitorDiscovery::Idle,
             #[cfg(target_os = "macos")]
             camera_permission_poll: None,
         };

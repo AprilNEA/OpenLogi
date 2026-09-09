@@ -61,7 +61,12 @@ pub use succession::Identity;
 /// v28: `Action::HoldShortcut` appended for lifecycle-held keyboard output.
 /// v29: `Agent::declare_client` + [`ClientKind`] appended — typed demand for
 ///      the macOS dormancy gate.
-pub const PROTOCOL_VERSION: u32 = 29;
+/// v30: monitor DDC/CI discovery RPC appended.
+/// v31: `MonitorInfo::friendly_name` appended.
+/// v32: monitor input test RPC appended.
+/// v33: monitor input test can request a delayed restore.
+/// v34: `AgentSnapshot::host_switch_warning` appended.
+pub const PROTOCOL_VERSION: u32 = 34;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -138,6 +143,8 @@ pub struct AgentSnapshot {
     /// Which application per-app profiles are resolving against. See
     /// [`ForegroundApps`].
     pub foreground: ForegroundApps,
+    /// Last user-visible warning from Easy-Switch follower transitions.
+    pub host_switch_warning: Option<String>,
 }
 
 /// The application the agent currently resolves per-app profiles against, and
@@ -408,6 +415,12 @@ pub struct RingObservation {
     pub invocation: Option<ActionRingInvocation>,
 }
 
+/// Monitor discovery failure sent over IPC as user-readable text.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MonitorCommandError {
+    pub message: String,
+}
+
 /// Why an Actions Ring interaction command was rejected.
 ///
 /// Variants are append-only because this enum crosses bincode IPC.
@@ -560,4 +573,12 @@ pub trait Agent {
     /// arms only on [`ClientKind::Gui`]. The takeover probe never declares —
     /// it speaks only [`Agent::protocol_version`] — and so never arms.
     async fn declare_client(kind: ClientKind);
+    /// Enumerate DDC/CI monitors and their known VCP 0x60 input values.
+    async fn list_monitors() -> Result<Vec<openlogi_monitor::MonitorInfo>, MonitorCommandError>;
+    /// Set one monitor input immediately from the GUI test button.
+    async fn test_monitor_input(
+        monitor_id: String,
+        input: u32,
+        restore_after_ms: u64,
+    ) -> Result<(), MonitorCommandError>;
 }

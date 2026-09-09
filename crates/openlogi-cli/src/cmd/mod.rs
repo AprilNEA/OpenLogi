@@ -9,6 +9,7 @@ pub mod camera;
 pub mod diag;
 pub mod light;
 pub mod list;
+pub mod monitor;
 pub mod snapshot;
 
 #[derive(Debug, Subcommand)]
@@ -30,6 +31,9 @@ pub enum Command {
     /// Inspect and control standalone Logitech lights.
     #[command(subcommand)]
     Light(light::LightCmd),
+    /// Discover and switch monitor DDC/CI inputs.
+    #[command(subcommand)]
+    Monitor(monitor::MonitorCmd),
 }
 
 impl Command {
@@ -49,6 +53,7 @@ impl Command {
             Self::Assets(cmd) => cmd.run()?,
             Self::Diag(cmd) => cmd.run().await?,
             Self::Light(cmd) => cmd.run().await?,
+            Self::Monitor(cmd) => cmd.run()?,
         }
         Ok(ExitCode::SUCCESS)
     }

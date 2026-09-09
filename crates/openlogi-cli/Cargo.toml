@@ -14,6 +14,7 @@ categories = ["command-line-utilities", "hardware-support"]
 openlogi-core = { path = "../openlogi-core", version = "0.8.3" }
 openlogi-hid = { path = "../openlogi-hid", version = "0.8.3" }
 openlogi-camera = { path = "../openlogi-camera", version = "0.8.3" }
+openlogi-monitor = { path = "../openlogi-monitor", version = "0.8.3" }
 openlogi-assets = { path = "../openlogi-assets", version = "0.8.3" }
 openlogi-ipc = { path = "../openlogi-ipc", version = "0.8.3" }
 tarpc = { workspace = true }
