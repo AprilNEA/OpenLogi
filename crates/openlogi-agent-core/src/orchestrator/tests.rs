@@ -6,7 +6,7 @@ use super::{
     pick_current, plan_reapply, reapply_targets, stable_id,
 };
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{Action, Binding, ButtonId};
+use openlogi_core::binding::{Action, Binding, ButtonId, GestureResponse};
 use openlogi_core::config::{
     Config, DeviceConfig, LightSettings, LinkConfig, ScrollResolution, VerticalScrollSensitivity,
 };
@@ -26,6 +26,31 @@ use crate::observable::ObservableState;
 /// than only in the running agent.
 fn orchestrator(config: Config) -> Orchestrator {
     Orchestrator::new(config, Arc::new(ObservableState::new("test".to_string())))
+}
+
+#[test]
+fn os_hook_gesture_response_follows_the_selected_device_profile() {
+    let first = "receiver:bolt:slot:1";
+    let second = "receiver:bolt:slot:2";
+    let mut config = Config::default();
+    config.set_gesture_mode(first, ButtonId::MiddleClick, true);
+    config.set_gesture_mode(second, ButtonId::MiddleClick, true);
+    config.set_gesture_response(first, ButtonId::MiddleClick, GestureResponse::FAST);
+    config.set_gesture_response(second, ButtonId::MiddleClick, GestureResponse::DELIBERATE);
+    let orch = orchestrator(config);
+
+    assert_eq!(
+        orch.hook_maps_for(Some(first), None)
+            .gesture_responses
+            .get(&ButtonId::MiddleClick),
+        Some(&GestureResponse::FAST)
+    );
+    assert_eq!(
+        orch.hook_maps_for(Some(second), None)
+            .gesture_responses
+            .get(&ButtonId::MiddleClick),
+        Some(&GestureResponse::DELIBERATE)
+    );
 }
 
 fn dev(key: &str, slot: u8, online: bool) -> AgentDevice {

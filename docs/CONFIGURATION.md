@@ -27,12 +27,12 @@ revision. Opening the GUI also tells the resident agent to reload the current
 file, so hand edits and runtime behavior converge immediately.
 
 Schema versions newer than the running build are rejected before their fields
-are parsed. v1 binding maps and the v2–v3 gesture-owner layout migrate on load.
-The v3 physical-device-key transition cannot safely assign older model-scoped
-device settings when two identical devices exist, so v2 model-key entries must
-be copied manually to the generated physical keys. Pre-v7 thumb-wheel scroll
-pairs on the old defaults are migrated in both device and per-application
-profiles so they keep their native direction.
+are parsed. v1 binding maps and v3-or-older gesture-owner layouts migrate on
+load. The v3 physical-device-key transition cannot safely assign older
+model-scoped device settings when two identical devices exist, so v2 model-key
+entries must be copied manually to the generated physical keys. Pre-v7
+thumb-wheel scroll pairs on the old defaults are migrated in both device and
+per-application profiles so they keep their native direction.
 
 ## Shape
 
@@ -63,6 +63,18 @@ Common device fields are:
 
 - `custom_name`, `enabled`, `dpi`, `dpi_presets`, thumb-wheel sensitivity,
   scroll inversion, and scroll resolution
+- `gesture_responses`: per-control click-versus-swipe settings. The GUI offers
+  Fast (`110` ms, `30` raw-XY travel), Balanced/default (`160`, `40`), and
+  Deliberate (`200`, `50`) independently for each gesture-mode control.
+  Advanced users may set `hold_ms` from `80` through `300` and
+  `travel_threshold` from `20` through `80`. A held gesture whose travel
+  qualifies before release dispatches its swipe direction once the gate has
+  elapsed, even if its last motion sample arrived earlier; otherwise release
+  dispatches that control's independent `Click` binding. Dedicated gesture
+  controls and macOS Back/Forward gestures use physical-device HID++ capture.
+  Gestures captured by the OS hook use the currently selected device profile,
+  matching their binding map; a shared receiver does not expose the originating
+  pairing slot to the native event hook.
 - `bindings`: a button maps to one action, an independent short/long action
   pair, or a gesture-direction map.
   `Thumbwheel` is the thumb wheel's capacitive tap — it has no GUI control and

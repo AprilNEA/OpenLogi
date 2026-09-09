@@ -28,6 +28,12 @@ thumbwheel_sensitivity = 20
 invert_scroll = false
 scroll_resolution = "high"
 
+# Hold time (milliseconds) and raw-XY travel per gesture control.
+# See CONFIGURATION.md for presets and bounds.
+[devices."receiver:aabbccdd:slot:1".gesture_responses]
+HapticPanel = { hold_ms = 110, travel_threshold = 30 }
+GestureButton = { hold_ms = 160, travel_threshold = 40 }
+
 [devices."receiver:aabbccdd:slot:1".bindings]
 Back = "BrowserBack"
 Forward = "BrowserForward"

@@ -11,7 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use openlogi_core::binding::{
-    Action, Binding, ButtonId, GestureDirection, SwipeAccumulator, default_binding,
+    Action, Binding, ButtonId, GestureDirection, GestureResponse, SwipeAccumulator, default_binding,
 };
 use openlogi_core::config::{KeyModifiers, KeyTrigger};
 use openlogi_hook::{
@@ -47,6 +47,12 @@ pub struct HookMaps {
     /// Entries survive map rebuilds because they are hardware observations,
     /// not configuration.
     pub(crate) thumbwheel_positive_is_forward: BTreeMap<String, bool>,
+    /// Click-versus-swipe response for each OS-hook gesture control on the
+    /// selected device profile. Native button events do not reliably identify
+    /// one peripheral behind a shared receiver, so this intentionally follows
+    /// the same selected-profile boundary as [`Self::bindings`] and
+    /// [`Self::gestures`]. HID++ capture plans carry physical-device responses.
+    pub gesture_responses: BTreeMap<ButtonId, GestureResponse>,
 }
 
 /// Shared, atomically-published [`HookMaps`], threaded between the config owner
@@ -73,9 +79,10 @@ fn convert_modifiers(m: openlogi_hook::KeyModifiers) -> KeyModifiers {
 
 /// Tracks which OS-hook button (Middle/Back/Forward) is mid-hold and defers the
 /// swipe detection itself to a shared [`SwipeAccumulator`], which commits a swipe
-/// *mid-motion* like the HID++ gesture-button path in `openlogi-hid`. This wrapper
-/// adds only the button identity the accumulator doesn't track; a press that
-/// never commits a direction is a plain click, fired on release.
+/// mid-motion or classifies qualifying accumulated travel on release, like the
+/// HID++ gesture-button path in `openlogi-device`. This wrapper adds only the
+/// button identity the accumulator doesn't track; travel that never qualifies is
+/// a plain click, fired on release.
 /// A gesture hold this old is presumed stale — real hold+swipe interactions
 /// finish in well under a second, and only a lost button-up (with no OS
 /// interrupt to trigger [`HoldState::cancel`]) leaves one lingering.
@@ -128,12 +135,13 @@ impl HoldState {
     }
 
     /// Store the token returned by the accepted lifecycle `Down`.
-    fn begin(&mut self, button: ButtonId, press: PressToken) {
+    fn begin(&mut self, button: ButtonId, press: PressToken, response: GestureResponse) {
         self.current = Some(GestureHold {
             button,
             started_at: Instant::now(),
             press,
         });
+        self.swipe = SwipeAccumulator::new(response);
         self.swipe.begin();
     }
 
@@ -147,12 +155,13 @@ impl HoldState {
             .map(|dir| (held.press.clone(), held.button, dir))
     }
 
-    /// End the hold for `button`, returning its exact token and whether it was a
-    /// click. A swipe returns `false`; a stray release returns `None`.
-    fn end(&mut self, button: ButtonId) -> Option<(PressToken, bool)> {
+    /// End the hold for `button`, returning its exact token and any direction
+    /// that still needs dispatch. A swipe already committed mid-motion returns
+    /// `None` as its direction; a stray release returns no token at all.
+    fn end(&mut self, button: ButtonId) -> Option<(PressToken, Option<GestureDirection>)> {
         let held = self.current.take_if(|held| held.button == button)?;
-        let was_click = self.swipe.end();
-        Some((held.press, was_click))
+        let direction = self.swipe.finish();
+        Some((held.press, direction))
     }
 
     /// Cancel any in-progress hold without firing anything — used when the OS
@@ -258,17 +267,22 @@ fn handle_button(
     // `try_read` only: a blocking read on the tap thread freezes every pointer
     // event while a config rebuild holds the write lock. Fail open if unavailable.
     if pressed {
-        let is_gesture = hooks.try_read().is_ok_and(|m| m.gestures.contains_key(&id));
+        let response = hooks
+            .try_read()
+            .ok()
+            .and_then(|maps| maps.gesture_responses.get(&id).copied());
         // A refused begin — a second gesture button pressed mid-hold — falls
         // through to the single-action path: the first hold wins and this press
         // still means its plain click.
-        let admission = is_gesture.then(|| HOLD.with_borrow_mut(|h| h.prepare_begin(id)));
+        let admission = response.map(|_| HOLD.with_borrow_mut(|h| h.prepare_begin(id)));
         if let Some(HoldAdmission::Begin | HoldAdmission::Replace(_)) = &admission {
             if let Some(HoldAdmission::Replace(stale)) = &admission {
                 dispatcher.cancel_stale_hook_press(stale);
             }
             if let Some(press) = dispatcher.try_hook_button_down(id, None) {
-                HOLD.with_borrow_mut(|h| h.begin(id, press));
+                HOLD.with_borrow_mut(|h| {
+                    h.begin(id, press, response.unwrap_or_default());
+                });
                 return EventDisposition::Suppress;
             }
             return FAIL_OPEN_PRESSES.with_borrow_mut(|s| remapped_press_disposition(id, false, s));
@@ -276,14 +290,14 @@ fn handle_button(
     } else {
         // Drop the HOLD borrow before any queueing (re-entrancy freeze hazard).
         let ended = HOLD.with_borrow_mut(|h| h.end(id));
-        if let Some((press, was_click)) = ended {
-            if was_click {
+        if let Some((press, direction)) = ended {
+            if let Some(direction) = direction {
                 let action = hooks
                     .try_read()
                     .ok()
-                    .map(|m| resolve_gesture_click(&m.gestures, id));
+                    .map(|m| resolve_gesture_action(&m.gestures, id, direction));
                 if let Some(action) = action {
-                    info!(button = %id, action = %action.label(), "gesture click → executing bound action");
+                    info!(button = %id, ?direction, action = %action.label(), "gesture completed → executing bound action");
                     dispatcher.try_dispatch_while_pressed(&press, &action);
                 }
             }
@@ -365,12 +379,10 @@ fn handle_moved(
 ) -> EventDisposition {
     let commit = HOLD.with_borrow_mut(|h| h.accumulate(delta_x, delta_y));
     if let Some((press, button, dir)) = commit {
-        let action = hooks.try_read().ok().map(|m| {
-            m.gestures
-                .get(&button)
-                .and_then(|dirs| dirs.get(&dir).cloned())
-                .unwrap_or_else(|| resolve_gesture_click(&m.gestures, button))
-        });
+        let action = hooks
+            .try_read()
+            .ok()
+            .map(|m| resolve_gesture_action(&m.gestures, button, dir));
         if let Some(action) = action {
             info!(button = %button, ?dir, action = %action.label(), "gesture swipe → executing bound action");
             dispatcher.try_dispatch_while_pressed(&press, &action);
@@ -556,6 +568,19 @@ fn resolve_gesture_click(
         .get(&id)
         .and_then(|m| m.get(&GestureDirection::Click).cloned())
         .unwrap_or_else(|| default_binding(id))
+}
+
+/// Resolve a completed gesture direction, falling back to the button's click
+/// action when a sparse map does not define that swipe arm.
+fn resolve_gesture_action(
+    gestures: &BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
+    id: ButtonId,
+    direction: GestureDirection,
+) -> Action {
+    gestures
+        .get(&id)
+        .and_then(|map| map.get(&direction).cloned())
+        .unwrap_or_else(|| resolve_gesture_click(gestures, id))
 }
 
 /// Whether `action` is just `id`'s own native event — i.e. the button is mapped

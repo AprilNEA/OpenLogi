@@ -1,6 +1,7 @@
 use super::*;
 use crate::backend::NodeId;
 use crate::channel::scripted::{ScriptedRawHidChannel, scripted_channel};
+use openlogi_core::binding::GestureResponse;
 
 const GESTURE: &[u16] = &[reprog_controls::GESTURE_BUTTON_CID];
 const PANEL: &[u16] = &[reprog_controls::HAPTIC_PANEL_CID];
@@ -296,6 +297,92 @@ fn both_press() -> RawControlEvent {
 
 fn release() -> RawControlEvent {
     RawControlEvent::DivertedButtons([0, 0, 0, 0])
+}
+
+#[test]
+fn fast_preset_classifies_a_completed_flick_on_release() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::with_response(GestureResponse::FAST);
+
+    handle_reprog(&mut acc, press(), GESTURE, &[], &[], &tx);
+    handle_reprog(
+        &mut acc,
+        RawControlEvent::RawXy { dx: 120, dy: 5 },
+        GESTURE,
+        &[],
+        &[],
+        &tx,
+    );
+    acc.backdate_hold_by_for_test(GestureResponse::FAST.hold_duration());
+    handle_reprog(&mut acc, release(), GESTURE, &[], &[], &tx);
+
+    assert_eq!(
+        next_gesture(&mut rx),
+        Ok(CapturedInput::Gesture(
+            ButtonId::GestureButton,
+            GestureDirection::Right
+        ))
+    );
+}
+
+#[test]
+fn each_gesture_source_uses_its_own_response() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::new(
+        [
+            (ButtonId::GestureButton, GestureResponse::DELIBERATE),
+            (ButtonId::HapticPanel, GestureResponse::FAST),
+        ]
+        .into_iter()
+        .collect(),
+    );
+
+    handle_reprog(&mut acc, press(), GESTURE, &[], &[], &tx);
+    acc.backdate_hold_by_for_test(GestureResponse::DELIBERATE.hold_duration());
+    handle_reprog(
+        &mut acc,
+        RawControlEvent::RawXy { dx: 40, dy: 5 },
+        GESTURE,
+        &[],
+        &[],
+        &tx,
+    );
+    handle_reprog(&mut acc, release(), GESTURE, &[], &[], &tx);
+    assert_eq!(
+        next_gesture(&mut rx),
+        Ok(CapturedInput::Gesture(
+            ButtonId::GestureButton,
+            GestureDirection::Click
+        )),
+        "the Deliberate Gesture Button must reject travel below its threshold"
+    );
+
+    handle_reprog(&mut acc, panel_press(), PANEL, &[], &[], &tx);
+    handle_reprog(
+        &mut acc,
+        RawControlEvent::RawXy { dx: 0, dy: 0 },
+        PANEL,
+        &[],
+        &[],
+        &tx,
+    );
+    acc.backdate_hold_by_for_test(GestureResponse::DELIBERATE.hold_duration());
+    handle_reprog(
+        &mut acc,
+        RawControlEvent::RawXy { dx: 40, dy: 5 },
+        PANEL,
+        &[],
+        &[],
+        &tx,
+    );
+    assert_eq!(
+        next_gesture(&mut rx),
+        Ok(CapturedInput::Gesture(
+            ButtonId::HapticPanel,
+            GestureDirection::Right
+        )),
+        "the Fast Haptic Panel must commit at its own shorter travel threshold"
+    );
 }
 
 /// Read the next completed gesture while leaving lifecycle assertions to the
