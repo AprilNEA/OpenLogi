@@ -244,17 +244,14 @@ pub(crate) fn ring_window_options(cx: &mut gpui::App) -> WindowOptions {
         if let (Some(cursor), Some(display)) = (&cursor, native_display) {
             (
                 Some(gpui::DisplayId::from(display.id)),
-                point(
-                    px((cursor.x - display.origin.0) as f32),
-                    px((cursor.y - display.origin.1) as f32),
-                ),
+                cursor_in_display_space(cursor, &display),
                 Some(Bounds::new(
                     Point::default(),
                     Size::new(px(display.size.0 as f32), px(display.size.1 as f32)),
                 )),
             )
         } else {
-            // No cursor or no native lookup (non-macOS): GPUI's own display
+            // No cursor or no native lookup (Linux): GPUI's own display
             // list, centering on the display when the cursor is unknown.
             let cursor_point = cursor
                 .as_ref()
@@ -291,6 +288,26 @@ pub(crate) fn ring_window_options(cx: &mut gpui::App) -> WindowOptions {
         app_id: Some("openlogi-action-ring".to_string()),
         ..WindowOptions::default()
     }
+}
+
+/// Translate a raw, global cursor point into `display`'s local logical space.
+///
+/// `display.scale` converts the raw point into the same logical unit as
+/// `display.origin` — a no-op (`scale == 1.0`) on macOS, where both are
+/// already points; on Windows the raw point is physical pixels and `scale`
+/// is the monitor's DPI scale, without which the ring would land at
+/// `cursor / scale` on any monitor not running at 100%.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "native cursor coordinates are screen-sized and exactly usable as GPUI f32 pixels"
+)]
+pub(crate) fn cursor_in_display_space(
+    cursor: &openlogi_hook::CursorPosition,
+    display: &platform::CursorDisplay,
+) -> Point<Pixels> {
+    let x = cursor.x / display.scale - display.origin.0;
+    let y = cursor.y / display.scale - display.origin.1;
+    point(px(x as f32), px(y as f32))
 }
 
 pub(crate) fn clamp_window_origin(
@@ -330,6 +347,41 @@ mod tests {
         assert_eq!(
             clamp_window_origin(desired, Size::new(px(400.0), px(400.0)), display),
             desired
+        );
+    }
+
+    #[test]
+    fn cursor_in_display_space_is_unscaled_at_100_percent() {
+        // macOS shape: the raw cursor point is already in the same unit as
+        // `display.origin` (points), so `scale == 1.0` is a plain subtraction.
+        let cursor = openlogi_hook::CursorPosition { x: 620.0, y: 340.0 };
+        let display = platform::CursorDisplay {
+            id: 1,
+            origin: (100.0, 50.0),
+            size: (1600.0, 1000.0),
+            scale: 1.0,
+        };
+        assert_eq!(
+            cursor_in_display_space(&cursor, &display),
+            point(px(520.0), px(290.0))
+        );
+    }
+
+    #[test]
+    fn cursor_in_display_space_divides_out_a_windows_dpi_scale() {
+        // Windows shape: `GetCursorPos` reports physical pixels; a monitor at
+        // 150% scale (144 dpi) must have that physical point divided down to
+        // GPUI's logical points before it lines up with `display.origin`.
+        let cursor = openlogi_hook::CursorPosition { x: 930.0, y: 510.0 };
+        let display = platform::CursorDisplay {
+            id: 1,
+            origin: (100.0, 50.0),
+            size: (1600.0, 1000.0),
+            scale: 1.5,
+        };
+        assert_eq!(
+            cursor_in_display_space(&cursor, &display),
+            point(px(520.0), px(290.0))
         );
     }
 }

@@ -89,13 +89,23 @@ pub fn watch_clicks_outside(_on_mouse_down: impl Fn() + 'static) -> Option<Click
 /// One display's global geometry, in the same top-left-origin global point
 /// space that `openlogi_hook::cursor_position()` reports.
 pub struct CursorDisplay {
-    /// Native display id; on macOS the `CGDirectDisplayID`, numerically equal
-    /// to GPUI's `DisplayId` for the same display.
+    /// Native display id; on macOS the `CGDirectDisplayID`, on Windows the
+    /// `HMONITOR` handle — both numerically equal to GPUI's `DisplayId` for
+    /// the same display.
     pub id: u64,
-    /// Global origin (top-left corner) of the display, in points.
+    /// Global origin (top-left corner) of the display, in the same unit as
+    /// `size` — GPUI logical points, already scaled down from whatever
+    /// physical unit the platform's raw display query reports.
     pub origin: (f64, f64),
-    /// Display size in points.
+    /// Display size, in the same logical unit as `origin`.
     pub size: (f64, f64),
+    /// Divide a raw `openlogi_hook::cursor_position()` coordinate by this to
+    /// reach the same logical unit as `origin`/`size`. `1.0` where the raw
+    /// cursor position already is that unit (macOS reports points, matching
+    /// `CGDisplayBounds` directly); on Windows `GetCursorPos` reports
+    /// physical pixels while GPUI positions windows in logical points, so
+    /// this is the monitor's DPI scale (`dpi / 96`).
+    pub scale: f64,
 }
 
 /// Find the display whose global bounds contain the point `(x, y)`.
@@ -131,13 +141,97 @@ pub fn display_containing(x: f64, y: f64) -> Option<CursorDisplay> {
             id: u64::from(id),
             origin: (bounds.origin.x, bounds.origin.y),
             size: (bounds.size.width, bounds.size.height),
+            scale: 1.0,
         })
     })
 }
 
-/// Away from macOS the GPUI display list already carries global origins, so
+/// Find the display whose global physical bounds contain the point `(x, y)`
+/// and convert its geometry to GPUI's logical points.
+///
+/// GPUI's `PlatformDisplay::bounds()` on Windows is already logical (divided
+/// by the monitor's DPI scale internally), so — unlike macOS — the display
+/// lookup itself could in principle use GPUI's own list. The reason this
+/// still goes native is the other half of the same problem `origin`/`scale`
+/// solve: `openlogi_hook::cursor_position()` calls `GetCursorPos`, which
+/// reports physical pixels, and there is no public GPUI API to learn a
+/// display's DPI before a window exists on it to ask. `MonitorFromPoint`
+/// takes the physical cursor point directly, sidestepping the need to
+/// convert it before knowing which monitor (and thus which scale) applies.
+#[cfg(target_os = "windows")]
+#[expect(
+    unsafe_code,
+    reason = "MonitorFromPoint/GetMonitorInfoW/GetDpiForMonitor are plain Win32 FFI; GPUI exposes no DPI query before a window exists"
+)]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "native cursor coordinates are screen-sized and exactly usable as an i32 POINT"
+)]
+pub fn display_containing(x: f64, y: f64) -> Option<CursorDisplay> {
+    use windows_sys::Win32::Foundation::{POINT, RECT};
+    use windows_sys::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MONITOR_DEFAULTTONULL, MONITORINFO, MonitorFromPoint,
+    };
+    use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+    use windows_sys::Win32::UI::WindowsAndMessaging::USER_DEFAULT_SCREEN_DPI;
+
+    let point = POINT {
+        x: x as i32,
+        y: y as i32,
+    };
+    // SAFETY: `point` is a valid POINT for the duration of the call; a null
+    // `HMONITOR` result (no monitor under the point) is checked below.
+    let monitor = unsafe { MonitorFromPoint(point, MONITOR_DEFAULTTONULL) };
+    if monitor.is_null() {
+        return None;
+    }
+    let mut dpi_x = 0u32;
+    let mut dpi_y = 0u32;
+    // SAFETY: `monitor` was just returned non-null by `MonitorFromPoint`;
+    // `dpi_x`/`dpi_y` are valid writable `u32`s for the call's duration.
+    if unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &raw mut dpi_x, &raw mut dpi_y) } != 0
+    {
+        return None;
+    }
+    let scale = f64::from(dpi_x) / f64::from(USER_DEFAULT_SCREEN_DPI);
+    let mut info = MONITORINFO {
+        cbSize: size_of::<MONITORINFO>() as u32,
+        rcMonitor: RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        },
+        rcWork: RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        },
+        dwFlags: 0,
+    };
+    // SAFETY: `monitor` is the same non-null handle just used above; `info`
+    // is a valid writable `MONITORINFO` with `cbSize` set, as the API
+    // requires.
+    if unsafe { GetMonitorInfoW(monitor, &raw mut info) } == 0 {
+        return None;
+    }
+    let rect = info.rcMonitor;
+    Some(CursorDisplay {
+        id: monitor as u64,
+        origin: (f64::from(rect.left) / scale, f64::from(rect.top) / scale),
+        size: (
+            f64::from(rect.right - rect.left) / scale,
+            f64::from(rect.bottom - rect.top) / scale,
+        ),
+        scale,
+    })
+}
+
+/// Away from macOS and Windows the GPUI display list already carries global
+/// origins in the same unit `openlogi_hook::cursor_position()` reports, so
 /// there is nothing to resolve natively.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn display_containing(_x: f64, _y: f64) -> Option<CursorDisplay> {
     None
 }

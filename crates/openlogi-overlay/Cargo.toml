@@ -44,5 +44,17 @@ objc2-app-kit = { workspace = true, features = ["NSApplication", "NSResponder", 
 # NSEvent global-monitor handlers are ObjC blocks (click-away dismissal).
 block2 = { workspace = true }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+# MonitorFromPoint/GetMonitorInfoW/GetDpiForMonitor: placing the ring on the
+# cursor's display, and converting its physical-pixel position to GPUI's
+# logical points, needs a DPI query GPUI exposes no API for before a window
+# exists to ask.
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_HiDpi",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
 [lints]
 workspace = true
