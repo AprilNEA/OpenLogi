@@ -663,6 +663,9 @@ mod macos;
 mod linux;
 
 #[cfg(any(target_os = "windows", test))]
+mod windows_cursor;
+
+#[cfg(any(target_os = "windows", test))]
 mod windows_worker;
 
 #[cfg(target_os = "windows")]

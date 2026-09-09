@@ -23,12 +23,13 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetCursorPos, GetForegroundWindow, GetMessageW,
     GetWindowThreadProcessId, HC_ACTION, KBDLLHOOKSTRUCT, LLKHF_INJECTED, LLMHF_INJECTED, MSG,
     MSLLHOOKSTRUCT, PM_NOREMOVE, PeekMessageW, PostThreadMessageW, SetWindowsHookExW,
-    TranslateMessage, USER_DEFAULT_SCREEN_DPI, UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL,
-    WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
-    WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP,
-    WM_SYSKEYDOWN, WM_SYSKEYUP, WM_USER, WM_XBUTTONDOWN, WM_XBUTTONUP, XBUTTON1, XBUTTON2,
+    TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_USER,
+    WM_XBUTTONDOWN, WM_XBUTTONUP, XBUTTON1, XBUTTON2,
 };
 
+use crate::windows_cursor::{MonitorDpi, PhysicalCursorPosition};
 use crate::windows_worker::{WorkerEvent, WorkerPhase, WorkerStatus};
 use crate::{
     ButtonId, CursorPosition, EventDisposition, ForegroundApp, HookBackend, HookError, HookEvent,
@@ -203,17 +204,16 @@ impl HookBackend for Backend {
         // the out-params unspecified (not necessarily untouched) on failure.
         let hr =
             unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &raw mut dpi_x, &raw mut dpi_y) };
-        let (dpi_x, dpi_y) = if hr >= 0 && dpi_x > 0 && dpi_y > 0 {
-            (dpi_x, dpi_y)
+        let dpi = if hr >= 0 {
+            MonitorDpi::try_from((dpi_x, dpi_y)).unwrap_or_default()
         } else {
-            (USER_DEFAULT_SCREEN_DPI, USER_DEFAULT_SCREEN_DPI)
+            MonitorDpi::default()
         };
-        let scale_x = f64::from(dpi_x) / f64::from(USER_DEFAULT_SCREEN_DPI);
-        let scale_y = f64::from(dpi_y) / f64::from(USER_DEFAULT_SCREEN_DPI);
-        Some(CursorPosition {
-            x: f64::from(point.x) / scale_x,
-            y: f64::from(point.y) / scale_y,
-        })
+        let physical = PhysicalCursorPosition {
+            x: point.x,
+            y: point.y,
+        };
+        Some(physical.into_logical(dpi))
     }
 }
 
