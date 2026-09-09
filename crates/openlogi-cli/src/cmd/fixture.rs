@@ -14,8 +14,13 @@ pub(crate) mod verify;
 #[derive(Debug, Subcommand)]
 pub enum FixtureCmd {
     /// Build a complete privacy-safe fixture with a resumable two-phase wizard.
+    ///
+    /// Direct capture discovery may enable wireless notifications and request arrival
+    /// reports on connected receivers before target selection. Notification flags are
+    /// not restored; captured operations do not change device settings or pairings.
+    /// Use --profile-only to avoid direct hardware access.
     Contribute(contribute::ContributeArgs),
-    /// Capture privacy-safe fixture data through a read-only owner.
+    /// Capture privacy-safe semantic state or named hardware reads.
     #[command(subcommand)]
     Record(FixtureRecordCmd),
     /// Strictly verify one complete on-disk fixture directory.
@@ -32,10 +37,14 @@ impl FixtureCmd {
     }
 }
 
-/// Read-only fixture recording commands.
+/// Fixture recording commands with read-only captured operations.
 #[derive(Debug, Subcommand)]
 pub enum FixtureRecordCmd {
     /// Record one named production read as a strict HID cassette.
+    ///
+    /// Discovery may enable wireless notifications and request arrival reports on
+    /// connected receivers before target selection. Notification flags are not
+    /// restored; captured operations do not change device settings or pairings.
     Case(record_case::RecordCaseArgs),
     /// Capture semantic state through the running Agent IPC, without direct hardware access.
     Profile(record_profile::RecordProfileArgs),

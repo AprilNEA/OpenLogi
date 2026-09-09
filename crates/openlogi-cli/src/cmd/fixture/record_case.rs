@@ -263,6 +263,11 @@ pub(super) async fn prepare_contribution_target(selector: Option<&str>) -> Resul
         "warning: fixture case capture reads hardware directly with this CLI process's own HID \
          permission and identity, not the OpenLogi agent"
     );
+    eprintln!(
+        "warning: discovery may enable wireless notifications and request arrival reports on \
+         connected receivers before target selection; notification flags are not restored. \
+         Captured operations do not change device settings or pairings."
+    );
     let inventories = openlogi_hid::enumerate()
         .await
         .map_err(|_| anyhow!("failed to enumerate HID++ devices for direct fixture capture"))?;

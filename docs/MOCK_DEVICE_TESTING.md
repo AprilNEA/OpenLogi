@@ -403,6 +403,11 @@ unknown JSON fields. It reports schema, relationship, privacy, and replay
 validation separately. This command performs no hardware access and does not
 establish semantic or physical correctness.
 
+The CLI corpus tests discover and strictly verify every directory under both
+`fixtures/devices/` and the packaged synthetic corpus. The root corpus may be
+absent until the first contribution; once present, every entry must be a valid
+fixture directory. Run `cargo test -p openlogi-cli fixture::verify` locally.
+
 ## Recording model
 
 ### Two capture modes
@@ -413,8 +418,15 @@ and already holds stable channels. This mode records no raw reports and needs no
 new IPC method.
 
 **Raw case capture** is a controlled direct diagnostic operation. It uses the
-same ownership model as the existing `openlogi diag` commands: select one target,
-open it, run one named operation, and exit. It is not an ambient sniffer.
+same ownership model as the existing `openlogi diag` commands: discover devices,
+select one target, open it, run one named read operation, and exit. Discovery
+uses production enumeration, which may write receiver notification flags
+(register `0x00`) and request arrival reports (register `0x02`) on connected
+receivers before target selection. Those flags are not restored. The CLI warns
+before discovery; use semantic profile capture to avoid this direct access.
+These setup writes are outside the cassette and are not accepted as read-only
+exchanges by the sanitizer. Capture does not change device settings or pairings
+and is not an ambient sniffer.
 
 Before enumerating hardware, raw fixture capture acquires the same profile's
 `agent.lock` used by agent startup, then checks that the IPC endpoint is
@@ -519,8 +531,10 @@ claim which physical route it represents.
 
 ### Writes
 
-No write runs in the default plan. A named write case requires
-`--allow-writes` and must define:
+The default plan records only reads. Its pre-selection receiver discovery has
+the notification/arrival setup side effects described above; it is not a
+zero-write hardware session. Setting-write cases are not implemented. A future
+named write case requires `--allow-writes` and must define:
 
 - the initial read;
 - a bounded alternate value supported by that device;

@@ -15,7 +15,9 @@ fixtures/devices/<synthetic-specimen-id>/
 Only privacy-verified fixture assets belong here. Never commit native recorder
 output, host paths, original hardware identities, passkeys, or unsanitized
 temporary files. Run `openlogi fixture verify <fixture-directory>` before
-review.
+review. `cargo test -p openlogi-cli fixture::verify` also discovers and strictly
+verifies every fixture directory in this corpus and the packaged synthetic
+corpus, including newly added specimens.
 
 ## Contribute a device fixture
 
@@ -36,6 +38,11 @@ same command. The second run uses the CLI's own HID permission to capture all
 eight supported read-only operations, self-replays them, generates the exact
 identity ledger and case relationships, and runs strict on-disk verification.
 Nothing is uploaded automatically.
+
+Before selecting a target, direct discovery may enable wireless notifications
+and request arrival reports on connected receivers. Notification flags are not
+restored. The CLI warns before discovery; captured operations do not change
+device settings or pairings.
 
 Use `--profile-only` when direct HID access is unavailable. Standalone raw-HID
 devices automatically produce profile-only fixtures because the cassette

@@ -376,6 +376,27 @@ mod tests {
     }
 
     #[test]
+    fn direct_fixture_help_discloses_receiver_discovery_side_effects() {
+        for args in [
+            vec!["openlogi", "fixture", "record", "case", "--help"],
+            vec!["openlogi", "fixture", "contribute", "--help"],
+        ] {
+            let help = Cli::try_parse_from(args)
+                .expect_err("help exits without accessing hardware")
+                .to_string();
+            for disclosure in [
+                "wireless notifications",
+                "arrival reports",
+                "before target selection",
+                "not restored",
+                "do not change device settings or pairings",
+            ] {
+                assert!(help.contains(disclosure), "missing {disclosure}: {help}");
+            }
+        }
+    }
+
+    #[test]
     fn fixture_record_profile_requires_synthetic_metadata_and_output() {
         let cli = Cli::try_parse_from([
             "openlogi",

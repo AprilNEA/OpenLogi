@@ -128,7 +128,9 @@ async fn start(args: ContributeArgs, state_path: &Path) -> Result<()> {
         "Stop the OpenLogi Agent, keep the same physical device connected, then rerun the same command."
     );
     println!(
-        "The second step uses this CLI process's own HID permission and records only eight read-only operations."
+        "The second step uses this CLI process's own HID permission and records eight read-only \
+         operations. Discovery may first enable notifications and request arrival reports on \
+         connected receivers; notification flags are not restored."
     );
     Ok(())
 }

@@ -11,16 +11,45 @@ use super::*;
 #[test]
 fn packaged_canonical_fixture_is_complete_and_valid() {
     let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("../openlogi-fixture/fixtures/devices");
-    require_directory(&corpus, "repository fixture corpus").expect("corpus root is real");
-    let entries = read_directory(&corpus, "repository fixture corpus").expect("read corpus root");
-    assert!(!entries.is_empty(), "repository fixture corpus is empty");
+    assert!(verify_corpus(&corpus).expect("packaged corpus is valid") > 0);
+}
+
+#[test]
+fn contributed_fixture_corpus_is_complete_and_valid() {
+    let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/devices");
+    match std::fs::symlink_metadata(&corpus) {
+        // Git has no empty directories; the first contribution creates this root.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        _ => {
+            verify_corpus(&corpus)
+                .expect("every contributed fixture must pass strict verification");
+        }
+    }
+}
+
+fn verify_corpus(corpus: &Path) -> Result<usize> {
+    require_directory(corpus, "fixture corpus")?;
+    let entries = read_directory(corpus, "fixture corpus")?;
+    let count = entries.len();
     for entry in entries {
-        require_entry_directory(&entry, "repository fixture directory")
-            .expect("corpus contains only real fixture directories");
+        require_entry_directory(&entry, "fixture directory")?;
         LoadedFixture::load(&entry.path())
             .and_then(|fixture| fixture.verify())
-            .unwrap_or_else(|error| panic!("{}: {error:#}", entry.path().display()));
+            .with_context(|| format!("invalid fixture {}", entry.path().display()))?;
     }
+    Ok(count)
+}
+
+#[test]
+fn corpus_walk_rejects_invalid_siblings_not_only_the_canonical_fixture() {
+    let (temp, fixture) = copied_canonical_fixture();
+    assert_eq!(verify_corpus(temp.path()).expect("valid corpus"), 1);
+
+    let invalid = temp.path().join("invalid-specimen");
+    std::fs::create_dir(&invalid).unwrap();
+    let error = verify_corpus(temp.path()).expect_err("every specimen must be checked");
+    assert!(format!("{error:#}").contains("invalid-specimen"));
+    assert!(fixture.join(PROFILE_FILE).is_file());
 }
 
 #[test]
