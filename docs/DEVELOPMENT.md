@@ -253,7 +253,7 @@ derived from the host (override with `PKG_ARCH`):
 
 ```sh
 cargo run -p xtask -- linux package
-# → target/release/openlogi_*.deb / .rpm / .pkg.tar.zst
+# → target/release/*.deb / *.rpm / *.pkg.tar.zst
 ```
 
 The package contents (binaries, udev rules, systemd user unit, desktop entry,
