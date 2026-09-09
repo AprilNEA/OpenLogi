@@ -128,10 +128,12 @@ pub enum Command {
         fallback_to_pane: bool,
     },
     /// Ask the agent to fire the macOS Input Monitoring prompt.
+    #[cfg(target_os = "macos")]
     RequestInputMonitoringPrompt {
         fallback_to_pane: bool,
     },
     /// Ask the agent to fire the macOS Bluetooth prompt.
+    #[cfg(target_os = "macos")]
     RequestBluetoothPrompt {
         fallback_to_pane: bool,
     },
@@ -615,20 +617,20 @@ async fn handle(
                 spawn_accessibility_fallback_wait(client.clone());
             }
         }
+        #[cfg(target_os = "macos")]
         Command::RequestInputMonitoringPrompt { fallback_to_pane } => {
             let granted = client
                 .request_input_monitoring_prompt(ctx)
                 .await
                 .map_err(|_| ())?;
             if !granted && fallback_to_pane {
-                #[cfg(target_os = "macos")]
                 openlogi_permissions::open_pane(openlogi_permissions::Permission::InputMonitoring);
             }
         }
+        #[cfg(target_os = "macos")]
         Command::RequestBluetoothPrompt { fallback_to_pane } => {
             let granted = client.request_bluetooth_prompt(ctx).await.map_err(|_| ())?;
             if !granted && fallback_to_pane {
-                #[cfg(target_os = "macos")]
                 openlogi_permissions::open_pane(openlogi_permissions::Permission::Bluetooth);
             }
         }
@@ -827,17 +829,17 @@ fn reply_disconnected(update_tx: &mpsc::UnboundedSender<GuiUpdate>, cmd: Command
                 openlogi_permissions::open_pane(openlogi_permissions::Permission::Accessibility);
             }
         }
-        Command::RequestInputMonitoringPrompt { fallback_to_pane } => {
-            if fallback_to_pane {
-                #[cfg(target_os = "macos")]
-                openlogi_permissions::open_pane(openlogi_permissions::Permission::InputMonitoring);
-            }
+        #[cfg(target_os = "macos")]
+        Command::RequestInputMonitoringPrompt {
+            fallback_to_pane: true,
+        } => {
+            openlogi_permissions::open_pane(openlogi_permissions::Permission::InputMonitoring);
         }
-        Command::RequestBluetoothPrompt { fallback_to_pane } => {
-            if fallback_to_pane {
-                #[cfg(target_os = "macos")]
-                openlogi_permissions::open_pane(openlogi_permissions::Permission::Bluetooth);
-            }
+        #[cfg(target_os = "macos")]
+        Command::RequestBluetoothPrompt {
+            fallback_to_pane: true,
+        } => {
+            openlogi_permissions::open_pane(openlogi_permissions::Permission::Bluetooth);
         }
         _ => {}
     }
