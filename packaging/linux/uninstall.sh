@@ -52,6 +52,9 @@ sudo rm -f "${BINDIR}/openlogi" "${BINDIR}/openlogi-desktop" \
 
 echo "Removing udev rules …"
 sudo rm -f /etc/udev/rules.d/70-openlogi.rules
+# Leave the module loaded: other software may be using it by now. Only stop
+# asking for it at boot.
+sudo rm -f /etc/modules-load.d/openlogi.conf
 if command -v udevadm >/dev/null 2>&1; then
   sudo udevadm control --reload-rules
   sudo udevadm trigger --subsystem-match=hidraw
