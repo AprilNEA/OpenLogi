@@ -5,8 +5,8 @@ use thiserror::Error;
 
 use crate::{
     channel::{
-        ChannelError, HidppChannel, HidppMessage, LONG_REPORT_LENGTH, SEND_RESPONSE_TIMEOUT,
-        SHORT_REPORT_LENGTH,
+        AbandonedReply, ChannelError, HidppChannel, HidppMessage, LONG_REPORT_LENGTH,
+        SEND_RESPONSE_TIMEOUT, SHORT_REPORT_LENGTH,
     },
     nibble::{self, U4},
 };
@@ -130,9 +130,24 @@ impl HidppChannel {
     /// This method simply calls [`Self::send`] with a pre-built response
     /// predicate comparing the headers of the outgoing and incoming message.
     pub async fn send_v20(&self, msg: Message) -> Result<Message, Hidpp20Error> {
+        self.send_v20_with(msg, AbandonedReply::Quarantine).await
+    }
+
+    /// [`Self::send_v20`], choosing what to do about a reply still owed to an
+    /// abandoned request with the same header (see [`AbandonedReply`]).
+    pub async fn send_v20_with(
+        &self,
+        msg: Message,
+        abandoned: AbandonedReply,
+    ) -> Result<Message, Hidpp20Error> {
         let header = msg.header();
         let response = self
-            .send(msg.into(), v20_response_predicate(header))
+            .send_with(
+                msg.into(),
+                v20_response_predicate(header),
+                SEND_RESPONSE_TIMEOUT,
+                abandoned,
+            )
             .await?;
         decode_v20_response(response)
     }
