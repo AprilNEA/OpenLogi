@@ -22,14 +22,13 @@ mod session;
 use std::sync::Arc;
 
 use anyhow::Result;
-use gpui::AppContext as _;
 use tracing::warn;
 use tracing_subscriber::EnvFilter;
 
 use openlogi_core::action_ring::DISPLAY_LIFETIME;
 
 use crate::agent::{Ipc, OverlayCommand, spawn_ipc};
-use crate::ring::{RingView, ring_window_options};
+use crate::ring::open_ring;
 use crate::session::{ClickAwaySession, claim_the_role, spawn_click_away_dismissal};
 
 fn main() -> Result<()> {
@@ -72,30 +71,38 @@ fn main() -> Result<()> {
                     for handle in cx.windows() {
                         let _ = handle.update(cx, |_, window, _| window.remove_window());
                     }
-                    let options = ring_window_options(cx);
-                    let commands = commands.clone();
-                    let timeout_commands = commands.clone();
-                    let session_id = invocation.session_id;
-                    match cx.open_window(options, |_, cx| {
-                        cx.new(|_| RingView::new(invocation, commands, &live_session))
-                    }) {
-                        Ok(handle) => {
-                            platform::configure_windows();
-                            cx.spawn(async move |cx| {
-                                cx.background_executor().timer(DISPLAY_LIFETIME).await;
-                                if handle
-                                    .update(cx, |_, window, _| window.remove_window())
-                                    .is_ok()
-                                {
-                                    let _ = timeout_commands
-                                        .send(OverlayCommand::Cancel { session_id });
-                                }
-                            })
-                            .detach();
-                        }
-                        Err(error) => warn!(%error, "could not open Actions Ring window"),
-                    }
                 });
+                let commands = commands.clone();
+                let timeout_commands = commands.clone();
+                let session_id = invocation.session_id;
+                // Awaited, not wrapped in `cx.update`: on Linux/Wayland this
+                // opens the ring's layer-shell host and then genuinely waits
+                // on the compositor's first pointer-motion delivery to it
+                // before placing the ring — see `ring::linux_wayland_ring_host`.
+                match open_ring(cx, invocation, commands, Arc::clone(&live_session)).await {
+                    Ok((handle, host)) => {
+                        platform::configure_windows();
+                        cx.spawn(async move |cx| {
+                            cx.background_executor().timer(DISPLAY_LIFETIME).await;
+                            if handle
+                                .update(cx, |_, window, _| window.remove_window())
+                                .is_ok()
+                            {
+                                let _ =
+                                    timeout_commands.send(OverlayCommand::Cancel { session_id });
+                            }
+                            // The ring's own dismissal paths (slot/cancel/root click,
+                            // click-away) already close the host alongside it — this
+                            // timeout path is the one exit that doesn't run through any
+                            // of those, so it must close the host itself.
+                            if let Some(host) = host {
+                                let _ = host.update(cx, |_, window, _| window.remove_window());
+                            }
+                        })
+                        .detach();
+                    }
+                    Err(error) => warn!(%error, "could not open Actions Ring window"),
+                }
             }
         })
         .detach();

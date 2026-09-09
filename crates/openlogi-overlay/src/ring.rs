@@ -5,8 +5,8 @@
 //! stays whole instead of being cut off.
 
 use gpui::{
-    Bounds, Context, Hsla, InteractiveElement, IntoElement, ParentElement, Pixels, Point, Render,
-    SharedString, Size, StatefulInteractiveElement as _, Styled, Window,
+    AppContext as _, Bounds, Context, Hsla, InteractiveElement, IntoElement, ParentElement, Pixels,
+    Point, Render, SharedString, Size, StatefulInteractiveElement as _, Styled, Window,
     WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div, point,
     prelude::FluentBuilder as _, px, svg,
 };
@@ -16,6 +16,8 @@ use openlogi_ui::action_icons::RING_CANCEL_ICON;
 use openlogi_ui::color;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+#[cfg(target_os = "linux")]
+use tokio::sync::oneshot;
 
 use crate::agent::OverlayCommand;
 use crate::platform;
@@ -57,6 +59,13 @@ pub(crate) struct RingView {
     hovered: Option<ActionRingSlot>,
     /// Publishes click-away identity for exactly this view's lifetime.
     _showing: ShowingRing,
+    /// The invisible full-screen Wayland layer-shell window this ring is an
+    /// `AnchoredPopup` child of, if [`open_ring`] opened one — `None`
+    /// everywhere else (macOS, Windows, Linux/X11, or Wayland without
+    /// `zwlr_layer_shell_v1`). Every place that closes this window must also
+    /// close this one, or it lingers as an invisible click-blocking layer
+    /// over the whole screen (#1206).
+    host: Option<gpui::AnyWindowHandle>,
 }
 
 impl RingView {
@@ -65,6 +74,7 @@ impl RingView {
         invocation: ActionRingInvocation,
         commands: mpsc::UnboundedSender<OverlayCommand>,
         live: &Arc<ClickAwaySession>,
+        host: Option<gpui::AnyWindowHandle>,
     ) -> Self {
         let showing = live.showing(invocation.session_id);
         Self {
@@ -72,12 +82,18 @@ impl RingView {
             commands,
             hovered: None,
             _showing: showing,
+            host,
         }
     }
 
     /// The ring session this view is showing.
     pub(crate) const fn session_id(&self) -> u64 {
         self.invocation.session_id
+    }
+
+    /// The host window ([`Self::host`]) a click-away dismissal must also close.
+    pub(crate) const fn host(&self) -> Option<gpui::AnyWindowHandle> {
+        self.host
     }
 
     /// Report this ring cancelled. The window is closed by the caller, which
@@ -99,6 +115,7 @@ impl RingView {
         let (left, top) = slot.placement(WINDOW_SIZE, RADIUS, SLOT_SIZE);
         let session_id = self.invocation.session_id;
         let activate = self.commands.clone();
+        let host = self.host;
         Some(
             div()
                 .id(("ring-slot", slot.index()))
@@ -138,7 +155,7 @@ impl RingView {
                 .on_click(move |_, window, cx| {
                     cx.stop_propagation();
                     let _ = activate.send(OverlayCommand::Activate { session_id, slot });
-                    window.remove_window();
+                    close_ring(window, cx, host);
                 })
                 .into_any_element(),
         )
@@ -150,6 +167,8 @@ impl Render for RingView {
         let session_id = self.invocation.session_id;
         let root_commands = self.commands.clone();
         let center_commands = self.commands.clone();
+        let root_host = self.host;
+        let center_host = self.host;
         let hovered_label = self.hovered.and_then(|slot| {
             let presentation = self.invocation.slots.get(&slot)?;
             // User-authored labels render verbatim: passing them through the
@@ -202,7 +221,7 @@ impl Render for RingView {
                     .on_click(move |_, window, cx| {
                         cx.stop_propagation();
                         let _ = center_commands.send(OverlayCommand::Cancel { session_id });
-                        window.remove_window();
+                        close_ring(window, cx, center_host);
                     }),
             )
             .when_some(hovered_label, |ring, label| {
@@ -218,18 +237,37 @@ impl Render for RingView {
                         .child(label),
                 )
             })
-            .on_click(move |_, window, _| {
+            .on_click(move |_, window, cx| {
                 let _ = root_commands.send(OverlayCommand::Cancel { session_id });
-                window.remove_window();
+                close_ring(window, cx, root_host);
             })
     }
 }
 
+/// Close a ring window and, if it has one, its Wayland layer-shell host
+/// together — every dismissal path but the display-lifetime timeout (which
+/// closes the host itself, see `main.rs`) goes through here.
+fn close_ring(window: &mut Window, cx: &mut gpui::App, host: Option<gpui::AnyWindowHandle>) {
+    window.remove_window();
+    if let Some(host) = host {
+        let _ = host.update(cx, |_, window, _| window.remove_window());
+    }
+}
+
+/// Where the ring belongs: which display it's on, its clamped top-left origin
+/// on that display (zeroed to the display's own top-left, matching GPUI's
+/// display-relative window bounds), and that display's own zero-origin bounds.
 #[expect(
     clippy::cast_possible_truncation,
     reason = "native cursor coordinates are screen-sized and exactly usable as GPUI f32 pixels"
 )]
-pub(crate) fn ring_window_options(cx: &mut gpui::App) -> WindowOptions {
+fn ring_placement(
+    cx: &mut gpui::App,
+) -> (
+    Option<gpui::DisplayId>,
+    Point<Pixels>,
+    Option<Bounds<Pixels>>,
+) {
     let cursor = openlogi_hook::cursor_position();
     let size = Size::new(px(WINDOW_SIZE), px(WINDOW_SIZE));
     // GPUI window bounds are display-relative (`display.bounds()` zeroes every
@@ -276,20 +314,268 @@ pub(crate) fn ring_window_options(cx: &mut gpui::App) -> WindowOptions {
     let origin = display_bounds.map_or(desired_origin, |display_bounds| {
         clamp_window_origin(desired_origin, size, display_bounds)
     });
-    let bounds = Bounds::new(origin, size);
-    WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(bounds)),
-        titlebar: None,
-        focus: false,
-        show: true,
-        kind: WindowKind::PopUp,
-        is_movable: false,
-        is_resizable: false,
-        is_minimizable: false,
-        display_id,
-        window_background: WindowBackgroundAppearance::Transparent,
-        app_id: Some("openlogi-action-ring".to_string()),
-        ..WindowOptions::default()
+    (display_id, origin, display_bounds)
+}
+
+/// Open the Actions Ring for `invocation`, reporting interactions through
+/// `commands`. Returns the ring's window handle and, on Linux/Wayland, the
+/// invisible layer-shell host it opened alongside it (every dismissal path
+/// must close that host together with the ring — see [`RingView::host`]).
+///
+/// A plain `WindowKind::PopUp` (used everywhere else, and as the Linux
+/// fallback when no Wayland layer-shell is available) is just another
+/// toplevel to a Wayland compositor — nothing stops it from being drawn under
+/// a panel/dock's own always-on-top surface. Anchoring the ring as a popup off
+/// a `Layer::Overlay` host instead inherits that host's guaranteed
+/// above-everything stacking (#1206).
+pub(crate) async fn open_ring(
+    cx: &mut gpui::AsyncApp,
+    invocation: ActionRingInvocation,
+    commands: mpsc::UnboundedSender<OverlayCommand>,
+    live_session: Arc<ClickAwaySession>,
+) -> anyhow::Result<(gpui::WindowHandle<RingView>, Option<gpui::AnyWindowHandle>)> {
+    let size = Size::new(px(WINDOW_SIZE), px(WINDOW_SIZE));
+    let host = linux_wayland_ring_host(cx, invocation.session_id).await;
+    let options = host.map_or_else(
+        || {
+            let (display_id, origin, _) = cx.update(ring_placement);
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(Bounds::new(origin, size))),
+                titlebar: None,
+                focus: false,
+                show: true,
+                kind: WindowKind::PopUp,
+                is_movable: false,
+                is_resizable: false,
+                is_minimizable: false,
+                display_id,
+                window_background: WindowBackgroundAppearance::Transparent,
+                app_id: Some("openlogi-action-ring".to_string()),
+                ..WindowOptions::default()
+            }
+        },
+        |(host, cursor)| {
+            // The anchor point is the host's real, live-tracked cursor
+            // position, already local to the host's own surface — no
+            // display-relative math needed (#1206).
+            WindowOptions {
+                // AnchoredPopup ignores window_bounds' origin (see its own
+                // doc comment) — only the size matters here, the host's
+                // anchor_rect carries the position.
+                window_bounds: Some(WindowBounds::Windowed(Bounds::new(Point::default(), size))),
+                titlebar: None,
+                focus: false,
+                show: true,
+                kind: WindowKind::AnchoredPopup(gpui::popup::PopupOptions {
+                    parent: host,
+                    // Center anchor + center gravity centers the popup
+                    // exactly on the anchor point — no manual half-size
+                    // offset to get subtly wrong (#1206).
+                    anchor_rect: Bounds::new(cursor, Size::default()),
+                    anchor: gpui::popup::PopupAnchor::Center,
+                    gravity: gpui::popup::PopupGravity::Center,
+                    constraint_adjustment: gpui::popup::PopupConstraintAdjustment::SLIDE_X
+                        | gpui::popup::PopupConstraintAdjustment::SLIDE_Y,
+                    offset: Point::default(),
+                    grab: false,
+                }),
+                is_movable: false,
+                is_resizable: false,
+                is_minimizable: false,
+                display_id: None,
+                window_background: WindowBackgroundAppearance::Transparent,
+                app_id: Some("openlogi-action-ring".to_string()),
+                ..WindowOptions::default()
+            }
+        },
+    );
+    let host = host.map(|(host, _)| host);
+    let opened = cx.update(|cx| {
+        cx.open_window(options, move |_, cx| {
+            cx.new(|_| RingView::new(invocation, commands, &live_session, host))
+        })
+    });
+    let handle = match opened {
+        Ok(handle) => handle,
+        Err(error) => {
+            // No RingView exists for this host yet, so nothing else will ever
+            // close it — leaving it open would block clicks across the whole
+            // screen until the next ring invocation or process exit.
+            if let Some(host) = host {
+                cx.update(|cx| {
+                    let _ = host.update(cx, |_, window, _| window.remove_window());
+                });
+            }
+            return Err(error);
+        }
+    };
+    Ok((handle, host))
+}
+
+/// Open the invisible full-screen `Layer::Overlay` window the ring anchors to
+/// on Linux/Wayland, so the ring inherits guaranteed above-panel stacking, and
+/// read the real cursor position from it. `None` on every other platform, on
+/// Linux/X11, or when the compositor doesn't support `zwlr_layer_shell_v1` —
+/// the ring then falls back to a plain `WindowKind::PopUp` at
+/// [`ring_placement`]'s (best-effort) guess, exactly as before this host
+/// existed.
+///
+/// Wayland deliberately has no query for "where is the pointer right now" —
+/// [`openlogi_hook::cursor_position`] falls back to XWayland's X11
+/// `query_pointer` under a Wayland session, which is not a real Wayland
+/// pointer and does not track one; it reports whatever coordinate it last
+/// held (often stale, and always display-ambiguous on a multi-monitor
+/// desktop). This host sidesteps that entirely: it opens, then waits for the
+/// compositor's own first pointer-move delivery — this surface covers the
+/// whole desktop with no other `zwlr_layer_shell_v1` surface competing for
+/// it, so that motion event's position is the real cursor position, already
+/// local to this surface (#1206). [`gpui::Window::mouse_position`] read
+/// immediately after `open_window` returns is **not** equivalent: the
+/// platform round-trip that carries the compositor's first `enter`/`motion`
+/// hasn't necessarily happened yet, so that read can (and, observed live,
+/// intermittently does) return a stale value from whatever this process last
+/// knew — capped at [`CURSOR_WAIT`] and falling back to
+/// [`ring_placement`]'s guess so a slow or absent compositor still
+/// eventually opens *a* ring rather than hanging.
+///
+/// No visible content otherwise: its only job is being a layer-shell surface
+/// the ring can be a positioned `AnchoredPopup` child of, and a click-away
+/// target (see [`RingHostView`]'s own doc comment). Its output is left to the
+/// compositor's own choice (no `display_id`) rather than guessed from the
+/// same broken cursor position — most compositors, including KWin, place an
+/// unrequested layer-shell surface on the output the pointer is currently
+/// over, which is exactly the output this ring needs to open on.
+#[cfg(target_os = "linux")]
+const CURSOR_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
+
+#[cfg(target_os = "linux")]
+async fn linux_wayland_ring_host(
+    cx: &mut gpui::AsyncApp,
+    session_id: u64,
+) -> Option<(gpui::AnyWindowHandle, Point<Pixels>)> {
+    if gpui::guess_compositor() != "Wayland" {
+        return None;
+    }
+    let (cursor_tx, cursor_rx) = oneshot::channel();
+    let opened = cx.update(|cx| {
+        // A placeholder size only: anchoring to all four edges makes the
+        // compositor's own configure response the real, authoritative size
+        // regardless of what's requested here.
+        let size = cx
+            .primary_display()
+            .map_or_else(|| Size::new(px(1920.0), px(1080.0)), |d| d.bounds().size);
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(Bounds::new(Point::default(), size))),
+            titlebar: None,
+            focus: false,
+            show: true,
+            kind: WindowKind::LayerShell(gpui::layer_shell::LayerShellOptions {
+                namespace: "openlogi-action-ring-host".to_string(),
+                layer: gpui::layer_shell::Layer::Overlay,
+                anchor: gpui::layer_shell::Anchor::TOP
+                    | gpui::layer_shell::Anchor::BOTTOM
+                    | gpui::layer_shell::Anchor::LEFT
+                    | gpui::layer_shell::Anchor::RIGHT,
+                exclusive_zone: None,
+                exclusive_edge: None,
+                margin: None,
+                keyboard_interactivity: gpui::layer_shell::KeyboardInteractivity::None,
+            }),
+            is_movable: false,
+            is_resizable: false,
+            is_minimizable: false,
+            display_id: None,
+            window_background: WindowBackgroundAppearance::Transparent,
+            app_id: Some("openlogi-action-ring-host".to_string()),
+            ..WindowOptions::default()
+        };
+        cx.open_window(options, |_, cx| {
+            cx.new(|_| RingHostView {
+                session_id,
+                cursor_tx: std::rc::Rc::new(std::cell::RefCell::new(Some(cursor_tx))),
+            })
+        })
+    });
+    let handle = match opened {
+        Ok(handle) => handle,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "could not open the Actions Ring's layer-shell host — \
+                 falling back to a plain popup, which a panel may draw over"
+            );
+            return None;
+        }
+    };
+    let cursor = tokio::select! {
+        cursor = cursor_rx => cursor.ok(),
+        () = cx.background_executor().timer(CURSOR_WAIT) => {
+            tracing::warn!(
+                "no pointer motion on the Actions Ring's layer-shell host within {CURSOR_WAIT:?} \
+                 — opening at a best-effort guess instead"
+            );
+            None
+        }
+    };
+    let cursor = if let Some(cursor) = cursor {
+        cursor
+    } else {
+        // `ring_placement`'s origin is in global desktop coordinates (what
+        // the `WindowKind::PopUp` fallback wants), but this anchor must be
+        // local to the host's own surface — the same conversion the host
+        // itself exists to avoid needing on the happy path.
+        let (_, origin, display_bounds) = cx.update(ring_placement);
+        display_bounds.map_or(origin, |bounds| origin - bounds.origin)
+    };
+    Some((handle.into(), cursor))
+}
+
+// `async` only to match the Linux implementation's signature, which the
+// caller `.await`s unconditionally — this stub has nothing to await.
+#[cfg(not(target_os = "linux"))]
+#[expect(clippy::allow_attributes, reason = "see below")]
+#[allow(
+    clippy::unused_async,
+    reason = "kept async to match the Linux implementation's signature"
+)]
+async fn linux_wayland_ring_host(
+    _cx: &mut gpui::AsyncApp,
+    _session_id: u64,
+) -> Option<(gpui::AnyWindowHandle, Point<Pixels>)> {
+    None
+}
+
+/// The invisible layer-shell window [`linux_wayland_ring_host`] opens. A
+/// click anywhere on it (i.e. anywhere outside the ring it hosts) dismisses
+/// that ring, and its first mouse-move reports the real cursor position back
+/// to whoever is waiting on [`Self::cursor_tx`] — see
+/// [`linux_wayland_ring_host`]'s own doc comment for both.
+#[cfg(target_os = "linux")]
+struct RingHostView {
+    session_id: u64,
+    /// Taken and fired on this view's first mouse-move; `None` after. Shared
+    /// (not owned outright) because [`Render::render`] hands a fresh
+    /// `on_mouse_move` closure to a new element tree on every call, and each
+    /// must see whether an earlier one already fired it.
+    cursor_tx: std::rc::Rc<std::cell::RefCell<Option<oneshot::Sender<Point<Pixels>>>>>,
+}
+
+#[cfg(target_os = "linux")]
+impl Render for RingHostView {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let session_id = self.session_id;
+        let cursor_tx = std::rc::Rc::clone(&self.cursor_tx);
+        div()
+            .id("ring-host")
+            .size_full()
+            .on_mouse_move(move |event, _window, _cx| {
+                if let Some(tx) = cursor_tx.borrow_mut().take() {
+                    let _ = tx.send(event.position);
+                }
+            })
+            .on_click(move |_, _window, cx| {
+                crate::session::dismiss_click_away(cx, session_id);
+            })
     }
 }
 
