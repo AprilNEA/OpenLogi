@@ -208,6 +208,77 @@ fn deferred_ticks_hold_the_nodes_cache_entries_out_of_miss_aging() {
     );
 }
 
+/// A warm start loads persisted entries before any receiver has answered,
+/// so a receiver deferred from its very first probe has no record of what is
+/// its. Every unattributed entry is held for it until it is actually probed;
+/// an entry another node has claimed is not.
+#[test]
+fn a_node_deferred_before_its_first_probe_holds_every_unattributed_entry() {
+    let mut e = Enumerator::with_backend(ScriptedBackend::new(Vec::new()));
+    let receiver = NodeId::from("warm-receiver".to_string());
+    let checked_node = NodeId::from("checked-receiver".to_string());
+    let persisted = CacheKey::Bolt { unit_id: [1; 4] };
+    let claimed = CacheKey::Bolt { unit_id: [2; 4] };
+    // The persisted entry was loaded, never attributed; another node
+    // contributed — and now stops reporting — an entry of its own.
+    e.cache.insert(persisted.clone(), cache_entry());
+    let mut frozen = HashSet::new();
+    let claim = NodeProbe {
+        inventory: None,
+        verdict: ProbeVerdict::Healthy { complete: true },
+        outcomes: vec![CacheOutcome::Fresh(claimed.clone(), cache_entry())],
+    };
+    e.hold_or_note_cache_keys(&checked_node, &claim, &mut frozen);
+    e.apply_outcomes(claim.outcomes);
+
+    for _ in 0..=CACHE_MISS_GRACE {
+        let mut frozen = HashSet::new();
+        let deferred = NodeProbe::deferred();
+        settle_probe(&mut e.ledger, &receiver, deferred.verdict, None);
+        e.hold_or_note_cache_keys(&receiver, &deferred, &mut frozen);
+        let checked = NodeProbe {
+            inventory: None,
+            verdict: ProbeVerdict::Healthy { complete: true },
+            outcomes: Vec::new(),
+        };
+        e.hold_or_note_cache_keys(&checked_node, &checked, &mut frozen);
+        assert_eq!(
+            frozen,
+            HashSet::from([persisted.clone()]),
+            "only the unattributed entry is held for the never-probed node"
+        );
+        let seen = e.apply_outcomes(deferred.outcomes);
+        e.evict_unseen(&seen, &frozen);
+    }
+    assert!(
+        e.cache.contains_key(&persisted),
+        "a persisted entry must survive deferrals of the receiver that has yet to claim it"
+    );
+    assert!(
+        !e.cache.contains_key(&claimed),
+        "the checked node's unreported entry ages as before"
+    );
+
+    // The receiver's first real probe claims nothing: from then on its
+    // deferrals hold nothing, and the persisted entry ages normally.
+    let first = NodeProbe {
+        inventory: None,
+        verdict: ProbeVerdict::Healthy { complete: true },
+        outcomes: Vec::new(),
+    };
+    e.hold_or_note_cache_keys(&receiver, &first, &mut HashSet::new());
+    for _ in 0..=CACHE_MISS_GRACE {
+        let mut frozen = HashSet::new();
+        e.hold_or_note_cache_keys(&receiver, &NodeProbe::deferred(), &mut frozen);
+        assert!(
+            frozen.is_empty(),
+            "a probed node holds only what it claimed"
+        );
+        e.evict_unseen(&HashSet::new(), &frozen);
+    }
+    assert!(!e.cache.contains_key(&persisted));
+}
+
 #[test]
 fn cached_probe_is_reused_until_refresh_interval() {
     let probed_at = Instant::now();

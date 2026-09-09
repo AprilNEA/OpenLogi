@@ -921,6 +921,13 @@ impl Enumerator {
     /// reporting its devices gone, and four such ticks must not delete the
     /// last-good capabilities the ledger is still replaying the inventory
     /// for, nor persist that deletion.
+    ///
+    /// A node deferred before this process has ever probed it has no record
+    /// yet, but its entries may well be in the cache: a warm start loads the
+    /// persisted Bolt entries before any receiver answers. Every entry no
+    /// node has claimed is held for it then — nothing that was checked
+    /// contributed them, so nothing that was checked can have found them
+    /// missing — and the node's first real probe attributes what is its.
     fn hold_or_note_cache_keys(
         &mut self,
         node: &NodeId,
@@ -928,13 +935,10 @@ impl Enumerator {
         frozen: &mut HashSet<CacheKey>,
     ) {
         if probe.verdict.is_deferred() {
-            frozen.extend(
-                self.node_cache_keys
-                    .get(node)
-                    .into_iter()
-                    .flatten()
-                    .cloned(),
-            );
+            match self.node_cache_keys.get(node) {
+                Some(keys) => frozen.extend(keys.iter().cloned()),
+                None => frozen.extend(self.unattributed_cache_keys()),
+            }
             return;
         }
         let keys = probe.outcomes.iter().filter_map(CacheOutcome::key).cloned();
@@ -942,6 +946,20 @@ impl Enumerator {
             .entry(node.clone())
             .or_default()
             .extend(keys);
+    }
+
+    /// Cache entries no node probed by this process has contributed:
+    /// persisted entries loaded at start, until their node's first probe.
+    fn unattributed_cache_keys(&self) -> impl Iterator<Item = CacheKey> + '_ {
+        self.cache
+            .keys()
+            .filter(|key| {
+                !self
+                    .node_cache_keys
+                    .values()
+                    .any(|keys| keys.contains(*key))
+            })
+            .cloned()
     }
 
     /// Drop cache entries for devices not seen this pass, after a short grace so
