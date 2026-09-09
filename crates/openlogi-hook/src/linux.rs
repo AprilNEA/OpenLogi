@@ -292,7 +292,16 @@ fn is_hookable_mouse(
 }
 
 fn build_virtual_device(device: &Device) -> io::Result<evdev::uinput::VirtualDevice> {
-    let builder = VirtualDevice::builder()?.name(VIRTUAL_DEVICE_NAME);
+    // Mirroring the physical device's bus/vendor/product/version is what lets
+    // the desktop keep treating this the same mouse. GNOME and KDE both key a
+    // per-device pointer-speed profile off that identity; leaving it at
+    // evdev's uinput default (a literal placeholder — vendor 0x1234, product
+    // 0x5678) makes the grabbed-and-reinjected mouse read as brand-new
+    // hardware, so the user's own speed setting for it silently stops
+    // applying (#1075).
+    let builder = VirtualDevice::builder()?
+        .name(VIRTUAL_DEVICE_NAME)
+        .input_id(device.input_id());
 
     let builder = if let Some(keys) = device.supported_keys() {
         builder.with_keys(keys)?
