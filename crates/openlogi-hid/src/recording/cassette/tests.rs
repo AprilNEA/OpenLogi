@@ -10,7 +10,7 @@ use hidpp::channel::{
 use hidpp::nibble::U4;
 use openlogi_device::backend::{NodeId, NodeInfo};
 use openlogi_device::replay::ReplayRawHidChannel;
-use openlogi_fixture::{HidCassette, RequestMatch};
+use openlogi_fixture::{HidCassette, ReportSupport, RequestMatch};
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
 use super::*;
@@ -150,6 +150,50 @@ async fn hidpp10_receiver_requests_remain_exact() {
         &cross_version,
         &CassetteRejectionReason::UnsupportedCrossVersionPing,
     );
+}
+
+#[tokio::test]
+async fn long_only_device_errors_are_recorded_and_rebound() {
+    let (mapping_request, mut mapping_response) = root_mapping_for(0xff, CAPTURE_SW_ID, 0x2201, 5);
+    mapping_response[0] = 0x11;
+    mapping_response.resize(20, 0);
+    let request = short(0xff, 5, 0x20 | CAPTURE_SW_ID, [0; 3]);
+    let mut error_payload = [0; 16];
+    error_payload[..2].copy_from_slice(&[0x20 | CAPTURE_SW_ID, 7]);
+    let response = long(0xff, 0xff, 5, &error_payload);
+    let report = record_successes_with_support(
+        vec![(mapping_request, mapping_response), (request, response)],
+        ReportSupport::LongOnly,
+    )
+    .await
+    .build_hid_cassette(metadata());
+
+    assert!(report.is_committable(), "{:?}", report.rejections);
+    let cassette = report.cassette.unwrap();
+    assert_eq!(cassette.report_support, ReportSupport::LongOnly);
+    let error_exchange = &cassette.exchanges[1];
+    assert_eq!(&error_exchange.request[..4], &[0x11, 0xff, 5, 0x20]);
+    assert_eq!(error_exchange.request.len(), 20);
+    let normalized_error = error_exchange.response.as_ref().unwrap();
+    assert_eq!(&normalized_error[..6], &[0x11, 0xff, 0xff, 5, 0x20, 7]);
+    assert_eq!(normalized_error.len(), 20);
+    replay_with_different_lease(cassette).await;
+}
+
+#[tokio::test]
+async fn acknowledged_receiver_writes_cannot_be_published() {
+    for register in [0x00, 0x02] {
+        let report = record_successes(vec![(
+            short(0xff, 0x80, register, [0, 1, 0]),
+            short(0xff, 0x80, register, [0; 3]),
+        )])
+        .await
+        .build_hid_cassette(metadata());
+        assert_rejected(
+            &report,
+            &CassetteRejectionReason::UnsupportedHidpp10Register,
+        );
+    }
 }
 
 #[tokio::test]
@@ -471,16 +515,24 @@ fn feature_set_mapping(
 }
 
 async fn record_successes(transactions: Vec<(Vec<u8>, Vec<u8>)>) -> RecordedChannel {
+    record_successes_with_support(transactions, ReportSupport::ShortAndLong).await
+}
+
+async fn record_successes_with_support(
+    transactions: Vec<(Vec<u8>, Vec<u8>)>,
+    report_support: ReportSupport,
+) -> RecordedChannel {
     let recorder = NativeRecorder::new(256).unwrap();
     let sink = recorder.sink();
     let mut capture = sink.begin_channel(test_node()).unwrap();
-    let (raw, handle) = FakeRawHidChannel::new();
+    let (mut raw, handle) = FakeRawHidChannel::new();
+    raw.report_support = report_support;
     let channel = HidppChannel::from_raw_channel_with_observer(raw, capture.observer())
         .await
         .unwrap();
     capture.complete(RecordedChannelOpenOutcome::Opened {
-        supports_short: true,
-        supports_long: true,
+        supports_short: report_support.supports_short_reports(),
+        supports_long: report_support.supports_long_reports(),
     });
     drop(capture);
 
@@ -690,6 +742,7 @@ async fn wait_for_closed(recorder: &NativeRecorder) {
 struct FakeRawHidChannel {
     incoming: AsyncMutex<mpsc::UnboundedReceiver<Vec<u8>>>,
     written: Arc<Mutex<Vec<Vec<u8>>>>,
+    report_support: ReportSupport,
 }
 
 struct FakeRawHidHandle {
@@ -705,6 +758,7 @@ impl FakeRawHidChannel {
             Self {
                 incoming: AsyncMutex::new(receiver),
                 written: Arc::clone(&written),
+                report_support: ReportSupport::ShortAndLong,
             },
             FakeRawHidHandle {
                 incoming: sender,
@@ -767,7 +821,10 @@ impl RawHidChannel for FakeRawHidChannel {
     }
 
     fn supports_short_long_hidpp(&self) -> Option<(bool, bool)> {
-        Some((true, true))
+        Some((
+            self.report_support.supports_short_reports(),
+            self.report_support.supports_long_reports(),
+        ))
     }
 
     async fn get_report_descriptor(

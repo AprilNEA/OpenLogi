@@ -256,6 +256,139 @@ fn detailed_verifier_classifies_schema_relationship_privacy_and_replay_failures(
     assert_eq!(error.stage(), FixtureVerificationStage::Replay);
 }
 
+#[test]
+fn receiver_case_checks_device_identity_at_its_actual_slot() {
+    let (mut manifest, profile, mut cassette) = slot_three_case(vec![
+        h20(short(3, 0, 0, [0, 3, 0]), short(3, 0, 0, [8, 0, 0])),
+        h20(
+            short(3, 8, 0, [0; 3]),
+            long(3, 8, 0, &[2, b'O', b'L', b'D', 2]),
+        ),
+    ]);
+    manifest.cases[0].relationship = FixtureCaseRelationship::Receiver {
+        receiver: "receiver-1".to_string(),
+    };
+    manifest
+        .verify(&profile, std::slice::from_ref(&cassette))
+        .expect("slot-3 identity belongs to this receiver case");
+
+    for exchange in &mut cassette.exchanges {
+        exchange.request[1] = 1;
+        exchange.response.as_mut().unwrap()[1] = 1;
+    }
+    let error = manifest
+        .verify_detailed(&profile, &[cassette])
+        .expect_err("slot-3 synthetic identity must not be attributed to slot 1");
+    assert_eq!(error.stage(), FixtureVerificationStage::Relationship);
+    assert!(error.to_string().contains("identity principal"), "{error}");
+}
+
+#[test]
+fn receiver_info_selectors_are_checked_even_without_identity_evidence() {
+    // Pairing information, Unifying name, and Bolt name all address slot 3,
+    // although the HID++ header itself always addresses receiver index 0xff.
+    for (correct, wrong) in [(0x53, 0x51), (0x42, 0x40), (0x63, 0x61)] {
+        for failed_read in [false, true] {
+            let response = if failed_read {
+                short(0xff, 0x8f, 0x83, [0xb5, 2, 0])
+            } else {
+                long(0xff, 0x83, 0xb5, &[correct, 0, 0])
+            };
+            let (manifest, profile, mut cassette) = slot_three_case(vec![CassetteExchange {
+                request_match: RequestMatch::Exact,
+                request: short(0xff, 0x83, 0xb5, [correct, 0, 0]),
+                response: Some(response),
+                required: true,
+            }]);
+            manifest
+                .verify(&profile, std::slice::from_ref(&cassette))
+                .expect("slot-3 receiver-info request matches the device case");
+
+            cassette.exchanges[0].request[4] = wrong;
+            if !failed_read {
+                cassette.exchanges[0].response.as_mut().unwrap()[4] = wrong;
+            }
+            let error = manifest
+                .verify_detailed(&profile, &[cassette])
+                .expect_err("device-specific receiver selector cannot address another slot");
+            assert_eq!(error.stage(), FixtureVerificationStage::Relationship);
+        }
+    }
+}
+
+#[test]
+fn receiver_info_identity_must_match_the_selected_device() {
+    let (mut manifest, profile, mut cassette) = slot_three_case(vec![CassetteExchange {
+        request_match: RequestMatch::Exact,
+        request: short(0xff, 0x83, 0xb5, [0x53, 0, 0]),
+        response: Some(long(
+            0xff,
+            0x83,
+            0xb5,
+            &[0x53, 0, 0, 0, b'O', b'L', b'D', 2],
+        )),
+        required: true,
+    }]);
+    manifest.cases[0].relationship = FixtureCaseRelationship::Receiver {
+        receiver: "receiver-1".to_string(),
+    };
+    manifest
+        .verify(&profile, std::slice::from_ref(&cassette))
+        .expect("receiver-info identity matches its slot");
+
+    cassette.exchanges[0].request[4] = 0x51;
+    cassette.exchanges[0].response.as_mut().unwrap()[4] = 0x51;
+    let error = manifest
+        .verify_detailed(&profile, &[cassette])
+        .expect_err("receiver header must not hide wrong-slot device identity");
+    assert_eq!(error.stage(), FixtureVerificationStage::Relationship);
+    assert!(error.to_string().contains("identity principal"), "{error}");
+}
+
+#[test]
+fn receiver_case_accepts_its_paired_slots_but_not_unpaired_or_direct_targets() {
+    let (manifest, profile, mut cassette) = case_fixture();
+    for slot in [1, 2, 3] {
+        cassette.exchanges.push(h20(
+            short(slot, 0, 0x10, [0; 3]),
+            short(slot, 0, 0x10, [4, 0, 0]),
+        ));
+    }
+    manifest
+        .verify(&profile, std::slice::from_ref(&cassette))
+        .expect("a receiver case can include all its devices, even identity-free offline slot 2");
+
+    for wrong in [4, 0xff] {
+        let mut wrong_target = cassette.clone();
+        wrong_target.exchanges.push(h20(
+            short(wrong, 0, 0x10, [0; 3]),
+            short(wrong, 0, 0x10, [4, 0, 0]),
+        ));
+        let error = manifest
+            .verify_detailed(&profile, &[wrong_target])
+            .expect_err("a receiver case cannot claim an unpaired slot or a direct device");
+        assert_eq!(error.stage(), FixtureVerificationStage::Relationship);
+    }
+}
+
+fn slot_three_case(
+    exchanges: Vec<CassetteExchange>,
+) -> (FixtureManifest, DeviceProfile, HidCassette) {
+    let (_, profile, mut cassette) = case_fixture();
+    cassette.exchanges = exchanges;
+    let manifest = FixtureManifest::from_assets(
+        "slot-three".to_string(),
+        &profile,
+        std::slice::from_ref(&cassette),
+        &[FixtureCaseBinding {
+            name: cassette.name.clone(),
+            route: profile.settings[2].route.clone(),
+        }],
+    )
+    .expect("slot-3 case generates a manifest");
+    (manifest, profile, cassette)
+}
+
 fn canonical_manifest() -> FixtureManifest {
     serde_json::from_str(CANONICAL_FIXTURE_MANIFEST_JSON).expect("canonical manifest parses")
 }

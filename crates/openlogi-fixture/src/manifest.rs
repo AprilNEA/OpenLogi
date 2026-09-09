@@ -640,7 +640,7 @@ fn validate_occurrence(
     Ok(())
 }
 
-fn case_relates_principal(
+pub(super) fn case_relates_principal(
     case: &FixtureCase,
     principal: &str,
     principals: &BTreeMap<&str, &FixturePrincipal>,

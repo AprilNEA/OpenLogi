@@ -19,9 +19,16 @@ enum Hidpp10Operation {
     ReceiverControl,
     ReceiverUniqueId,
     ReceiverSerialNumber,
-    DeviceUnitId,
-    UnifyingCodename,
-    BoltCodename,
+    DeviceUnitId { slot: u8 },
+    UnifyingCodename { slot: u8 },
+    BoltCodename { slot: u8 },
+}
+
+/// Protocol address of an inspected request, including receiver-register slot selectors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ProtocolRequestTarget {
+    Receiver,
+    Device(u8),
 }
 
 /// One identity-bearing response field located by the protocol extractor.
@@ -132,6 +139,25 @@ pub struct ProtocolIdentityExtractor {
 }
 
 impl ProtocolIdentityExtractor {
+    /// Resolve the target after inspecting the exchange and learning its protocol mappings.
+    pub(super) fn request_target(
+        &self,
+        request: &[u8],
+    ) -> Result<ProtocolRequestTarget, ProtocolIdentityError> {
+        validate_report(request)?;
+        if !self.is_hidpp10_request(request) {
+            return Ok(ProtocolRequestTarget::Device(request[1]));
+        }
+        Ok(match classify_hidpp10(request)? {
+            Hidpp10Operation::ReceiverControl
+            | Hidpp10Operation::ReceiverUniqueId
+            | Hidpp10Operation::ReceiverSerialNumber => ProtocolRequestTarget::Receiver,
+            Hidpp10Operation::DeviceUnitId { slot }
+            | Hidpp10Operation::UnifyingCodename { slot }
+            | Hidpp10Operation::BoltCodename { slot } => ProtocolRequestTarget::Device(slot),
+        })
+    }
+
     /// Inspect an exchange, learn feature mappings, and locate identity fields.
     pub fn inspect_exchange(
         &mut self,
@@ -210,16 +236,16 @@ impl ProtocolIdentityExtractor {
                 validate_receiver_info_response(request, response)?;
                 Some(field(SyntheticIdentityKind::UnifyingReceiverSerial, 5..9))
             }
-            Hidpp10Operation::DeviceUnitId => {
+            Hidpp10Operation::DeviceUnitId { .. } => {
                 validate_receiver_info_response(request, response)?;
                 Some(field(SyntheticIdentityKind::DeviceUnitId, 8..12))
             }
-            Hidpp10Operation::UnifyingCodename => {
+            Hidpp10Operation::UnifyingCodename { .. } => {
                 validate_receiver_info_response(request, response)?;
                 validate_utf8_field(response, 6, response[5], 20)?;
                 None
             }
-            Hidpp10Operation::BoltCodename => {
+            Hidpp10Operation::BoltCodename { .. } => {
                 validate_receiver_info_response(request, response)?;
                 validate_utf8_field(response, 7, response[6], 20)?;
                 None
@@ -256,7 +282,8 @@ impl ProtocolIdentityExtractor {
         }
         if is_hidpp20_error(response) {
             validate_supported_function(feature_id, function_id)?;
-            require_short(response)?;
+            // Long-only channels return the same error header in a long report.
+            // Framing and echoed request correlation were validated above.
             return Ok(Vec::new());
         }
 
@@ -369,12 +396,18 @@ fn validate_report(report: &[u8]) -> Result<(), ProtocolIdentityError> {
 fn classify_hidpp10(request: &[u8]) -> Result<Hidpp10Operation, ProtocolIdentityError> {
     require_short(request)?;
     match (request[2], request[3], request[4]) {
-        (0x80 | 0x81, 0x00 | 0x02, _) => Ok(Hidpp10Operation::ReceiverControl),
+        (0x81, 0x00 | 0x02, _) => Ok(Hidpp10Operation::ReceiverControl),
         (0x83, 0xfb, _) => Ok(Hidpp10Operation::ReceiverUniqueId),
         (0x83, 0xb5, 0x03) => Ok(Hidpp10Operation::ReceiverSerialNumber),
-        (0x83, 0xb5, 0x51..=0x56) => Ok(Hidpp10Operation::DeviceUnitId),
-        (0x83, 0xb5, 0x40..=0x45) => Ok(Hidpp10Operation::UnifyingCodename),
-        (0x83, 0xb5, 0x61..=0x66) => Ok(Hidpp10Operation::BoltCodename),
+        (0x83, 0xb5, selector @ 0x51..=0x56) => Ok(Hidpp10Operation::DeviceUnitId {
+            slot: selector - 0x50,
+        }),
+        (0x83, 0xb5, selector @ 0x40..=0x45) => Ok(Hidpp10Operation::UnifyingCodename {
+            slot: selector - 0x40 + 1,
+        }),
+        (0x83, 0xb5, selector @ 0x61..=0x66) => Ok(Hidpp10Operation::BoltCodename {
+            slot: selector - 0x60,
+        }),
         _ => Err(ProtocolIdentityError::UnsupportedHidpp10Register),
     }
 }

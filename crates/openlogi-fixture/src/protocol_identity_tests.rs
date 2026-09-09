@@ -1,5 +1,6 @@
 //! Protocol identity extraction tests.
 
+use super::protocol_identity::ProtocolRequestTarget;
 use super::*;
 
 const DEVICE: u8 = 1;
@@ -145,6 +146,107 @@ fn extractor_rejects_unknown_device_information_functions() {
             feature_id: 0x0003,
             function_id: 3,
         }
+    );
+}
+
+#[test]
+fn receiver_control_reads_are_allowed_but_writes_are_not() {
+    for register in [0x00, 0x02] {
+        let mut extractor = ProtocolIdentityExtractor::default();
+        let read = short(0xff, 0x81, register, [0; 3]);
+        let response = short(0xff, 0x81, register, [0, 1, 0]);
+        let inspection = extractor.inspect_exchange(&read, &response).unwrap();
+        assert_eq!(inspection.request_match, RequestMatch::Exact);
+        assert!(inspection.fields.is_empty());
+
+        let write = short(0xff, 0x80, register, [0, 1, 0]);
+        for response in [
+            short(0xff, 0x80, register, [0; 3]),
+            short(0xff, 0x8f, 0x80, [register, 2, 0]),
+        ] {
+            assert_eq!(
+                extractor.inspect_exchange(&write, &response).unwrap_err(),
+                ProtocolIdentityError::UnsupportedHidpp10Register,
+                "an ACK or device error does not make a write read-only"
+            );
+        }
+    }
+}
+
+#[test]
+fn hidpp20_errors_preserve_correlation_in_both_report_widths() {
+    for long_only in [false, true] {
+        let report = |device, feature, function, payload: [u8; 3]| {
+            if long_only {
+                long(device, feature, function, &payload)
+            } else {
+                short(device, feature, function, payload)
+            }
+        };
+        let mut extractor = ProtocolIdentityExtractor::default();
+        extractor
+            .inspect_exchange(
+                &report(0xff, 0, SW_ID, [0x22, 1, 0]),
+                &report(0xff, 0, SW_ID, [5, 0, 0]),
+            )
+            .expect("Root maps adjustable DPI");
+        let request = report(0xff, 5, 0x20 | SW_ID, [0; 3]);
+        let mut response = report(0xff, 0xff, 5, [0x20 | SW_ID, 7, 0]);
+        let inspection = extractor.inspect_exchange(&request, &response).unwrap();
+        assert_eq!(inspection.request_match, RequestMatch::Hidpp20);
+        assert!(inspection.fields.is_empty());
+
+        response[4] ^= 1;
+        assert_eq!(
+            extractor.inspect_exchange(&request, &response).unwrap_err(),
+            ProtocolIdentityError::CorrelationMismatch,
+            "the echoed function/software ID must still match"
+        );
+    }
+}
+
+#[test]
+fn request_targets_distinguish_receiver_selectors_from_direct_feature_indices() {
+    let mut extractor = ProtocolIdentityExtractor::default();
+    for (selector, slot) in [
+        (0x51, 1),
+        (0x56, 6),
+        (0x40, 1),
+        (0x45, 6),
+        (0x61, 1),
+        (0x66, 6),
+    ] {
+        let request = short(0xff, 0x83, 0xb5, [selector, 0, 0]);
+        extractor
+            .inspect_exchange(&request, &short(0xff, 0x8f, 0x83, [0xb5, 2, 0]))
+            .unwrap();
+        assert_eq!(
+            extractor.request_target(&request).unwrap(),
+            ProtocolRequestTarget::Device(slot)
+        );
+    }
+    let receiver_read = short(0xff, 0x81, 0, [0; 3]);
+    extractor
+        .inspect_exchange(&receiver_read, &receiver_read)
+        .unwrap();
+    assert_eq!(
+        extractor.request_target(&receiver_read).unwrap(),
+        ProtocolRequestTarget::Receiver
+    );
+
+    extractor
+        .inspect_exchange(
+            &short(0xff, 0, SW_ID, [0x10, 0, 0]),
+            &short(0xff, 0, SW_ID, [0x81, 0, 0]),
+        )
+        .expect("a direct device may assign a feature index resembling a receiver command");
+    let direct_read = short(0xff, 0x81, SW_ID, [0; 3]);
+    extractor
+        .inspect_exchange(&direct_read, &direct_read)
+        .unwrap();
+    assert_eq!(
+        extractor.request_target(&direct_read).unwrap(),
+        ProtocolRequestTarget::Device(0xff)
     );
 }
 

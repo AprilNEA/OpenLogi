@@ -3,14 +3,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use openlogi_core::hid::{DeviceRoute, speaks_unifying_protocol};
+use openlogi_core::device::DeviceInventory;
+use openlogi_core::hid::{DIRECT_DEVICE_INDEX, DeviceRoute, speaks_unifying_protocol};
 use thiserror::Error;
 
+use super::manifest::case_relates_principal;
+use super::protocol_identity::ProtocolRequestTarget;
 use super::{
-    DeviceProfile, FixtureDeviceRoute, FixtureError, FixtureManifest, FixturePrincipal,
-    HidCassette, IdentityLocation, IdentityOccurrence, ProfileIdentityField,
-    ProtocolIdentityExtractor, SyntheticIdentityKind, classify_synthetic_identity_bytes,
-    classify_synthetic_profile_identity,
+    DeviceProfile, FixtureCase, FixtureCaseRelationship, FixtureDeviceRoute, FixtureError,
+    FixtureManifest, FixturePrincipal, HidCassette, IdentityLocation, IdentityOccurrence,
+    ProfileIdentityField, ProtocolIdentityExtractor, SyntheticIdentityKind,
+    classify_synthetic_identity_bytes, classify_synthetic_profile_identity,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -31,8 +34,8 @@ pub(super) fn populate_exact_occurrences(
             .map_err(FixtureVerificationError::into_fixture_error)?;
         let ledger = LedgerIndex::new(manifest)?;
         let mut observed = BTreeMap::new();
-        verify_profile(profile, &ledger, &mut observed)?;
-        verify_cassettes(&cassettes, &ledger, &mut observed)
+        let receivers = verify_profile(profile, &ledger, &mut observed)?;
+        verify_cassettes(&cassettes, &ledger, &receivers, &mut observed)
             .map_err(FixtureVerificationError::into_fixture_error)?;
         observed
     };
@@ -152,15 +155,16 @@ impl FixtureManifest {
         let cassette_map = self.validate_cassette_relationships(cassettes)?;
         let ledger = LedgerIndex::new(self).map_err(schema_error)?;
         let mut observed = BTreeMap::new();
-        verify_profile(profile, &ledger, &mut observed).map_err(privacy_error)?;
-        verify_cassettes(&cassette_map, &ledger, &mut observed)?;
+        let receivers = verify_profile(profile, &ledger, &mut observed).map_err(privacy_error)?;
+        verify_cassettes(&cassette_map, &ledger, &receivers, &mut observed)?;
         compare_counts(&ledger.expected, &observed).map_err(privacy_error)
     }
 
     fn validate_cassette_relationships<'a>(
-        &self,
+        &'a self,
         cassettes: &'a [HidCassette],
-    ) -> Result<BTreeMap<&'a str, &'a HidCassette>, FixtureVerificationError> {
+    ) -> Result<BTreeMap<&'a str, (&'a FixtureCase, &'a HidCassette)>, FixtureVerificationError>
+    {
         let cases: BTreeMap<_, _> = self
             .cases
             .iter()
@@ -184,7 +188,10 @@ impl FixtureManifest {
                     ),
                 )));
             }
-            if found.insert(cassette.name.as_str(), cassette).is_some() {
+            if found
+                .insert(cassette.name.as_str(), (*case, cassette))
+                .is_some()
+            {
                 return Err(relationship_error(FixtureError::invalid(
                     "fixture verification",
                     format!("duplicate cassette {}", cassette.name),
@@ -285,12 +292,13 @@ impl<'a> LedgerIndex<'a> {
     }
 }
 
-fn verify_profile(
-    profile: &DeviceProfile,
-    ledger: &LedgerIndex<'_>,
+fn verify_profile<'a>(
+    profile: &'a DeviceProfile,
+    ledger: &'a LedgerIndex<'_>,
     observed: &mut BTreeMap<CountKey, u32>,
-) -> Result<(), FixtureError> {
+) -> Result<BTreeMap<&'a str, &'a DeviceInventory>, FixtureError> {
     let mut seen_principals = BTreeSet::new();
+    let mut receivers = BTreeMap::new();
     for inventory in &profile.inventories {
         let receiver = if let Some(identity) = inventory.receiver.unique_id.as_deref() {
             let kind = if speaks_unifying_protocol(inventory.receiver.product_id) {
@@ -306,6 +314,8 @@ fn verify_profile(
                 ProfileIdentityField::ReceiverIdentity,
             );
             seen_principals.insert(principal.to_string());
+            // Offline paired devices may have no identity-bearing ledger entry.
+            receivers.insert(principal, inventory);
             Some((principal, kind))
         } else {
             None
@@ -389,7 +399,7 @@ fn verify_profile(
     {
         return invalid(format!("principal {missing} has no matching profile route"));
     }
-    Ok(())
+    Ok(receivers)
 }
 
 fn observe_device_model(
@@ -481,17 +491,18 @@ fn verify_setting_routes(
 }
 
 fn verify_cassettes(
-    cassettes: &BTreeMap<&str, &HidCassette>,
+    cassettes: &BTreeMap<&str, (&FixtureCase, &HidCassette)>,
     ledger: &LedgerIndex<'_>,
+    receivers: &BTreeMap<&str, &DeviceInventory>,
     observed: &mut BTreeMap<CountKey, u32>,
 ) -> Result<(), FixtureVerificationError> {
-    for (case, cassette) in cassettes {
+    for (case_name, (case, cassette)) in cassettes {
         let mut extractor = ProtocolIdentityExtractor::default();
         for exchange in &cassette.exchanges {
             let Some(response) = exchange.response.as_deref() else {
                 return Err(replay_error(FixtureError::invalid(
                     "fixture verification",
-                    format!("cassette {case} contains unsupported response-less traffic"),
+                    format!("cassette {case_name} contains unsupported response-less traffic"),
                 )));
             };
             let inspection = extractor
@@ -499,13 +510,29 @@ fn verify_cassettes(
                 .map_err(|error| {
                     replay_error(FixtureError::invalid(
                         "fixture verification",
-                        format!("cassette {case}: {error}"),
+                        format!("cassette {case_name}: {error}"),
                     ))
                 })?;
             if inspection.request_match != exchange.request_match {
                 return Err(replay_error(FixtureError::invalid(
                     "fixture verification",
-                    format!("cassette {case} uses the wrong request matching rule"),
+                    format!("cassette {case_name} uses the wrong request matching rule"),
+                )));
+            }
+            let target = extractor
+                .request_target(&exchange.request)
+                .map_err(|error| {
+                    replay_error(FixtureError::invalid(
+                        "fixture verification",
+                        format!("cassette {case_name}: {error}"),
+                    ))
+                })?;
+            if !case_accepts_target(case, target, ledger, receivers) {
+                return Err(relationship_error(FixtureError::invalid(
+                    "fixture verification",
+                    format!(
+                        "cassette {case_name} request target {target:?} is unrelated to its case"
+                    ),
                 )));
             }
             for field in inspection.fields {
@@ -521,12 +548,30 @@ fn verify_cassettes(
                 let principal = ledger
                     .resolve_bytes(field.kind, value)
                     .map_err(privacy_error)?;
+                let matches_target = match (target, ledger.principals.get(principal)) {
+                    (ProtocolRequestTarget::Receiver, Some(FixturePrincipal::Receiver { .. })) => {
+                        true
+                    }
+                    (
+                        ProtocolRequestTarget::Device(index),
+                        Some(FixturePrincipal::Device { route, .. }),
+                    ) => route_has_device_index(route, index),
+                    _ => false,
+                };
+                if !matches_target || !case_relates_principal(case, principal, &ledger.principals) {
+                    return Err(relationship_error(FixtureError::invalid(
+                        "fixture verification",
+                        format!(
+                            "cassette {case_name} identity principal {principal} does not match request target {target:?}"
+                        ),
+                    )));
+                }
                 observe(
                     observed,
                     principal,
                     field.kind,
                     IdentityLocation::Cassette {
-                        case: (*case).to_string(),
+                        case: (*case_name).to_string(),
                         channel: cassette.channel.clone(),
                     },
                 );
@@ -534,6 +579,42 @@ fn verify_cassettes(
         }
     }
     Ok(())
+}
+
+fn case_accepts_target(
+    case: &FixtureCase,
+    target: ProtocolRequestTarget,
+    ledger: &LedgerIndex<'_>,
+    receivers: &BTreeMap<&str, &DeviceInventory>,
+) -> bool {
+    match &case.relationship {
+        FixtureCaseRelationship::Device { device } => {
+            ledger
+                .device_route(device)
+                .is_some_and(|route| match target {
+                    ProtocolRequestTarget::Receiver => route.receiver().is_some(),
+                    ProtocolRequestTarget::Device(index) => route_has_device_index(route, index),
+                })
+        }
+        FixtureCaseRelationship::Receiver { receiver } => match target {
+            ProtocolRequestTarget::Receiver => true,
+            ProtocolRequestTarget::Device(index) => {
+                receivers.get(receiver.as_str()).is_some_and(|inventory| {
+                    inventory.paired.iter().any(|device| device.slot == index)
+                })
+            }
+        },
+    }
+}
+
+fn route_has_device_index(route: &FixtureDeviceRoute, index: u8) -> bool {
+    match route {
+        FixtureDeviceRoute::Bolt { slot, .. } | FixtureDeviceRoute::Unifying { slot, .. } => {
+            *slot == index
+        }
+        FixtureDeviceRoute::Direct { .. } => index == DIRECT_DEVICE_INDEX,
+        FixtureDeviceRoute::RawHid { .. } => false,
+    }
 }
 
 fn resolve_device_route<'a>(
