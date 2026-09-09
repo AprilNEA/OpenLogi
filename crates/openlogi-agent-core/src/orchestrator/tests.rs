@@ -837,12 +837,18 @@ fn config_reload_publishes_scroll_preferences_without_restarting_the_hook() {
     config.app_settings.smooth_scroll = true;
     config.app_settings.vertical_scroll_sensitivity =
         VerticalScrollSensitivity::try_new(7).expect("valid sensitivity");
-    orch.reload_config(config);
+    config.app_settings.smooth_scroll_step =
+        openlogi_core::config::SmoothScrollStep::try_new(4).expect("valid step");
+    orch.reload_config(config.clone());
 
     assert!(preferences.smooth_scroll_enabled());
     assert_eq!(
         preferences.vertical_sensitivity(),
         VerticalScrollSensitivity::try_new(7).expect("valid sensitivity")
+    );
+    assert_eq!(
+        preferences.smooth_scroll_tuning(),
+        config.app_settings.smooth_scroll_tuning()
     );
 }
 

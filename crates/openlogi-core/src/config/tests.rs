@@ -880,6 +880,56 @@ fn app_settings_smooth_scroll_is_opt_in_and_roundtrips() {
 }
 
 #[test]
+fn app_settings_smooth_scroll_tuning_defaults_rejects_and_roundtrips() {
+    let default: Config = toml::from_str("schema_version = 5").expect("parse defaults");
+    assert_eq!(
+        default.app_settings.smooth_scroll_tuning(),
+        SmoothScrollTuning::default()
+    );
+    assert_eq!(
+        default.app_settings.smooth_scroll_step,
+        SmoothScrollStep::DEFAULT
+    );
+    assert_eq!(
+        default.app_settings.smooth_scroll_duration_ms,
+        SmoothScrollDurationMs::DEFAULT
+    );
+    assert_eq!(
+        default.app_settings.smooth_scroll_acceleration,
+        SmoothScrollAcceleration::DEFAULT
+    );
+
+    let mut cfg = Config::default();
+    cfg.app_settings.smooth_scroll_step = SmoothScrollStep::try_new(4).expect("valid step");
+    cfg.app_settings.smooth_scroll_duration_ms =
+        SmoothScrollDurationMs::try_new(550).expect("valid duration");
+    cfg.app_settings.smooth_scroll_acceleration =
+        SmoothScrollAcceleration::try_new(3).expect("valid acceleration");
+    let parsed = write_and_read(&cfg);
+    assert_eq!(
+        parsed.app_settings.smooth_scroll_step,
+        cfg.app_settings.smooth_scroll_step
+    );
+    assert_eq!(
+        parsed.app_settings.smooth_scroll_duration_ms,
+        cfg.app_settings.smooth_scroll_duration_ms
+    );
+    assert_eq!(
+        parsed.app_settings.smooth_scroll_acceleration,
+        cfg.app_settings.smooth_scroll_acceleration
+    );
+
+    // Out-of-range values are a parse error, not a silent clamp.
+    let overrange = r"
+schema_version = 5
+
+[app_settings]
+smooth_scroll_step = 21
+";
+    toml::from_str::<Config>(overrange).expect_err("step above the maximum is rejected");
+}
+
+#[test]
 fn app_settings_vertical_scroll_sensitivity_defaults_and_roundtrips() {
     let default: Config = toml::from_str("schema_version = 5").expect("parse defaults");
     assert_eq!(
