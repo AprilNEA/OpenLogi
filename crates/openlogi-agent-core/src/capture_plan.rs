@@ -320,35 +320,112 @@ mod tests {
     }
 
     #[test]
-    fn thumb_button_bound_to_a_browser_action_is_diverted() {
-        // BrowserBack used to be the default action for Back, so choosing it
-        // in the GUI matched the default and the button was never diverted.
-        let mut cfg = Config::default();
-        cfg.set_binding(
-            "2b023",
-            ButtonId::Back,
-            Binding::Single(Action::BrowserBack),
-        );
+    fn thumb_button_capture_distinguishes_native_and_browser_actions() {
+        for (button, native, browser) in [
+            (ButtonId::Back, Action::MouseBack, Action::BrowserBack),
+            (
+                ButtonId::Forward,
+                Action::MouseForward,
+                Action::BrowserForward,
+            ),
+        ] {
+            for (stored, expected_action, diverted) in [
+                (None, native.clone(), false),
+                (Some(native.clone()), native, false),
+                (Some(browser.clone()), browser, true),
+            ] {
+                let mut cfg = Config::default();
+                if let Some(action) = stored {
+                    cfg.set_binding("2b023", button, Binding::Single(action));
+                }
 
-        let plan = plan_for_device(&cfg, "2b023", route(), None, 0, true);
-        assert!(
-            plan.target
-                .spec
-                .divert_buttons
-                .iter()
-                .any(|&(_, button)| button == ButtonId::Back),
-            "a thumb button bound to a browser action must be diverted: {:?}",
-            plan.target.spec.divert_buttons
-        );
-        assert!(
-            !plan
-                .target
-                .spec
-                .divert_buttons
-                .iter()
-                .any(|&(_, button)| button == ButtonId::Forward),
-            "the untouched forward button must keep its native button 5"
-        );
+                let plan = plan_for_device(&cfg, "2b023", route(), None, 0, true);
+                assert_eq!(
+                    plan.dispatch.bindings.get(&button),
+                    Some(&Binding::Single(expected_action)),
+                    "{button:?} must resolve unset bindings to native clicks"
+                );
+                // Several model-specific CIDs can map to the same side button.
+                for side in [ButtonId::Back, ButtonId::Forward] {
+                    assert_eq!(
+                        plan.target
+                            .spec
+                            .divert_buttons
+                            .iter()
+                            .any(|&(_, captured)| captured == side),
+                        diverted && side == button,
+                        "only an explicitly browser-bound {button:?} should be diverted"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn thumb_button_capture_follows_per_app_overrides_and_inheritance() {
+        for (cid, button, native, browser) in [
+            (
+                0x0053,
+                ButtonId::Back,
+                Action::MouseBack,
+                Action::BrowserBack,
+            ),
+            (
+                0x0056,
+                ButtonId::Forward,
+                Action::MouseForward,
+                Action::BrowserForward,
+            ),
+        ] {
+            for (global, overridden, global_diverted) in [
+                (native.clone(), browser.clone(), false),
+                (browser, native, true),
+            ] {
+                let mut cfg = Config::default();
+                cfg.set_binding("2b023", button, Binding::Single(global.clone()));
+                cfg.set_per_app_binding(
+                    "2b023",
+                    "com.apple.Safari",
+                    button,
+                    Some(overridden.clone()),
+                );
+
+                for (app, expected_action, diverted) in [
+                    (None, &global, global_diverted),
+                    (Some("com.apple.Safari"), &overridden, !global_diverted),
+                    (Some("com.example.Other"), &global, global_diverted),
+                ] {
+                    let plan = plan_for_device(&cfg, "2b023", route(), app, 0, true);
+                    assert_eq!(
+                        plan.dispatch.bindings.get(&button),
+                        Some(&Binding::Single(expected_action.clone())),
+                        "{button:?} dispatch must resolve the profile for {app:?}"
+                    );
+                    assert_eq!(
+                        plan.target.spec.divert_buttons.contains(&(cid, button)),
+                        diverted,
+                        "{button:?} capture must follow its effective binding for {app:?}"
+                    );
+                }
+
+                cfg.set_per_app_binding("2b023", "com.apple.Safari", button, None);
+                let inherited =
+                    plan_for_device(&cfg, "2b023", route(), Some("com.apple.Safari"), 0, true);
+                assert_eq!(
+                    inherited.dispatch.bindings.get(&button),
+                    Some(&Binding::Single(global))
+                );
+                assert_eq!(
+                    inherited
+                        .target
+                        .spec
+                        .divert_buttons
+                        .contains(&(cid, button)),
+                    global_diverted,
+                    "clearing {button:?}'s app override must restore global capture"
+                );
+            }
+        }
     }
 
     #[test]

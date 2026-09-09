@@ -97,10 +97,8 @@ fn combo(shortcut: Shortcut) -> KeyCombo {
         Shortcut::SelectAll => "Cmd+A",
         Shortcut::Find => "Cmd+F",
         Shortcut::Save => "Cmd+S",
-        // Cmd+[ / Cmd+] for Chrome and other apps. Safari is handled
-        // upstream via ax_navigate_browser() with the PID captured at press
-        // time — by the time execute() is called the AX path has already
-        // run, so this is the fallback for non-Safari browsers only.
+        // Browser navigation uses keyboard shortcuts here, including for
+        // Safari. The AX helper is not called by this dispatch path.
         Shortcut::BrowserBack => "Cmd+[",
         Shortcut::BrowserForward => "Cmd+]",
         Shortcut::NewTab => "Cmd+T",

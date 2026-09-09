@@ -112,12 +112,10 @@ impl ActionExecutor {
                 );
                 return;
             }
-            // BrowserBack/BrowserForward fall through to the keyboard shortcut
-            // (Cmd+[ / Cmd+]) here — for Chrome and other apps that respond to
-            // it, and as the HID++ gesture watcher's own fallback when its
-            // AXPress attempt (Safari) fails. On devices where one physical
-            // press is visible through both capture paths, debounce the shared
-            // action so the browser navigates only once.
+            // Browser navigation uses platform input synthesis, not a native
+            // mouse click. If one physical press is visible through both
+            // capture paths, debounce the shared action so the browser
+            // navigates only once.
             Action::BrowserBack | Action::BrowserForward => {
                 if browser_nav_debounce_ok(action) {
                     openlogi_inject::execute(action);
