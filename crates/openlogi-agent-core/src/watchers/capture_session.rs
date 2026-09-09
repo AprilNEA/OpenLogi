@@ -59,6 +59,25 @@ impl<Restore> CaptureRecovery<Restore> {
     pub(super) fn is_empty(&self) -> bool {
         self.pending_restore.is_none() && self.restart_at.is_none()
     }
+
+    /// Next recovery work that can make progress for this slot. Restart is
+    /// blocked by firmware ownership, so its deadline is not actionable until
+    /// restoration succeeds. Keep the pacing deadline for an early success.
+    pub(super) fn next_deadline(
+        &self,
+        retry_at: impl FnOnce(&Restore) -> Instant,
+    ) -> Option<Instant> {
+        self.pending_restore
+            .as_ref()
+            .map(retry_at)
+            .or(self.restart_at)
+    }
+
+    /// Restoration must finish before a successor can use the hardware, even
+    /// if restart pacing has already elapsed.
+    pub(super) fn blocks_restart(&self, now: Instant) -> bool {
+        self.pending_restore.is_some() || self.restart_at.is_some_and(|deadline| deadline > now)
+    }
 }
 
 /// One manager-owned hardware slot. A session remains in `Running` while it
@@ -323,6 +342,130 @@ mod tests {
             recovery.restart_at,
             Some(restart_at),
             "restore and restart pacing may legitimately coexist"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn recovery_failed_restore_waits_instead_of_repeating_expired_restart() {
+        use std::time::Duration;
+
+        let start = Instant::now();
+        let restart_at = start + Duration::from_secs(1);
+        let mut slot = CaptureSlot::running(session());
+        slot.complete(
+            &HidppSessionId::with_epoch("mouse-a", 7),
+            Some(restart_at),
+            Some(restart_at),
+        )
+        .expect("an unexpected completion retains both restore and pacing");
+        assert!(slot.session().is_none());
+        let recovery = slot.recovery_mut().unwrap();
+        assert!(recovery.blocks_restart(start));
+        tokio::time::advance(Duration::from_secs(1)).await;
+
+        for _ in 0..3 {
+            assert_eq!(
+                recovery.next_deadline(|retry_at| *retry_at),
+                Some(Instant::now())
+            );
+            // A failed firmware retry returns ownership with a new deadline.
+            let retry_at = Instant::now() + Duration::from_secs(2);
+            recovery.pending_restore = Some(retry_at);
+            assert!(recovery.blocks_restart(Instant::now()));
+            assert_eq!(recovery.restart_at, Some(restart_at));
+            let deadline = recovery.next_deadline(|retry_at| *retry_at).unwrap();
+            assert_eq!(
+                deadline, retry_at,
+                "expired pacing cannot drive another reconciliation"
+            );
+
+            let mut wait = std::pin::pin!(tokio::time::sleep_until(deadline));
+            assert!(futures_lite::future::poll_once(&mut wait).await.is_none());
+
+            // This is the managers' pre-select condition. It must let both
+            // ordinary events and shutdown through after every failed retry.
+            assert!(deadline > Instant::now());
+            let (events, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+            events.send("input").unwrap();
+            tokio::select! {
+                () = &mut wait => panic!("restore retry must not be hot"),
+                event = event_rx.recv() => assert_eq!(event, Some("input")),
+            }
+            let (stop, mut shutdown) = oneshot::channel();
+            stop.send(()).unwrap();
+            tokio::select! {
+                () = &mut wait => panic!("restore retry must not starve shutdown"),
+                result = &mut shutdown => result.unwrap(),
+            }
+            assert_eq!(Instant::now() + Duration::from_secs(2), retry_at);
+            tokio::time::advance(Duration::from_secs(2)).await;
+            wait.await;
+        }
+
+        recovery.pending_restore = None;
+        assert!(
+            !recovery.blocks_restart(Instant::now()),
+            "only successful restoration admits a successor"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn recovery_early_restore_keeps_future_restart_pacing() {
+        use std::time::Duration;
+
+        let start = Instant::now();
+        let restart_at = start + Duration::from_secs(5);
+        let mut slot = CaptureSlot::running(session());
+        slot.complete(
+            &HidppSessionId::with_epoch("mouse-a", 7),
+            Some(start + Duration::from_secs(2)),
+            Some(restart_at),
+        )
+        .unwrap();
+        let recovery = slot.recovery_mut().unwrap();
+        assert_eq!(
+            recovery.next_deadline(|retry_at| *retry_at),
+            Some(start + Duration::from_secs(2))
+        );
+
+        // Inventory replacement accelerates the retry before either deadline.
+        tokio::time::advance(Duration::from_millis(500)).await;
+        recovery.pending_restore = Some(Instant::now());
+        assert_eq!(
+            recovery.next_deadline(|retry_at| *retry_at),
+            Some(Instant::now())
+        );
+        recovery.pending_restore = None;
+        assert_eq!(
+            recovery.next_deadline(|retry_at| *retry_at),
+            Some(restart_at)
+        );
+        assert!(recovery.blocks_restart(Instant::now()));
+
+        tokio::time::advance(Duration::from_millis(4499)).await;
+        assert!(recovery.blocks_restart(Instant::now()));
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(!recovery.blocks_restart(Instant::now()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn recovery_restore_later_than_restart_is_the_only_actionable_deadline() {
+        use std::time::Duration;
+
+        let now = Instant::now();
+        let recovery = CaptureRecovery {
+            pending_restore: Some(now + Duration::from_secs(3)),
+            restart_at: Some(now + Duration::from_secs(1)),
+        };
+        assert_eq!(
+            recovery.next_deadline(|retry_at| *retry_at),
+            Some(now + Duration::from_secs(3))
+        );
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(recovery.blocks_restart(Instant::now()));
+        assert_eq!(
+            recovery.next_deadline(|retry_at| *retry_at),
+            Some(now + Duration::from_secs(3))
         );
     }
 
