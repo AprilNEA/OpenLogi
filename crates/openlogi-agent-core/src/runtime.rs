@@ -38,7 +38,7 @@ pub(crate) enum ActionDispatchTarget {
 
 impl ActionDispatchTarget {
     fn capture() -> Self {
-        openlogi_inject::frontmost_safari_pid().map_or(Self::Keyboard, Self::SafariProcess)
+        openlogi_hook::frontmost_safari_pid().map_or(Self::Keyboard, Self::SafariProcess)
     }
 }
 /// Held output owned by accepted press capabilities rather than by a capture

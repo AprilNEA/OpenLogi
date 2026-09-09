@@ -31,8 +31,8 @@ files; **keep this table in sync when you add or move one**:
 | `openlogi-desktop/src/platform/registration/macos.rs` | `SMAppService` registration of the agent's launchd service (the login-item side of the agent lifecycle; the GUI must own it — the API resolves the plist against the calling app's bundle) |
 | `openlogi-desktop/src/platform/os.rs` | `NSProcessInfo` OS version + the `NSAppearance` titlebar sync |
 | `openlogi-hid/src/permissions.rs` | `IOHIDCheckAccess` / `IOHIDRequestAccess` (the prompting half of Input Monitoring) |
-| `openlogi-hook/src/macos.rs` | the CGEventTap (on `core-graphics`, see below), the `NSWorkspace` frontmost-app read, the Accessibility-trust check/prompt, and the HID sender-id lookup |
-| `openlogi-inject/src/inject/macos.rs` | CGEvent synthesis, media-key `NSEvent`s, `NSWorkspace` Safari-target capture, raw `AXUIElement` navigation, and the `dlopen`'d private SPIs |
+| `openlogi-hook/src/macos.rs` | the CGEventTap (on `core-graphics`, see below), the off-tap `NSWorkspace` frontmost-app read and Safari PID snapshot, the Accessibility-trust check/prompt, and the HID sender-id lookup |
+| `openlogi-inject/src/inject/macos.rs` | CGEvent synthesis, media-key `NSEvent`s, off-thread `NSWorkspace` validation, raw `AXUIElement` navigation, and the `dlopen`'d private SPIs |
 | `openlogi-overlay/src/platform.rs` | the Actions Ring helper's window policy: accessory activation, non-activating panel, the `NSEvent` global click-away monitor (`block2`), and `CGGetActiveDisplayList` / `CGDisplayBounds` |
 | `openlogi-permissions/src/macos.rs` | non-prompting permission reads + System-Settings deep links; `+[CBManager authorization]` via an `AnyClass` lookup |
 
