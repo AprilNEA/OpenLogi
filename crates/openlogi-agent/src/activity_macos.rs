@@ -126,6 +126,19 @@ impl ActivityGate {
         self.update(|levels| levels.on_console = on_console);
     }
 
+    /// Record a power transition together with the console level read at
+    /// the same moment, as one gate decision.
+    ///
+    /// Two separate writes would publish twice: a full wake against a stale
+    /// `on_console = true` would open the gate for the instant before the
+    /// fresh read closed it again, and a HID open can start in that instant.
+    pub fn observe(&self, power: PowerState, on_console: bool) {
+        self.update(|levels| {
+            levels.power = power;
+            levels.on_console = on_console;
+        });
+    }
+
     /// Release the launch hold. What the gate does next follows from the
     /// levels alone: a launch into a DarkWake stays closed until powerd
     /// reports the full wake.
@@ -289,10 +302,10 @@ unsafe extern "C" fn on_event(
         ?power,
         "power transition"
     );
-    gate.set_power(power);
-    // The console can move while the machine is dark; the wake is the moment
-    // a dropped session notification would otherwise start to matter.
-    gate.set_on_console(session_is_on_console());
+    // The console can move while the machine is dark, and the wake is the
+    // moment a dropped session notification would start to matter — so read
+    // it now and decide on both levels at once.
+    gate.observe(power, session_is_on_console());
     // SAFETY: `token` identifies this event on `connection`, both handed to
     // this callback by powerd.
     let status = unsafe { ffi::IOPMConnectionAcknowledgeEvent(connection, token) };
@@ -461,6 +474,26 @@ mod tests {
         );
         gate.set_on_console(true);
         assert!(io.allows_io());
+    }
+
+    #[test]
+    fn a_full_wake_into_another_users_console_never_publishes_allowed() {
+        use futures::FutureExt as _;
+
+        let (gate, mut io) = awake_on_console();
+        gate.set_power(PowerState::Sleep);
+        assert_eq!(io.changed().now_or_never(), Some(Some(false)));
+
+        // The console moved while the machine was dark and the session
+        // notification never arrived. The wake must not open the gate even
+        // for an instant: a watch channel keeps a version per publish, so an
+        // Allowed-then-Suspended pair would surface here as a change.
+        gate.observe(PowerState::FullWake, false);
+        assert!(!io.allows_io());
+        assert_eq!(io.changed().now_or_never(), None);
+
+        gate.observe(PowerState::FullWake, true);
+        assert_eq!(io.changed().now_or_never(), Some(Some(true)));
     }
 
     #[test]
