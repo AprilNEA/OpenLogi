@@ -32,7 +32,7 @@ pub mod standalone;
 use cache::{CACHE_MISS_GRACE, CacheKey, CacheOutcome, Cached};
 use events::{ChannelEventSubscriptions, EventNotifier, EventSubscriptionHandle};
 use persist::{ProbeCacheSnapshot, ProbeCacheStore};
-use probe::{PassContext, ProbeVerdict, probe_one};
+use probe::{NodeProbe, PassContext, ProbeVerdict, probe_one};
 
 /// How long to wait for device-arrival event bursts before assuming the
 /// receiver has finished reporting. MX Master 4 (and other devices that may
@@ -191,6 +191,10 @@ pub struct Enumerator {
     /// Consecutive passes each cached device has been missing, for grace-period
     /// eviction.
     misses: HashMap<CacheKey, u8>,
+    /// The cache entries each node has contributed and still holds: what a
+    /// deferred tick holds out of miss aging, since a probe that never ran
+    /// has seen nothing and missed nothing (see [`Self::evict_unseen`]).
+    node_cache_keys: HashMap<NodeId, HashSet<CacheKey>>,
     /// Open HID++ channels reused across reconciliations, keyed by OS node id.
     /// Opening (and tearing down) a device every pass is the churn issue #99 is about —
     /// each open also leaks an `io_service_t` in async-hid's macOS backend — so a
@@ -592,6 +596,7 @@ impl Enumerator {
             backend,
             cache: HashMap::new(),
             misses: HashMap::new(),
+            node_cache_keys: HashMap::new(),
             channels: ChannelCache::default(),
             ledger: NodeLedger::default(),
             registry: None,
@@ -707,6 +712,8 @@ impl Enumerator {
             Arc::strong_count(&cached.channel) == 1
         });
         self.ledger.retain_nodes(&seen_nodes);
+        self.node_cache_keys
+            .retain(|node, _| seen_nodes.contains(node));
 
         PreparedNodes {
             active,
@@ -804,9 +811,13 @@ impl Enumerator {
         // governed by each probe's verdict.
         let mut all_complete = true;
         let mut all_healthy = true;
+        // Entries of nodes whose probe was deferred: neither seen nor missed
+        // this pass.
+        let mut frozen_keys = HashSet::new();
         for (node, channel, probe) in results {
             all_complete &= probe.verdict.is_complete();
             all_healthy &= probe.verdict.is_healthy();
+            self.hold_or_note_cache_keys(&node, &probe, &mut frozen_keys);
             outcomes.extend(probe.outcomes);
             let settled = settle_probe(&mut self.ledger, &node, probe.verdict, probe.inventory);
             // Every node waits for the ledger's consecutive-failure threshold,
@@ -864,7 +875,7 @@ impl Enumerator {
         }
 
         let seen_keys = self.apply_outcomes(outcomes);
-        self.evict_unseen(&seen_keys);
+        self.evict_unseen(&seen_keys, &frozen_keys);
         self.retry_needed_last_tick = !all_healthy || !self.misses.is_empty();
         self.flush_cache();
         Ok((inventories, all_complete, all_healthy))
@@ -900,16 +911,53 @@ impl Enumerator {
         seen_keys
     }
 
+    /// Fold one node's probe into the cache's per-node bookkeeping.
+    ///
+    /// A probe that ran records the entries it contributed, so a later
+    /// deferred tick knows which entries are the node's. A deferred probe
+    /// adds those to `frozen`: the entries [`Self::evict_unseen`] holds out
+    /// of miss aging this pass. A tick that never asked the node has seen
+    /// nothing and missed nothing — its empty outcomes are not the node
+    /// reporting its devices gone, and four such ticks must not delete the
+    /// last-good capabilities the ledger is still replaying the inventory
+    /// for, nor persist that deletion.
+    fn hold_or_note_cache_keys(
+        &mut self,
+        node: &NodeId,
+        probe: &NodeProbe,
+        frozen: &mut HashSet<CacheKey>,
+    ) {
+        if probe.verdict.is_deferred() {
+            frozen.extend(
+                self.node_cache_keys
+                    .get(node)
+                    .into_iter()
+                    .flatten()
+                    .cloned(),
+            );
+            return;
+        }
+        let keys = probe.outcomes.iter().filter_map(CacheOutcome::key).cloned();
+        self.node_cache_keys
+            .entry(node.clone())
+            .or_default()
+            .extend(keys);
+    }
+
     /// Drop cache entries for devices not seen this pass, after a short grace so
     /// a transient receiver timeout doesn't discard a still-present device.
-    fn evict_unseen(&mut self, seen_keys: &HashSet<CacheKey>) {
+    ///
+    /// Entries in `frozen` — those of nodes whose probe was deferred — are
+    /// neither seen nor missed: their counters stand until the node is
+    /// actually probed again.
+    fn evict_unseen(&mut self, seen_keys: &HashSet<CacheKey>, frozen: &HashSet<CacheKey>) {
         for key in seen_keys {
             self.misses.remove(key);
         }
         let missing: Vec<CacheKey> = self
             .cache
             .keys()
-            .filter(|k| !seen_keys.contains(*k))
+            .filter(|k| !seen_keys.contains(*k) && !frozen.contains(*k))
             .cloned()
             .collect();
         for key in missing {
@@ -918,6 +966,9 @@ impl Enumerator {
             if *misses > CACHE_MISS_GRACE {
                 self.cache.remove(&key);
                 self.misses.remove(&key);
+                for keys in self.node_cache_keys.values_mut() {
+                    keys.remove(&key);
+                }
                 self.cache_dirty |= persist::is_persistable(&key);
             }
         }

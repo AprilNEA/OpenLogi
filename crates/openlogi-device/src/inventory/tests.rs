@@ -23,9 +23,9 @@ use super::probe::{
 use super::{
     ChannelCache, Enumerator, ONESHOT_ATTEMPTS, OneShotScan, ProbeDeadlines, ScanPass,
     UNIFYING_CACHED_SLOT_PROBE, UNIFYING_SLOT_PROBE, retained_nodes, routes_for_inventories,
-    settle_unhealthy_node,
+    settle_probe, settle_unhealthy_node,
 };
-use crate::backend::NodeInfo;
+use crate::backend::{NodeId, NodeInfo};
 use crate::channel::scripted::{
     ScriptedBackend, ScriptedNode, ScriptedRawHidChannel, scripted_channel, scripted_node_info,
 };
@@ -69,7 +69,7 @@ fn cache_dirty_tracks_only_persistable_keys() {
     // Its eviction is equally invisible to the persisted file.
     let nobody = HashSet::new();
     for _ in 0..=CACHE_MISS_GRACE {
-        e.evict_unseen(&nobody);
+        e.evict_unseen(&nobody, &nobody);
     }
     assert!(!e.cache.contains_key(&unifying), "entry should be evicted");
     assert!(!e.cache_dirty, "non-persistable eviction dirtied the cache");
@@ -95,14 +95,14 @@ fn cache_entry_survives_grace_then_evicts() {
     let nobody = HashSet::new();
     // Missing for the whole grace window: kept.
     for _ in 0..CACHE_MISS_GRACE {
-        e.evict_unseen(&nobody);
+        e.evict_unseen(&nobody, &nobody);
         assert!(
             e.cache.contains_key(&key),
             "evicted inside the grace window"
         );
     }
     // One miss past the grace: evicted.
-    e.evict_unseen(&nobody);
+    e.evict_unseen(&nobody, &nobody);
     assert!(
         !e.cache.contains_key(&key),
         "should evict past the grace window"
@@ -116,14 +116,95 @@ fn being_seen_resets_the_miss_counter() {
     e.cache.insert(key.clone(), cache_entry());
     let nobody = HashSet::new();
     let seen: HashSet<CacheKey> = std::iter::once(key.clone()).collect();
-    e.evict_unseen(&nobody); // miss 1
-    e.evict_unseen(&seen); // seen → counter reset
+    e.evict_unseen(&nobody, &nobody); // miss 1
+    e.evict_unseen(&seen, &nobody); // seen → counter reset
     for _ in 0..CACHE_MISS_GRACE {
-        e.evict_unseen(&nobody);
+        e.evict_unseen(&nobody, &nobody);
     }
     assert!(
         e.cache.contains_key(&key),
         "counter reset by a sighting, so still within grace"
+    );
+}
+
+/// A deferred tick is evidence of nothing about the node's devices either:
+/// the entries the node contributed are held out of miss aging, however many
+/// deferrals run back to back, while the entries of a node that was actually
+/// checked — and did not report them — age as before. Once the deferred node
+/// is probed again, normal aging resumes from where it stood.
+#[test]
+fn deferred_ticks_hold_the_nodes_cache_entries_out_of_miss_aging() {
+    let mut e = Enumerator::with_backend(ScriptedBackend::new(Vec::new()));
+    let deferred_node = NodeId::from("deferred-receiver".to_string());
+    let checked_node = NodeId::from("checked-receiver".to_string());
+    let held = CacheKey::Bolt { unit_id: [1; 4] };
+    let aged = CacheKey::Bolt { unit_id: [2; 4] };
+    let answered = |outcomes| NodeProbe {
+        inventory: None,
+        verdict: ProbeVerdict::Healthy { complete: true },
+        outcomes,
+    };
+    // One pass's cache bookkeeping for a set of settled probes: the shape of
+    // `enumerate_reporting_completeness`, without the channels.
+    let pass = |e: &mut Enumerator, probes: Vec<(&NodeId, NodeProbe)>| {
+        let mut frozen = HashSet::new();
+        let mut outcomes = Vec::new();
+        for (node, probe) in probes {
+            settle_probe(&mut e.ledger, node, probe.verdict, probe.inventory.clone());
+            e.hold_or_note_cache_keys(node, &probe, &mut frozen);
+            outcomes.extend(probe.outcomes);
+        }
+        let seen = e.apply_outcomes(outcomes);
+        e.evict_unseen(&seen, &frozen);
+    };
+
+    // Both nodes answer and contribute an entry each.
+    pass(
+        &mut e,
+        vec![
+            (
+                &deferred_node,
+                answered(vec![CacheOutcome::Fresh(held.clone(), cache_entry())]),
+            ),
+            (
+                &checked_node,
+                answered(vec![CacheOutcome::Fresh(aged.clone(), cache_entry())]),
+            ),
+        ],
+    );
+
+    // Then one pass past the grace in which the first node's probe is
+    // deferred and the second answers without its device.
+    for _ in 0..=CACHE_MISS_GRACE {
+        pass(
+            &mut e,
+            vec![
+                (&deferred_node, NodeProbe::deferred()),
+                (&checked_node, answered(Vec::new())),
+            ],
+        );
+    }
+    assert!(
+        e.cache.contains_key(&held),
+        "a deferred node's entry must not age out"
+    );
+    assert!(
+        !e.cache.contains_key(&aged),
+        "a checked node's unreported entry ages as before"
+    );
+    assert!(
+        !e.node_cache_keys[&checked_node].contains(&aged),
+        "an evicted entry is no longer the node's to hold"
+    );
+
+    // The deferred node is probed again and does not report its device:
+    // aging resumes.
+    for _ in 0..=CACHE_MISS_GRACE {
+        pass(&mut e, vec![(&deferred_node, answered(Vec::new()))]);
+    }
+    assert!(
+        !e.cache.contains_key(&held),
+        "normal aging resumes once the node is actually checked"
     );
 }
 

@@ -57,8 +57,9 @@ pub(super) enum ProbeVerdict {
     /// receiver register phase, so this probe skipped the node's I/O and has
     /// no evidence either way. The ledger replays the last-good snapshot
     /// without counting a failure — a channel that was never asked cannot
-    /// have failed, and must not be retired for it — while the one-shot
-    /// retry re-probes as it would after a failure.
+    /// have failed, and must not be retired for it — and the node's cache
+    /// entries are held out of miss aging, while the one-shot retry
+    /// re-probes as it would after a failure.
     Deferred,
     /// The node answered — the only verdict that counts as stability
     /// evidence. `complete` reports whether every expected device was seen,

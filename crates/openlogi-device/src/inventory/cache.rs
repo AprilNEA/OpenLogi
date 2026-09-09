@@ -106,6 +106,16 @@ pub(super) enum CacheOutcome {
     Unkeyed,
 }
 
+impl CacheOutcome {
+    /// The entry this outcome keeps alive, if it has one.
+    pub(super) fn key(&self) -> Option<&CacheKey> {
+        match self {
+            Self::Fresh(key, _) | Self::Update(key, _) | Self::Seen(key) => Some(key),
+            Self::Unkeyed => None,
+        }
+    }
+}
+
 /// `Seen` when the device has a stable key, else `Unkeyed`.
 pub(super) fn seen(id: Option<CacheKey>) -> CacheOutcome {
     id.map_or(CacheOutcome::Unkeyed, CacheOutcome::Seen)
