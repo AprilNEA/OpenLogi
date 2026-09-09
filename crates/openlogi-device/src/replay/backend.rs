@@ -106,7 +106,10 @@ pub struct ReplayNode {
     pub channel: Option<String>,
     /// Whether raw output-report opens are available.
     pub raw_writer: RawWriterAvailability,
-    /// Receiver pairing/link state, separate from node and channel state.
+    /// Initial explicit receiver-slot contracts, shared by this logical channel.
+    ///
+    /// Unlisted slots are unspecified, not implicitly empty. Nodes sharing a
+    /// channel must agree on any overlapping declarations.
     pub receiver_slots: Vec<ReceiverSlot>,
 }
 
@@ -255,6 +258,7 @@ impl ReplayBackend {
             .report_support
             .validate_report(report)
             .map_err(|error| ReplayError::invalid("replay channel report", error.to_string()))?;
+        runtime.cassette.validate_report(report)?;
         let mut delivered = 0;
         runtime.lifetimes.retain(|lifetime| {
             let Some(connected) = lifetime.connected.upgrade() else {
@@ -281,28 +285,21 @@ impl ReplayBackend {
         Ok(runtime.lifetimes.len())
     }
 
-    /// Change pairing/link state for one declared receiver slot.
+    /// Change pairing/link state for one declared receiver slot on the node's channel.
+    ///
+    /// Subsequent cassette responses and unsolicited reports must agree with
+    /// this state. Contradictions fail without consuming the exchange and remain
+    /// in completion diagnostics. No firmware replies are synthesized. Responses
+    /// already accepted behind a barrier remain in flight on their original
+    /// lifetime, allowing stale-response/retirement scenarios.
     pub fn set_receiver_slot_state(
         &self,
         node: &NodeId,
         slot: u8,
         slot_state: ReceiverSlotState,
     ) -> Result<(), ReplayError> {
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        let runtime = find_node_mut(&mut state.nodes, node)?;
-        let receiver_slot = runtime
-            .node
-            .receiver_slots
-            .iter_mut()
-            .find(|candidate| candidate.slot == slot)
-            .ok_or_else(|| {
-                ReplayError::invalid(
-                    "replay topology",
-                    format!("node {node} has no receiver slot {slot}"),
-                )
-            })?;
-        receiver_slot.state = slot_state;
-        Ok(())
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        receiver_cassette(&state, node)?.set_slot(slot, slot_state)
     }
 
     /// Read the pairing/link state of one declared receiver slot.
@@ -312,23 +309,7 @@ impl ReplayBackend {
         slot: u8,
     ) -> Result<ReceiverSlotState, ReplayError> {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        let runtime = state
-            .nodes
-            .iter()
-            .find(|runtime| runtime.node.info.id == *node)
-            .ok_or_else(|| ReplayError::UnknownNode(node.to_string()))?;
-        runtime
-            .node
-            .receiver_slots
-            .iter()
-            .find(|candidate| candidate.slot == slot)
-            .map(|receiver_slot| receiver_slot.state)
-            .ok_or_else(|| {
-                ReplayError::invalid(
-                    "replay topology",
-                    format!("node {node} has no receiver slot {slot}"),
-                )
-            })
+        receiver_cassette(&state, node)?.slot(slot)
     }
 
     /// Deliver a hotplug event without implicitly changing topology.
@@ -474,7 +455,7 @@ fn build_nodes(
 ) -> Result<Vec<NodeRuntime>, ReplayError> {
     let mut node_ids = HashSet::new();
     let mut runtimes = Vec::new();
-    for node in nodes {
+    for mut node in nodes {
         if !node_ids.insert(node.info.id.clone()) {
             return Err(ReplayError::invalid(
                 "replay topology",
@@ -496,6 +477,26 @@ fn build_nodes(
             ));
         }
         validate_receiver_slots(&node)?;
+        if !node.receiver_slots.is_empty() {
+            let channel = node
+                .channel
+                .as_ref()
+                .and_then(|id| channels.get(id))
+                .ok_or_else(|| {
+                    ReplayError::invalid(
+                        "replay topology",
+                        format!(
+                            "node {} declares receiver slots without a channel",
+                            node.info.id
+                        ),
+                    )
+                })?;
+            // Move declarations into the cassette lock: matching and topology
+            // transitions must consult one owner across every channel lifetime.
+            channel
+                .cassette
+                .declare_slots(std::mem::take(&mut node.receiver_slots))?;
+        }
         runtimes.push(NodeRuntime {
             node,
             open_count: 0,
@@ -526,6 +527,29 @@ fn validate_receiver_slots(node: &ReplayNode) -> Result<(), ReplayError> {
         }
     }
     Ok(())
+}
+
+fn receiver_cassette<'a>(
+    state: &'a BackendState,
+    node: &NodeId,
+) -> Result<&'a CassetteState, ReplayError> {
+    let runtime = state
+        .nodes
+        .iter()
+        .find(|runtime| runtime.node.info.id == *node)
+        .ok_or_else(|| ReplayError::UnknownNode(node.to_string()))?;
+    runtime
+        .node
+        .channel
+        .as_ref()
+        .and_then(|id| state.channels.get(id))
+        .map(|channel| channel.cassette.as_ref())
+        .ok_or_else(|| {
+            ReplayError::invalid(
+                "replay topology",
+                format!("node {node} has no receiver channel"),
+            )
+        })
 }
 
 fn find_node_mut<'a>(

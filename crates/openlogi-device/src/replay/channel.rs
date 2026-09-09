@@ -10,8 +10,9 @@ use tokio::sync::mpsc;
 
 use crate::backend::{BackendError, RawWriter};
 
-use super::ReplayError;
 use super::barrier::{RequestKey, ResponseGates};
+use super::slots::ReceiverSlots;
+use super::{ReceiverSlot, ReceiverSlotState, ReplayError};
 
 type Responder = Arc<dyn Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync>;
 
@@ -35,6 +36,8 @@ struct CassetteRuntime {
     exchanges: Vec<PendingExchange>,
     queues: HashMap<RequestKey, VecDeque<usize>>,
     unmatched: Vec<ReplayMismatch>,
+    receiver_slots: ReceiverSlots,
+    slot_state_errors: Vec<ReplayError>,
 }
 
 pub(super) struct CassetteState {
@@ -65,8 +68,39 @@ impl CassetteState {
                 exchanges,
                 queues,
                 unmatched: Vec::new(),
+                receiver_slots: ReceiverSlots::default(),
+                slot_state_errors: Vec::new(),
             }),
         }))
+    }
+
+    pub(super) fn declare_slots(&self, slots: Vec<ReceiverSlot>) -> Result<(), ReplayError> {
+        self.runtime
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .receiver_slots
+            .declare(slots)
+    }
+
+    pub(super) fn set_slot(&self, slot: u8, state: ReceiverSlotState) -> Result<(), ReplayError> {
+        self.runtime
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .receiver_slots
+            .set(slot, state)
+    }
+
+    pub(super) fn slot(&self, slot: u8) -> Result<ReceiverSlotState, ReplayError> {
+        self.runtime
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .receiver_slots
+            .get(slot)
+    }
+
+    pub(super) fn validate_report(&self, report: &[u8]) -> Result<(), ReplayError> {
+        let mut runtime = self.runtime.lock().unwrap_or_else(PoisonError::into_inner);
+        runtime.validate_slot_state(None, report)
     }
 
     fn respond(&self, actual: &[u8]) -> Result<Option<Vec<u8>>, ReplayError> {
@@ -76,15 +110,15 @@ impl CassetteState {
         let mut runtime = self.runtime.lock().unwrap_or_else(PoisonError::into_inner);
         let matched = runtime
             .queues
-            .get_mut(&exact)
-            .and_then(VecDeque::pop_front)
-            .map(|index| (index, RequestMatch::Exact))
+            .get(&exact)
+            .and_then(VecDeque::front)
+            .map(|&index| (index, RequestMatch::Exact))
             .or_else(|| {
                 runtime
                     .queues
-                    .get_mut(&hidpp20)
-                    .and_then(VecDeque::pop_front)
-                    .map(|index| (index, RequestMatch::Hidpp20))
+                    .get(&hidpp20)
+                    .and_then(VecDeque::front)
+                    .map(|&index| (index, RequestMatch::Hidpp20))
             });
         let Some((index, request_match)) = matched else {
             let mismatch = ReplayMismatch {
@@ -97,14 +131,23 @@ impl CassetteState {
                 normalized: mismatch.normalized,
             });
         };
-        let exchange = &mut runtime.exchanges[index];
-        exchange.consumed = true;
+        let exchange = &runtime.exchanges[index];
         let mut response = exchange.response.clone();
         if request_match == RequestMatch::Hidpp20
             && let Some(response) = response.as_mut()
         {
             rebind_software_id(response, actual[3] & 0x0f);
         }
+        if let Some(response) = &response {
+            runtime.validate_slot_state(Some(actual), response)?;
+        }
+        // Validation and consumption share the slot-state lock. A rejected
+        // response remains at the head of its queue for a later valid state.
+        runtime
+            .queues
+            .get_mut(&RequestKey::from_exchange(request_match, actual))
+            .and_then(VecDeque::pop_front);
+        runtime.exchanges[index].consumed = true;
         Ok(response)
     }
 
@@ -129,11 +172,26 @@ impl CassetteState {
         ReplayCompletion {
             written_reports,
             unmatched_requests: runtime.unmatched.clone(),
+            slot_state_errors: runtime.slot_state_errors.clone(),
             unconsumed_required,
             consumed_optional,
             unused_optional,
             channel_open_count: 0,
         }
+    }
+}
+
+impl CassetteRuntime {
+    fn validate_slot_state(
+        &mut self,
+        request: Option<&[u8]>,
+        report: &[u8],
+    ) -> Result<(), ReplayError> {
+        self.receiver_slots
+            .validate(request, report)
+            .inspect_err(|error| {
+                self.slot_state_errors.push(error.clone());
+            })
     }
 }
 
@@ -161,6 +219,10 @@ pub struct ReplayCompletion {
     pub written_reports: Vec<Vec<u8>>,
     /// Outgoing reports that matched no pending exchange.
     pub unmatched_requests: Vec<ReplayMismatch>,
+    /// Rejected evidence contradicting explicit receiver-slot state.
+    ///
+    /// These diagnostics remain even after recovery consumes the queued exchange.
+    pub slot_state_errors: Vec<ReplayError>,
     /// Required normalized request keys that remain unused.
     pub unconsumed_required: Vec<String>,
     /// Number of optional exchanges that were consumed.
@@ -175,14 +237,19 @@ pub struct ReplayCompletion {
 }
 
 impl ReplayCompletion {
-    /// Whether no request mismatched and every required exchange was consumed.
+    /// Whether no replay contract failed and every required exchange was consumed.
     #[must_use]
     pub fn is_complete(&self) -> bool {
-        self.unmatched_requests.is_empty() && self.unconsumed_required.is_empty()
+        self.unmatched_requests.is_empty()
+            && self.slot_state_errors.is_empty()
+            && self.unconsumed_required.is_empty()
     }
 
     /// Fail with the remaining required request keys when replay is incomplete.
     pub fn require_complete(&self) -> Result<(), ReplayError> {
+        if let Some(error) = self.slot_state_errors.first() {
+            return Err(error.clone());
+        }
         if let Some(mismatch) = self.unmatched_requests.first() {
             return Err(ReplayError::UnmatchedRequest {
                 actual: mismatch.actual.clone(),
@@ -236,6 +303,7 @@ impl ReplayChannelHandle {
             || ReplayCompletion {
                 written_reports: self.written_reports(),
                 unmatched_requests: Vec::new(),
+                slot_state_errors: Vec::new(),
                 unconsumed_required: Vec::new(),
                 consumed_optional: 0,
                 unused_optional: 0,

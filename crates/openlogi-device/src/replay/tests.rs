@@ -20,6 +20,8 @@ use crate::{
 
 use super::*;
 
+mod slot_state;
+
 const DIRECT_CHANNEL: &str = "direct-mouse";
 const RECEIVER_CHANNEL: &str = "bolt-receiver";
 const RECEIVER_UID: &str = "A1B2C3D4E5F60708";
