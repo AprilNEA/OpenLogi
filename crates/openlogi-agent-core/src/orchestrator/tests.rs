@@ -3,7 +3,7 @@
 use super::{
     AgentDevice, InventoryHealth, Orchestrator, VOLATILE_REAPPLY_CONFIRM_RETRIES,
     any_device_needs_capture_rearm, build_devices, configured_wheel_mode, host_switch_links,
-    pick_current, plan_reapply, reapply_targets, stable_id,
+    native_host_operating_system, pick_current, plan_reapply, reapply_targets, stable_id,
 };
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{Action, Binding, ButtonId};
@@ -26,6 +26,23 @@ use crate::observable::ObservableState;
 /// than only in the running agent.
 fn orchestrator(config: Config) -> Orchestrator {
     Orchestrator::new(config, Arc::new(ObservableState::new("test".to_string())))
+}
+
+#[test]
+fn native_host_operating_system_maps_supported_hosts() {
+    assert_eq!(
+        native_host_operating_system("windows"),
+        Some(openlogi_hid::HostOperatingSystem::Windows)
+    );
+    assert_eq!(
+        native_host_operating_system("macos"),
+        Some(openlogi_hid::HostOperatingSystem::MacOs)
+    );
+    assert_eq!(
+        native_host_operating_system("linux"),
+        Some(openlogi_hid::HostOperatingSystem::Linux)
+    );
+    assert_eq!(native_host_operating_system("unknown"), None);
 }
 
 fn dev(key: &str, slot: u8, online: bool) -> AgentDevice {

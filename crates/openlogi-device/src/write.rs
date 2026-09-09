@@ -22,6 +22,7 @@ mod error;
 mod fn_lock;
 mod haptic;
 mod hires_wheel;
+mod host_platform;
 mod lighting;
 mod litra;
 mod smartshift;
@@ -42,6 +43,9 @@ pub use hires_wheel::{
     ScrollReportingTarget, ScrollResolution, ScrollWheelMode, get_scroll_wheel_mode,
     get_scroll_wheel_mode_on, set_scroll_inversion, set_scroll_inversion_on, set_scroll_resolution,
     set_scroll_resolution_on, set_scroll_wheel_mode, set_scroll_wheel_mode_on,
+};
+pub use host_platform::{
+    HostOperatingSystem, HostPlatformApply, set_native_host_platform, set_native_host_platform_on,
 };
 pub use lighting::{
     LightingMethod, set_keyboard_color, set_keyboard_color_on, set_keyboard_color_with,

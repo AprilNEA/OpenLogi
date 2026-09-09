@@ -7,6 +7,9 @@ use crate::SharedChannel;
 use crate::channel::scripted::{ScriptedRawHidChannel, feature_error, scripted_channel};
 use crate::write::diagnostics::dump_firmware_entities_on_channel;
 use crate::write::dpi::expand_dpi_ranges;
+use crate::write::host_platform::{
+    HostOperatingSystem, HostPlatformApply, set_native_host_platform_on,
+};
 use crate::write::lighting::{collect_present_zones, per_key_reports};
 use crate::write::smartshift::{
     is_missing_enhanced, is_transient_smartshift_error, smartshift_to_wheel,
@@ -26,6 +29,144 @@ const TEST_TORQUE: TunableTorque = match TunableTorque::try_new(33) {
     Ok(value) => value,
     Err(_) => panic!("valid test SmartShift torque"),
 };
+
+fn multi_platform_response(
+    request: &[u8],
+    current_platform: u8,
+    applied_platform: u8,
+) -> Option<Vec<u8>> {
+    if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
+        return None;
+    }
+    let feature_index = request[2];
+    let function = request[3] >> 4;
+    let mut payload = [0u8; 16];
+    let long = match (feature_index, function) {
+        (0x00, 0x01) => {
+            payload[0] = 4;
+            false
+        }
+        (0x00, 0x00) => {
+            let feature_id = u16::from_be_bytes([request[4], request[5]]);
+            payload[0] = u8::from(feature_id == 0x4531) * 0x05;
+            false
+        }
+        // Captured from an MX Keys: capabilities, four platforms/descriptors,
+        // three host slots, concrete current slot 2, then current platform.
+        (0x05, 0x00) => {
+            payload[..7].copy_from_slice(&[0x03, 0x00, 4, 4, 3, 2, current_platform]);
+            true
+        }
+        (0x05, 0x01) => {
+            payload[..8].copy_from_slice(match request[4] {
+                0 => &[0, 0, 0x01, 0x00, 0, 0, 0, 0],
+                1 => &[1, 1, 0x20, 0x00, 0, 0, 0, 0],
+                2 => &[2, 2, 0x40, 0x00, 0, 0, 0, 0],
+                3 => &[3, 3, 0x10, 0x00, 0, 0, 0, 0],
+                _ => return None,
+            });
+            true
+        }
+        (0x05, 0x02) => {
+            payload[..6].copy_from_slice(&[2, 0, applied_platform, 3, 0xff, 0xff]);
+            true
+        }
+        (0x05, 0x03) => {
+            payload[..3].copy_from_slice(&request[4..7]);
+            false
+        }
+        _ => return None,
+    };
+
+    let mut response = vec![0u8; if long { 20 } else { 7 }];
+    response[0] = if long { 0x11 } else { 0x10 };
+    response[1..4].copy_from_slice(&request[1..4]);
+    let payload_len = response.len() - 4;
+    response[4..].copy_from_slice(&payload[..payload_len]);
+    Some(response)
+}
+
+fn windows_platform_response(request: &[u8]) -> Option<Vec<u8>> {
+    multi_platform_response(request, 1, 0)
+}
+
+fn windows_already_selected_response(request: &[u8]) -> Option<Vec<u8>> {
+    multi_platform_response(request, 0, 0)
+}
+
+fn macos_platform_response(request: &[u8]) -> Option<Vec<u8>> {
+    multi_platform_response(request, 0, 1)
+}
+
+async fn scripted_multi_platform_keyboard(
+    responder: crate::channel::scripted::Responder,
+) -> (
+    SharedChannel,
+    crate::channel::scripted::ScriptedRawHidHandle,
+) {
+    let (raw, handle) = ScriptedRawHidChannel::with_responder(responder);
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(
+        channel,
+        crate::DeviceRoute::Unifying {
+            receiver_uid: "AABBCCDD".to_string(),
+            slot: 2,
+        },
+    );
+    (shared, handle)
+}
+
+#[tokio::test]
+async fn native_platform_selects_windows_on_the_concrete_host_slot() -> Result<(), WriteError> {
+    let (shared, handle) = scripted_multi_platform_keyboard(windows_platform_response).await;
+
+    let result = set_native_host_platform_on(&shared, HostOperatingSystem::Windows).await?;
+
+    assert_eq!(result, HostPlatformApply::Updated { platform_index: 0 });
+    let setter = handle
+        .written_reports()
+        .into_iter()
+        .find(|report| report[2] == 0x05 && report[3] >> 4 == 0x03)
+        .expect("the platform setter must reach the keyboard");
+    assert_eq!(&setter[4..7], &[2, 0, 0]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn native_platform_resolves_macos_through_the_advertised_mask() -> Result<(), WriteError> {
+    let (shared, handle) = scripted_multi_platform_keyboard(macos_platform_response).await;
+
+    let result = set_native_host_platform_on(&shared, HostOperatingSystem::MacOs).await?;
+
+    assert_eq!(result, HostPlatformApply::Updated { platform_index: 1 });
+    let setter = handle
+        .written_reports()
+        .into_iter()
+        .find(|report| report[2] == 0x05 && report[3] >> 4 == 0x03)
+        .expect("the platform setter must reach the keyboard");
+    assert_eq!(&setter[4..7], &[2, 1, 0]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn native_platform_skips_an_already_selected_platform() -> Result<(), WriteError> {
+    let (shared, handle) =
+        scripted_multi_platform_keyboard(windows_already_selected_response).await;
+
+    let result = set_native_host_platform_on(&shared, HostOperatingSystem::Windows).await?;
+
+    assert_eq!(
+        result,
+        HostPlatformApply::AlreadySelected { platform_index: 0 }
+    );
+    assert!(
+        handle
+            .written_reports()
+            .iter()
+            .all(|report| report[2] != 0x05 || report[3] >> 4 != 0x03)
+    );
+    Ok(())
+}
 
 #[test]
 fn smartshift_and_wheel_mode_byte_encodings_match() {
