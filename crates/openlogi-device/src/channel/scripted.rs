@@ -43,6 +43,7 @@ pub(crate) struct ScriptedRawHidChannel {
     written: Arc<Mutex<Vec<Vec<u8>>>>,
     responder: DynamicResponder,
     fails: Option<WriteFailure>,
+    product_id: u16,
 }
 
 impl ScriptedRawHidChannel {
@@ -69,6 +70,14 @@ impl ScriptedRawHidChannel {
         Self::build(responder, Some(fails))
     }
 
+    /// The same channel presenting as `product_id` — a receiver's, for a
+    /// responder that scripts one, since `hidpp::receiver::detect` goes by
+    /// the id. The default is a direct device's.
+    pub(crate) fn presenting_as(mut self, product_id: u16) -> Self {
+        self.product_id = product_id;
+        self
+    }
+
     fn build(
         responder: impl Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync + 'static,
         fails: Option<WriteFailure>,
@@ -82,6 +91,7 @@ impl ScriptedRawHidChannel {
                 written: Arc::clone(&written),
                 responder: Arc::new(responder),
                 fails,
+                product_id: 0xb35b,
             },
             ScriptedRawHidHandle { written },
         )
@@ -95,7 +105,7 @@ impl RawHidChannel for ScriptedRawHidChannel {
     }
 
     fn product_id(&self) -> u16 {
-        0xb35b
+        self.product_id
     }
 
     async fn write_report(&self, src: &[u8]) -> Result<usize, Box<dyn Error + Send + Sync>> {

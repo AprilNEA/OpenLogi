@@ -11,12 +11,12 @@ use futures_concurrency::future::Join as _;
 use hidpp::channel::HidppChannel;
 use openlogi_core::device::DeviceInventory;
 use thiserror::Error;
-use tokio::time::timeout;
 use tracing::{debug, warn};
 
 use crate::ChannelRegistry;
 use crate::backend::{BackendError, HidBackend, NodeId, NodeInfo};
-use crate::channel::route::{DeviceRoute, find_receiver, is_receiver_pid};
+use crate::channel::route::{DeviceRoute, find_receiver};
+use crate::host_lock;
 use ledger::{NodeLedger, SettledNode};
 
 mod cache;
@@ -32,7 +32,7 @@ pub mod standalone;
 use cache::{CACHE_MISS_GRACE, CacheKey, CacheOutcome, Cached};
 use events::{ChannelEventSubscriptions, EventNotifier, EventSubscriptionHandle};
 use persist::{ProbeCacheSnapshot, ProbeCacheStore};
-use probe::{NodeProbe, ProbeVerdict, probe_one};
+use probe::{PassContext, ProbeVerdict, probe_one};
 
 /// How long to wait for device-arrival event bursts before assuming the
 /// receiver has finished reporting. MX Master 4 (and other devices that may
@@ -44,10 +44,11 @@ const ARRIVAL_DRAIN: Duration = Duration::from_millis(1500);
 /// range to surface paired-but-offline devices that won't fire arrival events.
 const MAX_BOLT_SLOTS: u8 = 6;
 
-/// Upper bound on probing one HID node. `hidpp`'s request/response has no
-/// timeout of its own, so without this a single unresponsive (e.g. asleep)
+/// Upper bound on probing one HID node's I/O. `hidpp`'s request/response has
+/// no timeout of its own, so without this a single unresponsive (e.g. asleep)
 /// device wedges the whole enumeration, so a permanent hang would stall every
-/// later event or recovery reconciliation.
+/// later event or recovery reconciliation. Time spent waiting for the node's
+/// register phase is not I/O and sits outside it — see [`ProbeDeadlines`].
 ///
 /// A timed-out node is skipped and re-probed by the bounded two-second repair
 /// deadline, and the first probe usually wakes the device so the retry succeeds
@@ -81,7 +82,11 @@ const PROBE_BUDGET: Duration = Duration::from_secs(25);
 /// slot's [`BOLT_SLOT_PROBE`] (10 s). 6 s proved too tight — a legitimate
 /// deep walk tripped the dead-delivery eviction, the surfaced-empty inventory
 /// tore down capture plans, and a pinned stale channel Arc then deadlocked
-/// recovery (dead buttons until restart). 13 s clears the honest worst case.
+/// recovery (dead buttons until restart). 13 s clears the honest worst case
+/// — and only that: the wait for the receiver's register phase, up to
+/// [`host_lock::RECEIVER_REGISTER_WAIT`] on its own, is taken before this
+/// budget starts (see [`ProbeDeadlines`]), or the two together would trip
+/// it on a working receiver.
 const RECEIVER_PROBE_BUDGET: Duration = Duration::from_secs(13);
 
 /// Per-slot budget for the HID++ 2.0 feature walk on a Unifying paired device.
@@ -121,6 +126,47 @@ const UNIFYING_CACHED_SLOT_PROBE: Duration = Duration::from_millis(750);
 /// headroom for degraded-but-alive paths while still fitting [`PROBE_BUDGET`]
 /// after the 1.5 s arrival drain and Bolt's sequential pairing-register pass.
 const BOLT_SLOT_PROBE: Duration = Duration::from_secs(10);
+
+/// The deadlines one probe pass runs under, kept together so their
+/// composition — which waits sit inside which budget — is one place to read,
+/// and one value for a test to shrink.
+///
+/// The composition: a receiver probe waits for the node's register phase for
+/// up to `register_lock_wait` *before* its `receiver_budget` starts, and
+/// under that budget runs an `arrival_drain` and slot walks each bounded by
+/// their own slot probe. A direct device runs under `direct_budget` alone.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ProbeDeadlines {
+    /// How long a receiver probe waits for another OpenLogi process to
+    /// release the node's register phase before settling as deferred
+    /// ([`probe::ProbeVerdict::Deferred`]). Outside the I/O budget.
+    pub(crate) register_lock_wait: Duration,
+    /// [`RECEIVER_PROBE_BUDGET`].
+    pub(crate) receiver_budget: Duration,
+    /// [`PROBE_BUDGET`].
+    pub(crate) direct_budget: Duration,
+    /// [`ARRIVAL_DRAIN`].
+    pub(crate) arrival_drain: Duration,
+    /// [`BOLT_SLOT_PROBE`].
+    pub(crate) bolt_slot_probe: Duration,
+    /// [`UNIFYING_SLOT_PROBE`].
+    pub(crate) unifying_slot_probe: Duration,
+    /// [`UNIFYING_CACHED_SLOT_PROBE`].
+    pub(crate) unifying_cached_slot_probe: Duration,
+}
+
+impl ProbeDeadlines {
+    /// The production deadlines.
+    pub(crate) const DEFAULT: Self = Self {
+        register_lock_wait: host_lock::RECEIVER_REGISTER_WAIT,
+        receiver_budget: RECEIVER_PROBE_BUDGET,
+        direct_budget: PROBE_BUDGET,
+        arrival_drain: ARRIVAL_DRAIN,
+        bolt_slot_probe: BOLT_SLOT_PROBE,
+        unifying_slot_probe: UNIFYING_SLOT_PROBE,
+        unifying_cached_slot_probe: UNIFYING_CACHED_SLOT_PROBE,
+    };
+}
 
 /// Errors raised while enumerating HID++ devices.
 #[derive(Debug, Error)]
@@ -171,6 +217,8 @@ pub struct Enumerator {
     retry_needed_last_tick: bool,
     /// Coalesced lifecycle-event sink installed on newly opened channels.
     event_notifier: Option<EventNotifier>,
+    /// The deadlines every pass's probes run under.
+    deadlines: ProbeDeadlines,
 }
 
 /// An open channel to a receiver / direct-device HID node, held across
@@ -552,6 +600,7 @@ impl Enumerator {
             open_failures_last_tick: false,
             retry_needed_last_tick: false,
             event_notifier: None,
+            deadlines: ProbeDeadlines::DEFAULT,
         }
     }
 
@@ -724,31 +773,23 @@ impl Enumerator {
         self.open_failures_last_tick = !open_failures.is_empty();
 
         // Probe each open channel concurrently, sharing `&cache` read-only;
-        // updates are collected and applied afterwards (no `RefCell`).
+        // updates are collected and applied afterwards (no `RefCell`). Each
+        // probe bounds its own I/O by the pass's deadlines (`probe_one`).
         let results = {
             let cache = &self.cache;
+            let deadlines = &self.deadlines;
             active
                 .into_iter()
                 .map(|(info, channel, events)| async move {
                     let node = info.id.clone();
-                    // Receivers answer register reads over local USB in
-                    // milliseconds; only direct (esp. Bluetooth) devices need
-                    // the long feature-walk budget. A tight receiver budget
-                    // bounds the outage when its channel's input-report
-                    // delivery dies (writes accepted, replies never seen —
-                    // observed on macOS with concurrent opens of one node).
-                    let receiver = is_receiver_pid(info.product_id);
-                    let budget = if receiver {
-                        RECEIVER_PROBE_BUDGET
-                    } else {
-                        PROBE_BUDGET
+                    let pass = PassContext {
+                        cache,
+                        now,
+                        subscriptions: events.as_ref(),
+                        deadlines,
                     };
-                    let probe = timeout(
-                        budget,
-                        probe_one(info, Arc::clone(&channel), cache, now, events.as_ref()),
-                    )
-                    .await;
-                    (node, channel, probe, budget, receiver)
+                    let probe = probe_one(info, Arc::clone(&channel), pass).await;
+                    (node, channel, probe)
                 })
                 .collect::<Vec<_>>()
                 .join()
@@ -763,20 +804,7 @@ impl Enumerator {
         // governed by each probe's verdict.
         let mut all_complete = true;
         let mut all_healthy = true;
-        for (node, channel, result, budget, receiver) in results {
-            let probe = if let Ok(probe) = result {
-                probe
-            } else {
-                // The probe burned the whole budget — an asleep direct device,
-                // or a channel whose input-report delivery died (writes
-                // accepted, replies never seen). Either way: "couldn't
-                // check", not "nothing there".
-                warn!(
-                    ?budget,
-                    receiver, "device probe timed out — treating as a failed probe"
-                );
-                NodeProbe::failed()
-            };
+        for (node, channel, probe) in results {
             all_complete &= probe.verdict.is_complete();
             all_healthy &= probe.verdict.is_healthy();
             outcomes.extend(probe.outcomes);
