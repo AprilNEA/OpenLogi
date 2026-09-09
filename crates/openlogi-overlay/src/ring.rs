@@ -4,17 +4,21 @@
 //! clamped to the display it came up on, so a ring raised near a screen edge
 //! stays whole instead of being cut off.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
+use std::sync::Arc;
+
 use gpui::{
     Bounds, Context, Hsla, InteractiveElement, IntoElement, ParentElement, Pixels, Point, Render,
-    SharedString, Size, StatefulInteractiveElement as _, Styled, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div, point,
+    RenderImage, SharedString, Size, StatefulInteractiveElement as _, Styled, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div, img, point,
     prelude::FluentBuilder as _, px, svg,
 };
 use openlogi_core::binding::{Action, ActionRingSlot};
 use openlogi_ipc::ActionRingInvocation;
 use openlogi_ui::action_icons::RING_CANCEL_ICON;
 use openlogi_ui::color;
-use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::agent::OverlayCommand;
@@ -51,8 +55,75 @@ const fn neutral(lightness: f32, alpha: f32) -> Hsla {
 const SELECTED_FILL_L: f32 = 0.48;
 const SELECTED_BORDER_L: f32 = 0.78;
 
+enum CachedIcon {
+    Loading,
+    Ready(Option<Arc<RenderImage>>),
+}
+
+/// Native icons cached for the overlay process lifetime, including misses.
+#[derive(Clone, Default)]
+pub(crate) struct ApplicationIconCache {
+    icons: Rc<RefCell<HashMap<String, CachedIcon>>>,
+}
+
+impl ApplicationIconCache {
+    /// Start every lookup this invocation needs without delaying its window.
+    pub(crate) fn ensure(&self, invocation: &ActionRingInvocation, cx: &mut gpui::App) {
+        for target in invocation
+            .slots
+            .values()
+            .filter_map(|presentation| presentation.application_icon.as_deref())
+        {
+            if !self.begin(target) {
+                continue;
+            }
+            let target = target.to_string();
+            let lookup_target = target.clone();
+            let cache = self.clone();
+            // A bounded process-lifetime lookup: it must populate the shared
+            // cache even if the short-lived ring that requested it closes.
+            cx.spawn(async move |cx| {
+                let icon = cx
+                    .background_executor()
+                    .spawn(async move { platform::application_icon(&lookup_target) })
+                    .await;
+                cache.finish(target, icon);
+                cx.update(|cx| {
+                    for handle in cx.windows() {
+                        let _ = handle.update(cx, |_, window, _| window.refresh());
+                    }
+                });
+            })
+            .detach();
+        }
+    }
+
+    fn begin(&self, target: &str) -> bool {
+        let mut icons = self.icons.borrow_mut();
+        if icons.contains_key(target) {
+            return false;
+        }
+        icons.insert(target.to_string(), CachedIcon::Loading);
+        true
+    }
+
+    fn finish(&self, target: String, icon: Option<Arc<RenderImage>>) {
+        self.icons
+            .borrow_mut()
+            .insert(target, CachedIcon::Ready(icon));
+    }
+
+    fn icon(&self, target: &str) -> Option<Arc<RenderImage>> {
+        match self.icons.borrow().get(target) {
+            Some(CachedIcon::Ready(Some(icon))) => Some(Arc::clone(icon)),
+            Some(CachedIcon::Loading | CachedIcon::Ready(None)) | None => None,
+        }
+    }
+}
+
 pub(crate) struct RingView {
     invocation: ActionRingInvocation,
+    icons: ApplicationIconCache,
     commands: mpsc::UnboundedSender<OverlayCommand>,
     hovered: Option<ActionRingSlot>,
     /// Publishes click-away identity for exactly this view's lifetime.
@@ -63,12 +134,14 @@ impl RingView {
     /// Open a view on `invocation`, reporting interactions through `commands`.
     pub(crate) fn new(
         invocation: ActionRingInvocation,
+        icons: ApplicationIconCache,
         commands: mpsc::UnboundedSender<OverlayCommand>,
         live: &Arc<ClickAwaySession>,
     ) -> Self {
         let showing = live.showing(invocation.session_id);
         Self {
             invocation,
+            icons,
             commands,
             hovered: None,
             _showing: showing,
@@ -95,6 +168,10 @@ impl RingView {
     ) -> Option<gpui::AnyElement> {
         let presentation = self.invocation.slots.get(&slot)?;
         let icon_path = presentation.icon.asset_path();
+        let application_icon = presentation
+            .application_icon
+            .as_deref()
+            .and_then(|target| self.icons.icon(target));
         let selected = self.hovered == Some(slot);
         let (left, top) = slot.placement(WINDOW_SIZE, RADIUS, SLOT_SIZE);
         let session_id = self.invocation.session_id;
@@ -122,7 +199,14 @@ impl RingView {
                 .shadow_md()
                 .text_color(GLYPH)
                 .cursor_pointer()
-                .child(svg().path(icon_path).size(px(22.0)).text_color(GLYPH))
+                .child(match application_icon {
+                    Some(icon) => img(icon).size(px(36.0)).flex_none().into_any_element(),
+                    None => svg()
+                        .path(icon_path)
+                        .size(px(22.0))
+                        .text_color(GLYPH)
+                        .into_any_element(),
+                })
                 .on_hover(cx.listener(move |this, hovered, _, cx| {
                     if *hovered && this.hovered != Some(slot) {
                         this.hovered = Some(slot);
@@ -308,6 +392,15 @@ pub(crate) fn clamp_window_origin(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completed_application_icon_misses_are_cached() {
+        let cache = ApplicationIconCache::default();
+        assert!(cache.begin("/Applications/Missing.app"));
+        assert!(!cache.begin("/Applications/Missing.app"));
+        cache.finish("/Applications/Missing.app".to_string(), None);
+        assert!(!cache.begin("/Applications/Missing.app"));
+    }
 
     #[test]
     fn overlay_origin_is_clamped_to_the_display() {

@@ -5738,7 +5738,12 @@ name = "openlogi-ui"
 version = "0.8.3"
 dependencies = [
  "gpui",
+ "image",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
  "openlogi-core",
+ "shellexpand",
 ]
 
 [[package]]

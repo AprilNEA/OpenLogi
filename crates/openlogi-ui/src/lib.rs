@@ -7,4 +7,6 @@
 //! reach the overlay through the back door.
 
 pub mod action_icons;
+pub mod application_icon;
 pub mod color;
+pub mod image;
