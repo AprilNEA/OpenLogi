@@ -113,6 +113,16 @@ pub fn matches_litra(vendor_id: u16, product_id: u16, usage_page: u16, usage_id:
     find_litra(vendor_id, product_id, usage_page, usage_id).is_some()
 }
 
+/// Whether `product_id` is a Litra light's Bluetooth identity rather than its
+/// USB one — a raw-HID route carries no other signal of which transport it
+/// is on.
+#[must_use]
+pub fn is_litra_bluetooth_product_id(product_id: u16) -> bool {
+    LITRA_DEVICES
+        .iter()
+        .any(|device| device.bluetooth_product_id == product_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{LITRA_DEVICES, LITRA_DRIVER_ID, LitraModel, find_litra};
@@ -166,5 +176,15 @@ mod tests {
             bluetooth.registry_model_id, usb.registry_model_id,
             "same physical product, same asset artwork, regardless of transport"
         );
+    }
+
+    #[test]
+    fn only_the_bluetooth_product_ids_report_bluetooth() {
+        use super::is_litra_bluetooth_product_id;
+
+        assert!(is_litra_bluetooth_product_id(0xb900));
+        assert!(is_litra_bluetooth_product_id(0xb901));
+        assert!(!is_litra_bluetooth_product_id(0xc900));
+        assert!(!is_litra_bluetooth_product_id(0xc901));
     }
 }
