@@ -1,15 +1,30 @@
 //! Implements basic messaging across HID and HID++ channels.
 //!
-//! This includes mapping incoming messages to previously sent requests.
+//! This includes mapping incoming messages to previously sent requests. A
+//! reply is matched to the oldest pending request whose predicate accepts it,
+//! and every predicate keys on the report's first three bytes — device,
+//! feature (or HID++1.0 sub id), function and software id (or register
+//! address). Two requests sharing those bytes therefore get replies nothing on
+//! the wire can tell apart, and a wireless receiver may answer them out of
+//! order (a retransmitted radio packet completes after a later one). The
+//! channel never lets that happen: a request whose key is already in flight
+//! waits until that request is answered — or, when it timed out or was
+//! cancelled unanswered, until its reply lands and is discarded or
+//! [`STALE_REPLY_GRACE`] passes without one. That holds even for a request
+//! that re-asks the abandoned one byte for byte — the same question does not
+//! promise the same answer once a write has gone between them — unless the
+//! caller says otherwise with [`AbandonedReply::AdoptIdentical`], which only
+//! a query of immutable state may.
 
 use std::{
+    any::Any,
     collections::{HashMap, VecDeque},
     sync::{
         Arc, Mutex, Weak,
         atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering},
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use futures::{FutureExt, channel::oneshot, select};
@@ -44,6 +59,47 @@ const MAX_RAW_REPORT_LENGTH: usize = 64;
 /// write plus the wait for a matching response. Callers that need a different
 /// budget can use [`HidppChannel::send_with_timeout`].
 pub const SEND_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long a request abandoned unanswered — timed out, or cancelled by an
+/// outer deadline — keeps its reply header reserved. A reply that lands inside
+/// this window is discarded; one that never comes frees the header when the
+/// window closes. Without the reservation a late reply would answer the next
+/// request with the same header, which nothing on the wire can distinguish.
+///
+/// One second covers the late replies seen in practice: a receiver answering a
+/// register read a few hundred milliseconds after a tight probe budget gave up
+/// on it. It is deliberately much shorter than [`SEND_RESPONSE_TIMEOUT`]: a
+/// device that never answers costs the next same-header request one grace
+/// window, not a whole timeout, and a reply later than the grace is as
+/// unattributable as it always was.
+///
+/// The quarantine makes no exception of its own for a request that re-asks
+/// the abandoned one byte for byte. The bytes say what was asked, not what
+/// the answer is: a DPI read abandoned before its reply, a DPI write
+/// acknowledged, and the read re-asked all fit inside one grace window, and
+/// the first read's late reply would hand the re-ask the value from before
+/// the write. A caller whose query cannot be changed by any write may opt in
+/// with [`AbandonedReply::AdoptIdentical`].
+pub const STALE_REPLY_GRACE: Duration = Duration::from_secs(1);
+
+/// What a request does about a reply still owed to an abandoned request with
+/// the same header — see [`STALE_REPLY_GRACE`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AbandonedReply {
+    /// Wait for it to land and be discarded, or for the grace to pass. The
+    /// default, and the only safe choice for a query whose answer a write
+    /// could have changed since the abandoned ask.
+    #[default]
+    Quarantine,
+    /// Take it as this request's own answer, provided the abandoned request
+    /// was byte-identical; the request goes out at once and is answered by
+    /// whichever reply comes first, the other being discarded on arrival.
+    /// The caller vouches that nothing can have changed the answer between
+    /// the two asks — a lookup in a device's feature table, which is fixed
+    /// for the life of the connection. A re-ask then costs no grace wait,
+    /// which is what keeps a feature walk over a lossy link moving.
+    AdoptIdentical,
+}
 
 type MessageListener = Arc<dyn Fn(HidppMessage, bool) + Send + Sync + 'static>;
 
@@ -98,15 +154,16 @@ pub enum SwIdPolicy {
     /// requests for a single exclusive user of a node. The counter is this
     /// policy's own; the id `0` slot is skipped in the wrap.
     Rotating(AtomicU8),
-    /// A fixed id owned process-wide: `free(id)` runs exactly once when this
-    /// policy is dropped, handing the lease back to the allocator — so
-    /// concurrent opens of one HID node never share a correlation id.
+    /// A fixed id held for the channel's lifetime, so concurrent opens of one
+    /// HID node never share a correlation id. The `lease` is whatever the
+    /// allocator hands out to back it — an entry in a table, an OS file lock —
+    /// and is dropped with the policy, which is when the id goes back.
     /// (OpenLogi local addition.)
     Leased {
         /// The leased id every request carries.
         id: RequestSwId,
-        /// Returns the id to the allocator on drop.
-        free: fn(u8),
+        /// Owns the lease; dropping it returns the id to the allocator.
+        lease: Box<dyn Any + Send + Sync>,
     },
 }
 
@@ -122,14 +179,6 @@ impl Default for SwIdPolicy {
     /// Fixed id `1`, matching the protocol's conventional default.
     fn default() -> Self {
         Self::Fixed(RequestSwId(U4::from_lo(0x01)))
-    }
-}
-
-impl Drop for SwIdPolicy {
-    fn drop(&mut self) {
-        if let Self::Leased { id, free } = self {
-            free(id.get().to_lo());
-        }
     }
 }
 
@@ -157,8 +206,9 @@ pub struct HidppChannel {
     /// the read thread and released the raw transport.
     sw_id_policy: SwIdPolicy,
 
-    /// All sent messages that are waiting for a response.
-    pending_messages: Arc<Mutex<VecDeque<PendingMessage>>>,
+    /// All sent messages that are waiting for a response, and the requests
+    /// parked behind one that shares their header.
+    pending_messages: Arc<Mutex<PendingQueue>>,
 
     /// The request ID assigned to the next pending message.
     pending_message_id: AtomicU64,
@@ -206,10 +256,186 @@ impl Drop for HidppChannel {
     }
 }
 
+/// The bytes every reply is matched on before any predicate runs: device
+/// index, feature index (HID++1.0: sub id), and function/software id
+/// (HID++1.0: register address) — the first three payload bytes of every
+/// report, on both report kinds. Two requests that share them get replies
+/// nothing on the wire can tell apart.
+type CorrelationKey = (u8, u8, u8);
+
+/// The requests awaiting a reply, plus the requests parked because one of
+/// those shares their [`CorrelationKey`].
+#[derive(Default)]
+struct PendingQueue {
+    /// Sent messages waiting for a response, oldest first.
+    messages: VecDeque<PendingMessage>,
+
+    /// Requests abandoned unanswered whose replies may still land. Each keeps
+    /// its key taken until its replies arrive and are discarded, or its grace
+    /// runs out — see [`STALE_REPLY_GRACE`].
+    stale: Vec<StaleKey>,
+
+    /// Woken whenever `messages` or `stale` changes, so a parked request can
+    /// re-check whether its key is free.
+    key_waiters: Vec<oneshot::Sender<()>>,
+}
+
+/// A request that timed out or was cancelled with replies outstanding.
+struct StaleKey {
+    /// The header bytes the outstanding replies will carry.
+    key: CorrelationKey,
+
+    /// The request as sent, so a byte-identical re-ask that asks to adopt
+    /// the outstanding replies can be recognised.
+    request: HidppMessage,
+
+    /// Recognises an outstanding reply, so it can be discarded on arrival.
+    response_predicate: Box<dyn Fn(&HidppMessage) -> bool + Send>,
+
+    /// How many replies are still owed: one per time the request went out
+    /// unanswered.
+    outstanding: usize,
+
+    /// When the key is given up on even without them.
+    expires: Instant,
+}
+
+/// What a request that could not register has to wait for.
+enum Wait {
+    /// A pending request with the same key; until it leaves the queue.
+    InFlight,
+    /// An abandoned request's replies with this key are still outstanding;
+    /// until they are discarded, or the given instant at the latest.
+    Stale(Instant),
+}
+
+impl PendingQueue {
+    /// Registers `message` if nothing holds its key as of `now`, else hands it
+    /// back with what it is waiting for. Prunes stale keys whose grace has
+    /// passed.
+    ///
+    /// A stale key blocks whatever the new request's bytes are: byte equality
+    /// with the abandoned request does not by itself make the outstanding
+    /// replies its answer, since a write may have gone between the two asks.
+    /// Only a request that asks to ([`AbandonedReply::AdoptIdentical`]) and
+    /// is byte-identical registers at once and adopts them — it is answered
+    /// by whichever reply comes first, and the rest stay owed (see
+    /// [`PendingMessage::extra_replies`]).
+    fn try_register(
+        &mut self,
+        mut message: PendingMessage,
+        now: Instant,
+    ) -> Result<(), (PendingMessage, Wait)> {
+        self.stale.retain(|stale| stale.expires > now);
+        if self
+            .messages
+            .iter()
+            .any(|pending| pending.key == message.key)
+        {
+            return Err((message, Wait::InFlight));
+        }
+        let adopts = |stale: &StaleKey| {
+            message.abandoned == AbandonedReply::AdoptIdentical && stale.request == message.request
+        };
+        if let Some(until) = self
+            .stale
+            .iter()
+            .filter(|stale| stale.key == message.key && !adopts(stale))
+            .map(|stale| stale.expires)
+            .max()
+        {
+            return Err((message, Wait::Stale(until)));
+        }
+        message.extra_replies = self
+            .stale
+            .iter()
+            .filter(|stale| stale.key == message.key)
+            .map(|stale| stale.outstanding)
+            .sum();
+        self.stale.retain(|stale| stale.key != message.key);
+        self.messages.push_back(message);
+        Ok(())
+    }
+
+    /// Gives up on the request with `id`, if it is still awaiting its reply:
+    /// it leaves the queue but its key stays taken for [`STALE_REPLY_GRACE`],
+    /// so the reply — should it still come — is discarded rather than handed
+    /// to the next request with that key. Wakes parked requests so they
+    /// re-check what they are waiting for.
+    fn abandon(&mut self, id: u64, now: Instant) {
+        let Some(pos) = self.messages.iter().position(|message| message.id == id) else {
+            return;
+        };
+        let Some(abandoned) = self.messages.remove(pos) else {
+            return;
+        };
+        // Its own reply, plus any it had adopted from earlier abandoned sends
+        // of the same request.
+        let outstanding = abandoned.extra_replies + 1;
+        self.owe_replies(abandoned, outstanding, now);
+        self.wake_key_waiters();
+    }
+
+    /// Keeps `message`'s key taken for `outstanding` more replies, for the
+    /// grace from `now`.
+    fn owe_replies(&mut self, message: PendingMessage, outstanding: usize, now: Instant) {
+        let PendingMessage {
+            key,
+            request,
+            response_predicate,
+            ..
+        } = message;
+        self.stale.push(StaleKey {
+            key,
+            request,
+            response_predicate,
+            outstanding,
+            expires: now + STALE_REPLY_GRACE,
+        });
+    }
+
+    /// Discards `msg` if it is an outstanding reply of an abandoned request,
+    /// freeing that request's key once none is owed.
+    fn discard_stale_reply(&mut self, msg: &HidppMessage) -> bool {
+        let Some(pos) = self
+            .stale
+            .iter()
+            .position(|stale| (stale.response_predicate)(msg))
+        else {
+            return false;
+        };
+        self.stale[pos].outstanding -= 1;
+        if self.stale[pos].outstanding == 0 {
+            self.stale.remove(pos);
+            self.wake_key_waiters();
+        }
+        true
+    }
+
+    fn wake_key_waiters(&mut self) {
+        for waiter in self.key_waiters.drain(..) {
+            // A parked request that was cancelled meanwhile has dropped its
+            // receiver; nothing to wake.
+            let _ = waiter.send(());
+        }
+    }
+}
+
 /// Represents a message that was sent and is waiting for a response.
 struct PendingMessage {
     /// Unique ID used to remove this request when its waiter goes away.
     id: u64,
+
+    /// The header bytes this request's reply will carry.
+    key: CorrelationKey,
+
+    /// The request as sent, so an abandoned one can be recognised when it is
+    /// re-asked.
+    request: HidppMessage,
+
+    /// What to do about replies still owed to an abandoned request with the
+    /// same header.
+    abandoned: AbandonedReply,
 
     /// The predicate that has to match for an incoming message to be classified
     /// as the response.
@@ -218,6 +444,12 @@ struct PendingMessage {
     /// The oneshot sender used to provide the response message to the receiving
     /// end.
     sender: oneshot::Sender<HidppMessage>,
+
+    /// Replies still owed to earlier, abandoned sends of this same request,
+    /// adopted on registration under [`AbandonedReply::AdoptIdentical`].
+    /// Whichever reply comes first answers this request; the rest are then
+    /// owed under a stale key.
+    extra_replies: usize,
 }
 
 /// One registered request and the receiver waiting for its response.
@@ -226,28 +458,88 @@ struct PendingMessage {
 /// deadline cancels [`HidppChannel::send_with_timeout`] during its write.
 struct PendingRequest {
     id: u64,
-    pending_messages: Arc<Mutex<VecDeque<PendingMessage>>>,
+    pending_messages: Arc<Mutex<PendingQueue>>,
     receiver: oneshot::Receiver<HidppMessage>,
 }
 
 impl PendingRequest {
-    fn register(
+    /// Registers the request once nothing holds its `key`: no pending request
+    /// shares it, and no abandoned request's reply with it is still expected.
+    ///
+    /// Until then the request is parked and woken each time the queue changes
+    /// — and, while the key is merely stale, at the end of the grace at the
+    /// latest. The check and the registration happen under one lock, so two
+    /// parked requests woken together cannot both slip in.
+    async fn register_when_key_free(
         id: u64,
-        pending_messages: Arc<Mutex<VecDeque<PendingMessage>>>,
+        pending_messages: Arc<Mutex<PendingQueue>>,
+        request: HidppMessage,
+        abandoned: AbandonedReply,
         response_predicate: impl Fn(&HidppMessage) -> bool + Send + 'static,
     ) -> Self {
         let (sender, receiver) = oneshot::channel();
-        let request = Self {
+        let key = request.header();
+        let mut message = PendingMessage {
+            id,
+            key,
+            request,
+            abandoned,
+            response_predicate: Box::new(response_predicate),
+            sender,
+            extra_replies: 0,
+        };
+        loop {
+            let now = Instant::now();
+            let (parked, stale_until) = {
+                let mut queue = lock(&pending_messages);
+                let stale_until = match queue.try_register(message, now) {
+                    Ok(()) => break,
+                    Err((returned, Wait::InFlight)) => {
+                        message = returned;
+                        None
+                    }
+                    Err((returned, Wait::Stale(expires))) => {
+                        message = returned;
+                        Some(expires)
+                    }
+                };
+                let (wake, parked) = oneshot::channel();
+                queue.key_waiters.push(wake);
+                (parked, stale_until)
+            };
+            let (dev, feat, func) = key;
+            match stale_until {
+                None => {
+                    trace!(
+                        dev,
+                        feat, func, "hidpp request parked — same header in flight"
+                    );
+                    // A dropped waker only means the queue changed; re-check
+                    // either way.
+                    let _ = parked.await;
+                }
+                Some(expires) => {
+                    trace!(
+                        dev,
+                        feat,
+                        func,
+                        "hidpp request parked — replies with its header are still outstanding"
+                    );
+                    let mut parked = parked.fuse();
+                    let mut grace =
+                        futures_timer::Delay::new(expires.saturating_duration_since(now)).fuse();
+                    select! {
+                        _ = parked => {}
+                        () = grace => {}
+                    }
+                }
+            }
+        }
+        Self {
             id,
             pending_messages,
             receiver,
-        };
-        lock(&request.pending_messages).push_back(PendingMessage {
-            id,
-            response_predicate: Box::new(response_predicate),
-            sender,
-        });
-        request
+        }
     }
 
     async fn receive(mut self) -> Result<HidppMessage, ChannelError> {
@@ -259,10 +551,7 @@ impl PendingRequest {
 
 impl Drop for PendingRequest {
     fn drop(&mut self) {
-        let mut pending = lock(&self.pending_messages);
-        if let Some(pos) = pending.iter().position(|message| message.id == self.id) {
-            pending.remove(pos);
-        }
+        lock(&self.pending_messages).abandon(self.id, Instant::now());
     }
 }
 
@@ -283,7 +572,7 @@ impl HidppChannel {
         }
 
         let raw_channel_rc = Arc::new(raw);
-        let pending_messages_rc = Arc::new(Mutex::new(VecDeque::<PendingMessage>::new()));
+        let pending_messages_rc = Arc::new(Mutex::new(PendingQueue::default()));
         let message_listeners_rc = Arc::new(Mutex::new(HashMap::<u32, MessageListener>::new()));
 
         let (close_sender, close_receiver) = oneshot::channel::<()>();
@@ -411,6 +700,16 @@ impl HidppChannel {
     /// response that still arrives later reaches message listeners as an
     /// unmatched message.
     ///
+    /// A request whose header — device, feature, function and software id —
+    /// is already in flight goes out only once that request is answered:
+    /// their replies would be indistinguishable, and a receiver may deliver
+    /// them out of order. If that request timed out or was cancelled
+    /// unanswered, its reply is still expected: the header stays reserved
+    /// until the reply lands and is discarded, or for [`STALE_REPLY_GRACE`]
+    /// at most — a byte-identical re-ask included, since a write may have gone
+    /// between the two asks. The wait counts against `timeout`. A query of
+    /// immutable state can adopt that reply instead through [`Self::send_with`].
+    ///
     /// [`Self::send`] uses this with [`SEND_RESPONSE_TIMEOUT`], which suits
     /// requests to a device that may be asleep. Requests that should fail
     /// faster — e.g. probing a receiver that answers immediately or not at
@@ -420,6 +719,21 @@ impl HidppChannel {
         msg: HidppMessage,
         response_predicate: impl Fn(&HidppMessage) -> bool + Send + 'static,
         timeout: Duration,
+    ) -> Result<HidppMessage, ChannelError> {
+        self.send_with(msg, response_predicate, timeout, AbandonedReply::Quarantine)
+            .await
+    }
+
+    /// [`Self::send_with_timeout`], choosing what to do about a reply still
+    /// owed to an abandoned request with the same header. Only a query whose
+    /// answer no write can change should pass
+    /// [`AbandonedReply::AdoptIdentical`].
+    pub async fn send_with(
+        &self,
+        msg: HidppMessage,
+        response_predicate: impl Fn(&HidppMessage) -> bool + Send + 'static,
+        timeout: Duration,
+        abandoned: AbandonedReply,
     ) -> Result<HidppMessage, ChannelError> {
         let msg = self.normalize_outgoing(msg);
         if !self.supports_msg(&msg) {
@@ -433,18 +747,22 @@ impl HidppChannel {
         trace!(dev, feat, func, "hidpp request");
 
         let pending_id = self.pending_message_id.fetch_add(1, Ordering::SeqCst);
-        let pending_request = PendingRequest::register(
-            pending_id,
-            Arc::clone(&self.pending_messages),
-            response_predicate,
-        );
 
-        // The deadline covers the write as well: `write_report` has no
-        // bounded-time contract of its own, so a wedged device could otherwise
-        // park `send` forever before the response wait even starts.
+        // The deadline covers the wait for an identical in-flight header and
+        // the write as well: `write_report` has no bounded-time contract of its
+        // own, so a wedged device could otherwise park `send` forever before
+        // the response wait even starts.
         let result = {
             let mut request = std::pin::pin!(
                 async move {
+                    let pending_request = PendingRequest::register_when_key_free(
+                        pending_id,
+                        Arc::clone(&self.pending_messages),
+                        msg,
+                        abandoned,
+                        response_predicate,
+                    )
+                    .await;
                     self.send_and_forget(msg).await?;
                     pending_request.receive().await
                 }
@@ -554,7 +872,7 @@ impl HidppChannel {
 /// lets the channel shut down — see [`RawHidChannel::read_report`].
 async fn read_loop(
     raw_channel: &dyn RawHidChannel,
-    pending_messages: &Mutex<VecDeque<PendingMessage>>,
+    pending_messages: &Mutex<PendingQueue>,
     message_listeners: &Mutex<HashMap<u32, MessageListener>>,
     mut close: oneshot::Receiver<()>,
 ) {
@@ -582,21 +900,51 @@ async fn read_loop(
         };
 
         let mut matched = false;
+        let mut stale = false;
         let pending_count;
         {
-            let mut msgs = lock(pending_messages);
-            pending_count = msgs.len();
-            if let Some(pos) = msgs.iter().position(|elem| (elem.response_predicate)(&msg))
-                && let Some(waiting) = msgs.remove(pos)
+            let mut queue = lock(pending_messages);
+            pending_count = queue.messages.len();
+            if let Some(answered) = queue
+                .messages
+                .iter()
+                .position(|elem| (elem.response_predicate)(&msg))
+                .and_then(|pos| queue.messages.remove(pos))
             {
-                let _ = waiting.sender.send(msg);
+                let PendingMessage {
+                    key,
+                    request,
+                    response_predicate,
+                    sender,
+                    extra_replies,
+                    ..
+                } = answered;
+                let _ = sender.send(msg);
+                if extra_replies > 0 {
+                    // Answered by one of several replies it was owed: the
+                    // others are still coming and must not answer the next
+                    // request with this header.
+                    queue.stale.push(StaleKey {
+                        key,
+                        request,
+                        response_predicate,
+                        outstanding: extra_replies,
+                        expires: Instant::now() + STALE_REPLY_GRACE,
+                    });
+                }
+                queue.wake_key_waiters();
                 matched = true;
+            } else {
+                // The reply of a request nobody waits for any more. Discarding
+                // it here is what frees its header for the next request.
+                stale = queue.discard_stale_reply(&msg);
             }
         }
 
         trace!(
             len,
             matched,
+            stale,
             pending_count,
             payload = format_args!("{:02x?}", &buf[..len.min(16)]),
             "raw report received"

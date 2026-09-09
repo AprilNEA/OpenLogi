@@ -16,16 +16,20 @@ use super::cache::{
 use super::events::EventFeatureIndices;
 use super::features::ProbedFeatures;
 use super::probe::{
-    NodeProbe, ProbeVerdict, assemble_bolt_probe, assemble_unifying_device,
-    parse_codename_unifying, preferred_direct_codename, probe_unifying_slot, unifying_probe_budget,
+    NodeProbe, PassContext, ProbeVerdict, assemble_bolt_probe, assemble_unifying_device,
+    parse_codename_unifying, preferred_direct_codename, probe_one, probe_unifying_slot,
+    unifying_probe_budget,
 };
 use super::{
-    ChannelCache, Enumerator, ONESHOT_ATTEMPTS, OneShotScan, ScanPass, UNIFYING_CACHED_SLOT_PROBE,
-    UNIFYING_SLOT_PROBE, retained_nodes, routes_for_inventories, settle_unhealthy_node,
+    ChannelCache, Enumerator, ONESHOT_ATTEMPTS, OneShotScan, ProbeDeadlines, ScanPass,
+    UNIFYING_CACHED_SLOT_PROBE, UNIFYING_SLOT_PROBE, retained_nodes, routes_for_inventories,
+    settle_probe, settle_unhealthy_node,
 };
+use crate::backend::{NodeId, NodeInfo};
 use crate::channel::scripted::{
     ScriptedBackend, ScriptedNode, ScriptedRawHidChannel, scripted_channel, scripted_node_info,
 };
+use crate::host_lock;
 use crate::{DIRECT_DEVICE_INDEX, DeviceRoute};
 
 fn cache_entry() -> Cached {
@@ -65,7 +69,7 @@ fn cache_dirty_tracks_only_persistable_keys() {
     // Its eviction is equally invisible to the persisted file.
     let nobody = HashSet::new();
     for _ in 0..=CACHE_MISS_GRACE {
-        e.evict_unseen(&nobody);
+        e.evict_unseen(&nobody, &nobody);
     }
     assert!(!e.cache.contains_key(&unifying), "entry should be evicted");
     assert!(!e.cache_dirty, "non-persistable eviction dirtied the cache");
@@ -91,14 +95,14 @@ fn cache_entry_survives_grace_then_evicts() {
     let nobody = HashSet::new();
     // Missing for the whole grace window: kept.
     for _ in 0..CACHE_MISS_GRACE {
-        e.evict_unseen(&nobody);
+        e.evict_unseen(&nobody, &nobody);
         assert!(
             e.cache.contains_key(&key),
             "evicted inside the grace window"
         );
     }
     // One miss past the grace: evicted.
-    e.evict_unseen(&nobody);
+    e.evict_unseen(&nobody, &nobody);
     assert!(
         !e.cache.contains_key(&key),
         "should evict past the grace window"
@@ -112,15 +116,167 @@ fn being_seen_resets_the_miss_counter() {
     e.cache.insert(key.clone(), cache_entry());
     let nobody = HashSet::new();
     let seen: HashSet<CacheKey> = std::iter::once(key.clone()).collect();
-    e.evict_unseen(&nobody); // miss 1
-    e.evict_unseen(&seen); // seen → counter reset
+    e.evict_unseen(&nobody, &nobody); // miss 1
+    e.evict_unseen(&seen, &nobody); // seen → counter reset
     for _ in 0..CACHE_MISS_GRACE {
-        e.evict_unseen(&nobody);
+        e.evict_unseen(&nobody, &nobody);
     }
     assert!(
         e.cache.contains_key(&key),
         "counter reset by a sighting, so still within grace"
     );
+}
+
+/// A deferred tick is evidence of nothing about the node's devices either:
+/// the entries the node contributed are held out of miss aging, however many
+/// deferrals run back to back, while the entries of a node that was actually
+/// checked — and did not report them — age as before. Once the deferred node
+/// is probed again, normal aging resumes from where it stood.
+#[test]
+fn deferred_ticks_hold_the_nodes_cache_entries_out_of_miss_aging() {
+    let mut e = Enumerator::with_backend(ScriptedBackend::new(Vec::new()));
+    let deferred_node = NodeId::from("deferred-receiver".to_string());
+    let checked_node = NodeId::from("checked-receiver".to_string());
+    let held = CacheKey::Bolt { unit_id: [1; 4] };
+    let aged = CacheKey::Bolt { unit_id: [2; 4] };
+    let answered = |outcomes| NodeProbe {
+        inventory: None,
+        verdict: ProbeVerdict::Healthy { complete: true },
+        outcomes,
+    };
+    // One pass's cache bookkeeping for a set of settled probes: the shape of
+    // `enumerate_reporting_completeness`, without the channels.
+    let pass = |e: &mut Enumerator, probes: Vec<(&NodeId, NodeProbe)>| {
+        let mut frozen = HashSet::new();
+        let mut outcomes = Vec::new();
+        for (node, probe) in probes {
+            settle_probe(&mut e.ledger, node, probe.verdict, probe.inventory.clone());
+            e.hold_or_note_cache_keys(node, &probe, &mut frozen);
+            outcomes.extend(probe.outcomes);
+        }
+        let seen = e.apply_outcomes(outcomes);
+        e.evict_unseen(&seen, &frozen);
+    };
+
+    // Both nodes answer and contribute an entry each.
+    pass(
+        &mut e,
+        vec![
+            (
+                &deferred_node,
+                answered(vec![CacheOutcome::Fresh(held.clone(), cache_entry())]),
+            ),
+            (
+                &checked_node,
+                answered(vec![CacheOutcome::Fresh(aged.clone(), cache_entry())]),
+            ),
+        ],
+    );
+
+    // Then one pass past the grace in which the first node's probe is
+    // deferred and the second answers without its device.
+    for _ in 0..=CACHE_MISS_GRACE {
+        pass(
+            &mut e,
+            vec![
+                (&deferred_node, NodeProbe::deferred()),
+                (&checked_node, answered(Vec::new())),
+            ],
+        );
+    }
+    assert!(
+        e.cache.contains_key(&held),
+        "a deferred node's entry must not age out"
+    );
+    assert!(
+        !e.cache.contains_key(&aged),
+        "a checked node's unreported entry ages as before"
+    );
+    assert!(
+        !e.node_cache_keys[&checked_node].contains(&aged),
+        "an evicted entry is no longer the node's to hold"
+    );
+
+    // The deferred node is probed again and does not report its device:
+    // aging resumes.
+    for _ in 0..=CACHE_MISS_GRACE {
+        pass(&mut e, vec![(&deferred_node, answered(Vec::new()))]);
+    }
+    assert!(
+        !e.cache.contains_key(&held),
+        "normal aging resumes once the node is actually checked"
+    );
+}
+
+/// A warm start loads persisted entries before any receiver has answered,
+/// so a receiver deferred from its very first probe has no record of what is
+/// its. Every unattributed entry is held for it until it is actually probed;
+/// an entry another node has claimed is not.
+#[test]
+fn a_node_deferred_before_its_first_probe_holds_every_unattributed_entry() {
+    let mut e = Enumerator::with_backend(ScriptedBackend::new(Vec::new()));
+    let receiver = NodeId::from("warm-receiver".to_string());
+    let checked_node = NodeId::from("checked-receiver".to_string());
+    let persisted = CacheKey::Bolt { unit_id: [1; 4] };
+    let claimed = CacheKey::Bolt { unit_id: [2; 4] };
+    // The persisted entry was loaded, never attributed; another node
+    // contributed — and now stops reporting — an entry of its own.
+    e.cache.insert(persisted.clone(), cache_entry());
+    let mut frozen = HashSet::new();
+    let claim = NodeProbe {
+        inventory: None,
+        verdict: ProbeVerdict::Healthy { complete: true },
+        outcomes: vec![CacheOutcome::Fresh(claimed.clone(), cache_entry())],
+    };
+    e.hold_or_note_cache_keys(&checked_node, &claim, &mut frozen);
+    e.apply_outcomes(claim.outcomes);
+
+    for _ in 0..=CACHE_MISS_GRACE {
+        let mut frozen = HashSet::new();
+        let deferred = NodeProbe::deferred();
+        settle_probe(&mut e.ledger, &receiver, deferred.verdict, None);
+        e.hold_or_note_cache_keys(&receiver, &deferred, &mut frozen);
+        let checked = NodeProbe {
+            inventory: None,
+            verdict: ProbeVerdict::Healthy { complete: true },
+            outcomes: Vec::new(),
+        };
+        e.hold_or_note_cache_keys(&checked_node, &checked, &mut frozen);
+        assert_eq!(
+            frozen,
+            HashSet::from([persisted.clone()]),
+            "only the unattributed entry is held for the never-probed node"
+        );
+        let seen = e.apply_outcomes(deferred.outcomes);
+        e.evict_unseen(&seen, &frozen);
+    }
+    assert!(
+        e.cache.contains_key(&persisted),
+        "a persisted entry must survive deferrals of the receiver that has yet to claim it"
+    );
+    assert!(
+        !e.cache.contains_key(&claimed),
+        "the checked node's unreported entry ages as before"
+    );
+
+    // The receiver's first real probe claims nothing: from then on its
+    // deferrals hold nothing, and the persisted entry ages normally.
+    let first = NodeProbe {
+        inventory: None,
+        verdict: ProbeVerdict::Healthy { complete: true },
+        outcomes: Vec::new(),
+    };
+    e.hold_or_note_cache_keys(&receiver, &first, &mut HashSet::new());
+    for _ in 0..=CACHE_MISS_GRACE {
+        let mut frozen = HashSet::new();
+        e.hold_or_note_cache_keys(&receiver, &NodeProbe::deferred(), &mut frozen);
+        assert!(
+            frozen.is_empty(),
+            "a probed node holds only what it claimed"
+        );
+        e.evict_unseen(&HashSet::new(), &frozen);
+    }
+    assert!(!e.cache.contains_key(&persisted));
 }
 
 #[test]
@@ -146,17 +302,22 @@ fn cached_probe_is_reused_until_refresh_interval() {
 #[test]
 fn unifying_cache_hits_use_only_the_battery_refresh_budget() {
     let cached = cache_entry();
+    let deadlines = &ProbeDeadlines::DEFAULT;
     assert_eq!(
-        unifying_probe_budget(Some(&cached), cached.probed_at),
+        unifying_probe_budget(Some(&cached), cached.probed_at, deadlines),
         UNIFYING_CACHED_SLOT_PROBE
     );
     assert_eq!(
-        unifying_probe_budget(Some(&cached), cached.probed_at + REFRESH_INTERVAL),
+        unifying_probe_budget(
+            Some(&cached),
+            cached.probed_at + REFRESH_INTERVAL,
+            deadlines
+        ),
         UNIFYING_SLOT_PROBE,
         "stale entries still get enough time for a full feature walk"
     );
     assert_eq!(
-        unifying_probe_budget(None, Instant::now()),
+        unifying_probe_budget(None, Instant::now(), deadlines),
         UNIFYING_SLOT_PROBE,
         "first sight still gets the full feature-walk budget"
     );
@@ -184,7 +345,13 @@ async fn offline_arrival_rebroadcasts_surface_without_probing_the_device() {
     let writes_before = handle.written_reports().len();
 
     let cache = HashMap::new();
-    let (device, _) = probe_unifying_slot(&channel, &event, "SERIAL", &cache, Instant::now(), None)
+    let pass = PassContext {
+        cache: &cache,
+        now: Instant::now(),
+        subscriptions: None,
+        deadlines: &ProbeDeadlines::DEFAULT,
+    };
+    let (device, _) = probe_unifying_slot(&channel, &event, "SERIAL", pass)
         .await
         .expect("an offline slot still surfaces from its re-broadcast");
 
@@ -790,4 +957,219 @@ async fn a_non_hidpp_node_leaves_the_tick_healthy() {
         "a node that is not HID++ is not a failure to retry"
     );
     assert!(complete, "nothing was left unchecked");
+}
+
+/// The Logi Bolt receiver's product id.
+const BOLT_RECEIVER_PID: u16 = 0xc548;
+
+/// The unit id [`bolt_receiver_with_a_silent_slot`] reports for slot 1.
+const SILENT_SLOT_UNIT_ID: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
+
+/// A Bolt receiver with one paired mouse in slot 1. The receiver answers
+/// every register read at once — no arrival events, so the drain runs to its
+/// deadline and the slot is read from the pairing register — while the mouse
+/// itself, addressed at its slot index, never answers: a slot whose feature
+/// walk runs to its own budget and falls back to the cache.
+fn bolt_receiver_with_a_silent_slot(request: &[u8]) -> Option<Vec<u8>> {
+    let [_, device, sub_id, address, sub_register, ..] = *request else {
+        return None;
+    };
+    if device != 0xff {
+        return None;
+    }
+    let short = |data: [u8; 3]| Some(vec![0x10, 0xff, sub_id, address, data[0], data[1], data[2]]);
+    let long = |data: &[u8]| {
+        let mut report = vec![0x11, 0xff, 0x83, address];
+        report.extend_from_slice(data);
+        report.resize(20, 0);
+        Some(report)
+    };
+    match (sub_id, address) {
+        // Notifications (wireless notifications already on) and Connections
+        // (one pairing) happen to read the same.
+        (0x81, 0x00 | 0x02) => short([0x00, 0x01, 0x00]),
+        // Register writes (the arrival trigger) are acknowledged.
+        (0x80, _) => short([0x00, 0x00, 0x00]),
+        // Unique id: sixteen ASCII bytes.
+        (0x83, 0xfb) => long(b"0000000012345678"),
+        (0x83, 0xb5) => match sub_register {
+            // Slot 1's pairing information: a mouse, online, wpid c09d.
+            0x51 => long(&[0x51, 0x02, 0x9d, 0xc0, 0xde, 0xad, 0xbe, 0xef]),
+            // Slot 1's codename.
+            0x61 => long(&[
+                0x61, 0x01, 0x08, b'M', b'X', b' ', b'P', b'r', b'o', b'b', b'e',
+            ]),
+            // Every other slot is empty: an error reply, no sub-register byte.
+            _ => Some(vec![0x10, 0xff, 0x8f, 0x83, 0xb5, 0x08, 0x00]),
+        },
+        _ => None,
+    }
+}
+
+/// A Bolt receiver node whose register phase no other test shares.
+fn bolt_receiver_node(tag: &str) -> NodeInfo {
+    let mut info = scripted_node_info(&format!("{tag}-{}", std::process::id()));
+    info.product_id = BOLT_RECEIVER_PID;
+    info
+}
+
+/// Deadlines shrunk to test scale, in the production proportions: the slot
+/// probe and the drain fit the receiver budget with room, and the register
+/// lock wait is long enough for a holder to release inside it.
+fn quick_deadlines() -> ProbeDeadlines {
+    ProbeDeadlines {
+        register_lock_wait: Duration::from_secs(2),
+        receiver_budget: Duration::from_millis(900),
+        direct_budget: Duration::from_millis(900),
+        arrival_drain: Duration::from_millis(100),
+        bolt_slot_probe: Duration::from_millis(400),
+        unifying_slot_probe: Duration::from_millis(400),
+        unifying_cached_slot_probe: Duration::from_millis(100),
+    }
+}
+
+/// A stale cache entry for the silent slot, so its walk runs and has
+/// something to fall back to when it times out.
+fn stale_silent_slot_cache() -> (CacheKey, HashMap<CacheKey, Cached>) {
+    let key = CacheKey::Bolt {
+        unit_id: SILENT_SLOT_UNIT_ID,
+    };
+    let mut entry = cache_entry();
+    entry.probe = probed(Some(model(SILENT_SLOT_UNIT_ID, Some("SN-1"))), false);
+    entry.probed_at = Instant::now()
+        .checked_sub(REFRESH_INTERVAL)
+        .expect("the process has been up longer than the refresh interval's worth of ticks");
+    let cache = HashMap::from([(key.clone(), entry)]);
+    (key, cache)
+}
+
+/// The register-phase wait sits outside the receiver's I/O budget: a probe
+/// that waited for another process to release the phase — inside its wait
+/// budget — still gets the whole I/O budget the receiver's worst case was
+/// sized for, so a slow slot reaches its normal timeout-and-cache fallback
+/// and the receiver settles healthy. Composed with the wait plus the I/O
+/// exceeding the budget on purpose: under one deadline around both, this
+/// probe failed — and two such failures retire a working receiver's channel.
+#[tokio::test]
+async fn a_receiver_probe_that_waited_for_its_register_phase_keeps_its_whole_io_budget() {
+    let info = bolt_receiver_node("register-phase-wait");
+    let deadlines = quick_deadlines();
+    let lock_held_for = Duration::from_millis(600);
+    // Another process (here: this test) holds the receiver's register phase,
+    // releasing it inside the wait but late enough that wait + I/O outruns
+    // the receiver budget.
+    let held = host_lock::try_lock(&host_lock::node_lock_name(&info.id))
+        .unwrap()
+        .expect("the test takes the phase first");
+    let release = tokio::spawn(async move {
+        tokio::time::sleep(lock_held_for).await;
+        drop(held);
+    });
+    let (raw, _handle) = ScriptedRawHidChannel::with_responder(bolt_receiver_with_a_silent_slot);
+    let channel = scripted_channel(raw.presenting_as(BOLT_RECEIVER_PID)).await;
+    let (key, cache) = stale_silent_slot_cache();
+    let pass = PassContext {
+        cache: &cache,
+        now: Instant::now(),
+        subscriptions: None,
+        deadlines: &deadlines,
+    };
+
+    let started = Instant::now();
+    let probe = probe_one(info, channel, pass).await;
+    release.await.unwrap();
+
+    let io_floor = deadlines.arrival_drain + deadlines.bolt_slot_probe;
+    assert!(
+        lock_held_for + io_floor > deadlines.receiver_budget,
+        "the test must compose a wait and an I/O floor that together outrun the budget"
+    );
+    assert!(
+        started.elapsed() >= lock_held_for + io_floor,
+        "the probe waited for the phase and the slot ran to its own budget: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        probe.verdict,
+        ProbeVerdict::Healthy { complete: true },
+        "the wait must not have eaten into the I/O budget"
+    );
+    let inventory = probe.inventory.expect("the receiver answered");
+    assert_eq!(
+        inventory.receiver.unique_id.as_deref(),
+        Some("0000000012345678")
+    );
+    assert_eq!(inventory.paired.len(), 1);
+    let device = &inventory.paired[0];
+    assert_eq!(device.slot, 1);
+    assert_eq!(device.codename.as_deref(), Some("MX Probe"));
+    assert!(device.online);
+    assert_eq!(
+        device.model_info.as_ref().map(|m| m.unit_id),
+        Some(SILENT_SLOT_UNIT_ID),
+        "the timed-out slot fell back to its cached probe"
+    );
+    assert!(
+        matches!(probe.outcomes.as_slice(), [CacheOutcome::Seen(seen)] if *seen == key),
+        "a timed-out slot keeps its cache entry alive without refreshing it"
+    );
+}
+
+/// A receiver whose register phase stays held past the wait is deferred
+/// without a byte of I/O: nothing was checked, so nothing is reported as
+/// failed.
+#[tokio::test]
+async fn a_receiver_probe_defers_when_the_register_phase_is_held_past_the_wait() {
+    let info = bolt_receiver_node("register-phase-held");
+    let deadlines = ProbeDeadlines {
+        register_lock_wait: Duration::from_millis(100),
+        ..quick_deadlines()
+    };
+    let _held = host_lock::try_lock(&host_lock::node_lock_name(&info.id))
+        .unwrap()
+        .expect("the test takes the phase first");
+    let (raw, handle) = ScriptedRawHidChannel::with_responder(bolt_receiver_with_a_silent_slot);
+    let channel = scripted_channel(raw.presenting_as(BOLT_RECEIVER_PID)).await;
+    let cache = HashMap::new();
+    let pass = PassContext {
+        cache: &cache,
+        now: Instant::now(),
+        subscriptions: None,
+        deadlines: &deadlines,
+    };
+
+    let probe = probe_one(info, channel, pass).await;
+
+    assert_eq!(probe.verdict, ProbeVerdict::Deferred);
+    assert!(probe.inventory.is_none());
+    assert!(probe.outcomes.is_empty());
+    assert!(
+        handle.written_reports().is_empty(),
+        "a deferred probe must not touch the receiver"
+    );
+}
+
+/// The I/O budget still bounds the probe on its own: a receiver whose slot
+/// walk alone outruns it is a failed probe, for the ledger to replay through.
+#[tokio::test]
+async fn a_receiver_probe_whose_io_outruns_the_budget_is_failed() {
+    let info = bolt_receiver_node("io-outruns-budget");
+    let deadlines = ProbeDeadlines {
+        receiver_budget: Duration::from_millis(150),
+        ..quick_deadlines()
+    };
+    let (raw, _handle) = ScriptedRawHidChannel::with_responder(bolt_receiver_with_a_silent_slot);
+    let channel = scripted_channel(raw.presenting_as(BOLT_RECEIVER_PID)).await;
+    let (_, cache) = stale_silent_slot_cache();
+    let pass = PassContext {
+        cache: &cache,
+        now: Instant::now(),
+        subscriptions: None,
+        deadlines: &deadlines,
+    };
+
+    let probe = probe_one(info, channel, pass).await;
+
+    assert_eq!(probe.verdict, ProbeVerdict::Failed);
+    assert!(probe.inventory.is_none());
 }

@@ -8,11 +8,10 @@
 //! collections carry both reports; BLE-direct collections are long-only, and the
 //! `hidpp` channel up-converts outgoing short messages to long for them.
 
+use std::collections::BTreeSet;
 use std::error::Error;
-#[cfg(not(target_os = "windows"))]
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::{AtomicU16, Ordering};
-use std::sync::{Arc, LazyLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock, Mutex as StdMutex, PoisonError};
 
 #[cfg(not(target_os = "windows"))]
 use async_hid::{AsyncHidRead, AsyncHidWrite, DeviceReader, DeviceWriter};
@@ -24,10 +23,11 @@ use hidpp::nibble::U4;
 use hidpp::{async_trait, channel::RawHidChannel};
 #[cfg(not(target_os = "windows"))]
 use tokio::sync::Mutex;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::LOGITECH_VENDOR_ID;
 use openlogi_device::backend::{BackendError, HotplugEvent, NodeId, NodeInfo};
+use openlogi_device::host_lock;
 use openlogi_device::write::matches_litra;
 use openlogi_device::{DeviceIoGate, DeviceIoSignal, device_io_channel};
 
@@ -111,15 +111,62 @@ fn node_info(info: &DeviceInfo) -> NodeInfo {
     }
 }
 
-/// Bitmask of leased HID++ software ids (`1..=15`; bit `N` means id `N` is taken).
+/// The HID++ software ids (`1..=15`) leased by this process's channels, as
+/// `(node lock name, id)` — see [`sw_id_lock_name`].
 ///
 /// HID++ correlates request/response by `(device, feature, function, software_id)`.
-/// Concurrent opens of the same physical HID node each get a private pending
-/// queue but share the OS input report stream, so a shared software id lets a
-/// response satisfy the wrong open. Each channel leases one **fixed** id for its
-/// lifetime (no rotation — offset rotating sequences still collide across
-/// channels) and frees it on drop via [`SwIdPolicy::Leased`].
-static SW_ID_LEASES: AtomicU16 = AtomicU16::new(0);
+/// Every open of the same physical HID node gets a private pending queue but
+/// the same OS input report stream — macOS, Windows and Linux all hand every
+/// input report to every open handle — so two channels sharing a software id
+/// satisfy each other's requests. A root `getFeature` reply carries no feature
+/// id, so one taken from another process pins the wrong feature index for the
+/// rest of a session: DPI writes fail with `InvalidFunctionId`, control diverts
+/// with `InvalidArgument`, and the agent's capture comes up with no buttons.
+/// Each channel therefore leases one **fixed** id for its lifetime (no
+/// rotation — offset rotating sequences still collide) and returns it on drop
+/// via [`SwIdPolicy::Leased`].
+///
+/// Ids are scoped to the node: report streams of different nodes never meet,
+/// so each node has the whole pool, and fifteen channels on one node do not
+/// refuse the sixteenth on another. A lease is held two ways: an entry here,
+/// which arbitrates between channels of this process, and an exclusive OS
+/// lock on the id's file in the host lock directory, which arbitrates between
+/// OpenLogi processes — the agent and a CLI or GUI opening the node while it
+/// runs. The OS drops a file lock with its holder, so a crashed process cannot
+/// strand an id. When the lock directory is unusable the lease is this entry
+/// alone, which is process-unique only.
+static SW_ID_LEASES: StdMutex<BTreeSet<(String, u8)>> = StdMutex::new(BTreeSet::new());
+
+/// One channel's software id on one node, held for the channel's lifetime.
+/// Dropping it returns the id.
+struct SwIdLease {
+    id: RequestSwId,
+    /// This lease's [`SW_ID_LEASES`] entry.
+    key: (String, u8),
+    /// The exclusive OS lock on the id's file, held only to be dropped. `None`
+    /// when the lock directory was unusable: the id is then unique to this
+    /// process only.
+    _lock: Option<host_lock::HostLock>,
+}
+
+impl SwIdLease {
+    fn id(&self) -> RequestSwId {
+        self.id
+    }
+}
+
+impl Drop for SwIdLease {
+    fn drop(&mut self) {
+        SW_ID_LEASES
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&self.key);
+    }
+}
+
+/// Whether the lock-directory fallback has been reported. It is reported once:
+/// the condition is per-host, not per-open.
+static SW_ID_LOCK_FALLBACK_REPORTED: AtomicBool = AtomicBool::new(false);
 
 mod native;
 pub(crate) use native::native_backend;
@@ -345,30 +392,51 @@ fn is_receiver_child_node(_id: &async_hid::DeviceId) -> bool {
     false
 }
 
-/// Lease one free software id in `1..=15`, or `None` if all 15 are held.
-fn try_lease_sw_id() -> Option<RequestSwId> {
-    loop {
-        let bits = SW_ID_LEASES.load(Ordering::Acquire);
-        let free = (1u8..=15).find(|&id| bits & (1u16 << id) == 0)?;
-        let next = bits | (1u16 << free);
-        if SW_ID_LEASES
-            .compare_exchange(bits, next, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            // `free` is `1..=15`, so the id-0 rejection can never fire here.
-            return RequestSwId::new(U4::from_lo(free));
+/// The host lock name of software id `id` on `node`: the node's own lock name
+/// (see [`host_lock::node_lock_name`]) with the id appended, so the file sits
+/// beside the node's register-phase lock and is unique to the node.
+fn sw_id_lock_name(node: &NodeId, id: u8) -> String {
+    format!("{}-sw-{id:02}", host_lock::node_lock_name(node))
+}
+
+/// Lease one software id in `1..=15` on `node` that no channel of this process
+/// and no other OpenLogi process holds, or `None` if all 15 are taken.
+fn try_lease_sw_id(node: &NodeId) -> Option<SwIdLease> {
+    let node_name = host_lock::node_lock_name(node);
+    let mut leases = SW_ID_LEASES.lock().unwrap_or_else(PoisonError::into_inner);
+    for sw_id in (1u8..=15).filter_map(|id| RequestSwId::new(U4::from_lo(id))) {
+        let id = sw_id.get().to_lo();
+        let key = (node_name.clone(), id);
+        if leases.contains(&key) {
+            continue;
         }
+        let lock = match host_lock::try_lock(&sw_id_lock_name(node, id)) {
+            Ok(Some(lock)) => Some(lock),
+            Ok(None) => continue,
+            Err(error) => {
+                if !SW_ID_LOCK_FALLBACK_REPORTED.swap(true, Ordering::Relaxed) {
+                    warn!(
+                        dir = %host_lock::lock_dir().display(),
+                        %error,
+                        "HID++ software-id lock directory unusable — ids are unique to this process only, \
+                         so another OpenLogi process opening the same device may cross-match replies"
+                    );
+                }
+                None
+            }
+        };
+        leases.insert(key.clone());
+        return Some(SwIdLease {
+            id: sw_id,
+            key,
+            _lock: lock,
+        });
     }
+    None
 }
 
-fn free_sw_id(id: u8) {
-    if (1..=15).contains(&id) {
-        SW_ID_LEASES.fetch_and(!(1u16 << id), Ordering::Release);
-    }
-}
-
-/// Give `channel` a process-unique fixed software id for its lifetime, or
-/// refuse when all 15 ids are leased.
+/// Give `channel` a fixed software id on `node` for its lifetime, or refuse
+/// when all 15 ids are leased.
 ///
 /// The `Leased` policy is fixed-id by construction — rotation cannot be
 /// combined with it, which is the point: concurrent channels that share a
@@ -378,15 +446,15 @@ fn free_sw_id(id: u8) {
 /// it would silently recreate the response cross-matching this allocator
 /// exists to prevent. A refused open surfaces as a failed probe, which the
 /// ledger replays and retries next tick.
-fn configure_channel_sw_ids(channel: &mut HidppChannel) -> Result<(), BackendError> {
-    let id = try_lease_sw_id().ok_or_else(|| {
+fn configure_channel_sw_ids(channel: &mut HidppChannel, node: &NodeId) -> Result<(), BackendError> {
+    let lease = try_lease_sw_id(node).ok_or_else(|| {
         BackendError::Backend(
-            "all 15 HID++ software ids are leased — refusing an open that would share one".into(),
+            "all 15 HID++ software ids on this node are leased by this or other OpenLogi processes — refusing an open that would share one".into(),
         )
     })?;
     channel.set_sw_id_policy(SwIdPolicy::Leased {
-        id,
-        free: free_sw_id,
+        id: lease.id(),
+        lease: Box::new(lease),
     });
     Ok(())
 }
@@ -412,7 +480,7 @@ pub(crate) async fn open_hidpp_channel(
             .map_err(backend_error)?;
         let channel = match HidppChannel::from_raw_channel(raw).await {
             Ok(mut c) => {
-                configure_channel_sw_ids(&mut c)?;
+                configure_channel_sw_ids(&mut c, &node_id(&info))?;
                 Arc::new(c)
             }
             Err(e) => {
@@ -435,7 +503,7 @@ pub(crate) async fn open_hidpp_channel(
         let raw = AsyncHidChannel::new(reader, writer, info.clone(), long_only, device_io);
         let channel = match HidppChannel::from_raw_channel(raw).await {
             Ok(mut c) => {
-                configure_channel_sw_ids(&mut c)?;
+                configure_channel_sw_ids(&mut c, &node_id(&info))?;
                 Arc::new(c)
             }
             Err(e) => {
@@ -453,29 +521,96 @@ pub(crate) async fn open_hidpp_channel(
 
 #[cfg(test)]
 mod sw_id_lease_tests {
-    use super::{free_sw_id, try_lease_sw_id};
+    use std::fs::{File, TryLockError};
+
+    use openlogi_device::backend::NodeId;
+    use openlogi_device::host_lock;
+
+    use super::{SW_ID_LEASES, sw_id_lock_name, try_lease_sw_id};
+
+    /// A node no real device has, unique to this process and test, so tests
+    /// neither lease each other's ids nor a running agent's.
+    fn node(tag: &str) -> NodeId {
+        NodeId::from(format!("sw-id-lease-test-{}-{tag}", std::process::id()))
+    }
+
+    /// A leased id's lock file is held for as long as the lease lasts, as seen
+    /// through a second open of the file — a separate open file description,
+    /// which is exactly what another process holds.
+    #[test]
+    fn lease_holds_the_ids_os_lock_until_dropped() {
+        let node = node("hold");
+        let lease = try_lease_sw_id(&node).expect("a fresh node has every id free");
+        let id = lease.id().get().to_lo();
+        let observer = File::open(host_lock::lock_dir().join(sw_id_lock_name(&node, id)))
+            .expect("leasing creates the id's lock file");
+        assert!(
+            matches!(observer.try_lock(), Err(TryLockError::WouldBlock)),
+            "a leased id's lock file must be held"
+        );
+
+        drop(lease);
+        assert!(
+            !SW_ID_LEASES
+                .lock()
+                .unwrap()
+                .contains(&(host_lock::node_lock_name(&node), id))
+        );
+        observer
+            .try_lock()
+            .expect("dropping the lease releases the OS lock");
+    }
+
+    /// An id whose lock another process holds is skipped, not shared.
+    #[test]
+    fn lease_skips_an_id_held_by_another_process() {
+        let node = node("skip");
+        let foreign = host_lock::try_lock(&sw_id_lock_name(&node, 1))
+            .unwrap()
+            .expect("nothing else locks this test's node");
+
+        let lease = try_lease_sw_id(&node).expect("fourteen ids remain");
+        assert_ne!(
+            lease.id().get().to_lo(),
+            1,
+            "an id locked by another process must be skipped"
+        );
+        drop(lease);
+        drop(foreign);
+    }
 
     #[test]
-    fn leases_are_unique_until_freed() {
-        // Leave any ids held by concurrent tests alone: lease two free slots,
-        // check they differ, free them, and confirm the first id is reusable.
-        let free = |id: super::RequestSwId| free_sw_id(id.get().to_lo());
-        let Some(a) = try_lease_sw_id() else {
-            return;
-        };
-        let Some(b) = try_lease_sw_id() else {
-            free(a);
-            return;
-        };
-        assert_ne!(a, b);
-        free(a);
-        let Some(c) = try_lease_sw_id() else {
-            free(b);
-            return;
-        };
-        assert_eq!(c, a);
-        free(b);
-        free(c);
+    fn leases_on_one_node_are_unique_until_dropped() {
+        let node = node("unique");
+        let a = try_lease_sw_id(&node).unwrap();
+        let b = try_lease_sw_id(&node).unwrap();
+        assert_ne!(a.id(), b.id());
+        let first = a.id();
+        drop(a);
+        let c = try_lease_sw_id(&node).unwrap();
+        assert_eq!(c.id(), first, "a dropped id is reusable");
+        drop(b);
+        drop(c);
+    }
+
+    /// Ids are per node: another node's report stream cannot cross-match, so
+    /// exhausting one node's pool must not refuse an open on another.
+    #[test]
+    fn unrelated_nodes_do_not_share_one_pool() {
+        let left = node("left");
+        let right = node("right");
+        let all_of_left: Vec<_> = (0..15)
+            .map(|_| try_lease_sw_id(&left).expect("fifteen ids per node"))
+            .collect();
+        assert!(
+            try_lease_sw_id(&left).is_none(),
+            "the sixteenth channel on one node is refused"
+        );
+
+        let on_right = try_lease_sw_id(&right).expect("another node is unaffected");
+        assert_eq!(on_right.id().get().to_lo(), 1);
+        drop(on_right);
+        drop(all_of_left);
     }
 }
 

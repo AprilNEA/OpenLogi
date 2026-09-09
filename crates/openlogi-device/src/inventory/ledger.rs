@@ -124,6 +124,19 @@ impl<K: Eq + Hash + Clone> NodeLedger<K> {
         }
     }
 
+    /// Fold in a tick that never asked the node — another OpenLogi process
+    /// held its receiver register phase — and so is evidence of nothing: the
+    /// last-good inventory is replayed, the failure count is left alone, and
+    /// no eviction is requested. A channel that was not used cannot have
+    /// failed, and retiring it would tear down every device behind it for a
+    /// contention that is not its own.
+    pub fn defer(&self, node: &K) -> SettledNode {
+        SettledNode {
+            inventory: self.last_good.get(node).cloned(),
+            evict_channel: false,
+        }
+    }
+
     /// Drop ledger state for nodes the OS no longer enumerates — a vanished
     /// node is a real disconnect, so there is nothing to replay or heal.
     pub fn retain_nodes(&mut self, seen: &HashSet<K>) {
@@ -229,6 +242,28 @@ mod tests {
         assert!(
             ledger.settle(&1, false, None).evict_channel,
             "a node that keeps failing is still replaced on the next tick"
+        );
+    }
+
+    /// Contention on the receiver's register phase is not the channel's
+    /// fault: however many ticks defer to the other process, the replay stays
+    /// within grace and the eviction count does not move — the next real
+    /// failure continues from where the count was.
+    #[test]
+    fn deferred_ticks_replay_without_counting_toward_eviction() {
+        let mut ledger = NodeLedger::default();
+        ledger.settle(&1, true, Some(inventory("bolt")));
+        assert!(!ledger.settle(&1, false, None).evict_channel);
+
+        for _ in 0..NODE_MISS_GRACE + 2 {
+            let deferred = ledger.defer(&1);
+            assert!(!deferred.evict_channel, "a deferred tick never evicts");
+            assert_eq!(receiver_name(deferred.inventory.as_ref()), Some("bolt"));
+        }
+
+        assert!(
+            ledger.settle(&1, false, None).evict_channel,
+            "the second real failure still evicts: deferrals left the count at one"
         );
     }
 
