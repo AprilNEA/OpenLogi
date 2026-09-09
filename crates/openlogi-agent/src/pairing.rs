@@ -109,13 +109,6 @@ impl SessionOwner {
         }
     }
 
-    fn active_mut(&mut self) -> Option<&mut ActiveSession> {
-        match &mut self.state {
-            SessionState::Active(session) => Some(session),
-            SessionState::Idle | SessionState::Admitting(_) => None,
-        }
-    }
-
     fn end(&mut self, id: SessionId) -> bool {
         if matches!(&self.state, SessionState::Active(session) if session.id == id) {
             self.state = SessionState::Idle;
@@ -199,7 +192,7 @@ impl PairingManager {
     /// Pair with a previously discovered device by address.
     pub fn pair(&self, address: [u8; 6]) -> Result<(), PairingCommandError> {
         with_session_owner(&self.session, |owner| {
-            let Some(session) = owner.active_mut() else {
+            let SessionState::Active(session) = &mut owner.state else {
                 warn!(?address, "pair requested without an active session");
                 return Err(PairingCommandError::NoActiveSession);
             };
@@ -327,9 +320,10 @@ fn apply_session_event(
     observable: &ObservableState,
 ) -> Option<PairingUpdate> {
     with_session_owner(session, |owner| {
-        let active = owner
-            .active_mut()
-            .filter(|active| active.id == event.session)?;
+        let active = match &mut owner.state {
+            SessionState::Active(active) if active.id == event.session => active,
+            _ => return None,
+        };
         let update = match event.event {
             PairingEvent::Searching | PairingEvent::DeviceFound(_)
                 if matches!(active.phase, ActivePhase::Pairing) =>
