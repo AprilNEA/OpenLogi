@@ -4,7 +4,10 @@ use num_enum::{IntoPrimitive, TryFromPrimitive};
 use thiserror::Error;
 
 use crate::{
-    channel::{ChannelError, HidppChannel, HidppMessage, LONG_REPORT_LENGTH, SHORT_REPORT_LENGTH},
+    channel::{
+        AbandonedReply, ChannelError, HidppChannel, HidppMessage, LONG_REPORT_LENGTH,
+        SEND_RESPONSE_TIMEOUT, SHORT_REPORT_LENGTH,
+    },
     nibble::{self, U4},
 };
 
@@ -127,24 +130,39 @@ impl HidppChannel {
     /// This method simply calls [`Self::send`] with a pre-built response
     /// predicate comparing the headers of the outgoing and incoming message.
     pub async fn send_v20(&self, msg: Message) -> Result<Message, Hidpp20Error> {
+        self.send_v20_with(msg, AbandonedReply::Quarantine).await
+    }
+
+    /// [`Self::send_v20`], choosing what to do about a reply still owed to an
+    /// abandoned request with the same header (see [`AbandonedReply`]).
+    pub async fn send_v20_with(
+        &self,
+        msg: Message,
+        abandoned: AbandonedReply,
+    ) -> Result<Message, Hidpp20Error> {
         let header = msg.header();
 
         let response = Message::from(
-            self.send(msg.into(), move |&response| {
-                let resp_msg = Message::from(response);
-                let resp_header = resp_msg.header();
+            self.send_with(
+                msg.into(),
+                move |&response| {
+                    let resp_msg = Message::from(response);
+                    let resp_header = resp_msg.header();
 
-                // A HID++2.0 error response sets the feature index to 0xFF and moves all header
-                // values starting from the real feature index one byte to the right.
-                let is_error = resp_header.device_index == header.device_index
-                    && resp_header.feature_index == 0xff
-                    && nibble::combine(resp_header.function_id, resp_header.software_id)
-                        == header.feature_index
-                    && resp_msg.extend_payload()[0]
-                        == nibble::combine(header.function_id, header.software_id);
+                    // A HID++2.0 error response sets the feature index to 0xFF and moves all header
+                    // values starting from the real feature index one byte to the right.
+                    let is_error = resp_header.device_index == header.device_index
+                        && resp_header.feature_index == 0xff
+                        && nibble::combine(resp_header.function_id, resp_header.software_id)
+                            == header.feature_index
+                        && resp_msg.extend_payload()[0]
+                            == nibble::combine(header.function_id, header.software_id);
 
-                is_error || resp_header == header
-            })
+                    is_error || resp_header == header
+                },
+                SEND_RESPONSE_TIMEOUT,
+                abandoned,
+            )
             .await?,
         );
 

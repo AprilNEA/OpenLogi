@@ -10,9 +10,11 @@
 //! channel never lets that happen: a request whose key is already in flight
 //! waits until that request is answered — or, when it timed out or was
 //! cancelled unanswered, until its reply lands and is discarded or
-//! [`STALE_REPLY_GRACE`] passes without one. A byte-identical re-ask is the
-//! exception: the outstanding reply answers it just as well, so it goes out
-//! at once and takes that reply if it comes.
+//! [`STALE_REPLY_GRACE`] passes without one. That holds even for a request
+//! that re-asks the abandoned one byte for byte — the same question does not
+//! promise the same answer once a write has gone between them — unless the
+//! caller says otherwise with [`AbandonedReply::AdoptIdentical`], which only
+//! a query of immutable state may.
 
 use std::{
     any::Any,
@@ -69,10 +71,35 @@ pub const SEND_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 /// on it. It is deliberately much shorter than [`SEND_RESPONSE_TIMEOUT`]: a
 /// device that never answers costs the next same-header request one grace
 /// window, not a whole timeout, and a reply later than the grace is as
-/// unattributable as it always was. A request that re-asks the abandoned one
-/// byte for byte does not wait at all: whichever reply comes first answers
-/// it, and the channel keeps counting the one still owed.
+/// unattributable as it always was.
+///
+/// The quarantine makes no exception of its own for a request that re-asks
+/// the abandoned one byte for byte. The bytes say what was asked, not what
+/// the answer is: a DPI read abandoned before its reply, a DPI write
+/// acknowledged, and the read re-asked all fit inside one grace window, and
+/// the first read's late reply would hand the re-ask the value from before
+/// the write. A caller whose query cannot be changed by any write may opt in
+/// with [`AbandonedReply::AdoptIdentical`].
 pub const STALE_REPLY_GRACE: Duration = Duration::from_secs(1);
+
+/// What a request does about a reply still owed to an abandoned request with
+/// the same header — see [`STALE_REPLY_GRACE`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AbandonedReply {
+    /// Wait for it to land and be discarded, or for the grace to pass. The
+    /// default, and the only safe choice for a query whose answer a write
+    /// could have changed since the abandoned ask.
+    #[default]
+    Quarantine,
+    /// Take it as this request's own answer, provided the abandoned request
+    /// was byte-identical; the request goes out at once and is answered by
+    /// whichever reply comes first, the other being discarded on arrival.
+    /// The caller vouches that nothing can have changed the answer between
+    /// the two asks — a lookup in a device's feature table, which is fixed
+    /// for the life of the connection. A re-ask then costs no grace wait,
+    /// which is what keeps a feature walk over a lossy link moving.
+    AdoptIdentical,
+}
 
 type MessageListener = Arc<dyn Fn(HidppMessage, bool) + Send + Sync + 'static>;
 
@@ -258,7 +285,8 @@ struct StaleKey {
     /// The header bytes the outstanding replies will carry.
     key: CorrelationKey,
 
-    /// The request as sent, so a byte-identical re-ask can be recognised.
+    /// The request as sent, so a byte-identical re-ask that asks to adopt
+    /// the outstanding replies can be recognised.
     request: HidppMessage,
 
     /// Recognises an outstanding reply, so it can be discarded on arrival.
@@ -276,7 +304,7 @@ struct StaleKey {
 enum Wait {
     /// A pending request with the same key; until it leaves the queue.
     InFlight,
-    /// A different request's replies with this key are still outstanding;
+    /// An abandoned request's replies with this key are still outstanding;
     /// until they are discarded, or the given instant at the latest.
     Stale(Instant),
 }
@@ -286,10 +314,13 @@ impl PendingQueue {
     /// back with what it is waiting for. Prunes stale keys whose grace has
     /// passed.
     ///
-    /// Outstanding replies to a byte-identical request do not block: they
-    /// would answer this request correctly, so it registers at once and adopts
-    /// them — it will be answered by whichever reply comes first, and the rest
-    /// stay owed (see [`PendingMessage::extra_replies`]).
+    /// A stale key blocks whatever the new request's bytes are: byte equality
+    /// with the abandoned request does not by itself make the outstanding
+    /// replies its answer, since a write may have gone between the two asks.
+    /// Only a request that asks to ([`AbandonedReply::AdoptIdentical`]) and
+    /// is byte-identical registers at once and adopts them — it is answered
+    /// by whichever reply comes first, and the rest stay owed (see
+    /// [`PendingMessage::extra_replies`]).
     fn try_register(
         &mut self,
         mut message: PendingMessage,
@@ -303,14 +334,16 @@ impl PendingQueue {
         {
             return Err((message, Wait::InFlight));
         }
-        let mut blocked_until: Option<Instant> = None;
-        for stale in self.stale.iter().filter(|stale| stale.key == message.key) {
-            if stale.request != message.request {
-                blocked_until =
-                    Some(blocked_until.map_or(stale.expires, |until| until.max(stale.expires)));
-            }
-        }
-        if let Some(until) = blocked_until {
+        let adopts = |stale: &StaleKey| {
+            message.abandoned == AbandonedReply::AdoptIdentical && stale.request == message.request
+        };
+        if let Some(until) = self
+            .stale
+            .iter()
+            .filter(|stale| stale.key == message.key && !adopts(stale))
+            .map(|stale| stale.expires)
+            .max()
+        {
             return Err((message, Wait::Stale(until)));
         }
         message.extra_replies = self
@@ -400,6 +433,10 @@ struct PendingMessage {
     /// re-asked.
     request: HidppMessage,
 
+    /// What to do about replies still owed to an abandoned request with the
+    /// same header.
+    abandoned: AbandonedReply,
+
     /// The predicate that has to match for an incoming message to be classified
     /// as the response.
     response_predicate: Box<dyn Fn(&HidppMessage) -> bool + Send>,
@@ -409,8 +446,9 @@ struct PendingMessage {
     sender: oneshot::Sender<HidppMessage>,
 
     /// Replies still owed to earlier, abandoned sends of this same request,
-    /// adopted on registration. Whichever reply comes first answers this
-    /// request; the rest are then owed under a stale key.
+    /// adopted on registration under [`AbandonedReply::AdoptIdentical`].
+    /// Whichever reply comes first answers this request; the rest are then
+    /// owed under a stale key.
     extra_replies: usize,
 }
 
@@ -436,6 +474,7 @@ impl PendingRequest {
         id: u64,
         pending_messages: Arc<Mutex<PendingQueue>>,
         request: HidppMessage,
+        abandoned: AbandonedReply,
         response_predicate: impl Fn(&HidppMessage) -> bool + Send + 'static,
     ) -> Self {
         let (sender, receiver) = oneshot::channel();
@@ -444,6 +483,7 @@ impl PendingRequest {
             id,
             key,
             request,
+            abandoned,
             response_predicate: Box::new(response_predicate),
             sender,
             extra_replies: 0,
@@ -483,7 +523,7 @@ impl PendingRequest {
                         dev,
                         feat,
                         func,
-                        "hidpp request parked — a reply with its header is still outstanding"
+                        "hidpp request parked — replies with its header are still outstanding"
                     );
                     let mut parked = parked.fuse();
                     let mut grace =
@@ -666,9 +706,9 @@ impl HidppChannel {
     /// them out of order. If that request timed out or was cancelled
     /// unanswered, its reply is still expected: the header stays reserved
     /// until the reply lands and is discarded, or for [`STALE_REPLY_GRACE`]
-    /// at most — unless the new request re-asks the abandoned one byte for
-    /// byte, in which case that reply answers it and it goes out at once.
-    /// The wait counts against `timeout`.
+    /// at most — a byte-identical re-ask included, since a write may have gone
+    /// between the two asks. The wait counts against `timeout`. A query of
+    /// immutable state can adopt that reply instead through [`Self::send_with`].
     ///
     /// [`Self::send`] uses this with [`SEND_RESPONSE_TIMEOUT`], which suits
     /// requests to a device that may be asleep. Requests that should fail
@@ -679,6 +719,21 @@ impl HidppChannel {
         msg: HidppMessage,
         response_predicate: impl Fn(&HidppMessage) -> bool + Send + 'static,
         timeout: Duration,
+    ) -> Result<HidppMessage, ChannelError> {
+        self.send_with(msg, response_predicate, timeout, AbandonedReply::Quarantine)
+            .await
+    }
+
+    /// [`Self::send_with_timeout`], choosing what to do about a reply still
+    /// owed to an abandoned request with the same header. Only a query whose
+    /// answer no write can change should pass
+    /// [`AbandonedReply::AdoptIdentical`].
+    pub async fn send_with(
+        &self,
+        msg: HidppMessage,
+        response_predicate: impl Fn(&HidppMessage) -> bool + Send + 'static,
+        timeout: Duration,
+        abandoned: AbandonedReply,
     ) -> Result<HidppMessage, ChannelError> {
         let msg = self.normalize_outgoing(msg);
         if !self.supports_msg(&msg) {
@@ -704,6 +759,7 @@ impl HidppChannel {
                         pending_id,
                         Arc::clone(&self.pending_messages),
                         msg,
+                        abandoned,
                         response_predicate,
                     )
                     .await;
