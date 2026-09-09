@@ -20,9 +20,10 @@ pub use openlogi_core::hid::route::{
     speaks_unifying_protocol,
 };
 
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::backend::{BackendError, HidBackend, NodeInfo, RawWriter};
+use crate::host_lock::{RECEIVER_REGISTER_WAIT, lock_receiver_registers};
 use crate::write::WriteError;
 
 /// Enumerate HID++ candidates and open the channel that reaches `route`.
@@ -31,6 +32,14 @@ use crate::write::WriteError;
 /// device through its slot via [`DeviceRoute::device_index`]); for a direct
 /// route it is the device's own channel. Returns `None` when nothing matching
 /// is currently connected.
+///
+/// Matching a receiver route reads the receiver's unique id, a HID++ 1.0
+/// register read, so it takes the receiver's register phase
+/// ([`lock_receiver_registers`]) like every other register caller. A
+/// receiver whose phase another OpenLogi process still holds after
+/// [`RECEIVER_REGISTER_WAIT`] is passed over this time — the caller sees the
+/// same `None` as for a receiver that is not there — rather than read
+/// unlocked into the holder's replies.
 pub(crate) async fn open_route_channel(
     backend: &dyn HidBackend,
     route: &DeviceRoute,
@@ -60,6 +69,12 @@ pub(crate) async fn open_route_channel(
                 let Some(Receiver::Bolt(bolt)) = receiver::detect(Arc::clone(&channel)) else {
                     continue;
                 };
+                let Some(_registers) =
+                    lock_receiver_registers(&node.id, RECEIVER_REGISTER_WAIT).await
+                else {
+                    debug!(node = %node.id, "receiver register phase held elsewhere — passing the node over");
+                    continue;
+                };
                 if let Ok(uid) = bolt.get_unique_id().await
                     && uid.eq_ignore_ascii_case(receiver_uid)
                 {
@@ -69,6 +84,12 @@ pub(crate) async fn open_route_channel(
             DeviceRoute::Unifying { receiver_uid, .. } => {
                 let Some(Receiver::Unifying(unifying)) = receiver::detect(Arc::clone(&channel))
                 else {
+                    continue;
+                };
+                let Some(_registers) =
+                    lock_receiver_registers(&node.id, RECEIVER_REGISTER_WAIT).await
+                else {
+                    debug!(node = %node.id, "receiver register phase held elsewhere — passing the node over");
                     continue;
                 };
                 if let Ok(uid) = unifying.get_unique_id().await
