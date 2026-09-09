@@ -38,7 +38,8 @@ pub use hidpp::receiver::bolt::DeviceKind as BoltDeviceKind;
 // re-exported here unchanged so this module's own API surface doesn't churn.
 pub use openlogi_core::hid::pairing::{Click, PairingError, PasskeyMethod, ReceiverSelector};
 
-use crate::backend::HidBackend;
+use crate::backend::{HidBackend, NodeId};
+use crate::host_lock::{RECEIVER_REGISTER_WAIT, ReceiverRegisterPhase, lock_receiver_registers};
 
 mod notification;
 mod registers;
@@ -180,7 +181,7 @@ pub async fn list_pairing_receivers(
             continue;
         };
         let uid = match family {
-            ReceiverFamily::Bolt => read_bolt_uid(&channel).await,
+            ReceiverFamily::Bolt => read_bolt_uid(&channel, &node.id).await,
             ReceiverFamily::Unifying => None,
         };
         out.push(PairingReceiver {
@@ -192,19 +193,36 @@ pub async fn list_pairing_receivers(
     Ok(out)
 }
 
-/// Reads a Bolt receiver's unique ID via the crate's `BoltReceiver`.
-async fn read_bolt_uid(channel: &Arc<HidppChannel>) -> Option<String> {
+/// Reads a Bolt receiver's unique ID via the crate's `BoltReceiver`, under
+/// the receiver's register phase. `None` when the read fails — or when
+/// another OpenLogi process still holds the phase, which is not read into.
+async fn read_bolt_uid(channel: &Arc<HidppChannel>, node: &NodeId) -> Option<String> {
     let Some(Receiver::Bolt(bolt)) = receiver::detect(Arc::clone(channel)) else {
         return None;
     };
+    let _registers = lock_receiver_registers(node, RECEIVER_REGISTER_WAIT).await?;
     bolt.get_unique_id().await.ok()
 }
 
-/// Opens the channel for the receiver named by `target`.
+/// An open receiver channel and the register phase a session runs under.
+struct OpenReceiver {
+    channel: Arc<HidppChannel>,
+    family: ReceiverFamily,
+    /// Held for the whole session: every register write in the flow — the
+    /// notification flags, discovery, pairing — is receiver register I/O,
+    /// and the flow waits on the user between them, so the phase is taken
+    /// once up front rather than around each write. Inventory probes in
+    /// every OpenLogi process defer to it meanwhile, replaying their last
+    /// snapshot, and pick the new pairing up once it is released.
+    _registers: ReceiverRegisterPhase,
+}
+
+/// Opens the channel for the receiver named by `target` and takes its
+/// register phase.
 async fn open_receiver(
     backend: &dyn HidBackend,
     target: &ReceiverSelector,
-) -> Result<(Arc<HidppChannel>, ReceiverFamily), PairingError> {
+) -> Result<OpenReceiver, PairingError> {
     for node in backend.enumerate_hidpp().await? {
         let Some(channel) = backend.open_hidpp(&node).await? else {
             continue;
@@ -212,18 +230,29 @@ async fn open_receiver(
         let Some(family) = family_for(channel.product_id) else {
             continue;
         };
-        match target {
-            ReceiverSelector::First => return Ok((channel, family)),
+        let matched = match target {
+            ReceiverSelector::First => true,
             ReceiverSelector::BoltUid(want) => {
-                if family == ReceiverFamily::Bolt
-                    && read_bolt_uid(&channel)
+                family == ReceiverFamily::Bolt
+                    && read_bolt_uid(&channel, &node.id)
                         .await
                         .is_some_and(|uid| uid.eq_ignore_ascii_case(want))
-                {
-                    return Ok((channel, family));
-                }
             }
+        };
+        if !matched {
+            continue;
         }
+        let Some(registers) = lock_receiver_registers(&node.id, RECEIVER_REGISTER_WAIT).await
+        else {
+            return Err(PairingError::Register(
+                "the receiver's registers are held by another OpenLogi process".to_string(),
+            ));
+        };
+        return Ok(OpenReceiver {
+            channel,
+            family,
+            _registers: registers,
+        });
     }
     Err(PairingError::ReceiverNotFound)
 }
@@ -246,22 +275,27 @@ pub async fn run_pairing(
     mut commands: mpsc::UnboundedReceiver<PairingCommand>,
     events: mpsc::UnboundedSender<PairingEvent>,
 ) -> Result<(), PairingError> {
-    let (channel, family) = match open_receiver(backend, &target).await {
+    let receiver = match open_receiver(backend, &target).await {
         Ok(receiver) => receiver,
         Err(e) => {
             let _ = events.send(PairingEvent::Failed(e.clone()));
             return Err(e);
         }
     };
-    let (listener, mut notifications) = subscribe(&channel);
+    let OpenReceiver {
+        channel, family, ..
+    } = &receiver;
+    let (listener, mut notifications) = subscribe(channel);
 
-    let result = run_session(&channel, family, &mut commands, &mut notifications, &events).await;
+    let result = run_session(channel, *family, &mut commands, &mut notifications, &events).await;
 
     drop(listener);
     // Best-effort restore: clear notification flags we set.
     let _ = channel
         .write_register(RECEIVER_INDEX, NOTIFICATIONS, [0, 0, 0])
         .await;
+    // The register phase is released with the receiver, after that write.
+    drop(receiver);
 
     if let Err(ref e) = result {
         let _ = events.send(PairingEvent::Failed(e.clone()));
@@ -473,16 +507,17 @@ pub async fn unpair(
     target: ReceiverSelector,
     slot: u8,
 ) -> Result<(), PairingError> {
-    let (channel, family) = open_receiver(backend, &target).await?;
-    match family {
+    let receiver = open_receiver(backend, &target).await?;
+    let channel = &receiver.channel;
+    match receiver.family {
         ReceiverFamily::Bolt => {
             let mut payload = [0u8; 16];
             payload[0] = 0x03; // action: unpair
             payload[1] = slot;
-            write_long_register(&channel, BOLT_PAIRING, payload).await
+            write_long_register(channel, BOLT_PAIRING, payload).await
         }
         ReceiverFamily::Unifying => {
-            write_register(&channel, UNIFYING_PAIRING, [0x03, slot, 0x00]).await
+            write_register(channel, UNIFYING_PAIRING, [0x03, slot, 0x00]).await
         }
     }
 }

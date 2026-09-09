@@ -35,53 +35,15 @@ use super::{
 };
 
 /// How long a receiver probe waits for another OpenLogi process to finish its
-/// register phase on the same node. A full phase — the 1.5 s arrival drain
-/// plus six slot reads — takes about 2 s; a holder still going past this is
-/// failing its own probe, one request timeout at a time, and this probe
-/// defers to it rather than joining it unlocked (see
-/// [`lock_receiver_registers`]).
-const RECEIVER_REGISTER_LOCK_WAIT: Duration = Duration::from_secs(5);
+/// register phase on the same node before settling as
+/// [`ProbeVerdict::Deferred`] — the ledger replays the last snapshot without
+/// counting a failure, and the one-shot retry re-probes. See
+/// [`host_lock::lock_receiver_registers`].
+const RECEIVER_REGISTER_LOCK_WAIT: Duration = host_lock::RECEIVER_REGISTER_WAIT;
 
-/// Holds a receiver's register phase for this process — or nothing, when the
-/// host cannot arbitrate the phase at all.
-struct RegisterPhase {
-    _lock: Option<host_lock::HostLock>,
-}
-
-/// Serialise a receiver's register phase across OpenLogi processes.
-///
-/// HID++ 1.0 register replies carry no software id, and an empty-slot error
-/// reply carries no sub-register either, so a second process probing the same
-/// receiver at the same time takes this probe's replies — most visibly its
-/// empty-slot errors, which turn the one paired slot into "unreadable". Both
-/// probes then fail, and the agent retires a channel that was fine. The lock
-/// is held for the register phase only; the feature walks that follow address
-/// each device by index under this process's own software id.
-///
-/// `None` when another process still holds the phase after
-/// [`RECEIVER_REGISTER_LOCK_WAIT`]: the caller settles a
-/// [`ProbeVerdict::Deferred`] probe — the ledger replays its last snapshot
-/// without counting a failure, and the one-shot retry re-probes. Proceeding
-/// unlocked instead would restore the very race the lock exists for. The lock
-/// directory being unusable is different: nothing can arbitrate, so the phase
-/// runs as it did before locks existed.
-async fn lock_receiver_registers(info: &NodeInfo) -> Option<RegisterPhase> {
-    match host_lock::lock_within(
-        &host_lock::node_lock_name(&info.id),
-        RECEIVER_REGISTER_LOCK_WAIT,
-    )
-    .await
-    {
-        Ok(Some(lock)) => Some(RegisterPhase { _lock: Some(lock) }),
-        Ok(None) => {
-            debug!(
-                node = %info.id,
-                "another OpenLogi process still holds this receiver's register phase — deferring the probe"
-            );
-            None
-        }
-        Err(_) => Some(RegisterPhase { _lock: None }),
-    }
+/// Take the receiver's register phase for this probe, or `None` to defer it.
+async fn lock_receiver_registers(info: &NodeInfo) -> Option<host_lock::ReceiverRegisterPhase> {
+    host_lock::lock_receiver_registers(&info.id, RECEIVER_REGISTER_LOCK_WAIT).await
 }
 
 /// One node probe's verdict about its own trustworthiness. An enum on

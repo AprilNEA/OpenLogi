@@ -6,10 +6,10 @@
 //! CLI or GUI run, take each other's replies. Two things therefore need
 //! arbitration across processes, not just across the channels of one: HID++
 //! software ids, leased per channel by the HID transport, and receiver
-//! register access, serialised per node by the inventory probe because HID++
-//! 1.0 register replies carry no software id at all. Both are exclusive OS
-//! file locks in one directory. The OS releases a lock with its holder, so a
-//! crashed process cannot strand one.
+//! register access, serialised per node by [`lock_receiver_registers`]
+//! because HID++ 1.0 register replies carry no software id at all. Both are
+//! exclusive OS file locks in one directory. The OS releases a lock with its
+//! holder, so a crashed process cannot strand one.
 
 use std::{
     fs::{self, File, OpenOptions, TryLockError},
@@ -95,6 +95,61 @@ pub async fn lock_within(name: &str, budget: Duration) -> io::Result<Option<Host
                 return Err(error);
             }
         }
+    }
+}
+
+/// How long a caller waits for another OpenLogi process to finish a
+/// receiver's register phase before giving up on it this time.
+///
+/// A phase is a probe's register reads — on a Unifying receiver held through
+/// its slot walk, since a codename read comes after it — or a route open's
+/// unique-id read: seconds at most, in the low single digits, with the 1.5 s
+/// arrival drains as the long poles. A holder still going past this is
+/// either a pairing session, which holds the phase for its whole run, or a
+/// probe failing one request timeout at a time; a waiter defers to it rather
+/// than joining it unlocked either way.
+pub const RECEIVER_REGISTER_WAIT: Duration = Duration::from_secs(8);
+
+/// Holds a receiver's register phase for this process — or nothing, when the
+/// host cannot arbitrate the phase at all. Dropping it releases the phase.
+#[derive(Debug)]
+pub struct ReceiverRegisterPhase {
+    _lock: Option<HostLock>,
+}
+
+/// Serialise a receiver's register phase across OpenLogi processes.
+///
+/// HID++ 1.0 register replies carry no software id, and an error reply
+/// carries no sub-register either, so a second process talking to the same
+/// receiver's registers at the same time takes this one's replies — most
+/// visibly a probe's empty-slot errors, which turn the one paired slot into
+/// "unreadable"; both probes then fail, and the agent retires a channel that
+/// was fine. Every caller that reads or writes a receiver's registers takes
+/// the phase for as long as it does so: the lock only works if conflicting
+/// callers participate. Feature walks are not register I/O — they address
+/// each device by index under this process's own software id — and run
+/// outside it.
+///
+/// `None` when another process still holds the phase after `wait`: the
+/// caller must not proceed unlocked, which would restore the very race the
+/// phase exists for. What it does instead is its own — a probe settles as
+/// deferred, a route open passes the node by this time. The lock directory
+/// being unusable is different: nothing can arbitrate, so the phase runs as
+/// it did before locks existed.
+pub async fn lock_receiver_registers(
+    node: &NodeId,
+    wait: Duration,
+) -> Option<ReceiverRegisterPhase> {
+    match lock_within(&node_lock_name(node), wait).await {
+        Ok(Some(lock)) => Some(ReceiverRegisterPhase { _lock: Some(lock) }),
+        Ok(None) => {
+            debug!(
+                node = %node,
+                "another OpenLogi process still holds this receiver's register phase"
+            );
+            None
+        }
+        Err(_) => Some(ReceiverRegisterPhase { _lock: None }),
     }
 }
 
