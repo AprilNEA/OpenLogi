@@ -133,6 +133,10 @@ pub enum HidppOperation {
     Light,
     /// Play one haptic waveform. Appended last — variant order is wire format.
     PlayHaptic,
+    /// Read headset audio sidetone level. Appended last — variant order is wire format.
+    ReadSidetone,
+    /// Write headset audio sidetone level. Appended last — variant order is wire format.
+    WriteSidetone,
 }
 
 /// HID++ feature error kind in a serializable wire-safe form.

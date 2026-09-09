@@ -17,6 +17,7 @@ use crate::{
         battery_status::BatteryStatusFeature,
         battery_voltage::BatteryVoltageFeature,
         brightness_control::BrightnessControlFeature,
+        centurion_battery_soc::CenturionBatterySocFeature,
         change_host::ChangeHostFeature,
         color_led_effects::ColorLedEffectsFeature,
         crown::CrownFeature,
@@ -33,6 +34,7 @@ use crate::{
         fn_inversion::{FnInversionMultiHostFeature, FnInversionWithDefaultStateFeature},
         gestures2::Gestures2Feature,
         haptic_feedback::HapticFeedbackFeature,
+        headset_audio_sidetone::HeadsetAudioSidetoneFeature,
         hires_wheel::HiResWheelFeature,
         hosts_info::HostsInfoFeature,
         illumination::IlluminationFeature,
@@ -170,6 +172,7 @@ static KNOWN_FEATURES: LazyLock<HashMap<u16, KnownFeature>> = LazyLock::new(|| {
     0x00c3 "DfuControlBolt",
     0x00d0 "Dfu",
     0x00d1 "DfuResumable",
+    0x0104 "CenturionBatterySoc" => CenturionBatterySocFeature,
     0x1000 "BatteryStatus" => BatteryStatusFeature,
     0x1001 "BatteryVoltage" => BatteryVoltageFeature,
     0x1004 "UnifiedBattery" => UnifiedBatteryFeature,
@@ -264,6 +267,9 @@ static KNOWN_FEATURES: LazyLock<HashMap<u16, KnownFeature>> = LazyLock::new(|| {
     0x8123 "ForceFeedback",
     0x8300 "Sidetone" => SidetoneFeature,
     0x8310 "Equalizer" => EqualizerFeature,
+    0x0602 "HeadsetMicSnr",
+    0x0604 "HeadsetAudioSidetone" => HeadsetAudioSidetoneFeature,
+    0x0636 "HeadsetOnboardEq",
     0x8320 "HeadsetOut",
     }
 });

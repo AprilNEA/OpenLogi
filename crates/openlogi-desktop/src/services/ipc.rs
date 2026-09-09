@@ -108,11 +108,13 @@ pub enum Command {
     SetLight(DeviceRoute, LightCommand, String, u64),
     SetLightManualPower(DeviceRoute, bool, String, u64),
     SetSmartShift(DeviceRoute, SmartShiftStatus),
+    SetSidetone(DeviceRoute, u8),
     ReadDpi(DeviceRoute, oneshot::Sender<Result<DpiInfo, WriteError>>),
     ReadSmartShift(
         DeviceRoute,
         oneshot::Sender<Result<SmartShiftStatus, WriteError>>,
     ),
+    ReadSidetone(DeviceRoute, oneshot::Sender<Result<u8, WriteError>>),
     ReloadConfig,
     /// Ask the agent to fire the macOS Accessibility prompt. The agent owns the
     /// CGEventTap, so the system dialog must name (and authorize) the *agent*
@@ -548,11 +550,17 @@ async fn handle(
         Command::SetSmartShift(route, status) => {
             log_apply(client.set_smartshift(ctx, route, status).await)?;
         }
+        Command::SetSidetone(route, level) => {
+            log_apply(client.set_sidetone(ctx, route, level).await)?;
+        }
         Command::ReadDpi(route, reply) => {
             let _ = reply.send(rpc_result(client.read_dpi(ctx, route).await)?);
         }
         Command::ReadSmartShift(route, reply) => {
             let _ = reply.send(rpc_result(client.read_smartshift(ctx, route).await)?);
+        }
+        Command::ReadSidetone(route, reply) => {
+            let _ = reply.send(rpc_result(client.read_sidetone(ctx, route).await)?);
         }
         Command::ReloadConfig => {
             // A transport failure is not the agent rejecting the config, but it
@@ -670,6 +678,9 @@ fn reply_disconnected(update_tx: &mpsc::UnboundedSender<GuiUpdate>, cmd: Command
             let _ = reply.send(Err(WriteError::AgentUnavailable));
         }
         Command::ReadSmartShift(_, reply) => {
+            let _ = reply.send(Err(WriteError::AgentUnavailable));
+        }
+        Command::ReadSidetone(_, reply) => {
             let _ = reply.send(Err(WriteError::AgentUnavailable));
         }
         Command::SetLight(_, command, key, request_id) => {

@@ -14,7 +14,9 @@ use hidpp::{
         },
     },
 };
-use openlogi_core::device::{DeviceInventory, DeviceKind, PairedDevice, ReceiverInfo};
+use openlogi_core::device::{
+    DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports, PairedDevice, ReceiverInfo,
+};
 use tokio::time::timeout;
 use tracing::{debug, warn};
 
@@ -24,7 +26,7 @@ use crate::backend::NodeInfo;
 use crate::channel::route::DIRECT_DEVICE_INDEX;
 
 use super::cache::{CacheKey, CacheOutcome, Cached, is_stale, probe_or_reuse, seen};
-use super::features::ProbedFeatures;
+use super::features::{BatteryProbe, ProbedFeatures, read_battery};
 use super::{
     ARRIVAL_DRAIN, BOLT_SLOT_PROBE, MAX_BOLT_SLOTS, UNIFYING_CACHED_SLOT_PROBE, UNIFYING_SLOT_PROBE,
 };
@@ -483,6 +485,7 @@ pub(super) fn preferred_direct_codename(marketing_name: Option<&str>, os_name: &
 /// case it's neither a receiver nor a direct device we recognise) — healthy
 /// only if that rejection rests on a completed feature walk, so a device
 /// that merely failed to answer is settled as a failed probe instead.
+#[expect(clippy::too_many_lines, reason = "direct probe handles both standard direct devices and Centurion headset routing")]
 async fn probe_direct(
     channel: Arc<HidppChannel>,
     info: &NodeInfo,
@@ -521,7 +524,48 @@ async fn probe_direct(
     let capabilities = probe.capabilities;
     let walk_succeeded = capabilities.is_some();
     let caps = capabilities.unwrap_or_default();
-    let is_peripheral = probe.battery.is_some() || caps.buttons || caps.pointer || caps.lighting;
+    let is_peripheral = probe.battery.is_some() || caps.buttons || caps.pointer || caps.lighting || info.product_id == 0x0af7;
+    if info.product_id == 0x0af7 {
+        let battery = read_battery(&channel, DIRECT_DEVICE_INDEX, BatteryProbe::Centurion(4)).await.or(probe.battery);
+
+        let model_info = probe.model_info.or(Some(DeviceModelInfo {
+            entity_count: 1,
+            serial_number: None,
+            unit_id: [0x0a, 0xf7, 0x00, 0x01],
+            transports: DeviceTransports {
+                usb: true,
+                equad: false,
+                btle: false,
+                bluetooth: false,
+            },
+            model_ids: [0x0af7, 0, 0],
+            extended_model_id: 0,
+        }));
+
+        let inventory = DeviceInventory {
+            receiver: ReceiverInfo {
+                name: "PRO X 2 LIGHTSPEED Wireless Gaming Headset".into(),
+                vendor_id: info.vendor_id,
+                product_id: info.product_id,
+                unique_id: None,
+            },
+            paired: vec![PairedDevice {
+                slot: DIRECT_DEVICE_INDEX,
+                codename: Some("PRO X 2 LIGHTSPEED".into()),
+                wpid: None,
+                kind: DeviceKind::Headset,
+                online: true,
+                battery,
+                model_info,
+                capabilities,
+            }],
+        };
+        return NodeProbe {
+            inventory: Some(inventory),
+            verdict: ProbeVerdict::healthy_when(walk_succeeded),
+            outcomes: vec![outcome],
+        };
+    }
     // A walk that never completed says nothing about what this node is: the
     // discriminator below would read "no battery, no config feature" off an
     // empty probe and reject a real mouse as a receiver's secondary interface.

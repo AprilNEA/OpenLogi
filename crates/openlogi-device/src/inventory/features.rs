@@ -8,6 +8,7 @@ use hidpp::{
         CreatableFeature,
         battery_status::BatteryStatusFeature,
         battery_voltage::BatteryVoltageFeature,
+        centurion_battery_soc::{CenturionBatterySocFeature, CenturionChargingStatus},
         device_information::{DeviceInformationFeature, DeviceTransport},
         device_type_and_name::DeviceTypeAndNameFeature,
         gestures2::Gestures2Feature,
@@ -70,6 +71,7 @@ pub(super) enum BatteryProbe {
     Unified(u8),
     Legacy(u8),
     Voltage(u8),
+    Centurion(u8),
 }
 
 /// Read just the battery by addressing its feature at the known runtime index —
@@ -124,6 +126,27 @@ pub(super) async fn read_battery(
                 }
             })
         }
+        BatteryProbe::Centurion(feature_index) => {
+            let feature = CenturionBatterySocFeature::new(Arc::clone(channel), slot, feature_index);
+            match feature.get_battery_info().await {
+                Ok(info) => {
+                    let status = match info.status {
+                        CenturionChargingStatus::Recharging => openlogi_core::device::BatteryStatus::Charging,
+                        CenturionChargingStatus::Full => openlogi_core::device::BatteryStatus::Full,
+                        CenturionChargingStatus::Discharging => openlogi_core::device::BatteryStatus::Discharging,
+                    };
+                    Some(BatteryInfo {
+                        percentage: info.percentage,
+                        level: legacy_battery_level_from_percentage(info.percentage),
+                        status,
+                    })
+                }
+                Err(e) => {
+                    debug!(error = ?e, "Centurion get_battery_info failed");
+                    None
+                }
+            }
+        }
     }
 }
 
@@ -145,6 +168,9 @@ pub(super) fn battery_feature_index(ids: impl IntoIterator<Item = u16>) -> Optio
         };
         if id == UnifiedBatteryFeature::ID {
             return Some(BatteryProbe::Unified(index));
+        }
+        if id == CenturionBatterySocFeature::ID {
+            return Some(BatteryProbe::Centurion(index));
         }
         if id == BatteryStatusFeature::ID && legacy.is_none() {
             legacy = Some(BatteryProbe::Legacy(index));

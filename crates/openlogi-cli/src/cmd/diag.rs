@@ -15,6 +15,7 @@ pub mod controls;
 pub mod dpi;
 pub mod features;
 pub mod lighting;
+pub mod sidetone;
 pub mod smartshift;
 pub mod wheel;
 
@@ -32,6 +33,8 @@ pub enum DiagCmd {
     Smartshift(smartshift::SmartshiftArgs),
     /// Set a wired RGB keyboard to a solid colour (e.g. `ff0000` for red).
     Lighting(lighting::LightingArgs),
+    /// Read or set headset audio sidetone (feature 0x0604).
+    Sidetone(sidetone::SidetoneArgs),
     /// Read or set the HID++ 0x2121 wheel reporting resolution.
     Wheel(wheel::WheelArgs),
 }
@@ -45,6 +48,7 @@ impl DiagCmd {
             Self::Dpi(args) => dpi::run(args).await,
             Self::Smartshift(args) => smartshift::run(args).await,
             Self::Lighting(args) => lighting::run(args).await,
+            Self::Sidetone(args) => sidetone::run(args).await,
             Self::Wheel(args) => wheel::run(args).await,
         }
     }

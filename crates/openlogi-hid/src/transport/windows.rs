@@ -256,6 +256,58 @@ impl RawHidChannel for WindowsHidppChannel {
         if !self.device_io.allows_io() {
             return Err(super::device_io_error());
         }
+
+        // Special handling for Centurion headsets (e.g. PRO X 2 LIGHTSPEED, PID 0x0AF7):
+        // Translate HID++ messages (0x10/0x11) into 64-byte Centurion CPL frames (Report ID 0x51).
+        if self.info.product_id == 0x0af7 {
+            let mut centurion_frame = [0u8; 64];
+            centurion_frame[0] = 0x51;
+            // In standard HID++ messages: src[0] is report_id, src[1] is devnumber.
+            // Meaningful payload starts at src[2..].
+            let payload = if src.len() > 2 { &src[2..] } else { &[] };
+
+            // If the command is addressed to a feature >= 4, it belongs to the sub-device (headset),
+            // and must be routed through CentPPBridge (feature index 3, function 1):
+            // Layer 3: [0x03, 0x1d, 0x00, sub_len, 0x00, sub_feat_idx, sub_func_sw, params...]
+            let feat_idx = payload.first().copied().unwrap_or(0);
+            if feat_idx >= 4 {
+                let sub_func_sw = payload.get(1).copied().unwrap_or(0);
+                let params = if payload.len() > 2 { &payload[2..] } else { &[] };
+                // sub_msg = [0x00, feat_idx, sub_func_sw, params...]
+                let sub_len = 3 + params.len();
+                let layer3_len = 2 + 2 + sub_len; // prefix(2) + hdr(2) + sub_msg
+                centurion_frame[1] = (layer3_len + 1).min(63) as u8; // cpl_length (+1 for flags)
+                centurion_frame[2] = 0x00; // flags
+                centurion_frame[3] = 0x03; // bridge_idx = 3
+                centurion_frame[4] = 0x1d; // sendFragment (func 1 | swid 0x0d)
+                centurion_frame[5] = ((sub_len >> 8) & 0x0F) as u8;
+                centurion_frame[6] = (sub_len & 0xFF) as u8;
+                centurion_frame[7] = 0x00; // sub_cpl = 0
+                centurion_frame[8] = feat_idx;
+                centurion_frame[9] = sub_func_sw;
+                if !params.is_empty() {
+                    let copy_len = params.len().min(50);
+                    centurion_frame[10..10 + copy_len].copy_from_slice(&params[..copy_len]);
+                }
+            } else {
+                // Direct dongle command
+                centurion_frame[1] = (payload.len() + 1).min(63) as u8;
+                centurion_frame[2] = 0x00; // flags
+                if !payload.is_empty() {
+                    let copy_len = payload.len().min(61);
+                    centurion_frame[3..3 + copy_len].copy_from_slice(&payload[..copy_len]);
+                }
+            }
+
+            let result = self.long.write_report(&centurion_frame).await;
+            if let Err(e) = &result
+                && is_permanent_disconnect(e.as_ref())
+            {
+                self.mark_disconnected();
+            }
+            return result.map(|_| src.len());
+        }
+
         let endpoint = match src.first().copied().and_then(endpoint_for_report_id) {
             Some(ReportEndpoint::Short) => self.short.as_ref(),
             Some(ReportEndpoint::Long) => Some(&self.long),
@@ -310,6 +362,56 @@ impl RawHidChannel for WindowsHidppChannel {
         }
 
         let mut reader = self.long.reader.lock().await;
+        if self.info.product_id == 0x0af7 {
+            let mut cent_buf = [0u8; 64];
+            loop {
+                let res = reader.read_input_report(&mut cent_buf).await;
+                let len = res.map_err(|e| {
+                    if matches!(e, async_hid::HidError::Disconnected) {
+                        let _ = self.connected.store(false, Ordering::Release);
+                    }
+                    e
+                })?;
+
+            if len >= 3 && cent_buf[0] == 0x51 {
+                    let cpl_len = cent_buf[1] as usize;
+                    // Bounded by both declared CPL length and actual read bytes len to prevent reading stale buffer
+                    let available_payload = len.saturating_sub(3);
+                    let payload_len = cpl_len.saturating_sub(1).min(available_payload).min(61);
+                    let inner = &cent_buf[3..3 + payload_len];
+
+                    // Skip pure ACK frames from bridge: [bridge_idx = 3, func_sw = 0x1d, ...]
+                    if inner.first() == Some(&0x03) && inner.get(1).map_or(false, |f| (f >> 4) == 0x01 && (f & 0x0F) != 0) {
+                        continue;
+                    }
+
+                    // Check if this is a bridge MessageEvent response:
+                    // inner: [03, 10, 00, 06, 00, 04, 02, 5f, 5f, 00]
+                    // inner[0] = 0x03 (bridge_idx)
+                    // inner[1] = 0x10 (MessageEvent)
+                    // inner[2..4] = length
+                    // inner[4] = sub_cpl (0x00)
+                    // inner[5] = sub_feat_idx (0x04)
+                    // inner[6] = sub_func_sw (0x02)
+                    // inner[7..] = data ([0x5f, 0x5f, 0x00])
+                    let sub_inner = if inner.len() >= 7 && inner[0] == 0x03 && (inner[1] & 0xF0) == 0x10 {
+                        &inner[5..] // Starts from sub_feat_idx (inner[5]) onward!
+                    } else {
+                        inner
+                    };
+
+                    buf[0] = LONG_REPORT_ID;
+                    buf[1] = 0xff; // receiver / direct index
+                    let copy_len = sub_inner.len().min(buf.len().saturating_sub(2));
+                    buf[2..2 + copy_len].copy_from_slice(&sub_inner[..copy_len]);
+                    if buf.len() > 2 + copy_len {
+                        buf[2 + copy_len..].fill(0);
+                    }
+                    return Ok(20);
+                }
+            }
+        }
+
         match reader.read_input_report(buf).await {
             Ok(len) => Ok(len),
             Err(async_hid::HidError::Disconnected) => self.park_disconnected().await,

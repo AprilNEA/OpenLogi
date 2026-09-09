@@ -1049,6 +1049,16 @@ impl Agent for MockAgent {
         info!(%route, enabled, "set_light_manual_power");
         Ok(())
     }
+
+    async fn read_sidetone(self, _: Context, route: DeviceRoute) -> Result<u8, WriteError> {
+        info!(%route, "read_sidetone");
+        Ok(50)
+    }
+
+    async fn set_sidetone(self, _: Context, route: DeviceRoute, level: u8) -> Result<(), WriteError> {
+        info!(%route, level, "set_sidetone");
+        Ok(())
+    }
 }
 
 #[cfg(test)]

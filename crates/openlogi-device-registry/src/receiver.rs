@@ -120,6 +120,7 @@ mod tests {
 
         assert_eq!(receiver.brand, ReceiverBrand::Lightspeed);
         assert_eq!(receiver.protocol, ReceiverProtocol::Unifying);
+
     }
 
     #[test]
