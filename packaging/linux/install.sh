@@ -48,7 +48,7 @@ The script installs:
   PREFIX/bin/openlogi-desktop
   PREFIX/bin/openlogi-overlay
   PREFIX/bin/openlogi-agent
-  /etc/udev/rules.d/70-openlogi.rules
+  /usr/lib/udev/rules.d/70-openlogi.rules
   /usr/lib/systemd/user/openlogi-agent.service  (if systemd is present)
   /usr/share/applications/openlogi.desktop
   /usr/share/icons/hicolor/<size>/apps/openlogi.png  (16 … 1024)
@@ -85,7 +85,38 @@ sudo install -Dm755 "${BUILD_DIR}/openlogi-agent" "${BINDIR}/openlogi-agent"
 
 echo "Installing udev rules …"
 sudo install -Dm644 "${SCRIPT_DIR}/udev/70-openlogi.rules" \
-  /etc/udev/rules.d/70-openlogi.rules
+  /usr/lib/udev/rules.d/70-openlogi.rules
+# A same-named file in the admin directory shadows the vendor file. Pre-0.9
+# releases installed there, so remove a copy whose effective rules (comments
+# and blank lines aside, so header-only edits don't matter) match a body ever
+# shipped — an unmodified leftover. Anything else may be a deliberate admin
+# override, which /etc/udev/rules.d exists for: leave it and say so.
+effective_rules() {
+  sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' "$1"
+}
+# The only two bodies ever installed to /etc: the original, and the one after
+# the input event-node rules were added (#530). 0.9+ never writes /etc, so
+# this set is frozen — it needs no update when the packaged rules change.
+SHIPPED_RULES_V1='SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", TAG+="uaccess"
+SUBSYSTEM=="hidraw", KERNELS=="*:046D:*", TAG+="uaccess"
+KERNEL=="uinput", TAG+="uaccess", OPTIONS+="static_node=uinput"'
+SHIPPED_RULES_V2="${SHIPPED_RULES_V1}"'
+SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_MOUSE}=="1", ATTRS{idVendor}=="046d", TAG+="uaccess"
+SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_MOUSE}=="1", KERNELS=="*:046D:*", TAG+="uaccess"'
+ETC_RULES=/etc/udev/rules.d/70-openlogi.rules
+if [ -f "$ETC_RULES" ]; then
+  # A read failure (say, a root-owned 0600 override) must fall through to the
+  # warning, not trip set -e and abort the install half-done.
+  ETC_EFFECTIVE="$(effective_rules "$ETC_RULES")" || ETC_EFFECTIVE=
+  if [ "$ETC_EFFECTIVE" = "$SHIPPED_RULES_V1" ] ||
+    [ "$ETC_EFFECTIVE" = "$SHIPPED_RULES_V2" ]; then
+    sudo rm -f "$ETC_RULES"
+  else
+    echo "Warning: $ETC_RULES does not match any rules OpenLogi ever shipped and" >&2
+    echo "overrides the vendor file just installed. If it is not a deliberate override:" >&2
+    echo "  sudo rm $ETC_RULES && sudo udevadm control --reload-rules" >&2
+  fi
+fi
 
 if command -v udevadm >/dev/null 2>&1; then
   echo "Reloading udev rules …"
