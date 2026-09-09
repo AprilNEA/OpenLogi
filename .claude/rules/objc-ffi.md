@@ -211,6 +211,8 @@ under a `SAFETY` comment. Where it currently lives on macOS:
   a safe fn, in `openlogi-permissions` and `openlogi-hid` alike.
 - `overlay/platform.rs` — `NSEvent::removeMonitor` and the
   `CGGetActiveDisplayList` / `CGDisplayBounds` pair.
+- `inject/macos.rs` — raw AX/CoreFoundation navigation, the private Dock/CGS
+  SPIs, and Mach clock calls used to timestamp native Smart Zoom events.
 - `desktop/platform/os.rs` — reading AppKit's `NSAppearanceName` statics to set
   `NSApp.appearance`.
 - `desktop/platform/registration/macos.rs` — the `SMAppService` calls (all generated
