@@ -416,6 +416,13 @@ new IPC method.
 same ownership model as the existing `openlogi diag` commands: select one target,
 open it, run one named operation, and exit. It is not an ambient sniffer.
 
+Before enumerating hardware, raw fixture capture acquires the same profile's
+`agent.lock` used by agent startup, then checks that the IPC endpoint is
+unreachable. The selected target holds the lock for the entire capture, including
+all eight cases in the contribution wizard. This excludes agent relaunches and
+other fixture captures until completion; errors, cancellation, and process exit
+release the lock. It does not exclude Options+ or other direct diagnostic tools.
+
 ### Contribution wizard
 
 `openlogi fixture contribute` combines the safe capture modes without changing

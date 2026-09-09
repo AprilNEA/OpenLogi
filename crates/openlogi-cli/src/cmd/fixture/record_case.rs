@@ -8,6 +8,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, ValueEnum};
 use openlogi_core::device::DeviceInventory;
+use openlogi_core::single_instance::{self, InstanceGuard};
 use openlogi_device::write::{
     self, FeatureEntry, FirmwareEntity, ReprogControlEntry, ScrollWheelMode, WriteError,
 };
@@ -196,9 +197,15 @@ pub(super) struct TargetCandidate {
     receiver_product_id: u16,
 }
 
-impl TargetCandidate {
+/// A selected target holding agent ownership until all direct capture is done.
+pub(super) struct CaptureTarget {
+    target: TargetCandidate,
+    _agent_guard: InstanceGuard,
+}
+
+impl CaptureTarget {
     pub(super) fn route(&self) -> &DeviceRoute {
-        &self.route
+        &self.target.route
     }
 }
 
@@ -250,8 +257,8 @@ pub async fn run(args: RecordCaseArgs) -> Result<()> {
     Ok(())
 }
 
-pub(super) async fn prepare_contribution_target(selector: Option<&str>) -> Result<TargetCandidate> {
-    ensure_agent_stopped().await?;
+pub(super) async fn prepare_contribution_target(selector: Option<&str>) -> Result<CaptureTarget> {
+    let agent_guard = acquire_capture_ownership().await?;
     eprintln!(
         "warning: fixture case capture reads hardware directly with this CLI process's own HID \
          permission and identity, not the OpenLogi agent"
@@ -260,20 +267,24 @@ pub(super) async fn prepare_contribution_target(selector: Option<&str>) -> Resul
         .await
         .map_err(|_| anyhow!("failed to enumerate HID++ devices for direct fixture capture"))?;
     let candidates = online_targets(&inventories);
-    target_selection::select_target(&candidates, selector)
+    let target = target_selection::select_target(&candidates, selector)?;
+    Ok(CaptureTarget {
+        target,
+        _agent_guard: agent_guard,
+    })
 }
 
 pub(super) async fn capture_for_contribution(
     operation: FixtureOperation,
-    target: &TargetCandidate,
+    target: &CaptureTarget,
     name: &str,
     channel: &str,
     capacity: usize,
     identity_plan: &HidCassetteIdentityPlan,
 ) -> Result<HidCassette> {
-    let (recording, observation) = capture(operation, &target.route, capacity).await?;
+    let (recording, observation) = capture(operation, target.route(), capacity).await?;
     let candidates = audit::sanitize_recording_with_plan(recording, name, channel, identity_plan)?;
-    replay::select_self_replaying(operation, target, &observation, candidates).await
+    replay::select_self_replaying(operation, &target.target, &observation, candidates).await
 }
 
 fn validate_metadata(args: &RecordCaseArgs) -> Result<()> {
@@ -286,9 +297,15 @@ fn validate_metadata(args: &RecordCaseArgs) -> Result<()> {
     Ok(())
 }
 
-async fn ensure_agent_stopped() -> Result<()> {
+async fn acquire_capture_ownership() -> Result<InstanceGuard> {
+    // The agent acquires this same lock before any HID I/O. An endpoint probe
+    // alone misses both early startup and a relaunch after the probe returns.
+    let guard = single_instance::acquire("agent.lock").context(
+        "refusing direct fixture capture: could not acquire agent.lock; \
+         stop the OpenLogi agent and any other fixture capture before retrying",
+    )?;
     match tokio::time::timeout(AGENT_PROBE_TIMEOUT, client::connect()).await {
-        Ok(Err(ConnectError::Endpoint(error))) if endpoint_is_unreachable(&error) => Ok(()),
+        Ok(Err(ConnectError::Endpoint(error))) if endpoint_is_unreachable(&error) => Ok(guard),
         Ok(Ok(_) | Err(ConnectError::Handshake(_) | ConnectError::Endpoint(_))) | Err(_) => bail!(
             "refusing direct fixture capture because the agent endpoint is active or accepted a \
              connection without completing a healthy handshake; this command uses the CLI's own \
@@ -447,6 +464,102 @@ mod tests {
         assert!(!endpoint_is_unreachable(&io::Error::other(
             "endpoint resolution failed"
         )));
+    }
+
+    // Unix socket paths honor XDG_CONFIG_HOME; Windows uses a fixed pipe name
+    // and cannot isolate this endpoint test from a real agent that way.
+    #[cfg(unix)]
+    #[test]
+    fn direct_capture_ownership() {
+        use openlogi_core::single_instance::InstanceError;
+
+        const TEST: &str = "cmd::fixture::record_case::tests::direct_capture_ownership";
+        const MODE: &str = "OPENLOGI_CAPTURE_OWNERSHIP_TEST";
+        let child = |mode: &str| {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args(["--exact", TEST, "--nocapture"])
+                .env(MODE, mode);
+            command
+        };
+        match std::env::var(MODE).as_deref() {
+            Ok("contender") => {
+                // This is the same lock acquisition that precedes agent HID I/O.
+                assert!(matches!(
+                    single_instance::acquire("agent.lock"),
+                    Err(InstanceError::AlreadyRunning { .. })
+                ));
+                return;
+            }
+            Ok("exercise") => {}
+            _ => {
+                let home = tempfile::tempdir().unwrap();
+                let output = child("exercise")
+                    .env("XDG_CONFIG_HOME", home.path())
+                    .env_remove("XDG_RUNTIME_DIR")
+                    .env("OPENLOGI_PROFILE", "prod")
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                return;
+            }
+        }
+
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                {
+                    let _agent = single_instance::acquire("agent.lock").unwrap();
+                    let error = prepare_contribution_target(None)
+                        .await
+                        .err()
+                        .expect("an agent starting before its socket binds must exclude capture");
+                    assert!(matches!(
+                        error.downcast_ref::<InstanceError>(),
+                        Some(InstanceError::AlreadyRunning { .. })
+                    ));
+                }
+                {
+                    let _capture = CaptureTarget {
+                        target: direct("Synthetic", 0xb034),
+                        _agent_guard: acquire_capture_ownership().await.unwrap(),
+                    };
+                    let output = child("contender").output().unwrap();
+                    assert!(
+                        output.status.success(),
+                        "agent must remain excluded after the endpoint check: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+                // Successful capture scope releases ownership.
+                drop(single_instance::acquire("agent.lock").unwrap());
+
+                // An endpoint accepting connections but not serving a handshake
+                // must still fail closed, even when no agent holds the lock.
+                let _listener = openlogi_ipc::transport::bind().unwrap();
+                acquire_capture_ownership()
+                    .await
+                    .err()
+                    .expect("an unresponsive endpoint must refuse capture");
+                drop(single_instance::acquire("agent.lock").unwrap());
+
+                // Cancelling a pending admission also releases the acquired lock.
+                let mut pending = Box::pin(acquire_capture_ownership());
+                assert!(futures::poll!(&mut pending).is_pending());
+                assert!(matches!(
+                    single_instance::acquire("agent.lock"),
+                    Err(InstanceError::AlreadyRunning { .. })
+                ));
+                drop(pending);
+                drop(single_instance::acquire("agent.lock").unwrap());
+            });
     }
 
     #[test]
