@@ -128,16 +128,17 @@ async fn exclusive_receiver_access_disables_expired_recovery_deadlines() {
     let exclusive = access
         .acquire_exclusive(crate::receiver_access::ExclusiveAccessReason::Pairing)
         .await;
+    let restart_at = Instant::now();
     let slots = HashMap::from([(
         physical_key(),
-        GestureSlot::recovering(None, Some(Instant::now())),
+        GestureSlot::recovering(None, Some(restart_at)),
     )]);
 
     assert_eq!(next_deadline(*requests.borrow(), true, &slots), None);
     drop(exclusive);
     assert_eq!(
         next_deadline(*requests.borrow(), true, &slots),
-        Some(Instant::now()),
+        Some(restart_at),
         "release makes the retry actionable without adding another backoff"
     );
 }

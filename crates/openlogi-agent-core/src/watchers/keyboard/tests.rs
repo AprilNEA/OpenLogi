@@ -152,13 +152,14 @@ async fn exclusive_receiver_access_disables_expired_recovery_deadlines() {
     let exclusive = access
         .acquire_exclusive(crate::receiver_access::ExclusiveAccessReason::Pairing)
         .await;
-    let slot = KeyboardSlot::recovering(None, Some(tokio::time::Instant::now()));
+    let restart_at = tokio::time::Instant::now();
+    let slot = KeyboardSlot::recovering(None, Some(restart_at));
 
     assert_eq!(next_deadline(*requests.borrow(), true, Some(&slot)), None);
     drop(exclusive);
     assert_eq!(
         next_deadline(*requests.borrow(), true, Some(&slot)),
-        Some(tokio::time::Instant::now()),
+        Some(restart_at),
         "release makes the retry actionable without adding another backoff"
     );
 }
