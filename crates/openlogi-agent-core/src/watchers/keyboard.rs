@@ -337,10 +337,7 @@ impl KeyboardManagerState {
         }
         if self.slot.as_ref().is_some_and(|slot| match slot {
             KeyboardSlot::Running(_) => true,
-            KeyboardSlot::Recovering(recovery) => {
-                recovery.pending_restore.is_some()
-                    || recovery.restart_at.is_some_and(|deadline| deadline > now)
-            }
+            KeyboardSlot::Recovering(recovery) => recovery.blocks_restart(now),
         }) {
             return;
         }
@@ -439,13 +436,7 @@ fn next_deadline(
         return None;
     }
     let recovery = slot.and_then(KeyboardSlot::recovery)?;
-    recovery
-        .pending_restore
-        .as_ref()
-        .map(|pending| pending.retry_at)
-        .into_iter()
-        .chain(recovery.restart_at)
-        .min()
+    recovery.next_deadline(|pending| pending.retry_at)
 }
 
 /// Retire the tracked keyboard epoch, preserve its ordered input ownership

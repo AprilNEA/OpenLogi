@@ -349,14 +349,7 @@ fn next_deadline(
     slots
         .values()
         .filter_map(GestureSlot::recovery)
-        .flat_map(|recovery| {
-            recovery
-                .pending_restore
-                .as_ref()
-                .map(|pending| pending.retry_at)
-                .into_iter()
-                .chain(recovery.restart_at)
-        })
+        .filter_map(|recovery| recovery.next_deadline(|pending| pending.retry_at))
         .min()
 }
 
@@ -456,10 +449,7 @@ impl GestureManagerState {
             let key = &plan.target.physical_key;
             if self.slots.get(key).is_some_and(|slot| match slot {
                 GestureSlot::Running(_) => true,
-                GestureSlot::Recovering(recovery) => {
-                    recovery.pending_restore.is_some()
-                        || recovery.restart_at.is_some_and(|deadline| deadline > now)
-                }
+                GestureSlot::Recovering(recovery) => recovery.blocks_restart(now),
             }) {
                 continue;
             }
