@@ -3,7 +3,10 @@
 
 use openlogi_hidpp_derive::Feature;
 
-use crate::{feature::FeatureEndpoint, protocol::v20::Hidpp20Error};
+use crate::{
+    feature::FeatureEndpoint,
+    protocol::v20::{self, Hidpp20Error},
+};
 
 bitflags::bitflags! {
     /// Host-switching capabilities reported by [`ChangeHostFeature::get_host_info`].
@@ -79,5 +82,69 @@ impl ChangeHostFeature {
     pub async fn set_cookie(&self, host: u8, cookie: u8) -> Result<(), Hidpp20Error> {
         self.endpoint.call(3, [host, cookie, 0]).await?;
         Ok(())
+    }
+}
+
+/// Event emitted by `0x1814`.
+///
+/// A device that owns host-switch controls its firmware refuses to divert (the
+/// `0x1b04` `CidInfo` for them reports neither `divertable` nor a working
+/// analytics stream) announces the change here instead. Only a press of the
+/// device's own host-switch control emits it: a switch requested through
+/// [`ChangeHostFeature::set_current_host`] does not, so acting on this event
+/// cannot feed back into itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub enum ChangeHostEvent {
+    /// A user-initiated host change is under way.
+    HostChange {
+        /// Host index carried by the event, in `0..host_count`.
+        host: u8,
+    },
+}
+
+pub(super) fn decode_event_payload(function_id: u8, payload: &[u8; 16]) -> Option<ChangeHostEvent> {
+    match function_id {
+        0 => Some(ChangeHostEvent::HostChange { host: payload[0] }),
+        _ => None,
+    }
+}
+
+/// Decodes a raw `0x1814` notification addressed to `device_index` /
+/// `feature_index`, or returns `None` when the report is anything else.
+#[must_use]
+pub fn decode_event(
+    msg: &v20::Message,
+    device_index: u8,
+    feature_index: u8,
+) -> Option<ChangeHostEvent> {
+    let header = msg.header();
+    if header.device_index != device_index
+        || header.feature_index != feature_index
+        || header.software_id.to_lo() != 0
+    {
+        return None;
+    }
+    decode_event_payload(header.function_id.to_lo(), &msg.extend_payload())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decodes_a_user_initiated_host_change() {
+        let mut payload = [0u8; 16];
+        payload[0] = 1;
+
+        assert_eq!(
+            decode_event_payload(0, &payload),
+            Some(ChangeHostEvent::HostChange { host: 1 }),
+        );
+    }
+
+    #[test]
+    fn ignores_unknown_event_ids() {
+        assert_eq!(decode_event_payload(1, &[0u8; 16]), None);
     }
 }

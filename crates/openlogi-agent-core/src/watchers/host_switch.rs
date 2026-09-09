@@ -555,15 +555,18 @@ fn spawn_session(
     let session_link = link.clone();
     let registry = services.registry.clone();
     let device_io = services.device_io.clone();
+    let channel_pool = services.channel_pool.clone();
     let events = services.events.clone();
     tokio::spawn(async move {
         let task = tokio::spawn(async move {
             let _receiver_lease = receiver_lease;
             match run_host_switch_session(
                 session_link.keyboard.clone(),
+                session_link.targets.clone(),
                 stop_rx,
                 &registry,
                 device_io,
+                channel_pool,
             )
             .await
             {

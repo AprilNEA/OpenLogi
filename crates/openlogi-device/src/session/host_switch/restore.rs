@@ -197,6 +197,9 @@ pub(super) async fn rollback_host_switch_start(
 
 #[cfg(test)]
 mod tests {
+    use crate::ChannelPool;
+    use crate::channel::scripted::ScriptedBackend;
+
     use super::super::{HostSwitchStopReason, monitor_host_switch, run_host_switch_session};
     use super::*;
     use crate::backend::NodeId;
@@ -255,7 +258,14 @@ mod tests {
 
             let outcome = tokio::time::timeout(
                 std::time::Duration::from_secs(2),
-                run_host_switch_session(route.clone(), stopped, &registry, gate),
+                run_host_switch_session(
+                    route.clone(),
+                    Vec::new(),
+                    stopped,
+                    &registry,
+                    gate,
+                    ChannelPool::with_backend(ScriptedBackend::new(Vec::new())),
+                ),
             )
             .await
             .expect("failed restoration must return ownership instead of looping");
