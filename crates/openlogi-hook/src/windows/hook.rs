@@ -29,14 +29,12 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_XBUTTONDOWN, WM_XBUTTONUP, XBUTTON1, XBUTTON2,
 };
 
-use crate::windows_cursor::{MonitorDpi, PhysicalCursorPosition};
-use crate::windows_worker::{WorkerEvent, WorkerPhase, WorkerStatus};
+use super::cursor::{MonitorDpi, PhysicalCursorPosition};
+use super::worker::{WorkerEvent, WorkerPhase, WorkerStatus};
 use crate::{
     ButtonId, CursorPosition, EventDisposition, ForegroundApp, HookBackend, HookError, HookEvent,
     KeyEvent, KeyModifiers, MouseEvent, ScrollDelta,
 };
-
-pub(crate) mod foreground;
 
 const WHEEL_DELTA: f64 = 120.0;
 
@@ -330,13 +328,15 @@ fn hook_thread(
     }
 }
 
+/// Why a native hook or foreground-observer message pump stopped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum MessageLoopExit {
+pub(super) enum MessageLoopExit {
     Quit,
     Failed(u32),
 }
 
-fn message_loop(mut handle_thread_message: impl FnMut(&MSG) -> bool) -> MessageLoopExit {
+/// Drive the calling thread's queue, dispatching messages the handler did not consume.
+pub(super) fn message_loop(mut handle_thread_message: impl FnMut(&MSG) -> bool) -> MessageLoopExit {
     let mut msg = MSG::default();
     loop {
         // SAFETY: `msg` is a live, owned MSG; a null window handle retrieves
