@@ -296,6 +296,56 @@ fn all_catalog_variants_roundtrip_toml() {
     }
 }
 
+/// [`ButtonId`] variant names are the `[devices.*.bindings]` map keys on
+/// disk, so renaming one silently orphans every existing binding under it.
+/// [`Action`] has the same guard below; this is its `ButtonId` counterpart.
+#[test]
+fn persisted_button_variant_names_are_stable() {
+    let mut actual: Vec<String> = ButtonId::ALL
+        .into_iter()
+        .chain(ButtonId::KEYBOARD_KEYS)
+        .map(
+            |button| match toml::Value::try_from(button).expect("serialize button") {
+                toml::Value::String(name) => name,
+                other => panic!("expected a plain string for {button:?}, got {other:?}"),
+            },
+        )
+        .collect();
+    actual.sort();
+    let mut expected = vec![
+        "Back",
+        "DpiToggle",
+        "Forward",
+        "GestureButton",
+        "HapticPanel",
+        "KeyBacklightDown",
+        "KeyBacklightUp",
+        "KeyDictation",
+        "KeyEmoji",
+        "KeyMicMute",
+        "KeyMute",
+        "KeyPlayPause",
+        "KeyScreenCapture",
+        "KeySearch",
+        "KeyVolumeDown",
+        "KeyVolumeUp",
+        "LeftClick",
+        "MiddleClick",
+        "RightClick",
+        "Thumbwheel",
+        "ThumbwheelScrollDown",
+        "ThumbwheelScrollUp",
+        "WheelTiltLeft",
+        "WheelTiltRight",
+    ];
+    expected.sort_unstable();
+    assert_eq!(
+        actual, expected,
+        "ButtonId variant names are the persisted binding map keys — a rename \
+         orphans existing config, and a new button belongs in this list"
+    );
+}
+
 #[test]
 fn persisted_action_variant_names_are_stable() {
     let mut actions = Action::catalog();
