@@ -108,6 +108,7 @@ fn combo(shortcut: Shortcut) -> Result<KeyCombo, u16> {
         Shortcut::NextTab => "Ctrl+Tab",
         Shortcut::PrevTab => "Ctrl+Shift+Tab",
         Shortcut::ReloadPage => "Ctrl+R",
+        Shortcut::SwitchApplications => "Alt+Tab",
     };
     Ok(parse_shortcut(text))
 }
@@ -418,6 +419,14 @@ mod tests {
                 .unwrap_or_else(|vk| panic!("NextTab should be a chord, not raw vk {vk:#x}"))
                 .rendered_label(),
             "Ctrl+Tab"
+        );
+        assert_eq!(
+            combo(Shortcut::SwitchApplications)
+                .unwrap_or_else(|vk| {
+                    panic!("SwitchApplications should be a chord, not raw vk {vk:#x}")
+                })
+                .rendered_label(),
+            "Alt+Tab"
         );
         assert_eq!(combo(Shortcut::BrowserBack), Err(VK_BROWSER_BACK));
         assert_eq!(combo(Shortcut::BrowserForward), Err(VK_BROWSER_FORWARD));

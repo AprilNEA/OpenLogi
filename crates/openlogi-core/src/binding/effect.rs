@@ -1,6 +1,6 @@
 //! A platform-neutral synthesis IR.
 //!
-//! [`Action`] has one variant per user-facing behaviour (52 of them), but the
+//! [`Action`] has one variant per user-facing behaviour (53 of them), but the
 //! three `openlogi-inject` backends don't care about most of that
 //! granularity — they care about *mechanism*: "press this chord", "click
 //! this mouse button", "fire this media key", "there is no portable way to
@@ -129,6 +129,8 @@ pub enum Shortcut {
     PrevTab,
     /// Reload the current page.
     ReloadPage,
+    /// Switch to the previously used application.
+    SwitchApplications,
 }
 
 impl Shortcut {
@@ -240,6 +242,7 @@ impl Action {
             Action::NextTab => Effect::Shortcut(Shortcut::NextTab),
             Action::PrevTab => Effect::Shortcut(Shortcut::PrevTab),
             Action::ReloadPage => Effect::Shortcut(Shortcut::ReloadPage),
+            Action::SwitchApplications => Effect::Shortcut(Shortcut::SwitchApplications),
 
             Action::MissionControl => Effect::Native(NativeAction::MissionControl),
             Action::AppExpose => Effect::Native(NativeAction::AppExpose),
