@@ -1,6 +1,6 @@
 //! Live control capture for one device: divert the device's gesture sources
-//! (the MX dedicated gesture button and/or the MX Master 4 haptic panel), the
-//! DPI/ModeShift button, and the thumb wheel over HID++ and turn their events
+//! (DPI/ModeShift, the MX dedicated gesture button and/or the MX Master 4
+//! haptic panel), and the thumb wheel over HID++ and turn their events
 //! into [`CapturedInput`] the GUI can dispatch.
 //!
 //! [`run_capture_session`] holds a single HID++ channel open for one device,
@@ -471,9 +471,10 @@ struct ArmedControls {
     /// The gesture-source CIDs diverted with raw-XY reporting: the
     /// `spec.divert_gesture_sources` members the device exposes.
     gesture_cids: Vec<u16>,
-    /// Raw-XY-capable standard-button CIDs diverted as gesture sources.
+    /// Raw-XY-capable additional CIDs diverted as gesture sources (macOS side
+    /// buttons and a gesture-mode DPI/ModeShift button).
     gesture_button_cids: Vec<(u16, ButtonId)>,
-    /// DPI/ModeShift CIDs diverted as plain buttons.
+    /// DPI/ModeShift CIDs diverted as plain buttons when gesture mode is off.
     dpi_cids: Vec<u16>,
     /// Standard-button CIDs diverted per the session's [`CaptureSpec`], with
     /// the [`ButtonId`] each dispatches as.
@@ -773,6 +774,17 @@ async fn arm_controls_into(
             }
         }
         for &cid in &reprog_controls::DPI_MODE_SHIFT_CIDS {
+            let gesture_requested = spec
+                .divert_gesture_buttons
+                .iter()
+                .any(|&(gesture_cid, button)| gesture_cid == cid && button == ButtonId::DpiToggle);
+            if gesture_requested {
+                // The raw-XY loop above owns a supported control. An
+                // unsupported one must stay native: plain-diverting it while
+                // dispatch still expects gesture events would swallow both
+                // the configured click and the firmware action.
+                continue;
+            }
             if controls.iter().any(|c| c.cid == cid && c.is_divertable()) {
                 arm_reprog_control(&rc, cid, false, &mut armed.reporting).await?;
                 armed.dpi_cids.push(cid);

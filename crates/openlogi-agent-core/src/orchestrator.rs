@@ -76,7 +76,7 @@ pub struct SharedRuntime {
     hardware: HardwareContext,
     /// The OS-hook callback's single-action + gesture maps, behind one lock so a
     /// rebuild publishes both atomically (see [`HookMaps`]). Also read by the
-    /// gesture watcher for the thumb-wheel/DPI-button single actions.
+    /// gesture watcher for thumb-wheel input and DPI-button actions/gestures.
     pub hook_maps: SharedHookMaps,
     /// Function-key remapper bindings (keycode+modifiers → action). Not
     /// per-app-profile in M1 (spec non-goal), so a single shared map.
