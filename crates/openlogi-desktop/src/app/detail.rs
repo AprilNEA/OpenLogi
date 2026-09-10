@@ -2,7 +2,7 @@
 //! section bodies (Buttons, Keys, Pointer, Lighting, Camera, Device).
 
 use gpui::{
-    Context, InteractiveElement, IntoElement, ParentElement, Rems, Role,
+    Context, InteractiveElement, IntoElement, ParentElement, Rems, Role, SharedString,
     StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rems,
 };
 use gpui_base::Button as BaseButton;
@@ -35,6 +35,7 @@ use crate::features::pointer::smartshift::SmartShiftPanel;
 use crate::features::profiles::{
     AppCatalogPicker, ProfileIconCache, action_ring_profile_scope_bar, button_profile_scope_bar,
 };
+use crate::state::HostSwitchFollower;
 use crate::state::{AppState, DeviceRecord, StateEvent};
 use crate::ui::battery::BatteryIndicator;
 use crate::ui::components::{PanelCard, Toggle};
@@ -640,7 +641,86 @@ fn device_tab(cx: &mut Context<AppView>) -> impl IntoElement {
             .w_full()
             .gap_3()
             .child(device_details_card(pal, cx))
+            .when(
+                AppState::try_read(cx).is_some_and(AppState::current_device_leads_host_switch),
+                |tab| tab.child(easy_switch_card(pal, cx)),
+            )
             .child(configuration_card(pal, cx)),
+    )
+}
+
+/// Easy-Switch card: which pointing devices change computer with this keyboard.
+///
+/// Pure config, like [`scrolling_card`], so it is a plain settings block rather
+/// than an `Entity` panel. Offline followers stay listed and stay toggleable:
+/// the link is configuration, not a live command, and hiding a sleeping mouse
+/// would read as having silently unlinked it.
+fn easy_switch_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
+    let followers: Vec<HostSwitchFollower> =
+        AppState::try_read(cx).map_or_else(Vec::new, AppState::host_switch_followers);
+    let content = if followers.is_empty() {
+        v_flex().child(
+            div()
+                .text_caption()
+                .text_color(pal.text_muted)
+                .child(tr!("device.easy_switch_no_followers")),
+        )
+    } else {
+        followers.into_iter().fold(
+            v_flex().gap_3().child(
+                div()
+                    .text_caption()
+                    .text_color(pal.text_muted)
+                    .child(tr!("device.easy_switch_description")),
+            ),
+            |column, follower| {
+                let key = follower.key.clone();
+                column.child(
+                    h_flex()
+                        .justify_between()
+                        .items_center()
+                        .gap_4()
+                        .child(
+                            v_flex()
+                                .child(
+                                    div()
+                                        .text_body()
+                                        .text_color(pal.text_primary)
+                                        .child(SharedString::from(follower.name)),
+                                )
+                                .when(!follower.online, |name| {
+                                    name.child(
+                                        div()
+                                            .text_caption()
+                                            .text_color(pal.text_muted)
+                                            .child(tr!("device.offline")),
+                                    )
+                                }),
+                        )
+                        .child(
+                            Toggle::new(SharedString::from(format!("easy-switch-{key}")))
+                                .selected(follower.follows)
+                                .on_change(move |follows, _window, cx| {
+                                    let follower_key = key.clone();
+                                    AppState::update(cx, |state, cx| {
+                                        let leader =
+                                            state.current_record().map(DeviceRecord::device_key);
+                                        state.commit_host_switch_follower(&follower_key, *follows);
+                                        if let Some(leader) = leader {
+                                            cx.emit(StateEvent::DeviceConfigChanged(leader));
+                                        }
+                                    });
+                                }),
+                        ),
+                )
+            },
+        )
+    };
+
+    PanelCard::new(
+        tr!("device.easy_switch_followers"),
+        Icon::new(IconName::ExternalLink),
+        content,
     )
 }
 

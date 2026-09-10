@@ -132,6 +132,10 @@ device = "デバイス"
 manage_this_device = "このデバイスを管理"
 usb = "USB"
 
+easy_switch_followers = "このキーボードに追従するデバイス"
+easy_switch_description = "Easy-Switch キーを押すと、これらのデバイスがキーボードと一緒にコンピューターを切り替えます。"
+easy_switch_no_followers = "このコンピューターにマウスやタッチパッドはペアリングされていません。"
+
 [profiles]
 active_profile = "アクティブなプロファイル"
 default_profile = "デフォルトプロファイル"

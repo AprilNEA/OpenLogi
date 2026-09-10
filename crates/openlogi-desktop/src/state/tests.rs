@@ -21,6 +21,8 @@ use openlogi_core::hid::{
 };
 
 use gpui::AppContext as _;
+
+use crate::state::DeviceRecord;
 use openlogi_core::app::ForegroundApp;
 use openlogi_ipc::ForegroundApps;
 
@@ -1857,4 +1859,101 @@ fn a_failed_save_keeps_the_forgotten_device() {
             .edit(|config| config.device_identity("2b034").is_some()),
         "the persisted entry must survive the failed save"
     );
+}
+
+/// The mouse fixture turned into a keyboard, so a host-switch link has an end
+/// that leads as well as one that follows.
+fn keyboard_inventory(unit_id: [u8; 4]) -> DeviceInventory {
+    let mut inventory = direct_inventory(unit_id);
+    inventory.receiver.name = "MX Keys S".to_string();
+    inventory.receiver.product_id = 0xb378;
+    for device in &mut inventory.paired {
+        device.codename = Some("MX Keys S".to_string());
+        device.kind = DeviceKind::Keyboard;
+        device.capabilities = Some(Capabilities::presumed_from_kind(DeviceKind::Keyboard));
+    }
+    inventory
+}
+
+fn state_with_a_keyboard_and_a_mouse() -> AppState {
+    let cache = AssetResolver::new();
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    AppState::with_runtime(
+        Config::ephemeral(),
+        &[
+            keyboard_inventory([0x3f, 0x1f, 0xa4, 0x31]),
+            direct_inventory([0xdb, 0x7f, 0x0b, 0x87]),
+        ],
+        &[],
+        &cache,
+        &[],
+        ConfigPersistence::MemoryOnly,
+        commands,
+    )
+}
+
+fn select_kind(state: &mut AppState, kind: DeviceKind) {
+    let index = state
+        .devices
+        .records
+        .iter()
+        .position(|record| record.kind == kind)
+        .expect("the fixture holds one device of each kind");
+    state.set_current_device(index);
+}
+
+fn leader_key(state: &AppState) -> String {
+    state
+        .current_record()
+        .and_then(DeviceRecord::persistent_config_key)
+        .expect("the keyboard carries a persistent key")
+        .to_string()
+}
+
+#[test]
+fn a_keyboard_offers_the_mouse_as_a_host_switch_follower() {
+    let mut state = state_with_a_keyboard_and_a_mouse();
+    select_kind(&mut state, DeviceKind::Keyboard);
+
+    assert!(state.current_device_leads_host_switch());
+    let followers = state.host_switch_followers();
+    assert_eq!(followers.len(), 1, "the mouse is the one candidate");
+    assert!(
+        !followers[0].follows,
+        "nothing follows a keyboard until the user links it"
+    );
+}
+
+#[test]
+fn a_mouse_leads_no_host_switch() {
+    let mut state = state_with_a_keyboard_and_a_mouse();
+    select_kind(&mut state, DeviceKind::Mouse);
+
+    assert!(!state.current_device_leads_host_switch());
+    assert!(
+        state.host_switch_followers().is_empty(),
+        "the card has nothing to render on a pointing device"
+    );
+}
+
+#[test]
+fn linking_a_follower_reaches_the_config_and_reads_back() {
+    let mut state = state_with_a_keyboard_and_a_mouse();
+    select_kind(&mut state, DeviceKind::Keyboard);
+    let leader = leader_key(&state);
+    let follower = state.host_switch_followers().remove(0).key;
+
+    state.commit_host_switch_follower(&follower, true);
+
+    assert!(state.host_switch_followers()[0].follows);
+    assert_eq!(
+        state.config.host_switch_targets(&leader),
+        [follower.clone()],
+        "the link has to survive as far as the file the agent reads"
+    );
+
+    state.commit_host_switch_follower(&follower, false);
+
+    assert!(!state.host_switch_followers()[0].follows);
+    assert!(state.config.host_switch_targets(&leader).is_empty());
 }
