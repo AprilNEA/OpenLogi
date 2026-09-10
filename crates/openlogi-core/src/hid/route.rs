@@ -263,6 +263,7 @@ mod tests {
         // Lightspeed hardware and says so in its own USB product string, so it
         // must not be surfaced as a Unifying receiver.
         assert_eq!(receiver_display_name(0xc539), "Lightspeed Receiver");
+        assert_eq!(receiver_display_name(0xc53a), "Lightspeed Receiver");
         assert_eq!(receiver_display_name(0xc53f), "Lightspeed Receiver");
         assert_eq!(receiver_display_name(0xc547), "Lightspeed Receiver");
         assert_eq!(receiver_display_name(0xc54d), "Lightspeed Receiver");

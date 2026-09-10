@@ -66,6 +66,12 @@ pub const RECEIVERS: &[ReceiverDescriptor] = &[
         ReceiverBrand::Lightspeed,
         ReceiverProtocol::Unifying,
     ),
+    // POWERPLAY wireless charging system's embedded Lightspeed receiver.
+    ReceiverDescriptor::logitech(
+        0xc53a,
+        ReceiverBrand::Lightspeed,
+        ReceiverProtocol::Unifying,
+    ),
     // Lightspeed nano receiver, verified with a G305 (WPID 0x4074).
     ReceiverDescriptor::logitech(
         0xc53f,
@@ -112,6 +118,14 @@ mod tests {
                 receiver.product_id
             );
         }
+    }
+
+    #[test]
+    fn powerplay_receiver_is_lightspeed_over_unifying_protocol() {
+        let receiver = find_receiver(LOGITECH_VENDOR_ID, 0xc53a).expect("c53a receiver");
+
+        assert_eq!(receiver.brand, ReceiverBrand::Lightspeed);
+        assert_eq!(receiver.protocol, ReceiverProtocol::Unifying);
     }
 
     #[test]
