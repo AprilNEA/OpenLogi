@@ -1957,3 +1957,22 @@ fn linking_a_follower_reaches_the_config_and_reads_back() {
     assert!(!state.host_switch_followers()[0].follows);
     assert!(state.config.host_switch_targets(&leader).is_empty());
 }
+
+#[test]
+fn a_follower_whose_receiver_is_gone_keeps_its_row() {
+    let mut state = state_with_a_keyboard_and_a_mouse();
+    select_kind(&mut state, DeviceKind::Keyboard);
+
+    state.commit_host_switch_follower("serial:deadbeef", true);
+
+    let ghost = state
+        .host_switch_followers()
+        .into_iter()
+        .find(|follower| follower.key == "serial:deadbeef")
+        .expect("a configured follower stays listed with no device behind it");
+    assert!(
+        ghost.follows,
+        "it is still linked, so it still reads linked"
+    );
+    assert!(!ghost.online, "and it is plainly marked as out of reach");
+}

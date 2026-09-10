@@ -57,7 +57,8 @@ impl AppState {
             return Vec::new();
         };
         let configured = self.config.host_switch_targets(leader);
-        self.devices
+        let mut followers: Vec<HostSwitchFollower> = self
+            .devices
             .records
             .iter()
             .filter(|record| Self::follows_a_keyboard(record.kind))
@@ -70,7 +71,30 @@ impl AppState {
                     online: record.online,
                 })
             })
-            .collect()
+            .collect();
+        // A device is only in `records` while some route reaches it, so pulling
+        // its receiver drops it entirely rather than leaving it there offline. A
+        // list built from live devices alone would then lose the row while the
+        // link stayed in the file: still followed, invisible, and impossible to
+        // undo. Configured keys keep their place, named from the identity the
+        // config remembers from when the device was last seen.
+        for key in configured {
+            if followers.iter().any(|follower| &follower.key == key) {
+                continue;
+            }
+            followers.push(HostSwitchFollower {
+                key: key.clone(),
+                name: self
+                    .config
+                    .devices
+                    .get(key)
+                    .and_then(|device| device.identity.as_ref())
+                    .map_or_else(|| key.clone(), |identity| identity.display_name.clone()),
+                follows: true,
+                online: false,
+            });
+        }
+        followers
     }
 
     /// Add or remove one follower of the active keyboard and persist it.

@@ -4,8 +4,9 @@ use std::thread;
 use std::time::Duration;
 
 use openlogi_hid::{
-    ChannelPool, ChannelRegistry, DeviceIoGate, DeviceRoute, HostSwitchRestoreOutcome,
-    HostSwitchStopReason, PendingHostSwitchRestore, run_host_switch_session, switch_linked_hosts,
+    ChannelPool, ChannelRegistry, DeviceIoGate, DeviceRoute, HostSwitchRequest,
+    HostSwitchRestoreOutcome, HostSwitchStopReason, PendingHostSwitchRestore,
+    run_host_switch_session, switch_linked_hosts,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
@@ -114,7 +115,7 @@ enum RestorePhase {
 struct Recovery {
     link: HostSwitchLink,
     generation: u64,
-    requested_host: Option<u8>,
+    requested_host: Option<HostSwitchRequest>,
     restore: RestorePhase,
 }
 
@@ -140,7 +141,24 @@ impl HostSwitchSlot {
 #[derive(Clone)]
 struct TransitionIntent {
     link: HostSwitchLink,
-    host: u8,
+    host: HostSwitchRequest,
+}
+
+impl TransitionIntent {
+    /// Whether this intent survives its link leaving the published set.
+    ///
+    /// A link is published only while its keyboard is online, and an
+    /// announcement is what a keyboard sends as it goes offline. Every check
+    /// that asks "is this link still listed?" therefore answers no for an
+    /// announcement, so an announcement made to pass them all would never run at
+    /// all. It stands instead on the link that was live when the session armed.
+    ///
+    /// A directed request keeps the check: its keyboard is still there, so a
+    /// link that has since been unpublished means the user unlinked it, and the
+    /// request should die with it.
+    fn outlives_its_link(&self) -> bool {
+        matches!(self.host, HostSwitchRequest::Announced { .. })
+    }
 }
 
 enum TransitionPhase {
@@ -154,7 +172,7 @@ struct SessionCompletion {
 }
 
 struct SessionResult {
-    requested_host: Option<u8>,
+    requested_host: Option<HostSwitchRequest>,
     pending_restore: Option<PendingHostSwitchRestore>,
     failed: bool,
 }
@@ -214,14 +232,31 @@ impl HostSwitchManagerState {
     fn reconcile_transition(&mut self, published: &[HostSwitchLink], terminal: bool) {
         if matches!(
             &self.transition,
-            Some(TransitionPhase::Waiting(intent)) if terminal || !published.contains(&intent.link)
+            Some(TransitionPhase::Waiting(intent))
+                if terminal
+                    || (!intent.outlives_its_link() && !published.contains(&intent.link))
         ) {
             self.transition = None;
         }
     }
 
     fn begin_transition(&mut self, terminal: bool) -> Option<TransitionIntent> {
-        if terminal || self.has_running_sessions() || self.has_pending_restores() {
+        if terminal || self.has_running_sessions() {
+            return None;
+        }
+        // A pending restore normally goes first: the keyboard's controls are put
+        // back before anything moves hosts. An announcement inverts that. The
+        // keyboard has already left, so its restore cannot succeed until it
+        // comes back, and by then the pointer that should have travelled with
+        // it is long stranded. Letting the transition through is safe because
+        // the receiver lock, not this gate, is what keeps the two apart: an
+        // exclusive request stops restores from acquiring, and waits out any
+        // that already holds.
+        let announced = matches!(
+            &self.transition,
+            Some(TransitionPhase::Waiting(intent)) if intent.outlives_its_link()
+        );
+        if !announced && self.has_pending_restores() {
             return None;
         }
         let Some(TransitionPhase::Waiting(intent)) = self
@@ -373,18 +408,42 @@ impl HostSwitchManagerState {
         if result.failed {
             debug!(route = %session.link.keyboard, "host switch session ended");
         }
-        let request_is_current = !terminal && published.contains(&session.link);
+        // A link is only published while its keyboard is online, and a keyboard
+        // announces precisely as it goes offline. Requiring the link to still be
+        // listed would therefore drop every announcement there will ever be, so
+        // an announcement stands on the link that was live when the session
+        // armed. A directed request keeps the original check: its keyboard is
+        // still here, so a link that has since been unpublished means the user
+        // unlinked it and the request should die with it.
+        let announced = matches!(
+            result.requested_host,
+            Some(HostSwitchRequest::Announced { .. })
+        );
+        let request_is_current = !terminal && (announced || published.contains(&session.link));
+        let request = result.requested_host.filter(|_| request_is_current);
+        // An announcement is scheduled beside the restore rather than behind it.
+        // A directed request rides along in the recovery and runs once the
+        // keyboard's controls are back, which is the right order while the
+        // keyboard is still here. An announcement means it is not: its restore
+        // cannot finish until it returns, and a pointer that waits that long has
+        // missed the trip it was supposed to make.
         if let Some(token) = result.pending_restore {
+            if let Some(host) = request.filter(|_| announced) {
+                self.transition = Some(TransitionPhase::Waiting(TransitionIntent {
+                    link: session.link.clone(),
+                    host,
+                }));
+            }
             self.slots.push(HostSwitchSlot::Recovering(Recovery {
                 link: session.link,
                 generation: session.generation,
-                requested_host: result.requested_host.filter(|_| request_is_current),
+                requested_host: request.filter(|_| !announced),
                 restore: RestorePhase::Ready {
                     token,
                     retry_at: Instant::now() + RETRY_DELAY,
                 },
             }));
-        } else if let Some(host) = result.requested_host.filter(|_| request_is_current) {
+        } else if let Some(host) = request {
             self.transition = Some(TransitionPhase::Waiting(TransitionIntent {
                 link: session.link,
                 host,
@@ -555,18 +614,15 @@ fn spawn_session(
     let session_link = link.clone();
     let registry = services.registry.clone();
     let device_io = services.device_io.clone();
-    let channel_pool = services.channel_pool.clone();
     let events = services.events.clone();
     tokio::spawn(async move {
         let task = tokio::spawn(async move {
             let _receiver_lease = receiver_lease;
             match run_host_switch_session(
                 session_link.keyboard.clone(),
-                session_link.targets.clone(),
                 stop_rx,
                 &registry,
                 device_io,
-                channel_pool,
             )
             .await
             {
@@ -637,7 +693,12 @@ async fn run_transition(
     let _lease = receiver_access
         .acquire_exclusive(ExclusiveAccessReason::HostTransition)
         .await;
-    if !device_io.allows_io() || !links.borrow().contains(&intent.link) {
+    if !device_io.allows_io() {
+        debug!(route = %intent.link.keyboard, "device I/O is suspended — host switch skipped");
+        return;
+    }
+    if !intent.outlives_its_link() && !links.borrow().contains(&intent.link) {
+        debug!(route = %intent.link.keyboard, "link is no longer published — host switch skipped");
         return;
     }
     match switch_linked_hosts(
@@ -651,7 +712,7 @@ async fn run_transition(
         Ok(true) => wait_for_departure(&mut links, &intent.link.keyboard).await,
         Ok(false) => {}
         Err(error) => {
-            debug!(%error, route = %intent.link.keyboard, host = intent.host, "keyboard host switch failed");
+            debug!(%error, route = %intent.link.keyboard, host = ?intent.host, "keyboard host switch failed");
         }
     }
 }
@@ -746,7 +807,7 @@ mod tests {
         let mut state = HostSwitchManagerState::new();
         state.transition = Some(TransitionPhase::Waiting(TransitionIntent {
             link: link(2),
-            host: 1,
+            host: HostSwitchRequest::Directed(1),
         }));
 
         state.reconcile_transition(&[link(3)], false);
@@ -808,6 +869,61 @@ mod tests {
     }
 
     #[test]
+    fn an_announced_transition_survives_its_link_being_unpublished() {
+        let mut state = HostSwitchManagerState::new();
+        state.transition = Some(TransitionPhase::Waiting(TransitionIntent {
+            link: link(2),
+            host: HostSwitchRequest::Announced { leader_host: 1 },
+        }));
+
+        // The keyboard going offline is what unpublishes the link, and it is
+        // also what produced the announcement, so an empty list here is the
+        // normal case rather than a reason to drop the work.
+        state.reconcile_transition(&[], false);
+
+        assert!(matches!(
+            state.transition,
+            Some(TransitionPhase::Waiting(_))
+        ));
+    }
+
+    #[test]
+    fn a_directed_transition_is_dropped_when_its_link_goes_away() {
+        let mut state = HostSwitchManagerState::new();
+        state.transition = Some(TransitionPhase::Waiting(TransitionIntent {
+            link: link(2),
+            host: HostSwitchRequest::Directed(2),
+        }));
+
+        state.reconcile_transition(&[], false);
+
+        assert!(state.transition.is_none(), "the user unlinked it");
+    }
+
+    #[test]
+    fn an_announced_transition_does_not_wait_for_restoration() {
+        let mut state = HostSwitchManagerState::new();
+        state.slots.push(HostSwitchSlot::Recovering(Recovery {
+            link: link(2),
+            generation: 1,
+            requested_host: None,
+            restore: RestorePhase::Restoring,
+        }));
+        state.transition = Some(TransitionPhase::Waiting(TransitionIntent {
+            link: link(2),
+            host: HostSwitchRequest::Announced { leader_host: 1 },
+        }));
+
+        // The keyboard announced a switch it makes itself and has already gone,
+        // so its restore cannot finish until it comes back. Waiting for it would
+        // hold the pointer on the machine the user just left.
+        assert_eq!(
+            state.begin_transition(false).unwrap().host,
+            HostSwitchRequest::Announced { leader_host: 1 }
+        );
+    }
+
+    #[test]
     fn transition_waits_for_restoration_and_keeps_running_until_acknowledged() {
         let mut state = HostSwitchManagerState::new();
         state.slots.push(HostSwitchSlot::Recovering(Recovery {
@@ -818,7 +934,7 @@ mod tests {
         }));
         state.transition = Some(TransitionPhase::Waiting(TransitionIntent {
             link: link(2),
-            host: 2,
+            host: HostSwitchRequest::Directed(2),
         }));
         assert!(state.begin_transition(false).is_none());
         assert!(matches!(
@@ -834,7 +950,10 @@ mod tests {
             &[link(2)],
             false,
         );
-        assert_eq!(state.begin_transition(false).unwrap().host, 2);
+        assert_eq!(
+            state.begin_transition(false).unwrap().host,
+            HostSwitchRequest::Directed(2)
+        );
         // Another manager wake while switching must not remove Running.
         assert!(state.begin_transition(false).is_none());
         assert!(state.terminal_completion(true).is_none());
