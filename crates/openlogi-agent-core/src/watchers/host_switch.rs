@@ -248,12 +248,26 @@ impl Transitions {
             .retain(|intent| intent.outlives_its_link() || published.contains(&intent.link));
     }
 
-    /// Take the next intent to run, or `None` while one is already running.
-    fn begin(&mut self) -> Option<TransitionIntent> {
+    /// Take the next intent that can run now.
+    ///
+    /// `None` while one is already running, or while nothing queued can go.
+    /// With a restore pending only an announcement can, since a directed
+    /// request waits for the keyboard's controls to be put back first.
+    ///
+    /// Skipping past a blocked directed request rather than stopping at it is
+    /// the point: the restore of a keyboard that has left keeps failing and
+    /// requeueing, so a directed request sitting at the front would hold every
+    /// announcement behind it for as long as that keyboard stays away — which
+    /// is exactly as long as the pointers it should have taken are stranded.
+    fn begin(&mut self, restores_pending: bool) -> Option<TransitionIntent> {
         if self.running {
             return None;
         }
-        let intent = self.queued.pop_front()?;
+        let index = self
+            .queued
+            .iter()
+            .position(|intent| !restores_pending || intent.outlives_its_link())?;
+        let intent = self.queued.remove(index)?;
         self.running = true;
         Some(intent)
     }
@@ -343,15 +357,7 @@ impl HostSwitchManagerState {
         // the receiver lock, not this gate, is what keeps the two apart: an
         // exclusive request stops restores from acquiring, and waits out any
         // that already holds.
-        let announced = self
-            .transitions
-            .queued
-            .front()
-            .is_some_and(TransitionIntent::outlives_its_link);
-        if !announced && self.has_pending_restores() {
-            return None;
-        }
-        self.transitions.begin()
+        self.transitions.begin(self.has_pending_restores())
     }
 
     fn terminal_completion(&self, terminal: bool) -> Option<ManagerCompletion> {
@@ -881,6 +887,42 @@ mod tests {
     /// The regression this pins down: a single transition slot. Two keyboards
     /// announcing close together overwrote one another there, and one set of
     /// followers simply never moved.
+    /// The regression this pins down: taking only the front of the queue. A
+    /// directed request waiting on a restore would sit there while the restore
+    /// of a keyboard that has left keeps failing and requeueing, and every
+    /// announcement behind it, along with the pointers it should have moved,
+    /// waited for a keyboard that was not coming back.
+    #[test]
+    fn an_announcement_is_not_held_up_by_a_directed_request_waiting_on_a_restore() {
+        let mut state = HostSwitchManagerState::new();
+        state.slots.push(HostSwitchSlot::Recovering(Recovery {
+            link: link(1),
+            generation: 1,
+            requested_host: None,
+            restore: RestorePhase::Restoring,
+        }));
+        state.transitions.schedule(TransitionIntent {
+            link: link(1),
+            host: HostSwitchRequest::Directed(2),
+        });
+        state.transitions.schedule(TransitionIntent {
+            link: link(2),
+            host: HostSwitchRequest::Announced { leader_host: 1 },
+        });
+
+        let intent = state
+            .begin_transition(false)
+            .expect("the announcement runs even though the directed request cannot");
+        assert_eq!(intent.link, link(2));
+
+        // And the directed request keeps its place rather than being dropped.
+        state.transitions.finish();
+        assert!(
+            state.begin_transition(false).is_none(),
+            "it still waits for the restore"
+        );
+    }
+
     #[test]
     fn two_keyboards_announcing_together_each_get_their_turn() {
         let mut state = HostSwitchManagerState::new();
