@@ -8,8 +8,7 @@ repository.workspace = true
 authors.workspace = true
 description = "GPUI-based desktop UI for OpenLogi."
 default-run = "openlogi-desktop"
-# Not publishable to crates.io: depends on git-only gpui / gpui_platform
-# (gpui_platform is not on the registry). Distributed as a bundled .app.
+# Distributed as a bundled app; Kit stays Git-pinned to embed its full themes.
 publish = false
 
 [[bin]]
@@ -30,7 +29,7 @@ gpui = { workspace = true }
 gpui_platform = { workspace = true }
 gpui-component = { workspace = true }
 gpui-base = { workspace = true }
-gpui-component-assets = { workspace = true }
+gpui-kit-assets = { workspace = true }
 swr-core = { workspace = true }
 swr-gpui = { workspace = true }
 tokio = { workspace = true }
@@ -44,7 +43,7 @@ rust-i18n = "4"
 # The raw, un-negotiated system locale for the diagnostics report; locale
 # *negotiation* lives in openlogi-ui.
 sys-locale = "0.3.2"
-gpui-updater = { git = "https://github.com/AprilNEA/gpui-updater", tag = "v0.0.7", features = ["gpui"] }
+gpui-updater = { package = "gpui-updater-pre", version = "0.1" }
 # Spawns the agent under its own macOS TCC identity (see ipc_client::spawn_agent).
 disclaim = "0.1"
 url = "2.5.8"
@@ -57,10 +56,9 @@ derive_more = { version = "2.1.1", default-features = false, features = ["displa
 # app's icon after the fact.
 appicon = { git = "https://github.com/AprilNEA/appicon", tag = "v0.1.1" }
 
-# Held at the version Cargo.lock already has for gpui's own build-dependency;
-# bumping it independently would move the pinned gpui rev.
 [build-dependencies]
 embed-resource = "3.0.9"
+serde_json.workspace = true
 
 # Window chrome, host OS string, and installed-app icon lookup only — the
 # menu-bar status item lives in the agent, not here.

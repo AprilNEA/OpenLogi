@@ -270,9 +270,8 @@ and the only ones that should:
 
 `cocoa` / `objc` 0.x are gone from every crate's direct deps (they remain in
 `Cargo.lock` only transitively via gpui — expected). Use `cargo add` for objc2
-framework crates, then **verify the `zed` / `gpui-component` git pins in
-`Cargo.lock` didn't move** (the gpui pin is held only by the lock; a resolve can
-bump it — restore with `cargo update -p gpui --precise <commit>`).
+framework crates, then verify that `Cargo.lock` still carries one version-aligned
+`gpui-pre` stack and the workspace's pinned Kit release.
 
 Every ObjC / Core-framework crate is declared **once** in the workspace table —
 `objc2`, `objc2-app-kit`, `objc2-foundation`, `objc2-core-foundation`,
@@ -281,8 +280,8 @@ Every ObjC / Core-framework crate is declared **once** in the workspace table �
 `default-features = false` there, and each member inherits with
 `workspace = true` and adds only the feature modules it uses. A new one belongs
 in that table too, never inline in a member manifest: the unified version is what
-keeps a resolve from dragging the gpui pin along. Trim a member's feature list
-when the code that needed it moves out.
+keeps the native framework types compatible across the app and GPUI. Trim a
+member's feature list when the code that needed it moves out.
 
 ## Build & verify
 

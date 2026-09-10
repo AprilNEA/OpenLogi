@@ -464,6 +464,23 @@ impl<E: Styled> Typography for E {}
 mod tests {
     use super::*;
 
+    #[gpui::test]
+    fn bundled_theme_picker_keeps_upstream_and_openlogi_themes(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            register_builtin_themes(cx);
+            let themes = ThemeRegistry::global(cx).themes();
+            for name in [
+                OPENLOGI_LIGHT,
+                OPENLOGI_DARK,
+                "Catppuccin Latte",
+                "Catppuccin Mocha",
+            ] {
+                assert!(themes.contains_key(name), "missing bundled theme: {name}");
+            }
+        });
+    }
+
     #[test]
     fn content_width_scale_preserves_the_standard_layout() {
         assert_eq!(

@@ -31,10 +31,33 @@ impl AssetSource for AppAssets {
         if let Some(bytes) = ActionIcons.load(path)? {
             return Ok(Some(bytes));
         }
-        gpui_component_assets::Assets.load(path)
+        gpui_kit_assets::Assets.load(path)
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
-        gpui_component_assets::Assets.list(path)
+        gpui_kit_assets::Assets.list(path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn logo_ring_and_component_assets_remain_available() {
+        let logo = AppAssets.load(LOGO).unwrap().unwrap();
+        assert!(logo.starts_with(b"\x89PNG\r\n\x1a\n"));
+
+        for path in [
+            openlogi_ui::action_icons::RING_CANCEL_ICON,
+            "icons/check.svg",
+            "icons/chevron-down.svg",
+        ] {
+            let bytes = AppAssets.load(path).unwrap().unwrap();
+            assert!(
+                std::str::from_utf8(&bytes).unwrap().contains("<svg"),
+                "missing SVG content for {path}"
+            );
+        }
     }
 }
