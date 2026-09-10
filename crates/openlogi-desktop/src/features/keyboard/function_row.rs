@@ -83,6 +83,10 @@ const FUNCTION_KEYS: [(&str, u16); 20] = [
 ];
 
 const MX_MECHANICAL_MINI_MAC_MODEL_ID: u16 = 0xb36d;
+/// MX Keys Mini (Logi Bolt / Bluetooth-direct), Logi depot `mx_keys_mini`. The
+/// for-Mac (`0xb36a`) and for-Business (`0xb36e`) SKUs ship separate depots and
+/// are not modelled here yet.
+const MX_KEYS_MINI_MODEL_ID: u16 = 0xb369;
 
 /// Width of the config panel (CSS px) when a key is selected.
 const PANEL_W: f32 = 320.;
@@ -426,6 +430,7 @@ fn key_definitions(
     if let Some(record) = record
         && let Some(model) = record.model_info.as_ref()
         && let Some(definitions) = mx_mechanical_mini_definitions(record.device_key(), model, asset)
+            .or_else(|| mx_keys_mini_definitions(record.device_key(), model, asset))
     {
         return definitions;
     }
@@ -470,6 +475,12 @@ fn keyboard_callout_label(button: ButtonId) -> Option<&'static str> {
         ButtonId::KeyEnd => Some("End"),
         ButtonId::KeyPageUp => Some("Pg Up"),
         ButtonId::KeyPageDown => Some("Pg Dn"),
+        ButtonId::KeyDictation => Some("Mic"),
+        ButtonId::KeyEmoji => Some("Emoji"),
+        ButtonId::KeyScreenCapture => Some("Snip"),
+        ButtonId::KeyMicMute => Some("Mic Mute"),
+        ButtonId::KeyPlayPause => Some("Play"),
+        ButtonId::KeyMute => Some("Mute"),
         _ => None,
     }
 }
@@ -542,6 +553,80 @@ fn mx_mechanical_mini_definitions(
         ));
     }
     (definitions.len() == FUNCTION_KEYS.len()).then_some(definitions)
+}
+
+/// Build the MX Keys Mini's physical top row from semantic depot slots. Like the
+/// Mechanical Mini its first three F-row markers live in
+/// `device_easyswitch_image`, but it has no navigation column and its
+/// dictation/emoji/screen-capture/mic-mute/media keys carry real HID++ CIDs, so
+/// they become per-device controls (only Esc, EasySwitch, and the two backlight
+/// keys stay native F-keys). Treating every marker as a positional F1-F19 row is
+/// what drew a 20-slot even-spaced overlay on top of this ~14-key board.
+fn mx_keys_mini_definitions(
+    device_key: DeviceKey,
+    model: &DeviceModelInfo,
+    asset: Option<&ResolvedAsset>,
+) -> Option<Vec<KeyDefinition>> {
+    if !model.model_ids.contains(&MX_KEYS_MINI_MODEL_ID) {
+        return None;
+    }
+    let asset = asset?;
+    let mut easy_switch: Vec<&Assignment> = assignments_for(asset, "device_easyswitch_image")
+        .filter(|assignment| assignment.slot_name.starts_with("SLOT_NAME_EASYSWITCH_"))
+        .collect();
+    easy_switch.sort_by(|a, b| a.marker.x.total_cmp(&b.marker.x));
+
+    let mut top_row: Vec<&Assignment> = assignments_for(asset, "device_keys_image").collect();
+    top_row.sort_by(|a, b| a.marker.x.total_cmp(&b.marker.x));
+    if easy_switch.len() != 3 || !(8..=12).contains(&top_row.len()) {
+        return None;
+    }
+
+    let mut definitions = Vec::with_capacity(1 + easy_switch.len() + top_row.len());
+    definitions.push(global_key_definition(
+        FUNCTION_KEYS[0].0,
+        FUNCTION_KEYS[0].1,
+        synthesized_esc_point(assignment_point(easy_switch[0])),
+    ));
+    for (index, assignment) in easy_switch.into_iter().enumerate() {
+        let function_index = index + 1;
+        definitions.push(global_key_definition(
+            FUNCTION_KEYS[function_index].0,
+            FUNCTION_KEYS[function_index].1,
+            calibrated_marker_point(assignment_point(assignment)),
+        ));
+    }
+    for (index, assignment) in top_row.into_iter().enumerate() {
+        let function_index = index + 4;
+        let point = calibrated_marker_point(assignment_point(assignment));
+        if let Some(button) = mx_keys_mini_control(&assignment.slot_name) {
+            definitions.push(device_key_definition(device_key.clone(), button, point));
+        } else {
+            definitions.push(global_key_definition(
+                FUNCTION_KEYS[function_index].0,
+                FUNCTION_KEYS[function_index].1,
+                point,
+            ));
+        }
+    }
+    Some(definitions)
+}
+
+/// The MX Keys Mini top-row slots that carry a divertable HID++ control ID
+/// (`KEYBOARD_KEY_CIDS` in `openlogi-device`). The two backlight slots have no
+/// CID and stay native F4/F5.
+fn mx_keys_mini_control(slot_name: &str) -> Option<ButtonId> {
+    match slot_name {
+        "SLOT_NAME_DICTATION" => Some(ButtonId::KeyDictation),
+        "SLOT_NAME_EMOJI" => Some(ButtonId::KeyEmoji),
+        "SLOT_NAME_SCREEN_CAPTURE" => Some(ButtonId::KeyScreenCapture),
+        "SLOT_NAME_MUTE_UNMUTE_AUDIO" => Some(ButtonId::KeyMicMute),
+        "SLOT_NAME_PLAY_PAUSE" => Some(ButtonId::KeyPlayPause),
+        "SLOT_NAME_MUTE" => Some(ButtonId::KeyMute),
+        "SLOT_NAME_VOLUME_DOWN" => Some(ButtonId::KeyVolumeDown),
+        "SLOT_NAME_VOLUME_UP" => Some(ButtonId::KeyVolumeUp),
+        _ => None,
+    }
 }
 
 fn assignments_for<'a>(

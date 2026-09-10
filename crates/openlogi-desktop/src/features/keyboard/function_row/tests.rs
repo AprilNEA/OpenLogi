@@ -133,6 +133,100 @@ fn unrelated_keyboard_does_not_use_the_mini_layout() {
 }
 
 #[test]
+fn mx_keys_mini_maps_media_keys_to_hidpp_and_keeps_backlight_native() {
+    let model = DeviceModelInfo {
+        entity_count: 1,
+        serial_number: None,
+        unit_id: [0; 4],
+        transports: DeviceTransports {
+            btle: true,
+            ..DeviceTransports::default()
+        },
+        model_ids: [MX_KEYS_MINI_MODEL_ID, 0, 0],
+        extended_model_id: 0,
+    };
+    let asset = mx_keys_mini_asset();
+    let test_key = DeviceKey::from("test-keys-mini");
+
+    let definitions = mx_keys_mini_definitions(test_key.clone(), &model, Some(&asset))
+        .expect("recognized Keys Mini layout");
+
+    // Esc + 3 EasySwitch + 10 top-row markers, no navigation column.
+    assert_eq!(definitions.len(), 14);
+
+    // Esc and F1-F3 (EasySwitch) stay global native keys.
+    assert_eq!(definitions[0].target, global_target(0x35));
+    assert_eq!(definitions[1].target, global_target(0x7a));
+    assert_approx_eq(definitions[1].point.x_frac, 0.1065);
+    assert_eq!(definitions[3].target, global_target(0x63));
+
+    // Backlight down/up have no HID++ CID — they remain F4/F5.
+    assert_eq!(definitions[4].target, global_target(0x76));
+    assert_eq!(definitions[5].target, global_target(0x60));
+
+    let device = |button| BindingTarget::Device {
+        device_key: test_key.clone(),
+        button,
+    };
+    assert_eq!(definitions[6].target, device(ButtonId::KeyDictation));
+    assert_eq!(definitions[7].target, device(ButtonId::KeyEmoji));
+    assert_eq!(definitions[8].target, device(ButtonId::KeyScreenCapture));
+    assert_eq!(definitions[9].target, device(ButtonId::KeyMicMute));
+    assert_eq!(definitions[10].target, device(ButtonId::KeyPlayPause));
+    assert_eq!(definitions[11].target, device(ButtonId::KeyMute));
+    assert_eq!(definitions[12].target, device(ButtonId::KeyVolumeDown));
+    assert_eq!(definitions[13].target, device(ButtonId::KeyVolumeUp));
+
+    // Markers keep their physical row position (single row, y calibrated once).
+    assert_approx_eq(definitions[6].point.x_frac, 0.4275);
+    assert_approx_eq(definitions[13].point.y_frac, 0.161);
+
+    assert_eq!(definitions[6].label.as_ref(), "Mic");
+    assert_eq!(definitions[8].label.as_ref(), "Snip");
+    assert_eq!(definitions[13].label.as_ref(), "Vol Up");
+}
+
+#[test]
+fn unrelated_keyboard_does_not_use_the_keys_mini_layout() {
+    let model = DeviceModelInfo {
+        entity_count: 1,
+        serial_number: None,
+        unit_id: [0; 4],
+        transports: DeviceTransports::default(),
+        model_ids: [0x1234, 0, 0],
+        extended_model_id: 0,
+    };
+
+    assert!(
+        mx_keys_mini_definitions(
+            DeviceKey::from("unrelated"),
+            &model,
+            Some(&mx_keys_mini_asset())
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn keys_mini_layout_needs_the_easy_switch_group() {
+    let model = DeviceModelInfo {
+        entity_count: 1,
+        serial_number: None,
+        unit_id: [0; 4],
+        transports: DeviceTransports::default(),
+        model_ids: [MX_KEYS_MINI_MODEL_ID, 0, 0],
+        extended_model_id: 0,
+    };
+    let mut asset = mx_keys_mini_asset();
+    asset
+        .metadata
+        .images
+        .retain(|image| image.key != "device_easyswitch_image");
+
+    assert!(mx_keys_mini_definitions(DeviceKey::from("keys-mini"), &model, Some(&asset)).is_none());
+}
+
+#[test]
 fn reset_for_device_drops_editor_and_selection_when_device_changes() {
     let mut view = FunctionRowView {
         current_device_key: Some(DeviceKey::from("keyboard-a")),
@@ -459,6 +553,67 @@ fn mx_mechanical_mini_asset() -> ResolvedAsset {
         display_name: "MX Mechanical Mini for Mac".to_string(),
         kind: Some(DeviceKind::Keyboard),
         image_path: PathBuf::from("/tmp/mx-mechanical-mini.png"),
+        hero_image_path: None,
+        glow: None,
+        metadata: Metadata {
+            images: vec![
+                ImageEntry {
+                    key: "device_keys_image".to_string(),
+                    origin: Origin {
+                        width: 1872,
+                        height: 728,
+                    },
+                    assignments: assignments(&top_row),
+                },
+                ImageEntry {
+                    key: "device_easyswitch_image".to_string(),
+                    origin: Origin {
+                        width: 1872,
+                        height: 728,
+                    },
+                    assignments: assignments(&easy_switch),
+                },
+            ],
+        },
+        png_width: 1872,
+        png_height: 728,
+    }
+}
+
+fn mx_keys_mini_asset() -> ResolvedAsset {
+    // Marker coordinates from the shipped `mx_keys_mini` depot metadata.
+    let top_row = [
+        ("SLOT_NAME_BACKLIGHT_DOWN", 27.9, 13.8),
+        ("SLOT_NAME_BACKLIGHT_UP", 34.3, 13.8),
+        ("SLOT_NAME_DICTATION", 40.75, 13.8),
+        ("SLOT_NAME_EMOJI", 47.1, 13.8),
+        ("SLOT_NAME_SCREEN_CAPTURE", 53.5, 13.8),
+        ("SLOT_NAME_MUTE_UNMUTE_AUDIO", 59.9, 13.8),
+        ("SLOT_NAME_PLAY_PAUSE", 66.3, 13.8),
+        ("SLOT_NAME_MUTE", 72.7, 13.8),
+        ("SLOT_NAME_VOLUME_DOWN", 79.1, 13.8),
+        ("SLOT_NAME_VOLUME_UP", 85.5, 13.8),
+    ];
+    let easy_switch = [
+        ("SLOT_NAME_EASYSWITCH_1", 8.65, 13.8),
+        ("SLOT_NAME_EASYSWITCH_2", 15.0, 13.8),
+        ("SLOT_NAME_EASYSWITCH_3", 21.4, 13.8),
+    ];
+    let assignments = |slots: &[(&str, f32, f32)]| {
+        slots
+            .iter()
+            .map(|(slot_name, x, y)| Assignment {
+                slot_name: (*slot_name).to_string(),
+                marker: Point { x: *x, y: *y },
+                label: Direction { x: -1, y: -1 },
+            })
+            .collect()
+    };
+    ResolvedAsset {
+        depot: "mx_keys_mini".to_string(),
+        display_name: "MX Keys Mini".to_string(),
+        kind: Some(DeviceKind::Keyboard),
+        image_path: PathBuf::from("/tmp/mx-keys-mini.png"),
         hero_image_path: None,
         glow: None,
         metadata: Metadata {
