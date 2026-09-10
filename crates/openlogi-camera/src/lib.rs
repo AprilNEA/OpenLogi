@@ -315,7 +315,7 @@ fn enumerate_all() -> Vec<Camera> {
 
 #[cfg(target_os = "linux")]
 fn enumerate_all() -> Vec<Camera> {
-    linux::nodes().iter().map(linux::describe).collect()
+    linux::cameras()
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
