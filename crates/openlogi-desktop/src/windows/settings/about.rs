@@ -39,15 +39,19 @@ fn about_hero(view: &Entity<SettingsView>, copied: bool, cx: &mut App) -> gpui::
     } else {
         tr!("about.copy_diagnostics")
     };
-    let view = view.clone();
-
     h_flex()
         .w_full()
         .items_start()
         .gap_3()
-        .child(img(crate::app_assets::LOGO).w(px(56.)).h(px(56.)))
+        .child(
+            img(crate::app_assets::LOGO)
+                .size(gpui::rems(3.5))
+                .flex_none(),
+        )
         .child(
             v_flex()
+                .flex_1()
+                .min_w_0()
                 .gap_2()
                 .child(
                     h_flex()
@@ -63,6 +67,8 @@ fn about_hero(view: &Entity<SettingsView>, copied: bool, cx: &mut App) -> gpui::
                 )
                 .child(
                     h_flex()
+                        .w_full()
+                        .flex_wrap()
                         .items_center()
                         .gap_1()
                         .pt_1()
@@ -90,40 +96,55 @@ fn about_hero(view: &Entity<SettingsView>, copied: bool, cx: &mut App) -> gpui::
                             tr!("about.report_an_issue"),
                             format!("{REPO_URL}/issues"),
                         ))
-                        .child(div().w(px(1.)).h(px(16.)).mx_1().bg(pal.border))
-                        .child(
-                            Button::new("about-copy-diagnostics")
-                                .ghost()
-                                .small()
-                                .icon(IconName::Copy)
-                                .label(diag_label)
-                                .on_click(move |_, _, cx| {
-                                    let report =
-                                        crate::services::diagnostics::collect(cx).to_markdown();
-                                    cx.write_to_clipboard(ClipboardItem::new_string(report));
-                                    view.update(cx, |this, cx| {
-                                        this.copied = true;
-                                        this.copied_gen = this.copied_gen.wrapping_add(1);
-                                        let generation = this.copied_gen;
-                                        cx.notify();
-                                        cx.spawn(async move |handle, cx| {
-                                            cx.background_executor()
-                                                .timer(std::time::Duration::from_secs(2))
-                                                .await;
-                                            handle
-                                                .update(cx, |this, cx| {
-                                                    if this.copied_gen == generation {
-                                                        this.copied = false;
-                                                        cx.notify();
-                                                    }
-                                                })
-                                                .ok();
-                                        })
-                                        .detach();
-                                    });
-                                }),
-                        ),
+                        .child(copy_diagnostics_action(view, diag_label, cx)),
                 ),
+        )
+}
+
+/// Keep the divider attached to its action when the About links wrap.
+fn copy_diagnostics_action(
+    view: &Entity<SettingsView>,
+    label: SharedString,
+    cx: &App,
+) -> gpui::Div {
+    let border = crate::ui::theme::palette(cx).border;
+    let view = view.clone();
+
+    h_flex()
+        .flex_none()
+        .child(div().w(px(1.)).h(px(16.)).mx_1().bg(border))
+        .child(
+            Button::new("about-copy-diagnostics")
+                .ghost()
+                .small()
+                .flex_none()
+                .min_w(gpui::rems(8.5))
+                .icon(IconName::Copy)
+                .label(label)
+                .on_click(move |_, _, cx| {
+                    let report = crate::services::diagnostics::collect(cx).to_markdown();
+                    cx.write_to_clipboard(ClipboardItem::new_string(report));
+                    view.update(cx, |this, cx| {
+                        this.copied = true;
+                        this.copied_gen = this.copied_gen.wrapping_add(1);
+                        let generation = this.copied_gen;
+                        cx.notify();
+                        cx.spawn(async move |handle, cx| {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_secs(2))
+                                .await;
+                            handle
+                                .update(cx, |this, cx| {
+                                    if this.copied_gen == generation {
+                                        this.copied = false;
+                                        cx.notify();
+                                    }
+                                })
+                                .ok();
+                        })
+                        .detach();
+                    });
+                }),
         )
 }
 
@@ -184,6 +205,7 @@ fn link_button(
     Button::new(id)
         .ghost()
         .small()
+        .flex_none()
         .icon(icon)
         .label(label)
         .on_click(move |_, _, cx| cx.open_url(&href))

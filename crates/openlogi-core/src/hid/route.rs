@@ -99,12 +99,11 @@ pub fn is_receiver_pid(product_id: u16) -> bool {
 /// but are surfaced under their own name.
 #[must_use]
 pub fn receiver_display_name(product_id: u16) -> &'static str {
-    if find_receiver(LOGITECH_VENDOR_ID, product_id)
-        .is_some_and(|receiver| receiver.brand == ReceiverBrand::Lightspeed)
-    {
-        "Lightspeed Receiver"
-    } else {
-        "Unifying Receiver"
+    match find_receiver(LOGITECH_VENDOR_ID, product_id).map(|receiver| receiver.brand) {
+        Some(ReceiverBrand::Bolt) => "Logi Bolt Receiver",
+        Some(ReceiverBrand::Nano) => "Nano Receiver",
+        Some(ReceiverBrand::Lightspeed) => "Lightspeed Receiver",
+        Some(ReceiverBrand::Unifying) | None => "Unifying Receiver",
     }
 }
 
@@ -257,7 +256,7 @@ mod tests {
     }
 
     #[test]
-    fn lightspeed_receiver_has_its_own_display_name() {
+    fn receiver_families_have_their_own_display_names() {
         // 0xc539 is the receiver bundled with the G502 LIGHTSPEED and the
         // G Pro Wireless. It routes through the Unifying code path, but it is
         // Lightspeed hardware and says so in its own USB product string, so it
@@ -266,6 +265,8 @@ mod tests {
         assert_eq!(receiver_display_name(0xc53f), "Lightspeed Receiver");
         assert_eq!(receiver_display_name(0xc547), "Lightspeed Receiver");
         assert_eq!(receiver_display_name(0xc54d), "Lightspeed Receiver");
+        assert_eq!(receiver_display_name(0xc537), "Nano Receiver");
+        assert_eq!(receiver_display_name(0xc548), "Logi Bolt Receiver");
         assert_eq!(receiver_display_name(0xc52b), "Unifying Receiver");
         assert_eq!(receiver_display_name(0xc532), "Unifying Receiver");
     }

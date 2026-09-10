@@ -27,8 +27,9 @@ use gpui_component::{
     v_flex,
 };
 use openlogi_core::config::{DeviceViewMode, LightSettings};
-use openlogi_core::device::{DeviceKind, DeviceTransports};
-use openlogi_core::hid::DeviceRoute;
+use openlogi_core::device::{DeviceKind, DeviceModelInfo};
+use openlogi_core::diagnostics::ConnectionKind;
+use openlogi_core::hid::{DeviceRoute, ReceiverBrand};
 
 use super::AppView;
 use super::status::{loading_body, notice_body};
@@ -268,7 +269,8 @@ fn transport_glance(record: &DeviceRecord, pal: Palette) -> impl IntoElement {
     } else {
         connection_icon_path(
             record.route.as_ref(),
-            record.model_info.as_ref().map(|model| &model.transports),
+            record.receiver_brand,
+            record.model_info.as_ref(),
         )
     };
     let color: Hsla = match path {
@@ -503,7 +505,8 @@ fn connection_view(record: &DeviceRecord, pal: Palette) -> impl IntoElement {
                 } else {
                     connection_icon_path(
                         record.route.as_ref(),
-                        record.model_info.as_ref().map(|model| &model.transports),
+                        record.receiver_brand,
+                        record.model_info.as_ref(),
                     )
                 })
                 .size_3()
@@ -513,7 +516,7 @@ fn connection_view(record: &DeviceRecord, pal: Palette) -> impl IntoElement {
 }
 
 fn connection_summary(record: &DeviceRecord) -> String {
-    let route = route_label(record.route.as_ref());
+    let route = route_label(record.route.as_ref(), record.receiver_brand);
     if matches!(
         record.route,
         Some(DeviceRoute::Bolt { .. } | DeviceRoute::Unifying { .. })
@@ -573,36 +576,21 @@ fn device_image(
         .into_any_element()
 }
 
-/// Connection-type glyph for a gallery card: a dongle for receiver-paired
-/// devices, a USB mark for radio-less direct ones (a wired keyboard is only
-/// ever on the cable), a Bluetooth mark for the rest.
-///
-/// The route says how the device is *addressed*, not what medium carries it,
-/// so `Direct` alone can't pick a glyph — the firmware transport table
-/// (HID++ 0x0003) disambiguates. A radio-capable device on a direct route
-/// keeps the Bluetooth mark: it *may* be on a cable right now, but the
-/// current link medium isn't reported, and Bluetooth is how such devices are
-/// normally attached.
+/// Connection-type glyph for a gallery card, classified from its active route.
 pub(super) fn connection_icon_path(
     route: Option<&DeviceRoute>,
-    transports: Option<&DeviceTransports>,
+    receiver_brand: Option<ReceiverBrand>,
+    model: Option<&DeviceModelInfo>,
 ) -> &'static str {
-    match route {
-        Some(DeviceRoute::Bolt { .. }) => "action-icons/bolt.svg",
-        Some(DeviceRoute::Unifying { .. }) => "action-icons/unifying.svg",
-        // Explicit arms (not `_`) so a new DeviceRoute variant trips the
-        // compiler here, matching the exhaustive sibling `route_label`.
-        Some(DeviceRoute::Direct { .. }) | None => match transports {
-            // No Bluetooth radio at all ⇒ the direct link can only be the
-            // cable. eQuad counts as wired-capable here: eQuad is
-            // receiver-only by definition, so it is never the *direct* link —
-            // an equad-only table still means this connection is a cable.
-            Some(t) if (t.usb || t.equad) && !t.bluetooth && !t.btle => "action-icons/usb.svg",
-            // Unknown transports (no 0x0003 snapshot, or an all-false table)
-            // keep the old default.
-            _ => "action-icons/bluetooth.svg",
-        },
-        Some(DeviceRoute::RawHid { .. }) => "action-icons/usb.svg",
+    match ConnectionKind::for_device(route, receiver_brand, model) {
+        ConnectionKind::BoltReceiver => "action-icons/bolt.svg",
+        // TODO: Replace the Nano and Lightspeed fallbacks with their appropriate logos.
+        ConnectionKind::UnifyingReceiver
+        | ConnectionKind::NanoReceiver
+        | ConnectionKind::LightspeedReceiver => "action-icons/unifying.svg",
+        ConnectionKind::BluetoothDirect => "action-icons/bluetooth.svg",
+        ConnectionKind::Wired => "action-icons/usb.svg",
+        ConnectionKind::Unknown => "action-icons/circle-dot.svg",
     }
 }
 
