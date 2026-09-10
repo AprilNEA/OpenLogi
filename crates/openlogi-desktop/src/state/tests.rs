@@ -88,7 +88,9 @@ fn smooth_scroll_change_reloads_the_agent_once() {
     assert!(state.app_settings().smooth_scroll);
     assert!(matches!(
         receiver.try_recv(),
-        Ok(crate::services::ipc::Command::ReloadConfig)
+        Ok(crate::services::ipc::Command::ReloadConfig(
+            crate::services::ipc::ConfigReloadContext::General
+        ))
     ));
 
     state.set_smooth_scroll(true);
@@ -466,7 +468,9 @@ fn canonical_profile_light_setting_errors_reach_desktop_state() {
     let mut reloads = 0;
     loop {
         match receiver.try_recv() {
-            Ok(crate::services::ipc::Command::ReloadConfig) => reloads += 1,
+            Ok(crate::services::ipc::Command::ReloadConfig(
+                crate::services::ipc::ConfigReloadContext::General,
+            )) => reloads += 1,
             Ok(_) => panic!("unexpected command before the light write"),
             Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
             Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {

@@ -8,8 +8,8 @@ use openlogi_core::binding::ActionRingSlot;
 use openlogi_core::config::Lighting;
 use openlogi_core::device::DeviceInventory;
 use openlogi_core::hid::{
-    BacklightMode, BacklightState, BacklightStatus, Dpi, DpiInfo, LightCommand, PasskeyMethod,
-    ReceiverSelector, ScrollWheelMode, SmartShiftStatus,
+    BacklightMode, BacklightState, BacklightStatus, DisableKeysMask, DisableKeysState, Dpi,
+    DpiInfo, LightCommand, PasskeyMethod, ReceiverSelector, ScrollWheelMode, SmartShiftStatus,
 };
 use openlogi_fixture::{
     CANONICAL_DEVICE_PROFILE_JSON, SyntheticIdentityKind, classify_synthetic_identity_bytes,
@@ -36,6 +36,7 @@ enum ReadFamily {
     Smartshift,
     Wheel,
     Backlight,
+    DisableKeys,
 }
 
 #[derive(Clone)]
@@ -284,6 +285,28 @@ impl Agent for TestAgent {
             0x1982,
         )
     }
+
+    async fn read_disable_keys(
+        self,
+        _: TarpcContext,
+        route: DeviceRoute,
+    ) -> Result<DisableKeysState, WriteError> {
+        self.read(
+            ReadFamily::DisableKeys,
+            &route,
+            |settings| &settings.disable_keys,
+            0x4521,
+        )
+    }
+
+    async fn set_disable_keys(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+        _desired: DisableKeysMask,
+    ) -> Result<DisableKeysState, WriteError> {
+        unreachable!("profile capture must never write Disable Keys")
+    }
 }
 
 async fn test_connection(agent: TestAgent) -> Connection {
@@ -376,6 +399,26 @@ fn args(output: PathBuf, device: Option<&str>) -> RecordProfileArgs {
     }
 }
 
+fn assert_receiver_capture_observations(inspection: &TestAgent) {
+    assert_eq!(
+        *inspection.declared.lock().expect("declaration lock"),
+        [ClientKind::Cli]
+    );
+    assert_eq!(*inspection.snapshots.lock().expect("snapshot lock"), 1);
+    let calls = inspection.calls.lock().expect("calls lock").clone();
+    assert_eq!(
+        calls.iter().map(|(family, _)| *family).collect::<Vec<_>>(),
+        [
+            ReadFamily::Dpi,
+            ReadFamily::Smartshift,
+            ReadFamily::Wheel,
+            ReadFamily::Backlight,
+            ReadFamily::Smartshift,
+            ReadFamily::DisableKeys,
+        ]
+    );
+}
+
 #[tokio::test]
 async fn receiver_capture_uses_agent_reads_and_writes_validated_profile_only() {
     let directory = tempfile::tempdir().expect("tempdir");
@@ -391,22 +434,7 @@ async fn receiver_capture_uses_agent_reads_and_writes_validated_profile_only() {
     .await
     .expect("semantic capture succeeds");
 
-    assert_eq!(
-        *inspection.declared.lock().expect("declaration lock"),
-        [ClientKind::Cli]
-    );
-    assert_eq!(*inspection.snapshots.lock().expect("snapshot lock"), 1);
-    let calls = inspection.calls.lock().expect("calls lock").clone();
-    assert_eq!(
-        calls.iter().map(|(family, _)| *family).collect::<Vec<_>>(),
-        [
-            ReadFamily::Dpi,
-            ReadFamily::Smartshift,
-            ReadFamily::Wheel,
-            ReadFamily::Backlight,
-            ReadFamily::Smartshift,
-        ]
-    );
+    assert_receiver_capture_observations(&inspection);
 
     let bytes = std::fs::read(&output).expect("profile output");
     assert!(bytes.ends_with(b"\n"));
@@ -666,8 +694,14 @@ async fn protocol_mismatch_aborts_before_snapshot_or_output() {
         .expect_err("protocol mismatch must abort")
         .to_string();
 
-    assert!(error.contains("protocol v29"), "{error}");
-    assert!(error.contains("requires v30"), "{error}");
+    assert!(
+        error.contains(&format!("protocol v{}", PROTOCOL_VERSION - 1)),
+        "{error}"
+    );
+    assert!(
+        error.contains(&format!("requires v{PROTOCOL_VERSION}")),
+        "{error}"
+    );
     assert_eq!(*inspection.snapshots.lock().expect("snapshot lock"), 0);
     assert!(!output.exists());
 }

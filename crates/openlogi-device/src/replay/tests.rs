@@ -783,6 +783,7 @@ fn dpi_settings(route: DeviceRoute, current: u16, supported: Vec<u16>) -> Profil
         smartshift: ProfileSetting::Unsupported,
         wheel: ProfileSetting::Unsupported,
         backlight: ProfileSetting::Unsupported,
+        disable_keys: ProfileSetting::Unsupported,
         lighting: ProfileSupport::Unsupported,
         light: ProfileSupport::Unsupported,
     }
