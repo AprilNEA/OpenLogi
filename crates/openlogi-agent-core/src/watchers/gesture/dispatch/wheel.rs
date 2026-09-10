@@ -17,10 +17,6 @@ use openlogi_hid::thumbwheel::WheelResolution;
 /// slow intermittent nudges do not eventually cross the threshold.
 const ACTION_DECAY: Duration = Duration::from_millis(300);
 
-/// Minimum gap between two fires of the same discrete action, so one deliberate
-/// flick triggers once instead of repeating across a fast spin.
-const ACTION_COOLDOWN: Duration = Duration::from_millis(200);
-
 /// Per-direction wheel state. Reversing the physical wheel must not cancel
 /// progress already earned in the other direction.
 #[derive(Default)]
@@ -158,8 +154,13 @@ impl WheelDirection {
             increments = 0;
         }
 
+        // The cooldown comes from the sensitivity slider like the threshold
+        // does. The threshold bottoms out at one increment halfway up the
+        // range, so past that point the cooldown is the only thing the slider
+        // can still move.
+        let cooldown = next_binding.sensitivity.action_cooldown();
         let cooling_down =
-            last_fired.is_some_and(|time| now.saturating_duration_since(time) < ACTION_COOLDOWN);
+            last_fired.is_some_and(|time| now.saturating_duration_since(time) < cooldown);
         let (output, last_fired) = if cooling_down {
             (WheelOutput::Idle, last_fired)
         } else {

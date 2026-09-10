@@ -3,6 +3,7 @@
 //! [`SmartShift`], and the legacy [`GestureOwner`], plus their serde helpers.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use az::SaturatingAs;
 use nutype::nutype;
@@ -404,9 +405,34 @@ impl ThumbwheelSensitivity {
     }
 
     /// Rotation increments required to fire a discrete thumb-wheel action.
+    ///
+    /// Floors at one increment, which the top half of the range reaches — from
+    /// there [`Self::action_cooldown`] is what the slider still moves.
     #[must_use]
     pub fn action_threshold(self) -> i32 {
         (2 * i32::from(Self::DEFAULT) - i32::from(self)).max(1)
+    }
+
+    /// Minimum gap between two fires of the same discrete thumb-wheel action.
+    ///
+    /// Scaled by the slider like [`Self::action_threshold`], because on its own
+    /// the threshold cannot express "repeat quickly": it bottoms out at one
+    /// increment around the middle of the range, and a fixed gap then caps a
+    /// whole swipe at a handful of fires however far the slider is pushed
+    /// (#887 — a volume binding moved two steps per swipe at every setting).
+    ///
+    /// [`Self::DEFAULT`] keeps the gap it always had, so an untouched install
+    /// behaves exactly as before. The floor keeps a fast spin from flooding the
+    /// action queue; the ceiling keeps the low end deliberate rather than
+    /// unusable.
+    #[must_use]
+    pub fn action_cooldown(self) -> Duration {
+        const AT_DEFAULT_MS: u64 = 200;
+        const FLOOR_MS: u64 = 25;
+        const CEILING_MS: u64 = 400;
+
+        let millis = AT_DEFAULT_MS * u64::from(u8::from(Self::DEFAULT)) / u64::from(u8::from(self));
+        Duration::from_millis(millis.clamp(FLOOR_MS, CEILING_MS))
     }
 }
 
@@ -762,6 +788,42 @@ where
 
 #[cfg(test)]
 mod tests {
+
+    /// #887: a volume binding moved two steps per swipe whatever the slider
+    /// said. The threshold floors at one increment halfway up the range, so
+    /// above that only the cooldown can still change the rate — it has to move
+    /// with the slider or the top half of the range does nothing at all.
+    #[test]
+    fn raising_sensitivity_shortens_the_gap_between_repeats() {
+        let default = ThumbwheelSensitivity::DEFAULT.action_cooldown();
+        let max = ThumbwheelSensitivity::MAX.action_cooldown();
+        let min = ThumbwheelSensitivity::MIN.action_cooldown();
+
+        assert!(
+            max < default,
+            "max {max:?} must repeat faster than {default:?}"
+        );
+        assert!(
+            min > default,
+            "min {min:?} must be more deliberate than {default:?}"
+        );
+        // The whole top half floors the threshold, so the cooldown is the only
+        // thing separating those settings.
+        let floored = ThumbwheelSensitivity::try_new(30).expect("in range");
+        assert_eq!(floored.action_threshold(), 1);
+        assert_eq!(ThumbwheelSensitivity::MAX.action_threshold(), 1);
+        assert!(ThumbwheelSensitivity::MAX.action_cooldown() < floored.action_cooldown());
+    }
+
+    /// An untouched install must behave exactly as it did before the slider
+    /// reached the cooldown.
+    #[test]
+    fn the_default_keeps_its_historical_gap() {
+        assert_eq!(
+            ThumbwheelSensitivity::DEFAULT.action_cooldown(),
+            Duration::from_millis(200)
+        );
+    }
     use super::*;
 
     #[test]
