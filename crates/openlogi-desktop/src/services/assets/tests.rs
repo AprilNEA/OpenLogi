@@ -246,6 +246,64 @@ fn standalone_registry_lookup_does_not_cross_model_depots() {
 }
 
 #[test]
+fn resolves_depot_with_named_manifest_and_non_standard_render() {
+    let root = tempfile::tempdir().expect("create temp dir");
+    let depot = "pro_keyboard_ext1";
+    let dir = root.path().join(depot);
+    std::fs::create_dir_all(&dir).expect("create depot dir");
+    std::fs::write(
+        dir.join("manifest.json"),
+        r#"{"devices":[
+            {"modelId":"pro_keyboard_ext1","resources":[{"key":"device_image","src":"front_mx.png"}]},
+            {"modelId":"pro_keyboard_ext7","resources":[{"key":"device_image","src":"front_kda.png"}]}
+        ],"resources":[]}"#,
+    )
+    .expect("write manifest");
+    std::fs::write(
+        dir.join("metadata.json"),
+        r#"{"images":[{"key":"device_image","origin":{"width":500,"height":300}}]}"#,
+    )
+    .expect("write metadata");
+    std::fs::write(dir.join("front_mx.png"), png_header(500, 300)).expect("write front_mx.png");
+    std::fs::write(dir.join("front_kda.png"), png_header(500, 300)).expect("write front_kda.png");
+
+    let resolver = AssetResolver {
+        read_roots: vec![root.path().to_path_buf()],
+        write_root: root.path().to_path_buf(),
+        has_bundle: false,
+        index: None,
+    };
+    let entry = DeviceEntry {
+        model_id: "c339".to_string(),
+        model_ids: vec!["c339".to_string()],
+        display_name: "PRO".to_string(),
+        kind: "KEYBOARD".to_string(),
+        asset_path: format!("v1/devices/{depot}/"),
+        files: Vec::new(),
+    };
+
+    // Base model (ext == 0) resolves front_mx.png via pro_keyboard_ext1
+    let asset = resolver
+        .load_files(depot, &entry, &bare_model())
+        .expect("pro keyboard base variant should resolve");
+    assert_eq!(
+        asset.image_path.file_name().expect("filename"),
+        "front_mx.png"
+    );
+
+    // KDA variant (ext == 7) resolves front_kda.png via pro_keyboard stem + _ext7
+    let mut kda_model = bare_model();
+    kda_model.extended_model_id = 7;
+    let kda_asset = resolver
+        .load_files(depot, &entry, &kda_model)
+        .expect("pro keyboard KDA variant should resolve");
+    assert_eq!(
+        kda_asset.image_path.file_name().expect("filename"),
+        "front_kda.png"
+    );
+}
+
+#[test]
 fn unsafe_standalone_manifest_filename_is_rejected() {
     let root = tempfile::tempdir().expect("create temp dir");
     let depot = root.path().join("litra_glow");
