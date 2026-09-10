@@ -871,6 +871,13 @@ impl Enumerator {
             .cloned()
             .collect();
         for key in missing {
+            // A key that names the device memoizes data that stays true while
+            // the device is away, and dropping it is what makes a device that
+            // steps out and back re-answer questions it has already answered.
+            // What it costs to keep is a few hundred bytes per device ever seen.
+            if key.names_the_device() {
+                continue;
+            }
             let misses = self.misses.entry(key.clone()).or_insert(0);
             *misses += 1;
             if *misses > CACHE_MISS_GRACE {

@@ -483,6 +483,23 @@ pub(super) fn preferred_direct_codename(marketing_name: Option<&str>, os_name: &
 /// case it's neither a receiver nor a direct device we recognise) — healthy
 /// only if that rejection rests on a completed feature walk, so a device
 /// that merely failed to answer is settled as a failed probe instead.
+/// The cache key for a directly connected device.
+///
+/// A serial is preferred wherever the backend reports one, because the node id
+/// lasts only as long as the connection. A Bluetooth device that switches to
+/// another host and comes back arrives under a fresh node, and keying on that
+/// makes it re-walk its entire feature table for data that could not have
+/// changed while it was away.
+pub(super) fn direct_cache_key(info: &NodeInfo) -> CacheKey {
+    info.serial_number
+        .as_deref()
+        .filter(|serial| !serial.is_empty())
+        .map_or_else(
+            || CacheKey::Direct(info.id.clone()),
+            |serial| CacheKey::DirectSerial(serial.to_ascii_lowercase()),
+        )
+}
+
 async fn probe_direct(
     channel: Arc<HidppChannel>,
     info: &NodeInfo,
@@ -490,7 +507,7 @@ async fn probe_direct(
     now: Instant,
     subscriptions: Option<&EventSubscriptionHandle>,
 ) -> NodeProbe {
-    let id = CacheKey::Direct(info.id.clone());
+    let id = direct_cache_key(info);
     let cached = cache.get(&id);
     // A direct device is always "present" (its HID node is the candidate), so
     // treat it as online: reuse the cached probe while fresh, otherwise probe.
