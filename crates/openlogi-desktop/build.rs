@@ -33,6 +33,12 @@ fn main() {
     println!("cargo:rerun-if-env-changed=OPENLOGI_UPDATE_MANIFEST_URL");
     println!("cargo:rerun-if-env-changed=OPENLOGI_THEMES_DIR");
 
+    // `rust_i18n::i18n!` in `main.rs` reads `../openlogi-ui/locales` at macro
+    // expansion time, and Cargo does not track a proc macro's file reads. Without
+    // this, editing a catalog leaves the embedded translations stale until an
+    // unrelated change happens to recompile this crate.
+    println!("cargo:rerun-if-changed=../openlogi-ui/locales");
+
     embed_windows_resources();
 
     let out = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
