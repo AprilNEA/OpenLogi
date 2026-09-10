@@ -414,7 +414,7 @@ view_changelog = "檢視更新日誌"
 update_connection_policy = "OpenLogi 沒有常駐更新程式，僅在你開啟自動檢查或點擊「檢查更新」時連線。"
 stable_channel = "穩定版通道"
 check_for_updates_consent_title = "檢查更新？"
-update_consent_description = "OpenLogi 可在每次啟動時透過 GitHub 檢查一次新版本，不會自動下載更新或傳送遙測資料。你可隨時在「設定」中更改此選項。"
+update_consent_description = "OpenLogi 可在每次啟動時透過 updates.openlogi.org 檢查一次新版本，不會自動下載更新或傳送遙測資料。你可隨時在「設定」中更改此選項。"
 
 [assets]
 assets = "資源"

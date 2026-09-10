@@ -414,7 +414,7 @@ view_changelog = "変更履歴を表示"
 update_connection_policy = "自動確認が有効な場合、または「アップデートを確認」を選択した場合にのみ接続します。"
 stable_channel = "安定版チャンネル"
 check_for_updates_consent_title = "アップデートを確認しますか？"
-update_consent_description = "起動時に GitHub で新しいバージョンを一度確認できます。自動ダウンロードやテレメトリ送信は行いません。この設定は「設定」で変更できます。"
+update_consent_description = "起動時に updates.openlogi.org で新しいバージョンを一度確認できます。自動ダウンロードやテレメトリ送信は行いません。この設定は「設定」で変更できます。"
 
 [assets]
 assets = "アセット"

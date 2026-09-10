@@ -414,7 +414,7 @@ view_changelog = "Voir les notes de version"
 update_connection_policy = "OpenLogi se connecte pour rechercher des mises à jour uniquement si la recherche automatique est activée ou si vous sélectionnez Rechercher des mises à jour."
 stable_channel = "Canal stable"
 check_for_updates_consent_title = "Rechercher des mises à jour ?"
-update_consent_description = "OpenLogi peut rechercher une nouvelle version sur GitHub une fois par lancement. Il ne télécharge rien automatiquement et n’envoie aucune télémétrie. Vous pouvez modifier ce réglage."
+update_consent_description = "OpenLogi peut rechercher une nouvelle version sur updates.openlogi.org une fois par lancement. Il ne télécharge rien automatiquement et n’envoie aucune télémétrie. Vous pouvez modifier ce réglage."
 
 [assets]
 assets = "Ressources"
