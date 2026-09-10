@@ -31,8 +31,8 @@ files; **keep this table in sync when you add or move one**:
 | `openlogi-desktop/src/platform/registration/macos.rs` | `SMAppService` registration of the agent's launchd service (the login-item side of the agent lifecycle; the GUI must own it — the API resolves the plist against the calling app's bundle) |
 | `openlogi-desktop/src/platform/os.rs` | `NSProcessInfo` OS version + the `NSAppearance` titlebar sync |
 | `openlogi-hid/src/permissions.rs` | `IOHIDCheckAccess` / `IOHIDRequestAccess` (the prompting half of Input Monitoring) |
-| `openlogi-hook/src/macos.rs` | the CGEventTap (on `core-graphics`, see below), the `NSWorkspace` frontmost-app read, the Accessibility-trust check/prompt, and the HID sender-id lookup |
-| `openlogi-inject/src/inject/macos.rs` | CGEvent synthesis, media-key `NSEvent`s, raw `AXUIElement` navigation, and the `dlopen`'d private SPIs |
+| `openlogi-hook/src/macos.rs` | the CGEventTap (on `core-graphics`, see below), the off-tap `NSWorkspace` frontmost-app read and Safari PID snapshot, the Accessibility-trust check/prompt, and the HID sender-id lookup |
+| `openlogi-inject/src/inject/macos.rs` | CGEvent synthesis, media-key `NSEvent`s, off-thread `NSWorkspace` validation, raw `AXUIElement` navigation, and the `dlopen`'d private SPIs |
 | `openlogi-overlay/src/platform.rs` | the Actions Ring helper's window policy: accessory activation, non-activating panel, the `NSEvent` global click-away monitor (`block2`), and `CGGetActiveDisplayList` / `CGDisplayBounds` |
 | `openlogi-permissions/src/macos.rs` | non-prompting permission reads + System-Settings deep links; `+[CBManager authorization]` via an `AnyClass` lookup |
 
@@ -253,8 +253,8 @@ read moved to `objc2`. Don't "modernize" the tap casually.
 
 Code on the main run loop needs no pool (`Retained` frees deterministically);
 code on a bare thread does, because the framework still autoreleases internal
-temporaries. The three places that keep an explicit `objc2::rc::autoreleasepool`,
-and the only ones that should:
+temporaries. The five call sites that keep an explicit
+`objc2::rc::autoreleasepool`, and the only ones that should:
 
 - `openlogi-hook`'s frontmost-application reads and activation observer — the
   watcher and notification callback may run on threads with no run loop, and
@@ -263,6 +263,11 @@ and the only ones that should:
   internal autoreleased temporaries are drained as well.
 - `openlogi-inject`'s `post_media_key` — the hook/gesture dispatch threads, where
   both the `NSEvent` creation and the `CGEvent` getter autorelease temporaries.
+- `openlogi-inject`'s `frontmost_safari_pid` — the hook callback thread, where
+  `to_str` borrows the Safari bundle id's UTF-8 view from the pool.
+- `openlogi-inject`'s `ax_browser_navigate` — the action worker, where `to_str`
+  borrows the current frontmost app's bundle id while validating the captured
+  Safari process.
 - `openlogi-camera`'s device enumeration — every `AVCaptureDevice` string is
   copied out before the pool drains, so no `Retained<T>` escapes it.
 

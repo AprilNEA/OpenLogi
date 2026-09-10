@@ -10,6 +10,7 @@ fn hook_press(id: u64, button: ButtonId) -> ActivePress {
     ActivePress {
         token: PressToken::hook_for_test(id, button),
         behavior: PressBehavior::Immediate(Action::Copy),
+        target: ActionDispatchTarget::Keyboard,
     }
 }
 
@@ -65,6 +66,7 @@ fn cancellation_is_scoped_to_one_session() {
             generation: 0,
         },
         behavior: PressBehavior::LifecycleOnly,
+        target: ActionDispatchTarget::Keyboard,
     };
     let second = ActivePress {
         token: PressToken {
@@ -73,6 +75,7 @@ fn cancellation_is_scoped_to_one_session() {
             generation: 0,
         },
         behavior: PressBehavior::LifecycleOnly,
+        target: ActionDispatchTarget::Keyboard,
     };
     state.press(first.clone());
     state.press(second.clone());
@@ -95,6 +98,7 @@ fn hook_cancellation_leaves_hidpp_presses_active() {
             generation: 0,
         },
         behavior: PressBehavior::LifecycleOnly,
+        target: ActionDispatchTarget::Keyboard,
     };
     state.press(hook.clone());
     state.press(hidpp.clone());
@@ -146,6 +150,86 @@ fn stale_token_cannot_trigger_after_same_key_repress() {
 }
 
 #[test]
+fn hook_actions_retain_the_press_time_target_across_focus_changes() {
+    let (sent, received) = mpsc::channel();
+    let mut owner = ButtonRuntimeOwner::spawn(move |event| {
+        sent.send(event)
+            .expect("test receiver should stay connected");
+    })
+    .expect("button worker should start");
+    let input = owner.input();
+    let target = ActionDispatchTarget::SafariProcess(417);
+    let token = input
+        .try_hook_down_with_target(ButtonId::Back, None, target)
+        .expect("Safari down should be queued");
+    let ButtonRuntimeEvent::Started(started) = recv_event(&received) else {
+        panic!("down should start the press lifecycle");
+    };
+    assert_eq!(started.target(), target);
+
+    input
+        .try_hook_down_with_target(ButtonId::Forward, None, ActionDispatchTarget::Keyboard)
+        .expect("post-focus-change down should be queued");
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Started(ActivePress {
+            target: ActionDispatchTarget::Keyboard,
+            ..
+        })
+    ));
+
+    assert!(input.try_trigger_while_pressed(&token, &Action::BrowserBack));
+    let ButtonRuntimeEvent::Triggered { press, action } = recv_event(&received) else {
+        panic!("queued browser action should retain its originating press");
+    };
+    assert_eq!(press.target(), target);
+    assert_eq!(action, Action::BrowserBack);
+    assert!(owner.shutdown());
+}
+
+#[test]
+fn hidpp_edges_and_pulses_retain_their_press_time_targets() {
+    let (sent, received) = mpsc::channel();
+    let mut owner = ButtonRuntimeOwner::spawn(move |event| {
+        sent.send(event)
+            .expect("test receiver should stay connected");
+    })
+    .expect("button worker should start");
+    let input = owner.input();
+    let session = HidppSessionId::with_epoch("mouse-a", 7);
+    let safari = ActionDispatchTarget::SafariProcess(417);
+
+    input
+        .try_hidpp_down(&session, ButtonId::Back, None, safari)
+        .expect("HID++ down should be queued");
+    let ButtonRuntimeEvent::Started(started) = recv_event(&received) else {
+        panic!("HID++ down should start a lifecycle");
+    };
+    assert_eq!(started.target(), safari);
+    assert!(input.try_hidpp_up(&session, ButtonId::Back));
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Ended { .. }
+    ));
+
+    assert!(input.try_hidpp_pulse(
+        &session,
+        ButtonId::Forward,
+        None,
+        ActionDispatchTarget::Keyboard,
+    ));
+    let ButtonRuntimeEvent::Started(started) = recv_event(&received) else {
+        panic!("HID++ pulse should start a lifecycle");
+    };
+    assert_eq!(started.target(), ActionDispatchTarget::Keyboard);
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Ended { .. }
+    ));
+    assert!(owner.shutdown());
+}
+
+#[test]
 fn source_cancellation_invalidates_queued_gesture_work() {
     let (sent, received) = mpsc::channel();
     let mut owner = ButtonRuntimeOwner::spawn(move |event| {
@@ -156,7 +240,12 @@ fn source_cancellation_invalidates_queued_gesture_work() {
     let input = owner.input();
     let session = HidppSessionId::with_epoch("mouse-a", 7);
     let token = input
-        .try_hidpp_down(&session, ButtonId::Back, None)
+        .try_hidpp_down(
+            &session,
+            ButtonId::Back,
+            None,
+            ActionDispatchTarget::Keyboard,
+        )
         .expect("down should be queued");
     assert!(matches!(
         recv_event(&received),
@@ -278,7 +367,12 @@ fn pulse_has_an_immediate_balanced_lifecycle() {
     let binding = Binding::Single(Action::HoldShortcut(
         "Ctrl+Space".parse().expect("valid shortcut"),
     ));
-    assert!(input.try_hidpp_pulse(&session, ButtonId::Back, Some(&binding)));
+    assert!(input.try_hidpp_pulse(
+        &session,
+        ButtonId::Back,
+        Some(&binding),
+        ActionDispatchTarget::Keyboard,
+    ));
 
     let ButtonRuntimeEvent::Started(started) = recv_event(&received) else {
         panic!("pulse must start before ending");
@@ -299,6 +393,7 @@ fn release_before_long_press_threshold_fires_only_the_short_action() {
     let press = ActivePress {
         token: PressToken::hook_for_test(1, ButtonId::Back),
         behavior: PressBehavior::new(Some(&binding), pressed_at),
+        target: ActionDispatchTarget::Keyboard,
     };
     state.press(press.clone());
     let mut events = Vec::new();
@@ -337,6 +432,7 @@ fn threshold_fires_long_once_and_suppresses_short_on_release() {
     let press = ActivePress {
         token: PressToken::hook_for_test(1, ButtonId::Back),
         behavior: PressBehavior::new(Some(&binding), pressed_at),
+        target: ActionDispatchTarget::Keyboard,
     };
     state.press(press.clone());
     let mut events = Vec::new();
@@ -385,6 +481,7 @@ fn cancellation_never_fires_a_pending_short_or_long_action() {
     let press = ActivePress {
         token: PressToken::hook_for_test(1, ButtonId::Back),
         behavior: PressBehavior::new(Some(&binding), pressed_at),
+        target: ActionDispatchTarget::Keyboard,
     };
     state.press(press);
     let mut events = Vec::new();
@@ -422,7 +519,12 @@ fn pulse_degrades_long_press_to_its_short_action() {
     let session = HidppSessionId::with_epoch("keyboard-a", 4);
     let binding = long_press(Action::Copy, Action::Paste);
 
-    assert!(input.try_hidpp_pulse(&session, ButtonId::Back, Some(&binding)));
+    assert!(input.try_hidpp_pulse(
+        &session,
+        ButtonId::Back,
+        Some(&binding),
+        ActionDispatchTarget::Keyboard,
+    ));
     assert!(matches!(
         recv_event(&received),
         ButtonRuntimeEvent::Started(_)
@@ -493,6 +595,7 @@ fn overdue_long_press_precedes_unrelated_queued_actions() {
     let press = ActivePress {
         token: PressToken::hook_for_test(1, ButtonId::Back),
         behavior: PressBehavior::new(Some(&binding), pressed_at),
+        target: ActionDispatchTarget::Keyboard,
     };
     state.press(press.clone());
     commands
@@ -554,6 +657,7 @@ fn continuous_commands_cannot_starve_a_long_press_deadline() {
             input: ButtonInput::Down(ActivePress {
                 token: PressToken::hook_for_test(1, ButtonId::Back),
                 behavior: PressBehavior::new(Some(&binding), pressed_at),
+                target: ActionDispatchTarget::Keyboard,
             }),
         })
         .expect("test queue should accept the press");
@@ -710,7 +814,7 @@ fn function_key_hold_has_one_balanced_lifecycle() {
     let input = owner.input();
     let action = Action::HoldShortcut("Ctrl+Space".parse().expect("valid shortcut"));
     let token = input
-        .try_hook_key_down(0x7a, &action)
+        .try_hook_key_down(0x7a, &action, ActionDispatchTarget::Keyboard)
         .expect("key down should be queued");
 
     let ButtonRuntimeEvent::Started(started) = recv_event(&received) else {

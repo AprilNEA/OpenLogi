@@ -10,7 +10,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
@@ -78,6 +78,32 @@ pub struct ForegroundApplicationObserver {
     token: Retained<ProtocolObject<dyn NSObjectProtocol>>,
 }
 
+const SAFARI_BUNDLE_ID: &str = "com.apple.Safari";
+const NO_SAFARI_PROCESS: i32 = 0;
+static FRONTMOST_SAFARI_PID: AtomicI32 = AtomicI32::new(NO_SAFARI_PROCESS);
+
+fn safari_process_id(bundle_id: &str, pid: i32) -> Option<i32> {
+    (bundle_id == SAFARI_BUNDLE_ID && pid > 0).then_some(pid)
+}
+
+fn observe_frontmost_application(
+    app: Option<&NSRunningApplication>,
+    pool: objc2::rc::AutoreleasePool<'_>,
+) -> Option<ForegroundApp> {
+    let foreground = app.and_then(|app| foreground_app_from_running_application(app, pool));
+    let safari_pid = app
+        .zip(foreground.as_ref())
+        .and_then(|(app, foreground)| safari_process_id(&foreground.id, app.processIdentifier()))
+        .unwrap_or(NO_SAFARI_PROCESS);
+    FRONTMOST_SAFARI_PID.store(safari_pid, Ordering::Release);
+    foreground
+}
+
+pub(crate) fn frontmost_safari_pid() -> Option<i32> {
+    let pid = FRONTMOST_SAFARI_PID.load(Ordering::Acquire);
+    (pid > 0).then_some(pid)
+}
+
 impl Drop for ForegroundApplicationObserver {
     fn drop(&mut self) {
         objc2::rc::autoreleasepool(|_| {
@@ -103,14 +129,14 @@ pub(crate) fn watch_frontmost_application_activations(
                         // SAFETY: NotificationCenter passes a live, non-null
                         // NSNotification to the block for the duration of this call.
                         let notification = unsafe { notification.as_ref() };
-                        let info = notification.userInfo()?;
-                        // SAFETY: AppKit documents NSWorkspaceApplicationKey as this
-                        // notification's NSRunningApplication-valued user-info entry.
-                        let app = info
-                            .objectForKey(unsafe { NSWorkspaceApplicationKey } as &AnyObject)?
-                            .downcast::<NSRunningApplication>()
-                            .ok()?;
-                        foreground_app_from_running_application(&app, pool)
+                        let app = notification.userInfo().and_then(|info| {
+                            // SAFETY: AppKit documents NSWorkspaceApplicationKey as this
+                            // notification's NSRunningApplication-valued user-info entry.
+                            info.objectForKey(unsafe { NSWorkspaceApplicationKey } as &AnyObject)?
+                                .downcast::<NSRunningApplication>()
+                                .ok()
+                        });
+                        observe_frontmost_application(app.as_deref(), pool)
                     });
                     on_activation(activation);
                 }));
@@ -595,6 +621,10 @@ impl HookBackend for Backend {
             return Err(HookError::AccessibilityDenied);
         }
 
+        // Seed the press-time snapshot before the tap can receive input. Later
+        // NSWorkspace activation notifications refresh it off the tap thread.
+        let _ = Self::frontmost_app();
+
         // Wrap in Arc so the closure handed to CGEventTap::new captures it by
         // clone rather than by move — avoids a second Box allocation.
         let cb: Arc<dyn Fn(HookEvent) -> EventDisposition + Send + Sync> = Arc::new(cb);
@@ -759,8 +789,8 @@ impl HookBackend for Backend {
         use objc2::rc::autoreleasepool;
 
         autoreleasepool(|pool| {
-            let app = NSWorkspace::sharedWorkspace().frontmostApplication()?;
-            foreground_app_from_running_application(&app, pool)
+            let app = NSWorkspace::sharedWorkspace().frontmostApplication();
+            observe_frontmost_application(app.as_deref(), pool)
         })
     }
 
@@ -1220,5 +1250,12 @@ mod tests {
             ),
             CallbackResult::Keep
         ));
+    }
+
+    #[test]
+    fn safari_snapshot_accepts_only_safari_with_a_positive_pid() {
+        assert_eq!(safari_process_id(SAFARI_BUNDLE_ID, 417), Some(417));
+        assert_eq!(safari_process_id("com.apple.finder", 417), None);
+        assert_eq!(safari_process_id(SAFARI_BUNDLE_ID, 0), None);
     }
 }
