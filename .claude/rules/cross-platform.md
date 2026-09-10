@@ -23,7 +23,7 @@ macOS-green proves **nothing** about `#[cfg(target_os = "linux")]` /
 
 When the diff touches any of:
 
-- `crates/openlogi-hook/src/linux.rs` / `windows.rs`
+- `crates/openlogi-hook/src/linux.rs` / `windows/**`
 - `crates/openlogi-inject/src/inject/linux.rs` / `windows.rs`
 - `crates/openlogi-agent/src/autostart/linux.rs` / `windows.rs`, or
   `crates/openlogi-agent/src/resume_windows.rs`

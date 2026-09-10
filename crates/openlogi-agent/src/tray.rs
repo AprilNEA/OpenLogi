@@ -43,6 +43,7 @@ use openlogi_core::config::AppIcon;
 use openlogi_hid::DeviceIoSignal;
 use tracing::{info, warn};
 
+use crate::shutdown::{self, ShutdownRequestSender};
 use crate::status_item;
 
 /// The installed menu-bar item plus the action target its menu items weakly
@@ -59,6 +60,10 @@ thread_local! {
     /// on the main thread, which is the same thread that installed it, so the
     /// affinity AppKit demands is the affinity the storage already has.
     static TRAY: RefCell<Option<TrayState>> = const { RefCell::new(None) };
+    /// Where menu actions hand process termination to the async lifecycle.
+    /// Kept separately because the AppKit loop still exists when the status
+    /// item is hidden by preference.
+    static SHUTDOWN_TX: RefCell<Option<ShutdownRequestSender>> = const { RefCell::new(None) };
 }
 
 /// The menu-bar glyph for `icon`: a monochrome template the system tints for
@@ -268,7 +273,8 @@ fn open_command(command: DeeplinkCommand) {
     open_url(&command.to_url());
 }
 
-/// Menu-bar Quit: take a running GUI with us, then end the process.
+/// Menu-bar Quit: take a running GUI with us, then hand process termination to
+/// the lifecycle that owns firmware capture and the input hook.
 ///
 /// Kept out of `define_class!` so the lint set actually sees the exit — clippy
 /// does not look inside macro expansions.
@@ -285,12 +291,9 @@ fn quit_agent() -> ! {
             .output();
     }
     crate::overlay::evict_on_quit();
-    info!("menu-bar Quit — exiting agent");
-    #[expect(
-        clippy::exit,
-        reason = "reached from an AppKit menu action on the main thread: the run loop owns `main`'s stack frame, so no status can travel back to it"
-    )]
-    std::process::exit(0)
+    info!("menu-bar Quit — requesting graceful agent shutdown");
+    let requests = SHUTDOWN_TX.with_borrow(Clone::clone);
+    shutdown::request_tray_quit(requests.as_ref(), 0)
 }
 
 /// Whether an OpenLogi GUI process is currently running (prod or dev bundle).
@@ -322,14 +325,13 @@ pub fn run_app_loop(
     show_in_menu_bar: bool,
     app_icon: AppIcon,
     device_io_signal: DeviceIoSignal,
+    shutdown_tx: ShutdownRequestSender,
 ) -> ! {
+    SHUTDOWN_TX.with_borrow_mut(|slot| *slot = Some(shutdown_tx));
     let Some(mtm) = MainThreadMarker::new() else {
         warn!("agent AppKit loop not started off the main thread — exiting");
-        #[expect(
-            clippy::exit,
-            reason = "this branch means `run_app_loop` was called off the process main thread, where AppKit cannot run at all; the function is `-> !` and `main` returns `()`, so a failure status has nowhere to propagate"
-        )]
-        std::process::exit(1);
+        let requests = SHUTDOWN_TX.with_borrow(Clone::clone);
+        shutdown::request_tray_quit(requests.as_ref(), 1);
     };
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
@@ -349,11 +351,9 @@ pub fn run_app_loop(
     info!(show_in_menu_bar, "agent AppKit loop started");
 
     app.run();
-    #[expect(
-        clippy::exit,
-        reason = "AppKit only returns from `run()` once the loop is torn down, and the agent core is still running on another thread; this function is `-> !` with no return path, so the process ends here"
-    )]
-    std::process::exit(0);
+    info!("agent AppKit loop ended — requesting graceful core shutdown");
+    let requests = SHUTDOWN_TX.with_borrow(Clone::clone);
+    shutdown::request_tray_quit(requests.as_ref(), 0);
 }
 
 /// Observe display/session sleep and user-visible resume transitions. Generic

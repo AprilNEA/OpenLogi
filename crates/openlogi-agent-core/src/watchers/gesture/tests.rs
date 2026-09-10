@@ -1,6 +1,6 @@
 use super::*;
 use openlogi_core::binding::{Action, Binding, ButtonId, GestureDirection};
-use openlogi_core::config::ThumbwheelSensitivity;
+use openlogi_core::config::{ThumbwheelSensitivity, VerticalScrollSensitivity};
 use openlogi_hid::DeviceRoute;
 
 fn route() -> DeviceRoute {
@@ -47,26 +47,30 @@ fn draining_session_with_epoch(epoch: u64) -> RunningSession {
 
 #[tokio::test(start_paused = true)]
 async fn planned_done_allows_an_immediate_successor_but_unexpected_done_is_paced() {
-    let planned = draining_session_with_epoch(7);
-    let CompletionAction::Remove {
-        unexpected: planned_unexpected,
-    } = planned.completion(&session_id(7))
-    else {
-        panic!("the tracked planned completion should remove its session");
-    };
+    let now = Instant::now();
+    let mut planned = GestureSlot::running(draining_session_with_epoch(7));
+    let (_, planned_unexpected) = planned
+        .complete(&session_id(7), None, Some(now + RETRY_DELAY))
+        .expect("the tracked planned completion should settle its session");
     assert!(
-        restart_deadline(planned_unexpected, Instant::now()).is_none(),
+        !planned_unexpected
+            && planned
+                .recovery()
+                .is_some_and(|recovery| recovery.restart_at.is_none()),
         "ordered Done after planned retirement must reconcile its successor immediately"
     );
 
-    let unexpected = live_session_with_epoch(8);
-    let CompletionAction::Remove { unexpected: failed } = unexpected.completion(&session_id(8))
-    else {
-        panic!("the tracked unexpected completion should remove its session");
-    };
-    let retry_at =
-        restart_deadline(failed, Instant::now()).expect("an unexpected completion must be paced");
-    assert_eq!(retry_at, Instant::now() + RETRY_DELAY);
+    let mut unexpected = GestureSlot::running(live_session_with_epoch(8));
+    let (_, failed) = unexpected
+        .complete(&session_id(8), None, Some(now + RETRY_DELAY))
+        .expect("the tracked unexpected completion should settle its session");
+    assert!(failed);
+    assert_eq!(
+        unexpected
+            .recovery()
+            .and_then(|recovery| recovery.restart_at),
+        Some(now + RETRY_DELAY)
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -101,27 +105,105 @@ async fn retry_deadline_is_not_postponed_by_ready_input() {
 #[test]
 fn suspended_device_io_disables_retry_deadlines() {
     let retry_at = Instant::now() + RETRY_DELAY;
-    let restart_after = HashMap::from([(physical_key(), retry_at)]);
+    let slots = HashMap::from([(
+        physical_key(),
+        GestureSlot::recovering(None, Some(retry_at)),
+    )]);
 
     assert_eq!(
-        next_deadline(
-            ReceiverRequestState::default(),
-            true,
-            &HashMap::new(),
-            &restart_after,
-        ),
+        next_deadline(ReceiverRequestState::default(), true, &slots),
         Some(retry_at),
     );
     assert_eq!(
-        next_deadline(
-            ReceiverRequestState::default(),
-            false,
-            &HashMap::new(),
-            &restart_after,
-        ),
+        next_deadline(ReceiverRequestState::default(), false, &slots),
         None,
         "capture retries must stay dormant until visible resume",
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn exclusive_receiver_access_disables_expired_recovery_deadlines() {
+    let access = ReceiverAccess::default();
+    let requests = access.subscribe_requests();
+    let exclusive = access
+        .acquire_exclusive(crate::receiver_access::ExclusiveAccessReason::Pairing)
+        .await;
+    let restart_at = Instant::now();
+    let slots = HashMap::from([(
+        physical_key(),
+        GestureSlot::recovering(None, Some(restart_at)),
+    )]);
+
+    assert_eq!(next_deadline(*requests.borrow(), true, &slots), None);
+    drop(exclusive);
+    assert_eq!(
+        next_deadline(*requests.borrow(), true, &slots),
+        Some(restart_at),
+        "release makes the retry actionable without adding another backoff"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn recovery_manager_waits_for_control_events_and_shutdown_between_retries() {
+    use crate::runtime::scroll::{ScrollPreferences, ScrollRuntime};
+    use futures_lite::future::poll_once;
+
+    for shutdown_requested in [false, true] {
+        let (plans_tx, capture_plans) = watch::channel(Arc::new(vec![plan()]));
+        let capture = CaptureChannel::default();
+        // A missing inventory channel makes the real session task fail without
+        // opening hardware; ordered Done then drives normal restart recovery.
+        let registry = openlogi_hid::ChannelRegistry::default();
+        let access = ReceiverAccess::default();
+        let (_signal, device_io) = openlogi_hid::device_io_channel();
+        let (ring, _ring_rx) = mpsc::unbounded_channel();
+        let mut actions = crate::runtime::ActionRuntime::new(
+            Arc::default(),
+            capture.clone(),
+            registry.clone(),
+            access.clone(),
+            device_io.clone(),
+            ring,
+        )
+        .unwrap();
+        let mut scroll = ScrollRuntime::spawn(Arc::new(ScrollPreferences::new(
+            false,
+            VerticalScrollSensitivity::default(),
+        )))
+        .unwrap();
+        let (shutdown_tx, shutdown) = oneshot::channel();
+        let mut manager = std::pin::pin!(manage(GestureManagerContext {
+            capture_plans,
+            capture_channel: capture,
+            receiver_requests: access.subscribe_requests(),
+            receiver_access: access,
+            channel_registry: registry,
+            device_io,
+            outputs: GestureOutputs::new(actions.dispatcher(), scroll.input(), Arc::default()),
+            shutdown,
+        }));
+
+        for _ in 0..3 {
+            // Poll the actual manager and its detached forwarder/session tasks
+            // through repeated failures. Each poll must return to event wait.
+            for _ in 0..4 {
+                assert!(poll_once(&mut manager).await.is_none());
+                tokio::task::yield_now().await;
+            }
+            tokio::time::advance(RETRY_DELAY).await;
+        }
+        let before_event = Instant::now();
+        if shutdown_requested {
+            shutdown_tx.send(()).unwrap();
+            assert!(matches!(manager.await, ManagerCompletion::Graceful));
+        } else {
+            drop(plans_tx);
+            assert!(matches!(manager.await, ManagerCompletion::Unexpected));
+        }
+        assert_eq!(Instant::now(), before_event);
+        scroll.shutdown();
+        actions.shutdown();
+    }
 }
 
 #[tokio::test]

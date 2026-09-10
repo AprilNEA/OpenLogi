@@ -38,7 +38,8 @@ use tokio::time::Instant;
 use tracing::{debug, warn};
 
 use self::dispatch::InputDispatcher;
-use super::capture_session::{CaptureSession, CompletionAction, ReconcileAction};
+use super::capture_session::{CaptureRecovery, CaptureSession, CaptureSlot, ReconcileAction};
+use super::shutdown::{ManagerCompletion, WatcherHandle};
 use crate::capture_plan::{CaptureTarget, DeviceCapturePlan, DispatchPlan, SharedCapturePlans};
 use crate::receiver_access::{ReceiverAccess, ReceiverRequestState, SessionReceiverLease};
 use crate::runtime::hook::SharedHookMaps;
@@ -87,6 +88,7 @@ impl GestureOutputs {
 /// Spawn the capture-manager thread. It owns a current-thread tokio runtime that
 /// keeps one capture session pointed at the active device and dispatches each
 /// captured input.
+#[must_use]
 pub fn spawn(
     capture_plans: &SharedCapturePlans,
     capture_channel: CaptureChannel,
@@ -94,9 +96,11 @@ pub fn spawn(
     channel_registry: openlogi_hid::ChannelRegistry,
     device_io: DeviceIoGate,
     outputs: GestureOutputs,
-) {
+) -> WatcherHandle {
     let plans = capture_plans.clone();
     let receiver_requests = receiver_access.subscribe_requests();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let (shutdown_done_tx, shutdown_done_rx) = oneshot::channel();
     thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -105,22 +109,31 @@ pub fn spawn(
             Ok(rt) => rt,
             Err(e) => {
                 warn!(error = %e, "capture watcher: could not build tokio runtime");
+                let _ = shutdown_done_tx.send(ManagerCompletion::Graceful);
                 return;
             }
         };
-        runtime.block_on(manage(
-            plans,
+        let completion = runtime.block_on(manage(GestureManagerContext {
+            capture_plans: plans,
             capture_channel,
             receiver_access,
             receiver_requests,
             channel_registry,
             device_io,
             outputs,
-        ));
+            shutdown: shutdown_rx,
+        }));
+        // Detached session tasks belong to this current-thread runtime. Drop
+        // it before acknowledging so even an unexpected manager return cannot
+        // leave a late firmware writer behind the process boundary.
+        drop(runtime);
+        let _ = shutdown_done_tx.send(completion);
     });
+    WatcherHandle::new(shutdown_tx, shutdown_done_rx)
 }
 
 type RunningSession = CaptureSession<CaptureTarget, DispatchPlan>;
+type GestureSlot = CaptureSlot<CaptureTarget, DispatchPlan, PendingRestore>;
 
 struct CapturedEvent {
     physical_key: PhysicalDeviceKey,
@@ -145,9 +158,7 @@ struct PendingRestore {
 }
 
 struct GestureManagerState {
-    sessions: HashMap<PhysicalDeviceKey, RunningSession>,
-    pending_restores: HashMap<PhysicalDeviceKey, PendingRestore>,
-    restart_after: HashMap<PhysicalDeviceKey, Instant>,
+    slots: HashMap<PhysicalDeviceKey, GestureSlot>,
     input_dispatcher: InputDispatcher,
     lease: std::sync::Weak<SessionReceiverLease>,
 }
@@ -158,6 +169,17 @@ struct SessionChannels {
     capture: CaptureChannel,
     registry: openlogi_hid::ChannelRegistry,
     device_io: DeviceIoGate,
+}
+
+struct GestureManagerContext {
+    capture_plans: watch::Receiver<Arc<Vec<DeviceCapturePlan>>>,
+    capture_channel: CaptureChannel,
+    receiver_access: ReceiverAccess,
+    receiver_requests: watch::Receiver<ReceiverRequestState>,
+    channel_registry: openlogi_hid::ChannelRegistry,
+    device_io: DeviceIoGate,
+    outputs: GestureOutputs,
+    shutdown: oneshot::Receiver<()>,
 }
 
 /// Forward one capture session's inputs onto the manager's ordered event
@@ -283,27 +305,35 @@ fn acquire_session_lease(
 }
 
 async fn retry_pending_restores(
-    pending_restores: &mut HashMap<PhysicalDeviceKey, PendingRestore>,
+    slots: &mut HashMap<PhysicalDeviceKey, GestureSlot>,
     registry: &openlogi_hid::ChannelRegistry,
     now: Instant,
 ) {
-    let keys: Vec<_> = pending_restores
+    let keys: Vec<_> = slots
         .iter()
-        .filter(|(_, pending)| pending.retry_at <= now)
+        .filter(|(_, slot)| {
+            slot.recovery()
+                .and_then(|recovery| recovery.pending_restore.as_ref())
+                .is_some_and(|pending| pending.retry_at <= now)
+        })
         .map(|(key, _)| key.clone())
         .collect();
     for key in keys {
-        let Some(pending) = pending_restores.remove(&key) else {
+        let Some(GestureSlot::Recovering(mut recovery)) = slots.remove(&key) else {
+            continue;
+        };
+        let Some(pending) = recovery.pending_restore.take() else {
+            slots.insert(key, GestureSlot::Recovering(recovery));
             continue;
         };
         if let CaptureSessionOutcome::RestorePending(token) = pending.token.retry(registry).await {
-            pending_restores.insert(
-                key,
-                PendingRestore {
-                    token,
-                    retry_at: Instant::now() + RETRY_DELAY,
-                },
-            );
+            recovery.pending_restore = Some(PendingRestore {
+                token,
+                retry_at: Instant::now() + RETRY_DELAY,
+            });
+        }
+        if !recovery.is_empty() {
+            slots.insert(key, GestureSlot::Recovering(recovery));
         }
     }
 }
@@ -311,48 +341,48 @@ async fn retry_pending_restores(
 fn next_deadline(
     requests: ReceiverRequestState,
     device_io_allowed: bool,
-    pending_restores: &HashMap<PhysicalDeviceKey, PendingRestore>,
-    restart_after: &HashMap<PhysicalDeviceKey, Instant>,
+    slots: &HashMap<PhysicalDeviceKey, GestureSlot>,
 ) -> Option<Instant> {
     if requests.any() || !device_io_allowed {
         return None;
     }
-    pending_restores
+    slots
         .values()
-        .map(|pending| pending.retry_at)
-        .chain(restart_after.values().copied())
+        .filter_map(GestureSlot::recovery)
+        .filter_map(|recovery| recovery.next_deadline(|pending| pending.retry_at))
         .min()
-}
-
-fn restart_deadline(unexpected: bool, now: Instant) -> Option<Instant> {
-    unexpected.then_some(now + RETRY_DELAY)
 }
 
 impl GestureManagerState {
     fn new(outputs: GestureOutputs) -> Self {
         Self {
-            sessions: HashMap::new(),
-            pending_restores: HashMap::new(),
-            restart_after: HashMap::new(),
+            slots: HashMap::new(),
             input_dispatcher: InputDispatcher::new(outputs),
             lease: std::sync::Weak::new(),
         }
     }
 
     fn deadline(&self, requests: ReceiverRequestState, device_io_allowed: bool) -> Option<Instant> {
-        next_deadline(
-            requests,
-            device_io_allowed,
-            &self.pending_restores,
-            &self.restart_after,
-        )
+        next_deadline(requests, device_io_allowed, &self.slots)
     }
 
     fn expedite_pending_restores(&mut self) {
         let now = Instant::now();
-        for pending in self.pending_restores.values_mut() {
-            pending.retry_at = now;
+        for slot in self.slots.values_mut() {
+            if let Some(pending) = slot
+                .recovery_mut()
+                .and_then(|recovery| recovery.pending_restore.as_mut())
+            {
+                pending.retry_at = now;
+            }
         }
+    }
+
+    fn has_pending_restores(&self) -> bool {
+        self.slots.values().any(|slot| {
+            slot.recovery()
+                .is_some_and(|recovery| recovery.pending_restore.is_some())
+        })
     }
 
     async fn reconcile(
@@ -376,55 +406,65 @@ impl GestureManagerState {
         } else {
             published.as_slice()
         };
-        for (key, session) in &mut self.sessions {
+        for (key, slot) in &mut self.slots {
+            let Some(session) = slot.session_mut() else {
+                continue;
+            };
             let wanted = wanted
                 .iter()
                 .find(|plan| plan.target.physical_key == *key)
                 .map(|plan| (&plan.target, &plan.dispatch));
             reconcile_session(session, wanted, &mut self.input_dispatcher);
         }
-        self.restart_after.retain(|key, _| {
-            published
+        self.slots.retain(|key, slot| {
+            let Some(recovery) = slot.recovery_mut() else {
+                return true;
+            };
+            if !published
                 .iter()
                 .any(|plan| plan.target.physical_key == *key)
+            {
+                recovery.restart_at = None;
+            }
+            !recovery.is_empty()
         });
 
         // Firmware ownership outlives the desired plan. Keep the strong lease
         // through successor spawning so restore→rearm is uninterrupted.
-        let due_restore = self
-            .pending_restores
-            .values()
-            .any(|pending| pending.retry_at <= now);
+        let due_restore = self.slots.values().any(|slot| {
+            slot.recovery()
+                .and_then(|recovery| recovery.pending_restore.as_ref())
+                .is_some_and(|pending| pending.retry_at <= now)
+        });
         let restore_lease = if due_restore {
             acquire_session_lease(receiver_access, &mut self.lease)
         } else {
             None
         };
         if restore_lease.is_some() {
-            retry_pending_restores(&mut self.pending_restores, &channels.registry, now).await;
+            retry_pending_restores(&mut self.slots, &channels.registry, now).await;
         }
 
         for plan in wanted {
             let key = &plan.target.physical_key;
-            if self.sessions.contains_key(key) || self.pending_restores.contains_key(key) {
+            if self.slots.get(key).is_some_and(|slot| match slot {
+                GestureSlot::Running(_) => true,
+                GestureSlot::Recovering(recovery) => recovery.blocks_restart(now),
+            }) {
                 continue;
             }
-            if self
-                .restart_after
-                .get(key)
-                .is_some_and(|deadline| *deadline > now)
-            {
-                continue;
-            }
-            self.restart_after.remove(key);
             let Some(session_lease) = acquire_session_lease(receiver_access, &mut self.lease)
             else {
-                self.restart_after.insert(key.clone(), now + RETRY_DELAY);
+                self.slots.insert(
+                    key.clone(),
+                    GestureSlot::recovering(None, Some(now + RETRY_DELAY)),
+                );
                 continue;
             };
             let id = HidppSessionId::new(&plan.dispatch.config_key);
             let session = spawn_session(id, plan.clone(), session_lease, channels);
-            self.sessions.insert(key.clone(), session);
+            self.slots
+                .insert(key.clone(), GestureSlot::running(session));
         }
     }
 
@@ -438,7 +478,10 @@ impl GestureManagerState {
         match event {
             SessionEvent::Input(event) => {
                 let key = &event.physical_key;
-                if device_io_allowed && let Some(session) = self.sessions.get_mut(key) {
+                if device_io_allowed
+                    && let Some(session) =
+                        self.slots.get_mut(key).and_then(GestureSlot::session_mut)
+                {
                     reconcile_published_session(
                         key,
                         session,
@@ -447,7 +490,7 @@ impl GestureManagerState {
                         &mut self.input_dispatcher,
                     );
                 }
-                let live = self.sessions.get(key);
+                let live = self.slots.get(key).and_then(GestureSlot::session);
                 let dispatch_context = dispatch_context_for(&event.session, live);
                 if let Some((session, plan)) = dispatch_context {
                     self.input_dispatcher.dispatch(session, plan, event.input);
@@ -466,35 +509,85 @@ impl GestureManagerState {
                 // Completion is queued behind every input the listener
                 // accepted during restoration, so cancellation cannot
                 // overtake the last diverted edge.
-                let Some((CompletionAction::Remove { unexpected }, dispatch_session)) = self
-                    .sessions
-                    .get(key)
-                    .map(|session| (session.completion(&done.session), session.id().clone()))
+                let now = Instant::now();
+                let pending_restore = done.pending_restore.map(|token| PendingRestore {
+                    token,
+                    retry_at: now + RETRY_DELAY,
+                });
+                let restart_at = device_io_allowed.then_some(now + RETRY_DELAY);
+                let Some(slot) = self.slots.get_mut(key) else {
+                    return false;
+                };
+                let Some((dispatch_session, unexpected)) =
+                    slot.complete(&done.session, pending_restore, restart_at)
                 else {
                     return false;
                 };
-                if let Some(pending) = done.pending_restore {
-                    self.pending_restores.insert(
-                        key.clone(),
-                        PendingRestore {
-                            token: pending,
-                            retry_at: Instant::now() + RETRY_DELAY,
-                        },
-                    );
-                }
+                let recovery_finished = slot.recovery().is_some_and(CaptureRecovery::is_empty);
                 self.input_dispatcher.cancel_session(&dispatch_session);
-                if device_io_allowed
-                    && let Some(deadline) = restart_deadline(unexpected, Instant::now())
-                {
-                    self.restart_after.insert(key.clone(), deadline);
+                if unexpected && device_io_allowed {
                     warn!(
                         key = key.as_str(),
                         "capture session ended unexpectedly, delaying re-arm"
                     );
                 }
-                self.sessions.remove(key);
+                if recovery_finished {
+                    self.slots.remove(key);
+                }
                 true
             }
+        }
+    }
+}
+
+/// Stop every tracked capture epoch and wait until each session task has
+/// reported ordered completion. Retain and retry pending restore tokens until
+/// the firmware ownership has been released.
+async fn drain_for_shutdown(
+    state: &mut GestureManagerState,
+    event_rx: &mut mpsc::UnboundedReceiver<SessionEvent>,
+    receiver_access: &ReceiverAccess,
+    receiver_requests: &watch::Receiver<ReceiverRequestState>,
+    capture_plans: &watch::Receiver<Arc<Vec<DeviceCapturePlan>>>,
+    channels: &SessionChannels,
+) {
+    for session in state
+        .slots
+        .values_mut()
+        .filter_map(GestureSlot::session_mut)
+    {
+        reconcile_session(session, None, &mut state.input_dispatcher);
+    }
+    while state.slots.values().any(|slot| slot.session().is_some()) {
+        let Some(event) = event_rx.recv().await else {
+            break;
+        };
+        state.handle_session_event(
+            event,
+            channels.device_io.allows_io(),
+            receiver_requests,
+            capture_plans,
+        );
+    }
+
+    state.expedite_pending_restores();
+    if state.has_pending_restores() {
+        warn!("capture watcher is waiting for pending firmware restoration before stopping");
+    }
+    let mut device_io = channels.device_io.clone();
+    while state.has_pending_restores() {
+        if !device_io.allows_io() && !device_io.wait_until_allowed().await {
+            // A closed suspended gate cannot prove firmware is native. The
+            // process lifecycle bounds terminal exits; confirmed replacement
+            // deliberately remains here rather than losing these tokens.
+            std::future::pending::<()>().await;
+        }
+        if let Some(_lease) = acquire_session_lease(receiver_access, &mut state.lease) {
+            retry_pending_restores(&mut state.slots, &channels.registry, Instant::now()).await;
+        }
+        if state.has_pending_restores() {
+            tokio::time::sleep(RETRY_DELAY).await;
+            state.expedite_pending_restores();
         }
     }
 }
@@ -502,15 +595,17 @@ impl GestureManagerState {
 /// Keep one capture session alive per online device, restarting a session when
 /// its device's plan changes, and dispatch incoming inputs against the plan of
 /// the device they arrived on. Runs for the lifetime of the process.
-async fn manage(
-    mut capture_plans: watch::Receiver<Arc<Vec<DeviceCapturePlan>>>,
-    capture_channel: CaptureChannel,
-    receiver_access: ReceiverAccess,
-    mut receiver_requests: watch::Receiver<ReceiverRequestState>,
-    channel_registry: openlogi_hid::ChannelRegistry,
-    mut device_io: DeviceIoGate,
-    outputs: GestureOutputs,
-) {
+async fn manage(context: GestureManagerContext) -> ManagerCompletion {
+    let GestureManagerContext {
+        mut capture_plans,
+        capture_channel,
+        receiver_access,
+        mut receiver_requests,
+        channel_registry,
+        mut device_io,
+        outputs,
+        mut shutdown,
+    } = context;
     let (events, mut event_rx) = mpsc::unbounded_channel::<SessionEvent>();
     let mut registry_changes = channel_registry.subscribe();
     // Capture sessions run as detached tasks, so an unexpected exit (a transient
@@ -556,6 +651,20 @@ async fn manage(
         }
 
         tokio::select! {
+            biased;
+
+            _ = &mut shutdown => {
+                drain_for_shutdown(
+                    &mut state,
+                    &mut event_rx,
+                    &receiver_access,
+                    &receiver_requests,
+                    &capture_plans,
+                    &channels,
+                )
+                .await;
+                return ManagerCompletion::Graceful;
+            }
             Some(event) = event_rx.recv() => {
                 reconcile |= state.handle_session_event(
                     event,
@@ -566,23 +675,23 @@ async fn manage(
             }
             result = capture_plans.changed() => match result {
                 Ok(()) => reconcile = true,
-                Err(_) => return,
+                Err(_) => return ManagerCompletion::Unexpected,
             },
             result = receiver_requests.changed() => match result {
                 Ok(()) => reconcile = true,
-                Err(_) => return,
+                Err(_) => return ManagerCompletion::Unexpected,
             },
             allowed = device_io.changed() => match allowed {
                 Some(true) => reconcile = true,
                 Some(false) => {}
-                None => return,
+                None => return ManagerCompletion::Unexpected,
             },
             open = wait_for_registry_change(
                 &mut registry_changes,
-                !state.pending_restores.is_empty(),
+                state.has_pending_restores(),
             ) => {
                 if !open {
-                    return;
+                    return ManagerCompletion::Unexpected;
                 }
                 if device_io.allows_io() {
                     state.expedite_pending_restores();

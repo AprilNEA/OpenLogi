@@ -25,8 +25,16 @@ use tokio::{
 };
 use tracing::{debug, info};
 
+mod restore;
+
+use restore::rollback_host_switch_start;
+pub use restore::{
+    HostSwitchRestoreOutcome, HostSwitchSessionFailure, HostSwitchSessionOutcome,
+    PendingHostSwitchRestore,
+};
+
 use crate::{
-    ChannelPool, DeviceIoGate, DeviceRoute,
+    ChannelPool, ChannelRegistry, DeviceIoGate, DeviceRoute, SharedChannel,
     backend::BackendError,
     reprog_controls::{self, ReprogControlsV4},
 };
@@ -99,23 +107,28 @@ pub enum HostSwitchError {
     },
 }
 
-/// Capture host switch keys on `keyboard` until one is pressed or `shutdown`
-/// resolves. Controls are restored before a requested host is returned.
+/// Capture host switch keys until a press, shutdown, or channel retirement.
+///
+/// Returns any requested host together with the restoration outcome. The caller
+/// must retain pending restoration and finish it before switching hosts or
+/// starting a successor session.
 pub async fn run_host_switch_session(
     keyboard: DeviceRoute,
     shutdown: oneshot::Receiver<HostSwitchStopReason>,
-    channel_pool: ChannelPool,
-    mut device_io: DeviceIoGate,
-) -> Result<Option<u8>, HostSwitchError> {
+    registry: &ChannelRegistry,
+    device_io: DeviceIoGate,
+) -> Result<HostSwitchSessionOutcome, HostSwitchSessionFailure> {
     if !device_io.allows_io() {
         return Err(HostSwitchError::Hid(BackendError::Backend(
             "host device I/O is suspended".into(),
-        )));
+        ))
+        .into());
     }
-    let channel = open_channel(&channel_pool, &keyboard, "opening keyboard channel")
-        .await?
+    let shared = registry
+        .lookup(&keyboard)
         .ok_or(HostSwitchError::KeyboardNotFound)?;
-    let keyboard_index = keyboard.device_index();
+    let channel = Arc::clone(shared.channel());
+    let keyboard_index = shared.device_index();
     let device = timed_hidpp(
         "opening keyboard device",
         Device::new(Arc::clone(&channel), keyboard_index),
@@ -129,9 +142,13 @@ pub async fn run_host_switch_session(
     .ok_or(HostSwitchError::UnsupportedKeyboard)?;
     let controls = ReprogControlsV4::new(Arc::clone(&channel), keyboard_index, feature.index);
 
-    let armed = arm_host_controls(&controls).await?;
+    let mut armed = Vec::new();
+    if let Err(error) = arm_host_controls_inner(&controls, &mut armed).await {
+        let pending = PendingHostSwitchRestore::new(&shared, controls.feature_index(), armed);
+        return Err(rollback_host_switch_start(error, pending, registry, &device_io).await);
+    }
     if armed.is_empty() {
-        return Err(HostSwitchError::UnsupportedKeyboard);
+        return Err(HostSwitchError::UnsupportedKeyboard.into());
     }
 
     let (press_tx, mut press_rx) = mpsc::unbounded_channel();
@@ -157,19 +174,79 @@ pub async fn run_host_switch_session(
         controls = armed.len(),
         "host switch link active"
     );
-    let outcome = tokio::select! {
-        reason = shutdown => {
-            let reason = reason.unwrap_or(HostSwitchStopReason::DeviceLost);
-            (None, reason == HostSwitchStopReason::Graceful)
-        },
-        Some(host) = press_rx.recv() => (Some(host), true),
-    };
+    let (requested_host, permit_retired_channel) = monitor_host_switch(
+        shutdown,
+        &mut press_rx,
+        registry,
+        &shared,
+        device_io.clone(),
+    )
+    .await;
 
     drop(listener);
-    if outcome.1 && device_io.wait_until_allowed().await {
-        restore_host_controls(&controls, armed).await;
+    let Some(mut pending) = PendingHostSwitchRestore::new(&shared, controls.feature_index(), armed)
+    else {
+        return Ok(HostSwitchSessionOutcome::Restored { requested_host });
+    };
+    if permit_retired_channel {
+        pending = pending.allow_current_channel();
     }
-    Ok(outcome.0)
+    if !device_io.allows_io() {
+        return Ok(HostSwitchSessionOutcome::RestorePending {
+            requested_host,
+            restore: pending,
+        });
+    }
+    Ok(match pending.retry(registry).await {
+        HostSwitchRestoreOutcome::Restored => HostSwitchSessionOutcome::Restored { requested_host },
+        HostSwitchRestoreOutcome::RestorePending(restore) => {
+            HostSwitchSessionOutcome::RestorePending {
+                requested_host,
+                restore,
+            }
+        }
+    })
+}
+
+async fn monitor_host_switch(
+    mut shutdown: oneshot::Receiver<HostSwitchStopReason>,
+    presses: &mut mpsc::UnboundedReceiver<u8>,
+    registry: &ChannelRegistry,
+    shared: &SharedChannel,
+    mut device_io: DeviceIoGate,
+) -> (Option<u8>, bool) {
+    let mut registry_changes = registry.subscribe();
+    loop {
+        if !registry.is_current(shared) {
+            info!(route = %shared.route(), "inventory replaced or removed host-switch channel");
+            return (None, false);
+        }
+        tokio::select! {
+            biased;
+
+            changed = registry_changes.changed() => {
+                if changed.is_err() {
+                    return (None, false);
+                }
+            }
+            reason = &mut shutdown => {
+                let reason = reason.unwrap_or(HostSwitchStopReason::DeviceLost);
+                let current = registry.is_current(shared);
+                return (
+                    None,
+                    reason == HostSwitchStopReason::Graceful && current,
+                );
+            }
+            host = presses.recv() => {
+                return (host, registry.is_current(shared));
+            }
+            allowed = device_io.changed() => {
+                if allowed.is_none() {
+                    return (None, registry.is_current(shared));
+                }
+            }
+        }
+    }
 }
 
 /// Move reachable targets to `host`, then move the keyboard last.
@@ -208,17 +285,6 @@ pub async fn switch_linked_hosts(
         debug!(host, route = %keyboard, "keyboard host switched");
     }
     Ok(changed)
-}
-
-async fn arm_host_controls(
-    controls: &ReprogControlsV4,
-) -> Result<Vec<ArmedControl>, HostSwitchError> {
-    let mut armed = Vec::new();
-    if let Err(error) = arm_host_controls_inner(controls, &mut armed).await {
-        restore_host_controls(controls, armed).await;
-        return Err(error);
-    }
-    Ok(armed)
 }
 
 async fn arm_host_controls_inner(
@@ -288,8 +354,9 @@ async fn arm_host_controls_inner(
     Ok(())
 }
 
-async fn restore_host_controls(controls: &ReprogControlsV4, armed: Vec<ArmedControl>) {
-    for control in armed {
+async fn restore_host_controls(controls: &ReprogControlsV4, armed: &[ArmedControl]) -> bool {
+    let mut complete = true;
+    for &control in armed {
         let mut restored = restore_host_control(controls, control).await;
         if restored.is_err() {
             restored = restore_host_control(controls, control).await;
@@ -300,8 +367,10 @@ async fn restore_host_controls(controls: &ReprogControlsV4, armed: Vec<ArmedCont
                 cid = control.cid,
                 "could not restore host switch control"
             );
+            complete = false;
         }
     }
+    complete
 }
 
 async fn restore_host_control(
@@ -528,14 +597,18 @@ mod tests {
     use hidpp::channel::HidppChannel;
 
     use super::{
-        ArmedControl, HostSwitchError, ReportingMode, event_host, host_change_required,
-        host_channel, prepare_host_change_on, restoration_change, shares_channel,
+        ArmedControl, HostSwitchError, HostSwitchRestoreOutcome, PendingHostSwitchRestore,
+        ReportingMode, event_host, host_change_required, host_channel, prepare_host_change_on,
+        restoration_change, rollback_host_switch_start, shares_channel,
     };
-    use crate::DeviceRoute;
-    use crate::channel::scripted::{ScriptedRawHidChannel, feature_error};
+    use crate::backend::NodeId;
+    use crate::channel::scripted::{
+        ScriptedRawHidChannel, feature_error, scripted_channel as raw_scripted_channel,
+    };
     use crate::reprog_controls::{
         AnalyticsKeyEvent, CidReporting, ControlId, CtrlIdInfo, ReprogControlsEvent,
     };
+    use crate::{ChannelRegistry, DeviceRoute, SharedChannel, device_io_channel};
 
     /// Feature index the scripted keyboard reports for `0x1814 ChangeHost`.
     const CHANGE_HOST_INDEX: u8 = 0x04;
@@ -722,6 +795,97 @@ mod tests {
             analytics_key_events: false,
             raw_wheel: true,
         }
+    }
+
+    fn direct_route() -> DeviceRoute {
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xb35b,
+        }
+    }
+
+    fn armed_control() -> ArmedControl {
+        ArmedControl {
+            cid: 0x00d3,
+            host: 0,
+            mode: ReportingMode::Diverted,
+            original: noisy_reporting(),
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_restore_recovers_only_through_a_new_current_publication() {
+        let route = direct_route();
+        let node = NodeId::from("keyboard-node".to_owned());
+        let registry = ChannelRegistry::default();
+        let (retired_raw, retired_handle) = ScriptedRawHidChannel::with_responder(|_| None);
+        let retired_channel = raw_scripted_channel(retired_raw).await;
+        let retired = SharedChannel::new(retired_channel.clone(), route.clone());
+        registry.replace_node(node.clone(), [route.clone()], retired_channel);
+        let pending = PendingHostSwitchRestore::new(&retired, 0x22, vec![armed_control()])
+            .expect("one armed control must require restoration");
+
+        let pending = match pending.retry(&registry).await {
+            HostSwitchRestoreOutcome::RestorePending(pending) => pending,
+            HostSwitchRestoreOutcome::Restored => {
+                panic!("the retired publication must not restore itself")
+            }
+        };
+        assert!(retired_handle.written_reports().is_empty());
+
+        let (failed_raw, failed_handle) =
+            ScriptedRawHidChannel::with_failing_writes(|request| Some(request.to_vec()), |_| true);
+        let failed = raw_scripted_channel(failed_raw).await;
+        registry.replace_node(node.clone(), [route.clone()], failed);
+        let pending = match pending.retry(&registry).await {
+            HostSwitchRestoreOutcome::RestorePending(pending) => pending,
+            HostSwitchRestoreOutcome::Restored => panic!("failed writes cannot restore firmware"),
+        };
+        assert_eq!(failed_handle.written_reports().len(), 2);
+
+        let (fresh_raw, fresh_handle) =
+            ScriptedRawHidChannel::with_responder(|request| Some(request.to_vec()));
+        registry.replace_node(node, [route], raw_scripted_channel(fresh_raw).await);
+
+        assert!(matches!(
+            pending.retry(&registry).await,
+            HostSwitchRestoreOutcome::Restored
+        ));
+        assert_eq!(fresh_handle.written_reports().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn suspended_partial_arm_rollback_returns_pending_without_writes() {
+        let route = direct_route();
+        let node = NodeId::from("keyboard-node".to_owned());
+        let registry = ChannelRegistry::default();
+        let (raw, handle) = ScriptedRawHidChannel::with_responder(|request| Some(request.to_vec()));
+        let channel = raw_scripted_channel(raw).await;
+        let shared = SharedChannel::new(channel.clone(), route.clone());
+        registry.replace_node(node, [route], channel);
+        let pending = PendingHostSwitchRestore::new(&shared, 0x22, vec![armed_control()]);
+        let (signal, gate) = device_io_channel();
+        assert!(signal.suspend());
+
+        let failure = rollback_host_switch_start(
+            HostSwitchError::Hidpp("partial arm failed".into()),
+            pending,
+            &registry,
+            &gate,
+        )
+        .await;
+        let (_, pending) = failure.into_parts();
+
+        assert!(handle.written_reports().is_empty());
+        assert!(signal.resume());
+        assert!(matches!(
+            pending
+                .expect("failed rollback must retain ownership")
+                .retry(&registry)
+                .await,
+            HostSwitchRestoreOutcome::Restored
+        ));
+        assert_eq!(handle.written_reports().len(), 1);
     }
 
     #[test]

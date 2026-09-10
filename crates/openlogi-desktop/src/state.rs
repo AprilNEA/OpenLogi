@@ -109,8 +109,11 @@ pub(crate) enum StateEvent {
     CameraChanged,
     /// Host camera-permission status may have changed.
     #[cfg_attr(
-        not(target_os = "macos"),
-        expect(dead_code, reason = "camera consent polling is macOS-only")
+        not(any(target_os = "macos", test)),
+        expect(
+            dead_code,
+            reason = "camera consent polling is macOS-only outside tests"
+        )
     )]
     CameraPermissionChanged,
     /// Per-device preferences outside the feature-specific events changed.

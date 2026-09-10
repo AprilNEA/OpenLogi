@@ -10,9 +10,11 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 
 use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, LPARAM, LRESULT, POINT, WPARAM};
+use windows_sys::Win32::Graphics::Gdi::{MONITOR_DEFAULTTONEAREST, MonitorFromPoint};
 use windows_sys::Win32::System::Threading::{
     GetCurrentThreadId, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
+use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, VIRTUAL_KEY, VK_CONTROL, VK_ESCAPE, VK_F1, VK_LWIN, VK_MENU, VK_RWIN,
     VK_SHIFT,
@@ -27,13 +29,12 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_XBUTTONDOWN, WM_XBUTTONUP, XBUTTON1, XBUTTON2,
 };
 
-use crate::windows_worker::{WorkerEvent, WorkerPhase, WorkerStatus};
+use super::cursor::{MonitorDpi, PhysicalCursorPosition};
+use super::worker::{WorkerEvent, WorkerPhase, WorkerStatus};
 use crate::{
     ButtonId, CursorPosition, EventDisposition, ForegroundApp, HookBackend, HookError, HookEvent,
     KeyEvent, KeyModifiers, MouseEvent, ScrollDelta,
 };
-
-pub(crate) mod foreground;
 
 const WHEEL_DELTA: f64 = 120.0;
 
@@ -183,10 +184,34 @@ impl HookBackend for Backend {
         if unsafe { GetCursorPos(&raw mut point) } == 0 {
             return None;
         }
-        Some(CursorPosition {
-            x: f64::from(point.x),
-            y: f64::from(point.y),
-        })
+        // `GetCursorPos` reports physical pixels, but every consumer of
+        // `CursorPosition` (currently the overlay, matching cursor against
+        // GPUI's own display bounds) works in DIPs — GPUI's Windows backend
+        // divides every display and window bounds by the monitor's DPI scale.
+        // Left un-normalized, the ring drifts away from the cursor by exactly
+        // the scale factor on any monitor above 100% scaling.
+        // SAFETY: `MonitorFromPoint` takes `point` by value and never fails —
+        // `MONITOR_DEFAULTTONEAREST` guarantees a valid `HMONITOR` even when
+        // `point` sits outside every monitor.
+        let monitor = unsafe { MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST) };
+        let mut dpi_x = 0u32;
+        let mut dpi_y = 0u32;
+        // SAFETY: `monitor` is a valid `HMONITOR` from `MonitorFromPoint` above;
+        // `dpi_x`/`dpi_y` are valid writable `u32`s for the duration of the call.
+        // The HRESULT is checked below rather than trusted, since MSDN leaves
+        // the out-params unspecified (not necessarily untouched) on failure.
+        let hr =
+            unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &raw mut dpi_x, &raw mut dpi_y) };
+        let dpi = if hr >= 0 {
+            MonitorDpi::try_from((dpi_x, dpi_y)).unwrap_or_default()
+        } else {
+            MonitorDpi::default()
+        };
+        let physical = PhysicalCursorPosition {
+            x: point.x,
+            y: point.y,
+        };
+        Some(physical.into_logical(dpi))
     }
 }
 
@@ -303,13 +328,15 @@ fn hook_thread(
     }
 }
 
+/// Why a native hook or foreground-observer message pump stopped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum MessageLoopExit {
+pub(super) enum MessageLoopExit {
     Quit,
     Failed(u32),
 }
 
-fn message_loop(mut handle_thread_message: impl FnMut(&MSG) -> bool) -> MessageLoopExit {
+/// Drive the calling thread's queue, dispatching messages the handler did not consume.
+pub(super) fn message_loop(mut handle_thread_message: impl FnMut(&MSG) -> bool) -> MessageLoopExit {
     let mut msg = MSG::default();
     loop {
         // SAFETY: `msg` is a live, owned MSG; a null window handle retrieves

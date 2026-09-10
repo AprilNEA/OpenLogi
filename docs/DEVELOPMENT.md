@@ -156,6 +156,10 @@ flow (discovery → passkey → paired). Its agent version carries a `-mock` suf
 so a mock session is identifiable in the UI. It is a dev tool only and is never
 bundled.
 
+The proposed architecture for recorded device profiles, raw HID++ replay, and
+deterministic hardware scenarios is documented in
+[Mock device and hardware record/replay architecture](MOCK_DEVICE_TESTING.md).
+
 ### Component gallery
 
 Use the debug-only component gallery to review shared controls across light and
@@ -253,7 +257,7 @@ derived from the host (override with `PKG_ARCH`):
 
 ```sh
 cargo run -p xtask -- linux package
-# → target/release/openlogi_*.deb / .rpm / .pkg.tar.zst
+# → target/release/*.deb / *.rpm / *.pkg.tar.zst
 ```
 
 The package contents (binaries, udev rules, systemd user unit, desktop entry,
