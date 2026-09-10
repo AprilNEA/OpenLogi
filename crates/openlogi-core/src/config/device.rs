@@ -61,7 +61,19 @@ pub struct DeviceIdentity {
 }
 
 impl DeviceIdentity {
-    /// Remove per-unit identifiers before this model snapshot is persisted.
+    /// Drop the serial number and unit id from this model snapshot before it
+    /// is persisted, leaving the identity body with model-level fields only.
+    ///
+    /// This does **not** make the saved file free of per-unit identifiers. A
+    /// device's configuration key has to be stable and unique per physical
+    /// unit, so [`runtime_key`] embeds one directly: `direct:` and `unknown:`
+    /// keys carry the device's own serial number or unit id, `raw:` keys carry
+    /// an OS-node- or serial-derived route identity, and a `receiver:` key
+    /// carries the receiver's UID. Stripping the body only keeps a device's
+    /// identifiers out of the file for `receiver:` keys, where the key names
+    /// the receiver and pairing slot rather than the paired device itself.
+    ///
+    /// [`runtime_key`]: crate::device_order::DeviceStableId::runtime_key
     #[must_use]
     pub fn without_unit_identifiers(mut self) -> Self {
         if let Some(model) = &mut self.model_info {
