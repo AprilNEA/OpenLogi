@@ -13,6 +13,7 @@ use gpui_component::{
     Icon, IconName, Selectable as _, button::Button, h_flex, input::InputState, tooltip::Tooltip,
     v_flex,
 };
+use openlogi_core::action_ring::geometry;
 use openlogi_core::binding::{
     ActionRingConfig, ActionRingEntry, ActionRingIcon, ActionRingLayout, ActionRingSlot,
 };
@@ -244,9 +245,13 @@ fn toggle_button(
         })
 }
 
-const PREVIEW_SIZE: f32 = 320.0;
-const PREVIEW_RADIUS: f32 = 106.0;
-const PREVIEW_SLOT_SIZE: f32 = 50.0;
+/// The preview draws the ring at its real size and shape
+/// (`openlogi_core::action_ring::geometry`), so what the user arranges here
+/// is what the overlay shows. The canvas is the ring plus a margin.
+const PREVIEW_SIZE: f32 = 280.0;
+const PREVIEW_RADIUS: f32 = geometry::RADIUS;
+const PREVIEW_SLOT_SIZE: f32 = geometry::SLOT_DIAMETER;
+const PREVIEW_CANCEL_SIZE: f32 = geometry::CANCEL_DIAMETER;
 
 fn ring_preview(
     layout: &ActionRingLayout,
@@ -258,30 +263,21 @@ fn ring_preview(
         .relative()
         .flex_none()
         .size(px(PREVIEW_SIZE))
+        // Free-floating slots around the cancel button, like the real ring:
+        // no backing disc.
         .child(
             div()
                 .absolute()
-                .left(px(24.0))
-                .top(px(24.0))
-                .size(px(PREVIEW_SIZE - 48.0))
-                .rounded_full()
-                .border_1()
-                .border_color(pal.border)
-                .bg(pal.panel),
-        )
-        .child(
-            div()
-                .absolute()
-                .left(px(PREVIEW_SIZE / 2.0 - 24.0))
-                .top(px(PREVIEW_SIZE / 2.0 - 24.0))
-                .size(px(48.0))
+                .left(px(PREVIEW_SIZE / 2.0 - PREVIEW_CANCEL_SIZE / 2.0))
+                .top(px(PREVIEW_SIZE / 2.0 - PREVIEW_CANCEL_SIZE / 2.0))
+                .size(px(PREVIEW_CANCEL_SIZE))
                 .flex()
                 .items_center()
                 .justify_center()
                 .rounded_full()
                 .bg(pal.muted)
                 .text_color(pal.text_muted)
-                .child(svg().path(RING_CANCEL_ICON).size(px(20.0)).flex_none()),
+                .child(svg().path(RING_CANCEL_ICON).size(px(16.0)).flex_none()),
         )
         .children(ActionRingSlot::ALL.into_iter().map(|slot| {
             slot_button(
