@@ -46,8 +46,14 @@ use crate::reprog_controls::{self, RawControlEvent, ReprogControlsV4};
 /// The divertable keyboard F-row controls OpenLogi models, as
 /// `(0x1b04 control ID, ButtonId)` pairs. CID values match Logitech's control
 /// catalog (cross-checked against Solaar's `special_keys.py`); the F-row
-/// positions are the Signature-series layout.
-pub const KEYBOARD_KEY_CIDS: [(u16, ButtonId); 9] = [
+/// positions are the Signature-series layout, except the backlight pair,
+/// which only the MX Mechanical family carries (F4/F5 on the Mini for Mac).
+pub const KEYBOARD_KEY_CIDS: [(u16, ButtonId); 11] = [
+    // The firmware task behind these two CIDs is the internal backlight
+    // adjust function — diversion suppresses it, so only a bound key loses
+    // its stock backlight behavior.
+    (0x00e2, ButtonId::KeyBacklightDown),
+    (0x00e3, ButtonId::KeyBacklightUp),
     (0x00d4, ButtonId::KeySearch),
     (0x0103, ButtonId::KeyDictation),
     (0x0108, ButtonId::KeyEmoji),
@@ -409,6 +415,40 @@ fn device_io_suspended() -> GestureError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cid_table_matches_the_keyboard_key_roster() {
+        let table: Vec<ButtonId> = KEYBOARD_KEY_CIDS
+            .iter()
+            .map(|&(_, button)| button)
+            .collect();
+        assert_eq!(
+            table,
+            ButtonId::KEYBOARD_KEYS,
+            "KEYBOARD_KEY_CIDS and ButtonId::KEYBOARD_KEYS live in different crates \
+             and must list the same keys in the same order"
+        );
+        // The roster check above projects the CID away, so a wrong CID passes
+        // it. Every neighbour here is a real control, so a single wrong digit
+        // diverts a different key rather than failing loudly.
+        assert_eq!(
+            KEYBOARD_KEY_CIDS,
+            [
+                (0x00e2, ButtonId::KeyBacklightDown),
+                (0x00e3, ButtonId::KeyBacklightUp),
+                (0x00d4, ButtonId::KeySearch),
+                (0x0103, ButtonId::KeyDictation),
+                (0x0108, ButtonId::KeyEmoji),
+                (0x010a, ButtonId::KeyScreenCapture),
+                (0x011c, ButtonId::KeyMicMute),
+                (0x00e5, ButtonId::KeyPlayPause),
+                (0x00e7, ButtonId::KeyMute),
+                (0x00e8, ButtonId::KeyVolumeDown),
+                (0x00e9, ButtonId::KeyVolumeUp),
+            ],
+            "each keyboard key's 0x1b04 control ID is a firmware contract"
+        );
+    }
 
     #[test]
     fn keyboard_snapshots_emit_balanced_edges_without_duplicates() {

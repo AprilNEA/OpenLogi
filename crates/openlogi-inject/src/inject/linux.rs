@@ -135,6 +135,8 @@ fn dispatch_media(key: MediaKey) {
         MediaKey::VolumeUp => press_key(&[], KeyCode::KEY_VOLUMEUP),
         MediaKey::VolumeDown => press_key(&[], KeyCode::KEY_VOLUMEDOWN),
         MediaKey::Mute => press_key(&[], KeyCode::KEY_MUTE),
+        MediaKey::BrightnessUp => press_key(&[], KeyCode::KEY_BRIGHTNESSUP),
+        MediaKey::BrightnessDown => press_key(&[], KeyCode::KEY_BRIGHTNESSDOWN),
     }
 }
 
@@ -281,6 +283,7 @@ const KEY_CAPABILITIES: &[KeyCode] = &[
     // Multimedia
     KeyCode::KEY_PLAYPAUSE, KeyCode::KEY_NEXTSONG, KeyCode::KEY_PREVIOUSSONG,
     KeyCode::KEY_VOLUMEUP,  KeyCode::KEY_VOLUMEDOWN, KeyCode::KEY_MUTE,
+    KeyCode::KEY_BRIGHTNESSUP, KeyCode::KEY_BRIGHTNESSDOWN,
     // Mouse buttons (injected as EV_KEY with BTN_* codes). The side pair
     // must be registered here or the kernel silently drops their events.
     KeyCode::BTN_LEFT, KeyCode::BTN_RIGHT, KeyCode::BTN_MIDDLE,
@@ -715,7 +718,10 @@ mod tests {
     use evdev::KeyCode;
     use openlogi_core::binding::{KeyCombo, Shortcut};
 
-    use super::{combo, hid_usage_to_linux, key_ev, key_phase_events, modifiers_to_keycodes, syn};
+    use super::{
+        KEY_CAPABILITIES, combo, hid_usage_to_linux, key_ev, key_phase_events,
+        modifiers_to_keycodes, syn,
+    };
     use crate::inject::KeyPhase;
 
     #[test]
@@ -763,6 +769,23 @@ mod tests {
         assert_eq!(hid_usage_to_linux(0x3a), Some(KeyCode::KEY_F1));
         assert_eq!(hid_usage_to_linux(0x6f), Some(KeyCode::KEY_F20));
         assert_eq!(hid_usage_to_linux(0xff), None);
+    }
+
+    /// A keycode `press_key` emits without a matching `KEY_CAPABILITIES`
+    /// entry is silently dropped by the kernel — `build` never registers it,
+    /// `emit` still returns `Ok`, and nothing distinguishes that from a
+    /// working press. The brightness pair shipped one commit ahead of its
+    /// capability entry while this feature was in review, and only Linux
+    /// compiles this file, so macOS CI can never catch a recurrence.
+    #[test]
+    fn brightness_keycodes_are_registered_as_capabilities() {
+        for code in [KeyCode::KEY_BRIGHTNESSUP, KeyCode::KEY_BRIGHTNESSDOWN] {
+            assert!(
+                KEY_CAPABILITIES.contains(&code),
+                "dispatch_media presses {code:?} but KEY_CAPABILITIES omits it, \
+                 so the kernel will drop the event"
+            );
+        }
     }
 
     /// Pin a handful of representative `Shortcut -> KeyCombo` rows so an
