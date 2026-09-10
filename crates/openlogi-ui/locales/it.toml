@@ -479,7 +479,7 @@ input_interception_detected = "Un'altra app sta intercettando l'input del mouse,
 [camera]
 camera = "Fotocamera"
 starting_preview = "Avvio anteprima…"
-camera_in_use_by_another_app = "Un'altra applicazione sta usando questa fotocamera."
+camera_resources_unavailable = "Le risorse della fotocamera non sono disponibili. Un'altra applicazione potrebbe usare la fotocamera."
 camera_preview_start_failed = "Impossibile avviare l'anteprima della fotocamera."
 camera_preview_permission_required = "Abilita l'accesso alla fotocamera nelle Impostazioni per l'anteprima."
 click_to_enable_camera_access = "Clicca per abilitare l'accesso alla fotocamera."

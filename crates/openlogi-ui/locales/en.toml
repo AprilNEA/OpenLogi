@@ -479,7 +479,7 @@ input_interception_detected = "Another app is intercepting mouse input, which ca
 [camera]
 camera = "Camera"
 starting_preview = "Starting preview…"
-camera_in_use_by_another_app = "Another application is using this camera."
+camera_resources_unavailable = "Camera resources are unavailable. Another application may be using the camera."
 camera_preview_start_failed = "The camera preview couldn't start."
 camera_preview_permission_required = "Enable Camera access in System Settings to see a preview."
 click_to_enable_camera_access = "Click to enable camera access."

@@ -479,7 +479,7 @@ input_interception_detected = "En anden app opfanger museinput, hvilket kan for�
 [camera]
 camera = "Kamera"
 starting_preview = "Starter forhåndsvisning…"
-camera_in_use_by_another_app = "En anden app bruger dette kamera."
+camera_resources_unavailable = "Kameraressourcerne er ikke tilgængelige. En anden app bruger muligvis kameraet."
 camera_preview_start_failed = "Kameraets forhåndsvisning kunne ikke startes."
 camera_preview_permission_required = "Aktivér kameraadgang i Indstillinger for at få vist en forhåndsvisning."
 click_to_enable_camera_access = "Klik for at aktivere kameraadgang."

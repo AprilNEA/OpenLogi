@@ -20,10 +20,8 @@
 //! camera's ~30 fps delivery rate.
 //!
 //! When the camera cannot be opened at all the placeholder says why rather than
-//! waiting on a first frame that is never coming — most usefully when another
-//! application already holds the device. That one resolves itself the moment the
-//! other application quits, and nothing reports when it does, so the preview
-//! keeps retrying on a timer for as long as its tab is on screen.
+//! waiting on a first frame that is never coming. Resource contention can clear
+//! without an event, so the preview retries on a timer while its tab is on screen.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -289,7 +287,17 @@ impl Render for CameraPreview {
                 |surface| {
                     surface.child(note(
                         match &self.lifecycle {
-                            PreviewLifecycle::StartFailed { error, .. } => failure_note(error),
+                            PreviewLifecycle::StartFailed {
+                                error: CaptureError::ResourcesUnavailable,
+                                ..
+                            } => tr!("camera.camera_resources_unavailable"),
+                            PreviewLifecycle::StartFailed {
+                                error: CaptureError::AccessDenied,
+                                ..
+                            } => tr!("camera.camera_preview_permission_required"),
+                            PreviewLifecycle::StartFailed { .. } => {
+                                tr!("camera.camera_preview_start_failed")
+                            }
                             _ => tr!("camera.starting_preview"),
                         },
                         pal,
@@ -330,19 +338,11 @@ fn build_image(frame: Frame) -> Option<Arc<RenderImage>> {
     Some(Arc::new(RenderImage::new(vec![ImageFrame::new(buffer)])))
 }
 
-/// What the placeholder says when the camera could not be opened. Only the
-/// in-use case gets its own wording: it is the one failure the user can act on
-/// (close the other application), and the one that used to render as an
-/// indefinite "Starting preview…" over a black box.
-fn failure_note(error: &CaptureError) -> SharedString {
-    match error {
-        CaptureError::InUse => tr!("camera.camera_in_use_by_another_app"),
-        _ => tr!("camera.camera_preview_start_failed"),
-    }
-}
-
 fn note(text: impl Into<SharedString>, pal: Palette) -> gpui::Div {
     div()
+        .max_w_full()
+        .px_4()
+        .text_center()
         .text_body()
         .text_color(pal.text_muted)
         .child(text.into())
