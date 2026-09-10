@@ -181,7 +181,12 @@ pub async fn run_host_switch_session(
         listen_for_announcements(&channel, keyboard_index, announcement, &press_tx);
 
     let mut armed = Vec::new();
-    if let Err(error) = arm_host_controls_inner(&controls, &mut armed).await {
+    let arming = arm_host_controls_inner(&controls, &mut armed).await;
+    if let Some(outcome) = answered_while_arming(&mut press_rx, announcement_listener.as_ref()) {
+        drop(announcement_listener);
+        return Ok(outcome);
+    }
+    if let Err(error) = arming {
         let pending = PendingHostSwitchRestore::new(&shared, controls.feature_index(), armed);
         return Err(rollback_host_switch_start(error, pending, registry, &device_io).await);
     }
@@ -189,21 +194,8 @@ pub async fn run_host_switch_session(
         return Err(HostSwitchError::UnsupportedKeyboard.into());
     }
 
-    let feature_index = controls.feature_index();
-    let event_controls = armed.clone();
-    let listener = channel.add_msg_listener_guarded(move |raw, matched| {
-        if matched {
-            return;
-        }
-        if let Some(request) = decode_control_request(
-            &v20::Message::from(raw),
-            keyboard_index,
-            feature_index,
-            &event_controls,
-        ) {
-            let _ = press_tx.send(request);
-        }
-    });
+    let listener =
+        listen_for_control_presses(&channel, keyboard_index, &controls, &armed, press_tx);
 
     info!(
         route = %keyboard,
@@ -354,6 +346,49 @@ pub async fn switch_linked_hosts(
         debug!(host, route = %keyboard, "keyboard host switched");
     }
     Ok(changed)
+}
+
+/// Starts listening for the host controls this session just armed.
+fn listen_for_control_presses(
+    channel: &Arc<HidppChannel>,
+    keyboard_index: u8,
+    controls: &ReprogControlsV4,
+    armed: &[ArmedControl],
+    press_tx: mpsc::UnboundedSender<HostSwitchRequest>,
+) -> MessageListenerGuard {
+    let feature_index = controls.feature_index();
+    let event_controls = armed.to_vec();
+    channel.add_msg_listener_guarded(move |raw, matched| {
+        if matched {
+            return;
+        }
+        if let Some(request) = decode_control_request(
+            &v20::Message::from(raw),
+            keyboard_index,
+            feature_index,
+            &event_controls,
+        ) {
+            let _ = press_tx.send(request);
+        }
+    })
+}
+
+/// The outcome for a request that arrived before the session finished arming.
+///
+/// An announcement can land while the controls are still being walked — that is
+/// the whole reason the listener starts first — and arming then tends to fail
+/// for the very reason the announcement exists: the keyboard left to serve it.
+/// Answering has to come before giving up on the session, or the pointers stay
+/// behind for the trip that was announced.
+fn answered_while_arming(
+    presses: &mut mpsc::UnboundedReceiver<HostSwitchRequest>,
+    listening: Option<&MessageListenerGuard>,
+) -> Option<HostSwitchSessionOutcome> {
+    listening?;
+    let request = presses.try_recv().ok()?;
+    Some(HostSwitchSessionOutcome::Restored {
+        requested_host: Some(request),
+    })
 }
 
 /// Starts listening for `0x1814` announcements, before the controls are armed.
