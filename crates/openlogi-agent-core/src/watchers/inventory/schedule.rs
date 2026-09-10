@@ -98,8 +98,10 @@ impl Schedule {
         next
     }
 
-    /// Any completed full pass satisfies pending repair and settings deadlines.
-    /// An unhealthy result then starts (or advances) one bounded repair run.
+    /// Any completed full pass satisfies a pending repair deadline. A settings
+    /// deadline is consumed only by the pass it scheduled: earlier HID or
+    /// hotplug scans are useful inventory updates, but are not confirmation
+    /// attempts. An unhealthy result starts (or advances) one repair run.
     pub(super) fn scan_finished(
         &mut self,
         trigger: ReconcileTrigger,
@@ -107,7 +109,9 @@ impl Schedule {
         now: Instant,
     ) {
         self.retry_due = None;
-        self.settings_due = None;
+        if trigger == ReconcileTrigger::SettingsConfirmation {
+            self.settings_due = None;
+        }
         self.recovery_due = now + RECOVERY_SCAN_INTERVAL;
 
         if !matches!(trigger, ReconcileTrigger::RepairRetry) {
@@ -122,7 +126,8 @@ impl Schedule {
     }
 
     /// Request one delayed settings-confirmation pass. Repeated requests
-    /// coalesce, and any intervening full scan satisfies the request.
+    /// coalesce without postponing the deadline; only that scheduled pass
+    /// satisfies the request.
     pub(super) fn request_settings_confirmation(&mut self, now: Instant) {
         self.settings_due.get_or_insert(now + FAST_RETRY_DELAY);
     }
@@ -202,6 +207,32 @@ mod tests {
             start + FAST_RETRY_DELAY,
         );
         assert!(schedule.settings_due.is_none());
+    }
+
+    #[test]
+    fn early_lifecycle_scans_do_not_consume_or_postpone_settings_confirmation() {
+        let start = Instant::now();
+        let due = start + FAST_RETRY_DELAY;
+        let mut schedule = Schedule::new(start);
+        schedule.request_settings_confirmation(start);
+
+        schedule.scan_finished(
+            ReconcileTrigger::HidEvent(HidppEventSource::UnifiedBattery),
+            false,
+            start + Duration::from_millis(500),
+        );
+        schedule.request_settings_confirmation(start + Duration::from_millis(500));
+        schedule.scan_finished(
+            ReconcileTrigger::Hotplug,
+            false,
+            start + Duration::from_secs(1),
+        );
+        schedule.request_settings_confirmation(start + Duration::from_secs(1));
+
+        assert_eq!(
+            schedule.next_deadline(),
+            (due, DeadlinePurpose::SettingsConfirmation)
+        );
     }
 
     #[test]

@@ -505,6 +505,29 @@ impl Orchestrator {
         standalone: &[StandaloneDevice],
         hid_open_failures: bool,
     ) {
+        self.refresh_inventory_inner(inventories, standalone, hid_open_failures, false);
+    }
+
+    /// Apply the inventory pass whose delayed purpose is confirming volatile
+    /// settings. Only this path consumes one bounded confirmation attempt;
+    /// ordinary HID and hotplug snapshots may arrive much sooner and must not
+    /// exhaust the retry run while a device's feature path is still booting.
+    pub fn refresh_inventory_for_settings_confirmation(
+        &mut self,
+        inventories: &[DeviceInventory],
+        standalone: &[StandaloneDevice],
+        hid_open_failures: bool,
+    ) {
+        self.refresh_inventory_inner(inventories, standalone, hid_open_failures, true);
+    }
+
+    fn refresh_inventory_inner(
+        &mut self,
+        inventories: &[DeviceInventory],
+        standalone: &[StandaloneDevice],
+        hid_open_failures: bool,
+        confirm_reapply: bool,
+    ) {
         // Even an empty snapshot is a *completed* enumeration — the watcher
         // skips failed ticks — so the device set is now known either way (and
         // a recovered backend upgrades `Unavailable` back to live data).
@@ -525,8 +548,13 @@ impl Orchestrator {
         let next_current = pick_current(&devices, self.config.selected_device());
         let rearm_capture = any_device_needs_capture_rearm(&self.devices, &devices, reapply_all);
         let followup = std::mem::take(&mut self.reapply_followup);
-        let (targets, next_followup) =
-            plan_reapply(&self.devices, &devices, &followup, reapply_all);
+        let (targets, next_followup) = plan_reapply(
+            &self.devices,
+            &devices,
+            &followup,
+            reapply_all,
+            confirm_reapply,
+        );
         self.reapply_followup = next_followup;
         for idx in targets {
             self.reapply_volatile_settings(&devices[idx]);
@@ -1137,14 +1165,16 @@ const VOLATILE_REAPPLY_CONFIRM_RETRIES: u8 = 4;
 
 /// Plan this refresh's volatile-settings writes: the [`reapply_targets`] set
 /// plus a bounded run of confirming re-applies, and the follow-up keys (with
-/// remaining retry counts) to confirm next refresh. Every trigger gets the
-/// same run: inventory availability only proves that the route was observed,
-/// not that each detached HID++ write completed successfully.
+/// remaining retry counts) to confirm on a delayed confirmation refresh.
+/// Ordinary lifecycle snapshots preserve that run without consuming it:
+/// inventory availability only proves that the route was observed, not that
+/// each detached HID++ write completed successfully.
 fn plan_reapply(
     prev: &[AgentDevice],
     next: &[AgentDevice],
     followup: &HashMap<String, u8>,
     reapply_all: bool,
+    confirm_followup: bool,
 ) -> (Vec<usize>, HashMap<String, u8>) {
     let mut targets = reapply_targets(prev, next, reapply_all);
     let mut next_followup: HashMap<String, u8> = targets
@@ -1157,15 +1187,19 @@ fn plan_reapply(
         })
         .collect();
     for (idx, dev) in next.iter().enumerate() {
-        if dev.online
-            && dev.route.is_some()
-            && !targets.contains(&idx)
-            && let Some(&remaining) = followup.get(&dev.config_key)
-        {
+        let Some(&remaining) = followup.get(&dev.config_key) else {
+            continue;
+        };
+        if !dev.online || dev.route.is_none() || targets.contains(&idx) || remaining == 0 {
+            continue;
+        }
+        if confirm_followup {
             targets.push(idx);
             if remaining > 1 {
                 next_followup.insert(dev.config_key.clone(), remaining - 1);
             }
+        } else {
+            next_followup.insert(dev.config_key.clone(), remaining);
         }
     }
     (targets, next_followup)
