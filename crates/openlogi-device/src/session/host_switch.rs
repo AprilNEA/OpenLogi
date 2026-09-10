@@ -16,7 +16,7 @@
 use std::{future::Future, sync::Arc, time::Duration};
 
 use hidpp::{
-    channel::HidppChannel,
+    channel::{HidppChannel, MessageListenerGuard},
     device::Device,
     feature::{
         CreatableFeature,
@@ -176,6 +176,10 @@ pub async fn run_host_switch_session(
     let controls = ReprogControlsV4::new(Arc::clone(&channel), keyboard_index, feature.index);
     let announcement = announcement_state(&mut device).await;
 
+    let (press_tx, mut press_rx) = mpsc::unbounded_channel();
+    let announcement_listener =
+        listen_for_announcements(&channel, keyboard_index, announcement, &press_tx);
+
     let mut armed = Vec::new();
     if let Err(error) = arm_host_controls_inner(&controls, &mut armed).await {
         let pending = PendingHostSwitchRestore::new(&shared, controls.feature_index(), armed);
@@ -185,20 +189,17 @@ pub async fn run_host_switch_session(
         return Err(HostSwitchError::UnsupportedKeyboard.into());
     }
 
-    let (press_tx, mut press_rx) = mpsc::unbounded_channel();
     let feature_index = controls.feature_index();
     let event_controls = armed.clone();
     let listener = channel.add_msg_listener_guarded(move |raw, matched| {
         if matched {
             return;
         }
-        let message = v20::Message::from(raw);
-        if let Some(request) = decode_request(
-            &message,
+        if let Some(request) = decode_control_request(
+            &v20::Message::from(raw),
             keyboard_index,
             feature_index,
             &event_controls,
-            announcement,
         ) {
             let _ = press_tx.send(request);
         }
@@ -229,6 +230,7 @@ pub async fn run_host_switch_session(
     let requested_host = request;
 
     drop(listener);
+    drop(announcement_listener);
     // An announcement leaves nothing to restore. The controls were set on a
     // device that has since gone, so the write can only spend the HID++ timeout
     // and then retry against something absent; the keyboard arms from scratch
@@ -354,26 +356,69 @@ pub async fn switch_linked_hosts(
     Ok(changed)
 }
 
-/// The request a raw report carries, or `None` when it carries neither.
+/// Starts listening for `0x1814` announcements, before the controls are armed.
 ///
-/// The two paths are tried in order because they are not alternatives so much
-/// as a preference: a keyboard that lets its host controls be diverted reports
-/// through `0x1b04` and names the destination, which is strictly better than an
-/// announcement that does not. `0x1814` is what is left for the keyboards that
-/// refuse.
-fn decode_request(
+/// Nothing about an announcement depends on the arming: the keyboard emits it
+/// whether or not `0x1b04` was ever touched. Arming walks the whole control
+/// table, which is seconds a returning keyboard is under no obligation to wait
+/// out, and a user who presses Easy-Switch as soon as it is back is pressing
+/// inside that window. An announcement landing there used to reach nobody.
+///
+/// `None` for a keyboard that has no `0x1814` to announce on.
+fn listen_for_announcements(
+    channel: &Arc<HidppChannel>,
+    keyboard_index: u8,
+    announcement: Option<(u8, u8)>,
+    press_tx: &mpsc::UnboundedSender<HostSwitchRequest>,
+) -> Option<MessageListenerGuard> {
+    let (feature_index, leader_host) = announcement?;
+    // Logged separately from "host switch link active", which now comes later:
+    // this is the instant announcements start being heard, and the gap between a
+    // keyboard reconnecting and this line is the window a press can fall into.
+    info!(leader_host, "listening for host change announcements");
+    let press_tx = press_tx.clone();
+    Some(channel.add_msg_listener_guarded(move |raw, matched| {
+        if matched {
+            return;
+        }
+        if let Some(request) = decode_announcement_request(
+            &v20::Message::from(raw),
+            keyboard_index,
+            feature_index,
+            leader_host,
+        ) {
+            let _ = press_tx.send(request);
+        }
+    }))
+}
+
+/// The request a diverted or analytics-reported control press carries.
+///
+/// This is the better of the two paths wherever a keyboard offers it, because
+/// the control that was pressed names the destination. `0x1814` is what is left
+/// for the keyboards that refuse to divert.
+fn decode_control_request(
     message: &v20::Message,
     keyboard_index: u8,
     feature_index: u8,
     controls: &[ArmedControl],
-    announcement: Option<(u8, u8)>,
 ) -> Option<HostSwitchRequest> {
-    if let Some(event) = reprog_controls::decode_full_event(message, keyboard_index, feature_index)
-    {
-        return event_host(controls, event).map(HostSwitchRequest::Directed);
-    }
-    let (index, leader_host) = announcement?;
-    decode_announcement(message, keyboard_index, index)
+    let event = reprog_controls::decode_full_event(message, keyboard_index, feature_index)?;
+    event_host(controls, event).map(HostSwitchRequest::Directed)
+}
+
+/// The request a `0x1814` announcement carries.
+///
+/// `leader_host` comes from the keyboard's own state read while arming rather
+/// than from the report: the notification does name a host, but which one it
+/// names could not be established from captures.
+fn decode_announcement_request(
+    message: &v20::Message,
+    keyboard_index: u8,
+    feature_index: u8,
+    leader_host: u8,
+) -> Option<HostSwitchRequest> {
+    decode_announcement(message, keyboard_index, feature_index)
         .is_some_and(|event| matches!(event, ChangeHostEvent::HostChange { .. }))
         .then_some(HostSwitchRequest::Announced { leader_host })
 }
@@ -861,9 +906,10 @@ mod tests {
 
     use super::{
         ArmedControl, HostSwitchError, HostSwitchRequest, HostSwitchRestoreOutcome,
-        PendingHostSwitchRestore, ReportingMode, decode_request, event_host, follow_target,
-        host_change_required, host_channel, prepare_host_change_on, restoration_change,
-        rollback_host_switch_start, shares_channel, sole_other_host, switch_linked_hosts,
+        PendingHostSwitchRestore, ReportingMode, decode_announcement_request,
+        decode_control_request, event_host, follow_target, host_change_required, host_channel,
+        prepare_host_change_on, restoration_change, rollback_host_switch_start, shares_channel,
+        sole_other_host, switch_linked_hosts,
     };
     use crate::backend::NodeId;
     use crate::channel::scripted::{
@@ -981,7 +1027,7 @@ mod tests {
     #[test]
     fn a_captured_announcement_decodes_into_a_follow_request() {
         assert_eq!(
-            decode_request(&announcement_message(), 0xff, 0x09, &[], Some((0x0a, 1))),
+            decode_announcement_request(&announcement_message(), 0xff, 0x0a, 1),
             Some(HostSwitchRequest::Announced { leader_host: 1 }),
         );
     }
@@ -989,9 +1035,9 @@ mod tests {
     #[test]
     fn an_announcement_is_ignored_when_the_feature_was_never_resolved() {
         assert_eq!(
-            decode_request(&announcement_message(), 0xff, 0x09, &[], None),
+            decode_control_request(&announcement_message(), 0xff, 0x09, &[]),
             None,
-            "a keyboard without 0x1814 must not have its other reports mistaken for one"
+            "the control path must not mistake an announcement for a press"
         );
     }
 
@@ -1004,12 +1050,11 @@ mod tests {
         raw[1] = 0x0c;
 
         assert_eq!(
-            decode_request(
+            decode_announcement_request(
                 &v20::Message::from(HidppMessage::Long(raw)),
                 0xff,
-                0x09,
-                &[],
-                Some((0x0a, 1)),
+                0x0a,
+                1,
             ),
             None,
         );
