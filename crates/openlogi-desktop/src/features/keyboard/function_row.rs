@@ -25,11 +25,12 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, AppContext as _, Bounds, Context, Entity, FontWeight, Hsla,
+    AnyElement, App, AppContext as _, Bounds, ClickEvent, Context, Entity, FontWeight, Hsla,
     InteractiveElement, IntoElement, ParentElement, PathBuilder, Render, RenderOnce, Role,
     SharedString, StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, hsla,
     point, prelude::FluentBuilder as _, px, rgb, svg,
 };
+use gpui_base::Button as BaseButton;
 use gpui_component::{Selectable as _, h_flex, input::InputState, v_flex};
 use openlogi_core::binding::{Action, WorkflowStep};
 use openlogi_core::config::{KeyModifiers, KeyTrigger};
@@ -833,9 +834,48 @@ impl FunctionRowView {
             .w(px(PANEL_W))
             .max_h(px(500.))
             .child(title_header(&key_name, &pal))
+            .when(current.is_some(), |panel| {
+                panel.child(reset_row(trigger.clone(), view, &pal))
+            })
             .child(divider(pal))
             .child(editor_scroll_list("key-panel-scroll", rows))
     }
+}
+
+/// "Reset to defaults" — shown only while `trigger` carries a non-default
+/// binding, so there is nothing else to reset to. Clearing goes through
+/// [`AppState::commit_keyboard_binding`] with `None`, the same call an
+/// F-key's binding removal already used before this button existed to
+/// trigger it — see that method's doc comment. Mirrors the camera controls
+/// panel's reset affordance (`crates/openlogi-desktop/src/features/camera/controls.rs`),
+/// reusing its `tr!("camera.reset_to_defaults")` key rather than adding a new one.
+fn reset_row(trigger: KeyTrigger, view: &Entity<FunctionRowView>, pal: &Palette) -> gpui::Div {
+    let view = view.clone();
+    h_flex().w_full().justify_end().px_2().pb_1().child(
+        BaseButton::new("fkey-reset")
+            .accessibility_label(tr!("camera.reset_to_defaults"))
+            .px_2p5()
+            .py_0p5()
+            .rounded_md()
+            .border_1()
+            .border_color(pal.border)
+            .bg(pal.control)
+            .hover(|s| s.bg(pal.control_hover))
+            .focus_visible(|s| s.bg(pal.control_hover))
+            .text_caption()
+            .text_color(pal.text_muted)
+            .child(tr!("camera.reset_to_defaults"))
+            .on_click(move |_: &ClickEvent, _window, cx| {
+                AppState::update(cx, |state, cx| {
+                    let key = state.current_record().map(DeviceRecord::device_key);
+                    state.commit_keyboard_binding(trigger.clone(), None);
+                    if let Some(key) = key {
+                        cx.emit(StateEvent::BindingsChanged(key));
+                    }
+                });
+                view.update(cx, |_, vcx| vcx.notify());
+            }),
+    )
 }
 
 /// The panel's title — shows which key is selected, e.g. "F1".
