@@ -20,6 +20,11 @@ futures-lite = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 
+# The camera watcher reads the Capability Access Manager's webcam consent store
+# to learn whether any client currently holds a camera.
+[target.'cfg(target_os = "windows")'.dependencies]
+winreg = { workspace = true }
+
 [lints]
 workspace = true
 

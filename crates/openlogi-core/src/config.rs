@@ -32,9 +32,10 @@ pub use identity::canonical_device_key;
 pub use key_trigger::{KeyModifiers, KeyTrigger, KeyboardConfig, ParseTriggerError};
 pub use settings::LightSettings;
 pub use settings::{
-    AppIcon, AppSettings, Appearance, AssetSourcePreference, CameraControls, DeviceViewMode,
-    Lighting, SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SMARTSHIFT_MIN_AUTO_DISENGAGE, ScrollResolution,
-    SmartShift, ThumbwheelSensitivity, UiScale, VerticalScrollSensitivity, WheelMode,
+    AppIcon, AppSettings, Appearance, AssetSourcePreference, CAMERA_AUTOMATION_SUPPORTED,
+    CameraControls, DeviceViewMode, Lighting, SMARTSHIFT_AUTO_DISENGAGE_DEFAULT,
+    SMARTSHIFT_MIN_AUTO_DISENGAGE, ScrollResolution, SmartShift, ThumbwheelSensitivity, UiScale,
+    VerticalScrollSensitivity, WheelMode,
 };
 
 use crate::binding::{

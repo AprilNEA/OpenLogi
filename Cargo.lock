@@ -5427,6 +5427,7 @@ dependencies = [
  "openlogi-ipc",
  "tokio",
  "tracing",
+ "winreg",
 ]
 
 [[package]]
