@@ -10,14 +10,6 @@
 //!
 //! `OPENLOGI_THEMES_DIR` overrides the lookup with an explicit path to the
 //! gpui-component `themes/` directory, as an escape hatch.
-//!
-//! Uses only `std` plus `embed-resource` on purpose: a build-dependency the
-//! resolver hasn't seen would re-resolve the lockfile and bump the
-//! precisely-pinned (Cargo.lock-only) gpui rev — so the `cargo metadata` JSON
-//! is scanned for `manifest_path` values directly rather than parsed with
-//! serde, and `embed-resource` (for [`embed_windows_resources`]) is pinned to
-//! the exact version already in the lock as gpui's own build-dependency, which
-//! adds an edge, not a crate.
 
 #![expect(
     clippy::expect_used,
@@ -169,14 +161,19 @@ fn locate_themes_dir() -> PathBuf {
     let metadata = cargo_metadata();
     // The themes live at the repo root next to (not inside) the gpui-component
     // crate, so walk up from its manifest until a populated `themes/` appears.
-    // `gpui-component-assets` shares the same checkout root, so either match
-    // converges on the same directory.
-    for manifest in manifest_paths(&metadata).filter(|p| p.contains("gpui-component")) {
-        for ancestor in Path::new(manifest).ancestors() {
-            let themes = ancestor.join("themes");
-            if themes.join("catppuccin.json").is_file() {
-                return themes;
-            }
+    // Package identity, not the checkout directory name, survives the rename
+    // from gpui-component to gpui-kit. JSON parsing also unescapes Windows paths.
+    let manifest = metadata["packages"]
+        .as_array()
+        .expect("cargo metadata packages")
+        .iter()
+        .find(|package| package["name"] == "gpui-component")
+        .and_then(|package| package["manifest_path"].as_str())
+        .expect("gpui-component dependency manifest");
+    for ancestor in Path::new(manifest).ancestors() {
+        let themes = ancestor.join("themes");
+        if themes.join("catppuccin.json").is_file() {
+            return themes;
         }
     }
 
@@ -186,9 +183,9 @@ fn locate_themes_dir() -> PathBuf {
     );
 }
 
-/// Run `cargo metadata` (locked, so it never mutates `Cargo.lock`) and return
+/// Run `cargo metadata` (locked, so it never mutates `Cargo.lock`) and parse
 /// its JSON stdout.
-fn cargo_metadata() -> String {
+fn cargo_metadata() -> serde_json::Value {
     println!("cargo:rerun-if-changed=../../Cargo.lock");
     let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let output = Command::new(cargo)
@@ -201,16 +198,5 @@ fn cargo_metadata() -> String {
         "`cargo metadata` failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    String::from_utf8(output.stdout).expect("`cargo metadata` produced non-UTF-8 output")
-}
-
-/// Yield every `manifest_path` string value in the metadata JSON. Paths on the
-/// platforms that build the GUI (macOS/Linux) contain no characters that JSON
-/// would escape, so a direct scan is enough and avoids a serde build-dep.
-fn manifest_paths(json: &str) -> impl Iterator<Item = &str> {
-    const KEY: &str = "\"manifest_path\":\"";
-    json.match_indices(KEY).filter_map(|(i, _)| {
-        let rest = &json[i + KEY.len()..];
-        rest.find('"').map(|end| &rest[..end])
-    })
+    serde_json::from_slice(&output.stdout).expect("parse cargo metadata JSON")
 }

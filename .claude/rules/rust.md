@@ -149,8 +149,8 @@ House style:
 - **Prefer mature crates over hand-rolled logic** (retry/backoff, hashing, paths, …).
   Check `cargo tree | grep <candidate>` before adding a dependency and use `cargo add`
   so versions come from the registry. After ANY dependency change, verify the
-  `gpui`/`gpui-component` git pins in `Cargo.lock` didn't move (they are held only by
-  the lock; restore with `cargo update -p gpui --precise <rev>`).
+  exact `gpui-pre` workspace version and shared Kit release still resolve once in
+  `Cargo.lock`, without a second GPUI package identity from an extension.
 - Module layout: a module with its own semantics is `foo.rs` (children in a sibling
   `foo/`); `foo/mod.rs` is only for pure namespace shells. Never both for one module.
 - Sibling implementations that differ are an investigation signal, not proof that

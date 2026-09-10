@@ -18,7 +18,7 @@
 #   commit SHAs, so the hashes below stay valid until a git pin actually
 #   moves. A version bump of OpenLogi itself changes nothing here.
 #
-# The only recurring maintenance is: when a git pin (gpui, gpui-component,
+# The only recurring maintenance is: when a git pin (gpui-component,
 # ...) is bumped, update the corresponding entry below — the failing build
 # prints the correct hash to paste. Nix CI watches Cargo.lock and the workspace
 # manifests so that failure happens in the PR that moves the pin.
@@ -86,10 +86,10 @@ let
   # at a separate checkout. The rev must match Cargo.lock (a mismatch fails
   # the build with a hash error, so it cannot drift silently); the hash is
   # shared with outputHashes below.
-  gpuiComponentRev = "da4f93696dc2b2b4d91bcc42412b9053a3d24de8";
-  gpuiComponentHash = "sha256-A5NitDokr5+8tQaSO6gSyQpH3X/8FWQHC140CHnpVsY=";
+  gpuiComponentRev = "36b51819deb52c947a79f8de29e0e9175eda7464";
+  gpuiComponentHash = "sha256-JwayvCQZx67+mFQUydQB+4soA6fjxJUcNhlUVsDNI8w=";
   gpuiComponentSrc = fetchgit {
-    url = "https://github.com/longbridge/gpui-component";
+    url = "https://github.com/longbridge/gpui-kit";
     rev = gpuiComponentRev;
     hash = gpuiComponentHash;
   };
@@ -109,31 +109,9 @@ rustPlatform.buildRustPackage {
     # `nix-prefetch-git <url> --rev <rev>`.
     outputHashes = {
       "appicon-0.1.0" = "sha256-XY8NS2qrpPbUXZ3xCPGjZbbT0tSVpapbcTbgA2H5+/I=";
-      "gpui-0.2.2" = "sha256-d2GVmZgvJzLk1pbNtPedw0V09+ANZFORZjTSLVxw7jc=";
-      "gpui-component-0.5.2" = gpuiComponentHash;
-      "gpui-updater-0.0.7" = "sha256-hxdATcCif7csqKLNoi41ETe09Ym6zM4rVzYvBDEvVg4=";
-      "proptest-1.10.0" = "sha256-p5NTcHhruI8QQvANACg8AMRVNmuvGxs2NLit+/8PaWo=";
-      "wasm_thread-0.3.3" = "sha256-+lRLCIk0S6Y5ORYjDKsYYHia2FtoSoh+rWkQh7mnPBE=";
-      "zed-font-kit-0.14.1-zed" = "sha256-KXygi0olNQi5yM8eaJVykNDtbPMDjT+cWPBF8UrtXR4=";
-      "zed-reqwest-0.12.15-zed" = "sha256-p4SiUrOrbTlk/3bBrzN/mq/t+1Gzy2ot4nso6w6S+F8=";
-      "zed-scap-0.0.8-zed" = "sha256-BihiQHlal/eRsktyf0GI3aSWsUCW7WcICMsC2Xvb7kw=";
-      "zed-xim-0.4.0-zed" = "sha256-pRT4Sz1JU9ros47/7pmIW9kosWOGMOItcnNd+VrvnpE=";
+      "gpui-component-0.6.1" = gpuiComponentHash;
     };
   };
-
-  postPatch = ''
-    # gpui-component's IconName proc-macro reads `../assets/assets/icons`
-    # relative to its own crate, assuming the upstream repo's workspace
-    # layout. The vendor tree lays crates out flat, so recreate the sibling
-    # directory as a link to the gpui-component-assets crate. Fail loudly if
-    # the glob doesn't resolve to exactly one directory.
-    assets=("$cargoDepsCopy"/gpui-component-assets-*)
-    if [ ''${#assets[@]} -ne 1 ] || [ ! -d "''${assets[0]}" ]; then
-      echo "could not uniquely locate the vendored gpui-component-assets: ''${assets[*]}" >&2
-      exit 1
-    fi
-    ln -sfn "''${assets[0]}" "$cargoDepsCopy/assets"
-  '';
 
   env.OPENLOGI_THEMES_DIR = "${gpuiComponentSrc}/themes";
 
@@ -174,8 +152,8 @@ rustPlatform.buildRustPackage {
     "--bin=openlogi-overlay"
   ];
 
-  # Match Linux CI: the pure workspace tests run in the sandbox; GUI tests are
-  # exercised on macOS because GPUI's Linux test harness is not headless.
+  # Match Linux CI's package selection; the desktop interaction suite is
+  # additionally exercised by the macOS test jobs.
   cargoTestFlags = [
     "--workspace"
     "--exclude=openlogi-desktop"

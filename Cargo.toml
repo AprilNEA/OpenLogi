@@ -86,27 +86,22 @@ objc2-io-kit = { version = "0.3.2", default-features = false }
 objc2-service-management = { version = "0.3.2", default-features = false }
 block2 = "0.6.2"
 
-# gpui / gpui_platform track zed's default branch, matching how gpui-component
-# declares them (an explicit rev here would fork the git source and conflict).
-# The exact, compatible zed commit is pinned in Cargo.lock instead — bump it
-# deliberately with `cargo update`, in lockstep with the gpui-component rev.
-gpui = { git = "https://github.com/zed-industries/zed" }
-gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit", "x11", "wayland"] }
-gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "da4f93696dc2b2b4d91bcc42412b9053a3d24de8" }
+# Version-aligned GPUI snapshots. Keep the core and platform on one release so
+# the desktop, overlay, and their integrations share the same GPUI types.
+gpui = { package = "gpui-pre", version = "=0.3.4" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.4", features = ["font-kit", "x11", "wayland"] }
+# Keep the Kit crates on one release checkout: build.rs embeds the upstream
+# themes, which are not included in the published component/assets packages.
+gpui-component = { git = "https://github.com/longbridge/gpui-kit", tag = "v0.6.1" }
 # The unstyled interaction primitives behind gpui-component. Desktop uses its
 # semantic Button for custom-painted controls that must retain native keyboard
 # and accessibility behavior without inheriting widget chrome.
-gpui-base = { git = "https://github.com/longbridge/gpui-component", rev = "da4f93696dc2b2b4d91bcc42412b9053a3d24de8" }
-# Pinned to the same rev as gpui-component: this crate embeds the lucide SVGs
-# that the `IconName` enum is macro-generated from, so the two must agree.
-gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "da4f93696dc2b2b4d91bcc42412b9053a3d24de8" }
+gpui-base = { git = "https://github.com/longbridge/gpui-kit", tag = "v0.6.1" }
+# The icon names and embedded SVGs must agree with the component release.
+gpui-kit-assets = { git = "https://github.com/longbridge/gpui-kit", tag = "v0.6.1" }
 
-# swr-gpui declares gpui from crates.io. A registry dependency and a git one are
-# different crates to cargo even at the same version, so without the
-# `[patch.crates-io]` below the tree would carry two incompatible `gpui`s and
-# `swr_gpui::Query` would not accept this app's `App`.
 swr-core = "0.1"
-swr-gpui = "0.1"
+swr-gpui = { package = "swr-gpui-pre", version = "0.1" }
 
 [workspace.lints.rust]
 # Denied workspace-wide, but `deny` (not `forbid`) so a crate that genuinely
@@ -150,10 +145,3 @@ debug = false
 lto = "fat"
 codegen-units = 1
 strip = "symbols"
-
-# Redirect swr-gpui's registry `gpui` onto the git source the rest of the tree
-# uses, so one `gpui` reaches the lock instead of two. The version disambiguates
-# the two `gpui` packages now present in the zed repository; the exact commit
-# stays pinned in Cargo.lock so this patch does not fork the git source.
-[patch.crates-io]
-gpui = { git = "https://github.com/zed-industries/zed", version = "=0.2.2" }
