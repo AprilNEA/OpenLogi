@@ -337,8 +337,70 @@ fn button_number_to_id(n: i64) -> Option<ButtonId> {
 }
 
 /// Best-effort device identity for a button event's HID sender.
+/// How long a remembered attribution stays usable for an unattributed event.
+const ATTRIBUTION_TTL: Duration = Duration::from_secs(2);
+/// How stale the remembered attribution must be before a pointer move refreshes
+/// it. Moves arrive at pointer rates; refreshing on every one would run two
+/// CoreGraphics/IOKit calls per event on the tap callback's hot path.
+const ATTRIBUTION_REFRESH: Duration = Duration::from_millis(200);
+
+thread_local! {
+    /// Last successful device attribution, with when it was taken.
+    ///
+    /// Some devices produce `CGEvent`s with no backing `IOHIDEvent` for a
+    /// subset of their event types: a Bluetooth-direct MX Anywhere 3 attributes
+    /// its Left/Right clicks and pointer moves normally, but every
+    /// `OtherMouseDown`/`OtherMouseUp` (middle, back, forward) arrives with
+    /// `CGEventCopyIOHIDEvent` returning null. Those events would otherwise be
+    /// unattributable, and the remap policy fails closed on macOS — so the
+    /// middle button silently does nothing.
+    static LAST_ATTRIBUTION: RefCell<Option<(crate::EventDevice, std::time::Instant)>> =
+        const { RefCell::new(None) };
+}
+
+/// Record a successful attribution for later unattributed events.
+fn remember_attribution(device: &crate::EventDevice) {
+    LAST_ATTRIBUTION.with_borrow_mut(|slot| {
+        *slot = Some((device.clone(), std::time::Instant::now()));
+    });
+}
+
+/// The last attribution, if it is recent enough to still describe the device
+/// the user's hand is on.
+fn recent_attribution() -> Option<crate::EventDevice> {
+    LAST_ATTRIBUTION.with_borrow(|slot| {
+        slot.as_ref()
+            .and_then(|(device, at)| (at.elapsed() < ATTRIBUTION_TTL).then(|| device.clone()))
+    })
+}
+
+/// Whether a pointer move should spend a lookup refreshing the attribution.
+fn attribution_needs_refresh() -> bool {
+    LAST_ATTRIBUTION.with_borrow(|slot| {
+        slot.as_ref()
+            .is_none_or(|(_, at)| at.elapsed() >= ATTRIBUTION_REFRESH)
+    })
+}
+
+/// Refresh the remembered attribution from an event that has a HID backing.
+/// Called from the pointer-move path so the fallback stays warm even when the
+/// user has not clicked an attributable button recently.
+fn refresh_attribution(event: &CGEvent) {
+    if attribution_needs_refresh()
+        && let Some(device) = event_sender_id(event).map(|id| sender_device_info(id).event_device)
+    {
+        remember_attribution(&device);
+    }
+}
+
 fn button_source(event: &CGEvent) -> Option<crate::EventDevice> {
-    event_sender_id(event).map(|id| sender_device_info(id).event_device)
+    if let Some(device) = event_sender_id(event).map(|id| sender_device_info(id).event_device) {
+        remember_attribution(&device);
+        return Some(device);
+    }
+    // No backing IOHIDEvent. Fall back to the device the tap most recently
+    // attributed, rather than dropping the event as unattributable.
+    recent_attribution()
 }
 
 /// Map the macOS modifier flags on a `CGEvent` to our [`KeyModifiers`].
@@ -472,6 +534,7 @@ fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEvent> {
         | CGEventType::LeftMouseDragged
         | CGEventType::RightMouseDragged
         | CGEventType::OtherMouseDragged => {
+            refresh_attribution(event);
             let dx = event.get_integer_value_field(EventField::MOUSE_EVENT_DELTA_X);
             let dy = event.get_integer_value_field(EventField::MOUSE_EVENT_DELTA_Y);
             #[expect(
@@ -1220,5 +1283,33 @@ mod tests {
             ),
             CallbackResult::Keep
         ));
+    }
+
+    /// An unattributed event falls back to a recent attribution, so a device
+    /// whose CGEvents carry no backing IOHIDEvent for some event types is not
+    /// dropped by the fail-closed remap policy.
+    #[test]
+    fn recent_attribution_backs_an_unattributed_event() {
+        let mouse = crate::EventDevice {
+            vendor_id: Some(crate::LOGITECH_VENDOR_ID),
+            product_id: Some(0xb025),
+            product_name: Some("MX Anywhere 3".into()),
+        };
+        LAST_ATTRIBUTION.with_borrow_mut(|slot| *slot = None);
+        assert_eq!(recent_attribution(), None);
+
+        remember_attribution(&mouse);
+        assert_eq!(recent_attribution(), Some(mouse.clone()));
+        assert!(!attribution_needs_refresh());
+
+        // Aged past the TTL, the fallback stops describing the user's hand.
+        LAST_ATTRIBUTION.with_borrow_mut(|slot| {
+            let stale = std::time::Instant::now()
+                .checked_sub(ATTRIBUTION_TTL + Duration::from_secs(1))
+                .expect("clock must support the test offset");
+            *slot = Some((mouse.clone(), stale));
+        });
+        assert_eq!(recent_attribution(), None);
+        assert!(attribution_needs_refresh());
     }
 }
