@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.4] - 2026-09-10
+
+### Added
+
+- *(cli)* add fixture contribution wizard
+- *(cli)* verify fixture corpus directories
+- *(cli)* capture semantic device profiles
+- *(device)* add fixture identity ledger
+- *(cli)* record privacy-safe fixture cases
+- *(agent)* add injectable hardware context
+- *(agent)* complete semantic profile reads
+- *(hid)* build sanitized cassettes from recordings
+- *(device)* add deterministic replay barriers
+- *(device)* add canonical synthetic profile
+- *(agent)* drive mock from device profiles
+- *(device)* complete semantic device profiles
+- *(hid)* add bounded native traffic recording
+- *(hid)* add strict device replay foundation
+- *(hidpp)* add channel observation API
+- *(gui)* add snapshot projection boundary
+- *(i18n)* migrate catalogs to semantic TOML keys ([#1169](https://github.com/AprilNEA/OpenLogi/pull/1169))
+
+### Changed
+
+- *(i18n)* avoid copying borrowed translations ([#1184](https://github.com/AprilNEA/OpenLogi/pull/1184))
+
+### Fixed
+
+- *(cli)* enforce fixture corpus and capture safety checks
+- *(hid)* enforce receiver slot state during cassette replay
+- *(fixture)* enforce read-only protocol and case relationships
+- *(cli)* hold agent ownership throughout fixture capture
+- *(cli)* use shared fixture identity policy
+- *(hid)* retain suspended open evidence
+- *(hid)* reject unknown nested fixture fields
+- *(gui)* stop linking SMAppServiceErrorDomain so macOS 13 and 14 can launch
+- *(gui)* place Windows actions ring in physical monitor coordinates ([#1319](https://github.com/AprilNEA/OpenLogi/pull/1319))
+- *(agent)* avoid capture recovery deadline busy loops ([#1321](https://github.com/AprilNEA/OpenLogi/pull/1321))
+- *(agent)* fence queued pairing discovery after selection ([#1320](https://github.com/AprilNEA/OpenLogi/pull/1320))
+- *(core)* stop seeding Back/Forward with a divertable default ([#1225](https://github.com/AprilNEA/OpenLogi/pull/1225))
+- *(linux)* declare F13-F20 in uinput key capabilities ([#1224](https://github.com/AprilNEA/OpenLogi/pull/1224))
+- *(agent)* keep terminal exit responsive during replacement
+- *(agent)* recover host-switch controls across channel retirement
+- *(agent)* restore diverted controls before process exit
+- *(hook)* normalize Windows cursor position to DIP scale ([#1246](https://github.com/AprilNEA/OpenLogi/pull/1246))
+- add Debian runtime dependencies ([#1249](https://github.com/AprilNEA/OpenLogi/pull/1249))
+- *(i18n)* correct mistranslations in the Spanish catalog ([#1315](https://github.com/AprilNEA/OpenLogi/pull/1315))
+- *(docs)* fix typo in installation guide ([#1189](https://github.com/AprilNEA/OpenLogi/pull/1189))
+- *(hid)* keep pairing phase after device selection ([#1181](https://github.com/AprilNEA/OpenLogi/pull/1181))
+- *(i18n)* refine French asset and control descriptions ([#1278](https://github.com/AprilNEA/OpenLogi/pull/1278))
+- *(i18n)* polish Brazilian Portuguese profile and settings copy ([#1276](https://github.com/AprilNEA/OpenLogi/pull/1276))
+- *(i18n)* avoid repeating device headings in count captions
+- *(i18n)* localize DPI steps and correct count labels
+- *(i18n)* polish supported locale copy ([#1180](https://github.com/AprilNEA/OpenLogi/pull/1180))
+
 ## [0.8.3] - 2026-08-30
 
 ### Fixed
