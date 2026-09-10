@@ -46,10 +46,17 @@ use crate::reprog_controls::{self, RawControlEvent, ReprogControlsV4};
 /// The divertable keyboard F-row controls OpenLogi models, as
 /// `(0x1b04 control ID, ButtonId)` pairs. CID values match Logitech's control
 /// catalog (cross-checked against Solaar's `special_keys.py`); the F-row
-/// positions are the Signature-series layout.
-pub const KEYBOARD_KEY_CIDS: [(u16, ButtonId); 9] = [
+/// positions are the Signature-series layout. The four `KeyEmoji*` face
+/// entries aren't F-row keys — they're the dedicated emoji row on the POP
+/// Keys series — but they divert over the same `0x1b04` mechanism, so they
+/// share this table.
+pub const KEYBOARD_KEY_CIDS: [(u16, ButtonId); 13] = [
     (0x00d4, ButtonId::KeySearch),
     (0x0103, ButtonId::KeyDictation),
+    (0x0104, ButtonId::KeyEmojiHeartEyes),
+    (0x0105, ButtonId::KeyEmojiCrying),
+    (0x0106, ButtonId::KeyEmojiSmiley),
+    (0x0107, ButtonId::KeyEmojiTears),
     (0x0108, ButtonId::KeyEmoji),
     (0x010a, ButtonId::KeyScreenCapture),
     (0x011c, ButtonId::KeyMicMute),
