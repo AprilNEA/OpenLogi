@@ -45,6 +45,8 @@ in
     [
       git
       cmake
+      # Buffa generates the Flow protocol types from protobuf at build time.
+      protobuf
       sccache
       prek
       typos
