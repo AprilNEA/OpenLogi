@@ -300,11 +300,26 @@ pub(super) async fn set_dpi_on_channel(
     // Read back to confirm the firmware accepted the value. A mismatch is a
     // silent failure mode that's otherwise invisible — devices in low-power
     // states or with unsupported DPI ranges can ACK the write yet keep the old
-    // value. We log a warning but still return Ok because the request reached
-    // the device.
+    // value. A single re-write disambiguates the two: firmware still drowsy
+    // from a link re-establishment usually takes the second write, while a
+    // value the device clamps deterministically comes back unchanged again.
+    // Either way this returns Ok because the request reached the device.
     if let Ok(actual) = feature.current_dpi().await {
         if actual == dpi {
             debug!(index, %dpi, "wrote DPI (verified)");
+        } else if feature.set_dpi(dpi).await.is_ok()
+            && feature
+                .current_dpi()
+                .await
+                .is_ok_and(|retried| retried == dpi)
+        {
+            tracing::info!(
+                index,
+                %dpi,
+                first_readback = %actual,
+                "DPI write landed on retry — first write was ACKed but dropped \
+                 (device likely mid link re-establishment)"
+            );
         } else {
             tracing::warn!(
                 index,
