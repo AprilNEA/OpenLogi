@@ -8,7 +8,7 @@ use std::{
 use hidpp::channel::HidppChannel;
 use thiserror::Error;
 
-use super::{ArmedControl, HostSwitchError, restore_host_controls};
+use super::{ArmedControl, HostSwitchError, HostSwitchRequest, restore_host_controls};
 use crate::{
     ChannelRegistry, DeviceIoGate, DeviceRoute, SharedChannel, reprog_controls::ReprogControlsV4,
 };
@@ -19,12 +19,12 @@ pub enum HostSwitchSessionOutcome {
     /// Every host control was restored before the session returned.
     Restored {
         /// Host requested by the keyboard, if the session ended on a key press.
-        requested_host: Option<u8>,
+        requested_host: Option<HostSwitchRequest>,
     },
     /// Restoration is incomplete and must precede any successor session.
     RestorePending {
         /// Host requested before teardown began, if any.
-        requested_host: Option<u8>,
+        requested_host: Option<HostSwitchRequest>,
         /// Owned capability for retrying restoration on a current publication.
         restore: PendingHostSwitchRestore,
     },
@@ -33,7 +33,7 @@ pub enum HostSwitchSessionOutcome {
 impl HostSwitchSessionOutcome {
     /// Split the transition intent from any retained firmware ownership.
     #[must_use]
-    pub fn into_parts(self) -> (Option<u8>, Option<PendingHostSwitchRestore>) {
+    pub fn into_parts(self) -> (Option<HostSwitchRequest>, Option<PendingHostSwitchRestore>) {
         match self {
             Self::Restored { requested_host } => (requested_host, None),
             Self::RestorePending {
@@ -197,6 +197,7 @@ pub(super) async fn rollback_host_switch_start(
 
 #[cfg(test)]
 mod tests {
+
     use super::super::{HostSwitchStopReason, monitor_host_switch, run_host_switch_session};
     use super::*;
     use crate::backend::NodeId;

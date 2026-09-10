@@ -132,6 +132,10 @@ device = "Cihaz"
 manage_this_device = "Bu cihazı yönet"
 usb = "USB"
 
+easy_switch_followers = "Bu klavyeyi izleyen cihazlar"
+easy_switch_description = "Bir Easy-Switch tuşuna bastığınızda bu cihazlar klavyeyle birlikte bilgisayar değiştirir."
+easy_switch_no_followers = "Bu bilgisayarla eşleştirilmiş fare veya dokunmatik yüzey yok."
+
 [profiles]
 active_profile = "Etkin profil"
 default_profile = "Varsayılan profil"

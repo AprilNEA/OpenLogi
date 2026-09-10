@@ -132,6 +132,10 @@ device = "기기"
 manage_this_device = "이 기기 관리"
 usb = "USB"
 
+easy_switch_followers = "이 키보드를 따라가는 장치"
+easy_switch_description = "Easy-Switch 키를 누르면 이 장치들이 키보드와 함께 컴퓨터를 전환합니다."
+easy_switch_no_followers = "이 컴퓨터에 페어링된 마우스나 터치패드가 없습니다."
+
 [profiles]
 active_profile = "활성 프로필"
 default_profile = "기본 프로필"

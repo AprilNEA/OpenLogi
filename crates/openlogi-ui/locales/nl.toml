@@ -132,6 +132,10 @@ device = "Apparaat"
 manage_this_device = "Dit apparaat beheren"
 usb = "USB"
 
+easy_switch_followers = "Apparaten die dit toetsenbord volgen"
+easy_switch_description = "Wanneer je op een Easy-Switch-toets drukt, schakelen deze apparaten samen met het toetsenbord van computer."
+easy_switch_no_followers = "Er is geen muis of touchpad aan deze computer gekoppeld."
+
 [profiles]
 active_profile = "Actief profiel"
 default_profile = "Standaardprofiel"

@@ -132,6 +132,10 @@ device = "Enhet"
 manage_this_device = "Hantera den här enheten"
 usb = "USB"
 
+easy_switch_followers = "Enheter som följer det här tangentbordet"
+easy_switch_description = "När du trycker på en Easy-Switch-tangent byter de här enheterna dator tillsammans med tangentbordet."
+easy_switch_no_followers = "Ingen mus eller styrplatta är parkopplad med den här datorn."
+
 [profiles]
 active_profile = "Aktiv profil"
 default_profile = "Standardprofil"

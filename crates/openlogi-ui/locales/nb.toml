@@ -132,6 +132,10 @@ device = "Enhet"
 manage_this_device = "Administrer denne enheten"
 usb = "USB"
 
+easy_switch_followers = "Enheter som følger dette tastaturet"
+easy_switch_description = "Når du trykker på en Easy-Switch-tast, bytter disse enhetene datamaskin sammen med tastaturet."
+easy_switch_no_followers = "Ingen mus eller styreflate er paret med denne datamaskinen."
+
 [profiles]
 active_profile = "Aktiv profil"
 default_profile = "Standardprofil"

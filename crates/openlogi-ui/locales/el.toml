@@ -132,6 +132,10 @@ device = "Συσκευή"
 manage_this_device = "Διαχείριση αυτής της συσκευής"
 usb = "USB"
 
+easy_switch_followers = "Συσκευές που ακολουθούν αυτό το πληκτρολόγιο"
+easy_switch_description = "Όταν πατάτε ένα πλήκτρο Easy-Switch, αυτές οι συσκευές αλλάζουν υπολογιστή μαζί με το πληκτρολόγιο."
+easy_switch_no_followers = "Δεν έχει συζευχθεί ποντίκι ή επιφάνεια αφής με αυτόν τον υπολογιστή."
+
 [profiles]
 active_profile = "Ενεργό προφίλ"
 default_profile = "Προεπιλεγμένο προφίλ"
