@@ -285,10 +285,22 @@ impl Orchestrator {
         self.shared.clone()
     }
 
+    /// The selected device's config key — source of the OS hook's *global*
+    /// binding map ([`Self::hook_maps_for`]) and of the Actions Ring session
+    /// ([`Self::action_ring_session`]).
+    ///
+    /// Deliberately does **not** filter by [`is_hidpp_device`]: that check
+    /// exists to keep a `RawHid` device from ever being auto-picked over a
+    /// real HID++ mouse/keyboard as the HID++ capture target (see
+    /// [`pick_current`]), which is a different question from "whose bindings
+    /// does the OS hook apply". The OS hook's map is global, not per-route —
+    /// a raw, non-HID++ mouse (or a Litra light, which simply never has any
+    /// button bindings configured) needs no HID++ capture session, but it
+    /// still needs its own saved bindings to actually reach the hook when the
+    /// user has selected it.
     fn current_key(&self) -> Option<&str> {
         self.devices
             .get(self.current)
-            .filter(|device| is_hidpp_device(device))
             .map(|d| d.config_key.as_str())
     }
 
@@ -454,11 +466,21 @@ impl Orchestrator {
     }
 
     /// One capture plan per online device, from the current config + app.
+    ///
+    /// Standalone raw-HID devices (`DeviceRoute::RawHid` — Litra lights, and
+    /// now the raw OS-hook-only mouse family) are excluded: that route can
+    /// never carry HID++ traffic (see its doc comment), so building a plan
+    /// for one only makes the gesture watcher open a session that fails
+    /// immediately and retries forever. `is_hidpp_device` is the same signal
+    /// [`pick_current`] already uses to keep these out of the capture-target
+    /// selection.
     fn capture_plans_for(&self) -> Vec<DeviceCapturePlan> {
         let rearm_generation = self.shared.capture_rearm_generation.load(Ordering::Relaxed);
         self.devices
             .iter()
-            .filter(|dev| dev.online && self.config.device_enabled(&dev.config_key))
+            .filter(|dev| {
+                dev.online && self.config.device_enabled(&dev.config_key) && is_hidpp_device(dev)
+            })
             .filter_map(|dev| {
                 let route = dev.route.clone()?;
                 let identity = DeviceIdentity::from_parts(dev.serial.as_deref(), dev.unit_id);
@@ -1165,18 +1187,21 @@ fn plan_reapply(
     (targets, next_followup)
 }
 
-/// Index of the selected HID++ input device. Prefer the saved selection while
-/// it is an online input route, otherwise the first online input route. If
-/// every input device is offline, preserve the saved selection (or the first
-/// input route) so its configuration remains stable. Standalone raw-HID
-/// devices participate in inventory and settings re-apply but must never
-/// replace the mouse/keyboard capture target when selected in the GUI.
+/// Index of the selected device. Prefer the saved selection while it is
+/// online, otherwise the first online HID++ input route. If every device is
+/// offline, preserve the saved selection (or the first HID++ input route) so
+/// its configuration remains stable.
+///
+/// The saved selection is honored regardless of device kind — including a
+/// standalone raw-HID device (a Litra light, or a raw non-HID++ mouse) the
+/// user explicitly selected in the GUI, since [`Orchestrator::current_key`]
+/// is also where that device's own OS-hook bindings get published. Only the
+/// *auto-pick* fallback (no saved selection, or it's offline) stays
+/// HID++-only: a raw-HID device must never silently steal the default
+/// capture target away from a real mouse/keyboard just by being first in the
+/// device list.
 fn pick_current(devices: &[AgentDevice], saved: Option<&str>) -> usize {
-    let saved = saved.and_then(|key| {
-        devices
-            .iter()
-            .position(|device| device.config_key == key && is_hidpp_device(device))
-    });
+    let saved = saved.and_then(|key| devices.iter().position(|device| device.config_key == key));
     saved
         .filter(|&idx| devices[idx].online)
         .or_else(|| {

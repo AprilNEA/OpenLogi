@@ -284,6 +284,7 @@ mod tests {
             name: "Test Mouse".to_owned(),
             manufacturer: Some("Test Vendor".to_owned()),
             serial_number: None,
+            is_hidpp_candidate: false,
         };
         let hidpp = NodeInfo {
             id: os_node,
@@ -294,6 +295,7 @@ mod tests {
             name: "Test Mouse".to_owned(),
             manufacturer: Some("Test Vendor".to_owned()),
             serial_number: None,
+            is_hidpp_candidate: true,
         };
 
         let hidpp_key = HandleKey::for_node(&hidpp);

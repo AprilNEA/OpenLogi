@@ -96,6 +96,11 @@ fn node_id(info: &DeviceInfo) -> NodeId {
 
 /// Restates an `async-hid` node as the backend-agnostic [`NodeInfo`] every
 /// layer above this module stores, filters and routes on.
+///
+/// Computes [`NodeInfo::is_hidpp_candidate`] here too, from the same
+/// `DeviceInfo` every caller already has in hand — a caller that needs both
+/// the full node list and this classification does not have to make a second
+/// live backend query to get it (see [`is_hidpp_candidate`]).
 fn node_info(info: &DeviceInfo) -> NodeInfo {
     {
         NodeInfo {
@@ -107,6 +112,13 @@ fn node_info(info: &DeviceInfo) -> NodeInfo {
             name: info.name.clone(),
             manufacturer: info.manufacturer.clone(),
             serial_number: info.serial_number.clone(),
+            is_hidpp_candidate: is_hidpp_candidate(
+                info.vendor_id,
+                info.product_id,
+                info.usage_page,
+                info.usage_id,
+                is_receiver_child_node(&info.id),
+            ),
         }
     }
 }
