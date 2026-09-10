@@ -381,6 +381,7 @@ fn persisted_action_variant_names_are_stable() {
         "ShowActionsRing",
         "ShowDesktop",
         "Sleep",
+        "SwitchApplications",
         "ToggleSmartShift",
         "TypeText",
         "Undo",
@@ -475,6 +476,7 @@ fn category_navigation_variants() {
     assert_eq!(Action::NextDesktop.category(), Category::Navigation);
     assert_eq!(Action::ShowDesktop.category(), Category::Navigation);
     assert_eq!(Action::LaunchpadShow.category(), Category::Navigation);
+    assert_eq!(Action::SwitchApplications.category(), Category::Navigation);
 }
 
 #[test]

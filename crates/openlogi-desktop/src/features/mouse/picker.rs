@@ -85,7 +85,9 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         Action::PreviousDesktop => "action-icons/square-arrow-left.svg",
         Action::NextDesktop => "action-icons/square-arrow-right.svg",
         Action::ShowDesktop => "action-icons/monitor.svg",
-        Action::LaunchpadShow | Action::OpenApplication(_) => "action-icons/grid-3x3.svg",
+        Action::LaunchpadShow | Action::SwitchApplications | Action::OpenApplication(_) => {
+            "action-icons/grid-3x3.svg"
+        }
         Action::LockScreen => "action-icons/lock.svg",
         Action::Screenshot | Action::CaptureRegion => "action-icons/camera.svg",
         Action::Sleep => "action-icons/moon.svg",
@@ -241,11 +243,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn gesture_action_catalog_includes_actions_ring() {
+    fn gesture_action_catalog_includes_gesture_friendly_system_actions() {
         let actions = grouped_catalog()
             .into_iter()
             .flat_map(|(_, actions)| actions)
             .collect::<Vec<_>>();
         assert!(actions.contains(&Action::ShowActionsRing));
+        assert!(actions.contains(&Action::SwitchApplications));
     }
 }

@@ -187,6 +187,12 @@ pub enum Action {
     /// cancellation and shutdown. Dispatchers without a release context must
     /// degrade this action to a balanced tap rather than leave keys held.
     HoldShortcut(KeyCombo),
+    /// Switch to the previously used application (Command-Tab on macOS,
+    /// Alt-Tab on Linux and Windows).
+    ///
+    /// Appended to preserve the serialized variant indices of every existing
+    /// action; see the stability contract above.
+    SwitchApplications,
 }
 
 /// One step in a [`Action::Workflow`]. A workflow is a `Vec<WorkflowStep>`
@@ -263,6 +269,7 @@ macro_rules! for_each_unit_action {
             NextDesktop "Next Desktop" "actions.next_desktop" Navigation NextDesktop,
             ShowDesktop "Show Desktop" "actions.show_desktop" Navigation Monitor,
             LaunchpadShow "Launchpad" "actions.launchpad" Navigation Applications,
+            SwitchApplications "Switch Applications" "actions.switch_applications" Navigation Applications,
             // System
             None "Do Nothing" "pointer.do_nothing" System Ban,
             LockScreen "Lock Screen" "actions.lock_screen" System Lock,
