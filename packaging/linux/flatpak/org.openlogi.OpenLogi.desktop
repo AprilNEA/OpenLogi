@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=OpenLogi
+Comment=Logitech HID++ device control: remap buttons, DPI, SmartShift
+Exec=openlogi-desktop
+Icon=org.openlogi.OpenLogi
+Terminal=false
+# Ties the running window (Wayland xdg-toplevel app_id / X11 WM_CLASS) back to
+# this launcher. The GUI advertises `openlogi_core::brand::APP_ID`, which is
+# lowercase and therefore differs from the flatpak application ID; without
+# this key the shell shows a generic icon for the window.
+StartupWMClass=org.openlogi.openlogi
+Categories=Settings;HardwareSettings;
+Keywords=logitech;mouse;hid;remap;dpi;
+StartupNotify=true

@@ -174,6 +174,15 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # Best-effort alongside the packages, and separate from them: the Flatpak
+      # leg builds the whole workspace again inside the SDK, so it is the
+      # slowest Linux job and the one most likely to be the single leg missing.
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: OpenLogi-linux-flatpak-*
+          path: dist
+          merge-multiple: true
+
       - name: Generate checksums
         run: |
           cd dist
@@ -185,7 +194,7 @@ jobs:
           # hashed alone. The Windows portable artifact is a zip of the GUI +
           # agent exes (#347); no bare .exe ships anymore.
           shopt -s nullglob
-          sha256sum -- *.dmg *.zip *.msi *.deb *.rpm *.pkg.tar.zst > SHA256SUMS
+          sha256sum -- *.dmg *.zip *.msi *.deb *.rpm *.pkg.tar.zst *.flatpak > SHA256SUMS
 
       # softprops' `files` can't list a glob that matches nothing without
       # tripping fail_on_unmatched_files. The Windows zip/msi (per arch leg)
@@ -196,7 +205,7 @@ jobs:
       - name: Detect best-effort artifacts
         id: artifacts
         run: |
-          for ext in zip msi deb rpm; do
+          for ext in zip msi deb rpm flatpak; do
             if compgen -G "dist/*.$ext" > /dev/null; then
               echo "$ext=true" >> "$GITHUB_OUTPUT"
             else
@@ -265,12 +274,15 @@ jobs:
           # The Windows binaries and Linux packages get the same minisign
           # treatment as the DMGs: manual verification today, and the future
           # auto-updaters need the detached signatures to exist for every
-          # shipped version.
-          # nullglob: the zip/msi/deb/rpm sets are best-effort per arch leg, so
-          # the globs may match nothing; the DMGs are guaranteed by the publish
-          # gate.
+          # shipped version. The Flatpak bundle is in that set for the same
+          # reason — it is attached to the release and copied to R2 like the
+          # rest, so leaving it unsigned would make it the one installer a user
+          # cannot verify.
+          # nullglob: the zip/msi/deb/rpm/flatpak sets are best-effort per arch
+          # leg, so the globs may match nothing; the DMGs are guaranteed by the
+          # publish gate.
           shopt -s nullglob
-          for artifact in dist/*.dmg dist/*.zip dist/*.msi dist/*.deb dist/*.rpm dist/*.pkg.tar.zst; do
+          for artifact in dist/*.dmg dist/*.zip dist/*.msi dist/*.deb dist/*.rpm dist/*.pkg.tar.zst dist/*.flatpak; do
             minisign -S -m "$artifact" -s "$key_file" -x "$artifact.minisig" -W
             minisign -V -m "$artifact" -P "$OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY" -x "$artifact.minisig"
           done
@@ -339,6 +351,7 @@ jobs:
             ${{ steps.artifacts.outputs.deb == 'true' && 'dist/*.deb' || '' }}
             ${{ steps.artifacts.outputs.rpm == 'true' && 'dist/*.rpm' || '' }}
             ${{ steps.artifacts.outputs.pacman == 'true' && 'dist/*.pkg.tar.zst' || '' }}
+            ${{ steps.artifacts.outputs.flatpak == 'true' && 'dist/*.flatpak' || '' }}
           fail_on_unmatched_files: true
 
   homebrew-tap:
