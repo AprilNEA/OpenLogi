@@ -231,6 +231,18 @@ mod tests {
         )
     }
 
+    /// Whether `plan` diverts `button` at all. The plan filters the divert
+    /// list per button, so every CID a button maps to is in or out together;
+    /// which CIDs those are is the device layer's table, not this crate's
+    /// concern.
+    fn diverts(plan: &DeviceCapturePlan, button: ButtonId) -> bool {
+        plan.target
+            .spec
+            .divert_buttons
+            .iter()
+            .any(|&(_, diverted)| diverted == button)
+    }
+
     #[test]
     fn both_hidpp_sources_gesture_when_both_are_in_gesture_mode() {
         // On MX Master 4 the dedicated button and the haptic panel can gesture
@@ -345,14 +357,9 @@ mod tests {
                     Some(&Binding::Single(expected_action)),
                     "{button:?} must resolve unset bindings to native clicks"
                 );
-                // Several model-specific CIDs can map to the same side button.
                 for side in [ButtonId::Back, ButtonId::Forward] {
                     assert_eq!(
-                        plan.target
-                            .spec
-                            .divert_buttons
-                            .iter()
-                            .any(|&(_, captured)| captured == side),
+                        diverts(&plan, side),
                         diverted && side == button,
                         "only an explicitly browser-bound {button:?} should be diverted"
                     );
@@ -363,15 +370,9 @@ mod tests {
 
     #[test]
     fn thumb_button_capture_follows_per_app_overrides_and_inheritance() {
-        for (cid, button, native, browser) in [
+        for (button, native, browser) in [
+            (ButtonId::Back, Action::MouseBack, Action::BrowserBack),
             (
-                0x0053,
-                ButtonId::Back,
-                Action::MouseBack,
-                Action::BrowserBack,
-            ),
-            (
-                0x0056,
                 ButtonId::Forward,
                 Action::MouseForward,
                 Action::BrowserForward,
@@ -402,7 +403,7 @@ mod tests {
                         "{button:?} dispatch must resolve the profile for {app:?}"
                     );
                     assert_eq!(
-                        plan.target.spec.divert_buttons.contains(&(cid, button)),
+                        diverts(&plan, button),
                         diverted,
                         "{button:?} capture must follow its effective binding for {app:?}"
                     );
@@ -416,11 +417,7 @@ mod tests {
                     Some(&Binding::Single(global))
                 );
                 assert_eq!(
-                    inherited
-                        .target
-                        .spec
-                        .divert_buttons
-                        .contains(&(cid, button)),
+                    diverts(&inherited, button),
                     global_diverted,
                     "clearing {button:?}'s app override must restore global capture"
                 );
