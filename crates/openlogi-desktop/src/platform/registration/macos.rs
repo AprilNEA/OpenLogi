@@ -123,7 +123,22 @@ mod backend {
     /// from macOS 15, and a binary that imports that symbol is refused by
     /// dyld on 13 and 14 before `main` runs (#1279). Rust has no availability
     /// checking to catch that, so the constant must never be linked here.
-    pub(super) const ERROR_DOMAIN: &str = "SMAppServiceErrorDomain";
+    const ERROR_DOMAIN: &str = "SMAppServiceErrorDomain";
+
+    /// Recognize `SMAppService` errors without importing its macOS 15-only
+    /// error-domain symbol.
+    pub(super) trait SmAppServiceErrorExt {
+        /// Match both the framework's domain and `expected`: the same small
+        /// integers mean something else as POSIX or OSStatus codes.
+        fn is_sm_app_service_error(&self, expected: core::ffi::c_uint) -> bool;
+    }
+
+    impl SmAppServiceErrorExt for NSError {
+        fn is_sm_app_service_error(&self, expected: core::ffi::c_uint) -> bool {
+            self.domain().to_string() == ERROR_DOMAIN
+                && isize::try_from(expected).is_ok_and(|expected| self.code() == expected)
+        }
+    }
 
     /// The framework handle for the agent service's embedded plist.
     #[expect(unsafe_code, reason = "plain ObjC class method via objc2 bindings")]
@@ -176,20 +191,12 @@ mod backend {
         benign: core::ffi::c_uint,
     ) -> Result<(), String> {
         result.or_else(|error| {
-            let domain = error.domain().to_string();
-            if is_benign(&domain, error.code(), benign) {
+            if error.is_sm_app_service_error(benign) {
                 Ok(())
             } else {
                 Err(error.localizedDescription().to_string())
             }
         })
-    }
-
-    /// Whether an error in `domain` with `code` is the framework's `benign`
-    /// outcome — and only in the framework's domain: the same small integers
-    /// mean something else entirely as POSIX or OSStatus codes.
-    pub(super) fn is_benign(domain: &str, code: isize, benign: core::ffi::c_uint) -> bool {
-        domain == ERROR_DOMAIN && isize::try_from(benign).is_ok_and(|benign| code == benign)
     }
 }
 
@@ -243,26 +250,44 @@ mod tests {
     }
 
     #[test]
-    fn only_the_frameworks_own_already_converged_code_is_forgiven() {
+    fn only_the_frameworks_own_error_domain_and_code_match() {
+        use objc2_foundation::{NSError, NSString};
         use objc2_service_management::{kSMErrorAlreadyRegistered, kSMErrorJobNotFound};
 
-        let already = isize::try_from(kSMErrorAlreadyRegistered).unwrap();
-        assert!(backend::is_benign(
-            backend::ERROR_DOMAIN,
-            already,
-            kSMErrorAlreadyRegistered
-        ));
-        // The other operation's benign code is a real failure for this one.
-        assert!(!backend::is_benign(
-            backend::ERROR_DOMAIN,
-            already,
-            kSMErrorJobNotFound
-        ));
-        // ENOMEM is 12 too; a POSIX error must never read as "already registered".
-        assert!(!backend::is_benign(
-            "NSPOSIXErrorDomain",
-            already,
-            kSMErrorAlreadyRegistered
-        ));
+        use super::backend::SmAppServiceErrorExt;
+
+        for (domain, code, expected, matches) in [
+            (
+                "SMAppServiceErrorDomain",
+                12,
+                kSMErrorAlreadyRegistered,
+                true,
+            ),
+            ("SMAppServiceErrorDomain", 6, kSMErrorJobNotFound, true),
+            // The other operation's benign code is a real failure for this one.
+            ("SMAppServiceErrorDomain", 12, kSMErrorJobNotFound, false),
+            (
+                "SMAppServiceErrorDomain",
+                6,
+                kSMErrorAlreadyRegistered,
+                false,
+            ),
+            // ENOMEM is 12 too; POSIX/OSStatus errors must never match.
+            ("NSPOSIXErrorDomain", 12, kSMErrorAlreadyRegistered, false),
+            ("NSOSStatusErrorDomain", 6, kSMErrorJobNotFound, false),
+            (
+                "SMAppServiceErrorDomain",
+                -1,
+                kSMErrorAlreadyRegistered,
+                false,
+            ),
+        ] {
+            let error = NSError::new(code, &NSString::from_str(domain));
+            assert_eq!(
+                error.is_sm_app_service_error(expected),
+                matches,
+                "domain={domain}, code={code}, expected={expected}"
+            );
+        }
     }
 }
