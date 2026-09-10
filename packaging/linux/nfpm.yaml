@@ -111,6 +111,11 @@ archlinux:
   packager: "AprilNEA <dev@aprilnea.me>"
 
 overrides:
+  deb:
+    depends:
+      - libxkbcommon0
+      - libxkbcommon-x11-0
+      - libxcb1
   archlinux:
     depends:
       - dbus

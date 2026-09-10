@@ -23,6 +23,7 @@
     unsafe_code,
     reason = "raw win32: Shell_NotifyIconW + a hidden window's message pump — localized here"
 )]
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use tracing::{info, warn};
@@ -42,6 +43,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WS_OVERLAPPED,
 };
 
+use crate::shutdown::{self, ShutdownRequestSender};
+
 /// Tray callback message the icon posts to the hidden window.
 const WM_TRAY: u32 = WM_APP + 1;
 /// Menu command ids returned by `TrackPopupMenu`.
@@ -53,20 +56,26 @@ const ID_QUIT: usize = 2;
 /// 0xC000).
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 
+thread_local! {
+    /// Where the win32 tray callback hands process termination to the async
+    /// lifecycle. The callback and message pump share this one tray thread.
+    static SHUTDOWN_TX: RefCell<Option<ShutdownRequestSender>> = const { RefCell::new(None) };
+}
+
 /// Host the tray icon on its own thread. No-op when the user disabled the
 /// menu-bar/tray preference (same `show_in_menu_bar` setting macOS honors;
 /// takes effect on the agent's next launch, as there).
 ///
 /// Failures are logged, never fatal — the agent's real work (hook, HID++,
 /// IPC) must not die because a shell icon couldn't be installed.
-pub fn spawn(show_in_tray: bool) {
+pub fn spawn(show_in_tray: bool, shutdown_tx: ShutdownRequestSender) {
     if !show_in_tray {
         info!("tray icon disabled by preference — agent stays invisible");
         return;
     }
     if let Err(e) = std::thread::Builder::new()
         .name("openlogi-tray".into())
-        .spawn(run_tray_loop)
+        .spawn(move || run_tray_loop(shutdown_tx))
     {
         warn!(error = %e, "could not spawn the tray thread");
     }
@@ -74,7 +83,8 @@ pub fn spawn(show_in_tray: bool) {
 
 /// Create the hidden window, install the icon, and pump messages for the
 /// agent's lifetime.
-fn run_tray_loop() {
+fn run_tray_loop(shutdown_tx: ShutdownRequestSender) {
+    SHUTDOWN_TX.with_borrow_mut(|slot| *slot = Some(shutdown_tx));
     let class_name = wide("OpenLogiAgentTray");
     // SAFETY: plain win32 registration/creation calls with pointers that
     // outlive the calls; the class name buffer lives until thread exit.
@@ -444,12 +454,9 @@ fn quit(hwnd: HWND) {
         Shell_NotifyIconW(NIM_DELETE, &raw const nid);
     }
     crate::overlay::evict_on_quit();
-    info!("tray Quit — exiting agent");
-    #[expect(
-        clippy::exit,
-        reason = "reached from the window procedure on the tray thread: the status cannot travel back through an `extern \"system\"` callback, and ending the message pump would only end this thread while `main` keeps running the agent core"
-    )]
-    std::process::exit(0);
+    info!("tray Quit — requesting graceful agent shutdown");
+    let requests = SHUTDOWN_TX.with_borrow(Clone::clone);
+    shutdown::request_tray_quit(requests.as_ref(), 0);
 }
 
 /// NUL-terminated UTF-16 for win32 W-APIs.

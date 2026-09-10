@@ -171,6 +171,9 @@ pub struct Enumerator {
     retry_needed_last_tick: bool,
     /// Coalesced lifecycle-event sink installed on newly opened channels.
     event_notifier: Option<EventNotifier>,
+    /// Receiver arrival-event drain decision. Production uses
+    /// [`ARRIVAL_DRAIN`]; deterministic replay scenarios set this to zero.
+    arrival_drain: Duration,
 }
 
 /// An open channel to a receiver / direct-device HID node, held across
@@ -536,6 +539,7 @@ impl Enumerator {
             open_failures_last_tick: false,
             retry_needed_last_tick: false,
             event_notifier: None,
+            arrival_drain: ARRIVAL_DRAIN,
         }
     }
 
@@ -710,7 +714,7 @@ impl Enumerator {
         // Probe each open channel concurrently, sharing `&cache` read-only;
         // updates are collected and applied afterwards (no `RefCell`).
         let results = {
-            let cache = &self.cache;
+            let (cache, arrival_drain) = (&self.cache, self.arrival_drain);
             active
                 .into_iter()
                 .map(|(info, channel, events)| async move {
@@ -727,11 +731,15 @@ impl Enumerator {
                     } else {
                         PROBE_BUDGET
                     };
-                    let probe = timeout(
-                        budget,
-                        probe_one(info, Arc::clone(&channel), cache, now, events.as_ref()),
-                    )
-                    .await;
+                    let probe = probe_one(
+                        info,
+                        Arc::clone(&channel),
+                        cache,
+                        now,
+                        arrival_drain,
+                        events.as_ref(),
+                    );
+                    let probe = timeout(budget, probe).await;
                     (node, channel, probe, budget, receiver)
                 })
                 .collect::<Vec<_>>()
@@ -739,14 +747,12 @@ impl Enumerator {
                 .await
         };
 
-        let mut inventories = Vec::new();
-        let mut outcomes = Vec::new();
+        let (mut inventories, mut outcomes) = (Vec::new(), Vec::new());
         // Aggregates for the one-shot retry. `all_complete` can stop
         // immediately; `all_healthy` gates the unchanged-inventory shortcut so
         // failed probes keep retrying. The ledger's own per-node replay is
         // governed by each probe's verdict.
-        let mut all_complete = true;
-        let mut all_healthy = true;
+        let (mut all_complete, mut all_healthy) = (true, true);
         for (node, channel, result, budget, receiver) in results {
             let probe = if let Ok(probe) = result {
                 probe
@@ -882,5 +888,9 @@ impl Enumerator {
     }
 }
 
+#[cfg(test)]
+mod replay_test_support;
+#[cfg(test)]
+mod replay_tests;
 #[cfg(test)]
 mod tests;
