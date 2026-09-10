@@ -4,6 +4,7 @@ paths:
   - "crates/openlogi-overlay/src/platform.rs"
   - "crates/openlogi-permissions/**"
   - "crates/openlogi-camera/**"
+  - "crates/openlogi-agent/src/activity_macos.rs"
   - "crates/openlogi-agent/src/tray.rs"
   - "crates/openlogi-agent/src/status_item.rs"
   - "crates/openlogi-agent-core/src/watchers/camera.rs"
@@ -22,8 +23,9 @@ files; **keep this table in sync when you add or move one**:
 
 | File | What it carries |
 |---|---|
+| `openlogi-agent/src/activity_macos.rs` | the device-I/O gate's levels: the `IOPMConnection` powerd subscription (hand-declared SPI, see below) and the `CGSessionCopyCurrentDictionary` console read |
 | `openlogi-agent/src/status_item.rs` | safe `objc2` wrappers over `NSStatusItem` / `NSMenu` / `NSMenuItem` |
-| `openlogi-agent/src/tray.rs` | the menu-bar semantics, `MenuTarget` + `ResumeTarget` (`define_class!`), the Accessory `NSApplication` loop, `NSWorkspace` resume notifications |
+| `openlogi-agent/src/tray.rs` | the menu-bar semantics, `MenuTarget` + `SessionTarget` (`define_class!`), the Accessory `NSApplication` loop, the `NSWorkspace` session (fast-user-switch) notifications |
 | `openlogi-agent-core/src/watchers/camera.rs` | the CoreMediaIO "camera is running" property read |
 | `openlogi-camera/src/capture.rs` | `AVCaptureSession` capture + the `define_class!` frame delegate, and the Camera TCC prompt |
 | `openlogi-camera/src/macos.rs` | `AVCaptureDevice` enumeration (`class!` + `msg_send!`) |
@@ -90,9 +92,11 @@ every 2 s tray refresh under the old `cocoa`/`objc` 0.x path).
   there. Do **not** copy gpui's own `NSThread.isMainThread` + `dispatch2`
   runtime-check idiom; we use the compile-time `MainThreadMarker` guarantee.
 - The tray needs no `static` and no `thread_local`: `run_app_loop` is `-> !`, so
-  the status item, its `MenuTarget` and the `ResumeTarget` are bound as locals
-  that outlive `NSApplication::run()`. They must stay bound — menu items
-  reference their target *weakly*, and the notification center does the same.
+  the status item, its `MenuTarget`, the `SessionTarget` and the powerd
+  `PowerConnection` are bound as locals that outlive `NSApplication::run()`.
+  They must stay bound — menu items reference their target *weakly*, the
+  notification center does the same, and the power callback's `param` points
+  into the connection's own `Arc`.
 - `openlogi-camera`'s frame delegate is deliberately the opposite: an
   `NSObject` subclass with no `thread_kind`, because AVFoundation drives it on
   a background dispatch queue. Its one ivar is the owning session's
@@ -191,6 +195,13 @@ its single user. The current set, all deliberate:
 
 - `openlogi-hook`: `CGEventCopyIOHIDEvent` / `IOHIDEventGetSenderID` —
   undocumented, no bindings anywhere.
+- `openlogi-agent/src/activity_macos.rs`: the `IOPMConnection` SPI
+  (`IOPMConnectionCreate` / `SetNotification` / `SetDispatchQueue` /
+  `AcknowledgeEvent` / `Release` / `GetSystemCapabilities`) — exported by IOKit
+  since 10.6 and what `pmset` is built on, but declared only in Apple's
+  open-source `IOKitUser/pwr_mgt.subproj/IOPMLibPrivate.h`, so `objc2-io-kit`
+  cannot generate it. It is the only API that reports a DarkWake → FullWake
+  transition, which is why the gate needs it (see `docs/DECISIONS.md`).
 - `openlogi-camera`: the AVFoundation / CoreMedia / CoreVideo / CoreFoundation
   statics and functions its capture and enumeration paths need
   (`AVMediaTypeVideo`, `CMSampleBufferGetImageBuffer`, the `CVPixelBuffer`
@@ -218,9 +229,12 @@ under a `SAFETY` comment. Where it currently lives on macOS:
 - `agent/status_item.rs` — `NSMenuItem::initWithTitle_action_keyEquivalent` +
   `setTarget:` (raw selector; the target is a *weak* reference, which is why the
   tray keeps `MenuTarget` alive for the app's lifetime).
+- `agent/activity_macos.rs` — the `IOPMConnection` calls, its C callback (the
+  `param` is the gate the `PowerConnection` keeps alive, and `Drop` drains the
+  delivery queue before that `Arc` goes), and the `CGSession` dictionary cast.
 - `agent/tray.rs` — `msg_send![super(this), init]`, the notification-center
-  `addObserver:selector:name:object:`, and the `NSWorkspace*Notification` name
-  statics.
+  `addObserver:selector:name:object:`, and the `NSWorkspaceSession*Notification`
+  name statics.
 - `hook/macos.rs` — the whole tap (Core Graphics / Core Foundation C APIs),
   the `NSWorkspace` activation-observer registration and typed notification
   payload, `AXIsProcessTrusted[WithOptions]` and the two extern statics they

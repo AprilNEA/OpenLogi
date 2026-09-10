@@ -394,9 +394,9 @@ impl GestureManagerState {
         channels: &SessionChannels,
     ) {
         // Keep existing passive listeners and their firmware ownership intact
-        // while the display/session is asleep. Retiring them here would issue
-        // restoration writes during DarkWake; retries and successors wait for
-        // the user-visible resume instead.
+        // while the host has paused device I/O. Retiring them here would issue
+        // restoration writes during a DarkWake; retries and successors wait
+        // for the full wake instead.
         if !device_io_allowed {
             return;
         }

@@ -15,6 +15,8 @@
     windows_subsystem = "windows"
 )]
 
+#[cfg(target_os = "macos")]
+mod activity_macos;
 mod autostart;
 mod binary_watch;
 mod lifecycle;
@@ -110,9 +112,8 @@ fn main() {
     #[cfg(target_os = "macos")]
     {
         // Fail closed before the core thread can enumerate or open HID devices.
-        // AppKit releases this startup hold only after its workspace observers
-        // have received the initial session state and Core Graphics has
-        // reported whether the display is already asleep.
+        // The AppKit loop releases this launch hold only after it has read the
+        // login session's console ownership and powerd's current power state.
         let _ = device_io_signal.suspend();
         // Read the menu-bar preference before `config` moves into the core
         // thread; the main thread hosts the tray.

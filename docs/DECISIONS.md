@@ -4,6 +4,49 @@ Durable "why we did it this way" records that are not obvious from the code.
 Add a dated entry when a non-obvious architectural or dependency decision is
 made or revisited.
 
+## 2026-09: The macOS device-I/O gate follows powerd, through an SPI, and fails open
+
+The gate that keeps HID access off while the Mac is dark (#656) was first built
+on `NSWorkspace` notifications (#1142): `WillSleep` / `ScreensDidSleep` /
+`SessionDidResignActive` closed it, `ScreensDidWake` / `SessionDidBecomeActive`
+reopened it. Those are edges, and macOS does not guarantee the wake edge —
+Apple DTS (developer forums thread 796109) confirms `ScreensDidWake` is skipped
+on some MacBooks for a lid-close/open cycle and that the system may not even
+run the app's run loop to deliver it. One dropped edge paused device I/O until
+the agent was restarted (#1281). The screen-sleep source was never a
+requirement in its own right: it stood in for "not a DarkWake", the state
+AppKit cannot name (`NSWorkspaceDidWakeNotification` fires for both).
+
+The gate now reads the thing it is actually about. `activity_macos` subscribes
+to powerd through `IOPMConnection`, which reports every Sleep / DarkWake /
+FullWake transition as the complete capability set of the new state and reads
+the current set on demand, so every input is a level: nothing pairs, a missed
+event is corrected by the next, no reconciler timer exists. The console level
+(fast user switching) comes from `CGSessionCopyCurrentDictionary`, with the
+AppKit session edges forwarded as hints and the level re-read on every power
+transition. A launch reads both levels before releasing its hold, so a
+watchdog relaunch during a sleep transition no longer guesses "awake" (#952).
+
+Three things decided the API:
+
+- **Only `IOPMConnection` names a DarkWake.** DTS states plainly that the
+  public API does not expose DarkWake at all: `IORegisterForSystemPower`
+  delivers `kIOMessageSystemHasPoweredOn` for a DarkWake as for a full wake,
+  so a gate on it cannot tell the one-second DarkWake blip #1281 was reported
+  with from the full wake that followed it. The undocumented `IOPMrootDomain`
+  "System Capabilities" registry key carries the same level but no events,
+  which is what forced #1283 into polling.
+- **It is an SPI, and that is accepted.** The functions are exported by IOKit
+  since 10.6 and prototyped only in Apple's open-source `IOKitUser`; the
+  shipping `pmset` is built on them. The hand-written `extern` is confined to
+  `activity_macos.rs` and inventoried in `.claude/rules/objc-ffi.md`. OpenLogi
+  is not App Store distributed.
+- **Losing the SPI fails open.** If the subscription cannot be made the gate
+  is told "permanent full wake" and follows the console alone, at error level.
+  That is pre-0.8.2 behaviour (hardware usable, #656 unprotected); failing
+  closed would leave an agent that can never touch hardware, which is the
+  outage #1281 describes.
+
 ## 2026-08: The agent stays one process; a crossing edge gets a wire, not an event layer
 
 The 2026-06 daemon split (#165) put the resident input machinery in

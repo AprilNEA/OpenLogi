@@ -1,4 +1,4 @@
-//! The agent's macOS AppKit loop, menu-bar item, and resume notifications.
+//! The agent's macOS AppKit loop, menu-bar item, and login-session observer.
 //!
 //! The always-on agent hosts the menu bar (the GUI is on-demand). The item
 //! carries GUI-directed actions ("Show Main Window", Settings, About, Check for
@@ -10,6 +10,10 @@
 //! launched then URL delivered) and warm reactivation (URL delivered to the
 //! running app).
 //!
+//! The device-I/O gate itself lives in `activity_macos`; this file only
+//! forwards the `NSWorkspace` session edges (fast user switching) to it and
+//! sequences the launch hold around `finishLaunching`.
+//!
 //! macOS-only. AppKit objects are `Retained<T>` (no #99-style leaks); the run
 //! loop owns the main thread for the agent's lifetime.
 
@@ -19,7 +23,7 @@
 )]
 
 use std::cell::RefCell;
-use std::sync::{Mutex, PoisonError};
+use std::sync::Arc;
 
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
@@ -28,21 +32,17 @@ use objc2::{
     AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel,
 };
 use objc2_app_kit::NSStatusItem;
-#[cfg(test)]
-use objc2_app_kit::NSWorkspaceDidWakeNotification;
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSImage, NSRunningApplication, NSWorkspace,
-    NSWorkspaceScreensDidSleepNotification, NSWorkspaceScreensDidWakeNotification,
     NSWorkspaceSessionDidBecomeActiveNotification, NSWorkspaceSessionDidResignActiveNotification,
-    NSWorkspaceWillSleepNotification,
 };
-use objc2_core_graphics::{CGDisplayIsAsleep, CGMainDisplayID};
 use objc2_foundation::{NSNotification, NSString};
 use openlogi_core::brand::{self, DeeplinkCommand};
 use openlogi_core::config::AppIcon;
 use openlogi_hid::DeviceIoSignal;
 use tracing::{info, warn};
 
+use crate::activity_macos::{self, ActivityGate};
 use crate::shutdown::{self, ShutdownRequestSender};
 use crate::status_item;
 
@@ -115,103 +115,36 @@ pub fn relocalize() {
     });
 }
 
-struct ActivityTargetIvars {
-    signal: DeviceIoSignal,
-    suspended_by: Mutex<u8>,
+struct SessionTargetIvars {
+    gate: Arc<ActivityGate>,
 }
 
-const SYSTEM_SLEEP: u8 = 1 << 0;
-const SCREEN_SLEEP: u8 = 1 << 1;
-const SESSION_INACTIVE: u8 = 1 << 2;
-const STARTUP: u8 = 1 << 3;
-
 define_class!(
-    // SAFETY: NSObject has no subclassing requirements, and `ActivityTarget`
+    // SAFETY: NSObject has no subclassing requirements, and `SessionTarget`
     // does not implement `Drop`.
     #[unsafe(super(NSObject))]
-    #[ivars = ActivityTargetIvars]
-    #[name = "OpenLogiAgentWorkspaceActivityTarget"]
-    struct ActivityTarget;
+    #[ivars = SessionTargetIvars]
+    #[name = "OpenLogiAgentWorkspaceSessionTarget"]
+    struct SessionTarget;
 
-    impl ActivityTarget {
-        #[unsafe(method(workspaceWillSleep:))]
-        fn workspace_will_sleep(&self, _notification: &NSNotification) {
-            self.suspend_from(SYSTEM_SLEEP);
-        }
-
-        #[unsafe(method(workspaceScreensDidSleep:))]
-        fn workspace_screens_did_sleep(&self, _notification: &NSNotification) {
-            self.suspend_from(SCREEN_SLEEP);
-        }
-
+    impl SessionTarget {
         #[unsafe(method(workspaceSessionDidResignActive:))]
         fn workspace_session_did_resign_active(&self, _notification: &NSNotification) {
-            self.suspend_from(SESSION_INACTIVE);
-        }
-
-        #[unsafe(method(workspaceScreensDidWake:))]
-        fn workspace_screens_did_wake(&self, _notification: &NSNotification) {
-            self.resume_from(SYSTEM_SLEEP | SCREEN_SLEEP);
+            self.ivars().gate.set_on_console(false);
         }
 
         #[unsafe(method(workspaceSessionDidBecomeActive:))]
         fn workspace_session_did_become_active(&self, _notification: &NSNotification) {
-            self.resume_from(SYSTEM_SLEEP | SESSION_INACTIVE);
+            self.ivars().gate.set_on_console(true);
         }
     }
 );
 
-impl ActivityTarget {
-    fn new(signal: DeviceIoSignal) -> Retained<Self> {
-        // `main` closes the gate before spawning the core thread; repeat the
-        // idempotent close here so the target's STARTUP source is self-contained
-        // in tests and any future caller cannot accidentally start open.
-        let _ = signal.suspend();
-        let this = Self::alloc().set_ivars(ActivityTargetIvars {
-            signal,
-            suspended_by: Mutex::new(STARTUP),
-        });
+impl SessionTarget {
+    fn new(gate: Arc<ActivityGate>) -> Retained<Self> {
+        let this = Self::alloc().set_ivars(SessionTargetIvars { gate });
         // SAFETY: `init` initializes our freshly allocated NSObject subclass.
         unsafe { msg_send![super(this), init] }
-    }
-
-    fn finish_startup(&self, display_asleep: bool) {
-        if display_asleep {
-            self.suspend_from(SCREEN_SLEEP);
-        }
-        self.resume_from(STARTUP);
-    }
-
-    fn suspend_from(&self, source: u8) {
-        let changed = {
-            let mut suspended_by = self
-                .ivars()
-                .suspended_by
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            let was_allowed = *suspended_by == 0;
-            *suspended_by |= source;
-            was_allowed && self.ivars().signal.suspend()
-        };
-        if changed {
-            info!("display/session suspended — pausing device I/O");
-        }
-    }
-
-    fn resume_from(&self, sources: u8) {
-        let changed = {
-            let mut suspended_by = self
-                .ivars()
-                .suspended_by
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            let was_suspended = *suspended_by != 0;
-            *suspended_by &= !sources;
-            was_suspended && *suspended_by == 0 && self.ivars().signal.resume()
-        };
-        if changed {
-            info!("display/session resumed — enabling device I/O");
-        }
     }
 }
 
@@ -319,8 +252,8 @@ fn gui_is_running() -> bool {
 /// tokio core still does all the work). The toggle takes effect on the agent's
 /// next launch — a no-restart live toggle would need a main-thread hop from the
 /// IPC reload path (deferred; it can't be verified headlessly).
-/// `device_io_signal` closes the hardware gate while the display/session is
-/// asleep and reopens it only for a user-visible resume.
+/// `device_io_signal` is the hardware gate; it opens only while the Mac is in
+/// a full wake and this login session owns the console (`activity_macos`).
 pub fn run_app_loop(
     show_in_menu_bar: bool,
     app_icon: AppIcon,
@@ -336,18 +269,23 @@ pub fn run_app_loop(
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 
-    let activity_target = install_activity_observer(device_io_signal);
+    let gate = ActivityGate::new(device_io_signal);
+    let _session = install_session_observer(Arc::clone(&gate));
     // Bind the status item (+ its target/menu) so they outlive `run()` — the
     // menu items only weakly reference the target. `None` when hidden.
     let _tray = show_in_menu_bar.then(|| install_status_item(mtm, app_icon));
 
     // AppKit documents that an app launched into an inactive session receives
     // `NSWorkspaceSessionDidResignActiveNotification` between its will- and
-    // did-finish-launching notifications. Finish that lifecycle while STARTUP
-    // still holds the hardware gate closed, then snapshot display sleep before
-    // permitting the core's initial inventory scan.
+    // did-finish-launching notifications. Finish that lifecycle while the
+    // launch hold still keeps the hardware gate closed, then read both levels
+    // — the console from CoreGraphics, the power state from powerd, which
+    // also starts the transition stream — before releasing the hold. Every
+    // one of those is a level, so the order they land in cannot matter.
     app.finishLaunching();
-    activity_target.finish_startup(CGDisplayIsAsleep(CGMainDisplayID()));
+    let _power = activity_macos::connect(&gate);
+    gate.set_on_console(activity_macos::session_is_on_console());
+    gate.finish_startup();
     info!(show_in_menu_bar, "agent AppKit loop started");
 
     app.run();
@@ -356,49 +294,24 @@ pub fn run_app_loop(
     shutdown::request_tray_quit(requests.as_ref(), 0);
 }
 
-/// Observe display/session sleep and user-visible resume transitions. Generic
-/// `NSWorkspaceDidWakeNotification` is deliberately not registered: macOS
-/// emits it for maintenance DarkWake, where opening BLE HID is exactly what can
-/// promote an otherwise invisible wake into a full display wake (#656).
-fn install_activity_observer(signal: DeviceIoSignal) -> Retained<ActivityTarget> {
-    let target = ActivityTarget::new(signal);
+/// Forward the login session's console edges to the gate. These are the fast
+/// user switching notifications; sleep and wake are deliberately not observed
+/// here — powerd reports them as levels (`activity_macos`).
+fn install_session_observer(gate: Arc<ActivityGate>) -> Retained<SessionTarget> {
+    let target = SessionTarget::new(gate);
     let workspace = NSWorkspace::sharedWorkspace();
     let center = workspace.notificationCenter();
     // SAFETY: AppKit exports each name as an immutable process-lifetime constant.
-    let system_sleep = unsafe { NSWorkspaceWillSleepNotification };
-    // SAFETY: AppKit exports each name as an immutable process-lifetime constant.
-    let screen_sleep = unsafe { NSWorkspaceScreensDidSleepNotification };
-    // SAFETY: AppKit exports each name as an immutable process-lifetime constant.
     let session_inactive = unsafe { NSWorkspaceSessionDidResignActiveNotification };
     // SAFETY: AppKit exports each name as an immutable process-lifetime constant.
-    let screen_wake = unsafe { NSWorkspaceScreensDidWakeNotification };
-    // SAFETY: AppKit exports each name as an immutable process-lifetime constant.
     let session_active = unsafe { NSWorkspaceSessionDidBecomeActiveNotification };
-    // SAFETY: Every selector below has exactly one `NSNotification` argument,
-    // and the caller retains the target for the AppKit loop's lifetime.
+    // SAFETY: Both selectors take exactly one `NSNotification` argument, and
+    // the caller retains the target for the AppKit loop's lifetime.
     unsafe {
-        center.addObserver_selector_name_object(
-            &target,
-            sel!(workspaceWillSleep:),
-            Some(system_sleep),
-            Some(&workspace),
-        );
-        center.addObserver_selector_name_object(
-            &target,
-            sel!(workspaceScreensDidSleep:),
-            Some(screen_sleep),
-            Some(&workspace),
-        );
         center.addObserver_selector_name_object(
             &target,
             sel!(workspaceSessionDidResignActive:),
             Some(session_inactive),
-            Some(&workspace),
-        );
-        center.addObserver_selector_name_object(
-            &target,
-            sel!(workspaceScreensDidWake:),
-            Some(screen_wake),
             Some(&workspace),
         );
         center.addObserver_selector_name_object(
@@ -500,89 +413,34 @@ fn build_menu(mtm: MainThreadMarker, target: &MenuTarget) -> Retained<objc2_app_
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::activity_macos::PowerState;
     use openlogi_hid::device_io_channel;
 
-    // Both tests post to the process-wide NSWorkspace notification center.
-    // Keep each observer's entire registration/posting/removal lifetime isolated
-    // so one test's session-inactive event cannot suspend the other test's gate.
-    static WORKSPACE_NOTIFICATIONS: Mutex<()> = Mutex::new(());
-
     #[test]
-    fn overlapping_suspend_sources_all_clear_before_device_io_resumes() {
-        let _notifications = WORKSPACE_NOTIFICATIONS.lock().unwrap();
-        let (signal, gate) = device_io_channel();
-        let target = install_activity_observer(signal);
-        target.finish_startup(false);
+    fn a_session_switch_closes_the_gate_and_the_switch_back_reopens_it() {
+        let (signal, io) = device_io_channel();
+        let gate = ActivityGate::new(signal);
+        let target = install_session_observer(Arc::clone(&gate));
+        gate.set_power(PowerState::FullWake);
+        gate.set_on_console(true);
+        gate.finish_startup();
+        assert!(io.allows_io());
+
         let workspace = NSWorkspace::sharedWorkspace();
         let center = workspace.notificationCenter();
-
-        // SAFETY: AppKit exports each name as an immutable process-lifetime constant.
-        let system_sleep = unsafe { NSWorkspaceWillSleepNotification };
-        // SAFETY: AppKit exports each name as an immutable process-lifetime constant.
-        let screen_sleep = unsafe { NSWorkspaceScreensDidSleepNotification };
-        // SAFETY: AppKit exports each name as an immutable process-lifetime constant.
+        // SAFETY: AppKit exports the name as an immutable process-lifetime constant.
         let session_inactive = unsafe { NSWorkspaceSessionDidResignActiveNotification };
         // SAFETY: `workspace` is live, matches the registration filter, and
         // notification delivery completes synchronously.
-        unsafe { center.postNotificationName_object(system_sleep, Some(&workspace)) };
-        // SAFETY: `workspace` is live, matches the registration filter, and
-        // notification delivery completes synchronously.
-        unsafe { center.postNotificationName_object(screen_sleep, Some(&workspace)) };
-        // SAFETY: `workspace` is live, matches the registration filter, and
-        // notification delivery completes synchronously.
         unsafe { center.postNotificationName_object(session_inactive, Some(&workspace)) };
-        assert!(!gate.allows_io());
-
-        // `DidWake` is a maintenance/system wake and intentionally has no
-        // observer, so posting it must leave the gate closed.
-        // SAFETY: AppKit exports the name as an immutable process-lifetime constant.
-        let darkwake = unsafe { NSWorkspaceDidWakeNotification };
-        // SAFETY: `workspace` is live and notification delivery is synchronous.
-        unsafe { center.postNotificationName_object(darkwake, Some(&workspace)) };
-        assert!(!gate.allows_io());
-
-        // SAFETY: AppKit exports the name as an immutable process-lifetime constant.
-        let screen_wake = unsafe { NSWorkspaceScreensDidWakeNotification };
-        // SAFETY: `workspace` is live, matches the registration filter, and
-        // notification delivery completes synchronously.
-        unsafe { center.postNotificationName_object(screen_wake, Some(&workspace)) };
-        assert!(
-            !gate.allows_io(),
-            "screen wake must not override an inactive session",
-        );
+        assert!(!io.allows_io());
 
         // SAFETY: AppKit exports the name as an immutable process-lifetime constant.
         let session_active = unsafe { NSWorkspaceSessionDidBecomeActiveNotification };
         // SAFETY: `workspace` is live, matches the registration filter, and
         // notification delivery completes synchronously.
         unsafe { center.postNotificationName_object(session_active, Some(&workspace)) };
-        assert!(gate.allows_io());
-
-        // SAFETY: This is the same live target registered with `center` above.
-        unsafe { center.removeObserver(&target) };
-    }
-
-    #[test]
-    fn startup_stays_suspended_when_the_display_is_already_asleep() {
-        let _notifications = WORKSPACE_NOTIFICATIONS.lock().unwrap();
-        let (signal, gate) = device_io_channel();
-        let target = install_activity_observer(signal);
-        assert!(!gate.allows_io(), "startup must fail closed");
-
-        target.finish_startup(true);
-        assert!(
-            !gate.allows_io(),
-            "an initially sleeping display must retain the suspension",
-        );
-
-        let workspace = NSWorkspace::sharedWorkspace();
-        let center = workspace.notificationCenter();
-        // SAFETY: AppKit exports the name as an immutable process-lifetime constant.
-        let screen_wake = unsafe { NSWorkspaceScreensDidWakeNotification };
-        // SAFETY: `workspace` is live, matches the registration filter, and
-        // notification delivery completes synchronously.
-        unsafe { center.postNotificationName_object(screen_wake, Some(&workspace)) };
-        assert!(gate.allows_io());
+        assert!(io.allows_io());
 
         // SAFETY: This is the same live target registered with `center` above.
         unsafe { center.removeObserver(&target) };
