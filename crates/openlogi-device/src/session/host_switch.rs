@@ -482,20 +482,29 @@ async fn sole_followable_host(
     let change_host = device.add_feature::<ChangeHostFeature>(info.index);
     let state = timed_hidpp("reading current host", change_host.get_host_info()).await?;
 
-    // A target that is not on the host being left has nothing to follow. It may
-    // have been switched on its own, and the announcement says only that the
-    // keyboard left one machine — never which one it joined — so moving this
-    // device could just as easily drag it back to the machine being abandoned.
-    if state.current_host != leader_host {
-        return Ok(None);
-    }
     let mut paired = Vec::new();
     for host in 0..state.host_count {
         if host_slot_is_paired(&mut device, host).await {
             paired.push(host);
         }
     }
-    Ok(sole_other_host(leader_host, &paired))
+    Ok(follow_target(state.current_host, leader_host, &paired))
+}
+
+/// Where a target should follow to, given where it sits and the host the
+/// keyboard is leaving.
+///
+/// Two rules, and the first is the one worth stating. A target that is not on
+/// the host being left has nothing to follow: it may have been switched on its
+/// own, and the announcement says only that the keyboard left one machine,
+/// never which one it joined, so moving it could just as easily drag it back to
+/// the machine being abandoned. The second is [`sole_other_host`]: among the
+/// hosts it is actually paired to, one candidate is an answer and two are a
+/// coin flip.
+fn follow_target(current_host: u8, leader_host: u8, paired: &[u8]) -> Option<u8> {
+    (current_host == leader_host)
+        .then(|| sole_other_host(leader_host, paired))
+        .flatten()
 }
 
 /// Whether `host` is *confirmed* paired on `device`.
@@ -847,11 +856,14 @@ mod tests {
 
     use hidpp::channel::HidppChannel;
 
+    use crate::ChannelPool;
+    use crate::channel::scripted::ScriptedBackend;
+
     use super::{
         ArmedControl, HostSwitchError, HostSwitchRequest, HostSwitchRestoreOutcome,
-        PendingHostSwitchRestore, ReportingMode, decode_request, event_host, host_change_required,
-        host_channel, prepare_host_change_on, restoration_change, rollback_host_switch_start,
-        shares_channel, sole_other_host,
+        PendingHostSwitchRestore, ReportingMode, decode_request, event_host, follow_target,
+        host_change_required, host_channel, prepare_host_change_on, restoration_change,
+        rollback_host_switch_start, shares_channel, sole_other_host, switch_linked_hosts,
     };
     use crate::backend::NodeId;
     use crate::channel::scripted::{
@@ -1001,6 +1013,60 @@ mod tests {
             ),
             None,
         );
+    }
+
+    /// The bug this pins down: `switch_linked_hosts` used to open the keyboard's
+    /// channel before it read the request. An announcement only ever arrives
+    /// because the keyboard left, so that open failed and took the targets down
+    /// with it, and the pointer never moved.
+    #[tokio::test]
+    async fn an_announced_switch_never_reaches_for_the_keyboard() {
+        let pool = ChannelPool::with_backend(ScriptedBackend::new(Vec::new()));
+        let keyboard = direct_route();
+
+        // Nothing answers for this route, so a directed switch cannot proceed.
+        assert!(matches!(
+            switch_linked_hosts(&keyboard, &[], HostSwitchRequest::Directed(0), &pool).await,
+            Err(HostSwitchError::KeyboardNotFound)
+        ));
+
+        // The same absent keyboard, and an announcement gets on with it.
+        assert!(matches!(
+            switch_linked_hosts(
+                &keyboard,
+                &[],
+                HostSwitchRequest::Announced { leader_host: 1 },
+                &pool
+            )
+            .await,
+            Ok(false)
+        ));
+    }
+
+    #[test]
+    fn a_target_already_off_the_abandoned_host_is_left_alone() {
+        // The keyboard leaves host 0 while the mouse is already on host 1,
+        // switched there on its own. Excluding the *mouse's* host instead of the
+        // keyboard's answers 0 here, dragging it back to the machine the
+        // keyboard just walked away from.
+        assert_eq!(follow_target(1, 0, &[0, 1]), None);
+    }
+
+    #[test]
+    fn a_target_on_the_abandoned_host_follows_to_its_one_other_host() {
+        assert_eq!(follow_target(1, 1, &[0, 1]), Some(0));
+        assert_eq!(follow_target(0, 0, &[0, 1]), Some(1));
+    }
+
+    #[test]
+    fn a_target_with_two_candidates_stays_rather_than_guessing() {
+        assert_eq!(follow_target(0, 0, &[0, 1, 2]), None);
+    }
+
+    #[test]
+    fn a_target_paired_to_nowhere_else_stays() {
+        assert_eq!(follow_target(1, 1, &[1]), None);
+        assert_eq!(follow_target(1, 1, &[]), None);
     }
 
     #[test]
