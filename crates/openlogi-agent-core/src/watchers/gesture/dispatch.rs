@@ -113,7 +113,7 @@ impl InputDispatcher {
     }
 
     /// Publish a hardware polarity observation into the OS-hook snapshot.
-    fn record_thumbwheel_direction(&self, key: &str, input: CapturedInput) -> bool {
+    fn record_thumbwheel_direction(&self, key: &str, input: &CapturedInput) -> bool {
         let CapturedInput::ThumbwheelDirection {
             positive_is_forward,
         } = input
@@ -122,7 +122,7 @@ impl InputDispatcher {
         };
         if let Ok(mut maps) = self.hook_maps.write() {
             maps.thumbwheel_positive_is_forward
-                .insert(key.to_owned(), positive_is_forward);
+                .insert(key.to_owned(), *positive_is_forward);
         }
         true
     }
@@ -143,11 +143,11 @@ impl InputDispatcher {
         input: CapturedInput,
     ) {
         let key = session.device_key();
-        if self.record_thumbwheel_direction(key, input) {
+        if self.record_thumbwheel_direction(key, &input) {
             return;
         }
         match input {
-            CapturedInput::Gesture(button, direction) => {
+            CapturedInput::Gesture(button, direction, _trace) => {
                 let Some(press) = self.gesture_presses.get(session, button) else {
                     debug!(key, %button, ?direction, "gesture from a canceled button lifecycle — ignored");
                     return;

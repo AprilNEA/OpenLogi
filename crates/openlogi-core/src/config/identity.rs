@@ -313,6 +313,8 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
     fold_option_field!(camera_controls);
     fold_option_field!(camera_profile);
     fold_option_field!(thumbwheel_sensitivity);
+    fold_option_field!(gesture_sensitivity);
+    fold_option_field!(gesture_axis_bias);
     fold_option_field!(fn_lock);
     // The user-assigned alias. Without this a legacy entry carrying a name
     // folded into a canonical entry with none would drop it silently — the

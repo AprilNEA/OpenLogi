@@ -151,6 +151,10 @@ pub struct AppInfo {
     pub check_for_updates: Option<bool>,
     /// Thumbwheel sensitivity setting, `None` when unknown.
     pub thumbwheel_sensitivity: Option<i32>,
+    /// Gesture sensitivity setting, `None` when unknown.
+    pub gesture_sensitivity: Option<i32>,
+    /// Gesture axis bias setting, `None` when unknown.
+    pub gesture_axis_bias: Option<i32>,
     /// `schema_version` of the loaded `config.toml`, when one loaded.
     pub config_schema_version: Option<u32>,
     /// Number of device entries in the config, when known.
@@ -260,10 +264,12 @@ impl DiagnosticsReport {
         let _ = writeln!(out, "- Running from: {source}");
         let _ = writeln!(
             out,
-            "- Config: schema {} · {} configured device(s) · thumbwheel {}\n",
+            "- Config: schema {} · {} configured device(s) · thumbwheel {} · gesture {} (bias {})\n",
             opt_num(a.config_schema_version),
             opt_num(a.configured_device_count),
             opt_num(a.thumbwheel_sensitivity),
+            opt_num(a.gesture_sensitivity),
+            opt_num(a.gesture_axis_bias),
         );
     }
 
@@ -530,6 +536,8 @@ mod tests {
             show_in_menu_bar: Some(true),
             check_for_updates: Some(false),
             thumbwheel_sensitivity: Some(0),
+            gesture_sensitivity: Some(14),
+            gesture_axis_bias: Some(0),
             config_schema_version: Some(2),
             configured_device_count: Some(3),
             running_from_bundle: true,
