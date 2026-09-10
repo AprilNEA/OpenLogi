@@ -81,15 +81,53 @@ fn cache_dirty_tracks_only_persistable_keys() {
     );
 }
 
+fn direct_node(serial: Option<&str>) -> crate::backend::NodeInfo {
+    crate::backend::NodeInfo {
+        id: crate::backend::NodeId::from("/dev/hidraw3".to_string()),
+        vendor_id: 0x046d,
+        product_id: 0xb378,
+        usage_page: 0xff43,
+        usage_id: 0x0202,
+        name: "MX KEYS S".to_string(),
+        manufacturer: None,
+        serial_number: serial.map(str::to_string),
+    }
+}
+
 #[test]
-fn cache_entry_survives_grace_then_evicts() {
+fn a_direct_device_is_keyed_on_its_serial_when_the_backend_reports_one() {
+    // A Bluetooth device's serial is its address, which is the same after it
+    // has been away on another computer. The node it arrives under is not.
+    assert_eq!(
+        super::probe::direct_cache_key(&direct_node(Some("D9:D2:69:B2:4B:96"))),
+        CacheKey::DirectSerial("d9:d2:69:b2:4b:96".to_string()),
+    );
+}
+
+#[test]
+fn a_direct_device_without_a_serial_falls_back_to_its_node() {
+    // Weaker, but still better than enumeration order, and it is all there is.
+    assert!(matches!(
+        super::probe::direct_cache_key(&direct_node(None)),
+        CacheKey::Direct(_)
+    ));
+    assert!(matches!(
+        super::probe::direct_cache_key(&direct_node(Some(""))),
+        CacheKey::Direct(_)
+    ));
+}
+
+#[test]
+fn a_slot_keyed_entry_survives_the_grace_then_evicts() {
     let mut e = Enumerator::with_backend(ScriptedBackend::new(Vec::new()));
-    let key = CacheKey::Bolt {
-        unit_id: [1, 2, 3, 4],
+    // A slot can belong to a different device the moment this one leaves, so
+    // what it memoizes stops being true once the device is gone for good.
+    let key = CacheKey::UnifyingSlot {
+        receiver_uid: "DA2699E1".to_string(),
+        slot: 1,
     };
     e.cache.insert(key.clone(), cache_entry());
     let nobody = HashSet::new();
-    // Missing for the whole grace window: kept.
     for _ in 0..CACHE_MISS_GRACE {
         e.evict_unseen(&nobody);
         assert!(
@@ -97,12 +135,35 @@ fn cache_entry_survives_grace_then_evicts() {
             "evicted inside the grace window"
         );
     }
-    // One miss past the grace: evicted.
+
     e.evict_unseen(&nobody);
+
     assert!(
         !e.cache.contains_key(&key),
         "should evict past the grace window"
     );
+}
+
+#[test]
+fn an_identity_keyed_entry_is_kept_however_long_the_device_is_away() {
+    let mut e = Enumerator::with_backend(ScriptedBackend::new(Vec::new()));
+    let bolt = CacheKey::Bolt {
+        unit_id: [1, 2, 3, 4],
+    };
+    let direct = CacheKey::DirectSerial("d9:d2:69:b2:4b:96".to_string());
+    e.cache.insert(bolt.clone(), cache_entry());
+    e.cache.insert(direct.clone(), cache_entry());
+    let nobody = HashSet::new();
+
+    // Well past the grace: a keyboard on another computer, a mouse asleep.
+    for _ in 0..(CACHE_MISS_GRACE * 10) {
+        e.evict_unseen(&nobody);
+    }
+
+    // These keys name the device, so nothing else can claim what they memoize,
+    // and keeping it is what lets the device come back without re-answering.
+    assert!(e.cache.contains_key(&bolt));
+    assert!(e.cache.contains_key(&direct));
 }
 
 #[test]
