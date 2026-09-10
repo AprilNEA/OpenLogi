@@ -643,6 +643,29 @@ impl Orchestrator {
         standalone: &[StandaloneDevice],
         hid_open_failures: bool,
     ) {
+        self.refresh_inventory_inner(inventories, standalone, hid_open_failures, false);
+    }
+
+    /// Apply the inventory pass whose delayed purpose is confirming volatile
+    /// settings. Only this path consumes one bounded confirmation attempt;
+    /// ordinary HID and hotplug snapshots may arrive much sooner and must not
+    /// exhaust the retry run while a device's feature path is still booting.
+    pub fn refresh_inventory_for_settings_confirmation(
+        &mut self,
+        inventories: &[DeviceInventory],
+        standalone: &[StandaloneDevice],
+        hid_open_failures: bool,
+    ) {
+        self.refresh_inventory_inner(inventories, standalone, hid_open_failures, true);
+    }
+
+    fn refresh_inventory_inner(
+        &mut self,
+        inventories: &[DeviceInventory],
+        standalone: &[StandaloneDevice],
+        hid_open_failures: bool,
+        confirm_reapply: bool,
+    ) {
         // Even an empty snapshot is a *completed* enumeration — the watcher
         // skips failed ticks — so the device set is now known either way (and
         // a recovered backend upgrades `Unavailable` back to live data).
@@ -663,8 +686,13 @@ impl Orchestrator {
         let next_current = pick_current(&devices, self.config.selected_device());
         let rearm_capture = any_device_needs_capture_rearm(&self.devices, &devices, reapply_all);
         let followup = std::mem::take(&mut self.reapply_followup);
-        let (targets, next_followup) =
-            plan_reapply(&self.devices, &devices, &followup, reapply_all);
+        let (targets, next_followup) = plan_reapply(
+            &self.devices,
+            &devices,
+            &followup,
+            reapply_all,
+            confirm_reapply,
+        );
         self.reapply_followup = next_followup;
         for idx in targets {
             self.reapply_volatile_settings(&devices[idx]);

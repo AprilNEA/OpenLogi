@@ -203,26 +203,26 @@ pub(super) fn any_device_needs_capture_rearm(
     !reapply_targets(prev, next, reapply_all).is_empty()
 }
 
-/// How many explicit confirmation passes a first-sighted or wake-targeted
-/// device keeps re-applying its volatile settings after the initial write. A
-/// cold restart leaves a Bolt/Unifying mouse slow to enumerate — and a system
-/// wake can enumerate a receiver whose mouse link is still re-establishing —
-/// so the first write (and a single confirm) can both time out against a
-/// still-booting device. Four confirmations are requested at two-second
-/// intervals; any intervening authoritative reconciliation satisfies one.
+/// How many inventory ticks a newly available device keeps re-applying its
+/// volatile settings after the initial write. A cold restart, device wake, or
+/// system wake can expose an online route while its HID++ feature path is
+/// still re-establishing, so the first write (and a single confirm) can both
+/// fail. Four confirmation passes at the two-second cadence keep trying for
+/// about eight seconds, so the write can land once the path is ready.
 pub(super) const VOLATILE_REAPPLY_CONFIRM_RETRIES: u8 = 4;
 
 /// Plan this refresh's volatile-settings writes: the [`reapply_targets`] set
-/// plus a bounded run of confirming re-applies for devices first sighted
-/// recently or targeted by a system wake, and the follow-up keys (with
-/// remaining retry counts) to confirm next refresh. Reconnects
-/// (offline→online) re-apply once — the device was already booted, so it
-/// needs no boot-race retry.
+/// plus a bounded run of confirming re-applies, and the follow-up keys (with
+/// remaining retry counts) to confirm on a delayed confirmation refresh.
+/// Ordinary lifecycle snapshots preserve that run without consuming it:
+/// inventory availability only proves that the route was observed, not that
+/// each detached HID++ write completed successfully.
 pub(super) fn plan_reapply(
     prev: &[AgentDevice],
     next: &[AgentDevice],
     followup: &HashMap<String, u8>,
     reapply_all: bool,
+    confirm_followup: bool,
 ) -> (Vec<usize>, HashMap<String, u8>) {
     let mut targets = reapply_targets(prev, next, reapply_all);
     let mut next_followup: HashMap<String, u8> = targets
@@ -235,15 +235,19 @@ pub(super) fn plan_reapply(
         })
         .collect();
     for (idx, dev) in next.iter().enumerate() {
-        if dev.online
-            && dev.route.is_some()
-            && !targets.contains(&idx)
-            && let Some(&remaining) = followup.get(&dev.config_key)
-        {
+        let Some(&remaining) = followup.get(&dev.config_key) else {
+            continue;
+        };
+        if !dev.online || dev.route.is_none() || targets.contains(&idx) || remaining == 0 {
+            continue;
+        }
+        if confirm_followup {
             targets.push(idx);
             if remaining > 1 {
                 next_followup.insert(dev.config_key.clone(), remaining - 1);
             }
+        } else {
+            next_followup.insert(dev.config_key.clone(), remaining);
         }
     }
     (targets, next_followup)
