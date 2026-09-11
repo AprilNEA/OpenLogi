@@ -505,7 +505,7 @@ fn held_key(usage: KeyboardUsage, phase: KeyPhase, modifiers: HeldModifiers) -> 
     }
 }
 
-fn held_modifier_flags(modifiers: HeldModifiers) -> CGEventFlags {
+pub(super) fn held_modifier_flags(modifiers: HeldModifiers) -> CGEventFlags {
     let mut flags = CGEventFlags::CGEventFlagNull;
     if modifiers.contains(HeldKey::Command) {
         flags |= CGEventFlags::CGEventFlagCommand;

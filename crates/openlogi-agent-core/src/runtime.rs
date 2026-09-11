@@ -76,6 +76,17 @@ struct HeldShortcuts {
 
 impl HeldShortcuts {
     fn start(&mut self, press: &PressToken, action: &Action) -> bool {
+        if let Some(mods) = action.held_modifier() {
+            match self.by_press.entry(press.clone()) {
+                std::collections::hash_map::Entry::Occupied(mut held) => {
+                    held.get_mut().replace_modifier(mods);
+                }
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(openlogi_inject::press_hold_modifier(mods));
+                }
+            }
+            return true;
+        }
         let Some((combo, keys)) = action.held_chord() else {
             return false;
         };
