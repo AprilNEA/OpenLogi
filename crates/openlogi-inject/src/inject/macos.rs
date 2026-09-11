@@ -349,7 +349,7 @@ fn held_key_event(
     Some((vk, held_modifier_flags(*modifiers)))
 }
 
-fn held_modifier_flags(modifiers: HeldModifiers) -> CGEventFlags {
+pub(super) fn held_modifier_flags(modifiers: HeldModifiers) -> CGEventFlags {
     let mut flags = CGEventFlags::CGEventFlagNull;
     if modifiers.contains(HeldKey::Command) {
         flags |= CGEventFlags::CGEventFlagCommand;
