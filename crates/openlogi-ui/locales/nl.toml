@@ -414,7 +414,7 @@ view_changelog = "Wijzigingslog bekijken"
 update_connection_policy = "OpenLogi maakt alleen verbinding voor updatecontroles als automatische controles zijn ingeschakeld of je ‘Controleren op updates’ selecteert."
 stable_channel = "Stabiel kanaal"
 check_for_updates_consent_title = "Controleren op updates?"
-update_consent_description = "OpenLogi kan bij elke start eenmaal op GitHub controleren op een nieuwe versie. Updates worden niet automatisch gedownload en er wordt geen telemetrie verzonden. Dit kun je wijzigen in Instellingen."
+update_consent_description = "OpenLogi kan bij elke start eenmaal op updates.openlogi.org controleren op een nieuwe versie. Updates worden niet automatisch gedownload en er wordt geen telemetrie verzonden. Dit kun je wijzigen in Instellingen."
 
 [assets]
 assets = "Bronnen"

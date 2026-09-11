@@ -414,7 +414,7 @@ view_changelog = "Visa ändringslogg"
 update_connection_policy = "OpenLogi ansluter bara för att söka efter uppdateringar när automatisk sökning är aktiverad eller när du väljer Sök efter uppdateringar."
 stable_channel = "Stabil kanal"
 check_for_updates_consent_title = "Sök efter uppdateringar?"
-update_consent_description = "OpenLogi kan söka efter en ny version på GitHub en gång per start. Programmet hämtar inte uppdateringar automatiskt och skickar ingen telemetri. Du kan ändra detta i Inställningar."
+update_consent_description = "OpenLogi kan söka efter en ny version på updates.openlogi.org en gång per start. Programmet hämtar inte uppdateringar automatiskt och skickar ingen telemetri. Du kan ändra detta i Inställningar."
 
 [assets]
 assets = "Resurser"

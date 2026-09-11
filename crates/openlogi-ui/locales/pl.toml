@@ -414,7 +414,7 @@ view_changelog = "Zobacz dziennik zmian"
 update_connection_policy = "Aktualizator nie działa w tle. OpenLogi łączy się tylko po włączeniu automatycznych sprawdzeń lub kliknięciu Sprawdź dostępność aktualizacji."
 stable_channel = "Kanał stabilny"
 check_for_updates_consent_title = "Sprawdzić dostępność aktualizacji?"
-update_consent_description = "OpenLogi może raz przy każdym uruchomieniu sprawdzać w serwisie GitHub dostępność nowej wersji. Nie pobiera automatycznie aktualizacji ani nie wysyła telemetrii. Możesz to zmienić w Ustawieniach."
+update_consent_description = "OpenLogi może raz przy każdym uruchomieniu sprawdzać na stronie updates.openlogi.org dostępność nowej wersji. Nie pobiera automatycznie aktualizacji ani nie wysyła telemetrii. Możesz to zmienić w Ustawieniach."
 
 [assets]
 assets = "Zasoby"

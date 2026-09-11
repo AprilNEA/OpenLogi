@@ -414,7 +414,7 @@ view_changelog = "Näytä muutosloki"
 update_connection_policy = "OpenLogi muodostaa yhteyden päivitysten tarkistamista varten vain, kun automaattinen tarkistus on käytössä tai valitset Tarkista päivitykset."
 stable_channel = "Vakaa kanava"
 check_for_updates_consent_title = "Tarkistetaanko päivitykset?"
-update_consent_description = "OpenLogi voi tarkistaa uuden version GitHubista kerran käynnistyksen aikana. Se ei lataa päivityksiä automaattisesti eikä lähetä telemetriatietoja. Asetusta voi muuttaa Asetuksissa."
+update_consent_description = "OpenLogi voi tarkistaa uuden version osoitteesta updates.openlogi.org kerran käynnistyksen aikana. Se ei lataa päivityksiä automaattisesti eikä lähetä telemetriatietoja. Asetusta voi muuttaa Asetuksissa."
 
 [assets]
 assets = "Resurssit"
