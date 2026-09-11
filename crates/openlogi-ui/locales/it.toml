@@ -414,7 +414,7 @@ view_changelog = "Visualizza registro modifiche"
 update_connection_policy = "OpenLogi si connette per verificare gli aggiornamenti solo se il controllo automatico è attivo o se fai clic su Controlla aggiornamenti."
 stable_channel = "Canale stabile"
 check_for_updates_consent_title = "Controllare gli aggiornamenti?"
-update_consent_description = "OpenLogi può verificare su GitHub la presenza di una nuova versione una volta per avvio. Non scarica automaticamente né invia telemetria. Puoi modificare questa opzione nelle Impostazioni."
+update_consent_description = "OpenLogi può verificare su updates.openlogi.org la presenza di una nuova versione una volta per avvio. Non scarica automaticamente né invia telemetria. Puoi modificare questa opzione nelle Impostazioni."
 
 [assets]
 assets = "Risorse"

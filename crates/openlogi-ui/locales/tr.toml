@@ -414,7 +414,7 @@ view_changelog = "Değişiklik günlüğünü görüntüle"
 update_connection_policy = "Arka planda çalışan bir güncelleyici yoktur. OpenLogi yalnızca otomatik denetimi açtığınızda veya Güncellemeleri Denetle'ye tıkladığınızda bağlanır."
 stable_channel = "Kararlı kanal"
 check_for_updates_consent_title = "Güncellemeler denetlensin mi?"
-update_consent_description = "OpenLogi her başlatmada bir kez GitHub üzerinden yeni sürüm denetimi yapabilir. Güncellemeleri otomatik olarak indirmez ve telemetri göndermez. Bu ayarı Ayarlar bölümünden değiştirebilirsiniz."
+update_consent_description = "OpenLogi her başlatmada bir kez updates.openlogi.org üzerinden yeni sürüm denetimi yapabilir. Güncellemeleri otomatik olarak indirmez ve telemetri göndermez. Bu ayarı Ayarlar bölümünden değiştirebilirsiniz."
 
 [assets]
 assets = "Görseller"
