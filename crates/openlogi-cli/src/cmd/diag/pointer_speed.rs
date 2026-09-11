@@ -41,16 +41,25 @@ pub async fn run(args: PointerSpeedArgs) -> Result<()> {
     }
 
     println!("  writing scaling: {}", ScalingDisplay(target));
-    let after = openlogi_hid::set_pointer_scaling(&route, target)
-        .await
-        .context("write pointer scaling")?;
+    let written = openlogi_hid::set_pointer_scaling(&route, target).await;
+    // Restore unconditionally and before judging the write: a failed
+    // read-back can follow a write that already reached the device, and no
+    // failed check may leave the pointer at the test speed.
+    let restored = openlogi_hid::set_pointer_scaling(&route, before).await;
+    let after = match (written, &restored) {
+        (Ok(after), _) => after,
+        (Err(write), Ok(_)) => {
+            return Err(anyhow::Error::new(write)
+                .context("write pointer scaling (original scaling restored)"));
+        }
+        (Err(write), Err(restore)) => anyhow::bail!(
+            "write pointer scaling failed ({write}), and restoring {} failed too ({restore})",
+            ScalingDisplay(before)
+        ),
+    };
     println!("  read-back scaling: {}", ScalingDisplay(after));
 
-    // Restore before judging the write, so a failed check never leaves the
-    // pointer at the test speed.
-    let restored = openlogi_hid::set_pointer_scaling(&route, before)
-        .await
-        .context("restore pointer scaling")?;
+    let restored = restored.context("restore pointer scaling")?;
     println!("  restored scaling: {}", ScalingDisplay(restored));
     if restored != before {
         anyhow::bail!(
@@ -79,10 +88,13 @@ pub async fn run(args: PointerSpeedArgs) -> Result<()> {
     Ok(())
 }
 
-/// Half the current speed: far enough from it to be unmistakable, and always
-/// inside the range firmware accepts for a device currently at a sane value.
+/// Half the current speed, far enough from it to be unmistakable. At the
+/// smallest non-zero value, where halving would reach zero, it doubles instead
+/// so the test never jumps to an unrelated speed.
 fn default_target(current: PointerScaling) -> PointerScaling {
-    PointerScaling::from_raw(current.raw() / 2).unwrap_or(PointerScaling::ONE)
+    let raw = current.raw();
+    let target = if raw > 1 { raw / 2 } else { raw * 2 };
+    PointerScaling::from_raw(target).unwrap_or(current)
 }
 
 struct ScalingDisplay(PointerScaling);
@@ -105,10 +117,17 @@ mod tests {
     }
 
     #[test]
-    fn default_target_never_writes_zero() {
+    fn default_target_doubles_the_smallest_scaling_instead_of_jumping() {
         let smallest = PointerScaling::from_raw(1).unwrap();
 
-        assert_eq!(default_target(smallest), PointerScaling::ONE);
+        assert_eq!(default_target(smallest).raw(), 2);
+    }
+
+    #[test]
+    fn default_target_halves_the_largest_scaling() {
+        let largest = PointerScaling::from_raw(u16::MAX).unwrap();
+
+        assert_eq!(default_target(largest).raw(), u16::MAX / 2);
     }
 
     #[test]
