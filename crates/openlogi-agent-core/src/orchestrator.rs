@@ -397,7 +397,10 @@ impl Orchestrator {
     /// Immediately republishes a neutral scale when there is no online,
     /// HiRes-wheel-capable current device, so switching away from one never
     /// leaves a stale multiplier in effect while the read for the new
-    /// device (if any) is still in flight.
+    /// device (if any) is still in flight. Every call also advances the
+    /// scale's generation counter, so a background read dispatched by an
+    /// earlier call (for a since-superseded device) can detect it is stale
+    /// and skip publishing instead of overwriting this call's result.
     fn refresh_scroll_resolution_scale(&self) {
         let key = self.current_key();
         let current = key.and_then(|key| self.devices.iter().find(|d| d.config_key == key));
@@ -406,9 +409,14 @@ impl Orchestrator {
             .and_then(|dev| Some((dev.route.clone()?, dev.capabilities?)));
         match target {
             Some((route, capabilities)) if capabilities.hires_wheel => {
+                let generation = self
+                    .shared
+                    .scroll_preferences
+                    .begin_resolution_scale_refresh();
                 crate::hardware::read_wheel_resolution_scale_in_background(
                     self.shared.device(&route),
                     Arc::clone(&self.shared.scroll_preferences),
+                    generation,
                 );
             }
             _ => self.shared.scroll_preferences.publish_resolution_scale(1),

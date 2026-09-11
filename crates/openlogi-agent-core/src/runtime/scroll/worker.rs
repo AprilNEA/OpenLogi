@@ -79,6 +79,11 @@ pub struct ScrollPreferences {
     /// `scroll_resolution` mode. `0` and `1` are both neutral (no device-
     /// specific scale published yet, or the device is in `High` mode).
     resolution_scale: AtomicU8,
+    /// Bumped on every device switch/refresh so an in-flight background
+    /// resolution-scale read started for a since-superseded device can
+    /// detect it is stale and skip publishing — see
+    /// [`Self::begin_resolution_scale_refresh`].
+    resolution_scale_generation: AtomicU64,
 }
 
 impl ScrollPreferences {
@@ -88,6 +93,7 @@ impl ScrollPreferences {
         Self {
             encoded: AtomicU8::new(Self::encode(smooth_scroll, vertical_sensitivity)),
             resolution_scale: AtomicU8::new(0),
+            resolution_scale_generation: AtomicU64::new(0),
         }
     }
 
@@ -101,9 +107,39 @@ impl ScrollPreferences {
 
     /// Publish the current device's resolution-aware base scale (its
     /// HiRes-wheel `multiplier` when in `Low`/Standard mode, or `1` when in
-    /// `High` mode / unknown).
+    /// `High` mode / unknown). Always applies immediately — used for the
+    /// synchronous neutral-reset path, which must win over any older
+    /// in-flight background read regardless of generation.
     pub fn publish_resolution_scale(&self, scale: u8) {
+        self.resolution_scale_generation
+            .fetch_add(1, Ordering::Relaxed);
         self.resolution_scale.store(scale, Ordering::Relaxed);
+    }
+
+    /// Start a new resolution-scale refresh cycle and return its generation
+    /// token. Pass the token to a background read's completion callback and
+    /// call [`Self::publish_resolution_scale_for_generation`] there instead
+    /// of [`Self::publish_resolution_scale`] directly, so a read for a
+    /// since-superseded device (one that started before a newer refresh or
+    /// neutral reset) is silently dropped instead of overwriting a fresher
+    /// value.
+    #[must_use]
+    pub fn begin_resolution_scale_refresh(&self) -> u64 {
+        self.resolution_scale_generation
+            .fetch_add(1, Ordering::Relaxed)
+            + 1
+    }
+
+    /// Publish a background read's result only if `generation` (obtained
+    /// from [`Self::begin_resolution_scale_refresh`] when the read was
+    /// dispatched) still matches the current generation — i.e. no newer
+    /// refresh or neutral reset has started since. Otherwise the read is
+    /// stale (the device was switched again, or reset to neutral, while it
+    /// was in flight) and is silently dropped.
+    pub fn publish_resolution_scale_for_generation(&self, scale: u8, generation: u64) {
+        if self.resolution_scale_generation.load(Ordering::Relaxed) == generation {
+            self.resolution_scale.store(scale, Ordering::Relaxed);
+        }
     }
 
     /// Whether finite smooth scrolling is currently enabled.
@@ -638,6 +674,58 @@ mod tests {
 
         let queued = queued_input(&receiver);
         assert_eq!(queued.impulse, WheelDelta { x: 0.0, y: 15.0 });
+    }
+
+    /// Regression guard for the async-read/device-switch race Greptile
+    /// flagged on PR #1316: a background resolution-scale read started for
+    /// an older device (its generation token captured at dispatch time) must
+    /// not overwrite a newer device's already-published scale, or a neutral
+    /// reset, once it completes late.
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "resolution_scale is an exact integer-to-f64 conversion, no rounding possible"
+    )]
+    fn stale_generation_resolution_scale_read_does_not_overwrite_a_newer_value() {
+        let preferences = preferences(false, 7);
+
+        // Simulates dispatching a background read for device A.
+        let stale_generation = preferences.begin_resolution_scale_refresh();
+
+        // The device is switched before device A's read completes: a fresh
+        // refresh cycle begins (bumping the generation) and immediately
+        // publishes device B's real scale.
+        let current_generation = preferences.begin_resolution_scale_refresh();
+        assert_ne!(stale_generation, current_generation);
+        preferences.publish_resolution_scale_for_generation(15, current_generation);
+        assert_eq!(preferences.resolution_scale(), 15.0);
+
+        // Device A's read now completes late, carrying its stale generation
+        // token — it must be dropped, not overwrite device B's scale.
+        preferences.publish_resolution_scale_for_generation(3, stale_generation);
+        assert_eq!(preferences.resolution_scale(), 15.0);
+    }
+
+    /// Same race, but the device is switched to one with no HiRes wheel (or
+    /// goes offline) — the orchestrator's neutral reset
+    /// (`publish_resolution_scale`) must also win over the stale read.
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "resolution_scale is an exact integer-to-f64 conversion, no rounding possible"
+    )]
+    fn stale_generation_resolution_scale_read_does_not_override_a_neutral_reset() {
+        let preferences = preferences(false, 7);
+        let stale_generation = preferences.begin_resolution_scale_refresh();
+
+        // Device switched to a non-HiRes/offline device: orchestrator resets
+        // to neutral synchronously, without going through the generation gate.
+        preferences.publish_resolution_scale(1);
+        assert_eq!(preferences.resolution_scale(), 1.0);
+
+        // The old device's read completes late — must not un-reset it.
+        preferences.publish_resolution_scale_for_generation(15, stale_generation);
+        assert_eq!(preferences.resolution_scale(), 1.0);
     }
 
     #[test]

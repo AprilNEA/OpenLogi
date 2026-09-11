@@ -516,6 +516,12 @@ fn resolution_scale_for(multiplier: u8, resolution: ScrollResolution) -> u8 {
 /// `vertical_scroll_sensitivity` — see
 /// `openspec/changes/normalize-scroll-sensitivity-by-resolution`.
 ///
+/// `generation` must come from a matching
+/// [`crate::runtime::scroll::ScrollPreferences::begin_resolution_scale_refresh`]
+/// call made when this read was dispatched, so a result that completes after
+/// the device has been switched (or reset to neutral) again is detected as
+/// stale and silently dropped instead of overwriting a fresher value.
+///
 /// Uses the device's *live* reported mode rather than the configured target,
 /// so the scale stays correct even while a mode write from
 /// [`write_scroll_wheel_mode_in_background`] is still in flight or the
@@ -525,6 +531,7 @@ fn resolution_scale_for(multiplier: u8, resolution: ScrollResolution) -> u8 {
 pub fn read_wheel_resolution_scale_in_background(
     op: DeviceOp<'_>,
     preferences: Arc<crate::runtime::scroll::ScrollPreferences>,
+    generation: u64,
 ) {
     let index = op.route.device_index();
     op.spawn_write(
@@ -537,7 +544,7 @@ pub fn read_wheel_resolution_scale_in_background(
         move |result| match result {
             Ok(Ok((capabilities, mode))) => {
                 let scale = resolution_scale_for(capabilities.multiplier, mode.resolution);
-                preferences.publish_resolution_scale(scale);
+                preferences.publish_resolution_scale_for_generation(scale, generation);
                 debug!(
                     index,
                     multiplier = capabilities.multiplier,
