@@ -111,6 +111,10 @@ fn print_empty_notes(status: Option<&AgentStatus>) {
                 "  - A Bluetooth-direct mouse (e.g. Lift, Signature) needs Input Monitoring \
                  permission: System Settings → Privacy & Security → Input Monitoring."
             );
+            println!(
+                "  - On Linux, HID++ access needs OpenLogi's udev rules (shipped by the \
+                 packages; for a source build see docs/INSTALL-linux.md)."
+            );
         }
     }
 }
