@@ -2260,3 +2260,217 @@ fn an_unknown_route_gets_the_device_value() {
         Some(Dpi::new(1600))
     );
 }
+
+#[cfg(target_os = "macos")]
+mod navigation_seed {
+    //! Finder/Safari never navigate on mouse buttons 4/5, so pointing devices
+    //! are seeded with per-app ⌘[ / ⌘] profiles — once, so a deleted or
+    //! customized profile is the user's to keep.
+
+    use super::*;
+    use crate::device::{Capabilities, DeviceKind};
+
+    fn identity(kind: DeviceKind) -> DeviceIdentity {
+        DeviceIdentity {
+            display_name: "Test Device".to_string(),
+            model_info: None,
+            codename: None,
+            kind,
+            capabilities: Capabilities::default(),
+            light_capabilities: None,
+            driver_id: None,
+            registry_model_id: None,
+        }
+    }
+
+    fn seeded_pair() -> std::collections::BTreeMap<ButtonId, Action> {
+        std::collections::BTreeMap::from([
+            (ButtonId::Back, Action::BrowserBack),
+            (ButtonId::Forward, Action::BrowserForward),
+        ])
+    }
+
+    #[test]
+    fn first_mouse_identity_seeds_finder_and_safari_profiles() {
+        let mut cfg = Config::default();
+        cfg.set_device_identity("serial:test", identity(DeviceKind::Mouse));
+
+        let device = &cfg.devices["serial:test"];
+        assert_eq!(
+            device.per_app_bindings.get("com.apple.finder"),
+            Some(&seeded_pair())
+        );
+        assert_eq!(
+            device.per_app_bindings.get("com.apple.Safari"),
+            Some(&seeded_pair())
+        );
+    }
+
+    #[test]
+    fn trackball_identity_is_seeded_too() {
+        let mut cfg = Config::default();
+        cfg.set_device_identity("serial:test", identity(DeviceKind::Trackball));
+        assert!(
+            cfg.devices["serial:test"]
+                .per_app_bindings
+                .contains_key("com.apple.finder")
+        );
+    }
+
+    #[test]
+    fn keyboard_identity_seeds_no_navigation_profiles() {
+        let mut cfg = Config::default();
+        cfg.set_device_identity("serial:test", identity(DeviceKind::Keyboard));
+        assert!(cfg.devices["serial:test"].per_app_bindings.is_empty());
+    }
+
+    #[test]
+    fn identity_refresh_does_not_reseed_a_removed_profile() {
+        let mut cfg = Config::default();
+        cfg.set_device_identity("serial:test", identity(DeviceKind::Mouse));
+        // The user deletes the Finder profile (removing every override prunes
+        // the app key, matching the GUI's remove-profile flow).
+        cfg.set_per_app_binding("serial:test", "com.apple.finder", ButtonId::Back, None);
+        cfg.set_per_app_binding("serial:test", "com.apple.finder", ButtonId::Forward, None);
+        assert!(
+            !cfg.devices["serial:test"]
+                .per_app_bindings
+                .contains_key("com.apple.finder"),
+            "precondition: the profile is gone"
+        );
+
+        // The next online sighting refreshes the identity.
+        cfg.set_device_identity("serial:test", identity(DeviceKind::Mouse));
+
+        assert!(
+            !cfg.devices["serial:test"]
+                .per_app_bindings
+                .contains_key("com.apple.finder"),
+            "an identity refresh must not resurrect a deleted profile"
+        );
+    }
+
+    #[test]
+    fn seed_keeps_a_preexisting_app_profile_verbatim() {
+        let mut cfg = Config::default();
+        cfg.set_per_app_binding(
+            "serial:test",
+            "com.apple.finder",
+            ButtonId::Back,
+            Some(Action::Undo),
+        );
+
+        cfg.set_device_identity("serial:test", identity(DeviceKind::Mouse));
+
+        let device = &cfg.devices["serial:test"];
+        assert_eq!(
+            device.per_app_bindings["com.apple.finder"],
+            std::collections::BTreeMap::from([(ButtonId::Back, Action::Undo)]),
+            "a profile the user already shaped is not touched"
+        );
+        assert_eq!(
+            device.per_app_bindings.get("com.apple.Safari"),
+            Some(&seeded_pair()),
+            "absent apps are still seeded"
+        );
+    }
+
+    const V7_MOUSE: &str = "\
+schema_version = 7
+
+[devices.\"serial:test\".identity]
+display_name = \"MX Master 3S\"
+kind = \"mouse\"
+
+[devices.\"serial:test\".identity.capabilities]
+buttons = true
+pointer = true
+lighting = false
+scroll_inversion = true
+hires_wheel = true
+thumbwheel = true
+haptic_feedback = false
+haptic_panel = false
+";
+
+    fn load(body: &str) -> Config {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        fs::write(&path, body).expect("write");
+        Config::load_from_path(&path).expect("load")
+    }
+
+    #[test]
+    fn pre_v8_mouse_config_gains_navigation_profiles_on_load() {
+        let cfg = load(V7_MOUSE);
+        let device = &cfg.devices["serial:test"];
+        assert_eq!(
+            device.per_app_bindings.get("com.apple.finder"),
+            Some(&seeded_pair())
+        );
+        assert_eq!(
+            device.per_app_bindings.get("com.apple.Safari"),
+            Some(&seeded_pair())
+        );
+        assert_eq!(cfg.schema_version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn pre_v8_migration_keeps_an_existing_finder_profile_verbatim() {
+        let body = format!(
+            "{V7_MOUSE}
+[devices.\"serial:test\".per_app_bindings.\"com.apple.finder\"]
+Back = {{ CustomShortcut = \"Cmd+[\" }}
+"
+        );
+        let cfg = load(&body);
+        let device = &cfg.devices["serial:test"];
+        let finder = &device.per_app_bindings["com.apple.finder"];
+        assert_eq!(finder.len(), 1, "the shaped profile is not extended");
+        assert!(
+            matches!(finder.get(&ButtonId::Back), Some(Action::CustomShortcut(_))),
+            "the user's action survives"
+        );
+        assert_eq!(
+            device.per_app_bindings.get("com.apple.Safari"),
+            Some(&seeded_pair()),
+            "apps without a profile are still seeded"
+        );
+    }
+
+    #[test]
+    fn pre_v8_migration_skips_identityless_and_keyboard_devices() {
+        let body = "\
+schema_version = 7
+
+[devices.\"serial:mystery\"]
+custom_name = \"No identity yet\"
+
+[devices.\"serial:kbd\".identity]
+display_name = \"MX Keys\"
+kind = \"keyboard\"
+
+[devices.\"serial:kbd\".identity.capabilities]
+buttons = false
+pointer = false
+lighting = false
+scroll_inversion = false
+hires_wheel = false
+thumbwheel = false
+haptic_feedback = false
+haptic_panel = false
+";
+        let cfg = load(body);
+        assert!(cfg.devices["serial:mystery"].per_app_bindings.is_empty());
+        assert!(cfg.devices["serial:kbd"].per_app_bindings.is_empty());
+    }
+
+    #[test]
+    fn a_v8_config_without_navigation_profiles_stays_unseeded() {
+        let cfg = load(&V7_MOUSE.replace("schema_version = 7", "schema_version = 8"));
+        assert!(
+            cfg.devices["serial:test"].per_app_bindings.is_empty(),
+            "the seed is a one-shot migration, not a load-time default"
+        );
+    }
+}
