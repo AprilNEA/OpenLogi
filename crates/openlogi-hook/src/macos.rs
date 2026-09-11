@@ -796,6 +796,28 @@ fn hooked_event_types() -> Vec<CGEventType> {
     ]
 }
 
+/// OR `held_flags` (`CGEventFlags` bits from
+/// [`openlogi_inject::held_modifier_flags`]) into `event`'s flags.
+///
+/// This is the second half of a bare-modifier hold: posting the modifier
+/// key-down reaches consumers that poll modifier state, but a hardware event's
+/// flags are stamped by the WindowServer from *physical* modifier state alone,
+/// so keystrokes, scroll, and clicks see a synthetic modifier only if this tap
+/// adds it. Existing flags are preserved — physical and held modifiers
+/// combine. `FlagsChanged` events are stamped too, so consumers that track
+/// modifiers through them agree with the keystrokes they receive; the release
+/// edge stays visible because the mirror is cleared before the modifier's own
+/// key-up is posted.
+///
+/// Runs inside the tap callback: one relaxed atomic load on the common (zero)
+/// path, and never a lock, allocation, or I/O.
+fn stamp_held_modifiers(event: &CGEvent, held_flags: u64) {
+    if held_flags == 0 {
+        return;
+    }
+    event.set_flags(event.get_flags() | CGEventFlags::from_bits_truncate(held_flags));
+}
+
 /// Invoke the user callback under `catch_unwind`, always failing open.
 fn run_tap_callback(
     cb: &dyn Fn(HookEvent) -> EventDisposition,
@@ -1046,6 +1068,7 @@ fn thread_main(
                     tap_disabled.store(true, Ordering::Release);
                 }
                 callback_activity.enter(callback_signals.now_millis());
+                stamp_held_modifiers(event, openlogi_inject::held_modifier_flags());
                 let disposition = run_tap_callback(cb.as_ref(), etype, event);
                 callback_activity.exit();
                 disposition
@@ -1197,6 +1220,23 @@ mod tests {
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
     use super::*;
+
+    #[test]
+    fn stamped_modifiers_extend_the_event_flags_without_replacing_them() {
+        let source = CGEventSource::new(CGEventSourceStateID::Private)
+            .expect("CGEventSourceCreate must succeed");
+        let event = CGEvent::new(source).expect("CGEventCreate must succeed");
+        event.set_flags(CGEventFlags::CGEventFlagShift);
+
+        // Nothing held: the event's own flags stay untouched.
+        stamp_held_modifiers(&event, 0);
+        assert_eq!(event.get_flags(), CGEventFlags::CGEventFlagShift);
+
+        // A held Cmd combines with the physical Shift instead of replacing it.
+        stamp_held_modifiers(&event, CGEventFlags::CGEventFlagCommand.bits());
+        assert!(event.get_flags().contains(CGEventFlags::CGEventFlagShift));
+        assert!(event.get_flags().contains(CGEventFlags::CGEventFlagCommand));
+    }
 
     #[test]
     fn tap_callback_suppresses_normally_and_passes_through_panics() {
