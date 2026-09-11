@@ -95,6 +95,28 @@ impl SessionWheels {
     }
 }
 
+/// In-flight software DPI writes for unbound G6–G8. Finished handles are
+/// dropped on the next track so a long-lived capture session cannot grow the
+/// vector without bound; cancel still awaits whatever is still running.
+#[derive(Default)]
+struct SpyOps(HashMap<HidppSessionId, Vec<JoinHandle<()>>>);
+
+impl SpyOps {
+    fn track(&mut self, session: &HidppSessionId, handle: JoinHandle<()>) {
+        let ops = self.0.entry(session.clone()).or_default();
+        ops.retain(|handle| !handle.is_finished());
+        ops.push(handle);
+    }
+
+    async fn cancel_session(&mut self, session: &HidppSessionId) {
+        if let Some(ops) = self.0.remove(session) {
+            for handle in ops {
+                let _ = handle.await;
+            }
+        }
+    }
+}
+
 /// Input routing plus the per-session state retained between
 /// captured events. Capture-session lifecycle remains owned by the parent.
 pub(super) struct InputDispatcher {
@@ -106,7 +128,7 @@ pub(super) struct InputDispatcher {
     spy_shift: Arc<tokio::sync::Mutex<HashMap<HidppSessionId, SpyShiftHold>>>,
     /// In-flight software DPI writes for unbound G6–G8. Cancel awaits these
     /// before restoring so shutdown cannot drop a ShiftDown or ShiftUp.
-    spy_ops: HashMap<HidppSessionId, Vec<JoinHandle<()>>>,
+    spy_ops: SpyOps,
 }
 
 impl InputDispatcher {
@@ -118,7 +140,7 @@ impl InputDispatcher {
             wheels: SessionWheels::default(),
             gesture_presses: GesturePresses::default(),
             spy_shift: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            spy_ops: HashMap::new(),
+            spy_ops: SpyOps::default(),
         }
     }
 
@@ -145,11 +167,7 @@ impl InputDispatcher {
         self.outputs.cancel_session(session);
         self.wheels.cancel_session(session);
         self.gesture_presses.cancel_session(session);
-        if let Some(ops) = self.spy_ops.remove(session) {
-            for handle in ops {
-                let _ = handle.await;
-            }
-        }
+        self.spy_ops.cancel_session(session).await;
         self.outputs
             .actions
             .restore_spy_shift(session.clone(), Arc::clone(&self.spy_shift))
@@ -168,10 +186,7 @@ impl InputDispatcher {
             kind,
             Arc::clone(&self.spy_shift),
         );
-        self.spy_ops
-            .entry(session.clone())
-            .or_default()
-            .push(handle);
+        self.spy_ops.track(session, handle);
     }
 
     /// Route one captured input from `session` to its bound action or
