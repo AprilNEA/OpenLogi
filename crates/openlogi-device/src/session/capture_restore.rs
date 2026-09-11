@@ -10,6 +10,7 @@ use thiserror::Error;
 
 use crate::backend::BackendError;
 use crate::reprog_controls::{self, ReprogControlsV4};
+use crate::session::gesture::spy::SpyRestore;
 use crate::thumbwheel::Thumbwheel;
 use crate::{ChannelRegistry, DeviceRoute, SharedChannel};
 
@@ -93,7 +94,7 @@ pub enum CaptureSessionOutcome {
 pub struct CaptureSessionFailure {
     #[source]
     error: GestureError,
-    pending_restore: Option<PendingCaptureRestore>,
+    pending_restore: Option<Box<PendingCaptureRestore>>,
 }
 
 impl CaptureSessionFailure {
@@ -107,14 +108,14 @@ impl CaptureSessionFailure {
     pub(crate) fn with_pending(error: GestureError, pending: PendingCaptureRestore) -> Self {
         Self {
             error,
-            pending_restore: Some(pending),
+            pending_restore: Some(Box::new(pending)),
         }
     }
 
     /// Split the setup error from firmware ownership the caller must retain.
     #[must_use]
     pub fn into_parts(self) -> (GestureError, Option<PendingCaptureRestore>) {
-        (self.error, self.pending_restore)
+        (self.error, self.pending_restore.map(|pending| *pending))
     }
 }
 
@@ -135,6 +136,7 @@ pub struct PendingCaptureRestore {
     retired_policy: RetiredChannelPolicy,
     reprog: Option<ReprogRestore>,
     thumb_index: Option<u8>,
+    spy: Option<Box<SpyRestore>>,
 }
 
 impl fmt::Debug for PendingCaptureRestore {
@@ -149,6 +151,7 @@ impl fmt::Debug for PendingCaptureRestore {
                     .map_or(0, |reprog| reprog.controls.len()),
             )
             .field("has_thumbwheel", &self.thumb_index.is_some())
+            .field("has_spy", &self.spy.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -158,8 +161,9 @@ impl PendingCaptureRestore {
         retired: &SharedChannel,
         reprog: Option<ReprogRestore>,
         thumb_index: Option<u8>,
+        spy: Option<SpyRestore>,
     ) -> Option<Self> {
-        if reprog.is_none() && thumb_index.is_none() {
+        if reprog.is_none() && thumb_index.is_none() && spy.is_none() {
             return None;
         }
         Some(Self {
@@ -168,6 +172,7 @@ impl PendingCaptureRestore {
             retired_policy: RetiredChannelPolicy::ReplacementOnly,
             reprog,
             thumb_index,
+            spy: spy.map(Box::new),
         })
     }
 
@@ -225,8 +230,11 @@ impl PendingCaptureRestore {
             }
         }
         if let Some(feature_index) = self.thumb_index {
-            let thumbwheel = Thumbwheel::new(channel, device_index, feature_index);
+            let thumbwheel = Thumbwheel::new(Arc::clone(&channel), device_index, feature_index);
             restored &= restore_result(thumbwheel.undivert().await, "thumb wheel");
+        }
+        if let Some(spy) = &self.spy {
+            restored &= spy.restore_on(&channel, device_index).await;
         }
         restored
     }

@@ -30,8 +30,8 @@ use std::time::Duration;
 use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_core::scroll::ScrollDelta;
 use openlogi_hid::{
-    CaptureChannel, CaptureSessionOutcome, CapturedInput, DeviceIoGate, PendingCaptureRestore,
-    run_capture_session_with_registry_spec,
+    CaptureChannel, CaptureSessionOutcome, CapturedInput, DeviceIoGate, DeviceRoute,
+    PendingCaptureRestore, run_capture_session_with_registry_spec,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
@@ -221,9 +221,9 @@ async fn report_done_after_inputs(
 fn dispatch_context_for<'a>(
     input_session: &HidppSessionId,
     live: Option<&'a RunningSession>,
-) -> Option<(&'a HidppSessionId, &'a DispatchPlan)> {
+) -> Option<(&'a HidppSessionId, &'a DispatchPlan, &'a DeviceRoute)> {
     live.filter(|session| session.owns(input_session))
-        .map(|session| (session.id(), session.dispatch()))
+        .map(|session| (session.id(), session.dispatch(), &session.target().route))
 }
 
 /// Snapshot the sessions that should be armed. An exclusive request
@@ -240,13 +240,13 @@ fn wanted_sessions(
     Arc::clone(&capture_plans.borrow())
 }
 
-fn reconcile_session(
+async fn reconcile_session(
     session: &mut RunningSession,
     wanted: Option<(&CaptureTarget, &DispatchPlan)>,
     dispatcher: &mut InputDispatcher,
 ) {
     if session.reconcile(wanted) == ReconcileAction::DispatchChanged {
-        dispatcher.cancel_session(session.id());
+        dispatcher.cancel_session(session.id()).await;
         let config_key = session.dispatch().config_key.clone();
         session.rekey(&config_key);
     }
@@ -255,7 +255,7 @@ fn reconcile_session(
 /// Reconcile one tracked slot directly against the latest publication. Input
 /// calls this before dispatch so an event cannot slip between publishing a hot
 /// action update and processing its notification.
-fn reconcile_published_session(
+async fn reconcile_published_session(
     key: &PhysicalDeviceKey,
     session: &mut RunningSession,
     receiver_requests: &watch::Receiver<ReceiverRequestState>,
@@ -263,14 +263,14 @@ fn reconcile_published_session(
     dispatcher: &mut InputDispatcher,
 ) {
     if receiver_requests.borrow().any() {
-        reconcile_session(session, None, dispatcher);
+        reconcile_session(session, None, dispatcher).await;
     } else {
         let plans = capture_plans.borrow();
         let wanted = plans
             .iter()
             .find(|plan| plan.target.physical_key == *key)
             .map(|plan| (&plan.target, &plan.dispatch));
-        reconcile_session(session, wanted, dispatcher);
+        reconcile_session(session, wanted, dispatcher).await;
     }
 }
 
@@ -414,7 +414,7 @@ impl GestureManagerState {
                 .iter()
                 .find(|plan| plan.target.physical_key == *key)
                 .map(|plan| (&plan.target, &plan.dispatch));
-            reconcile_session(session, wanted, &mut self.input_dispatcher);
+            reconcile_session(session, wanted, &mut self.input_dispatcher).await;
         }
         self.slots.retain(|key, slot| {
             let Some(recovery) = slot.recovery_mut() else {
@@ -468,7 +468,7 @@ impl GestureManagerState {
         }
     }
 
-    fn handle_session_event(
+    async fn handle_session_event(
         &mut self,
         event: SessionEvent,
         device_io_allowed: bool,
@@ -488,14 +488,16 @@ impl GestureManagerState {
                         receiver_requests,
                         capture_plans,
                         &mut self.input_dispatcher,
-                    );
+                    )
+                    .await;
                 }
                 let live = self.slots.get(key).and_then(GestureSlot::session);
                 let dispatch_context = dispatch_context_for(&event.session, live);
-                if let Some((session, plan)) = dispatch_context {
-                    self.input_dispatcher.dispatch(session, plan, event.input);
+                if let Some((session, plan, route)) = dispatch_context {
+                    self.input_dispatcher
+                        .dispatch(session, plan, route, event.input);
                 } else {
-                    self.input_dispatcher.cancel_session(&event.session);
+                    self.input_dispatcher.cancel_session(&event.session).await;
                     debug!(
                         key = key.as_str(),
                         epoch = event.session.epoch(),
@@ -524,7 +526,9 @@ impl GestureManagerState {
                     return false;
                 };
                 let recovery_finished = slot.recovery().is_some_and(CaptureRecovery::is_empty);
-                self.input_dispatcher.cancel_session(&dispatch_session);
+                self.input_dispatcher
+                    .cancel_session(&dispatch_session)
+                    .await;
                 if unexpected && device_io_allowed {
                     warn!(
                         key = key.as_str(),
@@ -556,18 +560,20 @@ async fn drain_for_shutdown(
         .values_mut()
         .filter_map(GestureSlot::session_mut)
     {
-        reconcile_session(session, None, &mut state.input_dispatcher);
+        reconcile_session(session, None, &mut state.input_dispatcher).await;
     }
     while state.slots.values().any(|slot| slot.session().is_some()) {
         let Some(event) = event_rx.recv().await else {
             break;
         };
-        state.handle_session_event(
-            event,
-            channels.device_io.allows_io(),
-            receiver_requests,
-            capture_plans,
-        );
+        state
+            .handle_session_event(
+                event,
+                channels.device_io.allows_io(),
+                receiver_requests,
+                capture_plans,
+            )
+            .await;
     }
 
     state.expedite_pending_restores();
@@ -666,12 +672,14 @@ async fn manage(context: GestureManagerContext) -> ManagerCompletion {
                 return ManagerCompletion::Graceful;
             }
             Some(event) = event_rx.recv() => {
-                reconcile |= state.handle_session_event(
-                    event,
-                    device_io.allows_io(),
-                    &receiver_requests,
-                    &capture_plans,
-                );
+                reconcile |= state
+                    .handle_session_event(
+                        event,
+                        device_io.allows_io(),
+                        &receiver_requests,
+                        &capture_plans,
+                    )
+                    .await;
             }
             result = capture_plans.changed() => match result {
                 Ok(()) => reconcile = true,

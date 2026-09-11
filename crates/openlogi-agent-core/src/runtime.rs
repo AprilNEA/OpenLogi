@@ -15,14 +15,17 @@ use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
 use openlogi_core::binding::{Action, Binding, ButtonId};
-use openlogi_hid::{CaptureChannel, ChannelRegistry, DeviceIoGate};
+use openlogi_hid::{CaptureChannel, ChannelRegistry, DeviceIoGate, DeviceRoute};
 use tracing::{info, warn};
 
 use self::button::{
     ButtonInputHandle, ButtonRuntimeEvent, ButtonRuntimeOwner, EndReason, PressControl,
 };
 pub(crate) use self::button::{HidppSessionId, PressToken};
-use crate::hardware::{toggle_smartshift_in_background, write_dpi_in_background};
+use crate::hardware::{
+    SpyNativeDpi, SpyShiftHold, apply_spy_native_dpi, toggle_smartshift_in_background,
+    write_dpi_in_background,
+};
 use crate::receiver_access::ReceiverAccess;
 use crate::{DpiCycleState, DpiCycles};
 
@@ -330,7 +333,84 @@ impl ActionDispatcher {
         self.buttons.try_hidpp_pulse(session, button, binding);
     }
 
-    /// Cancel presses from a HID++ session that is stopping or has died.
+    /// Software DPI for an unbound G6–G8 while Host mode has suppressed the
+    /// firmware mapping. Ops for one session are serialized so a G6 release
+    /// cannot race ahead of the press that captured the restore value.
+    pub(crate) fn spawn_spy_native_dpi(
+        &self,
+        session: HidppSessionId,
+        route: DeviceRoute,
+        kind: SpyNativeDpi,
+        shift: Arc<tokio::sync::Mutex<HashMap<HidppSessionId, SpyShiftHold>>>,
+    ) -> tokio::task::JoinHandle<()> {
+        let capture = self.executor.capture.clone();
+        let registry = self.executor.registry.clone();
+        let receiver_access = self.executor.receiver_access.clone();
+        let device_io = self.executor.device_io.clone();
+        tokio::spawn(async move {
+            let mut held = shift.lock().await;
+            let slot = held.entry(session).or_insert_with(|| SpyShiftHold {
+                restore: None,
+                route: route.clone(),
+            });
+            slot.route = route.clone();
+            if let Err(error) = apply_spy_native_dpi(
+                &capture,
+                &registry,
+                &receiver_access,
+                &device_io,
+                &route,
+                kind,
+                &mut slot.restore,
+            )
+            .await
+            {
+                warn!(?error, "spy native DPI fallback failed");
+            }
+        })
+    }
+
+    /// Wait for any in-flight G6 shift write, take the restore slot, then write
+    /// it back without holding the session map across HID I/O.
+    ///
+    /// Must not `try_lock` and drop the slot: that loses the restore value
+    /// while Host mode still has firmware sniper-shift suppressed. The map
+    /// lock itself still has to span [`Self::spawn_spy_native_dpi`]'s write
+    /// so a G6 release cannot run with `restore == None`.
+    ///
+    /// Callers must `.await` this before tearing down the capture runtime or
+    /// spawning a replacement session on the same route — a detached task
+    /// would be aborted by `drop(runtime)` or could overwrite a successor's DPI.
+    pub(crate) async fn restore_spy_shift(
+        &self,
+        session: HidppSessionId,
+        shift: Arc<tokio::sync::Mutex<HashMap<HidppSessionId, SpyShiftHold>>>,
+    ) {
+        let slot = {
+            let mut held = shift.lock().await;
+            held.remove(&session)
+        };
+        let Some(mut slot) = slot else {
+            return;
+        };
+        if slot.restore.is_none() {
+            return;
+        }
+        if let Err(error) = apply_spy_native_dpi(
+            &self.executor.capture,
+            &self.executor.registry,
+            &self.executor.receiver_access,
+            &self.executor.device_io,
+            &slot.route,
+            SpyNativeDpi::ShiftUp,
+            &mut slot.restore,
+        )
+        .await
+        {
+            warn!(?error, "spy G6 DPI restore on cancel failed");
+        }
+    }
+
     pub(crate) fn cancel_hidpp_session(&self, session: &HidppSessionId) {
         self.buttons.cancel_hidpp_session(session);
     }

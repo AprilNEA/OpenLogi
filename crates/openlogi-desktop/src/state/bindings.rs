@@ -3,8 +3,10 @@
 use std::collections::BTreeMap;
 
 use gpui::App;
-use openlogi_core::binding::{Action, Binding, ButtonId, GestureDirection};
-use openlogi_core::bindings::{bindings_for, hidpp_gesture_maps_for, oshook_gestures_for};
+use openlogi_core::binding::{Action, Binding, ButtonId, GestureDirection, SpyModel};
+use openlogi_core::bindings::{
+    bindings_for, button_bindings_for, hidpp_gesture_maps_for, oshook_gestures_for,
+};
 use openlogi_core::config::{Config, KeyTrigger};
 use tracing::debug;
 
@@ -153,6 +155,26 @@ impl AppState {
     #[must_use]
     pub fn button_bindings(&self) -> &BTreeMap<ButtonId, Action> {
         &self.bindings.button_bindings
+    }
+
+    /// Whether the selected device's current profile arms Host-mode spy capture.
+    ///
+    /// Uses the lifecycle binding map, not the click-action projection: a
+    /// click-less long press still pauses onboard profiles.
+    #[must_use]
+    pub fn spy_capture_armed(&self) -> bool {
+        let Some(record) = self.current_record() else {
+            return false;
+        };
+        let Some(model) = SpyModel::for_hidpp_key(record.model_key.as_str()) else {
+            return false;
+        };
+        let bindings = button_bindings_for(
+            &self.config,
+            Some(record.config_key.as_str()),
+            self.editing_app(),
+        );
+        !model.armed_buttons(&bindings).is_empty()
     }
 
     /// Device-global gesture direction maps for the selected device.
