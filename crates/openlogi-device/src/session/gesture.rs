@@ -337,7 +337,23 @@ async fn run_capture_session_on(
     if let Some(spy) = armed.spy.as_mut()
         && let Err(error) = spy.start().await
     {
-        warn!(?error, "failed to start mouse button spy");
+        warn!(
+            ?error,
+            "failed to start mouse button spy — restoring Host-mode remap"
+        );
+        if let Ok(mut slot) = channel_slot.write()
+            && slot
+                .as_ref()
+                .is_some_and(|published| Arc::ptr_eq(published.channel(), &chan))
+        {
+            *slot = None;
+        }
+        let pending = armed.into_pending(&shared);
+        return Err(drop_listener_after(
+            listener,
+            rollback_capture_start(error, pending, &shared, registry),
+        )
+        .await);
     }
 
     // Liveness watchdog: this session's channel is the sole delivery path for
@@ -601,10 +617,13 @@ impl ArmedControls {
     /// Reapply volatile diversion after a wireless reconnect broadcast. The
     /// broadcast can precede the device accepting feature writes, so allow a
     /// short settling window like the keyboard capture path does.
-    async fn rearm(&self, device_io: &DeviceIoGate) {
+    ///
+    /// Returns `false` when Host-mode spy mapping is applied but the spy
+    /// stream did not start — the session must restart so rollback can run.
+    async fn rearm(&self, device_io: &DeviceIoGate) -> bool {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         if !device_io.allows_io() {
-            return;
+            return true;
         }
         if let Some(rc) = self.reprog.as_ref() {
             for &reporting in &self.reporting {
@@ -628,9 +647,13 @@ impl ArmedControls {
         {
             warn!(?error, "thumb-wheel re-divert after wake failed");
         }
-        if let Some(spy) = self.spy.as_ref() {
-            spy.rearm().await;
+        if let Some(spy) = self.spy.as_ref()
+            && let Err(error) = spy.rearm().await
+        {
+            warn!(?error, "spy start after wake failed — restarting capture");
+            return false;
         }
+        true
     }
 }
 
@@ -724,7 +747,9 @@ async fn monitor_capture(
                 info!(?broadcast, "device reconnected — re-arming control capture");
                 *context.accum.lock().unwrap_or_else(PoisonError::into_inner) =
                     CaptureAccum::default();
-                context.armed.rearm(&device_io).await;
+                if !context.armed.rearm(&device_io).await {
+                    return stop_for_current_publication(context.registry, context.shared);
+                }
             }
             generation = context.activity.changed_after(activity_generation) => {
                 liveness.record_activity(tokio::time::Instant::now(), generation);
@@ -901,7 +926,10 @@ async fn arm_controls_into(
         }
     }
 
-    armed.spy = spy::ArmedSpy::arm(device, chan, slot, spec).await?;
+    armed.spy = spy::ArmedSpy::prepare(device, chan, slot, spec).await?;
+    if let Some(spy) = armed.spy.as_mut() {
+        spy.apply().await?;
+    }
     Ok(())
 }
 

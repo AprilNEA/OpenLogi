@@ -120,6 +120,9 @@ pub(super) struct ArmedSpy {
     bits: &'static [(u8, ButtonId)],
     spy_started: bool,
     released: bool,
+    /// True after a Host-mode or mapping write. Restore and [`Drop`] only
+    /// compensate when firmware may have changed.
+    dirty: bool,
 }
 
 /// Opaque restore token handed to [`super::PendingCaptureRestore`].
@@ -132,11 +135,10 @@ pub(crate) struct SpyRestore {
 }
 
 impl ArmedSpy {
-    /// Enter Host mode, snapshot the mapping, and zero G6–G9 slots.
-    ///
-    /// Does **not** start the spy stream: the channel listener must be
-    /// registered first so the first mask is not dropped.
-    pub(super) async fn arm(
+    /// Snapshot mapping and mode. Does **not** write firmware — store the
+    /// result on [`super::ArmedControls`] before [`Self::apply`] so a failed
+    /// Host-mode or mapping write still has a rollback token.
+    pub(super) async fn prepare(
         device: &Device,
         chan: &Arc<HidppChannel>,
         device_index: u8,
@@ -197,37 +199,45 @@ impl ArmedSpy {
             .spy_model_key
             .as_deref()
             .map_or(&[][..], spy_bits_for_model);
-        let armed = Self {
+        Ok(Some(Self {
             filter,
             filter_index,
             profiles,
             profiles_index,
-            original_mapping: original_mapping.clone(),
+            original_mapping,
             original_mode,
             buttons: spec.spy_buttons.clone(),
             bits,
             spy_started: false,
             released: false,
-        };
+            dirty: false,
+        }))
+    }
 
-        if original_mode == Some(OnboardProfilesMode::Onboard)
-            && let Some(profiles) = armed.profiles.as_ref()
+    /// Enter Host mode and zero armed mapping slots.
+    ///
+    /// Does **not** start the spy stream: the channel listener must be
+    /// registered first so the first mask is not dropped.
+    pub(super) async fn apply(&mut self) -> Result<(), GestureError> {
+        if self.original_mode == Some(OnboardProfilesMode::Onboard)
+            && let Some(profiles) = self.profiles.as_ref()
         {
             profiles
                 .set_mode(OnboardProfilesMode::Host)
                 .await
                 .map_err(|error| GestureError::Hidpp(format!("{error:?}")))?;
+            self.dirty = true;
         }
 
-        let suppressed = suppress_spy_slots(&original_mapping, &spec.spy_buttons, bits);
-        if suppressed != original_mapping {
-            armed
-                .filter
+        let suppressed = suppress_spy_slots(&self.original_mapping, &self.buttons, self.bits);
+        if suppressed != self.original_mapping {
+            self.filter
                 .set_mouse_button_mapping(&suppressed)
                 .await
                 .map_err(|error| GestureError::Hidpp(format!("{error:?}")))?;
+            self.dirty = true;
         }
-        Ok(Some(armed))
+        Ok(())
     }
 
     pub(super) fn feature_index(&self) -> u8 {
@@ -249,11 +259,16 @@ impl ArmedSpy {
             .await
             .map_err(|error| GestureError::Hidpp(format!("{error:?}")))?;
         self.spy_started = true;
+        self.dirty = true;
         Ok(())
     }
 
     /// Re-enter Host mode and re-zero mapping after a wireless reconnect.
-    pub(super) async fn rearm(&self) {
+    ///
+    /// A failed spy start after those writes is an error: Host mode plus a
+    /// suppressed mapping with no `0x8110` stream is the same dead-button
+    /// state as a failed first start, so the session must restart and roll back.
+    pub(super) async fn rearm(&self) -> Result<(), GestureError> {
         if let Some(profiles) = self.profiles.as_ref()
             && let Err(error) = profiles.set_mode(OnboardProfilesMode::Host).await
         {
@@ -263,9 +278,10 @@ impl ArmedSpy {
         if let Err(error) = self.filter.set_mouse_button_mapping(&suppressed).await {
             warn!(?error, "spy mapping re-arm after wake failed");
         }
-        if let Err(error) = self.filter.start_mouse_button_spy().await {
-            warn!(?error, "spy start after wake failed");
-        }
+        self.filter
+            .start_mouse_button_spy()
+            .await
+            .map_err(|error| GestureError::Hidpp(format!("{error:?}")))
     }
 
     /// Restore mapping then onboard mode. Marks the guard released so
@@ -287,7 +303,7 @@ impl ArmedSpy {
     }
 
     pub(super) fn into_restore(mut self) -> Option<SpyRestore> {
-        if self.released {
+        if self.released || !self.dirty {
             return None;
         }
         let restore = SpyRestore {
@@ -304,7 +320,7 @@ impl ArmedSpy {
 
 impl Drop for ArmedSpy {
     fn drop(&mut self) {
-        if self.released {
+        if self.released || !self.dirty {
             return;
         }
         let filter = Arc::clone(&self.filter);

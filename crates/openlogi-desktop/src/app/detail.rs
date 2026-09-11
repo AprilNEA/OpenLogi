@@ -15,7 +15,6 @@ use gpui_component::{
     switch::Switch,
     v_flex,
 };
-use openlogi_core::binding::{Action, SpyModel, default_binding};
 use openlogi_core::config::ScrollResolution;
 use openlogi_core::device::DeviceKind;
 use openlogi_core::hid::DeviceRoute;
@@ -268,21 +267,11 @@ fn buttons_tab(
 
 fn onboard_profiles_paused_note(cx: &Context<AppView>) -> Option<gpui::Div> {
     let state = AppState::try_read(cx)?;
-    let record = state.current_record()?;
-    let model = SpyModel::for_hidpp_key(record.model_key.as_str())?;
-    let bindings = state.button_bindings();
-    let extras = model.extra_buttons.iter().any(|button| {
-        bindings
-            .get(button)
-            .is_some_and(|action| *action != Action::None)
-    });
-    let side = model.spy_owned_os_buttons.iter().any(|button| {
-        bindings
-            .get(button)
-            .is_some_and(|action| *action != default_binding(*button))
-    });
-    (extras || side).then(|| {
-        let pal = theme::palette(cx);
+    if !state.spy_capture_armed() {
+        return None;
+    }
+    let pal = theme::palette(cx);
+    Some(
         h_flex()
             .flex_shrink_0()
             .w_full()
@@ -293,8 +282,8 @@ fn onboard_profiles_paused_note(cx: &Context<AppView>) -> Option<gpui::Div> {
             .text_caption()
             .text_color(pal.text_muted)
             .child(Icon::new(IconName::Info).size_4())
-            .child(tr!("device.onboard_profiles_paused"))
-    })
+            .child(tr!("device.onboard_profiles_paused")),
+    )
 }
 
 fn tab_body(

@@ -423,6 +423,17 @@ pub enum SpyNativeDpi {
     ShiftUp,
 }
 
+/// Per-session G6 shift restore. Cancellation must wait on this slot's mutex
+/// and apply [`SpyNativeDpi::ShiftUp`] before dropping it — `try_lock` +
+/// remove would leave the sensor at minimum DPI.
+#[derive(Debug)]
+pub struct SpyShiftHold {
+    /// DPI to write back on G6 release or session cancel.
+    pub restore: Option<Dpi>,
+    /// Route the shift write used; cancel needs it to restore.
+    pub route: DeviceRoute,
+}
+
 /// Read-modify-write the current sensor DPI for an unbound G6–G8 press.
 pub async fn apply_spy_native_dpi(
     capture: &CaptureChannel,

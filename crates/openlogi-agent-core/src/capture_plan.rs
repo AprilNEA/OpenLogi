@@ -659,6 +659,23 @@ mod tests {
     }
 
     #[test]
+    fn click_less_long_press_on_g6_still_arms_the_spy_cluster() {
+        let mut cfg = Config::default();
+        cfg.set_binding(
+            "04099",
+            ButtonId::DpiShift,
+            Binding::LongPress(LongPressBinding::new(Action::None, Action::MissionControl)),
+        );
+
+        let plan = plan_for_device(&cfg, "04099", route(), None, 0, true);
+        assert_eq!(
+            plan.target.spec.spy_buttons,
+            ButtonId::SPY_BUTTONS.to_vec(),
+            "a long-only G6 binding must still take Host mode"
+        );
+    }
+
+    #[test]
     fn g502_unit_key_still_arms_spy_from_persisted_identity() {
         use openlogi_core::config::DeviceIdentity;
         use openlogi_core::device::{Capabilities, DeviceKind, DeviceModelInfo, DeviceTransports};

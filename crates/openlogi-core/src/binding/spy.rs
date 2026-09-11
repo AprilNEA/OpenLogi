@@ -31,7 +31,6 @@
 
 use std::collections::BTreeMap;
 
-use super::action::Action;
 use super::button::{ButtonId, G502_X_PLUS_CONFIG_KEY};
 use super::defaults::default_binding;
 use super::value::Binding;
@@ -75,7 +74,7 @@ impl SpyModel {
         let extras_customized = self.extra_buttons.iter().any(|button| {
             bindings
                 .get(button)
-                .is_some_and(|binding| binding.click_action() != Action::None)
+                .is_some_and(Binding::has_configured_action)
         });
         let mut armed = Vec::new();
         if extras_customized {
@@ -103,6 +102,7 @@ fn os_button_needs_spy(button: ButtonId, binding: &Binding) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::binding::Action;
 
     #[test]
     fn only_the_g502_x_plus_is_a_spy_model() {
@@ -132,6 +132,23 @@ mod tests {
         let model = SpyModel::for_hidpp_key(G502_X_PLUS_CONFIG_KEY).expect("G502 row");
         let bindings = BTreeMap::from([(ButtonId::Back, Binding::Single(Action::PreviousDesktop))]);
         assert_eq!(model.armed_buttons(&bindings), vec![ButtonId::Back]);
+    }
+
+    #[test]
+    fn click_less_long_press_still_arms_the_extra_cluster() {
+        let model = SpyModel::for_hidpp_key(G502_X_PLUS_CONFIG_KEY).expect("G502 row");
+        let bindings = BTreeMap::from([(
+            ButtonId::DpiShift,
+            Binding::LongPress(crate::binding::LongPressBinding::new(
+                Action::None,
+                Action::MissionControl,
+            )),
+        )]);
+        assert_eq!(
+            model.armed_buttons(&bindings),
+            ButtonId::SPY_BUTTONS.to_vec(),
+            "a long-only G6 binding must take Host mode for the whole extra cluster"
+        );
     }
 
     #[test]

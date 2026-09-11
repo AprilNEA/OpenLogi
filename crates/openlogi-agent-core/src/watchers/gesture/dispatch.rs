@@ -8,14 +8,13 @@ use std::time::Instant;
 
 use openlogi_core::binding::{Action, Binding, ButtonId, default_binding};
 use openlogi_core::config::ThumbwheelSensitivity;
-use openlogi_core::hid::dpi::Dpi;
 use openlogi_hid::{CapturedInput, DeviceRoute};
 use tracing::debug;
 
 use self::wheel::{ScrollScale, WheelAccumulators, WheelOutput, WheelRotation};
 use super::GestureOutputs;
 use crate::capture_plan::DispatchPlan;
-use crate::hardware::SpyNativeDpi;
+use crate::hardware::{SpyNativeDpi, SpyShiftHold};
 use crate::runtime::hook::SharedHookMaps;
 use crate::runtime::{HidppSessionId, PressToken};
 
@@ -103,7 +102,7 @@ pub(super) struct InputDispatcher {
     wheels: SessionWheels,
     gesture_presses: GesturePresses,
     /// DPI to restore when an unbound G6 (DPI Shift) is released.
-    spy_shift: Arc<tokio::sync::Mutex<HashMap<HidppSessionId, Option<Dpi>>>>,
+    spy_shift: Arc<tokio::sync::Mutex<HashMap<HidppSessionId, SpyShiftHold>>>,
 }
 
 impl InputDispatcher {
@@ -138,9 +137,9 @@ impl InputDispatcher {
         self.outputs.cancel_session(session);
         self.wheels.cancel_session(session);
         self.gesture_presses.cancel_session(session);
-        if let Ok(mut held) = self.spy_shift.try_lock() {
-            held.remove(session);
-        }
+        self.outputs
+            .actions
+            .restore_spy_shift(session.clone(), Arc::clone(&self.spy_shift));
     }
 
     /// Route one captured input from `session` to its bound action or
@@ -242,7 +241,7 @@ impl InputDispatcher {
         let is_gesture = plan.gesture_bindings.contains_key(&button)
             || plan.side_gesture_bindings.contains_key(&button);
         let binding = (!is_gesture).then(|| plan.bindings.get(&button)).flatten();
-        let customized = binding.is_some_and(|binding| binding.click_action() != Action::None);
+        let customized = binding.is_some_and(Binding::has_configured_action);
         if customized {
             if let Some(binding) = binding {
                 debug!(key, ?button, action = %binding.click_action().label(), "HID++ button → binding");
@@ -280,10 +279,10 @@ impl InputDispatcher {
     ) {
         self.outputs.actions.try_hidpp_button_up(session, button);
         self.gesture_presses.end(session, button);
-        if plan
+        if !plan
             .bindings
             .get(&button)
-            .is_none_or(|binding| binding.click_action() == Action::None)
+            .is_some_and(Binding::has_configured_action)
             && let Some(kind) = spy_native_kind(button, false)
         {
             self.outputs.actions.spawn_spy_native_dpi(
