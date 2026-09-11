@@ -21,7 +21,7 @@ is no desktop toggle in this first cut.
 | OS | Backend | Runtime requirement |
 |---|---|---|
 | macOS | `IOHIDUserDevice` | Agent must be codesigned with `com.apple.developer.hid.virtual.device` (Apple-restricted). See [`OpenLogiAgent.entitlements`](../crates/openlogi-agent/bundle/OpenLogiAgent.entitlements). Without it, create returns a clear entitlement error. Host→device rumble is not wired on macOS yet (input still works). |
-| Linux | `uinput` joystick + optional `FF_RUMBLE` | User needs write access to `/dev/uinput` (same class of permission as OpenLogi's existing inject path). |
+| Linux | `uinput` joystick (no FF yet) | User needs write access to `/dev/uinput` (same class of permission as OpenLogi's existing inject path). Host rumble via `FF_RUMBLE` is not advertised until the read path exists. |
 | Windows | ViGEmBus (stub in this PR) | Install [ViGEmBus](https://github.com/nefarius/ViGEmBus); until the client is wired the agent soft-fails with "driver missing". |
 
 ## Browser Gamepad API

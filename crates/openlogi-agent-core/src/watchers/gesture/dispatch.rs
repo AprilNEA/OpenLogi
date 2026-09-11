@@ -243,7 +243,9 @@ impl InputDispatcher {
         }
     }
 
-    /// When the plan carries a gamepad map, divert owned controls into the pad.
+    /// When the plan carries a gamepad map **and** the pad is live, divert owned
+    /// controls into it. Plans should only carry a map for live pads; this is
+    /// defense in depth if a create fails after publish.
     fn try_dispatch_gamepad(
         &mut self,
         session: &HidppSessionId,
@@ -254,6 +256,9 @@ impl InputDispatcher {
             return false;
         };
         let key = session.device_key();
+        if !self.outputs.gamepads.is_active(key) {
+            return false;
+        }
         match input {
             CapturedInput::Gesture(button, direction) if map.owns_button(button) => {
                 self.outputs.gamepads.apply_gesture(key, button, direction);

@@ -78,6 +78,9 @@ impl GestureOutputs {
     fn cancel_session(&self, session: &HidppSessionId) {
         self.actions.cancel_hidpp_session(session);
         self.scroll.cancel_hidpp_session(session);
+        // A cancelled capture session can no longer deliver button-up; clear
+        // any held pad state so games do not see a stuck button.
+        self.gamepads.neutralize(session.device_key());
     }
 
     fn post_scroll(&self, session: &HidppSessionId, delta: ScrollDelta) {

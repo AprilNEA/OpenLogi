@@ -32,7 +32,8 @@ use tracing::{debug, info, warn};
 
 use crate::action_ring::ActionRingSessionSpec;
 use crate::capture_plan::{
-    DeviceCapturePlan, SharedCapturePlans, hidpp_side_gesture_maps_for, plan_for_device,
+    CapturePlanRuntime, DeviceCapturePlan, SharedCapturePlans, hidpp_side_gesture_maps_for,
+    plan_for_device,
 };
 use crate::hardware::{DeviceOp, HardwareContext};
 use crate::observable::ObservableState;
@@ -316,7 +317,7 @@ impl Orchestrator {
                 bindings.remove(button);
                 gestures.remove(button);
             }
-            if self.config.gamepad(key).enabled {
+            if self.config.gamepad(key).enabled && self.shared.gamepads.is_active(key) {
                 let map = openlogi_core::binding::GamepadMap::default_for_mouse();
                 for button in map.divert_buttons() {
                     if button.is_os_hook_button() {
@@ -406,9 +407,11 @@ impl Orchestrator {
     /// forget the other — a waking device needs both its capture session and
     /// its DPI-cycle slot.
     fn publish_device_runtime(&self) {
+        // Pads must sync before capture plans so diversion only arms for live
+        // virtual devices (fail-open when create fails).
+        self.sync_gamepads();
         self.publish_capture_plans();
         self.rebuild_dpi_cycles(self.current_key());
-        self.sync_gamepads();
         // Keyboard F-key bindings are global (not per-device), so they key off
         // the top-level config map rather than the selected device. Published
         // here so `reload_config` (GUI commit) takes effect live, not only on
@@ -528,7 +531,10 @@ impl Orchestrator {
                     route,
                     self.current_app.as_deref(),
                     rearm_generation,
-                    self.os_mouse_hook_available,
+                    CapturePlanRuntime {
+                        os_mouse_hook_available: self.os_mouse_hook_available,
+                        gamepad_live: self.shared.gamepads.is_active(&dev.config_key),
+                    },
                 ))
             })
             .collect()
