@@ -342,7 +342,7 @@ impl ActionDispatcher {
         route: DeviceRoute,
         kind: SpyNativeDpi,
         shift: Arc<tokio::sync::Mutex<HashMap<HidppSessionId, SpyShiftHold>>>,
-    ) {
+    ) -> tokio::task::JoinHandle<()> {
         let capture = self.executor.capture.clone();
         let registry = self.executor.registry.clone();
         let receiver_access = self.executor.receiver_access.clone();
@@ -367,7 +367,7 @@ impl ActionDispatcher {
             {
                 warn!(?error, "spy native DPI fallback failed");
             }
-        });
+        })
     }
 
     /// Wait for any in-flight G6 shift write, take the restore slot, then write
@@ -377,40 +377,38 @@ impl ActionDispatcher {
     /// while Host mode still has firmware sniper-shift suppressed. The map
     /// lock itself still has to span [`Self::spawn_spy_native_dpi`]'s write
     /// so a G6 release cannot run with `restore == None`.
-    pub(crate) fn restore_spy_shift(
+    ///
+    /// Callers must `.await` this before tearing down the capture runtime or
+    /// spawning a replacement session on the same route — a detached task
+    /// would be aborted by `drop(runtime)` or could overwrite a successor's DPI.
+    pub(crate) async fn restore_spy_shift(
         &self,
         session: HidppSessionId,
         shift: Arc<tokio::sync::Mutex<HashMap<HidppSessionId, SpyShiftHold>>>,
     ) {
-        let capture = self.executor.capture.clone();
-        let registry = self.executor.registry.clone();
-        let receiver_access = self.executor.receiver_access.clone();
-        let device_io = self.executor.device_io.clone();
-        tokio::spawn(async move {
-            let slot = {
-                let mut held = shift.lock().await;
-                held.remove(&session)
-            };
-            let Some(mut slot) = slot else {
-                return;
-            };
-            if slot.restore.is_none() {
-                return;
-            }
-            if let Err(error) = apply_spy_native_dpi(
-                &capture,
-                &registry,
-                &receiver_access,
-                &device_io,
-                &slot.route,
-                SpyNativeDpi::ShiftUp,
-                &mut slot.restore,
-            )
-            .await
-            {
-                warn!(?error, "spy G6 DPI restore on cancel failed");
-            }
-        });
+        let slot = {
+            let mut held = shift.lock().await;
+            held.remove(&session)
+        };
+        let Some(mut slot) = slot else {
+            return;
+        };
+        if slot.restore.is_none() {
+            return;
+        }
+        if let Err(error) = apply_spy_native_dpi(
+            &self.executor.capture,
+            &self.executor.registry,
+            &self.executor.receiver_access,
+            &self.executor.device_io,
+            &slot.route,
+            SpyNativeDpi::ShiftUp,
+            &mut slot.restore,
+        )
+        .await
+        {
+            warn!(?error, "spy G6 DPI restore on cancel failed");
+        }
     }
 
     pub(crate) fn cancel_hidpp_session(&self, session: &HidppSessionId) {

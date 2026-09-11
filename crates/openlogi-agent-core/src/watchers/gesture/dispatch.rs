@@ -9,6 +9,7 @@ use std::time::Instant;
 use openlogi_core::binding::{Action, Binding, ButtonId, default_binding};
 use openlogi_core::config::ThumbwheelSensitivity;
 use openlogi_hid::{CapturedInput, DeviceRoute};
+use tokio::task::JoinHandle;
 use tracing::debug;
 
 use self::wheel::{ScrollScale, WheelAccumulators, WheelOutput, WheelRotation};
@@ -103,6 +104,9 @@ pub(super) struct InputDispatcher {
     gesture_presses: GesturePresses,
     /// DPI to restore when an unbound G6 (DPI Shift) is released.
     spy_shift: Arc<tokio::sync::Mutex<HashMap<HidppSessionId, SpyShiftHold>>>,
+    /// In-flight software DPI writes for unbound G6–G8. Cancel awaits these
+    /// before restoring so shutdown cannot drop a ShiftDown or ShiftUp.
+    spy_ops: HashMap<HidppSessionId, Vec<JoinHandle<()>>>,
 }
 
 impl InputDispatcher {
@@ -114,6 +118,7 @@ impl InputDispatcher {
             wheels: SessionWheels::default(),
             gesture_presses: GesturePresses::default(),
             spy_shift: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            spy_ops: HashMap::new(),
         }
     }
 
@@ -133,13 +138,40 @@ impl InputDispatcher {
     }
 
     /// Cancel every input lifecycle retained for one capture session.
-    pub(super) fn cancel_session(&mut self, session: &HidppSessionId) {
+    ///
+    /// Awaits in-flight G6–G8 software DPI writes and any saved G6 restore
+    /// before returning, so teardown and a replacement session cannot race it.
+    pub(super) async fn cancel_session(&mut self, session: &HidppSessionId) {
         self.outputs.cancel_session(session);
         self.wheels.cancel_session(session);
         self.gesture_presses.cancel_session(session);
+        if let Some(ops) = self.spy_ops.remove(session) {
+            for handle in ops {
+                let _ = handle.await;
+            }
+        }
         self.outputs
             .actions
-            .restore_spy_shift(session.clone(), Arc::clone(&self.spy_shift));
+            .restore_spy_shift(session.clone(), Arc::clone(&self.spy_shift))
+            .await;
+    }
+
+    fn spawn_spy_native_dpi(
+        &mut self,
+        session: &HidppSessionId,
+        route: DeviceRoute,
+        kind: SpyNativeDpi,
+    ) {
+        let handle = self.outputs.actions.spawn_spy_native_dpi(
+            session.clone(),
+            route,
+            kind,
+            Arc::clone(&self.spy_shift),
+        );
+        self.spy_ops
+            .entry(session.clone())
+            .or_default()
+            .push(handle);
     }
 
     /// Route one captured input from `session` to its bound action or
@@ -259,12 +291,7 @@ impl InputDispatcher {
             }
         } else if let Some(kind) = spy_native_kind(button, true) {
             debug!(key, ?button, "unbound spy button → software DPI");
-            self.outputs.actions.spawn_spy_native_dpi(
-                session.clone(),
-                route.clone(),
-                kind,
-                Arc::clone(&self.spy_shift),
-            );
+            self.spawn_spy_native_dpi(session, route.clone(), kind);
         } else {
             debug!(key, ?button, "HID++ button with no binding — ignored");
         }
@@ -285,12 +312,7 @@ impl InputDispatcher {
             .is_some_and(Binding::has_configured_action)
             && let Some(kind) = spy_native_kind(button, false)
         {
-            self.outputs.actions.spawn_spy_native_dpi(
-                session.clone(),
-                route.clone(),
-                kind,
-                Arc::clone(&self.spy_shift),
-            );
+            self.spawn_spy_native_dpi(session, route.clone(), kind);
         }
     }
 }
