@@ -141,7 +141,7 @@ fn resolves_old_schema_depot_on_disk() {
     };
 
     let asset = resolver
-        .load_files(depot, &entry, &bare_model())
+        .load_files(depot, &entry, &bare_model(), None)
         .expect("old-schema depot should resolve");
     assert_eq!(
         asset.image_path.file_name().expect("image has a file name"),
@@ -322,6 +322,89 @@ fn standalone_resolution_prefers_the_first_read_root() {
     assert_eq!(
         asset.image_path,
         roots[0].path().join("litra_glow/front.png")
+    );
+}
+
+/// A Signature M650 (plain) model, matching the config.toml quoted in
+/// issue #1332: `model_ids = [0xb02a, 0, 0]`, `extended_model_id = 8`.
+fn m650_plain_model() -> DeviceModelInfo {
+    DeviceModelInfo {
+        entity_count: 0,
+        serial_number: None,
+        unit_id: [0; 4],
+        transports: DeviceTransports {
+            btle: true,
+            ..Default::default()
+        },
+        model_ids: [0xb02a, 0, 0],
+        extended_model_id: 8,
+    }
+}
+
+/// The catalog's single entry for `2b02a`: the Signature M650 *L* depot,
+/// whose one `displayName` covers every extended-model-id variant.
+fn m650_l_depot_entry() -> DeviceEntry {
+    DeviceEntry {
+        model_id: "2b02a".to_string(),
+        model_ids: Vec::new(),
+        display_name: "Signature M650 L".to_string(),
+        kind: "mouse".to_string(),
+        asset_path: "assets/signature_m650/".to_string(),
+        files: Vec::new(),
+    }
+}
+
+fn m650_index() -> Index {
+    index_of("signature_m650", m650_l_depot_entry())
+}
+
+/// #1332: a plain Signature M650 shares the M650 *L* depot's `modelId`
+/// (`2b02a`), so `resolve_in_index` matches it by pid regardless of
+/// variant. Without the firmware's own name, the GUI would show "Signature
+/// M650 L" for a mouse that isn't the L variant.
+#[test]
+fn m650_plain_display_name_drops_catalogs_l_suffix() {
+    let index = m650_index();
+    let (depot, entry) =
+        resolve_in_index(&index, &m650_plain_model(), Some("Signature M650 Mouse"))
+            .expect("2b02a pid should resolve to the shared depot");
+    assert_eq!(
+        variant_display_name(&entry.display_name, Some("Signature M650 Mouse")),
+        "Signature M650"
+    );
+    assert_eq!(depot, "signature_m650");
+}
+
+/// A real Signature M650 *L* whose own reported name already carries the
+/// "L" must keep showing it — the catalog name isn't overridden when it
+/// isn't a superset of the codename.
+#[test]
+fn m650_l_display_name_keeps_catalogs_l_suffix() {
+    let entry = m650_l_depot_entry();
+    assert_eq!(
+        variant_display_name(&entry.display_name, Some("Signature M650 L")),
+        "Signature M650 L"
+    );
+}
+
+/// No codename at all (offline placeholder, older firmware): keep trusting
+/// the catalog, same as before this fix.
+#[test]
+fn variant_display_name_falls_back_to_catalog_without_codename() {
+    assert_eq!(
+        variant_display_name("Signature M650 L", None),
+        "Signature M650 L"
+    );
+}
+
+/// A catalog name that isn't a superset of the codename (a genuinely
+/// different or more complete name, not a bare variant suffix) is left
+/// alone — the catalog stays authoritative outside the variant-suffix case.
+#[test]
+fn variant_display_name_keeps_catalog_when_not_a_superset() {
+    assert_eq!(
+        variant_display_name("MX Master 3S", Some("M3S")),
+        "MX Master 3S"
     );
 }
 
