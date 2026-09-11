@@ -257,12 +257,27 @@ struct WorkflowStepRow {
 
 impl RenderOnce for WorkflowStepRow {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let (type_label, glyph): (&'static str, &'static str) = match &self.step {
-            WorkflowStep::TypeText(_) => ("Type Text", "action-icons/keyboard.svg"),
-            WorkflowStep::PressKey(_) => ("Press Key", "action-icons/keyboard.svg"),
-            WorkflowStep::Delay { .. } => ("Delay", "action-icons/chevrons-right.svg"),
-            WorkflowStep::RunAppleScript(_) => ("AppleScript", "action-icons/terminal.svg"),
-            WorkflowStep::RunShellCommand(_) => ("Shell", "action-icons/terminal.svg"),
+        let (type_label, glyph): (gpui::SharedString, &'static str) = match &self.step {
+            WorkflowStep::TypeText(_) => (
+                tr!("actions.workflow_step_type_text"),
+                "action-icons/keyboard.svg",
+            ),
+            WorkflowStep::PressKey(_) => (
+                tr!("actions.workflow_step_press_key"),
+                "action-icons/keyboard.svg",
+            ),
+            WorkflowStep::Delay { .. } => (
+                tr!("actions.workflow_step_delay"),
+                "action-icons/chevrons-right.svg",
+            ),
+            WorkflowStep::RunAppleScript(_) => (
+                tr!("actions.workflow_step_applescript"),
+                "action-icons/terminal.svg",
+            ),
+            WorkflowStep::RunShellCommand(_) => (
+                tr!("actions.workflow_step_shell"),
+                "action-icons/terminal.svg",
+            ),
         };
         let pal = theme::palette(cx);
         let view_remove = self.view;
