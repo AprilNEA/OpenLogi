@@ -11,7 +11,9 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use openlogi_core::binding::{Action, Binding, ButtonId, GestureDirection, default_binding};
+use openlogi_core::binding::{
+    Action, Binding, ButtonId, GamepadMap, GestureDirection, default_binding,
+};
 use openlogi_core::bindings::{button_bindings_for, hidpp_gesture_maps_for, oshook_gestures_for};
 use openlogi_core::config::{Config, ThumbwheelSensitivity};
 use openlogi_core::device_order::PhysicalDeviceKey;
@@ -63,6 +65,9 @@ pub struct DispatchPlan {
     /// This device's effective thumb-wheel sensitivity (device override or the
     /// app-wide default).
     pub thumbwheel_sensitivity: ThumbwheelSensitivity,
+    /// When set, mapped controls feed the auxiliary virtual gamepad instead of
+    /// productivity actions.
+    pub gamepad: Option<GamepadMap>,
 }
 
 /// One device's independently versioned hardware target and dispatch plan.
@@ -116,6 +121,10 @@ pub fn plan_for_device(
     // gesture at once, each armed with its own raw-XY divert (the capture
     // target below derives the CIDs to divert from this map's keys).
     let gesture_bindings = hidpp_gesture_maps_for(config, Some(config_key));
+    let gamepad_map = config
+        .gamepad(config_key)
+        .enabled
+        .then(GamepadMap::default_for_mouse);
     let divert_gesture_buttons = if os_mouse_hook_available {
         DIVERTABLE_STANDARD_BUTTONS
             .into_iter()
@@ -131,7 +140,7 @@ pub fn plan_for_device(
     let plain_sources = GESTURE_SOURCE_BUTTONS
         .into_iter()
         .filter(|(_, button)| !gesture_bindings.contains_key(button));
-    let divert_buttons: Vec<(u16, ButtonId)> = DIVERTABLE_STANDARD_BUTTONS
+    let mut divert_buttons: Vec<(u16, ButtonId)> = DIVERTABLE_STANDARD_BUTTONS
         .into_iter()
         .chain(plain_sources)
         // These controls are owned by the OS-hook path. The capture opt-out
@@ -142,6 +151,12 @@ pub fn plan_for_device(
         })
         .filter(|(_, button)| !oshook.contains_key(button))
         .filter(|(_, button)| {
+            if gamepad_map
+                .as_ref()
+                .is_some_and(|map| map.owns_button(*button))
+            {
+                return true;
+            }
             bindings.get(button).is_some_and(|binding| {
                 if matches!(binding, Binding::LongPress(_)) {
                     return true;
@@ -165,11 +180,24 @@ pub fn plan_for_device(
     ]
     .iter()
     .any(|button| {
-        bindings
-            .get(button)
-            .is_some_and(|binding| binding.click_action() != default_binding(*button))
+        gamepad_map
+            .as_ref()
+            .is_some_and(|map| map.owns_button(*button))
+            || bindings
+                .get(button)
+                .is_some_and(|binding| binding.click_action() != default_binding(*button))
     });
     let thumbwheel_sensitivity = config.thumbwheel_sensitivity(config_key);
+    let mut divert_gesture_sources: Vec<u16> = GESTURE_SOURCE_BUTTONS
+        .into_iter()
+        .filter(|(_, button)| gesture_bindings.contains_key(button))
+        .map(|(cid, _)| cid)
+        .collect();
+    merge_gamepad_diverts(
+        gamepad_map.as_ref(),
+        &mut divert_buttons,
+        &mut divert_gesture_sources,
+    );
     DeviceCapturePlan {
         target: CaptureTarget {
             physical_key,
@@ -177,11 +205,7 @@ pub fn plan_for_device(
             spec: CaptureSpec {
                 capture_thumbwheel: thumbwheel_sensitivity != ThumbwheelSensitivity::DEFAULT
                     || thumbwheel_bindings_nondefault,
-                divert_gesture_sources: GESTURE_SOURCE_BUTTONS
-                    .into_iter()
-                    .filter(|(_, button)| gesture_bindings.contains_key(button))
-                    .map(|(cid, _)| cid)
-                    .collect(),
+                divert_gesture_sources,
                 divert_gesture_buttons,
                 divert_buttons,
             },
@@ -193,7 +217,31 @@ pub fn plan_for_device(
             gesture_bindings,
             side_gesture_bindings,
             thumbwheel_sensitivity,
+            gamepad: gamepad_map,
         },
+    }
+}
+
+/// Force-divert gamepad-owned controls that the productivity path left native.
+fn merge_gamepad_diverts(
+    gamepad_map: Option<&GamepadMap>,
+    divert_buttons: &mut Vec<(u16, ButtonId)>,
+    divert_gesture_sources: &mut Vec<u16>,
+) {
+    let Some(map) = gamepad_map else {
+        return;
+    };
+    // Gamepad-owned OS-hook buttons (Back/Forward) must be HID++-diverted even
+    // when the hook is up, otherwise they stay native mouse buttons.
+    for (cid, button) in DIVERTABLE_STANDARD_BUTTONS {
+        if map.owns_button(button) && !divert_buttons.iter().any(|(_, b)| *b == button) {
+            divert_buttons.push((cid, button));
+        }
+    }
+    for (cid, button) in GESTURE_SOURCE_BUTTONS {
+        if map.owns_button(button) && !divert_gesture_sources.contains(&cid) {
+            divert_gesture_sources.push(cid);
+        }
     }
 }
 

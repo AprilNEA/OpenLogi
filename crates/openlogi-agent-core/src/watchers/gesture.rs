@@ -41,6 +41,7 @@ use self::dispatch::InputDispatcher;
 use super::capture_session::{CaptureRecovery, CaptureSession, CaptureSlot, ReconcileAction};
 use super::shutdown::{ManagerCompletion, WatcherHandle};
 use crate::capture_plan::{CaptureTarget, DeviceCapturePlan, DispatchPlan, SharedCapturePlans};
+use crate::gamepad::GamepadPads;
 use crate::receiver_access::{ReceiverAccess, ReceiverRequestState, SessionReceiverLease};
 use crate::runtime::hook::SharedHookMaps;
 use crate::runtime::scroll::ScrollInputHandle;
@@ -54,6 +55,7 @@ pub struct GestureOutputs {
     actions: ActionDispatcher,
     scroll: ScrollInputHandle,
     hook_maps: SharedHookMaps,
+    gamepads: GamepadPads,
 }
 
 impl GestureOutputs {
@@ -63,11 +65,13 @@ impl GestureOutputs {
         actions: ActionDispatcher,
         scroll: ScrollInputHandle,
         hook_maps: SharedHookMaps,
+        gamepads: GamepadPads,
     ) -> Self {
         Self {
             actions,
             scroll,
             hook_maps,
+            gamepads,
         }
     }
 

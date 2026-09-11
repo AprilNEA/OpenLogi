@@ -71,6 +71,27 @@ impl AgentServer {
         dispatcher: ActionDispatcher,
     ) -> (Self, tokio::sync::mpsc::UnboundedReceiver<ClientKind>) {
         let ring_haptics = RingHapticPlayer::spawn(shared.clone());
+        // Forward host gamepad rumble onto MX Master–class haptics when capable.
+        {
+            let haptic_shared = shared.clone();
+            shared.gamepads.set_rumble_sink(move |route, rumble| {
+                let waveform = if rumble.strong >= rumble.weak {
+                    HapticWaveform::DampStateChange
+                } else {
+                    HapticWaveform::SubtleCollision
+                };
+                let shared = haptic_shared.clone();
+                tokio::spawn(async move {
+                    let _ = shared
+                        .device(&route)
+                        .run(HidppOperation::PlayHaptic, |c| async move {
+                            openlogi_hid::play_haptic_on(&c, waveform).await
+                        })
+                        .await;
+                });
+            });
+            shared.gamepads.spawn_rumble_poller();
+        }
         let (demand, declarations) = tokio::sync::mpsc::unbounded_channel();
         (
             Self {

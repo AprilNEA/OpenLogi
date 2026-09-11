@@ -5421,6 +5421,7 @@ dependencies = [
  "futures-lite",
  "openlogi-core",
  "openlogi-fixture",
+ "openlogi-gamepad",
  "openlogi-hid",
  "openlogi-hook",
  "openlogi-inject",
@@ -5608,6 +5609,17 @@ dependencies = [
  "serde_ignored",
  "serde_json",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "openlogi-gamepad"
+version = "0.8.3"
+dependencies = [
+ "core-foundation 0.10.0",
+ "evdev",
+ "openlogi-core",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]

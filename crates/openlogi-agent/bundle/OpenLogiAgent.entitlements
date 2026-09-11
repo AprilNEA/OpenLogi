@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Restricted Apple entitlement required for IOHIDUserDeviceCreate.
+	     Without a matching provisioning profile the agent is killed by AMFI
+	     if this key is present — leave it commented until AprilNEA's signing
+	     identity is approved for Virtual HID, then wire it into agent
+	     codesign the same way OpenLogi.entitlements is for the GUI. -->
+	<!--
+	<key>com.apple.developer.hid.virtual.device</key>
+	<true/>
+	-->
+</dict>
+</plist>
