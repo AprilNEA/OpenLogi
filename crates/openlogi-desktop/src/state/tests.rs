@@ -2166,3 +2166,127 @@ fn a_failed_save_keeps_the_forgotten_device() {
         "the persisted entry must survive the failed save"
     );
 }
+
+/// The zoom slider is the device's only zoom-speed control, so landing back on
+/// the app-wide default must *clear* the override rather than pin today's
+/// default forever — otherwise a later change in Settings → General would
+/// silently skip every device the user had ever touched the slider on.
+#[test]
+fn committing_the_app_default_clears_the_device_zoom_override() {
+    let cache = AssetResolver::new();
+    let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::with_runtime(
+        Config::ephemeral(),
+        &[],
+        &[],
+        &cache,
+        &[],
+        ConfigPersistence::MemoryOnly,
+        commands,
+    );
+    let app_default = state.app_settings().zoom_sensitivity;
+
+    state.set_device_zoom_sensitivity("mouse-a", ThumbwheelSensitivity::MAX);
+    assert_eq!(
+        state.device_zoom_sensitivity("mouse-a"),
+        ThumbwheelSensitivity::MAX
+    );
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(crate::services::ipc::Command::ReloadConfig)
+    ));
+
+    // Re-committing the same value stores nothing new and must not wake the agent.
+    state.set_device_zoom_sensitivity("mouse-a", ThumbwheelSensitivity::MAX);
+    assert!(receiver.try_recv().is_err());
+
+    state.set_device_zoom_sensitivity("mouse-a", app_default);
+    assert_eq!(state.device_zoom_sensitivity("mouse-a"), app_default);
+    assert!(
+        state
+            .config
+            .devices
+            .get("mouse-a")
+            .and_then(|d| d.zoom_sensitivity)
+            .is_none(),
+        "landing on the app default must clear the override, not store it"
+    );
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(crate::services::ipc::Command::ReloadConfig)
+    ));
+}
+
+/// Zoom and scroll speed are separate sliders on the same panel; moving one
+/// must not drag the other along.
+#[test]
+fn the_zoom_slider_does_not_move_the_scroll_slider() {
+    let cache = AssetResolver::new();
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::with_runtime(
+        Config::ephemeral(),
+        &[],
+        &[],
+        &cache,
+        &[],
+        ConfigPersistence::MemoryOnly,
+        commands,
+    );
+
+    state.set_device_zoom_sensitivity("mouse-a", ThumbwheelSensitivity::MAX);
+
+    assert_eq!(
+        state.device_zoom_sensitivity("mouse-a"),
+        ThumbwheelSensitivity::MAX
+    );
+    assert_eq!(
+        state.device_thumbwheel_sensitivity("mouse-a"),
+        ThumbwheelSensitivity::DEFAULT,
+        "the zoom slider must leave scroll sensitivity where it was"
+    );
+}
+
+/// The General page's zoom slider writes the app-wide default, which every
+/// device without its own override follows. Without this setter the setting
+/// existed in the config file but nothing in the UI could reach it.
+#[test]
+fn the_app_wide_zoom_default_applies_to_devices_without_an_override() {
+    let cache = AssetResolver::new();
+    let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::with_runtime(
+        Config::ephemeral(),
+        &[],
+        &[],
+        &cache,
+        &[],
+        ConfigPersistence::MemoryOnly,
+        commands,
+    );
+
+    state.set_zoom_sensitivity(ThumbwheelSensitivity::MAX);
+
+    assert_eq!(
+        state.app_settings().zoom_sensitivity,
+        ThumbwheelSensitivity::MAX
+    );
+    assert_eq!(
+        state.device_zoom_sensitivity("mouse-a"),
+        ThumbwheelSensitivity::MAX,
+        "a device with no override follows the app-wide zoom default"
+    );
+    assert_eq!(
+        state.app_settings().thumbwheel_sensitivity,
+        ThumbwheelSensitivity::DEFAULT,
+        "the zoom default must not move scroll sensitivity"
+    );
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(crate::services::ipc::Command::ReloadConfig)
+    ));
+
+    state.set_zoom_sensitivity(ThumbwheelSensitivity::MAX);
+    assert!(
+        receiver.try_recv().is_err(),
+        "an unchanged value is a no-op"
+    );
+}

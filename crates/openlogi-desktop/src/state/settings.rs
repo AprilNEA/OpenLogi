@@ -236,6 +236,33 @@ impl AppState {
         self.persist_and_reload("device thumbwheel sensitivity");
     }
 
+    /// The effective zoom sensitivity for `key` (its per-device override, else
+    /// the app-wide default).
+    #[must_use]
+    pub fn device_zoom_sensitivity(&self, key: &str) -> ThumbwheelSensitivity {
+        self.config.zoom_sensitivity(key)
+    }
+
+    /// Set `key`'s per-device zoom sensitivity override and persist it.
+    /// Committing the app-wide default *clears* the override, the same
+    /// "no override" gesture [`Self::set_device_thumbwheel_sensitivity`] uses.
+    pub fn set_device_zoom_sensitivity(&mut self, key: &str, sensitivity: ThumbwheelSensitivity) {
+        let override_value =
+            (sensitivity != self.config.app_settings.zoom_sensitivity).then_some(sensitivity);
+        let stored = self
+            .config
+            .devices
+            .get(key)
+            .and_then(|d| d.zoom_sensitivity);
+        if stored == override_value {
+            return;
+        }
+        self.config.edit(|config| {
+            config.set_device_zoom_sensitivity(key, override_value);
+        });
+        self.persist_and_reload("device zoom sensitivity");
+    }
+
     /// Set the app-wide default thumb-wheel sensitivity and persist it —
     /// devices without a per-device override follow it
     /// through the reloaded capture plans. No-op when unchanged. Disk failures
@@ -247,6 +274,21 @@ impl AppState {
         self.config
             .edit(|config| config.app_settings.thumbwheel_sensitivity = sensitivity);
         self.persist_and_reload("thumbwheel sensitivity");
+    }
+
+    /// Set the app-wide default zoom sensitivity and persist it — devices
+    /// without a per-device override follow it through the reloaded capture
+    /// plans. Separate from [`Self::set_thumbwheel_sensitivity`] because
+    /// comfortable scrolling and comfortable zooming are not the same number
+    /// of wheel degrees per unit. No-op when unchanged. Disk failures restore
+    /// the persisted value and surface a configuration error.
+    pub fn set_zoom_sensitivity(&mut self, sensitivity: ThumbwheelSensitivity) {
+        if self.config.app_settings.zoom_sensitivity == sensitivity {
+            return;
+        }
+        self.config
+            .edit(|config| config.app_settings.zoom_sensitivity = sensitivity);
+        self.persist_and_reload("zoom sensitivity");
     }
     /// Toggle finite animation for traditional mouse-wheel input and persist
     /// it. The agent publishes the change to the scroll worker on config

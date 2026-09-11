@@ -246,6 +246,10 @@ pub struct DeviceConfig {
     /// [`AppSettings::thumbwheel_sensitivity`](crate::config::AppSettings::thumbwheel_sensitivity).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thumbwheel_sensitivity: Option<ThumbwheelSensitivity>,
+    /// Per-device zoom sensitivity override. `None` falls back to the app-wide
+    /// [`AppSettings::zoom_sensitivity`](crate::config::AppSettings::zoom_sensitivity).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zoom_sensitivity: Option<ThumbwheelSensitivity>,
     /// Invert this device's scroll-wheel direction relative to the OS setting
     /// (issue #126): on, a wheel tick scrolls the opposite way, so a user who
     /// keeps macOS "natural scrolling" for the trackpad can have a traditional
@@ -366,6 +370,7 @@ impl Default for DeviceConfig {
             camera_profiles: BTreeMap::new(),
             camera_profile: None,
             thumbwheel_sensitivity: None,
+            zoom_sensitivity: None,
             invert_scroll: false,
             scroll_resolution: None,
             host_switch_targets: Vec::new(),
@@ -482,6 +487,7 @@ struct RawDeviceConfig {
     camera_profile: Option<String>,
     #[serde(default)]
     thumbwheel_sensitivity: Option<ThumbwheelSensitivity>,
+    zoom_sensitivity: Option<ThumbwheelSensitivity>,
     #[serde(default)]
     invert_scroll: bool,
     #[serde(default)]
@@ -546,6 +552,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             camera_profiles: raw.camera_profiles,
             camera_profile: raw.camera_profile,
             thumbwheel_sensitivity: raw.thumbwheel_sensitivity,
+            zoom_sensitivity: raw.zoom_sensitivity,
             invert_scroll: raw.invert_scroll,
             scroll_resolution: raw.scroll_resolution,
             host_switch_targets: raw.host_switch_targets,

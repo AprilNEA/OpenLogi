@@ -94,6 +94,8 @@ const ACTION_ICONS: &[(&str, &[u8])] = &[
     ("action-icons/volume-2.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/volume-2.svg"))),
     ("action-icons/volume-x.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/volume-x.svg"))),
     ("action-icons/x.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/x.svg"))),
+    ("action-icons/zoom-in.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/zoom-in.svg"))),
+    ("action-icons/zoom-out.svg", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/action-icons/zoom-out.svg"))),
 ];
 
 /// The Actions Ring's centre cancel mark. Both processes draw that target —

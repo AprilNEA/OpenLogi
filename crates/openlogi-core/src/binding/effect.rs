@@ -50,6 +50,14 @@ pub enum Effect<'a> {
         /// Vertical direction: -1 down, 1 up, 0 none.
         dy: i8,
     },
+    /// Synthesise one zoom step in the frontmost application.
+    ///
+    /// Mechanically this is a scroll tick held under the platform's zoom
+    /// modifier (⌘ on macOS, Ctrl on Windows and Linux) — the gesture apps
+    /// already read as continuous zoom — so it is its own effect rather than
+    /// an [`Effect::Scroll`] a backend would have to special-case, and rather
+    /// than an [`Effect::Shortcut`] whose chord only works in document apps.
+    Zoom(ZoomDirection),
     /// Fire a media/volume key. Every backend reaches these through a
     /// dedicated OS mechanism rather than an ordinary keyboard chord.
     Media(MediaKey),
@@ -165,6 +173,15 @@ pub enum MediaKey {
     Mute,
 }
 
+/// Which way an [`Effect::Zoom`] step goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ZoomDirection {
+    /// Magnify: scroll up under the zoom modifier.
+    In,
+    /// Shrink: scroll down under the zoom modifier.
+    Out,
+}
+
 /// A window-manager or power action with no shared cross-platform chord.
 ///
 /// Each backend reaches it through its own dedicated OS API — or, where the
@@ -272,6 +289,9 @@ impl Action {
             Action::ScrollDown => Effect::Scroll { dx: 0, dy: -1 },
             Action::HorizontalScrollLeft => Effect::Scroll { dx: -1, dy: 0 },
             Action::HorizontalScrollRight => Effect::Scroll { dx: 1, dy: 0 },
+
+            Action::ZoomIn => Effect::Zoom(ZoomDirection::In),
+            Action::ZoomOut => Effect::Zoom(ZoomDirection::Out),
 
             Action::CustomShortcut(combo) => Effect::Key(combo),
             Action::HoldShortcut(combo) => Effect::HeldKey(combo),

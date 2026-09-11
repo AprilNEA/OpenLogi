@@ -12,9 +12,11 @@ use crate::platform::registration::ServiceStatus;
 
 /// The page's two sensitivity sliders, named so a call site cannot swap two
 /// same-typed `Entity<SliderState>`s without the compiler noticing.
+#[derive(Clone)]
 pub(super) struct SensitivitySliders {
     pub(super) vertical_scroll: Entity<SliderState>,
     pub(super) thumbwheel: Entity<SliderState>,
+    pub(super) zoom: Entity<SliderState>,
 }
 
 pub(super) fn general_page(
@@ -24,6 +26,7 @@ pub(super) fn general_page(
     let SensitivitySliders {
         vertical_scroll,
         thumbwheel,
+        zoom,
     } = sliders;
     let group = SettingGroup::new()
         .item(smooth_scrolling_item())
@@ -42,6 +45,13 @@ pub(super) fn general_page(
                 SettingField::render(move |_, _, cx| thumbwheel_sensitivity_field(&thumbwheel, cx)),
             )
             .description(tr!("pointer.thumbwheel_sensitivity_description")),
+        )
+        .item(
+            SettingItem::new(
+                tr!("pointer.zoom_sensitivity"),
+                SettingField::render(move |_, _, cx| zoom_sensitivity_field(&zoom, cx)),
+            )
+            .description(tr!("pointer.zoom_sensitivity_description")),
         )
         .item(launch_at_login_item());
 
@@ -106,6 +116,16 @@ fn smooth_scrolling_item() -> SettingItem {
 }
 
 fn thumbwheel_sensitivity_field(slider: &Entity<SliderState>, cx: &mut App) -> gpui::Div {
+    let value = ThumbwheelSensitivity::from_rounded(slider.read(cx).value().start());
+    sensitivity_field(
+        slider,
+        value.to_string(),
+        value == ThumbwheelSensitivity::DEFAULT,
+        cx,
+    )
+}
+
+fn zoom_sensitivity_field(slider: &Entity<SliderState>, cx: &mut App) -> gpui::Div {
     let value = ThumbwheelSensitivity::from_rounded(slider.read(cx).value().start());
     sensitivity_field(
         slider,
