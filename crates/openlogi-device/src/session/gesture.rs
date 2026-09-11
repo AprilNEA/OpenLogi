@@ -216,9 +216,15 @@ pub struct CaptureSpec {
     /// [`GESTURE_SOURCE_BUTTONS`] whose binding leaves the default.
     pub divert_buttons: Vec<(u16, ButtonId)>,
     /// Extra buttons captured through `0x8110` spy events. Non-empty only for
-    /// models with a locked spy map (G502 X Plus). One customized sibling
-    /// arms all four: Host mode pauses onboard profiles for the session.
+    /// models with a locked spy map (see `openlogi_core::binding::SPY_MODELS`).
+    /// One customized extra arms the whole extra cluster; remapped G4/G5 join
+    /// when the model lists them as spy-owned. Host mode pauses onboard
+    /// profiles for the session.
     pub spy_buttons: Vec<ButtonId>,
+    /// HID++ model id whose bit table `spy_buttons` came from (`04099`).
+    /// `None` when `spy_buttons` is empty. Required so two cousins can share
+    /// [`ButtonId`]s with different masks.
+    pub spy_model_key: Option<String>,
 }
 
 /// Capture the controls selected by `spec` on `route` until `shutdown`
@@ -412,6 +418,7 @@ fn listen_captured_reports(
         .as_ref()
         .map_or(&[][..], spy::ArmedSpy::buttons)
         .to_vec();
+    let spy_bits = armed.spy.as_ref().map_or(&[][..], spy::ArmedSpy::bits);
     chan.add_msg_listener_guarded(move |raw, matched| {
         // Every parsed inbound HID++ report proves this channel's read
         // path is alive, including responses matched to another request.
@@ -448,7 +455,7 @@ fn listen_captured_reports(
             && let Some(mask) = spy::decode_event(&msg, device_index, idx)
         {
             let mut acc = accum.lock().unwrap_or_else(PoisonError::into_inner);
-            for (button, down) in spy::spy_edges(acc.spy_mask, mask, &spy_buttons) {
+            for (button, down) in spy::spy_edges(acc.spy_mask, mask, &spy_buttons, spy_bits) {
                 let input = if down {
                     CapturedInput::ButtonDown(button)
                 } else {

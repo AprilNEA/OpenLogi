@@ -12,7 +12,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use openlogi_core::binding::{Action, Binding, ButtonId, GestureDirection, default_binding};
-use openlogi_core::bindings::{button_bindings_for, hidpp_gesture_maps_for, oshook_gestures_for};
+use openlogi_core::bindings::{
+    button_bindings_for, hidpp_gesture_maps_for, oshook_gestures_for, spy_model_for_device,
+};
 use openlogi_core::config::{Config, ThumbwheelSensitivity};
 use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_hid::DeviceRoute;
@@ -116,6 +118,13 @@ pub fn plan_for_device(
     // gesture at once, each armed with its own raw-XY divert (the capture
     // target below derives the CIDs to divert from this map's keys).
     let gesture_bindings = hidpp_gesture_maps_for(config, Some(config_key));
+    let spy_model = spy_model_for_device(config, config_key);
+    let spy_buttons = spy_model
+        .map(|model| model.armed_buttons(&bindings))
+        .unwrap_or_default();
+    let spy_model_key = spy_model
+        .filter(|_| !spy_buttons.is_empty())
+        .map(|model| model.config_key.to_string());
     let divert_gesture_buttons = if os_mouse_hook_available {
         DIVERTABLE_STANDARD_BUTTONS
             .into_iter()
@@ -141,6 +150,7 @@ pub fn plan_for_device(
             config.app_settings.capture_mouse_events || !button.is_os_hook_button()
         })
         .filter(|(_, button)| !oshook.contains_key(button))
+        .filter(|(_, button)| !spy_buttons.contains(button))
         .filter(|(_, button)| {
             bindings.get(button).is_some_and(|binding| {
                 if matches!(binding, Binding::LongPress(_)) {
@@ -184,7 +194,8 @@ pub fn plan_for_device(
                     .collect(),
                 divert_gesture_buttons,
                 divert_buttons,
-                spy_buttons: spy_buttons_for(config_key, &bindings),
+                spy_buttons,
+                spy_model_key,
             },
             rearm_generation,
         },
@@ -195,25 +206,6 @@ pub fn plan_for_device(
             side_gesture_bindings,
             thumbwheel_sensitivity,
         },
-    }
-}
-
-/// Arm every G6–G9 spy ID when any of them leaves `Action::None`. Host mode
-/// pauses onboard profiles for the whole extra-button cluster, so one bound
-/// sibling takes over the rest for the session. G4/G5 stay out of this list.
-fn spy_buttons_for(config_key: &str, bindings: &BTreeMap<ButtonId, Binding>) -> Vec<ButtonId> {
-    let Some(buttons) = ButtonId::spy_buttons_for_config_key(config_key) else {
-        return Vec::new();
-    };
-    let customized = buttons.iter().any(|button| {
-        bindings
-            .get(button)
-            .is_some_and(|binding| binding.click_action() != Action::None)
-    });
-    if customized {
-        buttons.to_vec()
-    } else {
-        Vec::new()
     }
 }
 
@@ -651,13 +643,113 @@ mod tests {
             ButtonId::SPY_BUTTONS.to_vec(),
             "Host mode takes over the whole extra-button cluster"
         );
+        assert_eq!(
+            plan.target.spec.spy_model_key.as_deref(),
+            Some("04099"),
+            "bit tables are keyed by the HID++ model id, not the settings key"
+        );
         assert!(
             !plan.target.spec.spy_buttons.contains(&ButtonId::Back)
                 && !plan.target.spec.spy_buttons.contains(&ButtonId::Forward),
-            "G4/G5 must stay on the OS hook"
+            "unbound G4/G5 stay firmware-native"
         );
 
         let untouched = plan_for_device(&cfg, "2b042", route(), None, 0, true);
         assert!(untouched.target.spec.spy_buttons.is_empty());
+    }
+
+    #[test]
+    fn g502_unit_key_still_arms_spy_from_persisted_identity() {
+        use openlogi_core::config::DeviceIdentity;
+        use openlogi_core::device::{Capabilities, DeviceKind, DeviceModelInfo, DeviceTransports};
+
+        let mut cfg = Config::default();
+        cfg.set_device_identity(
+            "unit:75c69495",
+            DeviceIdentity {
+                display_name: "G502 X Plus".into(),
+                model_info: Some(DeviceModelInfo {
+                    entity_count: 12,
+                    serial_number: None,
+                    unit_id: [0; 4],
+                    transports: DeviceTransports {
+                        usb: true,
+                        equad: true,
+                        ..DeviceTransports::default()
+                    },
+                    model_ids: [0x4099, 0xc095, 0],
+                    extended_model_id: 0,
+                }),
+                codename: Some("G502 X PLUS".into()),
+                kind: DeviceKind::Mouse,
+                capabilities: Capabilities {
+                    buttons: true,
+                    ..Capabilities::default()
+                },
+                light_capabilities: None,
+                driver_id: None,
+                registry_model_id: None,
+            },
+        );
+        cfg.set_binding(
+            "unit:75c69495",
+            ButtonId::DpiUp,
+            Binding::Single(Action::MissionControl),
+        );
+
+        let plan = plan_for_device(&cfg, "unit:75c69495", route(), None, 0, true);
+        assert_eq!(
+            plan.target.spec.spy_buttons,
+            ButtonId::SPY_BUTTONS.to_vec(),
+            "a persisted HID++ model id must arm Host mode under the unit key"
+        );
+        assert_eq!(plan.target.spec.spy_model_key.as_deref(), Some("04099"));
+    }
+
+    #[test]
+    fn remapped_g502_side_buttons_are_spy_owned() {
+        let mut cfg = Config::default();
+        cfg.set_binding(
+            "04099",
+            ButtonId::Back,
+            Binding::Single(Action::PreviousDesktop),
+        );
+        cfg.set_binding(
+            "04099",
+            ButtonId::Forward,
+            Binding::Single(Action::NextDesktop),
+        );
+
+        let plan = plan_for_device(&cfg, "04099", route(), None, 0, true);
+        assert_eq!(
+            plan.target.spec.spy_buttons,
+            vec![ButtonId::Back, ButtonId::Forward],
+            "no 0x1b04: remapped G4/G5 must enter Host mode"
+        );
+        assert!(
+            !plan
+                .target
+                .spec
+                .divert_buttons
+                .iter()
+                .any(|&(_, button)| button.is_os_hook_button()),
+            "spy-owned side buttons must not also request a 0x1b04 divert"
+        );
+
+        cfg.set_binding(
+            "2b042",
+            ButtonId::Back,
+            Binding::Single(Action::PreviousDesktop),
+        );
+        let mx = plan_for_device(&cfg, "2b042", route(), None, 0, true);
+        assert!(mx.target.spec.spy_buttons.is_empty());
+        assert!(
+            mx.target
+                .spec
+                .divert_buttons
+                .iter()
+                .any(|&(_, button)| button == ButtonId::Back),
+            "MX Back still uses ReprogControls"
+        );
     }
 }

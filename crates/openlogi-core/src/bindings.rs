@@ -7,9 +7,35 @@
 use std::collections::BTreeMap;
 
 use crate::binding::{
-    Action, Binding, ButtonId, GestureDirection, default_binding, default_binding_for,
+    Action, Binding, ButtonId, GestureDirection, SpyModel, default_binding, default_binding_for,
 };
 use crate::config::Config;
+
+/// The locked [`SpyModel`] for this device, if it is a known `0x8110` model.
+///
+/// Schema 5 keys settings by unit/route (`unit:75c69495`), while the registry
+/// is the HID++ model id (`04099`). Accept either: a bare model key (tests,
+/// asset lookup) or a persisted identity that reports that model.
+#[must_use]
+pub fn spy_model_for_device(config: &Config, device_key: &str) -> Option<&'static SpyModel> {
+    SpyModel::for_hidpp_key(device_key).or_else(|| {
+        config
+            .devices
+            .get(device_key)
+            .and_then(|device| device.identity.as_ref())
+            .and_then(|identity| identity.model_info.as_ref())
+            .and_then(|model| SpyModel::for_hidpp_key(&model.config_key()))
+    })
+}
+
+/// Extra spy-remappable buttons for this device (G6–G9 on the G502 X Plus).
+///
+/// Does not include remapped G4/G5 — those join the armed set through
+/// [`SpyModel::armed_buttons`].
+#[must_use]
+pub fn spy_buttons_for_device(config: &Config, device_key: &str) -> Option<&'static [ButtonId]> {
+    spy_model_for_device(config, device_key).map(|model| model.extra_buttons)
+}
 
 /// Effective per-button single-action map for the device `config_key`, with
 /// `app_bundle`'s per-app overlay applied. Unset buttons fall back to
@@ -51,7 +77,7 @@ pub fn button_bindings_for(
         .copied()
         .map(|button| (button, Binding::Single(default_binding(button))))
         .collect();
-    if let Some(spy) = config_key.and_then(ButtonId::spy_buttons_for_config_key) {
+    if let Some(spy) = config_key.and_then(|key| spy_buttons_for_device(config, key)) {
         for button in spy {
             bindings
                 .entry(*button)
@@ -168,6 +194,49 @@ mod tests {
             assert!(
                 !mx.contains_key(&button),
                 "{button:?} must not appear on MX defaults"
+            );
+        }
+    }
+
+    #[test]
+    fn g502_unit_key_seeds_spy_buttons_from_persisted_identity() {
+        use crate::config::DeviceIdentity;
+        use crate::device::{Capabilities, DeviceKind, DeviceModelInfo, DeviceTransports};
+
+        let mut cfg = Config::default();
+        cfg.set_device_identity(
+            "unit:75c69495",
+            DeviceIdentity {
+                display_name: "G502 X Plus".into(),
+                model_info: Some(DeviceModelInfo {
+                    entity_count: 12,
+                    serial_number: None,
+                    unit_id: [0; 4],
+                    transports: DeviceTransports {
+                        usb: true,
+                        equad: true,
+                        ..DeviceTransports::default()
+                    },
+                    model_ids: [0x4099, 0xc095, 0],
+                    extended_model_id: 0,
+                }),
+                codename: Some("G502 X PLUS".into()),
+                kind: DeviceKind::Mouse,
+                capabilities: Capabilities {
+                    buttons: true,
+                    ..Capabilities::default()
+                },
+                light_capabilities: None,
+                driver_id: None,
+                registry_model_id: None,
+            },
+        );
+        let g502 = button_bindings_for(&cfg, Some("unit:75c69495"), None);
+        for button in ButtonId::SPY_BUTTONS {
+            assert_eq!(
+                g502.get(&button),
+                Some(&Binding::Single(Action::None)),
+                "{button:?} must seed from the persisted HID++ model id"
             );
         }
     }

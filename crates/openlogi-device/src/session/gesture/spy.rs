@@ -1,10 +1,16 @@
-//! G502 X Plus `0x8110` spy capture: Host-mode mapping suppress and mask-diff.
+//! `0x8110` spy capture: Host-mode mapping suppress and mask-diff.
 //!
-//! Bit assignments are locked from a live `diag mouse-buttons --watch` on
-//! this G502 X Plus (`config_key` `04099`). Other G-series maps are not
-//! invented here. Function semantics are reverse-engineered from public
-//! cvuchener `IMouseButtonSpy` / `IOnboardProfiles` descriptions; this file
-//! does not copy GPL code.
+//! Bit tables are keyed by the same HID++ model id as
+//! `openlogi_core::binding::SPY_MODELS`. The G502 X Plus row (`04099`) is
+//! locked from a live `diag mouse-buttons --watch`. Do not copy it onto a
+//! cousin. Function semantics are reverse-engineered from public cvuchener
+//! `IMouseButtonSpy` / `IOnboardProfiles` descriptions; this file does not
+//! copy GPL code.
+//!
+//! Adding a model: dump bits, add a [`SPY_BIT_TABLES`] row with that key, and
+//! add the matching [`openlogi_core::binding::SpyModel`]. G4/G5 belong in the
+//! bit table when the mouse has no `0x1b04` — remaps then suppress those
+//! mapping slots so the OS stops seeing hardware Back/Forward.
 
 use std::sync::Arc;
 
@@ -18,7 +24,7 @@ use hidpp::{
     },
     protocol::v20,
 };
-use openlogi_core::binding::ButtonId;
+use openlogi_core::binding::{ButtonId, G502_X_PLUS_CONFIG_KEY};
 use tracing::{debug, warn};
 
 use super::{CaptureSpec, GestureError};
@@ -26,13 +32,28 @@ use crate::session::capture_restore::restore_result;
 
 /// Locked `0x8110` bit → [`ButtonId`] map for the G502 X Plus.
 ///
-/// G4/G5 (bits 3 and 5) are OS-hook only and are never listed here.
-const G502_X_PLUS_SPY_BITS: [(u8, ButtonId); 4] = [
+/// G4/G5 (bits 3 and 5) are suppressed only when those buttons are in the
+/// armed set — unbound they stay firmware-native.
+const G502_X_PLUS_SPY_BITS: [(u8, ButtonId); 6] = [
+    (3, ButtonId::Back),
     (4, ButtonId::DpiShift),
+    (5, ButtonId::Forward),
     (10, ButtonId::DpiDown),
     (9, ButtonId::DpiUp),
     (8, ButtonId::ProfileCycle),
 ];
+
+/// Same HID++ keys as `openlogi_core::binding::SPY_MODELS`. Bits are
+/// per-model; two cousins can share [`ButtonId`]s with different masks.
+const SPY_BIT_TABLES: &[(&str, &[(u8, ButtonId)])] =
+    &[(G502_X_PLUS_CONFIG_KEY, &G502_X_PLUS_SPY_BITS)];
+
+fn spy_bits_for_model(key: &str) -> &'static [(u8, ButtonId)] {
+    SPY_BIT_TABLES
+        .iter()
+        .find(|(model, _)| *model == key)
+        .map_or(&[], |(_, bits)| *bits)
+}
 
 /// Decode an unsolicited `0x8110` spy event on this session's channel.
 ///
@@ -52,26 +73,35 @@ pub fn decode_event(msg: &v20::Message, device_index: u8, feature_index: u8) -> 
     Some(u16::from_be_bytes([p[0], p[1]]))
 }
 
-/// Rising and falling edges between two spy masks, in declaration order.
+/// Rising and falling edges between two spy masks, in table order.
 #[must_use]
-pub fn spy_edges(previous: u16, next: u16, buttons: &[ButtonId]) -> Vec<(ButtonId, bool)> {
+pub fn spy_edges(
+    previous: u16,
+    next: u16,
+    buttons: &[ButtonId],
+    bits: &[(u8, ButtonId)],
+) -> Vec<(ButtonId, bool)> {
     let changed = previous ^ next;
-    G502_X_PLUS_SPY_BITS
-        .into_iter()
+    bits.iter()
+        .copied()
         .filter(|(bit, button)| changed & (1 << bit) != 0 && buttons.contains(button))
         .map(|(bit, button)| (button, next & (1 << bit) != 0))
         .collect()
 }
 
-/// Zero the HID mapping slots that belong to `buttons`, leaving G1–G5 alone.
+/// Zero the HID mapping slots that belong to `buttons`.
 #[must_use]
-pub fn suppress_spy_slots(mapping: &[u8], buttons: &[ButtonId]) -> Vec<u8> {
+pub fn suppress_spy_slots(
+    mapping: &[u8],
+    buttons: &[ButtonId],
+    bits: &[(u8, ButtonId)],
+) -> Vec<u8> {
     let mut out = mapping.to_vec();
-    for (bit, button) in G502_X_PLUS_SPY_BITS {
-        if !buttons.contains(&button) {
+    for (bit, button) in bits {
+        if !buttons.contains(button) {
             continue;
         }
-        if let Some(slot) = out.get_mut(usize::from(bit)) {
+        if let Some(slot) = out.get_mut(usize::from(*bit)) {
             *slot = 0;
         }
     }
@@ -87,6 +117,7 @@ pub(super) struct ArmedSpy {
     original_mapping: Vec<u8>,
     original_mode: Option<OnboardProfilesMode>,
     buttons: Vec<ButtonId>,
+    bits: &'static [(u8, ButtonId)],
     spy_started: bool,
     released: bool,
 }
@@ -162,6 +193,10 @@ impl ArmedSpy {
             None => None,
         };
 
+        let bits = spec
+            .spy_model_key
+            .as_deref()
+            .map_or(&[][..], spy_bits_for_model);
         let armed = Self {
             filter,
             filter_index,
@@ -170,6 +205,7 @@ impl ArmedSpy {
             original_mapping: original_mapping.clone(),
             original_mode,
             buttons: spec.spy_buttons.clone(),
+            bits,
             spy_started: false,
             released: false,
         };
@@ -183,7 +219,7 @@ impl ArmedSpy {
                 .map_err(|error| GestureError::Hidpp(format!("{error:?}")))?;
         }
 
-        let suppressed = suppress_spy_slots(&original_mapping, &spec.spy_buttons);
+        let suppressed = suppress_spy_slots(&original_mapping, &spec.spy_buttons, bits);
         if suppressed != original_mapping {
             armed
                 .filter
@@ -200,6 +236,10 @@ impl ArmedSpy {
 
     pub(super) fn buttons(&self) -> &[ButtonId] {
         &self.buttons
+    }
+
+    pub(super) fn bits(&self) -> &'static [(u8, ButtonId)] {
+        self.bits
     }
 
     /// Start the spy after the session listener owns inbound reports.
@@ -219,7 +259,7 @@ impl ArmedSpy {
         {
             warn!(?error, "Host mode re-arm after wake failed");
         }
-        let suppressed = suppress_spy_slots(&self.original_mapping, &self.buttons);
+        let suppressed = suppress_spy_slots(&self.original_mapping, &self.buttons, self.bits);
         if let Err(error) = self.filter.set_mouse_button_mapping(&suppressed).await {
             warn!(?error, "spy mapping re-arm after wake failed");
         }
@@ -330,30 +370,40 @@ mod tests {
     #[test]
     fn edges_report_g8_down_then_up() {
         let buttons = ButtonId::SPY_BUTTONS;
-        let down = spy_edges(0, 0x0200, &buttons);
+        let down = spy_edges(0, 0x0200, &buttons, &G502_X_PLUS_SPY_BITS);
         assert_eq!(down, [(ButtonId::DpiUp, true)]);
-        let up = spy_edges(0x0200, 0, &buttons);
+        let up = spy_edges(0x0200, 0, &buttons, &G502_X_PLUS_SPY_BITS);
         assert_eq!(up, [(ButtonId::DpiUp, false)]);
     }
 
     #[test]
-    fn edges_ignore_g4_and_g5_bits() {
-        // bit 3 = G4 Back, bit 5 = G5 Forward — OS hook only.
-        let edges = spy_edges(0, 0x0008 | 0x0020, &ButtonId::SPY_BUTTONS);
-        assert!(edges.is_empty());
+    fn edges_ignore_g4_and_g5_unless_those_buttons_are_armed() {
+        let extras_only = spy_edges(
+            0,
+            0x0008 | 0x0020,
+            &ButtonId::SPY_BUTTONS,
+            &G502_X_PLUS_SPY_BITS,
+        );
+        assert!(extras_only.is_empty());
+        let with_back = spy_edges(0, 0x0008, &[ButtonId::Back], &G502_X_PLUS_SPY_BITS);
+        assert_eq!(with_back, [(ButtonId::Back, true)]);
     }
 
     #[test]
-    fn suppress_zeros_only_g6_through_g9() {
+    fn suppress_zeros_only_armed_slots() {
         let mapping: Vec<u8> = (1..=11).collect();
-        let suppressed = suppress_spy_slots(&mapping, &ButtonId::SPY_BUTTONS);
-        assert_eq!(&suppressed[..4], &[1, 2, 3, 4]);
-        assert_eq!(suppressed[4], 0);
-        assert_eq!(suppressed[5], 6);
-        assert_eq!(suppressed[6], 7);
-        assert_eq!(suppressed[7], 8);
-        assert_eq!(suppressed[8], 0);
-        assert_eq!(suppressed[9], 0);
-        assert_eq!(suppressed[10], 0);
+        let extras = suppress_spy_slots(&mapping, &ButtonId::SPY_BUTTONS, &G502_X_PLUS_SPY_BITS);
+        assert_eq!(&extras[..4], &[1, 2, 3, 4]);
+        assert_eq!(extras[4], 0);
+        assert_eq!(extras[5], 6);
+        assert_eq!(extras[6], 7);
+        assert_eq!(extras[7], 8);
+        assert_eq!(extras[8], 0);
+        assert_eq!(extras[9], 0);
+        assert_eq!(extras[10], 0);
+
+        let with_back = suppress_spy_slots(&mapping, &[ButtonId::Back], &G502_X_PLUS_SPY_BITS);
+        assert_eq!(with_back[3], 0);
+        assert_eq!(with_back[5], 6);
     }
 }

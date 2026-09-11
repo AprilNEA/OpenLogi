@@ -117,7 +117,8 @@ impl ButtonId {
     /// Extra G502 X Plus buttons captured through `0x8110` Mouse Button Spy.
     /// Kept out of [`ButtonId::ALL`] so MX-line popovers and default seeding
     /// stay unchanged. [`crate::bindings::button_bindings_for`] seeds these
-    /// only when the device `config_key` is [`G502_X_PLUS_CONFIG_KEY`].
+    /// only for a [`super::SpyModel`] row — today [`G502_X_PLUS_CONFIG_KEY`],
+    /// either passed directly or recovered from the device's persisted identity.
     pub const SPY_BUTTONS: [ButtonId; 4] = [
         ButtonId::DpiShift,
         ButtonId::DpiUp,
@@ -125,12 +126,13 @@ impl ButtonId {
         ButtonId::ProfileCycle,
     ];
 
-    /// Spy-remappable buttons for `config_key`, if this model has a locked
-    /// `0x8110` map. Only the G502 X Plus is listed; other G-series maps are
-    /// not invented here.
+    /// Extra spy-remappable buttons for this HID++ model id, if it has a
+    /// locked [`super::SpyModel`] row. Used by the GUI to decide whether DPI
+    /// Up/Down and the other extras exist — MX and undocumented cousins get
+    /// [`None`].
     #[must_use]
     pub fn spy_buttons_for_config_key(key: &str) -> Option<&'static [ButtonId]> {
-        (key == G502_X_PLUS_CONFIG_KEY).then_some(Self::SPY_BUTTONS.as_slice())
+        super::spy::SpyModel::for_hidpp_key(key).map(|model| model.extra_buttons)
     }
 
     /// The divertable keyboard F-row controls, in F-row order. Kept out of
