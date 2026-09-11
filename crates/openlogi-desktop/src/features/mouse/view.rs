@@ -17,7 +17,7 @@ use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding
 
 use super::geometry::{
     LABEL_H, LabelDistribution, asset_dimensions_for_png, asset_has_button_labels,
-    asset_hotspots_for_png, default_labels, labels_from_hotspots,
+    asset_hotspots_for_png, labels_from_hotspots,
 };
 use super::hotspots::{Hotspot, MOUSE_MODEL_SIZE, MouseControlId, default_hotspots};
 use super::inspector::{BindingInspectorData, binding_inspector};
@@ -268,7 +268,7 @@ impl Render for MouseModelView {
             mouse_h,
             hotspots,
             labels,
-        } = model_layout(asset, viewport_w, viewport_h, thumbwheel);
+        } = model_layout(asset, viewport_w, viewport_h, thumbwheel, device_key);
         let canvas_h = mouse_h;
 
         let highlight = self.hovered.or(active).or(self.selected);
@@ -384,6 +384,7 @@ fn model_layout(
     viewport_w: f32,
     viewport_h: f32,
     thumbwheel: bool,
+    config_key: Option<&str>,
 ) -> ModelLayout {
     let target_h = (viewport_h - MODEL_VERTICAL_RESERVE).clamp(MODEL_MIN_H, MOUSE_MODEL_SIZE.1);
     let has_labels = asset.is_none_or(asset_has_button_labels) && viewport_w >= 960.;
@@ -401,8 +402,14 @@ fn model_layout(
         0.
     };
     let max_image_w = (content_w - left_gutter - right_gutter).max(MODEL_MIN_CONTENT_W / 2.);
-    let (mouse_w, mouse_h, hotspots, mut labels) =
-        scaled_model(asset, target_h, max_image_w, thumbwheel, label_distribution);
+    let (mouse_w, mouse_h, hotspots, mut labels) = scaled_model(
+        asset,
+        target_h,
+        max_image_w,
+        thumbwheel,
+        label_distribution,
+        config_key,
+    );
     if !has_labels {
         labels.clear();
     }
@@ -427,15 +434,21 @@ fn scaled_model(
     max_w: f32,
     thumbwheel: bool,
     label_distribution: LabelDistribution,
+    config_key: Option<&str>,
 ) -> (f32, f32, Vec<Hotspot>, Vec<Label>) {
     if let Some(a) = asset {
         let (w, h) = asset_dimensions_for_png(a, target_h, max_w);
-        let hotspots = asset_hotspots_for_png(a, w, h);
+        let mut hotspots = asset_hotspots_for_png(a, w, h);
+        crate::features::mouse::hotspots::merge_spy_hotspots(
+            &mut hotspots,
+            config_key,
+            (w / MOUSE_MODEL_SIZE.0, h / MOUSE_MODEL_SIZE.1),
+        );
         let labels = labels_from_hotspots(&hotspots, h, label_distribution);
         (w, h, hotspots, labels)
     } else {
         let scale = (target_h / MOUSE_MODEL_SIZE.1).min(max_w / MOUSE_MODEL_SIZE.0);
-        let hotspots = default_hotspots(thumbwheel)
+        let mut hotspots = default_hotspots(thumbwheel)
             .into_iter()
             .map(|hs| Hotspot {
                 x: hs.x * scale,
@@ -445,13 +458,13 @@ fn scaled_model(
                 ..hs
             })
             .collect();
-        let labels = default_labels(thumbwheel, label_distribution)
-            .into_iter()
-            .map(|l| Label {
-                y: l.y * scale,
-                ..l
-            })
-            .collect();
+        crate::features::mouse::hotspots::merge_spy_hotspots(
+            &mut hotspots,
+            config_key,
+            (scale, scale),
+        );
+        let labels =
+            labels_from_hotspots(&hotspots, MOUSE_MODEL_SIZE.1 * scale, label_distribution);
         (
             MOUSE_MODEL_SIZE.0 * scale,
             MOUSE_MODEL_SIZE.1 * scale,
@@ -1022,8 +1035,10 @@ mod tests {
 
     #[test]
     fn fallback_model_only_adds_thumbwheel_when_capability_is_measured() {
-        let (_, _, without, _) = scaled_model(None, 560., 420., false, LabelDistribution::LeftOnly);
-        let (_, _, with, _) = scaled_model(None, 560., 420., true, LabelDistribution::LeftOnly);
+        let (_, _, without, _) =
+            scaled_model(None, 560., 420., false, LabelDistribution::LeftOnly, None);
+        let (_, _, with, _) =
+            scaled_model(None, 560., 420., true, LabelDistribution::LeftOnly, None);
         assert_eq!(
             without
                 .iter()

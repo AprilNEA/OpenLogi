@@ -122,6 +122,66 @@ pub fn default_hotspots(thumbwheel: bool) -> Vec<Hotspot> {
     hotspots
 }
 
+/// Synthetic G6–G9 targets for the G502 X Plus silhouette. Coordinates are
+/// approximate model-local pixels — this mouse has no depot `slotId`s.
+#[must_use]
+pub fn spy_hotspots() -> [Hotspot; 4] {
+    [
+        Hotspot {
+            id: ButtonId::DpiShift.into(),
+            x: 0.,
+            y: 360.,
+            w: 40.,
+            h: 50.,
+        },
+        Hotspot {
+            id: ButtonId::DpiDown.into(),
+            x: 130.,
+            y: 250.,
+            w: 40.,
+            h: 36.,
+        },
+        Hotspot {
+            id: ButtonId::DpiUp.into(),
+            x: 250.,
+            y: 250.,
+            w: 40.,
+            h: 36.,
+        },
+        Hotspot {
+            id: ButtonId::ProfileCycle.into(),
+            x: 175.,
+            y: 300.,
+            w: 70.,
+            h: 36.,
+        },
+    ]
+}
+
+/// Append G6–G9 targets when `config_key` is the G502 X Plus, even if a depot
+/// PNG already contributed other hotspots.
+pub fn merge_spy_hotspots(
+    hotspots: &mut Vec<Hotspot>,
+    config_key: Option<&str>,
+    scale: (f32, f32),
+) {
+    if config_key.is_none_or(|key| ButtonId::spy_buttons_for_config_key(key).is_none()) {
+        return;
+    }
+    for hotspot in spy_hotspots() {
+        if hotspots.iter().any(|existing| existing.id == hotspot.id) {
+            continue;
+        }
+        hotspots.push(Hotspot {
+            x: hotspot.x * scale.0,
+            y: hotspot.y * scale.1,
+            w: hotspot.w * scale.0,
+            h: hotspot.h * scale.1,
+            id: hotspot.id,
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,6 +222,41 @@ mod tests {
                 .iter()
                 .any(|h| { h.id == MouseControlId::Button(ButtonId::GestureButton) }),
             "the gesture button must be a mappable hotspot in the synthetic model"
+        );
+    }
+
+    #[test]
+    fn spy_hotspots_cover_g6_through_g9() {
+        let ids: Vec<_> = spy_hotspots().into_iter().map(|h| h.id).collect();
+        for button in ButtonId::SPY_BUTTONS {
+            assert!(
+                ids.contains(&MouseControlId::Button(button)),
+                "{button:?} must have a synthetic hotspot"
+            );
+        }
+    }
+
+    #[test]
+    fn merge_spy_hotspots_is_gated_on_the_g502() {
+        let mut mx = default_hotspots(false);
+        merge_spy_hotspots(&mut mx, Some("2b042"), (1., 1.));
+        assert!(!mx.iter().any(|h| h.id == ButtonId::DpiUp.into()));
+
+        let mut g502 = default_hotspots(false);
+        merge_spy_hotspots(&mut g502, Some("04099"), (1., 1.));
+        assert_eq!(
+            g502.iter()
+                .filter(|h| matches!(
+                    h.id,
+                    MouseControlId::Button(
+                        ButtonId::DpiShift
+                            | ButtonId::DpiUp
+                            | ButtonId::DpiDown
+                            | ButtonId::ProfileCycle
+                    )
+                ))
+                .count(),
+            4
         );
     }
 
