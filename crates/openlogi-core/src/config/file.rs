@@ -278,6 +278,12 @@ fn parse_config(path: &Path, source: &str) -> Result<(Config, u32), ConfigError>
     if header.schema_version <= 6 {
         config.migrate_thumbwheel_native_direction();
     }
+    // Pre-v8 pointing devices never received the built-in Finder/Safari
+    // navigation profiles. The version gate keeps this one-shot: on a v8
+    // file a missing profile is the user's deletion, not a gap to refill.
+    if header.schema_version <= 7 {
+        config.seed_recorded_navigation_profiles();
+    }
     config.repair_duplicate_routes();
     config.schema_version = SCHEMA_VERSION;
     Ok((config, header.schema_version))

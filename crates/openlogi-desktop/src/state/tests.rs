@@ -817,15 +817,34 @@ fn state_editing(app: &str) -> AppState {
     state
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn a_sighted_mouse_carries_the_seeded_navigation_profiles() {
+    // The runtime records the online mouse's identity from the inventory,
+    // which is the trigger that seeds the built-in Finder/Safari profiles.
+    let state = state_with_a_known_mouse();
+    let finder = state
+        .config
+        .per_app_overrides(KNOWN_MOUSE_KEY, "com.apple.finder")
+        .expect("the first sighting seeds Finder");
+    assert_eq!(finder.get(&ButtonId::Back), Some(&Action::BrowserBack));
+    assert_eq!(
+        finder.get(&ButtonId::Forward),
+        Some(&Action::BrowserForward)
+    );
+}
+
 #[test]
 fn a_binding_committed_in_a_per_app_profile_leaves_the_global_one_alone() {
-    let mut state = state_editing("com.apple.Safari");
+    // Not a seeded id: mouse devices ship Finder/Safari profiles by default,
+    // and this test needs a profile born from the commit alone.
+    let mut state = state_editing("com.example.Browser");
     state.commit_binding(ButtonId::Back, Action::Undo);
 
     assert_eq!(
         state
             .config
-            .per_app_overrides(KNOWN_MOUSE_KEY, "com.apple.Safari"),
+            .per_app_overrides(KNOWN_MOUSE_KEY, "com.example.Browser"),
         Some(&BTreeMap::from([(ButtonId::Back, Action::Undo)]))
     );
     assert!(
@@ -887,10 +906,11 @@ fn an_action_ring_icon_edit_targets_the_open_application_layout() {
 
 #[test]
 fn removing_an_action_ring_profile_leaves_button_overrides_untouched() {
+    // Not a seeded id — see above.
     let mut state = state_with_a_known_mouse();
-    state.set_editing_app(Some("com.apple.Safari".into()));
+    state.set_editing_app(Some("com.example.Browser".into()));
     state.commit_binding(ButtonId::Back, Action::Undo);
-    state.set_editing_action_ring_app(Some("com.apple.Safari".into()));
+    state.set_editing_action_ring_app(Some("com.example.Browser".into()));
     state.commit_action_ring_slot(ActionRingSlot::Top, Some(ring_action(Action::NewTab)));
 
     state.remove_editing_action_ring_profile();
@@ -900,21 +920,22 @@ fn removing_an_action_ring_profile_leaves_button_overrides_untouched() {
     assert_eq!(
         state
             .config
-            .per_app_overrides(KNOWN_MOUSE_KEY, "com.apple.Safari"),
+            .per_app_overrides(KNOWN_MOUSE_KEY, "com.example.Browser"),
         Some(&BTreeMap::from([(ButtonId::Back, Action::Undo)]))
     );
     assert_eq!(
         state.editing_app(),
-        Some("com.apple.Safari"),
+        Some("com.example.Browser"),
         "the Buttons editor keeps its independent scope"
     );
 }
 
 #[test]
 fn clearing_an_override_falls_back_to_the_global_binding() {
+    // Not a seeded id — see above.
     let mut state = state_with_a_known_mouse();
     state.commit_binding(ButtonId::Back, Action::Copy);
-    state.set_editing_app(Some("com.apple.Safari".into()));
+    state.set_editing_app(Some("com.example.Browser".into()));
     state.commit_binding(ButtonId::Back, Action::Undo);
     assert_eq!(
         state.button_bindings().get(&ButtonId::Back),
@@ -931,7 +952,7 @@ fn clearing_an_override_falls_back_to_the_global_binding() {
     assert!(
         state
             .config
-            .per_app_overrides(KNOWN_MOUSE_KEY, "com.apple.Safari")
+            .per_app_overrides(KNOWN_MOUSE_KEY, "com.example.Browser")
             .is_none(),
         "an emptied profile is pruned, not left behind"
     );
@@ -939,9 +960,10 @@ fn clearing_an_override_falls_back_to_the_global_binding() {
 
 #[test]
 fn clearing_a_thumbwheel_override_drops_both_directions() {
+    // Not a seeded id — see above.
     let mut state = state_with_a_known_mouse();
     state.commit_thumbwheel_preset(ThumbwheelPreset::Volume);
-    state.set_editing_app(Some("com.apple.Safari".into()));
+    state.set_editing_app(Some("com.example.Browser".into()));
     state.commit_thumbwheel_preset(ThumbwheelPreset::CycleDpi);
 
     state.clear_app_thumbwheel();
@@ -957,7 +979,7 @@ fn clearing_a_thumbwheel_override_drops_both_directions() {
     assert!(
         state
             .config
-            .per_app_overrides(KNOWN_MOUSE_KEY, "com.apple.Safari")
+            .per_app_overrides(KNOWN_MOUSE_KEY, "com.example.Browser")
             .is_none(),
         "both halves must be cleared so the empty profile is pruned"
     );
@@ -1069,11 +1091,12 @@ fn invalid_device_selection_preserves_the_valid_current_device() {
 
 #[test]
 fn the_active_profile_is_the_default_until_the_app_in_front_is_overridden() {
+    // Not a seeded id: Safari in front would resolve its built-in profile.
     let mut state = state_with_a_known_mouse();
-    let safari = app("com.apple.Safari", "Safari");
+    let editor = app("com.example.Editor", "Editor");
     state.set_foreground(ForegroundApps {
-        current: Some(safari.clone()),
-        recent: vec![safari],
+        current: Some(editor.clone()),
+        recent: vec![editor],
     });
 
     assert_eq!(
@@ -1085,12 +1108,12 @@ fn the_active_profile_is_the_default_until_the_app_in_front_is_overridden() {
     state.config.edit(|config| {
         config.set_per_app_binding(
             KNOWN_MOUSE_KEY,
-            "com.apple.Safari",
+            "com.example.Editor",
             ButtonId::Back,
             Some(Action::Undo),
         );
     });
-    assert_eq!(state.active_profile_name(), Some("Safari"));
+    assert_eq!(state.active_profile_name(), Some("Editor"));
 }
 
 #[test]
