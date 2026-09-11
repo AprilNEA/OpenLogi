@@ -33,6 +33,8 @@ Back = "BrowserBack"
 Forward = "BrowserForward"
 # Hold the chord for exactly as long as the physical button is held.
 MiddleClick = { HoldShortcut = "Ctrl+Space" }
+# Hold bare Cmd while the button is held; keys typed arrive modified.
+WheelTiltLeft = { HoldModifier = "Cmd" }
 # Release before 500 ms runs `short`; reaching 500 ms runs `long` once.
 DpiToggle = { short = "ShowDesktop", long = "MissionControl" }
 # The thumb wheel's capacitive tap. Inert unless set here; the wheel also
