@@ -429,7 +429,7 @@ fn handle_key(
 
     info!(keycode, action = %action.label(), "key → executing bound action");
     let action_target = capture_target();
-    let queued = if action.held_combo().is_some() {
+    let queued = if action.held_input().is_some() {
         let queued = dispatcher.try_hook_key_down(keycode, &action, action_target);
         if queued {
             HELD_KEYS.with_borrow_mut(|keys| {

@@ -12,7 +12,8 @@ use core_graphics::geometry::CGPoint;
 use objc2_application_services::{AXError, AXUIElement};
 use objc2_core_foundation::{CFArray, CFRetained, CFString, CFType, Type as _};
 use openlogi_core::binding::{
-    Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Script, Shortcut, WorkflowStep,
+    Action, Effect, HeldInput, KeyCombo, MediaKey, MouseButton, NativeAction, Script, Shortcut,
+    WorkflowStep,
 };
 use openlogi_core::scroll::ScrollDelta;
 
@@ -50,7 +51,14 @@ pub(super) fn execute(action: &Action) {
         // this — the hook passes it straight through to the OS.
         Effect::Click(button) => dispatch_click(button),
         Effect::Shortcut(shortcut) => post_keycombo(&combo(shortcut)),
-        Effect::Key(combo) | Effect::HeldKey(combo) => post_keycombo(combo),
+        Effect::Key(combo) | Effect::HeldKey(HeldInput::Shortcut(combo)) => post_keycombo(combo),
+        Effect::HeldKey(HeldInput::Globe) => {
+            tracing::warn!(
+                action = "HoldGlobeKey",
+                reason = "physical_release_required",
+                "one-shot input rejected"
+            );
+        }
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
         // Media/volume controls are NX system-defined keys, not ordinary
         // keyboard virtual-key events. Posting kVK_Volume* through
@@ -244,18 +252,22 @@ fn tag_synthetic(ev: &CGEvent) {
 }
 
 /// Post one keyboard edge for `vk` with `flags` set.
-fn post_key_phase(vk: u16, flags: CGEventFlags, phase: KeyPhase) {
+fn post_key_phase(vk: u16, flags: CGEventFlags, phase: KeyPhase) -> bool {
     let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
         tracing::warn!("CGEventSource::new failed");
-        return;
+        return false;
     };
     let down = phase == KeyPhase::Down;
     let Ok(event) = CGEvent::new_keyboard_event(src, vk, down) else {
         tracing::warn!(?phase, "CGEvent::new_keyboard_event failed");
-        return;
+        return false;
     };
     event.set_flags(flags);
+    if vk == 0x3f {
+        tag_synthetic(&event);
+    }
     event.post(CGEventTapLocation::HID);
+    true
 }
 
 /// Post a key-down + key-up pair for `vk` with `flags` set.
@@ -329,7 +341,15 @@ fn post_held_key(key: HeldKey, phase: KeyPhase, modifiers: &mut HeldModifiers) {
         }
         return;
     };
-    post_key_phase(vk, flags, phase);
+    let submitted = post_key_phase(vk, flags, phase);
+    if key == HeldKey::Globe {
+        tracing::info!(
+            action = "HoldGlobeKey",
+            ?phase,
+            submitted,
+            "Globe edge submission; target acceptance unknown"
+        );
+    }
 }
 
 fn held_key_event(
@@ -343,6 +363,7 @@ fn held_key_event(
         HeldKey::Shift => Some(0x38),
         HeldKey::Alt => Some(0x3a),
         HeldKey::Control => Some(0x3b),
+        HeldKey::Globe => Some(0x3f), // kVK_Function; macOS emits flagsChanged.
         HeldKey::Key(usage) => hid_usage_to_macos(usage.code()),
     }?;
     Some((vk, held_modifier_flags(*modifiers)))
@@ -361,6 +382,9 @@ fn held_modifier_flags(modifiers: HeldModifiers) -> CGEventFlags {
     }
     if modifiers.contains(HeldKey::Alt) {
         flags |= CGEventFlags::CGEventFlagAlternate;
+    }
+    if modifiers.contains(HeldKey::Globe) {
+        flags |= CGEventFlags::CGEventFlagSecondaryFn;
     }
     flags
 }
@@ -469,6 +493,90 @@ mod tests {
                 "{shortcut:?} table entry has no macOS virtual-key mapping"
             );
         }
+    }
+
+    /// Opt-in: observes only OpenLogi-tagged Fn events, never user keystrokes.
+    /// Needs Accessibility/Input Monitoring and can trigger configured voice tools.
+    #[test]
+    #[ignore = "posts real Fn events; requires a trusted macOS session"]
+    #[expect(
+        unsafe_code,
+        reason = "reading the system's immutable default run-loop mode"
+    )]
+    fn globe_live_event_tap_observes_balanced_guard_lifetimes() {
+        use crate::inject::{SYNTHETIC_EVENT_USER_DATA, press_hold};
+        use core_foundation::runloop::{CFRunLoop, kCFRunLoopDefaultMode};
+        use core_graphics::event::{
+            CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType,
+            CallbackResult, EventField,
+        };
+        use openlogi_core::binding::HeldInput;
+        use std::cell::RefCell;
+        use std::time::Duration;
+
+        let observed = RefCell::new(Vec::new());
+        // SAFETY: CoreFoundation provides this immutable mode for the process lifetime.
+        let mode = unsafe { kCFRunLoopDefaultMode };
+        let pump = || {
+            CFRunLoop::run_in_mode(mode, Duration::from_millis(80), false);
+        };
+        CGEventTap::with_enabled(
+            CGEventTapLocation::Session,
+            CGEventTapPlacement::HeadInsertEventTap,
+            CGEventTapOptions::ListenOnly,
+            vec![CGEventType::FlagsChanged],
+            |_, _, event| {
+                if event.get_integer_value_field(EventField::EVENT_SOURCE_USER_DATA)
+                    == SYNTHETIC_EVENT_USER_DATA
+                    && event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) == 63
+                {
+                    observed.borrow_mut().push(
+                        event
+                            .get_flags()
+                            .contains(CGEventFlags::CGEventFlagSecondaryFn),
+                    );
+                }
+                CallbackResult::Keep
+            },
+            || {
+                for _ in 0..3 {
+                    let first = press_hold(HeldInput::Globe);
+                    pump();
+                    let mut second = press_hold(HeldInput::Globe);
+                    second.replace(HeldInput::Globe);
+                    pump();
+                    drop(first);
+                    pump();
+                    drop(second);
+                    pump();
+                }
+            },
+        )
+        .expect("session event tap requires permission");
+        assert_eq!(
+            *observed.borrow(),
+            vec![true, false, true, false, true, false]
+        );
+    }
+
+    #[test]
+    fn globe_edges_clear_only_fn_and_preserve_other_held_modifiers() {
+        let mut modifiers = HeldModifiers::default();
+        held_key_event(HeldKey::Command, KeyPhase::Down, &mut modifiers).unwrap();
+        let (vk, down) = held_key_event(HeldKey::Globe, KeyPhase::Down, &mut modifiers).unwrap();
+        assert_eq!(vk, 63);
+        assert!(down.contains(CGEventFlags::CGEventFlagSecondaryFn));
+        assert!(down.contains(CGEventFlags::CGEventFlagCommand));
+
+        let (_, command_up) =
+            held_key_event(HeldKey::Command, KeyPhase::Up, &mut modifiers).unwrap();
+        assert!(command_up.contains(CGEventFlags::CGEventFlagSecondaryFn));
+        assert!(!command_up.contains(CGEventFlags::CGEventFlagCommand));
+        held_key_event(HeldKey::Shift, KeyPhase::Down, &mut modifiers).unwrap();
+        let (vk, up) = held_key_event(HeldKey::Globe, KeyPhase::Up, &mut modifiers).unwrap();
+        assert_eq!(vk, 63);
+        assert!(!up.contains(CGEventFlags::CGEventFlagSecondaryFn));
+        assert!(up.contains(CGEventFlags::CGEventFlagShift));
     }
 
     #[test]

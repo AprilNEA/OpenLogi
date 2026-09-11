@@ -46,9 +46,31 @@ fn hold_shortcut_has_distinct_lifecycle_semantics() {
 
     assert_eq!(held.label(), "Hold Alt+Space");
     assert_eq!(held.category(), Category::Editing);
-    assert_eq!(held.held_combo(), Some(&combo));
-    assert_matches!(held.effect(), Effect::HeldKey(actual) if actual == &combo);
-    assert_eq!(Action::CustomShortcut(combo).held_combo(), None);
+    assert_eq!(held.held_input(), Some(HeldInput::Shortcut(&combo)));
+    assert_matches!(held.effect(), Effect::HeldKey(HeldInput::Shortcut(actual)) if actual == &combo);
+    assert!(!held.requires_physical_release());
+    assert_eq!(Action::CustomShortcut(combo).held_input(), None);
+}
+
+#[test]
+fn globe_is_a_catalog_action_with_physical_hold_semantics() {
+    let action = Action::HoldGlobeKey;
+    assert_eq!(roundtrip(&action), action);
+    assert_eq!(action.category(), Category::System);
+    assert_eq!(action.translation_key(), Some("actions.hold_globe_key"));
+    assert_eq!(action.held_input(), Some(HeldInput::Globe));
+    assert_eq!(action.effect(), Effect::HeldKey(HeldInput::Globe));
+    assert!(action.requires_physical_release());
+    assert!(Action::catalog().contains(&action));
+    assert_eq!(ActionRingIcon::for_action(&action), ActionRingIcon::Globe);
+    assert!(
+        "Fn".parse::<KeyCombo>().is_err(),
+        "Fn must not become a fake USB usage"
+    );
+    assert_eq!(
+        RingAction::new(action),
+        Err(RingActionError::RequiresPhysicalRelease)
+    );
 }
 
 #[test]
@@ -346,6 +368,7 @@ fn persisted_action_variant_names_are_stable() {
         "Find",
         "HorizontalScrollLeft",
         "HorizontalScrollRight",
+        "HoldGlobeKey",
         "HoldShortcut",
         "LaunchpadShow",
         "LeftClick",

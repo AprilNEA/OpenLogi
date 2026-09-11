@@ -17,6 +17,19 @@ use crate::ui::theme::{ACCENT_BLUE, Palette, Typography as _};
 /// Height cap shared by compact inspector and editor lists.
 pub(crate) const EDITOR_LIST_MAX_H: f32 = 360.;
 
+/// Whether selecting an action gives it the original physical down edge.
+#[derive(Clone, Copy)]
+pub(crate) enum ActionActivation {
+    PhysicalPress,
+    Deferred,
+}
+
+impl ActionActivation {
+    fn allows(self, action: &Action) -> bool {
+        matches!(self, Self::PhysicalPress) || !action.requires_physical_release()
+    }
+}
+
 /// Commit callback invoked when an action row is clicked.
 pub(crate) type PickFn = Rc<dyn Fn(Action, &mut Window, &mut App)>;
 
@@ -25,6 +38,9 @@ pub(crate) type PickFn = Rc<dyn Fn(Action, &mut Window, &mut App)>;
 pub(crate) fn grouped_catalog() -> Vec<(Category, Vec<Action>)> {
     let mut sections: Vec<(Category, Vec<Action>)> = Vec::new();
     for action in Action::catalog() {
+        if action == Action::HoldGlobeKey && !cfg!(target_os = "macos") {
+            continue;
+        }
         let category = action.category();
         if let Some(section) = sections
             .iter_mut()
@@ -86,6 +102,7 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         Action::NextDesktop => "action-icons/square-arrow-right.svg",
         Action::ShowDesktop => "action-icons/monitor.svg",
         Action::LaunchpadShow | Action::OpenApplication(_) => "action-icons/grid-3x3.svg",
+        Action::HoldGlobeKey => "action-icons/globe.svg",
         Action::LockScreen => "action-icons/lock.svg",
         Action::Screenshot | Action::CaptureRegion => "action-icons/camera.svg",
         Action::Sleep => "action-icons/moon.svg",
@@ -115,12 +132,20 @@ pub(crate) fn action_rows(
     on_pick: &PickFn,
     pal: Palette,
 ) -> Vec<gpui::Div> {
-    action_rows_matching(id_prefix, current, "", on_pick, pal)
+    action_rows_matching(
+        id_prefix,
+        ActionActivation::PhysicalPress,
+        current,
+        "",
+        on_pick,
+        pal,
+    )
 }
 
 /// Build action rows filtered by localized action or category name.
 pub(crate) fn action_rows_matching(
     id_prefix: &'static str,
+    activation: ActionActivation,
     current: Option<&Action>,
     query: &str,
     on_pick: &PickFn,
@@ -141,6 +166,7 @@ pub(crate) fn action_rows_matching(
                 catalog_index += 1;
                 (key, action)
             })
+            .filter(|(_, action)| activation.allows(action))
             .filter(|(_, action)| {
                 query.is_empty()
                     || category_matches
@@ -239,6 +265,29 @@ pub(crate) fn editor_scroll_list(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn globe_is_offered_only_on_macos_with_a_globe_icon() {
+        let actions = grouped_catalog()
+            .into_iter()
+            .flat_map(|(_, actions)| actions)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actions.contains(&Action::HoldGlobeKey),
+            cfg!(target_os = "macos")
+        );
+        assert_eq!(
+            action_icon_path(&Action::HoldGlobeKey),
+            "action-icons/globe.svg"
+        );
+    }
+
+    #[test]
+    fn deferred_gestures_do_not_offer_globe_holds() {
+        assert!(!ActionActivation::Deferred.allows(&Action::HoldGlobeKey));
+        assert!(ActionActivation::PhysicalPress.allows(&Action::HoldGlobeKey));
+        assert!(ActionActivation::Deferred.allows(&Action::Copy));
+    }
 
     #[test]
     fn gesture_action_catalog_includes_actions_ring() {

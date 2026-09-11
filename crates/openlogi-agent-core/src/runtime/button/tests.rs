@@ -804,6 +804,126 @@ fn a_release_observed_before_the_threshold_wins_despite_worker_backlog() {
 }
 
 #[test]
+fn globe_starts_on_down_and_recovers_after_every_terminal_path() {
+    let (sent, received) = mpsc::channel();
+    let mut owner = ButtonRuntimeOwner::spawn(move |event| {
+        sent.send(event).unwrap();
+    })
+    .unwrap();
+    let input = owner.input();
+    let binding = Binding::Single(Action::HoldGlobeKey);
+
+    // No release or clock advance is needed to start a single-action hold.
+    for _ in 0..3 {
+        let token = input.try_hook_down(ButtonId::Back, Some(&binding)).unwrap();
+        let ButtonRuntimeEvent::Started(press) = recv_event(&received) else {
+            panic!("start expected");
+        };
+        assert_eq!(press.token, token);
+        assert_eq!(press.start_action(), Some(&Action::HoldGlobeKey));
+        assert_eq!(press.behavior.deadline(), None);
+        assert!(input.try_hook_up(ButtonId::Back));
+        let ButtonRuntimeEvent::Ended { press, reason } = recv_event(&received) else {
+            panic!("release expected");
+        };
+        assert_eq!(press.token, token);
+        assert_eq!(reason, EndReason::Released);
+    }
+    for reason in [
+        CancelReason::SourceEnded,
+        CancelReason::Invalidated,
+        CancelReason::Shutdown,
+    ] {
+        let token = input.try_hook_down(ButtonId::Back, Some(&binding)).unwrap();
+        assert!(matches!(
+            recv_event(&received),
+            ButtonRuntimeEvent::Started(_)
+        ));
+        match reason {
+            CancelReason::SourceEnded => input.cancel_hook_thread(),
+            CancelReason::Invalidated => input.invalidate_all(),
+            CancelReason::Shutdown => {
+                assert!(owner.shutdown());
+            }
+            _ => unreachable!(),
+        }
+        let ButtonRuntimeEvent::Ended {
+            press,
+            reason: actual,
+        } = recv_event(&received)
+        else {
+            panic!("cancel expected");
+        };
+        assert_eq!(press.token, token);
+        assert_eq!(actual, EndReason::Canceled(reason));
+    }
+    assert!(
+        received.try_recv().is_err(),
+        "each press has exactly one terminal event"
+    );
+}
+
+#[test]
+fn globe_hidpp_disconnect_does_not_end_another_devices_hold() {
+    let (sent, received) = mpsc::channel();
+    let mut owner = ButtonRuntimeOwner::spawn(move |event| {
+        sent.send(event).unwrap();
+    })
+    .unwrap();
+    let input = owner.input();
+    let binding = Binding::Single(Action::HoldGlobeKey);
+    let first = HidppSessionId::with_epoch("mouse-a", 1);
+    let second = HidppSessionId::with_epoch("mouse-b", 2);
+    let a = input
+        .try_hidpp_down(&first, ButtonId::Back, Some(&binding))
+        .unwrap();
+    let b = input
+        .try_hidpp_down(&second, ButtonId::Back, Some(&binding))
+        .unwrap();
+    for _ in 0..2 {
+        let ButtonRuntimeEvent::Started(press) = recv_event(&received) else {
+            panic!("start expected");
+        };
+        assert_eq!(press.start_action(), Some(&Action::HoldGlobeKey));
+    }
+    input.cancel_hidpp_session(&first);
+    let ButtonRuntimeEvent::Ended { press, reason } = recv_event(&received) else {
+        panic!("cancel expected");
+    };
+    assert_eq!(press.token, a);
+    assert_eq!(reason, EndReason::Canceled(CancelReason::SourceEnded));
+    assert!(input.try_hidpp_up(&second, ButtonId::Back));
+    let ButtonRuntimeEvent::Ended { press, reason } = recv_event(&received) else {
+        panic!("release expected");
+    };
+    assert_eq!(press.token, b);
+    assert_eq!(reason, EndReason::Released);
+    assert!(owner.shutdown());
+}
+
+#[test]
+fn globe_rejects_pulse_only_hardware() {
+    let (sent, received) = mpsc::channel();
+    let mut owner = ButtonRuntimeOwner::spawn(move |event| {
+        sent.send(event).unwrap();
+    })
+    .unwrap();
+    let input = owner.input();
+    let session = HidppSessionId::with_epoch("mouse", 1);
+    for binding in [
+        Binding::Single(Action::HoldGlobeKey),
+        long_press(Action::HoldGlobeKey, Action::Copy),
+    ] {
+        assert!(!input.try_hidpp_pulse(&session, ButtonId::Back, Some(&binding)));
+    }
+    assert!(owner.shutdown());
+    assert!(
+        received.try_recv().is_err(),
+        "a pulse must not open and immediately close voice input"
+    );
+}
+
+#[test]
 fn function_key_hold_has_one_balanced_lifecycle() {
     let (sent, received) = mpsc::channel();
     let mut owner = ButtonRuntimeOwner::spawn(move |event| {

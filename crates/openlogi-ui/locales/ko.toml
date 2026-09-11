@@ -235,6 +235,7 @@ wheel_resolution_other_connection = "다른 연결 방식에서는 휠 해상도
 smartshift = "SmartShift"
 
 [actions]
+hold_globe_key = "지구본 / Fn 길게 누르기 (macOS)"
 bind_control = "%{name} 지정"
 bind_control_in_app = "%{app}에서 %{name} 지정"
 unbound = "할당되지 않음"

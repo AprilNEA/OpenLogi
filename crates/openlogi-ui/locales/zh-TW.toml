@@ -235,6 +235,7 @@ wheel_resolution_other_connection = "此裝置使用另一種連線時支援滾�
 smartshift = "SmartShift"
 
 [actions]
+hold_globe_key = "地球鍵 / Fn（按住，macOS）"
 bind_control = "設定 %{name}"
 bind_control_in_app = "在 %{app} 中設定 %{name}"
 unbound = "未設定"

@@ -1,6 +1,6 @@
 //! A platform-neutral synthesis IR.
 //!
-//! [`Action`] has one variant per user-facing behaviour (52 of them), but the
+//! [`Action`] has one variant per user-facing behaviour, but the
 //! three `openlogi-inject` backends don't care about most of that
 //! granularity — they care about *mechanism*: "press this chord", "click
 //! this mouse button", "fire this media key", "there is no portable way to
@@ -38,10 +38,9 @@ pub enum Effect<'a> {
     /// Press an already-resolved keyboard chord: a user-recorded
     /// [`Action::CustomShortcut`], or a workflow's `PressKey` step.
     Key(&'a KeyCombo),
-    /// A user-recorded chord whose output is held by a lifecycle-aware
-    /// runtime. A one-shot executor treats this as [`Effect::Key`] so direct
-    /// dispatch remains balanced when no matching release can arrive.
-    HeldKey(&'a KeyCombo),
+    /// Keyboard output owned by a physical press lifecycle. Shortcuts retain
+    /// their balanced-tap fallback; Globe requires a matching physical release.
+    HeldKey(HeldInput<'a>),
     /// Synthesise one scroll tick. `dx`/`dy` are unit direction (-1/0/1);
     /// each backend applies its own tick magnitude.
     Scroll {
@@ -72,6 +71,18 @@ pub enum Effect<'a> {
     /// through any per-OS synthesis path), so from a backend's point of
     /// view it is exactly as much a no-op as the DPI actions.
     AgentSide,
+}
+
+/// Keyboard output held until the originating physical press ends.
+///
+/// Globe/Fn is an Apple modifier, not a USB keyboard-page usage. Keeping it
+/// distinct avoids inventing a fake usage in the portable shortcut schema.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HeldInput<'a> {
+    /// A portable keyboard chord.
+    Shortcut(&'a KeyCombo),
+    /// The macOS Globe/Fn modifier. Unsupported on other platforms.
+    Globe,
 }
 
 /// A physical mouse button an [`Effect::Click`] should press.
@@ -274,7 +285,8 @@ impl Action {
             Action::HorizontalScrollRight => Effect::Scroll { dx: 1, dy: 0 },
 
             Action::CustomShortcut(combo) => Effect::Key(combo),
-            Action::HoldShortcut(combo) => Effect::HeldKey(combo),
+            Action::HoldShortcut(combo) => Effect::HeldKey(HeldInput::Shortcut(combo)),
+            Action::HoldGlobeKey => Effect::HeldKey(HeldInput::Globe),
 
             Action::TypeText(text) => Effect::Text(text),
             Action::RunAppleScript(src) => Effect::Script(Script::AppleScript(src)),

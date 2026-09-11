@@ -235,6 +235,7 @@ wheel_resolution_other_connection = "This device supports wheel resolution on it
 smartshift = "SmartShift"
 
 [actions]
+hold_globe_key = "Hold Globe / Fn (macOS)"
 bind_control = "Bind %{name}"
 bind_control_in_app = "Bind %{name} in %{app}"
 unbound = "Unbound"

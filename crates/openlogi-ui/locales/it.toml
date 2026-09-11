@@ -235,6 +235,7 @@ wheel_resolution_other_connection = "Il dispositivo supporta la risoluzione dell
 smartshift = "SmartShift"
 
 [actions]
+hold_globe_key = "Tieni premuto Globo / Fn (macOS)"
 bind_control = "Associa %{name}"
 bind_control_in_app = "Associa %{name} in %{app}"
 unbound = "Non associato"

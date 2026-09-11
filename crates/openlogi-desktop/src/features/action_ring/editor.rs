@@ -395,5 +395,6 @@ mod tests {
         assert!(actions.contains(&Action::MissionControl));
         assert!(!actions.contains(&Action::None));
         assert!(!actions.contains(&Action::ShowActionsRing));
+        assert!(!actions.contains(&Action::HoldGlobeKey));
     }
 }

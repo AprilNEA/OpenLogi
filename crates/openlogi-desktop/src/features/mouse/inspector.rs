@@ -16,8 +16,8 @@ use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding
 
 use super::hotspots::MouseControlId;
 use super::picker::{
-    GESTURE_BUTTON_ICON, PickFn, action_icon_path, action_rows_matching, editor_section,
-    gesture_direction_icon,
+    ActionActivation, GESTURE_BUTTON_ICON, PickFn, action_icon_path, action_rows_matching,
+    editor_section, gesture_direction_icon,
 };
 use super::thumbwheel::ThumbwheelPreset;
 use super::view::MouseModelView;
@@ -230,6 +230,7 @@ fn button_inspector(
         .when(picker.open, |panel| {
             panel.child(action_library(
                 "inspector-action",
+                ActionActivation::PhysicalPress,
                 Some(&action),
                 picker.search,
                 &on_pick,
@@ -283,6 +284,7 @@ fn inherited_gesture_inspector(
         .when(picker.open, |panel| {
             panel.child(action_library(
                 "inspector-gesture-override",
+                ActionActivation::PhysicalPress,
                 None,
                 picker.search,
                 &on_pick,
@@ -346,6 +348,7 @@ fn gesture_inspector(
         .when(picker.open, |panel| {
             panel.child(action_library(
                 "inspector-gesture-action",
+                ActionActivation::Deferred,
                 Some(&current),
                 picker.search,
                 &on_pick,
@@ -661,6 +664,7 @@ fn selection_card(
 
 fn action_library(
     id_prefix: &'static str,
+    activation: ActionActivation,
     current: Option<&Action>,
     action_search: &Entity<InputState>,
     on_pick: &PickFn,
@@ -668,7 +672,7 @@ fn action_library(
     cx: &Context<MouseModelView>,
 ) -> impl IntoElement {
     let query = action_search.read(cx).value();
-    let rows = action_rows_matching(id_prefix, current, &query, on_pick, pal);
+    let rows = action_rows_matching(id_prefix, activation, current, &query, on_pick, pal);
     v_flex()
         .gap_2()
         .pt_1()

@@ -13,7 +13,8 @@ use evdev::{AttributeSet, EventType, InputEvent, KeyCode, RelativeAxisCode};
 use zbus::blocking::Connection as DbusConn;
 
 use openlogi_core::binding::{
-    Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Script, Shortcut, WorkflowStep,
+    Action, Effect, HeldInput, KeyCombo, MediaKey, MouseButton, NativeAction, Script, Shortcut,
+    WorkflowStep,
 };
 use openlogi_core::scroll::ScrollDelta;
 
@@ -39,7 +40,14 @@ pub(super) fn execute(action: &Action) {
         // buttons ("back"/"forward") browsers handle natively.
         Effect::Click(button) => click(mouse_button_code(button)),
         Effect::Shortcut(shortcut) => press_combo(&combo(shortcut)),
-        Effect::Key(combo) | Effect::HeldKey(combo) => press_combo(combo),
+        Effect::Key(combo) | Effect::HeldKey(HeldInput::Shortcut(combo)) => press_combo(combo),
+        Effect::HeldKey(HeldInput::Globe) => {
+            tracing::warn!(
+                action = "HoldGlobeKey",
+                reason = "unsupported_platform",
+                "input rejected"
+            );
+        }
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
         Effect::Media(key) => dispatch_media(key),
         Effect::Native(native) => dispatch_native(action, native),

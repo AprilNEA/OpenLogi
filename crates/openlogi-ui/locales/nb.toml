@@ -235,6 +235,7 @@ wheel_resolution_other_connection = "Enheten støtter hjuloppløsning via den an
 smartshift = "SmartShift"
 
 [actions]
+hold_globe_key = "Hold Globe / Fn (macOS)"
 bind_control = "Tilordne %{name}"
 bind_control_in_app = "Tilordne %{name} i %{app}"
 unbound = "Ikke tildelt"

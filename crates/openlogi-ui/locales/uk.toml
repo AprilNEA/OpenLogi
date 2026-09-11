@@ -235,6 +235,7 @@ wheel_resolution_other_connection = "Пристрій підтримує нал�
 smartshift = "SmartShift"
 
 [actions]
+hold_globe_key = "Hold Globe / Fn (macOS)"
 bind_control = "Прив'язати %{name}"
 bind_control_in_app = "Прив'язати %{name} в %{app}"
 unbound = "Не прив'язано"

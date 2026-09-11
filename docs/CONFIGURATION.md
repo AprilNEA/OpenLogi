@@ -103,6 +103,30 @@ the chord down until the originating physical button is released, and also
 releases it if capture is interrupted, the binding becomes invalid, or the
 agent shuts down. Use it for push-to-talk and other hold-to-activate controls.
 
+On macOS, the button picker also offers **Hold Globe / Fn (macOS)**:
+
+```toml
+Back = "HoldGlobeKey"
+```
+
+This single-action binding submits Fn down immediately on mouse down and Fn up
+on release or cancellation; it does not wait for a long-press threshold. Multiple
+OpenLogi holds share ownership, so releasing one does not release Fn while another
+still holds it. It requires the agent's existing input/Accessibility permissions.
+
+Globe/Fn is not a portable USB keyboard usage and cannot be entered as
+`CustomShortcut = "Fn"`. This action is hidden on Linux/Windows, where execution
+is unsupported. It is not offered in gesture editors or Actions Ring slots.
+Pulse-only hardware, deferred gesture/short/long actions, and direct one-shot
+execution reject it rather than opening and immediately closing voice input.
+Use a single binding on a button with real down/up edges.
+
+Only keyboard events are injected: OpenLogi does not switch input sources,
+configure an input method, record audio, or change the microphone. Configure a
+compatible voice tool to use hold-to-talk with Fn yourself. Synthetic Fn events
+are not a guarantee of macOS's built-in Globe-key behavior or third-party voice
+recognition; verify those on your own system. See [Globe key testing](TESTING_GLOBE_KEY.md).
+
 A `{ short = ..., long = ... }` binding waits for the button's outcome instead
 of firing on press. Releasing before 500 ms fires `short`; keeping the button
 down for 500 ms fires `long` exactly once, and the later release does not also

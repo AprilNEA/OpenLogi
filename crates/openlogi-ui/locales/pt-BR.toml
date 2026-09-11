@@ -235,6 +235,7 @@ wheel_resolution_other_connection = "O dispositivo oferece resolução da roda n
 smartshift = "SmartShift"
 
 [actions]
+hold_globe_key = "Manter Globo / Fn pressionado (macOS)"
 bind_control = "Atribuir %{name}"
 bind_control_in_app = "Atribuir %{name} em %{app}"
 unbound = "Não atribuído"

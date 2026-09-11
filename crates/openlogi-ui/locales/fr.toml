@@ -235,6 +235,7 @@ wheel_resolution_other_connection = "L’appareil prend en charge la résolution
 smartshift = "SmartShift"
 
 [actions]
+hold_globe_key = "Maintenir Globe / Fn (macOS)"
 bind_control = "Attribuer %{name}"
 bind_control_in_app = "Attribuer %{name} dans %{app}"
 unbound = "Non attribué"

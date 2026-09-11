@@ -235,6 +235,7 @@ wheel_resolution_other_connection = "To urządzenie obsługuje rozdzielczość k
 smartshift = "SmartShift"
 
 [actions]
+hold_globe_key = "Hold Globe / Fn (macOS)"
 bind_control = "Przypisz %{name}"
 bind_control_in_app = "Przypisz %{name} w %{app}"
 unbound = "Nieprzypisane"

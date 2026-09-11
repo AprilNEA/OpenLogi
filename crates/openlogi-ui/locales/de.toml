@@ -235,6 +235,7 @@ wheel_resolution_other_connection = "Dieses Gerät unterstützt die Mausradaufl�
 smartshift = "SmartShift"
 
 [actions]
+hold_globe_key = "Globus / Fn gedrückt halten (macOS)"
 bind_control = "%{name} zuweisen"
 bind_control_in_app = "%{name} in %{app} zuweisen"
 unbound = "Nicht zugewiesen"

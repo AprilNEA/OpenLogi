@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::application_target::ApplicationTarget;
 use super::category::Category;
+use super::effect::{Effect, HeldInput};
 use super::key_combo::KeyCombo;
 
 /// What pressing a [`ButtonId`](crate::binding::ButtonId) should do.
@@ -187,6 +188,13 @@ pub enum Action {
     /// cancellation and shutdown. Dispatchers without a release context must
     /// degrade this action to a balanced tap rather than leave keys held.
     HoldShortcut(KeyCombo),
+    /// Hold the macOS Globe/Fn key from physical press to release, without a
+    /// long-press threshold. Cancellation and shutdown release it too.
+    ///
+    /// Requires a single binding with physical down/up edges, not a deferred
+    /// gesture, long-press outcome, pulse, or Actions Ring activation. This
+    /// injects key events only; it does not configure an input method or audio.
+    HoldGlobeKey,
 }
 
 /// One step in a [`Action::Workflow`]. A workflow is a `Vec<WorkflowStep>`
@@ -265,6 +273,7 @@ macro_rules! for_each_unit_action {
             LaunchpadShow "Launchpad" "actions.launchpad" Navigation Applications,
             // System
             None "Do Nothing" "pointer.do_nothing" System Ban,
+            HoldGlobeKey "Hold Globe / Fn (macOS)" "actions.hold_globe_key" System Globe,
             LockScreen "Lock Screen" "actions.lock_screen" System Lock,
             Screenshot "Screenshot" "actions.screenshot" System Camera,
             CaptureRegion "Capture Region" "actions.capture_region" System Camera,
@@ -393,13 +402,20 @@ macro_rules! derive_action_core {
 for_each_unit_action!(derive_action_core);
 
 impl Action {
-    /// The chord whose output must remain down until the originating press
-    /// ends, or `None` for an instantaneous action.
+    /// Keyboard output owned by the originating press, or `None` for an
+    /// instantaneous action.
     #[must_use]
-    pub fn held_combo(&self) -> Option<&KeyCombo> {
-        match self {
-            Self::HoldShortcut(combo) => Some(combo),
+    pub fn held_input(&self) -> Option<HeldInput<'_>> {
+        match self.effect() {
+            Effect::HeldKey(input) => Some(input),
             _ => None,
         }
+    }
+
+    /// Whether a one-shot source must reject this action rather than tap it.
+    /// Existing held shortcuts keep their historical balanced-tap fallback.
+    #[must_use]
+    pub fn requires_physical_release(&self) -> bool {
+        matches!(self, Self::HoldGlobeKey)
     }
 }

@@ -235,6 +235,7 @@ wheel_resolution_other_connection = "別の接続方式ではホイール解像�
 smartshift = "SmartShift"
 
 [actions]
+hold_globe_key = "地球儀 / Fn を押したままにする（macOS）"
 bind_control = "%{name} を割り当て"
 bind_control_in_app = "%{app} で %{name} を割り当て"
 unbound = "未割り当て"

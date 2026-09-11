@@ -235,6 +235,7 @@ wheel_resolution_other_connection = "Dit apparaat ondersteunt wielresolutie via 
 smartshift = "SmartShift"
 
 [actions]
+hold_globe_key = "Globe / Fn ingedrukt houden (macOS)"
 bind_control = "%{name} toewijzen"
 bind_control_in_app = "%{name} toewijzen in %{app}"
 unbound = "Niet toegewezen"
