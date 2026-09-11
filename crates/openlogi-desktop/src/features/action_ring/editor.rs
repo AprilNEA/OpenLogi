@@ -93,14 +93,19 @@ pub(super) fn action_library(
 
 fn action_rows_scroller(content: impl IntoElement, scroll: &ScrollHandle) -> impl IntoElement {
     div()
-        .id("ring-action-library")
+        .relative()
         .flex_1()
         .min_h_0()
-        .track_scroll(scroll)
-        .overflow_y_scroll()
-        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+        .child(
+            div()
+                .id("ring-action-library")
+                .size_full()
+                .track_scroll(scroll)
+                .overflow_y_scroll()
+                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                .child(content),
+        )
         .vertical_scrollbar(scroll)
-        .child(content)
 }
 
 fn icon_editor(
@@ -318,8 +323,8 @@ fn commit_icon(slot: ActionRingSlot, icon: Option<ActionRingIcon>, cx: &mut gpui
 #[cfg(test)]
 mod tests {
     use gpui::{
-        Context, PlatformInput, Render, ScrollDelta, ScrollHandle, ScrollWheelEvent,
-        TestAppContext, Window, point, size,
+        Context, Render, ScrollDelta, ScrollHandle, ScrollWheelEvent, TestAppContext, Window,
+        point, px,
     };
 
     use super::*;
@@ -333,16 +338,22 @@ mod tests {
         fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
             div()
                 .id("page-scroll")
-                .size_full()
+                .w(px(160.0))
+                .h(px(120.0))
                 .track_scroll(&self.page_scroll)
                 .overflow_y_scroll()
                 .child(
                     v_flex()
                         .h(px(300.0))
-                        .child(v_flex().h(px(100.0)).child(action_rows_scroller(
-                            div().h(px(240.0)),
-                            &self.sidebar_scroll,
-                        )))
+                        .child(
+                            v_flex()
+                                .w(px(160.0))
+                                .h(px(100.0))
+                                .child(action_rows_scroller(
+                                    div().h(px(240.0)),
+                                    &self.sidebar_scroll,
+                                )),
+                        )
                         .child(div().h(px(200.0))),
                 )
         }
@@ -353,7 +364,7 @@ mod tests {
         cx.update(gpui_component::init);
         let page_scroll = ScrollHandle::new();
         let sidebar_scroll = ScrollHandle::new();
-        let window = cx.open_window(size(px(160.0), px(120.0)), {
+        let (_, cx) = cx.add_window_view({
             let page_scroll = page_scroll.clone();
             let sidebar_scroll = sidebar_scroll.clone();
             move |_, _| NestedScrollView {
@@ -362,22 +373,62 @@ mod tests {
             }
         });
         cx.run_until_parked();
+        cx.update(|window, cx| drop(window.draw(cx)));
 
-        window
-            .update(cx, |_, window, cx| {
-                window.dispatch_event(
-                    PlatformInput::ScrollWheel(ScrollWheelEvent {
-                        position: point(px(80.0), px(50.0)),
-                        delta: ScrollDelta::Pixels(point(px(0.0), px(-20.0))),
-                        ..Default::default()
-                    }),
-                    cx,
-                );
-            })
-            .unwrap();
+        let overlay_before = cx
+            .debug_bounds("scrollbar-overlay")
+            .expect("scrollbar overlay should exist");
+        assert_eq!(overlay_before.origin, point(px(0.0), px(0.0)));
+        assert_eq!(overlay_before.size, gpui::size(px(160.0), px(100.0)));
 
+        // Scroll inside the sidebar scroller
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(80.0), px(50.0)),
+            delta: ScrollDelta::Pixels(point(px(0.0), px(-20.0))),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| drop(window.draw(cx)));
+
+        // Sidebar scrolled, page did not
         assert_eq!(sidebar_scroll.offset().y, px(-20.0));
         assert_eq!(page_scroll.offset().y, px(0.0));
+
+        // Scrollbar overlay stays anchored to the scroller viewport
+        let overlay_after_sidebar_scroll = cx
+            .debug_bounds("scrollbar-overlay")
+            .expect("scrollbar overlay should exist");
+        assert_eq!(overlay_after_sidebar_scroll.origin, point(px(0.0), px(0.0)));
+        assert_eq!(
+            overlay_after_sidebar_scroll.size,
+            gpui::size(px(160.0), px(100.0))
+        );
+
+        // Click near the bottom of the scrollbar track (x: 155px, y: 80px) to jump
+        cx.simulate_click(point(px(155.0), px(80.0)), gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.update(|window, cx| drop(window.draw(cx)));
+
+        // The sidebar scroller should have jumped further down
+        assert!(sidebar_scroll.offset().y < px(-20.0));
+        assert_eq!(page_scroll.offset().y, px(0.0));
+
+        // Now scroll the outer page from outside the sidebar (e.g. at y: 110px)
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(10.0), px(110.0)),
+            delta: ScrollDelta::Pixels(point(px(0.0), px(-15.0))),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| drop(window.draw(cx)));
+
+        assert_eq!(page_scroll.offset().y, px(-15.0));
+
+        // The sidebar's scrollbar overlay moves together with the sidebar inside the page
+        let overlay_after_page_scroll = cx
+            .debug_bounds("scrollbar-overlay")
+            .expect("scrollbar overlay should exist");
+        assert_eq!(overlay_after_page_scroll.origin, point(px(0.0), px(-15.0)));
     }
 
     #[test]
