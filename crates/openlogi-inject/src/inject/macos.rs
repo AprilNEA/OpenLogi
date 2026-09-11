@@ -649,17 +649,29 @@ pub(super) fn post_scroll(delta: ScrollDelta) {
 }
 
 pub(super) fn post_smooth_scroll(delta: ScrollDelta, phase: SmoothScrollPhase) {
-    const POINTS_PER_WHEEL_TICK: f64 = 10.0;
+    // Doubled from the original 10.0 after real-hardware calibration showed a
+    // single Low/Standard-mode isolated tick's smooth-scroll output was
+    // barely perceptible even at this magnitude. The isolated-tick floor
+    // below turned out to rarely engage in practice (residual carried over
+    // from the previous tick usually keeps natural rounding nonzero
+    // already); the real fix for a single isolated tick is
+    // `ISOLATED_TICK_BOOST` in `runtime/scroll/worker.rs`, which boosts only
+    // that specific case ahead of this conversion - see
+    // `openspec/changes/normalize-scroll-sensitivity-by-resolution` design.md.
+    const POINTS_PER_WHEEL_TICK: f64 = 20.0;
 
-    let units_per_input = match delta {
-        ScrollDelta::Pixels { .. } => 1.0,
-        ScrollDelta::WheelTicks { .. } => POINTS_PER_WHEEL_TICK,
+    // A wheel tick's isolated-tick floor is raised to a full tick's worth of
+    // points (matching direct-scroll's "at least one line" guarantee for the
+    // same input) instead of the default one point, which is imperceptible.
+    let (units_per_input, floor_magnitude) = match delta {
+        ScrollDelta::Pixels { .. } => (1.0, 1.0),
+        ScrollDelta::WheelTicks { .. } => (POINTS_PER_WHEEL_TICK, POINTS_PER_WHEEL_TICK),
     };
     let Ok(mut quantizer) = SMOOTH_SCROLL_QUANTIZER.lock() else {
         tracing::warn!("macOS smooth-scroll quantizer mutex poisoned");
         return;
     };
-    let delta = quantizer.quantize(delta, units_per_input);
+    let delta = quantizer.quantize_with_floor(delta, units_per_input, floor_magnitude);
     drop(quantizer);
 
     let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {

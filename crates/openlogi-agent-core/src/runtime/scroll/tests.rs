@@ -306,3 +306,61 @@ fn source_cancellation_does_not_interrupt_another_source() {
         "the other device completes normally"
     );
 }
+
+#[test]
+fn rapid_retargeting_lag_stays_bounded_and_fully_catches_up() {
+    // Investigates a follow-up hypothesis (design.md): does retargeting
+    // (a new tick arriving before the previous ~100ms animation finishes)
+    // repeatedly reset the smoothstep curve's velocity, causing emitted
+    // position to fall further and further behind true cumulative input
+    // during continuous fast-ish ticking? At the real calibrated magnitude
+    // (~0.857/tick) and a 20ms tick cadence (faster than the 100ms
+    // animation, so every tick retargets), the lag converges to a small,
+    // BOUNDED steady state (~8.24 units, ~190ms worth) rather than growing
+    // without limit — a normal, generally-imperceptible characteristic of
+    // any eased/smoothed animation, not a runaway bug. Far short of the
+    // reported "1-2 seconds" of lag, so this mechanism is likely not that
+    // symptom's cause.
+    const BOOSTED_TICK: f64 = 0.1 * 15.0 * (8.0 / 14.0);
+    const TICK_COUNT: u64 = 100;
+    const TICK_INTERVAL_MS: u64 = 20;
+    let base = Instant::now();
+    let mut engine = ScrollEngine::default();
+    let mut frames = Vec::new();
+
+    let mut true_total = 0.0;
+    let mut lags = Vec::new();
+    for i in 0..TICK_COUNT {
+        let now = base + Duration::from_millis(i * TICK_INTERVAL_MS);
+        engine.impulse(source(), wheel(0.0, BOOSTED_TICK), now, &mut |frame| {
+            frames.push(frame);
+        });
+        true_total += BOOSTED_TICK;
+        lags.push(true_total - cumulative(&frames).y);
+    }
+
+    // The lag over the back half of the run must be bounded (converged),
+    // not still growing - if retargeting caused an unbounded stall, the
+    // last lag would be much larger than the lag at the run's midpoint.
+    let midpoint_lag = lags[lags.len() / 2];
+    let final_lag = *lags.last().expect("at least one tick");
+    assert!(
+        (final_lag - midpoint_lag).abs() < 0.1,
+        "lag should have converged by the run's second half, got midpoint \
+         {midpoint_lag:.4} vs final {final_lag:.4}"
+    );
+    assert!(
+        final_lag < 15.0,
+        "converged lag {final_lag:.4} should stay a small fraction of the \
+         {TICK_COUNT} ticks worth of true input ({true_total:.4}), not balloon"
+    );
+
+    // Once ticking stops, the animation must fully catch up to the true
+    // cumulative input - no distance permanently lost to the lag.
+    engine.advance_due(
+        base + Duration::from_millis((TICK_COUNT + 1) * TICK_INTERVAL_MS + 200),
+        &mut |frame| frames.push(frame),
+    );
+    assert_delta(cumulative(&frames), wheel(0.0, true_total));
+    assert!(engine.active.is_empty());
+}

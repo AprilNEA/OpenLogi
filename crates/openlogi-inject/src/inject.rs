@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use std::sync::{LazyLock, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use openlogi_core::binding::KeyboardUsage;
@@ -330,6 +331,21 @@ pub fn ax_navigate_browser(pid: i32, forward: bool) -> bool {
     }
 }
 
+/// Below this gap since an axis's last non-zero input, a new tick is treated
+/// as part of the same continuous scrolling gesture rather than an isolated
+/// one, and is not entitled to the isolated-tick visibility floor (it may
+/// legitimately emit zero while repaying an earlier floor's debt).
+///
+/// 500ms, not the 100ms of `openlogi-agent-core::runtime::scroll::ANIMATION_DURATION`
+/// this used to mirror: two deliberate taps closer together than that felt
+/// like one gesture to users but were being treated as two independently-
+/// isolated ones, each individually entitled to a guaranteed nonzero output —
+/// which is mathematically incompatible with bounded cumulative amplification
+/// for a sustained sequence of such taps (see design.md Decision 5). 500ms
+/// keeps back-to-back deliberate ticks classified as one gesture while still
+/// guaranteeing near-instant visibility after a genuine pause.
+const GESTURE_IDLE_GAP: Duration = Duration::from_millis(500);
+
 /// Integer scroll units ready for a platform API.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct QuantizedScroll {
@@ -338,32 +354,122 @@ struct QuantizedScroll {
 }
 
 /// Carries fractional platform units across frames so rounding never changes
-/// the cumulative distance.
+/// the cumulative distance, and tracks each axis's last non-zero input so an
+/// isolated tick after a quiet period is never silently rounded away.
 #[derive(Default)]
 struct ScrollQuantizer {
     residual_x: f64,
     residual_y: f64,
+    last_nonzero_x: Option<Instant>,
+    last_nonzero_y: Option<Instant>,
 }
 
 impl ScrollQuantizer {
     fn quantize(&mut self, delta: ScrollDelta, units_per_input: f64) -> QuantizedScroll {
+        self.quantize_at(delta, units_per_input, Instant::now())
+    }
+
+    /// `quantize` with an explicit clock, so isolation gaps are deterministic
+    /// in tests without a real sleep.
+    fn quantize_at(
+        &mut self,
+        delta: ScrollDelta,
+        units_per_input: f64,
+        now: Instant,
+    ) -> QuantizedScroll {
+        self.quantize_at_with_floor(delta, units_per_input, 1.0, now)
+    }
+
+    /// `quantize` with the isolated-tick visibility floor raised from the
+    /// default `1` output unit to `floor_magnitude` units. A caller whose
+    /// output unit is much finer than another caller's (smooth-scroll's
+    /// points vs. direct-scroll's lines, for the same `ScrollDelta::WheelTicks`
+    /// input) needs a proportionally larger floor to guarantee a comparably
+    /// visible result for one isolated, deliberate tick — see
+    /// `openspec/changes/normalize-scroll-sensitivity-by-resolution` design.md.
+    fn quantize_with_floor(
+        &mut self,
+        delta: ScrollDelta,
+        units_per_input: f64,
+        floor_magnitude: f64,
+    ) -> QuantizedScroll {
+        self.quantize_at_with_floor(delta, units_per_input, floor_magnitude, Instant::now())
+    }
+
+    fn quantize_at_with_floor(
+        &mut self,
+        delta: ScrollDelta,
+        units_per_input: f64,
+        floor_magnitude: f64,
+        now: Instant,
+    ) -> QuantizedScroll {
         QuantizedScroll {
-            x: quantize_axis(&mut self.residual_x, delta.x(), units_per_input),
-            y: quantize_axis(&mut self.residual_y, delta.y(), units_per_input),
+            x: quantize_axis(
+                &mut self.residual_x,
+                &mut self.last_nonzero_x,
+                delta.x(),
+                units_per_input,
+                floor_magnitude,
+                now,
+            ),
+            y: quantize_axis(
+                &mut self.residual_y,
+                &mut self.last_nonzero_y,
+                delta.y(),
+                units_per_input,
+                floor_magnitude,
+                now,
+            ),
         }
     }
+}
+
+/// `+1` for a positive value, `-1` for a negative one. Only called with
+/// non-zero `input`, so the sign is always meaningful.
+const fn sign_unit(input: f64) -> i32 {
+    if input.is_sign_positive() { 1 } else { -1 }
 }
 
 #[expect(
     clippy::cast_possible_truncation,
     reason = "the rounded value is clamped to the i32 range before conversion"
 )]
-fn quantize_axis(residual: &mut f64, input: f64, units_per_input: f64) -> i32 {
+fn quantize_axis(
+    residual: &mut f64,
+    last_nonzero: &mut Option<Instant>,
+    input: f64,
+    units_per_input: f64,
+    floor_magnitude: f64,
+    now: Instant,
+) -> i32 {
     let exact = input.mul_add(units_per_input, *residual);
-    let rounded = exact
+    let natural = exact
         .round()
-        .clamp(f64::from(i32::MIN), f64::from(i32::MAX));
-    let output = rounded as i32;
+        .clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32;
+
+    let is_isolated = input != 0.0
+        && last_nonzero.is_none_or(|at| now.saturating_duration_since(at) >= GESTURE_IDLE_GAP);
+    if input != 0.0 {
+        *last_nonzero = Some(now);
+    }
+
+    let output = if natural == 0 && is_isolated {
+        // A deliberate, isolated tick must be visible, by at least
+        // `floor_magnitude` output units.
+        (f64::from(sign_unit(input)) * floor_magnitude)
+            .round()
+            .clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32
+    } else if input != 0.0 && natural != 0 && natural.signum() != sign_unit(input) {
+        // Carried-over debt from an earlier floor must never surface as a
+        // reversed-direction unit — repay it silently instead.
+        0
+    } else {
+        natural
+    };
+
+    // Always deduct the emitted output from residual, including the floor's
+    // own output — an unpaid floor is exactly what let cumulative distance
+    // amplify without bound for slowly-spaced ticks (see design.md Decision 4).
     *residual = exact - f64::from(output);
     output
 }
@@ -499,6 +605,8 @@ fn hid_usage_to_windows(usage: u8) -> Option<u16> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use openlogi_core::scroll::ScrollDelta;
 
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
@@ -531,6 +639,379 @@ mod tests {
         let backward = quantizer.quantize(ScrollDelta::wheel_ticks(-0.25, 0.0), 120.0);
         assert_eq!(forward, QuantizedScroll { x: 30, y: 0 });
         assert_eq!(backward, QuantizedScroll { x: -30, y: 0 });
+    }
+
+    #[test]
+    fn isolated_tick_floors_from_a_clean_state() {
+        let mut quantizer = ScrollQuantizer::default();
+        let base = Instant::now();
+        let output = quantizer.quantize_at(ScrollDelta::wheel_ticks(0.0, 0.2), 1.0, base);
+        assert_eq!(
+            output.y, 1,
+            "an isolated tick from a clean state must be visible"
+        );
+    }
+
+    /// `normalize-scroll-sensitivity-by-resolution`: smooth-scroll's points
+    /// unit is much finer than direct-scroll's line unit, so the default
+    /// `+-1` isolated-tick floor is imperceptible there. `quantize_with_floor`
+    /// raises that floor to a caller-chosen magnitude instead.
+    #[test]
+    fn quantize_with_floor_raises_the_isolated_tick_guarantee() {
+        let mut quantizer = ScrollQuantizer::default();
+        let base = Instant::now();
+        // 0.01 * 20.0 = 0.2, well under the 0.5 rounding threshold, so
+        // natural rounding alone would give 0 here.
+        let output =
+            quantizer.quantize_at_with_floor(ScrollDelta::wheel_ticks(0.0, 0.01), 20.0, 20.0, base);
+        assert_eq!(
+            output.y, 20,
+            "an isolated tick must floor to floor_magnitude, not the default 1"
+        );
+    }
+
+    #[test]
+    fn quantize_with_floor_does_not_override_natural_rounding() {
+        let mut quantizer = ScrollQuantizer::default();
+        let base = Instant::now();
+        // 2.0 * 20.0 = 40, already comfortably nonzero, so the floor must
+        // not override natural rounding's own (larger) result.
+        let output =
+            quantizer.quantize_at_with_floor(ScrollDelta::wheel_ticks(0.0, 2.0), 20.0, 20.0, base);
+        assert_eq!(
+            output.y, 40,
+            "natural rounding must not be overridden once it is already nonzero"
+        );
+    }
+
+    #[test]
+    fn second_isolated_tick_may_repay_debt_instead_of_flooring_again() {
+        let mut quantizer = ScrollQuantizer::default();
+        let base = Instant::now();
+        let first = quantizer.quantize_at(ScrollDelta::wheel_ticks(0.0, 0.2), 1.0, base);
+        assert_eq!(first.y, 1, "the first isolated tick must be visible");
+
+        // A second, genuinely isolated tick (well past GESTURE_IDLE_GAP), same
+        // direction - but the first tick's floor already "spent" more than
+        // its own 0.2 true magnitude, so this one may legitimately repay that
+        // debt with zero output instead of flooring again (see design.md
+        // Decision 4).
+        let later = base + Duration::from_millis(600);
+        let second = quantizer.quantize_at(ScrollDelta::wheel_ticks(0.0, 0.2), 1.0, later);
+        assert_eq!(
+            second.y, 0,
+            "a second isolated tick may emit zero while repaying the first tick's debt"
+        );
+
+        // The combined total across both ticks must still be within one unit
+        // of the true cumulative distance (0.4, rounds to 0) - not checking
+        // each tick in isolation is exactly the oversight that let the
+        // pre-revision code amplify without anyone noticing (see PR #1316
+        // review).
+        let true_cumulative: f64 = 0.2 + 0.2;
+        assert!((f64::from(first.y + second.y) - true_cumulative.round()).abs() <= 1.0);
+    }
+
+    #[test]
+    fn a_quick_double_tap_is_treated_as_one_continuous_gesture() {
+        // Reproduces the second AI-review round's exact scenario: two ticks
+        // 200ms apart. Under GESTURE_IDLE_GAP=500ms this pair no longer
+        // qualifies as two separately-isolated ticks - it's one continuous
+        // gesture, where showing 0 while repaying debt is correct by design
+        // (see design.md Decision 5), not a guarantee violation.
+        let mut quantizer = ScrollQuantizer::default();
+        let base = Instant::now();
+        let first = quantizer.quantize_at(ScrollDelta::wheel_ticks(0.0, 0.2), 1.0, base);
+        assert_eq!(first.y, 1, "the first isolated tick must be visible");
+
+        let later = base + Duration::from_millis(200);
+        let second = quantizer.quantize_at(ScrollDelta::wheel_ticks(0.0, 0.2), 1.0, later);
+        assert_eq!(
+            second.y, 0,
+            "a quick follow-up tick within the gesture window may emit zero"
+        );
+    }
+
+    #[test]
+    fn slowly_spaced_ticks_stay_within_one_unit_of_true_cumulative_distance() {
+        let mut quantizer = ScrollQuantizer::default();
+        let base = Instant::now();
+        let per_tick = 0.2;
+        let tick_count: u32 = 25;
+
+        let total: i32 = (0..tick_count)
+            .map(|i| {
+                // Every tick is >=500ms apart (GESTURE_IDLE_GAP) - a
+                // slowly-spaced, deliberate scrolling gesture where each tick
+                // individually qualifies as isolated. This is the exact
+                // scenario the AI review found amplifying without bound in
+                // the pre-revision code.
+                let now = base + Duration::from_millis(u64::from(i) * 600);
+                quantizer
+                    .quantize_at(ScrollDelta::wheel_ticks(0.0, per_tick), 1.0, now)
+                    .y
+            })
+            .sum();
+
+        let true_cumulative = per_tick * f64::from(tick_count);
+        let excess = f64::from(total) - true_cumulative.round();
+        assert!(
+            (0.0..=1.0).contains(&excess),
+            "total {total} should stay within one unit of the true cumulative \
+             {true_cumulative} (excess was {excess}), not amplify without bound"
+        );
+    }
+
+    /// Real-hardware-calibrated regression guard for
+    /// `normalize-scroll-sensitivity-by-resolution`: a Low/Standard-mode raw
+    /// tick (measured ~0.1) boosted by that fix's `resolution_scale`
+    /// (measured `multiplier=15`) at the real calibrated sensitivity (8,
+    /// `scroll_multiplier` 8/14) scales to `0.1 * 15 * 8/14 ~= 0.857` -
+    /// comfortably above the quantizer's 0.5 rounding threshold on its own.
+    ///
+    /// This disproves the initial hypothesis that closely-spaced ticks at
+    /// this magnitude could legitimately skip via the debt-repayment
+    /// mechanism (see design.md's follow-up feedback item 2): at ~0.857,
+    /// natural rounding alone gives `1` whether or not the tick is
+    /// isolated, so the floor never needs to engage here. If the
+    /// "sometimes skips a tick" symptom is real, its cause is something
+    /// other than the isolated-tick/debt-repayment trade-off at this
+    /// specific magnitude - most plausibly genuine physical variance
+    /// pushing an individual raw tick's magnitude well below the typical
+    /// ~0.1 (e.g. a very light rotation).
+    ///
+    /// Note: this predates `ISOLATED_TICK_BOOST`
+    /// (`runtime/scroll/worker.rs`) and exercises `units_per_input=1.0` -
+    /// the direct/line-unit path, not smooth-scroll's points-based one. See
+    /// `isolated_tick_end_to_end_stays_comfortably_visible_after_the_fix`
+    /// below for the full smooth-scroll pipeline with the boost included.
+    #[test]
+    fn real_calibrated_boosted_tick_is_visible_whether_isolated_or_closely_spaced() {
+        const BOOSTED_TICK: f64 = 0.1 * 15.0 * (8.0 / 14.0);
+        let mut quantizer = ScrollQuantizer::default();
+        let base = Instant::now();
+
+        let isolated =
+            quantizer.quantize_at(ScrollDelta::wheel_ticks(0.0, BOOSTED_TICK), 1.0, base);
+        assert_eq!(
+            isolated.y, 1,
+            "a genuinely isolated real-calibrated tick must always be visible"
+        );
+
+        // Well under GESTURE_IDLE_GAP (500ms): one continuous gesture, not a
+        // second isolated tick - but at this magnitude natural rounding
+        // alone still gives 1, so it stays visible too.
+        let closely_spaced = base + Duration::from_millis(200);
+        let second = quantizer.quantize_at(
+            ScrollDelta::wheel_ticks(0.0, BOOSTED_TICK),
+            1.0,
+            closely_spaced,
+        );
+        assert_eq!(
+            second.y, 1,
+            "at this real calibrated magnitude, a closely-spaced repeat still \
+             rounds to 1 naturally - the debt-repayment skip only matters for \
+             smaller magnitudes than our calibrated one"
+        );
+    }
+
+    /// Characterizes the real (if more subtle than initially hypothesized)
+    /// shape of a known, NOT-yet-fixed limitation (see design.md's "Open
+    /// item: smooth-scroll per-frame dilution for Low-mode magnitudes"):
+    /// `smooth_scroll`'s animation splits an already-`resolution_scale`-boosted
+    /// tick across many per-frame quantizer calls independently. At the real
+    /// calibrated magnitude (~0.857), residual crosses the 0.5 rounding
+    /// threshold *within the same tick's own frame sequence* - not after
+    /// several physical ticks as initially hypothesized - but only in the
+    /// later frames: most of one tick's own frames show zero, and output
+    /// only appears well into that same ~100ms animation window.
+    ///
+    /// Simplification: real frames follow a cubic-smoothstep curve
+    /// (front/back-loaded, not equal slices); this approximates with equal
+    /// per-frame slices to isolate the dilution effect itself from the
+    /// easing shape.
+    #[test]
+    fn smooth_scroll_per_frame_split_delays_output_until_late_in_the_animation() {
+        const BOOSTED_TICK: f64 = 0.1 * 15.0 * (8.0 / 14.0); // real calibrated magnitude
+        const FRAMES_PER_TICK: u32 = 12; // ANIMATION_DURATION (100ms) / FRAME_INTERVAL (8ms)
+        const FRAME_INTERVAL_MS: u64 = 8;
+        let mut quantizer = ScrollQuantizer::default();
+        let base = Instant::now();
+
+        // Prime: establishes last_nonzero so the measured tick below is not
+        // itself isolated - matching a dead zone reported *during* ongoing
+        // slow scrolling, not on the very first click.
+        let mut now = base;
+        quantizer.quantize_at(ScrollDelta::wheel_ticks(0.0, BOOSTED_TICK), 1.0, now);
+
+        let mut first_visible_frame = None;
+        for frame in 1..=FRAMES_PER_TICK {
+            now += Duration::from_millis(FRAME_INTERVAL_MS);
+            let output = quantizer.quantize_at(
+                ScrollDelta::wheel_ticks(0.0, BOOSTED_TICK / f64::from(FRAMES_PER_TICK)),
+                1.0,
+                now,
+            );
+            if output.y != 0 && first_visible_frame.is_none() {
+                first_visible_frame = Some(frame);
+            }
+        }
+
+        // Documents the current limitation precisely: output should appear,
+        // but only in the back half of the animation, not the front half -
+        // most of the tick's own frames are silent before it catches up.
+        // If this ever fails because output appears in the front half, the
+        // per-frame dilution has likely improved - update design.md's "Open
+        // item" section to match; this is a regression marker, not a
+        // requirement to keep failing.
+        assert!(
+            first_visible_frame.is_some_and(|frame| frame > FRAMES_PER_TICK / 2),
+            "expected per-frame dilution to delay visible output into the back \
+             half of the {FRAMES_PER_TICK}-frame animation, got {first_visible_frame:?}"
+        );
+    }
+
+    /// End-to-end regression guard for the isolated-tick invisibility bug
+    /// this investigation fixed (see design.md's "Final fix" section):
+    /// combines the real calibrated magnitude, `ISOLATED_TICK_BOOST` (8.0,
+    /// from `runtime/scroll/worker.rs`), and the smooth-scroll
+    /// `POINTS_PER_WHEEL_TICK`/floor (20.0, from `inject/macos.rs`) - the
+    /// exact real-world isolated Low-mode tick that was confirmed invisible
+    /// in VS Code, Safari, and Finder before the fix, and confirmed "every
+    /// tick registered" on real hardware after it.
+    ///
+    /// If this ever drops back under the visibility floor, a future change
+    /// to `ISOLATED_TICK_BOOST` or `POINTS_PER_WHEEL_TICK` has silently
+    /// reintroduced the bug this test exists to catch.
+    #[test]
+    fn isolated_tick_end_to_end_stays_comfortably_visible_after_the_fix() {
+        const BOOSTED_TICK: f64 = 0.1 * 15.0 * (8.0 / 14.0); // real calibrated magnitude, pre-isolation-boost
+        const ISOLATED_TICK_BOOST: f64 = 8.0; // mirrors runtime/scroll/worker.rs
+        const POINTS_PER_WHEEL_TICK: f64 = 20.0; // mirrors inject/macos.rs
+        const FRAMES_PER_TICK: u32 = 12; // ANIMATION_DURATION (100ms) / FRAME_INTERVAL (8ms)
+        const FRAME_INTERVAL_MS: u64 = 8;
+        // Comfortably above the ~18 points confirmed invisible in every app
+        // tested before this fix, and comfortably below what a fast/multi-
+        // tick gesture already produces (hundreds of points) - just proof
+        // that a single isolated tick clears a real visibility bar.
+        const VISIBILITY_FLOOR: i32 = 50;
+
+        let boosted = BOOSTED_TICK * ISOLATED_TICK_BOOST;
+        let mut quantizer = ScrollQuantizer::default();
+        let base = Instant::now();
+
+        let mut total = 0;
+        for frame in 1..=FRAMES_PER_TICK {
+            let now = base + Duration::from_millis(FRAME_INTERVAL_MS * u64::from(frame));
+            let output = quantizer.quantize_at_with_floor(
+                ScrollDelta::wheel_ticks(0.0, boosted / f64::from(FRAMES_PER_TICK)),
+                POINTS_PER_WHEEL_TICK,
+                POINTS_PER_WHEEL_TICK,
+                now,
+            );
+            total += output.y;
+        }
+
+        assert!(
+            total >= VISIBILITY_FLOOR,
+            "a real isolated Low-mode tick (boosted magnitude {boosted:.3}) produced only \
+             {total} points across its {FRAMES_PER_TICK}-frame animation - below the \
+             {VISIBILITY_FLOOR}-point visibility floor. This is the exact scenario confirmed \
+             invisible in VS Code, Safari, and Finder before ISOLATED_TICK_BOOST was added."
+        );
+    }
+
+    #[test]
+    fn same_direction_ticks_never_emit_an_opposing_sign() {
+        let mut quantizer = ScrollQuantizer::default();
+        let base = Instant::now();
+
+        for i in 0_u32..25 {
+            // Alternate isolated (>=500ms, GESTURE_IDLE_GAP) and continuous
+            // (<500ms) spacing so both the floor and the debt-repayment
+            // clamp get exercised.
+            let gap_ms: u64 = if i % 3 == 0 { 600 } else { 20 };
+            let now = base + Duration::from_millis(u64::from(i) * gap_ms);
+            let output = quantizer.quantize_at(ScrollDelta::wheel_ticks(0.0, 0.2), 1.0, now);
+            assert!(
+                output.y >= 0,
+                "a positive-direction tick must never emit a negative output, got {} at tick {i}",
+                output.y
+            );
+        }
+    }
+
+    #[test]
+    fn a_genuine_direction_reversal_still_surfaces() {
+        let mut quantizer = ScrollQuantizer::default();
+        let base = Instant::now();
+
+        // Build up debt scrolling in the positive direction.
+        let forward = quantizer.quantize_at(ScrollDelta::wheel_ticks(0.0, 0.2), 1.0, base);
+        assert_eq!(forward.y, 1, "the initial isolated tick must be visible");
+
+        // Now genuinely reverse direction. The clamp only suppresses a
+        // *positive*-direction natural rounding gone negative from unpaid
+        // debt - it must not also suppress a real negative-direction input.
+        let mut saw_negative = false;
+        for i in 1..=5 {
+            let now = base + Duration::from_millis(200 * i);
+            let output = quantizer.quantize_at(ScrollDelta::wheel_ticks(0.0, -0.2), 1.0, now);
+            if output.y < 0 {
+                saw_negative = true;
+                break;
+            }
+        }
+        assert!(
+            saw_negative,
+            "a sustained genuine reversal must surface as negative output within a few ticks"
+        );
+    }
+
+    #[test]
+    fn swept_magnitudes_and_gaps_never_reverse_and_stay_bounded() {
+        // Property-style sweep, not just the hand-picked examples above: for
+        // every combination of per-tick magnitude and inter-tick gap in the
+        // grid below (including values straddling the 500ms
+        // GESTURE_IDLE_GAP threshold on both sides), run a 60-tick same-
+        // direction sequence and confirm the two properties this design
+        // depends on hold everywhere, not just at the specific numbers used
+        // in the PR's own examples: no output ever opposes the input's
+        // sign, and cumulative output never drifts more than one unit from
+        // the true cumulative distance. Found by direct measurement: the
+        // observed worst case across this whole grid is exactly 1 unit of
+        // excess, at the smallest magnitude/gap combination (0.05, 50ms).
+        let magnitudes = [0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.49, 0.51, 0.6, 0.8, 0.95];
+        let gaps_ms = [50_u64, 90, 150, 300, 499, 500, 501, 600, 900, 1500];
+        let tick_count: u32 = 60;
+
+        for &magnitude in &magnitudes {
+            for &gap_ms in &gaps_ms {
+                let mut quantizer = ScrollQuantizer::default();
+                let base = Instant::now();
+                let mut total = 0_i32;
+
+                for i in 0..tick_count {
+                    let now = base + Duration::from_millis(u64::from(i) * gap_ms);
+                    let output =
+                        quantizer.quantize_at(ScrollDelta::wheel_ticks(0.0, magnitude), 1.0, now);
+                    assert!(
+                        output.y >= 0,
+                        "reversal at magnitude={magnitude} gap_ms={gap_ms} tick={i}: got {}",
+                        output.y
+                    );
+                    total += output.y;
+
+                    let true_cumulative = magnitude * f64::from(i + 1);
+                    let excess = f64::from(total) - true_cumulative.round();
+                    assert!(
+                        excess.abs() <= 1.0,
+                        "excess {excess} exceeded one unit at magnitude={magnitude} \
+                         gap_ms={gap_ms} tick={i} (total={total}, true={true_cumulative})"
+                    );
+                }
+            }
+        }
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]

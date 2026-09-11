@@ -39,9 +39,11 @@ pub use fn_lock::{set_fn_lock, set_fn_lock_on};
 pub use haptic::{ensure_haptics_armed_on, play_haptic, play_haptic_on};
 pub use hidpp::feature::haptic_feedback::HapticWaveform;
 pub use hires_wheel::{
-    ScrollReportingTarget, ScrollResolution, ScrollWheelMode, get_scroll_wheel_mode,
-    get_scroll_wheel_mode_on, set_scroll_inversion, set_scroll_inversion_on, set_scroll_resolution,
-    set_scroll_resolution_on, set_scroll_wheel_mode, set_scroll_wheel_mode_on,
+    ScrollReportingTarget, ScrollResolution, ScrollWheelMode, WheelCapabilities,
+    get_scroll_wheel_mode, get_scroll_wheel_mode_on, get_wheel_capabilities,
+    get_wheel_capabilities_on, set_scroll_inversion, set_scroll_inversion_on,
+    set_scroll_resolution, set_scroll_resolution_on, set_scroll_wheel_mode,
+    set_scroll_wheel_mode_on,
 };
 pub use lighting::{
     LightingMethod, set_keyboard_color, set_keyboard_color_on, set_keyboard_color_with,

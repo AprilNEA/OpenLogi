@@ -18,6 +18,7 @@
 //! and avoids holding a long-lived async runtime alongside GPUI's executor.
 
 use std::future::Future;
+use std::sync::Arc;
 use std::time::Duration;
 
 use openlogi_core::config::Lighting;
@@ -495,6 +496,66 @@ pub fn write_scroll_wheel_mode_in_background(
             }
         },
         move |result| log_wheel_result(index, resolution, inverted, result),
+    );
+}
+
+/// Base multiplier to apply ahead of vertical scroll sensitivity so a wheel
+/// in `Low`/Standard resolution mode feels comparable to `High` mode at the
+/// same sensitivity value. Neutral (`1`) in `High` mode, or when the
+/// device's own reported multiplier is unusable (`0`).
+fn resolution_scale_for(multiplier: u8, resolution: ScrollResolution) -> u8 {
+    match resolution {
+        ScrollResolution::High => 1,
+        ScrollResolution::Low => multiplier.max(1),
+    }
+}
+
+/// Spawn an OS thread that reads `op`'s device's static HiRes wheel
+/// capabilities and current reporting mode, and republishes the
+/// resolution-normalization base scale `try_hook_scroll` applies ahead of
+/// `vertical_scroll_sensitivity` — see
+/// `openspec/changes/normalize-scroll-sensitivity-by-resolution`.
+///
+/// `generation` must come from a matching
+/// [`crate::runtime::scroll::ScrollPreferences::begin_resolution_scale_refresh`]
+/// call made when this read was dispatched, so a result that completes after
+/// the device has been switched (or reset to neutral) again is detected as
+/// stale and silently dropped instead of overwriting a fresher value.
+///
+/// Uses the device's *live* reported mode rather than the configured target,
+/// so the scale stays correct even while a mode write from
+/// [`write_scroll_wheel_mode_in_background`] is still in flight or the
+/// device has no configured override at all. An unsupported wheel (no
+/// `0x2121`) or a failed read is expected and only logged at debug level —
+/// `preferences` is left at whatever scale it last held.
+pub fn read_wheel_resolution_scale_in_background(
+    op: DeviceOp<'_>,
+    preferences: Arc<crate::runtime::scroll::ScrollPreferences>,
+    generation: u64,
+) {
+    let index = op.route.device_index();
+    op.spawn_write(
+        "wheel resolution scale read",
+        |shared| async move {
+            let capabilities = openlogi_hid::get_wheel_capabilities_on(&shared).await?;
+            let mode = openlogi_hid::get_scroll_wheel_mode_on(&shared).await?;
+            Ok((capabilities, mode))
+        },
+        move |result| match result {
+            Ok(Ok((capabilities, mode))) => {
+                let scale = resolution_scale_for(capabilities.multiplier, mode.resolution);
+                preferences.publish_resolution_scale_for_generation(scale, generation);
+                debug!(
+                    index,
+                    multiplier = capabilities.multiplier,
+                    ?mode.resolution,
+                    scale,
+                    "wheel resolution scale updated"
+                );
+            }
+            Ok(Err(e)) => debug!(error = ?e, "wheel resolution scale read failed"),
+            Err(_) => debug!("wheel resolution scale read timed out (device asleep/unresponsive)"),
+        },
     );
 }
 
