@@ -3,6 +3,7 @@
 
 use std::mem::size_of;
 use std::sync::{LazyLock, Mutex};
+use std::time::Instant;
 
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, MOUSEEVENTF_HWHEEL,
@@ -17,6 +18,7 @@ use openlogi_core::binding::{
 };
 use openlogi_core::scroll::ScrollDelta;
 
+use super::zoom_notch::ZoomNotches;
 use super::{HeldKey, KeyPhase, ScrollQuantizer};
 
 const WHEEL_DELTA: i32 = 120;
@@ -246,21 +248,14 @@ fn post_key(vk: u16, modifiers: &[u16]) {
 /// high-resolution wheel would round every step to zero and never zoom.
 pub(super) fn post_zoom(magnification: f64) {
     let notches = {
-        let Ok(mut pending) = ZOOM_REMAINDER.lock() else {
+        let Ok(mut pending) = ZOOM_NOTCHES.lock() else {
             tracing::warn!("Windows zoom remainder mutex poisoned");
             return;
         };
-        *pending += magnification / ZOOM_PER_NOTCH;
-        let whole = pending.trunc();
-        *pending -= whole;
-        whole
+        pending.take(magnification, ZOOM_PER_NOTCH, Instant::now())
     };
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "trunc() of an accumulator bounded by one notch per step"
-    )]
-    let count = notches.abs() as i32;
-    let delta = if notches.is_sign_negative() {
+    let count = notches.unsigned_abs();
+    let delta = if notches.is_negative() {
         -WHEEL_DELTA
     } else {
         WHEEL_DELTA
@@ -278,7 +273,8 @@ pub(super) fn post_zoom(magnification: f64) {
 /// wheel dispatcher applies per tick.
 const ZOOM_PER_NOTCH: f64 = 0.05;
 
-static ZOOM_REMAINDER: LazyLock<Mutex<f64>> = LazyLock::new(|| Mutex::new(0.0));
+static ZOOM_NOTCHES: LazyLock<Mutex<ZoomNotches>> =
+    LazyLock::new(|| Mutex::new(ZoomNotches::new()));
 
 /// Synthesise one scroll tick in direction `(dx, dy)`. Unit direction
 /// (-1/0/1) scaled by `WHEEL_DELTA`, the fixed magnitude the four

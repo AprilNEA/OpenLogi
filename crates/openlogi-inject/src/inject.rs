@@ -25,6 +25,12 @@ mod linux;
 #[cfg(target_os = "windows")]
 mod windows;
 
+// Quantizing zoom into Ctrl+wheel notches is Windows/Linux business, but the
+// logic is pure and its boundaries are exactly where the bugs live, so it is
+// compiled for tests on every host too.
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+mod zoom_notch;
+
 /// Which isolated edge of a held keyboard chord to synthesize.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum KeyPhase {

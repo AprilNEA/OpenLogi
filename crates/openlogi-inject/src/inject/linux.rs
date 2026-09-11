@@ -7,6 +7,7 @@
 
 use std::io;
 use std::sync::{LazyLock, Mutex};
+use std::time::Instant;
 
 use evdev::uinput::VirtualDevice;
 use evdev::{AttributeSet, EventType, InputEvent, KeyCode, RelativeAxisCode};
@@ -18,6 +19,7 @@ use openlogi_core::binding::{
 };
 use openlogi_core::scroll::ScrollDelta;
 
+use super::zoom_notch::ZoomNotches;
 use super::{HeldKey, KeyPhase, QuantizedScroll, ScrollQuantizer};
 
 const HIGH_RES_UNITS_PER_TICK: f64 = 120.0;
@@ -200,21 +202,14 @@ fn dispatch_script(script: Script<'_>) {
 /// round every step to zero and never zoom.
 pub(super) fn post_zoom(magnification: f64) {
     let notches = {
-        let Ok(mut pending) = ZOOM_REMAINDER.lock() else {
+        let Ok(mut pending) = ZOOM_NOTCHES.lock() else {
             tracing::warn!("Linux zoom remainder mutex poisoned");
             return;
         };
-        *pending += magnification / ZOOM_PER_NOTCH;
-        let whole = pending.trunc();
-        *pending -= whole;
-        whole
+        pending.take(magnification, ZOOM_PER_NOTCH, Instant::now())
     };
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "trunc() of an accumulator bounded by one notch per step"
-    )]
-    let count = notches.abs() as i32;
-    let value = if notches.is_sign_negative() { -1 } else { 1 };
+    let count = notches.unsigned_abs();
+    let value = if notches.is_negative() { -1 } else { 1 };
     let ctrl = [KeyCode::KEY_LEFTCTRL];
     for _ in 0..count {
         emit(&held_key_events(&ctrl, KeyPhase::Down));
@@ -227,7 +222,8 @@ pub(super) fn post_zoom(magnification: f64) {
 /// wheel dispatcher applies per tick.
 const ZOOM_PER_NOTCH: f64 = 0.05;
 
-static ZOOM_REMAINDER: LazyLock<Mutex<f64>> = LazyLock::new(|| Mutex::new(0.0));
+static ZOOM_NOTCHES: LazyLock<Mutex<ZoomNotches>> =
+    LazyLock::new(|| Mutex::new(ZoomNotches::new()));
 
 fn dispatch_scroll(dx: i8, dy: i8) {
     if dy != 0 {

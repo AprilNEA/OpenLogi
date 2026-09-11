@@ -2245,3 +2245,48 @@ fn the_zoom_slider_does_not_move_the_scroll_slider() {
         "the zoom slider must leave scroll sensitivity where it was"
     );
 }
+
+/// The General page's zoom slider writes the app-wide default, which every
+/// device without its own override follows. Without this setter the setting
+/// existed in the config file but nothing in the UI could reach it.
+#[test]
+fn the_app_wide_zoom_default_applies_to_devices_without_an_override() {
+    let cache = AssetResolver::new();
+    let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::with_runtime(
+        Config::ephemeral(),
+        &[],
+        &[],
+        &cache,
+        &[],
+        ConfigPersistence::MemoryOnly,
+        commands,
+    );
+
+    state.set_zoom_sensitivity(ThumbwheelSensitivity::MAX);
+
+    assert_eq!(
+        state.app_settings().zoom_sensitivity,
+        ThumbwheelSensitivity::MAX
+    );
+    assert_eq!(
+        state.device_zoom_sensitivity("mouse-a"),
+        ThumbwheelSensitivity::MAX,
+        "a device with no override follows the app-wide zoom default"
+    );
+    assert_eq!(
+        state.app_settings().thumbwheel_sensitivity,
+        ThumbwheelSensitivity::DEFAULT,
+        "the zoom default must not move scroll sensitivity"
+    );
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(crate::services::ipc::Command::ReloadConfig)
+    ));
+
+    state.set_zoom_sensitivity(ThumbwheelSensitivity::MAX);
+    assert!(
+        receiver.try_recv().is_err(),
+        "an unchanged value is a no-op"
+    );
+}
