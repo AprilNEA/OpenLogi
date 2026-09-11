@@ -3,11 +3,15 @@
 //! The orchestrator publishes the desired set of pads; this handle creates and
 //! destroys [`openlogi_gamepad::VirtualGamepad`] instances and applies mapped
 //! input from the HID++ capture path.
+//!
+//! Diversion only engages for keys that currently have a **live** pad — if
+//! create fails (no entitlement / no uinput / ViGEm missing), controls stay on
+//! the productivity path.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use openlogi_core::binding::{
     ButtonId, DpadDirection, GamepadAxis, GamepadBinding, GamepadFaceButton, GamepadMap,
@@ -17,6 +21,9 @@ use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_gamepad::{GamepadState, Rumble, VirtualGamepad, create as create_pad};
 use openlogi_hid::DeviceRoute;
 use tracing::{debug, info, warn};
+
+/// How long a thumb-wheel axis pulse stays deflected before returning to zero.
+const AXIS_PULSE: Duration = Duration::from_millis(50);
 
 /// One online device that should own a virtual pad.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -53,6 +60,8 @@ struct LivePad {
     map: GamepadMap,
     state: GamepadState,
     device: Box<dyn VirtualGamepad>,
+    /// Axes that should return to zero after [`AXIS_PULSE`].
+    axis_hold_until: HashMap<GamepadAxis, Instant>,
 }
 
 impl GamepadPads {
@@ -64,6 +73,14 @@ impl GamepadPads {
         if let Ok(mut guard) = self.inner.lock() {
             guard.rumble_sink = Some(Arc::new(sink));
         }
+    }
+
+    /// Whether a virtual pad is currently live for `config_key`.
+    #[must_use]
+    pub fn is_active(&self, config_key: &str) -> bool {
+        self.inner
+            .lock()
+            .is_ok_and(|guard| guard.pads.contains_key(config_key))
     }
 
     /// Diff `desired` against live pads: create, update, destroy.
@@ -85,16 +102,17 @@ impl GamepadPads {
             .cloned()
             .collect();
         for key in stale {
-            if let Some(pad) = guard.pads.remove(&key) {
-                info!(config_key = %key, "destroying virtual gamepad");
-                if let Err(error) = pad.device.shutdown() {
-                    warn!(config_key = %key, %error, "virtual gamepad shutdown failed");
-                }
-            }
+            destroy_pad(&mut guard, &key);
         }
 
         for (key, want) in wanted {
-            if let Some(existing) = guard.pads.get_mut(&key) {
+            let recreate = guard
+                .pads
+                .get(&key)
+                .is_some_and(|existing| existing.desired.product_name != want.product_name);
+            if recreate {
+                destroy_pad(&mut guard, &key);
+            } else if let Some(existing) = guard.pads.get_mut(&key) {
                 existing.desired = want;
                 continue;
             }
@@ -108,6 +126,7 @@ impl GamepadPads {
                             map: GamepadMap::default_for_mouse(),
                             state: GamepadState::default(),
                             device,
+                            axis_hold_until: HashMap::new(),
                         },
                     );
                 }
@@ -122,7 +141,7 @@ impl GamepadPads {
         }
     }
 
-    /// Whether `config_key`'s pad owns `button` (actions must not run).
+    /// Whether `config_key`'s live pad owns `button` (actions must not run).
     #[must_use]
     pub fn owns_button(&self, config_key: &str, button: ButtonId) -> bool {
         self.inner
@@ -196,19 +215,41 @@ impl GamepadPads {
         }
     }
 
-    /// Map thumb-wheel rotation to the configured axis (sign by direction).
+    /// Pulse a thumb-wheel axis, then auto-neutralize after [`AXIS_PULSE`].
     pub fn apply_thumbwheel_axis(&self, config_key: &str, button: ButtonId, magnitude: f32) {
         let Some(binding) = self.binding_for(config_key, button) else {
             return;
         };
-        if let GamepadBinding::Axis(axis) = binding {
-            let sign = if button == ButtonId::ThumbwheelScrollDown {
-                -1.0
-            } else {
-                1.0
-            };
-            self.set_axis(config_key, axis, (magnitude * sign).clamp(-1.0, 1.0));
-        }
+        let GamepadBinding::Axis(axis) = binding else {
+            return;
+        };
+        let sign = if button == ButtonId::ThumbwheelScrollDown {
+            -1.0
+        } else {
+            1.0
+        };
+        let value = (magnitude * sign).clamp(-1.0, 1.0);
+        self.with_pad(config_key, |pad| {
+            pad.state.set_axis(axis, value);
+            pad.axis_hold_until
+                .insert(axis, Instant::now() + AXIS_PULSE);
+            emit(pad);
+        });
+    }
+
+    /// Clear all buttons/axes for `config_key` and emit (capture teardown).
+    pub fn neutralize(&self, config_key: &str) {
+        self.with_pad(config_key, |pad| {
+            pad.state = GamepadState::default();
+            pad.axis_hold_until.clear();
+            emit(pad);
+        });
+    }
+
+    /// Expire thumb-wheel axis pulses and poll host rumble.
+    pub fn tick(&self) {
+        self.expire_axis_holds();
+        self.poll_rumble();
     }
 
     /// Poll every live pad for host rumble and forward to the sink.
@@ -231,18 +272,40 @@ impl GamepadPads {
         }
     }
 
-    /// Spawn a background rumble poller (daemon thread).
+    /// Spawn a background maintenance poller (axis decay + rumble).
     pub fn spawn_rumble_poller(&self) {
         let pads = self.clone();
         thread::Builder::new()
-            .name("openlogi-gamepad-rumble".into())
+            .name("openlogi-gamepad-tick".into())
             .spawn(move || {
                 loop {
-                    pads.poll_rumble();
+                    pads.tick();
                     thread::sleep(Duration::from_millis(30));
                 }
             })
             .ok();
+    }
+
+    fn expire_axis_holds(&self) {
+        let Ok(mut guard) = self.inner.lock() else {
+            return;
+        };
+        let now = Instant::now();
+        for pad in guard.pads.values_mut() {
+            let expired: Vec<GamepadAxis> = pad
+                .axis_hold_until
+                .iter()
+                .filter_map(|(axis, until)| (*until <= now).then_some(*axis))
+                .collect();
+            if expired.is_empty() {
+                continue;
+            }
+            for axis in expired {
+                pad.axis_hold_until.remove(&axis);
+                pad.state.set_axis(axis, 0.0);
+            }
+            emit(pad);
+        }
     }
 
     fn binding_for(&self, config_key: &str, button: ButtonId) -> Option<GamepadBinding> {
@@ -261,6 +324,15 @@ impl GamepadPads {
         };
         if let Some(pad) = guard.pads.get_mut(config_key) {
             f(pad);
+        }
+    }
+}
+
+fn destroy_pad(guard: &mut GamepadPadsInner, key: &str) {
+    if let Some(pad) = guard.pads.remove(key) {
+        info!(config_key = %key, "destroying virtual gamepad");
+        if let Err(error) = pad.device.shutdown() {
+            warn!(config_key = %key, %error, "virtual gamepad shutdown failed");
         }
     }
 }

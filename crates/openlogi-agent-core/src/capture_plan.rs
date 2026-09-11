@@ -99,6 +99,17 @@ pub(crate) fn hidpp_side_gesture_maps_for(
         .collect()
 }
 
+/// Host/runtime facts that are not config but still shape diversion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CapturePlanRuntime {
+    /// Whether the OS mouse hook can own side-button gesture presses.
+    pub os_mouse_hook_available: bool,
+    /// Whether [`crate::GamepadPads`] holds a created pad for this device —
+    /// diversion stays off when create failed so mapped controls keep
+    /// productivity / native behaviour (fail-open).
+    pub gamepad_live: bool,
+}
+
 /// Build one device's plan from the config (per-app effective for `app`).
 #[must_use]
 pub fn plan_for_device(
@@ -108,7 +119,7 @@ pub fn plan_for_device(
     route: DeviceRoute,
     app: Option<&str>,
     rearm_generation: u64,
-    os_mouse_hook_available: bool,
+    runtime: CapturePlanRuntime,
 ) -> DeviceCapturePlan {
     let bindings = button_bindings_for(config, Some(config_key), app);
     // Gesture-mode OS-hook controls normally stay native so the hook sees the
@@ -121,11 +132,9 @@ pub fn plan_for_device(
     // gesture at once, each armed with its own raw-XY divert (the capture
     // target below derives the CIDs to divert from this map's keys).
     let gesture_bindings = hidpp_gesture_maps_for(config, Some(config_key));
-    let gamepad_map = config
-        .gamepad(config_key)
-        .enabled
+    let gamepad_map = (config.gamepad(config_key).enabled && runtime.gamepad_live)
         .then(GamepadMap::default_for_mouse);
-    let divert_gesture_buttons = if os_mouse_hook_available {
+    let divert_gesture_buttons = if runtime.os_mouse_hook_available {
         DIVERTABLE_STANDARD_BUTTONS
             .into_iter()
             .filter(|(_, button)| side_gesture_bindings.contains_key(button))
@@ -275,7 +284,10 @@ mod tests {
             route,
             app,
             rearm_generation,
-            os_mouse_hook_available,
+            CapturePlanRuntime {
+                os_mouse_hook_available,
+                gamepad_live: false,
+            },
         )
     }
 
@@ -662,5 +674,57 @@ mod tests {
         } else {
             assert!(plan.dispatch.side_gesture_bindings.is_empty());
         }
+    }
+
+    #[test]
+    fn gamepad_map_requires_a_live_pad() {
+        // Enabled-but-failed create must fail open: no map, no gamepad divert.
+        let mut cfg = Config::default();
+        cfg.devices
+            .entry("2b042".into())
+            .or_default()
+            .gamepad
+            .enabled = true;
+
+        let dead = plan_for_device(&cfg, "2b042", route(), None, 0, true);
+        assert!(
+            dead.dispatch.gamepad.is_none(),
+            "without a live pad the map must stay off"
+        );
+        assert!(
+            !dead
+                .target
+                .spec
+                .divert_buttons
+                .iter()
+                .any(|&(_, button)| button == ButtonId::Back),
+            "Back must keep native/productivity behaviour when create failed"
+        );
+
+        let live = super::plan_for_device(
+            &cfg,
+            PhysicalDeviceKey::parse("receiver:cafe:slot:2")
+                .expect("fixture should be a physical key"),
+            "2b042",
+            route(),
+            None,
+            0,
+            CapturePlanRuntime {
+                os_mouse_hook_available: true,
+                gamepad_live: true,
+            },
+        );
+        assert!(
+            live.dispatch.gamepad.is_some(),
+            "a live pad publishes the default mouse map"
+        );
+        assert!(
+            live.target
+                .spec
+                .divert_buttons
+                .iter()
+                .any(|&(_, button)| button == ButtonId::Back),
+            "Back is on the default map and must divert when the pad is live"
+        );
     }
 }

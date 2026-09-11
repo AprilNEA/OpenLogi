@@ -15,15 +15,11 @@ const DEVICE_NAME_PREFIX: &str = "OpenLogi Virtual Gamepad";
 pub fn create(product_name: &str) -> Result<Box<dyn VirtualGamepad>, GamepadError> {
     let name = format!("{DEVICE_NAME_PREFIX} ({product_name})");
     let device = build(&name)?;
-    Ok(Box::new(LinuxGamepad {
-        device,
-        last_rumble: None,
-    }))
+    Ok(Box::new(LinuxGamepad { device }))
 }
 
 struct LinuxGamepad {
     device: VirtualDevice,
-    last_rumble: Option<Rumble>,
 }
 
 fn build(name: &str) -> Result<VirtualDevice, GamepadError> {
@@ -48,7 +44,9 @@ fn build(name: &str) -> Result<VirtualDevice, GamepadError> {
     let trigger = AbsInfo::new(0, 0, 255, 0, 0, 0);
     let hat = AbsInfo::new(0, -1, 1, 0, 0, 0);
 
-    let mut builder = VirtualDevice::builder()?
+    // Do not advertise FF_RUMBLE until poll_rumble reads uinput force-feedback
+    // events — advertising without implementing leaves host rumble dead.
+    Ok(VirtualDevice::builder()?
         .name(name)
         .with_keys(&keys)?
         .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_X, stick))?
@@ -58,28 +56,8 @@ fn build(name: &str) -> Result<VirtualDevice, GamepadError> {
         .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_Z, trigger))?
         .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_RZ, trigger))?
         .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_HAT0X, hat))?
-        .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_HAT0Y, hat))?;
-
-    // FF_RUMBLE is best-effort — older kernels / sandboxes may reject it.
-    builder = match builder.with_ff(16) {
-        Ok(b) => b,
-        Err(err) => {
-            tracing::debug!("uinput FF_RUMBLE unavailable: {err}");
-            VirtualDevice::builder()?
-                .name(name)
-                .with_keys(&keys)?
-                .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_X, stick))?
-                .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_Y, stick))?
-                .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_RX, stick))?
-                .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_RY, stick))?
-                .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_Z, trigger))?
-                .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_RZ, trigger))?
-                .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_HAT0X, hat))?
-                .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_HAT0Y, hat))?
-        }
-    };
-
-    Ok(builder.build()?)
+        .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_HAT0Y, hat))?
+        .build()?)
 }
 
 impl VirtualGamepad for LinuxGamepad {
@@ -188,8 +166,8 @@ impl VirtualGamepad for LinuxGamepad {
     }
 
     fn poll_rumble(&mut self) -> Option<Rumble> {
-        // Full FF_RUMBLE upload/playback is a follow-up; keep the slot for the trait.
-        self.last_rumble.take()
+        // Do not advertise FF until we read uinput force-feedback events.
+        None
     }
 
     fn shutdown(self: Box<Self>) -> Result<(), GamepadError> {
