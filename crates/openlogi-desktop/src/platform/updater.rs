@@ -29,6 +29,20 @@ const MANIFEST_URL: &str = match option_env!("OPENLOGI_UPDATE_MANIFEST_URL") {
 /// Absent in local/dev builds, which then fail closed (see [`new_entity`]).
 const MINISIGN_PUBLIC_KEY: Option<&str> = option_env!("OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY");
 
+/// Whether this build can update itself in place.
+///
+/// `xtask release latest-json` classifies exactly two things into the update
+/// manifest: the macOS DMG and the Windows MSI. Everything else — the Linux
+/// distro packages, and any target added later — has no asset there, and
+/// asking the updater for one resolves to "no release asset matched the
+/// current platform", which reads as a failure rather than as the design it
+/// is.
+///
+/// Named as the platforms that *do* ship an artifact rather than the one that
+/// does not, so a new target is excluded until someone adds it to the manifest
+/// and to this list, instead of inheriting a failure nobody chose.
+pub const IN_APP_UPDATES: bool = cfg!(any(target_os = "macos", target_os = "windows"));
+
 /// App-global handle to the shared updater entity.
 #[derive(Clone)]
 pub struct SharedUpdater(pub Entity<Updater>);
@@ -105,16 +119,17 @@ pub fn install(cx: &mut App, settings: &AppSettings) {
     // later manual check — is honoured. Installed unconditionally; it's inert
     // until both the flag is on and a check resolves to `Available`.
     let auto_install = cx.observe(&updater, |updater, cx| {
-        let opted_in = AppState::try_global(cx)
-            .map(|state| state.read(cx))
-            .is_some_and(|s| s.app_settings().auto_install_updates);
+        let opted_in = IN_APP_UPDATES
+            && AppState::try_global(cx)
+                .map(|state| state.read(cx))
+                .is_some_and(|s| s.app_settings().auto_install_updates);
         if opted_in && matches!(updater.read(cx).status(), UpdateStatus::Available(_)) {
             updater.update(cx, Updater::download_and_install);
         }
     });
     cx.set_global(AutoInstaller(auto_install));
 
-    if settings.check_for_updates {
+    if IN_APP_UPDATES && settings.check_for_updates {
         updater.update(cx, Updater::check);
     }
     cx.set_global(SharedUpdater(updater));

@@ -391,6 +391,7 @@ agent_restarted_during_pairing = "Usługa działająca w tle została uruchomion
 
 [updates]
 check_for_updates_dialog = "Sprawdź dostępność aktualizacji…"
+updates_menu_item = "Aktualizacje…"
 download_install = "Pobierz i zainstaluj"
 restart_to_update = "Uruchom ponownie, aby zaktualizować"
 checking_for_updates = "Sprawdzanie aktualizacji…"
@@ -411,6 +412,8 @@ automatically_download_and_install = "Automatycznie pobieraj i instaluj"
 automatic_update_description = "Pobieraj aktualizacje w tle i instaluj je przy następnym uruchomieniu OpenLogi."
 update_source = "Źródło aktualizacji"
 view_changelog = "Zobacz dziennik zmian"
+unavailable_platform_note = "Aktualizacje w aplikacji nie są dostępne na tej platformie — zaktualizuj OpenLogi tak samo, jak go zainstalowano."
+no_update_requests_note = "OpenLogi nie wysyła na tej platformie żadnych żądań aktualizacji — łączy się tylko przy otwarciu strony wydań."
 update_connection_policy = "Aktualizator nie działa w tle. OpenLogi łączy się tylko po włączeniu automatycznych sprawdzeń lub kliknięciu Sprawdź dostępność aktualizacji."
 stable_channel = "Kanał stabilny"
 check_for_updates_consent_title = "Sprawdzić dostępność aktualizacji?"

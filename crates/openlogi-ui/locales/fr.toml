@@ -391,6 +391,7 @@ agent_restarted_during_pairing = "Le service d’arrière-plan a redémarré. R�
 
 [updates]
 check_for_updates_dialog = "Rechercher des mises à jour…"
+updates_menu_item = "Mises à jour…"
 download_install = "Télécharger et installer"
 restart_to_update = "Redémarrer pour mettre à jour"
 checking_for_updates = "Recherche de mises à jour…"
@@ -411,6 +412,8 @@ automatically_download_and_install = "Télécharger et installer automatiquement
 automatic_update_description = "Télécharge les mises à jour en arrière-plan et les applique au prochain redémarrage d’OpenLogi."
 update_source = "Source des mises à jour"
 view_changelog = "Voir les notes de version"
+unavailable_platform_note = "Les mises à jour intégrées ne sont pas disponibles sur cette plateforme — mettez OpenLogi à jour comme vous l'avez installé."
+no_update_requests_note = "OpenLogi n'effectue aucune requête de mise à jour sur cette plateforme — il ne se connecte qu'à l'ouverture de la page des versions."
 update_connection_policy = "OpenLogi se connecte pour rechercher des mises à jour uniquement si la recherche automatique est activée ou si vous sélectionnez Rechercher des mises à jour."
 stable_channel = "Canal stable"
 check_for_updates_consent_title = "Rechercher des mises à jour ?"

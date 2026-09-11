@@ -391,6 +391,7 @@ agent_restarted_during_pairing = "O serviço em segundo plano foi reiniciado. Te
 
 [updates]
 check_for_updates_dialog = "Buscar Atualizações…"
+updates_menu_item = "Atualizações…"
 download_install = "Baixar e instalar"
 restart_to_update = "Reiniciar para atualizar"
 checking_for_updates = "Buscando atualizações…"
@@ -411,6 +412,8 @@ automatically_download_and_install = "Baixar e instalar automaticamente"
 automatic_update_description = "Baixe atualizações em segundo plano e aplique-as na próxima reinicialização do OpenLogi."
 update_source = "Fonte das atualizações"
 view_changelog = "Ver histórico de alterações"
+unavailable_platform_note = "Atualizações pelo app não estão disponíveis nesta plataforma — atualize o OpenLogi do mesmo jeito que você o instalou."
+no_update_requests_note = "O OpenLogi não faz requisições de atualização nesta plataforma — ele só se conecta ao abrir a página de versões."
 update_connection_policy = "O OpenLogi só se conecta para buscar atualizações quando a busca automática está ativa ou você clica em Buscar atualizações."
 stable_channel = "Canal estável"
 check_for_updates_consent_title = "Buscar atualizações?"

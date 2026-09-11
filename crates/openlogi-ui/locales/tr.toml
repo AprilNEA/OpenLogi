@@ -391,6 +391,7 @@ agent_restarted_during_pairing = "Arka plan hizmeti yeniden başladı. Eşleşti
 
 [updates]
 check_for_updates_dialog = "Güncellemeleri Denetle…"
+updates_menu_item = "Güncellemeler…"
 download_install = "İndir ve Kur"
 restart_to_update = "Güncellemek için Yeniden Başlat"
 checking_for_updates = "Güncellemeler denetleniyor…"
@@ -411,6 +412,8 @@ automatically_download_and_install = "Otomatik indir ve kur"
 automatic_update_description = "Güncellemeleri arka planda indir ve OpenLogi bir sonraki başlatıldığında uygula."
 update_source = "Güncelleme kaynağı"
 view_changelog = "Değişiklik günlüğünü görüntüle"
+unavailable_platform_note = "Uygulama içi güncelleme bu platformda yok — OpenLogi'yi nasıl kurduysanız o yolla güncelleyin."
+no_update_requests_note = "OpenLogi bu platformda hiçbir güncelleme isteği yapmaz — yalnızca sürümler sayfasını açtığınızda bağlanır."
 update_connection_policy = "Arka planda çalışan bir güncelleyici yoktur. OpenLogi yalnızca otomatik denetimi açtığınızda veya Güncellemeleri Denetle'ye tıkladığınızda bağlanır."
 stable_channel = "Kararlı kanal"
 check_for_updates_consent_title = "Güncellemeler denetlensin mi?"

@@ -391,6 +391,7 @@ agent_restarted_during_pairing = "Der Hintergrunddienst wurde neu gestartet – 
 
 [updates]
 check_for_updates_dialog = "Nach Updates suchen…"
+updates_menu_item = "Updates…"
 download_install = "Herunterladen und installieren"
 restart_to_update = "Zum Aktualisieren neu starten"
 checking_for_updates = "Suche nach Updates…"
@@ -411,6 +412,8 @@ automatically_download_and_install = "Automatisch herunterladen und installieren
 automatic_update_description = "Updates im Hintergrund herunterladen und beim nächsten Neustart von OpenLogi anwenden."
 update_source = "Updatequelle"
 view_changelog = "Änderungsprotokoll anzeigen"
+unavailable_platform_note = "In-App-Updates sind auf dieser Plattform nicht verfügbar – aktualisiere OpenLogi so, wie du es installiert hast."
+no_update_requests_note = "OpenLogi stellt auf dieser Plattform keine Update-Anfragen – es verbindet sich nur, wenn du die Releases-Seite öffnest."
 update_connection_policy = "OpenLogi stellt nur dann eine Verbindung zur Updateprüfung her, wenn automatische Prüfungen aktiviert sind oder du „Nach Updates suchen“ auswählst."
 stable_channel = "Stabiler Kanal"
 check_for_updates_consent_title = "Nach Updates suchen?"

@@ -391,6 +391,7 @@ agent_restarted_during_pairing = "バックグラウンドサービスが再起�
 
 [updates]
 check_for_updates_dialog = "アップデートを確認…"
+updates_menu_item = "アップデート…"
 download_install = "ダウンロードしてインストール"
 restart_to_update = "再起動してアップデート"
 checking_for_updates = "アップデートを確認中…"
@@ -411,6 +412,8 @@ automatically_download_and_install = "自動的にダウンロードしてイン
 automatic_update_description = "アップデートをバックグラウンドでダウンロードし、次回 OpenLogi を再起動したときに適用します。"
 update_source = "アップデート元"
 view_changelog = "変更履歴を表示"
+unavailable_platform_note = "このプラットフォームではアプリ内更新を利用できません。インストールしたときと同じ方法で OpenLogi を更新してください。"
+no_update_requests_note = "このプラットフォームで OpenLogi は更新の通信を行いません。リリースページを開いたときだけ接続します。"
 update_connection_policy = "自動確認が有効な場合、または「アップデートを確認」を選択した場合にのみ接続します。"
 stable_channel = "安定版チャンネル"
 check_for_updates_consent_title = "アップデートを確認しますか？"

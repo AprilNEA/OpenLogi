@@ -391,6 +391,7 @@ agent_restarted_during_pairing = "Taustapalvelu käynnistyi uudelleen. Yritä pa
 
 [updates]
 check_for_updates_dialog = "Tarkista päivitykset…"
+updates_menu_item = "Päivitykset…"
 download_install = "Lataa ja asenna"
 restart_to_update = "Käynnistä uudelleen päivittääksesi"
 checking_for_updates = "Tarkistetaan päivityksiä…"
@@ -411,6 +412,8 @@ automatically_download_and_install = "Lataa ja asenna automaattisesti"
 automatic_update_description = "Lataa päivitykset taustalla ja ota ne käyttöön, kun OpenLogi käynnistetään seuraavan kerran."
 update_source = "Päivityslähde"
 view_changelog = "Näytä muutosloki"
+unavailable_platform_note = "Sovelluksen sisäiset päivitykset eivät ole käytettävissä tällä alustalla — päivitä OpenLogi samalla tavalla kuin asensit sen."
+no_update_requests_note = "OpenLogi ei tee päivityspyyntöjä tällä alustalla — se ottaa yhteyden vain, kun avaat julkaisusivun."
 update_connection_policy = "OpenLogi muodostaa yhteyden päivitysten tarkistamista varten vain, kun automaattinen tarkistus on käytössä tai valitset Tarkista päivitykset."
 stable_channel = "Vakaa kanava"
 check_for_updates_consent_title = "Tarkistetaanko päivitykset?"

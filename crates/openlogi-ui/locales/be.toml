@@ -391,6 +391,7 @@ agent_restarted_during_pairing = "Фонавая служба перазапуш
 
 [updates]
 check_for_updates_dialog = "Праверыць наяўнасць абнаўленняў…"
+updates_menu_item = "Updates…"
 download_install = "Спампаваць і ўсталяваць"
 restart_to_update = "Перазапусціць для абнаўлення"
 checking_for_updates = "Праверка абнаўленняў…"
@@ -411,6 +412,8 @@ automatically_download_and_install = "Аўтаматычна спампоўва�
 automatic_update_description = "Спампоўваць абнаўленні ў фоне і прымяніць іх пры наступным перазапуску OpenLogi."
 update_source = "Крыніца абнаўленняў"
 view_changelog = "Паказаць спіс зменаў"
+unavailable_platform_note = "In-app updates aren't available on this platform — update OpenLogi the way you installed it."
+no_update_requests_note = "OpenLogi makes no update requests on this platform — opening the releases page is the only time it connects."
 update_connection_policy = "Фонавага абнаўляльніка няма. OpenLogi злучаецца толькі тады, калі вы ўключаеце аўтаматычную праверку ці націскаеце «Праверыць наяўнасць абнаўленняў»."
 stable_channel = "Стабільны канал"
 check_for_updates_consent_title = "Праверыць наяўнасць абнаўленняў?"

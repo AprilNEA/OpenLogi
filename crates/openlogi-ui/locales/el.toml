@@ -391,6 +391,7 @@ agent_restarted_during_pairing = "Η υπηρεσία παρασκηνίου ε�
 
 [updates]
 check_for_updates_dialog = "Έλεγχος για ενημερώσεις…"
+updates_menu_item = "Ενημερώσεις…"
 download_install = "Λήψη και εγκατάσταση"
 restart_to_update = "Επανεκκίνηση για ενημέρωση"
 checking_for_updates = "Έλεγχος για ενημερώσεις…"
@@ -411,6 +412,8 @@ automatically_download_and_install = "Αυτόματη λήψη και εγκα�
 automatic_update_description = "Λήψη ενημερώσεων στο παρασκήνιο και εφαρμογή τους στην επόμενη επανεκκίνηση του OpenLogi."
 update_source = "Πηγή ενημερώσεων"
 view_changelog = "Προβολή αρχείου αλλαγών"
+unavailable_platform_note = "Οι ενσωματωμένες ενημερώσεις δεν είναι διαθέσιμες σε αυτήν την πλατφόρμα — ενημερώστε το OpenLogi με τον τρόπο που το εγκαταστήσατε."
+no_update_requests_note = "Το OpenLogi δεν κάνει αιτήματα ενημέρωσης σε αυτήν την πλατφόρμα — συνδέεται μόνο όταν ανοίγετε τη σελίδα εκδόσεων."
 update_connection_policy = "Το OpenLogi συνδέεται για έλεγχο ενημερώσεων μόνο όταν είναι ενεργοί οι αυτόματοι έλεγχοι ή επιλέγετε Έλεγχος για ενημερώσεις."
 stable_channel = "Σταθερό κανάλι"
 check_for_updates_consent_title = "Έλεγχος για ενημερώσεις;"

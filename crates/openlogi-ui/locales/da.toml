@@ -391,6 +391,7 @@ agent_restarted_during_pairing = "Baggrundstjenesten blev genstartet. Prøv at p
 
 [updates]
 check_for_updates_dialog = "Søg efter opdateringer…"
+updates_menu_item = "Opdateringer…"
 download_install = "Download og installer"
 restart_to_update = "Genstart for at opdatere"
 checking_for_updates = "Søger efter opdateringer…"
@@ -411,6 +412,8 @@ automatically_download_and_install = "Download og installer automatisk"
 automatic_update_description = "Download opdateringer i baggrunden, og anvend dem, næste gang OpenLogi genstarter."
 update_source = "Opdateringskilde"
 view_changelog = "Vis ændringslog"
+unavailable_platform_note = "Indbyggede opdateringer er ikke tilgængelige på denne platform — opdatér OpenLogi på samme måde, som du installerede den."
+no_update_requests_note = "OpenLogi sender ingen opdateringsforespørgsler på denne platform — den forbinder kun, når du åbner udgivelsessiden."
 update_connection_policy = "OpenLogi opretter kun forbindelse for at søge efter opdateringer, når automatisk søgning er slået til, eller du vælger Søg efter opdateringer."
 stable_channel = "Stabil kanal"
 check_for_updates_consent_title = "Søg efter opdateringer?"

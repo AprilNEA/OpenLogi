@@ -391,6 +391,7 @@ agent_restarted_during_pairing = "背景服務已重新啟動，請再試一次�
 
 [updates]
 check_for_updates_dialog = "檢查更新…"
+updates_menu_item = "更新…"
 download_install = "下載並安裝"
 restart_to_update = "重新啟動以更新"
 checking_for_updates = "正在檢查更新…"
@@ -411,6 +412,8 @@ automatically_download_and_install = "自動下載並安裝"
 automatic_update_description = "在背景下載更新，下次重新啟動 OpenLogi 時套用。"
 update_source = "更新來源"
 view_changelog = "檢視更新日誌"
+unavailable_platform_note = "此平台不支援應用程式內更新 — 請以你安裝 OpenLogi 的方式更新。"
+no_update_requests_note = "OpenLogi 在此平台不會發出更新請求 — 只有開啟發佈頁面時才會連線。"
 update_connection_policy = "OpenLogi 沒有常駐更新程式，僅在你開啟自動檢查或點擊「檢查更新」時連線。"
 stable_channel = "穩定版通道"
 check_for_updates_consent_title = "檢查更新？"

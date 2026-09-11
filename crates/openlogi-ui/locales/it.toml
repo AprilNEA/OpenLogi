@@ -391,6 +391,7 @@ agent_restarted_during_pairing = "Il servizio in background è stato riavviato. 
 
 [updates]
 check_for_updates_dialog = "Controlla aggiornamenti…"
+updates_menu_item = "Aggiornamenti…"
 download_install = "Scarica e installa"
 restart_to_update = "Riavvia per aggiornare"
 checking_for_updates = "Controllo aggiornamenti…"
@@ -411,6 +412,8 @@ automatically_download_and_install = "Scarica e installa automaticamente"
 automatic_update_description = "Scarica gli aggiornamenti in background e applicali al successivo riavvio di OpenLogi."
 update_source = "Fonte aggiornamenti"
 view_changelog = "Visualizza registro modifiche"
+unavailable_platform_note = "Gli aggiornamenti dall'app non sono disponibili su questa piattaforma: aggiorna OpenLogi nello stesso modo in cui l'hai installato."
+no_update_requests_note = "OpenLogi non effettua richieste di aggiornamento su questa piattaforma: si collega solo quando apri la pagina delle release."
 update_connection_policy = "OpenLogi si connette per verificare gli aggiornamenti solo se il controllo automatico è attivo o se fai clic su Controlla aggiornamenti."
 stable_channel = "Canale stabile"
 check_for_updates_consent_title = "Controllare gli aggiornamenti?"

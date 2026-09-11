@@ -391,6 +391,7 @@ agent_restarted_during_pairing = "Фонову службу перезапуще
 
 [updates]
 check_for_updates_dialog = "Перевірити наявність оновлень…"
+updates_menu_item = "Оновлення…"
 download_install = "Завантажити й встановити"
 restart_to_update = "Перезапустити для оновлення"
 checking_for_updates = "Перевірка наявності оновлень…"
@@ -411,6 +412,8 @@ automatically_download_and_install = "Автоматично завантажу�
 automatic_update_description = "Завантажувати оновлення у фоновому режимі й застосовувати їх під час наступного перезапуску OpenLogi."
 update_source = "Джерело оновлень"
 view_changelog = "Переглянути список змін"
+unavailable_platform_note = "Оновлення з застосунку недоступні на цій платформі — оновлюйте OpenLogi так само, як його встановлювали."
+no_update_requests_note = "На цій платформі OpenLogi не надсилає запитів на оновлення — з'єднання відбувається лише під час відкриття сторінки випусків."
 update_connection_policy = "Фоновий оновлювач відсутній. OpenLogi підключається лише тоді, коли ви вмикаєте автоматичну перевірку або натискаєте «Перевірити наявність оновлень»."
 stable_channel = "Стабільний канал"
 check_for_updates_consent_title = "Перевіряти наявність оновлень?"

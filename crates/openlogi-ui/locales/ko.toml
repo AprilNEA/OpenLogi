@@ -391,6 +391,7 @@ agent_restarted_during_pairing = "백그라운드 서비스가 다시 시작되�
 
 [updates]
 check_for_updates_dialog = "업데이트 확인…"
+updates_menu_item = "업데이트…"
 download_install = "다운로드 및 설치"
 restart_to_update = "업데이트하려면 재시작"
 checking_for_updates = "업데이트 확인 중…"
@@ -411,6 +412,8 @@ automatically_download_and_install = "자동으로 다운로드 및 설치"
 automatic_update_description = "백그라운드에서 업데이트를 다운로드하고 다음에 OpenLogi를 다시 시작할 때 적용합니다."
 update_source = "업데이트 출처"
 view_changelog = "변경 내역 보기"
+unavailable_platform_note = "이 플랫폼에서는 앱 내 업데이트를 사용할 수 없습니다 — 설치한 방식 그대로 OpenLogi를 업데이트하세요."
+no_update_requests_note = "이 플랫폼에서 OpenLogi는 업데이트 요청을 보내지 않습니다 — 릴리스 페이지를 열 때만 연결합니다."
 update_connection_policy = "자동 확인을 켰거나 업데이트 확인을 선택한 경우에만 업데이트를 확인하기 위해 연결합니다."
 stable_channel = "안정 채널"
 check_for_updates_consent_title = "업데이트를 확인할까요?"

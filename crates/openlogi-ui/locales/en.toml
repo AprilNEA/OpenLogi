@@ -391,6 +391,7 @@ agent_restarted_during_pairing = "The background service restarted. Try pairing 
 
 [updates]
 check_for_updates_dialog = "Check for Updates…"
+updates_menu_item = "Updates…"
 download_install = "Download & Install"
 restart_to_update = "Restart to Update"
 checking_for_updates = "Checking for updates…"
@@ -411,6 +412,8 @@ automatically_download_and_install = "Automatically download and install"
 automatic_update_description = "Download updates in the background and apply them the next time OpenLogi restarts."
 update_source = "Update source"
 view_changelog = "View changelog"
+unavailable_platform_note = "In-app updates aren't available on this platform — update OpenLogi the way you installed it."
+no_update_requests_note = "OpenLogi makes no update requests on this platform — opening the releases page is the only time it connects."
 update_connection_policy = "OpenLogi connects to check for updates only when automatic checks are enabled or you select Check for Updates."
 stable_channel = "Stable channel"
 check_for_updates_consent_title = "Check for updates?"

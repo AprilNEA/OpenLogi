@@ -391,6 +391,7 @@ agent_restarted_during_pairing = "De achtergrondservice is opnieuw gestart. Prob
 
 [updates]
 check_for_updates_dialog = "Controleer op updates…"
+updates_menu_item = "Updates…"
 download_install = "Downloaden en installeren"
 restart_to_update = "Herstarten om bij te werken"
 checking_for_updates = "Controleren op updates…"
@@ -411,6 +412,8 @@ automatically_download_and_install = "Automatisch downloaden en installeren"
 automatic_update_description = "Download updates op de achtergrond en pas ze toe wanneer OpenLogi opnieuw start."
 update_source = "Updatebron"
 view_changelog = "Wijzigingslog bekijken"
+unavailable_platform_note = "In-app-updates zijn niet beschikbaar op dit platform — werk OpenLogi bij op dezelfde manier als je het hebt geïnstalleerd."
+no_update_requests_note = "OpenLogi doet op dit platform geen update-aanvragen — het maakt alleen verbinding wanneer je de releasespagina opent."
 update_connection_policy = "OpenLogi maakt alleen verbinding voor updatecontroles als automatische controles zijn ingeschakeld of je ‘Controleren op updates’ selecteert."
 stable_channel = "Stabiel kanaal"
 check_for_updates_consent_title = "Controleren op updates?"

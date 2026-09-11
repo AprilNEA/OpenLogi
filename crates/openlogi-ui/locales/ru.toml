@@ -391,6 +391,7 @@ agent_restarted_during_pairing = "Фоновая служба перезапус
 
 [updates]
 check_for_updates_dialog = "Проверить обновления…"
+updates_menu_item = "Обновления…"
 download_install = "Загрузить и установить"
 restart_to_update = "Перезапустить для обновления"
 checking_for_updates = "Проверка обновлений…"
@@ -411,6 +412,8 @@ automatically_download_and_install = "Автоматически загружа�
 automatic_update_description = "Загружать обновления в фоне и применять при следующем запуске OpenLogi."
 update_source = "Источник обновлений"
 view_changelog = "Посмотреть список изменений"
+unavailable_platform_note = "Обновление из приложения недоступно на этой платформе — обновляйте OpenLogi тем же способом, каким устанавливали."
+no_update_requests_note = "На этой платформе OpenLogi не отправляет запросов на обновление — соединение происходит только при открытии страницы релизов."
 update_connection_policy = "OpenLogi проверяет обновления только при включённой автоматической проверке или по вашей команде."
 stable_channel = "Стабильный канал"
 check_for_updates_consent_title = "Проверять обновления?"
