@@ -2,8 +2,10 @@
 #![expect(unsafe_code, reason = "SendInput is the Win32 API for synthetic input")]
 
 use std::mem::size_of;
+use std::os::windows::process::CommandExt;
 use std::sync::{LazyLock, Mutex};
 
+use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, MOUSEEVENTF_HWHEEL,
     MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
@@ -200,7 +202,13 @@ fn run_workflow(steps: &[WorkflowStep]) {
 }
 
 fn run_shell_command(cmd: &str) {
-    let _ = std::process::Command::new("cmd").args(["/C", cmd]).output();
+    // Without this flag `cmd.exe` allocates and briefly flashes a visible
+    // console window, since the agent itself is a console-less GUI/background
+    // process and the child would otherwise get one of its own.
+    let _ = std::process::Command::new("cmd")
+        .args(["/C", cmd])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
 }
 
 fn post_click(button: MouseButton) {
