@@ -9,6 +9,7 @@
 //! Channel-addressed operations (the `_on` family) need no backend and are not
 //! wrapped: they act on a channel the caller already holds.
 
+use std::future::Future;
 use std::sync::Arc;
 
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
@@ -24,7 +25,7 @@ use openlogi_device::inventory::{Enumerator, InventoryError};
 use openlogi_device::pairing::PairingReceiver;
 use openlogi_device::write::{
     self as device, Dpi, DpiInfo, FeatureEntry, FirmwareEntity, HapticWaveform, LightingMethod,
-    LitraModel, ReprogControlEntry, ScrollResolution, ScrollWheelMode,
+    LitraModel, MouseButtonFilterDump, ReprogControlEntry, ScrollResolution, ScrollWheelMode,
 };
 use openlogi_device::{DeviceIoGate, DeviceIoSignal, DeviceRoute};
 
@@ -194,6 +195,26 @@ pub async fn dump_reprog_controls(
 /// Read the raw battery report of the device `route` reaches.
 pub async fn read_battery_raw(route: &DeviceRoute) -> Result<String, WriteError> {
     device::read_battery_raw(&*native_backend(), route).await
+}
+
+/// Read the HID++ `0x8110` button count and mapping of the device `route` reaches.
+pub async fn dump_mouse_button_filter(
+    route: &DeviceRoute,
+) -> Result<MouseButtonFilterDump, WriteError> {
+    device::dump_mouse_button_filter(&*native_backend(), route).await
+}
+
+/// Start the `0x8110` button spy on `route` until `cancel` resolves.
+pub async fn watch_mouse_button_filter<F, C>(
+    route: &DeviceRoute,
+    on_event: F,
+    cancel: C,
+) -> Result<(), WriteError>
+where
+    F: FnMut(u16),
+    C: Future<Output = ()>,
+{
+    device::watch_mouse_button_filter(&*native_backend(), route, on_event, cancel).await
 }
 
 /// An enumerator over this host's HID stack, with a memory-only probe cache.
