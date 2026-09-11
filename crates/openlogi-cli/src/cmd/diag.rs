@@ -15,6 +15,7 @@ pub mod controls;
 pub mod dpi;
 pub mod features;
 pub mod lighting;
+pub mod pointer_speed;
 pub mod smartshift;
 pub mod wheel;
 
@@ -34,6 +35,8 @@ pub enum DiagCmd {
     Lighting(lighting::LightingArgs),
     /// Read or set the HID++ 0x2121 wheel reporting resolution.
     Wheel(wheel::WheelArgs),
+    /// Read 0x2205 pointer scaling → write a test value → read back → restore.
+    PointerSpeed(pointer_speed::PointerSpeedArgs),
 }
 
 impl DiagCmd {
@@ -46,6 +49,7 @@ impl DiagCmd {
             Self::Smartshift(args) => smartshift::run(args).await,
             Self::Lighting(args) => lighting::run(args).await,
             Self::Wheel(args) => wheel::run(args).await,
+            Self::PointerSpeed(args) => pointer_speed::run(args).await,
         }
     }
 }
