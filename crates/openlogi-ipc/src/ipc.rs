@@ -62,7 +62,8 @@ pub use succession::Identity;
 /// v29: `Agent::declare_client` + [`ClientKind`] appended — typed demand for
 ///      the macOS dormancy gate.
 /// v30: `Agent::read_wheel` and `Agent::read_backlight` appended.
-pub const PROTOCOL_VERSION: u32 = 30;
+/// v31: `HidppOperation::{ReadPointerScaling, WritePointerScaling}` appended.
+pub const PROTOCOL_VERSION: u32 = 31;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to

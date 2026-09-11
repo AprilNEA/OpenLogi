@@ -133,6 +133,12 @@ pub enum HidppOperation {
     Light,
     /// Play one haptic waveform. Appended last — variant order is wire format.
     PlayHaptic,
+    /// Read the `0x2205` pointer-motion scaling. Appended last — variant order
+    /// is wire format.
+    ReadPointerScaling,
+    /// Write the `0x2205` pointer-motion scaling. Appended last — variant order
+    /// is wire format.
+    WritePointerScaling,
 }
 
 /// HID++ feature error kind in a serializable wire-safe form.
