@@ -206,6 +206,7 @@ pub(crate) fn spawn_hidpp_watchers(
             inputs.dispatcher.clone(),
             inputs.scroll_input.clone(),
             shared.hook_maps.clone(),
+            shared.gamepads.clone(),
         ),
     );
     let host_switch = watchers::host_switch::spawn(

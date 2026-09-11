@@ -146,6 +146,9 @@ impl InputDispatcher {
         if self.record_thumbwheel_direction(key, input) {
             return;
         }
+        if self.try_dispatch_gamepad(session, plan, input) {
+            return;
+        }
         match input {
             CapturedInput::Gesture(button, direction) => {
                 let Some(press) = self.gesture_presses.get(session, button) else {
@@ -237,6 +240,53 @@ impl InputDispatcher {
             CapturedInput::ThumbwheelDirection { .. } => {
                 unreachable!("thumb-wheel direction reports return before dispatch")
             }
+        }
+    }
+
+    /// When the plan carries a gamepad map, divert owned controls into the pad.
+    fn try_dispatch_gamepad(
+        &mut self,
+        session: &HidppSessionId,
+        plan: &DispatchPlan,
+        input: CapturedInput,
+    ) -> bool {
+        let Some(map) = plan.gamepad.as_ref() else {
+            return false;
+        };
+        let key = session.device_key();
+        match input {
+            CapturedInput::Gesture(button, direction) if map.owns_button(button) => {
+                self.outputs.gamepads.apply_gesture(key, button, direction);
+                true
+            }
+            CapturedInput::ButtonDown(button) if map.owns_button(button) => {
+                self.outputs.gamepads.apply_button_edge(key, button, true);
+                true
+            }
+            CapturedInput::ButtonUp(button) if map.owns_button(button) => {
+                self.outputs.gamepads.apply_button_edge(key, button, false);
+                true
+            }
+            CapturedInput::ButtonPulse(button) if map.owns_button(button) => {
+                self.outputs.gamepads.apply_button_edge(key, button, true);
+                self.outputs.gamepads.apply_button_edge(key, button, false);
+                true
+            }
+            CapturedInput::Scroll { increments, .. } => {
+                let Some(rotation) = WheelRotation::from_increments(increments) else {
+                    return false;
+                };
+                let button = rotation.button();
+                if !map.owns_button(button) {
+                    return false;
+                }
+                let magnitude = (f32::from(increments.unsigned_abs()) / 120.0).clamp(0.15, 1.0);
+                self.outputs
+                    .gamepads
+                    .apply_thumbwheel_axis(key, button, magnitude);
+                true
+            }
+            _ => false,
         }
     }
 }

@@ -6,6 +6,7 @@ members = [
     "crates/openlogi-device-registry",
     "crates/openlogi-fixture",
     "crates/openlogi-inject",
+    "crates/openlogi-gamepad",
     "crates/openlogi-hidpp",
     "crates/openlogi-hidpp-derive",
     "crates/openlogi-hid",

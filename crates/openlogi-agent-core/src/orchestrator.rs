@@ -111,6 +111,8 @@ pub struct SharedRuntime {
     pub receiver_access: ReceiverAccess,
     /// Keyboard → pointing-device routes resolved from `config.toml`.
     pub host_switch_links: HostSwitchLinks,
+    /// Opt-in auxiliary virtual gamepads for online devices.
+    pub gamepads: crate::GamepadPads,
 }
 
 impl SharedRuntime {
@@ -254,6 +256,7 @@ impl Orchestrator {
             capture_rearm_generation: Arc::new(AtomicU64::new(0)),
             receiver_access: ReceiverAccess::default(),
             host_switch_links,
+            gamepads: crate::GamepadPads::default(),
         };
         let orch = Self {
             config,
@@ -312,6 +315,15 @@ impl Orchestrator {
                 // reintroduce a second, unattributed dispatch path.
                 bindings.remove(button);
                 gestures.remove(button);
+            }
+            if self.config.gamepad(key).enabled {
+                let map = openlogi_core::binding::GamepadMap::default_for_mouse();
+                for button in map.divert_buttons() {
+                    if button.is_os_hook_button() {
+                        bindings.remove(&button);
+                        gestures.remove(&button);
+                    }
+                }
             }
         }
         HookMaps {
@@ -396,6 +408,7 @@ impl Orchestrator {
     fn publish_device_runtime(&self) {
         self.publish_capture_plans();
         self.rebuild_dpi_cycles(self.current_key());
+        self.sync_gamepads();
         // Keyboard F-key bindings are global (not per-device), so they key off
         // the top-level config map rather than the selected device. Published
         // here so `reload_config` (GUI commit) takes effect live, not only on
@@ -410,6 +423,50 @@ impl Orchestrator {
             host_switch_links(&self.config, &self.devices),
         );
         publish_optional_arc_if_changed(&self.keyboard_spec_tx, self.keyboard_spec_for());
+    }
+
+    fn sync_gamepads(&self) {
+        let desired: Vec<crate::GamepadPadDesired> = self
+            .devices
+            .iter()
+            .filter(|dev| {
+                dev.online
+                    && self.config.device_enabled(&dev.config_key)
+                    && self.config.gamepad(&dev.config_key).enabled
+            })
+            .filter_map(|dev| {
+                let route = dev.route.clone()?;
+                let identity = DeviceIdentity::from_parts(dev.serial.as_deref(), dev.unit_id);
+                let physical_key = canonical_device_key(&stable_id(dev), Some(&identity))
+                    .or_else(|| PhysicalDeviceKey::parse(&dev.config_key))?;
+                let gamepad = self.config.gamepad(&dev.config_key);
+                let product_name = self
+                    .config
+                    .devices
+                    .get(&dev.config_key)
+                    .and_then(|entry| entry.custom_name.clone())
+                    .or_else(|| {
+                        self.config
+                            .devices
+                            .get(&dev.config_key)
+                            .and_then(|entry| entry.identity.as_ref())
+                            .map(|identity| identity.display_name.clone())
+                    })
+                    .unwrap_or_else(|| format!("OpenLogi ({})", dev.model_key));
+                Some(crate::GamepadPadDesired {
+                    config_key: dev.config_key.clone(),
+                    physical_key,
+                    product_name,
+                    route,
+                    rumble: gamepad.rumble,
+                    haptic_capable: dev
+                        .capabilities
+                        .as_ref()
+                        .is_some_and(|caps| caps.haptic_feedback),
+                })
+            })
+            .collect();
+        self.shared.gamepads.sync(&desired);
     }
 
     fn publish_capture_plans(&self) {

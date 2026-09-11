@@ -38,8 +38,8 @@ pub use settings::{
 };
 
 use crate::binding::{
-    Action, ActionRingConfig, ActionRingIcon, ActionRingSlot, Binding, ButtonId, GestureDirection,
-    RingAction, default_binding, default_binding_for, default_gesture_binding,
+    Action, ActionRingConfig, ActionRingIcon, ActionRingSlot, Binding, ButtonId, GamepadConfig,
+    GestureDirection, RingAction, default_binding, default_binding_for, default_gesture_binding,
 };
 use crate::device_order::PhysicalDeviceKey;
 use crate::hid::Dpi;
@@ -48,6 +48,9 @@ use settings::GestureOwner;
 /// The schema version the current build produces. Bumped whenever the
 /// persisted shape or enum vocabulary changes; readers inspect this value
 /// before consuming the rest of the file.
+///
+/// v8 adds the optional per-device `[devices.*.gamepad]` section (auxiliary
+/// virtual gamepad). Absent on older files; defaults keep the feature off.
 ///
 /// v7 aligns the thumb-wheel scroll defaults with its normalised physical
 /// direction. Pre-v7 explicit default pairs are migrated in device and
@@ -91,7 +94,7 @@ use settings::GestureOwner;
 /// next save; [`Config::load_from_path`] accepts supported versions `1` through
 /// [`SCHEMA_VERSION`] so an invalid or forward file fails loudly instead of
 /// silently losing bindings.
-pub const SCHEMA_VERSION: u32 = 7;
+pub const SCHEMA_VERSION: u32 = 8;
 
 /// Top-level config document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -684,6 +687,15 @@ impl Config {
         self.devices
             .get(device_key)
             .map(|device| device.action_ring.clone())
+            .unwrap_or_default()
+    }
+
+    /// Auxiliary virtual-gamepad settings for `device_key`.
+    #[must_use]
+    pub fn gamepad(&self, device_key: &str) -> GamepadConfig {
+        self.devices
+            .get(device_key)
+            .map(|device| device.gamepad.clone())
             .unwrap_or_default()
     }
 

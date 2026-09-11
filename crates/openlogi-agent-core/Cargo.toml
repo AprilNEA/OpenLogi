@@ -13,6 +13,7 @@ publish = false
 [dependencies]
 openlogi-core = { path = "../openlogi-core" }
 openlogi-inject = { path = "../openlogi-inject" }
+openlogi-gamepad = { path = "../openlogi-gamepad" }
 openlogi-hid = { path = "../openlogi-hid" }
 openlogi-hook = { path = "../openlogi-hook" }
 openlogi-ipc = { path = "../openlogi-ipc" }
