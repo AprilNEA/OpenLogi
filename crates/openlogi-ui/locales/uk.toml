@@ -321,6 +321,7 @@ hold_modifiers_tap_key = "Утримувати %{modifiers}, натиснути 
 tap_key = "Натиснути %{key}"
 shortcut_hold = "Утримувати"
 shortcut_tap = "Натиснути"
+hold_modifier = "Hold %{modifier}"
 gesture_named = "Жест %{name}"
 left_click = "Клацання лівою"
 right_click = "Клацання правою"

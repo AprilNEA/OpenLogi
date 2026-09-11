@@ -321,6 +321,7 @@ hold_modifiers_tap_key = "%{modifiers} 길게 누르고 %{key} 한 번 누르기
 tap_key = "%{key} 한 번 누르기"
 shortcut_hold = "길게 누르기"
 shortcut_tap = "탭"
+hold_modifier = "Hold %{modifier}"
 gesture_named = "제스처 %{name}"
 left_click = "왼쪽 클릭"
 right_click = "오른쪽 클릭"

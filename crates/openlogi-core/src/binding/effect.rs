@@ -272,7 +272,8 @@ impl Action {
             | Action::SetDpiPreset(_)
             | Action::ToggleSmartShift
             | Action::ShowActionsRing
-            | Action::OpenApplication(_) => Effect::AgentSide,
+            | Action::OpenApplication(_)
+            | Action::HoldModifier(_) => Effect::AgentSide,
 
             Action::ScrollUp => Effect::Scroll { dx: 0, dy: 1 },
             Action::ScrollDown => Effect::Scroll { dx: 0, dy: -1 },

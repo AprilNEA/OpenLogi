@@ -1,4 +1,4 @@
-//! Bare-modifier set for `Action::HoldModifier`.
+//! Bare-modifier set for [`super::Action::HoldModifier`].
 //!
 //! Sibling of [`super::KeyCombo`]: same modifier bit layout, no ordinary key.
 
