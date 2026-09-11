@@ -406,6 +406,30 @@ fn invert_scroll_roundtrips_per_device() {
 }
 
 #[test]
+fn gamepad_roundtrips_per_device() {
+    let mut cfg = Config::default();
+    cfg.devices
+        .entry("unit:deadbeef".into())
+        .or_default()
+        .gamepad
+        .enabled = true;
+    cfg.devices
+        .entry("unit:deadbeef".into())
+        .or_default()
+        .gamepad
+        .rumble = false;
+
+    let parsed = write_and_read(&cfg);
+    let pad = parsed.gamepad("unit:deadbeef");
+    assert!(pad.enabled);
+    assert!(!pad.rumble);
+    assert!(parsed.gamepad("missing").is_default());
+    let body = toml::to_string_pretty(&parsed).expect("serialize");
+    assert!(body.contains("[devices.\"unit:deadbeef\".gamepad]"));
+    assert!(body.contains("enabled = true"));
+}
+
+#[test]
 fn default_invert_scroll_is_omitted_from_toml() {
     // A device block with only the default (false) invert_scroll must not
     // emit the field — `skip_serializing_if` keeps configs clean.

@@ -14,6 +14,7 @@ pub mod action_ring;
 pub mod capture_plan;
 mod dpi;
 pub mod event_monitor;
+pub mod gamepad;
 pub mod hardware;
 pub mod observable;
 pub mod orchestrator;
@@ -22,3 +23,4 @@ pub mod runtime;
 pub mod watchers;
 
 pub use dpi::{DpiCycleState, DpiCycles};
+pub use gamepad::{GamepadPadDesired, GamepadPads};

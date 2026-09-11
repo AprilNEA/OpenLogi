@@ -26,7 +26,10 @@ fn plan() -> DeviceCapturePlan {
         route(),
         None,
         0,
-        true,
+        crate::capture_plan::CapturePlanRuntime {
+            os_mouse_hook_available: true,
+            gamepad_live: false,
+        },
     )
 }
 
@@ -179,7 +182,12 @@ async fn recovery_manager_waits_for_control_events_and_shutdown_between_retries(
             receiver_access: access,
             channel_registry: registry,
             device_io,
-            outputs: GestureOutputs::new(actions.dispatcher(), scroll.input(), Arc::default()),
+            outputs: GestureOutputs::new(
+                actions.dispatcher(),
+                scroll.input(),
+                Arc::default(),
+                crate::GamepadPads::default(),
+            ),
             shutdown,
         }));
 
@@ -406,7 +414,10 @@ fn capture_target_changes_schedule_the_old_session_for_retirement() {
         session.target().route.clone(),
         None,
         0,
-        true,
+        crate::capture_plan::CapturePlanRuntime {
+            os_mouse_hook_available: true,
+            gamepad_live: false,
+        },
     );
     assert_eq!(session.target(), &plan.target);
 
@@ -460,7 +471,10 @@ fn active_session_adopts_action_only_plan_changes_without_rearming() {
         route(),
         None,
         0,
-        true,
+        crate::capture_plan::CapturePlanRuntime {
+            os_mouse_hook_available: true,
+            gamepad_live: false,
+        },
     );
     let mut session = live_session_from_plan(7, first.clone());
 
@@ -476,7 +490,10 @@ fn active_session_adopts_action_only_plan_changes_without_rearming() {
         route(),
         None,
         0,
-        true,
+        crate::capture_plan::CapturePlanRuntime {
+            os_mouse_hook_available: true,
+            gamepad_live: false,
+        },
     );
     assert_eq!(first.target, rebound.target);
     assert_eq!(
@@ -500,7 +517,10 @@ fn active_session_adopts_gesture_and_per_app_dispatch_changes() {
         route(),
         None,
         0,
-        true,
+        crate::capture_plan::CapturePlanRuntime {
+            os_mouse_hook_available: true,
+            gamepad_live: false,
+        },
     );
     let mut session = live_session_from_plan(7, first.clone());
 
@@ -517,7 +537,10 @@ fn active_session_adopts_gesture_and_per_app_dispatch_changes() {
         route(),
         None,
         0,
-        true,
+        crate::capture_plan::CapturePlanRuntime {
+            os_mouse_hook_available: true,
+            gamepad_live: false,
+        },
     );
     assert_eq!(first.target, gestured.target);
     assert_eq!(
@@ -545,7 +568,10 @@ fn active_session_adopts_gesture_and_per_app_dispatch_changes() {
         route(),
         None,
         0,
-        true,
+        crate::capture_plan::CapturePlanRuntime {
+            os_mouse_hook_available: true,
+            gamepad_live: false,
+        },
     );
     let mut session = live_session_from_plan(8, base.clone());
     config.set_per_app_binding(
@@ -561,7 +587,10 @@ fn active_session_adopts_gesture_and_per_app_dispatch_changes() {
         route(),
         Some("com.example.Editor"),
         0,
-        true,
+        crate::capture_plan::CapturePlanRuntime {
+            os_mouse_hook_available: true,
+            gamepad_live: false,
+        },
     );
     assert_eq!(base.target, per_app.target);
     assert_eq!(
@@ -589,7 +618,10 @@ fn wheel_configuration_changes_refresh_without_rearming_hardware() {
         route(),
         None,
         0,
-        true,
+        crate::capture_plan::CapturePlanRuntime {
+            os_mouse_hook_available: true,
+            gamepad_live: false,
+        },
     );
     let mut session = live_session_from_plan(7, first.clone());
 
@@ -605,7 +637,10 @@ fn wheel_configuration_changes_refresh_without_rearming_hardware() {
         route(),
         None,
         0,
-        true,
+        crate::capture_plan::CapturePlanRuntime {
+            os_mouse_hook_available: true,
+            gamepad_live: false,
+        },
     );
     assert_eq!(
         first.target, rebound.target,
@@ -626,7 +661,10 @@ fn wheel_configuration_changes_refresh_without_rearming_hardware() {
         route(),
         None,
         0,
-        true,
+        crate::capture_plan::CapturePlanRuntime {
+            os_mouse_hook_available: true,
+            gamepad_live: false,
+        },
     );
     assert_eq!(rebound.target, rescaled.target);
     assert_eq!(

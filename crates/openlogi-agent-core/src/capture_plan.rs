@@ -11,7 +11,9 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use openlogi_core::binding::{Action, Binding, ButtonId, GestureDirection, default_binding};
+use openlogi_core::binding::{
+    Action, Binding, ButtonId, GamepadMap, GestureDirection, default_binding,
+};
 use openlogi_core::bindings::{button_bindings_for, hidpp_gesture_maps_for, oshook_gestures_for};
 use openlogi_core::config::{Config, ThumbwheelSensitivity};
 use openlogi_core::device_order::PhysicalDeviceKey;
@@ -63,6 +65,9 @@ pub struct DispatchPlan {
     /// This device's effective thumb-wheel sensitivity (device override or the
     /// app-wide default).
     pub thumbwheel_sensitivity: ThumbwheelSensitivity,
+    /// When set, mapped controls feed the auxiliary virtual gamepad instead of
+    /// productivity actions.
+    pub gamepad: Option<GamepadMap>,
 }
 
 /// One device's independently versioned hardware target and dispatch plan.
@@ -94,6 +99,17 @@ pub(crate) fn hidpp_side_gesture_maps_for(
         .collect()
 }
 
+/// Host/runtime facts that are not config but still shape diversion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CapturePlanRuntime {
+    /// Whether the OS mouse hook can own side-button gesture presses.
+    pub os_mouse_hook_available: bool,
+    /// Whether [`crate::GamepadPads`] holds a created pad for this device —
+    /// diversion stays off when create failed so mapped controls keep
+    /// productivity / native behaviour (fail-open).
+    pub gamepad_live: bool,
+}
+
 /// Build one device's plan from the config (per-app effective for `app`).
 #[must_use]
 pub fn plan_for_device(
@@ -103,7 +119,7 @@ pub fn plan_for_device(
     route: DeviceRoute,
     app: Option<&str>,
     rearm_generation: u64,
-    os_mouse_hook_available: bool,
+    runtime: CapturePlanRuntime,
 ) -> DeviceCapturePlan {
     let bindings = button_bindings_for(config, Some(config_key), app);
     // Gesture-mode OS-hook controls normally stay native so the hook sees the
@@ -116,7 +132,9 @@ pub fn plan_for_device(
     // gesture at once, each armed with its own raw-XY divert (the capture
     // target below derives the CIDs to divert from this map's keys).
     let gesture_bindings = hidpp_gesture_maps_for(config, Some(config_key));
-    let divert_gesture_buttons = if os_mouse_hook_available {
+    let gamepad_map = (config.gamepad(config_key).enabled && runtime.gamepad_live)
+        .then(GamepadMap::default_for_mouse);
+    let divert_gesture_buttons = if runtime.os_mouse_hook_available {
         DIVERTABLE_STANDARD_BUTTONS
             .into_iter()
             .filter(|(_, button)| side_gesture_bindings.contains_key(button))
@@ -131,7 +149,7 @@ pub fn plan_for_device(
     let plain_sources = GESTURE_SOURCE_BUTTONS
         .into_iter()
         .filter(|(_, button)| !gesture_bindings.contains_key(button));
-    let divert_buttons: Vec<(u16, ButtonId)> = DIVERTABLE_STANDARD_BUTTONS
+    let mut divert_buttons: Vec<(u16, ButtonId)> = DIVERTABLE_STANDARD_BUTTONS
         .into_iter()
         .chain(plain_sources)
         // These controls are owned by the OS-hook path. The capture opt-out
@@ -142,6 +160,12 @@ pub fn plan_for_device(
         })
         .filter(|(_, button)| !oshook.contains_key(button))
         .filter(|(_, button)| {
+            if gamepad_map
+                .as_ref()
+                .is_some_and(|map| map.owns_button(*button))
+            {
+                return true;
+            }
             bindings.get(button).is_some_and(|binding| {
                 if matches!(binding, Binding::LongPress(_)) {
                     return true;
@@ -165,11 +189,24 @@ pub fn plan_for_device(
     ]
     .iter()
     .any(|button| {
-        bindings
-            .get(button)
-            .is_some_and(|binding| binding.click_action() != default_binding(*button))
+        gamepad_map
+            .as_ref()
+            .is_some_and(|map| map.owns_button(*button))
+            || bindings
+                .get(button)
+                .is_some_and(|binding| binding.click_action() != default_binding(*button))
     });
     let thumbwheel_sensitivity = config.thumbwheel_sensitivity(config_key);
+    let mut divert_gesture_sources: Vec<u16> = GESTURE_SOURCE_BUTTONS
+        .into_iter()
+        .filter(|(_, button)| gesture_bindings.contains_key(button))
+        .map(|(cid, _)| cid)
+        .collect();
+    merge_gamepad_diverts(
+        gamepad_map.as_ref(),
+        &mut divert_buttons,
+        &mut divert_gesture_sources,
+    );
     DeviceCapturePlan {
         target: CaptureTarget {
             physical_key,
@@ -177,11 +214,7 @@ pub fn plan_for_device(
             spec: CaptureSpec {
                 capture_thumbwheel: thumbwheel_sensitivity != ThumbwheelSensitivity::DEFAULT
                     || thumbwheel_bindings_nondefault,
-                divert_gesture_sources: GESTURE_SOURCE_BUTTONS
-                    .into_iter()
-                    .filter(|(_, button)| gesture_bindings.contains_key(button))
-                    .map(|(cid, _)| cid)
-                    .collect(),
+                divert_gesture_sources,
                 divert_gesture_buttons,
                 divert_buttons,
             },
@@ -193,7 +226,31 @@ pub fn plan_for_device(
             gesture_bindings,
             side_gesture_bindings,
             thumbwheel_sensitivity,
+            gamepad: gamepad_map,
         },
+    }
+}
+
+/// Force-divert gamepad-owned controls that the productivity path left native.
+fn merge_gamepad_diverts(
+    gamepad_map: Option<&GamepadMap>,
+    divert_buttons: &mut Vec<(u16, ButtonId)>,
+    divert_gesture_sources: &mut Vec<u16>,
+) {
+    let Some(map) = gamepad_map else {
+        return;
+    };
+    // Gamepad-owned OS-hook buttons (Back/Forward) must be HID++-diverted even
+    // when the hook is up, otherwise they stay native mouse buttons.
+    for (cid, button) in DIVERTABLE_STANDARD_BUTTONS {
+        if map.owns_button(button) && !divert_buttons.iter().any(|(_, b)| *b == button) {
+            divert_buttons.push((cid, button));
+        }
+    }
+    for (cid, button) in GESTURE_SOURCE_BUTTONS {
+        if map.owns_button(button) && !divert_gesture_sources.contains(&cid) {
+            divert_gesture_sources.push(cid);
+        }
     }
 }
 
@@ -227,7 +284,10 @@ mod tests {
             route,
             app,
             rearm_generation,
-            os_mouse_hook_available,
+            CapturePlanRuntime {
+                os_mouse_hook_available,
+                gamepad_live: false,
+            },
         )
     }
 
@@ -614,5 +674,57 @@ mod tests {
         } else {
             assert!(plan.dispatch.side_gesture_bindings.is_empty());
         }
+    }
+
+    #[test]
+    fn gamepad_map_requires_a_live_pad() {
+        // Enabled-but-failed create must fail open: no map, no gamepad divert.
+        let mut cfg = Config::default();
+        cfg.devices
+            .entry("2b042".into())
+            .or_default()
+            .gamepad
+            .enabled = true;
+
+        let dead = plan_for_device(&cfg, "2b042", route(), None, 0, true);
+        assert!(
+            dead.dispatch.gamepad.is_none(),
+            "without a live pad the map must stay off"
+        );
+        assert!(
+            !dead
+                .target
+                .spec
+                .divert_buttons
+                .iter()
+                .any(|&(_, button)| button == ButtonId::Back),
+            "Back must keep native/productivity behaviour when create failed"
+        );
+
+        let live = super::plan_for_device(
+            &cfg,
+            PhysicalDeviceKey::parse("receiver:cafe:slot:2")
+                .expect("fixture should be a physical key"),
+            "2b042",
+            route(),
+            None,
+            0,
+            CapturePlanRuntime {
+                os_mouse_hook_available: true,
+                gamepad_live: true,
+            },
+        );
+        assert!(
+            live.dispatch.gamepad.is_some(),
+            "a live pad publishes the default mouse map"
+        );
+        assert!(
+            live.target
+                .spec
+                .divert_buttons
+                .iter()
+                .any(|&(_, button)| button == ButtonId::Back),
+            "Back is on the default map and must divert when the pad is live"
+        );
     }
 }
