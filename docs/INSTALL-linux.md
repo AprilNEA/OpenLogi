@@ -177,6 +177,37 @@ openlogi list
 openlogi-desktop
 ```
 
+## Hyprland and Omarchy
+
+When the agent runs inside a Hyprland session, native actions use the
+Hyprland/Omarchy-compatible commands below:
+
+| OpenLogi action | Linux behavior |
+|---|---|
+| `LaunchpadShow` | `omarchy-menu toggle` |
+| `PreviousDesktop` | `hyprctl dispatch workspace e-1` |
+| `NextDesktop` | `hyprctl dispatch workspace e+1` |
+| `LockScreen` | `omarchy-system-lock` |
+
+The lock action never sends `Super+L` on Hyprland because Omarchy uses that
+shortcut to change the workspace layout. If an Omarchy helper is unavailable
+or exits unsuccessfully, OpenLogi falls back to the corresponding compositor
+shortcut; the lock fallback is `Super+Ctrl+L`.
+
+The agent selects this behavior when `HYPRLAND_INSTANCE_SIGNATURE` is present.
+Because the agent normally runs as a systemd user service, verify that its
+manager environment contains both that variable and `XDG_RUNTIME_DIR`:
+
+```sh
+systemctl --user show-environment | \
+    grep -E '^(HYPRLAND_INSTANCE_SIGNATURE|XDG_RUNTIME_DIR)='
+```
+
+If either variable is missing, configure the session to import it into the
+systemd user manager before restarting `openlogi-agent.service`. The helper
+executables are resolved from `/usr/bin` and `/usr/local/bin`; missing helpers
+use the keyboard fallbacks above.
+
 ## Known limitations
 
 | Limitation | Status |
