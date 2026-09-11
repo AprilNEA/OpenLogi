@@ -74,16 +74,32 @@ struct ScrollPreferenceSnapshot {
 pub struct ScrollPreferences {
     encoded: AtomicU8,
     /// Resolution-aware base scale for the current device's vertical wheel,
-    /// applied ahead of `vertical_sensitivity` so the same sensitivity value
-    /// feels consistent whether the wheel is in `Low`/Standard or `High`
-    /// `scroll_resolution` mode. `0` and `1` are both neutral (no device-
-    /// specific scale published yet, or the device is in `High` mode).
-    resolution_scale: AtomicU8,
-    /// Bumped on every device switch/refresh so an in-flight background
-    /// resolution-scale read started for a since-superseded device can
-    /// detect it is stale and skip publishing — see
-    /// [`Self::begin_resolution_scale_refresh`].
-    resolution_scale_generation: AtomicU64,
+    /// packed together with a generation counter into one word so a
+    /// refresh-vs-publish race can never leave a stale scale in place: the
+    /// high 56 bits are the generation (bumped on every device switch/
+    /// refresh), the low 8 bits are the scale (`0`/`1` both neutral). A
+    /// background read's completion only commits its scale if the
+    /// generation still matches at the moment of a single atomic
+    /// compare-and-swap — see [`Self::begin_resolution_scale_refresh`] and
+    /// [`Self::publish_resolution_scale_for_generation`]. A plain
+    /// load-then-store pair (checking the generation, then separately
+    /// storing the scale) would leave a window for the orchestrator to
+    /// advance the generation and publish a fresh value in between, which a
+    /// stale read could then still overwrite — packing both into one word
+    /// and updating them with a single `fetch_update` closes that window.
+    resolution_scale: AtomicU64,
+}
+
+/// Bit width of the packed scale field in [`ScrollPreferences::resolution_scale`].
+const RESOLUTION_SCALE_BITS: u32 = 8;
+
+fn pack_resolution_scale(generation: u64, scale: u8) -> u64 {
+    (generation << RESOLUTION_SCALE_BITS) | u64::from(scale)
+}
+
+fn unpack_resolution_scale(packed: u64) -> (u64, u8) {
+    let scale = (packed & ((1 << RESOLUTION_SCALE_BITS) - 1)) as u8;
+    (packed >> RESOLUTION_SCALE_BITS, scale)
 }
 
 impl ScrollPreferences {
@@ -92,8 +108,7 @@ impl ScrollPreferences {
     pub fn new(smooth_scroll: bool, vertical_sensitivity: VerticalScrollSensitivity) -> Self {
         Self {
             encoded: AtomicU8::new(Self::encode(smooth_scroll, vertical_sensitivity)),
-            resolution_scale: AtomicU8::new(0),
-            resolution_scale_generation: AtomicU64::new(0),
+            resolution_scale: AtomicU64::new(pack_resolution_scale(0, 0)),
         }
     }
 
@@ -111,9 +126,20 @@ impl ScrollPreferences {
     /// synchronous neutral-reset path, which must win over any older
     /// in-flight background read regardless of generation.
     pub fn publish_resolution_scale(&self, scale: u8) {
-        self.resolution_scale_generation
-            .fetch_add(1, Ordering::Relaxed);
-        self.resolution_scale.store(scale, Ordering::Relaxed);
+        let mut current = self.resolution_scale.load(Ordering::Relaxed);
+        loop {
+            let (generation, _) = unpack_resolution_scale(current);
+            let next = pack_resolution_scale(generation + 1, scale);
+            match self.resolution_scale.compare_exchange_weak(
+                current,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return,
+                Err(observed) => current = observed,
+            }
+        }
     }
 
     /// Start a new resolution-scale refresh cycle and return its generation
@@ -125,20 +151,48 @@ impl ScrollPreferences {
     /// value.
     #[must_use]
     pub fn begin_resolution_scale_refresh(&self) -> u64 {
-        self.resolution_scale_generation
-            .fetch_add(1, Ordering::Relaxed)
-            + 1
+        let mut current = self.resolution_scale.load(Ordering::Relaxed);
+        loop {
+            let (generation, scale) = unpack_resolution_scale(current);
+            let next_generation = generation + 1;
+            let next = pack_resolution_scale(next_generation, scale);
+            match self.resolution_scale.compare_exchange_weak(
+                current,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return next_generation,
+                Err(observed) => current = observed,
+            }
+        }
     }
 
     /// Publish a background read's result only if `generation` (obtained
     /// from [`Self::begin_resolution_scale_refresh`] when the read was
-    /// dispatched) still matches the current generation — i.e. no newer
-    /// refresh or neutral reset has started since. Otherwise the read is
-    /// stale (the device was switched again, or reset to neutral, while it
-    /// was in flight) and is silently dropped.
+    /// dispatched) still matches the current generation at the moment of a
+    /// single atomic compare-and-swap — i.e. no newer refresh or neutral
+    /// reset has committed since, even one that raced in right after this
+    /// check started. Otherwise the read is stale (the device was switched
+    /// again, or reset to neutral, while it was in flight) and is silently
+    /// dropped.
     pub fn publish_resolution_scale_for_generation(&self, scale: u8, generation: u64) {
-        if self.resolution_scale_generation.load(Ordering::Relaxed) == generation {
-            self.resolution_scale.store(scale, Ordering::Relaxed);
+        let mut current = self.resolution_scale.load(Ordering::Relaxed);
+        loop {
+            let (current_generation, _) = unpack_resolution_scale(current);
+            if current_generation != generation {
+                return;
+            }
+            let next = pack_resolution_scale(current_generation, scale);
+            match self.resolution_scale.compare_exchange_weak(
+                current,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return,
+                Err(observed) => current = observed,
+            }
         }
     }
 
@@ -159,7 +213,7 @@ impl ScrollPreferences {
     /// published, or while the current device is in `High` resolution mode.
     #[must_use]
     pub fn resolution_scale(&self) -> f64 {
-        let raw = self.resolution_scale.load(Ordering::Relaxed);
+        let (_, raw) = unpack_resolution_scale(self.resolution_scale.load(Ordering::Relaxed));
         if raw <= 1 { 1.0 } else { f64::from(raw) }
     }
 
