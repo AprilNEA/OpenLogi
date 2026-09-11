@@ -2,8 +2,8 @@ use super::home::{connection_icon_path, ordered_device_indices};
 use super::{Capabilities, DetailTab, DeviceKind, DeviceRecord};
 use crate::ui::battery::{battery_charging_no_reading, battery_needs_attention};
 use openlogi_core::device::{
-    BatteryInfo, BatteryLevel, BatteryStatus, DeviceTransports, LightCapabilities, LightValueRange,
-    LightValueUnit,
+    BatteryInfo, BatteryLevel, BatteryStatus, DeviceModelInfo, DeviceTransports, LightCapabilities,
+    LightValueRange, LightValueUnit,
 };
 use openlogi_core::hid::DeviceRoute;
 
@@ -54,6 +54,24 @@ fn low_discharging_battery_needs_attention() {
     )));
 }
 
+/// Builds a [`DeviceModelInfo`] with `transports` and the packed per-transport
+/// PIDs a real device would report for them (ascending bit order: Bluetooth,
+/// BTLE, eQuad, USB — see [`DeviceModelInfo::model_ids`]), so tests can probe
+/// `connection_icon_path` with a `Direct` route's product id matching one of
+/// the live slots.
+fn model_with_pids(transports: DeviceTransports, pids: &[u16]) -> DeviceModelInfo {
+    let mut model_ids = [0u16; 3];
+    model_ids[..pids.len()].copy_from_slice(pids);
+    DeviceModelInfo {
+        entity_count: 1,
+        serial_number: None,
+        unit_id: [0, 0, 0, 0],
+        transports,
+        model_ids,
+        extended_model_id: 0,
+    }
+}
+
 #[test]
 fn connection_icon_matches_route() {
     let bolt = DeviceRoute::Bolt {
@@ -63,10 +81,6 @@ fn connection_icon_matches_route() {
     let uni = DeviceRoute::Unifying {
         receiver_uid: "r".into(),
         slot: 1,
-    };
-    let direct = DeviceRoute::Direct {
-        vendor_id: 0x046d,
-        product_id: 0xb019,
     };
     // Firmware transport tables (HID++ 0x0003): a wired-only device (G513),
     // a Bluetooth-capable one (MX Master on a cable or BT), and BLE-direct.
@@ -92,8 +106,17 @@ fn connection_icon_matches_route() {
         "action-icons/unifying.svg"
     );
     // Direct + radio-less firmware = the cable is the only possible link.
+    // The product id doesn't match any model_ids slot (no model info given
+    // beyond the flags), so this exercises the static-flags fallback.
+    let direct_wired_pid = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xb019,
+    };
     assert_eq!(
-        connection_icon_path(Some(&direct), Some(&wired)),
+        connection_icon_path(
+            Some(&direct_wired_pid),
+            Some(&model_with_pids(wired, &[0xb019]))
+        ),
         "action-icons/usb.svg"
     );
     // eQuad is receiver-only, so an equad-only table on a *direct* route
@@ -102,33 +125,90 @@ fn connection_icon_matches_route() {
         equad: true,
         ..DeviceTransports::default()
     };
+    let direct_equad_pid = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xb01a,
+    };
     assert_eq!(
-        connection_icon_path(Some(&direct), Some(&equad_only)),
+        connection_icon_path(
+            Some(&direct_equad_pid),
+            Some(&model_with_pids(equad_only, &[0xb01a]))
+        ),
         "action-icons/usb.svg"
     );
     // An all-false table is "unknown", not "wired".
+    let direct_unknown_pid = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xffff,
+    };
     assert_eq!(
-        connection_icon_path(Some(&direct), Some(&DeviceTransports::default())),
+        connection_icon_path(
+            Some(&direct_unknown_pid),
+            Some(&model_with_pids(DeviceTransports::default(), &[]))
+        ),
         "action-icons/bluetooth.svg"
     );
-    // Direct + any radio keeps the Bluetooth mark.
+    // Product id doesn't match a live slot (stale/unknown info): falls back
+    // to guessing from the static flags, same as before this fix.
     assert_eq!(
-        connection_icon_path(Some(&direct), Some(&bt)),
+        connection_icon_path(
+            Some(&direct_unknown_pid),
+            Some(&model_with_pids(bt, &[0xb019]))
+        ),
         "action-icons/bluetooth.svg"
     );
     assert_eq!(
-        connection_icon_path(Some(&direct), Some(&btle)),
+        connection_icon_path(
+            Some(&direct_unknown_pid),
+            Some(&model_with_pids(btle, &[0xb01b]))
+        ),
         "action-icons/bluetooth.svg"
     );
     // Unknown transports (no 0x0003 snapshot) keep the old default.
     assert_eq!(
-        connection_icon_path(Some(&direct), None),
+        connection_icon_path(Some(&direct_unknown_pid), None),
         "action-icons/bluetooth.svg"
     );
     // No route (e.g. a synthetic/placeholder card) falls back to Bluetooth.
     assert_eq!(
         connection_icon_path(None, None),
         "action-icons/bluetooth.svg"
+    );
+}
+
+/// Regression for issue #1218: a G915 X LS reports all three transports
+/// (USB, eQuad, BTLE) as supported, so the static flags alone can't tell
+/// which one is live. The `Direct` route's product id — the HID node this
+/// session actually enumerated — must pick the icon instead.
+#[test]
+fn connection_icon_follows_live_route_on_multi_transport_device() {
+    let model = model_with_pids(
+        DeviceTransports {
+            usb: true,
+            equad: true,
+            btle: true,
+            bluetooth: false,
+        },
+        &[0xb38a, 0x40b5, 0xc356], // BTLE, eQuad, USB — ascending bit order
+    );
+    let usb_direct = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xc356,
+    };
+    let btle_direct = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xb38a,
+    };
+    assert_eq!(
+        connection_icon_path(Some(&usb_direct), Some(&model)),
+        "action-icons/usb.svg",
+        "plugged in over USB must show the USB glyph even though the same \
+         device also supports Bluetooth/BTLE"
+    );
+    assert_eq!(
+        connection_icon_path(Some(&btle_direct), Some(&model)),
+        "action-icons/bluetooth.svg",
+        "the same device connected over BTLE must show the Bluetooth glyph"
     );
 }
 
