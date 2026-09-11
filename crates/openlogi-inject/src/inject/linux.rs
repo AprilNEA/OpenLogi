@@ -14,6 +14,7 @@ use zbus::blocking::Connection as DbusConn;
 
 use openlogi_core::binding::{
     Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Script, Shortcut, WorkflowStep,
+    ZoomDirection,
 };
 use openlogi_core::scroll::ScrollDelta;
 
@@ -41,6 +42,10 @@ pub(super) fn execute(action: &Action) {
         Effect::Shortcut(shortcut) => press_combo(&combo(shortcut)),
         Effect::Key(combo) | Effect::HeldKey(combo) => press_combo(combo),
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
+        Effect::Zoom(direction) => post_zoom(match direction {
+            ZoomDirection::In => ZOOM_PER_NOTCH,
+            ZoomDirection::Out => -ZOOM_PER_NOTCH,
+        }),
         Effect::Media(key) => dispatch_media(key),
         Effect::Native(native) => dispatch_native(action, native),
         Effect::Script(script) => dispatch_script(script),
@@ -182,6 +187,48 @@ fn dispatch_script(script: Script<'_>) {
 /// Synthesise one scroll tick in direction `(dx, dy)`. Unit direction
 /// (-1/0/1) scaled by the fixed relative-axis magnitude the four
 /// `Scroll*`/`HorizontalScroll*` actions have always used.
+/// Apply continuous magnification as Ctrl-held wheel notches.
+///
+/// Toolkits and browsers on X11 and Wayland alike zoom on Ctrl+wheel, and the
+/// modifier comes from the keyboard state the compositor tracks — a `uinput`
+/// wheel event carries no flags of its own — so `KEY_LEFTCTRL` is genuinely
+/// pressed around the notch, each edge in its own `SYN_REPORT` frame the way
+/// [`press_key`] does it.
+///
+/// A notch is the smallest step available here, so fractional magnification is
+/// accumulated until it is worth one; otherwise a high-resolution wheel would
+/// round every step to zero and never zoom.
+pub(super) fn post_zoom(magnification: f64) {
+    let notches = {
+        let Ok(mut pending) = ZOOM_REMAINDER.lock() else {
+            tracing::warn!("Linux zoom remainder mutex poisoned");
+            return;
+        };
+        *pending += magnification / ZOOM_PER_NOTCH;
+        let whole = pending.trunc();
+        *pending -= whole;
+        whole
+    };
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "trunc() of an accumulator bounded by one notch per step"
+    )]
+    let count = notches.abs() as i32;
+    let value = if notches.is_sign_negative() { -1 } else { 1 };
+    let ctrl = [KeyCode::KEY_LEFTCTRL];
+    for _ in 0..count {
+        emit(&held_key_events(&ctrl, KeyPhase::Down));
+        scroll(RelativeAxisCode::REL_WHEEL, value);
+        emit(&held_key_events(&ctrl, KeyPhase::Up));
+    }
+}
+
+/// Magnification one Ctrl+wheel notch is worth, mirroring the fraction the
+/// wheel dispatcher applies per tick.
+const ZOOM_PER_NOTCH: f64 = 0.05;
+
+static ZOOM_REMAINDER: LazyLock<Mutex<f64>> = LazyLock::new(|| Mutex::new(0.0));
+
 fn dispatch_scroll(dx: i8, dy: i8) {
     if dy != 0 {
         scroll(RelativeAxisCode::REL_WHEEL, i32::from(dy) * 3);

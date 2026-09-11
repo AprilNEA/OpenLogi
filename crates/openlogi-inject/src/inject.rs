@@ -393,6 +393,38 @@ pub fn post_scroll(delta: ScrollDelta) {
     }
 }
 
+/// Apply one continuous magnification step at the current focus.
+///
+/// `magnification` is a signed fraction of the current zoom, the unit a
+/// trackpad pinch reports. Successive calls belong to one gesture: the backend
+/// opens the gesture on the first step and closes it once the input stops, so
+/// applications see the same begin/change/end session a real pinch produces.
+///
+/// A per-step self-contained gesture is deliberately *not* what this does.
+/// Apps that read the raw wheel event in their own code accept one, but a
+/// browser's own page zoom discards a gesture that begins and ends inside a
+/// single step — which is exactly how zoom ends up working on a canvas app
+/// while an ordinary page only scrolls.
+pub fn post_zoom(magnification: f64) {
+    if !magnification.is_finite() || magnification == 0.0 {
+        return;
+    }
+    cfg_select! {
+        target_os = "macos" => {
+            macos::post_zoom(magnification);
+        }
+        target_os = "linux" => {
+            linux::post_zoom(magnification);
+        }
+        target_os = "windows" => {
+            windows::post_zoom(magnification);
+        }
+        _ => {
+            let _ = magnification;
+        }
+    }
+}
+
 /// Lifecycle phase of one synthetic smooth-scroll frame.
 ///
 /// macOS forwards this state to the scroll-wheel event so applications see a

@@ -248,6 +248,17 @@ pub struct AppSettings {
     /// only diverted from native scrolling once this leaves the default.
     #[serde(default)]
     pub thumbwheel_sensitivity: ThumbwheelSensitivity,
+    /// Zoom responsiveness for a wheel bound to zoom, scaling how much one
+    /// rotation increment magnifies.
+    ///
+    /// Separate from [`Self::thumbwheel_sensitivity`] because the two are not
+    /// the same preference: a comfortable scroll speed is a distance per
+    /// notch, while a comfortable zoom speed is a fraction of the current
+    /// magnification, and the rotation that feels right for one is usually
+    /// too slow or too coarse for the other. Reusing the sensitivity type
+    /// keeps one slider domain (1-100, `DEFAULT` = 1×) across both.
+    #[serde(default)]
+    pub zoom_sensitivity: ThumbwheelSensitivity,
     /// Light/dark appearance preference. Defaults to following the OS.
     #[serde(default)]
     pub appearance: Appearance,
@@ -464,6 +475,7 @@ impl Default for AppSettings {
             asset_source: AssetSourcePreference::Automatic,
             language: None,
             thumbwheel_sensitivity: ThumbwheelSensitivity::DEFAULT,
+            zoom_sensitivity: ThumbwheelSensitivity::DEFAULT,
             appearance: Appearance::System,
             ui_scale: UiScale::Normal,
             device_view_mode: DeviceViewMode::Grid,

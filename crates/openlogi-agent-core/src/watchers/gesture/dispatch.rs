@@ -24,6 +24,7 @@ pub(super) struct WheelConfiguration {
     up: Action,
     down: Action,
     sensitivity: ThumbwheelSensitivity,
+    zoom_sensitivity: ThumbwheelSensitivity,
 }
 
 impl WheelConfiguration {
@@ -38,6 +39,7 @@ impl WheelConfiguration {
             up: action(ButtonId::ThumbwheelScrollUp),
             down: action(ButtonId::ThumbwheelScrollDown),
             sensitivity: plan.thumbwheel_sensitivity,
+            zoom_sensitivity: plan.zoom_sensitivity,
         }
     }
 
@@ -223,11 +225,18 @@ impl InputDispatcher {
                 match wheels.advance(
                     rotation,
                     action,
-                    ScrollScale::new(resolution, configuration.sensitivity),
+                    ScrollScale::new(
+                        resolution,
+                        configuration.sensitivity,
+                        configuration.zoom_sensitivity,
+                    ),
                     Instant::now(),
                 ) {
                     WheelOutput::Idle => {}
                     WheelOutput::Scroll(delta) => self.outputs.post_scroll(session, delta),
+                    WheelOutput::Zoom(magnification) => {
+                        openlogi_inject::post_zoom(magnification);
+                    }
                     WheelOutput::FireAction => {
                         debug!(key, ?button, action = %action.label(), "thumb wheel → action");
                         self.outputs.actions.dispatch(action, Some(key));

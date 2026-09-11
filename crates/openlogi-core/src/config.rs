@@ -1031,6 +1031,28 @@ impl Config {
             .or_default()
             .thumbwheel_sensitivity = sensitivity;
     }
+
+    /// The effective zoom sensitivity for `device_key`: the device's override
+    /// when set, else the app-wide default.
+    #[must_use]
+    pub fn zoom_sensitivity(&self, device_key: &str) -> ThumbwheelSensitivity {
+        self.devices
+            .get(device_key)
+            .and_then(|d| d.zoom_sensitivity)
+            .unwrap_or(self.app_settings.zoom_sensitivity)
+    }
+
+    /// Set (or clear, with `None`) `device_key`'s zoom sensitivity override.
+    pub fn set_device_zoom_sensitivity(
+        &mut self,
+        device_key: &str,
+        sensitivity: Option<ThumbwheelSensitivity>,
+    ) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .zoom_sensitivity = sensitivity;
+    }
 }
 
 /// Resolve the most specific application overlay for a foreground identifier.
