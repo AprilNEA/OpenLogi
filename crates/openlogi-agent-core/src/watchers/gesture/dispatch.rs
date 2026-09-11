@@ -3,16 +3,19 @@
 mod wheel;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Instant;
 
 use openlogi_core::binding::{Action, Binding, ButtonId, default_binding};
 use openlogi_core::config::ThumbwheelSensitivity;
-use openlogi_hid::CapturedInput;
+use openlogi_core::hid::dpi::Dpi;
+use openlogi_hid::{CapturedInput, DeviceRoute};
 use tracing::debug;
 
 use self::wheel::{ScrollScale, WheelAccumulators, WheelOutput, WheelRotation};
 use super::GestureOutputs;
 use crate::capture_plan::DispatchPlan;
+use crate::hardware::SpyNativeDpi;
 use crate::runtime::hook::SharedHookMaps;
 use crate::runtime::{HidppSessionId, PressToken};
 
@@ -99,6 +102,8 @@ pub(super) struct InputDispatcher {
     outputs: GestureOutputs,
     wheels: SessionWheels,
     gesture_presses: GesturePresses,
+    /// DPI to restore when an unbound G6 (DPI Shift) is released.
+    spy_shift: Arc<tokio::sync::Mutex<HashMap<HidppSessionId, Option<Dpi>>>>,
 }
 
 impl InputDispatcher {
@@ -109,6 +114,7 @@ impl InputDispatcher {
             outputs,
             wheels: SessionWheels::default(),
             gesture_presses: GesturePresses::default(),
+            spy_shift: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -132,6 +138,9 @@ impl InputDispatcher {
         self.outputs.cancel_session(session);
         self.wheels.cancel_session(session);
         self.gesture_presses.cancel_session(session);
+        if let Ok(mut held) = self.spy_shift.try_lock() {
+            held.remove(session);
+        }
     }
 
     /// Route one captured input from `session` to its bound action or
@@ -140,6 +149,7 @@ impl InputDispatcher {
         &mut self,
         session: &HidppSessionId,
         plan: &DispatchPlan,
+        route: &DeviceRoute,
         input: CapturedInput,
     ) {
         let key = session.device_key();
@@ -171,32 +181,10 @@ impl InputDispatcher {
                 }
             }
             CapturedInput::ButtonDown(button) => {
-                // A raw-XY gesture source owns its click/swipe map; its physical
-                // lifecycle is still tracked, but it must not also fire the
-                // single-action projection on down.
-                let is_gesture = plan.gesture_bindings.contains_key(&button)
-                    || plan.side_gesture_bindings.contains_key(&button);
-                let binding = (!is_gesture).then(|| plan.bindings.get(&button)).flatten();
-                if let Some(binding) = binding {
-                    debug!(key, ?button, action = %binding.click_action().label(), "HID++ button → binding");
-                } else {
-                    debug!(key, ?button, "HID++ button with no binding — ignored");
-                }
-                let press = self
-                    .outputs
-                    .actions
-                    .try_hidpp_button_down(session, button, binding);
-                if is_gesture {
-                    if let Some(press) = press {
-                        self.gesture_presses.start(session, button, press);
-                    } else {
-                        self.gesture_presses.end(session, button);
-                    }
-                }
+                self.dispatch_button_down(session, plan, route, key, button);
             }
             CapturedInput::ButtonUp(button) => {
-                self.outputs.actions.try_hidpp_button_up(session, button);
-                self.gesture_presses.end(session, button);
+                self.dispatch_button_up(session, plan, route, button);
             }
             CapturedInput::ButtonPulse(button) => {
                 let binding = plan.bindings.get(&button);
@@ -238,6 +226,83 @@ impl InputDispatcher {
                 unreachable!("thumb-wheel direction reports return before dispatch")
             }
         }
+    }
+
+    fn dispatch_button_down(
+        &mut self,
+        session: &HidppSessionId,
+        plan: &DispatchPlan,
+        route: &DeviceRoute,
+        key: &str,
+        button: ButtonId,
+    ) {
+        // A raw-XY gesture source owns its click/swipe map; its physical
+        // lifecycle is still tracked, but it must not also fire the
+        // single-action projection on down.
+        let is_gesture = plan.gesture_bindings.contains_key(&button)
+            || plan.side_gesture_bindings.contains_key(&button);
+        let binding = (!is_gesture).then(|| plan.bindings.get(&button)).flatten();
+        let customized = binding.is_some_and(|binding| binding.click_action() != Action::None);
+        if customized {
+            if let Some(binding) = binding {
+                debug!(key, ?button, action = %binding.click_action().label(), "HID++ button → binding");
+            }
+            let press = self
+                .outputs
+                .actions
+                .try_hidpp_button_down(session, button, binding);
+            if is_gesture {
+                if let Some(press) = press {
+                    self.gesture_presses.start(session, button, press);
+                } else {
+                    self.gesture_presses.end(session, button);
+                }
+            }
+        } else if let Some(kind) = spy_native_kind(button, true) {
+            debug!(key, ?button, "unbound spy button → software DPI");
+            self.outputs.actions.spawn_spy_native_dpi(
+                session.clone(),
+                route.clone(),
+                kind,
+                Arc::clone(&self.spy_shift),
+            );
+        } else {
+            debug!(key, ?button, "HID++ button with no binding — ignored");
+        }
+    }
+
+    fn dispatch_button_up(
+        &mut self,
+        session: &HidppSessionId,
+        plan: &DispatchPlan,
+        route: &DeviceRoute,
+        button: ButtonId,
+    ) {
+        self.outputs.actions.try_hidpp_button_up(session, button);
+        self.gesture_presses.end(session, button);
+        if plan
+            .bindings
+            .get(&button)
+            .is_none_or(|binding| binding.click_action() == Action::None)
+            && let Some(kind) = spy_native_kind(button, false)
+        {
+            self.outputs.actions.spawn_spy_native_dpi(
+                session.clone(),
+                route.clone(),
+                kind,
+                Arc::clone(&self.spy_shift),
+            );
+        }
+    }
+}
+
+fn spy_native_kind(button: ButtonId, down: bool) -> Option<SpyNativeDpi> {
+    match (button, down) {
+        (ButtonId::DpiUp, true) => Some(SpyNativeDpi::Step { up: true }),
+        (ButtonId::DpiDown, true) => Some(SpyNativeDpi::Step { up: false }),
+        (ButtonId::DpiShift, true) => Some(SpyNativeDpi::ShiftDown),
+        (ButtonId::DpiShift, false) => Some(SpyNativeDpi::ShiftUp),
+        _ => None,
     }
 }
 

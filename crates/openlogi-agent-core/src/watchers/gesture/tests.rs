@@ -378,7 +378,7 @@ fn side_gesture_transition_keeps_the_retiring_plan_until_native_restore() {
     );
     assert!(!session.is_active());
 
-    let (_, retained) = dispatch_context_for(session.id(), Some(&session))
+    let (_, retained, _) = dispatch_context_for(session.id(), Some(&session))
         .expect("the draining session must remain an admissible input owner");
     assert!(
         retained

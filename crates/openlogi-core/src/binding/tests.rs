@@ -544,6 +544,24 @@ fn wheel_tilt_defaults_to_the_scroll_its_firmware_already_does() {
 }
 
 #[test]
+fn spy_buttons_stay_out_of_all_and_default_to_none() {
+    for button in ButtonId::SPY_BUTTONS {
+        assert!(
+            !ButtonId::ALL.contains(&button),
+            "{button:?} must not seed MX popovers"
+        );
+        assert_eq!(default_binding(button), Action::None);
+        assert!(!button.is_os_hook_button());
+        assert!(!button.is_hidpp_gesture_source());
+    }
+    assert_eq!(
+        ButtonId::spy_buttons_for_config_key(crate::binding::G502_X_PLUS_CONFIG_KEY),
+        Some(ButtonId::SPY_BUTTONS.as_slice())
+    );
+    assert_eq!(ButtonId::spy_buttons_for_config_key("2b042"), None);
+}
+
+#[test]
 fn thumbwheel_defaults_match_normalised_native_direction() {
     // HID++ capture normalises the per-model firmware polarity to physical
     // forward/up. The defaults must then reproduce native horizontal scroll,

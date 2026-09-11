@@ -51,6 +51,13 @@ pub fn button_bindings_for(
         .copied()
         .map(|button| (button, Binding::Single(default_binding(button))))
         .collect();
+    if let Some(spy) = config_key.and_then(ButtonId::spy_buttons_for_config_key) {
+        for button in spy {
+            bindings
+                .entry(*button)
+                .or_insert_with(|| Binding::Single(default_binding(*button)));
+        }
+    }
     for (button, mut binding) in stored {
         if let Binding::Gesture(map) = &mut binding {
             map.entry(GestureDirection::Click)
@@ -144,6 +151,26 @@ mod tests {
     use crate::binding::{LongPressBinding, default_gesture_binding};
 
     use super::*;
+
+    #[test]
+    fn g502_x_plus_seeds_spy_buttons_and_mx_does_not() {
+        let cfg = Config::default();
+        let g502 = button_bindings_for(&cfg, Some("04099"), None);
+        for button in ButtonId::SPY_BUTTONS {
+            assert_eq!(
+                g502.get(&button),
+                Some(&Binding::Single(Action::None)),
+                "{button:?} must seed on the G502 X Plus"
+            );
+        }
+        let mx = button_bindings_for(&cfg, Some("2b042"), None);
+        for button in ButtonId::SPY_BUTTONS {
+            assert!(
+                !mx.contains_key(&button),
+                "{button:?} must not appear on MX defaults"
+            );
+        }
+    }
 
     #[test]
     fn click_less_gesture_keeps_default_click_in_projection() {

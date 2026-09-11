@@ -21,9 +21,10 @@ use std::future::Future;
 use std::time::Duration;
 
 use openlogi_core::config::Lighting;
+use openlogi_core::hid::dpi::DpiInfo;
 use openlogi_hid::{
     CaptureChannel, ChannelRegistry, DeviceIoGate, DeviceRoute, Dpi, HidppOperation,
-    ScrollResolution, SharedChannel, SmartShiftStatus, WriteError,
+    ScrollResolution, SharedChannel, SmartShiftStatus, WriteError, get_dpi_info_on, set_dpi_on,
 };
 use tokio::time::error::Elapsed;
 use tracing::{debug, warn};
@@ -405,6 +406,74 @@ fn log_wheel_result(
             ?inverted,
             "wheel mode write timed out (device asleep/unresponsive)"
         ),
+    }
+}
+
+/// Native G6–G8 fallback while Host mode has suppressed firmware DPI.
+#[derive(Clone, Copy, Debug)]
+pub enum SpyNativeDpi {
+    /// Step one stage (or 50 DPI on a continuous list).
+    Step {
+        /// `true` is G8 / DPI up.
+        up: bool,
+    },
+    /// G6 hold: write the sensor's minimum DPI.
+    ShiftDown,
+    /// G6 release: restore the DPI captured on press.
+    ShiftUp,
+}
+
+/// Read-modify-write the current sensor DPI for an unbound G6–G8 press.
+pub async fn apply_spy_native_dpi(
+    capture: &CaptureChannel,
+    registry: &ChannelRegistry,
+    receiver_access: &ReceiverAccess,
+    device_io: &DeviceIoGate,
+    route: &DeviceRoute,
+    kind: SpyNativeDpi,
+    shift_restore: &mut Option<Dpi>,
+) -> Result<(), WriteError> {
+    if let SpyNativeDpi::ShiftUp = kind {
+        let Some(dpi) = shift_restore.take() else {
+            return Ok(());
+        };
+        return DeviceOp::new(capture, registry, receiver_access, device_io, route)
+            .run(HidppOperation::WriteDpi, move |shared| async move {
+                set_dpi_on(&shared, dpi).await
+            })
+            .await;
+    }
+
+    let info = DeviceOp::new(capture, registry, receiver_access, device_io, route)
+        .run(HidppOperation::ReadDpi, |shared| async move {
+            get_dpi_info_on(&shared).await
+        })
+        .await?;
+    let Some(dpi) = spy_native_target(&info, kind, shift_restore) else {
+        return Ok(());
+    };
+    if dpi == info.current {
+        return Ok(());
+    }
+    DeviceOp::new(capture, registry, receiver_access, device_io, route)
+        .run(HidppOperation::WriteDpi, move |shared| async move {
+            set_dpi_on(&shared, dpi).await
+        })
+        .await
+}
+
+fn spy_native_target(
+    info: &DpiInfo,
+    kind: SpyNativeDpi,
+    shift_restore: &mut Option<Dpi>,
+) -> Option<Dpi> {
+    match kind {
+        SpyNativeDpi::Step { up } => Some(info.capabilities.step(info.current, up)),
+        SpyNativeDpi::ShiftDown => {
+            *shift_restore = Some(info.current);
+            Some(info.capabilities.min())
+        }
+        SpyNativeDpi::ShiftUp => shift_restore.take(),
     }
 }
 

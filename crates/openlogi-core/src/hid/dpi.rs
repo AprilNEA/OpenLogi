@@ -134,6 +134,36 @@ impl DpiCapabilities {
             .unwrap_or(Dpi::new(1))
     }
 
+    /// Next or previous supported DPI from `current`.
+    ///
+    /// Discrete stage lists step to the adjacent reported value. A two-point
+    /// (or empty-gap) list is treated as continuous and steps by 50, clamped
+    /// through [`Self::nearest`].
+    #[must_use]
+    pub fn step(&self, current: Dpi, up: bool) -> Dpi {
+        if self.values.len() >= 3 {
+            match self.values.binary_search(&current) {
+                Ok(index) if up => self
+                    .values
+                    .get(index + 1)
+                    .copied()
+                    .unwrap_or(self.values[index]),
+                Ok(0) => self.values[0],
+                Err(index) if up => self.values.get(index).copied().unwrap_or(current),
+                Err(0) => current,
+                Ok(index) | Err(index) => self.values[index - 1],
+            }
+        } else {
+            let raw = current.into_inner();
+            let next = if up {
+                raw.saturating_add(50)
+            } else {
+                raw.saturating_sub(50)
+            };
+            Dpi::new(next.clamp(self.min().into_inner(), self.max().into_inner()))
+        }
+    }
+
     /// A supported value different from `current`, for diagnostic write tests.
     #[must_use]
     pub fn adjacent_test_target(&self, current: Dpi) -> Option<Dpi> {
@@ -213,6 +243,20 @@ mod tests {
         let caps = DpiCapabilities::new(vec![400, 800, 1200, 2000])?;
 
         assert_eq!(caps.step_hint(), Dpi::new(400));
+        Ok(())
+    }
+
+    #[test]
+    fn step_walks_discrete_stages_and_falls_back_by_fifty() -> Result<(), WriteError> {
+        let stages = DpiCapabilities::new(vec![400, 800, 1600, 3200])?;
+        assert_eq!(stages.step(Dpi::new(800), true), Dpi::new(1600));
+        assert_eq!(stages.step(Dpi::new(800), false), Dpi::new(400));
+        assert_eq!(stages.step(Dpi::new(3200), true), Dpi::new(3200));
+        assert_eq!(stages.step(Dpi::new(400), false), Dpi::new(400));
+
+        let continuous = DpiCapabilities::new(vec![100, 25_600])?;
+        assert_eq!(continuous.step(Dpi::new(800), true), Dpi::new(850));
+        assert_eq!(continuous.step(Dpi::new(800), false), Dpi::new(750));
         Ok(())
     }
 

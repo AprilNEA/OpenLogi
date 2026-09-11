@@ -30,8 +30,8 @@ use std::time::Duration;
 use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_core::scroll::ScrollDelta;
 use openlogi_hid::{
-    CaptureChannel, CaptureSessionOutcome, CapturedInput, DeviceIoGate, PendingCaptureRestore,
-    run_capture_session_with_registry_spec,
+    CaptureChannel, CaptureSessionOutcome, CapturedInput, DeviceIoGate, DeviceRoute,
+    PendingCaptureRestore, run_capture_session_with_registry_spec,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
@@ -221,9 +221,9 @@ async fn report_done_after_inputs(
 fn dispatch_context_for<'a>(
     input_session: &HidppSessionId,
     live: Option<&'a RunningSession>,
-) -> Option<(&'a HidppSessionId, &'a DispatchPlan)> {
+) -> Option<(&'a HidppSessionId, &'a DispatchPlan, &'a DeviceRoute)> {
     live.filter(|session| session.owns(input_session))
-        .map(|session| (session.id(), session.dispatch()))
+        .map(|session| (session.id(), session.dispatch(), &session.target().route))
 }
 
 /// Snapshot the sessions that should be armed. An exclusive request
@@ -492,8 +492,9 @@ impl GestureManagerState {
                 }
                 let live = self.slots.get(key).and_then(GestureSlot::session);
                 let dispatch_context = dispatch_context_for(&event.session, live);
-                if let Some((session, plan)) = dispatch_context {
-                    self.input_dispatcher.dispatch(session, plan, event.input);
+                if let Some((session, plan, route)) = dispatch_context {
+                    self.input_dispatcher
+                        .dispatch(session, plan, route, event.input);
                 } else {
                     self.input_dispatcher.cancel_session(&event.session);
                     debug!(

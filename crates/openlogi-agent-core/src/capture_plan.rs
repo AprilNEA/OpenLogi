@@ -184,6 +184,7 @@ pub fn plan_for_device(
                     .collect(),
                 divert_gesture_buttons,
                 divert_buttons,
+                spy_buttons: spy_buttons_for(config_key, &bindings),
             },
             rearm_generation,
         },
@@ -194,6 +195,25 @@ pub fn plan_for_device(
             side_gesture_bindings,
             thumbwheel_sensitivity,
         },
+    }
+}
+
+/// Arm every G6–G9 spy ID when any of them leaves `Action::None`. Host mode
+/// pauses onboard profiles for the whole extra-button cluster, so one bound
+/// sibling takes over the rest for the session. G4/G5 stay out of this list.
+fn spy_buttons_for(config_key: &str, bindings: &BTreeMap<ButtonId, Binding>) -> Vec<ButtonId> {
+    let Some(buttons) = ButtonId::spy_buttons_for_config_key(config_key) else {
+        return Vec::new();
+    };
+    let customized = buttons.iter().any(|button| {
+        bindings
+            .get(button)
+            .is_some_and(|binding| binding.click_action() != Action::None)
+    });
+    if customized {
+        buttons.to_vec()
+    } else {
+        Vec::new()
     }
 }
 
@@ -614,5 +634,30 @@ mod tests {
         } else {
             assert!(plan.dispatch.side_gesture_bindings.is_empty());
         }
+    }
+
+    #[test]
+    fn one_bound_g502_spy_button_arms_all_four_siblings() {
+        let mut cfg = Config::default();
+        cfg.set_binding(
+            "04099",
+            ButtonId::DpiUp,
+            Binding::Single(Action::MissionControl),
+        );
+
+        let plan = plan_for_device(&cfg, "04099", route(), None, 0, true);
+        assert_eq!(
+            plan.target.spec.spy_buttons,
+            ButtonId::SPY_BUTTONS.to_vec(),
+            "Host mode takes over the whole extra-button cluster"
+        );
+        assert!(
+            !plan.target.spec.spy_buttons.contains(&ButtonId::Back)
+                && !plan.target.spec.spy_buttons.contains(&ButtonId::Forward),
+            "G4/G5 must stay on the OS hook"
+        );
+
+        let untouched = plan_for_device(&cfg, "2b042", route(), None, 0, true);
+        assert!(untouched.target.spec.spy_buttons.is_empty());
     }
 }

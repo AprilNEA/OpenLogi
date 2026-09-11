@@ -15,14 +15,17 @@ use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
 use openlogi_core::binding::{Action, Binding, ButtonId};
-use openlogi_hid::{CaptureChannel, ChannelRegistry, DeviceIoGate};
+use openlogi_core::hid::dpi::Dpi;
+use openlogi_hid::{CaptureChannel, ChannelRegistry, DeviceIoGate, DeviceRoute};
 use tracing::{info, warn};
 
 use self::button::{
     ButtonInputHandle, ButtonRuntimeEvent, ButtonRuntimeOwner, EndReason, PressControl,
 };
 pub(crate) use self::button::{HidppSessionId, PressToken};
-use crate::hardware::{toggle_smartshift_in_background, write_dpi_in_background};
+use crate::hardware::{
+    SpyNativeDpi, apply_spy_native_dpi, toggle_smartshift_in_background, write_dpi_in_background,
+};
 use crate::receiver_access::ReceiverAccess;
 use crate::{DpiCycleState, DpiCycles};
 
@@ -331,6 +334,39 @@ impl ActionDispatcher {
     }
 
     /// Cancel presses from a HID++ session that is stopping or has died.
+    /// Software DPI for an unbound G6–G8 while Host mode has suppressed the
+    /// firmware mapping. Ops for one session are serialized so a G6 release
+    /// cannot race ahead of the press that captured the restore value.
+    pub(crate) fn spawn_spy_native_dpi(
+        &self,
+        session: HidppSessionId,
+        route: DeviceRoute,
+        kind: SpyNativeDpi,
+        shift: Arc<tokio::sync::Mutex<HashMap<HidppSessionId, Option<Dpi>>>>,
+    ) {
+        let capture = self.executor.capture.clone();
+        let registry = self.executor.registry.clone();
+        let receiver_access = self.executor.receiver_access.clone();
+        let device_io = self.executor.device_io.clone();
+        tokio::spawn(async move {
+            let mut held = shift.lock().await;
+            let slot = held.entry(session).or_insert(None);
+            if let Err(error) = apply_spy_native_dpi(
+                &capture,
+                &registry,
+                &receiver_access,
+                &device_io,
+                &route,
+                kind,
+                slot,
+            )
+            .await
+            {
+                warn!(?error, "spy native DPI fallback failed");
+            }
+        });
+    }
+
     pub(crate) fn cancel_hidpp_session(&self, session: &HidppSessionId) {
         self.buttons.cancel_hidpp_session(session);
     }
