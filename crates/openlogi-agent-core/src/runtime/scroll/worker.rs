@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
@@ -22,6 +23,42 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 const SMOOTH_SCROLL_FLAG: u8 = 0x80;
 const SENSITIVITY_MASK: u8 = !SMOOTH_SCROLL_FLAG;
 
+/// Above this raw (pre-scale) vertical magnitude, `ScrollPreferences::resolution_scale`
+/// is not applied — real-hardware measurement (MX Master 3S) showed the raw
+/// magnitude macOS reports for a free-spinning/fast wheel saturates to the
+/// same value regardless of `scroll_resolution` (Low and High both plateaued
+/// at an identical `~21.49`), while only the first one or two isolated-detent
+/// ticks of a gesture (raw magnitude well under this threshold) actually
+/// differ between resolution modes. Boosting an already-saturated value would
+/// make `Low`/Standard resolution scroll several times farther than `High`
+/// for the same physical motion — see
+/// `openspec/changes/normalize-scroll-sensitivity-by-resolution` design.md.
+const RESOLUTION_SCALE_MAGNITUDE_THRESHOLD: f64 = 3.0;
+
+/// Below this gap since the previous accepted OS-hook tick, a new tick is a
+/// genuinely isolated, deliberate action rather than part of an ongoing
+/// gesture. Mirrors `openlogi-inject`'s `GESTURE_IDLE_GAP` — both exist to
+/// tell "a fresh deliberate tick" apart from "a continuing sequence", just at
+/// different layers (this one gates `ISOLATED_TICK_BOOST`, the other gates
+/// the quantizer's visibility floor).
+const ISOLATED_TICK_GAP: Duration = Duration::from_millis(500);
+
+/// Extra multiplier applied only to a genuinely isolated tick (see
+/// `ISOLATED_TICK_GAP`) below `RESOLUTION_SCALE_MAGNITUDE_THRESHOLD`, on top
+/// of the normal `resolution_scale * scroll_multiplier` scaling, when smooth
+/// scrolling is on.
+///
+/// Real-hardware testing (multiple apps: VS Code, Safari, Finder) found a
+/// single isolated Low-mode tick's smooth-scroll output (~18 points at
+/// `POINTS_PER_WHEEL_TICK=20.0`) was not visible anywhere, while multi-tick/
+/// fast gestures (hundreds of points) already felt correct. A single flat
+/// increase to `POINTS_PER_WHEEL_TICK` can't fix this without also making
+/// those already-correct fast gestures overshoot, since it scales every tick
+/// uniformly — see `openspec/changes/normalize-scroll-sensitivity-by-resolution`
+/// design.md. This boost instead targets only the specific case that was
+/// measured invisible: the first, isolated tick of a fresh gesture.
+const ISOLATED_TICK_BOOST: f64 = 8.0;
+
 #[derive(Clone, Copy)]
 struct ScrollPreferenceSnapshot {
     smooth_scroll: bool,
@@ -36,6 +73,12 @@ struct ScrollPreferenceSnapshot {
 /// consistent settings snapshot instead of two independently changing values.
 pub struct ScrollPreferences {
     encoded: AtomicU8,
+    /// Resolution-aware base scale for the current device's vertical wheel,
+    /// applied ahead of `vertical_sensitivity` so the same sensitivity value
+    /// feels consistent whether the wheel is in `Low`/Standard or `High`
+    /// `scroll_resolution` mode. `0` and `1` are both neutral (no device-
+    /// specific scale published yet, or the device is in `High` mode).
+    resolution_scale: AtomicU8,
 }
 
 impl ScrollPreferences {
@@ -44,6 +87,7 @@ impl ScrollPreferences {
     pub fn new(smooth_scroll: bool, vertical_sensitivity: VerticalScrollSensitivity) -> Self {
         Self {
             encoded: AtomicU8::new(Self::encode(smooth_scroll, vertical_sensitivity)),
+            resolution_scale: AtomicU8::new(0),
         }
     }
 
@@ -53,6 +97,13 @@ impl ScrollPreferences {
             Self::encode(smooth_scroll, vertical_sensitivity),
             Ordering::Relaxed,
         );
+    }
+
+    /// Publish the current device's resolution-aware base scale (its
+    /// HiRes-wheel `multiplier` when in `Low`/Standard mode, or `1` when in
+    /// `High` mode / unknown).
+    pub fn publish_resolution_scale(&self, scale: u8) {
+        self.resolution_scale.store(scale, Ordering::Relaxed);
     }
 
     /// Whether finite smooth scrolling is currently enabled.
@@ -65,6 +116,15 @@ impl ScrollPreferences {
     #[must_use]
     pub fn vertical_sensitivity(&self) -> VerticalScrollSensitivity {
         self.load().vertical_sensitivity
+    }
+
+    /// The resolution-aware base scale to apply ahead of vertical
+    /// sensitivity. Neutral (`1.0`) until a device-specific scale has been
+    /// published, or while the current device is in `High` resolution mode.
+    #[must_use]
+    pub fn resolution_scale(&self) -> f64 {
+        let raw = self.resolution_scale.load(Ordering::Relaxed);
+        if raw <= 1 { 1.0 } else { f64::from(raw) }
     }
 
     fn encode(smooth_scroll: bool, vertical_sensitivity: VerticalScrollSensitivity) -> u8 {
@@ -177,6 +237,10 @@ pub struct ScrollInputHandle {
     generation: Arc<AtomicU64>,
     accepting: Arc<AtomicBool>,
     preferences: Arc<ScrollPreferences>,
+    /// Timestamp of the last accepted OS-hook tick, used to detect a fresh,
+    /// isolated tick for `ISOLATED_TICK_BOOST`. Separate from the quantizer's
+    /// own isolation tracking (a different crate, a different purpose).
+    last_hook_tick_at: Arc<Mutex<Option<Instant>>>,
 }
 
 impl ScrollInputHandle {
@@ -195,9 +259,30 @@ impl ScrollInputHandle {
             return false;
         };
         let preferences = self.preferences.load();
-        let Some(scaled) =
-            impulse.with_vertical_scale(preferences.vertical_sensitivity.scroll_multiplier())
-        else {
+        let now = Instant::now();
+        let is_isolated_tick = {
+            let mut last = self.last_hook_tick_at.lock().unwrap_or_else(|poisoned| {
+                self.last_hook_tick_at.clear_poison();
+                poisoned.into_inner()
+            });
+            let isolated =
+                last.is_none_or(|at| now.saturating_duration_since(at) >= ISOLATED_TICK_GAP);
+            *last = Some(now);
+            isolated
+        };
+        let resolution_scale = if impulse.y.abs() < RESOLUTION_SCALE_MAGNITUDE_THRESHOLD {
+            self.preferences.resolution_scale()
+        } else {
+            1.0
+        };
+        let mut scale = resolution_scale * preferences.vertical_sensitivity.scroll_multiplier();
+        if preferences.smooth_scroll
+            && is_isolated_tick
+            && impulse.y.abs() < RESOLUTION_SCALE_MAGNITUDE_THRESHOLD
+        {
+            scale *= ISOLATED_TICK_BOOST;
+        }
+        let Some(scaled) = impulse.with_vertical_scale(scale) else {
             return false;
         };
         let output = if preferences.smooth_scroll {
@@ -325,6 +410,7 @@ impl ScrollRuntime {
             generation: Arc::clone(&generation),
             accepting: Arc::new(AtomicBool::new(true)),
             preferences: Arc::clone(&preferences),
+            last_hook_tick_at: Arc::new(Mutex::new(None)),
         };
         let worker = thread::Builder::new()
             .name("openlogi-scroll".into())
@@ -501,6 +587,7 @@ mod tests {
                 generation: Arc::new(AtomicU64::new(0)),
                 accepting: Arc::new(AtomicBool::new(true)),
                 preferences,
+                last_hook_tick_at: Arc::new(Mutex::new(None)),
             },
             receiver,
             control_rx,
@@ -543,13 +630,176 @@ mod tests {
     }
 
     #[test]
-    fn hook_scales_vertical_distance_before_smoothing() {
-        let (input, receiver, _controls) = standalone_input(1, preferences(true, 7));
-        assert!(input.try_hook_scroll(ScrollDelta::wheel_ticks(2.0, 2.0)));
+    fn resolution_scale_multiplies_ahead_of_sensitivity() {
+        let preferences = preferences(false, 7);
+        let (input, receiver, _controls) = standalone_input(1, Arc::clone(&preferences));
+        preferences.publish_resolution_scale(15);
+        assert!(input.try_hook_scroll(ScrollDelta::wheel_ticks(0.0, 2.0)));
 
+        let queued = queued_input(&receiver);
+        assert_eq!(queued.impulse, WheelDelta { x: 0.0, y: 15.0 });
+    }
+
+    #[test]
+    fn resolution_scale_does_not_apply_above_the_magnitude_threshold() {
+        let preferences = preferences(false, 7);
+        let (input, receiver, _controls) = standalone_input(1, Arc::clone(&preferences));
+        preferences.publish_resolution_scale(15);
+        // Above RESOLUTION_SCALE_MAGNITUDE_THRESHOLD (3.0): falls back to a
+        // neutral 1x resolution scale, only sensitivity's own 0.5x applies.
+        assert!(input.try_hook_scroll(ScrollDelta::wheel_ticks(0.0, 21.49)));
+
+        let queued = queued_input(&receiver);
+        assert_eq!(queued.impulse, WheelDelta { x: 0.0, y: 10.745 });
+    }
+
+    /// Characterizes a High-resolution single physical click: the device's
+    /// own `HiResWheel` capability reports `multiplier=15` ("a single
+    /// ratchet distance will produce this amount of wheel movement reports
+    /// in hi-res mode"), and `resolution_scale` stays neutral (`1`) in High
+    /// mode regardless of magnitude, so this burst is completely unaffected
+    /// by the resolution-normalization fix. Verifies the worker's per-event
+    /// scaling stays linear across a rapid burst of many small reports (no
+    /// clipping, no accumulation bug), which is what "feels like in-between
+    /// movements rather than one atomic jump" reduces to architecturally —
+    /// a real regression here would show up as a wrong cumulative total.
+    #[test]
+    fn high_resolution_burst_of_small_reports_scales_linearly() {
+        const SUB_REPORT_MAGNITUDE: f64 = 0.1; // below the resolution-scale threshold too
+        const SUB_REPORTS_PER_RATCHET: usize = 15; // device-reported `multiplier`
+        let preferences = preferences(false, 8); // real calibrated sensitivity
+        let (input, receiver, _controls) = standalone_input(15, Arc::clone(&preferences));
+
+        for _ in 0..SUB_REPORTS_PER_RATCHET {
+            assert!(input.try_hook_scroll(ScrollDelta::wheel_ticks(0.0, SUB_REPORT_MAGNITUDE)));
+        }
+
+        let sensitivity_multiplier = sensitivity(8).scroll_multiplier();
+        let mut total = 0.0;
+        for _ in 0..SUB_REPORTS_PER_RATCHET {
+            total += queued_input(&receiver).impulse.y;
+        }
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "SUB_REPORTS_PER_RATCHET is a small constant (15), exactly representable as f64"
+        )]
+        let expected =
+            SUB_REPORT_MAGNITUDE * sensitivity_multiplier * SUB_REPORTS_PER_RATCHET as f64;
+        assert!(
+            (total - expected).abs() < 1.0e-9,
+            "burst total {total} != expected {expected} (per-event scaling must stay linear)"
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "resolution_scale is an exact integer-to-f64 conversion, no rounding possible"
+    )]
+    fn resolution_scale_of_zero_or_one_is_neutral() {
+        assert_eq!(
+            ScrollPreferences::new(false, sensitivity(7)).resolution_scale(),
+            1.0
+        );
+        let preferences = ScrollPreferences::new(false, sensitivity(7));
+        preferences.publish_resolution_scale(1);
+        assert_eq!(preferences.resolution_scale(), 1.0);
+        preferences.publish_resolution_scale(15);
+        assert_eq!(preferences.resolution_scale(), 15.0);
+    }
+
+    #[test]
+    fn hook_scales_vertical_distance_before_smoothing() {
+        let (input, receiver, _controls) = standalone_input(2, preferences(true, 7));
+        // Prime isolation state first so the assertion below reflects plain
+        // sensitivity scaling, not the isolated-tick boost (see the dedicated
+        // isolated-tick tests further down).
+        assert!(input.try_hook_scroll(ScrollDelta::wheel_ticks(0.0, 2.0)));
+        let _ = queued_input(&receiver);
+
+        assert!(input.try_hook_scroll(ScrollDelta::wheel_ticks(2.0, 2.0)));
         let queued = queued_input(&receiver);
         assert_eq!(queued.impulse, WheelDelta { x: 2.0, y: 1.0 });
         assert!(matches!(queued.output, ScrollOutputMode::Smooth { .. }));
+    }
+
+    #[test]
+    fn isolated_small_tick_is_boosted_only_when_smoothing() {
+        let (input, receiver, _controls) = standalone_input(1, preferences(true, 7));
+        // The very first tick on a fresh handle is isolated by definition
+        // (no prior tick to compare against).
+        assert!(input.try_hook_scroll(ScrollDelta::wheel_ticks(0.0, 2.0)));
+        let queued = queued_input(&receiver);
+        // Base scale (sensitivity 7 -> 0.5) times ISOLATED_TICK_BOOST (8.0).
+        assert_eq!(queued.impulse, WheelDelta { x: 0.0, y: 8.0 });
+    }
+
+    #[test]
+    fn a_quickly_following_tick_is_not_treated_as_isolated() {
+        let (input, receiver, _controls) = standalone_input(2, preferences(true, 7));
+        assert!(input.try_hook_scroll(ScrollDelta::wheel_ticks(0.0, 2.0)));
+        let _ = queued_input(&receiver);
+
+        // Well within ISOLATED_TICK_GAP of the first tick.
+        assert!(input.try_hook_scroll(ScrollDelta::wheel_ticks(0.0, 2.0)));
+        let queued = queued_input(&receiver);
+        assert_eq!(
+            queued.impulse,
+            WheelDelta { x: 0.0, y: 1.0 },
+            "a tick that is part of an ongoing gesture must not receive the isolated-tick boost"
+        );
+    }
+
+    #[test]
+    fn isolated_tick_boost_does_not_apply_without_smoothing() {
+        let (input, receiver, _controls) = standalone_input(1, preferences(false, 7));
+        assert!(input.try_hook_scroll(ScrollDelta::wheel_ticks(0.0, 2.0)));
+        let queued = queued_input(&receiver);
+        assert_eq!(
+            queued.impulse,
+            WheelDelta { x: 0.0, y: 1.0 },
+            "the isolated-tick boost only targets the smooth-scroll path"
+        );
+        assert!(matches!(queued.output, ScrollOutputMode::Direct));
+    }
+
+    #[test]
+    fn isolated_tick_boost_does_not_apply_above_the_magnitude_threshold() {
+        let (input, receiver, _controls) = standalone_input(1, preferences(true, 7));
+        assert!(input.try_hook_scroll(ScrollDelta::wheel_ticks(0.0, 21.49)));
+        let queued = queued_input(&receiver);
+        assert_eq!(
+            queued.impulse,
+            WheelDelta { x: 0.0, y: 10.745 },
+            "a fast/large isolated tick must not also receive the isolated-tick boost"
+        );
+    }
+
+    /// Regression guard using real hardware calibration (MX Master 3S,
+    /// `resolution_scale=15`, `sensitivity=8`): an accelerating tick's raw
+    /// magnitude (observed in real traces, well above
+    /// `RESOLUTION_SCALE_MAGNITUDE_THRESHOLD`) must fall back to neutral
+    /// `resolution_scale` and must not additionally receive
+    /// `ISOLATED_TICK_BOOST`, even though it is the first (isolated) tick on
+    /// a fresh handle - confirming the boost's scope stays narrow with real
+    /// numbers, not just the smaller fixture ones used above.
+    #[test]
+    fn a_fast_isolated_tick_at_real_calibration_is_not_boosted() {
+        const REAL_FAST_RAW: f64 = 5.67;
+        let preferences_cell = preferences(true, 8);
+        preferences_cell.publish_resolution_scale(15);
+        let (input, receiver, _controls) = standalone_input(1, Arc::clone(&preferences_cell));
+
+        assert!(input.try_hook_scroll(ScrollDelta::wheel_ticks(0.0, REAL_FAST_RAW)));
+        let queued = queued_input(&receiver);
+
+        let expected = REAL_FAST_RAW * sensitivity(8).scroll_multiplier();
+        assert!(
+            (queued.impulse.y - expected).abs() < 1.0e-9,
+            "a fast isolated tick above the magnitude threshold must not receive \
+             resolution_scale or ISOLATED_TICK_BOOST: got {}, expected {expected}",
+            queued.impulse.y
+        );
     }
 
     #[test]

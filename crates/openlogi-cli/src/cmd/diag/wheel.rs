@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
-use openlogi_hid::{ScrollReportingTarget, ScrollResolution, ScrollWheelMode};
+use openlogi_hid::{ScrollReportingTarget, ScrollResolution, ScrollWheelMode, WheelCapabilities};
 
 use crate::cmd::diag::select_device;
 
@@ -44,6 +44,11 @@ pub async fn run(args: WheelArgs) -> Result<()> {
         .await
         .context("read HiResWheel mode")?;
     print_mode("current", before);
+
+    let capabilities = openlogi_hid::get_wheel_capabilities(&route)
+        .await
+        .context("read HiResWheel capabilities")?;
+    print_capabilities(capabilities);
 
     let Some(requested) = args.resolution.map(ScrollResolution::from) else {
         return Ok(());
@@ -91,6 +96,17 @@ fn print_mode(label: &str, mode: ScrollWheelMode) {
             ScrollReportingTarget::Native => "native",
             ScrollReportingTarget::Diverted => "diverted",
         }
+    );
+}
+
+fn print_capabilities(capabilities: WheelCapabilities) {
+    println!(
+        "  capabilities: multiplier={} ratchets_per_rotation={} wheel_diameter={}mm has_invert={} has_switch={}",
+        capabilities.multiplier,
+        capabilities.ratchets_per_rotation,
+        capabilities.wheel_diameter,
+        capabilities.has_invert,
+        capabilities.has_switch,
     );
 }
 
