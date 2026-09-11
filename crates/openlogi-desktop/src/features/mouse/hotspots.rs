@@ -71,8 +71,20 @@ impl Hotspot {
 /// Fallback hotspot layout for the no-asset path (synthetic silhouette).
 /// Primary L/R click are intentionally absent — Logi doesn't expose them
 /// as remappable and we follow the same rule everywhere.
+///
+/// `dpi_toggle` gates the one control this fallback can actually verify
+/// against a measured capability: HID++ `AdjustableDpi` (`0x2201`/`0x2202`,
+/// [`openlogi_core::device::Capabilities::pointer`]). A device that never
+/// reports it — the M500, for one — has no DPI-cycle button, so offering the
+/// hotspot overclaims a control the mouse doesn't have (issue #1230).
+///
+/// Back/Forward and the dedicated gesture button stay unconditional: whether
+/// a *specific* unknown-model mouse physically has them isn't derivable from
+/// any capability this codebase reads today (the reprogrammable-controls
+/// table only says *some* control exists, not which) — the same known
+/// limitation already documented for the raw-HID fallback.
 #[must_use]
-pub fn default_hotspots(thumbwheel: bool) -> Vec<Hotspot> {
+pub fn default_hotspots(thumbwheel: bool, dpi_toggle: bool) -> Vec<Hotspot> {
     let mut hotspots = vec![
         Hotspot {
             id: ButtonId::MiddleClick.into(),
@@ -96,13 +108,6 @@ pub fn default_hotspots(thumbwheel: bool) -> Vec<Hotspot> {
             h: 60.,
         },
         Hotspot {
-            id: ButtonId::DpiToggle.into(),
-            x: 175.,
-            y: 230.,
-            w: 70.,
-            h: 40.,
-        },
-        Hotspot {
             id: ButtonId::GestureButton.into(),
             x: 8.,
             y: 380.,
@@ -110,6 +115,15 @@ pub fn default_hotspots(thumbwheel: bool) -> Vec<Hotspot> {
             h: 80.,
         },
     ];
+    if dpi_toggle {
+        hotspots.push(Hotspot {
+            id: ButtonId::DpiToggle.into(),
+            x: 175.,
+            y: 230.,
+            w: 70.,
+            h: 40.,
+        });
+    }
     if thumbwheel {
         hotspots.push(Hotspot {
             id: MouseControlId::ThumbwheelRotation,
@@ -141,12 +155,12 @@ mod tests {
     #[test]
     fn fallback_thumbwheel_is_capability_gated() {
         assert!(
-            !default_hotspots(false)
+            !default_hotspots(false, true)
                 .iter()
                 .any(|hotspot| { hotspot.id == MouseControlId::ThumbwheelRotation })
         );
         assert_eq!(
-            default_hotspots(true)
+            default_hotspots(true, true)
                 .iter()
                 .filter(|hotspot| hotspot.id == MouseControlId::ThumbwheelRotation)
                 .count(),
@@ -155,8 +169,25 @@ mod tests {
     }
 
     #[test]
+    fn fallback_dpi_toggle_is_capability_gated() {
+        assert!(
+            !default_hotspots(false, false)
+                .iter()
+                .any(|hotspot| hotspot.id == MouseControlId::Button(ButtonId::DpiToggle)),
+            "a mouse with no AdjustableDpi feature (e.g. the M500) must not get a DPI hotspot"
+        );
+        assert_eq!(
+            default_hotspots(false, true)
+                .iter()
+                .filter(|hotspot| hotspot.id == MouseControlId::Button(ButtonId::DpiToggle))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn default_hotspots_expose_the_gesture_button() {
-        let hotspots = default_hotspots(false);
+        let hotspots = default_hotspots(false, true);
         assert!(
             hotspots
                 .iter()
@@ -167,7 +198,7 @@ mod tests {
 
     #[test]
     fn default_hotspots_omit_primary_clicks() {
-        let hotspots = default_hotspots(false);
+        let hotspots = default_hotspots(false, true);
         assert!(
             !hotspots.iter().any(|h| {
                 matches!(
