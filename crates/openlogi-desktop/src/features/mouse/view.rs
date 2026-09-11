@@ -73,7 +73,7 @@ impl<'a> MouseWorkspaceData<'a> {
         AppState::try_read(cx).map(|state| Self {
             device_key: state
                 .current_record()
-                .map(|record| record.config_key.as_str()),
+                .map(|record| record.model_key.as_str()),
             asset: state
                 .current_record()
                 .and_then(|record| record.asset.as_ref()),
@@ -387,7 +387,9 @@ fn model_layout(
     config_key: Option<&str>,
 ) -> ModelLayout {
     let target_h = (viewport_h - MODEL_VERTICAL_RESERVE).clamp(MODEL_MIN_H, MOUSE_MODEL_SIZE.1);
-    let has_labels = asset.is_none_or(asset_has_button_labels) && viewport_w >= 960.;
+    let spy_model =
+        config_key.is_some_and(|key| ButtonId::spy_buttons_for_config_key(key).is_some());
+    let has_labels = (asset.is_none_or(asset_has_button_labels) && viewport_w >= 960.) || spy_model;
     let content_w =
         (viewport_w - MODEL_HORIZONTAL_RESERVE).clamp(MODEL_MIN_CONTENT_W, MODEL_CONTENT_MAX_W);
     let label_distribution = if has_labels && content_w >= TWO_SIDED_LABEL_MIN_W {
@@ -1051,6 +1053,35 @@ mod tests {
                 .filter(|hotspot| hotspot.id == MouseControlId::ThumbwheelRotation)
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn g502_model_shows_spy_hotspots_instead_of_mx_extras() {
+        let (_, _, hotspots, _) = scaled_model(
+            None,
+            560.,
+            420.,
+            false,
+            LabelDistribution::LeftOnly,
+            Some("04099"),
+        );
+        for button in ButtonId::SPY_BUTTONS {
+            assert!(
+                hotspots
+                    .iter()
+                    .any(|hotspot| hotspot.id == MouseControlId::Button(button)),
+                "{button:?} must be a visible G502 hotspot"
+            );
+        }
+        assert!(
+            !hotspots.iter().any(|hotspot| {
+                matches!(
+                    hotspot.id,
+                    MouseControlId::Button(ButtonId::GestureButton | ButtonId::DpiToggle)
+                )
+            }),
+            "the G502 must not keep MX gesture / DPI-toggle targets"
         );
     }
 }

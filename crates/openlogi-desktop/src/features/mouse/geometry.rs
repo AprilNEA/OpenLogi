@@ -203,7 +203,8 @@ pub fn labels_from_hotspots(
 }
 
 /// Label positions for the synthetic fallback silhouette.
-pub fn default_labels(thumbwheel: bool, distribution: LabelDistribution) -> Vec<Label> {
+#[cfg(test)]
+fn default_labels(thumbwheel: bool, distribution: LabelDistribution) -> Vec<Label> {
     labels_from_hotspots(
         &super::hotspots::default_hotspots(thumbwheel),
         MOUSE_MODEL_SIZE.1,

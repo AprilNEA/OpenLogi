@@ -15,7 +15,7 @@ use gpui_component::{
     switch::Switch,
     v_flex,
 };
-use openlogi_core::binding::{Action, ButtonId};
+use openlogi_core::binding::{Action, SpyModel, default_binding};
 use openlogi_core::config::ScrollResolution;
 use openlogi_core::device::DeviceKind;
 use openlogi_core::hid::DeviceRoute;
@@ -269,14 +269,19 @@ fn buttons_tab(
 fn onboard_profiles_paused_note(cx: &Context<AppView>) -> Option<gpui::Div> {
     let state = AppState::try_read(cx)?;
     let record = state.current_record()?;
-    let spy = ButtonId::spy_buttons_for_config_key(record.config_key.as_str())?;
+    let model = SpyModel::for_hidpp_key(record.model_key.as_str())?;
     let bindings = state.button_bindings();
-    let customized = spy.iter().any(|button| {
+    let extras = model.extra_buttons.iter().any(|button| {
         bindings
             .get(button)
             .is_some_and(|action| *action != Action::None)
     });
-    customized.then(|| {
+    let side = model.spy_owned_os_buttons.iter().any(|button| {
+        bindings
+            .get(button)
+            .is_some_and(|action| *action != default_binding(*button))
+    });
+    (extras || side).then(|| {
         let pal = theme::palette(cx);
         h_flex()
             .flex_shrink_0()
