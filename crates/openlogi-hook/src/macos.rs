@@ -579,8 +579,6 @@ const CALLBACK_WATCHDOG_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const LIFECYCLE_WATCHDOG_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const FREEZE_HAZARD_EXIT_CODE: i32 = 78;
 
-/// Event types the HID tap observes. Pointer *Dragged variants are required
-/// because a held button makes the OS emit those instead of `MouseMoved`.
 /// The macOS backend: a `CGEventTap` serviced by a private run-loop thread.
 pub(crate) struct Backend;
 
@@ -776,6 +774,10 @@ impl HookBackend for Backend {
     }
 }
 
+/// Filter button/key edges and scrolling, and observe held-button motion for
+/// gestures. Unheld `MouseMoved` events must bypass this synchronous HID tap:
+/// there is no gesture hold to update, and even passing them through makes
+/// cursor delivery wait for the agent's run-loop thread.
 fn hooked_event_types() -> Vec<CGEventType> {
     vec![
         CGEventType::LeftMouseDown,
@@ -785,7 +787,6 @@ fn hooked_event_types() -> Vec<CGEventType> {
         CGEventType::OtherMouseDown,
         CGEventType::OtherMouseUp,
         CGEventType::ScrollWheel,
-        CGEventType::MouseMoved,
         CGEventType::LeftMouseDragged,
         CGEventType::RightMouseDragged,
         CGEventType::OtherMouseDragged,
@@ -1194,9 +1195,52 @@ fn process_name(pid: i32) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use core_graphics::event::CGMouseButton;
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+    use core_graphics::geometry::CGPoint;
 
     use super::*;
+
+    #[test]
+    fn tap_observes_gesture_drags_without_filtering_unheld_motion() {
+        let events = hooked_event_types();
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, CGEventType::MouseMoved)),
+            "ordinary cursor motion must not wait for the filtering tap"
+        );
+
+        let source = CGEventSource::new(CGEventSourceStateID::Private)
+            .expect("CGEventSourceCreate must succeed");
+        for event_type in [
+            CGEventType::LeftMouseDragged,
+            CGEventType::RightMouseDragged,
+            CGEventType::OtherMouseDragged,
+        ] {
+            assert!(
+                events
+                    .iter()
+                    .any(|event| *event as u32 == event_type as u32)
+            );
+            let event = CGEvent::new_mouse_event(
+                source.clone(),
+                event_type,
+                CGPoint::new(0.0, 0.0),
+                CGMouseButton::Center,
+            )
+            .expect("CGEventCreateMouseEvent must succeed");
+            event.set_integer_value_field(EventField::MOUSE_EVENT_DELTA_X, 7);
+            event.set_integer_value_field(EventField::MOUSE_EVENT_DELTA_Y, -3);
+            assert!(matches!(
+                translate(event_type, &event),
+                Some(MouseEvent::Moved {
+                    delta_x: 7,
+                    delta_y: -3,
+                })
+            ));
+        }
+    }
 
     #[test]
     fn tap_callback_suppresses_normally_and_passes_through_panics() {
