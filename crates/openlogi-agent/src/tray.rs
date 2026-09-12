@@ -44,7 +44,7 @@ use objc2_core_graphics::{
     CGDirectDisplayID, CGDisplayIsAsleep, CGError, CGEventSource, CGEventSourceStateID,
     CGEventType, CGGetActiveDisplayList, CGSessionCopyCurrentDictionary,
 };
-use objc2_foundation::{NSNotification, NSString};
+use objc2_foundation::{NSNotification, NSNotificationCenter, NSString};
 use objc2_io_kit::{
     IOObjectRelease, IORegistryEntryCreateCFProperty, IOServiceGetMatchingService,
     IOServiceMatching, kIOMainPortDefault, kIOPMSystemCapabilityGraphics,
@@ -1015,9 +1015,25 @@ pub fn run_app_loop(
 /// and it is unverified whether macOS re-posts it when a DarkWake is promoted
 /// to a full wake, which is the shape this failed in.
 fn install_activity_observer(signal: DeviceIoSignal) -> Retained<ActivityTarget> {
-    let target = ActivityTarget::new(signal);
     let workspace = NSWorkspace::sharedWorkspace();
     let center = workspace.notificationCenter();
+    observe_activity(&center, &workspace, signal)
+}
+
+/// The registration itself, against an explicit center and `object` filter.
+///
+/// Production passes the workspace's own center and the workspace as the
+/// object, which is the only pairing AppKit ever posts these names on. It is a
+/// parameter so a test can run the real registration on a center of its own
+/// with a sentinel object: two tests that both registered on the process-global
+/// workspace center would otherwise receive each other's posts, which is a
+/// coin-flip failure rather than a race either test can see.
+fn observe_activity(
+    center: &NSNotificationCenter,
+    object: &AnyObject,
+    signal: DeviceIoSignal,
+) -> Retained<ActivityTarget> {
+    let target = ActivityTarget::new(signal);
     // SAFETY: AppKit exports each name as an immutable process-lifetime constant.
     let system_sleep = unsafe { NSWorkspaceWillSleepNotification };
     // SAFETY: AppKit exports each name as an immutable process-lifetime constant.
@@ -1035,31 +1051,31 @@ fn install_activity_observer(signal: DeviceIoSignal) -> Retained<ActivityTarget>
             &target,
             sel!(workspaceWillSleep:),
             Some(system_sleep),
-            Some(&workspace),
+            Some(object),
         );
         center.addObserver_selector_name_object(
             &target,
             sel!(workspaceScreensDidSleep:),
             Some(screen_sleep),
-            Some(&workspace),
+            Some(object),
         );
         center.addObserver_selector_name_object(
             &target,
             sel!(workspaceSessionDidResignActive:),
             Some(session_inactive),
-            Some(&workspace),
+            Some(object),
         );
         center.addObserver_selector_name_object(
             &target,
             sel!(workspaceScreensDidWake:),
             Some(screen_wake),
-            Some(&workspace),
+            Some(object),
         );
         center.addObserver_selector_name_object(
             &target,
             sel!(workspaceSessionDidBecomeActive:),
             Some(session_active),
-            Some(&workspace),
+            Some(object),
         );
     }
     target
@@ -1153,13 +1169,32 @@ fn build_menu(mtm: MainThreadMarker, target: &MenuTarget) -> Retained<objc2_app_
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use openlogi_hid::device_io_channel;
 
-    // Both tests post to the process-wide NSWorkspace notification center.
-    // Keep each observer's entire registration/posting/removal lifetime isolated
-    // so one test's session-inactive event cannot suspend the other test's gate.
-    static WORKSPACE_NOTIFICATIONS: Mutex<()> = Mutex::new(());
+    use super::*;
+
+    /// The real observer registration, on a notification center and posting
+    /// object belonging to this test alone.
+    ///
+    /// Both tests that drive notifications used to register on — and post to —
+    /// the process-global `NSWorkspace` center, filtered by the one shared
+    /// workspace object. Each therefore received the other's posts whenever the
+    /// two ran at once, which made them fail about half the time in no
+    /// reproducible order. Nothing here needs the real center: these names are
+    /// ordinary `NSNotificationName`s, and the registration under test is the
+    /// same function production calls.
+    fn isolated_observer(
+        signal: DeviceIoSignal,
+    ) -> (
+        Retained<NSNotificationCenter>,
+        Retained<NSObject>,
+        Retained<ActivityTarget>,
+    ) {
+        let center = NSNotificationCenter::new();
+        let sentinel = NSObject::new();
+        let target = observe_activity(&center, &sentinel, signal);
+        (center, sentinel, target)
+    }
 
     /// The user is at the machine: on console, no display reports itself
     /// asleep, and input a moment ago.
@@ -1181,12 +1216,9 @@ mod tests {
 
     #[test]
     fn overlapping_suspend_sources_all_clear_before_device_io_resumes() {
-        let _notifications = WORKSPACE_NOTIFICATIONS.lock().unwrap();
         let (signal, gate) = device_io_channel();
-        let target = install_activity_observer(signal);
+        let (center, sentinel, target) = isolated_observer(signal);
         assert_eq!(target.finish_startup(PRESENT), StartupDisplay::Awake);
-        let workspace = NSWorkspace::sharedWorkspace();
-        let center = workspace.notificationCenter();
 
         // SAFETY: AppKit exports each name as an immutable process-lifetime constant.
         let system_sleep = unsafe { NSWorkspaceWillSleepNotification };
@@ -1194,30 +1226,30 @@ mod tests {
         let screen_sleep = unsafe { NSWorkspaceScreensDidSleepNotification };
         // SAFETY: AppKit exports each name as an immutable process-lifetime constant.
         let session_inactive = unsafe { NSWorkspaceSessionDidResignActiveNotification };
-        // SAFETY: `workspace` is live, matches the registration filter, and
+        // SAFETY: `sentinel` is live, matches the registration filter, and
         // notification delivery completes synchronously.
-        unsafe { center.postNotificationName_object(system_sleep, Some(&workspace)) };
-        // SAFETY: `workspace` is live, matches the registration filter, and
+        unsafe { center.postNotificationName_object(system_sleep, Some(&sentinel)) };
+        // SAFETY: `sentinel` is live, matches the registration filter, and
         // notification delivery completes synchronously.
-        unsafe { center.postNotificationName_object(screen_sleep, Some(&workspace)) };
-        // SAFETY: `workspace` is live, matches the registration filter, and
+        unsafe { center.postNotificationName_object(screen_sleep, Some(&sentinel)) };
+        // SAFETY: `sentinel` is live, matches the registration filter, and
         // notification delivery completes synchronously.
-        unsafe { center.postNotificationName_object(session_inactive, Some(&workspace)) };
+        unsafe { center.postNotificationName_object(session_inactive, Some(&sentinel)) };
         assert!(!gate.allows_io());
 
         // `DidWake` is a maintenance/system wake and intentionally has no
         // observer, so posting it must leave the gate closed.
         // SAFETY: AppKit exports the name as an immutable process-lifetime constant.
         let darkwake = unsafe { NSWorkspaceDidWakeNotification };
-        // SAFETY: `workspace` is live and notification delivery is synchronous.
-        unsafe { center.postNotificationName_object(darkwake, Some(&workspace)) };
+        // SAFETY: `sentinel` is live and notification delivery is synchronous.
+        unsafe { center.postNotificationName_object(darkwake, Some(&sentinel)) };
         assert!(!gate.allows_io());
 
         // SAFETY: AppKit exports the name as an immutable process-lifetime constant.
         let screen_wake = unsafe { NSWorkspaceScreensDidWakeNotification };
-        // SAFETY: `workspace` is live, matches the registration filter, and
+        // SAFETY: `sentinel` is live, matches the registration filter, and
         // notification delivery completes synchronously.
-        unsafe { center.postNotificationName_object(screen_wake, Some(&workspace)) };
+        unsafe { center.postNotificationName_object(screen_wake, Some(&sentinel)) };
         assert!(
             !gate.allows_io(),
             "screen wake must not override an inactive session",
@@ -1225,9 +1257,9 @@ mod tests {
 
         // SAFETY: AppKit exports the name as an immutable process-lifetime constant.
         let session_active = unsafe { NSWorkspaceSessionDidBecomeActiveNotification };
-        // SAFETY: `workspace` is live, matches the registration filter, and
+        // SAFETY: `sentinel` is live, matches the registration filter, and
         // notification delivery completes synchronously.
-        unsafe { center.postNotificationName_object(session_active, Some(&workspace)) };
+        unsafe { center.postNotificationName_object(session_active, Some(&sentinel)) };
         assert!(gate.allows_io());
 
         // SAFETY: This is the same live target registered with `center` above.
@@ -1236,9 +1268,8 @@ mod tests {
 
     #[test]
     fn startup_stays_suspended_when_the_display_is_already_asleep() {
-        let _notifications = WORKSPACE_NOTIFICATIONS.lock().unwrap();
         let (signal, gate) = device_io_channel();
-        let target = install_activity_observer(signal);
+        let (center, sentinel, target) = isolated_observer(signal);
         assert!(!gate.allows_io(), "startup must fail closed");
 
         assert_eq!(target.finish_startup(IDLE), StartupDisplay::Unproven);
@@ -1247,17 +1278,15 @@ mod tests {
             "an unproven display must retain the startup hold",
         );
 
-        let workspace = NSWorkspace::sharedWorkspace();
-        let center = workspace.notificationCenter();
         // A screen wake is direct proof of a live display, so it discharges the
         // startup hold no level read could — #952 relaunched the agent every few
         // minutes for the whole of display sleep, and each relaunch has to stay
         // paused until the display really comes back.
         // SAFETY: AppKit exports the name as an immutable process-lifetime constant.
         let screen_wake = unsafe { NSWorkspaceScreensDidWakeNotification };
-        // SAFETY: `workspace` is live, matches the registration filter, and
+        // SAFETY: `sentinel` is live, matches the registration filter, and
         // notification delivery completes synchronously.
-        unsafe { center.postNotificationName_object(screen_wake, Some(&workspace)) };
+        unsafe { center.postNotificationName_object(screen_wake, Some(&sentinel)) };
         assert!(gate.allows_io());
 
         // SAFETY: This is the same live target registered with `center` above.
