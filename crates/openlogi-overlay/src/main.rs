@@ -29,7 +29,8 @@ use tracing_subscriber::EnvFilter;
 use openlogi_core::action_ring::DISPLAY_LIFETIME;
 
 use crate::agent::{Ipc, OverlayCommand, spawn_ipc};
-use crate::ring::{RingView, ring_window_options};
+use crate::platform::RingPlacement;
+use crate::ring::RingView;
 use crate::session::{ClickAwaySession, claim_the_role, spawn_click_away_dismissal};
 
 fn main() -> Result<()> {
@@ -72,15 +73,33 @@ fn main() -> Result<()> {
                     for handle in cx.windows() {
                         let _ = handle.update(cx, |_, window, _| window.remove_window());
                     }
-                    let options = ring_window_options(cx);
+                    let placement = match RingPlacement::capture(cx) {
+                        Ok(placement) => placement,
+                        Err(error) => {
+                            warn!(%error, "could not locate Actions Ring display");
+                            let _ = commands.send(OverlayCommand::Cancel {
+                                session_id: invocation.session_id,
+                            });
+                            return;
+                        }
+                    };
                     let commands = commands.clone();
                     let timeout_commands = commands.clone();
                     let session_id = invocation.session_id;
-                    match cx.open_window(options, |_, cx| {
+                    match cx.open_window(placement.window_options(), |_, cx| {
                         cx.new(|_| RingView::new(invocation, commands, &live_session))
                     }) {
                         Ok(handle) => {
-                            platform::configure_windows();
+                            if let Err(error) = handle
+                                .update(cx, |_, window, _| placement.show(window))
+                                .and_then(std::convert::identity)
+                            {
+                                warn!(%error, "could not position Actions Ring window");
+                                let _ = handle.update(cx, |_, window, _| window.remove_window());
+                                let _ =
+                                    timeout_commands.send(OverlayCommand::Cancel { session_id });
+                                return;
+                            }
                             cx.spawn(async move |cx| {
                                 cx.background_executor().timer(DISPLAY_LIFETIME).await;
                                 if handle

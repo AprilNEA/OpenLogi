@@ -1,5 +1,16 @@
 //! Native window policy for the standalone Actions Ring overlay.
 
+#[cfg(not(target_os = "windows"))]
+mod placement;
+// Keep Windows geometry tests runnable on the host; only native.rs needs Win32.
+#[cfg(any(target_os = "windows", test))]
+mod windows;
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) use placement::RingPlacement;
+#[cfg(target_os = "windows")]
+pub(crate) use windows::RingPlacement;
+
 /// Keep the overlay out of the Dock and app switcher.
 #[cfg(target_os = "macos")]
 pub fn configure_application() {
@@ -30,8 +41,8 @@ pub fn configure_windows() {
 #[cfg(not(target_os = "macos"))]
 pub fn configure_application() {}
 
-/// Other GPUI backends need no additional native window configuration here.
-#[cfg(not(target_os = "macos"))]
+/// Linux needs no additional native window configuration here.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn configure_windows() {}
 
 /// Owner of the native click-away event monitor; dropping it removes the
@@ -88,6 +99,7 @@ pub fn watch_clicks_outside(_on_mouse_down: impl Fn() + 'static) -> Option<Click
 
 /// One display's global geometry, in the same top-left-origin global point
 /// space that `openlogi_hook::cursor_position()` reports.
+#[cfg(not(target_os = "windows"))]
 pub struct CursorDisplay {
     /// Native display id; on macOS the `CGDirectDisplayID`, numerically equal
     /// to GPUI's `DisplayId` for the same display.
@@ -135,9 +147,9 @@ pub fn display_containing(x: f64, y: f64) -> Option<CursorDisplay> {
     })
 }
 
-/// Away from macOS the GPUI display list already carries global origins, so
-/// there is nothing to resolve natively.
-#[cfg(not(target_os = "macos"))]
+/// On Linux the GPUI display list already carries global origins, so there is
+/// nothing to resolve natively.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn display_containing(_x: f64, _y: f64) -> Option<CursorDisplay> {
     None
 }

@@ -53,6 +53,10 @@ version_group = "openlogi"
 name = "openlogi-core"
 version_group = "openlogi"
 
+[[package]]
+name = "openlogi-fixture"
+version_group = "openlogi"
+
 # The published CLI uses this contract to read the running agent's inventory,
 # so IPC is part of the crates.io dependency closure even though its other
 # consumers are application crates.

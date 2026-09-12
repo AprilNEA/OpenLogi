@@ -14,10 +14,15 @@ use std::future::Future;
 use std::thread;
 
 use openlogi_hid::{
-    DiscoveredDevice, PairingCommand, PairingError, PairingEvent, ReceiverSelector, run_pairing,
+    DiscoveredDevice, PairingCommand, PairingError, PairingEvent, ReceiverSelector,
 };
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
+
+use crate::hardware::HardwareContext;
+
+#[cfg(test)]
+mod replay_tests;
 
 /// Commands the UI sends to the pairing watcher.
 #[derive(Debug)]
@@ -72,6 +77,19 @@ pub fn spawn() -> (
     mpsc::UnboundedSender<Control>,
     mpsc::UnboundedReceiver<SessionEvent>,
 ) {
+    spawn_with_hardware(HardwareContext::production())
+}
+
+/// Spawn the watcher over one coherent hardware context. Production callers
+/// normally obtain this context from the agent's shared runtime; tests may
+/// inject a replay backend and lifecycle gate.
+#[must_use]
+pub fn spawn_with_hardware(
+    hardware: HardwareContext,
+) -> (
+    mpsc::UnboundedSender<Control>,
+    mpsc::UnboundedReceiver<SessionEvent>,
+) {
     let (ctrl_tx, ctrl_rx) = mpsc::unbounded_channel();
     let (evt_tx, evt_rx) = mpsc::unbounded_channel();
 
@@ -88,7 +106,7 @@ pub fn spawn() -> (
                     return;
                 }
             };
-            rt.block_on(run(ctrl_rx, evt_tx));
+            rt.block_on(run(ctrl_rx, evt_tx, hardware));
         });
     if let Err(e) = spawn_result {
         warn!(error = %e, "could not spawn pairing watcher thread");
@@ -100,13 +118,14 @@ pub fn spawn() -> (
 async fn run(
     ctrl_rx: mpsc::UnboundedReceiver<Control>,
     evt_tx: mpsc::UnboundedSender<SessionEvent>,
+    hardware: HardwareContext,
 ) {
     run_with(
         ctrl_rx,
         evt_tx,
-        |_session, target, commands, events| async move {
-            let backend = openlogi_hid::host::backend();
-            run_pairing(&*backend, target, commands, events).await
+        move |_session, target, commands, events| {
+            let hardware = hardware.clone();
+            async move { hardware.run_pairing(target, commands, events).await }
         },
     )
     .await;
