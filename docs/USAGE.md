@@ -9,9 +9,10 @@ openlogi assets sync          # pre-fetch device renders from the fastest availa
 openlogi diag features        # dump every HID++ feature the active device reports
 openlogi diag controls        # dump reprogrammable controls and capability flags
 openlogi diag dpi             # read → write → read-back → restore DPI (smoke test)
-openlogi diag pointer-speed   # test 0x2205 pointer scaling and attempt to restore it
-openlogi diag smartshift      # toggle SmartShift and restore (smoke test)
-openlogi diag lighting ff0000 # solid colour for a wired RGB keyboard (any RRGGBB hex)
+openlogi diag pointer-speed             # test 0x2205 pointer scaling and attempt to restore it
+openlogi diag smartshift                # toggle SmartShift and restore (smoke test)
+openlogi diag smartshift --torque 60    # set scrolling force / feedback intensity (1-100%)
+openlogi diag lighting ff0000           # solid colour for a wired RGB keyboard (any RRGGBB hex)
 ```
 
 Running `openlogi` with no subcommand defaults to `list`. Set
