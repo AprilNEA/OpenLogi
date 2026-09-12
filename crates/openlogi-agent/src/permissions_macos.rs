@@ -21,8 +21,6 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject};
 use tracing::warn;
 
-use crate::binary_watch;
-
 /// How long to wait for the user to answer the Bluetooth consent sheet.
 const BLUETOOTH_PROMPT_TIMEOUT: Duration = Duration::from_secs(180);
 const BLUETOOTH_POLL: Duration = Duration::from_millis(200);
@@ -63,7 +61,7 @@ pub async fn request_input_monitoring() -> bool {
         }
     };
     if granted {
-        binary_watch::relaunch_after_input_monitoring_grant();
+        crate::shutdown::request_input_monitoring_relaunch();
     }
     granted
 }

@@ -141,7 +141,9 @@ every grant on that machine is being ignored.
   answers, so it must not run on the async runtime. Its **return value** is the
   grant decision. `IOHIDCheckAccess` in the same process can stay stale after
   Allow, so a relaunch must follow that bool — not a follow-up check. That is
-  why the agent calls `binary_watch::relaunch_after_input_monitoring_grant()`.
+  why the agent schedules a successor via
+  `binary_watch::schedule_after_input_monitoring_grant()` and then exits
+  through the lifecycle.
 - `IOHIDDeviceOpen` — **denial is silent**. There is no TCC-specific error, so
   the transport pairs every open failure with
   `openlogi_hid::permissions::has_access()` and says which case it is (§1).
