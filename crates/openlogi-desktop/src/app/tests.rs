@@ -195,6 +195,25 @@ fn tabs_follow_capabilities_not_kind() {
     assert!(!tabs.contains(&DetailTab::Lighting));
 }
 
+#[test]
+fn wheel_controls_show_pointer_tab_without_adjustable_dpi() {
+    for caps in [
+        Capabilities {
+            scroll_inversion: true,
+            ..Capabilities::default()
+        },
+        Capabilities {
+            hires_wheel: true,
+            ..Capabilities::default()
+        },
+    ] {
+        assert!(
+            DetailTab::tabs_for(&record(DeviceKind::Mouse, Some(caps)))
+                .contains(&DetailTab::Pointer)
+        );
+    }
+}
+
 /// A keyboard that exposes ReprogControls (buttons=true) but has no resolved
 /// asset should not get the mouse-model Buttons panel — the generic mouse
 /// hotspot layout (Middle Click, DPI Toggle, …) is wrong for a keyboard.
