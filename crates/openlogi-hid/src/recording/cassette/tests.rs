@@ -348,6 +348,27 @@ async fn rejects_malformed_unmatched_and_unproven_fire_and_forget_evidence() {
 }
 
 #[tokio::test]
+async fn ignores_foreign_protocol_reports_from_the_same_node() {
+    // Wire-captured Logitech DJ "device paired" notification from a Unifying
+    // receiver on Linux, which shares its node with HID++.
+    let evidence = record_unassociated(vec![vec![
+        0x20, 0x01, 0x41, 0x01, 0x6f, 0x40, 0x1e, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00,
+    ]])
+    .await;
+
+    let report = evidence.build_hid_cassette(metadata());
+
+    assert!(
+        !report
+            .rejections
+            .iter()
+            .any(|rejection| rejection.reason == CassetteRejectionReason::MalformedIncomingReport),
+        "a foreign DJ report must not reject the cassette: {:?}",
+        report.rejections
+    );
+}
+
+#[tokio::test]
 async fn rejects_every_unsuccessful_terminal_outcome() {
     let transaction = root_mapping(CAPTURE_SW_ID, 0x0003, 5);
     let mut channel = record_successes(vec![
