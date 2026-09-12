@@ -102,7 +102,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 30);
+    assert_eq!(PROTOCOL_VERSION, 31);
 }
 
 #[test]
@@ -207,6 +207,8 @@ fn request_variant_order() {
         },
         "1902",
     );
+    assert_wire(&AgentRequest::RequestInputMonitoringPrompt {}, "1c");
+    assert_wire(&AgentRequest::RequestBluetoothPrompt {}, "1d");
 }
 
 #[test]
@@ -314,8 +316,9 @@ fn agent_status() {
         agent_version: "0.6.6".into(),
         input_monitoring_granted: true,
         hid_open_failures: false,
+        bluetooth_granted: false,
     };
-    assert_wire(&status, "010001010705302e362e360100");
+    assert_wire(&status, "010001010705302e362e36010000");
 
     assert_wire(&InventoryHealth::Scanning, "00");
     assert_wire(&InventoryHealth::Ready, "01");
@@ -334,6 +337,7 @@ fn agent_snapshot() {
             agent_version: "0.6.6".into(),
             input_monitoring_granted: true,
             hid_open_failures: false,
+            bluetooth_granted: false,
         },
         inventory: Vec::new(),
         standalone: Vec::new(),
@@ -343,14 +347,14 @@ fn agent_snapshot() {
         // pairing fields.
         foreground: ForegroundApps::default(),
     };
-    assert_wire(&snapshot, "010001010705302e362e360100000000000000");
+    assert_wire(&snapshot, "010001010705302e362e36010000000000000000");
 
     // The observation is the snapshot with its generation in front.
     let observed = Observation {
         generation: 3,
         snapshot,
     };
-    assert_wire(&observed, "03010001010705302e362e360100000000000000");
+    assert_wire(&observed, "03010001010705302e362e36010000000000000000");
 }
 
 /// The foreground application rides the snapshot, so both halves are pinned:

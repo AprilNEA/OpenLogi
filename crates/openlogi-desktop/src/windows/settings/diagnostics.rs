@@ -9,9 +9,11 @@ use openlogi_hook::Hook;
 #[cfg(debug_assertions)]
 use super::AppState;
 use super::{
-    App, Axis, IconName, IntoElement, Palette, ParentElement, SettingField, SettingGroup,
-    SettingItem, SettingPage, Styled, div, v_flex,
+    App, Axis, IconName, ParentElement, SettingField, SettingGroup, SettingItem, SettingPage,
+    Styled, div, v_flex,
 };
+#[cfg(debug_assertions)]
+use super::{IntoElement, Palette};
 
 /// The Diagnostics page: the curated input-conflict check, plus (debug) the raw
 /// tap list and the live event monitor polled by

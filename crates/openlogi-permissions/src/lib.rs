@@ -2,19 +2,23 @@
 //! system UI for fixing it.
 //!
 //! **Reading a status never prompts.** Prompting belongs to whichever process
-//! owns the resource: the agent raises the Accessibility prompt because it owns
-//! the event tap, and opens HID itself. A prompt from the wrong process records
-//! the grant against the wrong code-signing identity (issue #214), so this
-//! crate exposes only the non-prompting half plus [`open_pane`] — which is also
-//! why no general-purpose macOS permission crate fits: they assume one app
-//! asking for itself.
+//! owns the resource: the agent raises Accessibility, Input Monitoring, and
+//! Bluetooth prompts because it owns the event tap, HID opens, and the
+//! CoreBluetooth identity. A prompt from the wrong process records the grant
+//! against the wrong code-signing identity (issue #214), so this crate exposes
+//! only the non-prompting half plus [`open_pane`] — which is also why no
+//! general-purpose macOS permission crate fits: they assume one app asking for
+//! itself.
 //!
 //! ## macOS
 //!
-//! Two permissions matter: **Accessibility** (the hook's event tap) and **Input
-//! Monitoring** (opening HID devices via `IOHIDManager`). **Bluetooth** is
-//! surfaced for completeness — OpenLogi reaches BLE mice through `IOHIDManager`,
-//! so it usually reads [`PermissionStatus::Unknown`].
+//! Three agent permissions matter: **Accessibility** (the hook's event tap),
+//! **Input Monitoring** (opening HID devices via `IOHIDManager`), and
+//! **Bluetooth** (CoreBluetooth authorization so macOS can name OpenLogi
+//! Agent). The GUI must read those three statuses from the agent over IPC,
+//! never by querying this process. The macOS-only `bluetooth` helper still
+//! reports *this* process's CoreBluetooth state for diagnostics; it is not
+//! the agent's grant.
 //!
 //! Accessibility status is not read here: the agent owns the tap, so
 //! `openlogi_hook::has_accessibility` is the source of truth.

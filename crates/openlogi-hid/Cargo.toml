@@ -43,6 +43,7 @@ windows-sys = { workspace = true, features = [
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { workspace = true }
 objc2-io-kit = { workspace = true, features = ["std", "hidsystem"] }
 
 [lints]

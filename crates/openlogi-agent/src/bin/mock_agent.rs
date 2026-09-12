@@ -649,6 +649,7 @@ fn agent_status() -> AgentStatus {
         agent_version: concat!(env!("CARGO_PKG_VERSION"), "-mock").to_string(),
         input_monitoring_granted: true,
         hid_open_failures: false,
+        bluetooth_granted: true,
     }
 }
 
@@ -843,6 +844,16 @@ impl Agent for MockAgent {
 
     async fn request_accessibility_prompt(self, _: Context) {
         info!("request_accessibility_prompt (no-op in the mock)");
+    }
+
+    async fn request_input_monitoring_prompt(self, _: Context) -> bool {
+        info!("request_input_monitoring_prompt (no-op in the mock)");
+        true
+    }
+
+    async fn request_bluetooth_prompt(self, _: Context) -> bool {
+        info!("request_bluetooth_prompt (no-op in the mock)");
+        true
     }
 
     async fn start_pairing(

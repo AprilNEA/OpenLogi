@@ -2,7 +2,8 @@
 //!
 //! Every query is the *non-prompting* variant of its API pair
 //! (`IOHIDCheckAccess`, not `IOHIDRequestAccess`); whoever owns the resource
-//! raises the prompt.
+//! raises the prompt. Agent-owned grants (Accessibility, Input Monitoring,
+//! Bluetooth) are requested by `org.openlogi.agent`, never from the GUI.
 #![expect(
     unsafe_code,
     reason = "CoreBluetooth force-link + `+[CBManager authorization]` class-method send"

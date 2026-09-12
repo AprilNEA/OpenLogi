@@ -62,6 +62,11 @@ const RECONNECT_DELAY: Duration = Duration::from_millis(250);
 /// start plus a worst-case first enumeration is ~6 s).
 const UNREACHABLE_AFTER: Duration = Duration::from_secs(15);
 
+/// How long Grant may wait for the Accessibility watcher to observe Allow
+/// before treating the sheet as refused and opening System Settings.
+#[cfg(target_os = "macos")]
+const ACCESSIBILITY_FALLBACK_WAIT: Duration = Duration::from_secs(60);
+
 /// Request deadline for a held `observe`, above the agent's own
 /// [`OBSERVE_HOLD`]: tarpc cancels a handler whose deadline passes, so a
 /// shorter one would kill the hold instead of waiting it out.
@@ -117,7 +122,21 @@ pub enum Command {
     /// Ask the agent to fire the macOS Accessibility prompt. The agent owns the
     /// CGEventTap, so the system dialog must name (and authorize) the *agent*
     /// binary, not the GUI — prompting locally would grant the wrong process.
-    RequestAccessibilityPrompt,
+    RequestAccessibilityPrompt {
+        /// Open the System Settings pane if the agent reports the grant was
+        /// refused (or the agent is unreachable).
+        fallback_to_pane: bool,
+    },
+    /// Ask the agent to fire the macOS Input Monitoring prompt.
+    #[cfg(target_os = "macos")]
+    RequestInputMonitoringPrompt {
+        fallback_to_pane: bool,
+    },
+    /// Ask the agent to fire the macOS Bluetooth prompt.
+    #[cfg(target_os = "macos")]
+    RequestBluetoothPrompt {
+        fallback_to_pane: bool,
+    },
     /// Pairing (agent-owned, since it opens the receiver): begin a session,
     /// pair a discovered device by address, or cancel. Events stream back via
     /// the separate [`IpcClient::pairing`] long-poll, not these commands.
@@ -584,10 +603,37 @@ async fn handle(
                 }
             }
         }
-        Command::RequestAccessibilityPrompt => client
-            .request_accessibility_prompt(ctx)
-            .await
-            .map_err(|_| ())?,
+        Command::RequestAccessibilityPrompt { fallback_to_pane } => {
+            client
+                .request_accessibility_prompt(ctx)
+                .await
+                .map_err(|_| ())?;
+            if fallback_to_pane {
+                // The RPC returns as soon as the sheet is shown. Do not wait
+                // here: this loop is the only command+observe pump, and a
+                // declined or unanswered sheet would stall DPI, pairing, and
+                // snapshots for the full fallback window.
+                #[cfg(target_os = "macos")]
+                spawn_accessibility_fallback_wait(client.clone());
+            }
+        }
+        #[cfg(target_os = "macos")]
+        Command::RequestInputMonitoringPrompt { fallback_to_pane } => {
+            let granted = client
+                .request_input_monitoring_prompt(ctx)
+                .await
+                .map_err(|_| ())?;
+            if !granted && fallback_to_pane {
+                openlogi_permissions::open_pane(openlogi_permissions::Permission::InputMonitoring);
+            }
+        }
+        #[cfg(target_os = "macos")]
+        Command::RequestBluetoothPrompt { fallback_to_pane } => {
+            let granted = client.request_bluetooth_prompt(ctx).await.map_err(|_| ())?;
+            if !granted && fallback_to_pane {
+                openlogi_permissions::open_pane(openlogi_permissions::Permission::Bluetooth);
+            }
+        }
         Command::StartPairing(selector) => {
             pairing_command_result(update_tx, client.start_pairing(ctx, selector).await)?;
         }
@@ -666,6 +712,69 @@ fn rpc_result<T>(r: Result<T, tarpc::client::RpcError>) -> Result<T, ()> {
     r.map_err(|_| ())
 }
 
+/// Poll `poll` until it reports granted or `timeout` elapses.
+///
+/// `Some(true)` is a grant, `Some(false)` is still pending, `None` is a
+/// transient drop (agent relaunch). A drop is not a refusal: keep waiting
+/// so an Input Monitoring relaunch cannot open System Settings over a
+/// still-pending Accessibility sheet.
+#[cfg(test)]
+async fn wait_until_granted<F, Fut>(mut poll: F, timeout: Duration, interval: Duration) -> bool
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Option<bool>>,
+{
+    let deadline = Instant::now() + timeout;
+    loop {
+        if poll().await == Some(true) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(interval).await;
+    }
+}
+
+/// Wait for the Accessibility watcher off the command path, then open
+/// System Settings only if the grant never arrives. Spawned so Grant cannot
+/// stall the serialized IPC loop while the sheet is pending.
+#[cfg(target_os = "macos")]
+fn spawn_accessibility_fallback_wait(client: AgentClient) {
+    tokio::spawn(async move {
+        if !wait_for_accessibility_grant(client).await {
+            openlogi_permissions::open_pane(openlogi_permissions::Permission::Accessibility);
+        }
+    });
+}
+
+/// Wait until the agent's Accessibility watcher reports a grant, or until
+/// [`ACCESSIBILITY_FALLBACK_WAIT`]. An Input Monitoring Allow relaunches the
+/// agent and drops this client; reconnect and keep waiting instead of
+/// treating that drop as a declined sheet.
+#[cfg(target_os = "macos")]
+async fn wait_for_accessibility_grant(mut client: AgentClient) -> bool {
+    let deadline = Instant::now() + ACCESSIBILITY_FALLBACK_WAIT;
+    let interval = Duration::from_millis(400);
+    loop {
+        match client.status(context::current()).await {
+            Ok(status) if status.accessibility_granted => return true,
+            Ok(_) => {}
+            Err(_) => {
+                if let Ok(connection) = openlogi_ipc::client::connect().await {
+                    if connection.version == PROTOCOL_VERSION {
+                        client = connection.client;
+                    }
+                }
+            }
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(interval).await;
+    }
+}
+
 /// Reply to a read command that the agent is unreachable; writes are
 /// fire-and-forget so they have nothing to reply to.
 #[expect(
@@ -714,6 +823,24 @@ fn reply_disconnected(update_tx: &mpsc::UnboundedSender<GuiUpdate>, cmd: Command
                     .to_string(),
             })));
         }
+        Command::RequestAccessibilityPrompt { fallback_to_pane } => {
+            if fallback_to_pane {
+                #[cfg(target_os = "macos")]
+                openlogi_permissions::open_pane(openlogi_permissions::Permission::Accessibility);
+            }
+        }
+        #[cfg(target_os = "macos")]
+        Command::RequestInputMonitoringPrompt {
+            fallback_to_pane: true,
+        } => {
+            openlogi_permissions::open_pane(openlogi_permissions::Permission::InputMonitoring);
+        }
+        #[cfg(target_os = "macos")]
+        Command::RequestBluetoothPrompt {
+            fallback_to_pane: true,
+        } => {
+            openlogi_permissions::open_pane(openlogi_permissions::Permission::Bluetooth);
+        }
         _ => {}
     }
 }
@@ -735,6 +862,7 @@ mod tests {
                     agent_version: "test".to_string(),
                     input_monitoring_granted: true,
                     hid_open_failures: false,
+                    bluetooth_granted: false,
                 },
                 inventory: Vec::new(),
                 standalone: Vec::new(),
@@ -820,5 +948,66 @@ mod tests {
             panic!("a reload that never reached the agent must be reported as failed");
         };
         assert!(!error.message.is_empty(), "the notice needs a reason");
+    }
+
+    #[test]
+    fn accessibility_wait_resolves_once_granted() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("test runtime");
+        let granted = rt.block_on(async {
+            let mut n = 0;
+            wait_until_granted(
+                || {
+                    n += 1;
+                    let hit = n >= 3;
+                    async move { Some(hit) }
+                },
+                Duration::from_secs(2),
+                Duration::from_millis(5),
+            )
+            .await
+        });
+        assert!(granted);
+    }
+
+    #[test]
+    fn accessibility_wait_times_out_when_never_granted() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("test runtime");
+        let granted = rt.block_on(async {
+            wait_until_granted(
+                || async { Some(false) },
+                Duration::from_millis(40),
+                Duration::from_millis(5),
+            )
+            .await
+        });
+        assert!(!granted);
+    }
+
+    #[test]
+    fn accessibility_wait_survives_a_dropped_status_rpc() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("test runtime");
+        let granted = rt.block_on(async {
+            let mut n = 0;
+            wait_until_granted(
+                || {
+                    n += 1;
+                    let granted = n >= 3;
+                    async move { if granted { Some(true) } else { None } }
+                },
+                Duration::from_secs(2),
+                Duration::from_millis(5),
+            )
+            .await
+        });
+        assert!(granted);
     }
 }

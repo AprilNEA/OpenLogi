@@ -21,6 +21,8 @@ mod lifecycle;
 mod logging;
 mod overlay;
 mod pairing;
+#[cfg(target_os = "macos")]
+mod permissions_macos;
 #[cfg(target_os = "linux")]
 mod resume_linux;
 #[cfg(target_os = "windows")]
@@ -81,6 +83,8 @@ fn main() {
     // restart anything. The overlay spawns only after the lifecycle decides the
     // agent is wanted; a dormant agent must not bring a helper up.
     binary_watch::spawn(shutdown_tx.clone());
+    #[cfg(target_os = "macos")]
+    shutdown::publish_sender(shutdown_tx.clone());
 
     let config = Config::load_or_default().unwrap_or_else(|e| {
         warn!(error = %e, "could not load config.toml; using defaults");

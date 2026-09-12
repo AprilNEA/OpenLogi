@@ -437,15 +437,13 @@ impl AppView {
 }
 
 fn request_accessibility(cx: &mut App) {
-    use openlogi_permissions::{self as permissions, Permission};
     // Ask the *agent* to fire the prompt (it owns the hook, so the system dialog
     // must name and authorize openlogi-agent — prompting in the GUI would grant
-    // the wrong binary), then open the System Settings pane so the user can flip
-    // the switch. Shared by the gate button, the footer, and the Settings window.
+    // the wrong binary). System Settings opens only if the grant is still
+    // missing after that RPC (already denied, or the user declined).
     if let Some(state) = AppState::try_global(cx) {
-        state.read(cx).request_accessibility_prompt();
+        state.read(cx).request_accessibility_prompt(true);
     }
-    permissions::open_pane(Permission::Accessibility);
 }
 
 /// Client-side main-window titlebar: window controls (minimize / maximize /
