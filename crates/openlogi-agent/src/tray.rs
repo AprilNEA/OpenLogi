@@ -133,6 +133,12 @@ pub fn relocalize() {
 struct Suspension {
     held: u8,
     since: ContinuousInstant,
+    /// Bumped by every suspend edge, so a level reading taken before one can
+    /// be recognised as no longer describing the suspension it would be
+    /// judged against. A counter rather than `since` itself: two reads of
+    /// `CLOCK_MONOTONIC` can return the same value, so equal instants are not
+    /// proof that no edge intervened.
+    generation: u64,
 }
 
 /// A point on a monotonic clock that keeps running while the machine is asleep.
@@ -267,25 +273,31 @@ const RECONCILE_INTERVAL: Duration = Duration::from_secs(2);
 /// landed in it would otherwise reopen the gate on the way *into* a sleep and
 /// put a full HID enumeration on the wire as the machine goes down.
 ///
-/// macOS gives every `WillSleep` observer up to 30 s to return before it
-/// proceeds, so that gap is as wide as the slowest observer on the machine: it
-/// was 1 s here (`pmset -g log` timed the freeze one second after the
-/// notification), and there is no bound worth trusting. Five seconds covers an
-/// unremarkable spread of hosts and is still far shorter than the sleeps this
-/// recovers from. Deliberately its own constant rather than a multiple of
-/// [`RECONCILE_INTERVAL`] — the tick is a responsiveness knob, and shortening
-/// it to make a startup hold recover faster must not quietly shrink the sleep
-/// margin. In prose: the reconciler simply needs a few ticks before this can
-/// pass.
+/// IOPMLib puts a documented bound on that gap: a client registered for
+/// `kIOMessageSystemWillSleep` has **30 s** to acknowledge before power
+/// management stops waiting and proceeds with the sleep. So the machine can
+/// still be awake half a minute after the notification the gate closed on, and
+/// any shorter margin is a guess about how fast the slowest client on this
+/// particular Mac answers. It was 1 s here — `pmset -g log` timed the freeze
+/// one second after the notification — which is exactly the sort of number
+/// that does not generalise.
+///
+/// Deliberately its own constant rather than a multiple of
+/// [`RECONCILE_INTERVAL`]: the tick is a responsiveness knob, and shortening it
+/// to make a startup hold recover faster must not quietly shrink this. In
+/// prose, the reconciler needs many ticks before this can pass.
 ///
 /// What it costs is not "one more tick". The offset between a suspension and
 /// the last input is fixed once that input is in the past, so a recovery waits
-/// for the *next* input more than this far past the suspension. Every case this
-/// recovers from is one where the user is at the machine, which is where that
-/// input comes from immediately; the one it genuinely delays is a user who
-/// touched something inside the window and then walked away — and a machine
-/// nobody is touching has no device I/O to do.
-const SYSTEM_WAKE_INPUT_GRACE: Duration = Duration::from_secs(5);
+/// for the next input landing more than this far past the suspension — around
+/// half a minute after a stranding rather than a few seconds. That is the whole
+/// price, and it is paid in the one state where the user is at the machine
+/// producing exactly that input: the 2026-09-11 failure this recovers from ran
+/// four minutes and ended only because the agent was restarted by hand. The
+/// case it genuinely delays is someone who touched the machine inside the
+/// window and then walked away — and a machine nobody is touching has no device
+/// I/O to do.
+const SYSTEM_WAKE_INPUT_GRACE: Duration = Duration::from_secs(30);
 
 /// Whether `held` is a suspension a level read may discharge — which is all of
 /// them, so the only state the reconciler parks in is an open gate.
@@ -441,6 +453,25 @@ fn display_is_proven_awake(held: u8, held_for: Duration, levels: ActivityLevels)
     levels.idle < held_for
 }
 
+/// Where a level reading started: the suspend edge in force, and when.
+///
+/// Both halves are captured *before* [`read_levels`] runs, and travel together
+/// into [`ActivitySources::discharge`] because the reading is only meaningful
+/// against the state it began under.
+///
+/// `at` being the start of the read rather than its end is what keeps
+/// `held_for` a strict lower bound. `read_levels` samples the idle timer
+/// somewhere inside the read; taking the instant afterwards would inflate
+/// `held_for` by however long the window server took to answer, and compare a
+/// too-small idle against a too-large suspension age — the lenient direction,
+/// for a call that is not reliably fast. Multi-second stalls there are exactly
+/// what #952 was about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ReadStart {
+    generation: u64,
+    at: ContinuousInstant,
+}
+
 /// What [`ActivityTarget::finish_startup`] left behind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum StartupDisplay {
@@ -501,6 +532,7 @@ impl ActivityTarget {
                 suspension: Mutex::new(Suspension {
                     held: STARTUP,
                     since: ContinuousInstant::now(),
+                    generation: 0,
                 }),
                 reconcile: Condvar::new(),
             }),
@@ -516,12 +548,15 @@ impl ActivityTarget {
 
     /// Release the startup hold if `levels` prove the display is on.
     ///
+    /// `started` is where the reading began; see
+    /// [`ActivitySources::discharge`].
+    ///
     /// An unproven display keeps the gate closed. That is the fail-safe
     /// direction — a relaunched agent that guesses "awake" starts probing HID
     /// behind a dark panel — and it is the direction the old
     /// `CGDisplayIsAsleep(CGMainDisplayID())` snapshot got wrong (#952).
-    fn finish_startup(&self, levels: ActivityLevels) -> StartupDisplay {
-        if self.sources().discharge(levels) & STARTUP == 0 {
+    fn finish_startup(&self, levels: ActivityLevels, started: ReadStart) -> StartupDisplay {
+        if self.sources().discharge(levels, started) & STARTUP == 0 {
             StartupDisplay::Unproven
         } else {
             StartupDisplay::Awake
@@ -544,8 +579,8 @@ impl ActivitySources {
     }
 
     /// [`Self::suspend_from`] with an explicit `now`, so which instant an edge
-    /// records is testable — the same seam [`Self::discharge_at`] opens on the
-    /// other side of the proof.
+    /// records is testable — the same seam [`ReadStart`] opens on the other
+    /// side of the proof.
     fn suspend_from_at(&self, source: u8, now: ContinuousInstant) {
         let (changed, held) = {
             let mut suspension = self
@@ -563,6 +598,7 @@ impl ActivitySources {
             // every proof stricter; `SESSION_INACTIVE`, the one source with no
             // relative proof, is unaffected either way.
             suspension.since = now;
+            suspension.generation = suspension.generation.wrapping_add(1);
             suspension.held |= source;
             (was_allowed && self.signal.suspend(), suspension.held)
         };
@@ -606,23 +642,55 @@ impl ActivitySources {
         }
     }
 
-    /// Discharge every held source `levels` prove is over, and report which.
-    /// The one place a level read is allowed to move the gate.
-    fn discharge(&self, levels: ActivityLevels) -> u8 {
-        self.discharge_at(levels, ContinuousInstant::now())
+    /// Open a [`ReadStart`]: call it immediately before sampling the levels,
+    /// and hand the result back to [`Self::discharge`] afterwards.
+    fn read_start(&self) -> ReadStart {
+        ReadStart {
+            generation: self
+                .suspension
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .generation,
+            at: ContinuousInstant::now(),
+        }
     }
 
-    /// [`Self::discharge`] with an explicit `now`, so the time-dependent half
-    /// of the decision is testable.
-    fn discharge_at(&self, levels: ActivityLevels, now: ContinuousInstant) -> u8 {
+    /// Discharge every held source `levels` prove is over, and report which.
+    /// The one place a level read is allowed to move the gate.
+    ///
+    /// The sampling happens outside this lock — those are window-server round
+    /// trips, and nothing else may block on them — so a suspend edge can land
+    /// while it is in flight. Every relative proof here compares an idle time
+    /// against `held_for`, and both halves have to come from the same
+    /// suspension: a reading taken while an old suspension stood says the user
+    /// has been present for a while, and measured against the *new* edge's
+    /// `since` that reads as input newer than a suspension it predates. A hot
+    /// corner blanking the display during the read would then reopen the gate a
+    /// second after a screen sleep that was reported correctly. So a reading is
+    /// only ever judged against the edge it began under; anything else
+    /// discharges nothing and waits for the next tick to read honest levels.
+    fn discharge(&self, levels: ActivityLevels, started: ReadStart) -> u8 {
         let (held, held_for) = {
             let suspension = self
                 .suspension
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
+            if suspension.generation != started.generation {
+                let (current, held) = (suspension.generation, suspension.held);
+                // Log outside the lock: an appender write is not something the
+                // suspend path should ever be able to block behind.
+                drop(suspension);
+                debug!(
+                    sampled_under = started.generation,
+                    now_at = current,
+                    held = %Sources(held),
+                    "a suspend edge landed while the display/session levels were being read — discarding the reading"
+                );
+                return 0;
+            }
             (
                 suspension.held,
-                now.saturating_duration_since(suspension.since),
+                started.at.saturating_duration_since(suspension.since),
             )
         };
         let cleared = discharged_by(held, held_for, levels);
@@ -636,7 +704,7 @@ impl ActivitySources {
     ///
     /// Owned by the production launch sequence rather than by
     /// [`install_activity_observer`], so the unit tests drive
-    /// [`ActivitySources::discharge_at`] directly with no live thread racing
+    /// [`ActivitySources::discharge`] directly with no live thread racing
     /// them.
     fn start_reconciler(self: &Arc<Self>) {
         let sources = Arc::clone(self);
@@ -684,12 +752,16 @@ impl ActivitySources {
                 continue;
             }
             // Read the levels outside the lock: these are window-server round
-            // trips, and nothing else may block on them.
+            // trips, and nothing else may block on them. Which is why where the
+            // read starts — the suspend edge in force, and the instant
+            // `held_for` is measured from — is captured first; see `discharge`.
+            let started = self.read_start();
             let levels = read_levels();
             // STARTUP is excluded: a launch that could not prove its display
             // up front and proves it a tick later is the ordinary path, not a
             // dropped notification.
-            let missed = self.discharge(levels) & (SYSTEM_SLEEP | SCREEN_SLEEP | SESSION_INACTIVE);
+            let missed =
+                self.discharge(levels, started) & (SYSTEM_SLEEP | SCREEN_SLEEP | SESSION_INACTIVE);
             if missed != 0 {
                 warn!(
                     cleared = %Sources(missed),
@@ -976,8 +1048,9 @@ pub fn run_app_loop(
     // still holds the hardware gate closed, then try to prove the display is on
     // before permitting the core's initial inventory scan.
     app.finishLaunching();
+    let started = activity_target.sources().read_start();
     let levels = read_levels();
-    if activity_target.finish_startup(levels) == StartupDisplay::Unproven {
+    if activity_target.finish_startup(levels, started) == StartupDisplay::Unproven {
         info!(
             graphics = ?levels.graphics,
             displays_report_asleep = levels.displays_report_asleep,
@@ -1218,7 +1291,7 @@ mod tests {
     fn overlapping_suspend_sources_all_clear_before_device_io_resumes() {
         let (signal, gate) = device_io_channel();
         let (center, sentinel, target) = isolated_observer(signal);
-        assert_eq!(target.finish_startup(PRESENT), StartupDisplay::Awake);
+        assert_eq!(finish_startup(&target, PRESENT), StartupDisplay::Awake);
 
         // SAFETY: AppKit exports each name as an immutable process-lifetime constant.
         let system_sleep = unsafe { NSWorkspaceWillSleepNotification };
@@ -1272,7 +1345,7 @@ mod tests {
         let (center, sentinel, target) = isolated_observer(signal);
         assert!(!gate.allows_io(), "startup must fail closed");
 
-        assert_eq!(target.finish_startup(IDLE), StartupDisplay::Unproven);
+        assert_eq!(finish_startup(&target, IDLE), StartupDisplay::Unproven);
         assert!(
             !gate.allows_io(),
             "an unproven display must retain the startup hold",
@@ -1293,6 +1366,29 @@ mod tests {
         unsafe { center.removeObserver(&target) };
     }
 
+    /// Discharge `levels` as a reading just taken — the [`ReadStart`] the
+    /// reconciler opens before sampling. The one test that cares about a stale
+    /// reading builds its own.
+    fn discharge(target: &ActivityTarget, levels: ActivityLevels) -> u8 {
+        let sources = target.sources();
+        sources.discharge(levels, sources.read_start())
+    }
+
+    /// [`discharge`] with the read starting at an explicit instant.
+    fn discharge_at(target: &ActivityTarget, levels: ActivityLevels, now: ContinuousInstant) -> u8 {
+        let sources = target.sources();
+        let started = ReadStart {
+            at: now,
+            ..sources.read_start()
+        };
+        sources.discharge(levels, started)
+    }
+
+    /// [`ActivityTarget::finish_startup`] on a freshly taken reading.
+    fn finish_startup(target: &ActivityTarget, levels: ActivityLevels) -> StartupDisplay {
+        target.finish_startup(levels, target.sources().read_start())
+    }
+
     /// Every test below builds a bare [`ActivityTarget`] rather than calling
     /// [`install_activity_observer`], so it neither registers on the
     /// process-global workspace notification center nor is disturbed by what
@@ -1300,7 +1396,7 @@ mod tests {
     fn present_target() -> (Retained<ActivityTarget>, openlogi_hid::DeviceIoGate) {
         let (signal, gate) = device_io_channel();
         let target = ActivityTarget::new(signal);
-        assert_eq!(target.finish_startup(PRESENT), StartupDisplay::Awake);
+        assert_eq!(finish_startup(&target, PRESENT), StartupDisplay::Awake);
         assert!(gate.allows_io());
         (target, gate)
     }
@@ -1321,9 +1417,7 @@ mod tests {
             idle: Duration::from_secs(10),
             ..PRESENT
         };
-        target
-            .sources()
-            .discharge_at(levels, slept_at + Duration::from_secs(2));
+        discharge_at(&target, levels, slept_at + Duration::from_secs(2));
         assert!(
             !gate.allows_io(),
             "input older than the suspension proves nothing",
@@ -1334,9 +1428,7 @@ mod tests {
             idle: Duration::from_millis(500),
             ..PRESENT
         };
-        target
-            .sources()
-            .discharge_at(levels, slept_at + Duration::from_secs(2));
+        discharge_at(&target, levels, slept_at + Duration::from_secs(2));
         assert!(gate.allows_io());
     }
 
@@ -1356,9 +1448,7 @@ mod tests {
             ..PRESENT
         };
         assert!(levels.idle < DISPLAY_SLEEP_IDLE_FLOOR);
-        target
-            .sources()
-            .discharge_at(levels, slept_at + Duration::from_secs(5));
+        discharge_at(&target, levels, slept_at + Duration::from_secs(5));
         assert!(
             !gate.allows_io(),
             "the idle floor must not discharge a display sleep that was reported",
@@ -1378,12 +1468,12 @@ mod tests {
             on_console: false,
             ..IDLE
         };
-        target.sources().discharge(elsewhere);
+        discharge(&target, elsewhere);
         assert!(!gate.allows_io(), "another user still owns the console");
 
         // Back on console — and still idle, which must not matter here: no
         // display sleep was ever reported.
-        target.sources().discharge(IDLE);
+        discharge(&target, IDLE);
         assert!(
             gate.allows_io(),
             "an unpaired session-inactive edge must not outlive the console level that set it",
@@ -1404,9 +1494,7 @@ mod tests {
             graphics: SystemGraphics::Down,
             ..PRESENT
         };
-        target
-            .sources()
-            .discharge_at(darkwake, slept_at + Duration::from_secs(30));
+        discharge_at(&target, darkwake, slept_at + Duration::from_secs(30));
         assert!(
             !gate.allows_io(),
             "a DarkWake is not a wake, however present the other levels look",
@@ -1439,9 +1527,7 @@ mod tests {
             idle: Duration::from_millis(500),
             ..PRESENT
         };
-        target
-            .sources()
-            .discharge_at(darkwake, slept_at + Duration::from_millis(500));
+        discharge_at(&target, darkwake, slept_at + Duration::from_millis(500));
         assert!(!gate.allows_io(), "still a DarkWake");
 
         // Four seconds in, the capability set has read graphics-up (`caps=15`)
@@ -1450,30 +1536,42 @@ mod tests {
             idle: Duration::from_millis(4_200),
             ..PRESENT
         };
-        target
-            .sources()
-            .discharge_at(before_the_sleep, slept_at + Duration::from_secs(4));
+        discharge_at(&target, before_the_sleep, slept_at + Duration::from_secs(4));
         assert!(
             !gate.allows_io(),
             "input from before the sleep proves nothing"
         );
 
-        // The HID activity that promoted the wake landed 5.44 s in — past the
-        // sleep-request margin — so the next tick reconciles.
-        let after_the_sleep = ActivityLevels {
-            idle: Duration::from_millis(560),
+        // The HID activity that promoted the wake landed 5.44 s in — still
+        // inside the window in which the machine could have been on its way
+        // down, since a client has 30 s to acknowledge a `WillSleep`. Ten
+        // seconds in, it proves nothing either.
+        let promoted_the_wake = ActivityLevels {
+            idle: Duration::from_millis(4_560),
             ..PRESENT
         };
-        target
-            .sources()
-            .discharge_at(after_the_sleep, slept_at + Duration::from_secs(6));
+        discharge_at(
+            &target,
+            promoted_the_wake,
+            slept_at + Duration::from_secs(10),
+        );
+        assert!(!gate.allows_io(), "still inside the sleep-request margin");
+
+        // The user goes on working, as they did that evening, and the first
+        // input past the margin reconciles: input 38 s after the suspension,
+        // read at 40 s.
+        let working = ActivityLevels {
+            idle: Duration::from_secs(2),
+            ..PRESENT
+        };
+        discharge_at(&target, working, slept_at + Duration::from_secs(40));
         assert!(gate.allows_io());
     }
 
     /// The proof a system sleep demands, level by level.
     #[test]
     fn only_a_full_wake_with_input_after_the_sleep_discharges_a_system_sleep() {
-        let stood_for = Duration::from_secs(12);
+        let stood_for = Duration::from_secs(40);
         let after_the_sleep = |levels: ActivityLevels| ActivityLevels {
             idle: Duration::from_secs(5),
             ..levels
@@ -1556,6 +1654,68 @@ mod tests {
         ));
     }
 
+    /// The reconciler samples the levels outside the lock — they are
+    /// window-server round trips — so a suspend edge can land while the read is
+    /// in flight, and the sample would then be judged against a suspension it
+    /// predates. Here a hot corner blanks the display mid-read: the old sample
+    /// says the user has been present for a second, and measured against the
+    /// fresh `ScreensDidSleep` that reads as input newer than the blank, so the
+    /// gate would reopen one second after a screen sleep that was reported
+    /// perfectly correctly.
+    #[test]
+    fn levels_sampled_before_a_suspend_edge_cannot_discharge_the_one_after_it() {
+        let (target, gate) = present_target();
+        let stranded_at = ContinuousInstant::now();
+        target.sources().suspend_from_at(SCREEN_SLEEP, stranded_at);
+        assert!(!gate.allows_io());
+
+        // The reconciler opens its read — capturing the edge in force and the
+        // instant `held_for` will be measured from — then goes into
+        // `read_levels`. What it gets back is the proof that would discharge
+        // the stranded blank: input a second ago.
+        let sampled_under = target.sources().read_start();
+        let live = ActivityLevels {
+            idle: Duration::from_secs(1),
+            ..PRESENT
+        };
+
+        // A hot corner blanks the display while that read is in flight.
+        let blanked_at = stranded_at + Duration::from_secs(90);
+        target.sources().suspend_from_at(SCREEN_SLEEP, blanked_at);
+
+        let judged_at = blanked_at + Duration::from_secs(2);
+        assert_eq!(
+            target.sources().discharge(
+                live,
+                ReadStart {
+                    at: judged_at,
+                    ..sampled_under
+                },
+            ),
+            0,
+            "levels sampled under an earlier suspend edge prove nothing about this one",
+        );
+        assert!(!gate.allows_io(), "the display really is asleep");
+
+        // The second defence is the re-read: levels sampled *after* the edge
+        // carry an honest idle time, measured from the same last input, and the
+        // relative proof then rejects them on its own.
+        let re_read = ActivityLevels {
+            idle: Duration::from_secs(93),
+            ..PRESENT
+        };
+        assert_eq!(discharge_at(&target, re_read, judged_at), 0);
+        assert!(!gate.allows_io());
+
+        // And the user touching the machine after the blank still reconciles.
+        let woke_it = ActivityLevels {
+            idle: Duration::from_secs(1),
+            ..PRESENT
+        };
+        discharge_at(&target, woke_it, blanked_at + Duration::from_secs(5));
+        assert!(gate.allows_io());
+    }
+
     /// A second `WillSleep` over a source the set already holds still restarts
     /// the clock. Without that, a `SYSTEM_SLEEP` left standing by an aborted
     /// sleep hands its whole age to the next sleep attempt, and a mouse brushed
@@ -1579,9 +1739,7 @@ mod tests {
             idle: Duration::from_millis(300),
             ..PRESENT
         };
-        target
-            .sources()
-            .discharge_at(brushed, attempt_at + Duration::from_millis(300));
+        discharge_at(&target, brushed, attempt_at + Duration::from_millis(300));
         assert!(
             !gate.allows_io(),
             "input from inside the sleep request is not a wake",
@@ -1592,7 +1750,8 @@ mod tests {
             idle: Duration::from_secs(1),
             ..PRESENT
         };
-        target.sources().discharge_at(
+        discharge_at(
+            &target,
             back,
             attempt_at + SYSTEM_WAKE_INPUT_GRACE + Duration::from_secs(2),
         );
@@ -1608,7 +1767,7 @@ mod tests {
         let target = ActivityTarget::new(signal);
         assert!(!gate.allows_io(), "startup must fail closed");
 
-        assert_eq!(target.finish_startup(IDLE), StartupDisplay::Unproven);
+        assert_eq!(finish_startup(&target, IDLE), StartupDisplay::Unproven);
         assert!(!gate.allows_io());
 
         // Still nothing: a display that reports itself asleep is definite.
@@ -1616,11 +1775,11 @@ mod tests {
             displays_report_asleep: true,
             ..PRESENT
         };
-        target.sources().discharge(asleep);
+        discharge(&target, asleep);
         assert!(!gate.allows_io());
 
         // The user touches the machine, which is what wakes a sleeping display.
-        target.sources().discharge(PRESENT);
+        discharge(&target, PRESENT);
         assert!(gate.allows_io());
     }
 
@@ -1628,7 +1787,7 @@ mod tests {
     fn an_unproven_startup_display_does_not_mask_a_second_suspend_source() {
         let (signal, gate) = device_io_channel();
         let target = ActivityTarget::new(signal);
-        assert_eq!(target.finish_startup(IDLE), StartupDisplay::Unproven);
+        assert_eq!(finish_startup(&target, IDLE), StartupDisplay::Unproven);
 
         target.suspend_from(SESSION_INACTIVE);
         target.resume_from(STARTUP);
@@ -1779,11 +1938,11 @@ mod tests {
             ..PRESENT
         };
 
-        assert_eq!(target.finish_startup(darkwake), StartupDisplay::Unproven);
+        assert_eq!(finish_startup(&target, darkwake), StartupDisplay::Unproven);
         assert!(!gate.allows_io());
 
         // The full wake that follows is what lifts it.
-        target.sources().discharge(PRESENT);
+        discharge(&target, PRESENT);
         assert!(gate.allows_io());
     }
 
