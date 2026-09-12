@@ -18,6 +18,7 @@ use crate::{
     SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque,
 };
 use hidpp::feature::device_information::DeviceEntityType;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 const TEST_THRESHOLD: SmartShiftThreshold = match SmartShiftThreshold::try_new(10) {
     Ok(value) => value,
@@ -27,6 +28,7 @@ const TEST_TORQUE: TunableTorque = match TunableTorque::try_new(33) {
     Ok(value) => value,
     Err(_) => panic!("valid test SmartShift torque"),
 };
+static SCRIPTED_TORQUE: AtomicU8 = AtomicU8::new(33);
 
 #[test]
 fn smartshift_and_wheel_mode_byte_encodings_match() {
@@ -144,6 +146,57 @@ fn status_match_preserves_absent_torque() {
     ));
 }
 
+#[tokio::test]
+async fn set_torque_on_legacy_device_returns_unsupported() {
+    let (raw, _handle) = ScriptedRawHidChannel::with_responder(|request| {
+        let feature_index = request[2];
+        let function = request[3] >> 4;
+        let mut payload = [0u8; 16];
+        let long = match (feature_index, function) {
+            (0x00, 0x01) => {
+                payload[0] = 4;
+                false
+            }
+            (0x00, 0x00) => {
+                let feature_id = u16::from_be_bytes([request[4], request[5]]);
+                payload[0] = match feature_id {
+                    0x2110 => 0x04,
+                    _ => 0x00,
+                };
+                false
+            }
+            (0x04, 0x00) => {
+                payload[..3].copy_from_slice(&[u8::from(WheelMode::Ratchet), 10, 10]);
+                false
+            }
+            _ => return None,
+        };
+        let mut response = vec![0u8; if long { 20 } else { 7 }];
+        response[0] = if long { 0x11 } else { 0x10 };
+        response[1] = request[1];
+        response[2] = request[2];
+        response[3] = request[3];
+        let len = response.len() - 4;
+        response[4..].copy_from_slice(&payload[..len]);
+        Some(response)
+    });
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(
+        channel,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xb35b,
+        },
+    );
+    let result = set_smartshift_torque_on(&shared, TEST_TORQUE).await;
+    assert!(matches!(
+        result,
+        Err(WriteError::FeatureUnsupported {
+            feature_hex: 0x2111
+        })
+    ));
+}
+
 #[test]
 fn per_key_lighting_builds_only_very_long_frames_then_one_long_commit() {
     let reports = per_key_reports(0x03, 0x27, 0x11, 0x22, 0x33);
@@ -178,6 +231,7 @@ fn per_key_lighting_builds_only_very_long_frames_then_one_long_commit() {
 
 #[tokio::test]
 async fn shared_read_and_lighting_apis_use_the_supplied_channel() -> Result<(), WriteError> {
+    SCRIPTED_TORQUE.store(33, Ordering::Relaxed);
     let (raw, handle) = ScriptedRawHidChannel::with_responder(scripted_response);
     let channel = scripted_channel(raw).await;
     let shared = SharedChannel::new(
@@ -202,6 +256,10 @@ async fn shared_read_and_lighting_apis_use_the_supplied_channel() -> Result<(), 
         SmartShiftAutoDisengage::Threshold(TEST_THRESHOLD)
     );
     assert_eq!(smartshift.tunable_torque, Some(TEST_TORQUE));
+
+    let new_torque = TunableTorque::try_new(65).expect("valid torque");
+    let updated_torque = set_smartshift_torque_on(&shared, new_torque).await?;
+    assert_eq!(updated_torque.tunable_torque, Some(new_torque));
 
     let backlight = get_backlight_on(&shared).await?;
     assert_eq!(
@@ -232,6 +290,14 @@ async fn shared_read_and_lighting_apis_use_the_supplied_channel() -> Result<(), 
             && report[1] == 0xff
             && report[2] == 0x07
             && report[3] >> 4 == 0x05
+    }));
+    assert!(written.iter().any(|report| {
+        report.len() >= 7
+            && report[2] == 0x06
+            && report[3] >> 4 == 0x02
+            && report[4] == 0
+            && report[5] == 0
+            && report[6] == 65
     }));
     Ok(())
 }
@@ -492,9 +558,18 @@ fn scripted_response(request: &[u8]) -> Option<Vec<u8>> {
             payload[..8].copy_from_slice(&[0, 0x01, 0x90, 0x03, 0x20, 0x06, 0x40, 0]);
             true
         }
-        // Enhanced SmartShift status.
+        // Enhanced SmartShift status / write.
+        (0x06, 0x02) => {
+            if request[6] != 0 {
+                SCRIPTED_TORQUE.store(request[6], Ordering::Relaxed);
+            }
+            let torque = SCRIPTED_TORQUE.load(Ordering::Relaxed);
+            payload[..3].copy_from_slice(&[u8::from(WheelMode::Ratchet), 10, torque]);
+            false
+        }
         (0x06, 0x01) => {
-            payload[..3].copy_from_slice(&[u8::from(WheelMode::Ratchet), 10, 33]);
+            let torque = SCRIPTED_TORQUE.load(Ordering::Relaxed);
+            payload[..3].copy_from_slice(&[u8::from(WheelMode::Ratchet), 10, torque]);
             false
         }
         // Backlight config and info. The config mode occupies bits 3..=4 of
