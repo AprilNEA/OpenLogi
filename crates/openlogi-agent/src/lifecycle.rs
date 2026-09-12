@@ -175,6 +175,11 @@ impl Booted {
                             return None;
                         }
                     }
+                    ShutdownRequest::InputMonitoringRelaunch => {
+                        info!("Input Monitoring granted while dormant — exiting for relaunch");
+                        let _ = crate::binary_watch::schedule_after_input_monitoring_grant();
+                        return None;
+                    }
                 }
             }
         }
@@ -487,6 +492,13 @@ impl Running {
             ShutdownRequest::Restart { path, retry } => {
                 self.hidpp_watchers
                     .begin_replacement(Replacement { path, retry });
+            }
+            #[cfg(target_os = "macos")]
+            ShutdownRequest::InputMonitoringRelaunch => {
+                if crate::binary_watch::schedule_after_input_monitoring_grant() {
+                    self.shut_down("Input Monitoring permission relaunch", None)
+                        .await;
+                }
             }
         }
     }

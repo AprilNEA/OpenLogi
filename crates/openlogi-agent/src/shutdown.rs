@@ -2,6 +2,8 @@
 //! path that releases firmware capture and the input hook before process end.
 
 use std::path::PathBuf;
+#[cfg(target_os = "macos")]
+use std::sync::OnceLock;
 
 use openlogi_hook::Hook;
 use tokio::sync::{mpsc, oneshot};
@@ -30,6 +32,11 @@ pub(crate) enum ShutdownRequest {
         /// should resume observing for another settled replacement.
         retry: oneshot::Sender<()>,
     },
+    /// Input Monitoring was just granted. macOS keeps the pre-grant
+    /// `IOHIDCheckAccess` answer in this process, so the lifecycle schedules
+    /// a successor and exits after firmware teardown.
+    #[cfg(target_os = "macos")]
+    InputMonitoringRelaunch,
 }
 
 /// Sender cloned into the tray and executable watcher. Those threads request
@@ -50,6 +57,27 @@ impl ShutdownRequests {
 pub(crate) fn request_channel() -> (ShutdownRequestSender, ShutdownRequests) {
     let (tx, rx) = mpsc::unbounded_channel();
     (tx, ShutdownRequests(rx))
+}
+
+/// Sender published for threads that are not the lifecycle owner — the IPC
+/// Input Monitoring prompt needs the same teardown path as a binary update.
+#[cfg(target_os = "macos")]
+static REQUESTS: OnceLock<ShutdownRequestSender> = OnceLock::new();
+
+/// Remember the process-wide request sender so an Input Monitoring grant
+/// on the IPC path can ask the lifecycle to relaunch.
+#[cfg(target_os = "macos")]
+pub(crate) fn publish_sender(tx: ShutdownRequestSender) {
+    let _ = REQUESTS.set(tx);
+}
+
+/// Ask the lifecycle to schedule a successor and exit after an Input
+/// Monitoring Allow. No-op if [`publish_sender`] has not run.
+#[cfg(target_os = "macos")]
+pub(crate) fn request_input_monitoring_relaunch() {
+    if let Some(tx) = REQUESTS.get() {
+        let _ = tx.send(ShutdownRequest::InputMonitoringRelaunch);
+    }
 }
 
 /// Ask the async lifecycle to quit, then block this tray thread until the
