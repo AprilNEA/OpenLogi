@@ -49,6 +49,12 @@ embed-resource = "3.0.9"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 dispatch2 = "0.3.1"
+# Only for `clock_gettime_nsec_np(CLOCK_MONOTONIC)`: the activity gate has to
+# time a suspension on a clock that keeps running while the machine is asleep,
+# which `std::time::Instant` (`CLOCK_UPTIME_RAW` on Darwin) does not. Typed
+# constant rather than a hand-written extern with a hardcoded clock id; the
+# workspace already depends on libc through `openlogi-hook`.
+libc = "0.2"
 objc2 = { workspace = true }
 objc2-app-kit = { workspace = true, features = ["NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSResponder", "NSView", "NSMenu", "NSMenuItem", "NSImage", "NSApplication", "NSRunningApplication", "NSWorkspace"] }
 objc2-core-foundation = { workspace = true, features = ["CFDictionary", "CFNumber", "CFString"] }

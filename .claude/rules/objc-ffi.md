@@ -23,7 +23,7 @@ files; **keep this table in sync when you add or move one**:
 | File | What it carries |
 |---|---|
 | `openlogi-agent/src/status_item.rs` | safe `objc2` wrappers over `NSStatusItem` / `NSMenu` / `NSMenuItem` |
-| `openlogi-agent/src/tray.rs` | the menu-bar semantics, `MenuTarget` + `ActivityTarget` (`define_class!`), the Accessory `NSApplication` loop, the `NSWorkspace` display/session notifications, and the levels that prove them back — `CGSessionCopyCurrentDictionary`, `CGGetActiveDisplayList` / `CGDisplayIsAsleep`, `CGEventSourceSecondsSinceLastEventType`, and the `IOPMrootDomain` capability read (`IOServiceMatching` / `IOServiceGetMatchingService` / `IORegistryEntryCreateCFProperty`) that tells a DarkWake from a full wake |
+| `openlogi-agent/src/tray.rs` | the menu-bar semantics, `MenuTarget` + `ActivityTarget` (`define_class!`), the Accessory `NSApplication` loop, the `NSWorkspace` display/session notifications, and the levels that prove them back — `CGSessionCopyCurrentDictionary`, `CGGetActiveDisplayList` / `CGDisplayIsAsleep`, `CGEventSourceSecondsSinceLastEventType`, and the `IOPMrootDomain` capability read (`IOServiceMatching` / `IOServiceGetMatchingService` / `IORegistryEntryCreateCFProperty`) that tells a DarkWake from a full wake. Its one non-ObjC call is `libc::clock_gettime(CLOCK_MONOTONIC, …)`, the clock a suspension is timed on |
 | `openlogi-agent-core/src/watchers/camera.rs` | the CoreMediaIO "camera is running" property read |
 | `openlogi-camera/src/capture.rs` | `AVCaptureSession` capture + the `define_class!` frame delegate, and the Camera TCC prompt |
 | `openlogi-camera/src/macos.rs` | `AVCaptureDevice` enumeration (`class!` + `msg_send!`) |
@@ -223,7 +223,13 @@ under a `SAFETY` comment. Where it currently lives on macOS:
   statics, the `CGGetActiveDisplayList` out-parameter and the
   `CGSessionCopyCurrentDictionary` key cast, and the IOKit registry read
   (`kIOMainPortDefault` is an extern static, and the matching/property calls
-  are `unsafe fn`s because their pointer arguments are untyped). The
+  are `unsafe fn`s because their pointer arguments are untyped), plus the one
+  POSIX call in the file — `libc::clock_gettime(CLOCK_MONOTONIC, …)`, whose
+  `timespec` out-parameter is what makes it `unsafe`. That clock is here
+  because `std::time::Instant` is `CLOCK_UPTIME_RAW` on Darwin and stops at a
+  sleep, which would make a real sleep invisible to the gate's relative proof;
+  Darwin's `CLOCK_MONOTONIC` is the same monotonic clock with sleep counted in.
+  The
   `kIOPMSystemCapability*` bit values are generated constants from
   `objc2-io-kit`, not hand-written discriminants; only the registry *key*
   (`"System Capabilities"`) is undocumented, which is why an unreadable

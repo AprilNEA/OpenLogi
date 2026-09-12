@@ -15,14 +15,14 @@
 
 #![expect(
     unsafe_code,
-    reason = "objc2 calls: super-init, action targets, selector-based workspace notifications, the CoreGraphics display-list read, and the IOKit registry read of the system capability set"
+    reason = "objc2 calls: super-init, action targets, selector-based workspace notifications, the CoreGraphics display-list read, the IOKit registry read of the system capability set, and the POSIX clock read that times a suspension across a sleep"
 )]
 
 use std::cell::RefCell;
 use std::fmt;
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
@@ -132,7 +132,61 @@ pub fn relocalize() {
 /// proving something happened *after* the suspension was recorded.
 struct Suspension {
     held: u8,
-    since: Instant,
+    since: ContinuousInstant,
+}
+
+/// A point on a monotonic clock that keeps running while the machine is asleep.
+///
+/// Not [`std::time::Instant`], which on Darwin is `CLOCK_UPTIME_RAW` and stops
+/// at the freeze — and `CGEventSourceSecondsSinceLastEventType` measures its
+/// idle time against that same uptime clock. Timing a suspension on it would
+/// make a real sleep invisible to `held_for`: whatever the sleep's length, the
+/// input that woke the machine would sit a fixed pre-freeze gap *behind* the
+/// suspension, never newer than it, so the wake's own input could never prove
+/// the wake. Darwin's `CLOCK_MONOTONIC` is the same monotonic clock with sleep
+/// included, so `held_for` grows by the whole sleep and the first input after
+/// it proves. Before any sleep the two clocks agree exactly, which is what
+/// keeps the pre-sleep window [`SYSTEM_WAKE_INPUT_GRACE`] measures honest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ContinuousInstant(u64);
+
+impl ContinuousInstant {
+    fn now() -> Self {
+        let mut now = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: `clock_gettime` writes exactly one `timespec` through the
+        // pointer it is given, and this one is live and correctly typed.
+        let read = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &raw mut now) };
+        if read != 0 {
+            // Unreachable: the only documented failure is an unknown clock id,
+            // and this one is libc's own constant. A clock that answered
+            // nothing would answer zero every time, leaving `held_for` at zero
+            // and discharging nothing — the fail-closed direction.
+            return Self(0);
+        }
+        let seconds = u64::try_from(now.tv_sec).unwrap_or(0);
+        let nanos = u64::try_from(now.tv_nsec).unwrap_or(0);
+        Self(seconds.saturating_mul(1_000_000_000).saturating_add(nanos))
+    }
+
+    /// How long has passed since `earlier`, or zero if it is somehow ahead.
+    fn saturating_duration_since(self, earlier: Self) -> Duration {
+        Duration::from_nanos(self.0.saturating_sub(earlier.0))
+    }
+}
+
+#[cfg(test)]
+impl std::ops::Add<Duration> for ContinuousInstant {
+    type Output = Self;
+
+    fn add(self, rhs: Duration) -> Self {
+        Self(
+            self.0
+                .saturating_add(u64::try_from(rhs.as_nanos()).unwrap_or(u64::MAX)),
+        )
+    }
 }
 
 /// The activity state the workspace observers and the reconciler share.
@@ -204,14 +258,60 @@ const DISPLAY_SLEEP_IDLE_FLOOR: Duration = Duration::from_secs(60);
 /// was recorded, so an early tick is a stricter test, not a racier one.
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(2);
 
-/// Whether `held` is a suspension a level read may discharge.
+/// How far past a suspension input has to land before it counts as proof that
+/// the machine came back.
 ///
-/// `SYSTEM_SLEEP` deliberately is not: the process runs during a maintenance
+/// `NSWorkspaceWillSleepNotification` is posted *before* the machine freezes,
+/// and the gap in between is an ordinary full wake: graphics are up, and a
+/// mouse brushed there does not cancel a sleep already under way. Input that
+/// landed in it would otherwise reopen the gate on the way *into* a sleep and
+/// put a full HID enumeration on the wire as the machine goes down.
+///
+/// macOS gives every `WillSleep` observer up to 30 s to return before it
+/// proceeds, so that gap is as wide as the slowest observer on the machine: it
+/// was 1 s here (`pmset -g log` timed the freeze one second after the
+/// notification), and there is no bound worth trusting. Five seconds covers an
+/// unremarkable spread of hosts and is still far shorter than the sleeps this
+/// recovers from. Deliberately its own constant rather than a multiple of
+/// [`RECONCILE_INTERVAL`] — the tick is a responsiveness knob, and shortening
+/// it to make a startup hold recover faster must not quietly shrink the sleep
+/// margin. In prose: the reconciler simply needs a few ticks before this can
+/// pass.
+///
+/// What it costs is not "one more tick". The offset between a suspension and
+/// the last input is fixed once that input is in the past, so a recovery waits
+/// for the *next* input more than this far past the suspension. Every case this
+/// recovers from is one where the user is at the machine, which is where that
+/// input comes from immediately; the one it genuinely delays is a user who
+/// touched something inside the window and then walked away — and a machine
+/// nobody is touching has no device I/O to do.
+const SYSTEM_WAKE_INPUT_GRACE: Duration = Duration::from_secs(5);
+
+/// Whether `held` is a suspension a level read may discharge — which is all of
+/// them, so the only state the reconciler parks in is an open gate.
+///
+/// `SYSTEM_SLEEP` was once excluded here: the process runs during a maintenance
 /// DarkWake, and opening HID there is exactly what promoted an invisible wake
-/// into a full display wake (#656). A system sleep is cleared only by the wake
-/// notification that pairs with it.
+/// into a full display wake (#656). But a `WillSleep` is no more guaranteed a
+/// partner than any other edge. On 2026-09-11 a dock hotplug woke this machine
+/// into a DarkWake, macOS promoted it to a full wake for a notification and
+/// then posted `WillSleep` to go back to sleep — and HID activity promoted it
+/// to a full wake again a moment later without `ScreensDidWake` or
+/// `SessionDidBecomeActive`, because neither the screens nor the session had
+/// ever left. The gate stayed shut, and `openlogi list` lost every HID++ device
+/// until the agent was restarted (#1281). An aborted or cancelled sleep strands
+/// it the same way.
+///
+/// What keeps #656 out is not parking the reconciler but the proof
+/// [`system_wake_is_proven`] demands: a DarkWake reads
+/// [`SystemGraphics::Down`], which discharges nothing at all. And the work this
+/// now permits during a DarkWake is the work [`read_levels`] already does
+/// through every screen sleep — which is a DarkWake too — window-server state
+/// and one IORegistry property, no HID. A real sleep is not affected either
+/// way: the process is frozen, so neither the condvar timeout nor anything else
+/// runs until the machine is back.
 const fn reconcilable(held: u8) -> bool {
-    held != 0 && held & SYSTEM_SLEEP == 0
+    held != 0
 }
 
 /// What power management's system capability set says about graphics.
@@ -254,12 +354,13 @@ struct ActivityLevels {
 /// Which of `held`'s sources `levels` prove are over, given how long `held` has
 /// stood.
 ///
-/// Never returns `SYSTEM_SLEEP`; see [`reconcilable`].
+/// Three tiers of proof, strictest last: the console level discharges the
+/// session source on its own, [`display_is_proven_awake`] discharges the two
+/// display-shaped sources, and [`system_wake_is_proven`] — which alone insists
+/// on a positive [`SystemGraphics::Up`] — discharges a system sleep.
 fn discharged_by(held: u8, held_for: Duration, levels: ActivityLevels) -> u8 {
     if !levels.on_console {
-        // Another user owns the console. Nothing resumes into their session —
-        // which is also what keeps this from fighting the input hook that
-        // follows the same gate.
+        // Another user owns the console. Nothing resumes into their session.
         return 0;
     }
     if levels.graphics == SystemGraphics::Down {
@@ -279,7 +380,42 @@ fn discharged_by(held: u8, held_for: Duration, levels: ActivityLevels) -> u8 {
     if display_is_proven_awake(held, held_for, levels) {
         cleared |= SCREEN_SLEEP | STARTUP;
     }
+    if system_wake_is_proven(held_for, levels) {
+        cleared |= SYSTEM_SLEEP;
+    }
     cleared & held
+}
+
+/// Whether the machine can be *proved* to have come back from the sleep it
+/// announced — the one discharge that must survive #656, so the only one that
+/// demands a positive capability read rather than merely the absence of a
+/// negative one.
+///
+/// Three things have to hold at once, and the caller has already required the
+/// fourth (the console level):
+///
+/// - `graphics` is [`SystemGraphics::Up`]. A DarkWake is already gone by here —
+///   [`discharged_by`] returns on [`SystemGraphics::Down`] before reaching this
+///   — so what this guard actually rejects is [`SystemGraphics::Unknown`].
+///   Everywhere else an unreadable capability set degrades to the remaining
+///   levels, because there those levels are the whole proof and the capability
+///   read only ever vetoes them; here the positive read *is* the proof, since
+///   the state it has to rule out is the DarkWake in which every other level
+///   reads "the user is here" (#656). So a macOS that renames the key loses
+///   this recovery rather than trading it for the regression.
+/// - No display reports itself asleep. One-directional as always, but in the
+///   direction that matters: a machine whose panels are off is not one to
+///   resume device I/O into.
+/// - Input arrived after the suspension, by more than
+///   [`SYSTEM_WAKE_INPUT_GRACE`]. The same relative proof a reported screen
+///   sleep gets, for the same reason: the absolute idle floor cannot rule out a
+///   sleep that started a second after the last keystroke, and only input newer
+///   than the suspension can have happened on the far side of it.
+fn system_wake_is_proven(held_for: Duration, levels: ActivityLevels) -> bool {
+    if levels.graphics != SystemGraphics::Up || levels.displays_report_asleep {
+        return false;
+    }
+    levels.idle < held_for.saturating_sub(SYSTEM_WAKE_INPUT_GRACE)
 }
 
 /// Whether the display can be *proved* on. There is no reading that proves it
@@ -364,7 +500,7 @@ impl ActivityTarget {
                 signal,
                 suspension: Mutex::new(Suspension {
                     held: STARTUP,
-                    since: Instant::now(),
+                    since: ContinuousInstant::now(),
                 }),
                 reconcile: Condvar::new(),
             }),
@@ -404,17 +540,29 @@ impl ActivityTarget {
 impl ActivitySources {
     /// Record `source` and close the hardware gate.
     fn suspend_from(&self, source: u8) {
+        self.suspend_from_at(source, ContinuousInstant::now());
+    }
+
+    /// [`Self::suspend_from`] with an explicit `now`, so which instant an edge
+    /// records is testable — the same seam [`Self::discharge_at`] opens on the
+    /// other side of the proof.
+    fn suspend_from_at(&self, source: u8, now: ContinuousInstant) {
         let (changed, held) = {
             let mut suspension = self
                 .suspension
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
             let was_allowed = suspension.held == 0;
-            if source & !suspension.held != 0 {
-                // A newly recorded source restarts the clock the relative proof
-                // in `display_is_proven_awake` measures input against.
-                suspension.since = Instant::now();
-            }
+            // Every suspend edge restarts the clock the relative proofs measure
+            // input against, not only one that records a source the set did not
+            // already hold. A second `WillSleep` over a `SYSTEM_SLEEP` stranded
+            // by an earlier one would otherwise inherit that one's age, and
+            // input a moment after it would clear an hours-old `held_for` — a
+            // gate opened into a real sleep, which is the one thing the relative
+            // proof exists to prevent. Restarting unconditionally can only make
+            // every proof stricter; `SESSION_INACTIVE`, the one source with no
+            // relative proof, is unaffected either way.
+            suspension.since = now;
             suspension.held |= source;
             (was_allowed && self.signal.suspend(), suspension.held)
         };
@@ -461,12 +609,12 @@ impl ActivitySources {
     /// Discharge every held source `levels` prove is over, and report which.
     /// The one place a level read is allowed to move the gate.
     fn discharge(&self, levels: ActivityLevels) -> u8 {
-        self.discharge_at(levels, Instant::now())
+        self.discharge_at(levels, ContinuousInstant::now())
     }
 
     /// [`Self::discharge`] with an explicit `now`, so the time-dependent half
     /// of the decision is testable.
-    fn discharge_at(&self, levels: ActivityLevels, now: Instant) -> u8 {
+    fn discharge_at(&self, levels: ActivityLevels, now: ContinuousInstant) -> u8 {
         let (held, held_for) = {
             let suspension = self
                 .suspension
@@ -503,11 +651,14 @@ impl ActivitySources {
         }
     }
 
-    /// Park until a discharge-able suspension has stood for
-    /// [`RECONCILE_INTERVAL`], then check it against the levels.
+    /// Park until a suspension has stood for [`RECONCILE_INTERVAL`], then check
+    /// it against the levels.
     ///
-    /// Both an open gate and a system sleep park on the condvar, so this
-    /// performs no timed work and issues no CoreGraphics call in either state.
+    /// An open gate parks on the condvar, so this performs no timed work and
+    /// issues no CoreGraphics call in the state the agent spends its life in.
+    /// A suspension ticks — including a system sleep, where the process is
+    /// frozen for the sleep itself and the reads during any DarkWake around it
+    /// are the same ones a screen sleep already makes (see [`reconcilable`]).
     fn reconcile_forever(&self) -> ! {
         loop {
             let outstanding = {
@@ -535,13 +686,16 @@ impl ActivitySources {
             // Read the levels outside the lock: these are window-server round
             // trips, and nothing else may block on them.
             let levels = read_levels();
-            let missed = self.discharge(levels) & (SCREEN_SLEEP | SESSION_INACTIVE);
+            // STARTUP is excluded: a launch that could not prove its display
+            // up front and proves it a tick later is the ordinary path, not a
+            // dropped notification.
+            let missed = self.discharge(levels) & (SYSTEM_SLEEP | SCREEN_SLEEP | SESSION_INACTIVE);
             if missed != 0 {
                 warn!(
                     cleared = %Sources(missed),
                     graphics = ?levels.graphics,
                     idle_secs = levels.idle.as_secs_f64(),
-                    "the display/session levels disagreed with the last notification — a wake notification never arrived; reconciled"
+                    "the system/display/session levels disagreed with the last notification — a wake notification never arrived; reconciled"
                 );
             }
         }
@@ -848,11 +1002,18 @@ pub fn run_app_loop(
 /// promote an otherwise invisible wake into a full display wake (#656).
 ///
 /// These notifications are edges over window-server state, and the workspace
-/// center guarantees neither delivery nor pairing: a screens-asleep or
-/// session-inactive edge whose partner never arrives would otherwise pause
+/// center guarantees neither delivery nor pairing: a will-sleep, screens-asleep
+/// or session-inactive edge whose partner never arrives would otherwise pause
 /// device I/O until the agent restarts, and a relaunched agent has no history
 /// at all. `run_app_loop` therefore also starts
 /// [`ActivitySources::start_reconciler`], which proves those levels back.
+///
+/// The sleep half needs that as much as the others: a sleep the system aborts,
+/// or one it enters and leaves without the screens or the session ever moving,
+/// gets no wake notification of any kind (#1281). Registering `DidWake` is
+/// still not the answer — it fires for the maintenance DarkWakes #656 is about,
+/// and it is unverified whether macOS re-posts it when a DarkWake is promoted
+/// to a full wake, which is the shape this failed in.
 fn install_activity_observer(signal: DeviceIoSignal) -> Retained<ActivityTarget> {
     let target = ActivityTarget::new(signal);
     let workspace = NSWorkspace::sharedWorkspace();
@@ -1122,7 +1283,7 @@ mod tests {
     #[test]
     fn a_screen_sleep_whose_wake_never_arrives_is_reconciled_by_input_after_it() {
         let (target, gate) = present_target();
-        let slept_at = Instant::now();
+        let slept_at = ContinuousInstant::now();
         target.suspend_from(SCREEN_SLEEP);
         assert!(!gate.allows_io());
 
@@ -1156,7 +1317,7 @@ mod tests {
     #[test]
     fn a_forced_display_sleep_is_not_reconciled_by_input_that_preceded_it() {
         let (target, gate) = present_target();
-        let slept_at = Instant::now();
+        let slept_at = ContinuousInstant::now();
         target.suspend_from(SCREEN_SLEEP);
 
         // Idle 6 s, suspension 5 s old: the input is one second older than the
@@ -1200,24 +1361,212 @@ mod tests {
         );
     }
 
-    /// #656 non-regression: the process runs during a maintenance DarkWake, so
-    /// a level read must never be the thing that reopens the gate after a
-    /// system sleep — however present the user looks.
+    /// #656 non-regression. The proof, not a refusal to look, is what keeps
+    /// the gate shut here: the process runs during a maintenance DarkWake,
+    /// where every level except the capability set says the user is present.
     #[test]
-    fn reconciliation_never_clears_a_system_sleep_suspension() {
+    fn a_darkwake_never_clears_a_system_sleep_suspension() {
         let (target, gate) = present_target();
+        let slept_at = ContinuousInstant::now();
         target.suspend_from(SYSTEM_SLEEP);
         target.suspend_from(SCREEN_SLEEP);
 
-        assert!(!reconcilable(SYSTEM_SLEEP | SCREEN_SLEEP));
-        target.sources().discharge(PRESENT);
+        let darkwake = ActivityLevels {
+            graphics: SystemGraphics::Down,
+            ..PRESENT
+        };
+        target
+            .sources()
+            .discharge_at(darkwake, slept_at + Duration::from_secs(30));
         assert!(
             !gate.allows_io(),
-            "only the paired wake notification may clear a system sleep",
+            "a DarkWake is not a wake, however present the other levels look",
         );
 
         // The ordinary, user-visible resume still works.
         target.resume_from(SYSTEM_SLEEP | SCREEN_SLEEP);
+        assert!(gate.allows_io());
+    }
+
+    /// The 2026-09-11 field failure (#1281). Plugging the dock in woke the
+    /// machine into a DarkWake, macOS promoted it to a full wake to show a
+    /// notification and immediately posted `WillSleep` to go back to sleep —
+    /// then HID activity promoted it to a full wake again. No wake notification
+    /// paired with that `WillSleep`, because neither the screens nor the
+    /// session had ever moved, and the gate stayed shut for four minutes until
+    /// the agent was restarted by hand.
+    #[test]
+    fn a_system_sleep_whose_wake_never_arrives_is_reconciled_by_input_after_it() {
+        let (target, gate) = present_target();
+        let slept_at = ContinuousInstant::now();
+        target.suspend_from(SYSTEM_SLEEP);
+        assert!(!gate.allows_io());
+
+        // Half a second later the capability set still read graphics-down
+        // (`caps=9` in that evening's probe log): the DarkWake the notification
+        // wake dropped back into.
+        let darkwake = ActivityLevels {
+            graphics: SystemGraphics::Down,
+            idle: Duration::from_millis(500),
+            ..PRESENT
+        };
+        target
+            .sources()
+            .discharge_at(darkwake, slept_at + Duration::from_millis(500));
+        assert!(!gate.allows_io(), "still a DarkWake");
+
+        // Four seconds in, the capability set has read graphics-up (`caps=15`)
+        // but the newest input is still the one from before the sleep request.
+        let before_the_sleep = ActivityLevels {
+            idle: Duration::from_millis(4_200),
+            ..PRESENT
+        };
+        target
+            .sources()
+            .discharge_at(before_the_sleep, slept_at + Duration::from_secs(4));
+        assert!(
+            !gate.allows_io(),
+            "input from before the sleep proves nothing"
+        );
+
+        // The HID activity that promoted the wake landed 5.44 s in — past the
+        // sleep-request margin — so the next tick reconciles.
+        let after_the_sleep = ActivityLevels {
+            idle: Duration::from_millis(560),
+            ..PRESENT
+        };
+        target
+            .sources()
+            .discharge_at(after_the_sleep, slept_at + Duration::from_secs(6));
+        assert!(gate.allows_io());
+    }
+
+    /// The proof a system sleep demands, level by level.
+    #[test]
+    fn only_a_full_wake_with_input_after_the_sleep_discharges_a_system_sleep() {
+        let stood_for = Duration::from_secs(12);
+        let after_the_sleep = |levels: ActivityLevels| ActivityLevels {
+            idle: Duration::from_secs(5),
+            ..levels
+        };
+        let with = |levels| discharged_by(SYSTEM_SLEEP, stood_for, after_the_sleep(levels));
+
+        assert_eq!(with(PRESENT), SYSTEM_SLEEP, "a full wake with fresh input");
+        assert_eq!(
+            with(ActivityLevels {
+                graphics: SystemGraphics::Down,
+                ..PRESENT
+            }),
+            0,
+            "a DarkWake proves nothing however fresh the input",
+        );
+        // Unlike every other source, a system sleep needs the *positive*
+        // capability read: the state it has to rule out is the one all the
+        // other levels get wrong (#656).
+        let unreadable = ActivityLevels {
+            graphics: SystemGraphics::Unknown,
+            ..PRESENT
+        };
+        assert_eq!(
+            with(unreadable),
+            0,
+            "an unreadable capability set is not a wake"
+        );
+        assert_eq!(
+            discharged_by(STARTUP, stood_for, after_the_sleep(unreadable)),
+            STARTUP,
+            "and the same levels must still prove a launch display",
+        );
+        assert_eq!(
+            with(ActivityLevels {
+                displays_report_asleep: true,
+                ..PRESENT
+            }),
+            0,
+            "a display that reports itself asleep is not one to resume into",
+        );
+        assert_eq!(
+            with(ActivityLevels {
+                on_console: false,
+                ..PRESENT
+            }),
+            0,
+            "another user owns the console",
+        );
+        // Input older than the sleep is the input that preceded it.
+        for idle in [stood_for, Duration::from_secs(11), Duration::MAX] {
+            assert_eq!(
+                discharged_by(SYSTEM_SLEEP, stood_for, ActivityLevels { idle, ..PRESENT }),
+                0,
+                "input from before the sleep proves nothing about after it",
+            );
+        }
+    }
+
+    /// The pre-sleep edge: between `WillSleep` and the freeze the machine is
+    /// still a full wake, so a mouse brush there must not reopen the gate on
+    /// the way *into* a sleep.
+    #[test]
+    fn input_inside_the_sleep_request_window_does_not_prove_a_wake() {
+        let just_now = |held_for| {
+            system_wake_is_proven(
+                held_for,
+                ActivityLevels {
+                    idle: Duration::from_millis(100),
+                    ..PRESENT
+                },
+            )
+        };
+
+        assert!(!just_now(Duration::from_millis(500)));
+        assert!(!just_now(SYSTEM_WAKE_INPUT_GRACE));
+        // Past the grace it is the same relative proof a reported screen sleep
+        // gets: input strictly newer than the suspension.
+        assert!(just_now(
+            SYSTEM_WAKE_INPUT_GRACE + Duration::from_millis(200)
+        ));
+    }
+
+    /// A second `WillSleep` over a source the set already holds still restarts
+    /// the clock. Without that, a `SYSTEM_SLEEP` left standing by an aborted
+    /// sleep hands its whole age to the next sleep attempt, and a mouse brushed
+    /// a moment into *that* one clears an hours-old `held_for` — the gate
+    /// opening into a real sleep, which is what the margin exists to stop.
+    #[test]
+    fn a_repeated_will_sleep_restarts_the_clock_the_proof_measures_against() {
+        let (target, gate) = present_target();
+        let stranded_at = ContinuousInstant::now();
+        target.sources().suspend_from_at(SYSTEM_SLEEP, stranded_at);
+
+        // The sleep is aborted, nothing clears the source, and five minutes
+        // later a real sleep attempt posts `WillSleep` over the top of it.
+        let attempt_at = stranded_at + Duration::from_mins(5);
+        target.sources().suspend_from_at(SYSTEM_SLEEP, attempt_at);
+
+        // Input from inside the new sleep request proves nothing. Inheriting
+        // the first edge's instant is what would clear it: 0.3 s of idle
+        // against a five-minute `held_for`.
+        let brushed = ActivityLevels {
+            idle: Duration::from_millis(300),
+            ..PRESENT
+        };
+        target
+            .sources()
+            .discharge_at(brushed, attempt_at + Duration::from_millis(300));
+        assert!(
+            !gate.allows_io(),
+            "input from inside the sleep request is not a wake",
+        );
+
+        // Past the margin the ordinary recovery still works.
+        let back = ActivityLevels {
+            idle: Duration::from_secs(1),
+            ..PRESENT
+        };
+        target.sources().discharge_at(
+            back,
+            attempt_at + SYSTEM_WAKE_INPUT_GRACE + Duration::from_secs(2),
+        );
         assert!(gate.allows_io());
     }
 
@@ -1334,6 +1683,7 @@ mod tests {
             STARTUP,
             SCREEN_SLEEP,
             SESSION_INACTIVE,
+            SYSTEM_SLEEP,
             STARTUP | SCREEN_SLEEP,
         ] {
             assert_eq!(
@@ -1382,7 +1732,7 @@ mod tests {
             on_console: false,
             ..PRESENT
         };
-        for held in [STARTUP, SCREEN_SLEEP, SESSION_INACTIVE] {
+        for held in [STARTUP, SCREEN_SLEEP, SESSION_INACTIVE, SYSTEM_SLEEP] {
             assert_eq!(discharged_by(held, Duration::from_secs(60), elsewhere), 0);
         }
     }
@@ -1408,16 +1758,23 @@ mod tests {
         assert!(gate.allows_io());
     }
 
+    /// Every outstanding suspension ticks, including a system sleep: an
+    /// unpaired `WillSleep` is the one the reconciler was missing (#1281), and
+    /// the DarkWake it must not act on is excluded by the proof, not by parking.
     #[test]
-    fn only_a_system_sleep_is_beyond_the_reach_of_a_level_read() {
+    fn every_outstanding_suspension_is_reconcilable() {
         assert!(!reconcilable(0), "an open gate has nothing to reconcile");
-        assert!(reconcilable(STARTUP));
-        assert!(reconcilable(SCREEN_SLEEP));
-        assert!(reconcilable(SESSION_INACTIVE));
-        assert!(reconcilable(SCREEN_SLEEP | SESSION_INACTIVE));
-        assert!(!reconcilable(SYSTEM_SLEEP));
-        assert!(!reconcilable(SYSTEM_SLEEP | SCREEN_SLEEP));
-        assert!(!reconcilable(SYSTEM_SLEEP | STARTUP));
+        for held in [
+            STARTUP,
+            SCREEN_SLEEP,
+            SESSION_INACTIVE,
+            SYSTEM_SLEEP,
+            SCREEN_SLEEP | SESSION_INACTIVE,
+            SYSTEM_SLEEP | SCREEN_SLEEP,
+            SYSTEM_SLEEP | STARTUP,
+        ] {
+            assert!(reconcilable(held), "{} must be reconcilable", Sources(held));
+        }
     }
 
     #[test]
