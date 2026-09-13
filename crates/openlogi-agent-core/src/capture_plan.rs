@@ -77,7 +77,7 @@ pub struct DeviceCapturePlan {
 /// Read-only, lossless, coalescing view of the latest capture-plan snapshot.
 pub type SharedCapturePlans = watch::Receiver<Arc<Vec<DeviceCapturePlan>>>;
 
-/// Back/Forward gesture maps that macOS must own through device-specific HID++
+/// Middle/Back/Forward gesture maps that macOS must own through device-specific HID++
 /// capture because Bluetooth-direct CGEvents may carry no sender identity.
 #[must_use]
 pub(crate) fn hidpp_side_gesture_maps_for(
@@ -90,7 +90,7 @@ pub(crate) fn hidpp_side_gesture_maps_for(
     }
     oshook_gestures_for(config, Some(config_key), app)
         .into_iter()
-        .filter(|(button, _)| matches!(button, ButtonId::Back | ButtonId::Forward))
+        .filter(|(button, _)| matches!(button, ButtonId::MiddleClick | ButtonId::Back | ButtonId::Forward))
         .collect()
 }
 
