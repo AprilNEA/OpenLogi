@@ -41,6 +41,8 @@ enum KeyPhase {
 enum HeldKey {
     #[cfg(target_os = "macos")]
     Command,
+    /// The platform logo key: Linux `KEY_LEFTMETA`, the Windows key, macOS Command.
+    Super,
     Control,
     Shift,
     Alt,
@@ -81,6 +83,7 @@ impl HeldModifiers {
             HeldKey::Control => Some(1 << 1),
             HeldKey::Shift => Some(1 << 2),
             HeldKey::Alt => Some(1 << 3),
+            HeldKey::Super => Some(1 << 4),
             HeldKey::Key(_) => None,
         }
     }
@@ -137,6 +140,7 @@ impl HeldOutput {
             HeldKey::Control,
             HeldKey::Shift,
             HeldKey::Alt,
+            HeldKey::Super,
         ] {
             modifiers.set(key, self.owners.contains_key(&key));
         }
@@ -168,6 +172,9 @@ fn held_keys(combo: &KeyCombo) -> Vec<HeldKey> {
     }
     if combo.has_option() {
         keys.push(HeldKey::Alt);
+    }
+    if combo.has_super() {
+        keys.push(HeldKey::Super);
     }
     keys.push(HeldKey::Key(combo.key()));
     keys

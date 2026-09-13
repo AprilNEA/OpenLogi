@@ -295,6 +295,9 @@ fn combo_modifiers(combo: &KeyCombo) -> Vec<u16> {
     if combo.has_option() {
         modifiers.push(VK_MENU);
     }
+    if combo.has_super() {
+        modifiers.push(VK_LWIN);
+    }
     modifiers
 }
 
@@ -317,6 +320,7 @@ fn held_virtual_key(key: HeldKey) -> Option<u16> {
         HeldKey::Control => Some(VK_CONTROL),
         HeldKey::Shift => Some(VK_SHIFT),
         HeldKey::Alt => Some(VK_MENU),
+        HeldKey::Super => Some(VK_LWIN),
         HeldKey::Key(usage) => {
             let key = super::hid_usage_to_windows(usage.code());
             if key.is_none() {
