@@ -67,6 +67,16 @@ fn unit_path() -> io::Result<PathBuf> {
 /// `Restart=on-failure` mirrors the macOS `KeepAlive=SuccessfulExit:false`
 /// semantics: the agent is respawned after a crash but a clean `exit(0)` (e.g.
 /// the tray's Quit) stays stopped until the next login.
+///
+/// `ExecStartPre` waits for a Bluetooth adapter node to appear (and settle)
+/// before this agent starts opening HID++ sessions: a user unit can't order
+/// against the system `bluetooth.service` via `After=`, so without this a
+/// kernel-side adapter bring-up racing this agent's own probing at login can
+/// leave the adapter's HCI commands timing out for the rest of the session
+/// (#1065). A machine with no Bluetooth subsystem at all (no
+/// `/sys/class/bluetooth`) returns immediately; otherwise bounded at 10s,
+/// matching any `hciN` node rather than assuming `hci0` — mirrors the
+/// packaged unit at `packaging/linux/systemd/openlogi-agent.service`.
 fn render_unit(exe: &str) -> String {
     let exec_start = escape_systemd_exec(exe);
     format!(
@@ -76,6 +86,7 @@ fn render_unit(exe: &str) -> String {
         \n\
         [Service]\n\
         Type=simple\n\
+        ExecStartPre=/usr/bin/bash -c '[ -d /sys/class/bluetooth ] || exit 0; for i in $(seq 1 20); do ls /sys/class/bluetooth/hci* >/dev/null 2>&1 && {{ sleep 3; exit 0; }}; sleep 0.5; done'\n\
         ExecStart={exec_start}\n\
         Restart=on-failure\n\
         RestartSec=5\n\
@@ -143,6 +154,24 @@ mod tests {
         assert!(body.contains("Restart=on-failure"));
         assert!(body.contains("WantedBy=graphical-session.target"));
         assert!(!body.contains("--minimized"));
+    }
+
+    #[test]
+    fn rendered_unit_waits_for_bluetooth_before_starting() {
+        let body = render_unit("/usr/bin/openlogi-agent");
+        let exec_start_pre = body
+            .lines()
+            .find(|line| line.starts_with("ExecStartPre="))
+            .expect("ExecStartPre line");
+        // Matches any hciN node, not just hci0, and exits immediately when
+        // the Bluetooth subsystem isn't present at all rather than always
+        // running the bounded wait loop.
+        assert!(exec_start_pre.contains("[ -d /sys/class/bluetooth ] || exit 0"));
+        assert!(exec_start_pre.contains("/sys/class/bluetooth/hci*"));
+        assert!(!exec_start_pre.contains("hci0"));
+        // Must precede ExecStart, not follow it — systemd runs ExecStartPre
+        // entries in the order they appear.
+        assert!(body.find("ExecStartPre=").unwrap() < body.find("ExecStart=/usr").unwrap());
     }
 
     #[test]
