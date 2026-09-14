@@ -18,10 +18,10 @@ use std::sync::{Arc, LazyLock};
 use async_hid::{AsyncHidRead, AsyncHidWrite, DeviceReader, DeviceWriter};
 use async_hid::{DeviceInfo, HidBackend};
 use futures_lite::{Stream, StreamExt as _};
-use hidpp::channel::{HidppChannel, RequestSwId, SwIdPolicy};
-use hidpp::nibble::U4;
 #[cfg(not(target_os = "windows"))]
-use hidpp::{async_trait, channel::RawHidChannel};
+use hidpp::async_trait;
+use hidpp::channel::{ChannelObserver, HidppChannel, RawHidChannel, RequestSwId, SwIdPolicy};
+use hidpp::nibble::U4;
 #[cfg(not(target_os = "windows"))]
 use tokio::sync::Mutex;
 use tracing::debug;
@@ -122,7 +122,7 @@ fn node_info(info: &DeviceInfo) -> NodeInfo {
 static SW_ID_LEASES: AtomicU16 = AtomicU16::new(0);
 
 mod native;
-pub(crate) use native::native_backend;
+pub(crate) use native::{native_backend, recording_backend};
 
 #[cfg(any(target_os = "windows", test))]
 mod windows;
@@ -395,6 +395,24 @@ pub(crate) async fn open_hidpp_channel(
     dev: &async_hid::Device,
     device_io: DeviceIoGate,
 ) -> Result<Option<Arc<HidppChannel>>, BackendError> {
+    open_hidpp_channel_inner(dev, device_io, None).await
+}
+
+/// Open a native HID++ channel with `observer` installed before the channel's
+/// reader thread starts.
+pub(crate) async fn open_hidpp_channel_with_observer(
+    dev: &async_hid::Device,
+    device_io: DeviceIoGate,
+    observer: Arc<dyn ChannelObserver>,
+) -> Result<Option<Arc<HidppChannel>>, BackendError> {
+    open_hidpp_channel_inner(dev, device_io, Some(observer)).await
+}
+
+async fn open_hidpp_channel_inner(
+    dev: &async_hid::Device,
+    device_io: DeviceIoGate,
+    observer: Option<Arc<dyn ChannelObserver>>,
+) -> Result<Option<Arc<HidppChannel>>, BackendError> {
     if !device_io.allows_io() {
         return Err(device_io_suspended());
     }
@@ -410,7 +428,7 @@ pub(crate) async fn open_hidpp_channel(
         let raw = WindowsHidppChannel::open(dev, info.clone(), device_io)
             .await
             .map_err(backend_error)?;
-        let channel = match HidppChannel::from_raw_channel(raw).await {
+        let channel = match hidpp_channel_from_raw(raw, observer).await {
             Ok(mut c) => {
                 configure_channel_sw_ids(&mut c)?;
                 Arc::new(c)
@@ -433,7 +451,7 @@ pub(crate) async fn open_hidpp_channel(
         // it advertises short-unsupported and the `hidpp` channel up-converts shorts.
         let long_only = is_long_only_collection(info.usage_page, info.usage_id);
         let raw = AsyncHidChannel::new(reader, writer, info.clone(), long_only, device_io);
-        let channel = match HidppChannel::from_raw_channel(raw).await {
+        let channel = match hidpp_channel_from_raw(raw, observer).await {
             Ok(mut c) => {
                 configure_channel_sw_ids(&mut c)?;
                 Arc::new(c)
@@ -448,6 +466,16 @@ pub(crate) async fn open_hidpp_channel(
         // sight (and on reconnect) only — not every pass.
         debug!(name = %info.name, vid = format_args!("{:04x}", info.vendor_id), "opened HID++ channel");
         Ok(Some(channel))
+    }
+}
+
+pub(crate) async fn hidpp_channel_from_raw(
+    raw: impl RawHidChannel,
+    observer: Option<Arc<dyn ChannelObserver>>,
+) -> Result<HidppChannel, hidpp::channel::ChannelError> {
+    match observer {
+        Some(observer) => HidppChannel::from_raw_channel_with_observer(raw, observer).await,
+        None => HidppChannel::from_raw_channel(raw).await,
     }
 }
 

@@ -15,6 +15,8 @@ use hidpp::feature::wireless_device_status::WirelessDeviceStatusEvent;
 use hidpp::protocol::{v10, v20};
 use hidpp::receiver::{bolt, unifying};
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use tokio::sync::Notify;
 use tokio::sync::mpsc;
 
 use crate::ReceiverProtocol;
@@ -39,11 +41,18 @@ pub enum HidppEventSource {
 #[derive(Clone)]
 pub struct EventNotifier {
     sender: mpsc::Sender<HidppEventSource>,
+    #[cfg(test)]
+    observation: Option<Arc<EventObservation>>,
 }
 
 impl EventNotifier {
     fn notify(&self, source: HidppEventSource) {
         let _ = self.sender.try_send(source);
+        #[cfg(test)]
+        if let Some(observation) = &self.observation {
+            observation.count.fetch_add(1, Ordering::Release);
+            observation.changed.notify_waiters();
+        }
     }
 }
 
@@ -54,7 +63,57 @@ pub type EventReceiver = mpsc::Receiver<HidppEventSource>;
 #[must_use]
 pub fn event_channel() -> (EventNotifier, EventReceiver) {
     let (sender, receiver) = mpsc::channel(1);
-    (EventNotifier { sender }, receiver)
+    (
+        EventNotifier {
+            sender,
+            #[cfg(test)]
+            observation: None,
+        },
+        receiver,
+    )
+}
+
+#[cfg(test)]
+struct EventObservation {
+    count: AtomicUsize,
+    changed: Notify,
+}
+
+/// Barrier observing decoded lifecycle events, including coalesced requests.
+#[cfg(test)]
+pub(crate) struct EventObserver {
+    observation: Arc<EventObservation>,
+}
+
+#[cfg(test)]
+impl EventObserver {
+    pub(crate) async fn wait_for(&self, expected: usize) {
+        loop {
+            let changed = self.observation.changed.notified();
+            if self.observation.count.load(Ordering::Acquire) >= expected {
+                return;
+            }
+            changed.await;
+        }
+    }
+}
+
+/// Build the production capacity-one event channel plus a decode observation barrier.
+#[cfg(test)]
+pub(crate) fn observed_event_channel() -> (EventNotifier, EventReceiver, EventObserver) {
+    let (sender, receiver) = mpsc::channel(1);
+    let observation = Arc::new(EventObservation {
+        count: AtomicUsize::new(0),
+        changed: Notify::new(),
+    });
+    (
+        EventNotifier {
+            sender,
+            observation: Some(Arc::clone(&observation)),
+        },
+        receiver,
+        EventObserver { observation },
+    )
 }
 
 /// Runtime feature indexes whose unsolicited events affect inventory.

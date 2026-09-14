@@ -26,7 +26,7 @@ mod lighting;
 mod litra;
 mod smartshift;
 
-pub use backlight::{get_backlight, set_backlight_enabled};
+pub use backlight::{get_backlight, get_backlight_on, set_backlight_enabled};
 pub use diagnostics::{
     FeatureEntry, FirmwareEntity, FirmwareEntityInfo, ReprogControlEntry, dump_features,
     dump_firmware_entities, dump_reprog_controls, read_battery_raw,

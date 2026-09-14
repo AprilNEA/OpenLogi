@@ -61,20 +61,54 @@ pub enum ReceiverFamily {
     Unifying,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum PairingPhase {
-    BoltDiscovery,
-    BoltPairing,
+enum SessionState {
+    BoltDiscovery(BoltDiscovery),
+    BoltPairing(BoltPairing),
     UnifyingPairing,
 }
 
-impl From<ReceiverFamily> for PairingPhase {
+impl From<ReceiverFamily> for SessionState {
     fn from(family: ReceiverFamily) -> Self {
         match family {
-            ReceiverFamily::Bolt => Self::BoltDiscovery,
+            ReceiverFamily::Bolt => Self::BoltDiscovery(BoltDiscovery::default()),
             ReceiverFamily::Unifying => Self::UnifyingPairing,
         }
     }
+}
+
+impl SessionState {
+    async fn open(&self, channel: &HidppChannel) -> Result<(), PairingError> {
+        match self {
+            Self::BoltDiscovery(_) => {
+                write_register(channel, BOLT_DISCOVERY, [DISCOVERY_TIMEOUT, 0x01, 0x00]).await
+            }
+            Self::UnifyingPairing => {
+                write_register(channel, UNIFYING_PAIRING, [0x01, 0x00, DISCOVERY_TIMEOUT]).await
+            }
+            Self::BoltPairing(_) => unreachable!("a session starts in receiver-open state"),
+        }
+    }
+
+    fn select_bolt_device(&mut self, device: &DiscoveredDevice) -> Result<(), PairingError> {
+        match self {
+            Self::BoltDiscovery(_) | Self::BoltPairing(_) => {
+                *self = Self::BoltPairing(BoltPairing {
+                    authentication: device.authentication,
+                });
+                Ok(())
+            }
+            Self::UnifyingPairing => Err(PairingError::UnsupportedCommand),
+        }
+    }
+}
+
+#[derive(Default)]
+struct BoltDiscovery {
+    partial: HashMap<u16, PartialDevice>,
+}
+
+struct BoltPairing {
+    authentication: u8,
 }
 
 fn family_for(product_id: u16) -> Option<ReceiverFamily> {
@@ -277,10 +311,10 @@ async fn run_session(
     notifications: &mut mpsc::UnboundedReceiver<HidppMessage>,
     events: &mpsc::UnboundedSender<PairingEvent>,
 ) -> Result<(), PairingError> {
-    let mut phase = PairingPhase::from(family);
-    let result = drive(channel, family, &mut phase, commands, notifications, events).await;
+    let mut state = SessionState::from(family);
+    let result = drive(channel, &mut state, commands, notifications, events).await;
     if result.is_err() {
-        cancel(channel, phase).await;
+        cancel(channel, &state).await;
     }
     result
 }
@@ -288,28 +322,15 @@ async fn run_session(
 /// Core session loop.
 async fn drive(
     channel: &HidppChannel,
-    family: ReceiverFamily,
-    phase: &mut PairingPhase,
+    state: &mut SessionState,
     commands: &mut mpsc::UnboundedReceiver<PairingCommand>,
     notifications: &mut mpsc::UnboundedReceiver<HidppMessage>,
     events: &mpsc::UnboundedSender<PairingEvent>,
 ) -> Result<(), PairingError> {
     write_register(channel, NOTIFICATIONS, NOTIFICATION_FLAGS).await?;
-
-    match family {
-        ReceiverFamily::Bolt => {
-            write_register(channel, BOLT_DISCOVERY, [DISCOVERY_TIMEOUT, 0x01, 0x00]).await?;
-        }
-        ReceiverFamily::Unifying => {
-            write_register(channel, UNIFYING_PAIRING, [0x01, 0x00, DISCOVERY_TIMEOUT]).await?;
-        }
-    }
+    state.open(channel).await?;
     let _ = events.send(PairingEvent::Searching);
 
-    // Partial Bolt discovery frames, keyed by discovery counter.
-    let mut partial: HashMap<u16, PartialDevice> = HashMap::new();
-    // Auth byte of the device the user chose to pair, for passkey rendering.
-    let mut pairing_auth: Option<u8> = None;
     let deadline = tokio::time::sleep(SESSION_TIMEOUT);
     tokio::pin!(deadline);
 
@@ -319,13 +340,7 @@ async fn drive(
 
             cmd = commands.recv() => match cmd {
                 Some(PairingCommand::Pair(device)) => {
-                    if family != ReceiverFamily::Bolt {
-                        return Err(PairingError::UnsupportedCommand);
-                    }
-                    pairing_auth = Some(device.authentication);
-                    if *phase == PairingPhase::BoltDiscovery {
-                        *phase = PairingPhase::BoltPairing;
-                    }
+                    state.select_bolt_device(&device)?;
                     pair_bolt_device(channel, &device).await?;
                 }
                 Some(PairingCommand::Cancel) | None => {
@@ -344,9 +359,14 @@ async fn drive(
                 let Some(note) = parse_notification(sub_id, device_index, payload) else {
                     continue;
                 };
+                // Discovery is phase-bound: a late DeviceFound would move the
+                // event owner back from Pairing to Found after selection.
                 match note {
                     Notification::DiscoveryInfo { counter, kind, address, authentication } => {
-                        let entry = partial.entry(counter).or_default();
+                        let SessionState::BoltDiscovery(discovery) = state else {
+                            continue;
+                        };
+                        let entry = discovery.partial.entry(counter).or_default();
                         entry.kind = Some(kind);
                         entry.address = Some(address);
                         entry.authentication = Some(authentication);
@@ -355,15 +375,22 @@ async fn drive(
                         }
                     }
                     Notification::DiscoveryName { counter, name } => {
-                        let entry = partial.entry(counter).or_default();
+                        let SessionState::BoltDiscovery(discovery) = state else {
+                            continue;
+                        };
+                        let entry = discovery.partial.entry(counter).or_default();
                         entry.name = Some(name);
                         if let Some(device) = entry.build() {
                             let _ = events.send(PairingEvent::DeviceFound(device));
                         }
                     }
                     Notification::Passkey { digits, value } => {
-                        let method = match pairing_auth {
-                            Some(auth) if auth & 0x01 != 0 => PasskeyMethod::Keyboard(digits),
+                        let method = match state {
+                            SessionState::BoltPairing(pairing)
+                                if pairing.authentication & 0x01 != 0 =>
+                            {
+                                PasskeyMethod::Keyboard(digits)
+                            }
                             _ => PasskeyMethod::Pointer {
                                 clicks: passkey_to_clicks(value),
                                 passkey: digits,
@@ -379,7 +406,8 @@ async fn drive(
                         return Ok(());
                     }
                     Notification::PairingError(code) => return Err(PairingError::Device(code)),
-                    Notification::Connected { slot, established } if family == ReceiverFamily::Unifying => {
+                    Notification::Connected { slot, established }
+                        if matches!(state, SessionState::UnifyingPairing) => {
                         if established {
                             let _ = events.send(PairingEvent::Paired { slot });
                             return Ok(());
@@ -448,22 +476,27 @@ async fn pair_bolt_device(
 }
 
 /// Best-effort cancel of an in-progress flow.
-async fn cancel(channel: &HidppChannel, phase: PairingPhase) {
-    let res = match phase {
-        PairingPhase::BoltDiscovery => {
+async fn cancel(channel: &HidppChannel, state: &SessionState) {
+    let res = match state {
+        SessionState::BoltDiscovery(_) => {
             write_register(channel, BOLT_DISCOVERY, [DISCOVERY_TIMEOUT, 0x02, 0x00]).await
         }
-        PairingPhase::BoltPairing => {
+        SessionState::BoltPairing(_) => {
             let mut payload = [0u8; 16];
             payload[0] = 0x02;
             write_long_register(channel, BOLT_PAIRING, payload).await
         }
-        PairingPhase::UnifyingPairing => {
+        SessionState::UnifyingPairing => {
             write_register(channel, UNIFYING_PAIRING, [0x02, 0x00, 0x00]).await
         }
     };
     if let Err(e) = res {
-        debug!(?phase, ?e, "cancel write failed");
+        let phase = match state {
+            SessionState::BoltDiscovery(_) => "Bolt discovery",
+            SessionState::BoltPairing(_) => "Bolt pairing",
+            SessionState::UnifyingPairing => "Unifying pairing",
+        };
+        debug!(phase, ?e, "cancel write failed");
     }
 }
 

@@ -6,11 +6,11 @@
 //! exposes exact device-supported values once the list is known.
 
 use gpui::{
-    AnyElement, AppContext as _, Context, Entity, IntoElement, ParentElement, Render, SharedString,
-    Styled, Subscription, Window, div, px,
+    AnyElement, AppContext as _, Context, Entity, IntoElement, ParentElement, Render, Styled,
+    Subscription, Window, div, px,
 };
 use gpui_component::{
-    IconName, Selectable as _, Sizable as _,
+    Icon, IconName, Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     slider::{Slider, SliderEvent, SliderState},
@@ -287,23 +287,29 @@ fn dpi_panel_snapshot(cx: &mut Context<DpiPanel>) -> DpiPanelSnapshot {
         })
 }
 
-fn dpi_range_label(status: &DpiStatus, reachable: bool) -> SharedString {
+fn dpi_range_label(status: &DpiStatus, reachable: bool) -> AnyElement {
     match status {
-        // The numeric range is digits and symbols only — nothing to translate.
-        DpiStatus::Ready(info) => format!(
-            "{}–{} · step {}",
-            info.capabilities.min(),
-            info.capabilities.max(),
-            info.capabilities.step_hint()
-        )
-        .into(),
+        DpiStatus::Ready(info) => h_flex()
+            .gap_1()
+            .child(format!(
+                "{}–{}",
+                info.capabilities.min(),
+                info.capabilities.max()
+            ))
+            .child(Icon::empty().path("action-icons/dot.svg").size_3())
+            .child(tr!("pointer.dpi_step", step => info.capabilities.step_hint()))
+            .into_any_element(),
         DpiStatus::Unknown | DpiStatus::Loading if !reachable => {
-            tr!("pointer.dpi_range_device_offline")
+            tr!("pointer.dpi_range_device_offline").into_any_element()
         }
-        DpiStatus::Unknown | DpiStatus::Loading => tr!("pointer.loading_device_dpi_range"),
-        DpiStatus::Failed(message) => tr!("pointer.dpi_read_failed", message => message),
+        DpiStatus::Unknown | DpiStatus::Loading => {
+            tr!("pointer.loading_device_dpi_range").into_any_element()
+        }
+        DpiStatus::Failed(message) => {
+            tr!("pointer.dpi_read_failed", message => message).into_any_element()
+        }
         DpiStatus::Unsupported(message) => {
-            tr!("pointer.dpi_range_unavailable", message => message)
+            tr!("pointer.dpi_range_unavailable", message => message).into_any_element()
         }
     }
 }

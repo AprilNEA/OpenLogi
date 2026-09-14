@@ -1,0 +1,316 @@
+{
+  "schema_version": 1,
+  "id": "openlogi-canonical-synthetic-profile",
+  "name": "OpenLogi canonical synthetic fixture",
+  "inventories": [
+    {
+      "receiver": {
+        "name": "Synthetic Bolt Receiver",
+        "vendor_id": 1133,
+        "product_id": 50504,
+        "unique_id": "OL-BOLT-UID-0001"
+      },
+      "paired": [
+        {
+          "slot": 1,
+          "codename": "Synthetic Performance Mouse",
+          "wpid": 45108,
+          "kind": "mouse",
+          "online": true,
+          "battery": {
+            "percentage": 80,
+            "level": "good",
+            "status": "discharging"
+          },
+          "model_info": {
+            "entity_count": 3,
+            "serial_number": null,
+            "unit_id": [79, 76, 68, 1],
+            "transports": {
+              "usb": false,
+              "equad": true,
+              "btle": true,
+              "bluetooth": false
+            },
+            "model_ids": [45108, 16514, 0],
+            "extended_model_id": 11
+          },
+          "capabilities": {
+            "buttons": true,
+            "pointer": true,
+            "lighting": false,
+            "scroll_inversion": true,
+            "hires_wheel": true,
+            "thumbwheel": true,
+            "haptic_feedback": true,
+            "haptic_panel": true
+          }
+        },
+        {
+          "slot": 2,
+          "codename": "Synthetic Offline Mouse",
+          "wpid": 16528,
+          "kind": "mouse",
+          "online": false,
+          "battery": null,
+          "model_info": null,
+          "capabilities": null
+        },
+        {
+          "slot": 3,
+          "codename": "Synthetic RGB Keyboard",
+          "wpid": 16522,
+          "kind": "keyboard",
+          "online": true,
+          "battery": {
+            "percentage": 100,
+            "level": "full",
+            "status": "full"
+          },
+          "model_info": {
+            "entity_count": 2,
+            "serial_number": null,
+            "unit_id": [79, 76, 68, 2],
+            "transports": {
+              "usb": false,
+              "equad": true,
+              "btle": true,
+              "bluetooth": false
+            },
+            "model_ids": [45915, 16522, 0],
+            "extended_model_id": 0
+          },
+          "capabilities": {
+            "buttons": false,
+            "pointer": false,
+            "lighting": true,
+            "scroll_inversion": false,
+            "hires_wheel": false,
+            "thumbwheel": false,
+            "haptic_feedback": false,
+            "haptic_panel": false
+          }
+        }
+      ]
+    },
+    {
+      "receiver": {
+        "name": "Synthetic Direct Mouse",
+        "vendor_id": 1133,
+        "product_id": 45088,
+        "unique_id": null
+      },
+      "paired": [
+        {
+          "slot": 255,
+          "codename": "Synthetic Direct Mouse",
+          "wpid": null,
+          "kind": "mouse",
+          "online": true,
+          "battery": {
+            "percentage": 55,
+            "level": "good",
+            "status": "discharging"
+          },
+          "model_info": {
+            "entity_count": 2,
+            "serial_number": null,
+            "unit_id": [79, 76, 68, 3],
+            "transports": {
+              "usb": true,
+              "equad": false,
+              "btle": true,
+              "bluetooth": false
+            },
+            "model_ids": [45088, 0, 0],
+            "extended_model_id": 0
+          },
+          "capabilities": {
+            "buttons": true,
+            "pointer": true,
+            "lighting": false,
+            "scroll_inversion": false,
+            "hires_wheel": false,
+            "thumbwheel": false,
+            "haptic_feedback": false,
+            "haptic_panel": false
+          }
+        }
+      ]
+    }
+  ],
+  "standalone": [
+    {
+      "address": {
+        "vendor_id": 1133,
+        "product_id": 51456,
+        "usage_page": 65347,
+        "usage_id": 514,
+        "identity": "OPENLOGI-FIXTURE-RAWHID-001"
+      },
+      "display_name": "Synthetic Studio Light",
+      "manufacturer": "OpenLogi Test Fixture",
+      "serial_number": null,
+      "unit_id": [79, 76, 68, 4],
+      "kind": "light",
+      "online": true,
+      "capabilities": null,
+      "light_capabilities": {
+        "power": true,
+        "brightness": {
+          "min": 0,
+          "max": 100,
+          "step": 1,
+          "unit": "percent"
+        },
+        "temperature": {
+          "min": 2700,
+          "max": 6500,
+          "step": 100,
+          "unit": "kelvin"
+        },
+        "color": false,
+        "zones": false
+      },
+      "driver_id": "litra",
+      "registry_model_id": null
+    }
+  ],
+  "settings": [
+    {
+      "route": {
+        "Bolt": {
+          "receiver_uid": "OL-BOLT-UID-0001",
+          "slot": 1
+        }
+      },
+      "dpi": {
+        "support": "supported",
+        "value": {
+          "current": 1600,
+          "capabilities": {
+            "values": [200, 250, 300, 350, 400, 450, 500, 550, 600, 650, 700, 750, 800, 850, 900, 950, 1000, 1050, 1100, 1150, 1200, 1250, 1300, 1350, 1400, 1450, 1500, 1550, 1600, 1650, 1700, 1750, 1800, 1850, 1900, 1950, 2000, 2050, 2100, 2150, 2200, 2250, 2300, 2350, 2400, 2450, 2500, 2550, 2600, 2650, 2700, 2750, 2800, 2850, 2900, 2950, 3000, 3050, 3100, 3150, 3200, 3250, 3300, 3350, 3400, 3450, 3500, 3550, 3600, 3650, 3700, 3750, 3800, 3850, 3900, 3950, 4000, 4050, 4100, 4150, 4200, 4250, 4300, 4350, 4400, 4450, 4500, 4550, 4600, 4650, 4700, 4750, 4800, 4850, 4900, 4950, 5000, 5050, 5100, 5150, 5200, 5250, 5300, 5350, 5400, 5450, 5500, 5550, 5600, 5650, 5700, 5750, 5800, 5850, 5900, 5950, 6000, 6050, 6100, 6150, 6200, 6250, 6300, 6350, 6400, 6450, 6500, 6550, 6600, 6650, 6700, 6750, 6800, 6850, 6900, 6950, 7000, 7050, 7100, 7150, 7200, 7250, 7300, 7350, 7400, 7450, 7500, 7550, 7600, 7650, 7700, 7750, 7800, 7850, 7900, 7950, 8000]
+          }
+        }
+      },
+      "smartshift": {
+        "support": "supported",
+        "value": {
+          "mode": "Ratchet",
+          "auto_disengage": 16,
+          "tunable_torque": 50
+        }
+      },
+      "wheel": {
+        "support": "supported",
+        "value": {
+          "resolution": "high",
+          "inverted": false,
+          "target": "native"
+        }
+      },
+      "backlight": {
+        "support": "unsupported"
+      },
+      "lighting": "unsupported",
+      "light": "unsupported"
+    },
+    {
+      "route": {
+        "Bolt": {
+          "receiver_uid": "OL-BOLT-UID-0001",
+          "slot": 2
+        }
+      },
+      "dpi": {
+        "support": "unsupported"
+      },
+      "smartshift": {
+        "support": "unsupported"
+      },
+      "wheel": {
+        "support": "unsupported"
+      },
+      "backlight": {
+        "support": "unsupported"
+      },
+      "lighting": "unsupported",
+      "light": "unsupported"
+    },
+    {
+      "route": {
+        "Bolt": {
+          "receiver_uid": "OL-BOLT-UID-0001",
+          "slot": 3
+        }
+      },
+      "dpi": {
+        "support": "unsupported"
+      },
+      "smartshift": {
+        "support": "unsupported"
+      },
+      "wheel": {
+        "support": "unsupported"
+      },
+      "backlight": {
+        "support": "unsupported"
+      },
+      "lighting": "supported",
+      "light": "unsupported"
+    },
+    {
+      "route": {
+        "Direct": {
+          "vendor_id": 1133,
+          "product_id": 45088
+        }
+      },
+      "dpi": {
+        "support": "supported",
+        "value": {
+          "current": 1000,
+          "capabilities": {
+            "values": [400, 500, 600, 700, 800, 900, 1000, 1100, 1200, 1300, 1400, 1500, 1600, 1700, 1800, 1900, 2000, 2100, 2200, 2300, 2400, 2500, 2600, 2700, 2800, 2900, 3000, 3100, 3200, 3300, 3400, 3500, 3600, 3700, 3800, 3900, 4000]
+          }
+        }
+      },
+      "smartshift": {
+        "support": "unsupported"
+      },
+      "wheel": {
+        "support": "unsupported"
+      },
+      "backlight": {
+        "support": "unsupported"
+      },
+      "lighting": "unsupported",
+      "light": "unsupported"
+    },
+    {
+      "route": {
+        "RawHid": {
+          "vendor_id": 1133,
+          "product_id": 51456,
+          "usage_page": 65347,
+          "usage_id": 514,
+          "identity": "OPENLOGI-FIXTURE-RAWHID-001"
+        }
+      },
+      "dpi": {
+        "support": "unsupported"
+      },
+      "smartshift": {
+        "support": "unsupported"
+      },
+      "wheel": {
+        "support": "unsupported"
+      },
+      "backlight": {
+        "support": "unsupported"
+      },
+      "lighting": "unsupported",
+      "light": "supported"
+    }
+  ]
+}
