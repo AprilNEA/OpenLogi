@@ -799,6 +799,15 @@ fn a_side_gesture_button_uses_its_hidpp_raw_xy() {
         &[],
         &tx,
     );
+    handle_reprog_with_gesture_buttons(
+        &mut acc,
+        RawControlEvent::RawXy { dx: 17, dy: -3 },
+        &[],
+        &[],
+        &buttons,
+        &[],
+        &tx,
+    );
     handle_reprog_with_gesture_buttons(&mut acc, release(), &[], &[], &buttons, &[], &tx);
 
     assert_eq!(
@@ -811,6 +820,24 @@ fn a_side_gesture_button_uses_its_hidpp_raw_xy() {
             ButtonId::Forward,
             GestureDirection::Left
         ))
+    );
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::GestureMotion {
+            button: ButtonId::Forward,
+            delta_x: -120,
+            delta_y: 5,
+        }),
+        "the commit frame carries travel accumulated before direction resolution"
+    );
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::GestureMotion {
+            button: ButtonId::Forward,
+            delta_x: 17,
+            delta_y: -3,
+        }),
+        "later raw-XY reports remain available to interactive consumers"
     );
     assert_eq!(
         rx.try_recv(),

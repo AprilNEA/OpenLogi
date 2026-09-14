@@ -411,6 +411,41 @@ pub enum SmoothScrollPhase {
     Cancelled,
 }
 
+/// Lifecycle phase of an interactive macOS Space transition.
+///
+/// Unlike [`SmoothScrollPhase`], these frames represent a user's live
+/// hold-and-drag gesture rather than a time-smoothed wheel animation. Only
+/// macOS consumes them; other platforms retain their existing one-shot desktop
+/// actions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InteractiveSpacePhase {
+    /// First frame of a newly committed horizontal gesture.
+    Began,
+    /// A subsequent raw-XY movement frame from the held gesture source.
+    Changed,
+    /// The gesture button was released; macOS decides whether to finish or rebound.
+    Ended,
+    /// The capture session ended before a physical release could be observed.
+    Cancelled,
+}
+
+/// Whether this host supports OpenLogi's verified interactive Space-swipe
+/// injection protocol.
+///
+/// The legacy private Dock Swipe event layout is verified through macOS 26.
+/// macOS 27 changed the underlying event representation, so callers retain
+/// the ordinary one-shot desktop action there until a separately verified
+/// implementation is available.
+#[must_use]
+pub fn interactive_space_swipe_supported() -> bool {
+    cfg_select! {
+        target_os = "macos" => {
+            macos::interactive_space_swipe_supported()
+        }
+        _ => false
+    }
+}
+
 /// Synthesise one frame of a finite smooth-scroll animation.
 ///
 /// On macOS wheel ticks become continuous pixel events at ten points per tick,
@@ -429,6 +464,28 @@ pub fn post_smooth_scroll(delta: ScrollDelta, phase: SmoothScrollPhase) {
         _ => {
             let _ = phase;
             post_scroll(delta);
+        }
+    }
+}
+
+/// Send one cumulative-progress frame of an interactive macOS Space transition.
+///
+/// Returns `true` when the native event could be constructed and posted. The
+/// macOS Dock does not expose whether it accepted the gesture, so this only
+/// reports injection failure; callers may then fall back to the ordinary
+/// one-shot desktop action.
+#[must_use]
+pub fn post_interactive_space_swipe(progress_x: f64, phase: InteractiveSpacePhase) -> bool {
+    if !progress_x.is_finite() {
+        return false;
+    }
+    cfg_select! {
+        target_os = "macos" => {
+            macos::post_interactive_space_swipe(progress_x, phase)
+        }
+        _ => {
+            let _ = phase;
+            false
         }
     }
 }

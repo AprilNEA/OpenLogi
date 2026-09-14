@@ -3,7 +3,8 @@
 mod inject;
 
 pub use inject::{
-    HeldChord, SYNTHETIC_EVENT_USER_DATA, SmoothScrollPhase, ax_navigate_browser, execute,
+    HeldChord, InteractiveSpacePhase, SYNTHETIC_EVENT_USER_DATA, SmoothScrollPhase,
+    ax_navigate_browser, execute, interactive_space_swipe_supported, post_interactive_space_swipe,
     post_scroll, post_smooth_scroll, press_hold,
 };
 

@@ -2,6 +2,7 @@
 
 use std::sync::{LazyLock, Mutex};
 
+use core_graphics::display::CGDisplay;
 use core_graphics::event::{
     CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton, EventField,
     ScrollEventUnit,
@@ -16,7 +17,8 @@ use openlogi_core::binding::{
 use openlogi_core::scroll::ScrollDelta;
 
 use super::{
-    HeldKey, HeldModifiers, KeyPhase, QuantizedScroll, ScrollQuantizer, SmoothScrollPhase,
+    HeldKey, HeldModifiers, InteractiveSpacePhase, KeyPhase, QuantizedScroll, ScrollQuantizer,
+    SmoothScrollPhase,
 };
 
 static LINE_SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
@@ -25,6 +27,10 @@ static PIXEL_SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
     LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
 static SMOOTH_SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
     LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
+static INTERACTIVE_SPACE_SWIPE_SUPPORTED: LazyLock<bool> = LazyLock::new(|| {
+    let version = objc2_foundation::NSProcessInfo::processInfo().operatingSystemVersion();
+    legacy_dock_swipe_supported(version.majorVersion)
+});
 
 // `core-graphics` 0.25 does not expose these `CGEventTypes.h` fields.
 const SCROLL_PHASE: u32 = 99; // kCGScrollWheelEventScrollPhase
@@ -433,8 +439,11 @@ mod tests {
     use core_graphics::event::CGEventFlags;
     use openlogi_core::binding::Shortcut;
 
-    use super::{combo, held_key_event, hid_usage_to_macos};
-    use crate::inject::{HeldKey, HeldModifiers, KeyPhase};
+    use super::{
+        combo, dock_swipe_progress, dock_swipe_progress_bits, held_key_event, hid_usage_to_macos,
+        interactive_space_phase_value, legacy_dock_swipe_supported,
+    };
+    use crate::inject::{HeldKey, HeldModifiers, InteractiveSpacePhase, KeyPhase};
 
     #[test]
     fn hid_usages_map_to_macos_virtual_keys() {
@@ -494,6 +503,47 @@ mod tests {
             .expect("Command has a macOS virtual-key mapping");
         assert!(!flags.contains(CGEventFlags::CGEventFlagCommand));
         assert!(flags.contains(CGEventFlags::CGEventFlagControl));
+    }
+
+    #[test]
+    fn interactive_space_phases_match_native_continuous_scroll_phases() {
+        assert_eq!(
+            interactive_space_phase_value(InteractiveSpacePhase::Began),
+            1
+        );
+        assert_eq!(
+            interactive_space_phase_value(InteractiveSpacePhase::Changed),
+            2
+        );
+        assert_eq!(
+            interactive_space_phase_value(InteractiveSpacePhase::Ended),
+            4
+        );
+        assert_eq!(
+            interactive_space_phase_value(InteractiveSpacePhase::Cancelled),
+            8
+        );
+    }
+
+    #[test]
+    fn interactive_space_progress_is_normalised_to_the_main_display_span() {
+        assert_eq!(dock_swipe_progress(0.0, 1512.0), Some(0.0));
+        assert_eq!(dock_swipe_progress(f64::INFINITY, 1512.0), None);
+        assert_eq!(dock_swipe_progress(120.0, 0.0), Some(120.0 / 63.0));
+        assert_eq!(dock_swipe_progress(120.0, -63.0), None);
+    }
+
+    #[test]
+    fn interactive_space_progress_uses_the_docks_float32_bit_encoding() {
+        assert_eq!(dock_swipe_progress_bits(0.25), 0.25_f32.to_bits());
+        assert_eq!(dock_swipe_progress_bits(-0.5), (-0.5_f32).to_bits());
+    }
+
+    #[test]
+    fn interactive_space_swipe_uses_the_verified_legacy_protocol_through_macos_26() {
+        assert!(legacy_dock_swipe_supported(13));
+        assert!(legacy_dock_swipe_supported(26));
+        assert!(!legacy_dock_swipe_supported(27));
     }
 }
 
@@ -676,6 +726,97 @@ pub(super) fn post_smooth_scroll(delta: ScrollDelta, phase: SmoothScrollPhase) {
     ev.set_integer_value_field(MOMENTUM_PHASE, 0);
     tag_synthetic(&ev);
     ev.post(CGEventTapLocation::HID);
+}
+
+/// Scale raw HID++ gesture travel into macOS points before normalising it to
+/// Dock Swipe progress. Kept as a single native tuning point rather than
+/// exposing device units in user configuration.
+const SPACE_SWIPE_POINTS_PER_RAW_UNIT: f64 = 1.0;
+const DOCK_SWIPE_SEPARATOR_POINTS: f64 = 63.0;
+const DOCK_SWIPE_EVENT_SUBTYPE: f64 = 23.0;
+const DOCK_SWIPE_HORIZONTAL_MOTION: f64 = 1.0;
+const DOCK_SWIPE_INVERTED_FROM_DEVICE: i64 = 1;
+const FIRST_UNSUPPORTED_DOCK_SWIPE_MACOS_MAJOR: isize = 27;
+
+/// The type-30 field layout below is the legacy Dock Swipe protocol. macOS 27
+/// ignores those fields and requires an unverified IOHIDEvent-based replacement.
+pub(super) fn interactive_space_swipe_supported() -> bool {
+    *INTERACTIVE_SPACE_SWIPE_SUPPORTED
+}
+
+/// Post one cumulative-progress Dock Swipe frame for macOS Spaces.
+///
+/// Dock transitions are not ordinary continuous scroll events. They use a
+/// private type-30 event carrying a Dock Swipe subtype and total progress;
+/// posting scroll-wheel phases makes application content scroll but is ignored
+/// by the Dock.
+pub(super) fn post_interactive_space_swipe(progress_x: f64, phase: InteractiveSpacePhase) -> bool {
+    if !interactive_space_swipe_supported() {
+        return false;
+    }
+    let Some(event) = interactive_space_event(progress_x, phase) else {
+        return false;
+    };
+    event.post(CGEventTapLocation::Session);
+    true
+}
+
+fn interactive_space_event(progress_x: f64, phase: InteractiveSpacePhase) -> Option<CGEvent> {
+    let progress = dock_swipe_progress(progress_x, CGDisplay::main().bounds().size.width)?;
+    let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
+        tracing::warn!("CGEventSource::new failed for interactive Space swipe");
+        return None;
+    };
+    let Ok(event) = CGEvent::new(src) else {
+        tracing::warn!("CGEvent::new failed for interactive Space swipe");
+        return None;
+    };
+    // These private fields mirror the Dock Swipe event emitted by macOS's
+    // trackpad path. `core-graphics` does not name them because type 30 is
+    // private, but the numeric layout is stable through macOS 26.
+    event.set_double_value_field(55, 30.0);
+    event.set_double_value_field(41, 33_231.0);
+    event.set_double_value_field(110, DOCK_SWIPE_EVENT_SUBTYPE);
+    let phase = interactive_space_phase_value(phase);
+    event.set_double_value_field(132, f64::from(phase));
+    event.set_double_value_field(134, f64::from(phase));
+    event.set_double_value_field(124, progress);
+    event.set_integer_value_field(135, i64::from(dock_swipe_progress_bits(progress)));
+    let encoded_motion = f64::from(f32::from_bits(1));
+    event.set_double_value_field(119, encoded_motion);
+    event.set_double_value_field(139, encoded_motion);
+    event.set_double_value_field(123, DOCK_SWIPE_HORIZONTAL_MOTION);
+    event.set_double_value_field(165, DOCK_SWIPE_HORIZONTAL_MOTION);
+    event.set_integer_value_field(136, DOCK_SWIPE_INVERTED_FROM_DEVICE);
+    tag_synthetic(&event);
+    Some(event)
+}
+
+fn dock_swipe_progress(progress_x: f64, display_width: f64) -> Option<f64> {
+    let points = progress_x * SPACE_SWIPE_POINTS_PER_RAW_UNIT;
+    let span = display_width + DOCK_SWIPE_SEPARATOR_POINTS;
+    (points.is_finite() && span.is_finite() && span > 0.0).then_some(points / span)
+}
+
+const fn legacy_dock_swipe_supported(macos_major: isize) -> bool {
+    macos_major < FIRST_UNSUPPORTED_DOCK_SWIPE_MACOS_MAJOR
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the private Dock Swipe field stores its progress as IEEE-754 f32 bits"
+)]
+fn dock_swipe_progress_bits(progress: f64) -> u32 {
+    (progress as f32).to_bits()
+}
+
+const fn interactive_space_phase_value(phase: InteractiveSpacePhase) -> i32 {
+    match phase {
+        InteractiveSpacePhase::Began => 1,
+        InteractiveSpacePhase::Changed => 2,
+        InteractiveSpacePhase::Ended => 4,
+        InteractiveSpacePhase::Cancelled => 8,
+    }
 }
 
 const fn scroll_phase_value(phase: SmoothScrollPhase) -> i64 {
