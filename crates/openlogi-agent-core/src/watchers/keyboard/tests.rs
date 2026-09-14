@@ -144,3 +144,83 @@ fn suspended_device_io_disables_retry_deadlines() {
         "keyboard retries must stay dormant until visible resume",
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn exclusive_receiver_access_disables_expired_recovery_deadlines() {
+    let access = ReceiverAccess::default();
+    let requests = access.subscribe_requests();
+    let exclusive = access
+        .acquire_exclusive(crate::receiver_access::ExclusiveAccessReason::Pairing)
+        .await;
+    let restart_at = tokio::time::Instant::now();
+    let slot = KeyboardSlot::recovering(None, Some(restart_at));
+
+    assert_eq!(next_deadline(*requests.borrow(), true, Some(&slot)), None);
+    drop(exclusive);
+    assert_eq!(
+        next_deadline(*requests.borrow(), true, Some(&slot)),
+        Some(restart_at),
+        "release makes the retry actionable without adding another backoff"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn recovery_manager_waits_for_control_events_and_shutdown_between_retries() {
+    use futures_lite::future::poll_once;
+
+    for shutdown_requested in [false, true] {
+        let (spec_tx, spec) = watch::channel(Some(Arc::new(KeyboardSpec {
+            config_key: "keyboard-a".to_owned(),
+            route: target().route,
+            wanted: target().wanted,
+            bindings: dispatch(Action::MissionControl).bindings,
+        })));
+        let capture = CaptureChannel::default();
+        // A missing inventory channel makes the real session task fail without
+        // opening hardware; ordered Done then drives normal restart recovery.
+        let registry = ChannelRegistry::default();
+        let access = ReceiverAccess::default();
+        let (_signal, device_io) = openlogi_hid::device_io_channel();
+        let (ring, _ring_rx) = mpsc::unbounded_channel();
+        let mut actions = crate::runtime::ActionRuntime::new(
+            Arc::default(),
+            capture.clone(),
+            registry.clone(),
+            access.clone(),
+            device_io.clone(),
+            ring,
+        )
+        .unwrap();
+        let (shutdown_tx, shutdown) = oneshot::channel();
+        let mut manager = std::pin::pin!(manage(KeyboardManagerContext {
+            spec,
+            keyboard_channel: capture,
+            receiver_requests: access.subscribe_requests(),
+            receiver_access: access,
+            registry,
+            device_io,
+            dispatcher: actions.dispatcher(),
+            shutdown,
+        }));
+
+        for _ in 0..3 {
+            // Poll the actual manager and its detached forwarder/session tasks
+            // through repeated failures. Each poll must return to event wait.
+            for _ in 0..4 {
+                assert!(poll_once(&mut manager).await.is_none());
+                tokio::task::yield_now().await;
+            }
+            tokio::time::advance(RETRY_DELAY).await;
+        }
+        let before_event = tokio::time::Instant::now();
+        if shutdown_requested {
+            shutdown_tx.send(()).unwrap();
+            assert!(matches!(manager.await, ManagerCompletion::Graceful));
+        } else {
+            drop(spec_tx);
+            assert!(matches!(manager.await, ManagerCompletion::Unexpected));
+        }
+        assert_eq!(tokio::time::Instant::now(), before_event);
+        actions.shutdown();
+    }
+}

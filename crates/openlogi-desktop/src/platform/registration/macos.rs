@@ -116,6 +116,30 @@ mod backend {
 
     use super::{ServiceStatus, agent_service_label};
 
+    /// The domain `SMAppService` reports its errors in.
+    ///
+    /// Spelled out on purpose. The framework has used this string since
+    /// macOS 13 but exports it as the `SMAppServiceErrorDomain` symbol only
+    /// from macOS 15, and a binary that imports that symbol is refused by
+    /// dyld on 13 and 14 before `main` runs (#1279). Rust has no availability
+    /// checking to catch that, so the constant must never be linked here.
+    const ERROR_DOMAIN: &str = "SMAppServiceErrorDomain";
+
+    /// Recognize `SMAppService` errors without importing its macOS 15-only
+    /// error-domain symbol.
+    pub(super) trait SmAppServiceErrorExt {
+        /// Match both the framework's domain and `expected`: the same small
+        /// integers mean something else as POSIX or OSStatus codes.
+        fn is_sm_app_service_error(&self, expected: core::ffi::c_uint) -> bool;
+    }
+
+    impl SmAppServiceErrorExt for NSError {
+        fn is_sm_app_service_error(&self, expected: core::ffi::c_uint) -> bool {
+            self.domain().to_string() == ERROR_DOMAIN
+                && isize::try_from(expected).is_ok_and(|expected| self.code() == expected)
+        }
+    }
+
     /// The framework handle for the agent service's embedded plist.
     #[expect(unsafe_code, reason = "plain ObjC class method via objc2 bindings")]
     fn service() -> Retained<SMAppService> {
@@ -162,20 +186,12 @@ mod backend {
     /// Treat exactly one framework error code — the "already in the desired
     /// state" one for the operation — as success. Matched by the framework's
     /// own constants, never bare ints.
-    #[expect(
-        unsafe_code,
-        reason = "reading a framework-provided immutable static NSString"
-    )]
     fn forgive(
         result: Result<(), Retained<NSError>>,
         benign: core::ffi::c_uint,
     ) -> Result<(), String> {
         result.or_else(|error| {
-            // SAFETY: the extern static is an immutable framework-owned
-            // NSString.
-            let domain_matches =
-                &*error.domain() == unsafe { objc2_service_management::SMAppServiceErrorDomain };
-            if domain_matches && isize::try_from(benign).is_ok_and(|code| error.code() == code) {
+            if error.is_sm_app_service_error(benign) {
                 Ok(())
             } else {
                 Err(error.localizedDescription().to_string())
@@ -231,5 +247,47 @@ mod tests {
         // user's Login Items choice outranks both.
         assert_eq!(ensure_action(ServiceStatus::RequiresApproval, false), None);
         assert_eq!(ensure_action(ServiceStatus::RequiresApproval, true), None);
+    }
+
+    #[test]
+    fn only_the_frameworks_own_error_domain_and_code_match() {
+        use objc2_foundation::{NSError, NSString};
+        use objc2_service_management::{kSMErrorAlreadyRegistered, kSMErrorJobNotFound};
+
+        use super::backend::SmAppServiceErrorExt;
+
+        for (domain, code, expected, matches) in [
+            (
+                "SMAppServiceErrorDomain",
+                12,
+                kSMErrorAlreadyRegistered,
+                true,
+            ),
+            ("SMAppServiceErrorDomain", 6, kSMErrorJobNotFound, true),
+            // The other operation's benign code is a real failure for this one.
+            ("SMAppServiceErrorDomain", 12, kSMErrorJobNotFound, false),
+            (
+                "SMAppServiceErrorDomain",
+                6,
+                kSMErrorAlreadyRegistered,
+                false,
+            ),
+            // ENOMEM is 12 too; POSIX/OSStatus errors must never match.
+            ("NSPOSIXErrorDomain", 12, kSMErrorAlreadyRegistered, false),
+            ("NSOSStatusErrorDomain", 6, kSMErrorJobNotFound, false),
+            (
+                "SMAppServiceErrorDomain",
+                -1,
+                kSMErrorAlreadyRegistered,
+                false,
+            ),
+        ] {
+            let error = NSError::new(code, &NSString::from_str(domain));
+            assert_eq!(
+                error.is_sm_app_service_error(expected),
+                matches,
+                "domain={domain}, code={code}, expected={expected}"
+            );
+        }
     }
 }

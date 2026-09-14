@@ -29,10 +29,16 @@ use gpui::{
 use gpui_base::Button as BaseButton;
 use gpui_component::v_flex;
 use image::{Frame as ImageFrame, RgbaImage};
-use openlogi_camera::{CameraAuthorization, CameraStream, Frame};
+use openlogi_camera::{CameraAuthorization, Frame};
 
 use crate::state::{AppState, StateEvent};
 use crate::ui::theme::{self, Palette, Typography as _};
+
+mod capture;
+use capture::{Capture, PreviewStream, SystemCapture};
+
+#[cfg(test)]
+mod tests;
 
 const PREVIEW_W: f32 = 480.;
 const PREVIEW_H: f32 = 270.; // 16:9
@@ -40,6 +46,7 @@ const PREVIEW_H: f32 = 270.; // 16:9
 /// Live preview view. Holds the capture stream + its texture only while the
 /// parent points it at a camera via [`Self::set_target`].
 pub struct CameraPreview {
+    capture: Box<dyn Capture>,
     lifecycle: PreviewLifecycle,
     current_image: Option<Arc<RenderImage>>,
     _permission_obs: Subscription,
@@ -54,7 +61,7 @@ enum PreviewLifecycle {
     AwaitingAccess(String),
     Streaming {
         target: String,
-        stream: CameraStream,
+        stream: Box<dyn PreviewStream>,
         last_generation: u64,
         /// Dropping the streaming state cancels its frame-rate repaint pump.
         _repaint_task: Task<()>,
@@ -74,19 +81,24 @@ impl PreviewLifecycle {
 
 impl CameraPreview {
     pub fn new(cx: &mut Context<Self>) -> Self {
+        Self::with_capture(Box::new(SystemCapture), cx)
+    }
+
+    fn with_capture(capture: Box<dyn Capture>, cx: &mut Context<Self>) -> Self {
         let permission_obs = cx.subscribe(
             &AppState::global(cx),
             |preview, _, event: &StateEvent, cx| {
                 if !matches!(event, StateEvent::CameraPermissionChanged) {
                     return;
                 }
-                if openlogi_camera::camera_access_granted() {
+                if preview.capture.access_granted() {
                     preview.start_deferred_stream(cx);
                 }
                 cx.notify();
             },
         );
         Self {
+            capture,
             lifecycle: PreviewLifecycle::Stopped,
             current_image: None,
             _permission_obs: permission_obs,
@@ -100,7 +112,7 @@ impl CameraPreview {
     /// permission starts as soon as access is granted.
     pub fn set_target(&mut self, target: Option<String>, cx: &mut Context<Self>) {
         if target.as_deref() == self.lifecycle.target() {
-            if openlogi_camera::camera_access_granted() && self.start_deferred_stream(cx) {
+            if self.capture.access_granted() && self.start_deferred_stream(cx) {
                 cx.notify();
             }
             return;
@@ -119,7 +131,7 @@ impl CameraPreview {
         };
         // Only open the camera when access is already granted, so selecting it
         // never blocks the UI thread on the permission dialog.
-        if openlogi_camera::camera_access_granted() {
+        if self.capture.access_granted() {
             self.start_stream(target, cx);
         } else {
             self.lifecycle = PreviewLifecycle::AwaitingAccess(target);
@@ -138,7 +150,7 @@ impl CameraPreview {
     }
 
     fn start_stream(&mut self, target: String, cx: &mut Context<Self>) {
-        let Ok(stream) = openlogi_camera::start_stream(&target) else {
+        let Ok(stream) = self.capture.start_stream(&target) else {
             self.lifecycle = PreviewLifecycle::StartFailed(target);
             return;
         };
@@ -181,7 +193,7 @@ impl CameraPreview {
 impl Render for CameraPreview {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = theme::palette(cx);
-        let granted = openlogi_camera::camera_access_granted();
+        let granted = self.capture.access_granted();
 
         // Rebuild the texture only when a new frame arrived; free the old one.
         if let PreviewLifecycle::Streaming {

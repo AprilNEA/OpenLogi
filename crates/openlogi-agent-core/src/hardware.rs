@@ -30,9 +30,10 @@ use tracing::{debug, warn};
 
 use crate::receiver_access::ReceiverAccess;
 
+mod context;
 mod light;
 
-pub use light::{apply_light, cancel_light_reapply, set_light_in_background};
+pub use context::HardwareContext;
 
 /// Upper bound on a single HID++ write. `hidpp` has no request timeout of its
 /// own, so without this an asleep / unresponsive device would hang (and leak)

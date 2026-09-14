@@ -14,7 +14,8 @@ use crate::write::smartshift::{
 };
 use crate::write::{HidppFeatureErrorKind, HidppOperation};
 use crate::{
-    SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque,
+    BacklightMode, BacklightState, BacklightStatus, SmartShiftAutoDisengage, SmartShiftMode,
+    SmartShiftStatus, SmartShiftThreshold, TunableTorque,
 };
 use hidpp::feature::device_information::DeviceEntityType;
 
@@ -201,6 +202,18 @@ async fn shared_read_and_lighting_apis_use_the_supplied_channel() -> Result<(), 
         SmartShiftAutoDisengage::Threshold(TEST_THRESHOLD)
     );
     assert_eq!(smartshift.tunable_torque, Some(TEST_TORQUE));
+
+    let backlight = get_backlight_on(&shared).await?;
+    assert_eq!(
+        backlight,
+        BacklightState {
+            enabled: true,
+            mode: BacklightMode::Automatic,
+            status: BacklightStatus::AlsAutomatic,
+            current_level: 4,
+            nb_levels: 8,
+        }
+    );
 
     // The scripted device reports no 0x8070 effect engine, so Auto must fall
     // back to 0x8080 without opening a second transport.
@@ -461,6 +474,7 @@ fn scripted_response(request: &[u8]) -> Option<Vec<u8>> {
                 0x2201 => 0x05,
                 0x2111 => 0x06,
                 0x8080 => 0x07,
+                0x1982 => 0x08,
                 _ => 0x00,
             };
             false
@@ -482,6 +496,23 @@ fn scripted_response(request: &[u8]) -> Option<Vec<u8>> {
         (0x06, 0x01) => {
             payload[..3].copy_from_slice(&[u8::from(WheelMode::Ratchet), 10, 33]);
             false
+        }
+        // Backlight config and info. The config mode occupies bits 3..=4 of
+        // the little-endian options field; both replies carry long payloads.
+        (0x08, 0x00) => {
+            payload[0] = 1;
+            payload[1] = u8::from(hidpp::feature::backlight::BacklightMode::Automatic) << 3;
+            payload[5] = 4;
+            true
+        }
+        (0x08, 0x02) => {
+            payload[..4].copy_from_slice(&[
+                8,
+                4,
+                u8::from(hidpp::feature::backlight::BacklightStatus::AlsAutomatic),
+                u8::from(hidpp::feature::backlight::BacklightEffect::Static),
+            ]);
+            true
         }
         // Raw per-key frame commit expects no reply.
         _ => return None,
