@@ -50,7 +50,11 @@ enum KeyPhase {
 enum HeldKey {
     #[cfg(target_os = "macos")]
     Command,
-    /// The platform logo key: Linux `KEY_LEFTMETA`, the Windows key, macOS Command.
+    /// The platform logo key: Linux `KEY_LEFTMETA` or the Windows key. On macOS
+    /// the logo key *is* Command, so `Super` chords own `HeldKey::Command`
+    /// there — one physical key, one owner — exactly as `Cmd` chords own
+    /// `HeldKey::Control` on Linux and Windows.
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     Super,
     Control,
     Shift,
@@ -92,7 +96,6 @@ impl HeldModifiers {
             HeldKey::Control => Some(1 << 1),
             HeldKey::Shift => Some(1 << 2),
             HeldKey::Alt => Some(1 << 3),
-            HeldKey::Super => Some(1 << 4),
             HeldKey::Key(_) => None,
         }
     }
@@ -149,7 +152,6 @@ impl HeldOutput {
             HeldKey::Control,
             HeldKey::Shift,
             HeldKey::Alt,
-            HeldKey::Super,
         ] {
             modifiers.set(key, self.owners.contains_key(&key));
         }
@@ -165,7 +167,7 @@ static HELD_OUTPUT: LazyLock<Mutex<HeldOutput>> =
 fn held_keys(combo: &KeyCombo) -> Vec<HeldKey> {
     let mut keys = Vec::with_capacity(4);
     #[cfg(target_os = "macos")]
-    if combo.has_command() {
+    if combo.has_command() || combo.has_super() {
         keys.push(HeldKey::Command);
     }
     #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -182,6 +184,7 @@ fn held_keys(combo: &KeyCombo) -> Vec<HeldKey> {
     if combo.has_option() {
         keys.push(HeldKey::Alt);
     }
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     if combo.has_super() {
         keys.push(HeldKey::Super);
     }
@@ -680,6 +683,83 @@ mod tests {
             output.transition(Some(&command_a), None),
             HoldTransition {
                 up: vec![HeldKey::Command, HeldKey::Key(command_a.key())],
+                down: vec![],
+            }
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn super_and_command_share_one_physical_output() {
+        let super_a = combo("Super+A");
+        let command_b = combo("Cmd+B");
+        let mut output = HeldOutput::default();
+
+        assert_eq!(
+            output.transition(None, Some(&super_a)),
+            HoldTransition {
+                up: vec![],
+                down: vec![HeldKey::Command, HeldKey::Key(super_a.key())],
+            }
+        );
+        assert_eq!(
+            output.transition(None, Some(&command_b)),
+            HoldTransition {
+                up: vec![],
+                down: vec![HeldKey::Key(command_b.key())],
+            }
+        );
+        assert_eq!(
+            output.transition(Some(&super_a), None),
+            HoldTransition {
+                up: vec![HeldKey::Key(super_a.key())],
+                down: vec![],
+            }
+        );
+        assert_eq!(
+            output.transition(Some(&command_b), None),
+            HoldTransition {
+                up: vec![HeldKey::Command, HeldKey::Key(command_b.key())],
+                down: vec![],
+            }
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn super_plus_command_owns_the_physical_key_once() {
+        let chord = combo("Cmd+Super+A");
+        assert_eq!(
+            held_keys(&chord),
+            vec![HeldKey::Command, HeldKey::Key(chord.key())]
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[test]
+    fn super_is_distinct_from_control() {
+        let super_a = combo("Super+A");
+        let command_b = combo("Cmd+B");
+        let mut output = HeldOutput::default();
+
+        assert_eq!(
+            output.transition(None, Some(&super_a)),
+            HoldTransition {
+                up: vec![],
+                down: vec![HeldKey::Super, HeldKey::Key(super_a.key())],
+            }
+        );
+        assert_eq!(
+            output.transition(None, Some(&command_b)),
+            HoldTransition {
+                up: vec![],
+                down: vec![HeldKey::Control, HeldKey::Key(command_b.key())],
+            }
+        );
+        assert_eq!(
+            output.transition(Some(&super_a), None),
+            HoldTransition {
+                up: vec![HeldKey::Super, HeldKey::Key(super_a.key())],
                 down: vec![],
             }
         );
