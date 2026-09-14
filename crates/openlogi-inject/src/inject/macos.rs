@@ -350,7 +350,7 @@ fn held_key_event(
 ) -> Option<(u16, CGEventFlags)> {
     modifiers.set(key, phase == KeyPhase::Down);
     let vk = match key {
-        HeldKey::Command | HeldKey::Super => Some(0x37),
+        HeldKey::Command => Some(0x37),
         HeldKey::Shift => Some(0x38),
         HeldKey::Alt => Some(0x3a),
         HeldKey::Control => Some(0x3b),
@@ -361,7 +361,7 @@ fn held_key_event(
 
 fn held_modifier_flags(modifiers: HeldModifiers) -> CGEventFlags {
     let mut flags = CGEventFlags::CGEventFlagNull;
-    if modifiers.contains(HeldKey::Command) || modifiers.contains(HeldKey::Super) {
+    if modifiers.contains(HeldKey::Command) {
         flags |= CGEventFlags::CGEventFlagCommand;
     }
     if modifiers.contains(HeldKey::Shift) {
