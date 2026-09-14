@@ -463,15 +463,19 @@ impl SmartShiftPanel {
                                 handle.update(cx, |s, cx| {
                                     s.set_value(f32::from(GestureSensitivity::DEFAULT), window, cx);
                                 });
-                                if let Some(key) = AppState::try_read(cx)
-                                    .and_then(|s| s.current_record().map(|r| r.config_key.clone()))
+                                if let Some((config_key, event_key)) = AppState::try_read(cx)
+                                    .and_then(|s| {
+                                        s.current_record().map(|r| {
+                                            (r.config_key.clone(), r.device_key())
+                                        })
+                                    })
                                 {
                                     AppState::update(cx, |state, cx| {
                                         state.set_device_gesture_sensitivity(
-                                            &key,
+                                            &config_key,
                                             GestureSensitivity::DEFAULT,
                                         );
-                                        cx.emit(StateEvent::DeviceConfigChanged(key));
+                                        cx.emit(StateEvent::DeviceConfigChanged(event_key));
                                     });
                                 }
                             }
@@ -533,15 +537,19 @@ impl SmartShiftPanel {
                                 handle.update(cx, |s, cx| {
                                     s.set_value(f32::from(GestureAxisBias::DEFAULT), window, cx);
                                 });
-                                if let Some(key) = AppState::try_read(cx)
-                                    .and_then(|s| s.current_record().map(|r| r.config_key.clone()))
+                                if let Some((config_key, event_key)) = AppState::try_read(cx)
+                                    .and_then(|s| {
+                                        s.current_record().map(|r| {
+                                            (r.config_key.clone(), r.device_key())
+                                        })
+                                    })
                                 {
                                     AppState::update(cx, |state, cx| {
                                         state.set_device_gesture_axis_bias(
-                                            &key,
+                                            &config_key,
                                             GestureAxisBias::DEFAULT,
                                         );
-                                        cx.emit(StateEvent::DeviceConfigChanged(key));
+                                        cx.emit(StateEvent::DeviceConfigChanged(event_key));
                                     });
                                 }
                             }
@@ -604,15 +612,19 @@ impl SmartShiftPanel {
                                         cx,
                                     );
                                 });
-                                if let Some(key) = AppState::try_read(cx)
-                                    .and_then(|s| s.current_record().map(|r| r.config_key.clone()))
+                                if let Some((config_key, event_key)) = AppState::try_read(cx)
+                                    .and_then(|s| {
+                                        s.current_record().map(|r| {
+                                            (r.config_key.clone(), r.device_key())
+                                        })
+                                    })
                                 {
                                     AppState::update(cx, |state, cx| {
                                         state.set_device_thumbwheel_sensitivity(
-                                            &key,
+                                            &config_key,
                                             ThumbwheelSensitivity::DEFAULT,
                                         );
-                                        cx.emit(StateEvent::DeviceConfigChanged(key));
+                                        cx.emit(StateEvent::DeviceConfigChanged(event_key));
                                     });
                                 }
                             }
