@@ -22,7 +22,7 @@ fn plan() -> DeviceCapturePlan {
     crate::capture_plan::plan_for_device(
         &openlogi_core::config::Config::default(),
         physical_key(),
-        "mouse-a",
+        crate::capture_plan::CaptureDeviceKeys::same("mouse-a"),
         route(),
         None,
         0,
@@ -402,7 +402,7 @@ fn capture_target_changes_schedule_the_old_session_for_retirement() {
     let mut plan = crate::capture_plan::plan_for_device(
         &openlogi_core::config::Config::default(),
         physical_key(),
-        "mouse-a",
+        crate::capture_plan::CaptureDeviceKeys::same("mouse-a"),
         session.target().route.clone(),
         None,
         0,
@@ -456,7 +456,7 @@ fn active_session_adopts_action_only_plan_changes_without_rearming() {
     let first = crate::capture_plan::plan_for_device(
         &config,
         physical_key(),
-        "mouse-a",
+        crate::capture_plan::CaptureDeviceKeys::same("mouse-a"),
         route(),
         None,
         0,
@@ -472,7 +472,7 @@ fn active_session_adopts_action_only_plan_changes_without_rearming() {
     let rebound = crate::capture_plan::plan_for_device(
         &config,
         physical_key(),
-        "mouse-a",
+        crate::capture_plan::CaptureDeviceKeys::same("mouse-a"),
         route(),
         None,
         0,
@@ -496,7 +496,7 @@ fn active_session_adopts_gesture_and_per_app_dispatch_changes() {
     let first = crate::capture_plan::plan_for_device(
         &config,
         physical_key(),
-        "mouse-a",
+        crate::capture_plan::CaptureDeviceKeys::same("mouse-a"),
         route(),
         None,
         0,
@@ -513,7 +513,7 @@ fn active_session_adopts_gesture_and_per_app_dispatch_changes() {
     let gestured = crate::capture_plan::plan_for_device(
         &config,
         physical_key(),
-        "mouse-a",
+        crate::capture_plan::CaptureDeviceKeys::same("mouse-a"),
         route(),
         None,
         0,
@@ -541,7 +541,7 @@ fn active_session_adopts_gesture_and_per_app_dispatch_changes() {
     let base = crate::capture_plan::plan_for_device(
         &config,
         physical_key(),
-        "mouse-a",
+        crate::capture_plan::CaptureDeviceKeys::same("mouse-a"),
         route(),
         None,
         0,
@@ -557,7 +557,7 @@ fn active_session_adopts_gesture_and_per_app_dispatch_changes() {
     let per_app = crate::capture_plan::plan_for_device(
         &config,
         physical_key(),
-        "mouse-a",
+        crate::capture_plan::CaptureDeviceKeys::same("mouse-a"),
         route(),
         Some("com.example.Editor"),
         0,
@@ -585,7 +585,7 @@ fn wheel_configuration_changes_refresh_without_rearming_hardware() {
     let first = crate::capture_plan::plan_for_device(
         &config,
         physical_key(),
-        "mouse-a",
+        crate::capture_plan::CaptureDeviceKeys::same("mouse-a"),
         route(),
         None,
         0,
@@ -601,7 +601,7 @@ fn wheel_configuration_changes_refresh_without_rearming_hardware() {
     let rebound = crate::capture_plan::plan_for_device(
         &config,
         physical_key(),
-        "mouse-a",
+        crate::capture_plan::CaptureDeviceKeys::same("mouse-a"),
         route(),
         None,
         0,
@@ -622,7 +622,7 @@ fn wheel_configuration_changes_refresh_without_rearming_hardware() {
     let rescaled = crate::capture_plan::plan_for_device(
         &config,
         physical_key(),
-        "mouse-a",
+        crate::capture_plan::CaptureDeviceKeys::same("mouse-a"),
         route(),
         None,
         0,
