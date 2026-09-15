@@ -9,8 +9,8 @@ use gpui::{
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
-    Icon, IconName, Selectable as _, Sizable as _, button::Button, h_flex, input::InputState,
-    scroll::ScrollableElement as _, v_flex,
+    Disableable as _, Icon, IconName, Selectable as _, Sizable as _, button::Button, h_flex,
+    input::InputState, scroll::ScrollableElement as _, v_flex,
 };
 use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
 
@@ -35,6 +35,7 @@ pub(super) struct BindingInspectorData<'a> {
     pub action_picker_open: bool,
     pub bindings: &'a BTreeMap<ButtonId, Action>,
     pub gesture_maps: &'a BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
+    pub dpi_gestures: bool,
     pub editing_app: Option<&'a str>,
     pub overridden: Option<&'a BTreeMap<ButtonId, Action>>,
 }
@@ -120,6 +121,10 @@ fn empty_inspector(app: Option<&str>, override_count: usize, pal: Palette) -> gp
         .child(div().text_body().text_color(pal.text_muted).child(summary))
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the button inspector is clearest as one declarative UI tree"
+)]
 fn button_inspector(
     button: ButtonId,
     data: &BindingInspectorData<'_>,
@@ -195,21 +200,32 @@ fn button_inspector(
         })
         .when(can_enable_gestures(button, data.editing_app), |panel| {
             let observer = picker.view.clone();
-            panel.child(
-                control_button("inspector-use-gestures")
-                    .w_full()
-                    .icon(Icon::empty().path(GESTURE_BUTTON_ICON))
-                    .label(tr!("actions.use_gestures"))
-                    .on_click(move |_, _, cx| {
-                        AppState::update_bindings(cx, |state| {
-                            state.commit_gesture_mode(button, true);
-                        });
-                        observer.update(cx, |view, cx| {
-                            view.set_gesture_selected_dir(Some(GestureDirection::Click));
-                            cx.notify();
-                        });
-                    }),
-            )
+            let unavailable = button == ButtonId::DpiToggle && !data.dpi_gestures;
+            panel
+                .child(
+                    control_button("inspector-use-gestures")
+                        .w_full()
+                        .icon(Icon::empty().path(GESTURE_BUTTON_ICON))
+                        .label(tr!("actions.use_gestures"))
+                        .disabled(unavailable)
+                        .on_click(move |_, _, cx| {
+                            AppState::update_bindings(cx, |state| {
+                                state.commit_gesture_mode(button, true);
+                            });
+                            observer.update(cx, |view, cx| {
+                                view.set_gesture_selected_dir(Some(GestureDirection::Click));
+                                cx.notify();
+                            });
+                        }),
+                )
+                .when(unavailable, |panel| {
+                    panel.child(
+                        div()
+                            .text_body()
+                            .text_color(pal.text_muted)
+                            .child(tr!("actions.dpi_gestures_unavailable")),
+                    )
+                })
         })
         .when(picker.open, |panel| {
             panel.child(action_library(

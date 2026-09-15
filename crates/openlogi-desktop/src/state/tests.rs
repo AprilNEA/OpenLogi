@@ -689,9 +689,15 @@ fn transient_thumbwheel_pair_stays_in_memory_without_persistence() {
 fn state_with_a_known_mouse() -> AppState {
     let cache = AssetResolver::new();
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut inventory = direct_inventory([0xa3, 0x93, 0xca, 0xe0]);
+    inventory.paired[0]
+        .capabilities
+        .as_mut()
+        .unwrap()
+        .dpi_gestures = true;
     AppState::with_runtime(
         Config::ephemeral(),
-        &[direct_inventory([0xa3, 0x93, 0xca, 0xe0])],
+        &[inventory],
         &[],
         &cache,
         &[],
@@ -1008,6 +1014,51 @@ fn a_gesture_button_stays_one_when_the_scope_returns_to_the_default_profile() {
 
     state.set_editing_app(None);
     assert_eq!(state.current_gesture_maps(), global);
+}
+
+#[test]
+fn dpi_gesture_enablement_requires_measured_support_but_preserves_stored_maps() {
+    for capabilities in [
+        None,
+        Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
+    ] {
+        let mut state = state_with_a_known_mouse();
+        state.commit_binding(ButtonId::DpiToggle, Action::Paste);
+        state.devices.records[0].capabilities = capabilities;
+        state.commit_gesture_mode(ButtonId::DpiToggle, true);
+        assert!(
+            !state
+                .config
+                .is_gesture_mode(KNOWN_MOUSE_KEY, ButtonId::DpiToggle)
+        );
+        assert_eq!(
+            state.button_bindings().get(&ButtonId::DpiToggle),
+            Some(&Action::Paste)
+        );
+
+        // A stored map survives a missing/negative capability snapshot and
+        // remains editable and removable, but cannot be newly enabled.
+        state
+            .config
+            .edit(|config| config.set_gesture_mode(KNOWN_MOUSE_KEY, ButtonId::DpiToggle, true));
+        state.commit_gesture_binding(ButtonId::DpiToggle, GestureDirection::Up, Action::Copy);
+        assert_eq!(
+            state.current_gesture_maps()[&ButtonId::DpiToggle][&GestureDirection::Up],
+            Action::Copy
+        );
+        state.commit_gesture_mode(ButtonId::DpiToggle, false);
+        assert!(
+            !state
+                .config
+                .is_gesture_mode(KNOWN_MOUSE_KEY, ButtonId::DpiToggle)
+        );
+        state.commit_gesture_mode(ButtonId::DpiToggle, true);
+        assert!(
+            !state
+                .config
+                .is_gesture_mode(KNOWN_MOUSE_KEY, ButtonId::DpiToggle)
+        );
+    }
 }
 
 #[test]

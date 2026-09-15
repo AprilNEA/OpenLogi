@@ -308,6 +308,7 @@ native_controls_when_disabled = "When off, controls use their default behavior a
 overridden_in_app = "Overridden in %{app}"
 use_a_single_action = "Use a single action"
 use_gestures = "Use gestures"
+dpi_gestures_unavailable = "This device has not reported support for DPI button gestures."
 action_key_summary = "%{action} · %{key}"
 search_actions = "Search actions…"
 workflow_key_summary = "Workflow · %{key}"

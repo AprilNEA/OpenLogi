@@ -128,6 +128,10 @@ pub struct Capabilities {
     /// device's `0x1b04` control table.
     #[serde(default)]
     pub haptic_panel: bool,
+    /// A DPI/ModeShift control in the device's `0x1b04` control table supports
+    /// both diversion and raw-XY reporting for hold-and-swipe gestures.
+    #[serde(default)]
+    pub dpi_gestures: bool,
 }
 
 impl Capabilities {
@@ -150,6 +154,7 @@ impl Capabilities {
             thumbwheel: ids.contains(&0x2150),
             haptic_feedback: ids.contains(&0x19b0),
             haptic_panel: false,
+            dpi_gestures: false,
         }
     }
 
@@ -170,6 +175,7 @@ impl Capabilities {
                 thumbwheel: false,
                 haptic_feedback: false,
                 haptic_panel: false,
+                dpi_gestures: false,
             },
             DeviceKind::Keyboard => Self {
                 lighting: true,
@@ -475,6 +481,7 @@ mod tests {
                     thumbwheel: false,
                     haptic_feedback: false,
                     haptic_panel: false,
+                    dpi_gestures: false,
                 }),
             }],
         }
@@ -545,6 +552,7 @@ mod tests {
                 thumbwheel: true,
                 haptic_feedback: false,
                 haptic_panel: false,
+                dpi_gestures: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
@@ -561,6 +569,7 @@ mod tests {
                 thumbwheel: false,
                 haptic_feedback: false,
                 haptic_panel: false,
+                dpi_gestures: false,
             }
         );
         // No driving features → nothing offered.

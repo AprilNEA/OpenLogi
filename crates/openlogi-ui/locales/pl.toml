@@ -308,6 +308,7 @@ native_controls_when_disabled = "Po wyłączeniu elementy sterujące działają 
 overridden_in_app = "Zastąpiono w %{app}"
 use_a_single_action = "Użyj jednego działania"
 use_gestures = "Użyj gestów"
+dpi_gestures_unavailable = "To urządzenie nie zgłosiło obsługi gestów przyciskiem DPI."
 action_key_summary = "%{action} · %{key}"
 search_actions = "Szukaj działań…"
 workflow_key_summary = "Sekwencja · %{key}"

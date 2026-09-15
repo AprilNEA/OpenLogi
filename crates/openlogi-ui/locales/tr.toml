@@ -308,6 +308,7 @@ native_controls_when_disabled = "Kapalıyken her denetim cihazın kendi haliyle 
 overridden_in_app = "%{app} içinde geçersiz kılındı"
 use_a_single_action = "Tek eylem kullan"
 use_gestures = "Hareketleri kullan"
+dpi_gestures_unavailable = "Bu cihaz, DPI düğmesi hareketlerini desteklediğini bildirmedi."
 action_key_summary = "%{action} · %{key}"
 search_actions = "Eylem ara…"
 workflow_key_summary = "İş Akışı · %{key}"

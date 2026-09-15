@@ -664,15 +664,19 @@ fn an_incomplete_capability_walk_keeps_the_last_complete_answer() {
     let mut cached = probed(None, false);
     cached.capabilities = Some(Capabilities {
         haptic_panel: true,
+        dpi_gestures: true,
         ..Capabilities::default()
     });
 
     keep_known_capabilities(&mut fresh, &cached);
 
     assert_eq!(
-        fresh.capabilities.map(|caps| caps.haptic_panel),
-        Some(true),
-        "the panel the last complete walk saw must survive a lost reply"
+        fresh.capabilities, cached.capabilities,
+        "the last complete control walk must survive a lost reply"
+    );
+    assert!(
+        fresh.capabilities_incomplete,
+        "the failed probe still needs repair"
     );
 }
 
@@ -684,15 +688,13 @@ fn a_complete_capability_walk_is_left_alone() {
     let mut cached = probed(None, false);
     cached.capabilities = Some(Capabilities {
         haptic_panel: true,
+        dpi_gestures: true,
         ..Capabilities::default()
     });
 
     keep_known_capabilities(&mut fresh, &cached);
 
-    assert_eq!(
-        fresh.capabilities.map(|caps| caps.haptic_panel),
-        Some(false)
-    );
+    assert_eq!(fresh.capabilities, Some(Capabilities::default()));
 }
 
 #[test]

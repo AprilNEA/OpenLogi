@@ -386,6 +386,16 @@ impl AppState {
             debug!(?button, "gesture mode is not supported for this control");
             return;
         }
+        if enabled
+            && button == ButtonId::DpiToggle
+            && !self
+                .current_record()
+                .and_then(|record| record.capabilities)
+                .is_some_and(|caps| caps.dpi_gestures)
+        {
+            debug!("DPI gestures require measured raw-XY support");
+            return;
+        }
         let Some(key) = self
             .current_record()
             .and_then(DeviceRecord::persistent_config_key)

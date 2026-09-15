@@ -308,6 +308,7 @@ native_controls_when_disabled = "Wenn deaktiviert, verwenden die Bedienelemente 
 overridden_in_app = "In %{app} überschrieben"
 use_a_single_action = "Einzelne Aktion verwenden"
 use_gestures = "Gesten verwenden"
+dpi_gestures_unavailable = "Dieses Gerät hat keine Unterstützung für Gesten mit der DPI-Taste gemeldet."
 action_key_summary = "%{action} · %{key}"
 search_actions = "Aktionen suchen…"
 workflow_key_summary = "Workflow · %{key}"

@@ -64,6 +64,7 @@ struct MouseWorkspaceData<'a> {
     gesture_maps: &'a BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
     glow: Option<(Arc<GlowGeometry>, Hsla)>,
     thumbwheel: bool,
+    dpi_gestures: bool,
     editing_app: Option<String>,
     overridden: Option<&'a BTreeMap<ButtonId, Action>>,
 }
@@ -89,6 +90,10 @@ impl<'a> MouseWorkspaceData<'a> {
                 .current_record()
                 .and_then(|record| record.capabilities)
                 .is_some_and(|capabilities| capabilities.thumbwheel),
+            dpi_gestures: state
+                .current_record()
+                .and_then(|record| record.capabilities)
+                .is_some_and(|capabilities| capabilities.dpi_gestures),
             editing_app: state.editing_app().map(|app| {
                 state
                     .recent_app_name(app)
@@ -110,6 +115,7 @@ impl<'a> MouseWorkspaceData<'a> {
             gesture_maps,
             glow: None,
             thumbwheel: false,
+            dpi_gestures: false,
             editing_app: None,
             overridden: None,
         }
@@ -243,6 +249,7 @@ impl Render for MouseModelView {
             gesture_maps,
             glow,
             thumbwheel,
+            dpi_gestures,
             editing_app,
             overridden,
         } = MouseWorkspaceData::read(cx)
@@ -320,6 +327,7 @@ impl Render for MouseModelView {
                 action_picker_open: self.action_picker_open,
                 bindings,
                 gesture_maps,
+                dpi_gestures,
                 editing_app: editing_app.as_deref(),
                 overridden,
             },
@@ -974,6 +982,7 @@ mod tests {
                     action_picker_open: false,
                     bindings: &bindings,
                     gesture_maps: &gesture_maps,
+                    dpi_gestures: false,
                     editing_app: None,
                     overridden: None,
                 },

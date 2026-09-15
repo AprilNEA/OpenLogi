@@ -308,6 +308,7 @@ native_controls_when_disabled = "Når funktionen er slået fra, bruger knapperne
 overridden_in_app = "Tilsidesat i %{app}"
 use_a_single_action = "Brug én handling"
 use_gestures = "Brug bevægelser"
+dpi_gestures_unavailable = "Denne enhed har ikke meldt om understøttelse af bevægelser med DPI-knappen."
 action_key_summary = "%{action} · %{key}"
 search_actions = "Søg efter handlinger…"
 workflow_key_summary = "Arbejdsgang · %{key}"

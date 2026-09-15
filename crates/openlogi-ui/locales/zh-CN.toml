@@ -308,6 +308,7 @@ native_controls_when_disabled = "关闭后，所有控件保持原生行为，�
 overridden_in_app = "已在 %{app} 中覆盖"
 use_a_single_action = "使用单一操作"
 use_gestures = "使用手势"
+dpi_gestures_unavailable = "尚未检测到此设备支持 DPI 按钮手势。"
 action_key_summary = "%{action}·%{key}"
 search_actions = "搜索操作…"
 workflow_key_summary = "工作流·%{key}"

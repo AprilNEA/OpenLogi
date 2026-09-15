@@ -9,6 +9,71 @@ const BOTH: &[u16] = &[
     reprog_controls::HAPTIC_PANEL_CID,
 ];
 
+#[tokio::test]
+async fn dpi_gesture_arming_never_overwrites_raw_xy_with_plain_diversion() {
+    for cid in [0x00c4u16, 0x00ed, 0x00fd] {
+        for (gestures, raw_xy, expected_flags) in [
+            (true, true, vec![0x33]),
+            (true, false, vec![]),
+            (false, true, vec![0x23]),
+            (false, false, vec![0x23]),
+        ] {
+            let (raw, handle) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+                let mut response = vec![0; 20];
+                response[..4].copy_from_slice(&request[..4]);
+                response[0] = 0x11;
+                match (request[2], request[3] >> 4) {
+                    (0, 1) => response[4] = 4,
+                    (0, 0) => response[4] = 2,
+                    (2, 0) => response[4] = 1,
+                    (2, 1) => {
+                        response[4..6].copy_from_slice(&cid.to_be_bytes());
+                        response[8] = 0x20;
+                        response[12] = u8::from(raw_xy);
+                    }
+                    (2, 2) => response[4..6].copy_from_slice(&cid.to_be_bytes()),
+                    (2, 3) => return Some(request.to_vec()),
+                    _ => panic!("unexpected capture request: {request:02x?}"),
+                }
+                Some(response)
+            });
+            let channel = scripted_channel(raw).await;
+            let device = Device::new(channel.clone(), 0xff).await.unwrap();
+            let spec = CaptureSpec {
+                divert_gesture_buttons: if gestures {
+                    vec![(cid, ButtonId::DpiToggle)]
+                } else {
+                    vec![]
+                },
+                ..CaptureSpec::default()
+            };
+            let mut armed = ArmedControls::default();
+            arm_controls_into(&device, &channel, 0xff, &spec, &mut armed)
+                .await
+                .unwrap();
+            let writes: Vec<_> = handle
+                .written_reports()
+                .into_iter()
+                .filter(|report| report[2] == 2 && report[3] >> 4 == 3)
+                .map(|report| report[6])
+                .collect();
+            assert_eq!(
+                writes, expected_flags,
+                "CID {cid:04x}, gestures {gestures}, raw XY {raw_xy}"
+            );
+            assert_eq!(
+                armed.gesture_button_cids,
+                if gestures && raw_xy {
+                    vec![(cid, ButtonId::DpiToggle)]
+                } else {
+                    vec![]
+                }
+            );
+            assert_eq!(armed.dpi_cids, if gestures { vec![] } else { vec![cid] });
+        }
+    }
+}
+
 fn reporting(
     diverted: bool,
     remap: Option<reprog_controls::ControlId>,

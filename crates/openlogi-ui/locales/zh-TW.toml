@@ -308,6 +308,7 @@ native_controls_when_disabled = "關閉後，所有控制項會維持原有功�
 overridden_in_app = "已在 %{app} 中覆寫"
 use_a_single_action = "使用單一動作"
 use_gestures = "使用手勢"
+dpi_gestures_unavailable = "尚未偵測到此裝置支援 DPI 按鈕手勢。"
 action_key_summary = "%{action} · %{key}"
 search_actions = "搜尋動作…"
 workflow_key_summary = "工作流程 · %{key}"
