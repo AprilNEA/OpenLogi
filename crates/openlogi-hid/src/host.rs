@@ -24,7 +24,7 @@ use openlogi_device::inventory::{Enumerator, InventoryError};
 use openlogi_device::pairing::PairingReceiver;
 use openlogi_device::write::{
     self as device, Dpi, DpiInfo, FeatureEntry, FirmwareEntity, HapticWaveform, LightingMethod,
-    LitraModel, ReprogControlEntry, ScrollResolution, ScrollWheelMode,
+    LitraModel, PointerScaling, ReprogControlEntry, ScrollResolution, ScrollWheelMode,
 };
 use openlogi_device::{DeviceIoGate, DeviceIoSignal, DeviceRoute};
 
@@ -64,6 +64,20 @@ pub async fn get_dpi_info(route: &DeviceRoute) -> Result<DpiInfo, WriteError> {
 /// Write a new sensor DPI to the device `route` reaches.
 pub async fn set_dpi(route: &DeviceRoute, dpi: Dpi) -> Result<(), WriteError> {
     device::set_dpi(&*native_backend(), route, dpi).await
+}
+
+/// Read the pointer-motion scaling of the device `route` reaches.
+pub async fn get_pointer_scaling(route: &DeviceRoute) -> Result<PointerScaling, WriteError> {
+    device::get_pointer_scaling(&*native_backend(), route).await
+}
+
+/// Write a pointer-motion scaling to the device `route` reaches and return the
+/// value it applied.
+pub async fn set_pointer_scaling(
+    route: &DeviceRoute,
+    scaling: PointerScaling,
+) -> Result<PointerScaling, WriteError> {
+    device::set_pointer_scaling(&*native_backend(), route, scaling).await
 }
 
 /// Read the SmartShift mode, threshold and torque of the device `route` reaches.
