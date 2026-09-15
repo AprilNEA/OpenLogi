@@ -116,7 +116,7 @@ pub fn plan_for_device(
     // One direction map per HID++ source in gesture mode — several may
     // gesture at once, each armed with its own raw-XY divert (the capture
     // target below derives the CIDs to divert from this map's keys).
-    let gesture_bindings = hidpp_gesture_maps_for(config, Some(config_key));
+    let gesture_bindings = hidpp_gesture_maps_for(config, Some(config_key), app);
     let mut divert_gesture_buttons = Vec::new();
     if os_mouse_hook_available {
         divert_gesture_buttons.extend(
@@ -654,6 +654,57 @@ mod tests {
                 .into_iter()
                 .map(|cid| (cid, ButtonId::DpiToggle))
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn dpi_gesture_capture_follows_the_app_override() {
+        let mut cfg = Config::default();
+        cfg.set_gesture_mode("2b042", ButtonId::DpiToggle, true);
+        for action in [Action::Paste, Action::None] {
+            cfg.set_per_app_binding(
+                "2b042",
+                "com.example.Editor",
+                ButtonId::DpiToggle,
+                Some(action.clone()),
+            );
+            for app in [None, Some("com.example.Editor"), Some("com.example.Other")] {
+                let overridden = app == Some("com.example.Editor");
+                let plan = plan_for_device(&cfg, "2b042", route(), app, 0, false);
+                assert_eq!(
+                    plan.dispatch
+                        .gesture_bindings
+                        .contains_key(&ButtonId::DpiToggle),
+                    !overridden
+                );
+                assert_eq!(
+                    plan.target
+                        .spec
+                        .divert_gesture_buttons
+                        .iter()
+                        .any(|&(_, button)| button == ButtonId::DpiToggle),
+                    !overridden
+                );
+                if overridden {
+                    assert_eq!(
+                        plan.dispatch.bindings.get(&ButtonId::DpiToggle),
+                        Some(&Binding::Single(action.clone()))
+                    );
+                }
+            }
+        }
+        cfg.set_per_app_binding("2b042", "com.example.Editor", ButtonId::DpiToggle, None);
+        let restored =
+            plan_for_device(&cfg, "2b042", route(), Some("com.example.Editor"), 0, false);
+        assert!(
+            restored
+                .dispatch
+                .gesture_bindings
+                .contains_key(&ButtonId::DpiToggle)
+        );
+        assert_eq!(
+            restored.target.spec.divert_gesture_buttons.len(),
+            DPI_MODE_SHIFT_CIDS.len()
         );
     }
 

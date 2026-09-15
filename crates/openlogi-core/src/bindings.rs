@@ -63,7 +63,7 @@ pub fn button_bindings_for(
 
 /// Per-direction maps for every HID++ gesture source (DPI/ModeShift, the
 /// dedicated gesture button, and the MX Master 4 haptic panel) in gesture mode
-/// on `config_key`,
+/// on `config_key`, with `app_bundle`'s single-action overrides applied,
 /// keyed by the button its captured swipes dispatch as. Each map is seeded
 /// via [`Binding::fill_gesture_defaults`] — the one canonical seeding rule —
 /// so the watcher always dispatches the full five-direction set the GUI
@@ -72,11 +72,12 @@ pub fn button_bindings_for(
 pub fn hidpp_gesture_maps_for(
     config: &Config,
     config_key: Option<&str>,
+    app_bundle: Option<&str>,
 ) -> BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>> {
     let Some(key) = config_key else {
         return BTreeMap::new();
     };
-    let stored = config.bindings_for(key);
+    let stored = config.effective_bindings(key, app_bundle);
     ButtonId::ALL
         .iter()
         .copied()
@@ -287,7 +288,7 @@ mod tests {
         cfg.set_gesture_mode("2b042", ButtonId::DpiToggle, true);
         cfg.set_gesture_mode("2b042", ButtonId::HapticPanel, true);
 
-        let maps = hidpp_gesture_maps_for(&cfg, Some("2b042"));
+        let maps = hidpp_gesture_maps_for(&cfg, Some("2b042"), None);
         // The dedicated button gestures by default...
         let dedicated = maps
             .get(&ButtonId::GestureButton)
@@ -342,11 +343,54 @@ mod tests {
     }
 
     #[test]
+    fn per_app_overrides_replace_hidpp_gestures_and_clearing_restores_them() {
+        for button in [
+            ButtonId::DpiToggle,
+            ButtonId::GestureButton,
+            ButtonId::HapticPanel,
+        ] {
+            let mut cfg = Config::default();
+            cfg.set_gesture_mode("2b042", button, true);
+            let global = hidpp_gesture_maps_for(&cfg, Some("2b042"), None);
+            assert!(global.contains_key(&button));
+
+            for action in [Action::Paste, Action::None] {
+                cfg.set_per_app_binding(
+                    "2b042",
+                    "com.example.Editor",
+                    button,
+                    Some(action.clone()),
+                );
+                let mut expected = global.clone();
+                expected.remove(&button);
+                assert_eq!(
+                    hidpp_gesture_maps_for(&cfg, Some("2b042"), Some("com.example.Editor")),
+                    expected
+                );
+                assert_eq!(
+                    bindings_for(&cfg, Some("2b042"), Some("com.example.Editor")).get(&button),
+                    Some(&action)
+                );
+                assert_eq!(hidpp_gesture_maps_for(&cfg, Some("2b042"), None), global);
+                assert_eq!(
+                    hidpp_gesture_maps_for(&cfg, Some("2b042"), Some("com.example.Other")),
+                    global
+                );
+            }
+            cfg.set_per_app_binding("2b042", "com.example.Editor", button, None);
+            assert_eq!(
+                hidpp_gesture_maps_for(&cfg, Some("2b042"), Some("com.example.Editor")),
+                global
+            );
+        }
+    }
+
+    #[test]
     fn hidpp_maps_silent_for_a_demoted_dedicated_button() {
         // Default device: the dedicated HID++ gesture button gestures, with its
         // defaults seeded.
         let mut cfg = Config::default();
-        let maps = hidpp_gesture_maps_for(&cfg, Some("2b042"));
+        let maps = hidpp_gesture_maps_for(&cfg, Some("2b042"), None);
         assert_eq!(
             maps.get(&ButtonId::GestureButton)
                 .and_then(|m| m.get(&GestureDirection::Up)),
@@ -359,7 +403,7 @@ mod tests {
         cfg.set_gesture_mode("2b042", ButtonId::GestureButton, false);
         cfg.set_gesture_mode("2b042", ButtonId::Back, true);
         assert!(
-            hidpp_gesture_maps_for(&cfg, Some("2b042")).is_empty(),
+            hidpp_gesture_maps_for(&cfg, Some("2b042"), None).is_empty(),
             "a demoted dedicated button must dispatch nothing over HID++"
         );
     }
