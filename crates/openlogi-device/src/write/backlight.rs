@@ -6,8 +6,8 @@ use hidpp::{
     feature::{
         CreatableFeature,
         backlight::{
-            BacklightFeature, BacklightMode as FirmwareMode, BacklightStatus as FirmwareStatus,
-            SetBacklightConfig,
+            BacklightEffect as FirmwareEffect, BacklightFeature, BacklightMode as FirmwareMode,
+            BacklightStatus as FirmwareStatus, SetBacklightConfig,
         },
     },
 };
@@ -15,7 +15,7 @@ use tracing::debug;
 
 use crate::SharedChannel;
 use crate::backend::HidBackend;
-use crate::backlight::{BacklightMode, BacklightState, BacklightStatus};
+use crate::backlight::{BacklightEffect, BacklightMode, BacklightState, BacklightStatus};
 use crate::channel::route::DeviceRoute;
 
 use super::{HidppOperation, WriteError, classify_hidpp_error, open_feature, with_route};
@@ -43,6 +43,34 @@ fn mode_to_firmware(mode: BacklightMode) -> FirmwareMode {
         BacklightMode::None => FirmwareMode::None,
         BacklightMode::Automatic | BacklightMode::TemporaryManual => FirmwareMode::Automatic,
         BacklightMode::PermanentManual => FirmwareMode::PermanentManual,
+    }
+}
+
+/// Map the fork's `0x1982` effect onto OpenLogi's [`BacklightEffect`]. The
+/// source enum is `#[non_exhaustive]`; an unmodelled future variant maps to
+/// [`BacklightEffect::Static`], the firmware's default effect.
+fn effect_from_firmware(effect: FirmwareEffect) -> BacklightEffect {
+    match effect {
+        FirmwareEffect::None => BacklightEffect::None,
+        FirmwareEffect::Breathing => BacklightEffect::Breathing,
+        FirmwareEffect::Contrast => BacklightEffect::Contrast,
+        FirmwareEffect::Reaction => BacklightEffect::Reaction,
+        FirmwareEffect::Random => BacklightEffect::Random,
+        FirmwareEffect::Waves => BacklightEffect::Waves,
+        _ => BacklightEffect::Static,
+    }
+}
+
+/// The inverse of [`effect_from_firmware`], used when writing a config back.
+fn effect_to_firmware(effect: BacklightEffect) -> FirmwareEffect {
+    match effect {
+        BacklightEffect::Static => FirmwareEffect::Static,
+        BacklightEffect::None => FirmwareEffect::None,
+        BacklightEffect::Breathing => FirmwareEffect::Breathing,
+        BacklightEffect::Contrast => FirmwareEffect::Contrast,
+        BacklightEffect::Reaction => FirmwareEffect::Reaction,
+        BacklightEffect::Random => FirmwareEffect::Random,
+        BacklightEffect::Waves => FirmwareEffect::Waves,
     }
 }
 
@@ -170,6 +198,75 @@ pub async fn set_backlight_enabled(
     .await
 }
 
+/// Read the backlight effect currently running on `route`.
+///
+/// Not part of [`get_backlight`]'s [`BacklightState`] (see that type's own
+/// doc comment on why) — a separate `getBacklightInfo` round trip.
+///
+/// `FeatureUnsupported` when the device does not expose HID++ `0x1982`.
+pub async fn get_backlight_effect(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+) -> Result<BacklightEffect, WriteError> {
+    let index = route.device_index();
+    with_route(backend, route, move |channel| async move {
+        let mut device = Device::new(Arc::clone(&channel), index)
+            .await
+            .map_err(|_| WriteError::DeviceUnreachable { index })?;
+        let feature = open_feature::<BacklightFeature>(&mut device).await?;
+        let info = feature.get_backlight_info().await.map_err(|e| {
+            classify_hidpp_error(e, HidppOperation::ReadBacklight, BacklightFeature::ID)
+        })?;
+        Ok(effect_from_firmware(info.effect))
+    })
+    .await
+}
+
+/// Set a predefined backlight effect on `route`, and return the read-back
+/// state. Persistent (`setBacklightConfig`, non-volatile) — survives
+/// reconnects, host switches, and power cycles, matching
+/// [`set_backlight_enabled`]. Every other field (enabled, mode, level,
+/// fade-out durations) is read first and written back unchanged.
+///
+/// `FeatureUnsupported` when the device does not expose HID++ `0x1982`.
+pub async fn set_backlight_effect(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+    effect: BacklightEffect,
+) -> Result<BacklightState, WriteError> {
+    let index = route.device_index();
+    with_route(backend, route, move |channel| async move {
+        let mut device = Device::new(Arc::clone(&channel), index)
+            .await
+            .map_err(|_| WriteError::DeviceUnreachable { index })?;
+        let feature = open_feature::<BacklightFeature>(&mut device).await?;
+
+        let current = feature.get_backlight_config().await.map_err(|e| {
+            classify_hidpp_error(e, HidppOperation::ReadBacklight, BacklightFeature::ID)
+        })?;
+
+        feature
+            .set_backlight_config(SetBacklightConfig {
+                enabled: current.enabled,
+                options: current.options,
+                mode: mode_to_firmware(mode_from_firmware(current.mode)),
+                effect: Some(effect_to_firmware(effect)),
+                current_level: current.current_level,
+                duration_hands_out: current.duration_hands_out,
+                duration_hands_in: current.duration_hands_in,
+                duration_powered: current.duration_powered,
+            })
+            .await
+            .map_err(|e| {
+                classify_hidpp_error(e, HidppOperation::WriteBacklight, BacklightFeature::ID)
+            })?;
+
+        debug!(index, ?effect, "wrote backlight effect");
+        read_state(&feature).await
+    })
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,6 +300,37 @@ mod tests {
     fn writable_modes_survive_the_read_write_round_trip() {
         for mode in [FirmwareMode::None, FirmwareMode::PermanentManual] {
             assert_eq!(mode_to_firmware(mode_from_firmware(mode)), mode);
+        }
+    }
+
+    #[test]
+    fn firmware_effects_round_trip_through_openlogi_effects() {
+        assert_eq!(
+            effect_from_firmware(FirmwareEffect::Breathing),
+            BacklightEffect::Breathing
+        );
+        assert_eq!(
+            effect_from_firmware(FirmwareEffect::Waves),
+            BacklightEffect::Waves
+        );
+        assert_eq!(
+            effect_from_firmware(FirmwareEffect::Static),
+            BacklightEffect::Static
+        );
+    }
+
+    #[test]
+    fn every_effect_survives_the_read_write_round_trip() {
+        for effect in [
+            FirmwareEffect::Static,
+            FirmwareEffect::None,
+            FirmwareEffect::Breathing,
+            FirmwareEffect::Contrast,
+            FirmwareEffect::Reaction,
+            FirmwareEffect::Random,
+            FirmwareEffect::Waves,
+        ] {
+            assert_eq!(effect_to_firmware(effect_from_firmware(effect)), effect);
         }
     }
 

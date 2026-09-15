@@ -42,7 +42,7 @@ mod tests {
 
     use super::*;
     use cmd::Command;
-    use cmd::backlight::BacklightAction;
+    use cmd::backlight::{BacklightAction, EffectArg};
     use cmd::diag::DiagCmd;
     use cmd::diag::lighting::Method;
     use cmd::diag::wheel::ResolutionArg;
@@ -91,6 +91,32 @@ mod tests {
         match cli.cmd.expect("subcommand present") {
             Command::Backlight(args) => {
                 assert!(matches!(args.action, Some(BacklightAction::Off)));
+            }
+            other => panic!("expected Backlight, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn backlight_effect_takes_a_value_and_a_device_filter() {
+        let cli = Cli::try_parse_from([
+            "openlogi",
+            "backlight",
+            "--device",
+            "MX Mechanical",
+            "effect",
+            "breathing",
+        ])
+        .expect("backlight effect parses");
+
+        match cli.cmd.expect("subcommand present") {
+            Command::Backlight(args) => {
+                assert_eq!(args.device.as_deref(), Some("MX Mechanical"));
+                assert!(matches!(
+                    args.action,
+                    Some(BacklightAction::Effect {
+                        effect: EffectArg::Breathing
+                    })
+                ));
             }
             other => panic!("expected Backlight, got {other:?}"),
         }
