@@ -431,6 +431,7 @@ fn device_menu_content(
     popover: WeakEntity<PopoverState>,
     on_action: DeviceMenuActionHandler,
     rename_focus: &FocusHandle,
+    delete_focus: &FocusHandle,
 ) -> impl IntoElement {
     let rename_row = menu_row_action(
         MenuRow::new((
@@ -471,7 +472,8 @@ fn device_menu_content(
             popover,
             DeviceMenuAction::Delete,
             on_action,
-        );
+        )
+        .track_focus(delete_focus);
         panel = panel
             .child(
                 div()
@@ -515,20 +517,37 @@ where
                 .use_keyed_state((id.clone(), "rename-focus"), cx, |_, cx| cx.focus_handle())
                 .read(cx)
                 .clone();
-            if state.is_open() {
+            let delete_focus = window
+                .use_keyed_state((id.clone(), "delete-focus"), cx, |_, cx| cx.focus_handle())
+                .read(cx)
+                .clone();
+            if state.is_open()
+                && !rename_focus.is_focused(window)
+                && !delete_focus.is_focused(window)
+            {
                 rename_focus.focus(window, cx);
             }
             let keyboard_popover = popover.clone();
             let keyboard_action = on_action.clone();
+            let keyboard_rename_focus = rename_focus.clone();
+            let keyboard_delete_focus = delete_focus.clone();
             div()
                 .track_focus(&rename_focus)
                 .on_key_down(move |event: &KeyDownEvent, window, cx| {
-                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                        window.prevent_default();
-                        cx.stop_propagation();
-                        dismiss_device_menu(&keyboard_popover, window, cx);
-                        keyboard_action(DeviceMenuAction::Rename, window, cx);
+                    if !matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        return;
                     }
+                    let action = if keyboard_delete_focus.is_focused(window) {
+                        DeviceMenuAction::Delete
+                    } else if keyboard_rename_focus.is_focused(window) {
+                        DeviceMenuAction::Rename
+                    } else {
+                        return;
+                    };
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    dismiss_device_menu(&keyboard_popover, window, cx);
+                    keyboard_action(action, window, cx);
                 })
                 .child(device_menu_content(
                     data.clone(),
@@ -536,6 +555,7 @@ where
                     popover,
                     on_action.clone(),
                     &rename_focus,
+                    &delete_focus,
                 ))
         })
 }
@@ -999,6 +1019,27 @@ mod tests {
             [DeviceMenuAction::Delete]
         );
         assert!(offline_cx.debug_bounds("device-menu-delete-row").is_none());
+    }
+
+    #[gpui::test]
+    fn device_menu_delete_supports_keyboard_activation(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let mut offline_record = test_device_record();
+        offline_record.online = false;
+        let actions = Rc::new(RefCell::new(Vec::new()));
+        let visual_cx = add_menu_window(cx, offline_record, actions.clone());
+        draw(visual_cx);
+        open_menu(visual_cx);
+
+        visual_cx.update(Window::focus_next);
+        visual_cx.simulate_keystrokes("enter");
+        draw(visual_cx);
+
+        assert_eq!(
+            actions.borrow().as_slice(),
+            [DeviceMenuAction::Delete],
+            "the focused Delete row must dispatch Delete from Enter"
+        );
     }
 
     #[gpui::test]
