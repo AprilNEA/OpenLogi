@@ -44,8 +44,8 @@ pub use hires_wheel::{
     set_scroll_resolution_on, set_scroll_wheel_mode, set_scroll_wheel_mode_on,
 };
 pub use lighting::{
-    LightingMethod, set_keyboard_color, set_keyboard_color_on, set_keyboard_color_with,
-    set_keyboard_color_with_on,
+    LightingMethod, LightingWrite, set_keyboard_color, set_keyboard_color_on,
+    set_keyboard_color_with, set_keyboard_color_with_on,
 };
 pub(crate) use litra::litra_capabilities;
 pub use litra::{
