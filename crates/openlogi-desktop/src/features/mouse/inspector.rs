@@ -7,7 +7,7 @@ use gpui::{
     Context, Entity, InteractiveElement, IntoElement, ParentElement, Role,
     StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rgb, svg,
 };
-use gpui_base::Button as BaseButton;
+use gpui_base::{Button as BaseButton, Disableable};
 use gpui_component::{
     Icon, IconName, Selectable as _, Sizable as _, button::Button, h_flex, input::InputState,
     scroll::ScrollableElement as _, v_flex,
@@ -581,6 +581,7 @@ fn selection_card(
 ) -> impl IntoElement {
     let toggle = picker.view.clone();
     let search = picker.search.clone();
+    let shortcut_input = picker.shortcut_input.clone();
     let opening = !picker.open;
     let accessible_label = value.clone();
     BaseButton::new(id)
@@ -637,8 +638,12 @@ fn selection_card(
         .on_click(move |_, window, cx| {
             if opening {
                 search.update(cx, |search, cx| search.set_value("", window, cx));
+                shortcut_input.update(cx, |input, cx| input.set_value("", window, cx));
             }
             toggle.update(cx, |view, cx| {
+                if opening {
+                    view.set_shortcut_hold(false);
+                }
                 view.toggle_action_picker();
                 cx.notify();
             });
@@ -674,7 +679,7 @@ fn action_library(
                 })
                 .children(rows),
         )
-        .child(custom_shortcut_editor(picker, on_pick, pal))
+        .child(custom_shortcut_editor(picker, on_pick, pal, cx))
 }
 
 /// Free-text `KeyCombo` recorder shared by every `action_library` call site.
@@ -684,12 +689,19 @@ fn custom_shortcut_editor(
     picker: ActionPickerContext<'_>,
     on_pick: &PickFn,
     pal: Palette,
+    cx: &Context<MouseModelView>,
 ) -> impl IntoElement {
     let hold = picker.shortcut_hold;
     let view_tap = picker.view.clone();
     let view_hold = picker.view.clone();
     let submit_input = picker.shortcut_input.clone();
     let on_pick = on_pick.clone();
+    let is_valid = picker
+        .shortcut_input
+        .read(cx)
+        .value()
+        .parse::<KeyCombo>()
+        .is_ok();
 
     v_flex()
         .gap_1()
@@ -733,6 +745,7 @@ fn custom_shortcut_editor(
                     Button::new("shortcut-add")
                         .compact()
                         .label(tr!("common.add"))
+                        .disabled(!is_valid)
                         .on_click(move |_, window, cx| {
                             let text = submit_input.read(cx).value().to_string();
                             if let Ok(combo) = text.parse::<KeyCombo>() {
