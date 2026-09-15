@@ -106,7 +106,10 @@ impl Render for UpdateConsentView {
                             .text_body()
                             .text_center()
                             .text_color(pal.text_muted)
-                            .child(tr!("updates.update_consent_description")),
+                            .child(tr!(
+                                "updates.update_consent_description",
+                                host => crate::platform::updater::manifest_host()
+                            )),
                     )
                     .child(
                         h_flex()

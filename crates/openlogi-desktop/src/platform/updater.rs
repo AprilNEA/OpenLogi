@@ -25,6 +25,21 @@ const MANIFEST_URL: &str = match option_env!("OPENLOGI_UPDATE_MANIFEST_URL") {
     None => "https://updates.openlogi.org/channels/stable/latest.json",
 };
 
+/// The update-manifest endpoint's host, e.g. `updates.openlogi.org` — the one
+/// per-build fact the first-run consent prompt shows before the user opts
+/// in. [`OPENLOGI_UPDATE_MANIFEST_URL`](MANIFEST_URL) is baked in at compile
+/// time, so a self-hosted or forked build with its own manifest host must
+/// have the consent text say so too, rather than a literal
+/// `updates.openlogi.org` baked into every locale catalog.
+#[must_use]
+pub fn manifest_host() -> &'static str {
+    MANIFEST_URL
+        .split("://")
+        .nth(1)
+        .and_then(|rest| rest.split('/').next())
+        .unwrap_or(MANIFEST_URL)
+}
+
 /// Base64 minisign public key, embedded at build time by the release workflow.
 /// Absent in local/dev builds, which then fail closed (see [`new_entity`]).
 const MINISIGN_PUBLIC_KEY: Option<&str> = option_env!("OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY");
@@ -123,4 +138,29 @@ pub fn install(cx: &mut App, settings: &AppSettings) {
 /// The shared updater entity, if [`install`] has run.
 pub fn shared(cx: &App) -> Option<Entity<Updater>> {
     cx.try_global::<SharedUpdater>().map(|g| g.0.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::manifest_host;
+
+    #[test]
+    fn manifest_host_strips_scheme_and_path() {
+        assert_eq!(manifest_host(), "updates.openlogi.org");
+    }
+
+    #[test]
+    fn manifest_host_falls_back_to_the_whole_url_when_unparseable() {
+        // Guards the parsing logic itself against a malformed override, using
+        // the same split/strip steps `manifest_host` runs on `MANIFEST_URL`.
+        let no_scheme = "updates.example.com/latest.json";
+        assert_eq!(
+            no_scheme
+                .split("://")
+                .nth(1)
+                .and_then(|rest| rest.split('/').next())
+                .unwrap_or(no_scheme),
+            no_scheme
+        );
+    }
 }
