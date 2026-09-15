@@ -127,6 +127,51 @@ fn being_seen_resets_the_miss_counter() {
     );
 }
 
+#[test]
+fn settling_mixed_probe_verdicts_preserves_liveness_and_neutral_deferrals() {
+    use ProbeVerdict::{AliveButIncomplete, Deferred, Failed, Healthy};
+
+    let mut ledger = super::ledger::NodeLedger::default();
+    let known = inventory(&[1, 3]).pop().unwrap();
+    let healthy = settle_probe(
+        &mut ledger,
+        &1,
+        Healthy { complete: true },
+        Some(known.clone()),
+    );
+    assert_eq!(healthy.inventory, Some(known.clone()));
+    assert!(!healthy.evict_channel);
+
+    // Only real incomplete probes age the three-tick snapshot grace. A live
+    // receiver resets the ordinary two-failure streak, but its fourth failed
+    // arrival replay still retires the channel. Deferrals change neither.
+    for (tick, (verdict, replay, evict)) in [
+        (Failed, true, false),
+        (Deferred, true, false),
+        (Deferred, true, false),
+        (Deferred, true, false),
+        (Deferred, true, false),
+        (AliveButIncomplete, true, false),
+        (Failed, true, false),
+        (Deferred, true, false),
+        (AliveButIncomplete, false, false),
+        (Deferred, false, false),
+        (AliveButIncomplete, false, false),
+        (AliveButIncomplete, false, true),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let settled = settle_probe(&mut ledger, &1, verdict, None);
+        assert_eq!(
+            settled.inventory,
+            replay.then(|| known.clone()),
+            "tick {tick}"
+        );
+        assert_eq!(settled.evict_channel, evict, "tick {tick}");
+    }
+}
+
 /// A deferred tick is evidence of nothing about the node's devices either:
 /// the entries the node contributed are held out of miss aging, however many
 /// deferrals run back to back, while the entries of a node that was actually

@@ -139,24 +139,57 @@ fn send_times_out_and_removes_pending_message() {
 }
 
 #[test]
-fn send_write_through_starts_response_timeout_after_write_completes() {
+fn send_write_through_waits_for_same_header_then_finishes_native_write() {
     futures::executor::block_on(async {
         let (raw, handle) = MockRawHidChannel::new();
-        handle.park_writes();
         let channel = channel_with_reader(raw).await;
-        let response = short_msg(0x20);
-        handle.queue_response(response);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let listener_events = Arc::clone(&events);
+        channel.add_msg_listener(move |msg, matched| {
+            listener_events.lock().unwrap().push((msg, matched));
+        });
+        let request = short_msg(0x10);
+        let matches_header = move |candidate: &HidppMessage| candidate.header() == request.header();
+        let mut first = Box::pin(channel.send(request, matches_header));
+        assert!(futures::poll!(first.as_mut()).is_pending());
+
+        handle.park_writes();
         let mut send = Box::pin(channel.send_write_through(
-            short_msg(0x10),
-            move |candidate| *candidate == response,
+            request,
+            matches_header,
             Duration::from_millis(25),
         ));
-
         assert!(futures::poll!(send.as_mut()).is_pending());
+        assert_eq!(
+            handle.written_reports().len(),
+            1,
+            "same header is in flight"
+        );
+
+        drop(first);
+        assert!(futures::poll!(send.as_mut()).is_pending());
+        assert_eq!(
+            handle.written_reports().len(),
+            1,
+            "late reply is still owed"
+        );
+
+        // Even a byte-identical write must discard the abandoned reply.
+        let late_response = same_header_msg(0x10, 0x21);
+        handle.send_incoming(late_response).await;
+        wait_for_event_count(&events, 1).await;
+        assert_eq!(events.lock().unwrap()[0], (late_response, false));
+        assert!(futures::poll!(send.as_mut()).is_pending());
+        assert_eq!(handle.written_reports().len(), 2);
+        assert_eq!(stale_len(&channel), 0);
+
+        // The native write is now in progress, with no response timer yet.
         futures_timer::Delay::new(Duration::from_millis(50)).await;
         assert!(futures::poll!(send.as_mut()).is_pending());
-        assert_eq!(channel.pending_messages.lock().unwrap().messages.len(), 1);
+        assert_eq!(pending_len(&channel), 1);
 
+        let response = same_header_msg(0x10, 0x32);
+        handle.queue_response(response);
         handle.release_writes();
         assert_eq!(send.await.unwrap(), response);
         assert_pending_empty(&channel);
