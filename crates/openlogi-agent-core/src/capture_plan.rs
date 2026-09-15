@@ -184,6 +184,8 @@ pub fn plan_for_device(
                     .collect(),
                 divert_gesture_buttons,
                 divert_buttons,
+                gesture_sensitivity: config.gesture_sensitivity(config_key),
+                gesture_axis_bias: config.gesture_axis_bias(config_key),
             },
             rearm_generation,
         },
