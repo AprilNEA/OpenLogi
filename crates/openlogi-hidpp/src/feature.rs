@@ -214,6 +214,40 @@ impl FeatureEndpoint {
             .await
     }
 
+    /// Calls a function that echoes all three request bytes, waiting through
+    /// the native write before applying the response deadline. Differing
+    /// payloads (e.g. a late ownership claim during rollback) do not match.
+    ///
+    /// The owner must drive this future to completion; see
+    /// [`HidppChannel::send_v20_write_through`].
+    pub(crate) async fn call_echoed_write_through(
+        &self,
+        function: u8,
+        args: [u8; 3],
+    ) -> Result<v20::Message, Hidpp20Error> {
+        self.chan
+            .send_v20_write_through(
+                v20::Message::Short(self.header(function), args),
+                move |response| response.extend_payload()[..3] == args,
+            )
+            .await
+    }
+
+    /// Calls `function` with a 16-byte long-report payload, waiting through the
+    /// native write before applying the response deadline.
+    ///
+    /// The owner must drive this future to completion; see
+    /// [`HidppChannel::send_v20_write_through`].
+    pub(crate) async fn call_long_write_through(
+        &self,
+        function: u8,
+        args: [u8; 16],
+    ) -> Result<v20::Message, Hidpp20Error> {
+        self.chan
+            .send_v20_write_through(v20::Message::Long(self.header(function), args), |_| true)
+            .await
+    }
+
     /// Sends `function` with a 3-byte short-report payload without waiting for a
     /// response.
     ///

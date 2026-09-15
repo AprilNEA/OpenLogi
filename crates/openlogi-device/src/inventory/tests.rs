@@ -17,14 +17,15 @@ use super::events::EventFeatureIndices;
 use super::features::ProbedFeatures;
 use super::probe::{
     NodeProbe, ProbeVerdict, assemble_bolt_probe, assemble_unifying_device,
-    parse_codename_unifying, preferred_direct_codename, probe_unifying_slot, unifying_probe_budget,
+    parse_codename_unifying, preferred_direct_codename, probe_unifying_slot, retry_arrival_trigger,
+    unifying_probe_budget,
 };
 use super::{
     ChannelCache, Enumerator, ONESHOT_ATTEMPTS, OneShotScan, ScanPass, UNIFYING_CACHED_SLOT_PROBE,
     UNIFYING_SLOT_PROBE, retained_nodes, routes_for_inventories, settle_unhealthy_node,
 };
 use crate::channel::scripted::{
-    ScriptedBackend, ScriptedNode, ScriptedRawHidChannel, scripted_channel, scripted_node_info,
+    ScriptedBackend, ScriptedOpen, ScriptedRawHidChannel, scripted_channel, scripted_node_info,
 };
 use crate::{DIRECT_DEVICE_INDEX, DeviceRoute};
 
@@ -210,6 +211,66 @@ fn unifying_arrival_liveness_survives_missing_feature_data() {
     assert!(device.online);
     assert_eq!(device.wpid, Some(0x40b8));
     assert_eq!(device.kind, DeviceKind::Mouse);
+}
+
+#[tokio::test]
+async fn unifying_arrival_trigger_retries_one_transient_failure() {
+    let mut attempts = 0;
+
+    let result = retry_arrival_trigger(
+        || {
+            attempts += 1;
+            std::future::ready((attempts > 1).then_some(()).ok_or("transient"))
+        },
+        std::time::Duration::from_secs(1),
+        std::time::Duration::ZERO,
+    )
+    .await;
+
+    assert_eq!(result, Some(()));
+    assert_eq!(attempts, 2);
+}
+
+#[tokio::test]
+async fn unifying_arrival_trigger_surfaces_a_persistent_failure() {
+    let mut attempts = 0;
+
+    let result = retry_arrival_trigger(
+        || {
+            attempts += 1;
+            std::future::ready(Err::<(), _>("persistent"))
+        },
+        std::time::Duration::from_secs(1),
+        std::time::Duration::ZERO,
+    )
+    .await;
+
+    assert_eq!(result, None);
+    assert_eq!(attempts, 2);
+}
+
+#[tokio::test]
+async fn unifying_arrival_trigger_bounds_two_stalled_attempts() {
+    let attempt_timeout = std::time::Duration::from_millis(1);
+    let retry_delay = std::time::Duration::from_millis(1);
+    let mut attempts = 0;
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        retry_arrival_trigger(
+            || {
+                attempts += 1;
+                std::future::pending::<Result<(), &str>>()
+            },
+            attempt_timeout,
+            retry_delay,
+        ),
+    )
+    .await
+    .expect("the trigger retry must finish inside its caller's budget");
+
+    assert_eq!(result, None);
+    assert_eq!(attempts, 2);
 }
 
 fn inventory(slots: &[u8]) -> Vec<DeviceInventory> {
@@ -743,10 +804,8 @@ fn live_cached_channel_survives_a_transient_enumeration_gap() {
 /// ledger keeps replaying that node's last-good snapshot.
 #[tokio::test]
 async fn a_node_that_will_not_open_makes_the_tick_unhealthy() {
-    let backend = ScriptedBackend::new(vec![(
-        scripted_node_info("wont-open"),
-        ScriptedNode::OpenFails,
-    )]);
+    let backend =
+        ScriptedBackend::new(vec![(scripted_node_info("wont-open"), ScriptedOpen::Fails)]);
     let mut enumerator = Enumerator::with_backend(backend);
 
     let (inventories, complete, healthy) = enumerator
@@ -765,6 +824,32 @@ async fn a_node_that_will_not_open_makes_the_tick_unhealthy() {
     assert!(!complete, "a failed open leaves the tick incomplete");
 }
 
+#[tokio::test]
+async fn successful_channel_open_resets_eviction_but_not_inventory_grace() {
+    let info = scripted_node_info("replacement");
+    let node = info.id.clone();
+    let backend = ScriptedBackend::new(vec![(info.clone(), ScriptedOpen::UnresponsiveHidpp)]);
+    let mut enumerator = Enumerator::with_backend(backend.clone());
+    enumerator
+        .ledger
+        .settle(&node, true, Some(inventory(&[1]).remove(0)));
+    let mut expired = None;
+    for _ in 0..8 {
+        expired = enumerator.ledger.settle(&node, false, None).inventory;
+    }
+    assert!(
+        expired.is_none(),
+        "retirement ticks must eventually stop publishing stale inventory"
+    );
+
+    let prepared = enumerator.prepare_nodes(backend.as_ref(), vec![info]).await;
+    assert_eq!(prepared.active.len(), 1, "the replacement must open");
+    let first_incomplete_probe = enumerator.ledger.settle_arrival_replay_failure(&node);
+
+    assert!(!first_incomplete_probe.evict_channel);
+    assert!(first_incomplete_probe.inventory.is_none());
+}
+
 /// A node that opens but does not speak HID++ is simply not ours. It must not
 /// be confused with a failed open: dragging the tick unhealthy for it would
 /// make every host with an unrelated HID device retry forever.
@@ -772,7 +857,7 @@ async fn a_node_that_will_not_open_makes_the_tick_unhealthy() {
 async fn a_non_hidpp_node_leaves_the_tick_healthy() {
     let backend = ScriptedBackend::new(vec![(
         scripted_node_info("not-hidpp"),
-        ScriptedNode::NotHidpp,
+        ScriptedOpen::NotHidpp,
     )]);
     let mut enumerator = Enumerator::with_backend(backend);
 

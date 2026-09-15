@@ -21,6 +21,8 @@ use crate::channel::route::DeviceRoute;
 
 use super::{HidppOperation, WriteError, classify_hidpp_error, open_feature, with_route};
 
+mod rgb;
+
 /// HID++ `PerKeyLighting` (`0x8080`) — streams each key's colour individually.
 /// Its feature *index* varies per device, so it's resolved at runtime.
 const PER_KEY_LIGHTING_FEATURE: u16 = 0x8080;
@@ -65,9 +67,8 @@ const FRAME_GAP: Duration = Duration::from_millis(8);
 /// [`Auto`]: LightingMethod::Auto
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LightingMethod {
-    /// Prefer `ColorLedEffects` (`0x8070`), falling back to `PerKeyLighting2`
-    /// (`0x8081`) and then `PerKeyLighting` (`0x8080`) when the device exposes
-    /// no effect engine.
+    /// Prefer `ColorLedEffects` (`0x8070`), then `RgbEffects` (`0x8071`),
+    /// `PerKeyLighting2` (`0x8081`) and `PerKeyLighting` (`0x8080`).
     Auto,
     /// Force `ColorLedEffects` (`0x8070`) — the fixed-effect override.
     Effects,
@@ -78,10 +79,11 @@ pub enum LightingMethod {
     PerKeyV2,
 }
 
-/// Set a keyboard to a solid `(r, g, b)` colour, choosing the HID++ path
-/// automatically: the `0x8070` effect engine (which overrides the onboard
-/// profile) when present, else the `0x8080` per-key stream. `FeatureUnsupported`
-/// when the device exposes neither.
+/// Set a device to a solid `(r, g, b)` colour, choosing the HID++ path
+/// automatically: `0x8070` → `0x8071` → `0x8081` → `0x8080`.
+///
+/// Drive this future to completion; native callers should use the owned
+/// lighting job in `openlogi-hid` so cancellation cannot discard RGB rollback.
 pub async fn set_keyboard_color(
     backend: &dyn HidBackend,
     route: &DeviceRoute,
@@ -92,9 +94,9 @@ pub async fn set_keyboard_color(
     set_keyboard_color_with(backend, route, LightingMethod::Auto, r, g, b).await
 }
 
-/// [`set_keyboard_color`] with an explicit [`LightingMethod`]. `Auto` tries
-/// `0x8070` first and falls back to `0x8080` only when the effect engine is
-/// absent (a missing-`0x8070` `FeatureUnsupported`); any other error propagates.
+/// [`set_keyboard_color`] with an explicit [`LightingMethod`]. Unsupported
+/// discovery permits fallback; failures after RGB ownership is claimed do not.
+/// Like [`LightingWrite::apply_on`], this future must be driven to completion.
 pub async fn set_keyboard_color_with(
     backend: &dyn HidBackend,
     route: &DeviceRoute,
@@ -103,46 +105,146 @@ pub async fn set_keyboard_color_with(
     g: u8,
     b: u8,
 ) -> Result<(), WriteError> {
-    let device_index = route.device_index();
-    with_route(backend, route, move |channel| async move {
-        set_keyboard_color_with_on_channel(&channel, device_index, method, r, g, b).await
-    })
+    LightingWrite {
+        method,
+        color: openlogi_core::color::Rgb::new(r, g, b),
+    }
+    .apply(backend, route, || false, || true)
     .await
 }
 
-pub(super) async fn set_keyboard_color_with_on_channel(
-    channel: &Arc<HidppChannel>,
-    device_index: u8,
-    method: LightingMethod,
-    r: u8,
-    g: u8,
-    b: u8,
-) -> Result<(), WriteError> {
-    match method {
-        LightingMethod::PerKey => set_color_per_key(channel, device_index, r, g, b).await,
-        LightingMethod::PerKeyV2 => set_color_per_key_v2(channel, device_index, r, g, b).await,
-        LightingMethod::Effects => set_color_effects(channel, device_index, r, g, b).await,
-        LightingMethod::Auto => match set_color_effects(channel, device_index, r, g, b).await {
+/// One complete solid-colour transaction, including RGB ownership rollback.
+#[derive(Clone, Copy)]
+pub struct LightingWrite {
+    /// Preferred protocol path.
+    pub method: LightingMethod,
+    /// The colour after applying the configured brightness.
+    pub color: openlogi_core::color::Rgb,
+}
+
+impl LightingWrite {
+    /// Open a standalone route and apply with the same ownership contract as
+    /// [`Self::apply_on`]. The native worker owns this channel through cleanup.
+    pub async fn apply(
+        self,
+        backend: &dyn HidBackend,
+        route: &DeviceRoute,
+        cancelled: impl Fn() -> bool,
+        available: impl Fn() -> bool,
+    ) -> Result<(), WriteError> {
+        with_route(backend, route, |channel| async move {
+            let shared = SharedChannel::new(channel, route.clone());
+            self.apply_on(&shared, cancelled, available).await
+        })
+        .await
+    }
+
+    /// Apply on the supplied channel, observing caller cancellation and channel
+    /// availability between requests. `available` must reject retired agent
+    /// publications and suspended host I/O, including during compensation.
+    ///
+    /// The owner MUST poll to completion and serialize lighting transactions on
+    /// this route. Do not wrap this future in `timeout` or abort its task. Reads
+    /// have a five-second overall deadline; a started RGB native write drains
+    /// before cancellation/deadline errors trigger rollback. Its response and
+    /// the rollback response each have the channel's own bounded wait. A native
+    /// write that never completes cannot safely release ownership on a timer.
+    pub async fn apply_on(
+        self,
+        shared: &SharedChannel,
+        cancelled: impl Fn() -> bool,
+        available: impl Fn() -> bool,
+    ) -> Result<(), WriteError> {
+        let scope = WriteScope {
+            deadline: tokio::time::Instant::now() + Duration::from_secs(5),
+            cancelled,
+            available,
+        };
+        let channel = shared.channel();
+        let index = shared.device_index();
+        let (r, g, b) = self.color.components();
+        match self.method {
+            LightingMethod::PerKey => {
+                return scope.read(set_color_per_key(channel, index, r, g, b)).await;
+            }
+            LightingMethod::PerKeyV2 => {
+                return scope
+                    .read(set_color_per_key_v2(channel, index, r, g, b))
+                    .await;
+            }
+            LightingMethod::Effects => {
+                return scope.read(set_color_effects(channel, index, r, g, b)).await;
+            }
+            LightingMethod::Auto => {}
+        }
+        match scope.read(set_color_effects(channel, index, r, g, b)).await {
             Err(WriteError::FeatureUnsupported { feature_hex })
                 if feature_hex == COLOR_LED_EFFECTS_FEATURE =>
             {
-                debug!("no 0x8070 effect engine — trying the per-key paths");
-                // 0x8081 supersedes 0x8080 and is the one newer keyboards ship,
-                // so it is tried first; a device with neither reports the
-                // original 0x8080 as missing, which is the error this fallback
-                // chain has always ended with.
-                match set_color_per_key_v2(channel, device_index, r, g, b).await {
-                    Err(WriteError::FeatureUnsupported { feature_hex })
-                        if feature_hex == PerKeyLightingFeature::ID =>
-                    {
-                        debug!("no 0x8081 per-key zones — falling back to 0x8080 per-key");
-                        set_color_per_key(channel, device_index, r, g, b).await
-                    }
-                    other => other,
-                }
+                debug!("no 0x8070 effect engine — trying 0x8071 RGB effects");
+            }
+            other => return other,
+        }
+        match rgb::apply(channel, index, self.color, &scope).await {
+            Err(WriteError::FeatureUnsupported {
+                feature_hex: 0x8071,
+            }) => {
+                debug!("no supported 0x8071 static effect — trying per-key paths");
+            }
+            other => return other,
+        }
+        match scope
+            .read(set_color_per_key_v2(channel, index, r, g, b))
+            .await
+        {
+            Err(WriteError::FeatureUnsupported { feature_hex })
+                if feature_hex == PerKeyLightingFeature::ID =>
+            {
+                scope.read(set_color_per_key(channel, index, r, g, b)).await
             }
             other => other,
-        },
+        }
+    }
+}
+
+struct WriteScope<C, A> {
+    deadline: tokio::time::Instant,
+    cancelled: C,
+    available: A,
+}
+
+impl<C: Fn() -> bool, A: Fn() -> bool> WriteScope<C, A> {
+    fn check_available(&self) -> Result<(), WriteError> {
+        if (self.available)() {
+            Ok(())
+        } else {
+            Err(WriteError::DeviceNotFound)
+        }
+    }
+
+    fn check(&self) -> Result<(), WriteError> {
+        self.check_available()?;
+        if (self.cancelled)() || tokio::time::Instant::now() >= self.deadline {
+            Err(WriteError::RequestTimedOut {
+                operation: HidppOperation::Lighting,
+            })
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn read<T>(
+        &self,
+        future: impl std::future::Future<Output = Result<T, WriteError>>,
+    ) -> Result<T, WriteError> {
+        self.check()?;
+        let result = tokio::time::timeout_at(self.deadline, future)
+            .await
+            .map_err(|_| WriteError::RequestTimedOut {
+                operation: HidppOperation::Lighting,
+            })?;
+        self.check()?;
+        result
     }
 }
 
@@ -447,7 +549,7 @@ pub async fn set_keyboard_color_on(
 }
 
 /// Set a solid keyboard colour on an already-open [`SharedChannel`] with an
-/// explicit lighting method.
+/// explicit lighting method. Drive to completion; see [`LightingWrite::apply_on`].
 pub async fn set_keyboard_color_with_on(
     shared: &SharedChannel,
     method: LightingMethod,
@@ -455,6 +557,10 @@ pub async fn set_keyboard_color_with_on(
     g: u8,
     b: u8,
 ) -> Result<(), WriteError> {
-    set_keyboard_color_with_on_channel(shared.channel(), shared.device_index(), method, r, g, b)
-        .await
+    LightingWrite {
+        method,
+        color: openlogi_core::color::Rgb::new(r, g, b),
+    }
+    .apply_on(shared, || false, || shared.channel().is_connected())
+    .await
 }

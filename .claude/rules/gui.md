@@ -7,104 +7,47 @@ paths:
 
 # GUI (GPUI + gpui-component)
 
-- The UI stack is GPUI + gpui-component — a settled choice; don't propose alternatives.
-- **Three crates, not one.** `openlogi-desktop` is the settings app; `openlogi-overlay` is
-  the Actions Ring helper, a separate process and a pure IPC client; `openlogi-ui` is
-  what they share — ring geometry/icons, the GPUI asset source, the locale catalogs.
-  The overlay must never depend on `openlogi-desktop`. Before putting anything in
-  `openlogi-ui`, check both binaries actually need it: every dependency added there is
-  also added to the overlay, which is why `gpui-component` is *not* one of them.
-- One catalog, in `openlogi-ui/locales/`; the negotiation over its codes lives in
-  `openlogi_core::locale` (the platform-free core, where the GUI-less agent reaches it
-  for the tray). `t!` resolves against a backend the invoking crate must generate
-  itself, so each localized binary — the app, the overlay, and the agent — expands its
-  own `rust_i18n::i18n!` over that shared directory by relative path. A wrong path
-  there compiles to an **empty catalog** rather than an error, and every string
-  silently renders as its semantic key — `the_shared_catalog_is_wired_up` in
-  `openlogi-overlay` and `openlogi-agent` is what makes that fail loudly.
-- `gpui`/`gpui_platform` alias the version-aligned `gpui-pre` registry packages.
-  Upgrade their exact workspace versions together. The Kit crates share one Git
-  release tag because the full upstream theme catalog is not in their published
-  packages. After dependency changes, check that the lock has one `gpui-pre` and
-  no legacy `gpui` package; extensions must use the same package identity too.
-- Two color systems must agree: the bespoke `theme.rs` `Palette` (hand-painted
-  surfaces) and gpui-component's `cx.theme()` (widget chrome). Only the `ThemeMode` is
-  shared between them. A "white box under dark UI" or a surface that doesn't flip with
-  the OS appearance is a ThemeMode wiring bug — fix that, not per-element `bg()`.
-- The same split exists for sizing: gpui-component's size ladder (xs 20 / sm 24 /
-  md 32 / lg 44 px) has no step at the app's 30 px control rhythm
-  (`theme::CONTROL_H`), and its custom `Size::Size` heights are broken (`input_h`
-  falls through to 24 px, text scales with the size). Build standalone form
-  controls — filled/outline buttons, single-line inputs, selects — with
-  `ui::components::{control_button, control_input, control_select}`, which take
-  `.small()` typography and pin `CONTROL_H`. A bare `.small()` on one of those is
-  the "squashed control" bug; ghost/link affordances, `.compact()` inline buttons,
-  pills, and icon-only toggles stay on the stock ladder deliberately.
-- Trait imports must be unconditional for cross-platform widgets: a
-  `#[cfg(target_os = "macos")]`-gated `use gpui::StatefulInteractiveElement as _;`
-  compiles fine locally but breaks the Linux/Windows CI jobs the moment an ungated
-  element calls `.id(..).on_click(..)`. When adding such an element, ungate the import.
-- **An icon is never a text character.** `×` for close, `·` for a centre press, `+`
-  for add, `←`/`→` for anything — all of them are bugs, not shortcuts. A glyph's
-  advance width is set by the font, so a row of them does not align and no two read
-  at the same weight; a screen reader announces "multiplication sign". Reach for
-  `IconName` first, then a vendored SVG. Punctuation *between* text stays text: `·`
-  as a metadata separator and `…` on a menu item that opens a dialog are correct.
-- Icons are not limited to gpui-component's `IconName` (which is lucide, supplied
-  by `gpui-kit-assets`): vendor any SVG (must use
-  `stroke="currentColor"`) into `crates/openlogi-ui/action-icons/`, register it in
-  that crate's `action_icons.rs` `ACTION_ICONS`, render via
-  `Icon::empty().path("action-icons/….svg")` or `svg().path(..)`. Both binaries
-  serve the same set — the overlay pays for every entry, so prefer `IconName` when
-  it has the icon. The overlay itself has no `IconName`: it does not depend on
-  gpui-component, so anything both processes draw (the ring's cancel target) has to
-  be vendored and named through one shared const, never spelled out on each side.
-- `Icon` does **not** keep its own default size: its render overwrites the base
-  style refinement with the caller's, so a bare `Icon` falls through to the current
-  font size instead of the 16px `Default` sets. Any icon meant to line up with a
-  neighbouring `svg().size_4()` needs an explicit `.size_4()`.
-- Config panels/tabs gate on measured or last-good `Capabilities`, not directly on
-  device `kind` — kind is identity-only (icon/label). The sole kind-derived fallback
-  is `Capabilities::presumed_from_kind` in `tabs_for` for a never-probed offline
-  device; keep it centralized. A new panel means a new capability in
-  `Capabilities::from_feature_ids` plus a `tabs_for` arm.
-- Mouse-diagram hotspots come from Logi metadata; if the metadata omits a button
-  marker, omit the button — never synthesize hotspot positions.
-- Keep render helpers statically typed (`impl IntoElement` or a concrete element) until
-  a genuinely heterogeneous branch, collection, callback, or stored field requires
-  `AnyElement`. Prefer one typed `.when()` / `.when_some()` / `.children()` pipeline to
-  branching early and erasing each result.
-- Key dynamic `ElementId`s by a stable domain identity, not a filtered position or a
-  formatted display label. Derive reusable-component child IDs from the component's
-  caller-provided root ID so multiple instances cannot share focus or scroll state.
-- A view, entity, or app service owns every `Task` and `Subscription` whose work belongs
-  to its lifetime. Use `.detach()` only for true process-lifetime work or bounded
-  one-shots whose completion is safe after the initiating view disappears.
-- When an async UI operation captures inputs that may change before it completes
-  (device, route, query, selection, or request), capture their identity or generation
-  at launch and compare again before committing the result. Cancellation is useful,
-  but is not the stale-result fence.
-- Never call a function that reads `AppState` (menu rebuild, most `windows::`/`app::`
-  helpers) from inside an `AppState::update` closure — the entity lease is still held
-  and the re-entrant read panics ("cannot read … while it is already being updated";
-  the 0.8.0 language-switch crash). Run such side effects after the update returns,
-  the way `runtime.rs` orders its rebuilds, or `cx.defer` them from within.
-- A `tr!` string stored in entity state goes stale on a live language switch: an
-  `InputState` placeholder keeps the text it was constructed with, and a cached
-  localized description keeps its old locale. Placeholders re-derive in the owning
-  render via `ui::components::localize_placeholder` (guarded — never call
-  `set_placeholder` bare per render, it notifies unconditionally); other cached
-  localized text recomputes on `StateEvent::LanguageChanged`. Native window titles
-  are restamped by `windows::retitle_open`, already wired into
-  `AppState::set_language`.
-- When changing reusable controls, prefer focused `#[gpui::test]` behavior contracts
-  over screenshot coverage: keyboard activation, disabled no-op, controlled selected
-  state/callbacks, and independent parent/child interaction targets.
-- Verifying UI changes needs the running app: re-`cargo run -p openlogi-desktop` (a plain
-  `cargo build` leaves the dev bundle stale) after quitting the previous instance
-  (singleton lock). The GUI shows only the empty state unless the agent is running.
-- A visible UI change is not accepted from compile/tests alone. Run the real app through
-  each representative affected state, inspect a fresh screenshot, and attach it for
-  review. State any OS or hardware state that was not exercised. Screenshots catch
-  layout/theme regressions; an exercised behavior or focused test is still the proof
-  of behavior.
+## Use the upstream skills
+
+- Load [`gpui-kit`](../../.agents/skills/gpui-kit/SKILL.md) for GPUI implementation and review.
+- Load [`gpui-kit-design-guides`](../../.agents/skills/gpui-kit-design-guides/SKILL.md)
+  before layout, styling, interaction, copy, or design review.
+- Follow their Coding Guides and Design Guides as the default practice. Prefer
+  those guides over conflicting reference examples or existing OpenLogi patterns.
+  The constraints below cover only OpenLogi integration; do not duplicate general
+  GPUI rules here.
+
+## OpenLogi integration
+
+- **Process ownership:** desktop and overlay are IPC clients; the agent owns HID
+  and input I/O. The overlay must not depend on `openlogi-desktop`. Put shared
+  presentation in `openlogi-ui`; keep desktop-only widgets and assets in desktop.
+  Evaluate shared dependencies against both consumers.
+- **Dependency compatibility:** use `Cargo.toml` and `Cargo.lock` to verify API
+  signatures, imports, and test support. OpenLogi currently uses direct Kit crates
+  rather than the umbrella `gpui-kit` crate. Treat migrations as explicit, tested
+  changes, not a side effect of copying bootstrap examples. Keep GPUI core/platform
+  versions aligned, Kit crates on one release tag, and one GPUI package identity.
+- **Device state:** route settings through `AppState`, not direct `Config` writes.
+  Use measured or last-good `Capabilities` for hardware features. Extend `tabs_for`
+  for panel selection, including device-kind presentation and offline fallbacks.
+  When a device image has Logi metadata, do not invent missing button markers.
+- **Presentation owners:** use desktop's `ui::components` and `ui::theme` for
+  existing screens. `control_button`, `control_input`, and `control_select` apply
+  `CONTROL_H` (30 px); `Palette` and the component theme must agree on `ThemeMode`.
+  Adopt upstream improvements in these owners rather than patching each call site.
+  Shared SVGs use `openlogi-ui/action-icons/` and its `ActionIcons` asset source;
+  keep shared paths such as `RING_CANCEL_ICON` identical in the preview and overlay.
+- **Live language changes:** follow [i18n.md](i18n.md). Each localized binary generates
+  its own backend for `openlogi-ui/locales/`. Use `localize_placeholder` for cached
+  input placeholders and `StateEvent::LanguageChanged` for other cached text.
+  Run menu/window effects after `AppState` updates or defer them to avoid re-entry.
+
+## Verify in this repository
+
+Use the root [AGENTS.md](../../AGENTS.md) for checks and the
+[desktop guide](../../crates/openlogi-desktop/AGENTS.md#running-and-verifying) for
+the dev bundle, mock agent, and component gallery. Do not substitute upstream
+`script/check-ai` or starter-package commands. Exercise representative affected
+states, inspect fresh screenshots for visible changes, and report untested OS or
+hardware states. Update the gallery when a reusable component changes.
