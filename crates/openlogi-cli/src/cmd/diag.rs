@@ -8,6 +8,7 @@
 
 use anyhow::{Result, anyhow};
 use clap::Subcommand;
+use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{DeviceRoute, dump_features};
 
 pub mod battery;
@@ -30,7 +31,7 @@ pub enum DiagCmd {
     Dpi(dpi::DpiArgs),
     /// Read SmartShift mode → toggle → read back → toggle back → report.
     Smartshift(smartshift::SmartshiftArgs),
-    /// Set a wired RGB keyboard to a solid colour (e.g. `ff0000` for red).
+    /// Set an online RGB device to a solid colour (e.g. `ff0000` for red).
     Lighting(lighting::LightingArgs),
     /// Read or set the HID++ 0x2121 wheel reporting resolution.
     Wheel(wheel::WheelArgs),
@@ -62,21 +63,30 @@ struct Candidate {
 async fn online_devices() -> Result<Vec<Candidate>> {
     let inventories = openlogi_hid::enumerate().await?;
     let mut out = Vec::new();
-    for inv in inventories {
-        for paired in inv.paired.iter().filter(|p| p.online) {
-            let route =
-                DeviceRoute::device_route_for(&inv, paired.slot).unwrap_or(DeviceRoute::Direct {
-                    vendor_id: inv.receiver.vendor_id,
-                    product_id: inv.receiver.product_id,
-                });
+    for inventory in &inventories {
+        out.extend(online_candidates(inventory));
+    }
+    Ok(out)
+}
+
+fn online_candidates(inventory: &DeviceInventory) -> Vec<Candidate> {
+    let mut candidates = Vec::new();
+    for paired in inventory.paired.iter().filter(|paired| paired.online) {
+        if let Some(route) = DeviceRoute::device_route_for(inventory, paired.slot) {
             let name = paired
                 .codename
                 .clone()
                 .unwrap_or_else(|| format!("Slot {}", paired.slot));
-            out.push(Candidate { route, name });
+            candidates.push(Candidate { route, name });
+        } else {
+            tracing::warn!(
+                receiver = %inventory.receiver.name,
+                slot = paired.slot,
+                "skipping online device without a resolvable route"
+            );
         }
     }
-    Ok(out)
+    candidates
 }
 
 /// Build a helpful "couldn't pick a device" error that lists what *is* online.
@@ -156,10 +166,13 @@ pub(crate) async fn select_device(
 }
 
 #[cfg(test)]
-mod no_match_err_tests {
-    use openlogi_hid::DeviceRoute;
+mod tests {
+    use openlogi_core::device::{
+        Capabilities, DeviceInventory, DeviceKind, PairedDevice, ReceiverInfo,
+    };
+    use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute};
 
-    use super::{Candidate, no_match_err};
+    use super::{Candidate, no_match_err, online_candidates};
 
     fn candidate(name: &str) -> Candidate {
         Candidate {
@@ -208,5 +221,92 @@ mod no_match_err_tests {
         assert!(err.contains("could not pick a device automatically"));
         assert!(err.contains("pass --device <name> to choose one"));
         assert!(err.contains("MX Master 3S"));
+    }
+
+    #[test]
+    fn unresolved_receiver_route_is_ignored() {
+        let inventory = inventory(0xc547, None, vec![paired(2, "G502 X Plus", true)]);
+
+        assert!(online_candidates(&inventory).is_empty());
+    }
+
+    #[test]
+    fn receiver_route_retains_uid_and_slot() {
+        let inventory = inventory(
+            0xc547,
+            Some("receiver-uid"),
+            vec![paired(4, "G502 X Plus", true)],
+        );
+        let candidates = online_candidates(&inventory);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].name, "G502 X Plus");
+        assert_eq!(
+            candidates[0].route,
+            DeviceRoute::Unifying {
+                receiver_uid: "receiver-uid".into(),
+                slot: 4,
+            }
+        );
+    }
+
+    #[test]
+    fn direct_route_retains_direct_device_index() {
+        let inventory = inventory(
+            0xc095,
+            None,
+            vec![paired(DIRECT_DEVICE_INDEX, "G502 X Plus", true)],
+        );
+        let candidates = online_candidates(&inventory);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].route,
+            DeviceRoute::Direct {
+                vendor_id: 0x046d,
+                product_id: 0xc095,
+            }
+        );
+        assert_eq!(candidates[0].route.device_index(), DIRECT_DEVICE_INDEX);
+    }
+
+    #[test]
+    fn offline_device_is_ignored() {
+        let inventory = inventory(
+            0xc547,
+            Some("receiver-uid"),
+            vec![paired(2, "G502 X Plus", false)],
+        );
+
+        assert!(online_candidates(&inventory).is_empty());
+    }
+
+    fn inventory(
+        product_id: u16,
+        unique_id: Option<&str>,
+        paired: Vec<PairedDevice>,
+    ) -> DeviceInventory {
+        DeviceInventory {
+            receiver: ReceiverInfo {
+                name: "Test device".into(),
+                vendor_id: 0x046d,
+                product_id,
+                unique_id: unique_id.map(str::to_string),
+            },
+            paired,
+        }
+    }
+
+    fn paired(slot: u8, name: &str, online: bool) -> PairedDevice {
+        PairedDevice {
+            slot,
+            codename: Some(name.into()),
+            wpid: None,
+            kind: DeviceKind::Mouse,
+            online,
+            battery: None,
+            model_info: None,
+            capabilities: Some(Capabilities::default()),
+        }
     }
 }
