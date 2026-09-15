@@ -62,7 +62,11 @@ pub use succession::Identity;
 /// v29: `Agent::declare_client` + [`ClientKind`] appended — typed demand for
 ///      the macOS dormancy gate.
 /// v30: `Agent::read_wheel` and `Agent::read_backlight` appended.
-pub const PROTOCOL_VERSION: u32 = 30;
+/// v31: `Capabilities::dpi_button` appended — whether a divertable physical
+///      DPI/ModeShift control CID was found in the device's `0x1b04` control
+///      table, replacing `Capabilities::pointer` as the no-asset DPI-toggle
+///      hotspot's gate.
+pub const PROTOCOL_VERSION: u32 = 31;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to

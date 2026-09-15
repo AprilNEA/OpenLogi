@@ -666,8 +666,8 @@ async fn protocol_mismatch_aborts_before_snapshot_or_output() {
         .expect_err("protocol mismatch must abort")
         .to_string();
 
-    assert!(error.contains("protocol v29"), "{error}");
-    assert!(error.contains("requires v30"), "{error}");
+    assert!(error.contains("protocol v30"), "{error}");
+    assert!(error.contains("requires v31"), "{error}");
     assert_eq!(*inspection.snapshots.lock().expect("snapshot lock"), 0);
     assert!(!output.exists());
 }

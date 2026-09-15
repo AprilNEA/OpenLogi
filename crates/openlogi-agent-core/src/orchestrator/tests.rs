@@ -188,8 +188,18 @@ fn build_devices_still_finds_settings_left_under_a_pre_upgrade_receiver_key() {
 }
 
 #[test]
-fn build_devices_skips_transient_zero_unit_direct_identity() {
-    assert!(build_devices(&Config::default(), &[direct_inventory(None, [0; 4])], &[]).is_empty());
+fn build_devices_falls_back_to_a_runtime_key_for_transient_zero_unit_direct_identity() {
+    // A device with no serial and an all-zero unit id (a wired HID++ 1.0
+    // mouse such as the M500 that never resolved `DeviceInformation`, or any
+    // other device with no persistable identity) still gets an `AgentDevice`
+    // entry, under a route-derived runtime key — mirroring the GUI's own
+    // `build_device_list` fallback. Dropping it (the old behavior) silently
+    // excluded it from `current_key()`/`pick_current`, so it could never
+    // become the OS hook's selected device and a Middle/Back/Forward binding
+    // the GUI let the user set never fired (issue #1230).
+    let devices = build_devices(&Config::default(), &[direct_inventory(None, [0; 4])], &[]);
+    assert_eq!(devices.len(), 1);
+    assert_eq!(devices[0].config_key, "direct:046d:b023:unit:00000000");
 
     let devices = build_devices(
         &Config::default(),
@@ -200,6 +210,105 @@ fn build_devices_skips_transient_zero_unit_direct_identity() {
     // Bare identity, route-independent: the same key the GUI resolves for
     // this device regardless of which route it's reached by.
     assert_eq!(devices[0].config_key, "serial:abc123");
+}
+
+#[test]
+fn build_devices_keeps_a_paired_device_with_no_device_information_feature() {
+    // The M500 (and other HID++ 1.0 mice) never expose feature `0x0003`
+    // (`DeviceInformation`), so `paired.model_info` is `None` even though the
+    // feature walk still found a reprogrammable-controls table and reports
+    // `capabilities.buttons`. Regression test for issue #1230: this must not
+    // be dropped from the agent's device list — it needs to be selectable so
+    // its OS-hook (Middle/Back/Forward) bindings actually reach the hook.
+    let inventory = DeviceInventory {
+        receiver: ReceiverInfo {
+            name: "USB Laser Mouse".to_string(),
+            vendor_id: 0x046d,
+            product_id: 0xc069,
+            unique_id: None,
+        },
+        paired: vec![PairedDevice {
+            slot: DIRECT_DEVICE_INDEX,
+            codename: Some("M500".to_string()),
+            wpid: None,
+            kind: DeviceKind::Mouse,
+            online: true,
+            battery: None,
+            model_info: None,
+            capabilities: Some(Capabilities {
+                buttons: true,
+                ..Capabilities::default()
+            }),
+        }],
+    };
+
+    let devices = build_devices(&Config::default(), &[inventory], &[]);
+    assert_eq!(
+        devices.len(),
+        1,
+        "a model-info-less paired device must still surface"
+    );
+    assert_eq!(devices[0].model_key, "slot255");
+    assert_eq!(
+        devices[0].capabilities,
+        Some(Capabilities {
+            buttons: true,
+            ..Capabilities::default()
+        })
+    );
+    assert!(matches!(devices[0].route, Some(DeviceRoute::Direct { .. })));
+}
+
+#[test]
+fn a_middle_click_binding_on_a_model_info_less_mouse_reaches_the_global_hook_map() {
+    // End-to-end regression for issue #1230's second symptom: with the old
+    // `continue`-on-unresolved-identity behavior, this device never became an
+    // `AgentDevice` at all, so it could never be `current_key()` and its
+    // Middle-click binding never reached `HookMaps.bindings` — the button
+    // silently fell through to the OS default (a middle-click paste / new-tab)
+    // no matter what the GUI showed as configured.
+    let inventory = DeviceInventory {
+        receiver: ReceiverInfo {
+            name: "USB Laser Mouse".to_string(),
+            vendor_id: 0x046d,
+            product_id: 0xc069,
+            unique_id: None,
+        },
+        paired: vec![PairedDevice {
+            slot: DIRECT_DEVICE_INDEX,
+            codename: Some("M500".to_string()),
+            wpid: None,
+            kind: DeviceKind::Mouse,
+            online: true,
+            battery: None,
+            model_info: None,
+            capabilities: Some(Capabilities {
+                buttons: true,
+                ..Capabilities::default()
+            }),
+        }],
+    };
+    let config_key = build_devices(&Config::default(), std::slice::from_ref(&inventory), &[])[0]
+        .config_key
+        .clone();
+
+    let mut config = Config::default();
+    config.set_binding(
+        &config_key,
+        ButtonId::MiddleClick,
+        Binding::Single(Action::MissionControl),
+    );
+
+    let mut orch = orchestrator(config.clone());
+    orch.devices = build_devices(&config, &[inventory], &[]);
+    orch.rebuild();
+
+    let maps = orch.shared.hook_maps.read().expect("hook maps");
+    assert_eq!(maps.selected_device.as_deref(), Some(config_key.as_str()));
+    assert_eq!(
+        maps.bindings.get(&ButtonId::MiddleClick),
+        Some(&Binding::Single(Action::MissionControl))
+    );
 }
 
 #[test]

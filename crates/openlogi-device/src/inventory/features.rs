@@ -214,7 +214,7 @@ pub(super) async fn probe_features(
     // for capability derivation instead of discarding it.
     let mut battery_probe = None;
     let mut event_features = EventFeatureIndices::default();
-    let mut probe_haptic_controls = false;
+    let mut probe_reprog_controls = false;
     let mut capabilities = match device.enumerate_features().await {
         Ok(Some(features)) => {
             let ids: Vec<u16> = features.iter().map(|f| f.id).collect();
@@ -225,7 +225,7 @@ pub(super) async fn probe_features(
                 // battery/identity snapshot that will be published.
                 subscriptions.register_device(slot, event_features);
             }
-            probe_haptic_controls = ids.contains(&0x19b0) || ids.contains(&0x19c0);
+            probe_reprog_controls = should_probe_reprog_controls(&ids);
             Some(Capabilities::from_feature_ids(&ids))
         }
         Ok(None) => None,
@@ -240,7 +240,7 @@ pub(super) async fn probe_features(
     };
     let mut capabilities_incomplete = false;
     if let Some(caps) = capabilities.as_mut() {
-        capabilities_incomplete = probe_extra_capabilities(&device, caps, probe_haptic_controls)
+        capabilities_incomplete = probe_extra_capabilities(&device, caps, probe_reprog_controls)
             .await
             .is_err();
     }
@@ -309,6 +309,14 @@ pub(super) async fn probe_features(
     )
 }
 
+/// Whether the device's `0x1b04` control table is worth walking: either a
+/// haptic feature is present (for [`HAPTIC_PANEL`](control_ids::HAPTIC_PANEL))
+/// or the device exposes `ReprogControlsFeature` at all (for a physical DPI
+/// button, checked regardless of haptic support — issue #1368).
+fn should_probe_reprog_controls(ids: &[u16]) -> bool {
+    ids.contains(&0x19b0) || ids.contains(&0x19c0) || ids.contains(&ReprogControlsFeature::ID)
+}
+
 /// Fill in the capabilities the feature table alone can't answer, each of which
 /// costs its own round-trips.
 ///
@@ -318,7 +326,7 @@ pub(super) async fn probe_features(
 async fn probe_extra_capabilities(
     device: &Device,
     caps: &mut Capabilities,
-    probe_haptic_controls: bool,
+    probe_reprog_controls: bool,
 ) -> Result<(), ()> {
     if let Some(feature) = device.get_feature::<HiResWheelFeature>() {
         caps.scroll_inversion = feature
@@ -335,30 +343,40 @@ async fn probe_extra_capabilities(
     {
         caps.thumbwheel = feature.has_thumbwheel().await.unwrap_or(false);
     }
-    if probe_haptic_controls && let Some(feature) = device.get_feature::<ReprogControlsFeature>() {
-        match has_haptic_panel(&feature).await {
-            Some(found) => caps.haptic_panel = found,
+    if probe_reprog_controls && let Some(feature) = device.get_feature::<ReprogControlsFeature>() {
+        match scan_reprog_controls(&feature).await {
+            Some((haptic_panel, dpi_button)) => {
+                caps.haptic_panel = haptic_panel;
+                caps.dpi_button = dpi_button;
+            }
             None => return Err(()),
         }
     }
     Ok(())
 }
 
-/// Whether the device exposes a divertable haptic panel, or `None` when a read
-/// failed part-way through the ~40-entry control walk.
+/// Whether the device exposes a divertable haptic panel and/or a divertable
+/// physical DPI/ModeShift button (`0x00c4`/`0x00ed`/`0x00fd`), or `None` when a
+/// read failed part-way through the ~40-entry control walk.
 ///
 /// The distinction matters because the answer is memoized for `REFRESH_INTERVAL`:
-/// reporting a lost reply as `false` hides the Actions Ring binding for half a
-/// minute on a device that has the panel.
-async fn has_haptic_panel(feature: &ReprogControlsFeature) -> Option<bool> {
+/// reporting a lost reply as `false` hides the Actions Ring binding, or the
+/// DPI-toggle hotspot, for half a minute on a device that has the control.
+async fn scan_reprog_controls(feature: &ReprogControlsFeature) -> Option<(bool, bool)> {
+    const DPI_MODE_SHIFT_CIDS: [u16; 3] = crate::reprog_controls::DPI_MODE_SHIFT_CIDS;
+
     let count = feature.get_count().await.ok()?;
+    let mut haptic_panel = false;
+    let mut dpi_button = false;
     for index in 0..count {
         let info = feature.get_cid_info(index).await.ok()?;
         if info.cid == control_ids::HAPTIC_PANEL {
-            return Some(info.flags.is_divertable());
+            haptic_panel = info.flags.is_divertable();
+        } else if DPI_MODE_SHIFT_CIDS.contains(&info.cid.0) && info.flags.is_divertable() {
+            dpi_button = true;
         }
     }
-    Some(false)
+    Some((haptic_panel, dpi_button))
 }
 
 #[cfg(test)]

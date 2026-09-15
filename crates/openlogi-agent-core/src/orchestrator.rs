@@ -957,34 +957,58 @@ fn build_devices(
     let mut devices = Vec::new();
     for inv in inventories {
         for paired in &inv.paired {
-            let Some(model) = paired.model_info.as_ref() else {
-                continue;
+            // Mirror the GUI's `build_device_list` fallback (issue #1230): a
+            // device with no HID++ 2.0 `DeviceInformation` (HID++ 1.0 mice
+            // such as the M500, or a feature walk that timed out) still has a
+            // capability table and a route — dropping it here silently
+            // excludes it from selection, capture plans, and the OS hook's
+            // binding map, so a binding the GUI happily lets the user set
+            // never fires. Fall back to the wpid (or slot) as the model key
+            // and treat it as serial-less, exactly like the GUI does.
+            let (model_key, serial, unit_id) = match paired.model_info.as_ref() {
+                Some(model) => (
+                    model.config_key(),
+                    model.serial_number.clone(),
+                    model.unit_id,
+                ),
+                None => (
+                    paired.wpid.map_or_else(
+                        || format!("slot{}", paired.slot),
+                        |w| format!("wpid{w:04x}"),
+                    ),
+                    None,
+                    [0u8; 4],
+                ),
             };
             let route = DeviceRoute::device_route_for(inv, paired.slot);
-            let stable_id = DeviceStableId::from_parts(
-                route.as_ref(),
-                paired.slot,
-                model.serial_number.as_deref(),
-                model.unit_id,
-            );
+            let stable_id =
+                DeviceStableId::from_parts(route.as_ref(), paired.slot, serial.as_deref(), unit_id);
             // An offline probe reports an all-zero unit id, which is not a
             // physical identity — offer it only while the device is online,
             // exactly as the GUI does, or every sleeping device would resolve
             // to the same non-key.
-            let identity =
-                DeviceIdentity::from_parts(model.serial_number.as_deref(), model.unit_id);
-            let Some(config_key) =
-                config.resolve_device_key(&stable_id, paired.online.then_some(&identity))
-            else {
-                continue;
-            };
+            let identity = DeviceIdentity::from_parts(serial.as_deref(), unit_id);
+            // A device whose identity never resolves to a persistent physical
+            // key (no serial, no non-zero unit id — a wired HID++ 1.0 mouse
+            // like the M500 never reports either) still gets a route-derived
+            // runtime key here, exactly like the GUI's own fallback in
+            // `build_device_list`. Dropping it instead (as this used to)
+            // silently excluded it from `current_key()`/`pick_current` and
+            // therefore from the OS hook's binding map: the GUI would still
+            // let the user bind its buttons, under this same runtime key, and
+            // the binding would simply never reach the hook (issue #1230).
+            // Settings just don't persist across a config reload for such a
+            // device — same limitation the GUI already documents for it.
+            let config_key = config
+                .resolve_device_key(&stable_id, paired.online.then_some(&identity))
+                .map_or_else(|| stable_id.runtime_key(), PhysicalDeviceKey::into_string);
             devices.push(AgentDevice {
-                config_key: config_key.into_string(),
-                model_key: model.config_key(),
+                config_key,
+                model_key,
                 route,
                 slot: paired.slot,
-                serial: model.serial_number.clone(),
-                unit_id: model.unit_id,
+                serial,
+                unit_id,
                 capabilities: paired.capabilities,
                 kind: paired.kind,
                 light_capabilities: None,

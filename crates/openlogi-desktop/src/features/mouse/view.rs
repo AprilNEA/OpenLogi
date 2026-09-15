@@ -64,6 +64,19 @@ struct MouseWorkspaceData<'a> {
     gesture_maps: &'a BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
     glow: Option<(Arc<GlowGeometry>, Hsla)>,
     thumbwheel: bool,
+    /// Whether the synthetic no-asset fallback should offer a DPI-toggle
+    /// hotspot — gated on the measured `dpi_button` capability, which reflects
+    /// an actual physical DPI/ModeShift control CID (`0x00c4`/`0x00ed`/
+    /// `0x00fd`) found in the device's control table. `AdjustableDpi`
+    /// (`Capabilities::pointer`) only means the sensor's DPI can be changed;
+    /// it says nothing about whether a physical button exists to do it, so it
+    /// must not be used as a proxy here (issue #1368) — a mouse with
+    /// software-only DPI cycling and `pointer == true` still needs
+    /// `dpi_button == true` to show the hotspot. `false` when no capability
+    /// was measured yet: unlike `pointer`/`buttons`,
+    /// `Capabilities::presumed_from_kind` has no way to guess physical button
+    /// presence, so the fallback stays conservative.
+    dpi_toggle: bool,
     editing_app: Option<String>,
     overridden: Option<&'a BTreeMap<ButtonId, Action>>,
 }
@@ -89,6 +102,10 @@ impl<'a> MouseWorkspaceData<'a> {
                 .current_record()
                 .and_then(|record| record.capabilities)
                 .is_some_and(|capabilities| capabilities.thumbwheel),
+            dpi_toggle: state
+                .current_record()
+                .and_then(|record| record.capabilities)
+                .is_some_and(|capabilities| capabilities.dpi_button),
             editing_app: state.editing_app().map(|app| {
                 state
                     .recent_app_name(app)
@@ -110,6 +127,7 @@ impl<'a> MouseWorkspaceData<'a> {
             gesture_maps,
             glow: None,
             thumbwheel: false,
+            dpi_toggle: false,
             editing_app: None,
             overridden: None,
         }
@@ -243,6 +261,7 @@ impl Render for MouseModelView {
             gesture_maps,
             glow,
             thumbwheel,
+            dpi_toggle,
             editing_app,
             overridden,
         } = MouseWorkspaceData::read(cx)
@@ -268,7 +287,7 @@ impl Render for MouseModelView {
             mouse_h,
             hotspots,
             labels,
-        } = model_layout(asset, viewport_w, viewport_h, thumbwheel);
+        } = model_layout(asset, viewport_w, viewport_h, thumbwheel, dpi_toggle);
         let canvas_h = mouse_h;
 
         let highlight = self.hovered.or(active).or(self.selected);
@@ -384,6 +403,7 @@ fn model_layout(
     viewport_w: f32,
     viewport_h: f32,
     thumbwheel: bool,
+    dpi_toggle: bool,
 ) -> ModelLayout {
     let target_h = (viewport_h - MODEL_VERTICAL_RESERVE).clamp(MODEL_MIN_H, MOUSE_MODEL_SIZE.1);
     let has_labels = asset.is_none_or(asset_has_button_labels) && viewport_w >= 960.;
@@ -401,8 +421,14 @@ fn model_layout(
         0.
     };
     let max_image_w = (content_w - left_gutter - right_gutter).max(MODEL_MIN_CONTENT_W / 2.);
-    let (mouse_w, mouse_h, hotspots, mut labels) =
-        scaled_model(asset, target_h, max_image_w, thumbwheel, label_distribution);
+    let (mouse_w, mouse_h, hotspots, mut labels) = scaled_model(
+        asset,
+        target_h,
+        max_image_w,
+        thumbwheel,
+        dpi_toggle,
+        label_distribution,
+    );
     if !has_labels {
         labels.clear();
     }
@@ -426,6 +452,7 @@ fn scaled_model(
     target_h: f32,
     max_w: f32,
     thumbwheel: bool,
+    dpi_toggle: bool,
     label_distribution: LabelDistribution,
 ) -> (f32, f32, Vec<Hotspot>, Vec<Label>) {
     if let Some(a) = asset {
@@ -435,7 +462,7 @@ fn scaled_model(
         (w, h, hotspots, labels)
     } else {
         let scale = (target_h / MOUSE_MODEL_SIZE.1).min(max_w / MOUSE_MODEL_SIZE.0);
-        let hotspots = default_hotspots(thumbwheel)
+        let hotspots = default_hotspots(thumbwheel, dpi_toggle)
             .into_iter()
             .map(|hs| Hotspot {
                 x: hs.x * scale,
@@ -445,7 +472,7 @@ fn scaled_model(
                 ..hs
             })
             .collect();
-        let labels = default_labels(thumbwheel, label_distribution)
+        let labels = default_labels(thumbwheel, dpi_toggle, label_distribution)
             .into_iter()
             .map(|l| Label {
                 y: l.y * scale,
@@ -1022,8 +1049,10 @@ mod tests {
 
     #[test]
     fn fallback_model_only_adds_thumbwheel_when_capability_is_measured() {
-        let (_, _, without, _) = scaled_model(None, 560., 420., false, LabelDistribution::LeftOnly);
-        let (_, _, with, _) = scaled_model(None, 560., 420., true, LabelDistribution::LeftOnly);
+        let (_, _, without, _) =
+            scaled_model(None, 560., 420., false, true, LabelDistribution::LeftOnly);
+        let (_, _, with, _) =
+            scaled_model(None, 560., 420., true, true, LabelDistribution::LeftOnly);
         assert_eq!(
             without
                 .iter()
@@ -1034,6 +1063,28 @@ mod tests {
         assert_eq!(
             with.iter()
                 .filter(|hotspot| hotspot.id == MouseControlId::ThumbwheelRotation)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn fallback_model_only_adds_dpi_toggle_when_capability_is_measured() {
+        let (_, _, without, _) =
+            scaled_model(None, 560., 420., false, false, LabelDistribution::LeftOnly);
+        let (_, _, with, _) =
+            scaled_model(None, 560., 420., false, true, LabelDistribution::LeftOnly);
+        assert_eq!(
+            without
+                .iter()
+                .filter(|hotspot| hotspot.id == MouseControlId::Button(ButtonId::DpiToggle))
+                .count(),
+            0,
+            "a mouse with no physical DPI button must not get a DPI hotspot"
+        );
+        assert_eq!(
+            with.iter()
+                .filter(|hotspot| hotspot.id == MouseControlId::Button(ButtonId::DpiToggle))
                 .count(),
             1
         );

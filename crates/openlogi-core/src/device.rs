@@ -128,6 +128,14 @@ pub struct Capabilities {
     /// device's `0x1b04` control table.
     #[serde(default)]
     pub haptic_panel: bool,
+    /// A divertable physical DPI/ModeShift button (control IDs `0x00c4`,
+    /// `0x00ed`, or `0x00fd`) was found in the device's `0x1b04` control
+    /// table. Distinct from [`Self::pointer`]: a mouse can expose adjustable
+    /// DPI purely through software (`0x2201`/`0x2202`) with no physical
+    /// button to cycle it, so `pointer` alone cannot stand in for "has a DPI
+    /// button" (issue #1368).
+    #[serde(default)]
+    pub dpi_button: bool,
 }
 
 impl Capabilities {
@@ -153,6 +161,7 @@ impl Capabilities {
             thumbwheel: ids.contains(&0x2150),
             haptic_feedback: ids.contains(&0x19b0),
             haptic_panel: false,
+            dpi_button: false,
         }
     }
 
@@ -173,6 +182,7 @@ impl Capabilities {
                 thumbwheel: false,
                 haptic_feedback: false,
                 haptic_panel: false,
+                dpi_button: false,
             },
             DeviceKind::Keyboard => Self {
                 lighting: true,
@@ -478,6 +488,7 @@ mod tests {
                     thumbwheel: false,
                     haptic_feedback: false,
                     haptic_panel: false,
+                    dpi_button: false,
                 }),
             }],
         }
@@ -548,9 +559,17 @@ mod tests {
                 thumbwheel: true,
                 haptic_feedback: false,
                 haptic_panel: false,
+                dpi_button: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
+        // AdjustableDpi (software DPI cycling, 0x2201/0x2202) must NOT imply a
+        // physical DPI button on its own — `dpi_button` is only set by
+        // probing the device's actual `0x1b04` control table (issue #1368).
+        assert!(
+            !Capabilities::from_feature_ids(&[0x0003, 0x1b04, 0x2202]).dpi_button,
+            "pointer adjustability alone must not be treated as a DPI-button proxy"
+        );
         // A wired G-series keyboard: PerKeyLighting (0x8080), no DPI/buttons.
         let keyboard = Capabilities::from_feature_ids(&[0x0001, 0x8080]);
         assert_eq!(
@@ -564,6 +583,7 @@ mod tests {
                 thumbwheel: false,
                 haptic_feedback: false,
                 haptic_panel: false,
+                dpi_button: false,
             }
         );
         // No driving features → nothing offered.
