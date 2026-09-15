@@ -26,7 +26,7 @@ use strum::VariantArray as _;
 use xshell::{Shell, cmd};
 
 use super::bundle::identity::{self, Channel, Component};
-use super::bundle::{HELPERS, Helper, write_agent_launch_plist};
+use super::bundle::{HELPERS, Helper, verify_bundle, write_agent_launch_plist};
 use crate::icon::IconPipeline as _;
 use crate::icon::macos::AppBundle;
 use crate::support::fs::{ensure_file, repo_root};
@@ -93,6 +93,7 @@ pub(crate) fn run(args: &Args) -> Result<()> {
             embed_helper(&root, &app, &profile, helper, &icon, &signing)?;
         }
         write_agent_launch_plist(&app, CHANNEL)?;
+        verify_bundle(&app, CHANNEL)?;
         Component::VARIANTS
     } else {
         println!("==> helpers: skipped (OPENLOGI_DEV_AGENT=0)");

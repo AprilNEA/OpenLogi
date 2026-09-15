@@ -38,6 +38,57 @@ fn verify_bundle_binaries_accepts_a_complete_bundle() {
     }
 }
 
+#[test]
+fn final_bundle_verification_rejects_a_missing_agent_launch_plist() {
+    let channel = Channel::Production;
+    let app = tempfile::tempdir().unwrap();
+    touch_all(&required_bundle_binaries(app.path(), channel));
+
+    let error = verify_bundle(app.path(), channel).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("missing required agent launch plist"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn final_bundle_verification_accepts_a_matching_agent_launch_plist() {
+    for channel in [Channel::Production, Channel::Dev] {
+        let app = tempfile::tempdir().unwrap();
+        touch_all(&required_bundle_binaries(app.path(), channel));
+        write_agent_launch_plist(app.path(), channel).unwrap();
+
+        verify_bundle(app.path(), channel).unwrap();
+    }
+}
+
+#[test]
+fn final_bundle_verification_rejects_a_plist_for_the_wrong_channel() {
+    let channel = Channel::Production;
+    let app = tempfile::tempdir().unwrap();
+    touch_all(&required_bundle_binaries(app.path(), channel));
+    let path = app
+        .path()
+        .join("Contents/Library/LaunchAgents")
+        .join(format!("{}.plist", agent_service_label(channel)));
+    fs_err::create_dir_all(path.parent().unwrap()).unwrap();
+    plist::Value::Dictionary(agent_launch_plist(Channel::Dev).unwrap())
+        .to_file_xml(&path)
+        .unwrap();
+
+    let error = verify_bundle(app.path(), channel).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("does not match the production bundle layout"),
+        "unexpected error: {error}"
+    );
+}
+
 /// The checked-in helper plists are what a fresh bundle starts from, so a
 /// rename there that never reached the identity table would ship one name in
 /// the bundle and another in every verification.

@@ -40,8 +40,8 @@ use tracing::{debug, error, warn};
 
 use crate::{
     ButtonId, CursorPosition, EventDevice, EventDisposition, EventTapInfo, ForegroundApp,
-    HookBackend, HookError, HookEvent, KeyEvent, KeyModifiers, MouseEvent, ScrollDelta,
-    TapLocation,
+    HookBackend, HookError, HookEvent, HookStopHandle, KeyEvent, KeyModifiers, MouseEvent,
+    ScrollDelta, TapLocation,
 };
 use watchdog::{
     CallbackActivity, LifecycleDecision, LifecycleExitReason, LifecycleObservation,
@@ -66,6 +66,31 @@ pub(crate) struct HookInner {
 // documentation states that CFRunLoop objects can be passed between
 // threads; only CFRunLoopRun must be called on the owning thread.
 unsafe impl Send for HookInner {}
+
+/// The pieces needed to wake and stop the tap thread without joining it.
+///
+/// Core Foundation documents `CFRunLoopStop` as safe to call from another
+/// thread. `HookInner` already carries the same run loop across the lifecycle
+/// boundary for the synchronous stop path, so this small shared wrapper uses
+/// the identical thread-safety guarantee for the non-blocking stop handle.
+struct HookStopInner {
+    run_loop: CFRunLoop,
+    signals: Arc<WatchdogSignals>,
+}
+
+// SAFETY: `CFRunLoopStop` is the only operation exposed through this wrapper;
+// Core Foundation permits it from a thread other than the run loop owner.
+unsafe impl Send for HookStopInner {}
+// SAFETY: the shared wrapper only calls the thread-safe `CFRunLoopStop` and
+// atomic watchdog operations; it never accesses run-loop-owned sources.
+unsafe impl Sync for HookStopInner {}
+
+impl HookStopInner {
+    fn request_stop(&self) {
+        self.signals.request_stop();
+        self.run_loop.stop();
+    }
+}
 
 /// Owner of an `NSWorkspace` activation observer.
 ///
@@ -660,6 +685,18 @@ impl HookBackend for Backend {
         if let Err(e) = inner.lifecycle_watchdog.join() {
             error!("hook lifecycle watchdog panicked on shutdown: {e:?}");
         }
+    }
+
+    fn stop_handle(inner: &HookInner) -> HookStopHandle {
+        let stop = Arc::new(HookStopInner {
+            run_loop: inner.run_loop.clone(),
+            signals: Arc::clone(&inner.signals),
+        });
+        HookStopHandle::new(move || stop.request_stop())
+    }
+
+    fn is_running(inner: &HookInner) -> bool {
+        inner.signals.phase() == TapPhase::Armed
     }
 
     /// Check whether this process can still install the hook's event tap.

@@ -5,9 +5,9 @@
 //! builders.
 
 use gpui::{
-    AnyElement, App, ClickEvent, ElementId, Entity, InteractiveElement, Interactivity, IntoElement,
-    ParentElement, Pixels, RenderOnce, Role, SharedString, Stateful, StatefulInteractiveElement,
-    Styled, Window, div, prelude::FluentBuilder as _, px, rgb,
+    AnyElement, App, ClickEvent, ElementId, Entity, FocusHandle, InteractiveElement, Interactivity,
+    IntoElement, ParentElement, Pixels, RenderOnce, Role, SharedString, Stateful,
+    StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
@@ -273,6 +273,12 @@ impl MenuRow {
         handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> Self {
         self.on_click = Some(std::rc::Rc::new(handler));
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn track_focus(mut self, focus_handle: &FocusHandle) -> Self {
+        self.base = self.base.track_focus(focus_handle);
         self
     }
 }
