@@ -227,10 +227,20 @@ impl AssetResolver {
             };
             // Hotspot metadata in whichever schema this depot cached:
             // `core_metadata.json` (newer) or `metadata.json` (older).
-            let Some(&meta_name) = METADATA_FILES.iter().find(|n| dir.join(n).exists()) else {
+            //
+            // Two different situations look the same on disk, and only the
+            // registry tells them apart. A depot that *publishes* hotspot
+            // metadata but has none in this root is a stale or half-synced
+            // cache: skip the root so the next one (or the synthetic fallback)
+            // serves the device, rather than a render with no hotspots. A depot
+            // that publishes none at all — cameras, whose `image_metadata` is a
+            // per-PID `metadata_<pid>.json` of marker-less settings slots that
+            // no hotspot consumer reads — legitimately resolves from its render
+            // alone.
+            let meta_name = METADATA_FILES.iter().find(|n| dir.join(n).exists());
+            if meta_name.is_none() && entry.preferred_file(&METADATA_FILES).is_some() {
                 continue;
-            };
-            let meta_path = dir.join(meta_name);
+            }
 
             // Pick the colour variant matching this device's HID++
             // extended_model_id byte. Logi calibrates the assignment
@@ -286,12 +296,14 @@ impl AssetResolver {
                 continue;
             };
 
-            let metadata = match Metadata::load_from(&meta_path) {
-                Ok(m) => m,
-                Err(e) => {
+            let metadata = if let Some(&meta_name) = meta_name {
+                Metadata::load_from(&dir.join(meta_name)).unwrap_or_else(|e| {
                     warn!(depot, root = %root.display(), file = meta_name, error = ?e, "device metadata unparseable — rendering image without hotspots");
                     Metadata::default()
-                }
+                })
+            } else {
+                debug!(depot, root = %root.display(), "depot ships no hotspot metadata — rendering image without hotspots");
+                Metadata::default()
             };
             let (png_width, png_height) = match read_png_dimensions(&image_path) {
                 Ok(dims) => dims,

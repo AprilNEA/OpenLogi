@@ -93,6 +93,19 @@ fn bare_model() -> DeviceModelInfo {
     }
 }
 
+/// Registry `files` entries for `names`; the hashes and sizes are irrelevant to
+/// resolution, which only asks which names the depot publishes.
+fn registry_files(names: &[&str]) -> Vec<openlogi_assets::FileEntry> {
+    names
+        .iter()
+        .map(|name| openlogi_assets::FileEntry {
+            name: (*name).to_string(),
+            sha256: String::new(),
+            bytes: 0,
+        })
+        .collect()
+}
+
 /// A 24-byte PNG: signature + an `IHDR` chunk header carrying only the
 /// width/height — all `read_png_dimensions` actually reads.
 fn png_header(width: u32, height: u32) -> Vec<u8> {
@@ -149,6 +162,121 @@ fn resolves_old_schema_depot_on_disk() {
     );
     assert_eq!((asset.png_width, asset.png_height), (100, 200));
     assert_eq!(asset.metadata.assignments().count(), 1);
+}
+
+/// A camera depot (the C922 / StreamCam family) ships `front.png` and a
+/// manifest but none of the hotspot metadata files — its `image_metadata` is a
+/// per-PID `metadata_<pid>.json` nobody reads. The render alone must resolve,
+/// or every webcam falls back to the gallery glyph.
+#[test]
+fn resolves_camera_depot_without_hotspot_metadata() {
+    let root = tempfile::tempdir().expect("create temp dir");
+    let depot = "c922";
+    let dir = root.path().join(depot);
+    std::fs::create_dir_all(&dir).expect("create depot dir");
+    std::fs::write(
+        dir.join("manifest.json"),
+        r#"{"devices":[{"modelId":"085c","resources":[
+            {"key":"device_camera_image","src":"front.png"},
+            {"key":"image_metadata","src":"metadata_085c.json"}]}],
+          "resources":[]}"#,
+    )
+    .expect("write manifest.json");
+    std::fs::write(dir.join("front.png"), png_header(300, 150)).expect("write front.png");
+
+    let resolver = AssetResolver {
+        read_roots: vec![root.path().to_path_buf()],
+        write_root: root.path().to_path_buf(),
+        has_bundle: false,
+        index: None,
+    };
+    let entry = DeviceEntry {
+        model_id: "085c".to_string(),
+        model_ids: vec!["0883".to_string(), "0894".to_string(), "085c".to_string()],
+        display_name: "C922".to_string(),
+        kind: "CAMERA".to_string(),
+        asset_path: format!("v1/devices/{depot}/"),
+        files: registry_files(&["front.png", "manifest.json", "metadata_085c.json"]),
+    };
+    let mut model = bare_model();
+    model.model_ids = [0x085c, 0, 0];
+
+    let asset = resolver
+        .load_files(depot, &entry, &model)
+        .expect("render-only camera depot should resolve");
+    assert_eq!(
+        asset.image_path.file_name().expect("image has a file name"),
+        "front.png"
+    );
+    assert_eq!(
+        asset.hero_image_path.as_deref(),
+        Some(asset.image_path.as_path())
+    );
+    assert_eq!((asset.png_width, asset.png_height), (300, 150));
+    assert_eq!(asset.kind, Some(DeviceKind::Camera));
+    assert_eq!(asset.metadata.assignments().count(), 0);
+}
+
+/// A depot that *publishes* hotspot metadata (every mouse and keyboard) but has
+/// none in this root is a stale or half-synced cache, not a metadata-free
+/// device. It must keep missing so the next root or the synthetic fallback
+/// serves the device instead of a render with no hotspots.
+#[test]
+fn metadata_publishing_depot_without_cached_metadata_still_misses() {
+    let root = tempfile::tempdir().expect("create temp dir");
+    let depot = "mx_master_4";
+    let dir = root.path().join(depot);
+    std::fs::create_dir_all(&dir).expect("create depot dir");
+    std::fs::write(dir.join("front_core.png"), png_header(100, 200)).expect("write render");
+    std::fs::write(dir.join("side_core.png"), png_header(100, 200)).expect("write render");
+
+    let resolver = AssetResolver {
+        read_roots: vec![root.path().to_path_buf()],
+        write_root: root.path().to_path_buf(),
+        has_bundle: false,
+        index: None,
+    };
+    let entry = DeviceEntry {
+        model_id: "2b042".to_string(),
+        model_ids: Vec::new(),
+        display_name: "MX Master 4".to_string(),
+        kind: "MOUSE".to_string(),
+        asset_path: format!("v1/devices/{depot}/"),
+        files: registry_files(&[
+            "core_metadata.json",
+            "front_core.png",
+            "manifest.json",
+            "side_core.png",
+        ]),
+    };
+    assert!(resolver.load_files(depot, &entry, &bare_model()).is_none());
+}
+
+/// An unsynced depot directory — no render at all — must still miss, so the
+/// metadata relaxation above doesn't turn an empty cache into a broken image.
+#[test]
+fn depot_without_any_render_still_misses() {
+    let root = tempfile::tempdir().expect("create temp dir");
+    let depot = "c922";
+    let dir = root.path().join(depot);
+    std::fs::create_dir_all(&dir).expect("create depot dir");
+    std::fs::write(dir.join("manifest.json"), b"{}").expect("write manifest.json");
+
+    let resolver = AssetResolver {
+        read_roots: vec![root.path().to_path_buf()],
+        write_root: root.path().to_path_buf(),
+        has_bundle: false,
+        index: None,
+    };
+    let entry = DeviceEntry {
+        model_id: "085c".to_string(),
+        model_ids: Vec::new(),
+        display_name: "C922".to_string(),
+        kind: "CAMERA".to_string(),
+        asset_path: format!("v1/devices/{depot}/"),
+        files: Vec::new(),
+    };
+    assert!(resolver.load_files(depot, &entry, &bare_model()).is_none());
 }
 
 #[test]
