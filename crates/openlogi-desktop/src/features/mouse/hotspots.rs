@@ -122,9 +122,52 @@ pub fn default_hotspots(thumbwheel: bool) -> Vec<Hotspot> {
     hotspots
 }
 
+/// Hotspot layout for a raw, non-HID++ OS-hook-only mouse (`driver_id ==
+/// "raw-mouse"`, see `crates/openlogi-device/src/inventory/standalone.rs`).
+///
+/// A subset of [`default_hotspots`]: `DpiToggle` and `GestureButton` are
+/// dropped because both require HID++ features (`AdjustableDpi`, `Gestures2`)
+/// this hardware class can never have — binding an action to either would
+/// create a binding that can never fire. Middle-click/Back/Forward stay,
+/// since those route through the OS input hook and are genuinely bindable —
+/// whether *this specific* mouse physically has Back/Forward is not
+/// determined here; see the module-level note on that limitation.
+#[must_use]
+pub fn os_hook_only_hotspots() -> Vec<Hotspot> {
+    default_hotspots(false)
+        .into_iter()
+        .filter(|hotspot| {
+            !matches!(
+                hotspot.id,
+                MouseControlId::Button(ButtonId::DpiToggle | ButtonId::GestureButton)
+            )
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn os_hook_only_hotspots_omit_hidpp_only_controls() {
+        let hotspots = os_hook_only_hotspots();
+        assert!(
+            !hotspots.iter().any(|h| matches!(
+                h.id,
+                MouseControlId::Button(ButtonId::DpiToggle | ButtonId::GestureButton)
+            )),
+            "a raw non-HID++ mouse can never have DPI or gesture controls"
+        );
+        for button in [ButtonId::MiddleClick, ButtonId::Back, ButtonId::Forward] {
+            assert!(
+                hotspots
+                    .iter()
+                    .any(|h| h.id == MouseControlId::Button(button)),
+                "{button:?} must stay bindable through the OS hook"
+            );
+        }
+    }
 
     #[test]
     fn active_thumbwheel_directions_share_one_control() {

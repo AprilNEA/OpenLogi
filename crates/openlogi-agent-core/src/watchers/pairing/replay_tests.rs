@@ -119,6 +119,7 @@ fn bolt_topology(node_id: NodeId) -> ReplayTopology {
                 name: "Agent Replay Bolt Receiver".to_string(),
                 manufacturer: Some("Logitech".to_string()),
                 serial_number: None,
+                is_hidpp_candidate: true,
             },
             presence: NodePresence::Present,
             open_outcome: OpenOutcome::Hidpp,

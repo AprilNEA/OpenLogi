@@ -195,6 +195,29 @@ fn tabs_follow_capabilities_not_kind() {
     assert!(!tabs.contains(&DetailTab::Lighting));
 }
 
+/// A raw, non-HID++ mouse (`openlogi-device`'s `raw-mouse` driver, e.g. a
+/// Logitech nano receiver like the M185's, `0xc542`) has no adjustable DPI
+/// and no lighting — only its OS-hook-bindable buttons and the Actions Ring
+/// that rides on the same gate.
+#[test]
+fn raw_hook_only_mouse_shows_buttons_and_actions_ring_but_no_pointer_or_lighting() {
+    let caps = Some(Capabilities {
+        buttons: true,
+        pointer: false,
+        lighting: false,
+        scroll_inversion: false,
+        hires_wheel: false,
+        thumbwheel: false,
+        haptic_feedback: false,
+        haptic_panel: false,
+    });
+    let tabs = DetailTab::tabs_for(&record(DeviceKind::Mouse, caps));
+    assert!(tabs.contains(&DetailTab::Buttons));
+    assert!(tabs.contains(&DetailTab::ActionsRing));
+    assert!(!tabs.contains(&DetailTab::Pointer));
+    assert!(!tabs.contains(&DetailTab::Lighting));
+}
+
 /// A keyboard that exposes ReprogControls (buttons=true) but has no resolved
 /// asset should not get the mouse-model Buttons panel — the generic mouse
 /// hotspot layout (Middle Click, DPI Toggle, …) is wrong for a keyboard.

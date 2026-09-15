@@ -70,6 +70,36 @@ fn raw_light_dev(key: &str) -> AgentDevice {
     }
 }
 
+fn raw_mouse_dev(key: &str) -> AgentDevice {
+    AgentDevice {
+        config_key: key.to_string(),
+        model_key: "Logitech Wireless Receiver Mouse".to_string(),
+        route: Some(DeviceRoute::RawHid {
+            vendor_id: 0x046d,
+            product_id: 0xc542,
+            usage_page: 0x0001,
+            usage_id: 0x0002,
+            identity: "serial:raw-mouse-1".to_string(),
+        }),
+        slot: DIRECT_DEVICE_INDEX,
+        serial: Some("raw-mouse-1".to_string()),
+        unit_id: [0; 4],
+        capabilities: Some(Capabilities {
+            buttons: true,
+            pointer: false,
+            lighting: false,
+            scroll_inversion: false,
+            hires_wheel: false,
+            thumbwheel: false,
+            haptic_feedback: false,
+            haptic_panel: false,
+        }),
+        kind: DeviceKind::Mouse,
+        light_capabilities: None,
+        online: true,
+    }
+}
+
 fn direct_inventory(serial_number: Option<&str>, unit_id: [u8; 4]) -> DeviceInventory {
     DeviceInventory {
         receiver: ReceiverInfo {
@@ -275,12 +305,133 @@ fn the_agent_reads_settings_under_the_device_key() {
     assert_eq!(config.devices[key.as_str()].dpi, Some(Dpi::new(1600)));
 }
 
+/// The auto-pick fallback (no saved selection) never lands on a raw-HID
+/// device just because it happens to be first — it must not silently steal
+/// the default capture target away from a real mouse/keyboard.
 #[test]
-fn standalone_selection_never_replaces_the_hidpp_capture_target() {
+fn auto_pick_without_a_saved_selection_never_lands_on_a_standalone_device() {
+    let devices = [raw_light_dev("light"), dev("mouse", 1, true)];
+
+    assert_eq!(pick_current(&devices, None), 1);
+}
+
+/// An explicit saved selection of a standalone raw-HID device with real
+/// button capability (a raw non-HID++ mouse) *is* honored — unlike the
+/// capture target, `current_key()`'s consumers (the OS hook's global binding
+/// map, the Actions Ring session) need to know a raw mouse is selected so its
+/// own bindings actually get published/read.
+#[test]
+fn saved_selection_of_a_raw_mouse_is_honored() {
+    let devices = [raw_mouse_dev("mouse"), dev("other", 1, true)];
+
+    assert_eq!(pick_current(&devices, Some("mouse")), 0);
+}
+
+/// A saved selection of a standalone device with NO button capability (a
+/// Litra light: `capabilities: None`, no `Capabilities::buttons`) must never
+/// win — regression test for the case Greptile flagged: selecting a light
+/// must not silently replace a real mouse's bindings in the OS hook's single
+/// global binding map with the light's own (empty) defaults. Falls back to
+/// the online HID++ mouse instead.
+#[test]
+fn saved_selection_of_a_light_falls_back_to_the_hidpp_device() {
     let devices = [raw_light_dev("light"), dev("mouse", 1, true)];
 
     assert_eq!(pick_current(&devices, Some("light")), 1);
-    assert_eq!(pick_current(&devices, None), 1);
+}
+
+/// Same as above, but every device is offline: the light must still not be
+/// preserved as the stability fallback — an offline light coming back online
+/// later must not resurrect as the hook's selected device either.
+#[test]
+fn saved_selection_of_a_light_is_not_preserved_when_everything_is_offline() {
+    let light = AgentDevice {
+        online: false,
+        ..raw_light_dev("light")
+    };
+    let devices = [light, dev("mouse", 1, false)];
+
+    assert_eq!(pick_current(&devices, Some("light")), 1);
+}
+
+/// A standalone raw-HID device (`DeviceRoute::RawHid` — a Litra light, or a
+/// raw non-HID++ mouse) must never get a capture plan: that route can never
+/// carry HID++ traffic, so arming a session for it only makes the gesture
+/// watcher retry a doomed open forever (spamming "capture session ended
+/// unexpectedly" and burning CPU in a tight retry loop).
+#[test]
+fn raw_hid_devices_never_get_a_capture_plan() {
+    let mut orch = orchestrator(Config::default());
+    orch.devices = vec![raw_light_dev("light"), dev("mouse", 1, true)];
+    orch.rebuild();
+
+    let plans = orch.shared.capture_plans.borrow();
+    assert_eq!(plans.len(), 1, "only the HID++ device gets a capture plan");
+    assert_eq!(plans[0].dispatch.config_key, "mouse");
+}
+
+fn raw_mouse_standalone(identity: &str) -> StandaloneDevice {
+    StandaloneDevice {
+        address: RawDeviceAddress {
+            vendor_id: 0x046d,
+            product_id: 0xc542,
+            usage_page: 0x0001,
+            usage_id: 0x0002,
+            identity: identity.to_string(),
+        },
+        display_name: "Logitech Wireless Receiver Mouse".to_string(),
+        manufacturer: Some("Logitech".to_string()),
+        serial_number: None,
+        unit_id: [0; 4],
+        kind: DeviceKind::Mouse,
+        online: true,
+        capabilities: Some(Capabilities {
+            buttons: true,
+            pointer: false,
+            lighting: false,
+            scroll_inversion: false,
+            hires_wheel: false,
+            thumbwheel: false,
+            haptic_feedback: false,
+            haptic_panel: false,
+        }),
+        light_capabilities: None,
+        driver_id: "raw-mouse".to_string(),
+        registry_model_id: None,
+    }
+}
+
+/// The OS hook's binding map is global, not per-route (confirmed: no
+/// `DeviceCapturePlan` is possible for a `RawHid` device). A raw mouse's own
+/// saved binding must still reach that global map when the user selects it —
+/// the exclusion that correctly keeps `RawHid` devices out of HID++ capture
+/// selection (`pick_current`'s auto-pick, `capture_plans_for`) must NOT also
+/// keep an *explicitly selected* raw device from ever becoming `current_key`,
+/// or its binding is configured but never published anywhere the hook reads.
+#[test]
+fn a_selected_raw_mouses_binding_reaches_the_global_hook_map() {
+    let standalone = raw_mouse_standalone("stable:046d:c542:0001:0002");
+    let mut config = Config::default();
+    let devices = build_devices(&config, &[], std::slice::from_ref(&standalone));
+    let mouse = devices.first().expect("raw mouse becomes an AgentDevice");
+    let mouse_key = mouse.config_key.clone();
+
+    config.set_binding(&mouse_key, ButtonId::Back, Binding::Single(Action::Undo));
+    config.set_selected_device(Some(mouse_key.clone()));
+
+    let mut orch = orchestrator(config.clone());
+    orch.devices = build_devices(&config, &[], std::slice::from_ref(&standalone));
+    orch.current = pick_current(&orch.devices, config.selected_device());
+    orch.rebuild();
+
+    let maps = orch.shared.hook_maps.read().expect("hook maps");
+    assert_eq!(maps.selected_device.as_deref(), Some(mouse_key.as_str()));
+    assert_eq!(
+        maps.bindings.get(&ButtonId::Back),
+        Some(&Binding::Single(Action::Undo)),
+        "the raw mouse's own saved binding must reach the global hook map \
+         when it is the selected device"
+    );
 }
 
 #[test]

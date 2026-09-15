@@ -284,6 +284,7 @@ mod tests {
             name: "Test Mouse".to_owned(),
             manufacturer: Some("Test Vendor".to_owned()),
             serial_number: None,
+            is_hidpp_candidate: false,
         };
         let hidpp = NodeInfo {
             id: os_node,
@@ -294,6 +295,7 @@ mod tests {
             name: "Test Mouse".to_owned(),
             manufacturer: Some("Test Vendor".to_owned()),
             serial_number: None,
+            is_hidpp_candidate: true,
         };
 
         let hidpp_key = HandleKey::for_node(&hidpp);
@@ -325,6 +327,7 @@ mod tests {
             name: "Suspended Receiver".to_owned(),
             manufacturer: Some("Logitech".to_owned()),
             serial_number: None,
+            is_hidpp_candidate: true,
         };
 
         let Err(error) = backend.open_hidpp(&node).await else {

@@ -342,6 +342,7 @@ fn test_node() -> NodeInfo {
         name: "Test Receiver".to_owned(),
         manufacturer: Some("Logitech".to_owned()),
         serial_number: Some("unsanitized-test-serial".to_owned()),
+        is_hidpp_candidate: true,
     }
 }
 

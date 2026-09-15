@@ -211,6 +211,16 @@ pub fn default_labels(thumbwheel: bool, distribution: LabelDistribution) -> Vec<
     )
 }
 
+/// Label positions for [`super::hotspots::os_hook_only_hotspots`] — the raw,
+/// non-HID++ mouse fallback silhouette.
+pub fn os_hook_only_labels(distribution: LabelDistribution) -> Vec<Label> {
+    labels_from_hotspots(
+        &super::hotspots::os_hook_only_hotspots(),
+        MOUSE_MODEL_SIZE.1,
+        distribution,
+    )
+}
+
 /// Logitech's stable slot vocabulary → OpenLogi's visual control IDs. Intentionally
 /// conservative; unknown names fall through so widening `MouseControlId` later
 /// doesn't break old depots.

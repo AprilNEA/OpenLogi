@@ -479,6 +479,30 @@ mod tests {
         assert_eq!(key, Some("raw:046d:c900:ff43:0202:serial:glow-1".into()));
     }
 
+    /// A raw non-HID++ mouse (e.g. a Logitech nano receiver with no serial,
+    /// `openlogi-device`'s `raw-mouse` driver) has no serial and no HID++
+    /// `Info` feature to read a unit id from. Its `stable:` identity fragment
+    /// — derived from the device's own fixed HID identity tuple, not an OS
+    /// node id — must still be recognized as physical so a binding survives
+    /// a restart.
+    #[test]
+    fn raw_stable_identity_is_physical() {
+        let route = DeviceRoute::RawHid {
+            vendor_id: 0x046d,
+            product_id: 0xc542,
+            usage_page: 0x0001,
+            usage_id: 0x0002,
+            identity: "stable:046d:c542:0001:0002".into(),
+        };
+        let key = DeviceStableId::from_parts(Some(&route), 0xff, None, [0; 4])
+            .physical_key()
+            .map(PhysicalDeviceKey::into_string);
+        assert_eq!(
+            key,
+            Some("raw:046d:c542:0001:0002:stable:046d:c542:0001:0002".into())
+        );
+    }
+
     #[test]
     fn a_direct_route_key_drops_the_device_identity() {
         // The identity moves to the entry key; the route names only the path, so

@@ -103,6 +103,14 @@ pub struct NodeInfo {
     /// Device serial number, when the device has one and the backend can read
     /// it.
     pub serial_number: Option<String>,
+    /// Whether this node belongs to the HID++ channel path — the same
+    /// classification [`HidBackend::enumerate_hidpp`] filters
+    /// [`HidBackend::enumerate`]'s full node list down to, computed once by
+    /// the backend at enumeration time so a caller that needs both the full
+    /// node list and this classification (e.g. finding a device with no HID++
+    /// collection at all) can answer it from data already in hand instead of
+    /// issuing a second live query.
+    pub is_hidpp_candidate: bool,
 }
 
 impl NodeInfo {

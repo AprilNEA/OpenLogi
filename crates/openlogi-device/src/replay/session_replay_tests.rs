@@ -233,6 +233,7 @@ fn replay_node(id: NodeId, product_id: u16, name: &str) -> ReplayNode {
             name: name.to_string(),
             manufacturer: Some("Logitech".to_string()),
             serial_number: None,
+            is_hidpp_candidate: true,
         },
         presence: NodePresence::Present,
         open_outcome: OpenOutcome::Hidpp,

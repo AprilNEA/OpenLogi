@@ -816,6 +816,7 @@ fn node_info(id: NodeId, product_id: u16, name: &str) -> NodeInfo {
         name: name.to_string(),
         manufacturer: Some("Logitech".to_string()),
         serial_number: None,
+        is_hidpp_candidate: true,
     }
 }
 

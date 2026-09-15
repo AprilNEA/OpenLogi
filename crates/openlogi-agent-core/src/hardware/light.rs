@@ -341,6 +341,7 @@ mod tests {
                     name: "Agent Replay Litra Glow".to_string(),
                     manufacturer: Some("Logitech".to_string()),
                     serial_number: Some("AGENT-LITRA".to_string()),
+                    is_hidpp_candidate: false,
                 },
                 presence: NodePresence::Present,
                 open_outcome: OpenOutcome::NotHidpp,

@@ -687,6 +687,7 @@ fn test_node() -> NodeInfo {
         name: "Private Host Node".to_owned(),
         manufacturer: Some("Logitech".to_owned()),
         serial_number: Some("HOST-SERIAL-PRIVATE".to_owned()),
+        is_hidpp_candidate: true,
     }
 }
 

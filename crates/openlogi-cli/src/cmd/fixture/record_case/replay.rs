@@ -91,6 +91,7 @@ fn replay_topology(
                 name: "OpenLogi sanitized replay node".to_string(),
                 manufacturer: Some("OpenLogi synthetic fixture".to_string()),
                 serial_number: None,
+                is_hidpp_candidate: false,
             },
             presence: NodePresence::Present,
             open_outcome: OpenOutcome::Hidpp,
