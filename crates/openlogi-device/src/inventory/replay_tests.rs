@@ -30,7 +30,7 @@ async fn receiver_slots_interleave_on_one_channel_and_lifecycle_events_coalesce(
             online: false,
         },
     ];
-    let fixture = bolt_fixture(&slots, 1);
+    let fixture = bolt_fixture("interleaved-slots", &slots, 1);
     let expected = fixture.inventory.clone();
     let node_id = fixture.node_id.clone();
     let backend = Arc::new(
@@ -162,6 +162,7 @@ async fn transient_open_failure_requests_one_bounded_repair() {
 #[tokio::test]
 async fn disconnected_stale_channel_replays_last_good_then_opens_a_replacement() {
     let fixture = bolt_fixture(
+        "disconnected-channel",
         &[BoltSlot {
             slot: 1,
             online: true,
@@ -258,6 +259,7 @@ async fn disconnected_stale_channel_replays_last_good_then_opens_a_replacement()
 async fn vanished_direct_node_ages_out_independently_of_a_sleeping_receiver_slot() {
     let direct = direct_fixture(OpenOutcome::Hidpp, 1);
     let sleeping = bolt_fixture(
+        "sleeping-slot",
         &[BoltSlot {
             slot: 1,
             online: false,
