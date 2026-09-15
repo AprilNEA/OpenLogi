@@ -10,9 +10,10 @@
 //! [`DpiCycleState::capabilities`] stays `None` and presets cycle at their raw
 //! (still valid) values — exactly the GUI's "window never opened" behaviour.
 
+use parking_lot::RwLock;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
 
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{Action, Binding};
@@ -28,7 +29,7 @@ use openlogi_hid::{
 };
 use openlogi_ipc::InventoryHealth;
 use tokio::sync::watch;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::action_ring::ActionRingSessionSpec;
 use crate::capture_plan::{
@@ -327,16 +328,10 @@ impl Orchestrator {
     /// one lock the callback reads, so a device switch cannot combine facts
     /// from two devices.
     fn publish_hook_maps(&self, mut maps: HookMaps) {
-        match self.shared.hook_maps.write() {
-            Ok(mut current) => {
-                maps.thumbwheel_positive_is_forward =
-                    std::mem::take(&mut current.thumbwheel_positive_is_forward);
-                *current = maps;
-            }
-            Err(error) => {
-                warn!(%error, lock = "hook_maps", "lock poisoned — keeping stale value");
-            }
-        }
+        let mut current = self.shared.hook_maps.write();
+        maps.thumbwheel_positive_is_forward =
+            std::mem::take(&mut current.thumbwheel_positive_is_forward);
+        *current = maps;
     }
 
     /// The keyboard key-capture spec for the first known keyboard, or `None`
@@ -421,10 +416,7 @@ impl Orchestrator {
     /// capabilities) across rebuilds whose presets did not change — a config
     /// reload must not snap DPI back to `preset[0]`.
     fn rebuild_dpi_cycles(&self, selected: Option<&str>) {
-        let Ok(mut guard) = self.shared.dpi_cycle.write() else {
-            warn!("dpi_cycle lock poisoned — rebuild skipped");
-            return;
-        };
+        let mut guard = self.shared.dpi_cycle.write();
         let mut by_key = std::collections::HashMap::new();
         for dev in self
             .devices
@@ -1193,14 +1185,16 @@ fn is_hidpp_device(device: &AgentDevice) -> bool {
     !matches!(device.route, Some(DeviceRoute::RawHid { .. }))
 }
 
-/// Replace the value behind an `RwLock`, logging (not panicking) on poison so a
-/// background thread that panicked while holding the lock can't take the agent
-/// down — it just keeps the stale value until the next successful rebuild.
+/// Replace the value behind an `RwLock`.
+///
+/// Kept as a named function rather than inlined so every publish site reads the
+/// same, and so `name` stays available for tracing if this ever needs to log
+/// again. Nothing can fail here: `parking_lot` has no poisoning, which is the
+/// point — the previous version swallowed a poisoned lock and kept serving the
+/// stale value for the life of the agent.
 fn write_value<T>(lock: &RwLock<T>, value: T, name: &str) {
-    match lock.write() {
-        Ok(mut guard) => *guard = value,
-        Err(e) => warn!(error = %e, lock = name, "lock poisoned — keeping stale value"),
-    }
+    let _ = name;
+    *lock.write() = value;
 }
 
 /// Publish a fresh immutable snapshot only when its projected value changed.

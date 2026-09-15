@@ -158,4 +158,3 @@ pub mod feature;
 pub mod nibble;
 pub mod protocol;
 pub mod receiver;
-mod sync;

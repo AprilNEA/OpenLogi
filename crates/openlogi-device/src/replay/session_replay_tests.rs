@@ -1,4 +1,5 @@
-use std::sync::{Arc, RwLock};
+use parking_lot::RwLock;
+use std::sync::Arc;
 
 use openlogi_core::hid::PairingError;
 use openlogi_fixture::{
@@ -85,7 +86,6 @@ async fn gesture_capture_replay_restores_original_reporting_on_normal_shutdown()
         armed.request_written().await;
         let published = channel_slot
             .read()
-            .expect("capture channel slot is readable")
             .clone()
             .expect("capture channel is published after arming");
         assert!(registry.is_current(&published));
@@ -101,10 +101,7 @@ async fn gesture_capture_replay_restores_original_reporting_on_normal_shutdown()
         CaptureSessionOutcome::Restored
     ));
     assert!(
-        channel_slot
-            .read()
-            .expect("capture channel slot is readable")
-            .is_none(),
+        channel_slot.read().is_none(),
         "normal shutdown must clear the captured channel slot"
     );
     assert!(

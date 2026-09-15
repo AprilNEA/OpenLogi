@@ -19,6 +19,7 @@ openlogi-ipc = { path = "../openlogi-ipc" }
 futures-lite = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+parking_lot = { workspace = true }
 
 [lints]
 workspace = true

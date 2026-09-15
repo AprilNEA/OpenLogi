@@ -19,7 +19,8 @@
 
 mod liveness;
 
-use std::sync::{Arc, Mutex, PoisonError};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 use hidpp::{
     channel::HidppChannel,
@@ -306,9 +307,7 @@ async fn run_capture_session_on(
 
     // Publish this device's open channel so DPI/SmartShift writes reuse it
     // instead of opening their own. Cleared on the way out.
-    if let Ok(mut slot) = channel_slot.write() {
-        *slot = Some(shared.clone());
-    }
+    *channel_slot.write() = Some(shared.clone());
 
     let accum = Arc::new(Mutex::new(CaptureAccum::default()));
     let reprog_index = armed.reprog.as_ref().map(ReprogControlsV4::feature_index);
@@ -340,9 +339,7 @@ async fn run_capture_session_on(
             if let Some(idx) = reprog_index
                 && let Some(event) = reprog_controls::decode_event(&msg, device_index, idx)
             {
-                // Recover the guard even if a prior holder panicked — the
-                // critical section is panic-free, so the data is consistent.
-                let mut acc = accum.lock().unwrap_or_else(PoisonError::into_inner);
+                let mut acc = accum.lock();
                 handle_reprog_with_gesture_buttons(
                     &mut acc,
                     event,
@@ -402,12 +399,14 @@ async fn run_capture_session_on(
     // while it still holds *this* session's channel — evicting the sibling's
     // would silently demote its DPI/SmartShift writes to the fresh-open slow
     // path.
-    if let Ok(mut slot) = channel_slot.write()
-        && slot
+    {
+        let mut slot = channel_slot.write();
+        if slot
             .as_ref()
             .is_some_and(|shared| Arc::ptr_eq(shared.channel(), &chan))
-    {
-        *slot = None;
+        {
+            *slot = None;
+        }
     }
     let outcome = finish_capture(listener, stop, armed, shared, registry).await;
     debug!(index = device_index, "control capture stopped");
@@ -657,8 +656,7 @@ async fn monitor_capture(
                     continue;
                 };
                 info!(?broadcast, "device reconnected — re-arming control capture");
-                *context.accum.lock().unwrap_or_else(PoisonError::into_inner) =
-                    CaptureAccum::default();
+                *context.accum.lock() = CaptureAccum::default();
                 context.armed.rearm(&device_io).await;
             }
             generation = context.activity.changed_after(activity_generation) => {

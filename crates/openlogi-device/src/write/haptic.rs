@@ -1,4 +1,5 @@
-use std::sync::{Arc, Mutex, Weak};
+use parking_lot::Mutex;
+use std::sync::{Arc, Weak};
 
 use hidpp::{
     channel::HidppChannel,
@@ -71,7 +72,7 @@ static CACHED_LOCATION: Mutex<Option<FeatureLocation>> = Mutex::new(None);
 /// when nothing is cached, the entry belongs to another (or a dead) channel,
 /// or the device index differs.
 fn cached_feature(channel: &Arc<HidppChannel>, index: u8) -> Option<Arc<HapticFeedbackFeature>> {
-    let guard = CACHED_LOCATION.lock().ok()?;
+    let guard = CACHED_LOCATION.lock();
     let location = guard.as_ref()?;
     (location.device_index == index
         && location
@@ -92,21 +93,19 @@ fn cached_feature(channel: &Arc<HidppChannel>, index: u8) -> Option<Arc<HapticFe
 /// can never match another channel, so no store/retire ordering can produce
 /// wreckage.
 fn store_cached_location(channel: &Arc<HidppChannel>, device_index: u8, feature_index: u8) {
-    if let Ok(mut guard) = CACHED_LOCATION.lock() {
-        *guard = Some(FeatureLocation {
-            channel: Arc::downgrade(channel),
-            device_index,
-            feature_index,
-        });
-    }
+    let mut guard = CACHED_LOCATION.lock();
+    *guard = Some(FeatureLocation {
+        channel: Arc::downgrade(channel),
+        device_index,
+        feature_index,
+    });
 }
 
 /// Forget the cached location — called when I/O through it fails, so the next
 /// play re-resolves instead of replaying a location the device disowned.
 fn clear_cached_location() {
-    if let Ok(mut guard) = CACHED_LOCATION.lock() {
-        *guard = None;
-    }
+    let mut guard = CACHED_LOCATION.lock();
+    *guard = None;
 }
 
 /// Ensure the firmware haptic engine is armed: enabled, with a non-zero

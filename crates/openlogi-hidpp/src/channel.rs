@@ -2,10 +2,11 @@
 //!
 //! This includes mapping incoming messages to previously sent requests.
 
+use parking_lot::Mutex;
 use std::{
     collections::{HashMap, VecDeque},
     sync::{
-        Arc, Mutex, Weak,
+        Arc, Weak,
         atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering},
     },
     thread::{self, JoinHandle},
@@ -15,7 +16,7 @@ use std::{
 use futures::{FutureExt, channel::oneshot, select};
 use tracing::trace;
 
-use crate::{nibble::U4, sync::lock};
+use crate::nibble::U4;
 
 mod error;
 mod message;
@@ -59,7 +60,7 @@ pub struct MessageListenerGuard {
 impl Drop for MessageListenerGuard {
     fn drop(&mut self) {
         if let Some(message_listeners) = self.message_listeners.upgrade() {
-            lock(&message_listeners).remove(&self.hdl);
+            message_listeners.lock().remove(&self.hdl);
         }
     }
 }
@@ -248,11 +249,23 @@ impl PendingRequest {
             pending_messages,
             receiver,
         };
-        lock(&request.pending_messages).push_back(PendingMessage {
-            id,
-            response_predicate: Box::new(response_predicate),
-            sender,
-        });
+        {
+            let mut pending = request.pending_messages.lock();
+            // Drop abandoned requests before queuing this one. Timeouts and
+            // write failures remove their entry eagerly below, but a caller
+            // cancelled mid-flight (an outer `timeout(..)` dropping the whole
+            // future) still leaves its `PendingMessage` behind. On a channel
+            // reused across inventory ticks those would accumulate unboundedly
+            // — and a late response could be mis-delivered to a recycled
+            // software id. `is_canceled()` is true once the receiver is gone,
+            // so this prunes exactly the give-ups.
+            pending.retain(|m| !m.sender.is_canceled());
+            pending.push_back(PendingMessage {
+                id,
+                response_predicate: Box::new(response_predicate),
+                sender,
+            });
+        }
         request
     }
 
@@ -263,7 +276,7 @@ impl PendingRequest {
 
 impl Drop for PendingRequest {
     fn drop(&mut self) {
-        let mut pending = lock(&self.pending_messages);
+        let mut pending = self.pending_messages.lock();
         if let Some(pos) = pending.iter().position(|message| message.id == self.id) {
             pending.remove(pos);
         }
@@ -594,7 +607,9 @@ impl HidppChannel {
         listener: impl Fn(HidppMessage, bool) + Send + Sync + 'static,
     ) -> u32 {
         let hdl = self.next_listener_hdl.fetch_add(1, Ordering::Relaxed);
-        lock(&self.message_listeners).insert(hdl, Arc::new(listener));
+        self.message_listeners
+            .lock()
+            .insert(hdl, Arc::new(listener));
         hdl
     }
 
@@ -615,7 +630,7 @@ impl HidppChannel {
     ///
     /// Returns whether a listener was found using the given handle.
     pub fn remove_msg_listener(&self, hdl: u32) -> bool {
-        lock(&self.message_listeners).remove(&hdl).is_some()
+        self.message_listeners.lock().remove(&hdl).is_some()
     }
 }
 
@@ -661,7 +676,7 @@ async fn read_loop(
         let mut matched_id = None;
         let pending_count;
         {
-            let mut msgs = lock(pending_messages);
+            let mut msgs = pending_messages.lock();
             pending_count = msgs.len();
             if let Some(pos) = msgs.iter().position(|elem| (elem.response_predicate)(&msg))
                 && let Some(waiting) = msgs.remove(pos)
@@ -688,7 +703,7 @@ async fn read_loop(
 
         // Collected before dispatch so a listener may add or remove listeners
         // without deadlocking on the lock it is being called under.
-        let listeners: Vec<_> = lock(message_listeners).values().cloned().collect();
+        let listeners: Vec<_> = message_listeners.lock().values().cloned().collect();
         for listener in listeners {
             listener(msg, matched_id.is_some());
         }

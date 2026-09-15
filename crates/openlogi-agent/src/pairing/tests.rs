@@ -17,7 +17,7 @@ fn manager_with_ctrl(ctrl: mpsc::UnboundedSender<Control>) -> PairingManager {
     PairingManager {
         ctrl,
         updates: Mutex::new(upd_rx),
-        session: Arc::new(StdMutex::new(SessionOwner::default())),
+        session: Arc::new(SyncMutex::new(SessionOwner::default())),
         shared: shared_runtime(),
         observable: Arc::new(ObservableState::new("test".to_string())),
     }
@@ -75,7 +75,7 @@ async fn start_rolls_back_pause_when_watcher_send_fails() {
 
 #[test]
 fn admission_is_owned_and_rolled_back_by_session_identity() {
-    let sessions = Arc::new(StdMutex::new(SessionOwner::default()));
+    let sessions = Arc::new(SyncMutex::new(SessionOwner::default()));
     let first =
         SessionAdmission::new(Arc::clone(&sessions)).expect("idle owner should admit a session");
 

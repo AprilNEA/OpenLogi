@@ -441,9 +441,7 @@ fn dpi_cycle_drops_offline_device_and_restores_on_return() {
     orch.devices = vec![dev("mouse", 1, true)];
     orch.rebuild();
     {
-        let Ok(mut dpi) = orch.shared.dpi_cycle.write() else {
-            panic!("DPI cycle lock should not be poisoned");
-        };
+        let mut dpi = orch.shared.dpi_cycle.write();
         if let Some(state) = dpi.by_key.get_mut("mouse") {
             state.index = 3;
         }
@@ -452,17 +450,13 @@ fn dpi_cycle_drops_offline_device_and_restores_on_return() {
     orch.devices[0].online = false;
     orch.publish_device_runtime();
     {
-        let Ok(dpi) = orch.shared.dpi_cycle.read() else {
-            panic!("DPI cycle lock should not be poisoned");
-        };
+        let dpi = orch.shared.dpi_cycle.read();
         assert!(!dpi.by_key.contains_key("mouse"));
     }
 
     orch.devices[0].online = true;
     orch.publish_device_runtime();
-    let Ok(dpi) = orch.shared.dpi_cycle.read() else {
-        panic!("DPI cycle lock should not be poisoned");
-    };
+    let dpi = orch.shared.dpi_cycle.read();
     assert_eq!(dpi.by_key.get("mouse").map(|s| s.index), Some(0));
     assert_eq!(
         dpi.by_key.get("mouse").and_then(|s| s.target.clone()),
@@ -927,7 +921,7 @@ fn hook_maps_publish_selection_and_preserve_learned_thumbwheel_polarity() {
     orch.rebuild();
 
     {
-        let mut maps = orch.shared.hook_maps.write().expect("hook maps");
+        let mut maps = orch.shared.hook_maps.write();
         assert_eq!(maps.selected_device.as_deref(), Some("a"));
         maps.thumbwheel_positive_is_forward
             .insert("a".to_owned(), true);
@@ -936,7 +930,7 @@ fn hook_maps_publish_selection_and_preserve_learned_thumbwheel_polarity() {
     // Config/app rebuilds replace binding maps but hardware observations must
     // remain in the same atomically published snapshot.
     orch.reload_config(Config::default());
-    let maps = orch.shared.hook_maps.read().expect("hook maps");
+    let maps = orch.shared.hook_maps.read();
     assert_eq!(maps.selected_device.as_deref(), Some("a"));
     assert_eq!(maps.thumbwheel_positive_is_forward.get("a"), Some(&true));
 }
@@ -974,20 +968,12 @@ fn macos_side_gesture_capture_follows_mouse_hook_availability() {
     );
     let _ = capture_plans.borrow_and_update();
     if cfg!(target_os = "macos") {
-        let hook_maps = orch
-            .shared
-            .hook_maps
-            .read()
-            .expect("hook maps should not be poisoned");
+        let hook_maps = orch.shared.hook_maps.read();
         assert!(!hook_maps.bindings.contains_key(&ButtonId::Forward));
         assert!(!hook_maps.gestures.contains_key(&ButtonId::Forward));
         assert!(side_gesture_is_armed(&orch));
     } else {
-        let hook_maps = orch
-            .shared
-            .hook_maps
-            .read()
-            .expect("hook maps should not be poisoned");
+        let hook_maps = orch.shared.hook_maps.read();
         assert!(hook_maps.gestures.contains_key(&ButtonId::Forward));
         assert!(!side_gesture_is_armed(&orch));
     }

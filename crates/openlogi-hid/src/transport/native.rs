@@ -4,8 +4,9 @@
 //! through this type. It is the only implementor in the tree today; a scripted
 //! one for tests and a WebHID one under wasm are the reasons the trait exists.
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, Mutex, PoisonError};
+use std::sync::{Arc, LazyLock};
 
 use async_hid::{AsyncHidWrite as _, Device, DeviceWriter};
 use hidpp::async_trait;
@@ -129,7 +130,7 @@ impl NativeBackend {
             .iter()
             .map(|device| (HandleKey::for_device(device), Arc::clone(device)))
             .collect();
-        *self.nodes.lock().unwrap_or_else(PoisonError::into_inner) = handles;
+        *self.nodes.lock() = handles;
         Ok(devices)
     }
 
@@ -137,7 +138,6 @@ impl NativeBackend {
     fn handle(&self, node: &NodeInfo) -> Result<Arc<Device>, BackendError> {
         self.nodes
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
             .get(&HandleKey::for_node(node))
             .map(Arc::clone)
             .ok_or(BackendError::Disconnected)

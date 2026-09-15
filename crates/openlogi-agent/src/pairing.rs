@@ -12,9 +12,9 @@
 //! HID node. Dropping that lease lets HID++ capture resume when the session ends
 //! (every end — including cancel — emits a terminal event).
 
+use parking_lot::Mutex as SyncMutex;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 
 use openlogi_agent_core::observable::ObservableState;
@@ -36,7 +36,7 @@ const RECEIVER_LEASE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Address-keyed cache of the full discovered devices, so the GUI can pair by
 /// address without round-tripping the non-serializable `DiscoveredDevice`.
 type DeviceCache = HashMap<[u8; 6], DiscoveredDevice>;
-type SharedSessionOwner = Arc<StdMutex<SessionOwner>>;
+type SharedSessionOwner = Arc<SyncMutex<SessionOwner>>;
 
 /// The one owner of pairing admission, live-session resources, and discovery.
 struct SessionOwner {
@@ -146,7 +146,7 @@ impl PairingManager {
     pub fn new(shared: SharedRuntime, observable: Arc<ObservableState>) -> Self {
         let (ctrl, raw_events) = pairing::spawn_with_hardware(shared.hardware());
         let (upd_tx, upd_rx) = mpsc::unbounded_channel();
-        let session = Arc::new(StdMutex::new(SessionOwner::default()));
+        let session = Arc::new(SyncMutex::new(SessionOwner::default()));
         tokio::spawn(translate(
             raw_events,
             upd_tx.clone(),
@@ -244,14 +244,7 @@ fn with_session_owner<T>(
     session: &SharedSessionOwner,
     f: impl FnOnce(&mut SessionOwner) -> T,
 ) -> T {
-    match session.lock() {
-        Ok(mut owner) => f(&mut owner),
-        Err(poisoned) => {
-            warn!("pairing session owner lock poisoned; recovering session state");
-            let mut owner = poisoned.into_inner();
-            f(&mut owner)
-        }
-    }
+    f(&mut session.lock())
 }
 
 struct SessionAdmission {

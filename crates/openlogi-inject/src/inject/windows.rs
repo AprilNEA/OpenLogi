@@ -2,7 +2,9 @@
 #![expect(unsafe_code, reason = "SendInput is the Win32 API for synthetic input")]
 
 use std::mem::size_of;
-use std::sync::{LazyLock, Mutex};
+use std::sync::LazyLock;
+
+use parking_lot::Mutex;
 
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, MOUSEEVENTF_HWHEEL,
@@ -249,10 +251,7 @@ pub(super) fn post_scroll(delta: ScrollDelta) {
         tracing::debug!("pixel scroll output is unsupported on Windows");
         return;
     };
-    let Ok(mut quantizer) = SCROLL_QUANTIZER.lock() else {
-        tracing::warn!("Windows scroll quantizer mutex poisoned");
-        return;
-    };
+    let mut quantizer = SCROLL_QUANTIZER.lock();
     let delta = quantizer.quantize(delta, WHEEL_DELTA_F64);
     drop(quantizer);
 

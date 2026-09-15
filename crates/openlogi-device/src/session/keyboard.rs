@@ -13,8 +13,9 @@
 //! The plain F1–F12 codes of an Fn-locked row travel the ordinary HID keyboard
 //! interface and never reach `0x1b04`.
 
+use parking_lot::Mutex;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 
 use hidpp::{
     device::Device,
@@ -181,7 +182,7 @@ async fn run_keyboard_capture_session_on(
             };
             // Recover the guard even if a prior holder panicked — the critical
             // section is panic-free, so the data is consistent.
-            let mut down = held.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut down = held.lock();
             emit_button_edges(&mut down, &cids, &diverted, &sink);
         }
     });
@@ -202,7 +203,8 @@ async fn run_keyboard_capture_session_on(
     // Publish this keyboard's open channel so hardware writes (Fn-lock)
     // reuse it instead of opening the same HID node a second time. Cleared
     // on the way out.
-    if let Ok(mut slot) = channel_slot.write() {
+    {
+        let mut slot = channel_slot.write();
         *slot = Some(shared.clone());
     }
 
@@ -230,12 +232,14 @@ async fn run_keyboard_capture_session_on(
     // holds *this* session's channel — evicting the sibling's would silently
     // demote its hardware writes to the fresh-open slow path (the gesture
     // session applies the same discipline).
-    if let Ok(mut slot) = channel_slot.write()
-        && slot
+    {
+        let mut slot = channel_slot.write();
+        if slot
             .as_ref()
             .is_some_and(|shared| Arc::ptr_eq(shared.channel(), &chan))
-    {
-        *slot = None;
+        {
+            *slot = None;
+        }
     }
     let pending = armed.into_pending(&shared);
     // Keep accepting edges until firmware restoration is complete. The agent

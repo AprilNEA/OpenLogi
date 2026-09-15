@@ -5,8 +5,9 @@
     reason = "the low-level input hook is built on the Win32 C API"
 )]
 
+use parking_lot::Mutex;
 use std::cell::Cell;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, mpsc};
 use std::thread;
 
 use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, LPARAM, LRESULT, POINT, WPARAM};
@@ -224,22 +225,15 @@ fn hook_thread(
     ready: mpsc::Sender<Result<u32, HookError>>,
     worker: &WorkerStatus,
 ) {
-    match CALLBACK.lock() {
-        Ok(mut slot) if slot.is_none() => {
-            *slot = Some(callback);
-        }
-        Ok(_) => {
+    {
+        let mut slot = CALLBACK.lock();
+        if slot.is_some() {
             let _ = ready.send(Err(HookError::WindowsHook(
                 "another Windows input hook is already installed".into(),
             )));
             return;
         }
-        Err(e) => {
-            let _ = ready.send(Err(HookError::WindowsHook(format!(
-                "callback lock poisoned: {e}"
-            ))));
-            return;
-        }
+        *slot = Some(callback);
     }
 
     // SAFETY: GetCurrentThreadId returns the calling thread's id; no preconditions.
@@ -361,7 +355,8 @@ pub(super) fn message_loop(mut handle_thread_message: impl FnMut(&MSG) -> bool) 
 }
 
 fn clear_callback() {
-    if let Ok(mut slot) = CALLBACK.lock() {
+    {
+        let mut slot = CALLBACK.lock();
         *slot = None;
     }
 }
@@ -396,7 +391,7 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
         return call_next(code, wparam, lparam);
     };
 
-    let callback = CALLBACK.lock().ok().and_then(|slot| slot.clone());
+    let callback = CALLBACK.lock().clone();
     let disposition = callback
         .as_ref()
         .map_or(EventDisposition::PassThrough, |cb| {
@@ -537,7 +532,7 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
         return call_next(code, wparam, lparam);
     };
 
-    let callback = CALLBACK.lock().ok().and_then(|slot| slot.clone());
+    let callback = CALLBACK.lock().clone();
     let disposition = callback
         .as_ref()
         .map_or(EventDisposition::PassThrough, |cb| {

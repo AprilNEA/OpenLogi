@@ -120,10 +120,9 @@ impl InputDispatcher {
         else {
             return false;
         };
-        if let Ok(mut maps) = self.hook_maps.write() {
-            maps.thumbwheel_positive_is_forward
-                .insert(key.to_owned(), positive_is_forward);
-        }
+        let mut maps = self.hook_maps.write();
+        maps.thumbwheel_positive_is_forward
+            .insert(key.to_owned(), positive_is_forward);
         true
     }
 

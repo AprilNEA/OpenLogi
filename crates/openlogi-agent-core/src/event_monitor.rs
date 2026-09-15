@@ -9,8 +9,8 @@
 //! off when polls stop — so a closed panel or a crashed GUI can't leave the
 //! callback doing buffer work forever.
 
+use parking_lot::Mutex;
 use std::collections::VecDeque;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
@@ -98,7 +98,7 @@ impl EventMonitor {
         };
         // `try_lock` only — the freeze-sensitive hook callback must never block
         // on the monitor buffer (a contended `lock` stalls every pointer event).
-        if let Ok(mut buf) = self.buf.try_lock() {
+        if let Some(mut buf) = self.buf.try_lock() {
             if buf.len() == CAPACITY {
                 buf.pop_front();
             }
@@ -111,10 +111,7 @@ impl EventMonitor {
     pub fn poll(&self) -> Vec<MonitorEvent> {
         self.state
             .store(MonitorState::Polled as u8, Ordering::Release);
-        self.buf
-            .lock()
-            .map(|mut buf| buf.drain(..).collect())
-            .unwrap_or_default()
+        self.buf.lock().drain(..).collect()
     }
 
     fn idle_tick(&self) {
@@ -133,12 +130,13 @@ impl EventMonitor {
                 Ordering::Acquire,
             ) {
                 Ok(_) => {
-                    if next == MonitorState::Disabled
-                        && let Ok(mut buf) = self.buf.lock()
-                        && MonitorState::from_raw(self.state.load(Ordering::Acquire))
+                    if next == MonitorState::Disabled {
+                        let mut buf = self.buf.lock();
+                        if MonitorState::from_raw(self.state.load(Ordering::Acquire))
                             == MonitorState::Disabled
-                    {
-                        buf.clear();
+                        {
+                            buf.clear();
+                        }
                     }
                     return;
                 }

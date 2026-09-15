@@ -1,9 +1,10 @@
 //! Firmware ownership and channel-lifecycle primitives shared by mouse and
 //! keyboard capture without coupling their manager loops or input semantics.
 
+use parking_lot::RwLock;
 use std::fmt;
 use std::future::Future;
-use std::sync::{Arc, RwLock, Weak};
+use std::sync::{Arc, Weak};
 
 use hidpp::channel::HidppChannel;
 use thiserror::Error;

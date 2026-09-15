@@ -24,8 +24,9 @@
     reason = "Media Foundation COM (device activation + IMFSourceReader sample loop)"
 )]
 
+use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use windows::Win32::Media::MediaFoundation::{
@@ -93,7 +94,7 @@ impl CameraStream {
     /// The most recently delivered frame, or `None` before the first arrives.
     #[must_use]
     pub fn latest_frame(&self) -> Option<Arc<Frame>> {
-        self.shared.latest.lock().ok().and_then(|slot| slot.clone())
+        self.shared.latest.lock().clone()
     }
 
     /// Take the most recent frame out of the slot (the next delivered frame
@@ -101,11 +102,7 @@ impl CameraStream {
     /// buffer without copying it.
     #[must_use]
     pub fn take_frame(&self) -> Option<Arc<Frame>> {
-        self.shared
-            .latest
-            .lock()
-            .ok()
-            .and_then(|mut slot| slot.take())
+        self.shared.latest.lock().take()
     }
 
     /// A counter that increments on every delivered frame, so the preview can
@@ -626,10 +623,7 @@ fn store_frame(
     for px in bgra.as_chunks_mut::<4>().0 {
         px[3] = 0xFF;
     }
-    let mut slot = shared
-        .latest
-        .lock()
-        .map_err(|_| setup_err("camera frame slot is poisoned"))?;
+    let mut slot = shared.latest.lock();
     *slot = Some(Arc::new(Frame {
         width: hint.width,
         height: hint.height,

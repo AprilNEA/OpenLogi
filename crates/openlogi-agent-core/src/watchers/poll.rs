@@ -93,7 +93,7 @@ pub fn never<T>() -> mpsc::UnboundedReceiver<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use parking_lot::Mutex;
     use std::time::Instant;
 
     /// Drain what the watcher reports until it goes quiet, bounded so a broken
@@ -121,7 +121,6 @@ mod tests {
         .on_change(move || {
             samples
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .next()
                 // Hold the last sample once the script runs out, so the
                 // watcher has nothing new to report rather than exiting.

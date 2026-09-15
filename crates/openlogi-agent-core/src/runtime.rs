@@ -11,7 +11,9 @@ pub mod scroll;
 
 use std::collections::HashMap;
 use std::io;
-use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::sync::Arc;
+
+use parking_lot::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use openlogi_core::binding::{Action, Binding, ButtonId};
@@ -99,28 +101,18 @@ impl ActionExecutor {
         }
 
         let next = match action {
-            Action::CycleDpiPresets => match self.dpi_cycle.write() {
-                Ok(mut guard) => guard.state_for(device_key).and_then(DpiCycleState::cycle),
-                Err(e) => {
-                    warn!(error = %e, "dpi_cycle lock poisoned — cycle skipped");
-                    None
-                }
-            },
-            Action::SetDpiPreset(i) => match self.dpi_cycle.write() {
-                Ok(mut guard) => guard
-                    .state_for(device_key)
-                    .and_then(|state| state.set(usize::from(*i))),
-                Err(e) => {
-                    warn!(error = %e, "dpi_cycle lock poisoned — set skipped");
-                    None
-                }
-            },
+            Action::CycleDpiPresets => self
+                .dpi_cycle
+                .write()
+                .state_for(device_key)
+                .and_then(DpiCycleState::cycle),
+            Action::SetDpiPreset(i) => self
+                .dpi_cycle
+                .write()
+                .state_for(device_key)
+                .and_then(|state| state.set(usize::from(*i))),
             Action::ToggleSmartShift => {
-                let target = self
-                    .dpi_cycle
-                    .read()
-                    .ok()
-                    .and_then(|cycles| cycles.target_for(device_key));
+                let target = self.dpi_cycle.read().target_for(device_key);
                 info!("SmartShift toggle → flipping wheel mode");
                 toggle_smartshift_in_background(
                     &self.capture,
@@ -406,9 +398,7 @@ struct BrowserNavDebounceReservation {
 }
 
 fn browser_nav_debounce_begin(action: &Action) -> Option<BrowserNavDebounceReservation> {
-    let mut last = BROWSER_NAV_LAST
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let mut last = BROWSER_NAV_LAST.lock();
     let forward = matches!(action, Action::BrowserForward);
     let slot = if forward { &mut last.1 } else { &mut last.0 };
     let now = Instant::now();
@@ -425,9 +415,7 @@ fn browser_nav_debounce_begin(action: &Action) -> Option<BrowserNavDebounceReser
 }
 
 fn browser_nav_debounce_commit(reservation: BrowserNavDebounceReservation) {
-    let mut last = BROWSER_NAV_LAST
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let mut last = BROWSER_NAV_LAST.lock();
     let slot = if reservation.forward {
         &mut last.1
     } else {
@@ -441,9 +429,7 @@ fn browser_nav_debounce_commit(reservation: BrowserNavDebounceReservation) {
 }
 
 fn browser_nav_debounce_cancel(reservation: BrowserNavDebounceReservation) {
-    let mut last = BROWSER_NAV_LAST
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let mut last = BROWSER_NAV_LAST.lock();
     let slot = if reservation.forward {
         &mut last.1
     } else {
@@ -534,13 +520,9 @@ mod tests {
 
     #[test]
     fn browser_navigation_debounce_is_per_direction_and_expires() {
-        let _guard = BROWSER_NAV_TEST_LOCK
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let _guard = BROWSER_NAV_TEST_LOCK.lock();
         let now = Instant::now();
-        *BROWSER_NAV_LAST
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = (Some(now), None);
+        *BROWSER_NAV_LAST.lock() = (Some(now), None);
 
         assert!(browser_nav_debounce_begin(&Action::BrowserBack).is_none());
         assert!(browser_nav_debounce_begin(&Action::BrowserForward).is_some());
@@ -548,25 +530,18 @@ mod tests {
         let expired = Instant::now()
             .checked_sub(BROWSER_NAV_DEBOUNCE)
             .expect("the debounce interval fits before the current instant");
-        BROWSER_NAV_LAST
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .0 = Some(expired);
+        BROWSER_NAV_LAST.lock().0 = Some(expired);
 
         assert!(browser_nav_debounce_begin(&Action::BrowserBack).is_some());
     }
 
     #[test]
     fn slow_successful_navigation_still_debounces_the_queued_duplicate() {
-        let _guard = BROWSER_NAV_TEST_LOCK
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let _guard = BROWSER_NAV_TEST_LOCK.lock();
         let started = Instant::now()
             .checked_sub(BROWSER_NAV_DEBOUNCE * 2)
             .expect("the simulated AX duration fits before the current instant");
-        *BROWSER_NAV_LAST
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = (None, Some(started));
+        *BROWSER_NAV_LAST.lock() = (None, Some(started));
 
         browser_nav_debounce_commit(BrowserNavDebounceReservation {
             forward: true,
@@ -579,12 +554,8 @@ mod tests {
 
     #[test]
     fn failed_captured_navigation_releases_its_debounce_reservation() {
-        let _guard = BROWSER_NAV_TEST_LOCK
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        *BROWSER_NAV_LAST
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = (None, None);
+        let _guard = BROWSER_NAV_TEST_LOCK.lock();
+        *BROWSER_NAV_LAST.lock() = (None, None);
         let reservation = browser_nav_debounce_begin(&Action::BrowserBack)
             .expect("the first attempt should reserve the direction");
 
@@ -601,25 +572,15 @@ mod tests {
 
     #[test]
     fn canceling_a_failed_attempt_never_clears_a_newer_reservation() {
-        let _guard = BROWSER_NAV_TEST_LOCK
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let _guard = BROWSER_NAV_TEST_LOCK.lock();
         let original = Instant::now();
         let newer = original + Duration::from_millis(1);
-        *BROWSER_NAV_LAST
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = (Some(newer), None);
+        *BROWSER_NAV_LAST.lock() = (Some(newer), None);
         browser_nav_debounce_cancel(BrowserNavDebounceReservation {
             forward: false,
             timestamp: original,
         });
 
-        assert_eq!(
-            BROWSER_NAV_LAST
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .0,
-            Some(newer)
-        );
+        assert_eq!(BROWSER_NAV_LAST.lock().0, Some(newer));
     }
 }

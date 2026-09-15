@@ -24,9 +24,10 @@
     unsafe_code,
     reason = "AVFoundation / CoreMedia / CoreVideo capture FFI"
 )]
+use parking_lot::Mutex;
 use std::ffi::{CString, c_void};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use block2::RcBlock;
@@ -161,7 +162,8 @@ define_class!(
                             }
                         }
                     }
-                    if let Ok(mut slot) = sink.latest.lock() {
+                    {
+                        let mut slot = sink.latest.lock();
                         #[expect(
                             clippy::cast_possible_truncation,
                             reason = "CoreVideo reports sensor-sized dimensions, divided down again by `step`"
@@ -212,9 +214,8 @@ fn request_access(timeout: Duration) -> bool {
     // `void(^)(BOOL)` completion block. `RcBlock` is heap-allocated and
     // reference-counted, so it outlives the async call below on its own.
     let handler = RcBlock::new(move |granted: Bool| {
-        if let Ok(mut slot) = sink.lock() {
-            *slot = Some(granted.as_bool());
-        }
+        let mut slot = sink.lock();
+        *slot = Some(granted.as_bool());
     });
     let cls = class!(AVCaptureDevice);
     // SAFETY: documented async class method taking an AVMediaType + a
@@ -228,9 +229,7 @@ fn request_access(timeout: Duration) -> bool {
     }
     let deadline = Instant::now() + timeout;
     loop {
-        if let Ok(slot) = answered.lock()
-            && let Some(granted) = *slot
-        {
+        if let Some(granted) = *answered.lock() {
             return granted;
         }
         if Instant::now() >= deadline {
@@ -440,9 +439,7 @@ pub fn capture_frame(unique_id: &str, timeout: Duration) -> Result<Frame, Captur
     let session = open_session(unique_id, false)?;
     let deadline = Instant::now() + timeout;
     loop {
-        if let Ok(mut slot) = session.sink.latest.lock()
-            && let Some(frame) = slot.take()
-        {
+        if let Some(frame) = session.sink.latest.lock().take() {
             return Ok(Arc::unwrap_or_clone(frame));
         }
         if Instant::now() >= deadline {
@@ -465,12 +462,7 @@ impl CameraStream {
     /// pixel buffer.
     #[must_use]
     pub fn latest_frame(&self) -> Option<Arc<Frame>> {
-        self.session
-            .sink
-            .latest
-            .lock()
-            .ok()
-            .and_then(|slot| slot.clone())
+        self.session.sink.latest.lock().clone()
     }
 
     /// Take the most recent frame out of the slot (the next delivered frame
@@ -478,12 +470,7 @@ impl CameraStream {
     /// buffer without copying it.
     #[must_use]
     pub fn take_frame(&self) -> Option<Arc<Frame>> {
-        self.session
-            .sink
-            .latest
-            .lock()
-            .ok()
-            .and_then(|mut slot| slot.take())
+        self.session.sink.latest.lock().take()
     }
 
     /// A counter that increments on every delivered frame, so the preview can
