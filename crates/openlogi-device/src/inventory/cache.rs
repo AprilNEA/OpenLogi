@@ -31,11 +31,29 @@ pub(super) enum CacheKey {
     /// two receivers whose serials share a common prefix (e.g. "DA2699E1" and
     /// "DA2604F2" share "DA2").
     UnifyingSlot { receiver_uid: String, slot: u8 },
-    /// Direct (Bluetooth/USB): the OS-assigned HID node id (macOS registry-entry
-    /// id, Linux dev path, Windows interface path). Unique *per node*, so two
-    /// units of the same model never collide, and stable while connected so the
-    /// cache still hits across ticks.
+    /// Direct (Bluetooth/USB) with a serial the backend could read. For a
+    /// Bluetooth device that is its address, which survives both the device
+    /// leaving for another host and the machine rebooting.
+    DirectSerial(String),
+    /// Direct (Bluetooth/USB) with no readable serial: the OS-assigned HID node
+    /// id (macOS registry-entry id, Linux dev path, Windows interface path).
+    /// Unique *per node*, so two units of the same model never collide, but
+    /// only stable while connected.
     Direct(NodeId),
+}
+
+impl CacheKey {
+    /// Whether this key names the device itself rather than where it happened
+    /// to be attached.
+    ///
+    /// The distinction decides how long a memoized probe stays true. An
+    /// identity can never be handed to a different physical device, so what it
+    /// memoizes holds however long that device is away. A pairing slot or an
+    /// OS node id can belong to something else the moment this device leaves,
+    /// so what they memoize is only true while it is still there.
+    pub(super) fn names_the_device(&self) -> bool {
+        matches!(self, Self::Bolt { .. } | Self::DirectSerial(_))
+    }
 }
 
 /// Enumeration ticks a device may be missing before its cache entry is evicted.

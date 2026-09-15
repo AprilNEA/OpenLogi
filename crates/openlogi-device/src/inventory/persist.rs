@@ -7,12 +7,13 @@
 //! fully probed once keeps its identity across restarts, even on transports
 //! where a fresh walk is slow or failing (see `BOLT_SLOT_PROBE`).
 //!
-//! Only Bolt identities are persisted, because only they are keyed on the
-//! device's *own* identity (the pairing-register unit id), which no re-pairing
-//! can silently reassign. A `CacheKey::UnifyingSlot` is `receiver + slot`: a
-//! different device paired into that slot while the agent is down would
-//! inherit the previous occupant's probe on warm start. A `CacheKey::Direct`
-//! is an OS-runtime node id with no cross-boot stability. Loaded entries
+//! Only identity keys are persisted: the Bolt pairing-register unit id, and a
+//! direct device's HID serial (its address, on Bluetooth). Neither can be
+//! silently reassigned to another device. A `CacheKey::UnifyingSlot` is
+//! `receiver + slot`: a different device paired into that slot while the agent
+//! is down would inherit the previous occupant's probe on warm start. A
+//! `CacheKey::Direct` is an OS-runtime node id with no cross-boot
+//! stability. Loaded entries
 //! restart the elapsed refresh window, so the regular self-healing pass
 //! re-walks them on schedule; until (and unless) that walk succeeds, the
 //! persisted data serves exactly like an in-memory cache hit.
@@ -35,7 +36,8 @@ use super::features::{BatteryProbe, ProbedFeatures};
 /// (the cache is a warm-start optimization, not data anyone must keep).
 /// v2 dropped the `UnifyingSlot` key (slot-keyed, so not re-pair-safe).
 /// v3 adds event-capable feature indexes discovered by the immutable walk.
-const SCHEMA_VERSION: u32 = 3;
+/// v4 adds serial-keyed direct devices, which no longer re-walk on reconnect.
+const SCHEMA_VERSION: u32 = 4;
 
 impl ProbeCacheError {
     /// Report why a store could not keep a snapshot.
@@ -90,14 +92,18 @@ struct PersistedEntry {
 }
 
 /// The persistable subset of [`CacheKey`] — Bolt only (see the module docs).
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 enum PersistedKey {
     Bolt { unit_id: [u8; 4] },
+    DirectSerial { serial: String },
 }
 
 fn persistable(key: &CacheKey) -> Option<PersistedKey> {
     match key {
         CacheKey::Bolt { unit_id } => Some(PersistedKey::Bolt { unit_id: *unit_id }),
+        CacheKey::DirectSerial(serial) => Some(PersistedKey::DirectSerial {
+            serial: serial.clone(),
+        }),
         CacheKey::UnifyingSlot { .. } | CacheKey::Direct(_) => None,
     }
 }
@@ -112,6 +118,7 @@ pub(super) fn is_persistable(key: &CacheKey) -> bool {
 fn runtime_key(key: PersistedKey) -> CacheKey {
     match key {
         PersistedKey::Bolt { unit_id } => CacheKey::Bolt { unit_id },
+        PersistedKey::DirectSerial { serial } => CacheKey::DirectSerial(serial),
     }
 }
 
