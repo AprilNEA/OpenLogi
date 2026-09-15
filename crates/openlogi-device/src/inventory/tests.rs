@@ -320,6 +320,58 @@ fn failed_first_probe_then_deferrals_preserve_warm_cache() {
 }
 
 #[test]
+fn partial_first_probe_does_not_abandon_unread_slots_during_deferral() {
+    let mut e = Enumerator::with_backend(ScriptedBackend::new(Vec::new()));
+    let receiver = NodeId::from("warm-partial-receiver".to_string());
+    let readable = CacheKey::Bolt {
+        unit_id: [0, 0, 0, 1],
+    };
+    let unread = CacheKey::Bolt {
+        unit_id: [0, 0, 0, 2],
+    };
+    e.cache.insert(readable.clone(), cache_entry());
+    e.cache.insert(unread.clone(), cache_entry());
+
+    let pass = |e: &mut Enumerator, probe: NodeProbe| {
+        let mut frozen = HashSet::new();
+        e.hold_or_note_cache_keys(&receiver, &probe, &mut frozen);
+        settle_probe(&mut e.ledger, &receiver, probe.verdict, probe.inventory);
+        let seen = e.apply_outcomes(probe.outcomes);
+        e.evict_unseen(&seen, &frozen);
+    };
+
+    // The receiver reports two paired slots but only one identity is readable.
+    // Its identifying outcome is not a complete cache-ownership inventory.
+    let partial = assemble_bolt_probe(bolt_receiver_info(), Some(2), vec![bolt_slot(1)]);
+    assert_eq!(partial.verdict, ProbeVerdict::Failed);
+    pass(&mut e, partial);
+    assert_eq!(e.misses.get(&unread), Some(&1));
+    for _ in 0..CACHE_MISS_GRACE {
+        pass(&mut e, NodeProbe::deferred());
+    }
+    assert!(e.cache.contains_key(&readable));
+    assert!(
+        e.cache.contains_key(&unread),
+        "a partial first probe must not expose the unread slot to deferred miss aging"
+    );
+    assert_eq!(e.misses.get(&unread), Some(&1));
+    assert!(!e.cache_dirty);
+
+    // A later complete probe confirms only one pairing remains. Deferrals
+    // can now protect only that slot, so the removed slot ages out normally.
+    pass(
+        &mut e,
+        assemble_bolt_probe(bolt_receiver_info(), Some(1), vec![bolt_slot(1)]),
+    );
+    for _ in 1..CACHE_MISS_GRACE {
+        pass(&mut e, NodeProbe::deferred());
+    }
+    assert!(e.cache.contains_key(&readable));
+    assert!(!e.cache.contains_key(&unread));
+    assert!(e.cache_dirty);
+}
+
+#[test]
 fn cached_probe_is_reused_until_refresh_interval() {
     let probed_at = Instant::now();
     let cached = Cached {
