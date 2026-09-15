@@ -511,6 +511,16 @@ pub struct Lighting {
     pub brightness: u8,
 }
 
+/// Whether this host has an aggregate camera-use provider behind
+/// [`LightSettings::auto_camera`].
+///
+/// macOS reads CoreMediaIO's device-running property; Windows reads the
+/// Capability Access Manager's webcam consent store. A platform without a
+/// provider still persists the setting — the config stays portable across the
+/// machines sharing it — but leaves the light on manual power, so the GUI hides
+/// the toggle rather than offering a switch that cannot do anything.
+pub const CAMERA_AUTOMATION_SUPPORTED: bool = cfg!(any(target_os = "macos", target_os = "windows"));
+
 /// Persisted settings for a standalone light such as Logitech Litra.
 ///
 /// Brightness is stored as a normalized percentage so the same config shape

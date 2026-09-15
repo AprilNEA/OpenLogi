@@ -247,6 +247,43 @@ fn build_devices_keeps_serial_backed_standalone_lights_beside_hidpp_devices() {
     assert!(matches!(light.route, Some(DeviceRoute::RawHid { .. })));
 }
 
+/// A standalone light enumerates like any other device and, once it reports a
+/// serial, resolves a physical key — so nothing upstream stops it reaching the
+/// HID++ planners. Its route is the one fact that rules it out: a raw route
+/// cannot carry a control divert or a DPI feature write, and a plan built for
+/// one leaves the gesture watcher opening a session the device rejects, over
+/// and over.
+///
+/// Drive the published projections rather than the route predicate alone, so
+/// deleting either planner's filter fails here.
+#[test]
+fn a_standalone_light_is_left_out_of_both_hidpp_planners() {
+    let mut orch = orchestrator(Config::default());
+    orch.devices = vec![raw_light_dev("light"), dev("mouse", 1, true)];
+    orch.rebuild();
+
+    let plans = orch.shared.capture_plans.borrow().clone();
+    assert_eq!(
+        plans.len(),
+        1,
+        "only the HID++ device can carry a capture session"
+    );
+    assert!(
+        plans.iter().all(|plan| plan.target.route.speaks_hidpp()),
+        "no capture plan may name a raw route"
+    );
+
+    let cycles = orch.shared.dpi_cycle.read().expect("dpi cycle lock");
+    assert!(
+        !cycles.by_key.contains_key("light"),
+        "a light has no route that can carry a DPI feature write"
+    );
+    assert!(
+        cycles.by_key.contains_key("mouse"),
+        "the HID++ device still gets its cycle"
+    );
+}
+
 /// A cabled direct device whose own identity wasn't readable — the shape an
 /// offline probe reports, or a device seen for the first time.
 fn direct_stable_id() -> DeviceStableId {

@@ -162,12 +162,10 @@ fn light_worker_loop(
             continue;
         }
         let result = rt.block_on(apply_light_settings(
-            &request.hardware,
             &target,
-            &request.settings,
-            request.capabilities,
+            &request,
             &generation,
-            request.generation,
+            |command| apply_light_unlocked(&request.hardware, &target, command),
         ));
         match result {
             Ok(true) => info!(
@@ -184,28 +182,37 @@ fn light_worker_loop(
 }
 
 async fn apply_light_settings(
-    hardware: &HardwareContext,
     target: &DeviceRoute,
-    light: &LightSettings,
-    capabilities: LightCapabilities,
+    request: &LightApplyRequest,
     generation: &AtomicU64,
-    expected_generation: u64,
+    mut write: impl AsyncFnMut(LightCommand) -> Result<(), WriteError>,
 ) -> Result<bool, WriteError> {
     let lock = light_write_lock(target);
     let _guard = lock.lock().await;
     // The request may have passed the queue check while an explicit command
     // held the route lock. Re-check under that lock before writing anything so
     // a canceled re-apply cannot overwrite the newer explicit state.
-    if generation.load(Ordering::Acquire) != expected_generation {
+    if generation.load(Ordering::Acquire) != request.generation {
         return Ok(false);
     }
-    for command in commands_for_light_settings(*light, capabilities) {
-        if !hardware.device_io().allows_io() {
-            return Ok(false);
+    let mut first_error = None;
+    for command in commands_for_light_settings(request.settings, request.capabilities) {
+        // Power-off is last to avoid flashing the light. If a value fails,
+        // skip the remaining values but still try to leave the device dark.
+        if first_error.is_some() && command != LightCommand::Power(false) {
+            continue;
         }
-        apply_light_unlocked(hardware, target, command).await?;
+        if !request.hardware.device_io().allows_io() {
+            return first_error.map_or(Ok(false), Err);
+        }
+        if let Err(error) = write(command).await {
+            if request.settings.enabled || !request.capabilities.power {
+                return Err(error);
+            }
+            first_error.get_or_insert(error);
+        }
     }
-    Ok(true)
+    first_error.map_or(Ok(true), Err)
 }
 
 /// Apply a semantic command to a supported standalone light.
@@ -258,11 +265,12 @@ fn light_write_lock(route: &DeviceRoute) -> LightWriteLock {
 mod tests {
     use super::*;
 
+    use openlogi_core::device::{LightValueRange, LightValueUnit};
     use openlogi_hid::replay::{
         ChannelConnection, NodePresence, OpenOutcome, RawWriterAvailability, ReplayBackend,
         ReplayNode, ReplayTopology,
     };
-    use openlogi_hid::{NodeId, NodeInfo, device_io_channel};
+    use openlogi_hid::{LitraModel, NodeId, NodeInfo, device_io_channel, encode_litra_command};
 
     const PRODUCT_ID: u16 = 0xc900;
     const USAGE_PAGE: u16 = 0xff43;
@@ -350,5 +358,230 @@ mod tests {
             }],
             channels: Vec::new(),
         }
+    }
+
+    fn route() -> DeviceRoute {
+        DeviceRoute::RawHid {
+            vendor_id: 0x046d,
+            product_id: 0xc900,
+            usage_page: 0xff43,
+            usage_id: 0x0202,
+            identity: "serial:light-write-test".into(),
+        }
+    }
+
+    fn request(settings: LightSettings) -> LightApplyRequest {
+        LightApplyRequest {
+            settings,
+            capabilities: LightCapabilities {
+                power: true,
+                brightness: Some(LightValueRange::new(20, 250, 1, LightValueUnit::Lumens).unwrap()),
+                temperature: Some(
+                    LightValueRange::new(2700, 6500, 100, LightValueUnit::Kelvin).unwrap(),
+                ),
+                ..LightCapabilities::default()
+            },
+            generation: 1,
+            hardware: HardwareContext::injected(
+                Arc::new(
+                    ReplayBackend::new(
+                        ReplayTopology {
+                            nodes: Vec::new(),
+                            channels: Vec::new(),
+                        },
+                        Vec::new(),
+                    )
+                    .expect("valid empty replay topology"),
+                ),
+                device_io_channel().1,
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn successful_reapply_preserves_power_order() {
+        for (enabled, expected) in [
+            (
+                true,
+                vec![
+                    LightCommand::Power(true),
+                    LightCommand::BrightnessPercent(60),
+                    LightCommand::TemperatureKelvin(4600),
+                ],
+            ),
+            (
+                false,
+                vec![
+                    LightCommand::BrightnessPercent(60),
+                    LightCommand::TemperatureKelvin(4600),
+                    LightCommand::Power(false),
+                ],
+            ),
+        ] {
+            let request = request(LightSettings::new(enabled, 60, Some(4600)));
+            let mut written = Vec::new();
+            let result =
+                apply_light_settings(&route(), &request, &AtomicU64::new(1), async |command| {
+                    encode_litra_command(LitraModel::Glow, command)?;
+                    written.push(command);
+                    Ok(())
+                })
+                .await;
+
+            assert!(result.unwrap());
+            assert_eq!(written, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn rejected_temperature_does_not_prevent_power_off() {
+        // Config accepts 2750 K, but the Litra encoder requires 100 K steps.
+        let request = request(LightSettings::new(false, 60, Some(2750)));
+        let mut written = Vec::new();
+        let result =
+            apply_light_settings(&route(), &request, &AtomicU64::new(1), async |command| {
+                encode_litra_command(LitraModel::Glow, command)?;
+                written.push(command);
+                Ok(())
+            })
+            .await;
+
+        assert_eq!(
+            written,
+            vec![
+                LightCommand::BrightnessPercent(60),
+                LightCommand::Power(false)
+            ]
+        );
+        assert!(
+            matches!(result, Err(WriteError::InvalidLightValue { control, value: 2750 }) if control == "temperature_kelvin")
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_brightness_skips_to_power_off_and_retains_first_error() {
+        for power_off_result in [Ok(()), Err(WriteError::DeviceNotFound)] {
+            let request = request(LightSettings::new(false, 60, Some(4600)));
+            let mut attempted = Vec::new();
+            let result =
+                apply_light_settings(&route(), &request, &AtomicU64::new(1), async |command| {
+                    attempted.push(command);
+                    if command == LightCommand::BrightnessPercent(60) {
+                        Err(WriteError::RequestTimedOut {
+                            operation: HidppOperation::Light,
+                        })
+                    } else {
+                        power_off_result.clone()
+                    }
+                })
+                .await;
+
+            assert_eq!(
+                attempted,
+                vec![
+                    LightCommand::BrightnessPercent(60),
+                    LightCommand::Power(false)
+                ]
+            );
+            assert!(matches!(
+                result,
+                Err(WriteError::RequestTimedOut {
+                    operation: HidppOperation::Light
+                })
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn switching_on_still_stops_at_the_first_failure() {
+        for (failed, expected) in [
+            (LightCommand::Power(true), vec![LightCommand::Power(true)]),
+            (
+                LightCommand::BrightnessPercent(60),
+                vec![
+                    LightCommand::Power(true),
+                    LightCommand::BrightnessPercent(60),
+                ],
+            ),
+        ] {
+            let request = request(LightSettings::new(true, 60, Some(4600)));
+            let mut attempted = Vec::new();
+            let result =
+                apply_light_settings(&route(), &request, &AtomicU64::new(1), async |command| {
+                    attempted.push(command);
+                    if command == failed {
+                        Err(WriteError::DeviceNotFound)
+                    } else {
+                        Ok(())
+                    }
+                })
+                .await;
+
+            assert_eq!(attempted, expected);
+            assert!(matches!(result, Err(WriteError::DeviceNotFound)));
+        }
+    }
+
+    #[tokio::test]
+    async fn suspension_stops_writes_even_during_power_off_recovery() {
+        for first_result in [Ok(()), Err(WriteError::DeviceNotFound)] {
+            let (signal, device_io) = device_io_channel();
+            let mut request = request(LightSettings::new(false, 60, Some(4600)));
+            request.hardware = HardwareContext::injected(
+                Arc::new(
+                    ReplayBackend::new(
+                        ReplayTopology {
+                            nodes: Vec::new(),
+                            channels: Vec::new(),
+                        },
+                        Vec::new(),
+                    )
+                    .expect("valid empty replay topology"),
+                ),
+                device_io,
+            );
+            let mut attempted = Vec::new();
+            let result =
+                apply_light_settings(&route(), &request, &AtomicU64::new(1), async |command| {
+                    attempted.push(command);
+                    assert!(signal.suspend());
+                    first_result.clone()
+                })
+                .await;
+
+            assert_eq!(attempted, vec![LightCommand::BrightnessPercent(60)]);
+            match first_result {
+                Ok(()) => assert!(!result.unwrap()),
+                Err(_) => assert!(matches!(result, Err(WriteError::DeviceNotFound))),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn canceled_reapply_is_rechecked_after_acquiring_the_write_lock() {
+        let route = route();
+        let request = request(LightSettings::new(false, 60, Some(4600)));
+        let generation = AtomicU64::new(1);
+        let lock = light_write_lock(&route);
+        let guard = lock.lock().await;
+        let mut attempted = Vec::new();
+        let result = {
+            let apply = apply_light_settings(&route, &request, &generation, async |command| {
+                attempted.push(command);
+                Ok(())
+            });
+            let mut apply = std::pin::pin!(apply);
+            assert!(
+                futures_lite::future::poll_once(apply.as_mut())
+                    .await
+                    .is_none()
+            );
+            generation.store(2, Ordering::Release);
+            drop(guard);
+            apply.await
+        };
+
+        assert!(!result.unwrap());
+        assert!(attempted.is_empty());
     }
 }
