@@ -126,7 +126,7 @@ pub fn rebuild(cx: &mut App) {
 /// rendered. Shared by the app menu and agent tray IPC commands.
 pub fn check_for_updates(cx: &mut App) {
     if let Some(updater) = crate::platform::updater::shared(cx) {
-        updater.update(cx, gpui_updater::Updater::check);
+        crate::platform::updater::check(&updater, cx);
     }
     crate::windows::settings::open_at(crate::windows::settings::SettingsPage::Updates, cx);
 }

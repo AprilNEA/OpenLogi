@@ -138,7 +138,7 @@ fn update_hero(updater: &Entity<Updater>, cx: &mut App) -> gpui::Div {
                     .outline()
                     .label(tr!("updates.check_for_updates_action"))
                     .on_click(move |_, _, cx| {
-                        u.update(cx, Updater::check);
+                        crate::platform::updater::check(&u, cx);
                     }),
             ),
         }

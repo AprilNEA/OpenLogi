@@ -6,7 +6,11 @@
 //! is how a user opts in on first launch. Either choice marks the prompt seen
 //! so it never reappears; "Enable" also runs one check immediately.
 
+use crate::app::menu::{CloseWindow, Minimize, Zoom};
+use crate::state::{AppState, StateEvent};
+use crate::ui::theme;
 use crate::ui::theme::Typography as _;
+use crate::windows::{self, AuxWindow};
 use gpui::{
     App, Context, FocusHandle, InteractiveElement, IntoElement, ParentElement as _, Render, Size,
     Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px,
@@ -15,12 +19,6 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     h_flex, v_flex,
 };
-use gpui_updater::Updater;
-
-use crate::app::menu::{CloseWindow, Minimize, Zoom};
-use crate::state::{AppState, StateEvent};
-use crate::ui::theme;
-use crate::windows::{self, AuxWindow};
 
 /// Standalone first-run update-consent window root view.
 pub struct UpdateConsentView {
@@ -63,7 +61,7 @@ fn answer(enabled: bool, window: &mut Window, cx: &mut App) {
         cx.emit(StateEvent::SettingsChanged);
     });
     if enabled && let Some(updater) = crate::platform::updater::shared(cx) {
-        updater.update(cx, Updater::check);
+        crate::platform::updater::check(&updater, cx);
     }
     window.remove_window();
 }
