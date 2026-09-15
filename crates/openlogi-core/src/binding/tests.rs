@@ -317,6 +317,11 @@ fn persisted_action_variant_names_are_stable() {
             "F2".parse()
                 .unwrap_or_else(|error| panic!("valid shortcut failed: {error}")),
         ),
+        Action::HoldModifier(
+            "Ctrl"
+                .parse()
+                .unwrap_or_else(|error| panic!("valid modifier failed: {error}")),
+        ),
     ]);
     let mut actual: Vec<String> = actions
         .into_iter()
@@ -346,6 +351,7 @@ fn persisted_action_variant_names_are_stable() {
         "Find",
         "HorizontalScrollLeft",
         "HorizontalScrollRight",
+        "HoldModifier",
         "HoldShortcut",
         "LaunchpadShow",
         "LeftClick",

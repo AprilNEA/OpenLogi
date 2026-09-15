@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use super::application_target::ApplicationTarget;
 use super::category::Category;
 use super::key_combo::KeyCombo;
+use super::modifiers::Modifiers;
 
 /// What pressing a [`ButtonId`](crate::binding::ButtonId) should do.
 ///
@@ -187,6 +188,21 @@ pub enum Action {
     /// cancellation and shutdown. Dispatchers without a release context must
     /// degrade this action to a balanced tap rather than leave keys held.
     HoldShortcut(KeyCombo),
+    /// Hold one or more bare modifiers (Ctrl, Shift, Alt, Cmd, or any
+    /// combination) for the lifetime of the physical button press, with no
+    /// ordinary key. The held state composes with input from other devices:
+    /// scrolling while this button is down applies the modifier to the wheel,
+    /// and a keystroke typed on the keyboard meanwhile arrives modified.
+    ///
+    /// [`Modifiers`] carries the same bits as [`KeyCombo`], so Cmd is a
+    /// distinct key only on macOS — Linux and Windows inject it as Control,
+    /// exactly as they do for a chord.
+    ///
+    /// Lifecycle: modifiers down on press start, up on every terminal outcome
+    /// (release, capture cancellation, invalid binding, shutdown). A one-shot
+    /// dispatcher with no release context degrades to a no-op — a bare
+    /// modifier tap has no observable effect on any OS we target.
+    HoldModifier(Modifiers),
 }
 
 /// One step in a [`Action::Workflow`]. A workflow is a `Vec<WorkflowStep>`
@@ -314,6 +330,7 @@ macro_rules! derive_action_core {
                     Action::Workflow(steps) => format!("Workflow ({} steps)", steps.len()),
                     Action::OpenApplication(target) => format!("Open {}", target.display_name()),
                     Action::HoldShortcut(combo) => format!("Hold {}", combo.rendered_label()),
+                    Action::HoldModifier(mods) => format!("Hold {}", mods.rendered_label()),
                 }
             }
 
@@ -333,7 +350,8 @@ macro_rules! derive_action_core {
                     | Action::RunShellCommand(_)
                     | Action::Workflow(_)
                     | Action::OpenApplication(_)
-                    | Action::HoldShortcut(_) => None,
+                    | Action::HoldShortcut(_)
+                    | Action::HoldModifier(_) => None,
                 }
             }
 
@@ -362,7 +380,8 @@ macro_rules! derive_action_core {
                     | Action::RunAppleScript(_)
                     | Action::RunShellCommand(_)
                     | Action::Workflow(_)
-                    | Action::HoldShortcut(_) => Category::Editing,
+                    | Action::HoldShortcut(_)
+                    | Action::HoldModifier(_) => Category::Editing,
                     Action::SetDpiPreset(_) => Category::Dpi,
                     Action::OpenApplication(_) => Category::System,
                 }
@@ -401,5 +420,44 @@ impl Action {
             Self::HoldShortcut(combo) => Some(combo),
             _ => None,
         }
+    }
+
+    /// The bare modifiers whose output must remain down until the originating
+    /// press ends, or `None` for actions that hold a chord or nothing.
+    #[must_use]
+    pub fn held_modifier(&self) -> Option<Modifiers> {
+        match self {
+            Self::HoldModifier(mods) => Some(*mods),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hold_modifier_round_trips_and_labels_and_categorises() {
+        #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+        struct Wrapper {
+            binding: Action,
+        }
+
+        let wrapper = Wrapper {
+            binding: Action::HoldModifier("Ctrl+Shift".parse().expect("valid modifier set")),
+        };
+        let encoded = toml::to_string(&wrapper).expect("action serializes");
+        assert!(
+            encoded.contains("HoldModifier = \"Ctrl+Shift\""),
+            "unexpected encoding: {encoded}"
+        );
+        assert_eq!(toml::from_str::<Wrapper>(&encoded), Ok(wrapper));
+
+        let action = Action::HoldModifier("Ctrl".parse().expect("valid modifier"));
+        assert_eq!(action.label(), "Hold Ctrl");
+        assert_eq!(action.category(), Category::Editing);
+        assert!(action.translation_key().is_none());
+        assert!(matches!(action.effect(), crate::binding::Effect::AgentSide));
     }
 }

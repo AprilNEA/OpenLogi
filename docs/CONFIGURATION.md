@@ -103,6 +103,26 @@ the chord down until the originating physical button is released, and also
 releases it if capture is interrupted, the binding becomes invalid, or the
 agent shuts down. Use it for push-to-talk and other hold-to-activate controls.
 
+`HoldModifier` holds one or more bare modifiers with no ordinary key, under
+those same lifetime and release rules. Both shortcut actions require a key and
+reject a bare modifier string, so this is the shape that binds a button to
+Ctrl, Shift, Alt, or Cmd alone. The held modifier composes with input from
+other devices: hold it on the mouse, type on the keyboard, and the keystroke
+arrives modified. Combine modifiers with `+`, as in
+`HoldModifier = "Ctrl+Shift"`. On macOS Cmd and Ctrl are distinct keys; on
+Linux and Windows Cmd is injected as Control, as it is for the two shortcut
+actions.
+
+On macOS the held modifier works through two mechanisms: the modifier key
+itself stays down (menus update, modifier-state polls see it, the Cmd+Tab
+switcher stays open), and the agent's event tap stamps the modifier onto
+keyboard, scroll, and click events from other devices — a hardware event's
+flags otherwise reflect only physically held modifiers. `HoldShortcut` never
+feeds this stamping — holding a chord does not modify other input — though like
+any other input, a chord or scroll emitted while a bare modifier is held
+picks that modifier up. Linux and Windows inject below the layer where
+modifiers resolve, so injection alone covers them.
+
 A `{ short = ..., long = ... }` binding waits for the button's outcome instead
 of firing on press. Releasing before 500 ms fires `short`; keeping the button
 down for 500 ms fires `long` exactly once, and the later release does not also

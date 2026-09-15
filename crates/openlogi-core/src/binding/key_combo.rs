@@ -6,11 +6,11 @@ use nutype::nutype;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use thiserror::Error;
 
-const MOD_COMMAND: u8 = 1 << 0;
-const MOD_SHIFT: u8 = 1 << 1;
-const MOD_CONTROL: u8 = 1 << 2;
-const MOD_OPTION: u8 = 1 << 3;
-const ALL_MODIFIERS: u8 = MOD_COMMAND | MOD_SHIFT | MOD_CONTROL | MOD_OPTION;
+pub(super) const MOD_COMMAND: u8 = 1 << 0;
+pub(super) const MOD_SHIFT: u8 = 1 << 1;
+pub(super) const MOD_CONTROL: u8 = 1 << 2;
+pub(super) const MOD_OPTION: u8 = 1 << 3;
+pub(super) const ALL_MODIFIERS: u8 = MOD_COMMAND | MOD_SHIFT | MOD_CONTROL | MOD_OPTION;
 
 /// USB HID keyboard usage supported by custom shortcuts.
 ///
@@ -264,7 +264,7 @@ impl FromStr for KeyCombo {
     }
 }
 
-fn parse_modifier(token: &str) -> Option<u8> {
+pub(super) fn parse_modifier(token: &str) -> Option<u8> {
     match token.to_ascii_lowercase().as_str() {
         "cmd" | "command" | "meta" | "win" => Some(MOD_COMMAND),
         "shift" => Some(MOD_SHIFT),

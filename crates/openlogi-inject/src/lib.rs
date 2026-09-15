@@ -4,8 +4,11 @@ mod inject;
 
 pub use inject::{
     HeldChord, SYNTHETIC_EVENT_USER_DATA, SmoothScrollPhase, ax_navigate_browser, execute,
-    post_scroll, post_smooth_scroll, press_hold,
+    post_scroll, post_smooth_scroll, press_hold, press_hold_modifier,
 };
 
 #[cfg(target_os = "linux")]
 pub use inject::action_device_path;
+
+#[cfg(target_os = "macos")]
+pub use inject::held_modifier_flags;
