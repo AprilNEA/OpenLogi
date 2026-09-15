@@ -9,7 +9,8 @@ use core_graphics::event::{
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::CGPoint;
 
-use core_foundation::base::TCFType as _;
+use objc2_application_services::{AXError, AXUIElement};
+use objc2_core_foundation::{CFArray, CFRetained, CFString, CFType, Type as _};
 use openlogi_core::binding::{
     Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Script, Shortcut, WorkflowStep,
 };
@@ -718,185 +719,99 @@ fn set_continuous_axis(
     event.set_integer_value_field(fixed_field, points * FIXED_POINT_SCALE / POINTS_PER_LINE);
 }
 
-/// Raw FFI surface for the AXUIElement/CF calls used by [`ax_browser_navigate`]
-/// and its helpers below. Kept as module-level items (rather than nested in
-/// `ax_browser_navigate`) so each helper is independently readable and short.
-#[expect(unsafe_code, reason = "AXUIElement / CF APIs require raw FFI")]
-mod ax_nav {
-    use std::ffi::c_void;
-
-    pub(super) type AXUIElementRef = *const c_void;
-    pub(super) type CFTypeRef = *const c_void;
-
-    #[link(name = "ApplicationServices", kind = "framework")]
-    unsafe extern "C" {
-        pub(super) fn AXUIElementCreateApplication(pid: i32) -> AXUIElementRef;
-        pub(super) fn AXUIElementCopyAttributeValue(
-            element: AXUIElementRef,
-            attribute: core_foundation::string::CFStringRef,
-            value: *mut CFTypeRef,
-        ) -> i32;
-        pub(super) fn AXUIElementPerformAction(
-            element: AXUIElementRef,
-            action: core_foundation::string::CFStringRef,
-        ) -> i32;
-        pub(super) fn CFRelease(cf: CFTypeRef);
-        pub(super) fn CFGetTypeID(cf: CFTypeRef) -> usize;
-        pub(super) fn CFArrayGetTypeID() -> usize;
-        pub(super) fn CFArrayGetCount(arr: CFTypeRef) -> isize;
-        pub(super) fn CFArrayGetValueAtIndex(arr: CFTypeRef, idx: isize) -> CFTypeRef;
-        pub(super) fn CFRetain(cf: CFTypeRef) -> CFTypeRef;
-    }
-
-    pub(super) const AX_ERROR_SUCCESS: i32 = 0;
-}
-
 /// The AX attribute names needed by [`find_button`], bundled so its argument
 /// list does not grow with the tree depth it searches.
 struct AxAttrs {
-    role: core_foundation::string::CFStringRef,
-    identifier: core_foundation::string::CFStringRef,
-    children: core_foundation::string::CFStringRef,
+    role: CFRetained<CFString>,
+    identifier: CFRetained<CFString>,
+    children: CFRetained<CFString>,
 }
 
-/// Get one AX attribute as a raw CFTypeRef (+1 retained). Caller must CFRelease.
-///
-/// SAFETY: `el` must be a valid AXUIElementRef and `attr` a valid CFStringRef
-/// (the CF memory rules — Get Rule = no extra retain, Create/Copy Rule = +1
-/// retain, caller releases — apply throughout this module).
-#[expect(unsafe_code, reason = "AXUIElement / CF APIs require raw FFI")]
-unsafe fn copy_attr(
-    el: ax_nav::AXUIElementRef,
-    attr: core_foundation::string::CFStringRef,
-) -> Option<ax_nav::CFTypeRef> {
-    let mut val: ax_nav::CFTypeRef = std::ptr::null();
-    // SAFETY: caller upholds the AXUIElementRef/CFStringRef validity contract.
-    let err = unsafe { ax_nav::AXUIElementCopyAttributeValue(el, attr, &raw mut val) };
-    if err == 0 && !val.is_null() {
-        Some(val)
-    } else {
-        None
+/// Adopt the Copy-rule output once; all callers own a releasing smart pointer.
+#[expect(unsafe_code, reason = "AX attribute copying uses an out-pointer")]
+fn copy_attr(el: &AXUIElement, attr: &CFString) -> Option<CFRetained<CFType>> {
+    use std::ptr::NonNull;
+
+    let mut value = std::ptr::null();
+    // SAFETY: both framework objects and the writable out-pointer remain
+    // valid for the call; AX initializes the output on success.
+    let error = unsafe { el.copy_attribute_value(attr, NonNull::from(&mut value)) };
+    if error != AXError::Success {
+        return None;
     }
+    let value = NonNull::new(value.cast_mut())?;
+    // SAFETY: successful AX Copy output is a valid CF object at +1 ownership.
+    Some(unsafe { CFRetained::from_raw(value) })
 }
 
-/// Read an AX attribute as a String. Internally copies + releases.
-///
-/// SAFETY: same contract as [`copy_attr`].
-#[expect(unsafe_code, reason = "AXUIElement / CF APIs require raw FFI")]
-unsafe fn attr_string(
-    el: ax_nav::AXUIElementRef,
-    attr: core_foundation::string::CFStringRef,
-) -> Option<String> {
-    // SAFETY: caller upholds the AXUIElementRef/CFStringRef validity contract.
-    let val = unsafe { copy_attr(el, attr) }?;
-    // SAFETY: AX string attributes return CFStringRef.
-    let s = unsafe { core_foundation::string::CFString::wrap_under_create_rule(val.cast()) };
-    Some(s.to_string())
+fn attr_string(el: &AXUIElement, attr: &CFString) -> Option<String> {
+    Some(
+        copy_attr(el, attr)?
+            .downcast::<CFString>()
+            .ok()?
+            .to_string(),
+    )
 }
 
-/// Walk the AX tree looking for an AXButton matching one of `target_ids`. Returns the
-/// element pointer (+1 retained via `CFRetain` at the leaf, so the caller owns
-/// it independently of the parent arrays this function releases as it unwinds).
-///
-/// SAFETY: `el` must be a valid AXUIElementRef and every field of `attrs` a
-/// valid CFStringRef.
-#[expect(unsafe_code, reason = "AXUIElement / CF APIs require raw FFI")]
-unsafe fn find_button(
-    el: ax_nav::AXUIElementRef,
+/// Retain the matching button independently of the parent arrays as we unwind.
+#[expect(unsafe_code, reason = "AXChildren guarantees a CF-object array")]
+fn find_button(
+    el: &AXUIElement,
     target_ids: &[&str],
     attrs: &AxAttrs,
     depth: u8,
-) -> Option<ax_nav::AXUIElementRef> {
+) -> Option<CFRetained<AXUIElement>> {
     if depth == 0 {
         return None;
     }
-    // Check if this element is the button we want.
-    // SAFETY: caller upholds the AXUIElementRef/CFStringRef validity contract.
-    if let Some(role_val) = unsafe { copy_attr(el, attrs.role) } {
-        // SAFETY: AXRole is always a CFStringRef.
-        let role_s =
-            unsafe { core_foundation::string::CFString::wrap_under_create_rule(role_val.cast()) }
-                .to_string();
-        // Skip tab-bar elements — AXSplitGroup, AXTabGroup, AXOpaqueProviderGroup,
-        // AXRadioButton — to avoid wasting depth on Safari's 89-tab bar before
-        // reaching the toolbar navigation buttons.
-        let skip = matches!(
-            role_s.as_str(),
+    if let Some(role) = attr_string(el, &attrs.role) {
+        // Skip tab-bar subtrees before searching the toolbar.
+        if matches!(
+            role.as_str(),
             "AXSplitGroup" | "AXTabGroup" | "AXOpaqueProviderGroup" | "AXRadioButton"
-        );
-        if skip {
+        ) {
             return None;
         }
-        if role_s == "AXButton" {
-            // SAFETY: caller upholds the AXUIElementRef/CFStringRef validity contract.
-            let matches_target = unsafe { attr_string(el, attrs.identifier) }
+        if role == "AXButton" {
+            return attr_string(el, &attrs.identifier)
                 .as_deref()
-                .is_some_and(|identifier| target_ids.contains(&identifier));
-            // CFRetain here (only once, at the leaf) so callers can release the
-            // children arrays without dangling.
-            // SAFETY: el is a valid AXUIElementRef (CF Get Rule applies).
-            return matches_target.then(|| unsafe { ax_nav::CFRetain(el) });
+                .is_some_and(|identifier| target_ids.contains(&identifier))
+                .then(|| el.retain());
         }
     }
-    // Recurse into AXChildren.
-    // SAFETY: caller upholds the AXUIElementRef/CFStringRef validity contract.
-    let children_val = unsafe { copy_attr(el, attrs.children) }?;
-    // Verify it's actually a CFArray before treating it as one.
-    // SAFETY: children_val is a valid, +1-retained CFTypeRef from copy_attr above.
-    let is_array = unsafe { ax_nav::CFGetTypeID(children_val) == ax_nav::CFArrayGetTypeID() };
-    if !is_array {
-        // SAFETY: balance the +1 retain from copy_attr above.
-        unsafe { ax_nav::CFRelease(children_val) };
-        return None;
-    }
-    // SAFETY: children_val was just verified to be a CFArray.
-    let count = unsafe { ax_nav::CFArrayGetCount(children_val) };
-    let mut found: Option<ax_nav::AXUIElementRef> = None;
-    for i in 0..count {
-        // Get Rule — not retained.
-        // SAFETY: children_val is a valid CFArray and i is in bounds.
-        let child = unsafe { ax_nav::CFArrayGetValueAtIndex(children_val, i) };
-        if child.is_null() {
-            continue;
-        }
-        // SAFETY: child is a valid AXUIElementRef (CF Get Rule); attrs fields
-        // are valid CFStringRefs per this function's own contract.
-        if let Some(f) = unsafe { find_button(child, target_ids, attrs, depth - 1) } {
-            found = Some(f);
-            break;
+    let children = copy_attr(el, &attrs.children)?.downcast::<CFArray>().ok()?;
+    // SAFETY: the outer array type was checked; AXChildren contains CF objects.
+    // Each member is separately downcast before it is used as an AXUIElement.
+    let children = unsafe { CFRetained::cast_unchecked::<CFArray<CFType>>(children) };
+    for child in children {
+        if let Ok(child) = child.downcast::<AXUIElement>()
+            && let Some(button) = find_button(&child, target_ids, attrs, depth - 1)
+        {
+            return Some(button);
         }
     }
-    // found is already +1 retained (CFRetain'd at the leaf in the button check
-    // above). Parent frames propagate it without re-retaining. Safe to release
-    // the children array now.
-    // SAFETY: balance the +1 retain from copy_attr above.
-    unsafe { ax_nav::CFRelease(children_val) };
-    found
+    None
 }
 
 /// Press Safari's Back (`forward=false`) or Forward (`forward=true`)
 /// navigation button when Safari is frontmost via the Accessibility API.
 ///
-/// Safari's WKWebView ignores synthetic `CGEvent` mouse-button and keyboard
-/// events posted at the HID or Session tap levels. However it does respond
-/// correctly to `AXPress` on its toolbar button selected by stable
-/// `AXIdentifier`, because that path goes through AppKit's normal action
-/// dispatch rather than the input event pipeline.
+/// Stable `AXIdentifier`s avoid localized descriptions and positional guesses.
+/// All AppKit/AX work runs on the action worker, never in the event tap.
 ///
 /// Returns `true` when an AX button was found and pressed (result `kAXErrorSuccess`),
 /// or `false` when the captured Safari process is stale or navigation fails.
-#[expect(unsafe_code, reason = "AXUIElement / CF APIs require raw FFI")]
+#[expect(unsafe_code, reason = "typed AX creation and action calls require FFI")]
 pub(super) fn ax_browser_navigate(forward: bool, pid: i32) -> bool {
     use objc2::rc::autoreleasepool;
-    use objc2_app_kit::NSWorkspace;
 
-    use core_foundation::string::CFString;
-
-    let attr_focused_window = CFString::new("AXFocusedWindow");
-    let attr_children = CFString::new("AXChildren");
-    let attr_role = CFString::new("AXRole");
-    let attr_identifier = CFString::new("AXIdentifier");
-    let ax_press = CFString::new("AXPress");
+    let attr_focused_window = CFString::from_static_str("AXFocusedWindow");
+    let attrs = AxAttrs {
+        role: CFString::from_static_str("AXRole"),
+        identifier: CFString::from_static_str("AXIdentifier"),
+        children: CFString::from_static_str("AXChildren"),
+    };
+    let ax_press = CFString::from_static_str("AXPress");
     let target_identifiers = if forward {
         ["ForwardButton", "BackForwardToolbarButton_Forward"]
     } else {
@@ -904,49 +819,24 @@ pub(super) fn ax_browser_navigate(forward: bool, pid: i32) -> bool {
     };
 
     autoreleasepool(|pool| {
-        let frontmost = NSWorkspace::sharedWorkspace().frontmostApplication()?;
-        let bundle_id = frontmost.bundleIdentifier()?;
-        // SAFETY: the borrowed UTF-8 view is consumed before `pool` ends.
-        if unsafe { bundle_id.to_str(pool) } != "com.apple.Safari" {
-            return None::<()>;
-        }
-        let frontmost_pid = frontmost.processIdentifier();
-        if pid != frontmost_pid {
+        if !safari_is_frontmost(pid, pool) {
             return None;
         }
-        // SAFETY: returns +1 retained AXUIElement.
-        let app_ax = unsafe { ax_nav::AXUIElementCreateApplication(pid) };
-        if app_ax.is_null() {
-            return None::<()>;
-        }
-
-        // Get focused window (+1 retained).
-        // SAFETY: app_ax was just verified non-null; attr_focused_window is a valid CFStringRef.
-        let win = unsafe { copy_attr(app_ax, attr_focused_window.as_concrete_TypeRef()) };
-        // SAFETY: balance +1 from AXUIElementCreateApplication.
-        unsafe { ax_nav::CFRelease(app_ax) };
-        let win = win?;
-
-        let attrs = AxAttrs {
-            role: attr_role.as_concrete_TypeRef(),
-            identifier: attr_identifier.as_concrete_TypeRef(),
-            children: attr_children.as_concrete_TypeRef(),
-        };
-        // Find the nav button (borrowed pointer inside the window's tree).
-        // SAFETY: win is a valid AXUIElementRef; attrs fields are valid CFStringRefs.
-        let button = unsafe { find_button(win, &target_identifiers, &attrs, 6) };
-
+        // SAFETY: pid identifies the live frontmost Safari process.
+        let app = unsafe { AXUIElement::new_application(pid) };
+        let window = copy_attr(&app, &attr_focused_window)?
+            .downcast::<AXUIElement>()
+            .ok()?;
+        let button = find_button(&window, &target_identifiers, &attrs, 6);
         let result = button.map(|btn| {
-            // SAFETY: btn is a +1 retained AXUIElement (CFRetain'd by find_button).
-            let r =
-                unsafe { ax_nav::AXUIElementPerformAction(btn, ax_press.as_concrete_TypeRef()) };
-            // SAFETY: balance the CFRetain from find_button.
-            unsafe { ax_nav::CFRelease(btn) };
-            r == ax_nav::AX_ERROR_SUCCESS
+            // AX traversal can block. Revalidate immediately before dispatch
+            // so switching apps during the search cancels navigation.
+            if !safari_is_frontmost(pid, pool) {
+                return false;
+            }
+            // SAFETY: btn is a retained AXUIElement and ax_press is a valid string.
+            unsafe { btn.perform_action(&ax_press) == AXError::Success }
         });
-
-        // SAFETY: balance +1 from copy_attr (focused window).
-        unsafe { ax_nav::CFRelease(win) };
 
         match result {
             Some(true) => {
@@ -964,6 +854,22 @@ pub(super) fn ax_browser_navigate(forward: bool, pid: i32) -> bool {
         }
     })
     .is_some()
+}
+
+#[expect(
+    unsafe_code,
+    reason = "NSString UTF-8 view borrows from the autorelease pool"
+)]
+fn safari_is_frontmost(pid: i32, pool: objc2::rc::AutoreleasePool<'_>) -> bool {
+    objc2_app_kit::NSWorkspace::sharedWorkspace()
+        .frontmostApplication()
+        .is_some_and(|app| {
+            app.processIdentifier() == pid
+                && app.bundleIdentifier().is_some_and(|id| {
+                    // SAFETY: the UTF-8 view is consumed before the pool drains.
+                    unsafe { id.to_str(pool) == "com.apple.Safari" }
+                })
+        })
 }
 
 use dock::{app_expose, launchpad, mission_control, show_desktop};

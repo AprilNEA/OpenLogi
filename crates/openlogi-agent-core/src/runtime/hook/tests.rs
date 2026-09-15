@@ -9,10 +9,7 @@ fn token(id: u64, button: ButtonId) -> PressToken {
 
 #[test]
 fn senderless_buttons_follow_the_platform_source_policy() {
-    assert_eq!(
-        button_source_may_remap(ButtonId::Back, None, false),
-        !cfg!(target_os = "macos")
-    );
+    assert_eq!(button_source_may_remap(None), !cfg!(target_os = "macos"));
 }
 
 #[test]
@@ -26,16 +23,8 @@ fn attributed_sources_still_follow_the_device_policy() {
         ..EventDevice::default()
     };
 
-    assert!(!button_source_may_remap(
-        ButtonId::Back,
-        Some(&trackpad),
-        false
-    ));
-    assert!(button_source_may_remap(
-        ButtonId::Back,
-        Some(&logitech_mouse),
-        false
-    ));
+    assert!(!button_source_may_remap(Some(&trackpad)));
+    assert!(button_source_may_remap(Some(&logitech_mouse)));
 }
 
 fn test_dispatcher() -> (
@@ -244,76 +233,48 @@ fn queued_key_action_retains_its_press_time_target() {
 }
 
 #[test]
-fn unattributed_extra_buttons_preserve_the_narrow_macos_exception() {
-    for id in [ButtonId::Back, ButtonId::Forward] {
-        assert_eq!(
-            button_source_may_remap(id, None, false),
-            !cfg!(target_os = "macos"),
-            "macOS keeps sender-less browser buttons native outside Safari"
-        );
-        assert!(button_source_may_remap(id, None, true));
-    }
-    assert_eq!(
-        button_source_may_remap(ButtonId::MiddleClick, None, true),
-        !cfg!(target_os = "macos"),
-        "macOS admits only sender-less Back and Forward events"
-    );
-}
-
-#[test]
-fn accepted_unattributed_press_release_is_consumed_once() {
-    let mut presses = AcceptedUnattributedPresses::default();
-
-    assert!(!presses.take(ButtonId::Back));
-    presses.accept(ButtonId::Back);
-    assert!(presses.take(ButtonId::Back));
-    assert!(!presses.take(ButtonId::Back));
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn missing_unattributed_release_keeps_the_next_native_pair_balanced() {
-    HOLD.with_borrow_mut(HoldState::cancel);
-    ACCEPTED_UNATTRIBUTED_PRESSES.with_borrow_mut(AcceptedUnattributedPresses::clear);
-    FAIL_OPEN_PRESSES.with_borrow_mut(HashSet::clear);
+fn safari_target_never_relaxes_device_isolation() {
     let (dispatcher, mut owner, events) = test_dispatcher();
     let hooks = Arc::new(RwLock::new(HookMaps {
-        bindings: BTreeMap::new(),
-        gestures: BTreeMap::from([(ButtonId::Back, BTreeMap::new())]),
+        bindings: BTreeMap::from([
+            (ButtonId::Back, Action::BrowserBack.into()),
+            (ButtonId::Forward, Action::BrowserForward.into()),
+        ]),
         ..HookMaps::default()
     }));
-
-    assert_eq!(
-        handle_button(ButtonId::Back, true, None, &hooks, &dispatcher, || {
-            ActionDispatchTarget::SafariProcess(417)
-        },),
-        EventDisposition::Suppress
-    );
-    assert!(matches!(
-        events.recv().expect("press should start"),
-        super::super::button::ButtonRuntimeEvent::Started(_)
-    ));
-
-    assert_eq!(
-        handle_button(ButtonId::Back, true, None, &hooks, &dispatcher, || {
-            ActionDispatchTarget::Keyboard
-        },),
-        EventDisposition::PassThrough
-    );
-    assert!(matches!(
-        events.recv().expect("stale press should end"),
-        super::super::button::ButtonRuntimeEvent::Ended {
-            reason: super::super::button::EndReason::Released,
-            ..
+    let sources = [
+        Some(EventDevice {
+            vendor_id: Some(0x045e),
+            product_name: Some("Microsoft Mouse".into()),
+            ..EventDevice::default()
+        }),
+        Some(EventDevice {
+            product_name: Some("Magic Trackpad".into()),
+            ..EventDevice::default()
+        }),
+        None,
+    ];
+    for source in &sources {
+        // Linux/Windows filter attachment upstream and permit unknown senders.
+        if source.is_none() && !cfg!(target_os = "macos") {
+            continue;
         }
-    ));
-    assert_eq!(
-        handle_button(ButtonId::Back, false, None, &hooks, &dispatcher, || {
-            ActionDispatchTarget::Keyboard
-        },),
-        EventDisposition::PassThrough
-    );
+        for id in [ButtonId::Back, ButtonId::Forward] {
+            for pressed in [true, false] {
+                assert_eq!(
+                    handle_button(id, pressed, source.as_ref(), &hooks, &dispatcher, || {
+                        ActionDispatchTarget::SafariProcess(417)
+                    }),
+                    EventDisposition::PassThrough
+                );
+            }
+        }
+    }
     assert!(owner.shutdown());
+    assert!(matches!(
+        events.try_recv(),
+        Err(mpsc::TryRecvError::Disconnected)
+    ));
 }
 
 #[test]

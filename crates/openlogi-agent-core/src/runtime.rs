@@ -137,12 +137,14 @@ impl ActionExecutor {
             // capture paths before either output.
             Action::BrowserBack | Action::BrowserForward => {
                 if let Some(reservation) = browser_nav_debounce_begin(action) {
-                    if !dispatch_browser_navigation(
+                    if dispatch_browser_navigation(
                         action,
                         target,
                         openlogi_inject::ax_navigate_browser,
                         || openlogi_inject::execute(action),
                     ) {
+                        browser_nav_debounce_commit(reservation);
+                    } else {
                         browser_nav_debounce_cancel(reservation);
                     }
                 } else {
@@ -422,6 +424,22 @@ fn browser_nav_debounce_begin(action: &Action) -> Option<BrowserNavDebounceReser
     }
 }
 
+fn browser_nav_debounce_commit(reservation: BrowserNavDebounceReservation) {
+    let mut last = BROWSER_NAV_LAST
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let slot = if reservation.forward {
+        &mut last.1
+    } else {
+        &mut last.0
+    };
+    if *slot == Some(reservation.timestamp) {
+        // AX may take longer than the debounce interval. Start that interval
+        // at completion, before the button worker dequeues a duplicate path.
+        *slot = Some(Instant::now());
+    }
+}
+
 fn browser_nav_debounce_cancel(reservation: BrowserNavDebounceReservation) {
     let mut last = BROWSER_NAV_LAST
         .lock()
@@ -473,21 +491,26 @@ mod tests {
 
     #[test]
     fn captured_safari_navigation_keeps_press_time_pid_and_never_falls_back() {
-        let mut pid_and_direction = None;
-        let mut keyboard = false;
-
-        assert!(!dispatch_browser_navigation(
-            &Action::BrowserBack,
-            ActionDispatchTarget::SafariProcess(417),
-            |pid, forward| {
-                pid_and_direction = Some((pid, forward));
-                false
-            },
-            || keyboard = true,
-        ));
-
-        assert_eq!(pid_and_direction, Some((417, false)));
-        assert!(!keyboard);
+        for (action, forward) in [(Action::BrowserBack, false), (Action::BrowserForward, true)] {
+            for navigated in [false, true] {
+                let mut pid_and_direction = None;
+                let mut keyboard = false;
+                assert_eq!(
+                    dispatch_browser_navigation(
+                        &action,
+                        ActionDispatchTarget::SafariProcess(417),
+                        |pid, direction| {
+                            pid_and_direction = Some((pid, direction));
+                            navigated
+                        },
+                        || keyboard = true,
+                    ),
+                    navigated
+                );
+                assert_eq!(pid_and_direction, Some((417, forward)));
+                assert!(!keyboard);
+            }
+        }
     }
 
     #[test]
@@ -530,6 +553,27 @@ mod tests {
             .unwrap_or_else(PoisonError::into_inner)
             .0 = Some(expired);
 
+        assert!(browser_nav_debounce_begin(&Action::BrowserBack).is_some());
+    }
+
+    #[test]
+    fn slow_successful_navigation_still_debounces_the_queued_duplicate() {
+        let _guard = BROWSER_NAV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let started = Instant::now()
+            .checked_sub(BROWSER_NAV_DEBOUNCE * 2)
+            .expect("the simulated AX duration fits before the current instant");
+        *BROWSER_NAV_LAST
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = (None, Some(started));
+
+        browser_nav_debounce_commit(BrowserNavDebounceReservation {
+            forward: true,
+            timestamp: started,
+        });
+
+        assert!(browser_nav_debounce_begin(&Action::BrowserForward).is_none());
         assert!(browser_nav_debounce_begin(&Action::BrowserBack).is_some());
     }
 

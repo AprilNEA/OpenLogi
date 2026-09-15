@@ -186,54 +186,25 @@ thread_local! {
     /// rejected the remap. Their matching release must also pass through so
     /// apps never see a stuck auxiliary button (down without up).
     static FAIL_OPEN_PRESSES: RefCell<HashSet<ButtonId>> = RefCell::new(HashSet::new());
-    static ACCEPTED_UNATTRIBUTED_PRESSES: RefCell<AcceptedUnattributedPresses> =
-        RefCell::new(AcceptedUnattributedPresses::default());
     /// Function keys whose held action owns an accepted lifecycle. Repeated
     /// key-down events are auto-repeat, not replacement presses; their first
     /// matching key-up ends the lifecycle.
     static HELD_KEYS: RefCell<HashSet<u16>> = RefCell::new(HashSet::new());
 }
 
-#[derive(Default)]
-struct AcceptedUnattributedPresses {
-    buttons: HashSet<ButtonId>,
-}
-
-impl AcceptedUnattributedPresses {
-    fn accept(&mut self, id: ButtonId) {
-        self.buttons.insert(id);
-    }
-
-    fn take(&mut self, id: ButtonId) -> bool {
-        self.buttons.remove(&id)
-    }
-
-    fn clear(&mut self) {
-        self.buttons.clear();
-    }
-}
-
-/// Whether a translated mouse button is safe to remap.
+/// Whether a button event's physical source may be remapped/suppressed.
 ///
-/// macOS normally attributes CGEvents to an IOKit sender, but physical Back /
-/// Forward events can arrive without the backing IOHIDEvent. While Safari is
-/// frontmost, those two extra buttons are safe to admit: primary clicks are
-/// rejected before this policy, trackpad gestures arrive as scroll/motion
-/// rather than OtherMouse button 3/4, and OpenLogi's own synthetic events are
-/// filtered in the hook backend. Other apps and button types remain fail-closed
-/// when macOS omits attribution. Linux and Windows select the device before the
-/// callback, so their unattributed hook buttons remain remappable.
-fn button_source_may_remap(
-    id: ButtonId,
-    device: Option<&EventDevice>,
-    safari_is_frontmost: bool,
-) -> bool {
+/// macOS fails closed because its hook is global: only a known Logitech,
+/// non-trackpad source may be suppressed. Bluetooth-direct Back/Forward
+/// gestures are captured through their device-specific HID++ session instead
+/// of weakening this policy. Linux/Windows restrict hook attachment upstream,
+/// so an unavailable source remains eligible there.
+fn button_source_may_remap(device: Option<&EventDevice>) -> bool {
     match device {
         Some(d) => source_is_remappable(Some(d)),
-        None if cfg!(target_os = "macos") => {
-            safari_is_frontmost && matches!(id, ButtonId::Back | ButtonId::Forward)
-        }
-        None => true,
+        // Linux/Windows restrict which devices the hook attaches to upstream.
+        // macOS uses one global tap, so an unattributed event must fail closed.
+        None => !cfg!(target_os = "macos"),
     }
 }
 
@@ -244,11 +215,7 @@ fn button_source_may_remap(
 /// selection before this callback and therefore admit their unattributed
 /// wheel events through the same policy as button remapping.
 fn scroll_source_may_intercept(from_trackpad: bool, device: Option<&EventDevice>) -> bool {
-    !from_trackpad
-        && match device {
-            Some(d) => source_is_remappable(Some(d)),
-            None => !cfg!(target_os = "macos"),
-        }
+    !from_trackpad && button_source_may_remap(device)
 }
 
 /// Off-thread worker for bound actions so the tap callback never injects input.
@@ -291,37 +258,14 @@ fn handle_button(
     capture_target: impl FnOnce() -> ActionDispatchTarget,
 ) -> EventDisposition {
     // Primary L/R always pass through (suppressing them would brick the mouse).
-    if !id.is_os_hook_button() {
+    if !id.is_os_hook_button() || !button_source_may_remap(device) {
         return EventDisposition::PassThrough;
     }
-    let macos_browser_button =
-        cfg!(target_os = "macos") && matches!(id, ButtonId::Back | ButtonId::Forward);
-    if pressed
-        && macos_browser_button
-        && ACCEPTED_UNATTRIBUTED_PRESSES.with_borrow_mut(|presses| presses.take(id))
-    {
-        let _ = HOLD.with_borrow_mut(|hold| hold.end(id));
-        dispatcher.try_hook_button_up(id);
-    }
-    let accepted_unattributed_release = macos_browser_button
-        && !pressed
-        && ACCEPTED_UNATTRIBUTED_PRESSES.with_borrow_mut(|presses| presses.take(id));
-    let unattributed_browser_down = macos_browser_button && pressed && device.is_none();
     let action_target = if pressed {
         capture_target()
     } else {
         ActionDispatchTarget::Keyboard
     };
-    let safari_exception = unattributed_browser_down
-        && matches!(action_target, ActionDispatchTarget::SafariProcess(_));
-    if !accepted_unattributed_release && !button_source_may_remap(id, device, safari_exception) {
-        if !pressed && macos_browser_button && device.is_none() {
-            FAIL_OPEN_PRESSES.with_borrow_mut(|presses| {
-                presses.remove(&id);
-            });
-        }
-        return EventDisposition::PassThrough;
-    }
 
     // `try_read` only: a blocking read on the tap thread freezes every pointer
     // event while a config rebuild holds the write lock. Fail open if unavailable.
@@ -336,9 +280,6 @@ fn handle_button(
                 dispatcher.cancel_stale_hook_press(stale);
             }
             if let Some(press) = dispatcher.try_hook_button_down(id, None, action_target) {
-                if unattributed_browser_down {
-                    ACCEPTED_UNATTRIBUTED_PRESSES.with_borrow_mut(|presses| presses.accept(id));
-                }
                 HOLD.with_borrow_mut(|h| h.begin(id, press));
                 return EventDisposition::Suppress;
             }
@@ -361,10 +302,6 @@ fn handle_button(
             dispatcher.try_hook_button_up(id);
             return EventDisposition::Suppress;
         }
-        if accepted_unattributed_release {
-            dispatcher.try_hook_button_up(id);
-            return EventDisposition::Suppress;
-        }
     }
 
     let binding = hooks
@@ -382,9 +319,6 @@ fn handle_button(
         let queued = dispatcher
             .try_hook_button_down(id, Some(&binding), action_target)
             .is_some();
-        if queued && unattributed_browser_down {
-            ACCEPTED_UNATTRIBUTED_PRESSES.with_borrow_mut(|presses| presses.accept(id));
-        }
         return FAIL_OPEN_PRESSES.with_borrow_mut(|s| remapped_press_disposition(id, queued, s));
     }
     dispatcher.try_hook_button_up(id);
@@ -553,8 +487,6 @@ pub fn start(
                 }
                 MouseEvent::CaptureInterrupted => {
                     HOLD.with_borrow_mut(HoldState::cancel);
-                    ACCEPTED_UNATTRIBUTED_PRESSES
-                        .with_borrow_mut(AcceptedUnattributedPresses::clear);
                     HELD_KEYS.with_borrow_mut(HashSet::clear);
                     dispatcher.cancel_hook_thread_buttons();
                     scroll.cancel_hooks();

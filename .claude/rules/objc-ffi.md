@@ -32,7 +32,7 @@ files; **keep this table in sync when you add or move one**:
 | `openlogi-desktop/src/platform/os.rs` | `NSProcessInfo` OS version + the `NSAppearance` titlebar sync |
 | `openlogi-hid/src/permissions.rs` | `IOHIDCheckAccess` / `IOHIDRequestAccess` (the prompting half of Input Monitoring) |
 | `openlogi-hook/src/macos.rs` | the CGEventTap (on `core-graphics`, see below), the off-tap `NSWorkspace` frontmost-app read and Safari PID snapshot, the Accessibility-trust check/prompt, and the HID sender-id lookup |
-| `openlogi-inject/src/inject/macos.rs` | CGEvent synthesis, media-key `NSEvent`s, off-thread `NSWorkspace` validation, raw `AXUIElement` navigation, and the `dlopen`'d private SPIs |
+| `openlogi-inject/src/inject/macos.rs` | CGEvent synthesis, media-key `NSEvent`s, off-thread `NSWorkspace` validation, typed `AXUIElement` navigation with `CFRetained` ownership, and the `dlopen`'d private SPIs |
 | `openlogi-overlay/src/platform.rs` | the Actions Ring helper's window policy: accessory activation, non-activating panel, the `NSEvent` global click-away monitor (`block2`), and `CGGetActiveDisplayList` / `CGDisplayBounds` |
 | `openlogi-permissions/src/macos.rs` | non-prompting permission reads + System-Settings deep links; `+[CBManager authorization]` via an `AnyClass` lookup |
 
@@ -71,8 +71,8 @@ every 2 s tray refresh under the old `cocoa`/`objc` 0.x path).
   CoreFoundation values arrive as `CFRetained`. Never hand-balance a release.
 - **Never** call manual `retain`/`release`/`autorelease`, add raw `cocoa`/`objc`
   0.x, or build a bespoke retain/release helper layer — that re-derives
-  `Retained<T>`, worse. The one exception is the raw AX navigation in
-  `openlogi-inject` (see below), which is on the migrate-when-touched list.
+  `Retained<T>`, worse. AX navigation adopts Copy-rule outputs as `CFRetained`
+  and downcasts their runtime types before use.
 
 ## Thread affinity is in the type system
 
@@ -198,16 +198,13 @@ its single user. The current set, all deliberate:
   typed framework crate in the tree.
 - `openlogi-agent-core/src/watchers/camera.rs`: the CoreMediaIO property API —
   same reason.
-- `openlogi-inject`: the `AXUIElement` subset it navigates with, plus
-  `CFRetain`/`CFRelease`, and the `dlopen`/`dlsym`-resolved private SPIs
+- `openlogi-inject`: the `dlopen`/`dlsym`-resolved private SPIs
   (`CoreDockSendNotification`, the CGS symbolic-hotkey trio).
 - the `disclaim` crate: `responsibility_spawnattrs_setdisclaim` (private SPI).
 
-Two of those are on the migrate-when-touched list rather than permanent:
-`openlogi-inject`'s raw AX navigation with its manual `CFRetain`/`CFRelease`
-belongs in `objc2-application-services`, and `openlogi-camera`'s
-`AVAuthorizationStatus` integers belong in `objc2-av-foundation`. Don't copy
-either pattern into new code.
+`openlogi-camera`'s `AVAuthorizationStatus` integers remain on the
+migrate-when-touched list: they belong in `objc2-av-foundation`.
+Don't copy that pattern into new code.
 
 ## The `unsafe` that remains (and the `SAFETY` rule)
 
@@ -226,6 +223,8 @@ under a `SAFETY` comment. Where it currently lives on macOS:
   payload, `AXIsProcessTrusted[WithOptions]` and the two extern statics they
   need (`kAXTrustedCheckOptionPrompt`, `kCFBooleanTrue`), and
   `NSString::to_str(pool)` (the borrow is tied to the pool).
+- `inject/macos.rs` — typed AX creation, attribute-copy out-pointers, CF array
+  element typing, `AXPress`, and `NSString::to_str(pool)` for Safari validation.
 - `permissions/macos.rs` — the CoreBluetooth force-link and the `CBManager`
   class-method send. `IOHIDCheckAccess` needs none: `objc2-io-kit` exposes it as
   a safe fn, in `openlogi-permissions` and `openlogi-hid` alike.
@@ -253,7 +252,7 @@ read moved to `objc2`. Don't "modernize" the tap casually.
 
 Code on the main run loop needs no pool (`Retained` frees deterministically);
 code on a bare thread does, because the framework still autoreleases internal
-temporaries. The five call sites that keep an explicit
+temporaries. The call sites that keep an explicit
 `objc2::rc::autoreleasepool`, and the only ones that should:
 
 - `openlogi-hook`'s frontmost-application reads and activation observer — the
@@ -263,8 +262,6 @@ temporaries. The five call sites that keep an explicit
   internal autoreleased temporaries are drained as well.
 - `openlogi-inject`'s `post_media_key` — the hook/gesture dispatch threads, where
   both the `NSEvent` creation and the `CGEvent` getter autorelease temporaries.
-- `openlogi-inject`'s `frontmost_safari_pid` — the hook callback thread, where
-  `to_str` borrows the Safari bundle id's UTF-8 view from the pool.
 - `openlogi-inject`'s `ax_browser_navigate` — the action worker, where `to_str`
   borrows the current frontmost app's bundle id while validating the captured
   Safari process.
