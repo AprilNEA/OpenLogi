@@ -148,6 +148,12 @@ impl MouseModelView {
         .detach();
         let shortcut_input = cx
             .new(|cx| InputState::new(window, cx).placeholder(tr!("actions.shortcut_placeholder")));
+        cx.subscribe(&shortcut_input, |_, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        })
+        .detach();
         let state_obs = AppState::repaint_on(cx, |event| {
             matches!(
                 event,
