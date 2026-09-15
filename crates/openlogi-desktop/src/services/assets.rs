@@ -32,7 +32,10 @@ use openlogi_core::device::{DeviceKind, DeviceModelInfo};
 use tracing::{debug, warn};
 use walkdir::WalkDir;
 
-use self::images::{buttons_image_for, load_manifest, read_png_dimensions, variant_image_for};
+use self::images::{
+    buttons_image_for, find_variant_in_manifest, load_manifest, read_png_dimensions,
+    variant_image_for,
+};
 use self::paths::{bundle_assets_root, load_index, user_cache_root};
 
 /// Total bytes of the per-user asset cache — the tier [`sync`] writes and
@@ -247,14 +250,10 @@ impl AssetResolver {
             // Parse the manifest once and consult it for every candidate.
             let manifest = load_manifest(&dir);
             let buttons_name = manifest.as_ref().and_then(|m| {
-                entry
-                    .model_id_candidates()
-                    .find_map(|base| buttons_image_for(m, base, model.extended_model_id))
+                find_variant_in_manifest(m, entry, depot, model.extended_model_id, buttons_image_for)
             });
             let variant_front_name = manifest.as_ref().and_then(|m| {
-                entry
-                    .model_id_candidates()
-                    .find_map(|base| variant_image_for(m, base, model.extended_model_id))
+                find_variant_in_manifest(m, entry, depot, model.extended_model_id, variant_image_for)
             });
             // Front/hero render for the gallery: the colour variant's
             // `device_image`, falling back to the generic front renders. Resolved

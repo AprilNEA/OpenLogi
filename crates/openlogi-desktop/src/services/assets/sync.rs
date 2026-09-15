@@ -182,7 +182,7 @@ fn sync_depot(
         "device_camera_image",
     ] {
         let Some(variant) =
-            pick_variant_filename(&manifest_path, &entry.model_id, ext, resource_key)
+            pick_variant_filename(&manifest_path, entry, depot, ext, resource_key)
         else {
             continue;
         };
@@ -232,7 +232,8 @@ fn fetch_to_cache(
 /// `None` when the manifest is missing, malformed, or lacks the variant.
 fn pick_variant_filename(
     manifest_path: &Path,
-    base_model_id: &str,
+    entry: &DeviceEntry,
+    depot: &str,
     ext: u8,
     resource_key: &str,
 ) -> Option<String> {
@@ -242,9 +243,13 @@ fn pick_variant_filename(
     let manifest = DepotManifest::load_from(manifest_path)
         .map_err(|e| warn!(error = %e, path = %manifest_path.display(), "manifest unreadable"))
         .ok()?;
-    manifest
-        .resource_for_variant(base_model_id, ext, resource_key)
-        .map(str::to_string)
+    let candidates = super::images::candidate_manifest_bases(entry, depot);
+    for base in candidates {
+        if let Some(src) = manifest.resource_for_variant(&base, ext, resource_key) {
+            return Some(src.to_string());
+        }
+    }
+    None
 }
 
 /// A manual asset action requested from the Settings → Assets tab, pushed to
