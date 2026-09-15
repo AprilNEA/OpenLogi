@@ -947,12 +947,12 @@ impl Enumerator {
     /// last-good capabilities the ledger is still replaying the inventory
     /// for, nor persist that deletion.
     ///
-    /// A node deferred before this process has ever probed it has no record
+    /// A node deferred before this process has successfully probed it has no record
     /// yet, but its entries may well be in the cache: a warm start loads the
     /// persisted Bolt entries before any receiver answers. Every entry no
     /// node has claimed is held for it then — nothing that was checked
     /// contributed them, so nothing that was checked can have found them
-    /// missing — and the node's first real probe attributes what is its.
+    /// missing — and the node's first healthy probe attributes what is its.
     fn hold_or_note_cache_keys(
         &mut self,
         node: &NodeId,
@@ -964,6 +964,12 @@ impl Enumerator {
                 Some(keys) => frozen.extend(keys.iter().cloned()),
                 None => frozen.extend(self.unattributed_cache_keys()),
             }
+            return;
+        }
+        // A failed first probe cannot establish cache ownership, even if it
+        // found some slots before failing. Keep unknown attribution distinct
+        // from a healthy probe that positively found no entries.
+        if !probe.verdict.is_healthy() && !self.node_cache_keys.contains_key(node) {
             return;
         }
         let keys = probe.outcomes.iter().filter_map(CacheOutcome::key).cloned();

@@ -280,6 +280,46 @@ fn a_node_deferred_before_its_first_probe_holds_every_unattributed_entry() {
 }
 
 #[test]
+fn failed_first_probe_then_deferrals_preserve_warm_cache() {
+    let mut e = Enumerator::with_backend(ScriptedBackend::new(Vec::new()));
+    let receiver = NodeId::from("warm-failed-receiver".to_string());
+    let persisted = CacheKey::Bolt { unit_id: [7; 4] };
+    e.cache.insert(persisted.clone(), cache_entry());
+
+    let pass = |e: &mut Enumerator, probe: NodeProbe| {
+        let mut frozen = HashSet::new();
+        e.hold_or_note_cache_keys(&receiver, &probe, &mut frozen);
+        settle_probe(&mut e.ledger, &receiver, probe.verdict, probe.inventory);
+        let seen = e.apply_outcomes(probe.outcomes);
+        e.evict_unseen(&seen, &frozen);
+    };
+
+    // A timeout before identifying any slot is one real miss, but does not
+    // establish which persisted entries belong to this receiver.
+    pass(&mut e, NodeProbe::failed());
+    assert_eq!(e.misses.get(&persisted), Some(&1));
+
+    for _ in 0..CACHE_MISS_GRACE {
+        pass(&mut e, NodeProbe::deferred());
+    }
+    assert!(
+        e.cache.contains_key(&persisted),
+        "deferrals after one failed probe must not delete the warm cache"
+    );
+    assert_eq!(e.misses.get(&persisted), Some(&1));
+    assert!(!e.cache_dirty, "deferrals must not persist a deletion");
+
+    // Real failures still age the entry, including the original miss.
+    for _ in 1..CACHE_MISS_GRACE {
+        pass(&mut e, NodeProbe::failed());
+    }
+    assert!(e.cache.contains_key(&persisted));
+    pass(&mut e, NodeProbe::failed());
+    assert!(!e.cache.contains_key(&persisted));
+    assert!(e.cache_dirty);
+}
+
+#[test]
 fn cached_probe_is_reused_until_refresh_interval() {
     let probed_at = Instant::now();
     let cached = Cached {
