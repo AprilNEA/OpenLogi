@@ -24,6 +24,28 @@ pub enum BacklightMode {
     PermanentManual,
 }
 
+/// A predefined backlight animation the firmware can run.
+///
+/// Not part of [`BacklightState`] and does not cross the agent↔GUI IPC —
+/// nothing on that side consumes it yet. Read directly from the write layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BacklightEffect {
+    /// A fixed brightness with no animation.
+    Static,
+    /// No effect.
+    None,
+    /// Brightness fades in and out on a loop.
+    Breathing,
+    /// Brightness responds to on-screen contrast (device-defined).
+    Contrast,
+    /// Brightness reacts to typing.
+    Reaction,
+    /// Brightness varies unpredictably.
+    Random,
+    /// A wave pattern travels across the keys.
+    Waves,
+}
+
 /// Why the backlight is in its current state, as reported by the device.
 ///
 /// Crosses the agent↔GUI IPC, where serde encodes the variant *index*, so

@@ -19,7 +19,7 @@ use crate::transport::native_backend;
 use openlogi_core::hid::smartshift::{SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus};
 use openlogi_device::ChannelPool;
 use openlogi_device::backend::{HidBackend, HotplugStream};
-use openlogi_device::backlight::BacklightState;
+use openlogi_device::backlight::{BacklightEffect, BacklightState};
 use openlogi_device::inventory::{Enumerator, InventoryError};
 use openlogi_device::pairing::PairingReceiver;
 use openlogi_device::write::{
@@ -129,12 +129,25 @@ pub async fn get_backlight(route: &DeviceRoute) -> Result<BacklightState, WriteE
     device::get_backlight(&*native_backend(), route).await
 }
 
+/// Read the backlight effect currently running on the keyboard `route` reaches.
+pub async fn get_backlight_effect(route: &DeviceRoute) -> Result<BacklightEffect, WriteError> {
+    device::get_backlight_effect(&*native_backend(), route).await
+}
+
 /// Turn the backlight of the keyboard `route` reaches on or off.
 pub async fn set_backlight_enabled(
     route: &DeviceRoute,
     on: bool,
 ) -> Result<BacklightState, WriteError> {
     device::set_backlight_enabled(&*native_backend(), route, on).await
+}
+
+/// Set a predefined backlight effect on the keyboard `route` reaches.
+pub async fn set_backlight_effect(
+    route: &DeviceRoute,
+    effect: BacklightEffect,
+) -> Result<BacklightState, WriteError> {
+    device::set_backlight_effect(&*native_backend(), route, effect).await
 }
 
 /// Set every key of the keyboard `route` reaches to one colour.
