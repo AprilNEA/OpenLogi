@@ -39,7 +39,7 @@ access devices directly.
 | `crates/openlogi-ipc` | The tarpc IPC contract (`src/ipc.rs`) + its local-socket transport, shared by the agent and its clients |
 | `crates/openlogi-agent` | The `openlogi-agent` binary — runtime HID/input server |
 | `crates/openlogi-permissions` | Privacy-permission status + System-Settings deep links: macOS TCC reads, Linux device-file probes. Reads only — never prompts |
-| `crates/openlogi-ui` | Presentation shared by the two GPUI processes: ring geometry/icons, the GPUI asset source, the shared locale catalogs. Depends on `gpui` but **not** `gpui-component` |
+| `crates/openlogi-ui` | Presentation shared by the two GPUI processes: action icons, colors, the GPUI asset source, and locale catalogs. Currently depends on `gpui`, not `gpui-component` |
 | `crates/openlogi-desktop` | GPUI + gpui-component desktop app — polls the agent, no HID/input I/O |
 | `crates/openlogi-overlay` | The `openlogi-overlay` binary — cursor-centred Actions Ring, a pure IPC client |
 | `xtask` | `cargo xtask` maintenance: bundling, packaging, release manifest |
@@ -322,16 +322,24 @@ before editing that area.
 | `xtask/**`, `packaging/**`, `.github/scripts/**` | `xtask/AGENTS.md` (+ `xtask/README.md`) |
 | macOS native FFI (the rule carries the canonical path inventory) | `.claude/rules/objc-ffi.md` |
 
-## Task skills — invoke when the task matches, not when a path matches
+## Task skills — invoke when the task matches
 
-The rules above load from the file you are editing. Some work has no file to key
-on: triaging a user report, or deciding what a symptom means. That lives in
-`.claude/skills/`, which Claude Code offers by task description; other agents
-should read the `SKILL.md` when the task matches.
+Load the skill when its task matches. If the client cannot invoke skills, read
+the linked `SKILL.md` and the references it requires. For GPUI work, use the
+upstream skills as the default design and coding practice; `.claude/rules/gui.md`
+contains only OpenLogi integration constraints and verification entrypoints.
 
 | Task | Skill |
 |---|---|
+| GPUI implementation, components, state, lifecycle, or testing | [gpui-kit](.agents/skills/gpui-kit/SKILL.md) |
+| GUI layout, styling, interaction, copy, or design review | [gpui-kit-design-guides](.agents/skills/gpui-kit-design-guides/SKILL.md) |
 | a macOS report of no devices / "Failed to open device" / which permission to grant, and any change to the permission, helper-launch, or bundle-signing code | `.claude/skills/openlogi-macos-permissions/SKILL.md` |
 
-Everything else under `.claude/skills/` is a per-developer symlink into
-`.agents/skills/` and is not part of the project — see `.gitignore`.
+The GPUI skills are imported from
+[longbridge/gpui-kit](https://github.com/longbridge/gpui-kit/tree/959ccc5ea1ec23be8283c2c326467699a9b44729/skills),
+with the upstream [Apache-2.0 license](.agents/skills/LICENSE-APACHE).
+Marked reference files only normalize whitespace for repository hooks; keep the
+upstream guidance intact. `skills-lock.json` records the upstream content hashes.
+Track the files and lock together; review upstream changes before updating the
+source revision above. Claude Code uses the tracked symlinks in `.claude/skills/`.
+Other local skills remain ignored by Git.
