@@ -140,6 +140,14 @@ async fn run_effect(route: &DeviceRoute, effect: EffectArg) -> Result<()> {
         .context("read backlight effect")?;
     println!("  effect: {}", effect_label(before_effect));
 
+    // Same firmware limitation as the enable/disable path: setBacklightConfig
+    // cannot write TemporaryManual back, so it lands in Automatic.
+    if before.mode == BacklightMode::TemporaryManual {
+        println!(
+            "  note: the level came from the keyboard's backlight keys, a mode software cannot write back — it returns to automatic (ambient-light sensor)"
+        );
+    }
+
     let requested: BacklightEffect = effect.into();
     let after = openlogi_hid::set_backlight_effect(route, requested)
         .await
