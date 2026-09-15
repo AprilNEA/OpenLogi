@@ -44,7 +44,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn logo_ring_and_component_assets_remain_available() {
+    fn logo_ring_and_kit_assets_remain_available() {
         let logo = AppAssets.load(LOGO).unwrap().unwrap();
         assert!(logo.starts_with(b"\x89PNG\r\n\x1a\n"));
 
