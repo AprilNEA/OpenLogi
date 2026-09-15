@@ -164,17 +164,28 @@ fn foreground_app_from_running_application(
     app: &NSRunningApplication,
     pool: objc2::rc::AutoreleasePool<'_>,
 ) -> Option<ForegroundApp> {
-    let bundle_id = app.bundleIdentifier()?;
+    let bundle_id = app.bundleIdentifier();
     let name = app.localizedName();
     // SAFETY: Both UTF-8 views are copied into owned Strings before `pool`
     // drains, so no borrowed Objective-C storage escapes.
-    let (id, name) = unsafe {
+    let (bundle_id, name) = unsafe {
         (
-            bundle_id.to_str(pool).to_owned(),
+            bundle_id.as_ref().map(|id| id.to_str(pool).to_owned()),
             name.as_ref().map(|name| name.to_str(pool).to_owned()),
         )
     };
-    let display_name = name.unwrap_or_else(|| id.clone());
+    // A GUI process that is not an app bundle has no bundle identifier: AppKit
+    // publishes one only for a `.app` the executable actually sits in. Such a
+    // process still activates normally and is still reported as frontmost —
+    // emulators and QEMU front-ends commonly ship the window-owning binary in
+    // `Contents/Resources/`, launched from a shell script — so dropping it here
+    // made the window unaddressable by any per-app profile. Fall back to the
+    // executable path, which is what the Windows backend already keys on.
+    let id = match bundle_id {
+        Some(bundle_id) => bundle_id,
+        None => process_path(app.processIdentifier())?,
+    };
+    let display_name = name.unwrap_or_else(|| executable_name(&id).to_owned());
     Some(ForegroundApp { id, display_name })
 }
 
@@ -1201,8 +1212,8 @@ unsafe extern "C" {
     fn proc_pidpath(pid: i32, buffer: *mut std::ffi::c_void, buffersize: u32) -> i32;
 }
 
-/// Best-effort PID → executable file name via libproc.
-fn process_name(pid: i32) -> Option<String> {
+/// Best-effort PID → executable path via libproc.
+fn process_path(pid: i32) -> Option<String> {
     // PROC_PIDPATHINFO_MAXSIZE is 4 * MAXPATHLEN (4 * 1024).
     const BUF_LEN: u32 = 4096;
     if pid <= 0 {
@@ -1218,8 +1229,21 @@ fn process_name(pid: i32) -> Option<String> {
     // `len > 0` here, so `unsigned_abs` is the value itself; widening to usize
     // is lossless and sidesteps the sign-loss cast lint.
     buf.truncate(len.unsigned_abs() as usize);
-    let path = String::from_utf8_lossy(&buf);
-    Some(path.rsplit('/').next().unwrap_or(&path).to_string())
+    Some(String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// The trailing path component of `path` — the executable's own file name.
+///
+/// A bundle identifier contains no separator, so this returns it unchanged;
+/// that keeps the bundled display-name fallback exactly as it was.
+fn executable_name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+/// Best-effort PID → executable file name via libproc.
+fn process_name(pid: i32) -> Option<String> {
+    let path = process_path(pid)?;
+    Some(executable_name(&path).to_owned())
 }
 
 #[cfg(test)]
@@ -1257,5 +1281,35 @@ mod tests {
         assert_eq!(safari_process_id(SAFARI_BUNDLE_ID, 417), Some(417));
         assert_eq!(safari_process_id("com.apple.finder", 417), None);
         assert_eq!(safari_process_id(SAFARI_BUNDLE_ID, 0), None);
+    }
+
+    #[test]
+    fn executable_name_takes_the_last_path_component_and_spares_bundle_ids() {
+        assert_eq!(
+            executable_name("/Applications/Demo.app/Contents/Resources/runtime/bin/Demo VM"),
+            "Demo VM"
+        );
+        // The display-name fallback feeds bundle identifiers through here too,
+        // and must hand them back untouched.
+        assert_eq!(executable_name("com.apple.Safari"), "com.apple.Safari");
+    }
+
+    #[test]
+    fn process_path_resolves_this_process_and_rejects_absent_pids() {
+        let path = process_path(std::process::id().cast_signed())
+            .expect("libproc must resolve the running test binary");
+        assert!(
+            path.starts_with('/'),
+            "expected an absolute executable path, got {path:?}"
+        );
+        // The fallback identifier is only useful if it is a full path: the file
+        // name alone would collide across every copy of a binary.
+        assert!(
+            path.len() > executable_name(&path).len(),
+            "expected a path with a directory component, got {path:?}"
+        );
+
+        assert_eq!(process_path(0), None);
+        assert_eq!(process_path(-1), None);
     }
 }
