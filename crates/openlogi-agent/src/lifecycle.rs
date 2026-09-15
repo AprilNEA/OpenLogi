@@ -427,7 +427,9 @@ impl Armed {
                             Some(allowed) => running
                                 .apply_device_io(DeviceIoTransition::from_allowed(allowed))
                                 .await,
-                            None => running.shut_down("device I/O lifecycle ended"),
+                            None => running
+                                .shut_down("device I/O lifecycle ended", None)
+                                .await,
                         }
                     }
                     #[cfg(not(target_os = "macos"))]
@@ -774,23 +776,6 @@ impl Running {
         self.hook_stop.clear();
         shutdown::release_hook_and_exit(self.hook.take(), &mut self.inputs, reason, None)
     }
-}
-
-/// The event tap is a global input filter on macOS. It must be active only
-/// when the agent is configured to capture input, has Accessibility, and its
-/// login session is currently allowed to use host I/O.
-const fn hook_should_be_installed(
-    capture_mouse_events: bool,
-    accessibility_granted: bool,
-    device_io_allowed: bool,
-) -> bool {
-    capture_mouse_events && accessibility_granted && device_io_allowed
-}
-
-/// A failed install is retryable only while the hook is still wanted and no
-/// live handle exists.
-const fn hook_should_retry(hook_wanted: bool, hook_running: bool) -> bool {
-    hook_wanted && !hook_running
 }
 
 /// The event tap is a global input filter on macOS. It must be active only
