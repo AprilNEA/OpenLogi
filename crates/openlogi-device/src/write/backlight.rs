@@ -46,18 +46,29 @@ fn mode_to_firmware(mode: BacklightMode) -> FirmwareMode {
     }
 }
 
-/// Map the fork's `0x1982` effect onto OpenLogi's [`BacklightEffect`]. The
-/// source enum is `#[non_exhaustive]`; an unmodelled future variant maps to
-/// [`BacklightEffect::Static`], the firmware's default effect.
-fn effect_from_firmware(effect: FirmwareEffect) -> BacklightEffect {
+/// Map the fork's `0x1982` effect onto OpenLogi's [`BacklightEffect`].
+///
+/// Unlike [`mode_from_firmware`]/[`status_from_firmware`], this one is
+/// fallible rather than defaulting an unmodelled variant to a guess:
+/// `set_backlight_effect`'s read-back is compared against the *requested*
+/// effect to confirm the write applied, so silently collapsing an unknown
+/// future variant to [`BacklightEffect::Static`] could make that comparison
+/// report success for the wrong effect. Errors the same way an unrecognized
+/// wire byte already does one layer down (`get_backlight_info`'s own
+/// `TryFromPrimitive` decode).
+fn effect_from_firmware(effect: FirmwareEffect) -> Result<BacklightEffect, WriteError> {
     match effect {
-        FirmwareEffect::None => BacklightEffect::None,
-        FirmwareEffect::Breathing => BacklightEffect::Breathing,
-        FirmwareEffect::Contrast => BacklightEffect::Contrast,
-        FirmwareEffect::Reaction => BacklightEffect::Reaction,
-        FirmwareEffect::Random => BacklightEffect::Random,
-        FirmwareEffect::Waves => BacklightEffect::Waves,
-        _ => BacklightEffect::Static,
+        FirmwareEffect::Static => Ok(BacklightEffect::Static),
+        FirmwareEffect::None => Ok(BacklightEffect::None),
+        FirmwareEffect::Breathing => Ok(BacklightEffect::Breathing),
+        FirmwareEffect::Contrast => Ok(BacklightEffect::Contrast),
+        FirmwareEffect::Reaction => Ok(BacklightEffect::Reaction),
+        FirmwareEffect::Random => Ok(BacklightEffect::Random),
+        FirmwareEffect::Waves => Ok(BacklightEffect::Waves),
+        _ => Err(WriteError::UnsupportedResponse {
+            operation: HidppOperation::ReadBacklight,
+            feature_hex: BacklightFeature::ID,
+        }),
     }
 }
 
@@ -217,7 +228,7 @@ pub async fn get_backlight_effect(
         let info = feature.get_backlight_info().await.map_err(|e| {
             classify_hidpp_error(e, HidppOperation::ReadBacklight, BacklightFeature::ID)
         })?;
-        Ok(effect_from_firmware(info.effect))
+        effect_from_firmware(info.effect)
     })
     .await
 }
@@ -306,15 +317,15 @@ mod tests {
     #[test]
     fn firmware_effects_round_trip_through_openlogi_effects() {
         assert_eq!(
-            effect_from_firmware(FirmwareEffect::Breathing),
+            effect_from_firmware(FirmwareEffect::Breathing).expect("known effect"),
             BacklightEffect::Breathing
         );
         assert_eq!(
-            effect_from_firmware(FirmwareEffect::Waves),
+            effect_from_firmware(FirmwareEffect::Waves).expect("known effect"),
             BacklightEffect::Waves
         );
         assert_eq!(
-            effect_from_firmware(FirmwareEffect::Static),
+            effect_from_firmware(FirmwareEffect::Static).expect("known effect"),
             BacklightEffect::Static
         );
     }
@@ -330,7 +341,8 @@ mod tests {
             FirmwareEffect::Random,
             FirmwareEffect::Waves,
         ] {
-            assert_eq!(effect_to_firmware(effect_from_firmware(effect)), effect);
+            let mapped = effect_from_firmware(effect).expect("every known variant maps");
+            assert_eq!(effect_to_firmware(mapped), effect);
         }
     }
 
