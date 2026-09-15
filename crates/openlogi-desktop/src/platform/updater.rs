@@ -94,6 +94,23 @@ fn release_format() -> &'static str {
     }
 }
 
+/// Trigger an update check — or no-op on Linux.
+///
+/// `latest.json` never carries a Linux asset (the `.deb`/`.rpm`/`.pkg.tar.zst`
+/// packages update through the distro package manager instead — see `xtask`'s
+/// `classify`), so a check there can only ever resolve to
+/// [`UpdateStatus::Errored`]. Every place that can trigger a check — launch,
+/// the first-run consent prompt, the Settings button, the app menu, the tray
+/// IPC command — must route through here rather than calling
+/// [`Updater::check`] directly, or Linux goes back to showing a permanent
+/// "Update failed" for something that isn't actually broken (see e.g.
+/// upstream issue #605).
+pub fn check(updater: &Entity<Updater>, cx: &mut App) {
+    if !cfg!(target_os = "linux") {
+        updater.update(cx, Updater::check);
+    }
+}
+
 /// Publish the shared updater as a global and, when the user has opted in, run
 /// exactly one check on launch. Call once from the GPUI `run` closure.
 pub fn install(cx: &mut App, settings: &AppSettings) {
@@ -115,7 +132,7 @@ pub fn install(cx: &mut App, settings: &AppSettings) {
     cx.set_global(AutoInstaller(auto_install));
 
     if settings.check_for_updates {
-        updater.update(cx, Updater::check);
+        check(&updater, cx);
     }
     cx.set_global(SharedUpdater(updater));
 }
