@@ -367,18 +367,32 @@ fn remove_profile_question(profile: &ProfileChoice) -> gpui::SharedString {
 /// reported that application in this session. The identifier remains the
 /// matching key; only its last human-shaped component is presented.
 pub(crate) fn friendly_app_name(identifier: &str) -> String {
+    // Three of the four identifier namespaces are path-shaped: the `exe:`
+    // config shorthand, the plain executable path Windows reports, and a macOS
+    // process that is not an app bundle. Only a bundle id or a Linux app id
+    // names itself by its trailing dot-segment — applying that rule to a path
+    // yields a fragment, because a path's dots sit in the middle of it
+    // (`…/Try Omarchy.app/…`) or introduce its extension (`slack.exe`).
     if let Some(path) = identifier.strip_prefix("exe:") {
-        let name = path
-            .rsplit(['/', '\\'])
-            .find(|part| !part.is_empty())
-            .unwrap_or(path);
-        return name.trim_end_matches(".exe").to_string();
+        return executable_label(path);
+    }
+    if identifier.contains(['/', '\\']) {
+        return executable_label(identifier);
     }
     identifier
         .rsplit('.')
         .find(|part| !part.is_empty())
         .unwrap_or(identifier)
         .to_string()
+}
+
+/// The last component of a path, without the Windows executable extension.
+fn executable_label(path: &str) -> String {
+    let name = path
+        .rsplit(['/', '\\'])
+        .find(|part| !part.is_empty())
+        .unwrap_or(path);
+    name.trim_end_matches(".exe").to_string()
 }
 
 #[cfg(test)]
@@ -389,5 +403,25 @@ mod tests {
     fn profile_identifiers_have_a_readable_fallback() {
         assert_eq!(friendly_app_name("com.google.Chrome"), "Chrome");
         assert_eq!(friendly_app_name("exe:C:\\Tools\\Zed.exe"), "Zed");
+    }
+
+    #[test]
+    fn path_shaped_identifiers_are_named_by_their_last_component() {
+        // What Windows actually reports as the identifier — the `exe:` form
+        // above is only the config shorthand. The dot rule returned "exe" here.
+        assert_eq!(
+            friendly_app_name("c:\\program files\\slack\\slack.exe"),
+            "slack"
+        );
+        // A macOS process that is not an app bundle. The dot in `.app` sits in
+        // the middle of the path, so the dot rule returned the tail fragment.
+        assert_eq!(
+            friendly_app_name(
+                "/Applications/Try Omarchy.app/Contents/Resources/runtime/bin/Try Omarchy"
+            ),
+            "Try Omarchy"
+        );
+        // A Linux app id keeps the dot rule: it is not a path.
+        assert_eq!(friendly_app_name("org.mozilla.firefox"), "firefox");
     }
 }
