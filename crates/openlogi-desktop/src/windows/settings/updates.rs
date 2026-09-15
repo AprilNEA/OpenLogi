@@ -10,12 +10,33 @@ use crate::ui::theme::Typography as _;
 /// The Updates page: a hero card with the running build, its update status, and
 /// the contextual check / install / restart action; the opt-in auto-check and
 /// auto-install switches; and where updates come from.
+///
+/// Linux skips the toggles group and the hero's "Check for Updates" action:
+/// `latest.json` never has a Linux entry (those installs update through the
+/// distro package manager — see [`crate::platform::updater::install`]), so
+/// there is nothing here for either to do.
 pub(super) fn updates_page(updater: Entity<Updater>) -> SettingPage {
     let hero = SettingGroup::new().item(SettingItem::render(move |_, _, cx| {
         update_hero(&updater, cx)
     }));
 
-    let toggles = SettingGroup::new()
+    let page = SettingPage::new(tr!("updates.updates"))
+        .icon(IconName::ArrowDown)
+        .resettable(false)
+        .description(tr!("updates.update_network_privacy_description"))
+        .group(hero);
+    let page = if cfg!(target_os = "linux") {
+        page
+    } else {
+        page.group(toggles())
+    };
+
+    let source = SettingGroup::new().item(SettingItem::render(move |_, _, cx| update_source(cx)));
+    page.group(source)
+}
+
+fn toggles() -> SettingGroup {
+    SettingGroup::new()
         .item(
             SettingItem::new(
                 tr!("app.check_for_updates_setting"),
@@ -48,16 +69,7 @@ pub(super) fn updates_page(updater: Entity<Updater>) -> SettingPage {
                 ),
             )
             .description(tr!("updates.automatic_update_description")),
-        );
-
-    let source = SettingGroup::new().item(SettingItem::render(move |_, _, cx| update_source(cx)));
-    SettingPage::new(tr!("updates.updates"))
-        .icon(IconName::ArrowDown)
-        .resettable(false)
-        .description(tr!("updates.update_network_privacy_description"))
-        .group(hero)
-        .group(toggles)
-        .group(source)
+        )
 }
 
 /// The Updates hero row: logo, name + version, a status pill, the live status
@@ -98,27 +110,37 @@ fn update_hero(updater: &Entity<Updater>, cx: &mut App) -> gpui::Div {
         UpdateStatus::Checking | UpdateStatus::Downloading { .. } | UpdateStatus::Installing
     );
 
+    // No manual "Check for Updates" action on Linux: `latest.json` never has a
+    // Linux entry (see `updates_page`'s doc comment), so the check could only
+    // ever land on `Errored`.
     let action = {
         let u = updater.clone();
         match &status {
-            UpdateStatus::Available(_) => Button::new("update-install")
-                .outline()
-                .label(tr!("updates.download_install"))
-                .on_click(move |_, _, cx| {
-                    u.update(cx, Updater::download_and_install);
-                }),
-            UpdateStatus::Staged(_) => Button::new("update-restart")
-                .outline()
-                .label(tr!("updates.restart_to_update"))
-                .on_click(move |_, _, cx| {
-                    u.update(cx, |u, cx| u.restart(cx));
-                }),
-            _ => Button::new("update-check")
-                .outline()
-                .label(tr!("updates.check_for_updates_action"))
-                .on_click(move |_, _, cx| {
-                    u.update(cx, Updater::check);
-                }),
+            UpdateStatus::Available(_) => Some(
+                Button::new("update-install")
+                    .outline()
+                    .label(tr!("updates.download_install"))
+                    .on_click(move |_, _, cx| {
+                        u.update(cx, Updater::download_and_install);
+                    }),
+            ),
+            UpdateStatus::Staged(_) => Some(
+                Button::new("update-restart")
+                    .outline()
+                    .label(tr!("updates.restart_to_update"))
+                    .on_click(move |_, _, cx| {
+                        u.update(cx, |u, cx| u.restart(cx));
+                    }),
+            ),
+            _ if cfg!(target_os = "linux") => None,
+            _ => Some(
+                Button::new("update-check")
+                    .outline()
+                    .label(tr!("updates.check_for_updates_action"))
+                    .on_click(move |_, _, cx| {
+                        u.update(cx, Updater::check);
+                    }),
+            ),
         }
     };
 
@@ -163,7 +185,11 @@ fn update_hero(updater: &Entity<Updater>, cx: &mut App) -> gpui::Div {
                         ),
                 ),
         )
-        .child(div().flex_shrink_0().child(action.disabled(busy)))
+        .child(
+            div()
+                .flex_shrink_0()
+                .children(action.map(|a| a.disabled(busy))),
+        )
 }
 
 /// The "where updates come from" row plus the privacy footnote.

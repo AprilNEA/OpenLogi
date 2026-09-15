@@ -96,6 +96,12 @@ fn release_format() -> &'static str {
 
 /// Publish the shared updater as a global and, when the user has opted in, run
 /// exactly one check on launch. Call once from the GPUI `run` closure.
+///
+/// Linux is skipped: `latest.json` never carries a Linux asset (the `.deb`/
+/// `.rpm`/`.pkg.tar.zst` packages update through the distro package manager
+/// instead — see `xtask`'s `classify`), so a check there can only ever resolve
+/// to [`UpdateStatus::Errored`]. Running it anyway surfaced a permanent "Update
+/// failed" error on every Linux install (see e.g. upstream issue #605).
 pub fn install(cx: &mut App, settings: &AppSettings) {
     let updater = new_entity(cx);
 
@@ -114,7 +120,7 @@ pub fn install(cx: &mut App, settings: &AppSettings) {
     });
     cx.set_global(AutoInstaller(auto_install));
 
-    if settings.check_for_updates {
+    if settings.check_for_updates && !cfg!(target_os = "linux") {
         updater.update(cx, Updater::check);
     }
     cx.set_global(SharedUpdater(updater));
