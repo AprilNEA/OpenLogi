@@ -22,10 +22,11 @@ paths:
   there compiles to an **empty catalog** rather than an error, and every string
   silently renders as its semantic key — `the_shared_catalog_is_wired_up` in
   `openlogi-overlay` and `openlogi-agent` is what makes that fail loudly.
-- `gpui`/`gpui_platform` track zed's default branch on purpose; the compatible zed
-  commit is pinned **only in `Cargo.lock`**, in lockstep with the `gpui-component` rev.
-  After any `cargo add`/`cargo update`, check the pins didn't move; restore with
-  `cargo update -p gpui --precise <rev>`.
+- `gpui`/`gpui_platform` alias the version-aligned `gpui-pre` registry packages.
+  Upgrade their exact workspace versions together. The Kit crates share one Git
+  release tag because the full upstream theme catalog is not in their published
+  packages. After dependency changes, check that the lock has one `gpui-pre` and
+  no legacy `gpui` package; extensions must use the same package identity too.
 - Two color systems must agree: the bespoke `theme.rs` `Palette` (hand-painted
   surfaces) and gpui-component's `cx.theme()` (widget chrome). Only the `ThemeMode` is
   shared between them. A "white box under dark UI" or a surface that doesn't flip with
@@ -49,8 +50,8 @@ paths:
   at the same weight; a screen reader announces "multiplication sign". Reach for
   `IconName` first, then a vendored SVG. Punctuation *between* text stays text: `·`
   as a metadata separator and `…` on a menu item that opens a dialog are correct.
-- Icons are not limited to gpui-component's `IconName` (which is lucide, generated
-  from the `gpui-component-assets` icon directory): vendor any SVG (must use
+- Icons are not limited to gpui-component's `IconName` (which is lucide, supplied
+  by `gpui-kit-assets`): vendor any SVG (must use
   `stroke="currentColor"`) into `crates/openlogi-ui/action-icons/`, register it in
   that crate's `action_icons.rs` `ACTION_ICONS`, render via
   `Icon::empty().path("action-icons/….svg")` or `svg().path(..)`. Both binaries
