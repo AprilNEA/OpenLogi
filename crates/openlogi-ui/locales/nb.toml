@@ -308,6 +308,7 @@ native_controls_when_disabled = "Når funksjonen er av, bruker kontrollene stand
 overridden_in_app = "Overstyrt i %{app}"
 use_a_single_action = "Bruk én handling"
 use_gestures = "Bruk bevegelser"
+dpi_gestures_unavailable = "Denne enheten har ikke rapportert støtte for bevegelser med DPI-knappen."
 action_key_summary = "%{action} · %{key}"
 search_actions = "Søk etter handlinger…"
 workflow_key_summary = "Arbeidsflyt · %{key}"

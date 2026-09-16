@@ -308,6 +308,7 @@ native_controls_when_disabled = "Калі выключана, элементы �
 overridden_in_app = "Перавызначана ў %{app}"
 use_a_single_action = "Выкарыстоўваць адно дзеянне"
 use_gestures = "Выкарыстоўваць жэсты"
+dpi_gestures_unavailable = "Прылада не паведаміла пра падтрымку жэстаў кнопкай DPI."
 action_key_summary = "%{action} · %{key}"
 search_actions = "Шукаць дзеянні…"
 workflow_key_summary = "Сцэнар · %{key}"

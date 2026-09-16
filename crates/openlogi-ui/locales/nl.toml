@@ -308,6 +308,7 @@ native_controls_when_disabled = "Als dit uitstaat, gebruiken bedieningselementen
 overridden_in_app = "Overschreven in %{app}"
 use_a_single_action = "Eén actie gebruiken"
 use_gestures = "Gebaren gebruiken"
+dpi_gestures_unavailable = "Dit apparaat heeft geen ondersteuning voor gebaren met de DPI-knop gemeld."
 action_key_summary = "%{action} · %{key}"
 search_actions = "Acties zoeken…"
 workflow_key_summary = "Workflow · %{key}"

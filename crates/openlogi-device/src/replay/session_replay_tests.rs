@@ -267,6 +267,8 @@ fn gesture_capture_cassette() -> HidCassette {
             feature_set_count_exchange(2),
             feature_set_entry_exchange(1, 0x0001),
             feature_set_entry_exchange(2, reprog_controls::FEATURE_ID),
+            reprog_control_count_exchange(1),
+            reprog_gesture_control_info_exchange(),
             root_ping_exchange(),
             root_feature_lookup_exchange(reprog_controls::FEATURE_ID, REPROG_FEATURE_INDEX, 4),
             reprog_control_count_exchange(1),

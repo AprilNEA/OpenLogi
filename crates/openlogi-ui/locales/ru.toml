@@ -308,6 +308,7 @@ native_controls_when_disabled = "Если выключено, элементы �
 overridden_in_app = "Изменено в %{app}"
 use_a_single_action = "Использовать одно действие"
 use_gestures = "Использовать жесты"
+dpi_gestures_unavailable = "Устройство не сообщило о поддержке жестов кнопкой DPI."
 action_key_summary = "%{action} · %{key}"
 search_actions = "Поиск действий…"
 workflow_key_summary = "Сценарий · %{key}"

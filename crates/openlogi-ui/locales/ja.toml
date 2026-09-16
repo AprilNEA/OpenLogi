@@ -308,6 +308,7 @@ native_controls_when_disabled = "オフにすると各操作は標準の動作�
 overridden_in_app = "%{app} で変更済み"
 use_a_single_action = "1 つのアクションを使用"
 use_gestures = "ジェスチャーを使用"
+dpi_gestures_unavailable = "このデバイスでは DPI ボタンのジェスチャー対応が確認されていません。"
 action_key_summary = "%{action} · %{key}"
 search_actions = "アクションを検索…"
 workflow_key_summary = "ワークフロー · %{key}"

@@ -308,6 +308,7 @@ native_controls_when_disabled = "Kun asetus ei ole käytössä, kaikki säätime
 overridden_in_app = "Ohitettu sovelluksessa %{app}"
 use_a_single_action = "Käytä yhtä toimintoa"
 use_gestures = "Käytä eleitä"
+dpi_gestures_unavailable = "Tämä laite ei ole ilmoittanut tukevansa DPI-painikkeen eleitä."
 action_key_summary = "%{action} · %{key}"
 search_actions = "Hae toimintoja…"
 workflow_key_summary = "Työnkulku · %{key}"
