@@ -41,6 +41,7 @@ use crate::binding::{
     Action, ActionRingConfig, ActionRingIcon, ActionRingSlot, Binding, ButtonId, GestureDirection,
     RingAction, default_binding, default_binding_for, default_gesture_binding,
 };
+use crate::device::DeviceKind;
 use crate::device_order::PhysicalDeviceKey;
 use crate::hid::Dpi;
 #[cfg(feature = "fs")]
@@ -48,6 +49,13 @@ use settings::GestureOwner;
 /// The schema version the current build produces. Bumped whenever the
 /// persisted shape or enum vocabulary changes; readers inspect this value
 /// before consuming the rest of the file.
+///
+/// v8 seeds macOS per-app navigation profiles (Finder, Safari → ⌘[ / ⌘]) for
+/// pointing devices, once: neither app ever navigated on mouse buttons 4/5,
+/// so the Back/Forward defaults are silently dead there without the overlay
+/// (see `seed_navigation_profiles`). The version gate is what makes the
+/// seed one-shot — a v8 file whose profile was deleted or reshaped is the
+/// user's state, not a missing default.
 ///
 /// v7 aligns the thumb-wheel scroll defaults with its normalised physical
 /// direction. Pre-v7 explicit default pairs are migrated in device and
@@ -91,7 +99,46 @@ use settings::GestureOwner;
 /// next save; [`Config::load_from_path`] accepts supported versions `1` through
 /// [`SCHEMA_VERSION`] so an invalid or forward file fails loudly instead of
 /// silently losing bindings.
-pub const SCHEMA_VERSION: u32 = 7;
+pub const SCHEMA_VERSION: u32 = 8;
+
+/// macOS applications that never navigate on mouse buttons 4/5 but do honor
+/// their Go/History key equivalents — the pair Logi Options+ also ships
+/// per-app overrides for. Seeded by [`seed_navigation_profiles`].
+#[cfg(target_os = "macos")]
+const SEEDED_NAVIGATION_APPS: [&str; 2] = ["com.apple.finder", "com.apple.Safari"];
+
+/// Seed the built-in per-app navigation profiles for a pointing device.
+///
+/// Finder and Safari ignore the synthetic (and native) mouse button 4/5
+/// events the Back/Forward defaults produce, so without an overlay those
+/// buttons are silently dead there; `BrowserBack`/`BrowserForward` (⌘[ / ⌘])
+/// is what both apps actually honor. An app is seeded only when it has no
+/// per-app entry at all: a profile the user shaped — or deleted, via the
+/// callers' one-shot discipline — is never touched. Callers are the first
+/// identity record for a device ([`Config::set_device_identity`]) and the
+/// pre-v8 load migration; nothing re-runs on plain loads or refreshes.
+#[cfg(target_os = "macos")]
+fn seed_navigation_profiles(device: &mut DeviceConfig, kind: DeviceKind) {
+    if !matches!(kind, DeviceKind::Mouse | DeviceKind::Trackball) {
+        return;
+    }
+    for app in SEEDED_NAVIGATION_APPS {
+        device
+            .per_app_bindings
+            .entry(app.to_string())
+            .or_insert_with(|| {
+                BTreeMap::from([
+                    (ButtonId::Back, Action::BrowserBack),
+                    (ButtonId::Forward, Action::BrowserForward),
+                ])
+            });
+    }
+}
+
+/// Buttons 4/5 navigate natively in the stock file managers and browsers on
+/// Linux and Windows, so there is nothing to seed off macOS.
+#[cfg(not(target_os = "macos"))]
+fn seed_navigation_profiles(_device: &mut DeviceConfig, _kind: DeviceKind) {}
 
 /// Top-level config document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -583,6 +630,20 @@ impl Config {
         }
     }
 
+    /// Seed the built-in navigation profiles for every device whose recorded
+    /// identity marks it a pointing device — the pre-v8 half of
+    /// [`seed_navigation_profiles`]'s one-shot discipline. Devices without a
+    /// recorded identity are skipped, not lost: their first online sighting
+    /// routes through [`Self::set_device_identity`], which seeds then.
+    #[cfg(feature = "fs")]
+    fn seed_recorded_navigation_profiles(&mut self) {
+        for device in self.devices.values_mut() {
+            if let Some(kind) = device.identity.as_ref().map(|identity| identity.kind) {
+                seed_navigation_profiles(device, kind);
+            }
+        }
+    }
+
     /// Resolve the effective binding map for `device_key`, overlaying the
     /// per-app entry for `bundle_id` (if any) on top of the global per-device
     /// `bindings`. A per-app override replaces the whole button with a
@@ -779,11 +840,18 @@ impl Config {
 
     /// Record (or refresh) the identity captured for `device_key` while it was
     /// online, creating the device entry if needed.
+    ///
+    /// The first record for an entry — the moment a device's kind becomes
+    /// known — also seeds the built-in per-app navigation profiles (see
+    /// `seed_navigation_profiles`). A refresh never re-seeds: the entry
+    /// already carries an identity, so a profile the user deleted stays
+    /// deleted.
     pub fn set_device_identity(&mut self, device_key: &str, identity: DeviceIdentity) {
-        self.devices
-            .entry(device_key.to_string())
-            .or_default()
-            .identity = Some(identity.without_unit_identifiers());
+        let device = self.devices.entry(device_key.to_string()).or_default();
+        if device.identity.is_none() {
+            seed_navigation_profiles(device, identity.kind);
+        }
+        device.identity = Some(identity.without_unit_identifiers());
     }
 
     /// Drop everything recorded for `device_key` — identity, custom name, and
