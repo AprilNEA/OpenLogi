@@ -291,6 +291,31 @@ impl DeviceConfig {
             .unwrap_or(self.invert_scroll)
     }
 
+    /// [`Self::effective_invert_scroll`], but `None` when nothing on
+    /// `route_key` is evidence the user ever touched this device's native
+    /// wheel inversion.
+    ///
+    /// `invert_scroll` is a bare `bool` (unlike [`Self::dpi`] /
+    /// [`Self::smartshift`]'s `Option`), so a device-level `false` is
+    /// indistinguishable from never-set — see the same ambiguity noted in the
+    /// `identity` module's legacy-config fold. A link override is still
+    /// real signal either way, because it is an `Option<bool>`. Reapplying an
+    /// unconfigured `false` would force every capable device's native invert
+    /// bit off on every reconnect, silently undoing an inversion set through
+    /// any other host or tool (#1205) — the device's own power-on default is
+    /// already "not inverted", so there is nothing to reapply until the user
+    /// actually chooses a value in OpenLogi.
+    #[must_use]
+    pub fn configured_invert_scroll(&self, route_key: &str) -> Option<bool> {
+        if let Some(value) = self
+            .link_overrides(route_key)
+            .and_then(|overrides| overrides.invert_scroll)
+        {
+            return Some(value);
+        }
+        self.invert_scroll.then_some(true)
+    }
+
     /// Wheel resolution on `route_key`: the link's override when the user set
     /// one there, else the device-level value.
     #[must_use]
