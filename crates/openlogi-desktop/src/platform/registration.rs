@@ -22,7 +22,7 @@ use macos as platform;
 use unsupported as platform;
 
 #[cfg(target_os = "macos")]
-pub use macos::agent_service_label;
+pub use macos::{agent_service_label, reregister_missing_job};
 
 /// Where the agent service stands with launchd, mirroring
 /// `SMAppServiceStatus` plus a "not this platform" arm.
