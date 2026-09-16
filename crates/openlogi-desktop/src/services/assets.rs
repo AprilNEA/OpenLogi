@@ -198,7 +198,7 @@ impl AssetResolver {
     ) -> Option<ResolvedAsset> {
         let index = self.index.as_ref()?;
         let (depot, entry) = resolve_in_index(index, model, codename)?;
-        self.load_files(depot, entry, model)
+        self.load_files(depot, entry, model, codename)
     }
 
     /// Resolve a standalone device directly by its registry model id.
@@ -219,6 +219,7 @@ impl AssetResolver {
         depot: &str,
         entry: &DeviceEntry,
         model: &DeviceModelInfo,
+        codename: Option<&str>,
     ) -> Option<ResolvedAsset> {
         for root in &self.read_roots {
             let Ok(dir) = safe_component_path(root, depot, "asset depot") else {
@@ -329,7 +330,7 @@ impl AssetResolver {
                 .map(Arc::new);
             return Some(ResolvedAsset {
                 depot: depot.to_string(),
-                display_name: entry.display_name.clone(),
+                display_name: variant_display_name(&entry.display_name, codename),
                 kind,
                 image_path,
                 hero_image_path,
@@ -482,6 +483,59 @@ pub(crate) fn resolve_in_index<'a>(
         "asset matched via codename↔displayName fallback"
     );
     Some(hit)
+}
+
+/// Device-type words a firmware marketing name may append that carry no
+/// variant information (`"Signature M650 Mouse"`) — stripped before the
+/// prefix comparison in [`variant_display_name`] so they don't block it.
+const GENERIC_CODENAME_SUFFIXES: [&str; 3] = ["mouse", "keyboard", "trackball"];
+
+/// Trailing catalog words that are known hand/SKU *qualifiers* rather than
+/// part of the model's own generation name — issue #1332's "Signature M650
+/// **L**" (left-handed). [`variant_display_name`] only strips a trailing
+/// catalog word when it is in this list: an unlisted trailing word (`"3S"`,
+/// `"X"`, `"2S"`, …) is a real part of the model name — e.g. codename "MX
+/// Master" vs. catalog "MX Master 3S" — and must be kept (issue #1366).
+const VARIANT_QUALIFIER_SUFFIXES: [&str; 2] = ["l", "left"];
+
+/// The catalog stores one static `displayName` per depot regardless of
+/// which `extended_model_id` colour/hand variant this physical unit is —
+/// issue #1332: a plain Signature M650 (BLE direct) shares the Signature
+/// M650 *L* depot's `modelId`, so the depot's only name, "Signature M650
+/// L", is wrong for it. The firmware's own reported name is the one
+/// per-device signal the catalog can't carry.
+///
+/// Only override the catalog name when it is the device's own name plus
+/// extra trailing word(s) that are all recognized variant qualifiers (see
+/// [`VARIANT_QUALIFIER_SUFFIXES`]) — i.e. the catalog is the codename plus a
+/// bare hand/SKU suffix. A trailing word that isn't a recognized qualifier
+/// (a real model-generation word like "3S" or "X") is left alone, so a
+/// terser codename ("MX Master") never truncates a more specific catalog
+/// name ("MX Master 3S").
+fn variant_display_name(catalog_name: &str, codename: Option<&str>) -> String {
+    let Some(codename) = codename else {
+        return catalog_name.to_string();
+    };
+    let codename_words: Vec<&str> = codename
+        .split_whitespace()
+        .filter(|w| !GENERIC_CODENAME_SUFFIXES.contains(&w.to_lowercase().as_str()))
+        .collect();
+    let catalog_words: Vec<&str> = catalog_name.split_whitespace().collect();
+    if codename_words.is_empty() || catalog_words.len() <= codename_words.len() {
+        return catalog_name.to_string();
+    }
+    let is_prefix = codename_words
+        .iter()
+        .zip(catalog_words.iter())
+        .all(|(a, b)| a.eq_ignore_ascii_case(b));
+    let trailing_words_are_qualifiers = catalog_words[codename_words.len()..]
+        .iter()
+        .all(|w| VARIANT_QUALIFIER_SUFFIXES.contains(&w.to_lowercase().as_str()));
+    if is_prefix && trailing_words_are_qualifiers {
+        catalog_words[..codename_words.len()].join(" ")
+    } else {
+        catalog_name.to_string()
+    }
 }
 
 fn strict_candidates(model: &DeviceModelInfo) -> Vec<String> {
