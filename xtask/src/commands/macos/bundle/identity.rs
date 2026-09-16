@@ -57,33 +57,24 @@ pub(crate) enum Component {
 }
 
 impl Component {
-    /// Where this component lives inside the app bundle; `None` is the app itself.
-    ///
-    /// Each directory is named exactly like its `CFBundleDisplayName`, because
-    /// macOS privacy panes fall back to a bundle's filename whenever its
-    /// metadata is stale — a spelling that differs from the display name (or a
-    /// dev helper named like the shipped one) renders as a row nobody can
-    /// trust. The spellings are load-bearing: the GUI's `agent_binary_path`
-    /// and the agent's `overlay_binary_path` look the helpers up by name at
-    /// runtime, keeping the old no-space names (`OpenLogiAgent.app`,
-    /// `OpenLogiOverlay.app`) as fallbacks for bundles built before the
-    /// rename.
-    pub(crate) fn nested_bundle(self, channel: Channel) -> Option<&'static str> {
-        match (self, channel) {
-            (Self::App, _) => None,
-            (Self::Agent, Channel::Production) => {
-                Some("Contents/Library/LoginItems/OpenLogi Agent.app")
-            }
-            (Self::Agent, Channel::Dev) => {
-                Some("Contents/Library/LoginItems/OpenLogi Agent Dev.app")
-            }
-            (Self::Overlay, Channel::Production) => {
-                Some("Contents/Library/LoginItems/OpenLogi Overlay.app")
-            }
-            (Self::Overlay, Channel::Dev) => {
-                Some("Contents/Library/LoginItems/OpenLogi Overlay Dev.app")
-            }
+    /// The `brand` helper this component embeds; `None` is the app itself.
+    fn helper(self) -> Option<brand::Helper> {
+        match self {
+            Self::App => None,
+            Self::Agent => Some(brand::Helper::Agent),
+            Self::Overlay => Some(brand::Helper::Overlay),
         }
+    }
+
+    /// Where this component lives inside the app bundle; `None` is the app
+    /// itself. The spellings are [`brand::Helper`]'s: the GUI and the agent
+    /// look the helpers up by the same names at runtime.
+    pub(crate) fn nested_bundle(self, channel: Channel) -> Option<String> {
+        let helper = self.helper()?;
+        Some(match channel {
+            Channel::Production => helper.bundle_dir(),
+            Channel::Dev => helper.dev_bundle_dir(),
+        })
     }
 
     /// This component's bundle root inside `app`.
@@ -105,10 +96,9 @@ impl Component {
 
     /// The shipped identity — the one macOS ties existing grants to.
     fn production(self) -> Identity {
-        let (bundle_id, name) = match self {
-            Self::App => (brand::APP_ID, "OpenLogi"),
-            Self::Agent => (brand::AGENT_ID, "OpenLogi Agent"),
-            Self::Overlay => (brand::OVERLAY_ID, "OpenLogi Overlay"),
+        let (bundle_id, name) = match self.helper() {
+            None => (brand::APP_ID, brand::APP_NAME),
+            Some(helper) => (helper.bundle_id(), helper.display_name()),
         };
         Identity {
             bundle_id: bundle_id.to_owned(),
@@ -134,7 +124,7 @@ impl Channel {
             Self::Production => production,
             Self::Dev => Identity {
                 bundle_id: brand::dev_id(&production.bundle_id),
-                name: format!("{} Dev", production.name),
+                name: brand::dev_name(&production.name),
             },
         }
     }

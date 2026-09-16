@@ -80,7 +80,7 @@ fn replace_stale() -> Option<InstanceGuard> {
     system.refresh_processes(ProcessesToUpdate::All, true);
     let own_pid = Pid::from_u32(std::process::id());
     let stale_agents = system
-        .processes_by_exact_name(OsStr::new("openlogi-agent"))
+        .processes_by_exact_name(OsStr::new(openlogi_core::brand::Helper::Agent.executable()))
         .filter(|process| process.pid() != own_pid);
 
     let mut found = false;

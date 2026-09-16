@@ -86,8 +86,8 @@ pub(crate) fn run(args: &Args) -> Result<()> {
     // leftover from an older checkout is a second row in every macOS list that
     // names these processes. Same for the launchd service plists: one from an
     // earlier build could name a helper this build does not embed.
-    remove_bundle(&app.join("Contents/Library/LoginItems"))?;
-    remove_bundle(&app.join("Contents/Library/LaunchAgents"))?;
+    remove_bundle(&app.join(openlogi_core::brand::LOGIN_ITEMS_DIR))?;
+    remove_bundle(&app.join(openlogi_core::brand::LAUNCH_AGENTS_DIR))?;
     let components = if helpers_wanted() {
         for helper in &HELPERS {
             embed_helper(&root, &app, &profile, helper, &icon, &signing)?;

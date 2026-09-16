@@ -33,14 +33,14 @@ pub(crate) const HELPERS: [Helper; 2] = [
     Helper {
         component: Component::Agent,
         package: "openlogi-agent",
-        binary: "openlogi-agent",
+        binary: brand::Helper::Agent.executable(),
         info_plist: "crates/openlogi-desktop/bundle/agent-release/Info.plist",
         label: "agent helper",
     },
     Helper {
         component: Component::Overlay,
         package: "openlogi-overlay",
-        binary: "openlogi-overlay",
+        binary: brand::Helper::Overlay.executable(),
         info_plist: "crates/openlogi-desktop/bundle/overlay-release/Info.plist",
         label: "Actions Ring overlay helper",
     },
@@ -167,10 +167,6 @@ pub(crate) fn agent_service_label(channel: Channel) -> String {
 /// `SuccessfulExit` — when started unwanted (the GUI's
 /// `platform::registration` doc has the model).
 fn agent_launch_plist(channel: Channel) -> Result<plist::Dictionary> {
-    let helper = HELPERS
-        .iter()
-        .find(|helper| helper.component == Component::Agent)
-        .ok_or_else(|| anyhow!("HELPERS carries no agent entry"))?;
     let nested = Component::Agent
         .nested_bundle(channel)
         .ok_or_else(|| anyhow!("the agent component is always a nested bundle"))?;
@@ -184,7 +180,7 @@ fn agent_launch_plist(channel: Channel) -> Result<plist::Dictionary> {
     );
     root.insert(
         "BundleProgram".into(),
-        plist::Value::String(format!("{nested}/Contents/MacOS/{}", helper.binary)),
+        plist::Value::String(brand::Helper::Agent.executable_in(&nested)),
     );
     root.insert("KeepAlive".into(), plist::Value::Dictionary(keep_alive));
     Ok(root)
@@ -201,7 +197,7 @@ pub(crate) fn write_agent_launch_plist(app: &Path, channel: Channel) -> Result<(
         ensure_file(&app.join(bundle_program))
             .context("the agent service plist must be written after the helpers are embedded")?;
     }
-    let dir = app.join("Contents/Library/LaunchAgents");
+    let dir = app.join(brand::LAUNCH_AGENTS_DIR);
     fs_err::create_dir_all(&dir).with_context(|| format!("could not create {}", dir.display()))?;
     let path = dir.join(format!("{}.plist", agent_service_label(channel)));
     plist::Value::Dictionary(content)
