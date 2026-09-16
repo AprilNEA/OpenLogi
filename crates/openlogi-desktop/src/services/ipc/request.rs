@@ -29,7 +29,7 @@ use tracing::{debug, warn};
 use super::GuiUpdate;
 
 /// The GPUI-bound update stream a request may deliver through.
-pub(super) type Updates = mpsc::UnboundedSender<GuiUpdate>;
+pub(super) type UpdateSender = mpsc::UnboundedSender<GuiUpdate>;
 
 /// No agent could be reached for a request: the socket was down when it was
 /// dequeued, or the connection dropped before the answer arrived.
@@ -52,7 +52,7 @@ pub(super) trait Request: Send + 'static {
     /// Hand the outcome to whoever asked — the agent's answer, or that no
     /// agent could be reached. Consumes the request, so a reply channel it
     /// carries can be used.
-    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &Updates);
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender);
 }
 
 /// Run one request: over `client` when there is one, answered as unavailable
@@ -61,7 +61,7 @@ pub(super) trait Request: Send + 'static {
 pub(super) async fn run<R: Request>(
     request: R,
     client: Option<&AgentClient>,
-    updates: &Updates,
+    updates: &UpdateSender,
 ) -> Result<(), LinkLost> {
     let Some(client) = client else {
         request.deliver(Err(Unavailable), updates);
@@ -111,7 +111,7 @@ impl Request for SetDpi {
             .await
     }
 
-    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &Updates) {
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
         log_rejection("DPI", outcome);
     }
 }
@@ -135,7 +135,7 @@ impl Request for SetLighting {
             .await
     }
 
-    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &Updates) {
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
         log_rejection("lighting", outcome);
     }
 }
@@ -155,7 +155,7 @@ impl Request for SetSmartShift {
             .await
     }
 
-    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &Updates) {
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
         log_rejection("SmartShift", outcome);
     }
 }
@@ -163,8 +163,8 @@ impl Request for SetSmartShift {
 /// Report a standalone-light write to the state that made it. `key` and
 /// `request_id` identify that edit, so a slow failure cannot overwrite the
 /// status of a newer slider release.
-fn light_result(
-    updates: &Updates,
+fn report_light_result(
+    updates: &UpdateSender,
     key: String,
     request_id: u64,
     command: LightCommand,
@@ -196,8 +196,8 @@ impl Request for SetLight {
             .await
     }
 
-    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &Updates) {
-        light_result(updates, self.key, self.request_id, self.command, outcome);
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        report_light_result(updates, self.key, self.request_id, self.command, outcome);
     }
 }
 
@@ -219,8 +219,8 @@ impl Request for SetLightManualPower {
             .await
     }
 
-    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &Updates) {
-        light_result(
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        report_light_result(
             updates,
             self.key,
             self.request_id,
@@ -245,7 +245,7 @@ impl Request for ReadDpi {
             .await
     }
 
-    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &Updates) {
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
         let _ = self.reply.send(or_unavailable(outcome));
     }
 }
@@ -265,7 +265,7 @@ impl Request for ReadSmartShift {
             .await
     }
 
-    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &Updates) {
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
         let _ = self.reply.send(or_unavailable(outcome));
     }
 }
@@ -284,7 +284,7 @@ impl Request for ReloadConfig {
         client.reload_config(context::current()).await
     }
 
-    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &Updates) {
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
         if let Ok(verdict) = outcome {
             let _ = updates.send(GuiUpdate::ConfigReloadResult(verdict));
         }
@@ -307,15 +307,15 @@ impl Request for RequestAccessibilityPrompt {
             .await
     }
 
-    fn deliver(self, _: Result<Self::Answer, Unavailable>, _: &Updates) {}
+    fn deliver(self, _: Result<Self::Answer, Unavailable>, _: &UpdateSender) {}
 }
 
 /// An accepted pairing command needs no reply — its progress shows up in the
 /// observed state. A *rejected* one never becomes a session, and neither does
 /// one the agent never received, so the refusal is reported here or the
 /// window would wait for something that will never come.
-fn pairing_refusal(
-    updates: &Updates,
+fn report_pairing_refusal(
+    updates: &UpdateSender,
     outcome: Result<Result<(), PairingCommandError>, Unavailable>,
 ) {
     let failure = match outcome {
@@ -340,8 +340,8 @@ impl Request for StartPairing {
             .await
     }
 
-    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &Updates) {
-        pairing_refusal(updates, outcome);
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        report_pairing_refusal(updates, outcome);
     }
 }
 
@@ -357,8 +357,8 @@ impl Request for PairDevice {
         client.pair_device(context::current(), self.address).await
     }
 
-    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &Updates) {
-        pairing_refusal(updates, outcome);
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        report_pairing_refusal(updates, outcome);
     }
 }
 
@@ -374,7 +374,7 @@ impl Request for CancelPairing {
         client.cancel_pairing(context::current()).await
     }
 
-    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &Updates) {
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
         if let Ok(Err(refused)) = outcome {
             let _ = updates.send(GuiUpdate::PairingUndeliverable(PairingFailure::from(
                 refused,
@@ -400,7 +400,7 @@ impl Request for PollEventMonitor {
         client.poll_event_monitor(context::current()).await
     }
 
-    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &Updates) {
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
         let _ = self.reply.send(outcome.unwrap_or_default());
     }
 }
@@ -430,7 +430,7 @@ macro_rules! commands {
             pub(super) async fn run(
                 self,
                 client: Option<&AgentClient>,
-                updates: &Updates,
+                updates: &UpdateSender,
             ) -> Result<(), LinkLost> {
                 match self {
                     $($(#[$cfg])* Self::$variant(request) => run(request, client, updates).await,)*

@@ -18,7 +18,7 @@ use tarpc::client::RpcError;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
-use super::{GuiUpdate, Wire};
+use super::{Effects, GuiUpdate};
 
 /// How long the client may go without a usable connection before the GUI is
 /// told the agent is genuinely unreachable rather than still starting (agent
@@ -190,11 +190,11 @@ impl Link {
     /// failed — the GUI has then been told whatever that failure means for it.
     pub(super) async fn ensure(
         &mut self,
-        wire: &mut impl Wire,
+        effects: &mut impl Effects,
         updates: &mpsc::UnboundedSender<GuiUpdate>,
     ) -> Option<&AgentClient> {
         if let Self::Down(down) = self {
-            match wire.connect().await {
+            match effects.connect().await {
                 Ok(client) => {
                     debug!("connected to agent IPC socket");
                     *self = Self::Up(Up::new(client));

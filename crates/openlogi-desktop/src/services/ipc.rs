@@ -119,7 +119,7 @@ pub fn spawn() -> IpcClient {
     let (commands, mut cmd_rx) = mpsc::unbounded_channel::<Command>();
 
     let started = client::spawn_client_thread("openlogi-ipc-client", move || async move {
-        observe_loop(&mut Socket, &update_tx, &mut cmd_rx).await;
+        observe_loop(&mut System, &update_tx, &mut cmd_rx).await;
     });
     if let Err(error) = started {
         warn!(%error, "could not start the IPC client thread — agent state unavailable");
@@ -130,17 +130,17 @@ pub fn spawn() -> IpcClient {
 
 /// Where the agent is reached and how it is brought up — the loop's only two
 /// effects on the world, behind one seam so the tests can script them.
-trait Wire {
+trait Effects {
     /// Connect to the agent and complete the handshake as the GUI.
     async fn connect(&mut self) -> Result<AgentClient, ConnectError>;
     /// Start the agent when the socket stays down; see `launch::spawn_agent`.
     fn spawn_agent(&mut self);
 }
 
-/// The agent's local socket and its supervised launch paths.
-struct Socket;
+/// The real thing: the agent's local socket and its supervised launch paths.
+struct System;
 
-impl Wire for Socket {
+impl Effects for System {
     async fn connect(&mut self) -> Result<AgentClient, ConnectError> {
         client::connect_as(ClientKind::Gui).await
     }
@@ -159,7 +159,7 @@ impl Wire for Socket {
 /// the poll stays in flight across command handling, so a device write never
 /// cancels it.
 async fn observe_loop(
-    wire: &mut impl Wire,
+    effects: &mut impl Effects,
     update_tx: &mpsc::UnboundedSender<GuiUpdate>,
     cmd_rx: &mut mpsc::UnboundedReceiver<Command>,
 ) {
@@ -193,13 +193,13 @@ async fn observe_loop(
             // delivered at the end of this turn if a connection exists.
             Woken::Command(Some(Command::ReloadConfig(_))) => reload_owed = true,
             Woken::Command(Some(cmd)) => {
-                let client = link.ensure(wire, update_tx).await;
+                let client = link.ensure(effects, update_tx).await;
                 if cmd.run(client, update_tx).await.is_err() {
                     link.lose(Instant::now());
                 }
             }
             Woken::Reconnect => {
-                link.ensure(wire, update_tx).await;
+                link.ensure(effects, update_tx).await;
             }
         }
         // Whatever this turn did to the link, a held reload goes out the
@@ -219,7 +219,7 @@ async fn observe_loop(
             let _ = update_tx.send(notice);
         }
         if reflex.should_fire(&link, now) {
-            wire.spawn_agent();
+            effects.spawn_agent();
             reflex.fired(now);
         }
     }
@@ -304,14 +304,14 @@ mod tests {
         (client, reloads)
     }
 
-    /// A scripted agent socket: connect attempts pop the script front to back
-    /// and find the socket down once it runs out; launches are only counted.
-    struct ScriptedWire {
+    /// Scripted effects: connect attempts pop the script front to back and
+    /// find the socket down once it runs out; launches are only counted.
+    struct ScriptedEffects {
         attempts: VecDeque<Result<AgentClient, ConnectError>>,
         launches: usize,
     }
 
-    impl ScriptedWire {
+    impl ScriptedEffects {
         fn answering(
             attempts: impl IntoIterator<Item = Result<AgentClient, ConnectError>>,
         ) -> Self {
@@ -322,7 +322,7 @@ mod tests {
         }
     }
 
-    impl Wire for ScriptedWire {
+    impl Effects for ScriptedEffects {
         #[expect(
             clippy::unused_async_trait_impl,
             reason = "the trait is async for the real socket; the script answers from memory"
@@ -368,13 +368,13 @@ mod tests {
         // for the agent — not be reported as a failure that the agent's
         // arrival could never clear.
         let (agent, reloads) = scripted_agent(OnReload::Accept);
-        let mut wire = ScriptedWire::answering([down(), down(), Ok(agent)]);
+        let mut effects = ScriptedEffects::answering([down(), down(), Ok(agent)]);
         let (update_tx, mut updates) = mpsc::unbounded_channel();
         let (commands, mut cmd_rx) = mpsc::unbounded_channel();
         commands.send(ReloadConfig.into()).unwrap();
 
         let verdict = tokio::select! {
-            () = observe_loop(&mut wire, &update_tx, &mut cmd_rx) => {
+            () = observe_loop(&mut effects, &update_tx, &mut cmd_rx) => {
                 panic!("the loop ends only once the GUI hangs up")
             }
             verdict = reload_verdict(&mut updates) => verdict,
@@ -387,7 +387,7 @@ mod tests {
         );
         assert_eq!(reloads.load(Ordering::SeqCst), 1, "delivered exactly once");
         assert_eq!(
-            wire.launches, 1,
+            effects.launches, 1,
             "holding the reload does not stall the spawn reflex"
         );
     }
@@ -398,13 +398,13 @@ mod tests {
         // owed and reaches the replacement, which answers for itself.
         let (dying, dying_reloads) = scripted_agent(OnReload::Vanish);
         let (successor, successor_reloads) = scripted_agent(OnReload::Accept);
-        let mut wire = ScriptedWire::answering([Ok(dying), Ok(successor)]);
+        let mut effects = ScriptedEffects::answering([Ok(dying), Ok(successor)]);
         let (update_tx, mut updates) = mpsc::unbounded_channel();
         let (commands, mut cmd_rx) = mpsc::unbounded_channel();
         commands.send(ReloadConfig.into()).unwrap();
 
         let verdict = tokio::select! {
-            () = observe_loop(&mut wire, &update_tx, &mut cmd_rx) => {
+            () = observe_loop(&mut effects, &update_tx, &mut cmd_rx) => {
                 panic!("the loop ends only once the GUI hangs up")
             }
             verdict = reload_verdict(&mut updates) => verdict,
@@ -424,7 +424,7 @@ mod tests {
         // A read cannot wait for an agent the way a reload does: the panel is
         // showing a spinner for it. Transient, so the panel keeps retrying
         // instead of latching "unsupported".
-        let mut wire = ScriptedWire::answering([]);
+        let mut effects = ScriptedEffects::answering([]);
         let (update_tx, _updates) = mpsc::unbounded_channel();
         let (commands, mut cmd_rx) = mpsc::unbounded_channel();
         let (reply, answer) = oneshot::channel();
@@ -439,7 +439,7 @@ mod tests {
             .unwrap();
 
         let answer = tokio::select! {
-            () = observe_loop(&mut wire, &update_tx, &mut cmd_rx) => {
+            () = observe_loop(&mut effects, &update_tx, &mut cmd_rx) => {
                 panic!("the loop ends only once the GUI hangs up")
             }
             answer = answer => answer.expect("every read is answered"),
@@ -454,7 +454,7 @@ mod tests {
         // spot, and the agent's own verdict — not a local one — is what the
         // caller hears.
         let (agent, _) = scripted_agent(OnReload::Accept);
-        let mut wire = ScriptedWire::answering([Ok(agent)]);
+        let mut effects = ScriptedEffects::answering([Ok(agent)]);
         let (update_tx, _updates) = mpsc::unbounded_channel();
         let (commands, mut cmd_rx) = mpsc::unbounded_channel();
         let (reply, answer) = oneshot::channel();
@@ -469,13 +469,13 @@ mod tests {
             .unwrap();
 
         let answer = tokio::select! {
-            () = observe_loop(&mut wire, &update_tx, &mut cmd_rx) => {
+            () = observe_loop(&mut effects, &update_tx, &mut cmd_rx) => {
                 panic!("the loop ends only once the GUI hangs up")
             }
             answer = answer => answer.expect("every read is answered"),
         };
 
         assert!(matches!(answer, Err(WriteError::AmbiguousRawDevice)));
-        assert_eq!(wire.launches, 0, "a reachable agent is never spawned at");
+        assert_eq!(effects.launches, 0, "a reachable agent is never spawned at");
     }
 }
