@@ -5,7 +5,7 @@ use gpui::{
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
-    Icon, IconName, TitleBar,
+    Icon, IconName, Root, TitleBar,
     button::{Button, ButtonVariants as _},
     v_flex,
 };
@@ -468,6 +468,14 @@ fn app_title_bar(cx: &App) -> impl IntoElement {
     )
 }
 
+/// The component root stores modal state, while the application view chooses
+/// where its sheet, dialog, and notification layers sit in the paint order.
+fn with_root_layers(root: gpui::Div, window: &mut Window, cx: &mut App) -> gpui::Div {
+    root.children(Root::render_sheet_layer(window, cx))
+        .children(Root::render_dialog_layer(window, cx))
+        .children(Root::render_notification_layer(window, cx))
+}
+
 impl Render for AppView {
     #[expect(
         clippy::too_many_lines,
@@ -506,8 +514,7 @@ impl Render for AppView {
         self.config_issue_visible = config_issue.is_some();
         if let Some(issue) = config_issue {
             window.set_window_title("OpenLogi");
-            return root
-                .child(status::config_issue_body(issue, cx))
+            return with_root_layers(root.child(status::config_issue_body(issue, cx)), window, cx)
                 .into_any_element();
         }
 
@@ -524,15 +531,18 @@ impl Render for AppView {
         let status = match link {
             AgentLink::Connecting => {
                 window.set_window_title("OpenLogi");
-                return root.child(status::connecting_body(cx)).into_any_element();
+                return with_root_layers(root.child(status::connecting_body(cx)), window, cx)
+                    .into_any_element();
             }
             AgentLink::Unreachable => {
                 window.set_window_title("OpenLogi");
-                return root.child(status::unreachable_body(cx)).into_any_element();
+                return with_root_layers(root.child(status::unreachable_body(cx)), window, cx)
+                    .into_any_element();
             }
             AgentLink::OutdatedGui => {
                 window.set_window_title("OpenLogi");
-                return root.child(status::outdated_gui_body(cx)).into_any_element();
+                return with_root_layers(root.child(status::outdated_gui_body(cx)), window, cx)
+                    .into_any_element();
             }
             AgentLink::Ready(status) => status,
         };
@@ -540,7 +550,8 @@ impl Render for AppView {
         let granted = status.accessibility_granted;
         if !granted && !self.accessibility_dismissed {
             window.set_window_title("OpenLogi");
-            return root.child(Self::accessibility_gate(cx)).into_any_element();
+            return with_root_layers(root.child(Self::accessibility_gate(cx)), window, cx)
+                .into_any_element();
         }
 
         let has_device = AppState::try_global(cx)
@@ -634,10 +645,11 @@ impl Render for AppView {
             )
         };
 
-        root.child(header_el)
+        let root = root
+            .child(header_el)
             .child(content_el)
-            .when(!granted, |this| this.child(status::attention_footer(cx)))
-            .into_any_element()
+            .when(!granted, |this| this.child(status::attention_footer(cx)));
+        with_root_layers(root, window, cx).into_any_element()
     }
 }
 
