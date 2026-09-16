@@ -306,7 +306,7 @@ async fn acquire_capture_ownership() -> Result<InstanceGuard> {
     // The agent acquires this same lock before any HID I/O. An endpoint probe
     // alone misses both early startup and a relaunch after the probe returns.
     let guard = single_instance::acquire(Role::Agent).context(
-        "refusing direct fixture capture: could not acquire agent.lock; \
+        "refusing direct fixture capture: could not take the agent's instance lock; \
          stop the OpenLogi agent and any other fixture capture before retrying",
     )?;
     match tokio::time::timeout(AGENT_PROBE_TIMEOUT, client::probe_version()).await {
