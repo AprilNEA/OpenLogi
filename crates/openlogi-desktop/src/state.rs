@@ -289,14 +289,14 @@ impl AppState {
             state.persist_config("device identity");
         }
         if state.config.should_reload_agent() {
-            state.send_ipc(crate::services::ipc::Command::ReloadConfig);
+            state.send_ipc(crate::services::ipc::ReloadConfig);
         }
         state
     }
     /// Send a device command to the agent over IPC, logging a dropped channel
     /// (the client thread is gone) rather than surfacing it.
-    fn send_ipc(&self, command: crate::services::ipc::Command) -> bool {
-        if self.ipc_commands.send(command).is_err() {
+    fn send_ipc(&self, command: impl Into<crate::services::ipc::Command>) -> bool {
+        if self.ipc_commands.send(command.into()).is_err() {
             warn!("IPC client thread is gone — device command dropped");
             return false;
         }
@@ -312,7 +312,7 @@ impl AppState {
     /// config and surfaces the persistence error in the GUI.
     fn persist_and_reload(&mut self, what: &str) -> bool {
         if self.persist_config(what) {
-            self.send_ipc(crate::services::ipc::Command::ReloadConfig);
+            self.send_ipc(crate::services::ipc::ReloadConfig);
             true
         } else {
             false

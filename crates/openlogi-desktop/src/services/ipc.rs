@@ -26,9 +26,9 @@
 //! closes; a *hung* one is noticed when its hold window passes without an
 //! answer.
 //!
-//! Device commands are transient: one that finds no connection is answered
-//! locally (`reply_disconnected`) and the next snapshot repairs the panel. A
-//! config reload is not — `config.toml` has already changed on disk and the
+//! Device commands are transient: one that finds no connection is answered as
+//! unavailable by the request itself ([`request::Request::deliver`]) and the
+//! next snapshot repairs the panel. A config reload is not — `config.toml` has already changed on disk and the
 //! agent must re-read it — but neither is it urgent while no agent is running:
 //! an agent that starts reads the file anyway. So `ReloadConfig` is held as
 //! state rather than dispatched: the loop delivers it over the next live
@@ -38,28 +38,32 @@
 
 use std::time::{Duration, Instant};
 
-use openlogi_core::config::Lighting;
-use openlogi_core::hid::{
-    DeviceRoute, Dpi, DpiInfo, LightCommand, ReceiverSelector, SmartShiftStatus, WriteError,
-};
+use openlogi_core::hid::{LightCommand, WriteError};
 use openlogi_ipc::client::{self, ConnectError};
 use openlogi_ipc::{
-    AgentClient, AgentSnapshot, ClientKind, ConfigReloadError, Observation, PairingCommandError,
-    PairingFailure,
+    AgentClient, AgentSnapshot, ClientKind, ConfigReloadError, Observation, PairingFailure,
 };
 use tarpc::client::RpcError;
-use tarpc::context;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 mod launch;
 mod link;
 mod reflex;
+mod request;
 
 pub use launch::mark_suite_quitting;
 use launch::spawn_agent;
 use link::Link;
 use reflex::SpawnReflex;
+use request::LinkLost;
+#[cfg(all(target_os = "macos", debug_assertions))]
+pub use request::PollEventMonitor;
+pub use request::{
+    CancelPairing, Command, PairDevice, ReadDpi, ReadSmartShift, ReloadConfig,
+    RequestAccessibilityPrompt, SetDpi, SetLight, SetLightManualPower, SetLighting, SetSmartShift,
+    StartPairing,
+};
 
 /// How long to wait before retrying a connect that failed. This is a retry
 /// cadence, not a poll: once connected, nothing here runs on a timer. Short
@@ -96,40 +100,6 @@ pub enum GuiUpdate {
     /// in the observed state to explain the silence. Reported locally rather
     /// than faked as a session the agent never had.
     PairingUndeliverable(PairingFailure),
-}
-
-/// A device command sent from the GPUI thread to the client thread. Reads carry
-/// a `oneshot` for the reply; standalone-light writes return a result event so
-/// the GUI can surface device failures after an optimistic update.
-pub enum Command {
-    SetDpi(DeviceRoute, Dpi),
-    SetLighting(DeviceRoute, Lighting),
-    SetLight(DeviceRoute, LightCommand, String, u64),
-    SetLightManualPower(DeviceRoute, bool, String, u64),
-    SetSmartShift(DeviceRoute, SmartShiftStatus),
-    ReadDpi(DeviceRoute, oneshot::Sender<Result<DpiInfo, WriteError>>),
-    ReadSmartShift(
-        DeviceRoute,
-        oneshot::Sender<Result<SmartShiftStatus, WriteError>>,
-    ),
-    /// Have the agent re-read `config.toml`. Held by the loop until a
-    /// connection exists (module doc), never answered locally.
-    ReloadConfig,
-    /// Ask the agent to fire the macOS Accessibility prompt. The agent owns the
-    /// CGEventTap, so the system dialog must name (and authorize) the *agent*
-    /// binary, not the GUI — prompting locally would grant the wrong process.
-    RequestAccessibilityPrompt,
-    /// Pairing (agent-owned, since it opens the receiver): begin a session,
-    /// pair a discovered device by address, or cancel. Progress arrives in the
-    /// observed state like everything else, not as replies to these commands.
-    StartPairing(ReceiverSelector),
-    PairDevice([u8; 6]),
-    CancelPairing,
-    /// Drain the agent's live event-monitor buffer for the debug Diagnostics
-    /// monitor. The first poll enables monitoring agent-side; the agent
-    /// auto-disables it once polls stop.
-    #[cfg(all(target_os = "macos", debug_assertions))]
-    PollEventMonitor(oneshot::Sender<Vec<openlogi_ipc::MonitorEvent>>),
 }
 
 /// Handle the GUI holds to talk to the agent: a stream of state updates and a
@@ -220,15 +190,13 @@ async fn observe_loop(
             Woken::Command(None) => break, // GUI dropped the sender → shut down
             // Not dispatched like the device commands below: held, and
             // delivered at the end of this turn if a connection exists.
-            Woken::Command(Some(Command::ReloadConfig)) => reload_owed = true,
-            Woken::Command(Some(cmd)) => match link.ensure(wire, update_tx).await {
-                Some(client) => {
-                    if handle(client, update_tx, cmd).await.is_err() {
-                        link.lose(Instant::now());
-                    }
+            Woken::Command(Some(Command::ReloadConfig(_))) => reload_owed = true,
+            Woken::Command(Some(cmd)) => {
+                let client = link.ensure(wire, update_tx).await;
+                if cmd.run(client, update_tx).await.is_err() {
+                    link.lose(Instant::now());
                 }
-                None => reply_disconnected(update_tx, cmd),
-            },
+            }
             Woken::Reconnect => {
                 link.ensure(wire, update_tx).await;
             }
@@ -237,13 +205,9 @@ async fn observe_loop(
         // moment there is one to carry it. A transport failure here is the
         // same as anywhere: drop the link, keep the reload for the next one.
         if reload_owed && let Some(client) = link.client() {
-            if handle(client, update_tx, Command::ReloadConfig)
-                .await
-                .is_ok()
-            {
-                reload_owed = false;
-            } else {
-                link.lose(Instant::now());
+            match request::run(ReloadConfig, Some(client), update_tx).await {
+                Ok(()) => reload_owed = false,
+                Err(LinkLost) => link.lose(Instant::now()),
             }
         }
         let now = Instant::now();
@@ -279,190 +243,16 @@ fn ticker(period: Duration) -> tokio::time::Interval {
     interval
 }
 
-/// Run one command over a live connection. `Err` signals a dropped connection
-/// so the caller reconnects; the command's own failure is reported back over
-/// its oneshot.
-async fn handle(
-    client: &AgentClient,
-    update_tx: &mpsc::UnboundedSender<GuiUpdate>,
-    cmd: Command,
-) -> Result<(), ()> {
-    let ctx = context::current();
-    match cmd {
-        Command::SetDpi(route, dpi) => log_apply(client.set_dpi(ctx, route, dpi).await)?,
-        Command::SetLighting(route, lighting) => {
-            log_apply(client.set_lighting(ctx, route, lighting).await)?;
-        }
-        Command::SetLight(route, command, key, request_id) => {
-            send_light_result(
-                update_tx,
-                key,
-                request_id,
-                command,
-                client.set_light(ctx, route, command).await,
-            )?;
-        }
-        Command::SetLightManualPower(route, enabled, key, request_id) => {
-            send_light_result(
-                update_tx,
-                key,
-                request_id,
-                LightCommand::Power(enabled),
-                client.set_light_manual_power(ctx, route, enabled).await,
-            )?;
-        }
-        Command::SetSmartShift(route, status) => {
-            log_apply(client.set_smartshift(ctx, route, status).await)?;
-        }
-        Command::ReadDpi(route, reply) => {
-            let _ = reply.send(rpc_result(client.read_dpi(ctx, route).await)?);
-        }
-        Command::ReadSmartShift(route, reply) => {
-            let _ = reply.send(rpc_result(client.read_smartshift(ctx, route).await)?);
-        }
-        Command::ReloadConfig => {
-            // Only the agent's own verdict is reported. A transport failure is
-            // a reload that did not happen, not one the agent refused: it
-            // propagates as a dropped link, and the loop — which holds the
-            // reload until it is answered — delivers it again over the next.
-            let result = rpc_result(client.reload_config(ctx).await)?;
-            let _ = update_tx.send(GuiUpdate::ConfigReloadResult(result));
-        }
-        Command::RequestAccessibilityPrompt => client
-            .request_accessibility_prompt(ctx)
-            .await
-            .map_err(|_| ())?,
-        Command::StartPairing(selector) => {
-            pairing_command_result(update_tx, client.start_pairing(ctx, selector).await)?;
-        }
-        Command::PairDevice(address) => {
-            pairing_command_result(update_tx, client.pair_device(ctx, address).await)?;
-        }
-        Command::CancelPairing => {
-            pairing_command_result(update_tx, client.cancel_pairing(ctx).await)?;
-        }
-        #[cfg(all(target_os = "macos", debug_assertions))]
-        Command::PollEventMonitor(reply) => {
-            let _ = reply.send(rpc_result(client.poll_event_monitor(ctx).await)?);
-        }
-    }
-    Ok(())
-}
-
-/// An accepted pairing command needs no reply — its progress shows up in the
-/// observed state. A *rejected* one never becomes a session, so the refusal is
-/// reported here or the window would wait for something that will never come.
-fn pairing_command_result(
-    update_tx: &mpsc::UnboundedSender<GuiUpdate>,
-    result: Result<Result<(), PairingCommandError>, RpcError>,
-) -> Result<(), ()> {
-    match result.map_err(|_| ())? {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            let _ = update_tx.send(GuiUpdate::PairingUndeliverable(PairingFailure::from(error)));
-            Ok(())
-        }
-    }
-}
-
-/// A fire-and-forget "apply now": `Err(())` (transport drop) propagates so the
-/// caller reconnects; a device-side failure is logged, not surfaced.
-fn log_apply(r: Result<Result<(), WriteError>, RpcError>) -> Result<(), ()> {
-    match r {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(e)) => {
-            warn!(error = %e, "agent rejected device command");
-            Ok(())
-        }
-        Err(_) => Err(()),
-    }
-}
-
-fn send_light_result(
-    update_tx: &mpsc::UnboundedSender<GuiUpdate>,
-    key: String,
-    request_id: u64,
-    command: LightCommand,
-    result: Result<Result<(), WriteError>, RpcError>,
-) -> Result<(), ()> {
-    if let Ok(result) = result {
-        let _ = update_tx.send(GuiUpdate::LightCommandResult {
-            key,
-            request_id,
-            command,
-            result,
-        });
-        Ok(())
-    } else {
-        let _ = update_tx.send(GuiUpdate::LightCommandResult {
-            key,
-            request_id,
-            command,
-            result: Err(WriteError::AgentUnavailable),
-        });
-        Err(())
-    }
-}
-
-/// Unwrap a tarpc transport result: `Err(())` (connection dropped) propagates so
-/// the caller reconnects; the inner application `Result` is returned for the reply.
-fn rpc_result<T>(r: Result<T, RpcError>) -> Result<T, ()> {
-    r.map_err(|_| ())
-}
-
-/// Reply to a read command that the agent is unreachable; writes are
-/// fire-and-forget so they have nothing to reply to.
-#[expect(
-    clippy::match_same_arms,
-    reason = "the two read arms send the same disconnect error to differently-typed reply channels, so they can't be merged"
-)]
-fn reply_disconnected(update_tx: &mpsc::UnboundedSender<GuiUpdate>, cmd: Command) {
-    // Transient, not a permanent feature error: the agent is just restarting,
-    // so the panel should keep retrying, not latch "unsupported".
-    match cmd {
-        Command::ReadDpi(_, reply) => {
-            let _ = reply.send(Err(WriteError::AgentUnavailable));
-        }
-        Command::ReadSmartShift(_, reply) => {
-            let _ = reply.send(Err(WriteError::AgentUnavailable));
-        }
-        Command::SetLight(_, command, key, request_id) => {
-            let _ = update_tx.send(GuiUpdate::LightCommandResult {
-                key,
-                request_id,
-                command,
-                result: Err(WriteError::AgentUnavailable),
-            });
-        }
-        Command::SetLightManualPower(_, enabled, key, request_id) => {
-            let _ = update_tx.send(GuiUpdate::LightCommandResult {
-                key,
-                request_id,
-                command: LightCommand::Power(enabled),
-                result: Err(WriteError::AgentUnavailable),
-            });
-        }
-        Command::StartPairing(_) | Command::PairDevice(_) => {
-            let _ = update_tx.send(GuiUpdate::PairingUndeliverable(
-                PairingFailure::AgentRestarted,
-            ));
-        }
-        Command::CancelPairing => {}
-        // Never dispatched here: `observe_loop` holds a reload instead and
-        // delivers it over the next live connection.
-        Command::ReloadConfig => {}
-        _ => {}
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use openlogi_core::hid::DeviceRoute;
     use openlogi_ipc::testing::in_memory_agent;
     use openlogi_ipc::{AgentRequest, AgentResponse};
+    use tokio::sync::oneshot;
 
     use super::*;
 
@@ -580,7 +370,7 @@ mod tests {
         let mut wire = ScriptedWire::answering([down(), down(), Ok(agent)]);
         let (update_tx, mut updates) = mpsc::unbounded_channel();
         let (commands, mut cmd_rx) = mpsc::unbounded_channel();
-        commands.send(Command::ReloadConfig).unwrap();
+        commands.send(ReloadConfig.into()).unwrap();
 
         let verdict = tokio::select! {
             () = observe_loop(&mut wire, &update_tx, &mut cmd_rx) => {
@@ -610,7 +400,7 @@ mod tests {
         let mut wire = ScriptedWire::answering([Ok(dying), Ok(successor)]);
         let (update_tx, mut updates) = mpsc::unbounded_channel();
         let (commands, mut cmd_rx) = mpsc::unbounded_channel();
-        commands.send(Command::ReloadConfig).unwrap();
+        commands.send(ReloadConfig.into()).unwrap();
 
         let verdict = tokio::select! {
             () = observe_loop(&mut wire, &update_tx, &mut cmd_rx) => {
@@ -638,7 +428,13 @@ mod tests {
         let (commands, mut cmd_rx) = mpsc::unbounded_channel();
         let (reply, answer) = oneshot::channel();
         commands
-            .send(Command::ReadDpi(some_route(), reply))
+            .send(
+                ReadDpi {
+                    route: some_route(),
+                    reply,
+                }
+                .into(),
+            )
             .unwrap();
 
         let answer = tokio::select! {
@@ -662,7 +458,13 @@ mod tests {
         let (commands, mut cmd_rx) = mpsc::unbounded_channel();
         let (reply, answer) = oneshot::channel();
         commands
-            .send(Command::ReadDpi(some_route(), reply))
+            .send(
+                ReadDpi {
+                    route: some_route(),
+                    reply,
+                }
+                .into(),
+            )
             .unwrap();
 
         let answer = tokio::select! {

@@ -28,6 +28,7 @@ use openlogi_ipc::{AgentSnapshot, AgentStatus, ForegroundApps, InventoryHealth, 
 
 use crate::features::mouse::thumbwheel::ThumbwheelPreset;
 use crate::services::assets::AssetResolver;
+use crate::services::ipc::{SetLight, SetLightManualPower};
 
 use super::bindings::apply_thumbwheel_pair;
 use super::devices::build_device_list;
@@ -88,7 +89,7 @@ fn smooth_scroll_change_reloads_the_agent_once() {
     assert!(state.app_settings().smooth_scroll);
     assert!(matches!(
         receiver.try_recv(),
-        Ok(crate::services::ipc::Command::ReloadConfig)
+        Ok(crate::services::ipc::Command::ReloadConfig(_))
     ));
 
     state.set_smooth_scroll(true);
@@ -466,7 +467,7 @@ fn canonical_profile_light_setting_errors_reach_desktop_state() {
     let mut reloads = 0;
     loop {
         match receiver.try_recv() {
-            Ok(crate::services::ipc::Command::ReloadConfig) => reloads += 1,
+            Ok(crate::services::ipc::Command::ReloadConfig(_)) => reloads += 1,
             Ok(_) => panic!("unexpected command before the light write"),
             Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
             Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
@@ -494,12 +495,12 @@ fn canonical_profile_light_setting_errors_reach_desktop_state() {
     let mut pending = Vec::new();
     loop {
         match receiver.try_recv() {
-            Ok(crate::services::ipc::Command::SetLight(
+            Ok(crate::services::ipc::Command::SetLight(SetLight {
                 route,
                 command,
-                command_key,
+                key: command_key,
                 request_id,
-            )) => {
+            })) => {
                 assert_eq!(&route, &raw_settings.route);
                 assert_eq!(command_key, key);
                 pending.push((command, request_id));
@@ -629,8 +630,11 @@ fn superseded_litra_light() -> StandaloneDevice {
 fn next_light_command(
     receiver: &mut tokio::sync::mpsc::UnboundedReceiver<crate::services::ipc::Command>,
 ) -> (openlogi_core::hid::LightCommand, u64) {
-    let Ok(crate::services::ipc::Command::SetLight(_, command, _, request_id)) =
-        receiver.try_recv()
+    let Ok(crate::services::ipc::Command::SetLight(SetLight {
+        command,
+        request_id,
+        ..
+    })) = receiver.try_recv()
     else {
         panic!("expected a light command");
     };
@@ -1788,21 +1792,19 @@ fn light_write_failure_reaches_the_gui_state() {
         .clone();
     let requested = LightSettings::new(false, 50, None);
     state.commit_light(requested);
-    let Ok(crate::services::ipc::Command::SetLight(
-        _,
-        openlogi_core::hid::LightCommand::Power(false),
-        _,
+    let Ok(crate::services::ipc::Command::SetLight(SetLight {
+        command: openlogi_core::hid::LightCommand::Power(false),
         request_id,
-    )) = receiver.try_recv()
+        ..
+    })) = receiver.try_recv()
     else {
         panic!("expected the power command");
     };
-    let Ok(crate::services::ipc::Command::SetLight(
-        _,
-        openlogi_core::hid::LightCommand::BrightnessPercent(50),
-        _,
-        brightness_request_id,
-    )) = receiver.try_recv()
+    let Ok(crate::services::ipc::Command::SetLight(SetLight {
+        command: openlogi_core::hid::LightCommand::BrightnessPercent(50),
+        request_id: brightness_request_id,
+        ..
+    })) = receiver.try_recv()
     else {
         panic!("expected the brightness command");
     };
@@ -1961,12 +1963,10 @@ fn transient_light_state_is_kept_in_memory_and_only_supported_commands_are_sent(
     assert!(!state.light_enabled());
     assert!(matches!(
         receiver.try_recv(),
-        Ok(crate::services::ipc::Command::SetLight(
-            _,
-            openlogi_core::hid::LightCommand::BrightnessPercent(37),
-            _,
-            _
-        ))
+        Ok(crate::services::ipc::Command::SetLight(SetLight {
+            command: openlogi_core::hid::LightCommand::BrightnessPercent(37),
+            ..
+        }))
     ));
     assert!(receiver.try_recv().is_err());
 }
@@ -2034,10 +2034,7 @@ fn camera_automation_preserves_manual_power_and_clears_transient_override() {
     assert!(matches!(
         receiver.try_recv(),
         Ok(crate::services::ipc::Command::SetLightManualPower(
-            _,
-            false,
-            _,
-            _
+            SetLightManualPower { enabled: false, .. }
         ))
     ));
 
@@ -2091,12 +2088,10 @@ fn enabling_camera_automation_queues_effective_camera_power() {
 
     assert!(matches!(
         receiver.try_recv(),
-        Ok(crate::services::ipc::Command::SetLight(
-            _,
-            openlogi_core::hid::LightCommand::Power(true),
-            _,
-            _
-        ))
+        Ok(crate::services::ipc::Command::SetLight(SetLight {
+            command: openlogi_core::hid::LightCommand::Power(true),
+            ..
+        }))
     ));
     assert!(!state.light().enabled);
     assert!(state.light_enabled());

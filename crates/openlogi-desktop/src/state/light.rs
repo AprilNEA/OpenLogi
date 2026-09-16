@@ -192,12 +192,12 @@ impl AppState {
         {
             pending.pending = pending.pending.saturating_add(1);
         }
-        if !self.send_ipc(crate::services::ipc::Command::SetLight(
+        if !self.send_ipc(crate::services::ipc::SetLight {
             route,
             command,
-            key.to_string(),
+            key: key.to_string(),
             request_id,
-        )) {
+        }) {
             self.apply_light_command_result(
                 key.to_string(),
                 request_id,
@@ -577,12 +577,12 @@ impl AppState {
                     superseded,
                 }),
             );
-            if !self.send_ipc(crate::services::ipc::Command::SetLightManualPower(
+            if !self.send_ipc(crate::services::ipc::SetLightManualPower {
                 route,
                 enabled,
-                runtime_key.to_string(),
+                key: runtime_key.to_string(),
                 request_id,
-            )) {
+            }) {
                 self.apply_light_command_result(
                     runtime_key.to_string(),
                     request_id,

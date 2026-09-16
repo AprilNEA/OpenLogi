@@ -4,11 +4,12 @@
 //! not the GUI). This window is a thin state machine that talks to the agent
 //! over IPC:
 //!
-//! - The buttons send [`Command::StartPairing`] / [`Command::PairDevice`] /
-//!   [`Command::CancelPairing`] through the agent IPC client.
-//! - [`PairingUi`] — the latest session state, updated from the agent's pairing
-//!   long-poll ([`crate::services::ipc::IpcClient::pairing`]) in [`crate::main`]'s
-//!   loop via [`apply_update`]. The view observes it and repaints on change.
+//! - The buttons send [`StartPairing`] / [`PairDevice`] / [`CancelPairing`]
+//!   through the agent IPC client.
+//! - [`PairingUi`] — the latest session state, taken from the agent's observed
+//!   state by the runtime via [`apply_state`], or a refusal the agent never
+//!   turned into a session via [`apply_undeliverable`]. The view observes it
+//!   and repaints on change.
 //!
 //! Bolt is interactive (discover → pick → enter a passkey on the device);
 //! Unifying just opens a lock and waits for the next device to link, so it
@@ -28,7 +29,7 @@ use openlogi_core::hid::{Click, PasskeyMethod, ReceiverSelector};
 use openlogi_ipc::{FoundDevice, PairingFailure, PairingPhase};
 
 use crate::app::menu::{CloseWindow, Minimize, Zoom};
-use crate::services::ipc::Command;
+use crate::services::ipc::{CancelPairing, Command, PairDevice, StartPairing};
 use crate::state::AppState;
 use crate::ui::theme::{self, Palette, Typography as _};
 use crate::windows::{self, AuxWindow};
@@ -146,14 +147,19 @@ fn pairing_failure_text(failure: &PairingFailure) -> String {
     }
 }
 
-fn send(cx: &App, command: Command) {
+fn send(cx: &App, command: impl Into<Command>) {
     if let Some(state) = AppState::try_global(cx) {
-        let _ = state.read(cx).ipc_sender().send(command);
+        let _ = state.read(cx).ipc_sender().send(command.into());
     }
 }
 
 fn start_search(cx: &mut App) {
-    send(cx, Command::StartPairing(ReceiverSelector::First));
+    send(
+        cx,
+        StartPairing {
+            selector: ReceiverSelector::First,
+        },
+    );
 }
 
 /// Standalone Add Device window root view.
@@ -288,7 +294,7 @@ fn pairing_body(state: PairingUi, pal: Palette) -> impl IntoElement {
                 ))
                 .child(
                     action_button("ad-done", tr!("common.done"), false)
-                        .on_click(|_, _, cx| send(cx, Command::CancelPairing)),
+                        .on_click(|_, _, cx| send(cx, CancelPairing)),
                 );
         }
         PairingUi::Failed(failure) => {
@@ -336,7 +342,7 @@ fn device_row(device: &FoundDevice, pal: Palette) -> impl IntoElement {
         .hover(|s| s.bg(pal.control_hover))
         .focus_visible(|s| s.bg(pal.control_hover))
         .child(div().text_body().child(name))
-        .on_click(move |_, _, cx| send(cx, Command::PairDevice(address)))
+        .on_click(move |_, _, cx| send(cx, PairDevice { address }))
 }
 
 /// The passkey-entry instructions panel.
@@ -428,5 +434,5 @@ fn action_button(id: &'static str, label: impl Into<SharedString>, primary: bool
 
 fn cancel_button() -> impl IntoElement {
     action_button("ad-cancel", tr!("common.cancel"), false)
-        .on_click(|_, _, cx| send(cx, Command::CancelPairing))
+        .on_click(|_, _, cx| send(cx, CancelPairing))
 }

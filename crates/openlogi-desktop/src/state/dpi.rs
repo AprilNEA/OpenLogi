@@ -132,7 +132,7 @@ impl AppState {
             );
         }
         if let Some(route) = route {
-            self.send_ipc(crate::services::ipc::Command::SetDpi(route, dpi));
+            self.send_ipc(crate::services::ipc::SetDpi { route, dpi });
         }
     }
 

@@ -232,7 +232,7 @@ impl AppState {
             }
         }
         if let Some(route) = route {
-            self.send_ipc(crate::services::ipc::Command::SetSmartShift(route, status));
+            self.send_ipc(crate::services::ipc::SetSmartShift { route, status });
         }
         // Reflect the write immediately so the panel doesn't flicker back to
         // the previous value before a re-read lands, but queue a confirming

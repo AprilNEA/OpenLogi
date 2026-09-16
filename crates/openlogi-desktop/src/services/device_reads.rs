@@ -12,7 +12,7 @@ use swr_core::{
 use swr_gpui::Query;
 use tokio::sync::mpsc;
 
-use super::ipc::Command;
+use super::ipc::{Command, ReadDpi, ReadSmartShift};
 use crate::state::{AppState, DeviceKey, DpiStatus, Load, SmartShiftLoad, StateEvent};
 
 const ROOT: &str = "device-read";
@@ -80,7 +80,7 @@ impl DeviceReads {
             move |_| {
                 let commands = commands.clone();
                 let route = fetch_route.clone();
-                read_ipc(move |reply| Command::ReadDpi(route, reply), commands)
+                read_ipc(move |reply| ReadDpi { route, reply }.into(), commands)
             },
             READ_RETRY_POLICY,
         )
@@ -170,7 +170,10 @@ impl DeviceReads {
             move |_| {
                 let commands = commands.clone();
                 let route = fetch_route.clone();
-                read_ipc(move |reply| Command::ReadSmartShift(route, reply), commands)
+                read_ipc(
+                    move |reply| ReadSmartShift { route, reply }.into(),
+                    commands,
+                )
             },
             READ_RETRY_POLICY,
         )
