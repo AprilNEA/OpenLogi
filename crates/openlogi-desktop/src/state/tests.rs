@@ -28,7 +28,9 @@ use openlogi_ipc::{AgentSnapshot, AgentStatus, ForegroundApps, InventoryHealth, 
 
 use crate::features::mouse::thumbwheel::ThumbwheelPreset;
 use crate::services::assets::AssetResolver;
-use crate::services::ipc::{SetLight, SetLightManualPower};
+use crate::services::ipc::SetLight;
+#[cfg(target_os = "macos")]
+use crate::services::ipc::SetLightManualPower;
 
 use super::bindings::apply_thumbwheel_pair;
 use super::devices::build_device_list;
