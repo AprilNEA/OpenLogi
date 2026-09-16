@@ -31,7 +31,9 @@ type Cached<T> = Option<Arc<T>>;
 
 struct DeviceRead<T: 'static> {
     route: DeviceRoute,
-    generation: u64,
+    /// The query flight this read belongs to: a callback from an older flight
+    /// is stale and must not touch the entry that replaced it.
+    flight: u64,
     load: Load<Arc<T>>,
     query: Query<Cached<T>, WriteError>,
     _observer: Subscription,
@@ -46,7 +48,7 @@ struct DeviceRead<T: 'static> {
 pub(crate) struct DeviceReads {
     client: Option<SwrClient>,
     runtime: Option<Arc<dyn Runtime>>,
-    next_generation: u64,
+    next_flight: u64,
     dpi: BTreeMap<DeviceKey, DeviceRead<DpiInfo>>,
     smartshift: BTreeMap<DeviceKey, DeviceRead<SmartShiftStatus>>,
 }
@@ -73,7 +75,7 @@ impl DeviceReads {
         let Some((client, runtime)) = self.cache() else {
             return;
         };
-        let generation = self.take_generation();
+        let flight = self.take_flight();
         let fetch_route = route.clone();
         let fetcher = Retry::new(
             runtime,
@@ -93,7 +95,7 @@ impl DeviceReads {
             let load = project_load(query_state.read(cx), dpi_error_is_permanent);
             if state
                 .device_reads_mut()
-                .update_dpi(&observed_key, generation, load)
+                .update_dpi(&observed_key, flight, load)
             {
                 state.apply_dpi_read(&observed_key);
                 cx.emit(StateEvent::DpiChanged(observed_key.clone()));
@@ -103,7 +105,7 @@ impl DeviceReads {
             key,
             DeviceRead {
                 route,
-                generation,
+                flight,
                 load,
                 query,
                 _observer: observer,
@@ -163,7 +165,7 @@ impl DeviceReads {
         } else if had_previous {
             self.clear::<SmartShiftStatus>(SMARTSHIFT, &key);
         }
-        let generation = self.take_generation();
+        let flight = self.take_flight();
         let fetch_route = route.clone();
         let fetcher = Retry::new(
             runtime,
@@ -192,7 +194,7 @@ impl DeviceReads {
             let load = project_load(query_state, smartshift_error_is_permanent);
             if state
                 .device_reads_mut()
-                .update_smartshift(&observed_key, generation, load)
+                .update_smartshift(&observed_key, flight, load)
             {
                 if settled {
                     state.apply_smartshift_read(&observed_key, write_id);
@@ -204,7 +206,7 @@ impl DeviceReads {
             key,
             DeviceRead {
                 route,
-                generation,
+                flight,
                 load,
                 query,
                 _observer: observer,
@@ -327,18 +329,14 @@ impl DeviceReads {
         client.invalidate(query_key(kind, key));
     }
 
-    fn take_generation(&mut self) -> u64 {
-        let generation = self.next_generation;
-        self.next_generation = self.next_generation.saturating_add(1);
-        generation
+    fn take_flight(&mut self) -> u64 {
+        let flight = self.next_flight;
+        self.next_flight = self.next_flight.saturating_add(1);
+        flight
     }
 
-    fn update_dpi(&mut self, key: &DeviceKey, generation: u64, load: DpiStatus) -> bool {
-        let Some(read) = self
-            .dpi
-            .get_mut(key)
-            .filter(|read| read.generation == generation)
-        else {
+    fn update_dpi(&mut self, key: &DeviceKey, flight: u64, load: DpiStatus) -> bool {
+        let Some(read) = self.dpi.get_mut(key).filter(|read| read.flight == flight) else {
             return false;
         };
         if read.load == load {
@@ -348,22 +346,17 @@ impl DeviceReads {
         true
     }
 
-    fn update_smartshift(
-        &mut self,
-        key: &DeviceKey,
-        generation: u64,
-        load: SmartShiftLoad,
-    ) -> bool {
+    fn update_smartshift(&mut self, key: &DeviceKey, flight: u64, load: SmartShiftLoad) -> bool {
         let Some(read) = self
             .smartshift
             .get_mut(key)
-            .filter(|read| read.generation == generation)
+            .filter(|read| read.flight == flight)
         else {
             return false;
         };
         // A confirmation commonly resolves to the optimistic value already in
         // `load`. It must still reach `apply_smartshift_read` so Applying can
-        // transition to Confirmed; the generation check is the stale guard.
+        // transition to Confirmed; the flight check is the stale guard.
         read.load = load;
         true
     }

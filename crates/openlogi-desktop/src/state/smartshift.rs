@@ -174,7 +174,7 @@ impl AppState {
         }
     }
     /// Apply a settled query to write-confirmation state if it still belongs to
-    /// the current write. The service's generation guard independently rejects
+    /// the current write. The service's flight guard independently rejects
     /// callbacks from queries replaced by a newer confirmation.
     pub(crate) fn apply_smartshift_read(&mut self, key: &DeviceKey, write_id: Option<u64>) {
         let current_write = self.devices.runtime.get(key).map(|entry| &entry.smartshift);

@@ -74,7 +74,7 @@ impl AppState {
             })
             .unwrap_or(DEFAULT_DPI)
     }
-    /// Seed the active panel from the latest query. Query generations fence
+    /// Seed the active panel from the latest query. Query flights fence
     /// disconnected routes; this selected-device check prevents an old
     /// gallery card from changing the shared visible value.
     pub(crate) fn apply_dpi_read(&mut self, key: &DeviceKey) {
