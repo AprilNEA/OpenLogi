@@ -572,6 +572,7 @@ fn label_control(
         Side::Right => model.left + model.width + SIDE_GAP,
     };
     let view = view.clone();
+    let control = label.id;
     let trigger = LabelTrigger {
         id: ("label-trigger", idx).into(),
         label,
@@ -586,13 +587,15 @@ fn label_control(
         .top(px(label.y - LABEL_H / 2.))
         .w(px(LABEL_W))
         .h(px(LABEL_H))
+        .debug_selector(move || format!("label-card-{control:?}"))
         .child(trigger)
 }
 
 struct BindingLabel {
     text: gpui::SharedString,
     /// Vendored action-icon asset path (see [`action_icon_path`]) for the
-    /// card's leading glyph, or `None` for the gesture summary / unbound.
+    /// card's leading glyph. Every constructor currently supplies one; the
+    /// `Option` is the seam for icon-less bindings.
     icon: Option<&'static str>,
 }
 
@@ -623,13 +626,11 @@ impl RenderOnce for LabelTrigger {
         // customised bindings use the same neutral value colour; only the
         // actively highlighted control takes the accent.
         let binding = self.binding.text;
-        let binding_description = binding.clone();
-        let binding_icon = self.binding.icon;
         let button_name = tr!(self.label.id.translation_key());
         BaseButton::new(self.id)
             .selected(selected)
             .accessibility_label(tr!("actions.bind_control", name => button_name.clone()))
-            .aria_description(binding_description)
+            .aria_description(binding.clone())
             .aria_selected(selected)
             .flex()
             .flex_col()
@@ -680,10 +681,21 @@ impl RenderOnce for LabelTrigger {
                 h_flex()
                     .items_center()
                     .gap_2()
+                    // The card is a `flex_col` Button, and Button centres its
+                    // children on the cross axis (here horizontal), so this row
+                    // sits at its natural width and, past the card's content
+                    // box, overflows both edges symmetrically (#1401: the
+                    // default "Forward (Button 5)" is already wider than the
+                    // card, and every longer locale is worse). Capping the row
+                    // is what lets the value's `flex_1` / `min_w_0` /
+                    // `text_ellipsis` below take effect; short rows keep their
+                    // centred natural width.
+                    .max_w_full()
+                    .debug_selector(move || format!("label-value-row-{btn:?}"))
                     // Leading action icon (same glyph as the picker rows), tinted
                     // with the value so it tracks the default / set / highlighted
-                    // state. Absent for the gesture summary / unbound.
-                    .when_some(binding_icon, |row, path| {
+                    // state.
+                    .when_some(self.binding.icon, |row, path| {
                         row.child(
                             svg()
                                 .path(path)
@@ -922,11 +934,12 @@ impl RenderOnce for HotspotTrigger {
 
 #[cfg(test)]
 mod tests {
-    use gpui::TestAppContext;
+    use gpui::{TestAppContext, size};
     use openlogi_core::config::Config;
 
     use super::*;
     use crate::services::assets::AssetResolver;
+    use crate::services::i18n::LOCALE_LOCK;
     use crate::state::ConfigPersistence;
 
     fn install_app_state(cx: &mut TestAppContext) {
@@ -946,6 +959,52 @@ mod tests {
             });
             AppState::set_global(state, cx);
         });
+    }
+
+    #[gpui::test]
+    fn long_bindings_stay_inside_their_label_card(cx: &mut TestAppContext) {
+        // #1401: the card's Button base centres the value row, so without a cap the
+        // row keeps its natural width and overflows both edges once the binding name
+        // is wider than the card. The English defaults are enough to trip it under
+        // the test text system ("Forward (Button 5)" measures a 206px row over a
+        // 156px card). Pinned to English under the lock: another test in this
+        // binary leaves the process locale at zh-CN, whose labels are short enough
+        // to fit and would pass this test with the cap removed.
+        let _locale = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+        cx.update(gpui_component::init);
+        install_app_state(cx);
+        let (view, cx) = cx.add_window_view(MouseModelView::new);
+        // Wide enough for labels on both sides (`model_layout` hides them under 960).
+        cx.simulate_resize(size(px(1200.), px(800.)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        // Selectors are `label-card-{MouseControlId:?}` / `label-value-row-{MouseControlId:?}`.
+        for (card_selector, row_selector) in [
+            (
+                "label-card-Button(Forward)",
+                "label-value-row-Button(Forward)",
+            ),
+            (
+                "label-card-Button(MiddleClick)",
+                "label-value-row-Button(MiddleClick)",
+            ),
+        ] {
+            let card = cx
+                .debug_bounds(card_selector)
+                .expect("the synthetic model renders a label card for this control");
+            let row = cx
+                .debug_bounds(row_selector)
+                .expect("the label card renders its value row");
+            assert!(
+                card.contains(&row.origin) && card.contains(&row.bottom_right()),
+                "{row_selector}: value row {row:?} must sit inside its card {card:?}"
+            );
+        }
+
+        drop(view);
+        cx.update(|window, _| window.remove_window());
+        cx.run_until_parked();
     }
 
     #[gpui::test]
