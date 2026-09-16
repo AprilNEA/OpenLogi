@@ -64,14 +64,11 @@ pub fn preview(icon: AppIcon) -> Option<PathBuf> {
     icons_dir(format!("{icon}.png"))
 }
 
-/// Resolve the installed application's icon for a per-app profile identifier.
+/// Resolve the installed application's icon for a profile identifier or app path.
 ///
-/// macOS profile identifiers are bundle identifiers, which [`appcatalog`]
-/// resolves through Launch Services into a small straight-alpha RGBA
-/// rendition of the icon Finder shows; it is wrapped as a ready-to-paint
-/// texture with no encode or decode in between. The lookup does blocking
-/// platform work — callers run it on the background executor, never on the
-/// render path. Other identifier namespaces have no icon backend yet.
+/// Exact app paths use the icon for that file. Profile identifiers resolve
+/// through the application registry. The lookup does blocking platform work —
+/// callers run it on the background executor, never on the render path.
 #[must_use]
 pub fn application_icon(identifier: &str) -> Option<Arc<gpui::RenderImage>> {
     #[cfg(target_os = "macos")]
@@ -82,7 +79,11 @@ pub fn application_icon(identifier: &str) -> Option<Arc<gpui::RenderImage>> {
         /// display size at 2× scale, far below the 1024 px source renditions.
         const ICON_EDGE: u32 = 64;
 
-        let identity = ApplicationIdentity::new(IdentityKind::MacBundleIdentifier, identifier);
+        if let Some(icon) = openlogi_ui::application_icon::application_icon(identifier, ICON_EDGE) {
+            return Some(icon);
+        }
+        let identity =
+            ApplicationIdentity::new(IdentityKind::MacBundleIdentifier, identifier.to_string());
         let icon = match appcatalog::application_icon(&identity, ICON_EDGE) {
             Ok(icon) => icon?,
             Err(error) => {
@@ -90,7 +91,7 @@ pub fn application_icon(identifier: &str) -> Option<Arc<gpui::RenderImage>> {
                 return None;
             }
         };
-        render_image_from_rgba(icon.width(), icon.height(), icon.into_rgba())
+        openlogi_ui::image::render_image_from_rgba(icon.width(), icon.height(), icon.into_rgba())
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -99,25 +100,30 @@ pub fn application_icon(identifier: &str) -> Option<Arc<gpui::RenderImage>> {
     }
 }
 
-/// Wrap straight-alpha RGBA pixels as a gpui texture.
+/// Resolve a macOS bundle identifier to its launch path.
 ///
-/// [`gpui::RenderImage`] frames hold BGRA — the mirror of what gpui's own
-/// image decoding produces — so the red and blue channels swap in place and
-/// the buffer is consumed whole.
-#[cfg(target_os = "macos")]
-fn render_image_from_rgba(
-    width: u32,
-    height: u32,
-    mut rgba: Vec<u8>,
-) -> Option<Arc<gpui::RenderImage>> {
-    let (pixels, _) = rgba.as_chunks_mut::<4>();
-    for pixel in pixels {
-        pixel.swap(0, 2);
+/// The lookup is blocking and must run on the background executor.
+#[must_use]
+pub fn application_path(identifier: &str) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::rc::autoreleasepool;
+        use objc2_app_kit::NSWorkspace;
+        use objc2_foundation::NSString;
+
+        autoreleasepool(|_| {
+            let identifier = NSString::from_str(identifier);
+            NSWorkspace::sharedWorkspace()
+                .URLForApplicationWithBundleIdentifier(&identifier)?
+                .path()
+                .map(|path| path.to_string())
+        })
     }
-    let buffer = image::RgbaImage::from_raw(width, height, rgba)?;
-    Some(Arc::new(gpui::RenderImage::new(vec![image::Frame::new(
-        buffer,
-    )])))
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = identifier;
+        None
+    }
 }
 
 /// Resolve `file` inside the bundle's icon directory, if it is there.

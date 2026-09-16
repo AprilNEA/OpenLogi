@@ -25,7 +25,7 @@ pub(crate) struct ProfileIconCache {
 }
 
 impl ProfileIconCache {
-    pub(super) fn state(&self, app: &str) -> AppIconState {
+    pub(crate) fn state(&self, app: &str) -> AppIconState {
         match self.icons.borrow().get(app) {
             Some(Some(icon)) => AppIconState::Ready(icon.clone()),
             Some(None) => AppIconState::Missing,
@@ -37,7 +37,7 @@ impl ProfileIconCache {
 /// One application icon as the UI sees it right now. The two icon-less states
 /// render differently so an in-flight resolve does not look like a permanent
 /// missing icon.
-pub(super) enum AppIconState {
+pub(crate) enum AppIconState {
     Ready(Arc<RenderImage>),
     Loading,
     Missing,
@@ -63,6 +63,8 @@ pub(crate) struct AppCatalogPicker {
     /// One in-flight icon resolve per application; dropping the picker
     /// cancels whatever has not landed yet.
     icon_tasks: HashMap<String, Task<()>>,
+    application_paths: HashMap<String, Option<String>>,
+    application_path_tasks: HashMap<String, Task<()>>,
     /// Keeps the catalog list's scroll position across repaints and feeds its
     /// scrollbar.
     list_scroll: UniformListScrollHandle,
@@ -118,6 +120,8 @@ impl AppCatalogPicker {
             preferred_identity: preferred_identity_kind(None),
             icons,
             icon_tasks: HashMap::new(),
+            application_paths: HashMap::new(),
+            application_path_tasks: HashMap::new(),
             list_scroll: UniformListScrollHandle::new(),
             _search_subscription: search_subscription,
             _discovery_task: discovery_task,
@@ -149,7 +153,7 @@ impl AppCatalogPicker {
     /// Start a background resolve for `app`'s icon unless one already
     /// finished or is in flight. Each application resolves independently and
     /// repaints on arrival, so a slow icon never holds up the rest.
-    pub(super) fn ensure_icon(&mut self, app: &str, cx: &mut Context<Self>) {
+    pub(crate) fn ensure_icon(&mut self, app: &str, cx: &mut Context<Self>) {
         if self.icons.icons.borrow().contains_key(app) || self.icon_tasks.contains_key(app) {
             return;
         }
@@ -180,6 +184,38 @@ impl AppCatalogPicker {
         self.icons.state(app)
     }
 
+    pub(super) fn ensure_application_path(&mut self, app: &str, cx: &mut Context<Self>) {
+        if self.application_paths.contains_key(app) || self.application_path_tasks.contains_key(app)
+        {
+            return;
+        }
+        let app = app.to_string();
+        let task = cx.spawn({
+            let app = app.clone();
+            async move |picker, cx| {
+                let path = cx
+                    .background_executor()
+                    .spawn({
+                        let app = app.clone();
+                        async move { crate::platform::app_icon::application_path(&app) }
+                    })
+                    .await;
+                picker
+                    .update(cx, |picker, cx| {
+                        picker.application_paths.insert(app.clone(), path);
+                        picker.application_path_tasks.remove(&app);
+                        cx.notify();
+                    })
+                    .ok();
+            }
+        });
+        self.application_path_tasks.insert(app, task);
+    }
+
+    pub(super) fn application_path(&self, app: &str) -> Option<&str> {
+        self.application_paths.get(app)?.as_deref()
+    }
+
     pub(super) fn available_profiles(
         &self,
         observed: &HashSet<String>,
@@ -200,6 +236,7 @@ impl AppCatalogPicker {
                 }
                 Some(ProfileChoice {
                     app,
+                    launch_target: application_launch_target(application),
                     name: application.name.clone(),
                     override_count: 0,
                     persisted: false,
@@ -214,6 +251,20 @@ impl AppCatalogPicker {
         });
         CatalogPresentation::Ready(profiles)
     }
+}
+
+fn application_launch_target(application: &Application) -> Option<String> {
+    if application
+        .identities
+        .iter()
+        .any(|identity| identity.kind() == IdentityKind::MacBundleIdentifier)
+    {
+        return Some(application.registration.to_string_lossy().into_owned());
+    }
+    application
+        .executable
+        .as_deref()
+        .map(|path| path.to_string_lossy().into_owned())
 }
 
 fn identity_for_application(
@@ -284,7 +335,38 @@ mod tests {
 
     use appcatalog::{Application, ApplicationIdentity, IdentityKind};
 
-    use super::identity_for_application;
+    use super::{application_launch_target, identity_for_application};
+
+    #[test]
+    fn launch_target_uses_bundle_on_macos_and_executable_elsewhere() {
+        let macos = Application {
+            name: "Editor".into(),
+            identities: vec![ApplicationIdentity::new(
+                IdentityKind::MacBundleIdentifier,
+                "org.example.Editor",
+            )],
+            executable: Some("/Applications/Editor.app/Contents/MacOS/Editor".into()),
+            registration: "/Applications/Editor.app".into(),
+            icon: None,
+        };
+        assert_eq!(
+            application_launch_target(&macos).as_deref(),
+            Some("/Applications/Editor.app")
+        );
+
+        let mut linux = application_with_identities(vec![ApplicationIdentity::new(
+            IdentityKind::LinuxDesktopId,
+            "org.example.Editor",
+        )]);
+        linux.executable = Some("/usr/bin/editor".into());
+        linux.registration = "/usr/share/applications/editor.desktop".into();
+        assert_eq!(
+            application_launch_target(&linux).as_deref(),
+            Some("/usr/bin/editor")
+        );
+        linux.executable = None;
+        assert_eq!(application_launch_target(&linux), None);
+    }
 
     #[test]
     fn observed_identity_wins_over_the_platform_default() {
