@@ -18,8 +18,6 @@
 //! the method snapshot. The method therefore closes startup and extension-
 //! restart races without becoming a periodic polling path.
 
-use std::sync::{Arc, Mutex};
-use std::thread;
 use std::time::Duration;
 
 use futures_lite::{StreamExt as _, future};
@@ -28,7 +26,7 @@ use zbus::blocking::Connection;
 use zbus::blocking::connection::Builder;
 use zbus::proxy;
 
-use super::{FrontmostSource, PublishAppId, RECONNECT_DELAY, StopToken, lock_unpoisoned};
+use super::{FrontmostSource, PublishAppId, RECONNECT_DELAY, StopToken};
 
 /// Cap on every D-Bus call to the extension. Without it, a stalled GNOME Shell
 /// could block backend selection or an explicit snapshot read indefinitely.
@@ -128,11 +126,18 @@ impl GnomeShellSource {
                 return ConnectionOutcome::Stopped;
             }
             let event = future::race(
-                async { GnomeEvent::Focus(focus_changes.next().await) },
-                async { GnomeEvent::Owner(owner_changes.next().await) },
+                future::race(
+                    async { GnomeEvent::Focus(focus_changes.next().await) },
+                    async { GnomeEvent::Owner(owner_changes.next().await) },
+                ),
+                async {
+                    stop.stopped().await;
+                    GnomeEvent::Stop
+                },
             )
             .await;
             match event {
+                GnomeEvent::Stop => return ConnectionOutcome::Stopped,
                 GnomeEvent::Focus(Some(signal)) => match signal.args() {
                     Ok(args) => publish(app_id(args.wm_class().to_string())),
                     Err(error) => warn!("gnome-shell: malformed focus signal: {error}"),
@@ -165,6 +170,7 @@ fn app_id(wm_class: String) -> Option<String> {
 enum GnomeEvent<T, U> {
     Focus(Option<T>),
     Owner(Option<U>),
+    Stop,
 }
 
 enum ConnectionOutcome {
@@ -190,24 +196,10 @@ impl FrontmostSource for GnomeShellSource {
         stop: StopToken,
         publish: PublishAppId,
     ) -> Box<dyn FrontmostSource> {
-        // zbus owns its socket reader internally. A helper closes the worker's
-        // current connection when teardown is requested, waking both streams
-        // so the owning worker can synchronously return and join.
-        let active_connection = Arc::new(Mutex::new(None::<Connection>));
-        let stop_state = stop.state();
-        let connection_to_close = Arc::clone(&active_connection);
-        let stopper = thread::Builder::new()
-            .name("openlogi-frontmost-gnome-stop".into())
-            .spawn(move || {
-                stop_state.wait();
-                if let Some(conn) = lock_unpoisoned(&connection_to_close).take()
-                    && let Err(error) = conn.close()
-                {
-                    debug!("gnome-shell: failed to close observer connection: {error}");
-                }
-            })
-            .unwrap_or_else(|error| panic!("failed to start GNOME stop helper: {error}"));
-
+        // Stop wakes the observer through the stop token. Closing the
+        // connection from a helper thread to wake the streams instead left one
+        // socket descriptor open per observer renewal, which the idle-recovery
+        // cycle turns into a steady leak.
         loop {
             if stop.is_requested() {
                 break;
@@ -222,10 +214,8 @@ impl FrontmostSource for GnomeShellSource {
                 }
                 continue;
             };
-            *lock_unpoisoned(&active_connection) = Some(conn.clone());
             let outcome =
                 futures_lite::future::block_on(Self::observe_connection(conn, &stop, &publish));
-            lock_unpoisoned(&active_connection).take();
             self.conn = None;
 
             match outcome {
@@ -237,12 +227,6 @@ impl FrontmostSource for GnomeShellSource {
                     }
                 }
             }
-        }
-
-        // The helper is awake whenever the loop exits; joining proves no
-        // connection clone can be closed after this source returns to idle use.
-        if let Err(panic) = stopper.join() {
-            warn!("gnome-shell: stop helper panicked: {panic:?}");
         }
         self.conn = None;
         self
