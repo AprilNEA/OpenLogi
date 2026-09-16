@@ -333,7 +333,16 @@ contains only OpenLogi integration constraints and verification entrypoints.
 |---|---|
 | GPUI implementation, components, state, lifecycle, or testing | [gpui-kit](.agents/skills/gpui-kit/SKILL.md) |
 | GUI layout, styling, interaction, copy, or design review | [gpui-kit-design-guides](.agents/skills/gpui-kit-design-guides/SKILL.md) |
+| native UI verification, component gallery, mock-agent workflows, or visual/interaction regression tests | [testing-openlogi-ui](.agents/skills/testing-openlogi-ui/SKILL.md) |
+| missing HID devices, failed opens or pairing, unsupported features, or CLI/GUI disagreement | [triaging-openlogi-devices](.agents/skills/triaging-openlogi-devices/SKILL.md) |
+| selecting checks after changes or before an authorized commit/push | [verifying-openlogi-changes](.agents/skills/verifying-openlogi-changes/SKILL.md) |
+| recording, reviewing, or contributing device profiles and HID++ cassettes | [contributing-device-fixtures](.agents/skills/contributing-device-fixtures/SKILL.md) |
 | a macOS report of no devices / "Failed to open device" / which permission to grant, and any change to the permission, helper-launch, or bundle-signing code | `.claude/skills/openlogi-macos-permissions/SKILL.md` |
+
+The four OpenLogi workflow skills are maintained locally with the code. Keep
+mandatory invariants in this file and the scoped rules; link to those rules from
+skills rather than maintaining a second policy. Local skills have no upstream
+entry in `skills-lock.json`.
 
 The GPUI skills are imported from
 [longbridge/gpui-kit](https://github.com/longbridge/gpui-kit/tree/959ccc5ea1ec23be8283c2c326467699a9b44729/skills),

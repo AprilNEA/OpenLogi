@@ -45,9 +45,9 @@ paths:
 
 ## Verify in this repository
 
-Use the root [AGENTS.md](../../AGENTS.md) for checks and the
-[desktop guide](../../crates/openlogi-desktop/AGENTS.md#running-and-verifying) for
-the dev bundle, mock agent, and component gallery. Do not substitute upstream
-`script/check-ai` or starter-package commands. Exercise representative affected
-states, inspect fresh screenshots for visible changes, and report untested OS or
-hardware states. Update the gallery when a reusable component changes.
+Load [testing-openlogi-ui](../../.agents/skills/testing-openlogi-ui/SKILL.md) for
+focused GPUI tests, the dev bundle, mock agent, and component gallery. Use the root
+[AGENTS.md](../../AGENTS.md) for required checks; do not substitute upstream
+`script/check-ai` or starter-package commands. Exercise representative affected states,
+inspect fresh screenshots for visible changes, and report untested OS or hardware
+states. Update the gallery when a reusable component changes.
