@@ -25,11 +25,11 @@ pub(crate) struct ProfileIconCache {
 }
 
 impl ProfileIconCache {
-    pub(super) fn state(&self, app: &str) -> AppIconState {
+    pub(super) fn state(&self, app: &str) -> ApplicationIconState {
         match self.icons.borrow().get(app) {
-            Some(Some(icon)) => AppIconState::Ready(icon.clone()),
-            Some(None) => AppIconState::Missing,
-            None => AppIconState::Loading,
+            Some(Some(icon)) => ApplicationIconState::Ready(icon.clone()),
+            Some(None) => ApplicationIconState::Missing,
+            None => ApplicationIconState::Loading,
         }
     }
 }
@@ -37,7 +37,7 @@ impl ProfileIconCache {
 /// One application icon as the UI sees it right now. The two icon-less states
 /// render differently so an in-flight resolve does not look like a permanent
 /// missing icon.
-pub(super) enum AppIconState {
+pub(super) enum ApplicationIconState {
     Ready(Arc<RenderImage>),
     Loading,
     Missing,
@@ -176,7 +176,7 @@ impl AppCatalogPicker {
         self.icon_tasks.insert(app, task);
     }
 
-    pub(super) fn icon_state(&self, app: &str) -> AppIconState {
+    pub(super) fn icon_state(&self, app: &str) -> ApplicationIconState {
         self.icons.state(app)
     }
 
