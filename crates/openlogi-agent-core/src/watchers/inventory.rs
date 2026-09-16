@@ -9,7 +9,6 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::future::pending;
-use std::thread;
 use std::time::{Instant, SystemTime};
 
 use futures_lite::StreamExt as _;
@@ -264,27 +263,16 @@ fn spawn_inner(registry: Option<ChannelRegistry>, hardware: HardwareContext) -> 
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let worker_tx = event_tx.clone();
     let (refresh_tx, refresh_rx) = mpsc::channel(1);
-    let spawn_result = thread::Builder::new()
-        .name("openlogi-inventory-watcher".into())
-        .spawn(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    warn!(error = %e, "tokio runtime init failed; watcher exiting");
-                    return;
-                }
-            };
-            rt.block_on(run_watcher(worker_tx, refresh_rx, registry, hardware));
+    let started =
+        openlogi_core::runtime::spawn_thread("openlogi-inventory-watcher", move |runtime| {
+            runtime.block_on(run_watcher(worker_tx, refresh_rx, registry, hardware));
         });
-    if let Err(e) = spawn_result {
-        // OS thread / fork limits are non-fatal for the agent as a whole, but
-        // enumeration will never run. Say so — sending an empty *snapshot*
-        // here would forge a "checked, no devices" answer for a check that
-        // never happened.
-        warn!(error = %e, "could not spawn inventory watcher — device scanning unavailable");
+    if let Err(error) = started {
+        // OS thread / fork / runtime limits are non-fatal for the agent as a
+        // whole, but enumeration will never run. Say so — sending an empty
+        // *snapshot* here would forge a "checked, no devices" answer for a
+        // check that never happened.
+        warn!(%error, "could not start the inventory watcher — device scanning unavailable");
         let _ = event_tx.send(InventoryEvent::Unavailable);
     }
     InventoryWatcher {

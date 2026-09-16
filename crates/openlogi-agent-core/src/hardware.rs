@@ -253,10 +253,7 @@ impl<'a> DeviceOp<'a> {
 /// its OS thread onto. Logs and returns `None` on the rare case that
 /// initialization itself fails (e.g. OS resource exhaustion).
 fn one_shot_runtime(label: &str) -> Option<tokio::runtime::Runtime> {
-    match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
+    match openlogi_core::runtime::current_thread() {
         Ok(rt) => Some(rt),
         Err(e) => {
             warn!(error = %e, label, "tokio runtime init failed; write skipped");

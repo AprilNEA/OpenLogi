@@ -118,8 +118,8 @@ pub fn spawn() -> IpcClient {
     let (update_tx, updates) = mpsc::unbounded_channel();
     let (commands, mut cmd_rx) = mpsc::unbounded_channel::<Command>();
 
-    let started = client::spawn_client_thread("openlogi-ipc-client", move || async move {
-        observe_loop(&mut System, &update_tx, &mut cmd_rx).await;
+    let started = openlogi_core::runtime::spawn_thread("openlogi-ipc-client", move |runtime| {
+        runtime.block_on(observe_loop(&mut System, &update_tx, &mut cmd_rx));
     });
     if let Err(error) = started {
         warn!(%error, "could not start the IPC client thread — agent state unavailable");

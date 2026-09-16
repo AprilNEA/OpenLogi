@@ -5,10 +5,12 @@
 //! `hidpp`, `async-hid`, or any platform-specific event/window API; those live
 //! in sibling crates.
 //!
-//! The exceptions are feature-gated (both on by default): reading and writing
-//! that config file (`fs`), and locale negotiation (`locale`), which reads the
-//! host's language preference. Without them this crate touches no host at all,
-//! which is what the `wasm (portable crates)` CI job checks.
+//! The exceptions are feature-gated: reading and writing that config file
+//! (`fs`) and locale negotiation (`locale`), which reads the host's language
+//! preference, both on by default; and the dedicated tokio worker thread the
+//! host crates run async work on (`runtime`), off by default. Without them this
+//! crate touches no host at all, which is what the `wasm (portable crates)` CI
+//! job checks.
 
 #![deny(missing_docs)]
 
@@ -28,6 +30,8 @@ pub mod hid;
 pub mod locale;
 #[cfg(feature = "fs")]
 pub mod paths;
+#[cfg(feature = "runtime")]
+pub mod runtime;
 pub mod scroll;
 #[cfg(feature = "fs")]
 pub mod single_instance;

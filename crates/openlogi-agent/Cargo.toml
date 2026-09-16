@@ -23,7 +23,7 @@ path = "src/bin/mock_agent.rs"
 
 [dependencies]
 openlogi-agent-core = { path = "../openlogi-agent-core" }
-openlogi-core = { path = "../openlogi-core" }
+openlogi-core = { path = "../openlogi-core", features = ["runtime"] }
 openlogi-device = { path = "../openlogi-device" }
 openlogi-fixture = { workspace = true }
 openlogi-hid = { path = "../openlogi-hid" }

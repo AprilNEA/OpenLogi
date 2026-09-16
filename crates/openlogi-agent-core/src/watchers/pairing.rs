@@ -11,7 +11,6 @@
 //! global), instead of wiring a fresh channel on every window open.
 
 use std::future::Future;
-use std::thread;
 
 use openlogi_hid::{
     DiscoveredDevice, PairingCommand, PairingError, PairingEvent, ReceiverSelector,
@@ -93,23 +92,12 @@ pub fn spawn_with_hardware(
     let (ctrl_tx, ctrl_rx) = mpsc::unbounded_channel();
     let (evt_tx, evt_rx) = mpsc::unbounded_channel();
 
-    let spawn_result = thread::Builder::new()
-        .name("openlogi-pairing-watcher".into())
-        .spawn(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    warn!(error = %e, "tokio runtime init failed; pairing watcher exiting");
-                    return;
-                }
-            };
-            rt.block_on(run(ctrl_rx, evt_tx, hardware));
+    let started =
+        openlogi_core::runtime::spawn_thread("openlogi-pairing-watcher", move |runtime| {
+            runtime.block_on(run(ctrl_rx, evt_tx, hardware));
         });
-    if let Err(e) = spawn_result {
-        warn!(error = %e, "could not spawn pairing watcher thread");
+    if let Err(error) = started {
+        warn!(%error, "could not start the pairing watcher");
     }
     (ctrl_tx, evt_rx)
 }

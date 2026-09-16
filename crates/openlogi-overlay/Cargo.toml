@@ -15,7 +15,7 @@ name = "openlogi-overlay"
 path = "src/main.rs"
 
 [dependencies]
-openlogi-core = { path = "../openlogi-core" }
+openlogi-core = { path = "../openlogi-core", features = ["runtime"] }
 openlogi-hook = { path = "../openlogi-hook" }
 openlogi-ipc = { path = "../openlogi-ipc" }
 openlogi-ui = { path = "../openlogi-ui" }

@@ -139,10 +139,7 @@ fn light_worker_loop(
     receiver: mpsc::Receiver<LightApplyRequest>,
     generation: Arc<AtomicU64>,
 ) {
-    let rt = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
+    let rt = match openlogi_core::runtime::current_thread() {
         Ok(rt) => rt,
         Err(error) => {
             warn!(route = %target, error = %error, "light worker runtime init failed");

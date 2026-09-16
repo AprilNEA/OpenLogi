@@ -20,9 +20,8 @@
 //! from memory in that window is wedged, not busy.
 //!
 //! The rest of what every observing client repeats lives here too: the
-//! per-connection generation [`Ledger`], the request [`observe_context`] whose
-//! deadline outlasts the agent's hold, and the dedicated thread the GPUI
-//! processes run their client loop on ([`spawn_client_thread`]).
+//! per-connection generation [`Ledger`] and the request [`observe_context`]
+//! whose deadline outlasts the agent's hold.
 
 use std::cmp::Ordering;
 use std::future::Future;
@@ -265,31 +264,6 @@ pub fn observe_context() -> Context {
     let mut ctx = context::current();
     ctx.deadline = Instant::now() + OBSERVE_HOLD + OBSERVE_GRACE;
     ctx
-}
-
-/// Run an IPC client loop on a thread of its own.
-///
-/// The GPUI processes own no async runtime, so their agent client lives on a
-/// dedicated OS thread with a current-thread tokio runtime, and results cross
-/// back to the GPUI loop over channels. `run` is called on that thread and its
-/// future driven to completion there.
-///
-/// # Errors
-///
-/// Fails only if the runtime or the thread cannot be created; the caller
-/// decides what an app without its agent link does.
-pub fn spawn_client_thread<F, Fut>(name: &str, run: F) -> std::io::Result<()>
-where
-    F: FnOnce() -> Fut + Send + 'static,
-    Fut: Future<Output = ()>,
-{
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    std::thread::Builder::new()
-        .name(name.to_owned())
-        .spawn(move || runtime.block_on(run()))?;
-    Ok(())
 }
 
 #[cfg(test)]

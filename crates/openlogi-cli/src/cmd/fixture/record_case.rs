@@ -516,9 +516,7 @@ mod tests {
             }
         }
 
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
+        openlogi_core::runtime::current_thread()
             .unwrap()
             .block_on(async {
                 {
