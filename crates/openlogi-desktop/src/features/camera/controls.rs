@@ -748,7 +748,11 @@ fn section_indices(sliders: &[ControlSlider], lens: bool) -> Vec<usize> {
         .filter(|(_, s)| {
             matches!(
                 s.control,
-                CameraControl::Zoom | CameraControl::Focus | CameraControl::Exposure
+                CameraControl::Zoom
+                    | CameraControl::Pan
+                    | CameraControl::Tilt
+                    | CameraControl::Focus
+                    | CameraControl::Exposure
             ) == lens
         })
         .map(|(ix, _)| ix)
@@ -1102,6 +1106,8 @@ fn builtin_label(id: &str) -> SharedString {
 fn control_label(control: CameraControl) -> SharedString {
     match control {
         CameraControl::Zoom => tr!("common.zoom"),
+        CameraControl::Pan => tr!("camera.pan"),
+        CameraControl::Tilt => tr!("camera.tilt"),
         CameraControl::Focus => tr!("camera.focus"),
         CameraControl::Exposure => tr!("camera.exposure"),
         CameraControl::PowerLineFrequency => tr!("camera.anti_flicker"),
@@ -1110,6 +1116,8 @@ fn control_label(control: CameraControl) -> SharedString {
         CameraControl::Contrast => tr!("camera.contrast"),
         CameraControl::Saturation => tr!("camera.saturation"),
         CameraControl::Sharpness => tr!("camera.sharpness"),
+        CameraControl::Gain => tr!("camera.gain"),
+        CameraControl::BacklightCompensation => tr!("camera.backlight_compensation"),
         CameraControl::WhiteBalance => tr!("camera.white_balance"),
         CameraControl::Tint => tr!("camera.tint"),
     }
