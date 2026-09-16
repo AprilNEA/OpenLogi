@@ -1,4 +1,6 @@
 use super::*;
+use crate::backend::NodeId;
+use crate::channel::scripted::{ScriptedRawHidChannel, scripted_channel};
 
 const GESTURE: &[u16] = &[reprog_controls::GESTURE_BUTTON_CID];
 const PANEL: &[u16] = &[reprog_controls::HAPTIC_PANEL_CID];
@@ -21,6 +23,219 @@ fn reporting(
         analytics_key_events: true,
         raw_wheel: true,
     }
+}
+
+#[tokio::test]
+async fn pending_restore_waits_for_a_replacement_then_undiverts_through_it() {
+    let route = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xb35b,
+    };
+    let (retired_raw, retired_handle) = ScriptedRawHidChannel::with_responder(|_| None);
+    let retired_channel = scripted_channel(retired_raw).await;
+    let retired = SharedChannel::new(retired_channel.clone(), route.clone());
+    let registry = ChannelRegistry::default();
+    let node = NodeId::from("mouse-node".to_owned());
+    registry.replace_node(node.clone(), [route.clone()], retired_channel);
+    let pending = PendingCaptureRestore::new(
+        &retired,
+        ReprogRestore::new(
+            0x22,
+            vec![ArmedReporting {
+                cid: reprog_controls::GESTURE_BUTTON_CID,
+                original: reporting(false, None),
+            }],
+        ),
+        None,
+    )
+    .expect("one diverted control should require restoration");
+
+    let pending = match pending.retry(&registry).await {
+        CaptureSessionOutcome::RestorePending(pending) => pending,
+        CaptureSessionOutcome::Restored => {
+            panic!("the retired transport must never restore underneath a replacement")
+        }
+    };
+    assert!(retired_handle.written_reports().is_empty());
+
+    let (replacement_raw, replacement_handle) =
+        ScriptedRawHidChannel::with_responder(|request| Some(request.to_vec()));
+    let replacement = scripted_channel(replacement_raw).await;
+    registry.replace_node(node, [route.clone()], replacement);
+
+    assert!(matches!(
+        pending.retry(&registry).await,
+        CaptureSessionOutcome::Restored
+    ));
+    let reports = replacement_handle.written_reports();
+    assert_eq!(reports.len(), 1);
+    let restore = &reports[0];
+    assert_eq!(restore[2], 0x22, "restore must address ReprogControlsV4");
+    assert_eq!(restore[3] >> 4, 3, "restore must call setCidReporting");
+    assert_eq!(
+        &restore[4..7],
+        &[0x00, 0xc3, 0x22],
+        "restore must clear diversion and raw-XY using their valid bits"
+    );
+}
+
+#[tokio::test]
+async fn restore_retries_when_inventory_changes_during_an_awaited_write() {
+    let route = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xb35b,
+    };
+    let registry = ChannelRegistry::default();
+    let node = NodeId::from("mouse-node".to_owned());
+    let (retired_raw, _) = ScriptedRawHidChannel::with_responder(|_| None);
+    let retired_channel = scripted_channel(retired_raw).await;
+    let retired = SharedChannel::new(retired_channel, route.clone());
+    let pending = PendingCaptureRestore::new(
+        &retired,
+        ReprogRestore::new(
+            0x22,
+            vec![ArmedReporting {
+                cid: reprog_controls::GESTURE_BUTTON_CID,
+                original: reporting(false, None),
+            }],
+        ),
+        None,
+    )
+    .expect("one diverted control should require restoration");
+
+    let (winner_raw, winner_handle) =
+        ScriptedRawHidChannel::with_responder(|request| Some(request.to_vec()));
+    let winner = scripted_channel(winner_raw).await;
+    let replacement_registry = registry.clone();
+    let replacement_node = node.clone();
+    let replacement_route = route.clone();
+    let replacement_winner = winner.clone();
+    let (superseded_raw, superseded_handle) =
+        ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+            replacement_registry.replace_node(
+                replacement_node.clone(),
+                [replacement_route.clone()],
+                replacement_winner.clone(),
+            );
+            Some(request.to_vec())
+        });
+    let superseded = scripted_channel(superseded_raw).await;
+    registry.replace_node(node, [route], superseded);
+
+    let pending = match pending.retry(&registry).await {
+        CaptureSessionOutcome::RestorePending(pending) => pending,
+        CaptureSessionOutcome::Restored => {
+            panic!("a write to a publication replaced during await is not final")
+        }
+    };
+    assert_eq!(superseded_handle.written_reports().len(), 1);
+    assert!(matches!(
+        pending.retry(&registry).await,
+        CaptureSessionOutcome::Restored
+    ));
+    assert_eq!(winner_handle.written_reports().len(), 1);
+}
+
+#[tokio::test]
+async fn failed_setup_rollback_returns_its_restore_capability() {
+    let route = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xb35b,
+    };
+    let (raw, _) =
+        ScriptedRawHidChannel::with_failing_writes(|request| Some(request.to_vec()), |_| true);
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(channel, route.clone());
+    let pending = PendingCaptureRestore::new(
+        &shared,
+        ReprogRestore::new(
+            0x22,
+            vec![ArmedReporting {
+                cid: reprog_controls::GESTURE_BUTTON_CID,
+                original: reporting(false, None),
+            }],
+        ),
+        None,
+    );
+
+    let failure = rollback_capture_start(
+        GestureError::Hidpp("diversion failed".into()),
+        pending,
+        &shared,
+        None,
+    )
+    .await;
+    let (_, pending) = failure.into_parts();
+
+    assert!(
+        pending.is_some(),
+        "a failed compensating write must not discard firmware ownership"
+    );
+}
+
+#[tokio::test]
+async fn capture_listener_outlives_native_reporting_restore() {
+    struct DropProbe(Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (restored_tx, restored_rx) = oneshot::channel();
+    let task = tokio::spawn(drop_listener_after(
+        DropProbe(Arc::clone(&dropped)),
+        async move {
+            let _ = restored_rx.await;
+        },
+    ));
+
+    tokio::task::yield_now().await;
+    assert!(
+        !dropped.load(std::sync::atomic::Ordering::Relaxed),
+        "the listener must remain installed while native reporting is still diverted"
+    );
+
+    restored_tx.send(()).expect("restore signal should be open");
+    task.await.expect("listener-retirement task should finish");
+    assert!(
+        dropped.load(std::sync::atomic::Ordering::Relaxed),
+        "the listener may be removed after native reporting is restored"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn channel_change_takes_teardown_precedence_over_ready_shutdown() {
+    let route = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xb35b,
+    };
+    let registry = ChannelRegistry::default();
+    let node = NodeId::from("mouse-node".to_owned());
+    let (retired_raw, _) = ScriptedRawHidChannel::with_responder(|_| None);
+    let retired_channel = scripted_channel(retired_raw).await;
+    registry.replace_node(node.clone(), [route.clone()], retired_channel);
+    let retired = registry
+        .lookup(&route)
+        .expect("the capture publication should be current");
+
+    let (replacement_raw, _) = ScriptedRawHidChannel::with_responder(|_| None);
+    let replacement = scripted_channel(replacement_raw).await;
+    registry.replace_node(node, [route], replacement);
+
+    // These are the two monitor branches that can become ready together. The
+    // explicit shutdown branch re-checks the publication, so both preserve the
+    // typed replacement teardown rather than restoring through `retired`.
+    assert!(matches!(
+        stop_for_current_publication(Some(&registry), &retired),
+        CaptureStop::ChannelChanged
+    ));
+    assert!(matches!(
+        wait_for_channel_change(Some(&registry), &retired).await,
+        CaptureStop::ChannelChanged
+    ));
 }
 
 /// A control that was *already* diverted when the session armed it — an agent
@@ -49,6 +264,17 @@ fn restore_returns_the_remap_target_and_touches_nothing_else() {
     assert_eq!(change.force_raw_xy, None);
     assert_eq!(change.analytics_key_events, None);
     assert_eq!(change.raw_wheel, None);
+}
+
+#[test]
+fn wake_rearm_restores_diversion_mode_and_remap_target() {
+    let remap = reprog_controls::ControlId(0x0053);
+
+    let change = divert_change(reporting(false, Some(remap)), true);
+
+    assert_eq!(change.diverted, Some(true));
+    assert_eq!(change.raw_xy, Some(true));
+    assert_eq!(change.remap, Some(remap));
 }
 
 fn press() -> RawControlEvent {
@@ -106,7 +332,7 @@ fn a_still_held_second_source_takes_over_when_the_holder_releases() {
         "the released holder still clicks"
     );
 
-    acc.swipe.backdate_hold_for_test();
+    acc.backdate_hold_for_test();
     handle_reprog(
         &mut acc,
         RawControlEvent::RawXy { dx: 120, dy: 5 },
@@ -140,7 +366,7 @@ fn raw_xy_during_a_two_source_overlap_is_dropped_not_misattributed() {
     let mut acc = CaptureAccum::default();
 
     handle_reprog(&mut acc, press(), BOTH, &[], &[], &tx);
-    acc.swipe.backdate_hold_for_test();
+    acc.backdate_hold_for_test();
     handle_reprog(&mut acc, both_press(), BOTH, &[], &[], &tx);
     handle_reprog(
         &mut acc,
@@ -157,7 +383,7 @@ fn raw_xy_during_a_two_source_overlap_is_dropped_not_misattributed() {
 
     // The panel lifts; the surviving hold accumulates again.
     handle_reprog(&mut acc, press(), BOTH, &[], &[], &tx);
-    acc.swipe.backdate_hold_for_test();
+    acc.backdate_hold_for_test();
     handle_reprog(
         &mut acc,
         RawControlEvent::RawXy { dx: 120, dy: 5 },
@@ -195,7 +421,7 @@ fn a_same_report_swap_to_the_panel_still_discards_its_contact_jump() {
         "the swapped-out holder still clicks"
     );
 
-    acc.swipe.backdate_hold_for_test();
+    acc.backdate_hold_for_test();
     // The contact jump — leftward, far past every threshold — must be dropped.
     handle_reprog(
         &mut acc,
@@ -262,7 +488,7 @@ fn a_held_gesture_commits_a_swipe_and_does_not_also_click() {
 
     handle_reprog(&mut acc, press(), GESTURE, &[], &[], &tx);
     // Pretend the button has been held well past the swipe gate.
-    acc.swipe.backdate_hold_for_test();
+    acc.backdate_hold_for_test();
     handle_reprog(
         &mut acc,
         RawControlEvent::RawXy { dx: 120, dy: 5 },
@@ -296,7 +522,7 @@ fn the_haptic_panel_gestures_when_diverted_for_gestures() {
     let mut acc = CaptureAccum::default();
 
     handle_reprog(&mut acc, panel_press(), PANEL, &[], &[], &tx);
-    acc.swipe.backdate_hold_for_test();
+    acc.backdate_hold_for_test();
     // The panel's contact jump, discarded before the accumulator sees it.
     handle_reprog(
         &mut acc,
@@ -361,7 +587,7 @@ fn the_panels_first_raw_xy_sample_after_contact_is_discarded() {
     let mut acc = CaptureAccum::default();
 
     handle_reprog(&mut acc, panel_press(), PANEL, &[], &[], &tx);
-    acc.swipe.backdate_hold_for_test();
+    acc.backdate_hold_for_test();
     // The contact jump — leftward, far past every threshold.
     handle_reprog(
         &mut acc,
@@ -402,7 +628,7 @@ fn the_dedicated_buttons_first_sample_is_not_discarded() {
     let mut acc = CaptureAccum::default();
 
     handle_reprog(&mut acc, press(), GESTURE, &[], &[], &tx);
-    acc.swipe.backdate_hold_for_test();
+    acc.backdate_hold_for_test();
     handle_reprog(
         &mut acc,
         RawControlEvent::RawXy { dx: 120, dy: 5 },
@@ -431,7 +657,7 @@ fn an_undiverted_gesture_source_does_not_gesture() {
     let mut acc = CaptureAccum::default();
 
     handle_reprog(&mut acc, press(), PANEL, &[], &[], &tx);
-    acc.swipe.backdate_hold_for_test();
+    acc.backdate_hold_for_test();
     handle_reprog(
         &mut acc,
         RawControlEvent::RawXy { dx: 120, dy: 5 },
@@ -552,6 +778,77 @@ fn plain_button_snapshots_emit_each_edge_once_and_keep_buttons_independent() {
         Ok(CapturedInput::ButtonUp(ButtonId::Forward))
     );
     assert!(rx.try_recv().is_err(), "unchanged snapshots emit no edges");
+}
+
+#[test]
+fn a_side_gesture_button_uses_its_hidpp_raw_xy() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    let cid = 0x0056;
+    let buttons = [(cid, ButtonId::Forward)];
+    let down = RawControlEvent::DivertedButtons([cid, 0, 0, 0]);
+
+    handle_reprog_with_gesture_buttons(&mut acc, down, &[], &[], &buttons, &[], &tx);
+    acc.backdate_hold_for_test();
+    handle_reprog_with_gesture_buttons(
+        &mut acc,
+        RawControlEvent::RawXy { dx: -120, dy: 5 },
+        &[],
+        &[],
+        &buttons,
+        &[],
+        &tx,
+    );
+    handle_reprog_with_gesture_buttons(&mut acc, release(), &[], &[], &buttons, &[], &tx);
+
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::ButtonDown(ButtonId::Forward))
+    );
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::Gesture(
+            ButtonId::Forward,
+            GestureDirection::Left
+        ))
+    );
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::ButtonUp(ButtonId::Forward))
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "a committed side-button swipe must not also click on release"
+    );
+}
+
+#[test]
+fn a_side_gesture_button_tap_is_a_click() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    let cid = 0x0056;
+    let buttons = [(cid, ButtonId::Forward)];
+    let down = RawControlEvent::DivertedButtons([cid, 0, 0, 0]);
+
+    handle_reprog_with_gesture_buttons(&mut acc, down, &[], &[], &buttons, &[], &tx);
+    handle_reprog_with_gesture_buttons(&mut acc, release(), &[], &[], &buttons, &[], &tx);
+
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::ButtonDown(ButtonId::Forward))
+    );
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::Gesture(
+            ButtonId::Forward,
+            GestureDirection::Click
+        ))
+    );
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::ButtonUp(ButtonId::Forward))
+    );
+    assert_eq!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty));
 }
 
 #[test]

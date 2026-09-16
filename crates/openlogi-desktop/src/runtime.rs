@@ -119,6 +119,9 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
         // dead bytes. Off-thread so it never delays the first paint.
         std::thread::spawn(assets::cleanup_legacy_glow_pngs);
 
+        #[cfg(target_os = "macos")]
+        ensure_registration_at_startup(cx);
+
         let (sync_tx, mut sync_done) = tokio::sync::mpsc::unbounded_channel::<bool>();
         let mut rt = Runtime::new(cams, sync_tx, swr);
         let mut camera_scan = Box::pin(cx.background_executor().timer(CAMERA_SCAN_PERIOD));
@@ -167,6 +170,29 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
         }
     })
     .detach();
+}
+
+/// Ensure the agent's launchd service is registered, at startup: a fresh
+/// install registers on first GUI launch, an app update triggers the
+/// re-registration Apple requires for a changed executable. The spawn
+/// cascade in `services::ipc` also registers on demand — whichever runs
+/// first wins; this one still covers the update re-register while the agent
+/// is alive. Preference-independent (see `platform::registration`), so there
+/// is no stale input to stage around. On the background executor (XPC must
+/// not delay first paint); skipped for dev profiles, whose registration
+/// stays an explicit toggle.
+#[cfg(target_os = "macos")]
+fn ensure_registration_at_startup(cx: &mut gpui::AsyncApp) {
+    if openlogi_core::paths::is_dev_profile() {
+        return;
+    }
+    cx.background_executor()
+        .spawn(async {
+            if let Err(error) = crate::platform::registration::ensure_registered() {
+                tracing::warn!(error, "startup service registration failed");
+            }
+        })
+        .detach();
 }
 
 /// State the event loop carries between events.
@@ -285,40 +311,15 @@ impl Runtime {
             windows::add_device::apply_state(cx, snapshot.pairing.clone());
         });
         let (auto_download, asset_source, models) = cx.update(|cx| {
-            let (merged, auto_download, asset_source, models) =
+            let (changes, auto_download, asset_source, models) =
                 AppState::update(cx, |state, cx| {
-                    // Merge only completed enumerations. A scanning agent serves
-                    // an empty pre-enumeration list, which must not burn the GUI's
-                    // miss grace or replace the last known device set.
-                    let merged = inventory_ready
-                        && state.refresh_inventories(
-                            &snapshot.inventory,
-                            &snapshot.standalone,
-                            &self.cache,
-                            &self.cams,
-                        );
-                    if inventory_ready {
-                        state.store_inventory_snapshot(&snapshot.inventory);
-                    }
-                    let agent_changed =
-                        state.set_agent_link(state::AgentLink::Ready(snapshot.status.clone()));
-                    let camera_changed = state.set_camera_active(snapshot.camera_active);
-                    let foreground_changed = state.set_foreground(snapshot.foreground.clone());
-                    if merged {
-                        cx.emit(StateEvent::InventoryChanged);
-                    }
-                    if agent_changed {
-                        cx.emit(StateEvent::AgentChanged);
-                    }
-                    if camera_changed {
-                        cx.emit(StateEvent::CameraChanged);
-                    }
-                    if foreground_changed {
-                        cx.emit(StateEvent::ForegroundChanged);
+                    let changes = state.apply_agent_snapshot(snapshot, &self.cache, &self.cams);
+                    for event in &changes.events {
+                        cx.emit(event.clone());
                     }
                     let settings = state.app_settings();
                     (
-                        merged,
+                        changes,
                         settings.auto_download_assets,
                         settings.asset_source,
                         state.asset_models(),
@@ -327,10 +328,10 @@ impl Runtime {
             // A reconnect can drop an in-flight reply without changing the
             // inventory. Retry any cache entry that the reply lifecycle reset
             // to Unknown on every completed snapshot; resolved entries no-op.
-            if inventory_ready {
+            if changes.inventory_ready {
                 AppState::load_current_device_reads(cx);
             }
-            if merged {
+            if changes.inventory_changed() {
                 app::menu::rebuild(cx);
             }
             (auto_download, asset_source, models)

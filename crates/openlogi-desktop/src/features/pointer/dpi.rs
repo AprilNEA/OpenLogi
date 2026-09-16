@@ -6,11 +6,11 @@
 //! exposes exact device-supported values once the list is known.
 
 use gpui::{
-    AnyElement, AppContext as _, Context, Entity, IntoElement, ParentElement, Render, SharedString,
-    Styled, Subscription, Window, div, px,
+    AnyElement, AppContext as _, Context, Entity, IntoElement, ParentElement, Render, Styled,
+    Subscription, Window, div, px,
 };
 use gpui_component::{
-    IconName, Selectable as _, Sizable as _,
+    Icon, IconName, Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     slider::{Slider, SliderEvent, SliderState},
@@ -229,7 +229,7 @@ impl Render for DpiPanel {
                         div()
                             .text_body()
                             .text_color(pal.text_muted)
-                            .child(tr!("DPI")),
+                            .child(tr!("pointer.dpi")),
                     )
                     .child(
                         div()
@@ -252,7 +252,7 @@ impl Render for DpiPanel {
                         div()
                             .text_caption()
                             .text_color(pal.text_muted)
-                            .child(tr!("Presets")),
+                            .child(tr!("common.presets")),
                     )
                     .child(
                         h_flex()
@@ -282,28 +282,34 @@ fn dpi_panel_snapshot(cx: &mut Context<DpiPanel>) -> DpiPanelSnapshot {
             device_key: DeviceKey::default(),
             dpi: crate::state::DEFAULT_DPI,
             presets: Vec::new(),
-            status: DpiStatus::Unsupported(tr!("No active device").to_string()),
+            status: DpiStatus::Unsupported(tr!("device.no_active_device").to_string()),
             reachable: false,
         })
 }
 
-fn dpi_range_label(status: &DpiStatus, reachable: bool) -> SharedString {
+fn dpi_range_label(status: &DpiStatus, reachable: bool) -> AnyElement {
     match status {
-        // The numeric range is digits and symbols only — nothing to translate.
-        DpiStatus::Ready(info) => format!(
-            "{}–{} · step {}",
-            info.capabilities.min(),
-            info.capabilities.max(),
-            info.capabilities.step_hint()
-        )
-        .into(),
+        DpiStatus::Ready(info) => h_flex()
+            .gap_1()
+            .child(format!(
+                "{}–{}",
+                info.capabilities.min(),
+                info.capabilities.max()
+            ))
+            .child(Icon::empty().path("action-icons/dot.svg").size_3())
+            .child(tr!("pointer.dpi_step", step => info.capabilities.step_hint()))
+            .into_any_element(),
         DpiStatus::Unknown | DpiStatus::Loading if !reachable => {
-            tr!("Device offline — reconnect to read DPI range")
+            tr!("pointer.dpi_range_device_offline").into_any_element()
         }
-        DpiStatus::Unknown | DpiStatus::Loading => tr!("Loading device DPI range…"),
-        DpiStatus::Failed(message) => tr!("DPI read failed: %{message}", message => message),
+        DpiStatus::Unknown | DpiStatus::Loading => {
+            tr!("pointer.loading_device_dpi_range").into_any_element()
+        }
+        DpiStatus::Failed(message) => {
+            tr!("pointer.dpi_read_failed", message => message).into_any_element()
+        }
         DpiStatus::Unsupported(message) => {
-            tr!("DPI range unavailable: %{message}", message => message)
+            tr!("pointer.dpi_range_unavailable", message => message).into_any_element()
         }
     }
 }
@@ -319,7 +325,7 @@ fn slider_element(
         // A device with one supported DPI has nothing to drag — show the value.
         (DpiStatus::Ready(info), _) if info.capabilities.min() == info.capabilities.max() => {
             status_line(
-                tr!("Fixed DPI: %{dpi}", dpi => info.capabilities.min()),
+                tr!("pointer.fixed_dpi_value", dpi => info.capabilities.min()),
                 pal,
             )
             .into_any_element()
@@ -328,30 +334,28 @@ fn slider_element(
             Slider::new(slider_state).horizontal().into_any_element()
         }
         (DpiStatus::Ready(_), None) => {
-            status_line(tr!("Preparing DPI slider…"), pal).into_any_element()
+            status_line(tr!("pointer.preparing_dpi_slider"), pal).into_any_element()
         }
         (DpiStatus::Unknown | DpiStatus::Loading, _) if !reachable => {
-            status_line(tr!("Device offline — DPI unavailable."), pal).into_any_element()
+            status_line(tr!("pointer.device_offline_dpi_is_unavailable"), pal).into_any_element()
         }
         (DpiStatus::Unknown | DpiStatus::Loading, _) => {
-            status_line(tr!("Reading supported DPI values…"), pal).into_any_element()
+            status_line(tr!("pointer.reading_supported_dpi_values"), pal).into_any_element()
         }
         // Clickable: reselecting is a no-op for a single-device gallery, so the
         // retry must work in place.
         (DpiStatus::Failed(_), _) => retry_line(
             "dpi-retry",
-            tr!("Couldn't read DPI — click to retry."),
+            tr!("pointer.couldnt_read_dpi_click_to_retry"),
             pal,
             move |cx| {
                 AppState::retry_dpi_read(cx, key.clone());
             },
         )
         .into_any_element(),
-        (DpiStatus::Unsupported(_), _) => status_line(
-            tr!("This device did not report Adjustable DPI support."),
-            pal,
-        )
-        .into_any_element(),
+        (DpiStatus::Unsupported(_), _) => {
+            status_line(tr!("pointer.adjustable_dpi_unsupported"), pal).into_any_element()
+        }
     }
 }
 
@@ -418,7 +422,7 @@ fn add_preset_chip() -> impl IntoElement {
         .outline()
         .h(px(CHIP_H))
         .icon(IconName::Plus)
-        .label(tr!("Add"))
+        .label(tr!("common.add"))
         .on_click(|_event, _window, cx| {
             // Append the current DPI to the active device's preset list.
             // Duplicates are allowed — the user might want the same value

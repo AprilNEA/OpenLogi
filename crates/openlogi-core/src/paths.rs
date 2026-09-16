@@ -53,15 +53,26 @@ fn xdg() -> Result<Xdg, PathsError> {
 }
 
 fn app_dir() -> &'static str {
-    static IS_DEV_PROFILE: OnceLock<bool> = OnceLock::new();
-    if *IS_DEV_PROFILE.get_or_init(is_dev_profile) {
+    if is_dev_profile() {
         DEV_APP_DIR
     } else {
         APP_DIR
     }
 }
 
-fn is_dev_profile() -> bool {
+/// Whether this process runs under the dev profile: forced by
+/// `OPENLOGI_PROFILE=dev`/`prod`, or (macOS) detected from the bundle the
+/// executable lives in carrying a dev identifier. Decides the
+/// [`APP_DIR`]/[`DEV_APP_DIR`] split for every directory below, and which
+/// launchd service label the GUI manages. Memoized — the answer cannot change
+/// within a process lifetime.
+#[must_use]
+pub fn is_dev_profile() -> bool {
+    static IS_DEV_PROFILE: OnceLock<bool> = OnceLock::new();
+    *IS_DEV_PROFILE.get_or_init(detect_dev_profile)
+}
+
+fn detect_dev_profile() -> bool {
     match std::env::var("OPENLOGI_PROFILE") {
         Ok(value) if value == "dev" => return true,
         Ok(value) if matches!(value.as_str(), "prod" | "production") => return false,
@@ -117,10 +128,22 @@ pub fn home_dir() -> Result<PathBuf, PathsError> {
 /// The raw XDG config home directory (without the `openlogi` subdirectory).
 ///
 /// Honours an absolute `$XDG_CONFIG_HOME`; falls back to `~/.config`.
-/// Useful when placing files that belong to other apps under the same base
-/// (e.g. systemd user units at `$XDG_CONFIG_HOME/systemd/user/`).
+/// Useful when reading files that belong to another app's namespace under the
+/// same base. This tier is the user's own: generated files belong under
+/// [`xdg_data_home`] instead, which systemd and friends rank below it.
 pub fn xdg_config_home() -> Result<PathBuf, PathsError> {
     Ok(xdg()?.config_dir())
+}
+
+/// The raw XDG data home directory (without the `openlogi` subdirectory).
+///
+/// Honours an absolute `$XDG_DATA_HOME`; falls back to `~/.local/share`.
+/// The counterpart to [`xdg_config_home`] for files that belong to another
+/// app's namespace under the same base — generated systemd user units at
+/// `$XDG_DATA_HOME/systemd/user/`, which is the tier systemd reserves for
+/// units installed on the user's behalf rather than authored by them.
+pub fn xdg_data_home() -> Result<PathBuf, PathsError> {
+    Ok(xdg()?.data_dir())
 }
 
 /// Directory holding the user's `config.toml`.

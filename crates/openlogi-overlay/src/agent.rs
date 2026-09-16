@@ -16,7 +16,9 @@ use std::{
 
 use openlogi_core::action_ring::DISPLAY_LIFETIME;
 use openlogi_core::binding::ActionRingSlot;
-use openlogi_ipc::{ActionRingInvocation, AgentClient, Generation, OBSERVE_HOLD, PROTOCOL_VERSION};
+use openlogi_ipc::{
+    ActionRingInvocation, AgentClient, ClientKind, Generation, OBSERVE_HOLD, PROTOCOL_VERSION,
+};
 use succession::Standing;
 use tarpc::context;
 use tokio::sync::mpsc;
@@ -93,6 +95,13 @@ async fn connect() -> Option<AgentClient> {
         ));
     }
     let client = connection.client;
+    // Declare before anything else: an overlay reconnecting on its own is an
+    // orphan of a previous run and must not wake a dormant agent — an armed
+    // agent spawns its own overlay.
+    client
+        .declare_client(context::current(), ClientKind::Overlay)
+        .await
+        .ok()?;
     let identity = client.identity(context::current()).await.ok()?;
     if let Standing::Superseded(because) = allegiance().observe(identity) {
         stand_down(&because.to_string());
@@ -131,38 +140,78 @@ const GIVE_UP_AFTER: Duration = Duration::from_mins(1);
 /// How long to wait between attempts to reach an agent.
 const RETRY_PERIOD: Duration = Duration::from_secs(1);
 
-/// Record a failed attempt to reach an agent, and say whether to give up.
+/// Invocation observer phase and the state meaningful within each phase.
 ///
-/// `unreachable_since` is armed by the first failure of a run and cleared by
-/// the caller on every success, so a helper whose agent keeps flapping back
-/// within the deadline never accumulates its way to an exit.
-fn give_up(unreachable_since: &mut Option<Instant>, now: Instant) -> bool {
-    let armed = *unreachable_since.get_or_insert(now);
-    now.duration_since(armed) >= GIVE_UP_AFTER
+/// A successful connection owns its generation cursor; a reconnect episode
+/// owns its give-up clock. Transitioning between them resets the fact from the
+/// previous phase by construction.
+enum InvocationPollState<C> {
+    Reconnecting { unreachable_since: Option<Instant> },
+    Observing { client: C, seen: Generation },
+}
+
+impl<C> Default for InvocationPollState<C> {
+    fn default() -> Self {
+        Self::Reconnecting {
+            unreachable_since: None,
+        }
+    }
+}
+
+impl<C> InvocationPollState<C> {
+    fn connected(&mut self, client: C) {
+        *self = Self::Observing { client, seen: 0 };
+    }
+
+    fn connection_failed(&mut self, now: Instant) -> bool {
+        let Self::Reconnecting { unreachable_since } = self else {
+            return false;
+        };
+        let armed = *unreachable_since.get_or_insert(now);
+        now.duration_since(armed) >= GIVE_UP_AFTER
+    }
+
+    fn observation(&self) -> Option<(&C, Generation)> {
+        match self {
+            Self::Observing { client, seen } => Some((client, *seen)),
+            Self::Reconnecting { .. } => None,
+        }
+    }
+
+    fn observed(&mut self, generation: Generation) {
+        if let Self::Observing { seen, .. } = self {
+            *seen = generation;
+        }
+    }
+
+    fn disconnected(&mut self) {
+        *self = Self::Reconnecting {
+            unreachable_since: None,
+        };
+    }
 }
 
 async fn poll_invocations(tx: mpsc::UnboundedSender<Option<ActionRingInvocation>>) {
-    let mut client = None;
-    // Generation 0 says "I have seen nothing", so the first answer is whatever
-    // is showing right now — an overlay restarted mid-ring paints the live one
-    // instead of having missed its invocation. Reset on every disconnect: the
-    // replacement agent numbers its own generations.
-    let mut seen: Generation = 0;
-    // Armed while no agent is answering; see `give_up`.
-    let mut unreachable_since: Option<Instant> = None;
+    let mut state = InvocationPollState::default();
     loop {
-        if client.is_none() {
-            client = connect().await;
-            seen = 0;
-        }
-        let Some(active) = client.as_ref() else {
-            if give_up(&mut unreachable_since, Instant::now()) {
-                stand_down(&format!("no agent has answered for {GIVE_UP_AFTER:?}"));
+        if matches!(&state, InvocationPollState::Reconnecting { .. }) {
+            if let Some(client) = connect().await {
+                // Generation 0 says "I have seen nothing", so the first
+                // answer is whatever is showing right now. A replacement
+                // agent numbers its own generations, so every connection
+                // starts there independently.
+                state.connected(client);
+            } else {
+                if state.connection_failed(Instant::now()) {
+                    stand_down(&format!("no agent has answered for {GIVE_UP_AFTER:?}"));
+                }
+                tokio::time::sleep(RETRY_PERIOD).await;
+                continue;
             }
-            tokio::time::sleep(RETRY_PERIOD).await;
+        }
+        let Some((active, seen)) = state.observation() else {
             continue;
         };
-        unreachable_since = None;
         let mut ctx = context::current();
         // Above the agent's hold, or tarpc would cancel the handler mid-wait.
         ctx.deadline = std::time::Instant::now() + OBSERVE_HOLD + Duration::from_secs(5);
@@ -171,14 +220,14 @@ async fn poll_invocations(tx: mpsc::UnboundedSender<Option<ActionRingInvocation>
                 if observed.generation == seen {
                     continue; // the hold elapsed: still alive, still nothing new
                 }
-                seen = observed.generation;
+                state.observed(observed.generation);
                 if tx.send(observed.invocation).is_err() {
                     return;
                 }
             }
             Err(error) => {
                 debug!(?error, "Actions Ring state channel disconnected");
-                client = None;
+                state.disconnected();
             }
         }
     }
@@ -378,217 +427,4 @@ fn retry_before(deadline: Option<Instant>) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_first_failed_attempt_only_arms_the_give_up_clock() {
-        let mut since = None;
-        let now = Instant::now();
-        assert!(!give_up(&mut since, now));
-        assert_eq!(since, Some(now));
-    }
-
-    #[test]
-    fn an_agent_that_stays_away_past_the_deadline_ends_the_overlay() {
-        let start = Instant::now();
-        let mut since = None;
-        assert!(!give_up(&mut since, start));
-        assert!(!give_up(&mut since, start + GIVE_UP_AFTER / 2));
-        assert!(give_up(&mut since, start + GIVE_UP_AFTER));
-    }
-
-    #[test]
-    fn an_agent_that_keeps_coming_back_never_accumulates_its_way_to_an_exit() {
-        let start = Instant::now();
-        let mut since = None;
-        // Each round the agent is gone for half the deadline, then answers —
-        // which is what clears the clock at the call site. Five rounds is two
-        // and a half deadlines in total, so a version that kept the clock
-        // running across outages would have exited by the third.
-        for round in 1..=5 {
-            let gone = start + (GIVE_UP_AFTER / 2) * round;
-            assert!(
-                !give_up(&mut since, gone),
-                "a reachable agent must not inherit the previous outage's clock"
-            );
-            since = None;
-        }
-    }
-
-    #[test]
-    fn activation_takes_priority_over_queued_hover_updates() {
-        let hover = OverlayCommand::Hover {
-            session_id: 1,
-            slot: ActionRingSlot::Top,
-        };
-        let activation = OverlayCommand::Activate {
-            session_id: 1,
-            slot: ActionRingSlot::Right,
-        };
-        assert!(matches!(
-            coalesce_command(hover, activation),
-            OverlayCommand::Activate {
-                slot: ActionRingSlot::Right,
-                ..
-            }
-        ));
-        assert!(matches!(
-            coalesce_command(activation, hover),
-            OverlayCommand::Activate { .. }
-        ));
-    }
-
-    /// Rings open back to back — dismiss one, open the next — and the view
-    /// only emits a hover when the hovered slot *changes*. Swallowing the new
-    /// ring's first hover therefore loses it entirely for as long as the
-    /// pointer stays put: no hover buzz, and the agent believing nothing is
-    /// hovered.
-    #[test]
-    fn a_new_sessions_hover_survives_the_previous_sessions_dismissal() {
-        let closing = OverlayCommand::Cancel { session_id: 1 };
-        let hover = OverlayCommand::Hover {
-            session_id: 2,
-            slot: ActionRingSlot::Top,
-        };
-
-        assert!(matches!(
-            coalesce_command(closing, hover),
-            OverlayCommand::Hover { session_id: 2, .. }
-        ));
-    }
-
-    #[tokio::test]
-    async fn newer_activation_supersedes_a_stale_retry_immediately() {
-        let stale = OverlayCommand::Cancel { session_id: 1 };
-        let replacement = OverlayCommand::Activate {
-            session_id: 2,
-            slot: ActionRingSlot::Right,
-        };
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        tx.send(replacement).unwrap();
-
-        let (pending, _) = tokio::time::timeout(
-            Duration::from_millis(20),
-            wait_for_retry(&mut rx, stale, Some(Instant::now() + DISPLAY_LIFETIME)),
-        )
-        .await
-        .expect("queued replacement should interrupt the retry delay")
-        .expect("replacement command should remain pending");
-
-        assert_eq!(pending, replacement);
-    }
-
-    #[tokio::test]
-    async fn newer_activation_supersedes_a_stalled_terminal_request() {
-        let stale = OverlayCommand::Cancel { session_id: 1 };
-        let replacement = OverlayCommand::Activate {
-            session_id: 2,
-            slot: ActionRingSlot::Right,
-        };
-        let stale_started = std::sync::Arc::new(tokio::sync::Notify::new());
-        let replacement_sent = std::sync::Arc::new(tokio::sync::Notify::new());
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let worker = tokio::spawn({
-            let stale_started = std::sync::Arc::clone(&stale_started);
-            let replacement_sent = std::sync::Arc::clone(&replacement_sent);
-            async move {
-                send_commands_with(
-                    &mut rx,
-                    || Box::pin(async { Some(()) }),
-                    move |(), command| {
-                        let stale_started = std::sync::Arc::clone(&stale_started);
-                        let replacement_sent = std::sync::Arc::clone(&replacement_sent);
-                        Box::pin(async move {
-                            if command == stale {
-                                stale_started.notify_one();
-                                std::future::pending().await
-                            } else {
-                                replacement_sent.notify_one();
-                                true
-                            }
-                        })
-                    },
-                )
-                .await;
-            }
-        });
-
-        tx.send(stale).unwrap();
-        tokio::time::timeout(Duration::from_millis(100), stale_started.notified())
-            .await
-            .expect("stale request should start");
-        tx.send(replacement).unwrap();
-        tokio::time::timeout(Duration::from_millis(100), replacement_sent.notified())
-            .await
-            .expect("replacement should cancel the stalled request");
-        drop(tx);
-        tokio::time::timeout(Duration::from_millis(100), worker)
-            .await
-            .expect("command worker should stop")
-            .expect("command worker should not panic");
-    }
-
-    #[tokio::test]
-    async fn stalled_hover_stops_when_the_command_channel_closes() {
-        let hover = OverlayCommand::Hover {
-            session_id: 1,
-            slot: ActionRingSlot::Top,
-        };
-        let request_started = std::sync::Arc::new(tokio::sync::Notify::new());
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let worker = tokio::spawn({
-            let request_started = std::sync::Arc::clone(&request_started);
-            async move {
-                send_commands_with(
-                    &mut rx,
-                    || Box::pin(async { Some(()) }),
-                    move |(), _| {
-                        let request_started = std::sync::Arc::clone(&request_started);
-                        Box::pin(async move {
-                            request_started.notify_one();
-                            std::future::pending().await
-                        })
-                    },
-                )
-                .await;
-            }
-        });
-
-        tx.send(hover).unwrap();
-        tokio::time::timeout(Duration::from_millis(100), request_started.notified())
-            .await
-            .expect("hover request should start");
-        drop(tx);
-        tokio::time::timeout(Duration::from_millis(100), worker)
-            .await
-            .expect("closing the channel should stop the command worker")
-            .expect("command worker should not panic");
-    }
-
-    #[test]
-    fn only_terminal_commands_are_retryable() {
-        let hover = OverlayCommand::Hover {
-            session_id: 1,
-            slot: ActionRingSlot::Top,
-        };
-        let activation = OverlayCommand::Activate {
-            session_id: 1,
-            slot: ActionRingSlot::Top,
-        };
-        let cancellation = OverlayCommand::Cancel { session_id: 1 };
-        assert!(!hover.is_terminal());
-        assert!(activation.is_terminal());
-        assert!(cancellation.is_terminal());
-    }
-
-    #[test]
-    fn terminal_retries_last_only_until_the_session_deadline() {
-        assert!(retry_before(Some(Instant::now() + Duration::from_secs(1))));
-        let past = Instant::now()
-            .checked_sub(Duration::from_secs(1))
-            .unwrap_or_else(Instant::now);
-        assert!(!retry_before(Some(past)));
-        assert!(!retry_before(None));
-    }
-}
+mod tests;

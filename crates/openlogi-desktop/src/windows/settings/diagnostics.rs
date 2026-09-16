@@ -17,17 +17,17 @@ use super::{
 /// tap list and the live event monitor polled by
 /// [`SettingsView`](super::SettingsView)'s task.
 pub(super) fn diagnostics_page() -> SettingPage {
-    SettingPage::new(tr!("Diagnostics"))
+    SettingPage::new(tr!("diagnostics.diagnostics"))
         .icon(IconName::Info)
         .resettable(false)
         .group(
             SettingGroup::new().item(
                 SettingItem::new(
-                    tr!("Input interception"),
+                    tr!("diagnostics.input_interception"),
                     SettingField::render(move |_, _, cx| input_conflict_field(cx)),
                 )
                 .description(tr!(
-                    "Detects other apps tapping the mouse event stream — a common cause of pointer lag."
+                    "diagnostics.input_interception_description"
                 ))
                 // Vertical: the status + tap list are wide, multi-line content,
                 // not a compact right-side control — stacking them full-width
@@ -61,18 +61,13 @@ fn input_conflict_field(cx: &mut App) -> gpui::Div {
             div()
                 .text_caption()
                 .text_color(pal.text_muted)
-                .child(tr!("No other app is intercepting mouse input.")),
+                .child(tr!("diagnostics.no_other_app_is_intercepting_mouse_input")),
         );
     } else {
-        col = col.child(
-            div()
-                .text_body()
-                .text_color(pal.text_primary)
-                .child(tr!(
-                    "Another app is intercepting mouse input, which can cause pointer lag or duplicated button actions: %{apps}",
-                    apps => conflicts.join(", ")
-                )),
-        );
+        col = col.child(div().text_body().text_color(pal.text_primary).child(tr!(
+            "diagnostics.input_interception_detected",
+            apps => conflicts.join(", ")
+        )));
     }
 
     #[cfg(debug_assertions)]

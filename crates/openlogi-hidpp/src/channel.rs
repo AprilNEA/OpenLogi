@@ -6,7 +6,7 @@ use std::{
     collections::{HashMap, VecDeque},
     sync::{
         Arc, Mutex, Weak,
-        atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering},
     },
     thread::{self, JoinHandle},
     time::Duration,
@@ -19,6 +19,7 @@ use crate::{nibble::U4, sync::lock};
 
 mod error;
 mod message;
+mod observation;
 mod raw;
 
 #[cfg(test)]
@@ -28,8 +29,10 @@ pub use error::ChannelError;
 pub use message::{
     HidppMessage, LONG_REPORT_ID, LONG_REPORT_LENGTH, SHORT_REPORT_ID, SHORT_REPORT_LENGTH,
 };
+pub use observation::{ChannelObservation, ChannelObserver, ObservedReport, RequestOutcome};
 pub use raw::RawHidChannel;
 
+use observation::{RequestObservation, emit_report};
 use raw::supports_short_long_hidpp;
 
 /// This is the size of the buffer incoming reports are read into.
@@ -61,6 +64,78 @@ impl Drop for MessageListenerGuard {
     }
 }
 
+/// A software id a request may carry: `1..=15`.
+///
+/// Id `0` is the wire's device-notification marker (event decoding treats
+/// `software_id == 0` as "not a response"), so a request sent with it would
+/// have its response indistinguishable from an event — made unrepresentable
+/// here by construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestSwId(U4);
+
+impl RequestSwId {
+    /// The id as a request software id, or `None` for the reserved id `0`.
+    #[must_use]
+    pub fn new(id: U4) -> Option<Self> {
+        (id.to_lo() != 0).then_some(Self(id))
+    }
+
+    /// The nibble the wire carries.
+    #[must_use]
+    pub fn get(self) -> U4 {
+        self.0
+    }
+}
+
+/// How the channel assigns the software id each outgoing request carries.
+///
+/// One value instead of three cooperating fields (a rotate flag, the current
+/// id, an optional lease): the triple admitted states the wire cannot mean —
+/// rotation walking over ids other channels hold leases on, or a leased id
+/// different from the id actually sent. Constructed whole, those states are
+/// unrepresentable.
+pub enum SwIdPolicy {
+    /// Every request carries the same id.
+    Fixed(RequestSwId),
+    /// Walk `1..=15`, one id per request — eases mapping responses to
+    /// requests for a single exclusive user of a node. The counter is this
+    /// policy's own; the id `0` slot is skipped in the wrap.
+    Rotating(AtomicU8),
+    /// A fixed id owned process-wide: `free(id)` runs exactly once when this
+    /// policy is dropped, handing the lease back to the allocator — so
+    /// concurrent opens of one HID node never share a correlation id.
+    /// (OpenLogi local addition.)
+    Leased {
+        /// The leased id every request carries.
+        id: RequestSwId,
+        /// Returns the id to the allocator on drop.
+        free: fn(u8),
+    },
+}
+
+impl SwIdPolicy {
+    /// A fresh rotation, starting at id `1`.
+    #[must_use]
+    pub fn rotating() -> Self {
+        Self::Rotating(AtomicU8::new(0x01))
+    }
+}
+
+impl Default for SwIdPolicy {
+    /// Fixed id `1`, matching the protocol's conventional default.
+    fn default() -> Self {
+        Self::Fixed(RequestSwId(U4::from_lo(0x01)))
+    }
+}
+
+impl Drop for SwIdPolicy {
+    fn drop(&mut self) {
+        if let Self::Leased { id, free } = self {
+            free(id.get().to_lo());
+        }
+    }
+}
+
 /// Represents a HID communication channel supporting HID++.
 pub struct HidppChannel {
     /// Whether the channel supports short (7 bytes) HID++ messages.
@@ -78,11 +153,15 @@ pub struct HidppChannel {
     /// The underlying raw HID channel.
     raw_channel: Arc<dyn RawHidChannel>,
 
-    /// Whether to rotate the [`Self::software_id`].
-    rotate_software_id: AtomicBool,
+    /// Optional sink for reports and request lifecycle events.
+    observer: Option<Arc<dyn ChannelObserver>>,
 
-    /// The software ID to provide at the next call to [`Self::get_sw_id`].
-    software_id: AtomicU8,
+    /// The software-id policy for outgoing requests (see [`SwIdPolicy`]).
+    ///
+    /// This must remain after `raw_channel`: fields drop in declaration order,
+    /// so the final lease is returned only after channel shutdown has joined
+    /// the read thread and released the raw transport.
+    sw_id_policy: SwIdPolicy,
 
     /// All sent messages that are waiting for a response.
     pending_messages: Arc<Mutex<VecDeque<PendingMessage>>>,
@@ -107,21 +186,10 @@ pub struct HidppChannel {
     /// The handle to the read thread. Should be joined after signaling
     /// [`Self::read_thread_close`].
     read_thread_hdl: Option<JoinHandle<()>>,
-
-    /// Optional process-wide software-id lease: `(id, free)` run on drop.
-    ///
-    /// OpenLogi leases a unique HID++ software id per open so concurrent
-    /// channels on the same physical HID node never share a correlation id
-    /// (software id `0` is reserved for device notifications). Local addition.
-    sw_id_lease: Option<(u8, fn(u8))>,
 }
 
 impl Drop for HidppChannel {
     fn drop(&mut self) {
-        if let Some((id, free)) = self.sw_id_lease.take() {
-            free(id);
-        }
-
         if let Some(read_thread_close) = self.read_thread_close.take() {
             // This only fails if the receiving end, which is owned by the read thread in
             // this case, is dropped.
@@ -131,9 +199,10 @@ impl Drop for HidppChannel {
         }
 
         if let Some(read_thread_hdl) = self.read_thread_hdl.take() {
-            // Joining is not politeness: it is what makes the OS handle closed
-            // by the time this returns, so a caller that drops a channel and
-            // reopens the same node never has two opens of it alive at once.
+            // Joining is not politeness: together with the subsequent
+            // `raw_channel` field drop, it makes the OS handle close before the
+            // software-id lease is returned. A caller can therefore drop a
+            // channel and reopen the same node without overlapping lifetimes.
             #[expect(
                 clippy::unwrap_used,
                 reason = "propagate a read-thread panic instead of ignoring a crashed background worker"
@@ -145,7 +214,7 @@ impl Drop for HidppChannel {
 
 /// Represents a message that was sent and is waiting for a response.
 struct PendingMessage {
-    /// Unique ID used to remove this request if it times out.
+    /// Unique ID used to remove this request when its waiter goes away.
     id: u64,
 
     /// The predicate that has to match for an incoming message to be classified
@@ -155,6 +224,87 @@ struct PendingMessage {
     /// The oneshot sender used to provide the response message to the receiving
     /// end.
     sender: oneshot::Sender<HidppMessage>,
+}
+
+/// One registered request and the receiver waiting for its response.
+///
+/// Dropping this value unregisters the request, including when an outer async
+/// deadline cancels [`HidppChannel::send_with_timeout`] during its write.
+struct PendingRequest {
+    id: u64,
+    pending_messages: Arc<Mutex<VecDeque<PendingMessage>>>,
+    receiver: oneshot::Receiver<HidppMessage>,
+}
+
+impl PendingRequest {
+    fn register(
+        id: u64,
+        pending_messages: Arc<Mutex<VecDeque<PendingMessage>>>,
+        response_predicate: impl Fn(&HidppMessage) -> bool + Send + 'static,
+    ) -> Self {
+        let (sender, receiver) = oneshot::channel();
+        let request = Self {
+            id,
+            pending_messages,
+            receiver,
+        };
+        lock(&request.pending_messages).push_back(PendingMessage {
+            id,
+            response_predicate: Box::new(response_predicate),
+            sender,
+        });
+        request
+    }
+
+    async fn receive(mut self) -> Option<HidppMessage> {
+        (&mut self.receiver).await.ok()
+    }
+}
+
+impl Drop for PendingRequest {
+    fn drop(&mut self) {
+        let mut pending = lock(&self.pending_messages);
+        if let Some(pos) = pending.iter().position(|message| message.id == self.id) {
+            pending.remove(pos);
+        }
+    }
+}
+
+enum PendingRequestCompletion {
+    Response(HidppMessage),
+    WriteFailed(ChannelError),
+    NoResponse,
+    TimedOut,
+}
+
+fn finish_request(
+    completion: PendingRequestCompletion,
+    mut observation: RequestObservation<'_>,
+    dev: u8,
+    feat: u8,
+) -> Result<HidppMessage, ChannelError> {
+    match completion {
+        PendingRequestCompletion::Response(response) => {
+            observation.complete(RequestOutcome::Succeeded);
+            trace!(dev, feat, "hidpp response");
+            Ok(response)
+        }
+        PendingRequestCompletion::WriteFailed(error) => {
+            observation.complete(RequestOutcome::WriteFailed);
+            trace!(dev, feat, error = ?error, "hidpp no response");
+            Err(error)
+        }
+        PendingRequestCompletion::NoResponse => {
+            observation.complete(RequestOutcome::NoResponse);
+            trace!(dev, feat, error = ?ChannelError::NoResponse, "hidpp no response");
+            Err(ChannelError::NoResponse)
+        }
+        PendingRequestCompletion::TimedOut => {
+            observation.complete(RequestOutcome::TimedOut);
+            trace!(dev, feat, error = ?ChannelError::Timeout, "hidpp no response");
+            Err(ChannelError::Timeout)
+        }
+    }
 }
 
 impl HidppChannel {
@@ -167,6 +317,26 @@ impl HidppChannel {
     /// If the given HID channel does not support HID++,
     /// [`ChannelError::HidppNotSupported`] will be returned.
     pub async fn from_raw_channel(raw: impl RawHidChannel) -> Result<Self, ChannelError> {
+        Self::from_raw_channel_inner(raw, None).await
+    }
+
+    /// Tries to construct a HID++ channel that reports wire and request facts
+    /// to `observer`.
+    ///
+    /// This has the same channel behavior and failure contract as
+    /// [`Self::from_raw_channel`]. Observation is best enabled at construction
+    /// so incoming reports cannot race observer installation.
+    pub async fn from_raw_channel_with_observer(
+        raw: impl RawHidChannel,
+        observer: Arc<dyn ChannelObserver>,
+    ) -> Result<Self, ChannelError> {
+        Self::from_raw_channel_inner(raw, Some(observer)).await
+    }
+
+    async fn from_raw_channel_inner(
+        raw: impl RawHidChannel,
+        observer: Option<Arc<dyn ChannelObserver>>,
+    ) -> Result<Self, ChannelError> {
         let (supports_short, supports_long) = supports_short_long_hidpp(&raw).await?;
 
         if !supports_short && !supports_long {
@@ -183,12 +353,14 @@ impl HidppChannel {
             let raw_channel = Arc::clone(&raw_channel_rc);
             let pending_messages = Arc::clone(&pending_messages_rc);
             let message_listeners = Arc::clone(&message_listeners_rc);
+            let observer = observer.clone();
 
             move || {
                 futures::executor::block_on(read_loop(
                     &*raw_channel,
                     &pending_messages,
                     &message_listeners,
+                    observer.as_deref(),
                     close_receiver,
                 ));
             }
@@ -200,15 +372,14 @@ impl HidppChannel {
             vendor_id: raw_channel_rc.vendor_id(),
             product_id: raw_channel_rc.product_id(),
             raw_channel: raw_channel_rc,
-            rotate_software_id: AtomicBool::new(false),
-            software_id: AtomicU8::new(0x01),
+            observer,
+            sw_id_policy: SwIdPolicy::default(),
             pending_messages: pending_messages_rc,
             pending_message_id: AtomicU64::new(1),
             next_listener_hdl: AtomicU32::new(1),
             message_listeners: message_listeners_rc,
             read_thread_close: Some(close_sender),
             read_thread_hdl: Some(read_thread_hdl),
-            sw_id_lease: None,
         })
     }
 
@@ -217,61 +388,40 @@ impl HidppChannel {
         self.raw_channel.is_connected()
     }
 
-    /// Sets the software ID that should be returned by the next call to
-    /// [`Self::get_sw_id`].
+    /// Replace the software-id policy for outgoing requests.
     ///
-    /// Using software ID `0` is highly discouraged as it is used for device
-    /// notifications.
-    pub fn set_sw_id(&self, sw_id: U4) {
-        self.software_id.store(sw_id.to_lo(), Ordering::SeqCst);
-    }
-
-    /// Sets whether the software ID returned by a call to [`Self::get_sw_id`]
-    /// should increment (and potentially wrap around) after each call.
-    ///
-    /// This comes in handy when trying to map responses to requests
-    /// consistently.
-    ///
-    /// Software ID `0` will be skipped in the rotation process as it is
-    /// reserved for device notifications.
-    pub fn set_rotating_sw_id(&self, enable: bool) {
-        self.rotate_software_id.store(enable, Ordering::SeqCst);
-    }
-
-    /// Lease software id `id` until this channel is dropped, then call `free(id)`.
-    ///
-    /// Replaces any previous lease. Used by OpenLogi so concurrent opens of the
-    /// same HID node hold distinct correlation ids for their full lifetime.
-    ///
-    /// OpenLogi local addition.
-    pub fn set_sw_id_lease(&mut self, id: u8, free: fn(u8)) {
-        self.sw_id_lease = Some((id, free));
+    /// `&mut self` on purpose: the policy is decided while the channel is
+    /// still exclusively owned (right after opening, before it is shared), so
+    /// no request can race a policy change. Replacing a [`SwIdPolicy::Leased`]
+    /// policy returns its lease before this method returns. The channel's final
+    /// lease is returned only after its read thread and raw transport stop.
+    pub fn set_sw_id_policy(&mut self, policy: SwIdPolicy) {
+        self.sw_id_policy = policy;
     }
 
     /// Provides a software ID that can be used to send a HID++ message across
     /// the channel.
     ///
-    /// This method should be called separately for every message to send as it
-    /// may rotate (as indicated by [`Self::set_rotating_sw_id`]).
+    /// This method should be called separately for every message to send, as a
+    /// [`SwIdPolicy::Rotating`] policy advances per call.
     pub fn get_sw_id(&self) -> U4 {
-        if self.rotate_software_id.load(Ordering::SeqCst) {
-            // The closure always returns `Some`, so `fetch_update` never
-            // reports `Err`; both arms carry the same pre-update value.
-            let previous =
-                match self
-                    .software_id
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |old| {
+        match &self.sw_id_policy {
+            SwIdPolicy::Fixed(id) | SwIdPolicy::Leased { id, .. } => id.get(),
+            SwIdPolicy::Rotating(counter) => {
+                // The closure always returns `Some`, so `fetch_update` never
+                // reports `Err`; both arms carry the same pre-update value.
+                let previous =
+                    match counter.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |old| {
                         Some(if old & 0x0f == 0x0f {
                             0x01
                         } else {
                             old.wrapping_add(1)
                         })
                     }) {
-                    Ok(previous) | Err(previous) => previous,
-                };
-            U4::from_lo(previous)
-        } else {
-            U4::from_lo(self.software_id.load(Ordering::SeqCst))
+                        Ok(previous) | Err(previous) => previous,
+                    };
+                U4::from_lo(previous)
+            }
         }
     }
 
@@ -346,63 +496,95 @@ impl HidppChannel {
         let (dev, feat, func) = msg.header();
         trace!(dev, feat, func, "hidpp request");
 
-        let (sender, receiver) = oneshot::channel::<HidppMessage>();
         let pending_id = self.pending_message_id.fetch_add(1, Ordering::SeqCst);
-
-        {
-            let mut pending = lock(&self.pending_messages);
-            // Drop abandoned requests before queuing this one. Timeouts and
-            // write failures remove their entry eagerly below, but a caller
-            // cancelled mid-flight (an outer `timeout(..)` dropping the whole
-            // future) still leaves its `PendingMessage` behind. On a channel
-            // reused across inventory ticks those would accumulate unboundedly
-            // — and a late response could be mis-delivered to a recycled
-            // software id. `is_canceled()` is true once the receiver is gone,
-            // so this prunes exactly the give-ups.
-            pending.retain(|m| !m.sender.is_canceled());
-            pending.push_back(PendingMessage {
-                id: pending_id,
-                response_predicate: Box::new(response_predicate),
-                sender,
-            });
-        }
+        let observation = RequestObservation::new(self.observer.as_deref(), pending_id);
+        let pending_request = PendingRequest::register(
+            pending_id,
+            Arc::clone(&self.pending_messages),
+            response_predicate,
+        );
 
         // The deadline covers the write as well: `write_report` has no
         // bounded-time contract of its own, so a wedged device could otherwise
         // park `send` forever before the response wait even starts.
-        let mut request = std::pin::pin!(
-            async {
-                self.send_and_forget(msg).await?;
-                receiver.await.map_err(|_| ChannelError::NoResponse)
-            }
-            .fuse()
-        );
+        let completion = {
+            let mut request = std::pin::pin!(
+                async move {
+                    if let Err(error) = self.write_hidpp_report(msg, Some(pending_id)).await {
+                        return PendingRequestCompletion::WriteFailed(error);
+                    }
+                    pending_request.receive().await.map_or(
+                        PendingRequestCompletion::NoResponse,
+                        PendingRequestCompletion::Response,
+                    )
+                }
+                .fuse()
+            );
 
-        let result = select! {
-            result = request => result,
-            () = futures_timer::Delay::new(timeout).fuse() => Err(ChannelError::Timeout),
+            select! {
+                completion = request => completion,
+                () = futures_timer::Delay::new(timeout).fuse() => PendingRequestCompletion::TimedOut,
+            }
         };
 
-        match &result {
-            Ok(_) => trace!(dev, feat, "hidpp response"),
-            Err(e) => trace!(dev, feat, error = ?e, "hidpp no response"),
-        }
-
-        if result.is_err() {
-            // A timeout or write failure leaves the entry queued — remove it
-            // eagerly. After a matched response the read thread has already
-            // taken it, so this is a no-op then.
-            self.remove_pending_message(pending_id);
-        }
-
-        result
+        finish_request(completion, observation, dev, feat)
     }
 
-    fn remove_pending_message(&self, id: u64) {
-        let mut pending = lock(&self.pending_messages);
-        if let Some(pos) = pending.iter().position(|msg| msg.id == id) {
-            pending.remove(pos);
+    /// Sends a HID++ message without timing out its transport write, then
+    /// waits at most `response_timeout` for a matching response.
+    ///
+    /// This ordering is for an owner that must know the native write has
+    /// completed before issuing a later request such as rollback. A native HID
+    /// implementation may keep a write alive after its Rust future is dropped,
+    /// so timing out and discarding that future cannot guarantee wire order.
+    ///
+    /// The caller **must drive this future to completion**, even after its own
+    /// requester has cancelled or exceeded a deadline. Requester deadlines
+    /// belong outside the task that owns this future and should only signal
+    /// that owner. A wedged native write cannot honestly be bounded without a
+    /// transport-level cancellation or completion guarantee.
+    ///
+    /// Pending-request cleanup, observations, and response matching otherwise
+    /// follow [`Self::send_with_timeout`].
+    pub async fn send_write_through(
+        &self,
+        msg: HidppMessage,
+        response_predicate: impl Fn(&HidppMessage) -> bool + Send + 'static,
+        response_timeout: Duration,
+    ) -> Result<HidppMessage, ChannelError> {
+        let msg = self.normalize_outgoing(msg);
+        if !self.supports_msg(&msg) {
+            return Err(ChannelError::MessageTypeNotSupported);
         }
+
+        let (dev, feat, func) = msg.header();
+        trace!(dev, feat, func, "hidpp request");
+
+        let pending_id = self.pending_message_id.fetch_add(1, Ordering::SeqCst);
+        let observation = RequestObservation::new(self.observer.as_deref(), pending_id);
+        let pending_request = PendingRequest::register(
+            pending_id,
+            Arc::clone(&self.pending_messages),
+            response_predicate,
+        );
+
+        let completion = if let Err(error) = self.write_hidpp_report(msg, Some(pending_id)).await {
+            drop(pending_request);
+            PendingRequestCompletion::WriteFailed(error)
+        } else {
+            let mut response = std::pin::pin!(pending_request.receive().fuse());
+            select! {
+                response = response => response.map_or(
+                    PendingRequestCompletion::NoResponse,
+                    PendingRequestCompletion::Response,
+                ),
+                () = futures_timer::Delay::new(response_timeout).fuse() => {
+                    PendingRequestCompletion::TimedOut
+                },
+            }
+        };
+
+        finish_request(completion, observation, dev, feat)
     }
 
     /// Sends a HID++ message across the channel and does not wait for a
@@ -415,8 +597,19 @@ impl HidppChannel {
             return Err(ChannelError::MessageTypeNotSupported);
         }
 
+        self.write_hidpp_report(msg, None).await
+    }
+
+    async fn write_hidpp_report(
+        &self,
+        msg: HidppMessage,
+        request_id: Option<u64>,
+    ) -> Result<(), ChannelError> {
         let mut buf = [0u8; LONG_REPORT_LENGTH];
         let len = msg.write_raw(&mut buf);
+        emit_report(self.observer.as_deref(), &buf[..len], |report| {
+            ChannelObservation::OutgoingReport { request_id, report }
+        });
         self.raw_channel
             .write_report(&buf[..len])
             .await
@@ -445,6 +638,12 @@ impl HidppChannel {
             return Err(ChannelError::InvalidRawReportLength(report.len()));
         }
 
+        emit_report(self.observer.as_deref(), report, |report| {
+            ChannelObservation::OutgoingReport {
+                request_id: None,
+                report,
+            }
+        });
         let mut write = std::pin::pin!(self.raw_channel.write_report(report).fuse());
         select! {
             result = write => result.map_err(ChannelError::Implementation),
@@ -496,6 +695,7 @@ async fn read_loop(
     raw_channel: &dyn RawHidChannel,
     pending_messages: &Mutex<VecDeque<PendingMessage>>,
     message_listeners: &Mutex<HashMap<u32, MessageListener>>,
+    observer: Option<&dyn ChannelObserver>,
     mut close: oneshot::Receiver<()>,
 ) {
     let mut buf = [0u8; MAX_REPORT_LENGTH];
@@ -517,11 +717,14 @@ async fn read_loop(
         };
 
         let Some(msg) = HidppMessage::read_raw(&buf[..len]) else {
+            emit_report(observer, &buf[..len], |report| {
+                ChannelObservation::MalformedIncomingReport { report }
+            });
             trace!(len, "report not HID++ — dropped");
             continue;
         };
 
-        let mut matched = false;
+        let mut matched_id = None;
         let pending_count;
         {
             let mut msgs = lock(pending_messages);
@@ -529,14 +732,21 @@ async fn read_loop(
             if let Some(pos) = msgs.iter().position(|elem| (elem.response_predicate)(&msg))
                 && let Some(waiting) = msgs.remove(pos)
             {
+                matched_id = Some(waiting.id);
                 let _ = waiting.sender.send(msg);
-                matched = true;
             }
         }
 
+        emit_report(observer, &buf[..len], |report| {
+            ChannelObservation::IncomingReport {
+                request_id: matched_id,
+                report,
+            }
+        });
+
         trace!(
             len,
-            matched,
+            matched = matched_id.is_some(),
             pending_count,
             payload = format_args!("{:02x?}", &buf[..len.min(16)]),
             "raw report received"
@@ -546,7 +756,7 @@ async fn read_loop(
         // without deadlocking on the lock it is being called under.
         let listeners: Vec<_> = lock(message_listeners).values().cloned().collect();
         for listener in listeners {
-            listener(msg, matched);
+            listener(msg, matched_id.is_some());
         }
     }
 }

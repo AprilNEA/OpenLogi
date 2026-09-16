@@ -63,12 +63,17 @@ pub(super) fn reap_leftovers(app: &Path, target: &Path) -> Result<()> {
             .map(|(pid, exe)| format!("  pid {pid}: {}", exe.display()))
             .collect::<Vec<_>>()
             .join("\n");
+        let service = crate::commands::macos::bundle::agent_service_label(
+            crate::commands::macos::bundle::identity::Channel::Production,
+        );
         bail!(
             "an external openlogi-agent is already running.\n\n\
              The dev GUI would connect to that agent instead of the freshly built dev\n\
-             agent, which makes GUI+agent testing misleading. Stop it first, e.g.:\n\n  \
-             launchctl bootout \"gui/$(id -u)/org.openlogi.agent\"\n  \
+             agent, which makes GUI+agent testing misleading. Stop it first: Quit from\n\
+             its menu-bar icon, or\n\n  \
              pkill -x openlogi-agent\n\n\
+             (for an install registered as a login item, also:\n  \
+             launchctl bootout \"gui/$(id -u)/{service}\")\n\n\
              Running external agent(s):\n{listed}\n\n\
              If this is intentional, rerun with OPENLOGI_ALLOW_EXTERNAL_AGENT=1."
         );

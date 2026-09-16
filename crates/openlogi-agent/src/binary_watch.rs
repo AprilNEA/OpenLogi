@@ -29,13 +29,17 @@
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
-use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tracing::{info, warn};
 
 mod relaunch;
 
+#[cfg(all(unix, not(target_os = "macos")))]
+pub(crate) use relaunch::replace_process;
 #[cfg(target_os = "macos")]
-pub use relaunch::relaunch_after_input_monitoring_grant;
+pub(crate) use relaunch::{schedule, schedule_after_input_monitoring_grant};
+
+use crate::shutdown::{ShutdownRequest, ShutdownRequestSender};
 
 /// How often to stat the executable: one `metadata` call per tick — noise next
 /// to the 2 s HID enumerate — while keeping the update-to-restart window short.
@@ -169,23 +173,20 @@ fn is_translocated(path: &Path) -> bool {
 /// are resolved once, up front; if either fails the watch is disabled (logged)
 /// rather than guessing at a path.
 ///
-/// The returned receiver fires once, when the executable has been gone long
-/// enough to mean the app was uninstalled. The agent core shuts down on it —
-/// that path, and not a bare `process::exit`, is what drops the hook and
-/// detaches the macOS event tap. A disabled watch simply drops the sender, so
-/// the receiver never fires.
-pub fn spawn() -> mpsc::UnboundedReceiver<()> {
-    let (uninstalled_tx, uninstalled_rx) = mpsc::unbounded_channel();
+/// Settled replacement and uninstall decisions are sent to the lifecycle
+/// owner. This thread never replaces or exits the process itself: doing so
+/// would bypass the HID++ managers that own firmware diversion.
+pub fn spawn(requests: ShutdownRequestSender) {
     let Ok(path) = std::env::current_exe() else {
         warn!("could not resolve own executable — binary-update watch disabled");
-        return uninstalled_rx;
+        return;
     };
     let Sighting::Seen(baseline) = sight(&path) else {
         warn!(
             path = %path.display(),
             "could not stat own executable — binary-update watch disabled"
         );
-        return uninstalled_rx;
+        return;
     };
     // A translocated bundle already lives on a randomized, ephemeral mount, so
     // its path disappearing says nothing about whether the app is installed.
@@ -198,11 +199,22 @@ pub fn spawn() -> mpsc::UnboundedReceiver<()> {
                 match watch.tick(baseline, sight(&path)) {
                     Tick::Watch => {}
                     Tick::Restart => {
-                        relaunch::restart(&path);
-                        // Only reached when the exec failed (a broken or still-
-                        // churning file). Disarm so the retry needs a fresh
-                        // two-tick settle — staying alive on the old image beats
-                        // dying in setups with no respawner.
+                        let (retry_tx, retry_rx) = oneshot::channel();
+                        if requests
+                            .send(ShutdownRequest::Restart {
+                                path: path.clone(),
+                                retry: retry_tx,
+                            })
+                            .is_err()
+                        {
+                            return;
+                        }
+                        // A successful replacement ends this process. The only
+                        // reply means scheduling or exec failed and this old
+                        // image safely resumed its watcher fleet.
+                        if retry_rx.blocking_recv().is_err() {
+                            return;
+                        }
                         watch.pending = None;
                     }
                     Tick::Uninstalled => {
@@ -210,9 +222,7 @@ pub fn spawn() -> mpsc::UnboundedReceiver<()> {
                             path = %path.display(),
                             "own executable is gone — the app was removed; shutting down"
                         );
-                        // A closed receiver means the core is already going
-                        // down; either way this watcher is finished.
-                        let _ = uninstalled_tx.send(());
+                        let _ = requests.send(ShutdownRequest::Uninstalled);
                         return;
                     }
                 }
@@ -221,7 +231,6 @@ pub fn spawn() -> mpsc::UnboundedReceiver<()> {
     if let Err(e) = spawn_result {
         warn!(error = %e, "could not spawn the binary-update watch thread");
     }
-    uninstalled_rx
 }
 
 #[cfg(test)]

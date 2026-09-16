@@ -13,28 +13,35 @@ use openlogi_core::config::LightSettings;
 use crate::services::assets::ResolvedAsset;
 use crate::ui::theme::Palette;
 
+/// What a light's visual reflects about the device — connection and power
+/// are independent facts (an enabled light can be offline), so this is a
+/// named pair rather than two adjacent `bool`s.
+#[derive(Clone, Copy)]
+pub(crate) struct LightView {
+    pub(crate) online: bool,
+    pub(crate) enabled: bool,
+}
+
 /// Render a standalone light inside a home-gallery image slot.
 pub(crate) fn gallery(
     asset: Option<&ResolvedAsset>,
-    online: bool,
-    enabled: bool,
+    view: LightView,
     settings: LightSettings,
     pal: Palette,
 ) -> gpui::Div {
     visual_container()
         .when_some(asset, |container, asset| {
-            container.child(product_image(asset, 210., 180., online))
+            container.child(product_image(asset, 210., 180., view.online))
         })
         .when(asset.is_none(), |container| {
-            container.child(generated_visual(210., 180., online, enabled, settings, pal))
+            container.child(generated_visual(210., 180., view, settings, pal))
         })
 }
 
 /// Render a standalone light as the large hero in its detail view.
 pub(crate) fn detail(
     asset: Option<&ResolvedAsset>,
-    online: bool,
-    enabled: bool,
+    view: LightView,
     settings: LightSettings,
     pal: Palette,
 ) -> gpui::Div {
@@ -48,10 +55,10 @@ pub(crate) fn detail(
         .bg(pal.panel)
         .overflow_hidden()
         .when_some(asset, |container, asset| {
-            container.child(product_image(asset, 536., 460., online))
+            container.child(product_image(asset, 536., 460., view.online))
         })
         .when(asset.is_none(), |container| {
-            container.child(generated_visual(536., 460., online, enabled, settings, pal))
+            container.child(generated_visual(536., 460., view, settings, pal))
         })
 }
 
@@ -84,11 +91,11 @@ fn visual_container() -> gpui::Div {
 fn generated_visual(
     width: f32,
     height: f32,
-    online: bool,
-    enabled: bool,
+    view: LightView,
     settings: LightSettings,
     pal: Palette,
 ) -> gpui::Div {
+    let LightView { online, enabled } = view;
     let powered = online && enabled;
     let glow = light_color(settings.temperature_kelvin.unwrap_or(4600));
     let brightness = f32::from(settings.brightness_percent.min(100)) / 100.;

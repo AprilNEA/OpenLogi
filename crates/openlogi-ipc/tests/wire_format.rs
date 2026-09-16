@@ -32,21 +32,22 @@ use std::fmt::Write;
 use bincode::Options;
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
-use openlogi_core::config::Lighting;
+use openlogi_core::config::{Lighting, ScrollResolution};
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
     DeviceModelInfo, DeviceTransports, LightCapabilities, LightValueRange, LightValueUnit,
     PairedDevice, RawDeviceAddress, ReceiverInfo, StandaloneDevice,
 };
 use openlogi_core::hid::{
-    Click, DeviceRoute, Dpi, DpiCapabilities, DpiInfo, HidppFeatureErrorKind, HidppOperation,
-    HostInfo, LightCommand, PasskeyMethod, ReceiverSelector, SmartShiftAutoDisengage,
+    BacklightMode, BacklightState, BacklightStatus, Click, DeviceRoute, Dpi, DpiCapabilities,
+    DpiInfo, HidppFeatureErrorKind, HidppOperation, HostInfo, LightCommand, PasskeyMethod,
+    ReceiverSelector, ScrollReportingTarget, ScrollWheelMode, SmartShiftAutoDisengage,
     SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque, WriteError,
 };
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
-    AgentSnapshot, AgentStatus, ConfigReloadError, ForegroundApps, FoundDevice, Identity,
-    InventoryHealth, MonitorEvent, Observation, PROTOCOL_VERSION, PairingCommandError,
+    AgentSnapshot, AgentStatus, ClientKind, ConfigReloadError, ForegroundApps, FoundDevice,
+    Identity, InventoryHealth, MonitorEvent, Observation, PROTOCOL_VERSION, PairingCommandError,
     PairingFailure, PairingPhase, PairingUpdate, RingObservation,
 };
 use succession::{Compat, Run};
@@ -101,7 +102,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 29);
+    assert_eq!(PROTOCOL_VERSION, 31);
 }
 
 #[test]
@@ -143,7 +144,7 @@ fn request_variant_order() {
     assert_wire(&AgentRequest::NextPairing {}, "0d");
     assert_wire(&AgentRequest::Snapshot {}, "0e");
     assert_wire(&AgentRequest::PollEventMonitor {}, "0f");
-    // `read_host_info` is the v29 append — 0x19 pins it as the last method.
+    // `read_host_info` is the v31 append — 0x1c pins it as the last method.
     assert_wire(
         &AgentRequest::ReadHostInfo {
             route: DeviceRoute::Bolt {
@@ -151,7 +152,7 @@ fn request_variant_order() {
                 slot: 1,
             },
         },
-        "190008463030444341464501",
+        "1c0008463030444341464501",
     );
     assert_wire(
         &AgentRequest::SetLight {
@@ -198,6 +199,46 @@ fn request_variant_order() {
     assert_wire(&AgentRequest::Identity {}, "16");
     assert_wire(&AgentRequest::Observe { since: 7 }, "1707");
     assert_wire(&AgentRequest::ObserveActionRing { since: 7 }, "1807");
+    assert_wire(
+        &AgentRequest::DeclareClient {
+            kind: ClientKind::Gui,
+        },
+        "1900",
+    );
+    assert_wire(
+        &AgentRequest::DeclareClient {
+            kind: ClientKind::Cli,
+        },
+        "1901",
+    );
+    assert_wire(
+        &AgentRequest::DeclareClient {
+            kind: ClientKind::Overlay,
+        },
+        "1902",
+    );
+}
+
+#[test]
+fn semantic_read_requests() {
+    assert_wire(
+        &AgentRequest::ReadWheel {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+        },
+        "1a0008463030444341464501",
+    );
+    assert_wire(
+        &AgentRequest::ReadBacklight {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+        },
+        "1b0008463030444341464501",
+    );
 }
 
 /// The agent identity is frozen: a helper from any build has to be able to
@@ -529,6 +570,29 @@ fn device_settings_payloads() {
         &ReceiverSelector::BoltUid("F00DCAFE".into()),
         "01084630304443414645",
     );
+}
+
+#[test]
+fn semantic_read_payloads() {
+    assert_wire(&ScrollReportingTarget::Native, "00");
+    assert_wire(&ScrollReportingTarget::Diverted, "01");
+    let wheel: Result<ScrollWheelMode, WriteError> = Ok(ScrollWheelMode {
+        resolution: ScrollResolution::High,
+        inverted: false,
+        target: ScrollReportingTarget::Native,
+    });
+    assert_wire(&wheel, "00010000");
+
+    assert_wire(&BacklightMode::PermanentManual, "03");
+    assert_wire(&BacklightStatus::PermanentManual, "05");
+    let backlight: Result<BacklightState, WriteError> = Ok(BacklightState {
+        enabled: true,
+        mode: BacklightMode::Automatic,
+        status: BacklightStatus::AlsAutomatic,
+        current_level: 4,
+        nb_levels: 8,
+    });
+    assert_wire(&backlight, "000101020408");
 }
 
 #[test]

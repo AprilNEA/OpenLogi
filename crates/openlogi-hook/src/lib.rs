@@ -26,6 +26,9 @@
 //! ```
 
 use std::cfg_select;
+use std::sync::Arc;
+
+use thiserror::Error;
 
 pub use openlogi_core::app::ForegroundApp;
 pub use openlogi_core::binding::ButtonId;
@@ -36,7 +39,11 @@ pub use openlogi_core::scroll::ScrollDelta;
 /// sources (IOKit, evdev) hand it back as a `u32`.
 pub const LOGITECH_VENDOR_ID: u32 = openlogi_core::hid::LOGITECH_VENDOR_ID as u32;
 
-/// Cursor position in the operating system's global screen coordinate space.
+/// Cursor position in the operating system's global screen coordinate space,
+/// scaled so it lines up with GPUI's own logical (DIP) display bounds — the
+/// Windows backend divides physical `GetCursorPos` pixels by the cursor's
+/// monitor DPI scale to match; macOS `CGEvent` points and Linux root-window
+/// coordinates are already resolution-independent.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CursorPosition {
     /// Horizontal screen coordinate.
@@ -364,6 +371,13 @@ trait HookBackend {
     /// Stop the hook and join its threads.
     fn stop(running: Self::Running);
 
+    /// Whether the platform worker is still delivering events. Backends whose
+    /// workers are joined only during teardown have no separate terminal
+    /// state, so their live handle is sufficient by default.
+    fn is_running(_running: &Self::Running) -> bool {
+        true
+    }
+
     /// See [`Hook::has_accessibility`]. Platforms that gate the hook below the
     /// privacy layer answer `true`.
     fn has_accessibility() -> bool {
@@ -476,6 +490,16 @@ impl Hook {
         self.shutdown();
     }
 
+    /// Whether the platform worker is still able to deliver events.
+    ///
+    /// A Windows message-pump error is terminal: the worker clears its callback
+    /// so native input passes through, and this method then returns `false`
+    /// even though the [`Hook`] handle has not yet been dropped.
+    #[must_use]
+    pub fn is_running(&self) -> bool {
+        self.inner.as_ref().is_some_and(Backend::is_running)
+    }
+
     /// Tear down the platform hook if it is still running. Idempotent: the
     /// first call takes `inner`, so the `Drop` after an explicit [`Self::stop`]
     /// is a no-op.
@@ -543,11 +567,138 @@ impl Hook {
 /// `None` when no app is frontmost, when reading fails, or on an unsupported
 /// platform — including a pure-Wayland session with no backend (see
 /// `linux::detect_frontmost_source`). Costs one X11 round-trip on Linux and a
-/// handful of `objc_msgSend`s on macOS — well under a millisecond at the
-/// agent's 1 Hz polling cadence (`openlogi_agent_core::watchers::foreground_app`).
+/// handful of `objc_msgSend`s on macOS. Callers can use
+/// [`watch_frontmost_application_changes`] to drive reads from native platform
+/// events instead of polling.
 #[must_use]
 pub fn frontmost_application() -> Option<ForegroundApp> {
     Backend::frontmost_app()
+}
+
+/// Return the Safari process captured by the latest macOS foreground-app
+/// observation without querying AppKit on the caller's thread.
+///
+/// This is a nonblocking atomic snapshot for input callbacks. It returns
+/// `None` when Safari is not frontmost and on non-macOS platforms.
+#[must_use]
+pub fn frontmost_safari_pid() -> Option<i32> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::frontmost_safari_pid()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+/// Failure to install or operate a native foreground-application observer.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum ForegroundApplicationObserverError {
+    /// This target has no foreground-application event source.
+    #[error("foreground-application observation is unsupported on this platform")]
+    Unsupported,
+    /// The selected platform observer failed.
+    #[error("foreground-application observer failed: {0}")]
+    Platform(String),
+}
+
+/// RAII owner of the current platform's foreground-application observer.
+///
+/// Dropping this value synchronously unregisters the native observer and stops
+/// any worker it owns.
+#[must_use]
+pub struct ForegroundApplicationObserver {
+    #[cfg(target_os = "macos")]
+    platform: macos::ForegroundApplicationObserver,
+    #[cfg(target_os = "linux")]
+    platform: linux::ForegroundApplicationObserver,
+    #[cfg(target_os = "windows")]
+    platform: windows::foreground::ForegroundApplicationObserver,
+}
+
+impl ForegroundApplicationObserver {
+    /// Return an error if a fallible observer worker has stopped delivering.
+    ///
+    /// Native macOS registration has no independently observable worker
+    /// health, so it relies on the consumer's idle recovery read.
+    pub fn check_health(&self) -> Result<(), ForegroundApplicationObserverError> {
+        #[cfg(target_os = "linux")]
+        {
+            self.platform
+                .check_health()
+                .map_err(|error| ForegroundApplicationObserverError::Platform(error.to_owned()))
+        }
+        #[cfg(target_os = "windows")]
+        {
+            self.platform
+                .check_health()
+                .map_err(|error| ForegroundApplicationObserverError::Platform(error.to_string()))
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let _ = &self.platform;
+            Ok(())
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+        {
+            Err(ForegroundApplicationObserverError::Unsupported)
+        }
+    }
+}
+
+/// Observe native foreground-application changes.
+///
+/// The callback is an invalidation, not another source of application identity:
+/// call [`frontmost_application`] to read the authoritative current value. It
+/// may run on any thread, must return quickly, and is invoked once after native
+/// registration so the consumer can seed its state without a polling read.
+pub fn watch_frontmost_application_changes(
+    on_change: impl Fn() + Send + Sync + 'static,
+) -> Result<ForegroundApplicationObserver, ForegroundApplicationObserverError> {
+    let on_change: Arc<dyn Fn() + Send + Sync> = Arc::new(on_change);
+
+    #[cfg(target_os = "macos")]
+    {
+        let native_callback = Arc::clone(&on_change);
+        let platform = macos::watch_frontmost_application_activations(move |_| native_callback());
+        on_change();
+        Ok(ForegroundApplicationObserver { platform })
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let platform = linux::watch_frontmost_application_activations(move |_| on_change())
+            .map_err(|error| ForegroundApplicationObserverError::Platform(error.to_string()))?;
+        Ok(ForegroundApplicationObserver { platform })
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let platform = windows::foreground::watch_frontmost_application_activations(move |_| {
+            on_change();
+        })
+        .map_err(|error| ForegroundApplicationObserverError::Platform(error.to_string()))?;
+        Ok(ForegroundApplicationObserver { platform })
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        let _ = on_change;
+        Err(ForegroundApplicationObserverError::Unsupported)
+    }
+}
+
+/// Observe macOS foreground-application activations.
+///
+/// Each callback carries the application from AppKit's activation notification;
+/// it may run on any thread and must return quickly. Dropping the returned
+/// handle unregisters the native observer and releases its block.
+#[cfg(target_os = "macos")]
+pub fn watch_frontmost_application_activations(
+    on_activation: impl Fn(Option<ForegroundApp>) + Send + Sync + 'static,
+) -> ForegroundApplicationObserver {
+    ForegroundApplicationObserver {
+        platform: macos::watch_frontmost_application_activations(on_activation),
+    }
 }
 
 /// Return the current global cursor position without installing an input hook.
@@ -586,7 +737,7 @@ mod macos;
 #[cfg(target_os = "linux")]
 mod linux;
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", test))]
 mod windows;
 
 #[cfg(test)]

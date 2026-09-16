@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use clap::Args;
 use openlogi_camera::Camera;
 use openlogi_core::device::{BatteryInfo, DeviceInventory, DeviceModelInfo, PairedDevice};
-use openlogi_ipc::{AgentSnapshot, AgentStatus, PROTOCOL_VERSION, client};
+use openlogi_ipc::{AgentSnapshot, AgentStatus, ClientKind, PROTOCOL_VERSION, client};
 use tarpc::context;
 
 #[derive(Debug, Args)]
@@ -86,6 +86,16 @@ async fn agent_snapshot() -> Option<AgentSnapshot> {
         );
         return None;
     }
+    // Identify as a CLI so a dormant agent (launch-at-login off, started at
+    // login) serves this query without arming its whole input stack.
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        conn.client
+            .declare_client(context::current(), ClientKind::Cli),
+    )
+    .await
+    .ok()?
+    .ok()?;
     tokio::time::timeout(
         Duration::from_secs(5),
         conn.client.snapshot(context::current()),

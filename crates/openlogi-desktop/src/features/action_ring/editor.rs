@@ -31,7 +31,7 @@ pub(super) fn action_library(
     let current_action = current.map(ActionRingEntry::action).cloned();
     let current_label = current_action
         .as_ref()
-        .map_or_else(|| tr!("Empty slot"), localized_action_label);
+        .map_or_else(|| tr!("action_ring.empty_slot"), localized_action_label);
 
     v_flex()
         .flex_1()
@@ -54,11 +54,15 @@ pub(super) fn action_library(
                     h_flex()
                         .items_center()
                         .justify_between()
-                        .child(div().text_subheading().child(tr!("Actions Ring")))
+                        .child(
+                            div()
+                                .text_subheading()
+                                .child(tr!("action_ring.actions_ring")),
+                        )
                         .child(
                             Button::new("ring-clear-slot")
                                 .compact()
-                                .label(tr!("Clear slot"))
+                                .label(tr!("action_ring.clear_slot"))
                                 .on_click(move |_, _, cx| commit_slot(slot, None, cx)),
                         ),
                 )
@@ -109,7 +113,7 @@ fn icon_editor(
     let default = icon_button(
         "ring-default-icon",
         default_path,
-        tr!("Use action icon"),
+        tr!("action_ring.use_action_icon"),
         current.is_none(),
         pal,
     )
@@ -117,7 +121,7 @@ fn icon_editor(
 
     v_flex()
         .gap_1()
-        .child(editor_section(tr!("Icon"), pal))
+        .child(editor_section(tr!("action_ring.icon"), pal))
         .child(
             h_flex().flex_wrap().gap_1().child(default).children(
                 ActionRingIcon::ALL
@@ -127,7 +131,7 @@ fn icon_editor(
                         icon_button(
                             ("ring-custom-icon", index),
                             icon.asset_path(),
-                            rust_i18n::t!(icon.label()),
+                            rust_i18n::t!(icon.translation_key()),
                             current == Some(icon),
                             pal,
                         )
@@ -160,7 +164,7 @@ fn shortcut_editor(
     let submit_input = input.clone();
     v_flex()
         .gap_1()
-        .child(editor_section(tr!("Custom shortcut"), pal))
+        .child(editor_section(tr!("action_ring.custom_shortcut"), pal))
         .child(
             h_flex()
                 .gap_2()
@@ -173,7 +177,7 @@ fn shortcut_editor(
                 .child(
                     Button::new("ring-add-shortcut")
                         .compact()
-                        .label(tr!("Add"))
+                        .label(tr!("common.add"))
                         .on_click(move |_, _, cx| {
                             let shortcut = submit_input.read(cx).value().to_string();
                             if let Ok(combo) = shortcut.parse::<KeyCombo>() {
@@ -188,7 +192,10 @@ fn path_editor(slot: ActionRingSlot, input: &Entity<InputState>, pal: Palette) -
     let submit_input = input.clone();
     v_flex()
         .gap_1()
-        .child(editor_section(tr!("Open application or folder"), pal))
+        .child(editor_section(
+            tr!("action_ring.open_application_or_folder"),
+            pal,
+        ))
         .child(
             h_flex()
                 .gap_2()
@@ -201,7 +208,7 @@ fn path_editor(slot: ActionRingSlot, input: &Entity<InputState>, pal: Palette) -
                 .child(
                     Button::new("ring-add-path")
                         .compact()
-                        .label(tr!("Add"))
+                        .label(tr!("common.add"))
                         .on_click(move |_, _, cx| {
                             let path = submit_input.read(cx).value().to_string();
                             if let Ok(target) = ApplicationTarget::new(path, "") {
@@ -220,11 +227,14 @@ fn action_sections(
     let mut index = 0usize;
     ring_catalog().into_iter().map(move |(category, actions)| {
         v_flex()
-            .child(editor_section(rust_i18n::t!(category.label()), pal))
+            .child(editor_section(
+                rust_i18n::t!(category.translation_key()),
+                pal,
+            ))
             .children(actions.into_iter().map(|action| {
                 let selected = current == Some(&action);
                 let action_to_commit = action.clone();
-                let label = tr!(action.label());
+                let label = localized_action_label(&action);
                 let icon_path = action_icon_path(&action);
                 let row_index = index;
                 index += 1;

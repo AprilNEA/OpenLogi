@@ -24,13 +24,17 @@ path = "src/bin/mock_agent.rs"
 [dependencies]
 openlogi-agent-core = { path = "../openlogi-agent-core" }
 openlogi-core = { path = "../openlogi-core" }
+openlogi-device = { path = "../openlogi-device" }
+openlogi-fixture = { workspace = true }
 openlogi-hid = { path = "../openlogi-hid" }
 openlogi-hook = { path = "../openlogi-hook" }
 openlogi-ipc = { path = "../openlogi-ipc" }
+serde_json.workspace = true
 tarpc = { workspace = true }
 interprocess = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util", "signal"] }
 futures = "0.3"
+rust-i18n = "4"
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
@@ -47,8 +51,11 @@ embed-resource = "3.0.9"
 dispatch2 = "0.3.1"
 objc2 = { workspace = true }
 objc2-app-kit = { workspace = true, features = ["NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSResponder", "NSView", "NSMenu", "NSMenuItem", "NSImage", "NSApplication", "NSRunningApplication", "NSWorkspace"] }
+objc2-core-graphics = { workspace = true, features = ["CGDirectDisplay", "CGDisplayConfiguration", "libc"] }
 objc2-foundation = { workspace = true, features = ["NSString", "NSData", "NSArray", "NSNotification"] }
-plist = "1.10.0"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = "5"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 winreg = "0.55"
@@ -66,3 +73,4 @@ workspace = true
 
 [dev-dependencies]
 tempfile = "3.27.0"
+tokio = { workspace = true, features = ["test-util"] }

@@ -50,6 +50,29 @@ pub enum AssetSource {
     Override(String),
 }
 
+#[derive(Clone, Copy, Debug)]
+enum BuiltInSource {
+    Production,
+    Pages,
+    JsDelivr,
+}
+
+impl From<BuiltInSource> for AssetSource {
+    fn from(source: BuiltInSource) -> Self {
+        match source {
+            BuiltInSource::Production => Self::Production,
+            BuiltInSource::Pages => Self::Pages,
+            BuiltInSource::JsDelivr => Self::JsDelivr,
+        }
+    }
+}
+
+impl fmt::Display for BuiltInSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        AssetSource::from(*self).fmt(formatter)
+    }
+}
+
 impl fmt::Display for AssetSource {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -151,13 +174,13 @@ fn probe_default_sources(dir: &Path) -> Result<AssetRegistry, AssetError> {
     let (sender, receiver) = mpsc::channel();
 
     for (source, base) in [
-        (AssetSource::Production, PRODUCTION_BASE),
-        (AssetSource::Pages, PAGES_BASE),
+        (BuiltInSource::Production, PRODUCTION_BASE),
+        (BuiltInSource::Pages, PAGES_BASE),
     ] {
         let sender = sender.clone();
         thread::spawn(move || {
             let result = probe_uniform(base);
-            if sender.send((source.clone(), result)).is_err() {
+            if sender.send((source, result)).is_err() {
                 debug!(%source, "asset source probe finished after a winner was selected");
             }
         });
@@ -166,7 +189,7 @@ fn probe_default_sources(dir: &Path) -> Result<AssetRegistry, AssetError> {
     thread::spawn(move || {
         let result = probe_jsdelivr();
         if jsdelivr_sender
-            .send((AssetSource::JsDelivr, result))
+            .send((BuiltInSource::JsDelivr, result))
             .is_err()
         {
             debug!("jsDelivr probe finished after a winner was selected");
@@ -181,17 +204,14 @@ fn probe_default_sources(dir: &Path) -> Result<AssetRegistry, AssetError> {
         match result {
             Ok(probe) => {
                 // A local persistence failure is independent of the selected mirror.
-                return registry_from_probe(source, probe, dir);
+                return registry_from_probe(source.into(), probe, dir);
             }
             Err(error) => {
                 warn!(%source, error = ?error, "asset source probe failed");
                 match source {
-                    AssetSource::Production => production_error = Some(error),
-                    AssetSource::Pages => pages_error = Some(error),
-                    AssetSource::JsDelivr => jsdelivr_error = Some(error),
-                    AssetSource::Override(_) => {
-                        unreachable!("override is not sent by source probes")
-                    }
+                    BuiltInSource::Production => production_error = Some(error),
+                    BuiltInSource::Pages => pages_error = Some(error),
+                    BuiltInSource::JsDelivr => jsdelivr_error = Some(error),
                 }
             }
         }

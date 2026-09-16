@@ -14,10 +14,11 @@
 //! retained object** (session / output / delegate), so ownership is leak-proof
 //! by construction rather than hand-balanced `retain`/`release`. The frame
 //! delegate is an `NSObject` subclass declared with [`define_class!`] (the same
-//! macro the agent's tray target uses); it is stateless and driven on a
-//! background dispatch queue, so it inherits `NSObject`'s any-thread kind and
-//! needs no main-thread affinity (no `MainThreadMarker`) — AVFoundation's
-//! session start/stop and its sample-buffer callback are all off-main.
+//! macro the agent's tray target uses); its one ivar is the owning session's
+//! [`FrameSink`], and it is driven on a background dispatch queue, so it
+//! inherits `NSObject`'s any-thread kind and needs no main-thread affinity (no
+//! `MainThreadMarker`) — AVFoundation's session start/stop and its
+//! sample-buffer callback are all off-main.
 
 #![expect(
     unsafe_code,
@@ -25,13 +26,13 @@
 )]
 use std::ffi::{CString, c_void};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Bool, NSObject};
-use objc2::{AnyThread, class, define_class, msg_send};
+use objc2::{AnyThread, DefinedClass, class, define_class, msg_send};
 
 pub use crate::capture_types::{CaptureError, Frame};
 
@@ -40,20 +41,25 @@ const PIXEL_FORMAT_32BGRA: u32 = 0x4247_5241;
 /// kCVPixelBufferLock_ReadOnly.
 const LOCK_READ_ONLY: u64 = 1;
 
-// The most recent frame the delegate decoded, behind an `Arc` so the preview's
-// poll hands out a cheap refcount bump instead of copying the whole buffer. A
-// process previews one camera at a time, so a single global sink is enough and
-// keeps the delegate stateless.
-static LATEST: LazyLock<Mutex<Option<Arc<Frame>>>> = LazyLock::new(|| Mutex::new(None));
-
-/// Increments on every delivered frame, so a poller can tell a new frame from a
-/// repeat without comparing pixel buffers.
-static FRAME_GEN: AtomicU64 = AtomicU64::new(0);
-
-/// Target max width for delegate downsampling (0 = full resolution). Previews
-/// set this so an oversized buffer decimates down in one strided pass instead
-/// of copying (and uploading) pixels the preview can never show.
-static PREVIEW_TARGET_W: AtomicU32 = AtomicU32::new(0);
+/// One session's frame plumbing: the delegate writes, the owning [`Session`] /
+/// [`CameraStream`] reads. Owned per session — the Windows and Linux backends
+/// already model this per stream — so which session a frame belongs to is
+/// carried by ownership: two live sessions (a preview plus a snapshot, or an
+/// in-flight delegate callback from a session being replaced) can never stamp
+/// frames into each other's slot or clobber each other's decimation target.
+struct FrameSink {
+    /// The most recent frame the delegate decoded, behind an `Arc` so the
+    /// preview's poll hands out a cheap refcount bump instead of copying the
+    /// whole buffer.
+    latest: Mutex<Option<Arc<Frame>>>,
+    /// Increments on every delivered frame, so a poller can tell a new frame
+    /// from a repeat without comparing pixel buffers.
+    generation: AtomicU64,
+    /// Target max width for delegate downsampling (0 = full resolution).
+    /// Previews set this so an oversized buffer decimates down in one strided
+    /// pass instead of copying (and uploading) pixels they can never show.
+    target_width: AtomicU32,
+}
 
 #[link(name = "AVFoundation", kind = "framework")]
 unsafe extern "C" {
@@ -95,16 +101,19 @@ unsafe extern "C" {
 
 define_class!(
     // SAFETY: NSObject has no subclassing requirements, and `FrameDelegate` does
-    // not implement `Drop`. It carries no ivars and its one method only touches
-    // process-global state, so it is safe to use from the background dispatch
-    // queue AVFoundation drives it on (default any-thread kind, no `thread_kind`).
+    // not implement `Drop`. Its one ivar is an `Arc<FrameSink>` (`Send + Sync`)
+    // and its one method touches only that sink, so it is safe to use from the
+    // background dispatch queue AVFoundation drives it on (default any-thread
+    // kind, no `thread_kind`).
     #[unsafe(super(NSObject))]
     #[name = "OLCameraFrameDelegate"]
+    #[ivars = Arc<FrameSink>]
     struct FrameDelegate;
 
     impl FrameDelegate {
         /// `captureOutput:didOutputSampleBuffer:fromConnection:` — copies the
-        /// sample buffer's BGRA pixels (optionally decimated) into [`latest`].
+        /// sample buffer's BGRA pixels (optionally decimated) into its
+        /// session's [`FrameSink`].
         #[unsafe(method(captureOutput:didOutputSampleBuffer:fromConnection:))]
         fn did_output(
             &self,
@@ -112,6 +121,7 @@ define_class!(
             sbuf: *mut AnyObject,
             _conn: *mut AnyObject,
         ) {
+            let sink = self.ivars();
             // SAFETY: `sbuf` is a valid CMSampleBuffer delivered by AVFoundation;
             // the image buffer is locked for the read and unlocked before return.
             unsafe {
@@ -123,7 +133,7 @@ define_class!(
                 let bytes_per_row = CVPixelBufferGetBytesPerRow(pb);
                 let width = CVPixelBufferGetWidth(pb);
                 let height = CVPixelBufferGetHeight(pb);
-                let target = PREVIEW_TARGET_W.load(Ordering::Relaxed) as usize;
+                let target = sink.target_width.load(Ordering::Relaxed) as usize;
                 let step = if target > 0 && width > target {
                     width.div_ceil(target)
                 } else {
@@ -151,7 +161,7 @@ define_class!(
                             }
                         }
                     }
-                    if let Ok(mut slot) = LATEST.lock() {
+                    if let Ok(mut slot) = sink.latest.lock() {
                         #[expect(
                             clippy::cast_possible_truncation,
                             reason = "CoreVideo reports sensor-sized dimensions, divided down again by `step`"
@@ -162,7 +172,7 @@ define_class!(
                             bgra,
                         };
                         *slot = Some(Arc::new(frame));
-                        FRAME_GEN.fetch_add(1, Ordering::Relaxed);
+                        sink.generation.fetch_add(1, Ordering::Relaxed);
                     }
                 }
                 CVPixelBufferUnlockBaseAddress(pb, LOCK_READ_ONLY);
@@ -172,8 +182,8 @@ define_class!(
 );
 
 impl FrameDelegate {
-    fn new() -> Retained<Self> {
-        let this = Self::alloc().set_ivars(());
+    fn new(sink: Arc<FrameSink>) -> Retained<Self> {
+        let this = Self::alloc().set_ivars(sink);
         // SAFETY: `init` initializes our freshly-allocated NSObject subclass and
         // returns it (the two-phase construction objc2's `define_class!` uses).
         unsafe { msg_send![super(this), init] }
@@ -300,13 +310,15 @@ fn device_with_unique_id(unique_id: &str) -> Option<Retained<AnyObject>> {
 }
 
 /// A running capture session. Frames flow to the delegate on a background
-/// dispatch queue and land in [`LATEST`]; dropping the session stops it. The
-/// `Retained` fields keep the output + delegate alive for the session's life
-/// (the session references them, but we hold owning handles for clarity).
+/// dispatch queue and land in this session's own [`FrameSink`]; dropping the
+/// session stops it. The `Retained` fields keep the output + delegate alive
+/// for the session's life (the session references them, but we hold owning
+/// handles for clarity).
 struct Session {
     handle: Retained<AnyObject>,
     _output: Retained<AnyObject>,
     _delegate: Retained<FrameDelegate>,
+    sink: Arc<FrameSink>,
 }
 
 impl Drop for Session {
@@ -318,18 +330,20 @@ impl Drop for Session {
     }
 }
 
-/// Authorize, wire up, and start a capture session on `unique_id`. Frames begin
-/// arriving in [`LATEST`] shortly after this returns.
+/// Authorize, wire up, and start a capture session on `unique_id`. Frames
+/// begin arriving in the returned session's [`FrameSink`] shortly after this
+/// returns.
 fn open_session(unique_id: &str, low_res: bool) -> Result<Session, CaptureError> {
     ensure_access()?;
     let device = device_with_unique_id(unique_id).ok_or(CaptureError::NotFound)?;
-    if let Ok(mut slot) = LATEST.lock() {
-        *slot = None;
-    }
     // Previews cap at 720p-wide frames (the preview preset below already
     // delivers exactly that; the decimator only kicks in if a camera ignores
     // the preset and streams wider). Snapshots keep full resolution.
-    PREVIEW_TARGET_W.store(if low_res { 1280 } else { 0 }, Ordering::Relaxed);
+    let sink = Arc::new(FrameSink {
+        latest: Mutex::new(None),
+        generation: AtomicU64::new(0),
+        target_width: AtomicU32::new(if low_res { 1280 } else { 0 }),
+    });
 
     // SAFETY: standard AVCaptureSession wiring with documented selectors; every
     // object added is retained by the session, and the session is stopped on Drop.
@@ -379,7 +393,7 @@ fn open_session(unique_id: &str, low_res: bool) -> Result<Session, CaptureError>
         let _: () = msg_send![&*output, setVideoSettings: settings];
         let _: () = msg_send![&*output, setAlwaysDiscardsLateVideoFrames: true];
 
-        let delegate = FrameDelegate::new();
+        let delegate = FrameDelegate::new(Arc::clone(&sink));
         let queue = dispatch_queue_create(c"org.openlogi.camera".as_ptr(), std::ptr::null());
         let _: () = msg_send![&*output, setSampleBufferDelegate: &*delegate, queue: queue];
 
@@ -410,6 +424,7 @@ fn open_session(unique_id: &str, low_res: bool) -> Result<Session, CaptureError>
             handle: session,
             _output: output,
             _delegate: delegate,
+            sink,
         })
     }
 }
@@ -422,10 +437,10 @@ fn open_session(unique_id: &str, low_res: bool) -> Result<Session, CaptureError>
 /// granted, [`CaptureError::NotFound`] for an unknown id, [`CaptureError::Timeout`]
 /// when no frame arrives, or [`CaptureError::Setup`] on AVFoundation errors.
 pub fn capture_frame(unique_id: &str, timeout: Duration) -> Result<Frame, CaptureError> {
-    let _session = open_session(unique_id, false)?;
+    let session = open_session(unique_id, false)?;
     let deadline = Instant::now() + timeout;
     loop {
-        if let Ok(mut slot) = LATEST.lock()
+        if let Ok(mut slot) = session.sink.latest.lock()
             && let Some(frame) = slot.take()
         {
             return Ok(Arc::unwrap_or_clone(frame));
@@ -441,7 +456,7 @@ pub fn capture_frame(unique_id: &str, timeout: Duration) -> Result<Frame, Captur
 /// returns the most recent frame each time it's polled. Dropping it stops the
 /// camera.
 pub struct CameraStream {
-    _session: Session,
+    session: Session,
 }
 
 impl CameraStream {
@@ -450,7 +465,12 @@ impl CameraStream {
     /// pixel buffer.
     #[must_use]
     pub fn latest_frame(&self) -> Option<Arc<Frame>> {
-        LATEST.lock().ok().and_then(|slot| slot.clone())
+        self.session
+            .sink
+            .latest
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone())
     }
 
     /// Take the most recent frame out of the slot (the next delivered frame
@@ -458,14 +478,19 @@ impl CameraStream {
     /// buffer without copying it.
     #[must_use]
     pub fn take_frame(&self) -> Option<Arc<Frame>> {
-        LATEST.lock().ok().and_then(|mut slot| slot.take())
+        self.session
+            .sink
+            .latest
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take())
     }
 
     /// A counter that increments on every delivered frame, so the preview can
     /// skip rebuilding its texture when no new frame has arrived.
     #[must_use]
     pub fn frame_generation(&self) -> u64 {
-        FRAME_GEN.load(Ordering::Relaxed)
+        self.session.sink.generation.load(Ordering::Relaxed)
     }
 }
 
@@ -475,6 +500,6 @@ impl CameraStream {
 /// Same as [`capture_frame`], minus `Timeout` (frames are polled, not awaited).
 pub fn start_stream(unique_id: &str) -> Result<CameraStream, CaptureError> {
     Ok(CameraStream {
-        _session: open_session(unique_id, true)?,
+        session: open_session(unique_id, true)?,
     })
 }

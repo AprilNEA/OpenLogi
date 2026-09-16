@@ -23,7 +23,7 @@ impl SelectItem for AssetSourceOption {
 
     fn title(&self) -> SharedString {
         match self.source {
-            AssetSourcePreference::Automatic => tr!("Automatic (recommended)"),
+            AssetSourcePreference::Automatic => tr!("assets.automatic_recommended"),
             AssetSourcePreference::OpenLogi => SharedString::from("OpenLogi"),
             AssetSourcePreference::Cloudflare => SharedString::from("Cloudflare"),
             AssetSourcePreference::Fastly => SharedString::from("Fastly"),
@@ -67,22 +67,19 @@ pub(super) fn assets_page(
     let group = SettingGroup::new()
         .item(
             SettingItem::new(
-                tr!("Asset source"),
+                tr!("assets.asset_source"),
                 SettingField::render(move |_, _, _| {
                     asset_source_select_field(asset_source_select.clone())
                 }),
             )
-            .description(tr!(
-                "Automatic uses the first healthy mirror. Choose a source to pin downloads; OPENLOGI_ASSETS still takes precedence."
-            )),
+            .description(tr!("assets.asset_source_description")),
         )
         .item(
             SettingItem::new(
-                tr!("Automatically download device images"),
+                tr!("assets.automatically_download_device_images"),
                 SettingField::switch(
                     |cx| {
-                        AppState::try_read(cx)
-                            .is_none_or(|s| s.app_settings().auto_download_assets)
+                        AppState::try_read(cx).is_none_or(|s| s.app_settings().auto_download_assets)
                     },
                     |enabled, cx| {
                         AppState::update(cx, move |state, cx| {
@@ -97,17 +94,15 @@ pub(super) fn assets_page(
                     },
                 ),
             )
-            .description(tr!(
-                "Fetch device renders from the selected source when a device connects. When off, OpenLogi makes no asset network requests; bundled art and the silhouette still show."
-            )),
+            .description(tr!("assets.automatic_device_images_description")),
         )
         .item(
             SettingItem::new(
-                tr!("Refresh assets"),
+                tr!("assets.refresh_assets"),
                 SettingField::render(move |_, _, cx| {
                     let view = refresh_view.clone();
                     let pal = crate::ui::theme::palette(cx);
-                    action_button("assets-refresh", tr!("Refresh"), pal, move |cx| {
+                    action_button("assets-refresh", tr!("common.refresh"), pal, move |cx| {
                         send_asset_command(cx, AssetCommand::Refresh);
                         // Give the spawned sync a moment to land small fetches,
                         // then re-quote the size row so the click visibly did
@@ -117,15 +112,15 @@ pub(super) fn assets_page(
                     })
                 }),
             )
-            .description(tr!("Re-download images for the connected devices now.")),
+            .description(tr!("assets.refresh_device_images_description")),
         )
         .item(
             SettingItem::new(
-                tr!("Clear cache"),
+                tr!("assets.clear_cache"),
                 SettingField::render(move |_, _, cx| {
                     let view = view.clone();
                     let pal = crate::ui::theme::palette(cx);
-                    action_button("assets-clear", tr!("Clear"), pal, move |cx| {
+                    action_button("assets-clear", tr!("common.clear"), pal, move |cx| {
                         send_asset_command(cx, AssetCommand::ClearCache);
                         // The wipe runs on the main loop's channel arm, not
                         // synchronously here — without a recompute the row
@@ -139,18 +134,18 @@ pub(super) fn assets_page(
         )
         .item(
             SettingItem::new(
-                tr!("Cache location"),
+                tr!("assets.cache_location"),
                 SettingField::render(move |_, _, cx| {
                     let pal = crate::ui::theme::palette(cx);
-                    action_button("assets-open", tr!("Open"), pal, |_| {
+                    action_button("assets-open", tr!("common.open"), pal, |_| {
                         crate::services::assets::reveal_cache_in_file_manager();
                     })
                 }),
             )
-            .description(tr!("Show the downloaded-images folder in your file manager.")),
+            .description(tr!("assets.show_downloaded_images_description")),
         );
 
-    SettingPage::new(tr!("Assets"))
+    SettingPage::new(tr!("assets.assets"))
         .icon(IconName::HardDrive)
         .resettable(false)
         .group(group)
@@ -199,7 +194,7 @@ pub(super) fn cache_size_description() -> SharedString {
                   and this is a display-only size"
     )]
     let mb = crate::services::assets::cache_size_bytes() as f64 / 1024.0 / 1024.0;
-    tr!("Downloaded images currently use %{size}.", size => format!("{mb:.1} MB"))
+    tr!("assets.downloaded_images_size", size => format!("{mb:.1} MB"))
 }
 
 /// A small bordered text button matching the permission rows' "Open" control.

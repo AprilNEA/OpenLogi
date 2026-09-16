@@ -106,6 +106,8 @@ pub(super) enum ThemeFilter {
 pub struct SettingsView {
     focus_handle: FocusHandle,
     appearance_obs: Option<Subscription>,
+    /// Refreshes host-owned snapshots when Settings becomes active again.
+    _activation_obs: Subscription,
     _state_obs: Subscription,
     /// Which themes the Appearance grid shows (All / Light / Dark).
     theme_filter: ThemeFilter,
@@ -136,6 +138,12 @@ pub struct SettingsView {
     /// re-walking the cache on every render. A snapshot — reopen to refresh
     /// after a Clear.
     asset_cache_desc: SharedString,
+    /// Snapshot of the agent service's registration status, taken when the
+    /// window opens, regains focus, and after every settings change (the status
+    /// read is an XPC round-trip, so it must not run per frame). Drives the
+    /// General page's "switched off in System Settings" notice while keeping
+    /// the render path on this intentional cache.
+    registration_status: crate::platform::registration::ServiceStatus,
     /// Drives the debug live event monitor: polls the agent on a timer while the
     /// Settings window is open. Dropping it with the view stops polling, which
     /// lets the agent's idle janitor turn monitoring back off.
@@ -169,12 +177,18 @@ impl SettingsView {
                     | StateEvent::SettingsChanged
                     | StateEvent::LanguageChanged
             ) {
+                // A settings change may have run the opportunistic
+                // registration ensure, so re-read the status snapshot.
+                if matches!(event, StateEvent::SettingsChanged) {
+                    this.refresh_registration_status(cx);
+                }
                 cx.notify();
             }
         });
+        let activation_obs = Self::observe_registration_status(window, cx);
 
         let theme_search =
-            cx.new(|cx| InputState::new(window, cx).placeholder(tr!("Filter themes…")));
+            cx.new(|cx| InputState::new(window, cx).placeholder(tr!("appearance.filter_themes")));
         cx.subscribe(&theme_search, |_, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 cx.notify();
@@ -240,6 +254,7 @@ impl SettingsView {
         Self {
             focus_handle,
             appearance_obs: None,
+            _activation_obs: activation_obs,
             _state_obs: state_obs,
             theme_filter: ThemeFilter::All,
             theme_search,
@@ -253,9 +268,26 @@ impl SettingsView {
             copied: false,
             copied_gen: 0,
             asset_cache_desc: assets::cache_size_description(),
+            registration_status: crate::platform::registration::status(),
             #[cfg(all(target_os = "macos", debug_assertions))]
             _monitor_task: monitor_task,
         }
+    }
+
+    fn refresh_registration_status(&mut self, cx: &mut Context<Self>) {
+        let status = crate::platform::registration::status();
+        if self.registration_status != status {
+            self.registration_status = status;
+            cx.notify();
+        }
+    }
+
+    fn observe_registration_status(window: &mut Window, cx: &mut Context<Self>) -> Subscription {
+        cx.observe_window_activation(window, |this, window, cx| {
+            if window.is_window_active() {
+                this.refresh_registration_status(cx);
+            }
+        })
     }
 
     fn thumbwheel_sensitivity_slider(
@@ -414,7 +446,7 @@ pub fn open(cx: &mut App) {
 /// The window's native title — one definition for open and the live-language
 /// retitle ([`windows::retitle_open`]), so the two cannot drift.
 pub(crate) fn window_title() -> SharedString {
-    tr!("Settings")
+    tr!("app.settings")
 }
 
 pub fn open_at(page: SettingsPage, cx: &mut App) {
@@ -435,7 +467,7 @@ impl Render for SettingsView {
         theme::apply_ui_scale(window, cx);
         crate::ui::components::localize_placeholder(
             &self.theme_search,
-            tr!("Filter themes…"),
+            tr!("appearance.filter_themes"),
             window,
             cx,
         );
@@ -459,8 +491,11 @@ impl Render for SettingsView {
                 group_ix: None,
             })
             .page(general::general_page(
-                self.vertical_scroll_sensitivity_slider.clone(),
-                self.thumbwheel_sensitivity_slider.clone(),
+                general::SensitivitySliders {
+                    vertical_scroll: self.vertical_scroll_sensitivity_slider.clone(),
+                    thumbwheel: self.thumbwheel_sensitivity_slider.clone(),
+                },
+                self.registration_status,
             ))
             .page(updates::updates_page(self.updater.clone()));
         // Registered only where grants exist to manage — see the `mod
@@ -506,7 +541,7 @@ impl Render for SettingsView {
                         .top_0()
                         .left_0()
                         .right_0()
-                        .child(windows::aux_title_bar(tr!("Settings"), cx)),
+                        .child(windows::aux_title_bar(tr!("app.settings"), cx)),
                 )
             })
             .child(settings)

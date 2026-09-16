@@ -26,7 +26,9 @@ use crate::{
 
 mod event;
 
-pub use event::{DeviceConnection, DeviceKind, Event, PairingError, PairingPasskeyPressType};
+pub use event::{
+    DeviceConnection, DeviceKind, Event, PairingPasskeyPressType, decode as decode_notification,
+};
 
 /// All known registers of the Bolt receiver.
 ///

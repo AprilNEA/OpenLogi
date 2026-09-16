@@ -90,7 +90,8 @@ cargo clippy --target aarch64-unknown-linux-musl \
 `openlogi-camera`'s Linux backend needs kernel headers and does not
 cross-compile from macOS. Details: `.claude/rules/cross-platform.md`.
 
-Linux CI tests **exclude** `openlogi-desktop`, so i18n locale-parity tests run
+Linux CI tests **exclude** `openlogi-desktop`, but still run `openlogi-ui`'s
+portable locale-parity test. The desktop end-to-end key-resolution tests run
 only on macOS CI (`cargo test -p openlogi-desktop i18n`).
 
 ## If you changed X, run Y
@@ -106,7 +107,7 @@ only on macOS CI (`cargo test -p openlogi-desktop i18n`).
 | `rust-version` or a newly stabilized API | `MSRV` |
 | rustdoc / moved trait impls / hidpp derive | `rustdoc` |
 | `crates/openlogi-ipc/**` or wire types | `cargo test -p openlogi-ipc --test wire_format` |
-| `crates/openlogi-ui/locales/**` | `cargo test -p openlogi-desktop i18n` (macOS; Linux CI does not run this) |
+| `crates/openlogi-ui/locales/**` | `cargo test -p openlogi-ui locale`; also `cargo test -p openlogi-desktop i18n` when binary wiring or desktop resolution changed |
 | `devenv.nix` / `.envrc` / `devenv.lock` | devenv CI: `nix fmt -- --check devenv.nix` and `devenv --no-tui shell -- true` |
 | `flake.nix` / `flake.lock` / `packaging/linux/**` | Nix CI: `nix fmt -- --check flake.nix devenv.nix packaging/linux/package.nix packaging/linux/nixos-module.nix` and `nix flake check --all-systems --no-build --show-trace` |
 | `xtask/**` / `packaging/**` | unsigned `cargo xtask` package for that platform; the Build workflow is not part of `cargo xtask ci` |

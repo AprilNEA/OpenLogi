@@ -28,10 +28,11 @@ files; **keep this table in sync when you add or move one**:
 | `openlogi-camera/src/capture.rs` | `AVCaptureSession` capture + the `define_class!` frame delegate, and the Camera TCC prompt |
 | `openlogi-camera/src/macos.rs` | `AVCaptureDevice` enumeration (`class!` + `msg_send!`) |
 | `openlogi-camera/src/uvc.rs`, `.../uvc/iokit.rs` | IOKit USB / UVC control transfers; every `unsafe` in the macOS UVC backend lives in `iokit.rs` |
+| `openlogi-desktop/src/platform/registration/macos.rs` | `SMAppService` registration of the agent's launchd service (the login-item side of the agent lifecycle; the GUI must own it — the API resolves the plist against the calling app's bundle) |
 | `openlogi-desktop/src/platform/os.rs` | `NSProcessInfo` OS version + the `NSAppearance` titlebar sync |
 | `openlogi-hid/src/permissions.rs` | `IOHIDCheckAccess` / `IOHIDRequestAccess` (the prompting half of Input Monitoring) |
-| `openlogi-hook/src/macos.rs` | the CGEventTap (on `core-graphics`, see below), the `NSWorkspace` frontmost-app read, the Accessibility-trust check/prompt, and the HID sender-id lookup |
-| `openlogi-inject/src/inject/macos.rs` | CGEvent synthesis, media-key `NSEvent`s, raw `AXUIElement` navigation, and the `dlopen`'d private SPIs |
+| `openlogi-hook/src/macos.rs` | the CGEventTap (on `core-graphics`, see below), the off-tap `NSWorkspace` frontmost-app read and Safari PID snapshot, the Accessibility-trust check/prompt, and the HID sender-id lookup |
+| `openlogi-inject/src/inject/macos.rs` | CGEvent synthesis, media-key `NSEvent`s, off-thread `NSWorkspace` validation, typed `AXUIElement` navigation with `CFRetained` ownership, and the `dlopen`'d private SPIs |
 | `openlogi-overlay/src/platform.rs` | the Actions Ring helper's window policy: accessory activation, non-activating panel, the `NSEvent` global click-away monitor (`block2`), and `CGGetActiveDisplayList` / `CGDisplayBounds` |
 | `openlogi-permissions/src/macos.rs` | non-prompting permission reads + System-Settings deep links; `+[CBManager authorization]` via an `AnyClass` lookup |
 
@@ -41,7 +42,7 @@ Spawning the agent under its own macOS TCC identity (so its Accessibility /
 Input-Monitoring grants aren't attributed to the GUI, issue #214) lives in the
 external [`disclaim`](https://crates.io/crates/disclaim) crate — `posix_spawn` +
 the private `responsibility_spawnattrs_setdisclaim`, not ObjC.
-`openlogi-desktop/src/services/ipc.rs`'s `spawn_agent` uses it; there is no
+`openlogi-desktop/src/services/ipc/launch.rs`'s `spawn_agent` uses it; there is no
 in-tree FFI for it. Likewise, installed-application discovery and icon
 rendering for per-app profiles live in the external
 [`appcatalog`](https://crates.io/crates/appcatalog) crate (`NSWorkspace` +
@@ -50,8 +51,8 @@ only wraps its PNG bytes into a `gpui::Image`.
 
 The rest of `openlogi-desktop/src/platform/` (`updater.rs`, on `gpui_updater`)
 carries **no** ObjC FFI — don't add any. Neither do `openlogi-core`'s
-`single_instance.rs` (fs4 lock) or `openlogi-agent`'s `launch_agent.rs` (plist
-via `std::fs`).
+`single_instance.rs` (fs4 lock) or `openlogi-agent`'s `autostart/macos.rs`
+(legacy-plist cleanup via `std::fs`).
 
 ## Ownership: `Retained<T>`, never raw `id`
 
@@ -70,8 +71,8 @@ every 2 s tray refresh under the old `cocoa`/`objc` 0.x path).
   CoreFoundation values arrive as `CFRetained`. Never hand-balance a release.
 - **Never** call manual `retain`/`release`/`autorelease`, add raw `cocoa`/`objc`
   0.x, or build a bespoke retain/release helper layer — that re-derives
-  `Retained<T>`, worse. The one exception is the raw AX navigation in
-  `openlogi-inject` (see below), which is on the migrate-when-touched list.
+  `Retained<T>`, worse. AX navigation adopts Copy-rule outputs as `CFRetained`
+  and downcasts their runtime types before use.
 
 ## Thread affinity is in the type system
 
@@ -92,9 +93,11 @@ every 2 s tray refresh under the old `cocoa`/`objc` 0.x path).
   the status item, its `MenuTarget` and the `ResumeTarget` are bound as locals
   that outlive `NSApplication::run()`. They must stay bound — menu items
   reference their target *weakly*, and the notification center does the same.
-- `openlogi-camera`'s frame delegate is deliberately the opposite: an ivar-less
-  `NSObject` subclass with no `thread_kind`, because AVFoundation drives it on a
-  background dispatch queue.
+- `openlogi-camera`'s frame delegate is deliberately the opposite: an
+  `NSObject` subclass with no `thread_kind`, because AVFoundation drives it on
+  a background dispatch queue. Its one ivar is the owning session's
+  `Arc<FrameSink>` (`Send + Sync`), so which session a frame belongs to is
+  carried by ownership instead of process-global statics.
 
 ## Privacy permissions (TCC): typed framework crates, never a hand-rolled `extern`
 
@@ -160,6 +163,26 @@ Rules:
 
 [TN3127]: https://developer.apple.com/documentation/technotes/tn3127-inside-code-signing-requirements
 
+## Availability: the bindings do not know the deployment floor
+
+The bundles declare macOS 13.0 (`MACOSX_DEPLOYMENT_TARGET` in the release
+workflows, `LSMinimumSystemVersion` in the `Info.plist` templates under
+`crates/openlogi-desktop/bundle/`), but `objc2` generates every symbol a header
+declares regardless of its `API_AVAILABLE(macos(N))`, and Rust has no
+`@available` check. A *function* newer than the floor merely crashes
+when called on an older macOS; an extern *static* — `SMAppServiceErrorDomain`
+is `macos(15.0)` while the rest of `SMAppService` is 13.0 — is bound by dyld
+at load, so the whole binary is refused before `main` (#1279; 0.8.2 and 0.8.3
+would not launch on 13 or 14). CI never runs on the floor release, so nothing
+catches it after the fact.
+
+Before using a generated symbol, read its `API_AVAILABLE` in the SDK header
+(`xcrun --show-sdk-path`). If it is newer than the floor: for a string
+constant, spell the documented value out (the error domain above is the
+literal `"SMAppServiceErrorDomain"` on every release since 13); for a
+function, gate the call on the OS version and resolve it with `dlsym` —
+never import it strongly.
+
 ## Raw `extern` blocks: only where no bindings exist
 
 Typed framework crates are the default; a hand-written `unsafe extern "C"` block
@@ -175,16 +198,13 @@ its single user. The current set, all deliberate:
   typed framework crate in the tree.
 - `openlogi-agent-core/src/watchers/camera.rs`: the CoreMediaIO property API —
   same reason.
-- `openlogi-inject`: the `AXUIElement` subset it navigates with, plus
-  `CFRetain`/`CFRelease`, and the `dlopen`/`dlsym`-resolved private SPIs
+- `openlogi-inject`: the `dlopen`/`dlsym`-resolved private SPIs
   (`CoreDockSendNotification`, the CGS symbolic-hotkey trio).
 - the `disclaim` crate: `responsibility_spawnattrs_setdisclaim` (private SPI).
 
-Two of those are on the migrate-when-touched list rather than permanent:
-`openlogi-inject`'s raw AX navigation with its manual `CFRetain`/`CFRelease`
-belongs in `objc2-application-services`, and `openlogi-camera`'s
-`AVAuthorizationStatus` integers belong in `objc2-av-foundation`. Don't copy
-either pattern into new code.
+`openlogi-camera`'s `AVAuthorizationStatus` integers remain on the
+migrate-when-touched list: they belong in `objc2-av-foundation`.
+Don't copy that pattern into new code.
 
 ## The `unsafe` that remains (and the `SAFETY` rule)
 
@@ -199,16 +219,22 @@ under a `SAFETY` comment. Where it currently lives on macOS:
   `addObserver:selector:name:object:`, and the `NSWorkspace*Notification` name
   statics.
 - `hook/macos.rs` — the whole tap (Core Graphics / Core Foundation C APIs),
-  `AXIsProcessTrusted[WithOptions]` and the two extern statics they need
-  (`kAXTrustedCheckOptionPrompt`, `kCFBooleanTrue`), and `NSString::to_str(pool)`
-  (the borrow is tied to the pool).
+  the `NSWorkspace` activation-observer registration and typed notification
+  payload, `AXIsProcessTrusted[WithOptions]` and the two extern statics they
+  need (`kAXTrustedCheckOptionPrompt`, `kCFBooleanTrue`), and
+  `NSString::to_str(pool)` (the borrow is tied to the pool).
+- `inject/macos.rs` — typed AX creation, attribute-copy out-pointers, CF array
+  element typing, `AXPress`, and `NSString::to_str(pool)` for Safari validation.
 - `permissions/macos.rs` — the CoreBluetooth force-link and the `CBManager`
   class-method send. `IOHIDCheckAccess` needs none: `objc2-io-kit` exposes it as
   a safe fn, in `openlogi-permissions` and `openlogi-hid` alike.
 - `overlay/platform.rs` — `NSEvent::removeMonitor` and the
   `CGGetActiveDisplayList` / `CGDisplayBounds` pair.
 - `desktop/platform/os.rs` — reading AppKit's `NSAppearanceName` statics to set
-  `NSApp.appearance`. That is the GUI's only `unsafe`.
+  `NSApp.appearance`.
+- `desktop/platform/registration/macos.rs` — the `SMAppService` calls (all generated
+  bindings are `unsafe fn`s). Together with `os.rs`, the GUI's entire `unsafe`
+  surface.
 - `camera/{capture,uvc/iokit}.rs` — the AVFoundation capture FFI and the IOKit
   USB plug-in; `uvc/iokit.rs` deliberately concentrates every `unsafe` of the
   macOS UVC backend so the descriptor parser above it is ordinary safe code.
@@ -226,14 +252,19 @@ read moved to `objc2`. Don't "modernize" the tap casually.
 
 Code on the main run loop needs no pool (`Retained` frees deterministically);
 code on a bare thread does, because the framework still autoreleases internal
-temporaries. The three places that keep an explicit `objc2::rc::autoreleasepool`,
-and the only ones that should:
+temporaries. The call sites that keep an explicit
+`objc2::rc::autoreleasepool`, and the only ones that should:
 
-- `openlogi-hook`'s `frontmost_application` — a watcher thread with no run loop,
-  and `to_str` borrows its UTF-8 view from the pool (both the bundle id and the
-  localized name).
+- `openlogi-hook`'s frontmost-application reads and activation observer — the
+  watcher and notification callback may run on threads with no run loop, and
+  `to_str` borrows its UTF-8 view from the pool (both the bundle id and the
+  localized name). Registration and removal use the same boundary so AppKit's
+  internal autoreleased temporaries are drained as well.
 - `openlogi-inject`'s `post_media_key` — the hook/gesture dispatch threads, where
   both the `NSEvent` creation and the `CGEvent` getter autorelease temporaries.
+- `openlogi-inject`'s `ax_browser_navigate` — the action worker, where `to_str`
+  borrows the current frontmost app's bundle id while validating the captured
+  Safari process.
 - `openlogi-camera`'s device enumeration — every `AVCaptureDevice` string is
   copied out before the pool drains, so no `Retained<T>` escapes it.
 
@@ -241,19 +272,18 @@ and the only ones that should:
 
 `cocoa` / `objc` 0.x are gone from every crate's direct deps (they remain in
 `Cargo.lock` only transitively via gpui — expected). Use `cargo add` for objc2
-framework crates, then **verify the `zed` / `gpui-component` git pins in
-`Cargo.lock` didn't move** (the gpui pin is held only by the lock; a resolve can
-bump it — restore with `cargo update -p gpui --precise <commit>`).
+framework crates, then verify that `Cargo.lock` still carries one version-aligned
+`gpui-pre` stack and the workspace's pinned Kit release.
 
 Every ObjC / Core-framework crate is declared **once** in the workspace table —
 `objc2`, `objc2-app-kit`, `objc2-foundation`, `objc2-core-foundation`,
-`objc2-core-graphics`, `objc2-application-services`, `objc2-io-kit`, `block2`,
-`core-graphics`, `core-foundation`. The header-gated ones carry
+`objc2-core-graphics`, `objc2-application-services`, `objc2-io-kit`,
+`objc2-service-management`, `block2`, `core-graphics`, `core-foundation`. The header-gated ones carry
 `default-features = false` there, and each member inherits with
 `workspace = true` and adds only the feature modules it uses. A new one belongs
 in that table too, never inline in a member manifest: the unified version is what
-keeps a resolve from dragging the gpui pin along. Trim a member's feature list
-when the code that needed it moves out.
+keeps the native framework types compatible across the app and GPUI. Trim a
+member's feature list when the code that needed it moves out.
 
 ## Build & verify
 

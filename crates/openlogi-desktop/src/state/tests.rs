@@ -4,7 +4,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use openlogi_camera::Camera;
-use openlogi_core::binding::{Action, Binding, ButtonId};
+use openlogi_core::binding::{
+    Action, ActionRingIcon, ActionRingSlot, Binding, ButtonId, RingAction,
+};
 use openlogi_core::config::{
     Config, DeviceIdentity, LightSettings, Lighting, ScrollResolution, ThumbwheelSensitivity,
     VerticalScrollSensitivity,
@@ -15,12 +17,14 @@ use openlogi_core::device::{
     PairedDevice, RawDeviceAddress, ReceiverInfo, StandaloneDevice,
 };
 use openlogi_core::hid::{
-    Dpi, SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, WriteError,
+    DeviceRoute, Dpi, SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus,
+    SmartShiftThreshold, WriteError,
 };
 
 use gpui::AppContext as _;
 use openlogi_core::app::ForegroundApp;
-use openlogi_ipc::ForegroundApps;
+use openlogi_fixture::{CANONICAL_DEVICE_PROFILE_JSON, DeviceProfile, ProfileSupport};
+use openlogi_ipc::{AgentSnapshot, AgentStatus, ForegroundApps, InventoryHealth, PROTOCOL_VERSION};
 
 use crate::features::mouse::thumbwheel::ThumbwheelPreset;
 use crate::services::assets::AssetResolver;
@@ -28,8 +32,11 @@ use crate::services::assets::AssetResolver;
 use super::bindings::apply_thumbwheel_pair;
 use super::devices::build_device_list;
 use super::scroll::set_scroll_resolution_if_supported;
-use super::smartshift::{smartshift_read_is_current, smartshift_write_outcome};
-use super::{AppState, ConfigPersistence, LightCommandStatus, Load, SmartShiftWriteStatus};
+use super::smartshift::{
+    ConfirmationOutcome, SmartShiftDeviceState, smartshift_read_is_current,
+    smartshift_write_outcome,
+};
+use super::{AppState, ConfigPersistence, LightCommandStatus, Load};
 
 #[test]
 fn read_only_config_rolls_back_mutations_and_does_not_reload_agent() {
@@ -220,6 +227,312 @@ fn receiver_inventory() -> DeviceInventory {
             capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
         }],
     }
+}
+
+fn canonical_device_profile() -> DeviceProfile {
+    let profile: DeviceProfile =
+        serde_json::from_str(CANONICAL_DEVICE_PROFILE_JSON).expect("canonical profile parses");
+    profile.validate().expect("canonical profile validates");
+    profile
+}
+
+fn snapshot_candidate(profile: &DeviceProfile) -> AgentSnapshot {
+    let editor = app("org.openlogi.synthetic-editor", "Synthetic Editor");
+    AgentSnapshot {
+        status: AgentStatus {
+            accessibility_granted: true,
+            hook_installed: true,
+            launch_at_login: false,
+            inventory: InventoryHealth::Ready,
+            protocol_version: PROTOCOL_VERSION,
+            agent_version: "synthetic-profile-test".to_string(),
+            input_monitoring_granted: true,
+            hid_open_failures: false,
+        },
+        inventory: profile.inventories.clone(),
+        standalone: profile.standalone.clone(),
+        camera_active: true,
+        pairing: None,
+        foreground: ForegroundApps {
+            current: Some(editor.clone()),
+            recent: vec![editor],
+        },
+    }
+}
+
+fn canonical_profile_state(
+    commands: tokio::sync::mpsc::UnboundedSender<crate::services::ipc::Command>,
+) -> AppState {
+    let cache = AssetResolver::new();
+    AppState::with_runtime(
+        Config::ephemeral(),
+        &[],
+        &[],
+        &cache,
+        &[],
+        ConfigPersistence::MemoryOnly,
+        commands,
+    )
+}
+
+fn profile_device(state: &AppState, unit_id: [u8; 4]) -> &super::DeviceRecord {
+    state
+        .devices()
+        .iter()
+        .find(|record| record.unit_id == unit_id)
+        .expect("canonical profile device is projected")
+}
+
+#[test]
+fn canonical_profile_projects_identity_routes_capabilities_and_battery() {
+    let profile = canonical_device_profile();
+    let snapshot = snapshot_candidate(&profile);
+    let cache = AssetResolver::new();
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = canonical_profile_state(commands);
+
+    let changes = state.apply_agent_snapshot(&snapshot, &cache, &[]);
+
+    assert!(changes.inventory_ready);
+    assert_eq!(
+        changes.events,
+        [
+            super::StateEvent::InventoryChanged,
+            super::StateEvent::AgentChanged,
+            super::StateEvent::CameraChanged,
+            super::StateEvent::ForegroundChanged,
+        ]
+    );
+    assert_eq!(state.last_inventory(), snapshot.inventory);
+    assert_eq!(state.agent_status(), Some(&snapshot.status));
+    assert_eq!(state.devices().len(), 5);
+
+    let receiver_mouse = profile_device(&state, [79, 76, 68, 1]);
+    assert_eq!(receiver_mouse.config_key, "unit:4f4c4401");
+    assert_eq!(
+        receiver_mouse.route,
+        Some(DeviceRoute::Bolt {
+            receiver_uid: "OL-BOLT-UID-0001".to_string(),
+            slot: 1,
+        })
+    );
+    assert_eq!(
+        receiver_mouse.capabilities,
+        profile.inventories[0].paired[0].capabilities
+    );
+    assert_eq!(
+        receiver_mouse
+            .battery
+            .as_ref()
+            .map(|battery| battery.percentage),
+        Some(80)
+    );
+
+    let offline_mouse = state
+        .devices()
+        .iter()
+        .find(|record| record.slot == 2)
+        .expect("offline receiver slot is projected");
+    assert!(!offline_mouse.online);
+    assert_eq!(
+        offline_mouse.route,
+        Some(DeviceRoute::Bolt {
+            receiver_uid: "OL-BOLT-UID-0001".to_string(),
+            slot: 2,
+        })
+    );
+    assert_eq!(offline_mouse.capabilities, None);
+    assert_eq!(offline_mouse.battery, None);
+
+    let keyboard = profile_device(&state, [79, 76, 68, 2]);
+    assert_eq!(keyboard.config_key, "unit:4f4c4402");
+    assert_eq!(
+        keyboard.capabilities,
+        profile.inventories[0].paired[2].capabilities
+    );
+    assert_eq!(
+        keyboard.battery.as_ref().map(|battery| battery.percentage),
+        Some(100)
+    );
+
+    let direct = profile_device(&state, [79, 76, 68, 3]);
+    assert_eq!(direct.config_key, "unit:4f4c4403");
+    assert_eq!(
+        direct.route,
+        Some(DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xb020,
+        })
+    );
+    assert_eq!(
+        direct.capabilities,
+        profile.inventories[1].paired[0].capabilities
+    );
+    assert_eq!(
+        direct.battery.as_ref().map(|battery| battery.percentage),
+        Some(55)
+    );
+
+    let light = profile_device(&state, [79, 76, 68, 4]);
+    assert_eq!(light.config_key, "unit:4f4c4404");
+    assert_eq!(
+        light.route,
+        Some(DeviceRoute::RawHid {
+            vendor_id: 0x046d,
+            product_id: 0xc900,
+            usage_page: 0xff43,
+            usage_id: 0x0202,
+            identity: "OPENLOGI-FIXTURE-RAWHID-001".to_string(),
+        })
+    );
+    assert_eq!(
+        light.light_capabilities,
+        profile.standalone[0].light_capabilities
+    );
+}
+
+#[test]
+fn canonical_profile_snapshots_replace_online_state_and_remove_absent_receivers() {
+    let profile = canonical_device_profile();
+    let cache = AssetResolver::new();
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = canonical_profile_state(commands);
+    state.apply_agent_snapshot(&snapshot_candidate(&profile), &cache, &[]);
+    assert!(
+        state
+            .devices()
+            .iter()
+            .any(|record| record.slot == 2 && !record.online)
+    );
+
+    let mut replaced = snapshot_candidate(&profile);
+    replaced.inventory[0].paired[0].online = false;
+    replaced.inventory[0].paired[0].battery = None;
+    replaced.inventory[0].paired[0].capabilities = None;
+    replaced.inventory[1].paired[0].online = false;
+    replaced.inventory[1].paired[0].battery = None;
+    replaced.inventory[1].paired[0].capabilities = None;
+    state.apply_agent_snapshot(&replaced, &cache, &[]);
+    let receiver_mouse = profile_device(&state, [79, 76, 68, 1]);
+    assert!(!receiver_mouse.online);
+    assert_eq!(receiver_mouse.battery, None);
+    assert_eq!(receiver_mouse.capabilities, None);
+    let direct_mouse = profile_device(&state, [79, 76, 68, 3]);
+    assert!(!direct_mouse.online);
+    assert_eq!(direct_mouse.battery, None);
+    assert_eq!(direct_mouse.capabilities, None);
+
+    let mut without_receiver = replaced;
+    without_receiver.inventory.remove(0);
+    for _ in 0..=super::INVENTORY_MISS_GRACE {
+        state.apply_agent_snapshot(&without_receiver, &cache, &[]);
+    }
+
+    assert!(
+        state
+            .devices()
+            .iter()
+            .all(|record| !matches!(record.route, Some(DeviceRoute::Bolt { .. }))),
+        "all absent receiver records are removed after the probe-miss grace"
+    );
+    assert!(state.devices().iter().any(|record| {
+        matches!(record.route, Some(DeviceRoute::Direct { .. })) && !record.online
+    }));
+    assert!(state.devices().iter().any(|record| {
+        matches!(record.route, Some(DeviceRoute::RawHid { .. })) && record.online
+    }));
+}
+
+#[test]
+fn canonical_profile_light_setting_errors_reach_desktop_state() {
+    let profile = canonical_device_profile();
+    let raw_settings = profile
+        .settings
+        .iter()
+        .find(|settings| matches!(settings.route, DeviceRoute::RawHid { .. }))
+        .expect("canonical raw-HID settings");
+    assert_eq!(raw_settings.light, ProfileSupport::Supported);
+
+    let cache = AssetResolver::new();
+    let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = canonical_profile_state(commands);
+    state.apply_agent_snapshot(&snapshot_candidate(&profile), &cache, &[]);
+    let light_index = state
+        .devices()
+        .iter()
+        .position(|record| record.unit_id == [79, 76, 68, 4])
+        .expect("canonical light is projected");
+    state.set_current_device(light_index);
+    let mut reloads = 0;
+    loop {
+        match receiver.try_recv() {
+            Ok(crate::services::ipc::Command::ReloadConfig) => reloads += 1,
+            Ok(_) => panic!("unexpected command before the light write"),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                panic!("light command channel disconnected")
+            }
+        }
+    }
+    assert!(reloads > 0);
+    let light = state.current_record().expect("canonical light is selected");
+    assert!(light.online);
+    assert_eq!(light.route.as_ref(), Some(&raw_settings.route));
+    assert_eq!(
+        openlogi_core::hid::commands_for_light_settings(
+            LightSettings::new(false, 50, Some(3000)),
+            light
+                .light_capabilities
+                .expect("canonical light capabilities are projected"),
+        )
+        .len(),
+        3
+    );
+    let key = light.config_key.clone();
+
+    state.commit_light(LightSettings::new(false, 50, Some(3000)));
+    let mut pending = Vec::new();
+    loop {
+        match receiver.try_recv() {
+            Ok(crate::services::ipc::Command::SetLight(
+                route,
+                command,
+                command_key,
+                request_id,
+            )) => {
+                assert_eq!(&route, &raw_settings.route);
+                assert_eq!(command_key, key);
+                pending.push((command, request_id));
+            }
+            Ok(_) => panic!("unexpected command while collecting light writes"),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                panic!("light command channel disconnected")
+            }
+        }
+    }
+    assert_eq!(pending.len(), 3);
+    assert!(pending.windows(2).all(|pair| pair[0].1 == pair[1].1));
+
+    let setting_error = WriteError::DeviceUnreachable {
+        index: openlogi_core::hid::DIRECT_DEVICE_INDEX,
+    };
+    let expected_error = setting_error.to_string();
+    for (command, request_id) in pending {
+        let result = if matches!(
+            command,
+            openlogi_core::hid::LightCommand::TemperatureKelvin(_)
+        ) {
+            Err(setting_error.clone())
+        } else {
+            Ok(())
+        };
+        assert!(state.apply_light_command_result(key.clone(), request_id, command, result));
+    }
+    assert!(matches!(
+        state.light_command_status(),
+        Some(LightCommandStatus::Failed(error)) if error == expected_error
+    ));
 }
 
 #[test]
@@ -518,6 +831,82 @@ fn a_binding_committed_in_a_per_app_profile_leaves_the_global_one_alone() {
     assert!(
         state.config.bindings_for(KNOWN_MOUSE_KEY).is_empty(),
         "the device's global bindings must be untouched"
+    );
+}
+
+fn ring_action(action: Action) -> RingAction {
+    RingAction::new(action).expect("test action must be valid in the Actions Ring")
+}
+
+#[test]
+fn an_unsaved_action_ring_profile_inherits_default_until_its_first_edit() {
+    let mut state = state_with_a_known_mouse();
+    let inherited = state.current_action_ring_layout();
+
+    state.set_editing_action_ring_app(Some("com.apple.Safari".into()));
+
+    assert_eq!(state.current_action_ring_layout(), inherited);
+    assert!(
+        state.current_action_ring().per_app.is_empty(),
+        "selecting an application must not persist an unchanged layout"
+    );
+
+    state.commit_action_ring_slot(ActionRingSlot::Top, Some(ring_action(Action::NewTab)));
+
+    let ring = state.current_action_ring();
+    let safari = ring
+        .per_app
+        .get("com.apple.Safari")
+        .expect("the first edit creates the application layout");
+    assert_eq!(
+        ring.default, inherited,
+        "the default layout stays unchanged"
+    );
+    assert_eq!(safari.slots[&ActionRingSlot::Top].action(), &Action::NewTab);
+    assert_eq!(
+        safari.slots[&ActionRingSlot::Bottom],
+        inherited.slots[&ActionRingSlot::Bottom],
+        "the application profile starts as a complete copy of Default"
+    );
+}
+
+#[test]
+fn an_action_ring_icon_edit_targets_the_open_application_layout() {
+    let mut state = state_with_a_known_mouse();
+    state.set_editing_action_ring_app(Some("com.apple.Safari".into()));
+
+    state.commit_action_ring_icon(ActionRingSlot::Top, Some(ActionRingIcon::Keyboard));
+
+    let ring = state.current_action_ring();
+    assert_eq!(ring.default.slots[&ActionRingSlot::Top].custom_icon(), None);
+    assert_eq!(
+        ring.per_app["com.apple.Safari"].slots[&ActionRingSlot::Top].custom_icon(),
+        Some(ActionRingIcon::Keyboard)
+    );
+}
+
+#[test]
+fn removing_an_action_ring_profile_leaves_button_overrides_untouched() {
+    let mut state = state_with_a_known_mouse();
+    state.set_editing_app(Some("com.apple.Safari".into()));
+    state.commit_binding(ButtonId::Back, Action::Undo);
+    state.set_editing_action_ring_app(Some("com.apple.Safari".into()));
+    state.commit_action_ring_slot(ActionRingSlot::Top, Some(ring_action(Action::NewTab)));
+
+    state.remove_editing_action_ring_profile();
+
+    assert_eq!(state.editing_action_ring_app(), None);
+    assert!(state.current_action_ring().per_app.is_empty());
+    assert_eq!(
+        state
+            .config
+            .per_app_overrides(KNOWN_MOUSE_KEY, "com.apple.Safari"),
+        Some(&BTreeMap::from([(ButtonId::Back, Action::Undo)]))
+    );
+    assert_eq!(
+        state.editing_app(),
+        Some("com.apple.Safari"),
+        "the Buttons editor keeps its independent scope"
     );
 }
 
@@ -1001,7 +1390,7 @@ fn smartshift_write_feedback_requires_the_written_value() {
     assert_eq!(smartshift_write_outcome(expected, None), None);
     assert_eq!(
         smartshift_write_outcome(expected, Some(&Load::Ready(Arc::new(expected)))),
-        Some(SmartShiftWriteStatus::Confirmed)
+        Some(ConfirmationOutcome::Confirmed)
     );
     assert_eq!(
         smartshift_write_outcome(
@@ -1013,7 +1402,7 @@ fn smartshift_write_feedback_requires_the_written_value() {
                 ..expected
             }))),
         ),
-        Some(SmartShiftWriteStatus::Failed)
+        Some(ConfirmationOutcome::Failed)
     );
     assert_eq!(
         smartshift_write_outcome(
@@ -1022,7 +1411,7 @@ fn smartshift_write_feedback_requires_the_written_value() {
                 "timeout".to_string(),
             ))
         ),
-        Some(SmartShiftWriteStatus::Failed)
+        Some(ConfirmationOutcome::Failed)
     );
 }
 
@@ -1033,18 +1422,20 @@ fn stale_smartshift_reads_do_not_resolve_newer_writes() {
         auto_disengage: SmartShiftAutoDisengage::Threshold(SmartShiftThreshold::from_rounded(12.0)),
         tunable_torque: None,
     };
-    let applying = SmartShiftWriteStatus::Applying {
-        expected,
-        write_id: 2,
-    };
+    let mut write = SmartShiftDeviceState::default();
+    write.queue(expected, 2);
 
-    assert!(smartshift_read_is_current(Some(2), Some(&applying)));
-    assert!(!smartshift_read_is_current(Some(1), Some(&applying)));
-    assert!(!smartshift_read_is_current(None, Some(&applying)));
-    assert!(!smartshift_read_is_current(
-        Some(2),
-        Some(&SmartShiftWriteStatus::Confirmed)
-    ));
+    assert!(
+        !smartshift_read_is_current(Some(2), Some(&write)),
+        "a tagged read cannot land before its confirmation request starts"
+    );
+    assert!(!smartshift_read_is_current(None, Some(&write)));
+    assert_eq!(write.begin_confirmation(), Some(2));
+    assert!(smartshift_read_is_current(Some(2), Some(&write)));
+    assert!(!smartshift_read_is_current(Some(1), Some(&write)));
+    assert!(!smartshift_read_is_current(None, Some(&write)));
+    write.reset();
+    assert!(!smartshift_read_is_current(Some(2), Some(&write)));
     assert!(smartshift_read_is_current(None, None));
 }
 

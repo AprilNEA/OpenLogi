@@ -134,6 +134,17 @@ fn workflow_roundtrips_toml() {
     assert_eq!(wf, back);
 }
 
+#[test]
+fn actions_ring_is_available_to_normal_and_gesture_pickers() {
+    assert_eq!(Action::ShowActionsRing.label(), "Actions Ring");
+    assert_eq!(Action::ShowActionsRing.category(), Category::System);
+    assert!(Action::catalog().contains(&Action::ShowActionsRing));
+    assert_eq!(
+        RingAction::new(Action::ShowActionsRing),
+        Err(RingActionError::RecursiveTrigger)
+    );
+}
+
 // ── Binding (merged model) serde routing ──────────────────────────────────
 
 /// On-disk shape: a `ButtonId` → [`Binding`] map, as `DeviceConfig.bindings`
@@ -298,7 +309,6 @@ fn persisted_action_variant_names_are_stable() {
         Action::RunAppleScript(String::new()),
         Action::RunShellCommand(String::new()),
         Action::Workflow(Vec::new()),
-        Action::ShowActionsRing,
         Action::OpenApplication(
             ApplicationTarget::new("/Applications/OpenLogi.app", "OpenLogi")
                 .unwrap_or_else(|error| panic!("valid target failed: {error}")),
@@ -531,6 +541,21 @@ fn wheel_tilt_defaults_to_the_scroll_its_firmware_already_does() {
         assert!(!tilt.is_os_hook_button());
         assert!(!tilt.is_hidpp_gesture_source());
     }
+}
+
+#[test]
+fn thumbwheel_defaults_match_normalised_native_direction() {
+    // HID++ capture normalises the per-model firmware polarity to physical
+    // forward/up. The defaults must then reproduce native horizontal scroll,
+    // including when sensitivity alone causes the wheel to be diverted.
+    assert_eq!(
+        default_binding(ButtonId::ThumbwheelScrollUp),
+        Action::HorizontalScrollLeft
+    );
+    assert_eq!(
+        default_binding(ButtonId::ThumbwheelScrollDown),
+        Action::HorizontalScrollRight
+    );
 }
 
 // ── Effect classification ─────────────────────────────────────────────────

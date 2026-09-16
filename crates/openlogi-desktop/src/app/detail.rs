@@ -33,7 +33,9 @@ use crate::features::lighting::visual as light_visual;
 use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
 use crate::features::pointer::smartshift::SmartShiftPanel;
-use crate::features::profile_scope::{AppCatalogPicker, ProfileIconCache, profile_scope_bar};
+use crate::features::profiles::{
+    AppCatalogPicker, ProfileIconCache, action_ring_profile_scope_bar, button_profile_scope_bar,
+};
 use crate::state::{AppState, DeviceRecord, StateEvent};
 use crate::ui::battery::BatteryIndicator;
 use crate::ui::components::{PanelCard, Toggle};
@@ -55,7 +57,10 @@ pub(super) fn detail_header(
     cx: &mut Context<AppView>,
 ) -> impl IntoElement {
     let pal = theme::palette(cx);
-    let name = record.map_or_else(|| tr!("Device").to_string(), |r| r.display_name.clone());
+    let name = record.map_or_else(
+        || tr!("device.device").to_string(),
+        |r| r.display_name.clone(),
+    );
     let online = record.map(|r| r.online);
     let battery = record
         .and_then(|r| r.battery.as_ref())
@@ -116,7 +121,9 @@ pub(super) fn detail_content(
         DetailTab::Buttons => {
             buttons_tab(panels.mouse_model, profile_icons, app_catalog, cx).into_any_element()
         }
-        DetailTab::ActionsRing => action_ring_tab(panels.action_ring).into_any_element(),
+        DetailTab::ActionsRing => {
+            action_ring_tab(panels.action_ring, profile_icons, app_catalog, cx).into_any_element()
+        }
         DetailTab::Keys => keys_tab(panels.keyboard_model).into_any_element(),
         DetailTab::Pointer => {
             pointer_tab(panels.dpi_panel, panels.smartshift_panel, cx).into_any_element()
@@ -149,9 +156,7 @@ pub(super) fn detail_content(
                     .text_caption()
                     .text_color(pal.text_muted)
                     .child(Icon::new(IconName::Info).size_4())
-                    .child(tr!(
-                        "Device offline — changes will apply when it reconnects."
-                    )),
+                    .child(tr!("device.device_offline_changes_pending")),
             )
         })
         .child(
@@ -259,7 +264,7 @@ fn buttons_tab(
         .flex_1()
         .w_full()
         .min_h_0()
-        .children(profile_scope_bar(profile_icons, app_catalog, cx))
+        .children(button_profile_scope_bar(profile_icons, app_catalog, cx))
         .child(mouse_model.clone())
 }
 
@@ -282,8 +287,22 @@ fn keys_tab(keyboard_model: &gpui::Entity<FunctionRowView>) -> impl IntoElement 
     tab_body(ContentWidth::DoubleExtraLarge, keyboard_model.clone()).justify_center()
 }
 
-fn action_ring_tab(panel: &gpui::Entity<ActionRingPanel>) -> impl IntoElement {
-    tab_body(ContentWidth::Medium, panel.clone())
+fn action_ring_tab(
+    panel: &gpui::Entity<ActionRingPanel>,
+    profile_icons: &ProfileIconCache,
+    app_catalog: &gpui::Entity<AppCatalogPicker>,
+    cx: &mut Context<AppView>,
+) -> impl IntoElement {
+    v_flex()
+        .flex_1()
+        .w_full()
+        .min_h_0()
+        .children(action_ring_profile_scope_bar(
+            profile_icons,
+            app_catalog,
+            cx,
+        ))
+        .child(tab_body(ContentWidth::Medium, panel.clone()))
 }
 
 /// Flow tab: the arrangement editor (pointing devices) or the follower
@@ -293,7 +312,7 @@ fn flow_tab(panel: &gpui::Entity<FlowPanel>) -> impl IntoElement {
     tab_body(
         ContentWidth::Medium,
         PanelCard::new(
-            tr!("Flow"),
+            tr!("flow.title"),
             Icon::empty().path("action-icons/monitor.svg"),
             panel.clone().into_any_element(),
         ),
@@ -319,7 +338,7 @@ fn pointer_tab(
             .flex_wrap()
             .child(pointer_grid_card(
                 PanelCard::new(
-                    tr!("Pointer tuning"),
+                    tr!("device.pointer_tuning"),
                     Icon::empty().path("action-icons/gauge.svg"),
                     dpi_panel.clone().into_any_element(),
                 )
@@ -327,7 +346,7 @@ fn pointer_tab(
             ))
             .child(pointer_grid_card(
                 PanelCard::new(
-                    tr!("SmartShift"),
+                    tr!("pointer.smartshift"),
                     Icon::empty().path("action-icons/refresh-cw.svg"),
                     smartshift_panel.clone().into_any_element(),
                 )
@@ -354,24 +373,58 @@ fn pointer_grid_card(card: impl IntoElement) -> impl IntoElement {
         .child(card)
 }
 
+/// What the scrolling card shows for the selected device — `Default` is the
+/// no-device (or unreadable-state) blank.
+#[derive(Default)]
+struct ScrollingFacts {
+    /// The persisted inversion setting. Independent of
+    /// `inversion_supported` — a configured inversion on a link without
+    /// support still renders, checked and disabled — so these are two named
+    /// fields, not a sum type.
+    inverted: bool,
+    /// Whether the current link reports HID++ inversion support.
+    inversion_supported: bool,
+    resolution: Option<openlogi_core::config::ScrollResolution>,
+    hires: HiresWheel,
+}
+
+/// Where the device offers hi-res wheel control.
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+enum HiresWheel {
+    /// On the current link.
+    Here,
+    /// Only on another of its links.
+    Elsewhere,
+    /// Nowhere.
+    #[default]
+    Nowhere,
+}
+
 /// Scrolling card: per-device native inversion and wheel-resolution controls.
 /// Pure config — no hardware read — so it is a plain settings block rather than
 /// an `Entity` panel like DPI / SmartShift.
 fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
-    let (inverted, inversion_supported, resolution, hires_supported, hires_elsewhere) =
-        AppState::try_read(cx).map_or((false, false, None, false, false), |state| {
-            (
-                state.current_invert_scroll(),
-                state.current_scroll_inversion_supported(),
-                state.current_scroll_resolution(),
-                state.current_hires_wheel_supported(),
-                state.hires_wheel_supported_on_another_link(),
-            )
-        });
+    let ScrollingFacts {
+        inverted,
+        inversion_supported,
+        resolution,
+        hires,
+    } = AppState::try_read(cx).map_or_else(ScrollingFacts::default, |state| ScrollingFacts {
+        inverted: state.current_invert_scroll(),
+        inversion_supported: state.current_scroll_inversion_supported(),
+        resolution: state.current_scroll_resolution(),
+        hires: if state.current_hires_wheel_supported() {
+            HiresWheel::Here
+        } else if state.hires_wheel_supported_on_another_link() {
+            HiresWheel::Elsewhere
+        } else {
+            HiresWheel::Nowhere
+        },
+    });
     let inversion_description = if inversion_supported {
-        tr!("Reverse this mouse's scroll wheel. Your trackpad keeps the system scroll direction.")
+        tr!("pointer.scroll_direction_description")
     } else {
-        tr!("This device does not report native HID++ scroll inversion support.")
+        tr!("pointer.scroll_inversion_unsupported")
     };
     let inversion_row = h_flex()
         .justify_between()
@@ -383,7 +436,7 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
                     div()
                         .text_body()
                         .text_color(pal.text_primary)
-                        .child(tr!("Invert scroll direction")),
+                        .child(tr!("pointer.invert_scroll_direction")),
                 )
                 .child(
                     div()
@@ -396,7 +449,7 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
             Toggle::new("invert-scroll-toggle")
                 .selected(inverted)
                 .disabled(!inversion_supported)
-                .label((!inversion_supported).then(|| tr!("Unavailable")))
+                .label((!inversion_supported).then(|| tr!("common.unavailable")))
                 .on_change(|inverted, _window, cx| {
                     AppState::update(cx, |state, cx| {
                         let key = state.current_record().map(DeviceRecord::device_key);
@@ -407,18 +460,18 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
                     });
                 }),
         );
-    let resolution_description = if hires_supported {
-        match resolution {
-            None => tr!("OpenLogi does not change the wheel resolution."),
-            Some(ScrollResolution::Low) => tr!("Scrolls once per physical ratchet step."),
+    let resolution_description = match hires {
+        HiresWheel::Here => match resolution {
+            None => tr!("pointer.wheel_resolution_device_default_description"),
+            Some(ScrollResolution::Low) => tr!("pointer.scrolls_once_per_physical_ratchet_step"),
             Some(ScrollResolution::High) => {
-                tr!("Detects finer movement between ratchet steps.")
+                tr!("pointer.high_resolution_scrolling_description")
             }
+        },
+        HiresWheel::Elsewhere => {
+            tr!("pointer.wheel_resolution_other_connection")
         }
-    } else if hires_elsewhere {
-        tr!("This device supports wheel resolution on its other connection, but not this one.")
-    } else {
-        tr!("This device does not support wheel resolution control.")
+        HiresWheel::Nowhere => tr!("pointer.wheel_resolution_unsupported"),
     };
     let resolution_row = v_flex()
         .gap_2()
@@ -428,7 +481,7 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
                     div()
                         .text_body()
                         .text_color(pal.text_primary)
-                        .child(tr!("Wheel resolution")),
+                        .child(tr!("pointer.wheel_resolution")),
                 )
                 .child(
                     div()
@@ -437,9 +490,12 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
                         .child(resolution_description),
                 ),
         )
-        .child(wheel_resolution_control(resolution, hires_supported));
+        .child(wheel_resolution_control(
+            resolution,
+            hires == HiresWheel::Here,
+        ));
     PanelCard::new(
-        tr!("Scrolling"),
+        tr!("pointer.scrolling"),
         Icon::empty().path("action-icons/mouse.svg"),
         v_flex().gap_4().child(inversion_row).child(resolution_row),
     )
@@ -458,19 +514,19 @@ fn wheel_resolution_control(selected: Option<ScrollResolution>, enabled: bool) -
         .child(
             Button::new("wheel-resolution-default")
                 .flex_1()
-                .label(tr!("Device default"))
+                .label(tr!("pointer.device_default"))
                 .selected(selected.is_none()),
         )
         .child(
             Button::new("wheel-resolution-low")
                 .flex_1()
-                .label(tr!("Standard"))
+                .label(tr!("pointer.standard"))
                 .selected(selected == Some(ScrollResolution::Low)),
         )
         .child(
             Button::new("wheel-resolution-high")
                 .flex_1()
-                .label(tr!("High resolution"))
+                .label(tr!("pointer.high_resolution"))
                 .selected(selected == Some(ScrollResolution::High)),
         )
         .on_click(move |indices, _window, cx| {
@@ -494,7 +550,7 @@ fn lighting_tab(lighting_panel: &gpui::Entity<LightingPanel>) -> impl IntoElemen
     tab_body(
         ContentWidth::Small,
         PanelCard::new(
-            tr!("Lighting"),
+            tr!("device.lighting"),
             Icon::new(IconName::Palette),
             lighting_panel.clone().into_any_element(),
         ),
@@ -524,7 +580,7 @@ fn camera_tab(
                     .w(CAMERA_PREVIEW_W)
                     .flex_shrink_0()
                     .child(PanelCard::new(
-                        tr!("Camera"),
+                        tr!("camera.camera"),
                         Icon::new(IconName::Eye),
                         camera_preview.clone().into_any_element(),
                     )),
@@ -534,7 +590,7 @@ fn camera_tab(
                     .w(CAMERA_CONTROLS_W)
                     .flex_shrink_0()
                     .child(PanelCard::new(
-                        tr!("Camera controls"),
+                        tr!("camera.camera_controls"),
                         Icon::new(IconName::Settings),
                         camera_controls.clone().into_any_element(),
                     )),
@@ -574,13 +630,18 @@ fn light_tab(
             .gap_4()
             .flex_wrap()
             .items_start()
-            .child(light_visual::detail(asset, online, enabled, settings, pal))
+            .child(light_visual::detail(
+                asset,
+                light_visual::LightView { online, enabled },
+                settings,
+                pal,
+            ))
             .child(
                 div()
                     .w(LIGHT_CONTROLS_W)
                     .min_w(LIGHT_CONTROLS_MIN_W)
                     .child(PanelCard::new(
-                        tr!("Lighting"),
+                        tr!("device.lighting"),
                         Icon::new(IconName::Sun),
                         light_panel.clone().into_any_element(),
                     )),
@@ -610,7 +671,7 @@ fn device_details_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElem
                 div()
                     .text_body()
                     .text_color(pal.text_muted)
-                    .child(tr!("No active device"))
+                    .child(tr!("device.no_active_device"))
                     .into_any_element()
             },
             |record| {
@@ -631,9 +692,17 @@ fn device_details_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElem
             },
         );
 
-    PanelCard::new(tr!("Device details"), Icon::new(IconName::Info), content)
+    PanelCard::new(
+        tr!("device.device_details"),
+        Icon::new(IconName::Info),
+        content,
+    )
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the configuration card is clearest as one declarative UI tree"
+)]
 fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
     let device_enabled = AppState::try_read(cx)
         .and_then(|state| {
@@ -644,7 +713,7 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
         .unwrap_or(true);
     let (binding_count, gesture_count, preset_count, app_profile) = AppState::try_read(cx)
         .map_or_else(
-            || (0, 0, 0, tr!("Default profile").to_string()),
+            || (0, 0, 0, tr!("profiles.default_profile").to_string()),
             |state| {
                 (
                     state.button_bindings().len(),
@@ -652,9 +721,10 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
                     // device, and a per-app profile holds no gestures at all.
                     state.device_gesture_binding_count(),
                     state.dpi_presets().len(),
-                    state
-                        .active_profile_name()
-                        .map_or_else(|| tr!("Default profile").to_string(), str::to_owned),
+                    state.active_profile_name().map_or_else(
+                        || tr!("profiles.default_profile").to_string(),
+                        str::to_owned,
+                    ),
                 )
             },
         );
@@ -667,10 +737,13 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
                 .items_center()
                 .child(
                     v_flex()
-                        .child(div().text_body().child(tr!("Manage this device")))
-                        .child(div().text_caption().text_color(pal.text_muted).child(tr!(
-                            "Off leaves every control native and stops re-applying settings."
-                        ))),
+                        .child(div().text_body().child(tr!("device.manage_this_device")))
+                        .child(
+                            div()
+                                .text_caption()
+                                .text_color(pal.text_muted)
+                                .child(tr!("actions.native_controls_when_disabled")),
+                        ),
                 )
                 .child(
                     Switch::new("device-enabled")
@@ -694,14 +767,19 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
                 .columns(1)
                 .label_width(px(118.))
                 .bordered(false)
-                .child(DescriptionItem::new(tr!("Active profile")).value(app_profile))
+                .child(DescriptionItem::new(tr!("profiles.active_profile")).value(app_profile))
                 .child(
-                    DescriptionItem::new(tr!("Button bindings")).value(binding_count.to_string()),
+                    DescriptionItem::new(tr!("profiles.button_bindings"))
+                        .value(binding_count.to_string()),
                 )
                 .child(
-                    DescriptionItem::new(tr!("Gesture bindings")).value(gesture_count.to_string()),
+                    DescriptionItem::new(tr!("profiles.gesture_bindings"))
+                        .value(gesture_count.to_string()),
                 )
-                .child(DescriptionItem::new(tr!("DPI presets")).value(preset_count.to_string())),
+                .child(
+                    DescriptionItem::new(tr!("pointer.dpi_presets"))
+                        .value(preset_count.to_string()),
+                ),
         )
         .child(
             h_flex()
@@ -710,13 +788,13 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
                 .child(sidebar_action(
                     "right-panel-settings",
                     IconName::Settings,
-                    tr!("Settings"),
+                    tr!("app.settings"),
                     |_event, _window, cx| crate::windows::settings::open(cx),
                 ))
                 .child(sidebar_action(
                     "right-panel-config-folder",
                     IconName::Folder,
-                    tr!("Config folder"),
+                    tr!("profiles.config_folder"),
                     |_event, _window, cx| {
                         if let Ok(path) = openlogi_core::paths::config_dir()
                             && let Some(url) = file_url(&path)
@@ -727,7 +805,11 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
                 )),
         );
 
-    PanelCard::new(tr!("Configuration"), Icon::new(IconName::Folder), content)
+    PanelCard::new(
+        tr!("device.configuration"),
+        Icon::new(IconName::Folder),
+        content,
+    )
 }
 
 fn device_summary(
@@ -766,20 +848,21 @@ fn device_description_list(record: DeviceRecord) -> impl IntoElement {
     // a synthetic 0 that would only mislead next to real receiver slots.
     let is_camera = matches!(record.kind, DeviceKind::Camera);
     let connection = if is_camera {
-        tr!("USB").to_string()
+        tr!("device.usb").to_string()
     } else {
         route_label(record.route.as_ref())
     };
-    let mut items = vec![DescriptionItem::new(tr!("Connection")).value(connection)];
+    let mut items = vec![DescriptionItem::new(tr!("device.connection")).value(connection)];
     if matches!(
         record.route,
         Some(DeviceRoute::Bolt { .. } | DeviceRoute::Unifying { .. })
     ) {
-        items.push(DescriptionItem::new(tr!("Channel")).value(record.slot.to_string()));
+        items.push(DescriptionItem::new(tr!("device.channel")).value(record.slot.to_string()));
     }
-    items.push(DescriptionItem::new(tr!("Device key")).value(elided_key(&record.config_key)));
+    items
+        .push(DescriptionItem::new(tr!("device.device_key")).value(elided_key(&record.config_key)));
     if let Some(serial) = record.serial_number {
-        items.push(DescriptionItem::new(tr!("Serial")).value(serial));
+        items.push(DescriptionItem::new(tr!("device.serial")).value(serial));
     }
 
     DescriptionList::new()

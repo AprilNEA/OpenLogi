@@ -3,8 +3,9 @@
 GNOME (Mutter) does not let ordinary clients see which window is focused on
 Wayland, and it implements neither `wlr-foreign-toplevel` nor a focused-window
 portal. This minimal extension bridges that gap: it exports the WM_CLASS of the
-focused window over D-Bus so OpenLogi's `gnome-shell` frontmost backend can
-drive per-app mouse-profile switching.
+focused window over D-Bus and emits every native focus change so OpenLogi's
+`gnome-shell` backend can drive per-app mouse-profile switching without
+polling.
 
 It reads only `global.display.focus_window.get_wm_class()`. No titles, no window
 contents, no input, no UI.
@@ -14,6 +15,7 @@ contents, no input, no UI.
 - name: `org.openlogi.Frontmost`
 - path: `/org/openlogi/Frontmost`
 - method: `GetFocusedWmClass() -> s` (empty string when nothing is focused)
+- signal: `FocusedWmClassChanged(s)` (emitted on each GNOME focus change)
 
 ## Install
 
@@ -43,10 +45,16 @@ gdbus call --session \
   -d org.openlogi.Frontmost \
   -o /org/openlogi/Frontmost \
   -m org.openlogi.Frontmost.GetFocusedWmClass
+
+# Watch focus changes:
+gdbus monitor --session \
+  -d org.openlogi.Frontmost \
+  -o /org/openlogi/Frontmost
 ```
 
-If `gdbus call` prints the focused window's WM_CLASS, OpenLogi's GNOME backend
-will pick it up automatically the next time the hook starts.
+If the call prints the focused window's WM_CLASS and the monitor reports
+`FocusedWmClassChanged` while switching windows, OpenLogi's GNOME backend will
+pick it up automatically the next time the hook starts.
 
 ## Notes
 

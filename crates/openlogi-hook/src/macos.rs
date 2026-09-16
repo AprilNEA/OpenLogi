@@ -1,7 +1,7 @@
 //! macOS `CGEventTap` implementation of the OS-level mouse hook.
 #![expect(
     unsafe_code,
-    reason = "the event tap is built on Core Graphics / Core Foundation C APIs"
+    reason = "the event tap uses Core Graphics / Core Foundation C APIs, and workspace observation uses typed Objective-C notification APIs"
 )]
 
 mod watchdog;
@@ -9,11 +9,13 @@ mod watchdog;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::ptr::NonNull;
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
 
+use block2::RcBlock;
 use core_foundation::base::{CFTypeRef, TCFType as _};
 use core_foundation::number::CFNumber;
 use core_foundation::runloop::{
@@ -26,7 +28,14 @@ use core_graphics::event::{
 };
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use foreign_types_shared::ForeignType as _;
+use objc2::rc::Retained;
+use objc2::runtime::{AnyObject, ProtocolObject};
+use objc2_app_kit::{
+    NSRunningApplication, NSWorkspace, NSWorkspaceApplicationKey,
+    NSWorkspaceDidActivateApplicationNotification,
+};
 use objc2_application_services::{AXIsProcessTrusted, AXIsProcessTrustedWithOptions};
+use objc2_foundation::{NSNotification, NSNotificationCenter, NSObjectProtocol};
 use tracing::{debug, error, warn};
 
 use crate::{
@@ -35,8 +44,8 @@ use crate::{
     ScrollDelta, TapLocation,
 };
 use watchdog::{
-    LifecycleDecision, LifecycleExitReason, LifecycleObservation, LifecycleWatchdog, RearmBudget,
-    TapPhase, WatchdogSignals, stuck_callback,
+    CallbackActivity, LifecycleDecision, LifecycleExitReason, LifecycleObservation,
+    LifecycleWatchdog, RearmBudget, TapPhase, WatchdogSignals, stuck_callback,
 };
 
 /// Everything `Hook` needs to control the background thread.
@@ -57,6 +66,117 @@ pub(crate) struct HookInner {
 // documentation states that CFRunLoop objects can be passed between
 // threads; only CFRunLoopRun must be called on the owning thread.
 unsafe impl Send for HookInner {}
+
+/// Owner of an `NSWorkspace` activation observer.
+///
+/// The notification center retains the registration block. The returned token
+/// identifies that registration; removing it releases the center's block
+/// reference, and dropping the token releases the caller's final reference.
+#[must_use]
+pub struct ForegroundApplicationObserver {
+    center: Retained<NSNotificationCenter>,
+    token: Retained<ProtocolObject<dyn NSObjectProtocol>>,
+}
+
+const SAFARI_BUNDLE_ID: &str = "com.apple.Safari";
+const NO_SAFARI_PROCESS: i32 = 0;
+static FRONTMOST_SAFARI_PID: AtomicI32 = AtomicI32::new(NO_SAFARI_PROCESS);
+
+fn safari_process_id(bundle_id: &str, pid: i32) -> Option<i32> {
+    (bundle_id == SAFARI_BUNDLE_ID && pid > 0).then_some(pid)
+}
+
+fn observe_frontmost_application(
+    app: Option<&NSRunningApplication>,
+    pool: objc2::rc::AutoreleasePool<'_>,
+) -> Option<ForegroundApp> {
+    let foreground = app.and_then(|app| foreground_app_from_running_application(app, pool));
+    let safari_pid = app
+        .zip(foreground.as_ref())
+        .and_then(|(app, foreground)| safari_process_id(&foreground.id, app.processIdentifier()))
+        .unwrap_or(NO_SAFARI_PROCESS);
+    FRONTMOST_SAFARI_PID.store(safari_pid, Ordering::Release);
+    foreground
+}
+
+pub(crate) fn frontmost_safari_pid() -> Option<i32> {
+    let pid = FRONTMOST_SAFARI_PID.load(Ordering::Acquire);
+    (pid > 0).then_some(pid)
+}
+
+impl Drop for ForegroundApplicationObserver {
+    fn drop(&mut self) {
+        objc2::rc::autoreleasepool(|_| {
+            // SAFETY: `token` came from this center's block-observer registration
+            // and is removed exactly once, before both retained objects are dropped.
+            unsafe { self.center.removeObserver(self.token.as_ref()) };
+        });
+    }
+}
+
+/// Register for `NSWorkspaceDidActivateApplicationNotification`.
+pub(crate) fn watch_frontmost_application_activations(
+    on_activation: impl Fn(Option<ForegroundApp>) + Send + Sync + 'static,
+) -> ForegroundApplicationObserver {
+    objc2::rc::autoreleasepool(|_| {
+        let workspace = NSWorkspace::sharedWorkspace();
+        let center = workspace.notificationCenter();
+        let block: RcBlock<dyn Fn(NonNull<NSNotification>)> =
+            RcBlock::new(move |notification: NonNull<NSNotification>| {
+                // A panic must not unwind across the Objective-C block boundary.
+                let result = catch_unwind(AssertUnwindSafe(|| {
+                    let activation = objc2::rc::autoreleasepool(|pool| {
+                        // SAFETY: NotificationCenter passes a live, non-null
+                        // NSNotification to the block for the duration of this call.
+                        let notification = unsafe { notification.as_ref() };
+                        let app = notification.userInfo().and_then(|info| {
+                            // SAFETY: AppKit documents NSWorkspaceApplicationKey as this
+                            // notification's NSRunningApplication-valued user-info entry.
+                            info.objectForKey(unsafe { NSWorkspaceApplicationKey } as &AnyObject)?
+                                .downcast::<NSRunningApplication>()
+                                .ok()
+                        });
+                        observe_frontmost_application(app.as_deref(), pool)
+                    });
+                    on_activation(activation);
+                }));
+                if result.is_err() {
+                    error!("foreground-application activation callback panicked");
+                }
+            });
+        // SAFETY: AppKit exports the name as an immutable process-lifetime
+        // constant. The block captures only `Send + Sync` state and accepts the
+        // exact `NSNotification` argument required by the API. A nil queue asks
+        // the center to invoke it synchronously on the notification-posting thread.
+        let token = unsafe {
+            center.addObserverForName_object_queue_usingBlock(
+                Some(NSWorkspaceDidActivateApplicationNotification),
+                Some(&workspace),
+                None,
+                &block,
+            )
+        };
+        ForegroundApplicationObserver { center, token }
+    })
+}
+
+fn foreground_app_from_running_application(
+    app: &NSRunningApplication,
+    pool: objc2::rc::AutoreleasePool<'_>,
+) -> Option<ForegroundApp> {
+    let bundle_id = app.bundleIdentifier()?;
+    let name = app.localizedName();
+    // SAFETY: Both UTF-8 views are copied into owned Strings before `pool`
+    // drains, so no borrowed Objective-C storage escapes.
+    let (id, name) = unsafe {
+        (
+            bundle_id.to_str(pool).to_owned(),
+            name.as_ref().map(|name| name.to_str(pool).to_owned()),
+        )
+    };
+    let display_name = name.unwrap_or_else(|| id.clone());
+    Some(ForegroundApp { id, display_name })
+}
 
 /// Opaque `IOHIDEventRef` — the HID event backing a `CGEvent`.
 type IOHIDEventRef = *mut std::ffi::c_void;
@@ -501,6 +621,10 @@ impl HookBackend for Backend {
             return Err(HookError::AccessibilityDenied);
         }
 
+        // Seed the press-time snapshot before the tap can receive input. Later
+        // NSWorkspace activation notifications refresh it off the tap thread.
+        let _ = Self::frontmost_app();
+
         // Wrap in Arc so the closure handed to CGEventTap::new captures it by
         // clone rather than by move — avoids a second Box allocation.
         let cb: Arc<dyn Fn(HookEvent) -> EventDisposition + Send + Sync> = Arc::new(cb);
@@ -663,26 +787,10 @@ impl HookBackend for Backend {
     /// leaked the workspace/app/bundle-id objects: hundreds of MB across a workday.)
     fn frontmost_app() -> Option<ForegroundApp> {
         use objc2::rc::autoreleasepool;
-        use objc2_app_kit::NSWorkspace;
 
         autoreleasepool(|pool| {
-            let app = NSWorkspace::sharedWorkspace().frontmostApplication()?;
-            let bundle_id = app.bundleIdentifier()?;
-            let name = app.localizedName();
-            // SAFETY: `to_str` yields a UTF-8 view valid for `pool`'s lifetime.
-            // Both are copied into owned `String`s here, before the pool — and
-            // the `NSString`s borrowing from it — drop, so neither view escapes.
-            let (id, name) = unsafe {
-                (
-                    bundle_id.to_str(pool).to_owned(),
-                    name.as_ref().map(|name| name.to_str(pool).to_owned()),
-                )
-            };
-            // An app with no localized name is possible (a bare bundle, a
-            // background helper that briefly activates); the identifier is the
-            // only thing guaranteed, so it doubles as the name.
-            let display_name = name.unwrap_or_else(|| id.clone());
-            Some(ForegroundApp { id, display_name })
+            let app = NSWorkspace::sharedWorkspace().frontmostApplication();
+            observe_frontmost_application(app.as_deref(), pool)
         })
     }
 
@@ -794,8 +902,7 @@ fn run_tap_callback(
 /// the agent so macOS tears the tap down and system input recovers.
 fn spawn_callback_watchdog(
     signals: Arc<WatchdogSignals>,
-    in_callback: Arc<AtomicBool>,
-    entered_at_ms: Arc<AtomicU64>,
+    callback_activity: Arc<CallbackActivity>,
 ) -> std::io::Result<()> {
     thread::Builder::new()
         .name("openlogi-hook-watchdog".into())
@@ -806,21 +913,15 @@ fn spawn_callback_watchdog(
                     return;
                 }
                 thread::sleep(CALLBACK_WATCHDOG_POLL_INTERVAL);
-                if !in_callback.load(Ordering::Acquire) {
+                let Some(entered) = callback_activity.entered_at_ms() else {
                     continue;
-                }
-                let entered = entered_at_ms.load(Ordering::Acquire);
-                if entered == 0 {
-                    continue;
-                }
+                };
                 let Some(elapsed) = stuck_callback(signals.now_millis(), entered) else {
                     continue;
                 };
                 // Re-sample: a fresh high-frequency event may have rewritten
-                // the stamp between the first loads and the budget check.
-                if !in_callback.load(Ordering::Acquire)
-                    || entered_at_ms.load(Ordering::Acquire) != entered
-                {
+                // the complete activity state during the budget check.
+                if callback_activity.entered_at_ms() != Some(entered) {
                     continue;
                 }
                 if signals.phase() != TapPhase::Armed {
@@ -994,16 +1095,14 @@ fn thread_main(
     signals.mark_tap_progress();
     signals.set_phase(TapPhase::Arming);
 
-    let in_callback = Arc::new(AtomicBool::new(false));
-    let entered_at_ms = Arc::new(AtomicU64::new(0));
+    let callback_activity = Arc::new(CallbackActivity::default());
     // Latched by the callback when the OS disables the tap, consumed by the
     // run-loop slice that decides whether to re-arm it.
     let tap_disabled = Arc::new(AtomicBool::new(false));
 
     let tap_result = {
         let callback_signals = Arc::clone(&signals);
-        let in_callback = Arc::clone(&in_callback);
-        let entered_at_ms = Arc::clone(&entered_at_ms);
+        let callback_activity = Arc::clone(&callback_activity);
         let tap_disabled = Arc::clone(&tap_disabled);
         CGEventTap::new(
             CGEventTapLocation::HID,
@@ -1017,10 +1116,9 @@ fn thread_main(
                 ) {
                     tap_disabled.store(true, Ordering::Release);
                 }
-                entered_at_ms.store(callback_signals.now_millis(), Ordering::Relaxed);
-                in_callback.store(true, Ordering::Release);
+                callback_activity.enter(callback_signals.now_millis());
                 let disposition = run_tap_callback(cb.as_ref(), etype, event);
-                in_callback.store(false, Ordering::Release);
+                callback_activity.exit();
                 disposition
             },
         )
@@ -1048,11 +1146,9 @@ fn thread_main(
         run_loop.add_source(&loop_source, kCFRunLoopCommonModes);
     }
     signals.mark_tap_progress();
-    if let Err(error) = spawn_callback_watchdog(
-        Arc::clone(&signals),
-        Arc::clone(&in_callback),
-        Arc::clone(&entered_at_ms),
-    ) {
+    if let Err(error) =
+        spawn_callback_watchdog(Arc::clone(&signals), Arc::clone(&callback_activity))
+    {
         error!(%error, "could not spawn callback watchdog — refusing to arm HID tap");
         return;
     }
@@ -1195,5 +1291,12 @@ mod tests {
             ),
             CallbackResult::Keep
         ));
+    }
+
+    #[test]
+    fn safari_snapshot_accepts_only_safari_with_a_positive_pid() {
+        assert_eq!(safari_process_id(SAFARI_BUNDLE_ID, 417), Some(417));
+        assert_eq!(safari_process_id("com.apple.finder", 417), None);
+        assert_eq!(safari_process_id(SAFARI_BUNDLE_ID, 0), None);
     }
 }

@@ -7,6 +7,53 @@ fn token(id: u64, button: ButtonId) -> PressToken {
     PressToken::hook_for_test(id, button)
 }
 
+#[test]
+fn senderless_buttons_follow_the_platform_source_policy() {
+    assert_eq!(button_source_may_remap(None), !cfg!(target_os = "macos"));
+}
+
+#[test]
+fn attributed_sources_still_follow_the_device_policy() {
+    let trackpad = EventDevice {
+        product_name: Some("Apple Internal Keyboard / Trackpad".into()),
+        ..EventDevice::default()
+    };
+    let logitech_mouse = EventDevice {
+        product_name: Some("Logitech MX Master 3".into()),
+        ..EventDevice::default()
+    };
+
+    assert!(!button_source_may_remap(Some(&trackpad)));
+    assert!(button_source_may_remap(Some(&logitech_mouse)));
+}
+
+fn test_dispatcher() -> (
+    ActionDispatcher,
+    super::super::button::ButtonRuntimeOwner,
+    mpsc::Receiver<super::super::button::ButtonRuntimeEvent>,
+) {
+    let (events, received) = mpsc::channel();
+    let owner = super::super::button::ButtonRuntimeOwner::spawn(move |event| {
+        events
+            .send(event)
+            .expect("test receiver should stay connected");
+    })
+    .expect("button worker should start");
+    let (action_ring, _ring_events) = tokio::sync::mpsc::unbounded_channel();
+    let dispatcher = ActionDispatcher {
+        executor: super::super::ActionExecutor {
+            dpi_cycle: Arc::new(RwLock::new(crate::DpiCycles::default())),
+            capture: Arc::new(RwLock::new(None)),
+            registry: openlogi_hid::ChannelRegistry::default(),
+            receiver_access: crate::receiver_access::ReceiverAccess::default(),
+            device_io: openlogi_hid::device_io_channel().1,
+            action_ring,
+        },
+        buttons: owner.input(),
+    };
+    (dispatcher, owner, received)
+}
+
 // The mid-swipe gate itself is unit-tested on `SwipeAccumulator` in
 // `openlogi-core`; these cover only what `HoldState` adds on top — tagging a
 // commit with the exact press and held button, and matching the release.
@@ -153,6 +200,84 @@ fn rejected_key_edges_fail_open() {
 }
 
 #[test]
+fn queued_key_action_retains_its_press_time_target() {
+    let (dispatcher, mut owner, _events) = test_dispatcher();
+    let keycode = 0x7a;
+    let modifiers = KeyModifiers::default();
+    let bindings = Arc::new(RwLock::new(BTreeMap::from([(
+        KeyTrigger { keycode, modifiers },
+        Action::BrowserBack,
+    )])));
+    let (actions, queued) = mpsc::sync_channel(1);
+    let target = ActionDispatchTarget::SafariProcess(417);
+
+    assert_eq!(
+        handle_key(
+            KeyEvent {
+                keycode,
+                pressed: true,
+                modifiers: openlogi_hook::KeyModifiers::default(),
+            },
+            &bindings,
+            &actions,
+            &dispatcher,
+            || target,
+        ),
+        EventDisposition::Suppress
+    );
+    assert_eq!(
+        queued.recv().expect("action should be queued"),
+        (Action::BrowserBack, target)
+    );
+    assert!(owner.shutdown());
+}
+
+#[test]
+fn safari_target_never_relaxes_device_isolation() {
+    let (dispatcher, mut owner, events) = test_dispatcher();
+    let hooks = Arc::new(RwLock::new(HookMaps {
+        bindings: BTreeMap::from([
+            (ButtonId::Back, Action::BrowserBack.into()),
+            (ButtonId::Forward, Action::BrowserForward.into()),
+        ]),
+        ..HookMaps::default()
+    }));
+    let sources = [
+        Some(EventDevice {
+            vendor_id: Some(0x045e),
+            product_name: Some("Microsoft Mouse".into()),
+            ..EventDevice::default()
+        }),
+        Some(EventDevice {
+            product_name: Some("Magic Trackpad".into()),
+            ..EventDevice::default()
+        }),
+        None,
+    ];
+    for source in &sources {
+        // Linux/Windows filter attachment upstream and permit unknown senders.
+        if source.is_none() && !cfg!(target_os = "macos") {
+            continue;
+        }
+        for id in [ButtonId::Back, ButtonId::Forward] {
+            for pressed in [true, false] {
+                assert_eq!(
+                    handle_button(id, pressed, source.as_ref(), &hooks, &dispatcher, || {
+                        ActionDispatchTarget::SafariProcess(417)
+                    }),
+                    EventDisposition::PassThrough
+                );
+            }
+        }
+    }
+    assert!(owner.shutdown());
+    assert!(matches!(
+        events.try_recv(),
+        Err(mpsc::TryRecvError::Disconnected)
+    ));
+}
+
+#[test]
 fn scroll_interception_uses_the_button_source_safety_policy_and_skips_trackpads() {
     let logitech = EventDevice {
         vendor_id: Some(openlogi_hook::LOGITECH_VENDOR_ID),
@@ -181,7 +306,7 @@ fn rebound_horizontal_wheel_maps_to_thumbwheel_directions() {
             (ButtonId::ThumbwheelScrollUp, Action::NextTab.into()),
             (ButtonId::ThumbwheelScrollDown, Action::PrevTab.into()),
         ]),
-        gestures: BTreeMap::new(),
+        ..HookMaps::default()
     };
     assert_eq!(
         rebound_thumbwheel_action(&maps, 1.0),
@@ -192,6 +317,41 @@ fn rebound_horizontal_wheel_maps_to_thumbwheel_directions() {
         Some((ButtonId::ThumbwheelScrollUp, Action::NextTab))
     );
     assert_eq!(rebound_thumbwheel_action(&maps, 0.0), None);
+}
+
+#[test]
+fn rebound_horizontal_wheel_uses_the_selected_devices_polarity() {
+    let maps = HookMaps {
+        bindings: BTreeMap::from([
+            (ButtonId::ThumbwheelScrollUp, Action::NextTab.into()),
+            (ButtonId::ThumbwheelScrollDown, Action::PrevTab.into()),
+        ]),
+        selected_device: Some("mx3".to_owned()),
+        thumbwheel_positive_is_forward: BTreeMap::from([("mx3".to_owned(), true)]),
+        ..HookMaps::default()
+    };
+    assert_eq!(
+        rebound_thumbwheel_action(&maps, 1.0),
+        Some((ButtonId::ThumbwheelScrollUp, Action::NextTab))
+    );
+    assert_eq!(
+        rebound_thumbwheel_action(&maps, -1.0),
+        Some((ButtonId::ThumbwheelScrollDown, Action::PrevTab))
+    );
+}
+
+#[test]
+fn rebound_horizontal_wheel_does_not_guess_a_selected_devices_polarity() {
+    let maps = HookMaps {
+        bindings: BTreeMap::from([
+            (ButtonId::ThumbwheelScrollUp, Action::NextTab.into()),
+            (ButtonId::ThumbwheelScrollDown, Action::PrevTab.into()),
+        ]),
+        selected_device: Some("not-learned-yet".to_owned()),
+        ..HookMaps::default()
+    };
+    assert_eq!(rebound_thumbwheel_action(&maps, 1.0), None);
+    assert_eq!(rebound_thumbwheel_action(&maps, -1.0), None);
 }
 
 #[test]
@@ -207,7 +367,7 @@ fn native_thumbwheel_scroll_stays_os_native() {
                 default_binding(ButtonId::ThumbwheelScrollDown).into(),
             ),
         ]),
-        gestures: BTreeMap::new(),
+        ..HookMaps::default()
     };
     assert_eq!(rebound_thumbwheel_action(&maps, 1.0), None);
     assert_eq!(rebound_thumbwheel_action(&maps, -1.0), None);

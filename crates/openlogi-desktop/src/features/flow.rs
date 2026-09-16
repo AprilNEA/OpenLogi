@@ -258,7 +258,7 @@ fn enable_row(enabled: bool, pal: Palette) -> impl IntoElement {
         .items_start()
         .gap_6()
         .child(section_heading(
-            tr!("Enable Flow"),
+            tr!("flow.enable"),
             enable_description(),
             pal,
         ))
@@ -278,17 +278,9 @@ fn enable_row(enabled: bool, pal: Palette) -> impl IntoElement {
 /// The enable description; Linux copy names the Wayland limitation instead of
 /// letting the switch look broken there.
 fn enable_description() -> SharedString {
-    let base = tr!(
-        "Push the cursor against a mapped screen edge to move your mouse and keyboard to another computer they are paired with. Both computers must run OpenLogi."
-    );
+    let base = tr!("flow.description");
     if cfg!(target_os = "linux") {
-        format!(
-            "{base} {}",
-            tr!(
-                "Flow needs a global cursor position and is unavailable on native Wayland sessions."
-            )
-        )
-        .into()
+        format!("{base} {}", tr!("flow.wayland_unavailable")).into()
     } else {
         base
     }
@@ -335,8 +327,8 @@ fn trigger_section(trigger: FlowTriggerMode, pal: Palette) -> impl IntoElement {
         .w_full()
         .gap_2()
         .child(section_heading(
-            tr!("Trigger"),
-            tr!("Switch as soon as the cursor pushes a mapped edge, or only while a Ctrl key is held."),
+            tr!("flow.trigger"),
+            tr!("flow.trigger_description"),
             pal,
         ))
         .child(
@@ -344,7 +336,7 @@ fn trigger_section(trigger: FlowTriggerMode, pal: Palette) -> impl IntoElement {
                 .gap_2()
                 .child(choice_chip(
                     "flow-trigger-edge",
-                    tr!("Move to edge"),
+                    tr!("flow.trigger_edge"),
                     trigger == FlowTriggerMode::Edge,
                     false,
                     pal,
@@ -352,7 +344,7 @@ fn trigger_section(trigger: FlowTriggerMode, pal: Palette) -> impl IntoElement {
                 ))
                 .child(choice_chip(
                     "flow-trigger-ctrl",
-                    tr!("Hold Ctrl and move to edge"),
+                    tr!("flow.trigger_ctrl_edge"),
                     trigger == FlowTriggerMode::CtrlEdge,
                     false,
                     pal,
@@ -376,11 +368,11 @@ fn arrangement_section(
         .w_full()
         .gap_3()
         .child(section_heading(
-            tr!("Arrangement"),
+            tr!("flow.arrangement"),
             format!(
                 "{} {}",
-                tr!("Drag a computer card to the edge your other screen sits on."),
-                tr!("Click an empty edge to add another computer.")
+                tr!("flow.arrangement_description"),
+                tr!("flow.arrangement_add_hint")
             )
             .into(),
             pal,
@@ -457,7 +449,7 @@ fn side_index(side: FlowSide) -> usize {
 }
 
 fn host_label(host: u8) -> SharedString {
-    tr!("Host %{number}", number => (u32::from(host) + 1).to_string())
+    tr!("flow.host_number", number => (u32::from(host) + 1).to_string())
 }
 
 fn card_title(label: SharedString, pal: Palette) -> gpui::Div {
@@ -505,8 +497,8 @@ fn this_computer_card(
 ) -> impl IntoElement {
     let subtitle: Option<SharedString> = match host_info {
         HostInfoStatus::Ready(info) => Some(host_label(info.current_host)),
-        HostInfoStatus::Reading => Some(tr!("Reading current host…")),
-        HostInfoStatus::Failed => Some(tr!("Host unknown")),
+        HostInfoStatus::Reading => Some(tr!("flow.reading_current_host")),
+        HostInfoStatus::Failed => Some(tr!("flow.host_unknown")),
         HostInfoStatus::Unknown => None,
     };
     computer_card_shell(pal)
@@ -522,7 +514,7 @@ fn this_computer_card(
                     .on_click(move |event, window, cx| refresh(event, window, cx)),
             ),
         )
-        .child(card_title(tr!("This computer"), pal))
+        .child(card_title(tr!("flow.this_computer"), pal))
         .when_some(subtitle, |this, subtitle| {
             this.child(
                 div()
@@ -622,7 +614,7 @@ fn empty_slot(
                 div()
                     .text_caption()
                     .text_color(pal.text_muted)
-                    .child(tr!("Add a computer")),
+                    .child(tr!("flow.add_computer")),
             )
             .on_click(move |_event, _window, cx| {
                 update_flow(cx, move |state| {
@@ -693,8 +685,8 @@ fn follower_content(
         .w_full()
         .gap_3()
         .child(section_heading(
-            tr!("Follow the mouse"),
-            tr!("When the mouse switches to another computer with Flow, this device follows it."),
+            tr!("flow.follow_mouse"),
+            tr!("flow.follow_description"),
             pal,
         ))
         .child(
@@ -703,7 +695,7 @@ fn follower_content(
                 .flex_wrap()
                 .child(choice_chip(
                     "flow-follow-auto",
-                    tr!("Automatic"),
+                    tr!("flow.follow_automatic"),
                     matches!(follow, FlowFollow::Auto),
                     false,
                     pal,
@@ -711,7 +703,7 @@ fn follower_content(
                 ))
                 .child(choice_chip(
                     "flow-follow-off",
-                    tr!("Don't follow"),
+                    tr!("flow.follow_never"),
                     matches!(follow, FlowFollow::Off),
                     false,
                     pal,
@@ -721,7 +713,7 @@ fn follower_content(
                     let target = key.clone();
                     choice_chip(
                         ("flow-follow-device", index),
-                        tr!("Follow %{name}", name => name),
+                        tr!("flow.follow_host", name => name),
                         selected_key.as_deref() == Some(key.as_str()),
                         false,
                         pal,

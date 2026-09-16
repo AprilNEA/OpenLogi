@@ -27,7 +27,7 @@ mod lighting;
 mod litra;
 mod smartshift;
 
-pub use backlight::{get_backlight, set_backlight_enabled};
+pub use backlight::{get_backlight, get_backlight_on, set_backlight_enabled};
 pub use diagnostics::{
     FeatureEntry, FirmwareEntity, FirmwareEntityInfo, ReprogControlEntry, dump_features,
     dump_firmware_entities, dump_reprog_controls, read_battery_raw,
@@ -37,10 +37,7 @@ pub use dpi::{
 };
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
 pub use fn_lock::{set_fn_lock, set_fn_lock_on};
-pub(crate) use haptic::clear_haptic_feature_cache_for;
-pub use haptic::{
-    clear_haptic_feature_cache, ensure_haptics_armed_on, play_haptic, play_haptic_on,
-};
+pub use haptic::{ensure_haptics_armed_on, play_haptic, play_haptic_on};
 pub use hidpp::feature::haptic_feedback::HapticWaveform;
 pub use hires_wheel::{
     ScrollReportingTarget, ScrollResolution, ScrollWheelMode, get_scroll_wheel_mode,
@@ -49,8 +46,8 @@ pub use hires_wheel::{
 };
 pub use host_info::{HostInfo, get_host_info_on};
 pub use lighting::{
-    LightingMethod, set_keyboard_color, set_keyboard_color_on, set_keyboard_color_with,
-    set_keyboard_color_with_on,
+    LightingMethod, LightingWrite, set_keyboard_color, set_keyboard_color_on,
+    set_keyboard_color_with, set_keyboard_color_with_on,
 };
 pub(crate) use litra::litra_capabilities;
 pub use litra::{

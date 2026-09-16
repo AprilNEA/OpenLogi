@@ -11,7 +11,7 @@ use super::poll::{self, Poll};
 ///
 /// Poll it for as long as a hook is installed: an active event tap that
 /// outlives its grant wedges system input until reboot, so the agent has to
-/// learn about a revocation on its own (see `.claude/rules/hook.md`).
+/// learn about a revocation on its own (see `crates/openlogi-hook/AGENTS.md`).
 pub fn spawn(period: Duration) -> mpsc::UnboundedReceiver<bool> {
     if !cfg!(target_os = "macos") {
         // Linux and Windows gate the hook below the privacy layer, so there is

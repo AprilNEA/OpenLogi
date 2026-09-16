@@ -110,8 +110,11 @@ pub(crate) enum StateEvent {
     CameraChanged,
     /// Host camera-permission status may have changed.
     #[cfg_attr(
-        not(target_os = "macos"),
-        expect(dead_code, reason = "camera consent polling is macOS-only")
+        not(any(target_os = "macos", test)),
+        expect(
+            dead_code,
+            reason = "camera consent polling is macOS-only outside tests"
+        )
     )]
     CameraPermissionChanged,
     /// Per-device preferences outside the feature-specific events changed.
@@ -167,6 +170,8 @@ pub struct AppState {
     devices: DeviceStore,
     /// Binding-editor scope and projections derived from config.
     bindings: BindingState,
+    /// Per-device Actions Ring profile open in this window's editor.
+    action_ring_editing_apps: BTreeMap<String, String>,
     /// DPI/SmartShift reads and the active pointer editor value.
     pointer: PointerState,
     /// Standalone-light sequencing and aggregate camera activity.
@@ -266,6 +271,7 @@ impl AppState {
             agent: AgentSession::default(),
             devices: DeviceStore::new(device_list, current_device),
             bindings,
+            action_ring_editing_apps: BTreeMap::new(),
             pointer: PointerState::default(),
             lighting: LightingState::default(),
             ipc_commands,

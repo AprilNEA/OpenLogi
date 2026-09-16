@@ -47,7 +47,7 @@
 //! use std::sync::Arc;
 //!
 //! use hidpp::{
-//!     channel::HidppChannel,
+//!     channel::{HidppChannel, SwIdPolicy},
 //!     device::Device,
 //!     feature::{
 //!        CreatableFeature,
@@ -62,22 +62,18 @@
 //! // First, we will create the HID++ channel.
 //! // This function will return `ChannelError::HidppNotSupported`
 //! // if the passed HID channel does not support HID++.
-//! let channel = Arc::new(
-//!     HidppChannel::from_raw_channel(my_hid_channel)
-//!         .await
-//!         .expect("could not establish HID++ communication"),
-//! );
+//! let mut channel = HidppChannel::from_raw_channel(my_hid_channel)
+//!     .await
+//!     .expect("could not establish HID++ communication");
 //!
-//! // HID++2.0 includes an arbitrary "software ID" in every message.
-//! // This ID is meant to differentiate messages of different
-//! // software, but it can also be used to ease the mapping of
-//! // incoming messages to previously sent outgoing messages by
-//! // rotating it after every sent message.
-//! // By default, the software ID is `0x01` and will not rotate.
-//! channel.set_rotating_sw_id(true);
-//!
-//! // You can also set a custom software ID.
-//! channel.set_sw_id(U4::from_lo(0xa));
+//! // HID++2.0 includes an arbitrary "software ID" in every message, used to
+//! // map responses back to requests. The channel's policy decides it per
+//! // request: `Fixed` (the default, id 1), `Rotating` (one id per request),
+//! // or `Leased` (a process-unique fixed id handed back on drop, for
+//! // concurrent opens of one node). Decide the policy while the channel is
+//! // still exclusively owned, then share it.
+//! channel.set_sw_id_policy(SwIdPolicy::rotating());
+//! let channel = Arc::new(channel);
 //!
 //! // If a wireless receiver is handling the HID++ communication,
 //! // we can detect it.

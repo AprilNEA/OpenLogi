@@ -55,6 +55,10 @@ fn repository(version: &str) -> (tempfile::TempDir, Shell) {
     cmd!(sh, "git config user.email test@example.com")
         .run()
         .unwrap();
+    // The temp repo inherits the developer's global signing config, and a
+    // locked signing agent then fails every test commit with exit 128 —
+    // these fixtures must not depend on that state.
+    cmd!(sh, "git config commit.gpgsign false").run().unwrap();
     write_manifest(directory.path(), version, "");
     commit(&sh, "initial version");
     (directory, sh)

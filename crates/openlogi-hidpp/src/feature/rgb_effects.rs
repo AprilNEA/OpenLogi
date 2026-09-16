@@ -130,6 +130,10 @@ impl RgbEffectsFeature {
     /// `persistence` controls volatile/non-volatile storage and `power_mode`
     /// selects which power mode the effect applies to. Requires software control
     /// (see [`Self::set_sw_control`]).
+    ///
+    /// Drive this future to completion even if its requester cancels: it waits
+    /// for native write completion before bounding the response wait. See
+    /// [`crate::channel::HidppChannel::send_write_through`].
     pub async fn set_rgb_cluster_effect(
         &self,
         cluster_index: u8,
@@ -143,7 +147,7 @@ impl RgbEffectsFeature {
         args[1] = cluster_effect_index;
         args[2..2 + CLUSTER_EFFECT_PARAM_COUNT].copy_from_slice(&params);
         args[12] = persistence.bits() | (u8::from(power_mode) << POWER_TARGET_SHIFT);
-        self.endpoint.call_long(1, args).await?;
+        self.endpoint.call_long_write_through(1, args).await?;
         Ok(())
     }
 
@@ -245,13 +249,18 @@ impl RgbEffectsFeature {
     }
 
     /// Sets the software-control and event-notification flags.
+    ///
+    /// Drive to completion, as for [`Self::set_rgb_cluster_effect`]. The
+    /// [v4 spec, pp. 26–28](https://drive.google.com/file/d/1lecrJQgAC7wnXlo8PEnwVSb3L0GioALG/view)
+    /// returns all three request fields; matching them keeps a late claim ACK
+    /// with different flags from satisfying a restore request.
     pub async fn set_sw_control(
         &self,
         control: SwControlFlags,
         events: EventsNotificationFlags,
     ) -> Result<(), Hidpp20Error> {
         self.endpoint
-            .call(5, [GetOrSet::Set.into(), control.bits(), events.bits()])
+            .call_echoed_write_through(5, [GetOrSet::Set.into(), control.bits(), events.bits()])
             .await?;
         Ok(())
     }

@@ -52,9 +52,9 @@ pub(super) fn home_header(cx: &mut Context<AppView>) -> impl IntoElement {
     });
     let view = cx.entity();
     let device_count_label = if device_count == 1 {
-        tr!("%{count} device", count => device_count)
+        tr!("device.device_count_singular", count => device_count)
     } else {
-        tr!("%{count} devices", count => device_count)
+        tr!("device.device_count_plural", count => device_count)
     };
     h_flex()
         .h(px(HEADER_H))
@@ -69,7 +69,7 @@ pub(super) fn home_header(cx: &mut Context<AppView>) -> impl IntoElement {
                 .flex_1()
                 .min_w_0()
                 .gap_0p5()
-                .child(div().text_heading().child(tr!("Devices")))
+                .child(div().text_heading().child(tr!("device.devices")))
                 .child(
                     div()
                         .text_caption()
@@ -281,9 +281,9 @@ fn transport_glance(record: &DeviceRecord, pal: Palette) -> impl IntoElement {
     let hint: SharedString = format!(
         "{} · {}",
         if record.online {
-            tr!("Connected")
+            tr!("device.connected")
         } else {
-            tr!("Offline")
+            tr!("device.offline")
         },
         connection_summary(record)
     )
@@ -357,7 +357,7 @@ pub(super) fn device_menu(
     let deletable = record.persistent && !record.online;
     move |menu, _window, _cx| {
         let menu = menu.item(
-            PopupMenuItem::new(tr!("Rename…"))
+            PopupMenuItem::new(tr!("common.rename_dialog"))
                 .icon(Icon::empty().path("action-icons/pencil.svg"))
                 .on_click({
                     let record_key = record_key.clone();
@@ -378,7 +378,7 @@ pub(super) fn device_menu(
             return menu;
         }
         menu.item(PopupMenuItem::separator()).item(
-            PopupMenuItem::new(tr!("Delete device…"))
+            PopupMenuItem::new(tr!("device.delete_device_dialog"))
                 .icon(IconName::Delete)
                 .on_click({
                     let record_key = record_key.clone();
@@ -412,15 +412,13 @@ pub(super) fn device_menu_button(record: &DeviceRecord, pal: Palette) -> impl In
 fn open_delete_confirmation(window: &mut Window, cx: &mut App, record_key: String, name: String) {
     window.open_alert_dialog(cx, move |alert, _, _| {
         alert
-            .title(tr!("Delete %{name}?", name => name.clone()))
-            .description(tr!(
-                "This forgets the device and its settings. Reconnect or pair it again to set it up from scratch."
-            ))
+            .title(tr!("device.delete_named_device_confirmation", name => name.clone()))
+            .description(tr!("device.delete_device_description"))
             .button_props(
                 DialogButtonProps::default()
-                    .ok_text(tr!("Delete device"))
+                    .ok_text(tr!("device.delete_device"))
                     .ok_variant(ButtonVariant::Danger)
-                    .cancel_text(tr!("Cancel"))
+                    .cancel_text(tr!("common.cancel"))
                     .show_cancel(true),
             )
             .on_ok({
@@ -453,19 +451,19 @@ fn open_rename_dialog(
         input.update(cx, |input, cx| input.focus(window, cx));
         dialog
             .w(px(420.))
-            .title(tr!("Rename device"))
+            .title(tr!("device.rename_device"))
             .child(
                 v_flex().gap_2().child(control_input(&input)).child(
                     div()
                         .text_caption()
                         .text_color(theme::palette(cx).text_muted)
-                        .child(tr!("Leave blank to use the model name.")),
+                        .child(tr!("device.leave_blank_to_use_the_model_name")),
                 ),
             )
             .button_props(
                 DialogButtonProps::default()
-                    .ok_text(tr!("Save"))
-                    .cancel_text(tr!("Cancel"))
+                    .ok_text(tr!("common.save"))
+                    .cancel_text(tr!("common.cancel"))
                     .show_cancel(true),
             )
             .on_ok({
@@ -493,9 +491,9 @@ fn connection_view(record: &DeviceRecord, pal: Palette) -> impl IntoElement {
         .text_color(pal.text_muted)
         .child(connectivity_dot(record.online, pal))
         .child(if record.online {
-            tr!("Connected")
+            tr!("device.connected")
         } else {
-            tr!("Offline")
+            tr!("device.offline")
         })
         .child("·")
         .child(
@@ -520,7 +518,7 @@ fn connection_summary(record: &DeviceRecord) -> String {
         record.route,
         Some(DeviceRoute::Bolt { .. } | DeviceRoute::Unifying { .. })
     ) {
-        format!("{route} · {} {}", tr!("Channel"), record.slot)
+        format!("{route} · {} {}", tr!("device.channel"), record.slot)
     } else {
         route
     }
@@ -543,8 +541,10 @@ fn device_image(
     if record.kind == DeviceKind::Light {
         return light_visual::gallery(
             record.asset.as_ref(),
-            record.online,
-            light_enabled,
+            light_visual::LightView {
+                online: record.online,
+                enabled: light_enabled,
+            },
             light_settings,
             pal,
         )
@@ -613,7 +613,7 @@ pub(super) fn connection_icon_path(
 /// [`device_empty_state`], or to [`scanning_unavailable_state`] the moment
 /// the agent reports where its enumeration landed.
 pub(super) fn device_scanning_state(cx: &App) -> Div {
-    loading_body(tr!("Scanning for devices…"), cx)
+    loading_body(tr!("agent.scanning_for_devices"), cx)
         .flex_1()
         .w_full()
         .min_h_0()
@@ -626,8 +626,8 @@ pub(super) fn device_scanning_state(cx: &App) -> Div {
 /// regular snapshot.
 pub(super) fn scanning_unavailable_state(cx: &App) -> Div {
     notice_body(
-        tr!("Device scanning is unavailable"),
-        tr!("The background service couldn't scan for devices — check its log for details."),
+        tr!("agent.device_scanning_is_unavailable"),
+        tr!("agent.device_scan_failure_description"),
         cx,
     )
     .flex_1()
@@ -654,28 +654,28 @@ pub(super) fn device_empty_state(cx: &App) -> Div {
                 .size_8()
                 .text_color(pal.text_muted),
         )
-        .child(
-            div()
-                .text_title()
-                .child(tr!("No devices connected")),
-        )
+        .child(div().text_title().child(tr!("device.no_devices_connected")))
         .child(
             div()
                 .max_w(ContentWidth::Narrow.rems())
                 .text_body()
                 .text_center()
-                .child(tr!(
-                    "Plug in or pair a supported Logitech device — it'll show up here automatically. For direct Bluetooth connections, pair in your computer's bluetooth settings."
-                )),
+                .child(tr!("device.device_connection_help")),
         )
         .child(
             Button::new("empty-add-device")
                 .primary()
                 .icon(IconName::Plus)
-                .label(tr!("Add Device"))
+                .label(tr!("pairing.add_device"))
                 .on_click(|_, _, cx| crate::windows::add_device::open(cx)),
         )
-        .child(div().mt_1().max_w(ContentWidth::Narrow.rems()).text_caption().text_center().text_color(pal.text_muted).child(tr!(
-            "Using Logi Options+? Quit it first — both apps compete for HID++ access."
-        )))
+        .child(
+            div()
+                .mt_1()
+                .max_w(ContentWidth::Narrow.rems())
+                .text_caption()
+                .text_center()
+                .text_color(pal.text_muted)
+                .child(tr!("device.quit_logi_options_hid_access")),
+        )
 }

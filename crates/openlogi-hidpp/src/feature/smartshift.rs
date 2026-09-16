@@ -2,6 +2,7 @@
 //! smart shift enhanced scroll wheel.
 
 use std::hash::Hash;
+use std::num::NonZeroU8;
 
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use openlogi_hidpp_derive::Feature;
@@ -41,23 +42,21 @@ impl SmartShiftFeature {
     /// `0xff` enables permanent ratchet mode.
     ///
     /// All values are optional and will stay as they are if provided with
-    /// [`None`].
-    ///
-    /// For `auto_disengage` and `auto_disengange_default`, `0` will have the
-    /// same effect as [`None`].
+    /// [`None`] — encoded as the wire's `0` sentinel, so a written value is
+    /// non-zero by construction rather than by a doc warning.
     pub async fn set_ratchet_control_mode(
         &self,
         wheel_mode: Option<WheelMode>,
-        auto_disengage: Option<u8>,
-        auto_disengage_default: Option<u8>,
+        auto_disengage: Option<NonZeroU8>,
+        auto_disengage_default: Option<NonZeroU8>,
     ) -> Result<(), Hidpp20Error> {
         self.endpoint
             .call(
                 1,
                 [
                     wheel_mode.map_or(0, u8::from),
-                    auto_disengage.unwrap_or(0),
-                    auto_disengage_default.unwrap_or(0),
+                    auto_disengage.map_or(0, NonZeroU8::get),
+                    auto_disengage_default.map_or(0, NonZeroU8::get),
                 ],
             )
             .await?;

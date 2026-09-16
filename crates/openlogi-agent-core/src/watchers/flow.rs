@@ -9,24 +9,26 @@
 //!
 //! Latency shape: the moment the cursor *enters* a mapped zone the watcher
 //! starts acquiring the exclusive receiver lease, which (via
-//! `ReceiverAccess::watch_exclusive`) wakes every capture watcher to release
+//! `ReceiverAccess::subscribe_requests`) wakes every capture watcher to release
 //! immediately — so session teardown overlaps the short dwell instead of
 //! serializing after it, and the fire itself only waits for the HID++ writes.
 
 pub(crate) mod edge;
 
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use openlogi_core::config::FlowTriggerMode;
 use openlogi_hid::{
-    ChannelPool, DeviceRoute, PreparedHostSwitch, prepare_host_switch, switch_linked_hosts,
-    switch_linked_hosts_strict,
+    ChannelPool, DeviceIoGate, DeviceRoute, PreparedHostSwitch, prepare_host_switch,
+    switch_linked_hosts, switch_linked_hosts_strict,
 };
 use openlogi_hook::DisplayBounds;
+use tokio::sync::{oneshot, watch};
 use tracing::{debug, info, warn};
 
+use super::shutdown::{ManagerCompletion, WatcherHandle};
 use crate::receiver_access::{ExclusiveAccessReason, ExclusiveReceiverLease, ReceiverAccess};
 use edge::{EdgeObservation, EdgeStateMachine, ZoneTrigger};
 
@@ -76,11 +78,30 @@ pub struct FlowSpec {
 }
 
 /// Shared resolved spec; `None` while Flow is disabled, unmapped, or has no
-/// online pointing device.
-pub type SharedFlowSpec = Arc<RwLock<Option<FlowSpec>>>;
+/// online pointing device. A read-only projection published by the
+/// orchestrator, like every other runtime spec.
+pub type SharedFlowSpec = watch::Receiver<Option<Arc<FlowSpec>>>;
+
+/// Everything the Flow manager needs from the shared runtime.
+struct FlowManagerContext {
+    spec: SharedFlowSpec,
+    channel_pool: ChannelPool,
+    receiver_access: ReceiverAccess,
+    device_io: DeviceIoGate,
+    shutdown: oneshot::Receiver<()>,
+}
 
 /// Spawn the Flow watcher.
-pub fn spawn(spec: SharedFlowSpec, channel_pool: ChannelPool, receiver_access: ReceiverAccess) {
+#[must_use]
+pub fn spawn(
+    spec: &SharedFlowSpec,
+    channel_pool: ChannelPool,
+    receiver_access: ReceiverAccess,
+    device_io: DeviceIoGate,
+) -> WatcherHandle {
+    let spec = spec.clone();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let (shutdown_done_tx, shutdown_done_rx) = oneshot::channel();
     thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -89,11 +110,23 @@ pub fn spawn(spec: SharedFlowSpec, channel_pool: ChannelPool, receiver_access: R
             Ok(runtime) => runtime,
             Err(error) => {
                 warn!(%error, "flow watcher: could not build tokio runtime");
+                let _ = shutdown_done_tx.send(ManagerCompletion::Unexpected);
                 return;
             }
         };
-        runtime.block_on(watch(spec, channel_pool, receiver_access));
+        let completion = runtime.block_on(watch(FlowManagerContext {
+            spec,
+            channel_pool,
+            receiver_access,
+            device_io,
+            shutdown: shutdown_rx,
+        }));
+        // The fire path spawns the lease acquisition; destroy the runtime
+        // before reporting that no Flow task can still write a device.
+        drop(runtime);
+        let _ = shutdown_done_tx.send(completion);
     });
+    WatcherHandle::new(shutdown_tx, shutdown_done_rx)
 }
 
 /// The pre-acquired exclusive lease's lifecycle, driven by the edge machine:
@@ -142,7 +175,14 @@ impl LeaseState {
     }
 }
 
-async fn watch(spec: SharedFlowSpec, channel_pool: ChannelPool, receiver_access: ReceiverAccess) {
+async fn watch(context: FlowManagerContext) -> ManagerCompletion {
+    let FlowManagerContext {
+        spec,
+        channel_pool,
+        receiver_access,
+        device_io,
+        mut shutdown,
+    } = context;
     let mut machine = EdgeStateMachine::default();
     let mut displays: Vec<DisplayBounds> = Vec::new();
     let mut displays_read_at: Option<Instant> = None;
@@ -150,19 +190,23 @@ async fn watch(spec: SharedFlowSpec, channel_pool: ChannelPool, receiver_access:
     let mut prepared: Option<PreparedFlow> = None;
     let mut prepare_attempted_at: Option<Instant> = None;
     loop {
-        let Some(current) = read_spec(&spec) else {
-            // Disarmed: drop all zone state and any outstanding lease, and
-            // stop touching the cursor entirely. The prepared cache is
-            // deliberately KEPT — the devices being away is exactly the
-            // state a return-trip re-arm resumes from, and re-preparing
-            // would put the slow path back on the first push after they
-            // return. Its receiver channel stays pooled either way, and a
-            // transport that genuinely died falls back at fire time.
+        // Disarmed: drop all zone state and any outstanding lease, and stop
+        // touching the cursor entirely. A suspended host counts as disarmed —
+        // proactive HID++ probes and fires both wait for the resume. The
+        // prepared cache is deliberately KEPT — the devices being away is
+        // exactly the state a return-trip re-arm resumes from, and
+        // re-preparing would put the slow path back on the first push after
+        // they return. Its receiver channel stays pooled either way, and a
+        // transport that genuinely died falls back at fire time.
+        let armed = read_spec(&spec).filter(|_| device_io.allows_io());
+        let Some(current) = armed else {
             machine = EdgeStateMachine::default();
             displays_read_at = None;
             lease.release();
             prepare_attempted_at = None;
-            tokio::time::sleep(IDLE_POLL).await;
+            if !nap(IDLE_POLL, &mut shutdown).await {
+                return ManagerCompletion::Graceful;
+            }
             continue;
         };
         let now = Instant::now();
@@ -218,43 +262,81 @@ async fn watch(spec: SharedFlowSpec, channel_pool: ChannelPool, receiver_access:
                 }
             }
             EdgeObservation::Fire { host } => {
-                if receiver_access.requested(ExclusiveAccessReason::Pairing) {
-                    // Drop the fire rather than queue a switch behind pairing.
-                    // The machine stays spent until the cursor leaves the
-                    // zone, so nothing fires twice once the receiver frees up.
-                    debug!("flow: edge fired during pairing — ignored");
-                    lease.release();
-                } else {
-                    let held = lease.take_for_fire(&receiver_access).await;
-                    let outcome = match &prepared {
-                        Some(cache) if cache.spec == current => fast_switch(cache, host).await,
-                        _ => FastOutcome::AbortedCleanly,
-                    };
-                    match outcome {
-                        FastOutcome::Switched => drop(held),
-                        // No cache, a stale cache, or a failure before any
-                        // write was accepted: nothing has moved, so the
-                        // strict all-or-nothing path is safe. Invalidate and
-                        // re-resolve.
-                        FastOutcome::AbortedCleanly => {
-                            prepared = None;
-                            prepare_attempted_at = None;
-                            switch(&current, host, &channel_pool, held).await;
-                        }
-                        // Past the commit point: a follower already departed,
-                        // so aborting would split the set. Press forward
-                        // tolerantly to bring the pointer (and whoever is
-                        // still here) across to it.
-                        FastOutcome::Committed => {
-                            prepared = None;
-                            prepare_attempted_at = None;
-                            switch_forward(&current, host, &channel_pool, held).await;
-                        }
-                    }
+                if fire(
+                    &current,
+                    host,
+                    prepared.as_ref(),
+                    &channel_pool,
+                    &receiver_access,
+                    &mut lease,
+                )
+                .await
+                {
+                    prepared = None;
+                    prepare_attempted_at = None;
                 }
             }
         }
-        tokio::time::sleep(ACTIVE_POLL).await;
+        if !nap(ACTIVE_POLL, &mut shutdown).await {
+            lease.release();
+            return ManagerCompletion::Graceful;
+        }
+    }
+}
+
+/// Apply one fired edge. Reports whether the prepared cache was spent — a
+/// caller that sees `true` drops it (and its retry pacing) so the next tick
+/// re-resolves the switch from scratch.
+async fn fire(
+    current: &FlowSpec,
+    host: u8,
+    prepared: Option<&PreparedFlow>,
+    channel_pool: &ChannelPool,
+    receiver_access: &ReceiverAccess,
+    lease: &mut LeaseState,
+) -> bool {
+    if receiver_access.requested(ExclusiveAccessReason::Pairing) {
+        // Drop the fire rather than queue a switch behind pairing. The machine
+        // stays spent until the cursor leaves the zone, so nothing fires twice
+        // once the receiver frees up.
+        debug!("flow: edge fired during pairing — ignored");
+        lease.release();
+        return false;
+    }
+    let held = lease.take_for_fire(receiver_access).await;
+    let outcome = match prepared {
+        Some(cache) if cache.spec == *current => fast_switch(cache, host).await,
+        _ => FastOutcome::AbortedCleanly,
+    };
+    match outcome {
+        FastOutcome::Switched => {
+            drop(held);
+            false
+        }
+        // No cache, a stale cache, or a failure before any write was accepted:
+        // nothing has moved, so the strict all-or-nothing path is safe.
+        // Invalidate and re-resolve.
+        FastOutcome::AbortedCleanly => {
+            switch(current, host, channel_pool, held).await;
+            true
+        }
+        // Past the commit point: a follower already departed, so aborting would
+        // split the set. Press forward tolerantly to bring the pointer (and
+        // whoever is still here) across to it.
+        FastOutcome::Committed => {
+            switch_forward(current, host, channel_pool, held).await;
+            true
+        }
+    }
+}
+
+/// Wait out one poll interval, or report `false` when the process asked the
+/// manager to stop first. Every wait in the loop goes through here so a stop
+/// request is never held up by a full idle interval.
+async fn nap(delay: Duration, shutdown: &mut oneshot::Receiver<()>) -> bool {
+    tokio::select! {
+        () = tokio::time::sleep(delay) => true,
+        _ = shutdown => false,
     }
 }
 
@@ -275,7 +357,7 @@ fn effective_triggers(
 }
 
 fn read_spec(spec: &SharedFlowSpec) -> Option<FlowSpec> {
-    spec.read().map_or_else(|_| None, |guard| guard.clone())
+    spec.borrow().as_deref().cloned()
 }
 
 /// The switch resolved ahead of time for the currently armed spec: every

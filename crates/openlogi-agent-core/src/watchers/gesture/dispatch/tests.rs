@@ -14,8 +14,8 @@ fn scale() -> ScrollScale {
 
 #[test]
 fn replacement_session_does_not_inherit_progress_or_cooldown() {
-    let old = HidppSessionId::new("mouse-a", 7);
-    let replacement = HidppSessionId::new("mouse-a", 8);
+    let old = HidppSessionId::with_epoch("mouse-a", 7);
+    let replacement = HidppSessionId::with_epoch("mouse-a", 8);
     let threshold = ThumbwheelSensitivity::DEFAULT.action_threshold();
     let now = Instant::now();
     let mut wheels = SessionWheels::default();
@@ -46,8 +46,8 @@ fn replacement_session_does_not_inherit_progress_or_cooldown() {
 
 #[test]
 fn replacement_session_does_not_inherit_partial_progress() {
-    let old = HidppSessionId::new("mouse-a", 7);
-    let replacement = HidppSessionId::new("mouse-a", 8);
+    let old = HidppSessionId::with_epoch("mouse-a", 7);
+    let replacement = HidppSessionId::with_epoch("mouse-a", 8);
     let threshold = ThumbwheelSensitivity::DEFAULT.action_threshold();
     let now = Instant::now();
     let mut wheels = SessionWheels::default();

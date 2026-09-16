@@ -55,19 +55,19 @@ pub(super) fn device_view_switcher(
         toggle(
             "device-view-grid",
             IconName::LayoutDashboard,
-            tr!("Grid"),
+            tr!("common.grid"),
             DeviceViewMode::Grid,
         ),
         toggle(
             "device-view-list",
             IconName::Menu,
-            tr!("List"),
+            tr!("common.list"),
             DeviceViewMode::List,
         ),
         toggle(
             "device-view-carousel",
             IconName::GalleryVerticalEnd,
-            tr!("Carousel"),
+            tr!("common.carousel"),
             DeviceViewMode::Carousel,
         ),
     ])
@@ -346,9 +346,9 @@ fn device_list_row(
 
 fn device_accessibility_description(record: &DeviceRecord) -> SharedString {
     let status = if record.online {
-        tr!("Connected")
+        tr!("device.connected")
     } else {
-        tr!("Offline")
+        tr!("device.offline")
     };
     let identity = if record.display_name == record.model_name {
         super::kind_label(record.kind)
@@ -358,11 +358,15 @@ fn device_accessibility_description(record: &DeviceRecord) -> SharedString {
     let metadata = format!("{status}. {identity}. {}.", connection_summary(record));
     if let Some(battery) = record.battery.as_ref() {
         let battery = if battery_charging_no_reading(battery) {
-            tr!("Charging").to_string()
+            tr!("device.charging").to_string()
         } else if record.online {
-            format!("{} {}%", tr!("Battery"), battery.percentage)
+            format!("{} {}%", tr!("device.battery"), battery.percentage)
         } else {
-            format!("{} {}%", tr!("Last known battery"), battery.percentage)
+            format!(
+                "{} {}%",
+                tr!("device.last_known_battery"),
+                battery.percentage
+            )
         };
         format!("{metadata} {battery}.").into()
     } else {

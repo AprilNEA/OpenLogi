@@ -17,6 +17,8 @@ use std::time::{Duration, Instant};
 use openlogi_core::binding::{Action, Binding, ButtonId, LONG_PRESS_THRESHOLD};
 use tracing::warn;
 
+use super::ActionDispatchTarget;
+
 /// OS-hook callbacks must fail open rather than block.
 const EVENT_QUEUE_CAPACITY: usize = 128;
 /// Bounds how long graceful process exit waits for terminal handlers.
@@ -24,18 +26,42 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 /// Lets the worker observe the out-of-band shutdown channel even while idle.
 const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
-/// Stable identity of one HID++ capture-session incarnation.
+/// Process-unique identity of one HID++ hardware capture incarnation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct CaptureEpoch(u64);
+
+/// A capture epoch bound to the config namespace its actions currently use.
+/// The namespace can hot-swap while the epoch remains the task's stable input
+/// identity.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct HidppSessionId {
     device_key: Arc<str>,
-    epoch: u64,
+    epoch: CaptureEpoch,
 }
 
+/// Feeds [`HidppSessionId::new`] — one counter for the whole process.
+static NEXT_SESSION_EPOCH: AtomicU64 = AtomicU64::new(1);
+
 impl HidppSessionId {
-    pub(crate) fn new(device_key: &str, epoch: u64) -> Self {
+    /// Mint the identity for a fresh capture-session incarnation. The epoch
+    /// is allocated here rather than by the calling manager, so uniqueness
+    /// holds by construction: the gesture and keyboard managers both run a
+    /// session for an online bound keyboard, and manager-local counters would
+    /// deterministically collide on its first sessions.
+    pub(crate) fn new(device_key: &str) -> Self {
         Self {
             device_key: Arc::from(device_key),
-            epoch,
+            epoch: CaptureEpoch(NEXT_SESSION_EPOCH.fetch_add(1, Ordering::Relaxed)),
+        }
+    }
+
+    /// Test-only: an id with a chosen epoch, so stale-vs-current cases are
+    /// constructible regardless of minting order.
+    #[cfg(test)]
+    pub(crate) fn with_epoch(device_key: &str, epoch: u64) -> Self {
+        Self {
+            device_key: Arc::from(device_key),
+            epoch: CaptureEpoch(epoch),
         }
     }
 
@@ -44,7 +70,19 @@ impl HidppSessionId {
     }
 
     pub(crate) fn epoch(&self) -> u64 {
-        self.epoch
+        self.epoch.0
+    }
+
+    /// Whether two IDs name the same hardware capture incarnation even when
+    /// its hot-swappable config namespace has changed.
+    pub(crate) fn same_epoch(&self, other: &Self) -> bool {
+        self.epoch == other.epoch
+    }
+
+    /// Move future dispatch from this hardware epoch to a different config
+    /// namespace. Managers cancel the old action lifecycle before calling it.
+    pub(crate) fn rekey(&mut self, device_key: &str) {
+        self.device_key = Arc::from(device_key);
     }
 }
 
@@ -132,6 +170,7 @@ impl PressToken {
 pub(crate) struct ActivePress {
     token: PressToken,
     behavior: PressBehavior,
+    target: ActionDispatchTarget,
 }
 
 /// Runtime-only state of the action semantics attached to one active press.
@@ -214,6 +253,10 @@ impl ActivePress {
 
     pub(crate) fn start_action(&self) -> Option<&Action> {
         self.behavior.start_action()
+    }
+
+    pub(crate) fn target(&self) -> ActionDispatchTarget {
+        self.target
     }
 
     fn release_action(&self) -> Option<&Action> {
@@ -382,24 +425,40 @@ pub(crate) struct ButtonInputHandle {
 }
 
 impl ButtonInputHandle {
+    #[cfg(test)]
     pub(crate) fn try_hook_down(
         &self,
         button: ButtonId,
         binding: Option<&Binding>,
     ) -> Option<PressToken> {
-        self.try_down(ButtonSource::current_hook(), button, binding)
+        self.try_hook_down_with_target(button, binding, ActionDispatchTarget::capture())
+    }
+
+    pub(crate) fn try_hook_down_with_target(
+        &self,
+        button: ButtonId,
+        binding: Option<&Binding>,
+        target: ActionDispatchTarget,
+    ) -> Option<PressToken> {
+        self.try_down(ButtonSource::current_hook(), button, binding, target)
     }
 
     pub(crate) fn try_hook_up(&self, button: ButtonId) -> bool {
         self.try_up(ButtonSource::current_hook(), button)
     }
 
-    pub(crate) fn try_hook_key_down(&self, keycode: u16, action: &Action) -> Option<PressToken> {
+    pub(crate) fn try_hook_key_down(
+        &self,
+        keycode: u16,
+        action: &Action,
+        target: ActionDispatchTarget,
+    ) -> Option<PressToken> {
         let generation = self.generation.load(Ordering::Acquire);
         let press = self.new_press(
             PressKey::for_key(ButtonSource::current_hook(), keycode),
             PressBehavior::Immediate(action.clone()),
             generation,
+            target,
         );
         let token = press.token.clone();
         self.try_input(generation, ButtonInput::Down(press))
@@ -430,8 +489,14 @@ impl ButtonInputHandle {
         session: &HidppSessionId,
         button: ButtonId,
         binding: Option<&Binding>,
+        target: ActionDispatchTarget,
     ) -> Option<PressToken> {
-        self.try_down(ButtonSource::Hidpp(session.clone()), button, binding)
+        self.try_down(
+            ButtonSource::Hidpp(session.clone()),
+            button,
+            binding,
+            target,
+        )
     }
 
     pub(crate) fn try_hidpp_up(&self, session: &HidppSessionId, button: ButtonId) -> bool {
@@ -443,12 +508,14 @@ impl ButtonInputHandle {
         session: &HidppSessionId,
         button: ButtonId,
         binding: Option<&Binding>,
+        target: ActionDispatchTarget,
     ) -> bool {
         let generation = self.generation.load(Ordering::Acquire);
         let press = self.new_press(
             PressKey::new(ButtonSource::Hidpp(session.clone()), button),
             PressBehavior::new(binding, Instant::now()),
             generation,
+            target,
         );
         self.try_input(generation, ButtonInput::Pulse(press))
     }
@@ -487,12 +554,14 @@ impl ButtonInputHandle {
         source: ButtonSource,
         button: ButtonId,
         binding: Option<&Binding>,
+        target: ActionDispatchTarget,
     ) -> Option<PressToken> {
         let generation = self.generation.load(Ordering::Acquire);
         let press = self.new_press(
             PressKey::new(source, button),
             PressBehavior::new(binding, Instant::now()),
             generation,
+            target,
         );
         let token = press.token.clone();
         self.try_input(generation, ButtonInput::Down(press))
@@ -510,7 +579,13 @@ impl ButtonInputHandle {
         )
     }
 
-    fn new_press(&self, key: PressKey, behavior: PressBehavior, generation: u64) -> ActivePress {
+    fn new_press(
+        &self,
+        key: PressKey,
+        behavior: PressBehavior,
+        generation: u64,
+        target: ActionDispatchTarget,
+    ) -> ActivePress {
         let id = PressId(self.next_press.fetch_add(1, Ordering::Relaxed));
         ActivePress {
             token: PressToken {
@@ -519,6 +594,7 @@ impl ButtonInputHandle {
                 generation,
             },
             behavior,
+            target,
         }
     }
 

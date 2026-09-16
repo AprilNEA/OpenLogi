@@ -12,27 +12,30 @@
 //! can silently reassign. A `CacheKey::UnifyingSlot` is `receiver + slot`: a
 //! different device paired into that slot while the agent is down would
 //! inherit the previous occupant's probe on warm start. A `CacheKey::Direct`
-//! is an OS-runtime node id with no cross-boot stability. Loaded entries get
-//! `probed_tick = 0`, so the regular `cache::REFRESH_TICKS`
-//! self-healing pass re-walks them on schedule; until (and unless) that walk
-//! succeeds, the persisted data serves exactly like an in-memory cache hit.
+//! is an OS-runtime node id with no cross-boot stability. Loaded entries
+//! restart the elapsed refresh window, so the regular self-healing pass
+//! re-walks them on schedule; until (and unless) that walk succeeds, the
+//! persisted data serves exactly like an in-memory cache hit.
 //!
 //! *Where* a snapshot is kept is the host's business, not this module's: the
 //! enumerator writes through a [`ProbeCacheStore`]; `openlogi-hid` supplies
 //! the file-backed one every native build uses.
 
 use std::collections::HashMap;
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::cache::{CacheKey, Cached};
+use super::events::EventFeatureIndices;
 use super::features::{BatteryProbe, ProbedFeatures};
 
 /// Bumped when the persisted shape changes; a mismatched snapshot is discarded
 /// (the cache is a warm-start optimization, not data anyone must keep).
 /// v2 dropped the `UnifyingSlot` key (slot-keyed, so not re-pair-safe).
-const SCHEMA_VERSION: u32 = 2;
+/// v3 adds event-capable feature indexes discovered by the immutable walk.
+const SCHEMA_VERSION: u32 = 3;
 
 impl ProbeCacheError {
     /// Report why a store could not keep a snapshot.
@@ -67,7 +70,7 @@ pub trait ProbeCacheStore: Send + Sync {
     /// Persist `snapshot`.
     ///
     /// An `Err` is logged by the caller and the snapshot retried on the next
-    /// tick that dirties the cache, so a store may fail freely.
+    /// pass that dirties the cache, so a store may fail freely.
     fn save(&self, snapshot: &ProbeCacheSnapshot) -> Result<(), ProbeCacheError>;
 }
 
@@ -83,6 +86,7 @@ struct PersistedEntry {
     key: PersistedKey,
     probe: ProbedFeatures,
     battery: Option<BatteryProbe>,
+    events: EventFeatureIndices,
 }
 
 /// The persistable subset of [`CacheKey`] — Bolt only (see the module docs).
@@ -144,6 +148,7 @@ impl ProbeCacheSnapshot {
                         key,
                         probe,
                         battery: cached.battery,
+                        events: cached.events,
                     }
                 })
             })
@@ -175,11 +180,12 @@ impl ProbeCacheSnapshot {
                     Cached {
                         probe: entry.probe,
                         battery: entry.battery,
+                        events: entry.events,
                         // Restart the refresh clock: the entry serves
                         // immediately as a cache hit, and the periodic
                         // self-healing re-walk decides when it is due for a
                         // fresh read.
-                        probed_tick: 0,
+                        probed_at: Instant::now(),
                     },
                 )
             })
@@ -190,12 +196,14 @@ impl ProbeCacheSnapshot {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::time::Instant;
 
     use openlogi_core::device::{
         BatteryInfo, BatteryLevel, BatteryStatus, DeviceModelInfo, DeviceTransports,
     };
 
     use super::super::cache::{CacheKey, Cached};
+    use super::super::events::EventFeatureIndices;
     use super::super::features::{BatteryProbe, ProbedFeatures};
     use super::{ProbeCacheSnapshot, SCHEMA_VERSION};
 
@@ -229,7 +237,11 @@ mod tests {
                     ..Default::default()
                 },
                 battery: Some(BatteryProbe::Unified(9)),
-                probed_tick: 7,
+                events: EventFeatureIndices {
+                    wireless_status: Some(7),
+                    unified_battery: Some(9),
+                },
+                probed_at: Instant::now(),
             },
         );
         cache.insert(
@@ -240,11 +252,14 @@ mod tests {
             Cached {
                 probe: ProbedFeatures::default(),
                 battery: None,
-                probed_tick: 3,
+                events: EventFeatureIndices::default(),
+                probed_at: Instant::now(),
             },
         );
 
-        let restored = ProbeCacheSnapshot::of(&cache).into_entries();
+        let snapshot = ProbeCacheSnapshot::of(&cache);
+        let restored_after = Instant::now();
+        let restored = snapshot.into_entries();
 
         let bolt = restored
             .get(&CacheKey::Bolt {
@@ -257,12 +272,20 @@ mod tests {
             Some(BatteryProbe::Unified(9)),
             "the battery *feature index* is immutable and kept"
         );
+        assert_eq!(
+            bolt.events,
+            EventFeatureIndices {
+                wireless_status: Some(7),
+                unified_battery: Some(9),
+            },
+            "event feature indexes are immutable and kept"
+        );
         assert!(
             bolt.probe.battery.is_none(),
             "the battery *reading* is volatile — restoring it would resurrect a stale value"
         );
-        assert_eq!(
-            bolt.probed_tick, 0,
+        assert!(
+            bolt.probed_at >= restored_after,
             "a restored entry restarts the refresh clock"
         );
         assert!(

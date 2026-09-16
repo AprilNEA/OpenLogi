@@ -1,20 +1,23 @@
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use hidpp::channel::HidppChannel;
 use openlogi_core::device::{BatteryInfo, BatteryStatus};
 
+use super::events::{EventFeatureIndices, EventSubscriptionHandle};
 use super::features::{BatteryProbe, ProbedFeatures, probe_features, read_battery};
 use crate::backend::NodeId;
 
-/// How many `enumerate` ticks a device's probe is reused before a fresh read.
+/// How long a device's probe is reused before a fresh read.
 /// The expensive part of a probe (the `enumerate_features` feature-table walk)
 /// reads *immutable* data — model, capabilities, marketing type — so it never
 /// needs re-reading for a known device; the periodic full probe is kept only as
 /// a self-healing pass (e.g. a firmware update reshuffling the feature table).
 /// The volatile battery does NOT ride this window: cache hits re-read it every
-/// tick through the memoized feature index (see [`read_battery`]), so it stays
-/// as fresh as it was before the cache existed (#153).
-pub(super) const REFRESH_TICKS: u64 = 15;
+/// reconciliation through the memoized feature index (see [`read_battery`]).
+/// Elapsed time rather than scan count preserves cache freshness now that
+/// event-driven scans are intentionally irregular.
+pub(super) const REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Stable identity used to memoize a device's probe across `enumerate` ticks.
 /// Keyed on the device's *own* identity (never its slot) so a re-paired or
@@ -40,7 +43,7 @@ pub(super) enum CacheKey {
 /// device's memoized data.
 pub(super) const CACHE_MISS_GRACE: u8 = 3;
 
-/// A memoized probe result plus the tick it was taken on.
+/// A memoized probe result plus the instant it was taken.
 #[derive(Clone)]
 pub(super) struct Cached {
     pub(super) probe: ProbedFeatures,
@@ -49,7 +52,9 @@ pub(super) struct Cached {
     /// round-trip — no `Device::new` ping, no table walk. `None` when the device
     /// exposes neither `0x1004` nor the legacy `0x1000`.
     pub(super) battery: Option<BatteryProbe>,
-    pub(super) probed_tick: u64,
+    /// Event-capable feature indexes found by the same immutable table walk.
+    pub(super) events: EventFeatureIndices,
+    pub(super) probed_at: Instant,
 }
 
 /// The legacy `0x1000` battery feature (MX2S-era mice) reports `discharge_level
@@ -107,8 +112,8 @@ pub(super) fn seen(id: Option<CacheKey>) -> CacheOutcome {
 }
 
 /// Whether `cached` is stale enough that the device should be re-probed.
-pub(super) fn is_stale(cached: &Cached, tick: u64) -> bool {
-    tick.wrapping_sub(cached.probed_tick) >= REFRESH_TICKS
+pub(super) fn is_stale(cached: &Cached, now: Instant) -> bool {
+    now.saturating_duration_since(cached.probed_at) >= REFRESH_INTERVAL
 }
 
 /// Decide a device's probe: reuse a fresh cache, or (online + miss/stale)
@@ -122,10 +127,14 @@ pub(super) async fn probe_or_reuse(
     id: Option<CacheKey>,
     cached: Option<&Cached>,
     online: bool,
-    tick: u64,
+    now: Instant,
+    subscriptions: Option<&EventSubscriptionHandle>,
 ) -> (ProbedFeatures, CacheOutcome) {
-    if online && cached.is_none_or(|c| is_stale(c, tick)) {
-        let (mut fresh, battery) = probe_features(channel, index).await;
+    if let (Some(cached), Some(subscriptions)) = (cached, subscriptions) {
+        subscriptions.register_device(index, cached.events);
+    }
+    if online && cached.is_none_or(|c| is_stale(c, now)) {
+        let (mut fresh, battery, events) = probe_features(channel, index, subscriptions).await;
         if let (Some(reading), Some(probe)) = (fresh.battery.take(), battery) {
             fresh.battery = Some(hold_percentage_while_charging(
                 reading,
@@ -141,15 +150,16 @@ pub(super) async fn probe_or_reuse(
             }
             // A first-sight probe whose identity reads failed is served but not
             // memoized: caching it would pin a wrong (all-zero unit or
-            // serial-less) config key for `REFRESH_TICKS` (#482). The next tick
-            // re-probes instead.
+            // serial-less) config key for `REFRESH_INTERVAL` (#482). The next
+            // reconciliation re-probes instead.
             if fresh.identity_incomplete && cached.is_none() {
                 return (fresh, seen(id));
             }
             // Same reasoning for a capability read that failed part-way: the
             // walk understates the device, and memoizing that hides a panel in
-            // the GUI for `REFRESH_TICKS`. A previous complete walk outranks
-            // this partial one, so defer to it and re-probe next tick.
+            // the GUI for `REFRESH_INTERVAL`. A previous complete walk
+            // outranks this partial one, so defer to it and re-probe next
+            // reconciliation.
             if fresh.capabilities_incomplete {
                 if let Some(c) = cached {
                     keep_known_capabilities(&mut fresh, &c.probe);
@@ -161,7 +171,8 @@ pub(super) async fn probe_or_reuse(
                     let value = Cached {
                         probe: fresh.clone(),
                         battery,
-                        probed_tick: tick,
+                        events,
+                        probed_at: now,
                     };
                     (fresh, CacheOutcome::Fresh(key, value))
                 }

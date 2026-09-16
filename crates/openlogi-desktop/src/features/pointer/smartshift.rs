@@ -205,12 +205,12 @@ impl SmartShiftPanel {
 
         let mode_row = v_flex()
             .gap_2()
-            .child(section_label(tr!("Wheel mode"), pal))
+            .child(section_label(tr!("pointer.wheel_mode"), pal))
             .child(
                 h_flex()
                     .gap_2()
                     .child(mode_pill(
-                        tr!("Free spin"),
+                        tr!("pointer.free_spin"),
                         !ratchet,
                         SmartShiftStatus {
                             mode: SmartShiftMode::Free,
@@ -218,7 +218,7 @@ impl SmartShiftPanel {
                         },
                     ))
                     .child(mode_pill(
-                        tr!("Ratchet"),
+                        tr!("pointer.ratchet"),
                         ratchet,
                         // `committed`, not the current setting: when the cached value is
                         // `0xFF` (permanent ratchet) this resolves to the last
@@ -243,7 +243,7 @@ impl SmartShiftPanel {
                 h_flex()
                     .justify_between()
                     .items_baseline()
-                    .child(section_label(tr!("Sensitivity"), pal))
+                    .child(section_label(tr!("pointer.sensitivity"), pal))
                     .child(
                         div()
                             .text_body()
@@ -255,9 +255,12 @@ impl SmartShiftPanel {
                 row.child(Slider::new(&self.threshold).horizontal())
             })
             .when(!sensitivity_enabled, |row| row.child(disabled_track(pal)))
-            .child(div().text_caption().text_color(pal.text_muted).child(tr!(
-                "Higher keeps the ratchet engaged longer before free-spin."
-            )));
+            .child(
+                div()
+                    .text_caption()
+                    .text_color(pal.text_muted)
+                    .child(tr!("pointer.smartshift_sensitivity_description")),
+            );
 
         let wheel_row = self.wheel_sensitivity_row(window, cx);
 
@@ -299,7 +302,7 @@ impl SmartShiftPanel {
                 h_flex()
                     .justify_between()
                     .items_baseline()
-                    .child(section_label(tr!("Thumb Wheel Sensitivity"), pal))
+                    .child(section_label(tr!("pointer.thumb_wheel_sensitivity"), pal))
                     .child(
                         div()
                             .text_body()
@@ -331,20 +334,22 @@ impl Render for SmartShiftPanel {
         let content: AnyElement = match status {
             SmartShiftLoad::Ready(s) => self.ready_body(*s, window, cx).into_any_element(),
             SmartShiftLoad::Loading | SmartShiftLoad::Unknown if !reachable => {
-                status_line(tr!("Device offline — SmartShift unavailable."), pal).into_any_element()
+                status_line(tr!("pointer.device_offline_smartshift_is_unavailable"), pal)
+                    .into_any_element()
             }
             SmartShiftLoad::Loading | SmartShiftLoad::Unknown => {
-                status_line(tr!("Reading SmartShift settings…"), pal).into_any_element()
+                status_line(tr!("pointer.reading_smartshift_settings"), pal).into_any_element()
             }
             SmartShiftLoad::Failed(_) => retry_line(
                 "smartshift-retry",
-                tr!("Couldn't read SmartShift — click to retry."),
+                tr!("pointer.couldnt_read_smartshift_click_to_retry"),
                 pal,
                 retry_smartshift_closure(key.clone()),
             )
             .into_any_element(),
             SmartShiftLoad::Unsupported(_) => {
-                status_line(tr!("This device does not support SmartShift."), pal).into_any_element()
+                status_line(tr!("pointer.this_device_does_not_support_smartshift"), pal)
+                    .into_any_element()
             }
         };
 
@@ -371,15 +376,15 @@ fn smartshift_write_feedback(
 ) -> Option<AnyElement> {
     match status {
         Some(SmartShiftWriteStatus::Applying { .. }) => {
-            Some(status_line(tr!("Reading SmartShift settings…"), pal).into_any_element())
+            Some(status_line(tr!("pointer.reading_smartshift_settings"), pal).into_any_element())
         }
         Some(SmartShiftWriteStatus::Confirmed) => {
-            Some(status_line(tr!("Done"), pal).into_any_element())
+            Some(status_line(tr!("common.done"), pal).into_any_element())
         }
         Some(SmartShiftWriteStatus::Failed) => Some(
             retry_line(
                 "smartshift-confirm-retry",
-                tr!("Couldn't read SmartShift — click to retry."),
+                tr!("pointer.couldnt_read_smartshift_click_to_retry"),
                 pal,
                 retry_smartshift_closure(key),
             )
@@ -402,12 +407,12 @@ fn permanent_row(
         .items_center()
         .child(
             v_flex()
-                .child(section_label(tr!("Permanent ratchet"), pal))
+                .child(section_label(tr!("pointer.permanent_ratchet"), pal))
                 .child(
                     div()
                         .text_caption()
                         .text_color(pal.text_muted)
-                        .child(tr!("Never auto-switch to free-spin.")),
+                        .child(tr!("pointer.never_auto_switch_to_free_spin")),
                 ),
         )
         .child(
