@@ -1,0 +1,14 @@
+{
+    "KPlugin": {
+        "Id": "openlogi-frontmost",
+        "Name": "OpenLogi Frontmost Window",
+        "Description": "Tells OpenLogi which window is focused, so per-app mouse profiles work on Plasma Wayland.",
+        "Icon": "input-mouse",
+        "Authors": [{ "Name": "OpenLogi" }],
+        "License": "MIT",
+        "Version": "1.0",
+        "Website": "https://github.com/AprilNEA/OpenLogi"
+    },
+    "KPackageStructure": "KWin/Script",
+    "X-Plasma-API-Minimum-Version": "6.0"
+}
