@@ -23,7 +23,7 @@ use openlogi_ipc::ActionRingInvocation;
 use openlogi_ui::action_icons::RING_CANCEL_ICON;
 use openlogi_ui::color;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 use crate::agent::OverlayCommand;
@@ -86,6 +86,13 @@ pub(crate) struct RingView {
     /// at the cursor and asks for a frame, and the animation is started on the
     /// frame after, which comes from the frame loop of a presented window.
     armed: bool,
+    /// When the fly-out lands, once it has been started. Until then the
+    /// slots are stacked under the cursor on their way out, and the topmost
+    /// one would read as hovered — a spurious haptic on every open — so slot
+    /// hover and click are ignored before this instant. Under Reduce Motion
+    /// the slots are drawn in place on the first animated frame, and this is
+    /// that frame's instant.
+    settled_at: Option<Instant>,
     /// Publishes click-away identity for exactly this view's lifetime.
     _showing: ShowingRing,
 }
@@ -103,6 +110,7 @@ impl RingView {
             commands,
             hovered: None,
             armed: false,
+            settled_at: None,
             _showing: showing,
         }
     }
@@ -120,6 +128,11 @@ impl RingView {
         });
     }
 
+    /// Whether the slots have landed and may respond to the cursor.
+    fn settled(&self) -> bool {
+        slots_settled(self.settled_at, Instant::now())
+    }
+
     fn slot_element(
         &self,
         slot: ActionRingSlot,
@@ -131,7 +144,6 @@ impl RingView {
         let selected = self.hovered == Some(slot);
         let home = slot.placement(WINDOW_SIZE, RADIUS, SLOT_SIZE);
         let session_id = self.invocation.session_id;
-        let activate = self.commands.clone();
         let element = div()
             .id(("ring-slot", slot.index()))
             .absolute()
@@ -155,6 +167,9 @@ impl RingView {
             .child(svg().path(icon_path).size(px(SLOT_GLYPH)).text_color(GLYPH))
             .on_hover(cx.listener(move |this, hovered, _, cx| {
                 if *hovered && this.hovered != Some(slot) {
+                    if !this.settled() {
+                        return;
+                    }
                     this.hovered = Some(slot);
                     let _ = this
                         .commands
@@ -165,11 +180,16 @@ impl RingView {
                     cx.notify();
                 }
             }))
-            .on_click(move |_, window, cx| {
+            .on_click(cx.listener(move |this, _, window, cx| {
                 cx.stop_propagation();
-                let _ = activate.send(OverlayCommand::Activate { session_id, slot });
+                if !this.settled() {
+                    return;
+                }
+                let _ = this
+                    .commands
+                    .send(OverlayCommand::Activate { session_id, slot });
                 window.remove_window();
-            });
+            }));
         // Position is owned by the fly-out: the slot starts under the cursor
         // and flies to `home`, fading in on the way. Before the view is armed
         // it just waits at the start. Reduce Motion renders the end state
@@ -193,6 +213,23 @@ impl RingView {
     }
 }
 
+/// When slots started flying out at `started` land: one [`FLY_OUT`] later,
+/// or at once under Reduce Motion, where GPUI renders the end state instead
+/// of animating (so the ring must not look ready while ignoring the cursor).
+fn fly_out_lands_at(started: Instant, reduce_motion: bool) -> Instant {
+    if reduce_motion {
+        started
+    } else {
+        started + FLY_OUT
+    }
+}
+
+/// Whether the slots have landed by `now`: never before the fly-out has been
+/// started, and not until it has run its course.
+fn slots_settled(settled_at: Option<Instant>, now: Instant) -> bool {
+    settled_at.is_some_and(|at| now >= at)
+}
+
 /// Where a slot sits `progress` (0..=1) of the way from the ring's centre to
 /// its `home` placement. Positions are the slot's top-left corner, as GPUI lays
 /// it out.
@@ -209,6 +246,9 @@ impl Render for RingView {
         let armed = std::mem::replace(&mut self.armed, true);
         if !armed {
             window.request_animation_frame();
+        } else if self.settled_at.is_none() {
+            // This render starts the fly-out.
+            self.settled_at = Some(fly_out_lands_at(Instant::now(), cx.reduce_motion()));
         }
         let session_id = self.invocation.session_id;
         let root_commands = self.commands.clone();
@@ -333,6 +373,29 @@ pub(crate) fn clamp_window_origin(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slots_ignore_the_cursor_until_the_fly_out_has_landed() {
+        let now = Instant::now();
+        assert!(
+            !slots_settled(None, now),
+            "not started: still parked under the cursor"
+        );
+        let lands = fly_out_lands_at(now, false);
+        assert_eq!(lands, now + FLY_OUT);
+        assert!(!slots_settled(Some(lands), now));
+        assert!(!slots_settled(Some(lands), now + FLY_OUT / 2));
+        assert!(slots_settled(Some(lands), lands));
+        assert!(slots_settled(Some(lands), lands + Duration::from_millis(1)));
+    }
+
+    #[test]
+    fn under_reduce_motion_the_slots_are_ready_on_the_frame_they_appear() {
+        let now = Instant::now();
+        let lands = fly_out_lands_at(now, true);
+        assert_eq!(lands, now, "drawn in place, so no wait");
+        assert!(slots_settled(Some(lands), now));
+    }
 
     #[test]
     fn slots_fly_out_from_the_centre_to_their_placement() {
