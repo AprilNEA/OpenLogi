@@ -5684,7 +5684,6 @@ dependencies = [
  "derive_more",
  "disclaim",
  "embed-resource",
- "futures-lite",
  "gpui-base",
  "gpui-component",
  "gpui-kit-assets",
@@ -5862,12 +5861,14 @@ name = "openlogi-ipc"
 version = "0.8.5"
 dependencies = [
  "bincode",
+ "futures-lite",
  "interprocess",
  "openlogi-core",
  "serde",
  "succession",
  "tarpc",
  "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

@@ -72,7 +72,7 @@ objc2-service-management = { workspace = true, features = ["std", "SMAppService"
 workspace = true
 
 [dev-dependencies]
-futures-lite = { workspace = true }
+openlogi-ipc = { path = "../openlogi-ipc", features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
 openlogi-device = { path = "../openlogi-device" }
 openlogi-fixture = { workspace = true }

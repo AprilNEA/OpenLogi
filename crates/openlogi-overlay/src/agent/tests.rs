@@ -49,7 +49,10 @@ fn an_agent_that_keeps_coming_back_never_accumulates_its_way_to_an_exit() {
 fn a_replacement_agent_starts_with_its_own_generation_cursor() {
     let mut state = InvocationPollState::default();
     state.connected(());
-    state.observed(17);
+    state.observed(RingObservation {
+        generation: 17,
+        invocation: None,
+    });
     assert_eq!(
         state.observation().map(|observation| observation.1),
         Some(17)

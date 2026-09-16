@@ -41,10 +41,10 @@ use openlogi_core::config::Lighting;
 use openlogi_core::hid::{
     DeviceRoute, Dpi, DpiInfo, LightCommand, ReceiverSelector, SmartShiftStatus, WriteError,
 };
-use openlogi_ipc::client::{ConnectError, Connection};
+use openlogi_ipc::client::{self, ConnectError, Ledger, ProtocolSkew, observe_context};
 use openlogi_ipc::{
-    AgentClient, AgentSnapshot, ClientKind, ConfigReloadError, Generation, OBSERVE_HOLD,
-    Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure,
+    AgentClient, AgentSnapshot, ClientKind, ConfigReloadError, Observation, PairingCommandError,
+    PairingFailure,
 };
 use tarpc::context;
 use tokio::sync::{mpsc, oneshot};
@@ -72,11 +72,6 @@ const RECONNECT_DELAY: Duration = Duration::from_millis(250);
 /// told the agent is genuinely unreachable rather than still starting (agent
 /// start plus a worst-case first enumeration is ~6 s).
 const UNREACHABLE_AFTER: Duration = Duration::from_secs(15);
-
-/// Request deadline for a held `observe`, above the agent's own
-/// [`OBSERVE_HOLD`]: tarpc cancels a handler whose deadline passes, so a
-/// shorter one would kill the hold instead of waiting it out.
-const OBSERVE_DEADLINE: Duration = OBSERVE_HOLD.saturating_add(Duration::from_secs(5));
 
 /// What the client thread tells the GPUI loop.
 pub enum GuiUpdate {
@@ -164,25 +159,11 @@ pub fn spawn() -> IpcClient {
     let (update_tx, updates) = mpsc::unbounded_channel();
     let (commands, mut cmd_rx) = mpsc::unbounded_channel::<Command>();
 
-    let spawn_result = std::thread::Builder::new()
-        .name("openlogi-ipc-client".into())
-        .spawn(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    warn!(error = %e, "tokio runtime init failed; IPC client exiting");
-                    return;
-                }
-            };
-            rt.block_on(async move {
-                observe_loop(&mut Socket, &update_tx, &mut cmd_rx).await;
-            });
-        });
-    if let Err(e) = spawn_result {
-        warn!(error = %e, "could not spawn IPC client thread — agent state unavailable");
+    let started = client::spawn_client_thread("openlogi-ipc-client", move || async move {
+        observe_loop(&mut Socket, &update_tx, &mut cmd_rx).await;
+    });
+    if let Err(error) = started {
+        warn!(%error, "could not start the IPC client thread — agent state unavailable");
     }
 
     IpcClient { updates, commands }
@@ -191,8 +172,8 @@ pub fn spawn() -> IpcClient {
 /// Where the agent is reached and how it is brought up — the loop's only two
 /// effects on the world, behind one seam so the tests can script them.
 trait Wire {
-    /// Connect to the agent and complete the protocol handshake.
-    async fn connect(&mut self) -> Result<Connection, ConnectError>;
+    /// Connect to the agent and complete the handshake as the GUI.
+    async fn connect(&mut self) -> Result<AgentClient, ConnectError>;
     /// Start the agent when the socket stays down; see `launch::spawn_agent`.
     fn spawn_agent(&mut self);
 }
@@ -201,8 +182,8 @@ trait Wire {
 struct Socket;
 
 impl Wire for Socket {
-    async fn connect(&mut self) -> Result<Connection, ConnectError> {
-        openlogi_ipc::client::connect().await
+    async fn connect(&mut self) -> Result<AgentClient, ConnectError> {
+        client::connect_as(ClientKind::Gui).await
     }
 
     fn spawn_agent(&mut self) {
@@ -255,8 +236,8 @@ async fn observe_loop(
                         reflex.connected();
                         notified_unreachable = false;
                         notified_outdated = false;
-                        if let Some(snapshot) = accept_observation(&mut conn.seen, observation) {
-                            let _ = update_tx.send(GuiUpdate::Snapshot(snapshot));
+                        if let Some(observed) = conn.ledger.accept(observation) {
+                            let _ = update_tx.send(GuiUpdate::Snapshot(observed.snapshot));
                         }
                         inflight = Some(observe(conn));
                     } else {
@@ -435,27 +416,15 @@ impl SpawnReflex {
 /// A usable, declared connection, carrying everything that is true only *of
 /// this connection*: the identity that tags its in-flight poll, and the
 /// generation ledger — a replacement agent numbers its own generations, so
-/// `seen` lives and dies with the connection instead of being reset by
+/// the ledger lives and dies with the connection instead of being reset by
 /// discipline at every disconnect site.
 struct LiveConnection {
     client: AgentClient,
     /// This connection's slot in the connect sequence. A settled poll tagged
     /// with another id belongs to a connection already gone, and is dropped.
     id: u64,
-    /// Latest generation seen on this connection. Starts at 0 — "I have seen
-    /// nothing" — so the first answer is the agent's whole state.
-    seen: Generation,
-}
-
-/// Advance one connection's generation ledger and return only a genuinely
-/// newer snapshot. Equal generations are long-poll heartbeats; lower ones are
-/// stale replies and must not move the desktop back to older device state.
-fn accept_observation(seen: &mut Generation, observation: Observation) -> Option<AgentSnapshot> {
-    if observation.generation <= *seen {
-        return None;
-    }
-    *seen = observation.generation;
-    Some(observation.snapshot)
+    /// What this connection has seen of the agent's generations.
+    ledger: Ledger,
 }
 
 /// Why [`observe_loop`] woke up. Named so the in-flight poll can be handed back
@@ -480,13 +449,14 @@ type ObserveFuture = Pin<Box<dyn Future<Output = (u64, Result<Observation, ()>)>
 fn observe(conn: &LiveConnection) -> ObserveFuture {
     let client = conn.client.clone();
     let id = conn.id;
-    let seen = conn.seen;
+    let since = conn.ledger.seen();
     Box::pin(async move {
-        let mut ctx = context::current();
-        ctx.deadline = Instant::now() + OBSERVE_DEADLINE;
-        let observed = client.observe(ctx, seen).await.map_err(|error| {
-            debug!(%error, "observe failed — reconnecting");
-        });
+        let observed = client
+            .observe(observe_context(), since)
+            .await
+            .map_err(|error| {
+                debug!(%error, "observe failed — reconnecting");
+            });
         (id, observed)
     })
 }
@@ -528,51 +498,28 @@ async fn ensure<'a>(
     conn_seq: &mut u64,
 ) -> Result<&'a LiveConnection, ConnectFailure> {
     if link.is_none() {
-        // The handshake happens before any real RPC: mismatched bincode layouts
-        // would otherwise surface only as opaque RpcErrors and a silently empty
-        // device list. Refuse with a clear log instead, and report the
-        // direction — who is stale decides who must restart.
-        let connection = wire.connect().await.map_err(|error| {
-            debug!(%error, "no usable agent");
-            ConnectFailure::Unreachable
-        })?;
-        match connection.version {
-            version if version == PROTOCOL_VERSION => {
-                // Declare before any other RPC: a dormant agent arms only on
-                // this — merely connecting no longer wakes it.
-                connection
-                    .client
-                    .declare_client(context::current(), ClientKind::Gui)
-                    .await
-                    .map_err(|error| {
-                        debug!(%error, "agent dropped during the declare handshake");
-                        ConnectFailure::Unreachable
-                    })?;
-                *conn_seq += 1;
-                *link = Some(LiveConnection {
-                    client: connection.client,
-                    id: *conn_seq,
-                    seen: 0,
-                });
-                debug!("connected to agent IPC socket");
-            }
-            version if version < PROTOCOL_VERSION => {
-                warn!(
-                    agent = version,
-                    gui = PROTOCOL_VERSION,
-                    "agent IPC protocol is older — waiting for the agent to be replaced"
-                );
-                return Err(ConnectFailure::Unreachable);
-            }
-            version => {
-                warn!(
-                    agent = version,
-                    gui = PROTOCOL_VERSION,
-                    "agent IPC protocol is newer — this GUI needs a relaunch"
-                );
+        // The handshake — the version check, then the declaration that arms a
+        // dormant agent — is `openlogi_ipc::client`'s. What is left to decide
+        // here is what a mismatch means for this process: who is stale decides
+        // who must restart.
+        let client = match wire.connect().await {
+            Ok(client) => client,
+            Err(ConnectError::Skew(skew @ ProtocolSkew::AgentNewer { .. })) => {
+                warn!(%skew, "this GUI is the stale side — waiting for a relaunch");
                 return Err(ConnectFailure::NewerAgent);
             }
-        }
+            Err(error) => {
+                debug!(%error, "no usable agent");
+                return Err(ConnectFailure::Unreachable);
+            }
+        };
+        *conn_seq += 1;
+        *link = Some(LiveConnection {
+            client,
+            id: *conn_seq,
+            ledger: Ledger::new(),
+        });
+        debug!("connected to agent IPC socket");
     }
     // `link` is `Some` here (just set, or already was); the `None` arm is
     // unreachable but keeps this `expect`-free.
@@ -759,55 +706,13 @@ fn reply_disconnected(update_tx: &mpsc::UnboundedSender<GuiUpdate>, cmd: Command
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use futures_lite::StreamExt as _;
+    use openlogi_ipc::testing::in_memory_agent;
     use openlogi_ipc::{AgentRequest, AgentResponse};
-    use tarpc::server::Channel as _;
 
     use super::*;
-
-    fn observation(generation: Generation, camera_active: bool) -> Observation {
-        Observation {
-            generation,
-            snapshot: AgentSnapshot {
-                status: openlogi_ipc::AgentStatus {
-                    accessibility_granted: true,
-                    hook_installed: true,
-                    launch_at_login: true,
-                    inventory: openlogi_ipc::InventoryHealth::Ready,
-                    protocol_version: PROTOCOL_VERSION,
-                    agent_version: "test".to_string(),
-                    input_monitoring_granted: true,
-                    hid_open_failures: false,
-                },
-                inventory: Vec::new(),
-                standalone: Vec::new(),
-                camera_active,
-                pairing: None,
-                foreground: openlogi_ipc::ForegroundApps::default(),
-            },
-        }
-    }
-
-    #[test]
-    fn stale_observations_do_not_move_the_connection_backward() {
-        let mut seen = 0;
-
-        let first = accept_observation(&mut seen, observation(2, true))
-            .expect("a newer generation is accepted");
-        assert!(first.camera_active);
-        assert_eq!(seen, 2);
-
-        assert!(accept_observation(&mut seen, observation(1, false)).is_none());
-        assert!(accept_observation(&mut seen, observation(2, false)).is_none());
-        assert_eq!(seen, 2, "stale replies cannot rewind the ledger");
-
-        let next = accept_observation(&mut seen, observation(3, false))
-            .expect("the next newer generation is still accepted");
-        assert!(!next.camera_active);
-        assert_eq!(seen, 3);
-    }
 
     #[test]
     fn a_never_reached_agent_is_spawned_immediately() {
@@ -852,13 +757,6 @@ mod tests {
         assert!(reflex.should_fire(t0 + SPAWN_RETRY_PERIOD));
     }
 
-    /// What a scripted agent saw, in order.
-    #[derive(Debug, PartialEq, Eq)]
-    enum Seen {
-        Declared(ClientKind),
-        Reloaded,
-    }
-
     /// How a scripted agent answers a reload.
     #[derive(Clone, Copy)]
     enum OnReload {
@@ -868,31 +766,26 @@ mod tests {
         Vanish,
     }
 
-    /// An in-memory agent over a tarpc channel: answers the declare handshake
-    /// and reloads as told, holds `observe` open forever (a quiet agent), and
-    /// records what it saw. Anything else is out of these tests' scope.
-    fn scripted_agent(on_reload: OnReload) -> (Connection, Arc<Mutex<Vec<Seen>>>) {
-        let seen = Arc::new(Mutex::new(Vec::new()));
+    /// An in-memory agent past the handshake: reloads as told, holds `observe`
+    /// open forever (a quiet agent), and counts the reloads it saw. Anything
+    /// else is out of these tests' scope.
+    fn scripted_agent(on_reload: OnReload) -> (AgentClient, Arc<AtomicUsize>) {
+        let reloads = Arc::new(AtomicUsize::new(0));
         let vanish = Arc::new(tokio::sync::Notify::new());
-        let (client_transport, server_transport) = tarpc::transport::channel::unbounded();
-        let serve = {
-            let seen = seen.clone();
-            let vanish = vanish.clone();
-            tarpc::server::serve(move |_: context::Context, request: AgentRequest| {
-                let seen = seen.clone();
-                let vanish = vanish.clone();
-                async move {
+        let counted = reloads.clone();
+        let signal = vanish.clone();
+        let client = in_memory_agent(
+            move |request| {
+                let counted = counted.clone();
+                let signal = signal.clone();
+                Box::pin(async move {
                     match request {
-                        AgentRequest::DeclareClient { kind } => {
-                            seen.lock().unwrap().push(Seen::Declared(kind));
-                            Ok(AgentResponse::DeclareClient(()))
-                        }
                         AgentRequest::ReloadConfig {} => {
-                            seen.lock().unwrap().push(Seen::Reloaded);
+                            counted.fetch_add(1, Ordering::SeqCst);
                             match on_reload {
                                 OnReload::Accept => Ok(AgentResponse::ReloadConfig(Ok(()))),
                                 OnReload::Vanish => {
-                                    vanish.notify_one();
+                                    signal.notify_one();
                                     std::future::pending().await
                                 }
                             }
@@ -900,36 +793,17 @@ mod tests {
                         AgentRequest::Observe { .. } => std::future::pending().await,
                         other => panic!("the client loop sent an unexpected request: {other:?}"),
                     }
-                }
-            })
-        };
-        tokio::spawn(async move {
-            let channel = tarpc::server::BaseChannel::with_defaults(server_transport);
-            let mut responses = std::pin::pin!(channel.execute(serve));
-            loop {
-                tokio::select! {
-                    () = vanish.notified() => break,
-                    next = responses.next() => match next {
-                        Some(response) => {
-                            tokio::spawn(response);
-                        }
-                        None => break,
-                    },
-                }
-            }
-        });
-        let client = AgentClient::new(tarpc::client::Config::default(), client_transport).spawn();
-        let connection = Connection {
-            client,
-            version: PROTOCOL_VERSION,
-        };
-        (connection, seen)
+                })
+            },
+            async move { vanish.notified().await },
+        );
+        (client, reloads)
     }
 
     /// A scripted agent socket: connect attempts pop the script front to back
     /// and find the socket down once it runs out; launches are only counted.
     struct ScriptedWire {
-        attempts: VecDeque<Result<Connection, ConnectError>>,
+        attempts: VecDeque<Result<AgentClient, ConnectError>>,
         launches: usize,
     }
 
@@ -938,7 +812,7 @@ mod tests {
             clippy::unused_async_trait_impl,
             reason = "the trait is async for the real socket; the script answers from memory"
         )]
-        async fn connect(&mut self) -> Result<Connection, ConnectError> {
+        async fn connect(&mut self) -> Result<AgentClient, ConnectError> {
             self.attempts.pop_front().unwrap_or_else(down)
         }
 
@@ -947,7 +821,7 @@ mod tests {
         }
     }
 
-    fn down() -> Result<Connection, ConnectError> {
+    fn down() -> Result<AgentClient, ConnectError> {
         Err(std::io::Error::from(std::io::ErrorKind::ConnectionRefused).into())
     }
 
@@ -967,11 +841,11 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_reload_requested_before_the_agent_is_up_waits_for_it() {
-        // The relaunch after a self-update outruns its agent by a second or
-        // two, and the state constructor asks for a reload right away. That
-        // reload has to wait for the agent — not be reported as a failure
-        // that the agent's arrival could never clear.
-        let (agent, agent_saw) = scripted_agent(OnReload::Accept);
+        // The relaunch after a self-update outruns its agent, and the state
+        // constructor asks for a reload right away. That reload has to wait
+        // for the agent — not be reported as a failure that the agent's
+        // arrival could never clear.
+        let (agent, reloads) = scripted_agent(OnReload::Accept);
         let mut wire = ScriptedWire {
             attempts: VecDeque::from([down(), down(), Ok(agent)]),
             launches: 0,
@@ -992,11 +866,7 @@ mod tests {
             Ok(()),
             "the agent's own verdict is what reaches the GUI"
         );
-        assert_eq!(
-            *agent_saw.lock().unwrap(),
-            [Seen::Declared(ClientKind::Gui), Seen::Reloaded],
-            "delivered once, and only after the declare handshake"
-        );
+        assert_eq!(reloads.load(Ordering::SeqCst), 1, "delivered exactly once");
         assert_eq!(
             wire.launches, 1,
             "holding the reload does not stall the spawn reflex"
@@ -1007,8 +877,8 @@ mod tests {
     async fn a_reload_the_agent_took_down_with_it_reaches_its_successor() {
         // An agent that dies mid-reload has applied nothing. The reload stays
         // owed and reaches the replacement, which answers for itself.
-        let (dying, dying_saw) = scripted_agent(OnReload::Vanish);
-        let (successor, successor_saw) = scripted_agent(OnReload::Accept);
+        let (dying, dying_reloads) = scripted_agent(OnReload::Vanish);
+        let (successor, successor_reloads) = scripted_agent(OnReload::Accept);
         let mut wire = ScriptedWire {
             attempts: VecDeque::from([Ok(dying), Ok(successor)]),
             launches: 0,
@@ -1029,13 +899,7 @@ mod tests {
             Ok(()),
             "the lost attempt is never reported as a verdict"
         );
-        assert_eq!(
-            *dying_saw.lock().unwrap(),
-            [Seen::Declared(ClientKind::Gui), Seen::Reloaded]
-        );
-        assert_eq!(
-            *successor_saw.lock().unwrap(),
-            [Seen::Declared(ClientKind::Gui), Seen::Reloaded]
-        );
+        assert_eq!(dying_reloads.load(Ordering::SeqCst), 1);
+        assert_eq!(successor_reloads.load(Ordering::SeqCst), 1);
     }
 }

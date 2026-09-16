@@ -63,39 +63,29 @@ pub fn try_replace_stale() -> Option<InstanceGuard> {
 
 #[cfg(unix)]
 fn replace_stale() -> Option<InstanceGuard> {
-    use openlogi_ipc::{AgentClient, PROTOCOL_VERSION};
+    use openlogi_ipc::client::{self, ProtocolSkew};
     use std::ffi::OsStr;
     use sysinfo::{Pid, ProcessesToUpdate, Signal, System};
-    use tarpc::{client, context};
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .ok()?;
     let holder_version = rt.block_on(async {
-        let handshake = async {
-            let stream = openlogi_ipc::transport::connect().await.ok()?;
-            let transport = openlogi_ipc::transport::wrap(stream);
-            let client = AgentClient::new(client::Config::default(), transport).spawn();
-            client.protocol_version(context::current()).await.ok()
-        };
-        tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake)
+        tokio::time::timeout(HANDSHAKE_TIMEOUT, client::probe_version())
             .await
+            .ok()?
             .ok()
-            .flatten()
     })?;
     drop(rt);
 
-    if holder_version >= PROTOCOL_VERSION {
-        // We are the duplicate (or the stale one — the GUI handles that
-        // direction by telling the user to relaunch).
+    // Only an older holder is ours to replace. The same version makes us the
+    // duplicate; a newer one makes us the stale side, which the GUI handles by
+    // telling the user to relaunch.
+    let Err(skew @ ProtocolSkew::AgentOlder { .. }) = ProtocolSkew::check(holder_version) else {
         return None;
-    }
-    info!(
-        holder = holder_version,
-        ours = PROTOCOL_VERSION,
-        "lock holder speaks an older protocol — taking over"
-    );
+    };
+    info!(%skew, "lock holder speaks an older protocol — taking over");
 
     let mut system = System::new();
     system.refresh_processes(ProcessesToUpdate::All, true);

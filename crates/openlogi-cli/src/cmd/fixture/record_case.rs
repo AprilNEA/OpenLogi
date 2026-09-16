@@ -309,9 +309,9 @@ async fn acquire_capture_ownership() -> Result<InstanceGuard> {
         "refusing direct fixture capture: could not acquire agent.lock; \
          stop the OpenLogi agent and any other fixture capture before retrying",
     )?;
-    match tokio::time::timeout(AGENT_PROBE_TIMEOUT, client::connect()).await {
+    match tokio::time::timeout(AGENT_PROBE_TIMEOUT, client::probe_version()).await {
         Ok(Err(ConnectError::Endpoint(error))) if endpoint_is_unreachable(&error) => Ok(guard),
-        Ok(Ok(_) | Err(ConnectError::Handshake(_) | ConnectError::Endpoint(_))) | Err(_) => bail!(
+        Ok(Ok(_) | Err(_)) | Err(_) => bail!(
             "refusing direct fixture capture because the agent endpoint is active or accepted a \
              connection without completing a healthy handshake; this command uses the CLI's own \
              HID permission and identity, so stop the OpenLogi agent before retrying"

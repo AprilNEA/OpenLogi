@@ -16,9 +16,8 @@ use std::{
 
 use openlogi_core::action_ring::DISPLAY_LIFETIME;
 use openlogi_core::binding::ActionRingSlot;
-use openlogi_ipc::{
-    ActionRingInvocation, AgentClient, ClientKind, Generation, OBSERVE_HOLD, PROTOCOL_VERSION,
-};
+use openlogi_ipc::client::{self, ConnectError, Ledger};
+use openlogi_ipc::{ActionRingInvocation, AgentClient, ClientKind, Generation, RingObservation};
 use succession::Standing;
 use tarpc::context;
 use tokio::sync::mpsc;
@@ -59,24 +58,15 @@ pub(crate) struct Ipc {
 pub(crate) fn spawn_ipc() -> Ipc {
     let (invocation_tx, invocations) = mpsc::unbounded_channel();
     let (commands, mut command_rx) = mpsc::unbounded_channel();
-    std::thread::spawn(move || {
-        let runtime = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(runtime) => runtime,
-            Err(error) => {
-                warn!(%error, "overlay IPC runtime initialization failed");
-                return;
-            }
-        };
-        runtime.block_on(async move {
-            tokio::join!(
-                poll_invocations(invocation_tx),
-                send_commands(&mut command_rx)
-            );
-        });
+    let started = client::spawn_client_thread("openlogi-overlay-ipc", move || async move {
+        tokio::join!(
+            poll_invocations(invocation_tx),
+            send_commands(&mut command_rx)
+        );
     });
+    if let Err(error) = started {
+        warn!(%error, "overlay IPC client thread could not start");
+    }
     Ipc {
         invocations,
         commands,
@@ -84,24 +74,17 @@ pub(crate) fn spawn_ipc() -> Ipc {
 }
 
 async fn connect() -> Option<AgentClient> {
-    let connection = openlogi_ipc::client::connect().await.ok()?;
-    // A mismatch in either direction is not transient — this binary is from a
-    // superseded install, and the agent will start the overlay that matches it
-    // as soon as this one releases the role.
-    if connection.version != PROTOCOL_VERSION {
-        stand_down(&format!(
-            "agent speaks protocol {} and this overlay speaks {PROTOCOL_VERSION}",
-            connection.version
-        ));
-    }
-    let client = connection.client;
-    // Declare before anything else: an overlay reconnecting on its own is an
-    // orphan of a previous run and must not wake a dormant agent — an armed
-    // agent spawns its own overlay.
-    client
-        .declare_client(context::current(), ClientKind::Overlay)
-        .await
-        .ok()?;
+    // Declaring as an overlay is part of the handshake: an overlay
+    // reconnecting on its own is an orphan of a previous run and must not wake
+    // a dormant agent — an armed agent spawns its own overlay.
+    let client = match client::connect_as(ClientKind::Overlay).await {
+        Ok(client) => client,
+        // A mismatch in either direction is not transient — this binary is
+        // from a superseded install, and the agent will start the overlay
+        // that matches it as soon as this one releases the role.
+        Err(ConnectError::Skew(skew)) => stand_down(&skew.to_string()),
+        Err(_) => return None,
+    };
     let identity = client.identity(context::current()).await.ok()?;
     if let Standing::Superseded(because) = allegiance().observe(identity) {
         stand_down(&because.to_string());
@@ -147,7 +130,7 @@ const RETRY_PERIOD: Duration = Duration::from_secs(1);
 /// previous phase by construction.
 enum InvocationPollState<C> {
     Reconnecting { unreachable_since: Option<Instant> },
-    Observing { client: C, seen: Generation },
+    Observing { client: C, ledger: Ledger },
 }
 
 impl<C> Default for InvocationPollState<C> {
@@ -160,7 +143,10 @@ impl<C> Default for InvocationPollState<C> {
 
 impl<C> InvocationPollState<C> {
     fn connected(&mut self, client: C) {
-        *self = Self::Observing { client, seen: 0 };
+        *self = Self::Observing {
+            client,
+            ledger: Ledger::new(),
+        };
     }
 
     fn connection_failed(&mut self, now: Instant) -> bool {
@@ -173,14 +159,17 @@ impl<C> InvocationPollState<C> {
 
     fn observation(&self) -> Option<(&C, Generation)> {
         match self {
-            Self::Observing { client, seen } => Some((client, *seen)),
+            Self::Observing { client, ledger } => Some((client, ledger.seen())),
             Self::Reconnecting { .. } => None,
         }
     }
 
-    fn observed(&mut self, generation: Generation) {
-        if let Self::Observing { seen, .. } = self {
-            *seen = generation;
+    /// Fold an answer into this connection's ledger: `Some` only when it is
+    /// newer than everything seen on it.
+    fn observed(&mut self, observed: RingObservation) -> Option<RingObservation> {
+        match self {
+            Self::Observing { ledger, .. } => ledger.accept(observed),
+            Self::Reconnecting { .. } => None,
         }
     }
 
@@ -212,15 +201,16 @@ async fn poll_invocations(tx: mpsc::UnboundedSender<Option<ActionRingInvocation>
         let Some((active, seen)) = state.observation() else {
             continue;
         };
-        let mut ctx = context::current();
-        // Above the agent's hold, or tarpc would cancel the handler mid-wait.
-        ctx.deadline = std::time::Instant::now() + OBSERVE_HOLD + Duration::from_secs(5);
-        match active.observe_action_ring(ctx, seen).await {
+        match active
+            .observe_action_ring(client::observe_context(), seen)
+            .await
+        {
             Ok(observed) => {
-                if observed.generation == seen {
-                    continue; // the hold elapsed: still alive, still nothing new
-                }
-                state.observed(observed.generation);
+                // The hold elapsing with nothing new, or a stale reply: still
+                // alive, nothing to show.
+                let Some(observed) = state.observed(observed) else {
+                    continue;
+                };
                 if tx.send(observed.invocation).is_err() {
                     return;
                 }
