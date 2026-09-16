@@ -161,7 +161,7 @@ impl AppCatalogPicker {
                     .background_executor()
                     .spawn({
                         let app = app.clone();
-                        async move { crate::platform::app_icon::application_icon(&app) }
+                        async move { application_icon(&app) }
                     })
                     .await;
                 picker
@@ -276,6 +276,46 @@ fn preferred_identity_kind(runtime: Option<IdentityKind>) -> IdentityKind {
             IdentityKind::LinuxWaylandAppId
         }
     }
+}
+
+/// The installed application's Finder icon for a profile identifier.
+///
+/// Only macOS has an icon backend: its identifiers are bundle identifiers,
+/// which Launch Services renders to a small RGBA rendition. Blocking — run it
+/// on the background executor.
+fn application_icon(identifier: &str) -> Option<Arc<RenderImage>> {
+    #[cfg(target_os = "macos")]
+    {
+        /// Above the 18 pt display size at 2×, far below the 1024 px source.
+        const ICON_EDGE: u32 = 64;
+
+        let identity = ApplicationIdentity::new(IdentityKind::MacBundleIdentifier, identifier);
+        let icon = match appcatalog::application_icon(&identity, ICON_EDGE) {
+            Ok(icon) => icon?,
+            Err(error) => {
+                tracing::warn!(%identifier, %error, "could not render the application icon");
+                return None;
+            }
+        };
+        image_from_rgba(icon.width(), icon.height(), icon.into_rgba())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = identifier;
+        None
+    }
+}
+
+/// Wrap straight-alpha RGBA pixels as a gpui texture. [`RenderImage`] frames
+/// hold BGRA, so red and blue swap in place first.
+#[cfg(target_os = "macos")]
+fn image_from_rgba(width: u32, height: u32, mut rgba: Vec<u8>) -> Option<Arc<RenderImage>> {
+    let (pixels, _) = rgba.as_chunks_mut::<4>();
+    for pixel in pixels {
+        pixel.swap(0, 2);
+    }
+    let buffer = image::RgbaImage::from_raw(width, height, rgba)?;
+    Some(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])))
 }
 
 #[cfg(test)]
