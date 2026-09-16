@@ -4,7 +4,7 @@ use super::*;
 fn the_first_failed_attempt_only_arms_the_give_up_clock() {
     let mut state = InvocationPollState::<()>::default();
     let now = Instant::now();
-    assert!(!state.connection_failed(now));
+    assert!(!state.connect_failed(now));
     assert!(matches!(
         state,
         InvocationPollState::Reconnecting {
@@ -17,9 +17,9 @@ fn the_first_failed_attempt_only_arms_the_give_up_clock() {
 fn an_agent_that_stays_away_past_the_deadline_ends_the_overlay() {
     let start = Instant::now();
     let mut state = InvocationPollState::<()>::default();
-    assert!(!state.connection_failed(start));
-    assert!(!state.connection_failed(start + GIVE_UP_AFTER / 2));
-    assert!(state.connection_failed(start + GIVE_UP_AFTER));
+    assert!(!state.connect_failed(start));
+    assert!(!state.connect_failed(start + GIVE_UP_AFTER / 2));
+    assert!(state.connect_failed(start + GIVE_UP_AFTER));
 }
 
 #[test]
@@ -33,7 +33,7 @@ fn an_agent_that_keeps_coming_back_never_accumulates_its_way_to_an_exit() {
     for round in 1..=5 {
         let gone = start + (GIVE_UP_AFTER / 2) * round;
         assert!(
-            !state.connection_failed(gone),
+            !state.connect_failed(gone),
             "a reachable agent must not inherit the previous outage's clock"
         );
         state.connected(());
@@ -51,7 +51,7 @@ fn a_replacement_agent_starts_with_its_own_generation_cursor() {
     state.connected(());
     assert!(
         state
-            .observed(RingObservation {
+            .answered(RingObservation {
                 generation: 17,
                 invocation: None,
             })

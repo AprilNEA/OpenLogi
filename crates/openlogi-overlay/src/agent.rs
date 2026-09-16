@@ -149,7 +149,7 @@ impl<C> InvocationPollState<C> {
         };
     }
 
-    fn connection_failed(&mut self, now: Instant) -> bool {
+    fn connect_failed(&mut self, now: Instant) -> bool {
         let Self::Reconnecting { unreachable_since } = self else {
             return false;
         };
@@ -166,7 +166,7 @@ impl<C> InvocationPollState<C> {
 
     /// Fold an answer into this connection's ledger: `Some` only when it is
     /// newer than everything seen on it.
-    fn observed(&mut self, observed: RingObservation) -> Option<RingObservation> {
+    fn answered(&mut self, observed: RingObservation) -> Option<RingObservation> {
         match self {
             Self::Observing { ledger, .. } => ledger.accept(observed),
             Self::Reconnecting { .. } => None,
@@ -191,7 +191,7 @@ async fn poll_invocations(tx: mpsc::UnboundedSender<Option<ActionRingInvocation>
                 // starts there independently.
                 state.connected(client);
             } else {
-                if state.connection_failed(Instant::now()) {
+                if state.connect_failed(Instant::now()) {
                     stand_down(&format!("no agent has answered for {GIVE_UP_AFTER:?}"));
                 }
                 tokio::time::sleep(RETRY_PERIOD).await;
@@ -208,7 +208,7 @@ async fn poll_invocations(tx: mpsc::UnboundedSender<Option<ActionRingInvocation>
             Ok(observed) => {
                 // The hold elapsing with nothing new, or a stale reply: still
                 // alive, nothing to show.
-                let Some(observed) = state.observed(observed) else {
+                let Some(observed) = state.answered(observed) else {
                     continue;
                 };
                 if tx.send(observed.invocation).is_err() {
