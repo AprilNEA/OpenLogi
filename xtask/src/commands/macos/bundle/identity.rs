@@ -69,7 +69,7 @@ impl Component {
     /// Where this component lives inside the app bundle; `None` is the app
     /// itself. The spellings are [`brand::Helper`]'s: the GUI and the agent
     /// look the helpers up by the same names at runtime.
-    pub(crate) fn nested_bundle(self, channel: Channel) -> Option<String> {
+    pub(crate) fn nested_bundle_dir(self, channel: Channel) -> Option<String> {
         let helper = self.helper()?;
         Some(match channel {
             Channel::Production => helper.bundle_dir(),
@@ -79,7 +79,7 @@ impl Component {
 
     /// This component's bundle root inside `app`.
     pub(crate) fn root(self, app: &Path, channel: Channel) -> PathBuf {
-        self.nested_bundle(channel)
+        self.nested_bundle_dir(channel)
             .map_or_else(|| app.to_path_buf(), |nested| app.join(nested))
     }
 

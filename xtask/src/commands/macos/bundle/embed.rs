@@ -13,7 +13,7 @@ use crate::support::fs::ensure_file;
 use crate::support::info_plist::stamp_bundle_version;
 
 /// A nested login-item helper embedded under `Contents/Library/LoginItems`.
-pub(crate) struct Helper {
+pub(crate) struct EmbeddedHelper {
     /// Identity component, which also locates the helper inside the app bundle.
     pub(crate) component: Component,
     /// Cargo package that builds it.
@@ -29,15 +29,15 @@ pub(crate) struct Helper {
 }
 
 /// Every helper the app bundle ships.
-pub(crate) const HELPERS: [Helper; 2] = [
-    Helper {
+pub(crate) const HELPERS: [EmbeddedHelper; 2] = [
+    EmbeddedHelper {
         component: Component::Agent,
         package: "openlogi-agent",
         binary: brand::Helper::Agent.executable(),
         info_plist: "crates/openlogi-desktop/bundle/agent-release/Info.plist",
         label: "agent helper",
     },
-    Helper {
+    EmbeddedHelper {
         component: Component::Overlay,
         package: "openlogi-overlay",
         binary: brand::Helper::Overlay.executable(),
@@ -99,11 +99,11 @@ fn embed_helper(
     root: &Path,
     release_dir: &Path,
     app: &Path,
-    helper: &Helper,
+    helper: &EmbeddedHelper,
     icon: &Path,
     channel: Channel,
 ) -> Result<()> {
-    let Helper { binary, label, .. } = *helper;
+    let EmbeddedHelper { binary, label, .. } = *helper;
     println!("==> {label} (embed)");
     let built = release_dir.join(binary);
     ensure_file(&built)?;
@@ -168,7 +168,7 @@ pub(crate) fn agent_service_label(channel: Channel) -> String {
 /// `platform::registration` doc has the model).
 fn agent_launch_plist(channel: Channel) -> Result<plist::Dictionary> {
     let nested = Component::Agent
-        .nested_bundle(channel)
+        .nested_bundle_dir(channel)
         .ok_or_else(|| anyhow!("the agent component is always a nested bundle"))?;
 
     let mut keep_alive = plist::Dictionary::new();

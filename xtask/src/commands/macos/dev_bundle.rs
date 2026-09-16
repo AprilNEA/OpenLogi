@@ -26,7 +26,7 @@ use strum::VariantArray as _;
 use xshell::{Shell, cmd};
 
 use super::bundle::identity::{self, Channel, Component};
-use super::bundle::{HELPERS, Helper, write_agent_launch_plist};
+use super::bundle::{EmbeddedHelper, HELPERS, write_agent_launch_plist};
 use crate::icon::IconPipeline as _;
 use crate::icon::macos::AppBundle;
 use crate::support::fs::{ensure_file, repo_root};
@@ -167,11 +167,11 @@ fn embed_helper(
     root: &Path,
     app: &Path,
     profile: &BuildProfile,
-    helper: &Helper,
+    helper: &EmbeddedHelper,
     icon: &Path,
     signing: &signing::Signing,
 ) -> Result<()> {
-    let Helper {
+    let EmbeddedHelper {
         component,
         package,
         binary,
@@ -237,7 +237,7 @@ fn remove_bundle(path: &Path) -> Result<()> {
 fn sign_order(app: &Path, components: &[Component]) -> Vec<PathBuf> {
     let mut targets: Vec<PathBuf> = components
         .iter()
-        .filter(|component| component.nested_bundle(CHANNEL).is_some())
+        .filter(|component| component.nested_bundle_dir(CHANNEL).is_some())
         .map(|component| component.root(app, CHANNEL))
         .collect();
     targets.push(app.to_path_buf());

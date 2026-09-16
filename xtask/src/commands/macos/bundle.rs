@@ -21,7 +21,7 @@ use identity::{Channel, Component};
 
 // The rest of the macOS domain reaches these through `bundle::`, which is the
 // module that owns them conceptually even now that the code sits deeper.
-pub(super) use embed::{HELPERS, Helper, agent_service_label, write_agent_launch_plist};
+pub(super) use embed::{EmbeddedHelper, HELPERS, agent_service_label, write_agent_launch_plist};
 pub(super) use signing::quoted_identity;
 
 #[derive(Clone, Copy, ValueEnum)]
