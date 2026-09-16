@@ -72,10 +72,12 @@ objc2-service-management = { workspace = true, features = ["std", "SMAppService"
 workspace = true
 
 [dev-dependencies]
+futures-lite = { workspace = true }
 gpui = { workspace = true, features = ["test-support"] }
 openlogi-device = { path = "../openlogi-device" }
 openlogi-fixture = { workspace = true }
 tempfile = "3.27.0"
+tokio = { workspace = true, features = ["test-util"] }
 
 [package.metadata.bundle]
 name = "OpenLogi"

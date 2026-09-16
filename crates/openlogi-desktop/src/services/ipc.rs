@@ -22,6 +22,16 @@
 //! [`GuiUpdate::Unreachable`] so the window can say so instead of waiting
 //! forever. A dead agent is noticed the moment the socket closes; a *hung* one
 //! is noticed when its hold window passes without an answer.
+//!
+//! Device commands are transient: one that finds no connection is answered
+//! locally (`reply_disconnected`) and the next snapshot repairs the panel. A
+//! config reload is not — `config.toml` has already changed on disk and the
+//! agent must re-read it — but neither is it urgent while no agent is running:
+//! an agent that starts reads the file anyway. So `ReloadConfig` is held as
+//! state rather than dispatched: the loop delivers it over the next live
+//! connection and reports the agent's verdict then. That is what keeps an app
+//! relaunch that outruns its agent (every self-update does) from latching a
+//! "not applied" notice the agent's arrival could never clear.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -31,6 +41,7 @@ use openlogi_core::config::Lighting;
 use openlogi_core::hid::{
     DeviceRoute, Dpi, DpiInfo, LightCommand, ReceiverSelector, SmartShiftStatus, WriteError,
 };
+use openlogi_ipc::client::{ConnectError, Connection};
 use openlogi_ipc::{
     AgentClient, AgentSnapshot, ClientKind, ConfigReloadError, Generation, OBSERVE_HOLD,
     Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure,
@@ -113,6 +124,8 @@ pub enum Command {
         DeviceRoute,
         oneshot::Sender<Result<SmartShiftStatus, WriteError>>,
     ),
+    /// Have the agent re-read `config.toml`. Held by the loop until a
+    /// connection exists (module doc), never answered locally.
     ReloadConfig,
     /// Ask the agent to fire the macOS Accessibility prompt. The agent owns the
     /// CGEventTap, so the system dialog must name (and authorize) the *agent*
@@ -165,7 +178,7 @@ pub fn spawn() -> IpcClient {
                 }
             };
             rt.block_on(async move {
-                observe_loop(&update_tx, &mut cmd_rx).await;
+                observe_loop(&mut Socket, &update_tx, &mut cmd_rx).await;
             });
         });
     if let Err(e) = spawn_result {
@@ -173,6 +186,28 @@ pub fn spawn() -> IpcClient {
     }
 
     IpcClient { updates, commands }
+}
+
+/// Where the agent is reached and how it is brought up — the loop's only two
+/// effects on the world, behind one seam so the tests can script them.
+trait Wire {
+    /// Connect to the agent and complete the protocol handshake.
+    async fn connect(&mut self) -> Result<Connection, ConnectError>;
+    /// Start the agent when the socket stays down; see `launch::spawn_agent`.
+    fn spawn_agent(&mut self);
+}
+
+/// The agent's local socket and its supervised launch paths.
+struct Socket;
+
+impl Wire for Socket {
+    async fn connect(&mut self) -> Result<Connection, ConnectError> {
+        openlogi_ipc::client::connect().await
+    }
+
+    fn spawn_agent(&mut self) {
+        spawn_agent();
+    }
 }
 
 /// The state/command loop.
@@ -183,6 +218,7 @@ pub fn spawn() -> IpcClient {
 /// share the connection — tarpc multiplexes requests, and the in-flight poll is
 /// held across command handling so a device write never cancels it.
 async fn observe_loop(
+    wire: &mut impl Wire,
     update_tx: &mpsc::UnboundedSender<GuiUpdate>,
     cmd_rx: &mut mpsc::UnboundedReceiver<Command>,
 ) {
@@ -193,6 +229,10 @@ async fn observe_loop(
     // The agent is normally started by launchd, but the GUI brings it up when
     // the socket is down (see `launch::spawn_agent`), gated by the reflex.
     let mut reflex = SpawnReflex::new(Instant::now());
+    // A `ReloadConfig` the agent has not answered yet — requested with no
+    // connection, or lost with one. Idempotent (the agent re-reads the file),
+    // so it is simply delivered again over the next live connection.
+    let mut reload_pending = false;
     let mut notified_unreachable = false;
     let mut notified_outdated = false;
     let mut inflight: Option<ObserveFuture> = None;
@@ -241,17 +281,27 @@ async fn observe_loop(
                 }
             },
             Woken::Command(None) => break, // GUI dropped the sender → shut down
+            // Not dispatched like the device commands below: held, and
+            // delivered at the end of this turn if a connection exists.
+            Woken::Command(Some(Command::ReloadConfig)) => {
+                inflight = pending;
+                reload_pending = true;
+            }
             Woken::Command(Some(cmd)) => {
                 inflight = pending;
-                if handle(&mut link, &mut conn_seq, update_tx, cmd)
-                    .await
-                    .is_err()
-                {
-                    link = None;
-                    reflex.lost(Instant::now());
+                match ensure(wire, &mut link, &mut conn_seq).await {
+                    Ok(conn) => {
+                        if handle(conn, update_tx, cmd).await.is_err() {
+                            link = None;
+                            reflex.lost(Instant::now());
+                        }
+                    }
+                    // A failed connect is not a dropped live connection:
+                    // `link` stays `None` and the reflex keeps its clock.
+                    Err(_) => reply_disconnected(update_tx, cmd),
                 }
             }
-            Woken::Reconnect => match ensure(&mut link, &mut conn_seq).await {
+            Woken::Reconnect => match ensure(wire, &mut link, &mut conn_seq).await {
                 Ok(conn) => {
                     reflex.connected();
                     inflight = Some(observe(conn));
@@ -266,6 +316,17 @@ async fn observe_loop(
                 }
             },
         }
+        // Whatever this turn did to the link, a held reload goes out the
+        // moment there is one to carry it. A transport failure here is the
+        // same as anywhere: drop the link, keep the reload for the next one.
+        if reload_pending && let Some(conn) = link.as_ref() {
+            if handle(conn, update_tx, Command::ReloadConfig).await.is_ok() {
+                reload_pending = false;
+            } else {
+                link = None;
+                reflex.lost(Instant::now());
+            }
+        }
         let now = Instant::now();
         if let Some(down_at) = reflex.down_since() {
             if !notified_unreachable && now.saturating_duration_since(down_at) >= UNREACHABLE_AFTER
@@ -274,7 +335,7 @@ async fn observe_loop(
                 let _ = update_tx.send(GuiUpdate::Unreachable);
             }
             if reflex.should_fire(now) {
-                spawn_agent();
+                wire.spawn_agent();
                 reflex.fired(now);
             }
         }
@@ -462,6 +523,7 @@ enum ConnectFailure {
 
 /// Ensure a live connection, connecting — and stamping a fresh id — on demand.
 async fn ensure<'a>(
+    wire: &mut impl Wire,
     link: &'a mut Option<LiveConnection>,
     conn_seq: &mut u64,
 ) -> Result<&'a LiveConnection, ConnectFailure> {
@@ -470,7 +532,7 @@ async fn ensure<'a>(
         // would otherwise surface only as opaque RpcErrors and a silently empty
         // device list. Refuse with a clear log instead, and report the
         // direction — who is stale decides who must restart.
-        let connection = openlogi_ipc::client::connect().await.map_err(|error| {
+        let connection = wire.connect().await.map_err(|error| {
             debug!(%error, "no usable agent");
             ConnectFailure::Unreachable
         })?;
@@ -517,19 +579,14 @@ async fn ensure<'a>(
     link.as_ref().ok_or(ConnectFailure::Unreachable)
 }
 
-/// Run one device command. `Err` signals a dropped connection so the caller
-/// reconnects; the command's own failure is reported back over its oneshot.
+/// Run one command over a live connection. `Err` signals a dropped connection
+/// so the caller reconnects; the command's own failure is reported back over
+/// its oneshot.
 async fn handle(
-    link: &mut Option<LiveConnection>,
-    conn_seq: &mut u64,
+    conn: &LiveConnection,
     update_tx: &mpsc::UnboundedSender<GuiUpdate>,
     cmd: Command,
 ) -> Result<(), ()> {
-    // keep `link` None on connect failure; that's not a dropped live connection
-    let Ok(conn) = ensure(link, conn_seq).await else {
-        reply_disconnected(update_tx, cmd);
-        return Ok(());
-    };
     let client = &conn.client;
     let ctx = context::current();
     match cmd {
@@ -565,24 +622,12 @@ async fn handle(
             let _ = reply.send(rpc_result(client.read_smartshift(ctx, route).await)?);
         }
         Command::ReloadConfig => {
-            // A transport failure is not the agent rejecting the config, but it
-            // is still a reload that did not happen — and the file on disk has
-            // already changed. Staying silent here would leave the window
-            // showing the new settings while the agent keeps running the old
-            // ones, which is exactly the divergence this fails closed on.
-            match client.reload_config(ctx).await {
-                Ok(result) => {
-                    let _ = update_tx.send(GuiUpdate::ConfigReloadResult(result));
-                }
-                Err(error) => {
-                    let _ = update_tx.send(GuiUpdate::ConfigReloadResult(Err(ConfigReloadError {
-                        message: format!(
-                            "saved, but the agent could not be reached to apply it: {error}"
-                        ),
-                    })));
-                    return Err(());
-                }
-            }
+            // Only the agent's own verdict is reported. A transport failure is
+            // a reload that did not happen, not one the agent refused: it
+            // propagates as a dropped link, and the loop — which holds the
+            // reload until it is answered — delivers it again over the next.
+            let result = rpc_result(client.reload_config(ctx).await)?;
+            let _ = update_tx.send(GuiUpdate::ConfigReloadResult(result));
         }
         Command::RequestAccessibilityPrompt => client
             .request_accessibility_prompt(ctx)
@@ -704,22 +749,22 @@ fn reply_disconnected(update_tx: &mpsc::UnboundedSender<GuiUpdate>, cmd: Command
             ));
         }
         Command::CancelPairing => {}
-        // Unlike the device commands above, a missed reload is not something a
-        // later poll repairs on its own: the config file has already changed,
-        // so the agent stays on the old one until another reload succeeds. Say
-        // so rather than let the window imply the change took effect.
-        Command::ReloadConfig => {
-            let _ = update_tx.send(GuiUpdate::ConfigReloadResult(Err(ConfigReloadError {
-                message: "saved, but the agent is not running, so it has not been applied yet"
-                    .to_string(),
-            })));
-        }
+        // Never dispatched here: `observe_loop` holds a reload instead and
+        // delivers it over the next live connection.
+        Command::ReloadConfig => {}
         _ => {}
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+
+    use futures_lite::StreamExt as _;
+    use openlogi_ipc::{AgentRequest, AgentResponse};
+    use tarpc::server::Channel as _;
+
     use super::*;
 
     fn observation(generation: Generation, camera_active: bool) -> Observation {
@@ -807,18 +852,190 @@ mod tests {
         assert!(reflex.should_fire(t0 + SPAWN_RETRY_PERIOD));
     }
 
-    #[test]
-    fn a_reload_that_never_reached_the_agent_is_reported() {
-        // The config file is already written by the time the reload is
-        // dispatched, so dropping this result silently would leave the window
-        // showing settings the agent is not running.
-        let (update_tx, mut update_rx) = mpsc::unbounded_channel();
+    /// What a scripted agent saw, in order.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Seen {
+        Declared(ClientKind),
+        Reloaded,
+    }
 
-        reply_disconnected(&update_tx, Command::ReloadConfig);
+    /// How a scripted agent answers a reload.
+    #[derive(Clone, Copy)]
+    enum OnReload {
+        /// Adopt the config.
+        Accept,
+        /// Close the connection without answering, as a dying agent does.
+        Vanish,
+    }
 
-        let Ok(GuiUpdate::ConfigReloadResult(Err(error))) = update_rx.try_recv() else {
-            panic!("a reload that never reached the agent must be reported as failed");
+    /// An in-memory agent over a tarpc channel: answers the declare handshake
+    /// and reloads as told, holds `observe` open forever (a quiet agent), and
+    /// records what it saw. Anything else is out of these tests' scope.
+    fn scripted_agent(on_reload: OnReload) -> (Connection, Arc<Mutex<Vec<Seen>>>) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let vanish = Arc::new(tokio::sync::Notify::new());
+        let (client_transport, server_transport) = tarpc::transport::channel::unbounded();
+        let serve = {
+            let seen = seen.clone();
+            let vanish = vanish.clone();
+            tarpc::server::serve(move |_: context::Context, request: AgentRequest| {
+                let seen = seen.clone();
+                let vanish = vanish.clone();
+                async move {
+                    match request {
+                        AgentRequest::DeclareClient { kind } => {
+                            seen.lock().unwrap().push(Seen::Declared(kind));
+                            Ok(AgentResponse::DeclareClient(()))
+                        }
+                        AgentRequest::ReloadConfig {} => {
+                            seen.lock().unwrap().push(Seen::Reloaded);
+                            match on_reload {
+                                OnReload::Accept => Ok(AgentResponse::ReloadConfig(Ok(()))),
+                                OnReload::Vanish => {
+                                    vanish.notify_one();
+                                    std::future::pending().await
+                                }
+                            }
+                        }
+                        AgentRequest::Observe { .. } => std::future::pending().await,
+                        other => panic!("the client loop sent an unexpected request: {other:?}"),
+                    }
+                }
+            })
         };
-        assert!(!error.message.is_empty(), "the notice needs a reason");
+        tokio::spawn(async move {
+            let channel = tarpc::server::BaseChannel::with_defaults(server_transport);
+            let mut responses = std::pin::pin!(channel.execute(serve));
+            loop {
+                tokio::select! {
+                    () = vanish.notified() => break,
+                    next = responses.next() => match next {
+                        Some(response) => {
+                            tokio::spawn(response);
+                        }
+                        None => break,
+                    },
+                }
+            }
+        });
+        let client = AgentClient::new(tarpc::client::Config::default(), client_transport).spawn();
+        let connection = Connection {
+            client,
+            version: PROTOCOL_VERSION,
+        };
+        (connection, seen)
+    }
+
+    /// A scripted agent socket: connect attempts pop the script front to back
+    /// and find the socket down once it runs out; launches are only counted.
+    struct ScriptedWire {
+        attempts: VecDeque<Result<Connection, ConnectError>>,
+        launches: usize,
+    }
+
+    impl Wire for ScriptedWire {
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "the trait is async for the real socket; the script answers from memory"
+        )]
+        async fn connect(&mut self) -> Result<Connection, ConnectError> {
+            self.attempts.pop_front().unwrap_or_else(down)
+        }
+
+        fn spawn_agent(&mut self) {
+            self.launches += 1;
+        }
+    }
+
+    fn down() -> Result<Connection, ConnectError> {
+        Err(std::io::Error::from(std::io::ErrorKind::ConnectionRefused).into())
+    }
+
+    /// The first reload verdict the loop reports; the other updates do not
+    /// matter to these tests.
+    async fn reload_verdict(
+        updates: &mut mpsc::UnboundedReceiver<GuiUpdate>,
+    ) -> Result<(), ConfigReloadError> {
+        loop {
+            match updates.recv().await {
+                Some(GuiUpdate::ConfigReloadResult(verdict)) => return verdict,
+                Some(_) => {}
+                None => panic!("the loop dropped its update channel"),
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_reload_requested_before_the_agent_is_up_waits_for_it() {
+        // The relaunch after a self-update outruns its agent by a second or
+        // two, and the state constructor asks for a reload right away. That
+        // reload has to wait for the agent — not be reported as a failure
+        // that the agent's arrival could never clear.
+        let (agent, agent_saw) = scripted_agent(OnReload::Accept);
+        let mut wire = ScriptedWire {
+            attempts: VecDeque::from([down(), down(), Ok(agent)]),
+            launches: 0,
+        };
+        let (update_tx, mut updates) = mpsc::unbounded_channel();
+        let (commands, mut cmd_rx) = mpsc::unbounded_channel();
+        commands.send(Command::ReloadConfig).unwrap();
+
+        let verdict = tokio::select! {
+            () = observe_loop(&mut wire, &update_tx, &mut cmd_rx) => {
+                panic!("the loop ends only once the GUI hangs up")
+            }
+            verdict = reload_verdict(&mut updates) => verdict,
+        };
+
+        assert_eq!(
+            verdict,
+            Ok(()),
+            "the agent's own verdict is what reaches the GUI"
+        );
+        assert_eq!(
+            *agent_saw.lock().unwrap(),
+            [Seen::Declared(ClientKind::Gui), Seen::Reloaded],
+            "delivered once, and only after the declare handshake"
+        );
+        assert_eq!(
+            wire.launches, 1,
+            "holding the reload does not stall the spawn reflex"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_reload_the_agent_took_down_with_it_reaches_its_successor() {
+        // An agent that dies mid-reload has applied nothing. The reload stays
+        // owed and reaches the replacement, which answers for itself.
+        let (dying, dying_saw) = scripted_agent(OnReload::Vanish);
+        let (successor, successor_saw) = scripted_agent(OnReload::Accept);
+        let mut wire = ScriptedWire {
+            attempts: VecDeque::from([Ok(dying), Ok(successor)]),
+            launches: 0,
+        };
+        let (update_tx, mut updates) = mpsc::unbounded_channel();
+        let (commands, mut cmd_rx) = mpsc::unbounded_channel();
+        commands.send(Command::ReloadConfig).unwrap();
+
+        let verdict = tokio::select! {
+            () = observe_loop(&mut wire, &update_tx, &mut cmd_rx) => {
+                panic!("the loop ends only once the GUI hangs up")
+            }
+            verdict = reload_verdict(&mut updates) => verdict,
+        };
+
+        assert_eq!(
+            verdict,
+            Ok(()),
+            "the lost attempt is never reported as a verdict"
+        );
+        assert_eq!(
+            *dying_saw.lock().unwrap(),
+            [Seen::Declared(ClientKind::Gui), Seen::Reloaded]
+        );
+        assert_eq!(
+            *successor_saw.lock().unwrap(),
+            [Seen::Declared(ClientKind::Gui), Seen::Reloaded]
+        );
     }
 }

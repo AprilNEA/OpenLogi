@@ -5684,6 +5684,7 @@ dependencies = [
  "derive_more",
  "disclaim",
  "embed-resource",
+ "futures-lite",
  "gpui-base",
  "gpui-component",
  "gpui-kit-assets",
