@@ -1,11 +1,14 @@
-//! Brand constants shared across the workspace: the project's public URLs and
-//! the `openlogi://` deep-link command vocabulary.
+//! Brand constants shared across the workspace: the project's public URLs,
+//! the `openlogi://` deep-link command vocabulary, the three processes' bundle
+//! identifiers, and the app bundle's layout — where the helpers live and what
+//! they are called on disk.
 //!
-//! Both live here, in the platform-free core crate, so the agent (which *emits*
-//! tray deep links and renders help links) and the GUI (which *parses* the deep
-//! links and renders the same help links) share a single source of truth — the
-//! command names can't drift across the process boundary, and a repo move
-//! touches one file instead of three.
+//! All of it lives here, in the platform-free core crate, so the agent (which
+//! *emits* tray deep links and finds the overlay), the GUI (which *parses* the
+//! deep links and finds the agent), and the packaging tooling share a single
+//! source of truth: the command names can't drift across the process boundary,
+//! a helper is looked up at runtime by the name packaging gave it, and a rename
+//! touches one file.
 
 use std::path::Path;
 
