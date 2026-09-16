@@ -209,6 +209,13 @@ fn held_keys(combo: &KeyCombo) -> Vec<HeldKey> {
 pub fn execute(action: &Action) {
     if let Action::OpenApplication(target) = action {
         let expanded = shellexpand::tilde(target.path());
+        // On Linux an executable path or a bare command name has to be
+        // spawned; `xdg-open` would only try to *open* it. Everything the
+        // desktop can genuinely open falls through to the opener below.
+        #[cfg(target_os = "linux")]
+        if linux::launch_program(expanded.as_ref()) {
+            return;
+        }
         if let Err(error) = opener::open(expanded.as_ref()) {
             tracing::warn!(
                 %error,
