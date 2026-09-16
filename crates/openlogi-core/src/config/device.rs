@@ -61,7 +61,20 @@ pub struct DeviceIdentity {
 }
 
 impl DeviceIdentity {
-    /// Remove per-unit identifiers before this model snapshot is persisted.
+    /// Drop the serial number and unit id from this model snapshot before it
+    /// is persisted, leaving the identity body with model-level fields only.
+    ///
+    /// This does **not** make the saved file free of per-unit identifiers.
+    /// Settings are keyed by what a device *is*, so [`canonical_device_key`]
+    /// makes the entry key itself a `serial:` or `unit:` fragment whenever the
+    /// device reported one, whatever transport it was reached by. Only a
+    /// device with no usable identity falls back to a route-derived key such
+    /// as `receiver:{uid}:slot:{n}`. The entry's `links` table, keyed by
+    /// [`route_key`], also persists receiver UIDs and, for `raw:` and
+    /// `unknown:` routes, an OS-node- or serial-derived identity.
+    ///
+    /// [`canonical_device_key`]: crate::config::canonical_device_key
+    /// [`route_key`]: crate::device_order::DeviceStableId::route_key
     #[must_use]
     pub fn without_unit_identifiers(mut self) -> Self {
         if let Some(model) = &mut self.model_info {
