@@ -1424,17 +1424,29 @@ mod tests {
 
     #[test]
     fn stop_token_wakes_a_parked_async_observer() {
-        let (control, token) = stop_pair().expect("stop pipe must open");
-        let observer = thread::spawn(move || futures_lite::future::block_on(token.stopped()));
+        struct CountingWaker(std::sync::atomic::AtomicUsize);
+        impl std::task::Wake for CountingWaker {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
 
-        thread::sleep(Duration::from_millis(50));
-        assert!(
-            !observer.is_finished(),
-            "stopped() resolved before a stop request"
-        );
+        let (control, token) = stop_pair().expect("stop pipe must open");
+        let counter = Arc::new(CountingWaker(std::sync::atomic::AtomicUsize::new(0)));
+        let waker = Waker::from(Arc::clone(&counter));
+        let mut cx = Context::from_waker(&waker);
+        let mut stopped = std::pin::pin!(token.stopped());
+
+        assert!(stopped.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(counter.0.load(Ordering::SeqCst), 0);
 
         control.request();
-        observer.join().expect("observer thread must not panic");
+        assert_eq!(
+            counter.0.load(Ordering::SeqCst),
+            1,
+            "request must wake the parked observer"
+        );
+        assert!(stopped.as_mut().poll(&mut cx).is_ready());
     }
 
     #[test]
