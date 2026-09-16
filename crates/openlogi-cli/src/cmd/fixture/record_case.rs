@@ -8,7 +8,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, ValueEnum};
 use openlogi_core::device::DeviceInventory;
-use openlogi_core::single_instance::{self, InstanceGuard};
+use openlogi_core::single_instance::{self, InstanceGuard, Role};
 use openlogi_device::write::{
     self, FeatureEntry, FirmwareEntity, ReprogControlEntry, ScrollWheelMode, WriteError,
 };
@@ -305,7 +305,7 @@ fn validate_metadata(args: &RecordCaseArgs) -> Result<()> {
 async fn acquire_capture_ownership() -> Result<InstanceGuard> {
     // The agent acquires this same lock before any HID I/O. An endpoint probe
     // alone misses both early startup and a relaunch after the probe returns.
-    let guard = single_instance::acquire("agent.lock").context(
+    let guard = single_instance::acquire(Role::Agent).context(
         "refusing direct fixture capture: could not acquire agent.lock; \
          stop the OpenLogi agent and any other fixture capture before retrying",
     )?;
@@ -491,7 +491,7 @@ mod tests {
             Ok("contender") => {
                 // This is the same lock acquisition that precedes agent HID I/O.
                 assert!(matches!(
-                    single_instance::acquire("agent.lock"),
+                    single_instance::acquire(Role::Agent),
                     Err(InstanceError::AlreadyRunning { .. })
                 ));
                 return;
@@ -502,7 +502,10 @@ mod tests {
                 let output = child("exercise")
                     .env("XDG_CONFIG_HOME", home.path())
                     .env_remove("XDG_RUNTIME_DIR")
-                    .env("OPENLOGI_PROFILE", "prod")
+                    .env(
+                        openlogi_core::env::PROFILE,
+                        openlogi_core::paths::Profile::Production.env_value(),
+                    )
                     .output()
                     .unwrap();
                 assert!(
@@ -521,7 +524,7 @@ mod tests {
             .unwrap()
             .block_on(async {
                 {
-                    let _agent = single_instance::acquire("agent.lock").unwrap();
+                    let _agent = single_instance::acquire(Role::Agent).unwrap();
                     let error = prepare_contribution_target(None)
                         .await
                         .err()
@@ -544,7 +547,7 @@ mod tests {
                     );
                 }
                 // Successful capture scope releases ownership.
-                drop(single_instance::acquire("agent.lock").unwrap());
+                drop(single_instance::acquire(Role::Agent).unwrap());
 
                 // An endpoint accepting connections but not serving a handshake
                 // must still fail closed, even when no agent holds the lock.
@@ -553,17 +556,17 @@ mod tests {
                     .await
                     .err()
                     .expect("an unresponsive endpoint must refuse capture");
-                drop(single_instance::acquire("agent.lock").unwrap());
+                drop(single_instance::acquire(Role::Agent).unwrap());
 
                 // Cancelling a pending admission also releases the acquired lock.
                 let mut pending = Box::pin(acquire_capture_ownership());
                 assert!(futures::poll!(&mut pending).is_pending());
                 assert!(matches!(
-                    single_instance::acquire("agent.lock"),
+                    single_instance::acquire(Role::Agent),
                     Err(InstanceError::AlreadyRunning { .. })
                 ));
                 drop(pending);
-                drop(single_instance::acquire("agent.lock").unwrap());
+                drop(single_instance::acquire(Role::Agent).unwrap());
             });
     }
 

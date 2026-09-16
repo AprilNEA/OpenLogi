@@ -51,7 +51,7 @@ use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
     PairedDevice, StandaloneDevice,
 };
-use openlogi_core::single_instance::{self, InstanceError};
+use openlogi_core::single_instance::{self, InstanceError, Role};
 use openlogi_fixture::{DeviceProfile, FixtureError, ProfileDeviceSettings, ProfileSetting};
 use openlogi_hid::{
     BacklightState, DeviceRoute, Dpi, DpiInfo, LightCommand, PasskeyMethod, ReceiverSelector,
@@ -125,7 +125,8 @@ fn main() -> ExitCode {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
-            EnvFilter::try_from_env("OPENLOGI_LOG").unwrap_or_else(|_| EnvFilter::new("info")),
+            EnvFilter::try_from_env(openlogi_core::env::LOG)
+                .unwrap_or_else(|_| EnvFilter::new(openlogi_core::env::LOG_DEFAULT)),
         )
         .init();
 
@@ -141,7 +142,7 @@ fn main() -> ExitCode {
     // agent spawned meanwhile (GUI auto-spawn, launchd KeepAlive) exit as a
     // duplicate — its takeover handshake sees us answer the current
     // PROTOCOL_VERSION and stands down.
-    let _guard = match single_instance::acquire("agent.lock") {
+    let _guard = match single_instance::acquire(Role::Agent) {
         Ok(guard) => guard,
         Err(InstanceError::AlreadyRunning { path }) => {
             warn!(
@@ -218,7 +219,7 @@ fn load_fixture_profile(path: &Path) -> Result<DeviceProfile, String> {
 /// socket — the two would never meet, and the mock would sit on the installed
 /// app's paths instead.
 fn default_to_dev_profile() {
-    if std::env::var_os("OPENLOGI_PROFILE").is_some() {
+    if std::env::var_os(openlogi_core::env::PROFILE).is_some() {
         return;
     }
     #[expect(
@@ -229,7 +230,10 @@ fn default_to_dev_profile() {
     // the first statement of `main`: no runtime, no tracing subscriber, no
     // other thread exists yet, and nothing has read the environment.
     unsafe {
-        std::env::set_var("OPENLOGI_PROFILE", "dev");
+        std::env::set_var(
+            openlogi_core::env::PROFILE,
+            openlogi_core::paths::Profile::Dev.env_value(),
+        );
     }
 }
 
@@ -238,7 +242,7 @@ fn default_to_dev_profile() {
 async fn serve(server: MockAgent) -> std::io::Result<()> {
     let listener = transport::bind()?;
     info!(
-        profile = std::env::var("OPENLOGI_PROFILE").unwrap_or_default(),
+        profile = std::env::var(openlogi_core::env::PROFILE).unwrap_or_default(),
         "mock agent listening"
     );
     loop {

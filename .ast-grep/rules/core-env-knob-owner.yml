@@ -1,0 +1,18 @@
+# Owner: openlogi_core::env — the environment variables more than one process
+# reads.
+id: core-env-knob-owner
+language: rust
+severity: error
+message: Environment variables every process reads are named in openlogi_core::env (PROFILE, LOG, LOG_DEFAULT); use the constant instead of the literal here.
+note: |
+  Five binaries spelled the log filter variable and its default by hand. See
+  "Single source of truth" in AGENTS.md.
+files:
+  - crates/**/*.rs
+  - xtask/**/*.rs
+ignores:
+  - crates/openlogi-core/**
+rule:
+  any:
+    - pattern: '"OPENLOGI_PROFILE"'
+    - pattern: '"OPENLOGI_LOG"'

@@ -52,7 +52,9 @@ fn main() {
     // racing the GUI's one-shot auto-spawn could otherwise bring up two, and the
     // loser would steal the socket and install a duplicate event tap. Held for
     // the whole process; the OS releases it on exit (crash-recovery is free).
-    let _guard = match openlogi_core::single_instance::acquire("agent.lock") {
+    let _guard = match openlogi_core::single_instance::acquire(
+        openlogi_core::single_instance::Role::Agent,
+    ) {
         Ok(g) => g,
         Err(openlogi_core::single_instance::InstanceError::AlreadyRunning { path }) => {
             // The holder may be a leftover from before this binary's update —

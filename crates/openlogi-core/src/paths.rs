@@ -29,15 +29,59 @@ use etcetera::{BaseStrategy, base_strategy::Xdg};
 use thiserror::Error;
 
 /// Production subdirectory created under each XDG base directory.
-///
-/// Public because the dev tooling has to name the same directories from
-/// outside a running app — `xtask macos dev-bundle` remembers the developer's
-/// codesigning certificate under [`DEV_APP_DIR`], where `cargo clean` cannot
-/// reach it.
-pub const APP_DIR: &str = "openlogi";
+const APP_DIR: &str = "openlogi";
 /// Local macOS dev builds use a separate profile so development agents
 /// cannot take over the installed app's socket, lock, config, or asset cache.
-pub const DEV_APP_DIR: &str = "openlogi-dev";
+const DEV_APP_DIR: &str = "openlogi-dev";
+/// The user's configuration file, under [`config_dir`].
+pub const CONFIG_FILE: &str = "config.toml";
+
+/// Which of the two side-by-side installs a process belongs to.
+///
+/// Decides the per-profile directory under every XDG base, so a local dev
+/// build never touches the shipped app's socket, lock, config, or asset cache.
+/// Tooling that has to name a profile's files from outside a process of that
+/// profile — `xtask macos dev-bundle` waiting for the dev agent's socket, or
+/// remembering the developer's codesigning certificate — asks for that
+/// profile's paths by name instead of rebuilding them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Profile {
+    /// The shipped app.
+    Production,
+    /// A local packaged macOS build stamped with dev-channel identifiers.
+    Dev,
+}
+
+impl Profile {
+    /// The profile this process runs under: forced by [`crate::env::PROFILE`],
+    /// or detected from the bundle the executable lives in. Memoized — the
+    /// answer cannot change within a process lifetime.
+    #[must_use]
+    pub fn current() -> Self {
+        if is_dev_profile() {
+            Self::Dev
+        } else {
+            Self::Production
+        }
+    }
+
+    /// The value of [`crate::env::PROFILE`] that forces this profile.
+    #[must_use]
+    pub const fn env_value(self) -> &'static str {
+        match self {
+            Self::Production => "prod",
+            Self::Dev => "dev",
+        }
+    }
+
+    /// The per-profile directory name under each XDG base.
+    const fn app_dir(self) -> &'static str {
+        match self {
+            Self::Production => APP_DIR,
+            Self::Dev => DEV_APP_DIR,
+        }
+    }
+}
 
 /// Failure resolving the per-user base directories.
 #[derive(Debug, Error)]
@@ -53,19 +97,14 @@ fn xdg() -> Result<Xdg, PathsError> {
 }
 
 fn app_dir() -> &'static str {
-    if is_dev_profile() {
-        DEV_APP_DIR
-    } else {
-        APP_DIR
-    }
+    Profile::current().app_dir()
 }
 
 /// Whether this process runs under the dev profile: forced by
-/// `OPENLOGI_PROFILE=dev`/`prod`, or (macOS) detected from the bundle the
-/// executable lives in carrying a dev identifier. Decides the
-/// [`APP_DIR`]/[`DEV_APP_DIR`] split for every directory below, and which
-/// launchd service label the GUI manages. Memoized — the answer cannot change
-/// within a process lifetime.
+/// [`crate::env::PROFILE`], or (macOS) detected from the bundle the executable
+/// lives in carrying a dev identifier. Decides which profile directory every
+/// path below lives under, and which launchd service label the GUI manages.
+/// Memoized — the answer cannot change within a process lifetime.
 #[must_use]
 pub fn is_dev_profile() -> bool {
     static IS_DEV_PROFILE: OnceLock<bool> = OnceLock::new();
@@ -73,9 +112,12 @@ pub fn is_dev_profile() -> bool {
 }
 
 fn detect_dev_profile() -> bool {
-    match std::env::var("OPENLOGI_PROFILE") {
-        Ok(value) if value == "dev" => return true,
-        Ok(value) if matches!(value.as_str(), "prod" | "production") => return false,
+    match std::env::var(crate::env::PROFILE) {
+        Ok(value) if value == Profile::Dev.env_value() => return true,
+        // `production` is the long-hand spelling older docs used.
+        Ok(value) if value == Profile::Production.env_value() || value == "production" => {
+            return false;
+        }
         _ => {}
     }
 
@@ -151,12 +193,17 @@ pub fn xdg_data_home() -> Result<PathBuf, PathsError> {
 /// `$XDG_CONFIG_HOME/openlogi`, default `~/.config/openlogi`.
 /// Local macOS dev builds use `openlogi-dev` instead.
 pub fn config_dir() -> Result<PathBuf, PathsError> {
-    Ok(xdg_config_home()?.join(app_dir()))
+    config_dir_for(Profile::current())
+}
+
+/// [`config_dir`] for a named profile, for tooling outside that profile.
+pub fn config_dir_for(profile: Profile) -> Result<PathBuf, PathsError> {
+    Ok(xdg_config_home()?.join(profile.app_dir()))
 }
 
 /// Full path to the user config file.
 pub fn config_path() -> Result<PathBuf, PathsError> {
-    Ok(config_dir()?.join("config.toml"))
+    Ok(config_dir()?.join(CONFIG_FILE))
 }
 
 /// Directory for downloaded application data; the device-render asset cache
@@ -182,17 +229,28 @@ pub fn state_dir() -> Result<PathBuf, PathsError> {
 
 /// Directory for runtime sockets — the background agent's IPC endpoint.
 pub fn runtime_dir() -> Result<PathBuf, PathsError> {
+    runtime_dir_for(Profile::current())
+}
+
+/// [`runtime_dir`] for a named profile, for tooling outside that profile.
+pub fn runtime_dir_for(profile: Profile) -> Result<PathBuf, PathsError> {
     let xdg = xdg()?;
     Ok(xdg.runtime_dir().map_or_else(
-        || xdg.config_dir().join(app_dir()),
-        |dir| dir.join(app_dir()),
+        || xdg.config_dir().join(profile.app_dir()),
+        |dir| dir.join(profile.app_dir()),
     ))
 }
 
 /// Path to the background agent's Unix-domain IPC socket: the GUI connects here
 /// to reach the agent that owns device I/O.
 pub fn agent_socket_path() -> Result<PathBuf, PathsError> {
-    Ok(runtime_dir()?.join("agent.sock"))
+    agent_socket_path_for(Profile::current())
+}
+
+/// [`agent_socket_path`] for a named profile: where tooling waits for a dev
+/// agent it just started, without being a dev-profile process itself.
+pub fn agent_socket_path_for(profile: Profile) -> Result<PathBuf, PathsError> {
+    Ok(runtime_dir_for(profile)?.join("agent.sock"))
 }
 
 #[cfg(test)]
@@ -213,5 +271,24 @@ mod tests {
     #[test]
     fn runtime_dir_keeps_openlogi_suffix() {
         assert!(runtime_dir().expect("runtime dir").ends_with("openlogi"));
+    }
+
+    #[test]
+    fn a_named_profile_resolves_its_own_directories() {
+        assert!(
+            config_dir_for(Profile::Dev)
+                .expect("dev config dir")
+                .ends_with("openlogi-dev")
+        );
+        assert!(
+            agent_socket_path_for(Profile::Dev)
+                .expect("dev socket")
+                .ends_with("openlogi-dev/agent.sock")
+        );
+        assert!(
+            agent_socket_path_for(Profile::Production)
+                .expect("production socket")
+                .ends_with("openlogi/agent.sock")
+        );
     }
 }

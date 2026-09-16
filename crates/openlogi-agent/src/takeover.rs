@@ -30,7 +30,7 @@ use std::time::Duration;
 
 use openlogi_core::single_instance::InstanceGuard;
 #[cfg(unix)]
-use openlogi_core::single_instance::{self, InstanceError};
+use openlogi_core::single_instance::{self, InstanceError, Role};
 use tracing::info;
 #[cfg(unix)]
 use tracing::warn;
@@ -119,7 +119,7 @@ fn replace_stale() -> Option<InstanceGuard> {
 
     let (attempts, delay) = LOCK_RETRY;
     for _ in 0..attempts {
-        match single_instance::acquire("agent.lock") {
+        match single_instance::acquire(Role::Agent) {
             Ok(guard) => return Some(guard),
             Err(InstanceError::AlreadyRunning { .. }) => std::thread::sleep(delay),
             Err(e) => {

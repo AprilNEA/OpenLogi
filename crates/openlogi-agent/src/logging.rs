@@ -22,7 +22,8 @@ const MAX_LOG_FILES: usize = 7;
 /// launchd-run agent cannot be diagnosed at all (#336). If the file cannot be
 /// opened the agent falls back to stderr only and says so.
 pub(crate) fn init() {
-    let filter = EnvFilter::try_from_env("OPENLOGI_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_env(openlogi_core::env::LOG)
+        .unwrap_or_else(|_| EnvFilter::new(openlogi_core::env::LOG_DEFAULT));
     let (file_layer, file_error) = match file_appender() {
         Ok(appender) => (
             Some(

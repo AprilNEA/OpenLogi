@@ -30,7 +30,8 @@ pub async fn run() -> Result<ExitCode> {
     fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
-            EnvFilter::try_from_env("OPENLOGI_LOG").unwrap_or_else(|_| EnvFilter::new("info")),
+            EnvFilter::try_from_env(openlogi_core::env::LOG)
+                .unwrap_or_else(|_| EnvFilter::new(openlogi_core::env::LOG_DEFAULT)),
         )
         .init();
 

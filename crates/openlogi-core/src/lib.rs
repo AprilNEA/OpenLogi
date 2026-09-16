@@ -22,6 +22,7 @@ pub mod config;
 pub mod device;
 pub mod device_order;
 pub mod diagnostics;
+pub mod env;
 pub mod hid;
 #[cfg(feature = "locale")]
 pub mod locale;

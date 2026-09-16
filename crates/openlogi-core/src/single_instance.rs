@@ -4,7 +4,7 @@
 //! named file under the user's data dir. Holding the lock keeps a second
 //! invocation of the *same* role from running — the GUI uses it to avoid a
 //! duplicate window, the background agent to avoid two processes fighting over
-//! the same devices and IPC socket. Each role passes its own lock file name so
+//! the same devices and IPC socket. Each [`Role`] has its own lock file, so
 //! the GUI and the agent don't lock each other out. The lock is released by the
 //! OS when the process exits, so crash-recovery is free: the next launch
 //! reclaims the lock on the leftover file without any cleanup ceremony.
@@ -63,9 +63,30 @@ pub enum InstanceError {
     },
 }
 
-/// Acquire the single-instance lock on `lock_name` (a bare file name resolved
-/// under [`paths::config_dir`]). Returns `Ok(guard)` on success — keep the
-/// guard alive until the process is about to exit.
+/// The processes that must run at most once per user, each on its own lock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+    /// The background agent — real or mock — that owns the devices and the IPC
+    /// socket. A tool that must keep every agent away from the hardware while
+    /// it works takes this lock itself.
+    Agent,
+    /// The settings app: one window per user.
+    App,
+}
+
+impl Role {
+    /// The lock file's name under [`paths::config_dir`].
+    const fn lock_file(self) -> &'static str {
+        match self {
+            Self::Agent => "agent.lock",
+            Self::App => "openlogi.lock",
+        }
+    }
+}
+
+/// Acquire the single-instance lock for `role` (a file under
+/// [`paths::config_dir`]). Returns `Ok(guard)` on success — keep the guard
+/// alive until the process is about to exit.
 ///
 /// `AlreadyRunning` is the polite "another copy is open" signal callers
 /// surface to the user (and exit with a non-error status). Other variants
@@ -76,8 +97,8 @@ pub enum InstanceError {
 /// Returns [`InstanceError`] if the lock path can't be resolved, the lock file
 /// can't be opened, another instance already holds the lock, or the lock
 /// syscall itself fails.
-pub fn acquire(lock_name: &str) -> Result<InstanceGuard, InstanceError> {
-    let path = paths::config_dir()?.join(lock_name);
+pub fn acquire(role: Role) -> Result<InstanceGuard, InstanceError> {
+    let path = paths::config_dir()?.join(role.lock_file());
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|source| InstanceError::Open {
             path: path.clone(),
