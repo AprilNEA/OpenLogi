@@ -88,7 +88,7 @@ fn gesture_maps_for(
     let Some(key) = persistent_key else {
         return BTreeMap::new();
     };
-    let mut maps = hidpp_gesture_maps_for(config, Some(key));
+    let mut maps = hidpp_gesture_maps_for(config, Some(key), None);
     maps.extend(oshook_gestures_for(config, Some(key), None));
     maps
 }

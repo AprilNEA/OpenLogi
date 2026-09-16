@@ -115,7 +115,7 @@ pub fn plan_for_device(
     // One direction map per HID++ source in gesture mode — several may
     // gesture at once, each armed with its own raw-XY divert (the capture
     // target below derives the CIDs to divert from this map's keys).
-    let gesture_bindings = hidpp_gesture_maps_for(config, Some(config_key));
+    let gesture_bindings = hidpp_gesture_maps_for(config, Some(config_key), app);
     let divert_gesture_buttons = if os_mouse_hook_available {
         DIVERTABLE_STANDARD_BUTTONS
             .into_iter()
