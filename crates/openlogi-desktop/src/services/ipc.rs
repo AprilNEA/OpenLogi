@@ -12,16 +12,19 @@
 //! every answer is the complete state, a reconnect needs no resynchronisation:
 //! ask again with generation 0 and the next answer is the whole truth.
 //!
-//! What is left to time is failure. `launch::spawn_agent` brings the agent up
-//! when the socket stays down — gated by [`SpawnReflex`], which fires
-//! immediately for an agent that was never reachable but gives a lost
-//! connection [`SPAWN_AFTER_LOSS`] first (the deliberate quits and the
-//! supervised restarts announce themselves within that window) and never
-//! fires at a live agent newer than this GUI. A stretch without a
-//! usable connection longer than [`UNREACHABLE_AFTER`] is pushed to the GUI as
-//! [`GuiUpdate::Unreachable`] so the window can say so instead of waiting
-//! forever. A dead agent is noticed the moment the socket closes; a *hung* one
-//! is noticed when its hold window passes without an answer.
+//! The connection is one [`link::Link`]: while up it owns the client, the
+//! generation ledger and the poll in flight; while down it owns the outage
+//! clock and what the window has been told about it. What is left to time is
+//! failure. `launch::spawn_agent` brings the agent up when the socket stays
+//! down — gated by [`reflex::SpawnReflex`], which fires immediately for an
+//! agent that was never reachable but gives a lost connection
+//! [`reflex::SPAWN_AFTER_LOSS`] first (the deliberate quits and the supervised
+//! restarts announce themselves within that window) and never fires at a live
+//! agent newer than this GUI. An outage longer than `link::UNREACHABLE_AFTER`
+//! is pushed to the GUI as [`GuiUpdate::Unreachable`] so the window can say so
+//! instead of waiting forever. A dead agent is noticed the moment the socket
+//! closes; a *hung* one is noticed when its hold window passes without an
+//! answer.
 //!
 //! Device commands are transient: one that finds no connection is answered
 //! locally (`reply_disconnected`) and the next snapshot repairs the panel. A
@@ -33,57 +36,47 @@
 //! relaunch that outruns its agent (every self-update does) from latching a
 //! "not applied" notice the agent's arrival could never clear.
 
-use std::future::Future;
-use std::pin::Pin;
 use std::time::{Duration, Instant};
 
 use openlogi_core::config::Lighting;
 use openlogi_core::hid::{
     DeviceRoute, Dpi, DpiInfo, LightCommand, ReceiverSelector, SmartShiftStatus, WriteError,
 };
-use openlogi_ipc::client::{self, ConnectError, Ledger, ProtocolSkew, observe_context};
+use openlogi_ipc::client::{self, ConnectError};
 use openlogi_ipc::{
     AgentClient, AgentSnapshot, ClientKind, ConfigReloadError, Observation, PairingCommandError,
     PairingFailure,
 };
+use tarpc::client::RpcError;
 use tarpc::context;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
-/// Minimum gap between agent-launch attempts while the socket is unreachable.
-/// Long enough that a missing or crash-looping binary can't be respawned in a
-/// tight loop, short enough that a quit / crashed agent is recovered promptly.
-const SPAWN_RETRY_PERIOD: Duration = Duration::from_secs(30);
+mod launch;
+mod link;
+mod reflex;
 
-/// How long a *lost* connection must stay down before the spawn reflex may
-/// fire. Every cause of a warm loss has a better first responder — launchd's
-/// crash respawn, the agent's self-exec on update, the tray-Quit deep link —
-/// and the reflex is the responder of last resort, so it waits them out
-/// (~8 reconnect attempts). A connection that never existed has no first
-/// responder; the cold path fires on the first failed attempt.
-const SPAWN_AFTER_LOSS: Duration = Duration::from_secs(2);
+pub use launch::mark_suite_quitting;
+use launch::spawn_agent;
+use link::Link;
+use reflex::SpawnReflex;
 
 /// How long to wait before retrying a connect that failed. This is a retry
 /// cadence, not a poll: once connected, nothing here runs on a timer. Short
 /// enough that a just-started agent is picked up immediately.
 const RECONNECT_DELAY: Duration = Duration::from_millis(250);
 
-/// How long the client may go without a usable connection before the GUI is
-/// told the agent is genuinely unreachable rather than still starting (agent
-/// start plus a worst-case first enumeration is ~6 s).
-const UNREACHABLE_AFTER: Duration = Duration::from_secs(15);
-
 /// What the client thread tells the GPUI loop.
 pub enum GuiUpdate {
     /// The agent's state, as of a generation this client had not seen.
     Snapshot(AgentSnapshot),
-    /// No usable connection for [`UNREACHABLE_AFTER`]: the agent is genuinely
-    /// unreachable (not just starting up). Sent once per outage; the next
-    /// snapshot supersedes it.
+    /// No usable connection for `link::UNREACHABLE_AFTER`: the agent is
+    /// genuinely unreachable (not just starting up). Sent once per outage; the
+    /// next snapshot supersedes it.
     Unreachable,
     /// The agent answered the handshake with a *newer* protocol — the app was
     /// updated on disk while this GUI kept running, and only a relaunch
-    /// helps. Sent once per episode.
+    /// helps. Sent once per outage.
     OutdatedGui,
     /// Result of an agent-owned standalone-light command. The typed failure
     /// reaches the GPUI state model instead of being reduced to a log line.
@@ -127,8 +120,8 @@ pub enum Command {
     /// binary, not the GUI — prompting locally would grant the wrong process.
     RequestAccessibilityPrompt,
     /// Pairing (agent-owned, since it opens the receiver): begin a session,
-    /// pair a discovered device by address, or cancel. Events stream back via
-    /// the separate [`IpcClient::pairing`] long-poll, not these commands.
+    /// pair a discovered device by address, or cancel. Progress arrives in the
+    /// observed state like everything else, not as replies to these commands.
     StartPairing(ReceiverSelector),
     PairDevice([u8; 6]),
     CancelPairing,
@@ -142,11 +135,6 @@ pub enum Command {
 /// Handle the GUI holds to talk to the agent: a stream of state updates and a
 /// sender for device commands. Pairing progress arrives through the same state
 /// updates as everything else.
-mod launch;
-
-pub use launch::mark_suite_quitting;
-use launch::spawn_agent;
-
 pub struct IpcClient {
     pub updates: mpsc::UnboundedReceiver<GuiUpdate>,
     pub commands: mpsc::UnboundedSender<Command>,
@@ -193,282 +181,93 @@ impl Wire for Socket {
 
 /// The state/command loop.
 ///
-/// One `observe` request is kept in flight at all times, carrying the last
-/// generation this client saw; the agent answers when its state differs from
-/// that, or after its hold window with the same state as a heartbeat. Commands
-/// share the connection — tarpc multiplexes requests, and the in-flight poll is
-/// held across command handling so a device write never cancels it.
+/// One `observe` request is kept in flight whenever there is a connection,
+/// carrying the last generation this client saw; the agent answers when its
+/// state differs from that, or after its hold window with the same state as a
+/// heartbeat. Commands share the connection — tarpc multiplexes requests, and
+/// the poll stays in flight across command handling, so a device write never
+/// cancels it.
 async fn observe_loop(
     wire: &mut impl Wire,
     update_tx: &mpsc::UnboundedSender<GuiUpdate>,
     cmd_rx: &mut mpsc::UnboundedReceiver<Command>,
 ) {
-    let mut link: Option<LiveConnection> = None;
-    // Connect counter feeding `LiveConnection::id` — never reused, so a
-    // result from a replaced connection can always be told apart.
-    let mut conn_seq: u64 = 0;
-    // The agent is normally started by launchd, but the GUI brings it up when
-    // the socket is down (see `launch::spawn_agent`), gated by the reflex.
-    let mut reflex = SpawnReflex::new(Instant::now());
+    let mut link = Link::cold(Instant::now());
+    let mut reflex = SpawnReflex::new();
     // A `ReloadConfig` the agent has not answered yet — requested with no
     // connection, or lost with one. Idempotent (the agent re-reads the file),
     // so it is simply delivered again over the next live connection.
-    let mut reload_pending = false;
-    let mut notified_unreachable = false;
-    let mut notified_outdated = false;
-    let mut inflight: Option<ObserveFuture> = None;
+    let mut reload_owed = false;
     let mut retry = ticker(RECONNECT_DELAY);
     loop {
-        // Taken for the duration of the select so the completed arm can consume
-        // it while the others hand it back untouched.
-        let mut pending = inflight.take();
         let woken = tokio::select! {
-            (id, observed) = maybe(pending.as_mut()) => Woken::Observed(id, observed),
+            observed = link.observed() => Woken::Observed(observed),
             cmd = cmd_rx.recv() => Woken::Command(cmd),
-            _ = retry.tick(), if pending.is_none() => Woken::Reconnect,
+            _ = retry.tick(), if link.is_down() => Woken::Reconnect,
         };
         match woken {
-            // The poll answered. `pending` is finished, so it is deliberately
-            // not handed back — the arms below arm a successor instead.
-            Woken::Observed(id, observed) => match link.as_mut() {
-                Some(conn) if conn.id == id => {
-                    if let Ok(observation) = observed {
-                        reflex.connected();
-                        notified_unreachable = false;
-                        notified_outdated = false;
-                        if let Some(observed) = conn.ledger.accept(observation) {
-                            let _ = update_tx.send(GuiUpdate::Snapshot(observed.snapshot));
-                        }
-                        inflight = Some(observe(conn));
-                    } else {
-                        // The connection dropped (agent self-exec on update,
-                        // or a crash). Reconnecting re-reads the whole state,
-                        // so nothing is lost.
-                        link = None;
-                        reflex.lost(Instant::now());
-                    }
+            Woken::Observed(Ok(observation)) => {
+                if let Some(snapshot) = link.answered(observation) {
+                    let _ = update_tx.send(GuiUpdate::Snapshot(snapshot));
                 }
-                // A poll from a connection this loop no longer holds — a
-                // command reconnected while it was in flight, or the link is
-                // down. Its result, success or failure, says nothing about
-                // the live connection, so it must neither advance `seen` nor
-                // tear anything down. What it does mean: the live connection
-                // (created mid-command with the old poll still occupying the
-                // slot) has no observe yet — arm its first one.
-                _ => {
-                    if let Some(conn) = link.as_ref() {
-                        inflight = Some(observe(conn));
-                    }
-                }
-            },
+            }
+            // The connection dropped (agent self-exec on update, or a crash).
+            // Reconnecting re-reads the whole state, so nothing is lost.
+            Woken::Observed(Err(error)) => {
+                debug!(%error, "observe failed — reconnecting");
+                link.lose(Instant::now());
+            }
             Woken::Command(None) => break, // GUI dropped the sender → shut down
             // Not dispatched like the device commands below: held, and
             // delivered at the end of this turn if a connection exists.
-            Woken::Command(Some(Command::ReloadConfig)) => {
-                inflight = pending;
-                reload_pending = true;
-            }
-            Woken::Command(Some(cmd)) => {
-                inflight = pending;
-                match ensure(wire, &mut link, &mut conn_seq).await {
-                    Ok(conn) => {
-                        if handle(conn, update_tx, cmd).await.is_err() {
-                            link = None;
-                            reflex.lost(Instant::now());
-                        }
-                    }
-                    // A failed connect is not a dropped live connection:
-                    // `link` stays `None` and the reflex keeps its clock.
-                    Err(_) => reply_disconnected(update_tx, cmd),
-                }
-            }
-            Woken::Reconnect => match ensure(wire, &mut link, &mut conn_seq).await {
-                Ok(conn) => {
-                    reflex.connected();
-                    inflight = Some(observe(conn));
-                }
-                Err(ConnectFailure::Unreachable) => reflex.agent_unreachable(),
-                Err(ConnectFailure::NewerAgent) => {
-                    reflex.newer_agent_running();
-                    if !notified_outdated {
-                        notified_outdated = true;
-                        let _ = update_tx.send(GuiUpdate::OutdatedGui);
+            Woken::Command(Some(Command::ReloadConfig)) => reload_owed = true,
+            Woken::Command(Some(cmd)) => match link.ensure(wire, update_tx).await {
+                Some(client) => {
+                    if handle(client, update_tx, cmd).await.is_err() {
+                        link.lose(Instant::now());
                     }
                 }
+                None => reply_disconnected(update_tx, cmd),
             },
+            Woken::Reconnect => {
+                link.ensure(wire, update_tx).await;
+            }
         }
         // Whatever this turn did to the link, a held reload goes out the
         // moment there is one to carry it. A transport failure here is the
         // same as anywhere: drop the link, keep the reload for the next one.
-        if reload_pending && let Some(conn) = link.as_ref() {
-            if handle(conn, update_tx, Command::ReloadConfig).await.is_ok() {
-                reload_pending = false;
+        if reload_owed && let Some(client) = link.client() {
+            if handle(client, update_tx, Command::ReloadConfig)
+                .await
+                .is_ok()
+            {
+                reload_owed = false;
             } else {
-                link = None;
-                reflex.lost(Instant::now());
+                link.lose(Instant::now());
             }
         }
         let now = Instant::now();
-        if let Some(down_at) = reflex.down_since() {
-            if !notified_unreachable && now.saturating_duration_since(down_at) >= UNREACHABLE_AFTER
-            {
-                notified_unreachable = true;
-                let _ = update_tx.send(GuiUpdate::Unreachable);
-            }
-            if reflex.should_fire(now) {
-                wire.spawn_agent();
-                reflex.fired(now);
-            }
+        if let Some(notice) = link
+            .down_mut()
+            .and_then(|down| down.unreachable_notice(now))
+        {
+            let _ = update_tx.send(notice);
+        }
+        if reflex.should_fire(&link, now) {
+            wire.spawn_agent();
+            reflex.fired(now);
         }
     }
 }
 
-/// The spawn reflex: what the loop knows about the agent link, and the rule
-/// for when `launch::spawn_agent` may fire — all timing, no I/O, driven by an
-/// explicit `now` so the tests can pin it.
-struct SpawnReflex {
-    link: Link,
-    /// The last connect attempt found a live agent *newer* than this GUI:
-    /// spawning cannot help (kickstart is a no-op on a running service and a
-    /// fresh copy exits as a duplicate) — only a GUI relaunch does.
-    agent_is_newer: bool,
-    last_fired: Option<Instant>,
-}
-
-/// The reflex's view of the agent link. `Cold` and `Lost` differ in who else
-/// might act: a connection that never existed has no first responder, while
-/// every cause of losing one has a better first responder than this GUI.
-enum Link {
-    /// A usable, version-matched connection exists.
-    Connected,
-    /// No connection has ever existed — down since process start.
-    Cold { since: Instant },
-    /// An established connection dropped at `since`: launchd's respawn, the
-    /// agent's self-exec, and the tray-Quit deep link all announce
-    /// themselves within [`SPAWN_AFTER_LOSS`].
-    Lost { since: Instant },
-}
-
-impl SpawnReflex {
-    fn new(now: Instant) -> Self {
-        Self {
-            link: Link::Cold { since: now },
-            agent_is_newer: false,
-            last_fired: None,
-        }
-    }
-
-    fn connected(&mut self) {
-        self.link = Link::Connected;
-        self.agent_is_newer = false;
-    }
-
-    /// An established connection dropped. A no-op while already down: the
-    /// original downtime keeps its start (and `Cold` stays cold — a
-    /// connection that came and went inside one command dispatch was never
-    /// established from the loop's point of view).
-    fn lost(&mut self, now: Instant) {
-        if matches!(self.link, Link::Connected) {
-            self.link = Link::Lost { since: now };
-        }
-    }
-
-    fn agent_unreachable(&mut self) {
-        self.agent_is_newer = false;
-    }
-
-    fn newer_agent_running(&mut self) {
-        self.agent_is_newer = true;
-    }
-
-    /// When the downtime started, `None` while connected — the unreachable
-    /// banner's clock.
-    fn down_since(&self) -> Option<Instant> {
-        match self.link {
-            Link::Connected => None,
-            Link::Cold { since } | Link::Lost { since } => Some(since),
-        }
-    }
-
-    /// The trigger rule: fire immediately while cold, wait out the first
-    /// responders after a loss, never at a newer agent, at most once per
-    /// [`SPAWN_RETRY_PERIOD`].
-    fn should_fire(&self, now: Instant) -> bool {
-        if self.agent_is_newer {
-            return false;
-        }
-        let waited = match self.link {
-            Link::Connected => return false,
-            Link::Cold { .. } => true,
-            Link::Lost { since } => now.saturating_duration_since(since) >= SPAWN_AFTER_LOSS,
-        };
-        waited
-            && self
-                .last_fired
-                .is_none_or(|t| now.saturating_duration_since(t) >= SPAWN_RETRY_PERIOD)
-    }
-
-    fn fired(&mut self, now: Instant) {
-        self.last_fired = Some(now);
-    }
-}
-
-/// A usable, declared connection, carrying everything that is true only *of
-/// this connection*: the identity that tags its in-flight poll, and the
-/// generation ledger — a replacement agent numbers its own generations, so
-/// the ledger lives and dies with the connection instead of being reset by
-/// discipline at every disconnect site.
-struct LiveConnection {
-    client: AgentClient,
-    /// This connection's slot in the connect sequence. A settled poll tagged
-    /// with another id belongs to a connection already gone, and is dropped.
-    id: u64,
-    /// What this connection has seen of the agent's generations.
-    ledger: Ledger,
-}
-
-/// Why [`observe_loop`] woke up. Named so the in-flight poll can be handed back
-/// after the select ends rather than mutated from inside a borrowed arm.
+/// Why [`observe_loop`] woke up.
 enum Woken {
-    /// The long-poll answered, or its connection dropped — tagged with the
-    /// [`LiveConnection::id`] it was armed on.
-    Observed(u64, Result<Observation, ()>),
+    /// The long-poll answered, or its connection dropped.
+    Observed(Result<Observation, RpcError>),
     /// A device command, or `None` once the GUI drops the sender.
     Command(Option<Command>),
     /// Time to try connecting again.
     Reconnect,
-}
-
-/// A long-poll in flight. Boxed because it is stored across loop turns, and it
-/// owns a clone of the client so the loop can still replace its own link
-/// while the poll is outstanding — which is why the output carries the
-/// connection id: the loop must be able to tell whose answer this is.
-type ObserveFuture = Pin<Box<dyn Future<Output = (u64, Result<Observation, ()>)> + Send>>;
-
-/// Ask for the next state newer than what this connection has seen.
-fn observe(conn: &LiveConnection) -> ObserveFuture {
-    let client = conn.client.clone();
-    let id = conn.id;
-    let since = conn.ledger.seen();
-    Box::pin(async move {
-        let observed = client
-            .observe(observe_context(), since)
-            .await
-            .map_err(|error| {
-                debug!(%error, "observe failed — reconnecting");
-            });
-        (id, observed)
-    })
-}
-
-/// Await a future that may not exist, never resolving when there is none. The
-/// caller pairs it with a precondition, so "none" is a disabled select arm
-/// rather than a stall.
-async fn maybe<F: Future>(future: Option<F>) -> F::Output {
-    match future {
-        Some(future) => future.await,
-        None => std::future::pending().await,
-    }
 }
 
 /// A tokio interval that *delays* missed ticks instead of bursting them: while
@@ -480,61 +279,14 @@ fn ticker(period: Duration) -> tokio::time::Interval {
     interval
 }
 
-/// Why [`ensure`] couldn't produce a usable client.
-enum ConnectFailure {
-    /// Socket down, handshake failed, or the agent is *older* than us — in
-    /// every case the fix is an agent (re)start, which the spawn retry and
-    /// the agent-side takeover drive; keep retrying.
-    Unreachable,
-    /// The agent is *newer* than us: this GUI process is the stale side and
-    /// only a relaunch helps. Surfaced to the user as [`GuiUpdate::OutdatedGui`].
-    NewerAgent,
-}
-
-/// Ensure a live connection, connecting — and stamping a fresh id — on demand.
-async fn ensure<'a>(
-    wire: &mut impl Wire,
-    link: &'a mut Option<LiveConnection>,
-    conn_seq: &mut u64,
-) -> Result<&'a LiveConnection, ConnectFailure> {
-    if link.is_none() {
-        // The handshake — the version check, then the declaration that arms a
-        // dormant agent — is `openlogi_ipc::client`'s. What is left to decide
-        // here is what a mismatch means for this process: who is stale decides
-        // who must restart.
-        let client = match wire.connect().await {
-            Ok(client) => client,
-            Err(ConnectError::Skew(skew @ ProtocolSkew::AgentNewer { .. })) => {
-                warn!(%skew, "this GUI is the stale side — waiting for a relaunch");
-                return Err(ConnectFailure::NewerAgent);
-            }
-            Err(error) => {
-                debug!(%error, "no usable agent");
-                return Err(ConnectFailure::Unreachable);
-            }
-        };
-        *conn_seq += 1;
-        *link = Some(LiveConnection {
-            client,
-            id: *conn_seq,
-            ledger: Ledger::new(),
-        });
-        debug!("connected to agent IPC socket");
-    }
-    // `link` is `Some` here (just set, or already was); the `None` arm is
-    // unreachable but keeps this `expect`-free.
-    link.as_ref().ok_or(ConnectFailure::Unreachable)
-}
-
 /// Run one command over a live connection. `Err` signals a dropped connection
 /// so the caller reconnects; the command's own failure is reported back over
 /// its oneshot.
 async fn handle(
-    conn: &LiveConnection,
+    client: &AgentClient,
     update_tx: &mpsc::UnboundedSender<GuiUpdate>,
     cmd: Command,
 ) -> Result<(), ()> {
-    let client = &conn.client;
     let ctx = context::current();
     match cmd {
         Command::SetDpi(route, dpi) => log_apply(client.set_dpi(ctx, route, dpi).await)?,
@@ -602,7 +354,7 @@ async fn handle(
 /// reported here or the window would wait for something that will never come.
 fn pairing_command_result(
     update_tx: &mpsc::UnboundedSender<GuiUpdate>,
-    result: Result<Result<(), PairingCommandError>, tarpc::client::RpcError>,
+    result: Result<Result<(), PairingCommandError>, RpcError>,
 ) -> Result<(), ()> {
     match result.map_err(|_| ())? {
         Ok(()) => Ok(()),
@@ -615,7 +367,7 @@ fn pairing_command_result(
 
 /// A fire-and-forget "apply now": `Err(())` (transport drop) propagates so the
 /// caller reconnects; a device-side failure is logged, not surfaced.
-fn log_apply(r: Result<Result<(), WriteError>, tarpc::client::RpcError>) -> Result<(), ()> {
+fn log_apply(r: Result<Result<(), WriteError>, RpcError>) -> Result<(), ()> {
     match r {
         Ok(Ok(())) => Ok(()),
         Ok(Err(e)) => {
@@ -631,7 +383,7 @@ fn send_light_result(
     key: String,
     request_id: u64,
     command: LightCommand,
-    result: Result<Result<(), WriteError>, tarpc::client::RpcError>,
+    result: Result<Result<(), WriteError>, RpcError>,
 ) -> Result<(), ()> {
     if let Ok(result) = result {
         let _ = update_tx.send(GuiUpdate::LightCommandResult {
@@ -654,7 +406,7 @@ fn send_light_result(
 
 /// Unwrap a tarpc transport result: `Err(())` (connection dropped) propagates so
 /// the caller reconnects; the inner application `Result` is returned for the reply.
-fn rpc_result<T>(r: Result<T, tarpc::client::RpcError>) -> Result<T, ()> {
+fn rpc_result<T>(r: Result<T, RpcError>) -> Result<T, ()> {
     r.map_err(|_| ())
 }
 
@@ -714,49 +466,6 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn a_never_reached_agent_is_spawned_immediately() {
-        let t0 = Instant::now();
-        let reflex = SpawnReflex::new(t0);
-        assert!(reflex.should_fire(t0));
-    }
-
-    #[test]
-    fn a_lost_connection_waits_out_the_first_responders() {
-        // A supervised restart, a self-exec, or the quit deep link announce
-        // themselves within the grace window; the reflex must not race them.
-        let t0 = Instant::now();
-        let mut reflex = SpawnReflex::new(t0);
-        reflex.connected();
-        assert!(!reflex.should_fire(t0 + Duration::from_secs(120)));
-        reflex.lost(t0 + Duration::from_secs(120));
-        assert!(!reflex.should_fire(t0 + Duration::from_secs(121)));
-        assert!(reflex.should_fire(t0 + Duration::from_secs(120) + SPAWN_AFTER_LOSS));
-    }
-
-    #[test]
-    fn a_live_newer_agent_is_never_spawned_at() {
-        // Kickstart would no-op and a fresh copy exits as a duplicate; only
-        // relaunching the GUI helps, so firing is pure churn.
-        let t0 = Instant::now();
-        let mut reflex = SpawnReflex::new(t0);
-        reflex.newer_agent_running();
-        assert!(!reflex.should_fire(t0 + Duration::from_secs(120)));
-        // The newer agent going away (it was quit or replaced) re-arms the
-        // reflex on the next failed attempt.
-        reflex.agent_unreachable();
-        assert!(reflex.should_fire(t0 + Duration::from_secs(120)));
-    }
-
-    #[test]
-    fn retries_are_rate_limited() {
-        let t0 = Instant::now();
-        let mut reflex = SpawnReflex::new(t0);
-        reflex.fired(t0);
-        assert!(!reflex.should_fire(t0 + Duration::from_secs(29)));
-        assert!(reflex.should_fire(t0 + SPAWN_RETRY_PERIOD));
-    }
-
     /// How a scripted agent answers a reload.
     #[derive(Clone, Copy)]
     enum OnReload {
@@ -766,9 +475,10 @@ mod tests {
         Vanish,
     }
 
-    /// An in-memory agent past the handshake: reloads as told, holds `observe`
-    /// open forever (a quiet agent), and counts the reloads it saw. Anything
-    /// else is out of these tests' scope.
+    /// An in-memory agent past the handshake: reloads as told, refuses every
+    /// DPI read with a device error, holds `observe` open forever (a quiet
+    /// agent), and counts the reloads it saw. Anything else is out of these
+    /// tests' scope.
     fn scripted_agent(on_reload: OnReload) -> (AgentClient, Arc<AtomicUsize>) {
         let reloads = Arc::new(AtomicUsize::new(0));
         let vanish = Arc::new(tokio::sync::Notify::new());
@@ -790,6 +500,9 @@ mod tests {
                                 }
                             }
                         }
+                        AgentRequest::ReadDpi { .. } => {
+                            Ok(AgentResponse::ReadDpi(Err(WriteError::AmbiguousRawDevice)))
+                        }
                         AgentRequest::Observe { .. } => std::future::pending().await,
                         other => panic!("the client loop sent an unexpected request: {other:?}"),
                     }
@@ -805,6 +518,17 @@ mod tests {
     struct ScriptedWire {
         attempts: VecDeque<Result<AgentClient, ConnectError>>,
         launches: usize,
+    }
+
+    impl ScriptedWire {
+        fn answering(
+            attempts: impl IntoIterator<Item = Result<AgentClient, ConnectError>>,
+        ) -> Self {
+            Self {
+                attempts: attempts.into_iter().collect(),
+                launches: 0,
+            }
+        }
     }
 
     impl Wire for ScriptedWire {
@@ -823,6 +547,13 @@ mod tests {
 
     fn down() -> Result<AgentClient, ConnectError> {
         Err(std::io::Error::from(std::io::ErrorKind::ConnectionRefused).into())
+    }
+
+    fn some_route() -> DeviceRoute {
+        DeviceRoute::Bolt {
+            receiver_uid: "test-receiver".to_owned(),
+            slot: 1,
+        }
     }
 
     /// The first reload verdict the loop reports; the other updates do not
@@ -846,10 +577,7 @@ mod tests {
         // for the agent — not be reported as a failure that the agent's
         // arrival could never clear.
         let (agent, reloads) = scripted_agent(OnReload::Accept);
-        let mut wire = ScriptedWire {
-            attempts: VecDeque::from([down(), down(), Ok(agent)]),
-            launches: 0,
-        };
+        let mut wire = ScriptedWire::answering([down(), down(), Ok(agent)]);
         let (update_tx, mut updates) = mpsc::unbounded_channel();
         let (commands, mut cmd_rx) = mpsc::unbounded_channel();
         commands.send(Command::ReloadConfig).unwrap();
@@ -879,10 +607,7 @@ mod tests {
         // owed and reaches the replacement, which answers for itself.
         let (dying, dying_reloads) = scripted_agent(OnReload::Vanish);
         let (successor, successor_reloads) = scripted_agent(OnReload::Accept);
-        let mut wire = ScriptedWire {
-            attempts: VecDeque::from([Ok(dying), Ok(successor)]),
-            launches: 0,
-        };
+        let mut wire = ScriptedWire::answering([Ok(dying), Ok(successor)]);
         let (update_tx, mut updates) = mpsc::unbounded_channel();
         let (commands, mut cmd_rx) = mpsc::unbounded_channel();
         commands.send(Command::ReloadConfig).unwrap();
@@ -901,5 +626,53 @@ mod tests {
         );
         assert_eq!(dying_reloads.load(Ordering::SeqCst), 1);
         assert_eq!(successor_reloads.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_read_while_the_agent_is_down_is_answered_unavailable() {
+        // A read cannot wait for an agent the way a reload does: the panel is
+        // showing a spinner for it. Transient, so the panel keeps retrying
+        // instead of latching "unsupported".
+        let mut wire = ScriptedWire::answering([]);
+        let (update_tx, _updates) = mpsc::unbounded_channel();
+        let (commands, mut cmd_rx) = mpsc::unbounded_channel();
+        let (reply, answer) = oneshot::channel();
+        commands
+            .send(Command::ReadDpi(some_route(), reply))
+            .unwrap();
+
+        let answer = tokio::select! {
+            () = observe_loop(&mut wire, &update_tx, &mut cmd_rx) => {
+                panic!("the loop ends only once the GUI hangs up")
+            }
+            answer = answer => answer.expect("every read is answered"),
+        };
+
+        assert!(matches!(answer, Err(WriteError::AgentUnavailable)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_command_brings_the_link_up_and_carries_the_agents_answer() {
+        // A command does not wait for the reconnect tick: it connects on the
+        // spot, and the agent's own verdict — not a local one — is what the
+        // caller hears.
+        let (agent, _) = scripted_agent(OnReload::Accept);
+        let mut wire = ScriptedWire::answering([Ok(agent)]);
+        let (update_tx, _updates) = mpsc::unbounded_channel();
+        let (commands, mut cmd_rx) = mpsc::unbounded_channel();
+        let (reply, answer) = oneshot::channel();
+        commands
+            .send(Command::ReadDpi(some_route(), reply))
+            .unwrap();
+
+        let answer = tokio::select! {
+            () = observe_loop(&mut wire, &update_tx, &mut cmd_rx) => {
+                panic!("the loop ends only once the GUI hangs up")
+            }
+            answer = answer => answer.expect("every read is answered"),
+        };
+
+        assert!(matches!(answer, Err(WriteError::AmbiguousRawDevice)));
+        assert_eq!(wire.launches, 0, "a reachable agent is never spawned at");
     }
 }
