@@ -11,6 +11,7 @@ export_languages:
   - de
   - es-ES
   - fr
+  - gl
   - it
   - nl
   - "no"
@@ -42,6 +43,7 @@ files:
         de: "de"
         es-ES: "es"
         fr: "fr"
+        gl: "gl"
         it: "it"
         nl: "nl"
         "no": "nb"
