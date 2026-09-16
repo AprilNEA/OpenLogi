@@ -32,7 +32,8 @@ use tracing::{debug, info, warn};
 
 use crate::action_ring::ActionRingSessionSpec;
 use crate::capture_plan::{
-    DeviceCapturePlan, SharedCapturePlans, hidpp_side_gesture_maps_for, plan_for_device,
+    CaptureDeviceKeys, DeviceCapturePlan, SharedCapturePlans, hidpp_side_gesture_maps_for,
+    plan_for_device,
 };
 use crate::hardware::{DeviceOp, HardwareContext};
 use crate::observable::ObservableState;
@@ -467,7 +468,7 @@ impl Orchestrator {
                 Some(plan_for_device(
                     &self.config,
                     physical_key,
-                    &dev.config_key,
+                    CaptureDeviceKeys::new(&dev.config_key, &dev.model_key),
                     route,
                     self.current_app.as_deref(),
                     rearm_generation,

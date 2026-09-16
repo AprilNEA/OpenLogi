@@ -16,10 +16,42 @@ use openlogi_core::bindings::{button_bindings_for, hidpp_gesture_maps_for, oshoo
 use openlogi_core::config::{Config, ThumbwheelSensitivity};
 use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_hid::DeviceRoute;
+use openlogi_hid::reprog_controls::M720_GESTURE_BUTTON_CID;
 use openlogi_hid::session::gesture::{
     CaptureSpec, DIVERTABLE_STANDARD_BUTTONS, GESTURE_SOURCE_BUTTONS,
 };
 use tokio::sync::watch;
+
+/// HID++ model identifier for the M720 Triathlon.
+///
+/// Its physical thumb gesture button uses a control ID that is not a generic
+/// HID++ gesture-source ID, so it must never be armed for another model.
+const M720_MODEL_KEY: &str = "0b015";
+
+/// The configuration and model keys that identify a capture-plan device.
+///
+/// The configuration key chooses user bindings, while the model key selects
+/// model-specific HID++ controls. They deliberately remain distinct because a
+/// device's configuration may be keyed by its physical identity.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CaptureDeviceKeys<'a> {
+    config_key: &'a str,
+    model_key: &'a str,
+}
+
+impl<'a> CaptureDeviceKeys<'a> {
+    pub(crate) const fn new(config_key: &'a str, model_key: &'a str) -> Self {
+        Self {
+            config_key,
+            model_key,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn same(key: &'a str) -> Self {
+        Self::new(key, key)
+    }
+}
 
 /// Hardware identity of one HID++ capture session.
 ///
@@ -96,26 +128,26 @@ pub(crate) fn hidpp_side_gesture_maps_for(
 
 /// Build one device's plan from the config (per-app effective for `app`).
 #[must_use]
-pub fn plan_for_device(
+pub(crate) fn plan_for_device(
     config: &Config,
     physical_key: PhysicalDeviceKey,
-    config_key: &str,
+    device: CaptureDeviceKeys<'_>,
     route: DeviceRoute,
     app: Option<&str>,
     rearm_generation: u64,
     os_mouse_hook_available: bool,
 ) -> DeviceCapturePlan {
-    let bindings = button_bindings_for(config, Some(config_key), app);
+    let bindings = button_bindings_for(config, Some(device.config_key), app);
     // Gesture-mode OS-hook controls normally stay native so the hook sees the
     // press. macOS Back/Forward are the exception below: HID++ owns their
     // button and motion reports because Bluetooth-direct CGEvents may be
     // unattributed.
-    let oshook = oshook_gestures_for(config, Some(config_key), app);
-    let side_gesture_bindings = hidpp_side_gesture_maps_for(config, config_key, app);
+    let oshook = oshook_gestures_for(config, Some(device.config_key), app);
+    let side_gesture_bindings = hidpp_side_gesture_maps_for(config, device.config_key, app);
     // One direction map per HID++ source in gesture mode — several may
     // gesture at once, each armed with its own raw-XY divert (the capture
     // target below derives the CIDs to divert from this map's keys).
-    let gesture_bindings = hidpp_gesture_maps_for(config, Some(config_key));
+    let gesture_bindings = hidpp_gesture_maps_for(config, Some(device.config_key));
     let divert_gesture_buttons = if os_mouse_hook_available {
         DIVERTABLE_STANDARD_BUTTONS
             .into_iter()
@@ -128,8 +160,7 @@ pub fn plan_for_device(
     // single binding on one is deliverable only via a plain HID++ divert — but
     // only while the source is NOT in gesture mode (the raw-XY gesture divert
     // owns a gesturing source's CID).
-    let plain_sources = GESTURE_SOURCE_BUTTONS
-        .into_iter()
+    let plain_sources = gesture_sources_for(device.model_key)
         .filter(|(_, button)| !gesture_bindings.contains_key(button));
     let divert_buttons: Vec<(u16, ButtonId)> = DIVERTABLE_STANDARD_BUTTONS
         .into_iter()
@@ -169,7 +200,7 @@ pub fn plan_for_device(
             .get(button)
             .is_some_and(|binding| binding.click_action() != default_binding(*button))
     });
-    let thumbwheel_sensitivity = config.thumbwheel_sensitivity(config_key);
+    let thumbwheel_sensitivity = config.thumbwheel_sensitivity(device.config_key);
     DeviceCapturePlan {
         target: CaptureTarget {
             physical_key,
@@ -177,8 +208,7 @@ pub fn plan_for_device(
             spec: CaptureSpec {
                 capture_thumbwheel: thumbwheel_sensitivity != ThumbwheelSensitivity::DEFAULT
                     || thumbwheel_bindings_nondefault,
-                divert_gesture_sources: GESTURE_SOURCE_BUTTONS
-                    .into_iter()
+                divert_gesture_sources: gesture_sources_for(device.model_key)
                     .filter(|(_, button)| gesture_bindings.contains_key(button))
                     .map(|(cid, _)| cid)
                     .collect(),
@@ -188,7 +218,7 @@ pub fn plan_for_device(
             rearm_generation,
         },
         dispatch: DispatchPlan {
-            config_key: config_key.to_owned(),
+            config_key: device.config_key.to_owned(),
             bindings,
             gesture_bindings,
             side_gesture_bindings,
@@ -197,10 +227,24 @@ pub fn plan_for_device(
     }
 }
 
+/// Gesture controls known to belong to `model_key`.
+///
+/// Most gesture CIDs are protocol-wide. M720's `0x00d0` thumb button is a
+/// model-specific exception, so keeping this selection in plan construction
+/// ensures an unrelated device can never have a coincident control diverted.
+fn gesture_sources_for(model_key: &str) -> impl Iterator<Item = (u16, ButtonId)> + '_ {
+    GESTURE_SOURCE_BUTTONS
+        .into_iter()
+        .filter(move |&(cid, _)| cid != M720_GESTURE_BUTTON_CID || model_key == M720_MODEL_KEY)
+}
+
 #[cfg(test)]
 mod tests {
     use openlogi_core::binding::{Binding, LongPressBinding};
-    use openlogi_hid::reprog_controls::{GESTURE_BUTTON_CID, HAPTIC_PANEL_CID};
+    use openlogi_core::device::{DeviceModelInfo, DeviceTransports};
+    use openlogi_hid::reprog_controls::{
+        GESTURE_BUTTON_CID, HAPTIC_PANEL_CID, M720_GESTURE_BUTTON_CID,
+    };
 
     use super::*;
 
@@ -223,7 +267,7 @@ mod tests {
             config,
             PhysicalDeviceKey::parse("receiver:cafe:slot:2")
                 .expect("fixture should be a physical key"),
-            config_key,
+            CaptureDeviceKeys::same(config_key),
             route,
             app,
             rearm_generation,
@@ -534,6 +578,15 @@ mod tests {
                 .contains(&(GESTURE_BUTTON_CID, ButtonId::GestureButton)),
             "a single-bound gesture button must be plain-diverted, or the binding can never fire"
         );
+        assert!(
+            !plan
+                .target
+                .spec
+                .divert_buttons
+                .iter()
+                .any(|&(cid, _)| cid == M720_GESTURE_BUTTON_CID),
+            "a non-M720 device must not plain-divert M720's model-specific control"
+        );
     }
 
     #[test]
@@ -559,6 +612,57 @@ mod tests {
                 .any(|&(cid, _)| cid == GESTURE_BUTTON_CID),
             "the gesture owner is delivered via raw-XY divert, never a plain one"
         );
+        assert!(
+            !plan
+                .target
+                .spec
+                .divert_gesture_sources
+                .contains(&M720_GESTURE_BUTTON_CID),
+            "a non-M720 device must never claim M720's model-specific control"
+        );
+    }
+
+    #[test]
+    fn m720_hidden_thumb_button_is_armed_only_for_m720() {
+        let mut cfg = Config::default();
+        cfg.set_gesture_mode("unit:m720", ButtonId::GestureButton, true);
+
+        let plan = super::plan_for_device(
+            &cfg,
+            PhysicalDeviceKey::parse("receiver:cafe:slot:2")
+                .expect("fixture should be a physical key"),
+            CaptureDeviceKeys::new("unit:m720", M720_MODEL_KEY),
+            route(),
+            None,
+            0,
+            true,
+        );
+
+        assert!(
+            plan.target
+                .spec
+                .divert_gesture_sources
+                .contains(&M720_GESTURE_BUTTON_CID),
+            "the M720 hidden thumb button must be armed for the shared gesture binding"
+        );
+    }
+
+    #[test]
+    fn m720_model_key_matches_its_hidpp_device_information() {
+        let model = DeviceModelInfo {
+            entity_count: 3,
+            serial_number: None,
+            unit_id: [0; 4],
+            transports: DeviceTransports {
+                equad: true,
+                btle: true,
+                ..DeviceTransports::default()
+            },
+            model_ids: [0xb015, 0x405e, 0],
+            extended_model_id: 0,
+        };
+
+        assert_eq!(model.config_key(), M720_MODEL_KEY);
     }
 
     #[test]

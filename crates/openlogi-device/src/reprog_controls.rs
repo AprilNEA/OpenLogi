@@ -42,6 +42,13 @@ pub const FEATURE_ID: u16 = 0x1b04;
 /// panel is [`HAPTIC_PANEL_CID`], not this CID.
 pub const GESTURE_BUTTON_CID: u16 = 0x00c3;
 
+/// Control ID of the M720 Triathlon's physical thumb gesture button.
+///
+/// The adjacent `0x00d7` entry is a virtual control. The physical thumb
+/// button is `0x00d0` (task `0x00ad`) and supports divertable raw-XY input,
+/// so it dispatches through the same Gesture Button gesture map.
+pub const M720_GESTURE_BUTTON_CID: u16 = 0x00d0;
+
 /// Control ID of the MX Master 4 Haptic Sense Panel — the touch-sensitive
 /// thumb rest that replaces the dedicated gesture button on that model.
 ///

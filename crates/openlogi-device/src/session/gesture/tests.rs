@@ -3,6 +3,7 @@ use crate::backend::NodeId;
 use crate::channel::scripted::{ScriptedRawHidChannel, scripted_channel};
 
 const GESTURE: &[u16] = &[reprog_controls::GESTURE_BUTTON_CID];
+const M720_GESTURE: &[u16] = &[reprog_controls::M720_GESTURE_BUTTON_CID];
 const PANEL: &[u16] = &[reprog_controls::HAPTIC_PANEL_CID];
 const BOTH: &[u16] = &[
     reprog_controls::GESTURE_BUTTON_CID,
@@ -285,6 +286,10 @@ fn panel_press() -> RawControlEvent {
     RawControlEvent::DivertedButtons([reprog_controls::HAPTIC_PANEL_CID, 0, 0, 0])
 }
 
+fn m720_gesture_press() -> RawControlEvent {
+    RawControlEvent::DivertedButtons([reprog_controls::M720_GESTURE_BUTTON_CID, 0, 0, 0])
+}
+
 fn both_press() -> RawControlEvent {
     RawControlEvent::DivertedButtons([
         reprog_controls::GESTURE_BUTTON_CID,
@@ -309,6 +314,31 @@ fn next_gesture(
             return Ok(input);
         }
     }
+}
+
+#[test]
+fn m720_hidden_thumb_button_dispatches_as_a_gesture_button() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+
+    handle_reprog(&mut acc, m720_gesture_press(), M720_GESTURE, &[], &[], &tx);
+    acc.backdate_hold_for_test();
+    handle_reprog(
+        &mut acc,
+        RawControlEvent::RawXy { dx: 120, dy: 5 },
+        M720_GESTURE,
+        &[],
+        &[],
+        &tx,
+    );
+
+    assert_eq!(
+        next_gesture(&mut rx),
+        Ok(CapturedInput::Gesture(
+            ButtonId::GestureButton,
+            GestureDirection::Right
+        ))
+    );
 }
 
 #[test]
