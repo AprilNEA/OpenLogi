@@ -308,6 +308,7 @@ native_controls_when_disabled = "Όταν είναι ανενεργό, όλα τ
 overridden_in_app = "Παράκαμψη στο %{app}"
 use_a_single_action = "Χρήση μίας ενέργειας"
 use_gestures = "Χρήση χειρονομιών"
+dpi_gestures_unavailable = "Αυτή η συσκευή δεν έχει αναφέρει υποστήριξη χειρονομιών με το κουμπί DPI."
 action_key_summary = "%{action} · %{key}"
 search_actions = "Αναζήτηση ενεργειών…"
 workflow_key_summary = "Ροή εργασίας · %{key}"

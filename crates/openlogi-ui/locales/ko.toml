@@ -308,6 +308,7 @@ native_controls_when_disabled = "끄면 각 컨트롤은 기본 동작을 사용
 overridden_in_app = "%{app}에서 변경됨"
 use_a_single_action = "동작 하나 사용"
 use_gestures = "제스처 사용"
+dpi_gestures_unavailable = "이 장치의 DPI 버튼 제스처 지원이 확인되지 않았습니다."
 action_key_summary = "%{action} · %{key}"
 search_actions = "동작 검색…"
 workflow_key_summary = "워크플로 · %{key}"

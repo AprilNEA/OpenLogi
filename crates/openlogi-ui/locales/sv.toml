@@ -308,6 +308,7 @@ native_controls_when_disabled = "När funktionen är av använder reglagen sina 
 overridden_in_app = "Åsidosatt i %{app}"
 use_a_single_action = "Använd en enda åtgärd"
 use_gestures = "Använd gester"
+dpi_gestures_unavailable = "Den här enheten har inte rapporterat stöd för gester med DPI-knappen."
 action_key_summary = "%{action} · %{key}"
 search_actions = "Sök efter åtgärder…"
 workflow_key_summary = "Arbetsflöde · %{key}"

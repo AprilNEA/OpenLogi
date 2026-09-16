@@ -30,7 +30,7 @@ async fn receiver_slots_interleave_on_one_channel_and_lifecycle_events_coalesce(
             online: false,
         },
     ];
-    let fixture = bolt_fixture(&slots, 1);
+    let fixture = bolt_fixture("interleaved-slots", &slots, 1);
     let expected = fixture.inventory.clone();
     let node_id = fixture.node_id.clone();
     let backend = Arc::new(
@@ -59,7 +59,7 @@ async fn receiver_slots_interleave_on_one_channel_and_lifecycle_events_coalesce(
         .expect("known channel");
     let (notifier, mut events, observed) = observed_event_channel();
     let mut enumerator = Enumerator::with_backend(backend.clone()).with_event_notifier(notifier);
-    enumerator.arrival_drain = Duration::ZERO;
+    enumerator.deadlines.arrival_drain = Duration::ZERO;
 
     let (inventory, ()) = tokio::join!(enumerator.enumerate(), async {
         tokio::join!(slot_one.request_written(), slot_two.request_written());
@@ -162,6 +162,7 @@ async fn transient_open_failure_requests_one_bounded_repair() {
 #[tokio::test]
 async fn disconnected_stale_channel_replays_last_good_then_opens_a_replacement() {
     let fixture = bolt_fixture(
+        "disconnected-channel",
         &[BoltSlot {
             slot: 1,
             online: true,
@@ -186,7 +187,7 @@ async fn disconnected_stale_channel_replays_last_good_then_opens_a_replacement()
     );
     let registry = ChannelRegistry::default();
     let mut enumerator = Enumerator::with_backend(backend.clone()).with_registry(registry.clone());
-    enumerator.arrival_drain = Duration::ZERO;
+    enumerator.deadlines.arrival_drain = Duration::ZERO;
     let initial = enumerator
         .enumerate()
         .await
@@ -258,6 +259,7 @@ async fn disconnected_stale_channel_replays_last_good_then_opens_a_replacement()
 async fn vanished_direct_node_ages_out_independently_of_a_sleeping_receiver_slot() {
     let direct = direct_fixture(OpenOutcome::Hidpp, 1);
     let sleeping = bolt_fixture(
+        "sleeping-slot",
         &[BoltSlot {
             slot: 1,
             online: false,
@@ -279,7 +281,7 @@ async fn vanished_direct_node_ages_out_independently_of_a_sleeping_receiver_slot
         .expect("valid mixed replay"),
     );
     let mut enumerator = Enumerator::with_backend(backend.clone());
-    enumerator.arrival_drain = Duration::ZERO;
+    enumerator.deadlines.arrival_drain = Duration::ZERO;
     let initial = enumerator.enumerate().await.expect("mixed probe succeeds");
     assert!(initial.contains(&direct_inventory));
     assert!(

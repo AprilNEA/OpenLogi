@@ -608,7 +608,7 @@ async fn replay_with_different_lease(cassette: HidCassette) {
     let mut channel = HidppChannel::from_raw_channel(raw).await.unwrap();
     channel.set_sw_id_policy(SwIdPolicy::Leased {
         id: RequestSwId::new(U4::from_lo(REPLAY_SW_ID)).unwrap(),
-        free: release_test_lease,
+        lease: Box::new(()),
     });
 
     for exchange in exchanges {
@@ -633,8 +633,6 @@ async fn replay_with_different_lease(cassette: HidCassette) {
 
     handle.require_complete().unwrap();
 }
-
-fn release_test_lease(_id: u8) {}
 
 fn assert_replacement(
     replacements: &[IdentityReplacement],

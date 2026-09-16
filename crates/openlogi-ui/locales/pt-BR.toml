@@ -308,6 +308,7 @@ native_controls_when_disabled = "Quando desativado, os controles mantêm o compo
 overridden_in_app = "Substituído em %{app}"
 use_a_single_action = "Usar uma única ação"
 use_gestures = "Usar gestos"
+dpi_gestures_unavailable = "Este dispositivo não informou suporte a gestos com o botão DPI."
 action_key_summary = "%{action} · %{key}"
 search_actions = "Buscar ações…"
 workflow_key_summary = "Fluxo de trabalho · %{key}"

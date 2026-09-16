@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.5] - 2026-09-16
+
+### Added
+
+- *(gui)* expose supported button gestures
+- *(agent)* support dpi button gestures
+
+### Fixed
+
+- *(gui)* declare the alignment bespoke buttons relied on
+- *(gui)* pin ChoiceCard to a column under gpui-kit 0.6
+- *(gui)* require measured raw-xy support for dpi gestures
+- *(agent)* honor per-app overrides for hidpp gestures
+- *(core)* preserve existing middle click gestures
+- *(hid)* preserve warm cache after a failed initial probe
+- *(inventory)* hold unattributed cache entries for a node deferred before its first probe
+- *(inventory)* hold a deferred node's cache entries out of miss aging
+- *(inventory)* take a receiver's register phase before its I/O budget starts
+- *(hid)* every receiver register caller takes the node's register phase
+- *(hidpp)* quarantine an abandoned request's reply even for a byte-identical re-ask
+- *(inventory)* settle a deferred receiver probe without counting a failure
+- *(hid)* defer a receiver probe that cannot take the register-phase lock
+- *(hidpp)* keep an abandoned request's header reserved until its reply lands
+- *(hid)* lease HID++ software ids per node, not per host
+- *(hidpp)* never keep two requests with one reply header in flight
+- *(hid)* serialise a receiver's register phase across OpenLogi processes
+- *(hid)* lease HID++ software ids across OpenLogi processes
+- *(hidpp)* match sub-register reads on the echoed sub-register byte
+- *(linux)* serialise autostart reconciles and claim the marker atomically
+- *(linux)* preserve systemd unit and enablement ownership
+- *(gui)* resolve depot metadata named only by the manifest
+
 ## [0.8.4] - 2026-09-15
 
 ### Added

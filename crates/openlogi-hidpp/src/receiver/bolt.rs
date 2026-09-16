@@ -274,14 +274,11 @@ impl Receiver {
     ) -> Result<DevicePairingInformation, ReceiverError> {
         let response = self
             .chan
-            .read_long_register(
+            .read_long_sub_register(
                 RECEIVER_DEVICE_INDEX,
                 Register::ReceiverInfo.into(),
-                [
-                    u8::from(InfoSubRegister::DevicePairingInformation) + (device_index & 0x0f),
-                    0x00,
-                    0x00,
-                ],
+                u8::from(InfoSubRegister::DevicePairingInformation) + (device_index & 0x0f),
+                [0x00, 0x00],
             )
             .await?;
 
@@ -304,14 +301,11 @@ impl Receiver {
 
         let response = self
             .chan
-            .read_long_register(
+            .read_long_sub_register(
                 RECEIVER_DEVICE_INDEX,
                 Register::ReceiverInfo.into(),
-                [
-                    u8::from(InfoSubRegister::DeviceCodename) + (device_index & 0x0f),
-                    0x01,
-                    0x00,
-                ],
+                u8::from(InfoSubRegister::DeviceCodename) + (device_index & 0x0f),
+                [0x01, 0x00],
             )
             .await?;
 

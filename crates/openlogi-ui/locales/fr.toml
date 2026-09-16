@@ -308,6 +308,7 @@ native_controls_when_disabled = "Lorsque cette option est désactivée, les comm
 overridden_in_app = "Remplacé dans %{app}"
 use_a_single_action = "Utiliser une seule action"
 use_gestures = "Utiliser des gestes"
+dpi_gestures_unavailable = "Cet appareil n’a pas signalé de prise en charge des gestes avec le bouton DPI."
 action_key_summary = "%{action} · %{key}"
 search_actions = "Rechercher des actions…"
 workflow_key_summary = "Flux de travail · %{key}"

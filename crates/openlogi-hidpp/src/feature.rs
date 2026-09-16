@@ -3,7 +3,9 @@
 use std::{any::Any, sync::Arc};
 
 use crate::{
-    channel::{HidppChannel, HidppMessage, LONG_REPORT_LENGTH, MessageListenerGuard},
+    channel::{
+        AbandonedReply, HidppChannel, HidppMessage, LONG_REPORT_LENGTH, MessageListenerGuard,
+    },
     emitter::EventEmitter,
     nibble::U4,
     protocol::v20::{self, Hidpp20Error},
@@ -197,8 +199,22 @@ impl FeatureEndpoint {
         function: u8,
         args: [u8; 3],
     ) -> Result<v20::Message, Hidpp20Error> {
+        self.call_with(function, args, AbandonedReply::Quarantine)
+            .await
+    }
+
+    /// [`Self::call`], choosing what to do about a reply still owed to an
+    /// abandoned call with the same header. Only a function that reads
+    /// state no write can change should pass
+    /// [`AbandonedReply::AdoptIdentical`].
+    pub(crate) async fn call_with(
+        &self,
+        function: u8,
+        args: [u8; 3],
+        abandoned: AbandonedReply,
+    ) -> Result<v20::Message, Hidpp20Error> {
         self.chan
-            .send_v20(v20::Message::Short(self.header(function), args))
+            .send_v20_with(v20::Message::Short(self.header(function), args), abandoned)
             .await
     }
 
