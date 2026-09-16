@@ -64,6 +64,7 @@ mod device_runtime;
 mod device_store;
 mod devices;
 mod dpi;
+mod flow;
 mod inventory;
 mod light;
 mod lighting;

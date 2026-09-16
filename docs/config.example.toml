@@ -113,3 +113,25 @@ dpi = 800
 [keyboard.bindings]
 f1 = "MissionControl"
 "shift+command+f5" = "ShowDesktop"
+
+# Flow: push the cursor against a mapped screen edge to switch this pointing
+# device (and every device following it) to another paired host,
+# Logitech-Flow style. Both computers run OpenLogi; each side maps the edge
+# that points at the other. Configured per device — this table lives on the
+# mouse's entry. `trigger` is "edge" (default; push to switch) or "ctrl_edge"
+# (only while a Ctrl key is held).
+[devices."unit:6be9d300".flow]
+enabled = true
+trigger = "ctrl_edge"
+
+# Each mapped side names the device's zero-based host slot to switch to; a
+# side covers its edge plus both adjacent corners. Sides: left/right/top/bottom.
+[devices."unit:6be9d300".flow.placements]
+right = 1
+
+# Whether another device follows the Flow mouse across hosts. "auto" (the
+# default, never written) makes keyboards follow with no setup; "off" opts
+# out; naming a device key follows that specific pointer.
+# On the keyboard's entry:
+#   flow_follow = "off"
+#   flow_follow = { device = "unit:6be9d300" }

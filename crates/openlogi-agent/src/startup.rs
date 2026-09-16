@@ -173,6 +173,7 @@ impl InputServices {
 pub(crate) struct HidppWatcherHandles {
     gesture: WatcherHandle,
     host_switch: WatcherHandle,
+    flow: WatcherHandle,
     keyboard: WatcherHandle,
 }
 
@@ -180,12 +181,13 @@ impl HidppWatcherHandles {
     /// Stop all managers concurrently and confirm firmware teardown. The
     /// lifecycle retains this future and owns the terminal-exit deadline.
     pub(crate) async fn stop_and_wait(self) -> bool {
-        let (gesture, host_switch, keyboard) = tokio::join!(
+        let (gesture, host_switch, flow, keyboard) = tokio::join!(
             self.gesture.stop_and_wait("gesture"),
             self.host_switch.stop_and_wait("host-switch"),
+            self.flow.stop_and_wait("flow"),
             self.keyboard.stop_and_wait("keyboard"),
         );
-        [gesture, host_switch, keyboard]
+        [gesture, host_switch, flow, keyboard]
             .into_iter()
             .all(StopOutcome::is_stopped)
     }
@@ -215,6 +217,12 @@ pub(crate) fn spawn_hidpp_watchers(
         shared.channel_registry.clone(),
         shared.device_io.clone(),
     );
+    let flow = watchers::flow::spawn(
+        &shared.flow_spec,
+        shared.channel_pool.clone(),
+        shared.receiver_access.clone(),
+        shared.device_io.clone(),
+    );
     let keyboard = watchers::keyboard::spawn(
         &shared.keyboard_spec,
         shared.keyboard_channel.clone(),
@@ -226,6 +234,7 @@ pub(crate) fn spawn_hidpp_watchers(
     HidppWatcherHandles {
         gesture,
         host_switch,
+        flow,
         keyboard,
     }
 }

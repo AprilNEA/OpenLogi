@@ -187,12 +187,27 @@ fn tabs_follow_capabilities_not_kind() {
         thumbwheel: false,
         haptic_feedback: false,
         haptic_panel: false,
+        host_switching: false,
     });
     // After 0x0005 kind-correction the record has kind=Mouse, not Keyboard.
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Mouse, caps));
     assert!(tabs.contains(&DetailTab::Buttons));
     assert!(tabs.contains(&DetailTab::Pointer));
     assert!(!tabs.contains(&DetailTab::Lighting));
+}
+
+/// The Flow tab is gated purely on the ChangeHost capability — a mouse or
+/// keyboard with it gets the tab, anything without it never does.
+#[test]
+fn flow_tab_follows_the_host_switching_capability() {
+    let with = Some(Capabilities {
+        host_switching: true,
+        ..Capabilities::default()
+    });
+    assert!(DetailTab::tabs_for(&record(DeviceKind::Mouse, with)).contains(&DetailTab::Flow));
+    assert!(DetailTab::tabs_for(&record(DeviceKind::Keyboard, with)).contains(&DetailTab::Flow));
+    let without = Some(Capabilities::default());
+    assert!(!DetailTab::tabs_for(&record(DeviceKind::Mouse, without)).contains(&DetailTab::Flow));
 }
 
 /// A keyboard that exposes ReprogControls (buttons=true) but has no resolved
@@ -209,6 +224,7 @@ fn keyboard_without_asset_hides_buttons_tab() {
         thumbwheel: false,
         haptic_feedback: false,
         haptic_panel: false,
+        host_switching: false,
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(
@@ -229,6 +245,7 @@ fn keyboard_with_buttons_shows_keys_tab() {
         thumbwheel: false,
         haptic_feedback: false,
         haptic_panel: false,
+        host_switching: false,
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(tabs.contains(&DetailTab::Keys));

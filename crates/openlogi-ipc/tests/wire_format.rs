@@ -40,9 +40,9 @@ use openlogi_core::device::{
 };
 use openlogi_core::hid::{
     BacklightMode, BacklightState, BacklightStatus, Click, DeviceRoute, Dpi, DpiCapabilities,
-    DpiInfo, HidppFeatureErrorKind, HidppOperation, LightCommand, PasskeyMethod, ReceiverSelector,
-    ScrollReportingTarget, ScrollWheelMode, SmartShiftAutoDisengage, SmartShiftMode,
-    SmartShiftStatus, SmartShiftThreshold, TunableTorque, WriteError,
+    DpiInfo, HidppFeatureErrorKind, HidppOperation, HostInfo, LightCommand, PasskeyMethod,
+    ReceiverSelector, ScrollReportingTarget, ScrollWheelMode, SmartShiftAutoDisengage,
+    SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque, WriteError,
 };
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
@@ -102,7 +102,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 30);
+    assert_eq!(PROTOCOL_VERSION, 31);
 }
 
 #[test]
@@ -144,6 +144,16 @@ fn request_variant_order() {
     assert_wire(&AgentRequest::NextPairing {}, "0d");
     assert_wire(&AgentRequest::Snapshot {}, "0e");
     assert_wire(&AgentRequest::PollEventMonitor {}, "0f");
+    // `read_host_info` is the v31 append — 0x1c pins it as the last method.
+    assert_wire(
+        &AgentRequest::ReadHostInfo {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+        },
+        "1c0008463030444341464501",
+    );
     assert_wire(
         &AgentRequest::SetLight {
             route: DeviceRoute::RawHid {
@@ -438,12 +448,13 @@ fn device_inventory() {
                 thumbwheel: true,
                 haptic_feedback: true,
                 haptic_panel: true,
+                host_switching: true,
             }),
         }],
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b000010150020001030106323134304c5a0102030400010100fb34b0fb8240000b010101000001010101",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b000010150020001030106323134304c5a0102030400010100fb34b0fb8240000b01010100000101010101",
     );
 }
 
@@ -496,6 +507,12 @@ fn device_settings_payloads() {
         feature_hex: 0x2201,
     });
     assert_wire(&unsupported, "0103fb0122");
+
+    let host_info: Result<HostInfo, WriteError> = Ok(HostInfo {
+        current_host: 0,
+        host_count: 3,
+    });
+    assert_wire(&host_info, "000003");
 
     assert_wire(
         &WriteError::RequestTimedOut {

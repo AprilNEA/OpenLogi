@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 mod device;
 #[cfg(feature = "fs")]
 mod file;
+mod flow;
 mod identity;
 mod key_trigger;
 mod settings;
@@ -28,6 +29,7 @@ pub use device::{DeviceConfig, DeviceIdentity, LinkConfig, LinkOverrides};
 pub use file::{ConfigError, ConfigFile};
 #[cfg(all(test, feature = "fs"))]
 use file::{backup_existing_config, config_backup_path};
+pub use flow::{FlowConfig, FlowFollow, FlowPlacements, FlowSide, FlowTriggerMode};
 pub use identity::canonical_device_key;
 pub use key_trigger::{KeyModifiers, KeyTrigger, KeyboardConfig, ParseTriggerError};
 pub use settings::LightSettings;

@@ -20,7 +20,7 @@ futures-lite = { workspace = true }
 libc = "0.2"
 wayland-client = "0.31"
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
-x11rb = "0.13"
+x11rb = { version = "0.13", features = ["randr"] }
 zbus = "5"
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
@@ -37,6 +37,10 @@ core-foundation = { workspace = true }
 foreign-types-shared = "0.3"
 objc2 = { workspace = true }
 objc2-app-kit = { workspace = true, features = ["NSWorkspace", "NSRunningApplication"] }
+# The Ctrl-held poll (`control_held`) uses the typed CGEventSourceFlagsState
+# binding; the CGEventTap itself deliberately stays on `core-graphics` (see
+# .claude/rules/objc-ffi.md).
+objc2-core-graphics = { workspace = true, features = ["CGEventSource", "CGEventTypes"] }
 objc2-application-services = { workspace = true, features = ["std", "HIServices", "AXUIElement"] }
 objc2-core-foundation = { workspace = true, features = ["std", "CFDictionary", "CFNumber"] }
 objc2-foundation = { workspace = true, features = [

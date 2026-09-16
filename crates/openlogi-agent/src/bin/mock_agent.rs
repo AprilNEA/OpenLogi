@@ -54,8 +54,8 @@ use openlogi_core::device::{
 use openlogi_core::single_instance::{self, InstanceError};
 use openlogi_fixture::{DeviceProfile, FixtureError, ProfileDeviceSettings, ProfileSetting};
 use openlogi_hid::{
-    BacklightState, DeviceRoute, Dpi, DpiInfo, LightCommand, PasskeyMethod, ReceiverSelector,
-    ScrollWheelMode, SmartShiftStatus, WriteError,
+    BacklightState, DeviceRoute, Dpi, DpiInfo, HostInfo, LightCommand, PasskeyMethod,
+    ReceiverSelector, ScrollWheelMode, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
@@ -839,6 +839,18 @@ impl Agent for MockAgent {
     ) -> Result<BacklightState, WriteError> {
         let state = self.state.lock().await;
         profile_value(&state.settings_for(&route)?.backlight, &route, 0x1982).copied()
+    }
+
+    async fn read_host_info(self, _: Context, route: DeviceRoute) -> Result<HostInfo, WriteError> {
+        // Every scripted multi-host device sits on its first slot of three, so
+        // the Flow tab renders (and its host pickers exclude "Host 1") without
+        // hardware.
+        let state = self.state.lock().await;
+        state.settings_for(&route)?;
+        Ok(HostInfo {
+            current_host: 0,
+            host_count: 3,
+        })
     }
 
     async fn request_accessibility_prompt(self, _: Context) {

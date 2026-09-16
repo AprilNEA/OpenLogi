@@ -17,6 +17,7 @@ use self::menu::{APP_KEY_CONTEXT, CloseWindow, Minimize, NavigateBack, Zoom};
 use crate::features::action_ring::ActionRingPanel;
 use crate::features::camera::controls::CameraControlsPanel;
 use crate::features::camera::preview::CameraPreview;
+use crate::features::flow::FlowPanel;
 use crate::features::keyboard::function_row::FunctionRowView;
 use crate::features::lighting::device::LightingPanel;
 use crate::features::lighting::standalone::LightPanel;
@@ -77,6 +78,8 @@ enum DetailTab {
     Keys,
     /// Pointer tuning — DPI and presets.
     Pointer,
+    /// Flow — edge-triggered switching between paired computers.
+    Flow,
     /// RGB lighting — color, brightness, on/off.
     Lighting,
     /// Live webcam preview (UVC cameras only).
@@ -127,6 +130,11 @@ impl DetailTab {
         if caps.pointer {
             tabs.push(Self::Pointer);
         }
+        // Flow needs ChangeHost (0x1814): the arrangement editor on pointing
+        // devices, the follower choice on everything else.
+        if caps.host_switching {
+            tabs.push(Self::Flow);
+        }
         if caps.lighting {
             tabs.push(Self::Lighting);
         }
@@ -151,6 +159,7 @@ impl DetailTab {
             Self::ActionsRing => tr!("action_ring.actions_ring"),
             Self::Keys => tr!("device.keys"),
             Self::Pointer => tr!("device.pointer"),
+            Self::Flow => tr!("flow.title"),
             Self::Lighting | Self::Light => tr!("device.lighting"),
             Self::Camera => tr!("camera.camera"),
             Self::Device => tr!("device.device"),
@@ -167,6 +176,7 @@ pub struct AppView {
     keyboard_model: Entity<FunctionRowView>,
     dpi_panel: Entity<DpiPanel>,
     smartshift_panel: Entity<SmartShiftPanel>,
+    flow_panel: Entity<FlowPanel>,
     lighting_panel: Entity<LightingPanel>,
     camera_preview: Entity<CameraPreview>,
     camera_controls: Entity<CameraControlsPanel>,
@@ -229,6 +239,7 @@ impl AppView {
         let keyboard_model = cx.new(FunctionRowView::new);
         let dpi_panel = cx.new(DpiPanel::new);
         let smartshift_panel = cx.new(SmartShiftPanel::new);
+        let flow_panel = cx.new(FlowPanel::new);
         let lighting_panel = cx.new(LightingPanel::new);
         let camera_preview = cx.new(CameraPreview::new);
         let camera_controls = cx.new(CameraControlsPanel::new);
@@ -237,55 +248,7 @@ impl AppView {
         let app_catalog = cx.new(|cx| AppCatalogPicker::new(profile_icons.clone(), window, cx));
         let app_catalog_obs = cx.observe(&app_catalog, |_, _, cx| cx.notify());
         let state_obs = cx.subscribe(&state, |view, _, event: &StateEvent, cx| {
-            let active_key = AppState::try_read(cx)
-                .and_then(AppState::current_record)
-                .map(DeviceRecord::device_key);
-            let on_home = matches!(view.route, Route::Home);
-            let relevant = match event {
-                StateEvent::AgentChanged
-                | StateEvent::InventoryChanged
-                | StateEvent::DeviceSelected(_) => true,
-                StateEvent::ForegroundChanged => !on_home,
-                StateEvent::BindingsChanged(key) => {
-                    !on_home
-                        && matches!(
-                            view.active_tab,
-                            DetailTab::Buttons | DetailTab::ActionsRing | DetailTab::Device
-                        )
-                        && active_key.as_ref() == Some(key)
-                }
-                StateEvent::DpiChanged(key) => {
-                    !on_home
-                        && view.active_tab == DetailTab::Device
-                        && active_key.as_ref() == Some(key)
-                }
-                StateEvent::LightingChanged(key) => {
-                    on_home
-                        || (view.active_tab == DetailTab::Light && active_key.as_ref() == Some(key))
-                }
-                StateEvent::DeviceConfigChanged(key) => {
-                    on_home
-                        || (matches!(view.active_tab, DetailTab::Pointer | DetailTab::Device)
-                            && active_key.as_ref() == Some(key))
-                }
-                StateEvent::CameraChanged => on_home || view.active_tab == DetailTab::Light,
-                // Child entities own these surfaces and subscribe directly. A
-                // language switch already refreshes every window, and the root
-                // caches no localized text.
-                StateEvent::SmartShiftChanged(_)
-                | StateEvent::CameraPermissionChanged
-                | StateEvent::DiagnosticsChanged
-                | StateEvent::LanguageChanged => false,
-                // App-wide settings render in their own window. The root only
-                // cares when a persistence/reload failure opens or closes its
-                // fail-closed configuration-error screen.
-                StateEvent::SettingsChanged => {
-                    view.config_issue_visible
-                        || AppState::try_read(cx)
-                            .is_some_and(|state| state.config_issue().is_some())
-                }
-            };
-            if relevant {
+            if state_event_is_relevant(view, event, cx) {
                 cx.notify();
             }
         });
@@ -297,6 +260,7 @@ impl AppView {
             keyboard_model,
             dpi_panel,
             smartshift_panel,
+            flow_panel,
             lighting_panel,
             camera_preview,
             camera_controls,
@@ -468,6 +432,56 @@ fn app_title_bar(cx: &App) -> impl IntoElement {
     )
 }
 
+/// Whether one [`StateEvent`] changes something the root view itself renders.
+/// Child entities subscribe for their own surfaces, so the root repaints only
+/// for the screen it is actually showing.
+fn state_event_is_relevant(view: &AppView, event: &StateEvent, cx: &App) -> bool {
+    let active_key = AppState::try_read(cx)
+        .and_then(AppState::current_record)
+        .map(DeviceRecord::device_key);
+    let on_home = matches!(view.route, Route::Home);
+    match event {
+        StateEvent::AgentChanged | StateEvent::InventoryChanged | StateEvent::DeviceSelected(_) => {
+            true
+        }
+        StateEvent::ForegroundChanged => !on_home,
+        StateEvent::BindingsChanged(key) => {
+            !on_home
+                && matches!(
+                    view.active_tab,
+                    DetailTab::Buttons | DetailTab::ActionsRing | DetailTab::Device
+                )
+                && active_key.as_ref() == Some(key)
+        }
+        StateEvent::DpiChanged(key) => {
+            !on_home && view.active_tab == DetailTab::Device && active_key.as_ref() == Some(key)
+        }
+        StateEvent::LightingChanged(key) => {
+            on_home || (view.active_tab == DetailTab::Light && active_key.as_ref() == Some(key))
+        }
+        StateEvent::DeviceConfigChanged(key) => {
+            on_home
+                || (matches!(view.active_tab, DetailTab::Pointer | DetailTab::Device)
+                    && active_key.as_ref() == Some(key))
+        }
+        StateEvent::CameraChanged => on_home || view.active_tab == DetailTab::Light,
+        // Child entities own these surfaces and subscribe directly. A
+        // language switch already refreshes every window, and the root
+        // caches no localized text.
+        StateEvent::SmartShiftChanged(_)
+        | StateEvent::CameraPermissionChanged
+        | StateEvent::DiagnosticsChanged
+        | StateEvent::LanguageChanged => false,
+        // App-wide settings render in their own window. The root only
+        // cares when a persistence/reload failure opens or closes its
+        // fail-closed configuration-error screen.
+        StateEvent::SettingsChanged => {
+            view.config_issue_visible
+                || AppState::try_read(cx).is_some_and(|state| state.config_issue().is_some())
+        }
+    }
+}
+
 impl Render for AppView {
     #[expect(
         clippy::too_many_lines,
@@ -603,6 +617,7 @@ impl Render for AppView {
                         keyboard_model: &self.keyboard_model,
                         dpi_panel: &self.dpi_panel,
                         smartshift_panel: &self.smartshift_panel,
+                        flow_panel: &self.flow_panel,
                         lighting_panel: &self.lighting_panel,
                         camera_preview: &self.camera_preview,
                         camera_controls: &self.camera_controls,

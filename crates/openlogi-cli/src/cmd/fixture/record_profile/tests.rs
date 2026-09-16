@@ -8,8 +8,8 @@ use openlogi_core::binding::ActionRingSlot;
 use openlogi_core::config::Lighting;
 use openlogi_core::device::DeviceInventory;
 use openlogi_core::hid::{
-    BacklightMode, BacklightState, BacklightStatus, Dpi, DpiInfo, LightCommand, PasskeyMethod,
-    ReceiverSelector, ScrollWheelMode, SmartShiftStatus,
+    BacklightMode, BacklightState, BacklightStatus, Dpi, DpiInfo, HostInfo, LightCommand,
+    PasskeyMethod, ReceiverSelector, ScrollWheelMode, SmartShiftStatus,
 };
 use openlogi_fixture::{
     CANONICAL_DEVICE_PROFILE_JSON, SyntheticIdentityKind, classify_synthetic_identity_bytes,
@@ -270,6 +270,15 @@ impl Agent for TestAgent {
             |settings| &settings.wheel,
             0x2121,
         )
+    }
+
+    async fn read_host_info(self, _: TarpcContext, _: DeviceRoute) -> Result<HostInfo, WriteError> {
+        // Host slots are not part of a recorded profile; the recorder never
+        // asks, so answering is enough to satisfy the service.
+        Ok(HostInfo {
+            current_host: 0,
+            host_count: 1,
+        })
     }
 
     async fn read_backlight(
@@ -666,8 +675,8 @@ async fn protocol_mismatch_aborts_before_snapshot_or_output() {
         .expect_err("protocol mismatch must abort")
         .to_string();
 
-    assert!(error.contains("protocol v29"), "{error}");
-    assert!(error.contains("requires v30"), "{error}");
+    assert!(error.contains("protocol v30"), "{error}");
+    assert!(error.contains("requires v31"), "{error}");
     assert_eq!(*inspection.snapshots.lock().expect("snapshot lock"), 0);
     assert!(!output.exists());
 }

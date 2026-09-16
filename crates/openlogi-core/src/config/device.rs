@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use super::flow::{FlowConfig, FlowFollow};
 use super::settings::{
     CameraControls, GestureOwner, LightSettings, Lighting, ScrollResolution, SmartShift,
     ThumbwheelSensitivity, deserialize_gesture_owner,
@@ -270,6 +271,16 @@ pub struct DeviceConfig {
     /// [`Self::dpi`]. `None` means "never set — leave the keyboard alone".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fn_lock: Option<bool>,
+    /// Flow pointer role: this device's cursor drives edge-triggered host
+    /// switching. Meaningful on pointing devices; untouched devices serialize
+    /// nothing.
+    #[serde(default, skip_serializing_if = "FlowConfig::is_default")]
+    pub flow: FlowConfig,
+    /// Flow follower role: whether this device tracks a Flow pointer's host
+    /// switches. [`FlowFollow::Auto`] (the default) is what makes a keyboard
+    /// jump with the mouse without setup.
+    #[serde(default, skip_serializing_if = "FlowFollow::is_auto")]
+    pub flow_follow: FlowFollow,
 }
 
 impl DeviceConfig {
@@ -370,6 +381,8 @@ impl Default for DeviceConfig {
             scroll_resolution: None,
             host_switch_targets: Vec::new(),
             fn_lock: None,
+            flow: FlowConfig::default(),
+            flow_follow: FlowFollow::default(),
         }
     }
 }
@@ -490,6 +503,10 @@ struct RawDeviceConfig {
     host_switch_targets: Vec<String>,
     #[serde(default)]
     fn_lock: Option<bool>,
+    #[serde(default)]
+    flow: FlowConfig,
+    #[serde(default)]
+    flow_follow: FlowFollow,
     #[serde(default = "default_true")]
     enabled: bool,
     #[serde(default)]
@@ -550,6 +567,8 @@ impl From<RawDeviceConfig> for DeviceConfig {
             scroll_resolution: raw.scroll_resolution,
             host_switch_targets: raw.host_switch_targets,
             fn_lock: raw.fn_lock,
+            flow: raw.flow,
+            flow_follow: raw.flow_follow,
         }
     }
 }

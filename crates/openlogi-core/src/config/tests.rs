@@ -207,6 +207,87 @@ fn keyboard_section_roundtrips_through_config() {
 }
 
 #[test]
+fn flow_settings_roundtrip_per_device() {
+    let mut config = Config::default();
+    let device = config.devices.entry("unit:6be9d300".into()).or_default();
+    device.flow.enabled = true;
+    device.flow.placements.set(FlowSide::Right, Some(1));
+    device.flow.placements.set(FlowSide::Top, Some(2));
+    device.flow.trigger = FlowTriggerMode::CtrlEdge;
+    config
+        .devices
+        .entry("receiver:aabb:slot:1".into())
+        .or_default()
+        .flow_follow = FlowFollow::Device("unit:6be9d300".into());
+    config
+        .devices
+        .entry("receiver:aabb:slot:2".into())
+        .or_default()
+        .flow_follow = FlowFollow::Off;
+
+    let roundtripped = write_and_read(&config);
+    let mouse = &roundtripped.devices["unit:6be9d300"];
+    assert!(mouse.flow.enabled);
+    assert_eq!(mouse.flow.placements.get(FlowSide::Right), Some(1));
+    assert_eq!(mouse.flow.placements.get(FlowSide::Top), Some(2));
+    assert_eq!(mouse.flow.placements.get(FlowSide::Left), None);
+    assert_eq!(mouse.flow.placements.len(), 2);
+    assert_eq!(mouse.flow.trigger, FlowTriggerMode::CtrlEdge);
+    assert_eq!(
+        roundtripped.devices["receiver:aabb:slot:1"].flow_follow,
+        FlowFollow::Device("unit:6be9d300".into())
+    );
+    assert_eq!(
+        roundtripped.devices["receiver:aabb:slot:2"].flow_follow,
+        FlowFollow::Off
+    );
+    // Auto is the default and never persists.
+    assert_eq!(mouse.flow_follow, FlowFollow::Auto);
+}
+
+#[test]
+fn default_flow_settings_are_omitted_from_toml() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    let mut config = Config::default();
+    // A device entry with only non-Flow settings must not grow flow tables.
+    config.set_dpi("unit:6be9d300", Dpi::new(1600));
+    config.save_to_path(&path).expect("save");
+    let body = fs::read_to_string(&path).expect("read");
+    assert!(
+        !body.contains("flow"),
+        "untouched Flow must not clutter config.toml:\n{body}"
+    );
+}
+
+#[test]
+fn flow_side_names_are_stable_snake_case() {
+    // The placements table is hand-authored TOML surface; renaming a field
+    // would orphan existing configs.
+    let mut config = Config::default();
+    let device = config.devices.entry("unit:6be9d300".into()).or_default();
+    device.flow.enabled = true;
+    for (host, &side) in FlowSide::ALL.iter().enumerate() {
+        device
+            .flow
+            .placements
+            .set(side, Some(u8::try_from(host).expect("four sides")));
+    }
+    device.flow.trigger = FlowTriggerMode::CtrlEdge;
+    let body = toml::to_string_pretty(&config).expect("serialize");
+    for name in ["left", "right", "top", "bottom"] {
+        assert!(
+            body.contains(&format!("{name} = ")),
+            "expected side {name} in:\n{body}"
+        );
+    }
+    assert!(
+        body.contains("trigger = \"ctrl_edge\""),
+        "trigger mode must serialize snake_case:\n{body}"
+    );
+}
+
+#[test]
 fn set_keyboard_binding_inserts_and_clears() {
     let mut config = Config::default();
     let f1: KeyTrigger = "f1".parse().expect("parse key trigger");
@@ -585,6 +666,7 @@ fn device_identity_roundtrips_and_is_iterable() {
             thumbwheel: false,
             haptic_feedback: false,
             haptic_panel: false,
+            host_switching: false,
         },
         light_capabilities: None,
         driver_id: None,

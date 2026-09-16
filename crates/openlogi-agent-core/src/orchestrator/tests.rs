@@ -2,13 +2,14 @@
 
 use super::{
     AgentDevice, InventoryHealth, Orchestrator, VOLATILE_REAPPLY_CONFIRM_RETRIES,
-    any_device_needs_capture_rearm, build_devices, configured_wheel_mode, host_switch_links,
-    pick_current, plan_reapply, reapply_targets, stable_id,
+    any_device_needs_capture_rearm, build_devices, configured_wheel_mode, flow_spec,
+    host_switch_links, pick_current, plan_reapply, reapply_targets, stable_id,
 };
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{Action, Binding, ButtonId};
 use openlogi_core::config::{
-    Config, DeviceConfig, LightSettings, LinkConfig, ScrollResolution, VerticalScrollSensitivity,
+    Config, DeviceConfig, FlowFollow, FlowSide, LightSettings, LinkConfig, ScrollResolution,
+    VerticalScrollSensitivity,
 };
 use openlogi_core::device::{
     Capabilities, DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports,
@@ -412,6 +413,146 @@ fn host_switch_links_keep_sleeping_targets_but_require_online_keyboard() {
                 slot: 3,
             }
         ]
+    );
+}
+
+/// An online device with the ChangeHost capability bit as given.
+fn flow_dev(key: &str, slot: u8, kind: DeviceKind, host_switching: bool) -> AgentDevice {
+    let mut device = dev(key, slot, true);
+    device.kind = kind;
+    device.capabilities = Some(Capabilities {
+        host_switching,
+        ..Capabilities::default()
+    });
+    device
+}
+
+/// Enable Flow on `key` with the right edge mapped to host 1.
+fn enable_flow(config: &mut Config, key: &str) {
+    let entry = config.devices.entry(key.into()).or_default();
+    entry.flow.enabled = true;
+    entry.flow.placements.set(FlowSide::Right, Some(1));
+}
+
+#[test]
+fn flow_spec_requires_enabled_placements_and_capability() {
+    let devices = [flow_dev("mouse", 1, DeviceKind::Mouse, true)];
+
+    // No flow config at all → disarmed.
+    assert!(flow_spec(&Config::default(), &devices).is_none());
+
+    // Enabled with a mapped side → armed.
+    let mut config = Config::default();
+    enable_flow(&mut config, "mouse");
+    let spec = flow_spec(&config, &devices).expect("flow must arm");
+    assert_eq!(
+        spec.pointer,
+        DeviceRoute::Bolt {
+            receiver_uid: "AA00".into(),
+            slot: 1,
+        }
+    );
+    assert!(!spec.triggers.is_empty());
+
+    // Enabled but no side mapped → disarmed.
+    let mut unmapped = Config::default();
+    unmapped
+        .devices
+        .entry("mouse".into())
+        .or_default()
+        .flow
+        .enabled = true;
+    assert!(flow_spec(&unmapped, &devices).is_none());
+
+    // A pointer that cannot switch hosts never arms.
+    let incapable = [flow_dev("mouse", 1, DeviceKind::Mouse, false)];
+    assert!(flow_spec(&config, &incapable).is_none());
+
+    // A device the user disabled never arms.
+    config.set_device_enabled("mouse", false);
+    assert!(flow_spec(&config, &devices).is_none());
+}
+
+#[test]
+fn flow_spec_auto_followers_are_host_switching_keyboards_only() {
+    let mut config = Config::default();
+    enable_flow(&mut config, "mouse");
+    let devices = [
+        flow_dev("mouse", 1, DeviceKind::Mouse, true),
+        // Untouched keyboard: Auto follows.
+        flow_dev("keyboard", 2, DeviceKind::Keyboard, true),
+        // A keyboard that cannot switch hosts cannot follow.
+        flow_dev("old-keyboard", 3, DeviceKind::Keyboard, false),
+        // A second mouse never follows on Auto.
+        flow_dev("spare-mouse", 4, DeviceKind::Mouse, true),
+    ];
+
+    let spec = flow_spec(&config, &devices).expect("flow must arm");
+    assert_eq!(
+        spec.followers,
+        vec![DeviceRoute::Bolt {
+            receiver_uid: "AA00".into(),
+            slot: 2,
+        }]
+    );
+}
+
+#[test]
+fn flow_spec_follow_overrides_beat_auto() {
+    let mut config = Config::default();
+    enable_flow(&mut config, "mouse");
+    config
+        .devices
+        .entry("keyboard".into())
+        .or_default()
+        .flow_follow = FlowFollow::Off;
+    // An explicitly bound second mouse follows even though Auto would not
+    // take it.
+    config
+        .devices
+        .entry("spare-mouse".into())
+        .or_default()
+        .flow_follow = FlowFollow::Device("mouse".into());
+    // Explicitly bound to a *different* pointer → not a follower here.
+    config
+        .devices
+        .entry("numpad".into())
+        .or_default()
+        .flow_follow = FlowFollow::Device("elsewhere".into());
+    let devices = [
+        flow_dev("mouse", 1, DeviceKind::Mouse, true),
+        flow_dev("keyboard", 2, DeviceKind::Keyboard, true),
+        flow_dev("spare-mouse", 3, DeviceKind::Mouse, true),
+        flow_dev("numpad", 4, DeviceKind::Numpad, true),
+    ];
+
+    let spec = flow_spec(&config, &devices).expect("flow must arm");
+    assert_eq!(
+        spec.followers,
+        vec![DeviceRoute::Bolt {
+            receiver_uid: "AA00".into(),
+            slot: 3,
+        }]
+    );
+}
+
+#[test]
+fn flow_spec_first_flow_enabled_pointer_wins() {
+    let mut config = Config::default();
+    enable_flow(&mut config, "mouse-a");
+    enable_flow(&mut config, "mouse-b");
+    let devices = [
+        flow_dev("mouse-a", 1, DeviceKind::Mouse, true),
+        flow_dev("mouse-b", 2, DeviceKind::Mouse, true),
+    ];
+
+    let spec = flow_spec(&config, &devices).expect("flow must arm");
+    assert_eq!(
+        spec.pointer,
+        DeviceRoute::Bolt {
+            receiver_uid: "AA00".into(),
+            slot: 1,
+        }
     );
 }
 
