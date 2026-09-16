@@ -453,7 +453,7 @@ pub(crate) fn resolve_in_index<'a>(
     model: &DeviceModelInfo,
     codename: Option<&str>,
 ) -> Option<(&'a str, &'a DeviceEntry)> {
-    if let Ok(forced) = std::env::var("OPENLOGI_FORCE_DEPOT")
+    if let Ok(forced) = std::env::var(openlogi_core::env::FORCE_DEPOT)
         && let Some((depot, entry)) = index
             .devices
             .iter()
