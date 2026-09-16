@@ -572,6 +572,7 @@ fn label_control(
         Side::Right => model.left + model.width + SIDE_GAP,
     };
     let view = view.clone();
+    let control = label.id;
     let trigger = LabelTrigger {
         id: ("label-trigger", idx).into(),
         label,
@@ -586,26 +587,27 @@ fn label_control(
         .top(px(label.y - LABEL_H / 2.))
         .w(px(LABEL_W))
         .h(px(LABEL_H))
+        .debug_selector(move || format!("label-card-{control:?}"))
         .child(trigger)
 }
 
 struct BindingLabel {
     text: gpui::SharedString,
     /// Vendored action-icon asset path (see [`action_icon_path`]) for the
-    /// card's leading glyph, or `None` for the gesture summary / unbound.
+    /// card's leading glyph. Every constructor currently supplies one; the
+    /// `Option` is the seam for icon-less bindings.
     icon: Option<&'static str>,
 }
 
 impl BindingLabel {
     /// The card's value row: the leading action icon, the binding text, and
     /// the trailing chevron, all tinted with `color`.
-    fn row(self, color: Hsla, pal: theme::Palette) -> impl IntoElement {
+    fn row(self, color: Hsla, pal: theme::Palette) -> gpui::Div {
         h_flex()
             .items_center()
             .gap_2()
             // Leading action icon (same glyph as the picker rows), tinted with
             // the value so it tracks the default / set / highlighted state.
-            // Absent for the gesture summary / unbound.
             .when_some(self.icon, |row, path| {
                 row.child(svg().path(path).size_4().flex_none().text_color(color))
             })
@@ -709,7 +711,11 @@ impl RenderOnce for LabelTrigger {
             )
             // Current binding — the value (sm), the same size as the action rows
             // it edits.
-            .child(self.binding.row(binding_color, pal))
+            .child(
+                self.binding
+                    .row(binding_color, pal)
+                    .debug_selector(move || format!("label-value-row-{btn:?}")),
+            )
             .on_click(move |_event, _window, cx| {
                 click_view.update(cx, |this, cx| {
                     this.select(btn);
@@ -921,11 +927,12 @@ impl RenderOnce for HotspotTrigger {
 
 #[cfg(test)]
 mod tests {
-    use gpui::TestAppContext;
+    use gpui::{TestAppContext, size};
     use openlogi_core::config::Config;
 
     use super::*;
     use crate::services::assets::AssetResolver;
+    use crate::services::i18n::LOCALE_LOCK;
     use crate::state::ConfigPersistence;
 
     fn install_app_state(cx: &mut TestAppContext) {
@@ -945,6 +952,53 @@ mod tests {
             });
             AppState::set_global(state, cx);
         });
+    }
+
+    #[gpui::test]
+    fn long_bindings_stay_inside_their_label_card(cx: &mut TestAppContext) {
+        // #1401: the card's Button base centres its children on the cross axis,
+        // so without `items_stretch` the value row keeps its natural width and
+        // overflows both edges once the binding name is wider than the card. The
+        // English defaults are enough to trip it under the test text system
+        // ("Forward (Button 5)" measures a 206px row over a 156px card). Pinned
+        // to English under the lock: another test in this binary leaves the
+        // process locale at zh-CN, whose labels are short enough to fit and
+        // would have made this a false pass.
+        let _locale = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+        cx.update(gpui_component::init);
+        install_app_state(cx);
+        let (view, cx) = cx.add_window_view(MouseModelView::new);
+        // Wide enough for labels on both sides (`model_layout` hides them under 960).
+        cx.simulate_resize(size(px(1200.), px(800.)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        // Selectors are `label-card-{MouseControlId:?}` / `label-value-row-{MouseControlId:?}`.
+        for (card_selector, row_selector) in [
+            (
+                "label-card-Button(Forward)",
+                "label-value-row-Button(Forward)",
+            ),
+            (
+                "label-card-Button(MiddleClick)",
+                "label-value-row-Button(MiddleClick)",
+            ),
+        ] {
+            let card = cx
+                .debug_bounds(card_selector)
+                .expect("the synthetic model renders a label card for this control");
+            let row = cx
+                .debug_bounds(row_selector)
+                .expect("the label card renders its value row");
+            assert!(
+                card.contains(&row.origin) && card.contains(&row.bottom_right()),
+                "{row_selector}: value row {row:?} must sit inside its card {card:?}"
+            );
+        }
+
+        drop(view);
+        cx.update(|window, _| window.remove_window());
+        cx.run_until_parked();
     }
 
     #[gpui::test]
