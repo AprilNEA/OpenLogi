@@ -1,0 +1,20 @@
+# Owner: openlogi_ipc::client::Ledger — which observe answers are newer than
+# what a connection has seen. Only the IPC clients are in scope; the agent side
+# and the desktop's own read generations compare generations for other reasons.
+id: ipc-generation-ledger-owner
+language: rust
+severity: error
+message: Whether an observe answer is newer than what this connection has seen is openlogi_ipc::client::Ledger's call (Ledger::accept). Do not compare generations by hand here.
+note: |
+  The desktop and the overlay once kept two ledgers, and one of them accepted
+  stale replies. See "Single source of truth" in AGENTS.md.
+files:
+  - crates/openlogi-desktop/**/*.rs
+  - crates/openlogi-overlay/**/*.rs
+  - crates/openlogi-cli/**/*.rs
+rule:
+  any:
+    - pattern: $OBSERVED.generation <= $SEEN
+    - pattern: $OBSERVED.generation < $SEEN
+    - pattern: $OBSERVED.generation >= $SEEN
+    - pattern: $OBSERVED.generation > $SEEN

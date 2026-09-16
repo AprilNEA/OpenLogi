@@ -1,0 +1,18 @@
+# Owner: openlogi_ipc::client::observe_context — the request deadline that
+# outlasts the agent's hold. The agent side (openlogi-agent, openlogi-agent-core)
+# implements the hold itself and is the other legitimate reader.
+id: ipc-observe-hold-owner
+language: rust
+severity: error
+message: Clients take their observe deadline from openlogi_ipc::client::observe_context(); do not derive one from OBSERVE_HOLD here.
+note: |
+  Two clients once added their own grace to the hold. See "Single source of
+  truth" in AGENTS.md.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-ipc/**
+  - crates/openlogi-agent/**
+  - crates/openlogi-agent-core/**
+rule:
+  pattern: OBSERVE_HOLD

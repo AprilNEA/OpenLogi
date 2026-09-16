@@ -1,0 +1,14 @@
+# Owner: openlogi_ipc::client::spawn_client_thread — the dedicated thread and
+# current-thread runtime the GPUI processes run their agent client on.
+id: gui-client-thread-owner
+language: rust
+severity: error
+message: The GPUI processes run their agent client through openlogi_ipc::client::spawn_client_thread. Do not build another client runtime here.
+note: |
+  The desktop and the overlay once each built the same thread and runtime by
+  hand. See "Single source of truth" in AGENTS.md.
+files:
+  - crates/openlogi-desktop/**/*.rs
+  - crates/openlogi-overlay/**/*.rs
+rule:
+  pattern: tokio::runtime::Builder::new_current_thread()

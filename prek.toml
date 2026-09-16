@@ -35,6 +35,17 @@ language = "system"
 types = ["rust"]
 pass_filenames = false
 
+# The single-source-of-truth guards (.ast-grep/rules): each names the module
+# that owns a decision and fails on its ingredients anywhere else. The same
+# rules as CI's `ast-grep` job, here over the staged Rust files; ast-grep is in
+# the devenv shell.
+[[repos.hooks]]
+id = "ast-grep"
+name = "ast-grep"
+entry = "ast-grep scan"
+language = "system"
+types = ["rust"]
+
 # Clippy compiles the workspace, so keep it on pre-push rather than every commit.
 [[repos.hooks]]
 id = "cargo-clippy"

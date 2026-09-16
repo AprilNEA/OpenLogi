@@ -52,6 +52,17 @@ jobs:
         with:
           config: .config/typos.toml
 
+  # The single-source-of-truth guards in .ast-grep/rules: each names the module
+  # that owns a decision and fails on its ingredients anywhere else.
+  ast-grep:
+    name: ast-grep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ast-grep/action@370e627637505696e4365db4a149af9f2311afe8 # v1.4
+        with:
+          version: 0.45.1
+
   publish-closure:
     name: publish closure
     runs-on: ubuntu-latest

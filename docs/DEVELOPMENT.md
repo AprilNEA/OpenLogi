@@ -196,8 +196,8 @@ crates/
 ## Local CI
 
 The PR test pipeline is `.github/workflows/ci.yml`. To run every job this
-machine can reproduce — including typos, MSRV, cargo-deny, and the Windows
-cross-lint the host-OS gate does not run:
+machine can reproduce — including typos, the ast-grep guards, MSRV, cargo-deny,
+and the Windows cross-lint the host-OS gate does not run:
 
 ```sh
 cargo xtask ci
@@ -224,8 +224,9 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps \
 ```
 
 Equivalent to `devenv tasks run openlogi:check`. That is **not** the full
-pipeline: typos, Linux clippy, Windows clippy, MSRV, cargo-deny, and the shell
-lint (shellcheck + shfmt) are separate CI jobs. Reproduce those with
+pipeline: typos, the ast-grep guards, Linux clippy, Windows clippy, MSRV,
+cargo-deny, and the shell lint (shellcheck + shfmt) are separate CI jobs.
+Reproduce those with
 `cargo xtask ci` or the commands in `.claude/rules/ci.md`.
 
 ## Packaging the macOS DMG

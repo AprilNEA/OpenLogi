@@ -62,6 +62,24 @@ access devices directly.
 - Fix the verified root cause at its owning module and lifecycle boundary. Do not hide
   a broken owner or lifecycle behind a shim, fallback, or one-use abstraction.
 
+## Single source of truth
+
+- A decision every consumer must make the same way — a handshake step, a version
+  policy, a deadline, a threshold, an encoding — has exactly one owner, and the owner
+  exports the *decision*, not the ingredients. Clients call
+  `openlogi_ipc::client::connect_as(kind)` and match `ConnectError::Skew`; they never
+  see a raw version number to compare. Whatever consumers must not recombine stays
+  private, or leaves the public surface with the consolidation.
+- The second copy is the trigger, not the third. About to write a decision that already
+  exists elsewhere — in another crate, in a test, in a different shape — stop, move the
+  first copy to its owner, and consume it from both sites. Copies that differ are an
+  investigation signal (`.claude/rules/rust.md`), never a licence to keep both.
+- Every consolidation ships its guard: an ast-grep rule under `.ast-grep/rules/` that
+  names the owner and fails on the ingredients anywhere else, so the next copy is a red
+  `ast-grep` CI job (`cargo xtask ci ast-grep`; the prek hook runs it at commit), not a
+  review comment. Token-level clone detectors were evaluated for this and rejected:
+  they find copied text, and these copies were re-derivations that shared none.
+
 ## Build, run, verify
 
 Nix/devenv is optional — rustup + `rust-toolchain.toml` is enough. If devenv is
@@ -175,7 +193,7 @@ impl to a derive macro kills every `Type::trait_method` doc link — is explaine
 The local gate is the host-OS subset. The pipeline is `.github/workflows/ci.yml`
 (Linux clippy, macOS+Linux MSRV, rustdoc, Linux tests excluding desktop, macOS
 `--all-targets` tests, typos, cargo-deny, Windows clippy, wasm portability, shell
-lint). macOS-green is not that matrix. To run every job this machine can reproduce:
+lint, the ast-grep SSOT guards). macOS-green is not that matrix. To run every job this machine can reproduce:
 
 ```sh
 cargo xtask ci
@@ -189,7 +207,8 @@ OS, missing `cargo-deny`, no MSRV toolchain) is **not** a pass — name it as no
 run in the PR Testing section. Full map, including "if you changed X, run Y":
 [`.claude/rules/ci.md`](.claude/rules/ci.md).
 
-prek hooks (`prek.toml`): typos and `cargo fmt` at commit; full-workspace clippy
+prek hooks (`prek.toml`): typos, `cargo fmt`, and the ast-grep guards at commit;
+full-workspace clippy
 **and rustdoc** at push (rust-scoped, so non-Rust pushes skip it). Hooks are a
 backstop, not a substitute for running the gate yourself after a rebase.
 
@@ -310,6 +329,7 @@ before editing that area.
 | Area | Rule file |
 |---|---|
 | reproducing CI jobs locally (every `ci.yml` job → command) | `.claude/rules/ci.md` |
+| `.ast-grep/**`, `sgconfig.yml` (the single-source-of-truth guards) | `.claude/rules/ci.md` |
 | any `*.rs` / `Cargo.toml` (workspace Rust standards) | `.claude/rules/rust.md` |
 | `crates/openlogi-desktop/**`, `crates/openlogi-ui/**`, `crates/openlogi-overlay/**` (GPUI) | `.claude/rules/gui.md` |
 | `crates/openlogi-desktop/**` (that crate's own contract and map) | `crates/openlogi-desktop/AGENTS.md` |
