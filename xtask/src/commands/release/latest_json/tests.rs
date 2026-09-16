@@ -97,6 +97,7 @@ fn collect_assets_skips_linux_packages_and_foreign_archives() {
     for name in [
         "openlogi-v1.2.3-linux-amd64.deb",
         "openlogi-v1.2.3-linux-amd64.rpm",
+        "openlogi-v1.2.3-linux-amd64.pkg.tar.zst",
         "not-an-artifact.zip",
         "SHA256SUMS",
     ] {
