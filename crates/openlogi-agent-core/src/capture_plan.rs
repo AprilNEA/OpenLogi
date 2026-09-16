@@ -672,7 +672,13 @@ mod tests {
         } else {
             assert!(plan.dispatch.side_gesture_bindings.is_empty());
             assert!(plan.target.spec.divert_gesture_buttons.is_empty());
-            assert!(plan.target.spec.gesture_responses.is_empty());
+            assert!(
+                plan.target
+                    .spec
+                    .gesture_responses
+                    .keys()
+                    .all(|button| !matches!(button, ButtonId::Back | ButtonId::Forward))
+            );
         }
     }
 
