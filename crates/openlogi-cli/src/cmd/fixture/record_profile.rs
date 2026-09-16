@@ -93,8 +93,8 @@ fn safe_connect_error(error: &ConnectError) -> anyhow::Error {
             "{skew}; update or restart OpenLogi so both processes match (no profile was written)"
         ),
         ConnectError::Timeout => anyhow!(
-            "timed out connecting to the running OpenLogi Agent; semantic profile capture \
-             requires a responsive Agent and will not access hardware directly"
+            "timed out reaching the running OpenLogi Agent; restart it and retry (semantic \
+             profile capture has no direct-hardware fallback, and no profile was written)"
         ),
     }
 }

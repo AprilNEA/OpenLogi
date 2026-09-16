@@ -668,7 +668,7 @@ fn protocol_skew_is_reported_as_a_safe_agent_only_error() {
 }
 
 #[test]
-fn unreachable_and_handshake_failures_are_safe_and_agent_only() {
+fn unreachable_handshake_and_timeout_failures_are_safe_and_agent_only() {
     let endpoint = ConnectError::Endpoint(io::Error::other("/Users/private/agent.sock"));
     let endpoint_error = safe_connect_error(&endpoint).to_string();
     assert!(endpoint_error.contains("running OpenLogi Agent"));
@@ -679,6 +679,17 @@ fn unreachable_and_handshake_failures_are_safe_and_agent_only() {
     let handshake_error = safe_connect_error(&handshake).to_string();
     assert!(handshake_error.contains("healthy IPC handshake"));
     assert!(!handshake_error.contains("shutdown"));
+
+    let timeout_error = safe_connect_error(&ConnectError::Timeout).to_string();
+    assert!(timeout_error.contains("timed out"), "{timeout_error}");
+    assert!(
+        timeout_error.contains("restart it and retry"),
+        "{timeout_error}"
+    );
+    assert!(
+        timeout_error.contains("no profile was written"),
+        "{timeout_error}"
+    );
 }
 
 #[test]
