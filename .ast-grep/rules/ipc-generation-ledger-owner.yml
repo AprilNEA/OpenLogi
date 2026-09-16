@@ -1,6 +1,8 @@
 # Owner: openlogi_ipc::client::Ledger — which observe answers are newer than
-# what a connection has seen. Only the IPC clients are in scope; the agent side
-# and the desktop's own read generations compare generations for other reasons.
+# what a connection has seen. Only the IPC clients are in scope: the agent side
+# compares generations for its own reasons, and so does the desktop's
+# per-device read sequencing (services/device_reads.rs numbers its own reads,
+# nothing the agent stamped), which is why that one file is exempt.
 id: ipc-generation-ledger-owner
 language: rust
 severity: error
@@ -12,9 +14,19 @@ files:
   - crates/openlogi-desktop/**/*.rs
   - crates/openlogi-overlay/**/*.rs
   - crates/openlogi-cli/**/*.rs
+ignores:
+  - crates/openlogi-desktop/src/services/device_reads.rs
 rule:
-  any:
-    - pattern: $OBSERVED.generation <= $SEEN
-    - pattern: $OBSERVED.generation < $SEEN
-    - pattern: $OBSERVED.generation >= $SEEN
-    - pattern: $OBSERVED.generation > $SEEN
+  # Any comparison with a `.generation` field or `.generation()` accessor on
+  # either side, whichever way round it is written.
+  kind: binary_expression
+  all:
+    - has:
+        field: operator
+        regex: '^(==|!=|<=|>=|<|>)$'
+    - has:
+        any:
+          - kind: field_expression
+            regex: '\.generation$'
+          - kind: call_expression
+            regex: '\.generation\(\)$'
