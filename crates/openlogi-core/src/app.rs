@@ -18,6 +18,12 @@ pub struct ForegroundApp {
     /// bundle identifier, an X11 `WM_CLASS` class or a Wayland xdg `app_id` on
     /// Linux, or the lower-cased executable path on Windows.
     ///
+    /// macOS has one documented exception: a frontmost process that is not an
+    /// app bundle has no bundle identifier to report, so it is identified by
+    /// its executable path instead. That keeps such windows addressable rather
+    /// than invisible to per-app profiles, at the cost of a single platform
+    /// whose identifiers come from two namespaces.
+    ///
     /// Those namespaces do not map onto one another by any simple string rule,
     /// which is why a profile authored under one of them will not match under
     /// another. See

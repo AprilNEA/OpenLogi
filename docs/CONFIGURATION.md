@@ -70,7 +70,10 @@ Common device fields are:
   thumb contact as well as from deliberate ones
 - `per_app_bindings`: sparse action overlays keyed by macOS bundle id, Linux
   application id, exact lower-cased Windows executable path, or
-  `exe:<filename>.exe`. The Buttons panel edits these under its Profile
+  `exe:<filename>.exe`. A macOS window whose process is not an app bundle —
+  emulators and QEMU front-ends commonly ship the window-owning binary outside
+  `Contents/MacOS/` — has no bundle id to report and is keyed by its executable
+  path instead. The Buttons panel edits these under its Profile
   selector, which offers applications the agent has seen in front — the only
   identifiers guaranteed to match, since the four platforms name applications
   differently and a profile authored under one namespace will not match under

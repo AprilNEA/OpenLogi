@@ -524,8 +524,10 @@ impl Hook {
 /// bundle identifier on macOS (e.g. `"com.microsoft.VSCode"`), the `WM_CLASS`
 /// class component under X11 / XWayland (e.g. `"Code"`), the xdg-shell
 /// `app_id` under wlroots (e.g. `"org.mozilla.firefox"`), and the lower-cased
-/// executable path on Windows. [`ForegroundApp::display_name`] is whatever the
-/// platform can name it, falling back to the identifier.
+/// executable path on Windows. A macOS process that is not an app bundle has
+/// no bundle identifier, and is reported by its executable path instead.
+/// [`ForegroundApp::display_name`] is whatever the platform can name it,
+/// falling back to the identifier — or, for that path form, to its file name.
 ///
 /// `None` when no app is frontmost, when reading fails, or on an unsupported
 /// platform — including a pure-Wayland session with no backend (see
