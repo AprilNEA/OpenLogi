@@ -1,16 +1,14 @@
 use std::{
     fmt::{self, Write as _},
     process::ExitCode,
-    time::Duration,
 };
 
 use anyhow::{Context, Result};
 use clap::Args;
 use openlogi_camera::Camera;
 use openlogi_core::device::{BatteryInfo, DeviceInventory, DeviceModelInfo, PairedDevice};
-use openlogi_ipc::client::{self, ConnectError};
-use openlogi_ipc::{AgentSnapshot, AgentStatus, ClientKind};
-use tarpc::context;
+use openlogi_ipc::client::ConnectError;
+use openlogi_ipc::{AgentSnapshot, AgentStatus};
 
 #[derive(Debug, Args)]
 pub struct ListArgs {}
@@ -75,22 +73,15 @@ pub async fn run(_args: ListArgs) -> Result<ExitCode> {
 /// no agent listening, a hung handshake, a protocol mismatch, or a stalled
 /// snapshot call.
 async fn agent_snapshot() -> Option<AgentSnapshot> {
-    // Connecting as a CLI lets a dormant agent (launch-at-login off, started
-    // at login) serve this query without arming its whole input stack.
-    let connected =
-        tokio::time::timeout(Duration::from_secs(2), client::connect_as(ClientKind::Cli)).await;
-    let client = match connected {
-        Ok(Ok(client)) => client,
-        Ok(Err(ConnectError::Skew(skew))) => {
+    let client = match crate::agent::connect().await {
+        Ok(client) => client,
+        Err(ConnectError::Skew(skew)) => {
             eprintln!("note: {skew} — reading hardware directly");
             return None;
         }
-        Ok(Err(_)) | Err(_) => return None,
+        Err(_) => return None,
     };
-    tokio::time::timeout(Duration::from_secs(5), client.snapshot(context::current()))
-        .await
-        .ok()?
-        .ok()
+    crate::agent::snapshot(&client).await.ok()
 }
 
 /// Why the list is empty. With an agent status in hand the reason is known;

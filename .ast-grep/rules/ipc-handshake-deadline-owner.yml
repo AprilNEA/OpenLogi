@@ -1,0 +1,21 @@
+# Owner: openlogi_ipc::client::HANDSHAKE_DEADLINE — how long an agent has to
+# answer the handshake. connect_as and probe_version already apply it.
+id: ipc-handshake-deadline-owner
+language: rust
+severity: error
+message: The handshake is already bounded by openlogi_ipc::client::HANDSHAKE_DEADLINE; a timeout around connect_as, probe_version, or a wrapper of them is a second, competing deadline.
+note: |
+  Four callers once wrapped the handshake in their own two seconds. See
+  "Single source of truth" in AGENTS.md.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-ipc/**
+rule:
+  any:
+    - pattern: tokio::time::timeout($D, $P::connect_as($$$))
+    - pattern: tokio::time::timeout($D, $P::probe_version())
+    - pattern: tokio::time::timeout($D, $P::connect())
+    - pattern: timeout($D, $P::connect_as($$$))
+    - pattern: timeout($D, $P::probe_version())
+    - pattern: timeout($D, $P::connect())

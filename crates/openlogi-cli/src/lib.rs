@@ -7,6 +7,7 @@ use anyhow::Result;
 use clap::Parser;
 use tracing_subscriber::{EnvFilter, fmt};
 
+mod agent;
 mod cmd;
 
 /// OpenLogi: a local-first companion for Logitech HID++ peripherals.

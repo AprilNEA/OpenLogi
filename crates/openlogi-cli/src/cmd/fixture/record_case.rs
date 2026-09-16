@@ -3,7 +3,6 @@
 use std::fmt::Write as _;
 use std::io;
 use std::path::PathBuf;
-use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, ValueEnum};
@@ -26,7 +25,6 @@ mod replay;
 
 pub(super) const DEFAULT_RECORDING_CAPACITY: usize = 8_192;
 const MAX_RECORDING_CAPACITY: usize = 65_536;
-const AGENT_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Arguments for one read-only HID++ cassette capture.
 #[derive(Debug, Args)]
@@ -309,9 +307,9 @@ async fn acquire_capture_ownership() -> Result<InstanceGuard> {
         "refusing direct fixture capture: could not take the agent's instance lock; \
          stop the OpenLogi agent and any other fixture capture before retrying",
     )?;
-    match tokio::time::timeout(AGENT_PROBE_TIMEOUT, client::probe_version()).await {
-        Ok(Err(ConnectError::Endpoint(error))) if endpoint_is_unreachable(&error) => Ok(guard),
-        Ok(Ok(_) | Err(_)) | Err(_) => bail!(
+    match client::probe_version().await {
+        Err(ConnectError::Endpoint(error)) if endpoint_is_unreachable(&error) => Ok(guard),
+        Ok(_) | Err(_) => bail!(
             "refusing direct fixture capture because the agent endpoint is active or accepted a \
              connection without completing a healthy handshake; this command uses the CLI's own \
              HID permission and identity, so stop the OpenLogi agent before retrying"

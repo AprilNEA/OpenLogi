@@ -28,3 +28,4 @@ workspace = true
 [dev-dependencies]
 bincode = "1.3"
 futures-lite = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

@@ -14,6 +14,10 @@
 //! holder without waking it. It gets [`probe_version`] and judges the answer
 //! with [`ProtocolSkew::check`], the same rule.
 //!
+//! Both entry points give the agent [`HANDSHAKE_DEADLINE`] to answer, so no
+//! caller wraps them in a timeout of its own: an agent that cannot answer the
+//! two handshake calls from memory in that window is wedged, not busy.
+//!
 //! The rest of what every observing client repeats lives here too: the
 //! per-connection generation [`Ledger`], the request [`observe_context`] whose
 //! deadline outlasts the agent's hold, and the dedicated thread the GPUI
@@ -46,7 +50,19 @@ pub enum ConnectError {
     /// which side is stale.
     #[error(transparent)]
     Skew(#[from] ProtocolSkew),
+    /// The agent accepted the connection but did not finish the handshake
+    /// within [`HANDSHAKE_DEADLINE`]: wedged, and best treated as absent.
+    #[error("the agent did not answer the IPC handshake within {} s", HANDSHAKE_DEADLINE.as_secs())]
+    Timeout,
 }
+
+/// How long an agent has to answer the handshake.
+///
+/// Both handshake calls are answered from memory, so an agent that cannot
+/// manage them in this window is wedged, not busy. A client treats it as
+/// absent and keeps retrying; the takeover handshake leaves such a holder
+/// alone rather than reason about it.
+pub const HANDSHAKE_DEADLINE: Duration = Duration::from_secs(2);
 
 /// A protocol mismatch between this build and the agent, judged once here.
 ///
@@ -114,6 +130,15 @@ pub async fn connect_as(kind: ClientKind) -> Result<AgentClient, ConnectError> {
     establish(open().await?, kind).await
 }
 
+/// Run one handshake against [`HANDSHAKE_DEADLINE`].
+async fn within_deadline<T>(
+    handshake: impl Future<Output = Result<T, ConnectError>>,
+) -> Result<T, ConnectError> {
+    tokio::time::timeout(HANDSHAKE_DEADLINE, handshake)
+        .await
+        .unwrap_or(Err(ConnectError::Timeout))
+}
+
 /// Ask whichever agent holds the socket which protocol it speaks, and nothing
 /// else.
 ///
@@ -125,7 +150,8 @@ pub async fn connect_as(kind: ClientKind) -> Result<AgentClient, ConnectError> {
 /// [`ConnectError::Endpoint`] when the socket cannot be reached,
 /// [`ConnectError::Handshake`] when the holder does not answer.
 pub async fn probe_version() -> Result<u32, ConnectError> {
-    Ok(open().await?.protocol_version(context::current()).await?)
+    let client = open().await?;
+    within_deadline(async { Ok(client.protocol_version(context::current()).await?) }).await
 }
 
 /// A tarpc client on a fresh connection to the agent's socket.
@@ -139,10 +165,13 @@ async fn open() -> Result<AgentClient, ConnectError> {
 /// wire-stable across every version, so it is the only call worth making
 /// before the two sides are known to agree.
 async fn establish(client: AgentClient, kind: ClientKind) -> Result<AgentClient, ConnectError> {
-    let version = client.protocol_version(context::current()).await?;
-    ProtocolSkew::check(version)?;
-    client.declare_client(context::current(), kind).await?;
-    Ok(client)
+    within_deadline(async {
+        let version = client.protocol_version(context::current()).await?;
+        ProtocolSkew::check(version)?;
+        client.declare_client(context::current(), kind).await?;
+        Ok(client)
+    })
+    .await
 }
 
 /// An answer to an observe call: anything stamped with the agent's
@@ -321,6 +350,19 @@ mod tests {
             ConnectError::Skew(ProtocolSkew::AgentNewer { agent }) if agent == PROTOCOL_VERSION + 1
         ));
         assert!(declared.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_agent_is_given_up_on() {
+        // A socket that accepts and never answers is a wedged agent, not a
+        // slow one; the handshake is answered from memory.
+        let silent = in_memory_agent(|_| Box::pin(std::future::pending()), std::future::pending());
+
+        let Err(error) = establish(silent, ClientKind::Gui).await else {
+            panic!("a silent agent is not usable");
+        };
+
+        assert!(matches!(error, ConnectError::Timeout), "{error}");
     }
 
     struct Stamp(Generation);

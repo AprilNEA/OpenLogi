@@ -35,12 +35,6 @@ use tracing::info;
 #[cfg(unix)]
 use tracing::warn;
 
-/// How long to wait for the protocol handshake against the lock holder. The
-/// agent answers from memory; a holder that can't answer in this window is
-/// wedged in a way we can't reason about, so leave it alone.
-#[cfg(unix)]
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
-
 /// How long to wait for the singleton lock after terminating the stale
 /// holder (20 × 200 ms). SIGTERM delivery and process teardown are fast; the
 /// budget mostly covers a slow exit under load.
@@ -71,12 +65,10 @@ fn replace_stale() -> Option<InstanceGuard> {
         .enable_all()
         .build()
         .ok()?;
-    let holder_version = rt.block_on(async {
-        tokio::time::timeout(HANDSHAKE_TIMEOUT, client::probe_version())
-            .await
-            .ok()?
-            .ok()
-    })?;
+    // The probe carries the shared handshake deadline: a holder that cannot
+    // answer within it is wedged in a way we cannot reason about, so it is
+    // left alone like an unreachable one.
+    let holder_version = rt.block_on(client::probe_version()).ok()?;
     drop(rt);
 
     // Only an older holder is ours to replace. The same version makes us the

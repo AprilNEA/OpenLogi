@@ -11,8 +11,8 @@ use openlogi_core::hid::{DeviceRoute, WriteError};
 use openlogi_fixture::{
     DeviceProfile, FIXTURE_SCHEMA_VERSION, ProfileDeviceSettings, ProfileSetting, ProfileSupport,
 };
-use openlogi_ipc::client::{self, ConnectError};
-use openlogi_ipc::{AgentClient, AgentSnapshot, ClientKind};
+use openlogi_ipc::client::ConnectError;
+use openlogi_ipc::{AgentClient, AgentSnapshot};
 use tarpc::client::RpcError;
 use tarpc::context;
 
@@ -21,8 +21,6 @@ mod selection;
 
 use selection::TargetLocation;
 
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
-const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(5);
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Arguments for one privacy-safe semantic device profile capture.
@@ -76,14 +74,9 @@ pub(super) async fn capture_for_contribution(
 }
 
 async fn connect_to_agent() -> Result<AgentClient> {
-    match tokio::time::timeout(CONNECT_TIMEOUT, client::connect_as(ClientKind::Cli)).await {
-        Err(_) => bail!(
-            "timed out connecting to the running OpenLogi Agent; semantic profile capture \
-             requires a responsive Agent and will not access hardware directly"
-        ),
-        Ok(Err(error)) => Err(safe_connect_error(&error)),
-        Ok(Ok(client)) => Ok(client),
-    }
+    crate::agent::connect()
+        .await
+        .map_err(|error| safe_connect_error(&error))
 }
 
 fn safe_connect_error(error: &ConnectError) -> anyhow::Error {
@@ -98,6 +91,10 @@ fn safe_connect_error(error: &ConnectError) -> anyhow::Error {
         ),
         ConnectError::Skew(skew) => anyhow!(
             "{skew}; update or restart OpenLogi so both processes match (no profile was written)"
+        ),
+        ConnectError::Timeout => anyhow!(
+            "timed out connecting to the running OpenLogi Agent; semantic profile capture \
+             requires a responsive Agent and will not access hardware directly"
         ),
     }
 }
@@ -126,12 +123,7 @@ async fn capture_connected_profile(
     id: String,
     name: String,
 ) -> Result<CapturedProfile> {
-    let snapshot = tokio::time::timeout(SNAPSHOT_TIMEOUT, client.snapshot(context::current()))
-        .await
-        .map_err(|_| anyhow!("the running Agent timed out while providing its device snapshot"))?
-        .map_err(|_| {
-            anyhow!("the running Agent disconnected while providing its device snapshot")
-        })?;
+    let snapshot = crate::agent::snapshot(client).await?;
 
     let captured = capture_profile(client, snapshot, selector, id, name).await?;
     captured
