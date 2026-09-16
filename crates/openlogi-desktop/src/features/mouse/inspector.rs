@@ -582,6 +582,7 @@ fn selection_card(
         .aria_expanded(picker.open)
         .flex()
         .flex_col()
+        .items_stretch()
         .gap_2()
         .rounded(pal.control_radius)
         .border_1()

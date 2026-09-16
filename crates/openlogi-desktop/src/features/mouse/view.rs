@@ -596,6 +596,40 @@ struct BindingLabel {
     icon: Option<&'static str>,
 }
 
+impl BindingLabel {
+    /// The card's value row: the leading action icon, the binding text, and
+    /// the trailing chevron, all tinted with `color`.
+    fn row(self, color: Hsla, pal: theme::Palette) -> impl IntoElement {
+        h_flex()
+            .items_center()
+            .gap_2()
+            // Leading action icon (same glyph as the picker rows), tinted with
+            // the value so it tracks the default / set / highlighted state.
+            // Absent for the gesture summary / unbound.
+            .when_some(self.icon, |row, path| {
+                row.child(svg().path(path).size_4().flex_none().text_color(color))
+            })
+            .child(
+                // Shrink + ellipsis so a long action name (e.g. "Mission
+                // Control") doesn't push the chevron out of the fixed card.
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .text_body()
+                    .text_color(color)
+                    .child(self.text),
+            )
+            .child(
+                Icon::new(IconName::ChevronRight)
+                    .size_3()
+                    .text_color(pal.text_muted),
+            )
+    }
+}
+
 #[derive(IntoElement)]
 struct LabelTrigger {
     id: ElementId,
@@ -622,9 +656,7 @@ impl RenderOnce for LabelTrigger {
         // Always show the action the button actually performs. Default and
         // customised bindings use the same neutral value colour; only the
         // actively highlighted control takes the accent.
-        let binding = self.binding.text;
-        let binding_description = binding.clone();
-        let binding_icon = self.binding.icon;
+        let binding_description = self.binding.text.clone();
         let button_name = tr!(self.label.id.translation_key());
         BaseButton::new(self.id)
             .selected(selected)
@@ -633,6 +665,7 @@ impl RenderOnce for LabelTrigger {
             .aria_selected(selected)
             .flex()
             .flex_col()
+            .items_stretch()
             .w(px(LABEL_W))
             .h(px(LABEL_H))
             .px_3()
@@ -676,41 +709,7 @@ impl RenderOnce for LabelTrigger {
             )
             // Current binding — the value (sm), the same size as the action rows
             // it edits.
-            .child(
-                h_flex()
-                    .items_center()
-                    .gap_2()
-                    // Leading action icon (same glyph as the picker rows), tinted
-                    // with the value so it tracks the default / set / highlighted
-                    // state. Absent for the gesture summary / unbound.
-                    .when_some(binding_icon, |row, path| {
-                        row.child(
-                            svg()
-                                .path(path)
-                                .size_4()
-                                .flex_none()
-                                .text_color(binding_color),
-                        )
-                    })
-                    .child(
-                        // Shrink + ellipsis so a long action name (e.g. "Mission
-                        // Control") doesn't push the chevron out of the fixed card.
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .whitespace_nowrap()
-                            .text_body()
-                            .text_color(binding_color)
-                            .child(binding),
-                    )
-                    .child(
-                        Icon::new(IconName::ChevronRight)
-                            .size_3()
-                            .text_color(pal.text_muted),
-                    ),
-            )
+            .child(self.binding.row(binding_color, pal))
             .on_click(move |_event, _window, cx| {
                 click_view.update(cx, |this, cx| {
                     this.select(btn);

@@ -227,6 +227,7 @@ fn applications_toggle(
         .w_full()
         .flex()
         .items_center()
+        .justify_start()
         .gap_2()
         .px_2()
         .py_1p5()
