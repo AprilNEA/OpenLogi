@@ -147,18 +147,18 @@ async fn establish(client: AgentClient, kind: ClientKind) -> Result<AgentClient,
 
 /// An answer to an observe call: anything stamped with the agent's
 /// [`Generation`].
-pub trait Observed {
+pub trait Stamped {
     /// The generation this answer describes.
     fn generation(&self) -> Generation;
 }
 
-impl Observed for Observation {
+impl Stamped for Observation {
     fn generation(&self) -> Generation {
         self.generation
     }
 }
 
-impl Observed for RingObservation {
+impl Stamped for RingObservation {
     fn generation(&self) -> Generation {
         self.generation
     }
@@ -193,12 +193,12 @@ impl Ledger {
     /// `Some` only for a generation newer than everything this connection has
     /// seen. An equal one is the hold elapsing with nothing new; a lower one
     /// is a stale reply. Neither may move a client's state backwards.
-    pub fn accept<T: Observed>(&mut self, observed: T) -> Option<T> {
-        if observed.generation() <= self.seen {
+    pub fn accept<T: Stamped>(&mut self, answer: T) -> Option<T> {
+        if answer.generation() <= self.seen {
             return None;
         }
-        self.seen = observed.generation();
-        Some(observed)
+        self.seen = answer.generation();
+        Some(answer)
     }
 }
 
@@ -325,7 +325,7 @@ mod tests {
 
     struct Stamp(Generation);
 
-    impl Observed for Stamp {
+    impl Stamped for Stamp {
         fn generation(&self) -> Generation {
             self.0
         }
