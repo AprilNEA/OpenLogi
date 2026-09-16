@@ -54,7 +54,7 @@ pub fn spawn(
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let (shutdown_done_tx, shutdown_done_rx) = oneshot::channel();
     thread::spawn(move || {
-        let runtime = match openlogi_core::runtime::current_thread() {
+        let runtime = match openlogi_core::worker::runtime() {
             Ok(runtime) => runtime,
             Err(error) => {
                 warn!(%error, "host switch watcher: could not build tokio runtime");

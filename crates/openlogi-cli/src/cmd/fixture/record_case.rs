@@ -516,54 +516,52 @@ mod tests {
             }
         }
 
-        openlogi_core::runtime::current_thread()
-            .unwrap()
-            .block_on(async {
-                {
-                    let _agent = single_instance::acquire(Role::Agent).unwrap();
-                    let error = prepare_contribution_target(None)
-                        .await
-                        .err()
-                        .expect("an agent starting before its socket binds must exclude capture");
-                    assert!(matches!(
-                        error.downcast_ref::<InstanceError>(),
-                        Some(InstanceError::AlreadyRunning { .. })
-                    ));
-                }
-                {
-                    let _capture = CaptureTarget {
-                        target: direct("Synthetic", 0xb034),
-                        _agent_guard: acquire_capture_ownership().await.unwrap(),
-                    };
-                    let output = child("contender").output().unwrap();
-                    assert!(
-                        output.status.success(),
-                        "agent must remain excluded after the endpoint check: {}",
-                        String::from_utf8_lossy(&output.stderr)
-                    );
-                }
-                // Successful capture scope releases ownership.
-                drop(single_instance::acquire(Role::Agent).unwrap());
-
-                // An endpoint accepting connections but not serving a handshake
-                // must still fail closed, even when no agent holds the lock.
-                let _listener = openlogi_ipc::transport::bind().unwrap();
-                acquire_capture_ownership()
+        openlogi_core::worker::runtime().unwrap().block_on(async {
+            {
+                let _agent = single_instance::acquire(Role::Agent).unwrap();
+                let error = prepare_contribution_target(None)
                     .await
                     .err()
-                    .expect("an unresponsive endpoint must refuse capture");
-                drop(single_instance::acquire(Role::Agent).unwrap());
-
-                // Cancelling a pending admission also releases the acquired lock.
-                let mut pending = Box::pin(acquire_capture_ownership());
-                assert!(futures::poll!(&mut pending).is_pending());
+                    .expect("an agent starting before its socket binds must exclude capture");
                 assert!(matches!(
-                    single_instance::acquire(Role::Agent),
-                    Err(InstanceError::AlreadyRunning { .. })
+                    error.downcast_ref::<InstanceError>(),
+                    Some(InstanceError::AlreadyRunning { .. })
                 ));
-                drop(pending);
-                drop(single_instance::acquire(Role::Agent).unwrap());
-            });
+            }
+            {
+                let _capture = CaptureTarget {
+                    target: direct("Synthetic", 0xb034),
+                    _agent_guard: acquire_capture_ownership().await.unwrap(),
+                };
+                let output = child("contender").output().unwrap();
+                assert!(
+                    output.status.success(),
+                    "agent must remain excluded after the endpoint check: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            // Successful capture scope releases ownership.
+            drop(single_instance::acquire(Role::Agent).unwrap());
+
+            // An endpoint accepting connections but not serving a handshake
+            // must still fail closed, even when no agent holds the lock.
+            let _listener = openlogi_ipc::transport::bind().unwrap();
+            acquire_capture_ownership()
+                .await
+                .err()
+                .expect("an unresponsive endpoint must refuse capture");
+            drop(single_instance::acquire(Role::Agent).unwrap());
+
+            // Cancelling a pending admission also releases the acquired lock.
+            let mut pending = Box::pin(acquire_capture_ownership());
+            assert!(futures::poll!(&mut pending).is_pending());
+            assert!(matches!(
+                single_instance::acquire(Role::Agent),
+                Err(InstanceError::AlreadyRunning { .. })
+            ));
+            drop(pending);
+            drop(single_instance::acquire(Role::Agent).unwrap());
+        });
     }
 
     #[test]

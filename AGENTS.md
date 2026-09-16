@@ -23,7 +23,7 @@ access devices directly.
 | Crate | Role |
 |---|---|
 | `crates/openlogi` | The CLI binary — thin wrapper over `openlogi-cli` |
-| `crates/openlogi-core` | Pure types: TOML config, device model, action catalog, locale negotiation. No I/O, no async (feature-gated host plumbing: `fs`, `locale`, and the `runtime` worker thread) |
+| `crates/openlogi-core` | Pure types: TOML config, device model, action catalog, locale negotiation. No I/O, no async (feature-gated host plumbing: `fs`, `locale`, and the `worker` thread) |
 | `crates/openlogi-device-registry` | Pure hardware identity registry: receiver protocols and standalone-device driver metadata |
 | `crates/openlogi-hidpp` | Hard fork of the `hidpp` protocol crate (**lib name `hidpp`**, 0BSD) |
 | `crates/openlogi-hidpp-derive` | Private derive macro for `openlogi-hidpp` feature boilerplate |

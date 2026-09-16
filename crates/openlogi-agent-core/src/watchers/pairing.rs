@@ -92,10 +92,9 @@ pub fn spawn_with_hardware(
     let (ctrl_tx, ctrl_rx) = mpsc::unbounded_channel();
     let (evt_tx, evt_rx) = mpsc::unbounded_channel();
 
-    let started =
-        openlogi_core::runtime::spawn_thread("openlogi-pairing-watcher", move |runtime| {
-            runtime.block_on(run(ctrl_rx, evt_tx, hardware));
-        });
+    let started = openlogi_core::worker::spawn("openlogi-pairing-watcher", move |runtime| {
+        runtime.block_on(run(ctrl_rx, evt_tx, hardware));
+    });
     if let Err(error) = started {
         warn!(%error, "could not start the pairing watcher");
     }

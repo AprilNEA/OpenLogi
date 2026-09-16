@@ -28,7 +28,7 @@ tarpc encodes the **method order**, so the wire format is positional:
 the handshake (connect, judge the version in both directions, declare — all within
 `HANDSHAKE_TIMEOUT`, so no caller adds a timeout of its own),
 `probe_version` the agent's takeover probe, and `Ledger` and `observe_context` the
-observe bookkeeping (the thread a client loop runs on is `openlogi_core::runtime`'s).
+observe bookkeeping (the thread a client loop runs on is `openlogi_core::worker`'s).
 Consumers
 never compare `PROTOCOL_VERSION`, call `declare_client`, or open the transport
 themselves — the `.ast-grep/rules/ipc-*.yml` guards fail the `ast-grep` CI job on any

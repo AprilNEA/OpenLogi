@@ -263,10 +263,9 @@ fn spawn_inner(registry: Option<ChannelRegistry>, hardware: HardwareContext) -> 
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let worker_tx = event_tx.clone();
     let (refresh_tx, refresh_rx) = mpsc::channel(1);
-    let started =
-        openlogi_core::runtime::spawn_thread("openlogi-inventory-watcher", move |runtime| {
-            runtime.block_on(run_watcher(worker_tx, refresh_rx, registry, hardware));
-        });
+    let started = openlogi_core::worker::spawn("openlogi-inventory-watcher", move |runtime| {
+        runtime.block_on(run_watcher(worker_tx, refresh_rx, registry, hardware));
+    });
     if let Err(error) = started {
         // OS thread / fork / runtime limits are non-fatal for the agent as a
         // whole, but enumeration will never run. Say so — sending an empty

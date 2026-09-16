@@ -13,7 +13,7 @@ fn route(slot: u8) -> DeviceRoute {
 }
 
 fn runtime() -> tokio::runtime::Runtime {
-    openlogi_core::runtime::current_thread().unwrap()
+    openlogi_core::worker::runtime().unwrap()
 }
 
 #[test]

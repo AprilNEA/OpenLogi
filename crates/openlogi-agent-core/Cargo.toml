@@ -11,7 +11,7 @@ description = "Headless orchestration shared by the OpenLogi background agent: h
 publish = false
 
 [dependencies]
-openlogi-core = { path = "../openlogi-core", features = ["runtime"] }
+openlogi-core = { path = "../openlogi-core", features = ["worker"] }
 openlogi-inject = { path = "../openlogi-inject" }
 openlogi-hid = { path = "../openlogi-hid" }
 openlogi-hook = { path = "../openlogi-hook" }

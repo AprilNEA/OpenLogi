@@ -61,7 +61,7 @@ fn replace_stale() -> Option<InstanceGuard> {
     use std::ffi::OsStr;
     use sysinfo::{Pid, ProcessesToUpdate, Signal, System};
 
-    let rt = openlogi_core::runtime::current_thread().ok()?;
+    let rt = openlogi_core::worker::runtime().ok()?;
     // The probe carries the shared handshake deadline: a holder that cannot
     // answer within it is wedged in a way we cannot reason about, so it is
     // left alone like an unreachable one.

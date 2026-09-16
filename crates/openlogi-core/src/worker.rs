@@ -4,7 +4,7 @@
 //! watchers and hardware writers off its main runtime, so each of them puts a
 //! current-thread runtime on an OS thread of its own. That choice — which
 //! runtime flavour, with which drivers, failing how — was once written out at
-//! every such site; this module makes it once. Behind the `runtime` feature so
+//! every such site; this module makes it once. Behind the `worker` feature so
 //! the portable core stays free of tokio.
 
 use std::io;
@@ -18,14 +18,14 @@ use tokio::runtime::Runtime;
 ///
 /// Only if the OS refuses the runtime its resources — rare, and the caller's
 /// to report in its own terms.
-pub fn current_thread() -> io::Result<Runtime> {
+pub fn runtime() -> io::Result<Runtime> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
 }
 
-/// Spawn a named OS thread that owns a current-thread runtime, and hand the
-/// runtime to `run`.
+/// Spawn a named worker thread that owns a current-thread runtime, and hand
+/// the runtime to `run`.
 ///
 /// The runtime is built before the thread starts, so a failure reaches the
 /// caller instead of a thread that silently never ran. `run` typically blocks
@@ -36,11 +36,11 @@ pub fn current_thread() -> io::Result<Runtime> {
 /// # Errors
 ///
 /// If the runtime or the thread cannot be created.
-pub fn spawn_thread(name: &str, run: impl FnOnce(Runtime) + Send + 'static) -> io::Result<()> {
-    let runtime = current_thread()?;
+pub fn spawn(name: &str, run: impl FnOnce(Runtime) + Send + 'static) -> io::Result<()> {
+    let rt = runtime()?;
     std::thread::Builder::new()
         .name(name.to_owned())
-        .spawn(move || run(runtime))?;
+        .spawn(move || run(rt))?;
     Ok(())
 }
 
@@ -52,7 +52,7 @@ mod tests {
     fn a_worker_runs_its_future_on_the_named_thread() {
         let (report, reported) = std::sync::mpsc::channel();
 
-        spawn_thread("openlogi-test-worker", move |runtime| {
+        spawn("openlogi-test-worker", move |runtime| {
             runtime.block_on(async {
                 let _ = report.send(std::thread::current().name().map(str::to_owned));
             });

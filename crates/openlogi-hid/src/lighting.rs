@@ -65,7 +65,7 @@ impl LightingJob {
         std::thread::Builder::new()
             .name("openlogi-rgb".into())
             .spawn(move || {
-                let result = match openlogi_core::runtime::current_thread() {
+                let result = match openlogi_core::worker::runtime() {
                     Ok(runtime) => runtime.block_on(async {
                         let _guard = tokio::time::timeout(WAIT_BUDGET, lock.lock_owned())
                             .await

@@ -58,7 +58,7 @@ pub(crate) struct Ipc {
 pub(crate) fn spawn_ipc() -> Ipc {
     let (invocation_tx, invocations) = mpsc::unbounded_channel();
     let (commands, mut command_rx) = mpsc::unbounded_channel();
-    let started = openlogi_core::runtime::spawn_thread("openlogi-overlay-ipc", move |runtime| {
+    let started = openlogi_core::worker::spawn("openlogi-overlay-ipc", move |runtime| {
         runtime.block_on(async {
             tokio::join!(
                 poll_invocations(invocation_tx),
