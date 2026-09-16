@@ -19,7 +19,8 @@ use openlogi_core::binding::{
 };
 use openlogi_core::scroll::ScrollDelta;
 
-use super::zoom_notch::ZoomNotches;
+use super::BUTTON_ZOOM_SOURCE;
+use super::zoom_notch::ZoomNotchRegistry;
 use super::{HeldKey, KeyPhase, QuantizedScroll, ScrollQuantizer};
 
 const HIGH_RES_UNITS_PER_TICK: f64 = 120.0;
@@ -44,10 +45,15 @@ pub(super) fn execute(action: &Action) {
         Effect::Shortcut(shortcut) => press_combo(&combo(shortcut)),
         Effect::Key(combo) | Effect::HeldKey(combo) => press_combo(combo),
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
-        Effect::Zoom(direction) => post_zoom(match direction {
-            ZoomDirection::In => ZOOM_PER_NOTCH,
-            ZoomDirection::Out => -ZOOM_PER_NOTCH,
-        }),
+        // A button is its own zoom source: it must not spend progress the
+        // wheel made, nor leave any behind for the wheel to trip over.
+        Effect::Zoom(direction) => post_zoom(
+            match direction {
+                ZoomDirection::In => ZOOM_PER_NOTCH,
+                ZoomDirection::Out => -ZOOM_PER_NOTCH,
+            },
+            BUTTON_ZOOM_SOURCE,
+        ),
         Effect::Media(key) => dispatch_media(key),
         Effect::Native(native) => dispatch_native(action, native),
         Effect::Script(script) => dispatch_script(script),
@@ -200,13 +206,13 @@ fn dispatch_script(script: Script<'_>) {
 /// A notch is the smallest step available here, so fractional magnification is
 /// accumulated until it is worth one; otherwise a high-resolution wheel would
 /// round every step to zero and never zoom.
-pub(super) fn post_zoom(magnification: f64) {
+pub(super) fn post_zoom(magnification: f64, source: &str) {
     let notches = {
         let Ok(mut pending) = ZOOM_NOTCHES.lock() else {
             tracing::warn!("Linux zoom remainder mutex poisoned");
             return;
         };
-        pending.take(magnification, ZOOM_PER_NOTCH, Instant::now())
+        pending.take(source, magnification, ZOOM_PER_NOTCH, Instant::now())
     };
     let count = notches.unsigned_abs();
     let value = if notches.is_negative() { -1 } else { 1 };
@@ -222,8 +228,8 @@ pub(super) fn post_zoom(magnification: f64) {
 /// wheel dispatcher applies per tick.
 const ZOOM_PER_NOTCH: f64 = 0.05;
 
-static ZOOM_NOTCHES: LazyLock<Mutex<ZoomNotches>> =
-    LazyLock::new(|| Mutex::new(ZoomNotches::new()));
+static ZOOM_NOTCHES: LazyLock<Mutex<ZoomNotchRegistry>> =
+    LazyLock::new(|| Mutex::new(ZoomNotchRegistry::new()));
 
 fn dispatch_scroll(dx: i8, dy: i8) {
     if dy != 0 {

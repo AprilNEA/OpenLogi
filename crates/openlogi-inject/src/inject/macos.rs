@@ -72,10 +72,15 @@ pub(super) fn execute(action: &Action) {
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
         // A one-shot zoom action (a button, not the wheel) still has to be a
         // gesture, so it borrows the same session with one tick's worth.
-        Effect::Zoom(direction) => post_zoom(match direction {
-            ZoomDirection::In => ZOOM_STEP,
-            ZoomDirection::Out => -ZOOM_STEP,
-        }),
+        // A button is its own zoom source: it must not spend progress the
+        // wheel made, nor leave any behind for the wheel to trip over.
+        Effect::Zoom(direction) => post_zoom(
+            match direction {
+                ZoomDirection::In => ZOOM_STEP,
+                ZoomDirection::Out => -ZOOM_STEP,
+            },
+            BUTTON_ZOOM_SOURCE,
+        ),
         // Media/volume controls are NX system-defined keys, not ordinary
         // keyboard virtual-key events. Posting kVK_Volume* through
         // CGEventCreateKeyboardEvent is ignored by macOS' volume handler.
@@ -662,7 +667,10 @@ fn dispatch_scroll(dx: i8, dy: i8) {
 /// the only way to reach the gesture path other apps already listen on —
 /// consistent with how this module already reaches Mission Control and Spaces
 /// through private SPIs rather than synthesised chords.
-pub(super) fn post_zoom(magnification: f64) {
+pub(super) fn post_zoom(magnification: f64, _source: &str) {
+    // macOS needs no per-source accumulator: magnification is sent as a real
+    // value inside a gesture session and the window server merges concurrent
+    // sessions itself, so there is no fraction to strand between sources.
     let Ok(mut gesture) = ZOOM_GESTURE.lock() else {
         tracing::warn!("macOS zoom gesture mutex poisoned");
         return;
@@ -1258,6 +1266,7 @@ pub(super) fn ax_browser_navigate(forward: bool, pid: Option<i32>) -> bool {
 use dock::{app_expose, launchpad, mission_control, show_desktop};
 use symbolic_hotkey::{next_desktop, previous_desktop};
 
+use super::BUTTON_ZOOM_SOURCE;
 use app_services::symbol as app_services_symbol;
 
 /// Shared resolver for private ApplicationServices SPI used by the Dock and

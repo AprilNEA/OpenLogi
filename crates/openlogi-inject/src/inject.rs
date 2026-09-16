@@ -25,6 +25,12 @@ mod linux;
 #[cfg(target_os = "windows")]
 mod windows;
 
+/// Source name for button-bound zoom. A button press is a gesture of its own,
+/// distinct from any wheel, so the two must never share zoom progress. Lives
+/// here rather than beside the quantizer because every backend names this
+/// source, while only the quantized ones keep an accumulator.
+const BUTTON_ZOOM_SOURCE: &str = "\0button";
+
 // Quantizing zoom into Ctrl+wheel notches is Windows/Linux business, but the
 // logic is pure and its boundaries are exactly where the bugs live, so it is
 // compiled for tests on every host too.
@@ -411,19 +417,19 @@ pub fn post_scroll(delta: ScrollDelta) {
 /// browser's own page zoom discards a gesture that begins and ends inside a
 /// single step — which is exactly how zoom ends up working on a canvas app
 /// while an ordinary page only scrolls.
-pub fn post_zoom(magnification: f64) {
+pub fn post_zoom(magnification: f64, source: &str) {
     if !magnification.is_finite() || magnification == 0.0 {
         return;
     }
     cfg_select! {
         target_os = "macos" => {
-            macos::post_zoom(magnification);
+            macos::post_zoom(magnification, source);
         }
         target_os = "linux" => {
-            linux::post_zoom(magnification);
+            linux::post_zoom(magnification, source);
         }
         target_os = "windows" => {
-            windows::post_zoom(magnification);
+            windows::post_zoom(magnification, source);
         }
         _ => {
             let _ = magnification;

@@ -13,7 +13,13 @@
 //! for; carried across a pause it leaks into an unrelated later gesture, a
 //! different device, or a different binding. Both boundaries therefore reset
 //! it.
+//!
+//! The same argument applies across *sources*: two mice, or a button-bound and
+//! a wheel-bound zoom on one mouse, are separate gestures that happen to share
+//! a process. A single accumulator would let one spend the other's progress,
+//! so each source gets its own and [`ZoomNotchRegistry`] keeps them apart.
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 /// How long a gesture may pause before the leftover fraction is stale. Matches
@@ -59,6 +65,50 @@ impl ZoomNotches {
         )]
         let notches = whole as i32;
         notches
+    }
+
+    /// Whether this source has been quiet long enough that its progress is
+    /// worthless and the entry can be dropped.
+    fn is_stale(&self, now: Instant) -> bool {
+        self.last.is_none_or(|(when, _)| now - when >= IDLE)
+    }
+}
+
+/// One [`ZoomNotches`] per zoom source, so a second mouse — or a button-bound
+/// zoom alongside a wheel-bound one — cannot consume progress it did not make.
+pub(super) struct ZoomNotchRegistry {
+    per_source: HashMap<String, ZoomNotches>,
+}
+
+impl ZoomNotchRegistry {
+    pub(super) fn new() -> Self {
+        Self {
+            per_source: HashMap::new(),
+        }
+    }
+
+    /// How many sources are currently tracked.
+    #[cfg(test)]
+    pub(super) fn len(&self) -> usize {
+        self.per_source.len()
+    }
+
+    /// Feed one step from `source` and take the whole notches it completes.
+    pub(super) fn take(
+        &mut self,
+        source: &str,
+        magnification: f64,
+        per_notch: f64,
+        now: Instant,
+    ) -> i32 {
+        // Sources come and go (devices unplug, bindings change), so drop the
+        // ones that have gone quiet rather than growing the map forever.
+        self.per_source
+            .retain(|held, notches| held == source || !notches.is_stale(now));
+        self.per_source
+            .entry(source.to_owned())
+            .or_insert_with(ZoomNotches::new)
+            .take(magnification, per_notch, now)
     }
 }
 
