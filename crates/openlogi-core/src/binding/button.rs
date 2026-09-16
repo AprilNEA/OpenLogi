@@ -73,11 +73,26 @@ pub enum ButtonId {
     /// Tilting the main wheel right — `0x1b04` CID `0x005d` ("Right Scroll"),
     /// Logi metadata slot `SLOT_NAME_RIGHT_SCROLL_BUTTON`. Counterpart to
     /// [`ButtonId::WheelTiltLeft`].
+    WheelTiltRight,
+    /// G502 X Plus G6 — hold-to-shift ("sniper") DPI. Captured over HID++
+    /// `0x8110` spy events, not the OS hook. Kept out of [`ButtonId::ALL`] so
+    /// MX popovers stay clean; seeded only for [`G502_X_PLUS_CONFIG_KEY`].
+    DpiShift,
+    /// G502 X Plus G8 — DPI up. Spy-captured like [`ButtonId::DpiShift`].
+    DpiUp,
+    /// G502 X Plus G7 — DPI down. Spy-captured like [`ButtonId::DpiShift`].
+    DpiDown,
+    /// G502 X Plus G9 — onboard profile cycle. Spy-captured like
+    /// [`ButtonId::DpiShift`].
     ///
     /// Declared last: the TOML config and any serialized form encode the
     /// variant identifier / index, so new buttons are append-only.
-    WheelTiltRight,
+    ProfileCycle,
 }
+
+/// Lightspeed / wired G502 X Plus (`wpid=4099`). The `config_key` is
+/// `format!("{:x}{:04x}", extended_model_id, model_ids[0])` with ext = 0.
+pub const G502_X_PLUS_CONFIG_KEY: &str = "04099";
 
 impl ButtonId {
     /// Every rebindable button in declaration (physical front-to-side) order —
@@ -98,6 +113,27 @@ impl ButtonId {
         ButtonId::GestureButton,
         ButtonId::HapticPanel,
     ];
+
+    /// Extra G502 X Plus buttons captured through `0x8110` Mouse Button Spy.
+    /// Kept out of [`ButtonId::ALL`] so MX-line popovers and default seeding
+    /// stay unchanged. [`crate::bindings::button_bindings_for`] seeds these
+    /// only for a [`super::SpyModel`] row — today [`G502_X_PLUS_CONFIG_KEY`],
+    /// either passed directly or recovered from the device's persisted identity.
+    pub const SPY_BUTTONS: [ButtonId; 4] = [
+        ButtonId::DpiShift,
+        ButtonId::DpiUp,
+        ButtonId::DpiDown,
+        ButtonId::ProfileCycle,
+    ];
+
+    /// Extra spy-remappable buttons for this HID++ model id, if it has a
+    /// locked [`super::SpyModel`] row. Used by the GUI to decide whether DPI
+    /// Up/Down and the other extras exist — MX and undocumented cousins get
+    /// [`None`].
+    #[must_use]
+    pub fn spy_buttons_for_config_key(key: &str) -> Option<&'static [ButtonId]> {
+        super::spy::SpyModel::for_hidpp_key(key).map(|model| model.extra_buttons)
+    }
 
     /// The divertable keyboard F-row controls, in F-row order. Kept out of
     /// [`ButtonId::ALL`]: that array seeds mouse defaults and the mouse
@@ -166,6 +202,10 @@ impl ButtonId {
             ButtonId::KeyVolumeDown => "Volume Down Key",
             ButtonId::KeyVolumeUp => "Volume Up Key",
             ButtonId::HapticPanel => "Haptic Panel",
+            ButtonId::DpiShift => "DPI Shift",
+            ButtonId::DpiUp => "DPI Up",
+            ButtonId::DpiDown => "DPI Down",
+            ButtonId::ProfileCycle => "Profile Cycle",
         }
     }
 
@@ -195,6 +235,10 @@ impl ButtonId {
             ButtonId::KeyVolumeDown => "keyboard.volume_down_key",
             ButtonId::KeyVolumeUp => "keyboard.volume_up_key",
             ButtonId::HapticPanel => "actions.haptic_panel",
+            ButtonId::DpiShift => "actions.dpi_shift",
+            ButtonId::DpiUp => "actions.dpi_up",
+            ButtonId::DpiDown => "actions.dpi_down",
+            ButtonId::ProfileCycle => "actions.profile_cycle",
         }
     }
 }

@@ -44,6 +44,24 @@ fn replacement_session_does_not_inherit_progress_or_cooldown() {
     );
 }
 
+#[tokio::test]
+async fn spy_ops_drop_finished_handles() {
+    let session = HidppSessionId::with_epoch("mouse-a", 1);
+    let mut ops = SpyOps::default();
+    ops.track(&session, tokio::spawn(async {}));
+    while ops
+        .0
+        .get(&session)
+        .is_some_and(|handles| handles.iter().any(|handle| !handle.is_finished()))
+    {
+        tokio::task::yield_now().await;
+    }
+    ops.track(&session, tokio::spawn(std::future::pending()));
+    let handles = ops.0.get(&session).expect("session still tracked");
+    assert_eq!(handles.len(), 1, "finished DPI ops must not accumulate");
+    assert!(!handles[0].is_finished());
+}
+
 #[test]
 fn replacement_session_does_not_inherit_partial_progress() {
     let old = HidppSessionId::with_epoch("mouse-a", 7);

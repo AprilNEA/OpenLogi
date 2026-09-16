@@ -25,6 +25,14 @@ owns the layer. `crates/openlogi-hid/AGENTS.md` points back here.
   last-good capabilities retained by the cache. The sole kind-derived fallback is
   `Capabilities::presumed_from_kind` for a device that has never been probed and is
   currently offline; keep it centralized and do not add new `kind` gates.
+- `0x8110` Host-mode remaps are a per-model registry, not a global button list.
+  Add a mouse only after a live `openlogi diag mouse-buttons --watch` dump: one
+  [`openlogi_core::binding::SpyModel`] row, one `session/gesture/spy.rs`
+  `SPY_BIT_TABLES` row, and a silhouette overlay in desktop `spy_overlay_for`.
+  Do not copy another model's bits. Extra buttons (DPI Up/Down, …) stay out of
+  `ButtonId::ALL` so MX popovers stay clean. G4/G5 join the spy set only when
+  that model has no `0x1b04` and the user remaps them — otherwise they stay
+  firmware-native.
 - The Agent's persistent enumerator is event-first: OS hotplug and HID++ lifecycle
   notifications are identity-free hints that request authoritative full
   re-enumeration. A named low-frequency recovery scan covers missed/unsupported events

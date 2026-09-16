@@ -211,6 +211,17 @@ fn binding_long_press_roundtrips_without_overlapping_other_table_shapes() {
 }
 
 #[test]
+fn click_less_long_press_still_has_a_configured_action() {
+    let binding = Binding::LongPress(LongPressBinding::new(Action::None, Action::MissionControl));
+    assert_eq!(binding.click_action(), Action::None);
+    assert!(
+        binding.has_configured_action(),
+        "the long arm must still arm capture / dispatch"
+    );
+    assert!(!Binding::Single(Action::None).has_configured_action());
+}
+
+#[test]
 fn binding_long_press_requires_exact_short_and_long_fields() {
     let missing_long = "[bindings.Back]\nshort = \"Copy\"";
     assert!(toml::from_str::<BindingWrapper>(missing_long).is_err());
@@ -541,6 +552,24 @@ fn wheel_tilt_defaults_to_the_scroll_its_firmware_already_does() {
         assert!(!tilt.is_os_hook_button());
         assert!(!tilt.is_hidpp_gesture_source());
     }
+}
+
+#[test]
+fn spy_buttons_stay_out_of_all_and_default_to_none() {
+    for button in ButtonId::SPY_BUTTONS {
+        assert!(
+            !ButtonId::ALL.contains(&button),
+            "{button:?} must not seed MX popovers"
+        );
+        assert_eq!(default_binding(button), Action::None);
+        assert!(!button.is_os_hook_button());
+        assert!(!button.is_hidpp_gesture_source());
+    }
+    assert_eq!(
+        ButtonId::spy_buttons_for_config_key(crate::binding::G502_X_PLUS_CONFIG_KEY),
+        Some(ButtonId::SPY_BUTTONS.as_slice())
+    );
+    assert_eq!(ButtonId::spy_buttons_for_config_key("2b042"), None);
 }
 
 #[test]

@@ -82,7 +82,14 @@ pub fn default_binding(button: ButtonId) -> Action {
         | ButtonId::KeyPlayPause
         | ButtonId::KeyMute
         | ButtonId::KeyVolumeDown
-        | ButtonId::KeyVolumeUp => Action::None,
+        | ButtonId::KeyVolumeUp
+        // Spy extras stay firmware-native until the user binds them. Seeding
+        // `None` matches keyboard keys: an unbound control is never treated
+        // as customized, so Host mode is not entered for a fresh G502.
+        | ButtonId::DpiShift
+        | ButtonId::DpiUp
+        | ButtonId::DpiDown
+        | ButtonId::ProfileCycle => Action::None,
     }
 }
 

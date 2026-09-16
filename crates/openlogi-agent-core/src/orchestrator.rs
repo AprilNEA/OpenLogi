@@ -16,7 +16,7 @@ use std::sync::{Arc, RwLock};
 
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{Action, Binding};
-use openlogi_core::bindings::{button_bindings_for, oshook_gestures_for};
+use openlogi_core::bindings::{button_bindings_for, oshook_gestures_for, spy_model_for_device};
 use openlogi_core::config::{Config, LightSettings, ScrollResolution, canonical_device_key};
 use openlogi_core::device::{
     Capabilities, DeviceInventory, DeviceKind, LightCapabilities, StandaloneDevice,
@@ -312,6 +312,16 @@ impl Orchestrator {
                 // reintroduce a second, unattributed dispatch path.
                 bindings.remove(button);
                 gestures.remove(button);
+            }
+            if let Some(model) = spy_model_for_device(&self.config, key) {
+                for button in model.armed_buttons(&bindings) {
+                    if button.is_os_hook_button() {
+                        // Spy suppresses the firmware HID report; a leftover
+                        // hook binding would double-dispatch if one leaked.
+                        bindings.remove(&button);
+                        gestures.remove(&button);
+                    }
+                }
             }
         }
         HookMaps {

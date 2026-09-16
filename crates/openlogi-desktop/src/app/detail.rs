@@ -261,7 +261,29 @@ fn buttons_tab(
         .w_full()
         .min_h_0()
         .children(button_profile_scope_bar(profile_icons, app_catalog, cx))
+        .children(onboard_profiles_paused_note(cx))
         .child(mouse_model.clone())
+}
+
+fn onboard_profiles_paused_note(cx: &Context<AppView>) -> Option<gpui::Div> {
+    let state = AppState::try_read(cx)?;
+    if !state.spy_capture_armed() {
+        return None;
+    }
+    let pal = theme::palette(cx);
+    Some(
+        h_flex()
+            .flex_shrink_0()
+            .w_full()
+            .items_center()
+            .gap_2()
+            .px_5()
+            .py_2()
+            .text_caption()
+            .text_color(pal.text_muted)
+            .child(Icon::new(IconName::Info).size_4())
+            .child(tr!("device.onboard_profiles_paused")),
+    )
 }
 
 fn tab_body(

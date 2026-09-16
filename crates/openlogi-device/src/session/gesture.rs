@@ -18,11 +18,12 @@
 //! defaults (click bound, rotation rebound, or sensitivity changed).
 
 mod liveness;
+pub(crate) mod spy;
 
 use std::sync::{Arc, Mutex, PoisonError};
 
 use hidpp::{
-    channel::HidppChannel,
+    channel::{HidppChannel, MessageListenerGuard},
     device::Device,
     feature::{
         CreatableFeature, EmittingFeature,
@@ -149,6 +150,8 @@ struct CaptureAccum {
     dpi_down: bool,
     /// Diverted standard-button CIDs held in the last event.
     buttons_down: Vec<u16>,
+    /// Last `0x8110` spy mask, for rising/falling edges.
+    spy_mask: u16,
 }
 
 #[cfg(test)]
@@ -212,6 +215,16 @@ pub struct CaptureSpec {
     /// [`DIVERTABLE_STANDARD_BUTTONS`] and non-gesturing
     /// [`GESTURE_SOURCE_BUTTONS`] whose binding leaves the default.
     pub divert_buttons: Vec<(u16, ButtonId)>,
+    /// Extra buttons captured through `0x8110` spy events. Non-empty only for
+    /// models with a locked spy map (see `openlogi_core::binding::SPY_MODELS`).
+    /// One customized extra arms the whole extra cluster; remapped G4/G5 join
+    /// when the model lists them as spy-owned. Host mode pauses onboard
+    /// profiles for the session.
+    pub spy_buttons: Vec<ButtonId>,
+    /// HID++ model id whose bit table `spy_buttons` came from (`04099`).
+    /// `None` when `spy_buttons` is empty. Required so two cousins can share
+    /// [`ButtonId`]s with different masks.
+    pub spy_model_key: Option<String>,
 }
 
 /// Capture the controls selected by `spec` on `route` until `shutdown`
@@ -298,7 +311,7 @@ async fn run_capture_session_on(
     }
     let chan = Arc::clone(shared.channel());
     let device_index = shared.device_index();
-    let armed = arm_controls(&chan, device_index, &spec, &shared, registry).await?;
+    let mut armed = arm_controls(&chan, device_index, &spec, &shared, registry).await?;
 
     if let Some(direction) = armed.thumbwheel_direction() {
         let _ = sink.send(direction);
@@ -311,57 +324,37 @@ async fn run_capture_session_on(
     }
 
     let accum = Arc::new(Mutex::new(CaptureAccum::default()));
-    let reprog_index = armed.reprog.as_ref().map(ReprogControlsV4::feature_index);
-    let gesture_cids = armed.gesture_cids.clone();
-    let gesture_button_set = armed.gesture_button_cids.clone();
-    let thumb_index = armed
-        .thumb
-        .as_ref()
-        .map(|thumb| thumb.wheel.feature_index());
-    let thumb_resolution = armed
-        .thumb
-        .as_ref()
-        .map_or(WheelResolution::UNKNOWN, ArmedThumbwheel::resolution);
-    let dpi_set = armed.dpi_cids.clone();
-    let button_set = armed.button_cids.clone();
     let activity = Arc::new(ChannelActivity::default());
-    let listener = chan.add_msg_listener_guarded({
-        let accum = Arc::clone(&accum);
-        let activity = Arc::clone(&activity);
-        let sink = sink.clone();
-        move |raw, matched| {
-            // Every parsed inbound HID++ report proves this channel's read
-            // path is alive, including responses matched to another request.
-            activity.record();
-            if matched {
-                return;
-            }
-            let msg = v20::Message::from(raw);
-            if let Some(idx) = reprog_index
-                && let Some(event) = reprog_controls::decode_event(&msg, device_index, idx)
-            {
-                // Recover the guard even if a prior holder panicked — the
-                // critical section is panic-free, so the data is consistent.
-                let mut acc = accum.lock().unwrap_or_else(PoisonError::into_inner);
-                handle_reprog_with_gesture_buttons(
-                    &mut acc,
-                    event,
-                    &gesture_cids,
-                    &dpi_set,
-                    &gesture_button_set,
-                    &button_set,
-                    &sink,
-                );
-                return;
-            }
-            if let Some(idx) = thumb_index
-                && let Some(event) = thumbwheel::decode_event(&msg, device_index, idx)
-                && let Some(input) = thumbwheel_input(event, thumb_resolution)
-            {
-                let _ = sink.send(input);
-            }
+    let listener = listen_captured_reports(
+        &chan,
+        device_index,
+        &armed,
+        Arc::clone(&accum),
+        Arc::clone(&activity),
+        sink.clone(),
+    );
+
+    if let Some(spy) = armed.spy.as_mut()
+        && let Err(error) = spy.start().await
+    {
+        warn!(
+            ?error,
+            "failed to start mouse button spy — restoring Host-mode remap"
+        );
+        if let Ok(mut slot) = channel_slot.write()
+            && slot
+                .as_ref()
+                .is_some_and(|published| Arc::ptr_eq(published.channel(), &chan))
+        {
+            *slot = None;
         }
-    });
+        let pending = armed.into_pending(&shared);
+        return Err(drop_listener_after(
+            listener,
+            rollback_capture_start(error, pending, &shared, registry),
+        )
+        .await);
+    }
 
     // Liveness watchdog: this session's channel is the sole delivery path for
     // every diverted control, and a channel whose input-report delivery dies
@@ -414,15 +407,95 @@ async fn run_capture_session_on(
     Ok(outcome)
 }
 
+fn listen_captured_reports(
+    chan: &Arc<HidppChannel>,
+    device_index: u8,
+    armed: &ArmedControls,
+    accum: Arc<Mutex<CaptureAccum>>,
+    activity: Arc<ChannelActivity>,
+    sink: mpsc::UnboundedSender<CapturedInput>,
+) -> MessageListenerGuard {
+    let reprog_index = armed.reprog.as_ref().map(ReprogControlsV4::feature_index);
+    let gesture_cids = armed.gesture_cids.clone();
+    let gesture_button_set = armed.gesture_button_cids.clone();
+    let thumb_index = armed
+        .thumb
+        .as_ref()
+        .map(|thumb| thumb.wheel.feature_index());
+    let thumb_resolution = armed
+        .thumb
+        .as_ref()
+        .map_or(WheelResolution::UNKNOWN, ArmedThumbwheel::resolution);
+    let dpi_set = armed.dpi_cids.clone();
+    let button_set = armed.button_cids.clone();
+    let spy_index = armed.spy.as_ref().map(spy::ArmedSpy::feature_index);
+    let spy_buttons = armed
+        .spy
+        .as_ref()
+        .map_or(&[][..], spy::ArmedSpy::buttons)
+        .to_vec();
+    let spy_bits = armed.spy.as_ref().map_or(&[][..], spy::ArmedSpy::bits);
+    chan.add_msg_listener_guarded(move |raw, matched| {
+        // Every parsed inbound HID++ report proves this channel's read
+        // path is alive, including responses matched to another request.
+        activity.record();
+        if matched {
+            return;
+        }
+        let msg = v20::Message::from(raw);
+        if let Some(idx) = reprog_index
+            && let Some(event) = reprog_controls::decode_event(&msg, device_index, idx)
+        {
+            // Recover the guard even if a prior holder panicked — the
+            // critical section is panic-free, so the data is consistent.
+            let mut acc = accum.lock().unwrap_or_else(PoisonError::into_inner);
+            handle_reprog_with_gesture_buttons(
+                &mut acc,
+                event,
+                &gesture_cids,
+                &dpi_set,
+                &gesture_button_set,
+                &button_set,
+                &sink,
+            );
+            return;
+        }
+        if let Some(idx) = thumb_index
+            && let Some(event) = thumbwheel::decode_event(&msg, device_index, idx)
+            && let Some(input) = thumbwheel_input(event, thumb_resolution)
+        {
+            let _ = sink.send(input);
+            return;
+        }
+        if let Some(idx) = spy_index
+            && let Some(mask) = spy::decode_event(&msg, device_index, idx)
+        {
+            let mut acc = accum.lock().unwrap_or_else(PoisonError::into_inner);
+            for (button, down) in spy::spy_edges(acc.spy_mask, mask, &spy_buttons, spy_bits) {
+                let input = if down {
+                    CapturedInput::ButtonDown(button)
+                } else {
+                    CapturedInput::ButtonUp(button)
+                };
+                let _ = sink.send(input);
+            }
+            acc.spy_mask = mask;
+        }
+    })
+}
+
 /// Restore or hand off one stopped session while its listener still owns every
 /// diverted input report.
 async fn finish_capture<T>(
     listener: T,
     stop: CaptureStop,
-    armed: ArmedControls,
+    mut armed: ArmedControls,
     retired: SharedChannel,
     registry: Option<&ChannelRegistry>,
 ) -> CaptureSessionOutcome {
+    if let Some(spy) = armed.spy.as_mut() {
+        let _ = spy.restore().await;
+    }
     let pending = armed.into_pending(&retired);
     drop_listener_after(
         listener,
@@ -483,6 +556,8 @@ struct ArmedControls {
     /// `0x2150` accessor and the information read while diverting it, present
     /// when the thumb wheel is diverted.
     thumb: Option<ArmedThumbwheel>,
+    /// Host-mode `0x8110` spy session, present when G6–G9 are remapped.
+    spy: Option<spy::ArmedSpy>,
 }
 
 struct ArmedThumbwheel {
@@ -526,6 +601,7 @@ impl ArmedControls {
             reprog,
             reporting,
             thumb,
+            spy,
             ..
         } = self;
         let reprog =
@@ -534,16 +610,20 @@ impl ArmedControls {
             retired,
             reprog,
             thumb.as_ref().map(|thumb| thumb.wheel.feature_index()),
+            spy.and_then(spy::ArmedSpy::into_restore),
         )
     }
 
     /// Reapply volatile diversion after a wireless reconnect broadcast. The
     /// broadcast can precede the device accepting feature writes, so allow a
     /// short settling window like the keyboard capture path does.
-    async fn rearm(&self, device_io: &DeviceIoGate) {
+    ///
+    /// Returns `false` when Host-mode spy mapping is applied but the spy
+    /// stream did not start — the session must restart so rollback can run.
+    async fn rearm(&self, device_io: &DeviceIoGate) -> bool {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         if !device_io.allows_io() {
-            return;
+            return true;
         }
         if let Some(rc) = self.reprog.as_ref() {
             for &reporting in &self.reporting {
@@ -567,6 +647,13 @@ impl ArmedControls {
         {
             warn!(?error, "thumb-wheel re-divert after wake failed");
         }
+        if let Some(spy) = self.spy.as_ref()
+            && let Err(error) = spy.rearm().await
+        {
+            warn!(?error, "spy start after wake failed — restarting capture");
+            return false;
+        }
+        true
     }
 }
 
@@ -578,6 +665,7 @@ fn log_capture_active(device_index: u8, armed: &ArmedControls, wake_rearm: bool)
         dpi_buttons = armed.dpi_cids.len(),
         buttons = armed.button_cids.len(),
         thumbwheel = armed.thumb.is_some(),
+        spy_buttons = armed.spy.as_ref().map_or(0, |spy| spy.buttons().len()),
         wake_rearm,
         "control capture active"
     );
@@ -659,7 +747,9 @@ async fn monitor_capture(
                 info!(?broadcast, "device reconnected — re-arming control capture");
                 *context.accum.lock().unwrap_or_else(PoisonError::into_inner) =
                     CaptureAccum::default();
-                context.armed.rearm(&device_io).await;
+                if !context.armed.rearm(&device_io).await {
+                    return stop_for_current_publication(context.registry, context.shared);
+                }
             }
             generation = context.activity.changed_after(activity_generation) => {
                 liveness.record_activity(tokio::time::Instant::now(), generation);
@@ -727,6 +817,7 @@ async fn arm_controls(
         && armed.dpi_cids.is_empty()
         && armed.button_cids.is_empty()
         && armed.thumb.is_none()
+        && armed.spy.is_none()
     {
         debug!(slot, "no capturable controls — idle session");
     }
@@ -833,6 +924,11 @@ async fn arm_controls_into(
         {
             return Err(GestureError::Hidpp(format!("{error:?}")));
         }
+    }
+
+    armed.spy = spy::ArmedSpy::prepare(device, chan, slot, spec).await?;
+    if let Some(spy) = armed.spy.as_mut() {
+        spy.apply().await?;
     }
     Ok(())
 }

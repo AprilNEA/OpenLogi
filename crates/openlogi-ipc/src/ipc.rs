@@ -62,7 +62,10 @@ pub use succession::Identity;
 /// v29: `Agent::declare_client` + [`ClientKind`] appended — typed demand for
 ///      the macOS dormancy gate.
 /// v30: `Agent::read_wheel` and `Agent::read_backlight` appended.
-pub const PROTOCOL_VERSION: u32 = 30;
+/// v31: `ButtonId` gained G502 X Plus spy extras (`DpiShift`, `DpiUp`,
+///      `DpiDown`, `ProfileCycle`). Capabilities still treat `0x8110` as
+///      buttons without a new field.
+pub const PROTOCOL_VERSION: u32 = 31;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to

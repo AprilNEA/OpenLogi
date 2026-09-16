@@ -167,6 +167,27 @@ mod tests {
     }
 
     #[test]
+    fn mouse_buttons_watch_and_device_flags_are_mapped() {
+        let cli = Cli::try_parse_from([
+            "openlogi",
+            "diag",
+            "mouse-buttons",
+            "--watch",
+            "--device",
+            "G502 X PLUS",
+        ])
+        .expect("valid mouse-buttons invocation parses");
+
+        match cli.cmd.expect("subcommand present") {
+            Command::Diag(DiagCmd::MouseButtons(args)) => {
+                assert!(args.watch);
+                assert_eq!(args.device.as_deref(), Some("G502 X PLUS"));
+            }
+            other => panic!("expected Diag(MouseButtons), got {other:?}"),
+        }
+    }
+
+    #[test]
     fn lighting_rejects_unknown_method() {
         let result = Cli::try_parse_from([
             "openlogi", "diag", "lighting", "ff0000", "--method", "bogus",

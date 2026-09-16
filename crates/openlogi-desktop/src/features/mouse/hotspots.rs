@@ -3,7 +3,7 @@
 //! stored as plain `f32` tuples so this module stays purely data and doesn't
 //! drag in `gpui` types.
 
-use openlogi_core::binding::ButtonId;
+use openlogi_core::binding::{ButtonId, SpyModel};
 
 /// One visual target in the mouse diagram.
 ///
@@ -122,6 +122,100 @@ pub fn default_hotspots(thumbwheel: bool) -> Vec<Hotspot> {
     hotspots
 }
 
+/// MX-only controls that the G502 X Plus does not have. They occupy the same
+/// silhouette slots we use for G6–G9, so they must come off before merge.
+const G502_OMIT: [MouseControlId; 3] = [
+    MouseControlId::Button(ButtonId::GestureButton),
+    MouseControlId::Button(ButtonId::DpiToggle),
+    MouseControlId::Button(ButtonId::HapticPanel),
+];
+
+/// Per-model silhouette overlay for a [`SpyModel`]. Gated on the HID++ key so
+/// DPI Up/Down never appear on MX or an undocumented cousin.
+pub struct SpyOverlay {
+    /// MX slots this model's extras replace.
+    pub omit: &'static [MouseControlId],
+    /// Synthetic extra-button targets (G6–G9 on the G502 X Plus).
+    pub hotspots: [Hotspot; 4],
+}
+
+/// Overlay for this HID++ model id, if it has a locked spy map.
+#[must_use]
+pub fn spy_overlay_for(config_key: &str) -> Option<SpyOverlay> {
+    SpyModel::for_hidpp_key(config_key)?;
+    Some(SpyOverlay {
+        omit: &G502_OMIT,
+        hotspots: spy_hotspots(),
+    })
+}
+
+/// Synthetic G6–G9 targets for the G502 X Plus silhouette. Coordinates reuse
+/// the MX left-thumb and DPI-cluster slots so the extras are visible; this
+/// mouse has no depot `slotId`s. Other models add their own overlay in
+/// [`spy_overlay_for`] — do not reuse these numbers.
+#[must_use]
+pub fn spy_hotspots() -> [Hotspot; 4] {
+    [
+        // Left-thumb sniper — the MX silhouette's gesture-button slot.
+        Hotspot {
+            id: ButtonId::DpiShift.into(),
+            x: 8.,
+            y: 380.,
+            w: 44.,
+            h: 80.,
+        },
+        // DPI cluster, left of the old ModeShift pad.
+        Hotspot {
+            id: ButtonId::DpiDown.into(),
+            x: 130.,
+            y: 226.,
+            w: 48.,
+            h: 44.,
+        },
+        // DPI cluster, right of the old ModeShift pad.
+        Hotspot {
+            id: ButtonId::DpiUp.into(),
+            x: 242.,
+            y: 226.,
+            w: 48.,
+            h: 44.,
+        },
+        // Profile cycle — immediately behind the DPI cluster.
+        Hotspot {
+            id: ButtonId::ProfileCycle.into(),
+            x: 175.,
+            y: 278.,
+            w: 70.,
+            h: 40.,
+        },
+    ]
+}
+
+/// Append this model's extra-button targets when `config_key` is a locked
+/// spy model. MX (`2b042`) and undocumented cousins get no DPI Up/Down.
+pub fn merge_spy_hotspots(
+    hotspots: &mut Vec<Hotspot>,
+    config_key: Option<&str>,
+    scale: (f32, f32),
+) {
+    let Some(overlay) = config_key.and_then(spy_overlay_for) else {
+        return;
+    };
+    hotspots.retain(|hotspot| !overlay.omit.contains(&hotspot.id));
+    for hotspot in overlay.hotspots {
+        if hotspots.iter().any(|existing| existing.id == hotspot.id) {
+            continue;
+        }
+        hotspots.push(Hotspot {
+            x: hotspot.x * scale.0,
+            y: hotspot.y * scale.1,
+            w: hotspot.w * scale.0,
+            h: hotspot.h * scale.1,
+            id: hotspot.id,
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,6 +256,51 @@ mod tests {
                 .iter()
                 .any(|h| { h.id == MouseControlId::Button(ButtonId::GestureButton) }),
             "the gesture button must be a mappable hotspot in the synthetic model"
+        );
+    }
+
+    #[test]
+    fn spy_hotspots_cover_g6_through_g9() {
+        let ids: Vec<_> = spy_hotspots().into_iter().map(|h| h.id).collect();
+        for button in ButtonId::SPY_BUTTONS {
+            assert!(
+                ids.contains(&MouseControlId::Button(button)),
+                "{button:?} must have a synthetic hotspot"
+            );
+        }
+    }
+
+    #[test]
+    fn merge_spy_hotspots_is_gated_on_the_g502() {
+        assert!(spy_overlay_for("04099").is_some());
+        assert!(spy_overlay_for("2b042").is_none());
+        assert!(
+            spy_overlay_for("0409f").is_none(),
+            "a cousin without a watch dump must not inherit the Plus overlay"
+        );
+        let mut mx = default_hotspots(false);
+        merge_spy_hotspots(&mut mx, Some("2b042"), (1., 1.));
+        assert!(!mx.iter().any(|h| h.id == ButtonId::DpiUp.into()));
+
+        let mut g502 = default_hotspots(false);
+        merge_spy_hotspots(&mut g502, Some("04099"), (1., 1.));
+        assert_eq!(
+            g502.iter()
+                .filter(|h| matches!(
+                    h.id,
+                    MouseControlId::Button(
+                        ButtonId::DpiShift
+                            | ButtonId::DpiUp
+                            | ButtonId::DpiDown
+                            | ButtonId::ProfileCycle
+                    )
+                ))
+                .count(),
+            4
+        );
+        assert!(
+            !g502.iter().any(|h| G502_OMIT.contains(&h.id)),
+            "MX-only slots must yield to G6–G9 on the G502 silhouette"
         );
     }
 

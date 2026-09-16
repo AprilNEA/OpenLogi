@@ -24,6 +24,7 @@ mod haptic;
 mod hires_wheel;
 mod lighting;
 mod litra;
+mod mouse_button_filter;
 mod smartshift;
 
 pub use backlight::{get_backlight, get_backlight_on, set_backlight_enabled};
@@ -52,6 +53,9 @@ pub use litra::{
     LITRA_BEAM_PRODUCT_ID, LITRA_GLOW_PRODUCT_ID, LightCommand, LitraDescriptor, LitraModel,
     apply as apply_litra, encode_command as encode_litra_command, find_litra,
     litra_model_for_route, matches_litra,
+};
+pub use mouse_button_filter::{
+    MouseButtonFilterDump, dump_mouse_button_filter, watch_mouse_button_filter,
 };
 pub use smartshift::{
     get_smartshift_status, get_smartshift_status_on, set_smartshift, set_smartshift_on,
