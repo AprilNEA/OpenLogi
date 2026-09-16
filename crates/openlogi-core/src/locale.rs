@@ -34,6 +34,7 @@ pub const SUPPORTED: &[(&str, &str)] = &[
     ("en", "English"),
     ("es", "Español"),
     ("fr", "Français"),
+    ("gl", "Galego"),
     ("it", "Italiano"),
     ("nl", "Nederlands"),
     ("nb", "Norsk"),
@@ -169,6 +170,8 @@ mod tests {
         assert_eq!(match_supported("it"), Some("it"));
         assert_eq!(match_supported("it-IT"), Some("it"));
         assert_eq!(match_supported("fr-FR"), Some("fr"));
+        assert_eq!(match_supported("gl"), Some("gl"));
+        assert_eq!(match_supported("gl-ES"), Some("gl"));
         assert_eq!(match_supported("de"), Some("de"));
         assert_eq!(match_supported("ko-KR"), Some("ko"));
         assert_eq!(match_supported("pt"), Some("pt-PT"));
