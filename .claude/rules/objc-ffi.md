@@ -31,8 +31,8 @@ files; **keep this table in sync when you add or move one**:
 | `openlogi-desktop/src/platform/registration/macos.rs` | `SMAppService` registration of the agent's launchd service (the login-item side of the agent lifecycle; the GUI must own it — the API resolves the plist against the calling app's bundle) |
 | `openlogi-desktop/src/platform/os.rs` | `NSProcessInfo` OS version + the `NSAppearance` titlebar sync |
 | `openlogi-hid/src/permissions.rs` | `IOHIDCheckAccess` / `IOHIDRequestAccess` (the prompting half of Input Monitoring) |
-| `openlogi-hook/src/macos.rs` | the CGEventTap (on `core-graphics`, see below), the `NSWorkspace` frontmost-app read, the Accessibility-trust check/prompt, and the HID sender-id lookup |
-| `openlogi-inject/src/inject/macos.rs` | CGEvent synthesis, media-key `NSEvent`s, raw `AXUIElement` navigation, and the `dlopen`'d private SPIs |
+| `openlogi-hook/src/macos.rs` | the CGEventTap (on `core-graphics`, see below), the off-tap `NSWorkspace` frontmost-app read and Safari PID snapshot, the Accessibility-trust check/prompt, and the HID sender-id lookup |
+| `openlogi-inject/src/inject/macos.rs` | CGEvent synthesis, media-key `NSEvent`s, off-thread `NSWorkspace` validation, typed `AXUIElement` navigation with `CFRetained` ownership, and the `dlopen`'d private SPIs |
 | `openlogi-overlay/src/platform.rs` | the Actions Ring helper's window policy: accessory activation, non-activating panel, the `NSEvent` global click-away monitor (`block2`), and `CGGetActiveDisplayList` / `CGDisplayBounds` |
 | `openlogi-permissions/src/macos.rs` | non-prompting permission reads + System-Settings deep links; `+[CBManager authorization]` via an `AnyClass` lookup |
 
@@ -71,8 +71,8 @@ every 2 s tray refresh under the old `cocoa`/`objc` 0.x path).
   CoreFoundation values arrive as `CFRetained`. Never hand-balance a release.
 - **Never** call manual `retain`/`release`/`autorelease`, add raw `cocoa`/`objc`
   0.x, or build a bespoke retain/release helper layer — that re-derives
-  `Retained<T>`, worse. The one exception is the raw AX navigation in
-  `openlogi-inject` (see below), which is on the migrate-when-touched list.
+  `Retained<T>`, worse. AX navigation adopts Copy-rule outputs as `CFRetained`
+  and downcasts their runtime types before use.
 
 ## Thread affinity is in the type system
 
@@ -198,16 +198,13 @@ its single user. The current set, all deliberate:
   typed framework crate in the tree.
 - `openlogi-agent-core/src/watchers/camera.rs`: the CoreMediaIO property API —
   same reason.
-- `openlogi-inject`: the `AXUIElement` subset it navigates with, plus
-  `CFRetain`/`CFRelease`, and the `dlopen`/`dlsym`-resolved private SPIs
+- `openlogi-inject`: the `dlopen`/`dlsym`-resolved private SPIs
   (`CoreDockSendNotification`, the CGS symbolic-hotkey trio).
 - the `disclaim` crate: `responsibility_spawnattrs_setdisclaim` (private SPI).
 
-Two of those are on the migrate-when-touched list rather than permanent:
-`openlogi-inject`'s raw AX navigation with its manual `CFRetain`/`CFRelease`
-belongs in `objc2-application-services`, and `openlogi-camera`'s
-`AVAuthorizationStatus` integers belong in `objc2-av-foundation`. Don't copy
-either pattern into new code.
+`openlogi-camera`'s `AVAuthorizationStatus` integers remain on the
+migrate-when-touched list: they belong in `objc2-av-foundation`.
+Don't copy that pattern into new code.
 
 ## The `unsafe` that remains (and the `SAFETY` rule)
 
@@ -226,6 +223,8 @@ under a `SAFETY` comment. Where it currently lives on macOS:
   payload, `AXIsProcessTrusted[WithOptions]` and the two extern statics they
   need (`kAXTrustedCheckOptionPrompt`, `kCFBooleanTrue`), and
   `NSString::to_str(pool)` (the borrow is tied to the pool).
+- `inject/macos.rs` — typed AX creation, attribute-copy out-pointers, CF array
+  element typing, `AXPress`, and `NSString::to_str(pool)` for Safari validation.
 - `permissions/macos.rs` — the CoreBluetooth force-link and the `CBManager`
   class-method send. `IOHIDCheckAccess` needs none: `objc2-io-kit` exposes it as
   a safe fn, in `openlogi-permissions` and `openlogi-hid` alike.
@@ -253,8 +252,8 @@ read moved to `objc2`. Don't "modernize" the tap casually.
 
 Code on the main run loop needs no pool (`Retained` frees deterministically);
 code on a bare thread does, because the framework still autoreleases internal
-temporaries. The three places that keep an explicit `objc2::rc::autoreleasepool`,
-and the only ones that should:
+temporaries. The call sites that keep an explicit
+`objc2::rc::autoreleasepool`, and the only ones that should:
 
 - `openlogi-hook`'s frontmost-application reads and activation observer — the
   watcher and notification callback may run on threads with no run loop, and
@@ -263,6 +262,9 @@ and the only ones that should:
   internal autoreleased temporaries are drained as well.
 - `openlogi-inject`'s `post_media_key` — the hook/gesture dispatch threads, where
   both the `NSEvent` creation and the `CGEvent` getter autorelease temporaries.
+- `openlogi-inject`'s `ax_browser_navigate` — the action worker, where `to_str`
+  borrows the current frontmost app's bundle id while validating the captured
+  Safari process.
 - `openlogi-camera`'s device enumeration — every `AVCaptureDevice` string is
   copied out before the pool drains, so no `Retained<T>` escapes it.
 
@@ -270,9 +272,8 @@ and the only ones that should:
 
 `cocoa` / `objc` 0.x are gone from every crate's direct deps (they remain in
 `Cargo.lock` only transitively via gpui — expected). Use `cargo add` for objc2
-framework crates, then **verify the `zed` / `gpui-component` git pins in
-`Cargo.lock` didn't move** (the gpui pin is held only by the lock; a resolve can
-bump it — restore with `cargo update -p gpui --precise <commit>`).
+framework crates, then verify that `Cargo.lock` still carries one version-aligned
+`gpui-pre` stack and the workspace's pinned Kit release.
 
 Every ObjC / Core-framework crate is declared **once** in the workspace table —
 `objc2`, `objc2-app-kit`, `objc2-foundation`, `objc2-core-foundation`,
@@ -281,8 +282,8 @@ Every ObjC / Core-framework crate is declared **once** in the workspace table �
 `default-features = false` there, and each member inherits with
 `workspace = true` and adds only the feature modules it uses. A new one belongs
 in that table too, never inline in a member manifest: the unified version is what
-keeps a resolve from dragging the gpui pin along. Trim a member's feature list
-when the code that needed it moves out.
+keeps the native framework types compatible across the app and GPUI. Trim a
+member's feature list when the code that needed it moves out.
 
 ## Build & verify
 

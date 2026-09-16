@@ -8,6 +8,50 @@ use super::types::{
 };
 
 #[test]
+fn restoring_control_rejects_late_claim_and_different_notification_flags() {
+    use std::sync::Arc;
+
+    use super::{EventsNotificationFlags, RgbEffectsFeature, SwControlFlags};
+    use crate::channel::tests::{MockRawHidChannel, channel_with_reader};
+    use crate::feature::CreatableFeature;
+    use crate::nibble::U4;
+    use crate::protocol::v20::{Message, MessageHeader};
+
+    futures::executor::block_on(async {
+        let (raw, handle) = MockRawHidChannel::new();
+        let channel = Arc::new(channel_with_reader(raw).await);
+        let (seen, incoming) = async_channel::unbounded();
+        let _listener = channel.add_msg_listener_guarded(move |_, matched| {
+            seen.try_send(matched).unwrap();
+        });
+        let feature = RgbEffectsFeature::new(channel, 3, 8);
+        let mut restore = Box::pin(feature.set_sw_control(
+            SwControlFlags::from_bits_retain(0x82),
+            EventsNotificationFlags::from_bits_retain(0x45),
+        ));
+        assert!(futures::poll!(restore.as_mut()).is_pending());
+        let header = MessageHeader {
+            device_index: 3,
+            feature_index: 8,
+            function_id: U4::from_lo(5),
+            software_id: U4::from_lo(1),
+        };
+        for payload in [[1, 0x83, 0x45], [1, 0x82, 0x44], [0, 0x82, 0x45]] {
+            handle
+                .send_incoming(Message::Short(header, payload).into())
+                .await;
+            assert!(!incoming.recv().await.unwrap());
+            assert!(futures::poll!(restore.as_mut()).is_pending());
+        }
+        handle
+            .send_incoming(Message::Short(header, [1, 0x82, 0x45]).into())
+            .await;
+        restore.await.unwrap();
+        assert!(incoming.recv().await.unwrap());
+    });
+}
+
+#[test]
 fn parses_device_info() {
     let mut payload = [0; 16];
     payload[0] = 0xff;

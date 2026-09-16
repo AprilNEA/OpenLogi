@@ -4,7 +4,10 @@ use num_enum::{IntoPrimitive, TryFromPrimitive};
 use thiserror::Error;
 
 use crate::{
-    channel::{ChannelError, HidppChannel, HidppMessage, LONG_REPORT_LENGTH, SHORT_REPORT_LENGTH},
+    channel::{
+        ChannelError, HidppChannel, HidppMessage, LONG_REPORT_LENGTH, SEND_RESPONSE_TIMEOUT,
+        SHORT_REPORT_LENGTH,
+    },
     nibble::{self, U4},
 };
 
@@ -128,35 +131,72 @@ impl HidppChannel {
     /// predicate comparing the headers of the outgoing and incoming message.
     pub async fn send_v20(&self, msg: Message) -> Result<Message, Hidpp20Error> {
         let header = msg.header();
-
-        let response = Message::from(
-            self.send(msg.into(), move |&response| {
-                let resp_msg = Message::from(response);
-                let resp_header = resp_msg.header();
-
-                // A HID++2.0 error response sets the feature index to 0xFF and moves all header
-                // values starting from the real feature index one byte to the right.
-                let is_error = resp_header.device_index == header.device_index
-                    && resp_header.feature_index == 0xff
-                    && nibble::combine(resp_header.function_id, resp_header.software_id)
-                        == header.feature_index
-                    && resp_msg.extend_payload()[0]
-                        == nibble::combine(header.function_id, header.software_id);
-
-                is_error || resp_header == header
-            })
-            .await?,
-        );
-
-        if response.header().feature_index == 0xff {
-            let err = ErrorType::try_from(response.extend_payload()[1])
-                .map_err(|_| Hidpp20Error::UnsupportedResponse)?;
-
-            return Err(Hidpp20Error::Feature(err));
-        }
-
-        Ok(response)
+        let response = self
+            .send(msg.into(), v20_response_predicate(header))
+            .await?;
+        decode_v20_response(response)
     }
+
+    /// Sends a HID++2.0 message without timing out its native write, then waits
+    /// up to [`SEND_RESPONSE_TIMEOUT`] for the matching response.
+    ///
+    /// `matches_payload` further filters successful responses where the feature
+    /// defines echoed fields. Header-matched errors bypass this filter.
+    ///
+    /// The caller **must drive this future to completion**. Requester deadlines
+    /// belong outside the task that owns this future; see
+    /// [`HidppChannel::send_write_through`] for the transport-ordering contract.
+    pub async fn send_v20_write_through(
+        &self,
+        msg: Message,
+        matches_payload: impl Fn(&Message) -> bool + Send + 'static,
+    ) -> Result<Message, Hidpp20Error> {
+        let matches_header = v20_response_predicate(msg.header());
+        let response = self
+            .send_write_through(
+                msg.into(),
+                move |raw| {
+                    let response = Message::from(*raw);
+                    matches_header(raw)
+                        && (response.header().feature_index == 0xff || matches_payload(&response))
+                },
+                SEND_RESPONSE_TIMEOUT,
+            )
+            .await?;
+        decode_v20_response(response)
+    }
+}
+
+fn v20_response_predicate(
+    header: MessageHeader,
+) -> impl Fn(&HidppMessage) -> bool + Send + 'static {
+    move |&response| {
+        let response = Message::from(response);
+        let response_header = response.header();
+
+        // A HID++2.0 error response sets the feature index to 0xFF and moves all header
+        // values starting from the real feature index one byte to the right.
+        let is_error = response_header.device_index == header.device_index
+            && response_header.feature_index == 0xff
+            && nibble::combine(response_header.function_id, response_header.software_id)
+                == header.feature_index
+            && response.extend_payload()[0]
+                == nibble::combine(header.function_id, header.software_id);
+
+        is_error || response_header == header
+    }
+}
+
+fn decode_v20_response(response: HidppMessage) -> Result<Message, Hidpp20Error> {
+    let response = Message::from(response);
+    if response.header().feature_index == 0xff {
+        let err = ErrorType::try_from(response.extend_payload()[1])
+            .map_err(|_| Hidpp20Error::UnsupportedResponse)?;
+
+        return Err(Hidpp20Error::Feature(err));
+    }
+
+    Ok(response)
 }
 
 /// Represents the type of an error a HID++2.0 device returns if a feature

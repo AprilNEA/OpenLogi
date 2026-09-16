@@ -277,6 +277,36 @@ enum PendingRequestCompletion {
     TimedOut,
 }
 
+fn finish_request(
+    completion: PendingRequestCompletion,
+    mut observation: RequestObservation<'_>,
+    dev: u8,
+    feat: u8,
+) -> Result<HidppMessage, ChannelError> {
+    match completion {
+        PendingRequestCompletion::Response(response) => {
+            observation.complete(RequestOutcome::Succeeded);
+            trace!(dev, feat, "hidpp response");
+            Ok(response)
+        }
+        PendingRequestCompletion::WriteFailed(error) => {
+            observation.complete(RequestOutcome::WriteFailed);
+            trace!(dev, feat, error = ?error, "hidpp no response");
+            Err(error)
+        }
+        PendingRequestCompletion::NoResponse => {
+            observation.complete(RequestOutcome::NoResponse);
+            trace!(dev, feat, error = ?ChannelError::NoResponse, "hidpp no response");
+            Err(ChannelError::NoResponse)
+        }
+        PendingRequestCompletion::TimedOut => {
+            observation.complete(RequestOutcome::TimedOut);
+            trace!(dev, feat, error = ?ChannelError::Timeout, "hidpp no response");
+            Err(ChannelError::Timeout)
+        }
+    }
+}
+
 impl HidppChannel {
     /// Tries to construct a HID++ channel from a raw HID channel.
     ///
@@ -467,7 +497,7 @@ impl HidppChannel {
         trace!(dev, feat, func, "hidpp request");
 
         let pending_id = self.pending_message_id.fetch_add(1, Ordering::SeqCst);
-        let mut observation = RequestObservation::new(self.observer.as_deref(), pending_id);
+        let observation = RequestObservation::new(self.observer.as_deref(), pending_id);
         let pending_request = PendingRequest::register(
             pending_id,
             Arc::clone(&self.pending_messages),
@@ -497,28 +527,64 @@ impl HidppChannel {
             }
         };
 
-        match completion {
-            PendingRequestCompletion::Response(response) => {
-                observation.complete(RequestOutcome::Succeeded);
-                trace!(dev, feat, "hidpp response");
-                Ok(response)
-            }
-            PendingRequestCompletion::WriteFailed(error) => {
-                observation.complete(RequestOutcome::WriteFailed);
-                trace!(dev, feat, error = ?error, "hidpp no response");
-                Err(error)
-            }
-            PendingRequestCompletion::NoResponse => {
-                observation.complete(RequestOutcome::NoResponse);
-                trace!(dev, feat, error = ?ChannelError::NoResponse, "hidpp no response");
-                Err(ChannelError::NoResponse)
-            }
-            PendingRequestCompletion::TimedOut => {
-                observation.complete(RequestOutcome::TimedOut);
-                trace!(dev, feat, error = ?ChannelError::Timeout, "hidpp no response");
-                Err(ChannelError::Timeout)
-            }
+        finish_request(completion, observation, dev, feat)
+    }
+
+    /// Sends a HID++ message without timing out its transport write, then
+    /// waits at most `response_timeout` for a matching response.
+    ///
+    /// This ordering is for an owner that must know the native write has
+    /// completed before issuing a later request such as rollback. A native HID
+    /// implementation may keep a write alive after its Rust future is dropped,
+    /// so timing out and discarding that future cannot guarantee wire order.
+    ///
+    /// The caller **must drive this future to completion**, even after its own
+    /// requester has cancelled or exceeded a deadline. Requester deadlines
+    /// belong outside the task that owns this future and should only signal
+    /// that owner. A wedged native write cannot honestly be bounded without a
+    /// transport-level cancellation or completion guarantee.
+    ///
+    /// Pending-request cleanup, observations, and response matching otherwise
+    /// follow [`Self::send_with_timeout`].
+    pub async fn send_write_through(
+        &self,
+        msg: HidppMessage,
+        response_predicate: impl Fn(&HidppMessage) -> bool + Send + 'static,
+        response_timeout: Duration,
+    ) -> Result<HidppMessage, ChannelError> {
+        let msg = self.normalize_outgoing(msg);
+        if !self.supports_msg(&msg) {
+            return Err(ChannelError::MessageTypeNotSupported);
         }
+
+        let (dev, feat, func) = msg.header();
+        trace!(dev, feat, func, "hidpp request");
+
+        let pending_id = self.pending_message_id.fetch_add(1, Ordering::SeqCst);
+        let observation = RequestObservation::new(self.observer.as_deref(), pending_id);
+        let pending_request = PendingRequest::register(
+            pending_id,
+            Arc::clone(&self.pending_messages),
+            response_predicate,
+        );
+
+        let completion = if let Err(error) = self.write_hidpp_report(msg, Some(pending_id)).await {
+            drop(pending_request);
+            PendingRequestCompletion::WriteFailed(error)
+        } else {
+            let mut response = std::pin::pin!(pending_request.receive().fuse());
+            select! {
+                response = response => response.map_or(
+                    PendingRequestCompletion::NoResponse,
+                    PendingRequestCompletion::Response,
+                ),
+                () = futures_timer::Delay::new(response_timeout).fuse() => {
+                    PendingRequestCompletion::TimedOut
+                },
+            }
+        };
+
+        finish_request(completion, observation, dev, feat)
     }
 
     /// Sends a HID++ message across the channel and does not wait for a

@@ -139,6 +139,71 @@ fn send_times_out_and_removes_pending_message() {
 }
 
 #[test]
+fn send_write_through_starts_response_timeout_after_write_completes() {
+    futures::executor::block_on(async {
+        let (raw, handle) = MockRawHidChannel::new();
+        handle.park_writes();
+        let channel = channel_with_reader(raw).await;
+        let response = short_msg(0x20);
+        handle.queue_response(response);
+        let mut send = Box::pin(channel.send_write_through(
+            short_msg(0x10),
+            move |candidate| *candidate == response,
+            Duration::from_millis(25),
+        ));
+
+        assert!(futures::poll!(send.as_mut()).is_pending());
+        futures_timer::Delay::new(Duration::from_millis(50)).await;
+        assert!(futures::poll!(send.as_mut()).is_pending());
+        assert_eq!(channel.pending_messages.lock().unwrap().len(), 1);
+
+        handle.release_writes();
+        assert_eq!(send.await.unwrap(), response);
+        assert_pending_empty(&channel);
+    });
+}
+
+#[test]
+fn send_write_through_times_out_and_cleans_up_after_write_completes() {
+    futures::executor::block_on(async {
+        let (raw, handle) = MockRawHidChannel::new();
+        handle.park_writes();
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let observer_observations = Arc::clone(&observations);
+        let observer: Arc<dyn ChannelObserver> = Arc::new(move |observation| {
+            observer_observations.lock().unwrap().push(observation);
+        });
+        let channel = HidppChannel::from_raw_channel_with_observer(raw, observer)
+            .await
+            .expect("the mock transport speaks HID++");
+        let mut send = Box::pin(channel.send_write_through(
+            short_msg(0x10),
+            |_| false,
+            Duration::from_millis(25),
+        ));
+
+        assert!(futures::poll!(send.as_mut()).is_pending());
+        futures_timer::Delay::new(Duration::from_millis(50)).await;
+        assert!(futures::poll!(send.as_mut()).is_pending());
+
+        handle.release_writes();
+        let error = send.await.unwrap_err();
+
+        assert!(matches!(error, ChannelError::Timeout));
+        assert_pending_empty(&channel);
+        assert!(observations.lock().unwrap().iter().any(|observation| {
+            matches!(
+                observation,
+                ChannelObservation::RequestOutcome {
+                    request_id: 1,
+                    outcome: RequestOutcome::TimedOut,
+                }
+            )
+        }));
+    });
+}
+
+#[test]
 fn cancelled_send_removes_pending_before_a_late_response() {
     futures::executor::block_on(async {
         let (raw, handle) = MockRawHidChannel::new();
@@ -547,6 +612,33 @@ fn send_v20_error_frame_with_unmapped_code_is_unsupported_response() {
     });
 }
 
+#[test]
+fn send_v20_write_through_preserves_typed_feature_errors() {
+    futures::executor::block_on(async {
+        let (raw, handle) = MockRawHidChannel::new();
+        handle.park_writes();
+        let channel = channel_with_reader(raw).await;
+
+        let header = v20::MessageHeader {
+            device_index: 0x01,
+            feature_index: 0x05,
+            function_id: U4::from_lo(0x2),
+            software_id: U4::from_lo(0x3),
+        };
+        let request = v20::Message::Short(header, [0, 0, 0]);
+        let error_response = v20_error_frame(header, ErrorType::Busy.into());
+        handle.queue_response(error_response.into());
+        let mut send = Box::pin(channel.send_v20_write_through(request, |_| false));
+
+        assert!(futures::poll!(send.as_mut()).is_pending());
+        handle.release_writes();
+        let error = send.await.unwrap_err();
+
+        assert!(matches!(error, Hidpp20Error::Feature(ErrorType::Busy)));
+        assert_pending_empty(&channel);
+    });
+}
+
 /// Builds the HID++2.0 error-frame encoding for `request_header`: feature
 /// index 0xFF, with the original feature index and function|software byte
 /// shifted one byte to the right (see `v20::HidppChannel::send_v20`'s
@@ -595,6 +687,10 @@ impl MockRawHidHandle {
 
     pub(crate) fn park_writes(&self) {
         self.park_writes.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) fn release_writes(&self) {
+        self.park_writes.store(false, Ordering::SeqCst);
     }
 
     pub(crate) fn fail_writes(&self) {
@@ -683,8 +779,8 @@ impl RawHidChannel for MockRawHidChannel {
         if self.fail_writes.load(Ordering::SeqCst) {
             return Err(mock_error());
         }
-        if self.park_writes.load(Ordering::SeqCst) {
-            return std::future::pending().await;
+        while self.park_writes.load(Ordering::SeqCst) {
+            futures_timer::Delay::new(Duration::from_millis(1)).await;
         }
         let response = self.responses_on_write.lock().unwrap().pop_front();
         if let Some(response) = response {
