@@ -941,10 +941,9 @@ fn hook_maps_publish_selection_and_preserve_learned_thumbwheel_polarity() {
     assert_eq!(maps.thumbwheel_positive_is_forward.get("a"), Some(&true));
 }
 
-#[test]
-fn macos_side_gesture_capture_follows_mouse_hook_availability() {
+fn assert_side_gesture_capture_follows_mouse_hook_availability(button: ButtonId) {
     let mut config = Config::default();
-    config.set_gesture_mode("a", ButtonId::Forward, true);
+    config.set_gesture_mode("a", button, true);
     let mut orch = orchestrator(config);
     orch.devices = vec![dev("a", 1, true)];
     orch.rebuild();
@@ -957,7 +956,7 @@ fn macos_side_gesture_capture_follows_mouse_hook_availability() {
             .spec
             .divert_gesture_buttons
             .iter()
-            .any(|&(_, button)| button == ButtonId::Forward)
+            .any(|&(_, b)| b == button)
     };
     assert!(
         !side_gesture_is_armed(&orch),
@@ -979,8 +978,8 @@ fn macos_side_gesture_capture_follows_mouse_hook_availability() {
             .hook_maps
             .read()
             .expect("hook maps should not be poisoned");
-        assert!(!hook_maps.bindings.contains_key(&ButtonId::Forward));
-        assert!(!hook_maps.gestures.contains_key(&ButtonId::Forward));
+        assert!(!hook_maps.bindings.contains_key(&button));
+        assert!(!hook_maps.gestures.contains_key(&button));
         assert!(side_gesture_is_armed(&orch));
     } else {
         let hook_maps = orch
@@ -988,7 +987,7 @@ fn macos_side_gesture_capture_follows_mouse_hook_availability() {
             .hook_maps
             .read()
             .expect("hook maps should not be poisoned");
-        assert!(hook_maps.gestures.contains_key(&ButtonId::Forward));
+        assert!(hook_maps.gestures.contains_key(&button));
         assert!(!side_gesture_is_armed(&orch));
     }
 
@@ -1004,6 +1003,16 @@ fn macos_side_gesture_capture_follows_mouse_hook_availability() {
         !side_gesture_is_armed(&orch),
         "revoking the movement hook must restore native HID++ controls"
     );
+}
+
+#[test]
+fn macos_side_gesture_capture_follows_mouse_hook_availability() {
+    assert_side_gesture_capture_follows_mouse_hook_availability(ButtonId::Forward);
+}
+
+#[test]
+fn macos_middle_click_gesture_capture_follows_mouse_hook_availability() {
+    assert_side_gesture_capture_follows_mouse_hook_availability(ButtonId::MiddleClick);
 }
 
 #[test]
