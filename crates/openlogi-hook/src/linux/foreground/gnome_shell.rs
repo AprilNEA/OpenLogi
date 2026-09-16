@@ -122,22 +122,12 @@ impl GnomeShellSource {
         }
 
         loop {
-            if stop.is_requested() {
-                return ConnectionOutcome::Stopped;
-            }
             let event = future::race(
-                future::race(
-                    async { GnomeEvent::Focus(focus_changes.next().await) },
-                    async { GnomeEvent::Owner(owner_changes.next().await) },
-                ),
-                async {
-                    stop.stopped().await;
-                    GnomeEvent::Stop
-                },
+                async { GnomeEvent::Focus(focus_changes.next().await) },
+                async { GnomeEvent::Owner(owner_changes.next().await) },
             )
             .await;
             match event {
-                GnomeEvent::Stop => return ConnectionOutcome::Stopped,
                 GnomeEvent::Focus(Some(signal)) => match signal.args() {
                     Ok(args) => publish(app_id(args.wm_class().to_string())),
                     Err(error) => warn!("gnome-shell: malformed focus signal: {error}"),
@@ -170,7 +160,6 @@ fn app_id(wm_class: String) -> Option<String> {
 enum GnomeEvent<T, U> {
     Focus(Option<T>),
     Owner(Option<U>),
-    Stop,
 }
 
 enum ConnectionOutcome {
@@ -196,10 +185,16 @@ impl FrontmostSource for GnomeShellSource {
         stop: StopToken,
         publish: PublishAppId,
     ) -> Box<dyn FrontmostSource> {
-        // Stop wakes the observer through the stop token. Closing the
-        // connection from a helper thread to wake the streams instead left one
-        // socket descriptor open per observer renewal, which the idle-recovery
-        // cycle turns into a steady leak.
+        // Stop cancels the whole observation — setup, snapshots, and the event
+        // loop — by dropping its future on this thread while the connection is
+        // still open. Dropping the signal streams queues their `RemoveMatch`
+        // calls on the connection's executor, which is still running, so they
+        // complete and release the connection.
+        //
+        // Waking the streams by closing the connection from a helper thread
+        // instead let the socket reader see EOF and zbus's executor thread exit
+        // first; the `RemoveMatch` tasks queued afterwards were never run, kept
+        // the connection alive, and leaked its socket on every renewal.
         loop {
             if stop.is_requested() {
                 break;
@@ -214,8 +209,13 @@ impl FrontmostSource for GnomeShellSource {
                 }
                 continue;
             };
-            let outcome =
-                futures_lite::future::block_on(Self::observe_connection(conn, &stop, &publish));
+            let outcome = future::block_on(future::race(
+                async {
+                    stop.stopped().await;
+                    ConnectionOutcome::Stopped
+                },
+                Self::observe_connection(conn, &stop, &publish),
+            ));
             self.conn = None;
 
             match outcome {
