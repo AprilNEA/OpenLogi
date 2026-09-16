@@ -60,7 +60,7 @@ pub(crate) struct Args {
 pub(crate) fn run(args: &Args) -> Result<()> {
     let root = repo_root()?;
     let app = root.join("target/dev/OpenLogi.app");
-    let profile = Profile::of(&args.binary)?;
+    let profile = BuildProfile::of(&args.binary)?;
 
     processes::reap_leftovers(&app, &root.join("target"))?;
 
@@ -166,7 +166,7 @@ fn start_agent(app: &Path) -> Result<()> {
 fn embed_helper(
     root: &Path,
     app: &Path,
-    profile: &Profile,
+    profile: &BuildProfile,
     helper: &Helper,
     icon: &Path,
     signing: &signing::Signing,
@@ -277,7 +277,7 @@ fn helpers_wanted() -> bool {
 /// `<root>/target`, which `CARGO_TARGET_DIR`, a shared target directory or a
 /// git worktree all move somewhere else.
 #[derive(Clone, PartialEq, Eq, Debug)]
-struct Profile {
+struct BuildProfile {
     /// The directory the helpers will be built into as well.
     dir: PathBuf,
     /// Whether to pass `--release` when building them. Helpers match the GUI:
@@ -285,7 +285,7 @@ struct Profile {
     release: bool,
 }
 
-impl Profile {
+impl BuildProfile {
     fn of(binary: &Path) -> Result<Self> {
         let dir = binary
             .parent()

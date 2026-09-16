@@ -2,11 +2,11 @@ use super::*;
 
 #[test]
 fn the_profile_comes_from_the_binarys_own_directory() {
-    let debug = Profile::of(Path::new("/repo/target/debug/openlogi-desktop")).unwrap();
+    let debug = BuildProfile::of(Path::new("/repo/target/debug/openlogi-desktop")).unwrap();
     assert!(!debug.release);
     assert_eq!(debug.dir, Path::new("/repo/target/debug"));
 
-    let release = Profile::of(Path::new("/repo/target/release/openlogi-desktop")).unwrap();
+    let release = BuildProfile::of(Path::new("/repo/target/release/openlogi-desktop")).unwrap();
     assert!(release.release);
     assert_eq!(release.dir, Path::new("/repo/target/release"));
 }
@@ -17,7 +17,7 @@ fn the_profile_comes_from_the_binarys_own_directory() {
 #[test]
 fn the_helper_directory_follows_cargo_rather_than_the_repo() {
     let profile =
-        Profile::of(Path::new("/elsewhere/shared-target/debug/openlogi-desktop")).unwrap();
+        BuildProfile::of(Path::new("/elsewhere/shared-target/debug/openlogi-desktop")).unwrap();
 
     assert_eq!(profile.dir, Path::new("/elsewhere/shared-target/debug"));
 }
@@ -26,7 +26,7 @@ fn the_helper_directory_follows_cargo_rather_than_the_repo() {
 /// guessing would build the helpers from the wrong profile.
 #[test]
 fn an_unrecognised_profile_directory_is_an_error() {
-    let error = Profile::of(Path::new("/repo/target/aarch64-apple-darwin/debug-fast/x"))
+    let error = BuildProfile::of(Path::new("/repo/target/aarch64-apple-darwin/debug-fast/x"))
         .unwrap_err()
         .to_string();
     assert!(error.contains("named debug or release"), "got: {error}");
