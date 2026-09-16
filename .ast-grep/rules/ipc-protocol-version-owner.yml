@@ -1,6 +1,6 @@
 # Owner: openlogi_ipc::client — connect_as, or ProtocolSkew::check on a
 # probe_version answer.
-id: ipc-protocol-version-policy
+id: ipc-protocol-version-owner
 language: rust
 severity: error
 message: Protocol versions are judged once, in openlogi_ipc::client (connect_as, or ProtocolSkew::check on a probe_version answer). Consume the verdict instead of comparing PROTOCOL_VERSION here.
