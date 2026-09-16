@@ -70,8 +70,8 @@ pub enum Role {
     /// socket. A tool that must keep every agent away from the hardware while
     /// it works takes this lock itself.
     Agent,
-    /// The settings app: one window per user.
-    App,
+    /// The GUI: one settings window per user.
+    Gui,
 }
 
 impl Role {
@@ -79,7 +79,7 @@ impl Role {
     const fn lock_file(self) -> &'static str {
         match self {
             Self::Agent => "agent.lock",
-            Self::App => "openlogi.lock",
+            Self::Gui => "openlogi.lock",
         }
     }
 }

@@ -61,7 +61,7 @@ fn main() -> Result<()> {
     }
 
     let _guard =
-        match openlogi_core::single_instance::acquire(openlogi_core::single_instance::Role::App) {
+        match openlogi_core::single_instance::acquire(openlogi_core::single_instance::Role::Gui) {
             Ok(g) => g,
             Err(openlogi_core::single_instance::InstanceError::AlreadyRunning { path }) => {
                 info!(
