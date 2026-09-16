@@ -47,7 +47,9 @@ optional physical device key.
   optional theme names, and optional UI radius
 - `smooth_scroll` toggles finite animation for traditional mouse-wheel input
 - `vertical_scroll_sensitivity`, from `1` through `100` (`14` is 1×);
-  continuous trackpad input remains native
+  continuous trackpad input remains native. Automatically normalized against
+  a HiRes-wheel device's `scroll_resolution` (Low/Standard vs. High), so the
+  same value feels consistent after switching modes
 - `thumbwheel_sensitivity`, from `1` through `100` (`14` is 1×)
 
 `[devices."<physical-key>"]` contains per-device state. Receiver keys look like

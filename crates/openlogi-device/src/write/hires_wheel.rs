@@ -32,6 +32,68 @@ pub async fn get_scroll_wheel_mode(
     .await
 }
 
+/// Static capabilities of the HiRes wheel and this feature, as reported by
+/// the device itself (`0x2121` `getWheelCapabilities`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WheelCapabilities {
+    /// Wheel movement reports one ratchet distance produces in hi-res mode.
+    pub multiplier: u8,
+    /// Whether native HID scroll direction can be inverted in firmware.
+    pub has_invert: bool,
+    /// Whether the device has a hardware ratchet-mode switch.
+    pub has_switch: bool,
+    /// Ratchets produced by one full rotation of the wheel.
+    pub ratchets_per_rotation: u8,
+    /// Nominal wheel diameter in millimeters.
+    pub wheel_diameter: u8,
+}
+
+impl From<hidpp::feature::hires_wheel::WheelCapabilities> for WheelCapabilities {
+    fn from(capabilities: hidpp::feature::hires_wheel::WheelCapabilities) -> Self {
+        Self {
+            multiplier: capabilities.multiplier,
+            has_invert: capabilities.has_invert,
+            has_switch: capabilities.has_switch,
+            ratchets_per_rotation: capabilities.ratches_per_rotation,
+            wheel_diameter: capabilities.wheel_diameter,
+        }
+    }
+}
+
+/// Read the wheel's static capabilities.
+pub async fn get_wheel_capabilities(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+) -> Result<WheelCapabilities, WriteError> {
+    let index = route.device_index();
+    with_route(backend, route, move |channel| async move {
+        get_wheel_capabilities_on_channel(&channel, index).await
+    })
+    .await
+}
+
+/// Read the wheel's static capabilities on an already-open [`SharedChannel`].
+pub async fn get_wheel_capabilities_on(
+    shared: &SharedChannel,
+) -> Result<WheelCapabilities, WriteError> {
+    get_wheel_capabilities_on_channel(shared.channel(), shared.device_index()).await
+}
+
+async fn get_wheel_capabilities_on_channel(
+    channel: &Arc<HidppChannel>,
+    index: u8,
+) -> Result<WheelCapabilities, WriteError> {
+    let mut device = open_device(channel, index).await?;
+    let feature = open_feature::<HiResWheelFeature>(&mut device).await?;
+    feature
+        .get_wheel_capabilities()
+        .await
+        .map(WheelCapabilities::from)
+        .map_err(|error| {
+            classify_hidpp_error(error, HidppOperation::ReadWheelMode, HiResWheelFeature::ID)
+        })
+}
+
 /// Read the current wheel mode on an already-open [`SharedChannel`].
 pub async fn get_scroll_wheel_mode_on(
     shared: &SharedChannel,
