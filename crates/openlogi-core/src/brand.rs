@@ -147,17 +147,23 @@ impl Helper {
         format!("{bundle_dir}/Contents/MacOS/{}", self.executable())
     }
 
+    /// The bundle name this helper shipped under before it took its display
+    /// name. History, so spelled out rather than derived: a future rename must
+    /// not quietly stop old installs from being found.
+    const fn legacy_bundle_name(self) -> &'static str {
+        match self {
+            Self::Agent => "OpenLogiAgent",
+            Self::Overlay => "OpenLogiOverlay",
+        }
+    }
+
     /// Every path, relative to the app bundle's root, at which this helper's
     /// executable has ever shipped, newest layout first: the dev-suffixed
-    /// name, the shipped name, and the pre-rename no-space name
-    /// (`OpenLogiAgent.app`) for bundles built before the helpers took their
-    /// display names.
+    /// name, the shipped name, and the pre-rename name for bundles built
+    /// before the helpers took their display names.
     #[must_use]
     pub fn executable_candidates(self) -> [String; 3] {
-        let legacy = format!(
-            "{LOGIN_ITEMS_DIR}/{}.app",
-            self.display_name().replace(' ', "")
-        );
+        let legacy = format!("{LOGIN_ITEMS_DIR}/{}.app", self.legacy_bundle_name());
         [
             self.executable_in(&self.dev_bundle_dir()),
             self.executable_in(&self.bundle_dir()),
