@@ -15,7 +15,7 @@
 //! with [`ProtocolSkew::check`], the same rule.
 //!
 //! Both entry points reach the socket and finish the handshake within
-//! [`HANDSHAKE_DEADLINE`], so no caller wraps them in a timeout of its own: an
+//! [`HANDSHAKE_TIMEOUT`], so no caller wraps them in a timeout of its own: an
 //! agent that cannot accept a connection and answer the two handshake calls
 //! from memory in that window is wedged, not busy.
 //!
@@ -52,9 +52,9 @@ pub enum ConnectError {
     #[error(transparent)]
     Skew(#[from] ProtocolSkew),
     /// Reaching the socket and finishing the handshake together outran
-    /// [`HANDSHAKE_DEADLINE`]: a wedged agent, or an endpoint that accepts and
+    /// [`HANDSHAKE_TIMEOUT`]: a wedged agent, or an endpoint that accepts and
     /// never answers, and best treated as absent.
-    #[error("the agent did not complete the IPC handshake within {} s", HANDSHAKE_DEADLINE.as_secs())]
+    #[error("the agent did not complete the IPC handshake within {} s", HANDSHAKE_TIMEOUT.as_secs())]
     Timeout,
 }
 
@@ -65,7 +65,7 @@ pub enum ConnectError {
 /// served from memory, so an agent that cannot manage them in this window is
 /// wedged, not busy. A client treats it as absent and keeps retrying; the
 /// takeover handshake leaves such a holder alone rather than reason about it.
-pub const HANDSHAKE_DEADLINE: Duration = Duration::from_secs(2);
+pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// A protocol mismatch between this build and the agent, judged once here.
 ///
@@ -117,7 +117,7 @@ impl ProtocolSkew {
 }
 
 /// Connect to the agent as `kind`: reach the socket, verify the protocol,
-/// declare — all within [`HANDSHAKE_DEADLINE`].
+/// declare — all within [`HANDSHAKE_TIMEOUT`].
 ///
 /// The declaration comes last, and only once the versions agree: it is what
 /// arms a dormant agent when `kind` is [`ClientKind::Gui`], and a mismatched
@@ -129,13 +129,13 @@ impl ProtocolSkew {
 /// [`ConnectError::Handshake`] when the agent drops out before the handshake
 /// completes, [`ConnectError::Skew`] when the two sides disagree on the
 /// protocol, [`ConnectError::Timeout`] when the whole sequence outruns the
-/// deadline.
+/// timeout.
 pub async fn connect_as(kind: ClientKind) -> Result<AgentClient, ConnectError> {
-    connect_via(open(), kind).await
+    connect_with(open(), kind).await
 }
 
 /// Ask whichever agent holds the socket which protocol it speaks, and nothing
-/// else — within [`HANDSHAKE_DEADLINE`].
+/// else — within [`HANDSHAKE_TIMEOUT`].
 ///
 /// For the agent's takeover handshake, which must judge a lock holder without
 /// declaring itself a client of it. Everything else uses [`connect_as`].
@@ -144,9 +144,9 @@ pub async fn connect_as(kind: ClientKind) -> Result<AgentClient, ConnectError> {
 ///
 /// [`ConnectError::Endpoint`] when the socket cannot be reached,
 /// [`ConnectError::Handshake`] when the holder drops out before answering,
-/// [`ConnectError::Timeout`] when reaching it and asking outrun the deadline.
+/// [`ConnectError::Timeout`] when reaching it and asking outrun the timeout.
 pub async fn probe_version() -> Result<u32, ConnectError> {
-    probe_via(open()).await
+    probe_with(open()).await
 }
 
 /// A tarpc client on a fresh connection to the agent's socket.
@@ -155,31 +155,31 @@ async fn open() -> Result<AgentClient, ConnectError> {
     Ok(AgentClient::new(client::Config::default(), transport::wrap(stream)).spawn())
 }
 
-/// [`connect_as`] over any way of opening a client, so the deadline can be
+/// [`connect_as`] over any way of opening a client, so the timeout can be
 /// exercised against an in-memory agent — or an endpoint that never opens.
-async fn connect_via(
+async fn connect_with(
     open: impl Future<Output = Result<AgentClient, ConnectError>>,
     kind: ClientKind,
 ) -> Result<AgentClient, ConnectError> {
-    within_deadline(async { handshake(open.await?, kind).await }).await
+    within_timeout(async { handshake(open.await?, kind).await }).await
 }
 
 /// [`probe_version`] over any way of opening a client.
-async fn probe_via(
+async fn probe_with(
     open: impl Future<Output = Result<AgentClient, ConnectError>>,
 ) -> Result<u32, ConnectError> {
-    within_deadline(async {
+    within_timeout(async {
         let client = open.await?;
         Ok(client.protocol_version(context::current()).await?)
     })
     .await
 }
 
-/// Bound one connect sequence — opening included — by [`HANDSHAKE_DEADLINE`].
-async fn within_deadline<T>(
+/// Bound one connect sequence — opening included — by [`HANDSHAKE_TIMEOUT`].
+async fn within_timeout<T>(
     sequence: impl Future<Output = Result<T, ConnectError>>,
 ) -> Result<T, ConnectError> {
-    tokio::time::timeout(HANDSHAKE_DEADLINE, sequence)
+    tokio::time::timeout(HANDSHAKE_TIMEOUT, sequence)
         .await
         .unwrap_or(Err(ConnectError::Timeout))
 }
@@ -335,7 +335,7 @@ mod tests {
     async fn a_matching_agent_is_declared_to() {
         let (client, declared) = agent_speaking(PROTOCOL_VERSION);
 
-        connect_via(opened(client), ClientKind::Overlay)
+        connect_with(opened(client), ClientKind::Overlay)
             .await
             .expect("matching versions establish a client");
 
@@ -348,7 +348,7 @@ mod tests {
         // to it must not wake it.
         let (client, declared) = agent_speaking(PROTOCOL_VERSION - 1);
 
-        let Err(error) = connect_via(opened(client), ClientKind::Gui).await else {
+        let Err(error) = connect_with(opened(client), ClientKind::Gui).await else {
             panic!("an older agent is not usable");
         };
 
@@ -366,7 +366,7 @@ mod tests {
     async fn a_newer_agent_makes_this_client_the_stale_side() {
         let (client, declared) = agent_speaking(PROTOCOL_VERSION + 1);
 
-        let Err(error) = connect_via(opened(client), ClientKind::Cli).await else {
+        let Err(error) = connect_with(opened(client), ClientKind::Cli).await else {
             panic!("a newer agent is not usable");
         };
 
@@ -383,7 +383,7 @@ mod tests {
         // slow one; the handshake is answered from memory.
         let silent = in_memory_agent(|_| Box::pin(std::future::pending()), std::future::pending());
 
-        let Err(error) = connect_via(opened(silent), ClientKind::Gui).await else {
+        let Err(error) = connect_with(opened(silent), ClientKind::Gui).await else {
             panic!("a silent agent is not usable");
         };
 
@@ -392,14 +392,14 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn an_endpoint_that_never_opens_is_given_up_on() {
-        // The deadline covers reaching the agent, not only its two answers:
+        // The timeout covers reaching the agent, not only its two answers:
         // a socket nobody accepts on must not hang the caller.
-        let Err(error) = connect_via(std::future::pending(), ClientKind::Cli).await else {
+        let Err(error) = connect_with(std::future::pending(), ClientKind::Cli).await else {
             panic!("an endpoint that never opens is not usable");
         };
         assert!(matches!(error, ConnectError::Timeout), "{error}");
 
-        let Err(error) = probe_via(std::future::pending()).await else {
+        let Err(error) = probe_with(std::future::pending()).await else {
             panic!("nor can its version be probed");
         };
         assert!(matches!(error, ConnectError::Timeout), "{error}");

@@ -26,7 +26,7 @@ tarpc encodes the **method order**, so the wire format is positional:
 
 `src/client.rs` owns everything a client must do identically: `connect_as(kind)` is
 the handshake (connect, judge the version in both directions, declare — all within
-`HANDSHAKE_DEADLINE`, so no caller adds a timeout of its own),
+`HANDSHAKE_TIMEOUT`, so no caller adds a timeout of its own),
 `probe_version` the agent's takeover probe, `Ledger` and `observe_context` the observe
 bookkeeping, and `spawn_client_thread` the GPUI processes' client thread. Consumers
 never compare `PROTOCOL_VERSION`, call `declare_client`, or open the transport
