@@ -174,18 +174,36 @@ fn foreground_app_from_running_application(
             name.as_ref().map(|name| name.to_str(pool).to_owned()),
         )
     };
-    // A GUI process that is not an app bundle has no bundle identifier: AppKit
-    // publishes one only for a `.app` the executable actually sits in. Such a
-    // process still activates normally and is still reported as frontmost —
-    // emulators and QEMU front-ends commonly ship the window-owning binary in
-    // `Contents/Resources/`, launched from a shell script — so dropping it here
-    // made the window unaddressable by any per-app profile. Fall back to the
-    // executable path, which is what the Windows backend already keys on.
+    let pid = app.processIdentifier();
+    identify_foreground_app(bundle_id, name, || process_path(pid))
+}
+
+/// Choose the identifier and display name for a frontmost process from what
+/// AppKit reported about it.
+///
+/// A GUI process that is not an app bundle has no bundle identifier: AppKit
+/// publishes one only for a `.app` the executable actually sits in. Such a
+/// process still activates normally and is still reported as frontmost —
+/// emulators and QEMU front-ends commonly ship the window-owning binary in
+/// `Contents/Resources/`, launched from a shell script — so dropping it here
+/// made the window unaddressable by any per-app profile. Fall back to the
+/// executable path, which is what the Windows backend already keys on.
+/// `executable_path` is consulted only in that case, and a process it cannot
+/// resolve (already exited, or out of permission scope) yields `None`.
+///
+/// The display name is AppKit's `localizedName` when present, else the last
+/// component of the identifier — the executable's file name for a path, and
+/// the bundle identifier itself otherwise.
+fn identify_foreground_app(
+    bundle_id: Option<String>,
+    localized_name: Option<String>,
+    executable_path: impl FnOnce() -> Option<String>,
+) -> Option<ForegroundApp> {
     let id = match bundle_id {
         Some(bundle_id) => bundle_id,
-        None => process_path(app.processIdentifier())?,
+        None => executable_path()?,
     };
-    let display_name = name.unwrap_or_else(|| executable_name(&id).to_owned());
+    let display_name = localized_name.unwrap_or_else(|| executable_name(&id).to_owned());
     Some(ForegroundApp { id, display_name })
 }
 
@@ -1292,6 +1310,46 @@ mod tests {
         // The display-name fallback feeds bundle identifiers through here too,
         // and must hand them back untouched.
         assert_eq!(executable_name("com.apple.Safari"), "com.apple.Safari");
+    }
+
+    #[test]
+    fn foreground_app_keeps_bundle_ids_and_falls_back_to_the_executable_path() {
+        const VM_PATH: &str = "/Applications/Demo.app/Contents/Resources/runtime/bin/Demo VM";
+        let unreachable = || panic!("a bundled app must not consult the executable path");
+
+        // Bundled app: the bundle id wins and the path lookup is never made.
+        let app = identify_foreground_app(
+            Some("com.apple.Safari".to_owned()),
+            Some("Safari".to_owned()),
+            unreachable,
+        )
+        .expect("a bundled app is always identified");
+        assert_eq!(app.id, "com.apple.Safari");
+        assert_eq!(app.display_name, "Safari");
+
+        // Bundled app AppKit could not name: the bundle id doubles as the name.
+        let app = identify_foreground_app(Some("com.apple.Safari".to_owned()), None, unreachable)
+            .expect("a bundled app is always identified");
+        assert_eq!(app.display_name, "com.apple.Safari");
+
+        // Bundle-less process: keyed by its executable path, named by AppKit.
+        let app = identify_foreground_app(None, Some("Demo VM".to_owned()), || {
+            Some(VM_PATH.to_owned())
+        })
+        .expect("a resolvable executable path identifies the process");
+        assert_eq!(app.id, VM_PATH);
+        assert_eq!(app.display_name, "Demo VM");
+
+        // Bundle-less and nameless: the file name stands in for the name.
+        let app = identify_foreground_app(None, None, || Some(VM_PATH.to_owned()))
+            .expect("a resolvable executable path identifies the process");
+        assert_eq!(app.display_name, "Demo VM");
+
+        // Neither a bundle id nor a resolvable path: nothing to key a profile on.
+        assert_eq!(
+            identify_foreground_app(None, Some("Gone".to_owned()), || None),
+            None
+        );
     }
 
     #[test]
