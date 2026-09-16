@@ -75,12 +75,13 @@ pub enum GuiUpdate {
     /// The agent's state, as of a generation this client had not seen.
     Snapshot(AgentSnapshot),
     /// No usable connection for `link::UNREACHABLE_AFTER`: the agent is
-    /// genuinely unreachable (not just starting up). Sent once per outage; the
-    /// next snapshot supersedes it.
+    /// genuinely unreachable (not just starting up). Never sent while a newer
+    /// agent is the reason; a snapshot or [`Self::OutdatedGui`] supersedes it.
     Unreachable,
     /// The agent answered the handshake with a *newer* protocol — the app was
     /// updated on disk while this GUI kept running, and only a relaunch
-    /// helps. Sent once per outage.
+    /// helps. Sent when an attempt finds one and not repeated until
+    /// [`Self::Unreachable`] has superseded it.
     OutdatedGui,
     /// Result of an agent-owned standalone-light command. The typed failure
     /// reaches the GPUI state model instead of being reduced to a log line.

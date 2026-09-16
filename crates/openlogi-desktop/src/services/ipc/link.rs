@@ -51,8 +51,18 @@ pub(super) struct Down {
     /// cannot help — kickstart is a no-op on a running service and a fresh copy
     /// exits as a duplicate — only a GUI relaunch does.
     pub(super) agent_is_newer: bool,
-    told_unreachable: bool,
-    told_outdated: bool,
+    /// The last notice the GUI got about this outage. Each goes out when it
+    /// becomes true and again only after the other has superseded it, so the
+    /// window always shows the current reason and never a stale one.
+    told: Option<Notice>,
+}
+
+/// What the GUI can be told about an outage; see [`GuiUpdate::Unreachable`]
+/// and [`GuiUpdate::OutdatedGui`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Notice {
+    Unreachable,
+    Outdated,
 }
 
 impl Down {
@@ -61,26 +71,25 @@ impl Down {
             since,
             outage,
             agent_is_newer: false,
-            told_unreachable: false,
-            told_outdated: false,
+            told: None,
         }
     }
 
     /// Fold a failed connect attempt in, and say what the GUI is owed for it.
     ///
-    /// A newer agent is a fact about this process, told once per outage; the
-    /// retry that finds it every quarter second would otherwise spam both the
-    /// log and the window.
+    /// A newer agent is a fact about this process, told once; the retry that
+    /// finds it every quarter second would otherwise spam both the log and the
+    /// window.
     pub(super) fn connect_failed(&mut self, error: &ConnectError) -> Option<GuiUpdate> {
         match error {
             ConnectError::Skew(skew @ ProtocolSkew::AgentNewer { .. }) => {
                 self.agent_is_newer = true;
-                if self.told_outdated {
+                if self.told == Some(Notice::Outdated) {
                     debug!(%skew, "still the stale side");
                     return None;
                 }
                 warn!(%skew, "this GUI is the stale side — only a relaunch helps");
-                self.told_outdated = true;
+                self.told = Some(Notice::Outdated);
                 Some(GuiUpdate::OutdatedGui)
             }
             error => {
@@ -91,13 +100,17 @@ impl Down {
         }
     }
 
-    /// The unreachable notice, once, after [`UNREACHABLE_AFTER`] of this
-    /// outage. Before that the agent may simply be starting.
+    /// The unreachable notice, after [`UNREACHABLE_AFTER`] of this outage.
+    /// Before that the agent may simply be starting — and a newer agent is
+    /// not unreachable at all, so the relaunch notice stands while it is live.
     pub(super) fn unreachable_notice(&mut self, now: Instant) -> Option<GuiUpdate> {
-        if self.told_unreachable || now.saturating_duration_since(self.since) < UNREACHABLE_AFTER {
+        if self.agent_is_newer
+            || self.told == Some(Notice::Unreachable)
+            || now.saturating_duration_since(self.since) < UNREACHABLE_AFTER
+        {
             return None;
         }
-        self.told_unreachable = true;
+        self.told = Some(Notice::Unreachable);
         Some(GuiUpdate::Unreachable)
     }
 }
@@ -248,6 +261,33 @@ mod tests {
         // the spawn reflex may act on the next failed attempt.
         assert!(down.connect_failed(&socket_down()).is_none());
         assert!(!down.agent_is_newer);
+    }
+
+    #[test]
+    fn a_live_newer_agent_is_never_called_unreachable() {
+        let t0 = Instant::now();
+        let mut link = Link::cold(t0);
+        let down = link.down_mut().expect("cold is down");
+        let long_after = t0 + UNREACHABLE_AFTER + UNREACHABLE_AFTER;
+
+        assert!(down.connect_failed(&newer_agent()).is_some());
+        assert!(
+            down.unreachable_notice(long_after).is_none(),
+            "the relaunch notice must not be overwritten while the newer agent is live"
+        );
+
+        // Once it is gone the outage is an ordinary one, and when it comes back
+        // the relaunch notice is owed again: the window shows the current
+        // reason, not the first one.
+        assert!(down.connect_failed(&socket_down()).is_none());
+        assert!(matches!(
+            down.unreachable_notice(long_after),
+            Some(GuiUpdate::Unreachable)
+        ));
+        assert!(matches!(
+            down.connect_failed(&newer_agent()),
+            Some(GuiUpdate::OutdatedGui)
+        ));
     }
 
     #[test]
