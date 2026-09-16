@@ -4,6 +4,38 @@
 //! drag in `gpui` types.
 
 use openlogi_core::binding::ButtonId;
+use openlogi_core::device::{Capabilities, DeviceKind};
+
+/// The measured capabilities that decide which targets the model draws.
+///
+/// Both bits come from the device's HID++ feature table. An unprobed device has
+/// none, so [`Self::for_device`] falls back to the same presumption the tab gate
+/// makes rather than to [`Default`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ModelControls {
+    /// A horizontal thumb wheel is present — HID++ `0x2150` or a `0x6501`
+    /// gesture descriptor.
+    pub(crate) thumbwheel: bool,
+    /// HID++ ReprogControls (`0x1b00`–`0x1b04`) are present, so controls beyond
+    /// the OS-visible middle/back/forward can be diverted and remapped. Without
+    /// it only the OS hook can remap this mouse, and only what the OS sees.
+    pub(crate) can_divert: bool,
+}
+
+impl ModelControls {
+    /// Derive the drawable control set from a device's measured capabilities.
+    ///
+    /// Devices that were offline at startup have none, so this presumes the
+    /// same set the tab gate presumes — the two must agree, or a device is
+    /// offered a panel whose contents were computed from different assumptions.
+    pub(crate) fn for_device(capabilities: Option<Capabilities>, kind: DeviceKind) -> Self {
+        let capabilities = capabilities.unwrap_or_else(|| Capabilities::presumed_from_kind(kind));
+        Self {
+            thumbwheel: capabilities.thumbwheel,
+            can_divert: capabilities.can_divert_buttons(),
+        }
+    }
+}
 
 /// One visual target in the mouse diagram.
 ///
@@ -122,6 +154,19 @@ pub fn default_hotspots(thumbwheel: bool) -> Vec<Hotspot> {
     hotspots
 }
 
+/// Drop the targets this device cannot actually remap.
+///
+/// A mouse with no ReprogControls (`0x1b04`) — every G-series mouse, which
+/// carries `0x8100` OnboardProfiles instead — can only be remapped by the OS
+/// input hook, and the hook sees exactly middle/back/forward. Offering a DPI
+/// or gesture hotspot there would accept a binding that can never fire.
+pub(crate) fn retain_remappable_hotspots(hotspots: &mut Vec<Hotspot>, can_divert: bool) {
+    if can_divert {
+        return;
+    }
+    hotspots.retain(|hotspot| hotspot.id.button().is_some_and(ButtonId::is_os_hook_button));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,6 +208,62 @@ mod tests {
                 .any(|h| { h.id == MouseControlId::Button(ButtonId::GestureButton) }),
             "the gesture button must be a mappable hotspot in the synthetic model"
         );
+    }
+
+    /// A device that was offline at startup has no measured capabilities, so
+    /// the model must presume the same set `DetailTab::tabs_for` presumes —
+    /// otherwise a sleeping MX Master is handed the Buttons panel and then
+    /// shown three hotspots out of six.
+    #[test]
+    fn unprobed_mouse_keeps_the_presumed_full_model() {
+        let controls = ModelControls::for_device(None, DeviceKind::Mouse);
+        assert!(
+            controls.can_divert,
+            "an unprobed mouse must not lose hotspots the tab gate assumes it has"
+        );
+    }
+
+    /// A probed G-series mouse is a *measurement*, not a missing one, and the
+    /// restriction it measured must survive into the model. Built from the real
+    /// feature table so this tests the derivation rather than restating a
+    /// hand-written struct literal back to itself.
+    #[test]
+    fn probed_gaming_mouse_gets_the_model_but_cannot_divert() {
+        let g502 = Capabilities::from_feature_ids(&[0x8100, 0x8110, 0x2201, 0x2121]);
+        let controls = ModelControls::for_device(Some(g502), DeviceKind::Mouse);
+        assert!(g502.buttons, "the panel itself must still be offered");
+        assert!(
+            !controls.can_divert,
+            "no 0x1b04 means the model may only draw what the OS hook sees"
+        );
+    }
+
+    /// A G-series mouse (no `0x1b04`) keeps only what the OS hook can remap.
+    /// The DPI toggle, the gesture button and the thumb wheel are HID++-only
+    /// controls: without a capture feature they can never fire, so offering
+    /// them would take a binding and silently drop it.
+    #[test]
+    fn hook_only_mouse_keeps_only_os_hook_targets() {
+        let mut hotspots = default_hotspots(true);
+        retain_remappable_hotspots(&mut hotspots, false);
+        assert_eq!(
+            hotspots.iter().map(|h| h.id).collect::<Vec<_>>(),
+            vec![
+                MouseControlId::Button(ButtonId::MiddleClick),
+                MouseControlId::Button(ButtonId::Back),
+                MouseControlId::Button(ButtonId::Forward),
+            ]
+        );
+    }
+
+    /// The filter is a capability gate, not a rewrite: a mouse that *does*
+    /// expose ReprogControls keeps every target, in its authored order.
+    #[test]
+    fn divertable_mouse_keeps_every_target() {
+        let mut hotspots = default_hotspots(true);
+        let before = hotspots.clone();
+        retain_remappable_hotspots(&mut hotspots, true);
+        assert_eq!(hotspots, before);
     }
 
     #[test]

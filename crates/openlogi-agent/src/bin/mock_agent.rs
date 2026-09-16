@@ -24,9 +24,10 @@
 //! Built-in demo behavior:
 //!
 //! - A Bolt receiver with an online mouse (DPI + SmartShift + battery that
-//!   drains ~1%/minute), an offline mouse, and a lighting-capable keyboard,
-//!   plus one directly-attached mouse — covering every panel and both route
-//!   kinds without hardware.
+//!   drains ~1%/minute), an offline mouse, a lighting-capable keyboard and a
+//!   G-series mouse (gaming control tables, no ReprogControls), plus one
+//!   directly-attached mouse — covering every panel and both route kinds
+//!   without hardware.
 //! - A standalone Litra light whose power / brightness / temperature writes
 //!   persist, and a `camera_active` flag that flips every 30s so the
 //!   camera-linked light rendering has something to follow.

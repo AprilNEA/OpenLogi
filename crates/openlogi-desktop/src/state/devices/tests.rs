@@ -260,6 +260,7 @@ fn mouse_identity(name: &str) -> DeviceIdentity {
         kind: DeviceKind::Mouse,
         capabilities: Capabilities {
             buttons: true,
+            hook_only_buttons: false,
             pointer: true,
             lighting: false,
             scroll_inversion: false,
