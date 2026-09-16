@@ -243,7 +243,7 @@ mod tests {
     /// controls: without a capture feature they can never fire, so offering
     /// them would take a binding and silently drop it.
     #[test]
-    fn hook_only_mouse_keeps_only_os_hook_targets() {
+    fn undivertable_mouse_keeps_only_os_hook_targets() {
         let mut hotspots = default_hotspots(true);
         retain_remappable_hotspots(&mut hotspots, false);
         assert_eq!(

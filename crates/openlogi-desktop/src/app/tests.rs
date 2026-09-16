@@ -180,7 +180,7 @@ fn gallery_order_moves_connected_devices_first_stably() {
 fn tabs_follow_capabilities_not_kind() {
     let caps = Some(Capabilities {
         buttons: true,
-        hook_only_buttons: false,
+        no_button_diversion: false,
         pointer: true,
         lighting: false,
         scroll_inversion: false,
@@ -222,7 +222,7 @@ fn gaming_keyboard_gets_no_keys_tab() {
 fn mouse_without_reprogcontrols_still_gets_buttons_and_ring() {
     let caps = Some(Capabilities {
         buttons: true,
-        hook_only_buttons: true,
+        no_button_diversion: true,
         pointer: true,
         lighting: false,
         scroll_inversion: false,
@@ -260,7 +260,7 @@ fn keyboard_without_reprogcontrols_gains_no_mouse_panels() {
 fn keyboard_without_asset_hides_buttons_tab() {
     let caps = Some(Capabilities {
         buttons: true,
-        hook_only_buttons: false,
+        no_button_diversion: false,
         pointer: false,
         lighting: true,
         scroll_inversion: false,
@@ -282,7 +282,7 @@ fn keyboard_without_asset_hides_buttons_tab() {
 fn keyboard_with_buttons_shows_keys_tab() {
     let caps = Some(Capabilities {
         buttons: true,
-        hook_only_buttons: false,
+        no_button_diversion: false,
         pointer: false,
         lighting: true,
         scroll_inversion: false,

@@ -431,7 +431,7 @@ fn device_inventory() {
             }),
             capabilities: Some(Capabilities {
                 buttons: true,
-                hook_only_buttons: false,
+                no_button_diversion: false,
                 pointer: true,
                 lighting: false,
                 scroll_inversion: false,

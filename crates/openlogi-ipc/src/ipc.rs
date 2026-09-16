@@ -63,7 +63,7 @@ pub use succession::Identity;
 ///      the macOS dormancy gate.
 /// v30: `Agent::read_wheel` and `Agent::read_backlight` appended.
 /// v31: `Capabilities::dpi_gestures` appended.
-/// v32: `Capabilities::hook_only_buttons` added — `buttons` widened to cover
+/// v32: `Capabilities::no_button_diversion` added — `buttons` widened to cover
 ///      the gaming control tables, so the two are no longer the same question
 ///      (see [`openlogi_core::device::Capabilities`]).
 pub const PROTOCOL_VERSION: u32 = 32;

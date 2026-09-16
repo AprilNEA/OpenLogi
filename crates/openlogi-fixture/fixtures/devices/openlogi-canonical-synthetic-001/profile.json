@@ -117,7 +117,7 @@
           },
           "capabilities": {
             "buttons": true,
-            "hook_only_buttons": true,
+            "no_button_diversion": true,
             "pointer": true,
             "lighting": true,
             "scroll_inversion": false,
