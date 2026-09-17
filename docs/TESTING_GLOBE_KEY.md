@@ -325,5 +325,10 @@ injected events. Read-only preflight checks on the command process reported
 Accessibility, event-posting and event-listening access as false. This is not a
 successful live-event test; no permissions were changed. The installed agent has
 its own identity, so the command process's result does not establish the agent's
-permission state. Physical mouse timing and the destination application's response
-still require the manual cases above.
+permission state.
+
+The user subsequently confirmed all three requested behaviors on the MX Anywhere
+3S: single click cycles DPI presets, a hold presses Fn and releases it on mouse-up,
+and double click sends Control+Option+Shift+T. This is a successful physical smoke
+test; the exact 299/300 ms and 199/200/201 ms boundaries are verified by the automated
+tests rather than a stopwatch measurement on the mouse.
