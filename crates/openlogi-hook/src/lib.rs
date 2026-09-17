@@ -39,7 +39,11 @@ pub use openlogi_core::scroll::ScrollDelta;
 /// sources (IOKit, evdev) hand it back as a `u32`.
 pub const LOGITECH_VENDOR_ID: u32 = openlogi_core::hid::LOGITECH_VENDOR_ID as u32;
 
-/// Cursor position in the operating system's global screen coordinate space.
+/// Cursor position in the operating system's global screen coordinate space,
+/// scaled so it lines up with GPUI's own logical (DIP) display bounds — the
+/// Windows backend divides physical `GetCursorPos` pixels by the cursor's
+/// monitor DPI scale to match; macOS `CGEvent` points and Linux root-window
+/// coordinates are already resolution-independent.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CursorPosition {
     /// Horizontal screen coordinate.
@@ -534,6 +538,23 @@ pub fn frontmost_application() -> Option<ForegroundApp> {
     Backend::frontmost_app()
 }
 
+/// Return the Safari process captured by the latest macOS foreground-app
+/// observation without querying AppKit on the caller's thread.
+///
+/// This is a nonblocking atomic snapshot for input callbacks. It returns
+/// `None` when Safari is not frontmost and on non-macOS platforms.
+#[must_use]
+pub fn frontmost_safari_pid() -> Option<i32> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::frontmost_safari_pid()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
 /// Failure to install or operate a native foreground-application observer.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -659,9 +680,6 @@ mod macos;
 mod linux;
 
 #[cfg(any(target_os = "windows", test))]
-mod windows_worker;
-
-#[cfg(target_os = "windows")]
 mod windows;
 
 #[cfg(test)]

@@ -31,7 +31,7 @@
 /crates/openlogi-camera/src/uvc_windows.rs      @AprilNEA @davidbudnick
 /crates/openlogi-hid/src/transport/windows.rs   @AprilNEA @davidbudnick
 /crates/openlogi-hid/src/windows_hid.rs         @AprilNEA @davidbudnick
-/crates/openlogi-hook/src/windows.rs            @AprilNEA @davidbudnick
+/crates/openlogi-hook/src/windows/hook.rs      @AprilNEA @davidbudnick
 /crates/openlogi-inject/src/inject/windows.rs   @AprilNEA @davidbudnick
 
 # ── Release, packaging, supply chain ───────────────────────────────────────

@@ -585,6 +585,7 @@ fn device_identity_roundtrips_and_is_iterable() {
             thumbwheel: false,
             haptic_feedback: false,
             haptic_panel: false,
+            dpi_gestures: true,
         },
         light_capabilities: None,
         driver_id: None,
@@ -1596,7 +1597,7 @@ fn set_gesture_mode_off_without_click_falls_back_to_the_default() {
 
     assert_eq!(
         cfg.bindings_for("2b042").get(&ButtonId::Back),
-        Some(&Binding::Single(Action::BrowserBack))
+        Some(&Binding::Single(Action::MouseBack))
     );
 }
 

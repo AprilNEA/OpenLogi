@@ -215,9 +215,8 @@ async fn observe_loop(
                         reflex.connected();
                         notified_unreachable = false;
                         notified_outdated = false;
-                        if observation.generation != conn.seen {
-                            conn.seen = observation.generation;
-                            let _ = update_tx.send(GuiUpdate::Snapshot(observation.snapshot));
+                        if let Some(snapshot) = accept_observation(&mut conn.seen, observation) {
+                            let _ = update_tx.send(GuiUpdate::Snapshot(snapshot));
                         }
                         inflight = Some(observe(conn));
                     } else {
@@ -385,6 +384,17 @@ struct LiveConnection {
     /// Latest generation seen on this connection. Starts at 0 — "I have seen
     /// nothing" — so the first answer is the agent's whole state.
     seen: Generation,
+}
+
+/// Advance one connection's generation ledger and return only a genuinely
+/// newer snapshot. Equal generations are long-poll heartbeats; lower ones are
+/// stale replies and must not move the desktop back to older device state.
+fn accept_observation(seen: &mut Generation, observation: Observation) -> Option<AgentSnapshot> {
+    if observation.generation <= *seen {
+        return None;
+    }
+    *seen = observation.generation;
+    Some(observation.snapshot)
 }
 
 /// Why [`observe_loop`] woke up. Named so the in-flight poll can be handed back
@@ -711,6 +721,48 @@ fn reply_disconnected(update_tx: &mpsc::UnboundedSender<GuiUpdate>, cmd: Command
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn observation(generation: Generation, camera_active: bool) -> Observation {
+        Observation {
+            generation,
+            snapshot: AgentSnapshot {
+                status: openlogi_ipc::AgentStatus {
+                    accessibility_granted: true,
+                    hook_installed: true,
+                    launch_at_login: true,
+                    inventory: openlogi_ipc::InventoryHealth::Ready,
+                    protocol_version: PROTOCOL_VERSION,
+                    agent_version: "test".to_string(),
+                    input_monitoring_granted: true,
+                    hid_open_failures: false,
+                },
+                inventory: Vec::new(),
+                standalone: Vec::new(),
+                camera_active,
+                pairing: None,
+                foreground: openlogi_ipc::ForegroundApps::default(),
+            },
+        }
+    }
+
+    #[test]
+    fn stale_observations_do_not_move_the_connection_backward() {
+        let mut seen = 0;
+
+        let first = accept_observation(&mut seen, observation(2, true))
+            .expect("a newer generation is accepted");
+        assert!(first.camera_active);
+        assert_eq!(seen, 2);
+
+        assert!(accept_observation(&mut seen, observation(1, false)).is_none());
+        assert!(accept_observation(&mut seen, observation(2, false)).is_none());
+        assert_eq!(seen, 2, "stale replies cannot rewind the ledger");
+
+        let next = accept_observation(&mut seen, observation(3, false))
+            .expect("the next newer generation is still accepted");
+        assert!(!next.camera_active);
+        assert_eq!(seen, 3);
+    }
 
     #[test]
     fn a_never_reached_agent_is_spawned_immediately() {

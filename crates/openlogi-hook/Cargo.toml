@@ -9,8 +9,8 @@ authors.workspace = true
 description = "OS-level mouse-event hook for OpenLogi. macOS via CGEventTap; Linux via evdev+uinput; Windows via WH_MOUSE_LL."
 
 [dependencies]
-openlogi-core = { path = "../openlogi-core", version = "0.8.3" }
-openlogi-inject = { path = "../openlogi-inject", version = "0.8.3" }
+openlogi-core = { path = "../openlogi-core", version = "0.8.5" }
+openlogi-inject = { path = "../openlogi-inject", version = "0.8.5" }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
@@ -50,8 +50,10 @@ objc2-foundation = { workspace = true, features = [
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
+    "Win32_Graphics_Gdi",
     "Win32_System_Threading",
     "Win32_UI_Accessibility",
+    "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }

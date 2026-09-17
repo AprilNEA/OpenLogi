@@ -26,7 +26,7 @@ mod lighting;
 mod litra;
 mod smartshift;
 
-pub use backlight::{get_backlight, set_backlight_enabled};
+pub use backlight::{get_backlight, get_backlight_on, set_backlight_enabled};
 pub use diagnostics::{
     FeatureEntry, FirmwareEntity, FirmwareEntityInfo, ReprogControlEntry, dump_features,
     dump_firmware_entities, dump_reprog_controls, read_battery_raw,
@@ -44,8 +44,8 @@ pub use hires_wheel::{
     set_scroll_resolution_on, set_scroll_wheel_mode, set_scroll_wheel_mode_on,
 };
 pub use lighting::{
-    LightingMethod, set_keyboard_color, set_keyboard_color_on, set_keyboard_color_with,
-    set_keyboard_color_with_on,
+    LightingMethod, LightingWrite, set_keyboard_color, set_keyboard_color_on,
+    set_keyboard_color_with, set_keyboard_color_with_on,
 };
 pub(crate) use litra::litra_capabilities;
 pub use litra::{

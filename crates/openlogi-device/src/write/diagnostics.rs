@@ -21,7 +21,7 @@ use crate::write::{HidppOperation, WriteError, classify_hidpp_error, open_featur
 
 /// Snapshot of one HID++ feature exposed by a device: protocol ID +
 /// version. Returned by [`dump_features`] for diagnostics.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FeatureEntry {
     /// HID++ feature ID.
     pub id: u16,
@@ -35,7 +35,7 @@ pub struct FeatureEntry {
 /// Snapshot of one HID++ `0x1b04` reprogrammable control. Returned by
 /// [`dump_reprog_controls`] for diagnostics so new device controls can be
 /// identified before OpenLogi maps them to a first-class button.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReprogControlEntry {
     /// HID++ control ID.
     pub cid: u16,
@@ -252,7 +252,7 @@ impl From<DeviceEntityFirmwareInfo> for FirmwareEntityInfo {
 /// There are two states and only two: the device answered with a record that
 /// decoded, or it did not. An enum makes "a version with no kind" and "an
 /// error alongside a version" unrepresentable rather than merely unreachable.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FirmwareEntity {
     /// The entity's record was read and decoded.
     Readable {
