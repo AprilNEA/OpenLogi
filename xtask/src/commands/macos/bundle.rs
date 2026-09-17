@@ -117,7 +117,7 @@ fn run_with_channel(
     embed::write_agent_launch_plist(&app, channel)?;
     embed::embed_cli(&release_dir, &app)?;
     embed::verify_bundle_binaries(&app, channel)?;
-    info_plist::stamp_privacy_usage_descriptions(&app)?;
+    info_plist::localize_app(&app, &root.join(info_plist::LOCALES_DIR))?;
     // Identity first, then the checks, then signing — a signature seals the
     // `Info.plist` files, so nothing may rewrite them afterwards.
     identity::stamp(&app, channel, Component::VARIANTS)?;
