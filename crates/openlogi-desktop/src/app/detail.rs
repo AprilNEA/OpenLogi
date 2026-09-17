@@ -196,6 +196,7 @@ fn detail_navigation(
                 .w_full()
                 .flex()
                 .items_center()
+                .justify_start()
                 .gap_2p5()
                 .px_3()
                 .py_2()

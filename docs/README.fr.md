@@ -46,7 +46,7 @@ Ce qu'OpenLogi fait et qu'Options+ ne fait pas :
 
 - **Rester léger.** Du Rust natif + GPUI.
 - **Tourner sous Linux.** Linux est une plateforme de premier rang pour OpenLogi.
-- **Choisir son bouton de gestes.** Confiez le rôle de gestes à n'importe quel bouton physique — ou désactivez complètement les gestes.
+- **Des gestes sur les boutons pris en charge.** Affectez des actions gestuelles aux commandes prises en charge — ou désactivez complètement les gestes.
 - **Une configuration en texte brut.** Tout tient dans un fichier TOML, synchronisable entre machines comme vous voulez.
 - **Scriptable.** Une vraie CLI en plus de la GUI.
 
@@ -60,7 +60,9 @@ Ce qu'OpenLogi fait et qu'Options+ ne fait pas :
 **Souris**
 
 - Capture et remappage des boutons du milieu, mode-shift et molette de pouce (le bouton du milieu partout, le reste selon l'appareil)
-- Affectations de gestes par direction avec capture en direct, sur n'importe quel bouton compatible
+- Affectations de gestes par direction avec capture en direct sur les commandes prises en charge : Précédent/Suivant, DPI/ModeShift, bouton de gestes dédié et panneau haptique
+  - Les gestes DPI/ModeShift nécessitent une prise en charge de la redirection des événements (diversion) et de raw-XY signalée par l'appareil.
+  - Les boutons gauche et droit et les commandes des molettes ne peuvent pas recevoir de nouvelles affectations de gestes ; les affectations existantes du bouton du milieu sont conservées.
 - Actions Ring : un anneau d'actions à huit emplacements centré sur le curseur (`ShowActionsRing`), avec des dispositions par application
 - Contrôle DPI avec préréglages et actions Cycle / Set-preset (`0x2201`)
 - Molette SmartShift : mode, sensibilité et panneau de cran permanent (`0x2111`)

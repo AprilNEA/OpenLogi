@@ -40,7 +40,7 @@ Was OpenLogi kann und Options+ nicht:
 
 - **Leichtgewichtig bleiben.** Natives Rust + GPUI.
 - **Auf Linux laufen.** Linux ist in OpenLogi eine vollwertige Plattform.
-- **Die Gestentaste frei wählen.** Weise die Gestenrolle jeder beliebigen physischen Taste zu — oder schalte Gesten ganz ab.
+- **Gesten auf unterstützten Tasten.** Weise unterstützten Bedienelementen Gestenaktionen zu — oder schalte Gesten ganz ab.
 - **Konfiguration im Klartext.** Alles steckt in einer TOML-Datei, die sich beliebig zwischen Rechnern synchronisieren lässt.
 - **Skriptbar.** Neben der GUI gibt es eine echte CLI.
 
@@ -54,7 +54,9 @@ Was OpenLogi kann und Options+ nicht:
 **Maus**
 
 - Erfassung und Umbelegung von Mitteltaste, Mode-Shift und Daumenrad (Mitteltaste überall, der Rest, sofern das Gerät sie bereitstellt)
-- Gestenbelegungen pro Richtung mit Live-Erfassung, auf jeder geeigneten Taste
+- Gestenbelegungen pro Richtung mit Live-Erfassung auf unterstützten Bedienelementen: Zurück/Vorwärts, DPI/ModeShift, dedizierte Gestentaste und haptisches Panel
+  - DPI/ModeShift-Gesten erfordern vom Gerät gemeldete Unterstützung für Ereignisumleitung (diversion) und raw-XY.
+  - Linke und rechte Maustaste sowie Rad-Bedienelemente können nicht neu mit Gesten belegt werden; bestehende Gestenbelegungen der Mitteltaste bleiben erhalten.
 - Actions Ring: ein cursorzentriertes Aktions-Overlay mit acht Slots (`ShowActionsRing`), mit Layouts pro Anwendung
 - DPI-Steuerung mit Voreinstellungen und Cycle-/Set-Preset-Aktionen (`0x2201`)
 - SmartShift-Rad: Modus, Empfindlichkeit und permanente Rasterung (`0x2111`)

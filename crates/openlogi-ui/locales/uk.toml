@@ -308,6 +308,7 @@ native_controls_when_disabled = "Якщо вимкнено, елементи к�
 overridden_in_app = "Змінено в %{app}"
 use_a_single_action = "Використовувати одну дію"
 use_gestures = "Використовувати жести"
+dpi_gestures_unavailable = "Пристрій не повідомив про підтримку жестів кнопкою DPI."
 action_key_summary = "%{action} · %{key}"
 search_actions = "Пошук дій…"
 workflow_key_summary = "Сценарій · %{key}"
@@ -479,6 +480,8 @@ input_interception_detected = "Інша програма перехоплює в
 [camera]
 camera = "Камера"
 starting_preview = "Запуск перегляду…"
+camera_resources_unavailable = "Ресурси камери недоступні. Можливо, камеру використовує інша програма."
+camera_preview_start_failed = "Не вдалося запустити попередній перегляд камери."
 camera_preview_permission_required = "Увімкніть доступ до камери в налаштуваннях, щоб побачити перегляд."
 click_to_enable_camera_access = "Натисніть, щоб увімкнути доступ до камери."
 brightness = "Яскравість"

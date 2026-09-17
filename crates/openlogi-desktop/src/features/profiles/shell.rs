@@ -13,7 +13,7 @@ use gpui_component::{
     spinner::Spinner,
 };
 
-use super::catalog::{AppCatalogPicker, AppIconState, ProfileIconCache};
+use super::catalog::{AppCatalogPicker, ApplicationIconState, ProfileIconCache};
 use super::picker::add_app_popover;
 use super::{ProfileChoice, ProfileScopeActions, ProfileScopeModel};
 use crate::features::mouse::picker::{compact_panel, divider, title};
@@ -203,7 +203,7 @@ fn profile_tab(
 }
 
 pub(super) fn application_mark(
-    icon: AppIconState,
+    icon: ApplicationIconState,
     name: &str,
     edge: f32,
     pal: Palette,
@@ -214,13 +214,13 @@ pub(super) fn application_mark(
         .items_center()
         .justify_center();
     match icon {
-        AppIconState::Ready(icon) => slot.child(img(icon).size(px(edge)).flex_none()),
-        AppIconState::Loading => slot.child(
+        ApplicationIconState::Ready(icon) => slot.child(img(icon).size(px(edge)).flex_none()),
+        ApplicationIconState::Loading => slot.child(
             Spinner::new()
                 .with_size(px(edge * 0.6))
                 .color(pal.text_muted),
         ),
-        AppIconState::Missing => {
+        ApplicationIconState::Missing => {
             let initial = name
                 .chars()
                 .find(|character| !character.is_whitespace())
