@@ -320,6 +320,22 @@ fn a_repeatable_action_fires_once_per_threshold_crossed_in_one_swipe() {
 }
 
 #[test]
+fn a_single_event_never_fires_more_than_the_repeat_cap() {
+    // A raw rotation increment is a signed i16; a corrupt or malformed report
+    // could claim a huge magnitude at max sensitivity (threshold == 1). One
+    // event must never synchronously dispatch thousands of actions.
+    let mut direction = WheelDirection::default();
+    let now = Instant::now();
+    let scale = unscaled(ThumbwheelSensitivity::MAX);
+    assert_eq!(ThumbwheelSensitivity::MAX.action_threshold(), 1);
+
+    assert_eq!(
+        direction.advance(&Action::VolumeUp, i32::from(i16::MAX), scale, now),
+        WheelOutput::FireAction(MAX_REPEATS_PER_EVENT.cast_unsigned())
+    );
+}
+
+#[test]
 fn repeatable_action_progress_below_threshold_carries_over() {
     let mut direction = WheelDirection::default();
     let now = Instant::now();

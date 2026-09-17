@@ -21,6 +21,13 @@ const ACTION_DECAY: Duration = Duration::from_millis(300);
 /// flick triggers once instead of repeating across a fast spin.
 const ACTION_COOLDOWN: Duration = Duration::from_millis(200);
 
+/// Most times a single captured event may fire a repeatable action. A real
+/// swipe never legitimately needs more than a handful; this only bounds a
+/// pathological or corrupt report (a raw rotation increment is a signed
+/// `i16`) from synchronously flooding the OS with thousands of presses from
+/// one input callback.
+const MAX_REPEATS_PER_EVENT: i32 = 20;
+
 /// Per-direction wheel state. Reversing the physical wheel must not cancel
 /// progress already earned in the other direction.
 #[derive(Default)]
@@ -169,7 +176,13 @@ impl WheelDirection {
             // threshold crossing, capping a swipe to one step regardless of
             // sensitivity — exactly the reported symptom.
             increments += magnitude;
-            let repeats = increments / threshold;
+            // Cap how many times one event can fire: a captured rotation
+            // increment is a signed `i16`, so a single malformed or corrupt
+            // report could otherwise claim a magnitude of thousands and
+            // synchronously flood the OS with that many volume presses from
+            // the input callback. A real swipe never legitimately needs more
+            // than a handful of fires per report.
+            let repeats = (increments / threshold).min(MAX_REPEATS_PER_EVENT);
             increments -= repeats * threshold;
             if repeats > 0 {
                 (WheelOutput::FireAction(repeats.cast_unsigned()), Some(now))
