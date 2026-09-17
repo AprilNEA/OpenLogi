@@ -1,0 +1,9 @@
+# shellcheck shell=bash
+# udev reload/trigger and icon/desktop cache refresh are covered by alpm hooks;
+# this script only prints the steps pacman cannot do for the user.
+post_install() {
+  echo "Enable the background agent for your user with:"
+  echo "  systemctl --user enable --now openlogi-agent.service"
+  echo "On GNOME Wayland, enable per-app profiles with:"
+  echo "  gnome-extensions enable openlogi-frontmost@openlogi.dev"
+}

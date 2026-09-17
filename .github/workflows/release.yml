@@ -123,6 +123,10 @@ jobs:
     if: ${{ github.ref_type == 'tag' && !cancelled() && needs.build.outputs.macos_result == 'success' && needs.release-notes.result == 'success' }}
     permissions:
       contents: write
+    outputs:
+      pacman: ${{ steps.artifacts.outputs.pacman }}
+      pkg_sha256_amd64: ${{ steps.pkg_hashes.outputs.amd64 }}
+      pkg_sha256_arm64: ${{ steps.pkg_hashes.outputs.arm64 }}
     steps:
       # Needed to build & run the xtask manifest generator below.
       - uses: actions/checkout@v7
@@ -186,6 +190,18 @@ jobs:
           # agent exes (#347); no bare .exe ships anymore.
           shopt -s nullglob
           sha256sum -- *.dmg *.zip *.msi *.deb *.rpm *.pkg.tar.zst > SHA256SUMS
+
+      # Deliberately silent when a Linux leg is missing — the Linux packages
+      # are best-effort, so publish must not fail for AUR reasons. An empty
+      # output fails loudly in aur-publish's render asserts instead.
+      - name: Extract pacman package hashes for AUR
+        id: pkg_hashes
+        run: |
+          for arch in amd64 arm64; do
+            awk -v name="openlogi-${GITHUB_REF_NAME}-linux-${arch}.pkg.tar.zst" \
+              -v arch="$arch" '$2 == name { print arch "=" $1 }' \
+              dist/SHA256SUMS >> "$GITHUB_OUTPUT"
+          done
 
       # softprops' `files` can't list a glob that matches nothing without
       # tripping fail_on_unmatched_files. The Windows zip/msi (per arch leg)
@@ -369,3 +385,92 @@ jobs:
           event-type: update-openlogi
           client-payload: |
             {"version": "${{ github.ref_name }}"}
+
+  aur-publish:
+    name: Publish AUR openlogi-bin
+    runs-on: ubuntu-latest
+    needs: publish
+    # Dormant until the AUR co-maintainer cutover (#255 / #265): the current
+    # openlogi-bin maintainer's own CI updates the package today, and two
+    # writers to one AUR repo race each other. The job shows as skipped on
+    # every release until the repo variable AUR_PUBLISH_ENABLED is 'true'.
+    # The hyphen guard skips pre-release tags (not valid pacman pkgvers); no
+    # status function appears here, so the implicit success() gate on
+    # `needs: publish` still applies.
+    if: ${{ github.repository == 'AprilNEA/OpenLogi' && vars.AUR_PUBLISH_ENABLED == 'true' && needs.publish.outputs.pacman == 'true' && !contains(github.ref_name, '-') }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      # Rendered inside the workspace: the deploy action runs in a docker
+      # container that only has the workspace mounted, not runner.temp.
+      - name: Render PKGBUILD from the release checksums
+        env:
+          SHA_AMD64: ${{ needs.publish.outputs.pkg_sha256_amd64 }}
+          SHA_ARM64: ${{ needs.publish.outputs.pkg_sha256_arm64 }}
+        run: |
+          # The tag lands in a file makepkg sources as shell, and hyphenless
+          # tag names may legally contain ; $ ` ' & / — allow exactly semver.
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::tag '$GITHUB_REF_NAME' is not vMAJOR.MINOR.PATCH"
+            exit 1
+          }
+          # Never publish a PKGBUILD referencing a missing arch asset.
+          [[ "$SHA_AMD64" =~ ^[0-9a-f]{64}$ ]] || {
+            echo "::error::amd64 .pkg.tar.zst hash missing from SHA256SUMS"
+            exit 1
+          }
+          [[ "$SHA_ARM64" =~ ^[0-9a-f]{64}$ ]] || {
+            echo "::error::arm64 .pkg.tar.zst hash missing from SHA256SUMS"
+            exit 1
+          }
+          mkdir -p .release
+          sed -e "s/@PKGVER@/${GITHUB_REF_NAME#v}/g" \
+            -e "s/@SHA256_X86_64@/${SHA_AMD64}/g" \
+            -e "s/@SHA256_AARCH64@/${SHA_ARM64}/g" \
+            packaging/arch/openlogi-bin/PKGBUILD > .release/PKGBUILD
+          if grep -qE '@[A-Z0-9_]+@' .release/PKGBUILD; then
+            echo "::error::unrendered placeholder left in PKGBUILD"
+            exit 1
+          fi
+
+      - name: Load AUR SSH key from 1Password
+        id: aur_config
+        uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
+        with:
+          export-env: false
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          AUR_SSH_PRIVATE_KEY_B64: ${{ secrets.OP_AUR_SECRET_ITEM }}/AUR_SSH_PRIVATE_KEY
+
+      # Stored base64-encoded (an unencrypted ed25519 key) so the multi-line
+      # body survives 1Password field handling, like the minisign key.
+      - name: Decode AUR SSH key
+        id: ssh_key
+        env:
+          KEY_B64: ${{ steps.aur_config.outputs.AUR_SSH_PRIVATE_KEY_B64 }}
+        run: |
+          : "${KEY_B64:?AUR_PUBLISH_ENABLED is set but the AUR key is missing}"
+          key="$(printf '%s' "$KEY_B64" | tr -d '[:space:]' | base64 -d)"
+          while IFS= read -r line; do echo "::add-mask::$line"; done <<< "$key"
+          {
+            echo "key<<OPENLOGI_AUR_KEY_EOF"
+            printf '%s\n' "$key"
+            echo "OPENLOGI_AUR_KEY_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Publish to AUR
+        uses: KSXGitHub/github-actions-deploy-aur@084b0d9b15415bf9cdb65d44dad1efe37a354050 # v4.2.0
+        with:
+          pkgname: openlogi-bin
+          pkgbuild: .release/PKGBUILD
+          assets: packaging/arch/openlogi-bin/openlogi-bin.install
+          commit_username: AprilNEA
+          commit_email: dev@aprilnea.me
+          commit_message: "upgpkg: openlogi-bin ${{ github.ref_name }}"
+          ssh_private_key: ${{ steps.ssh_key.outputs.key }}
+          # updpkgsums would recompute — and silently replace — the
+          # upstream-attested hashes; a mismatch must fail instead.
+          updpkgsums: false
+          test: false
