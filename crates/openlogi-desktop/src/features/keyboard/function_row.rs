@@ -864,25 +864,25 @@ fn panel_action_rows(
 ) -> Vec<gpui::Div> {
     let mut children = action_rows("panel-action", current, on_pick, *pal);
 
-    let power_user_actions: &[(PowerUserKind, &str, &'static str)] = &[
+    let power_user_actions: &[(PowerUserKind, SharedString, &'static str)] = &[
         (
             PowerUserKind::TypeText,
-            "Type Text…",
+            tr!("actions.type_text"),
             "action-icons/keyboard.svg",
         ),
         (
             PowerUserKind::RunAppleScript,
-            "Run AppleScript…",
+            tr!("actions.run_applescript"),
             "action-icons/terminal.svg",
         ),
         (
             PowerUserKind::RunShellCommand,
-            "Run Shell Command…",
+            tr!("actions.run_shell_command"),
             "action-icons/terminal.svg",
         ),
         (
             PowerUserKind::Workflow,
-            "Workflow…",
+            tr!("actions.workflow"),
             "action-icons/list-checks.svg",
         ),
     ];
@@ -921,7 +921,7 @@ fn panel_action_rows(
                                         .flex_none()
                                         .text_color(pal.text_muted),
                                 )
-                                .child(div().child((*label).to_string())),
+                                .child(div().child(label.clone())),
                         )
                         .when(selected, |s| {
                             s.child(
