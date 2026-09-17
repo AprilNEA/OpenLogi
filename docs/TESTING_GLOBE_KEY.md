@@ -327,8 +327,15 @@ successful live-event test; no permissions were changed. The installed agent has
 its own identity, so the command process's result does not establish the agent's
 permission state.
 
-The user subsequently confirmed all three requested behaviors on the MX Anywhere
-3S: single click cycles DPI presets, a hold presses Fn and releases it on mouse-up,
-and double click sends Control+Option+Shift+T. This is a successful physical smoke
-test; the exact 299/300 ms and 199/200/201 ms boundaries are verified by the automated
-tests rather than a stopwatch measurement on the mouse.
+The user subsequently reported all three behaviors working on the MX Anywhere 3S:
+a hold presses Fn and releases it on mouse-up, and double click sends
+Control+Option+Shift+T. Single click is bound to CycleDpiPresets, but a later config
+inspection found no DPI presets; actual DPI cycling still requires adding presets
+on the Pointer page. Treat the user's report as physical smoke-test evidence for
+the keyboard actions, not measured DPI changes or timing. The exact 299/300 ms and
+199/200/201 ms boundaries are verified by the automated tests.
+
+The final installed bundle passed strict signature verification and matched the
+built GUI and agent binaries. After refreshing the existing Accessibility grant,
+the installed agent logged that its OS input hook was installed. Restarted GUI
+inspection confirmed the three configured actions persisted.
