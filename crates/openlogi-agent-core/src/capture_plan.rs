@@ -58,7 +58,10 @@ pub struct DispatchPlan {
     /// keyed by the button its captured swipes dispatch as; empty when none
     /// gestures.
     pub gesture_bindings: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
-    /// macOS Back/Forward gesture maps resolved from device-owned HID++ raw XY.
+    /// macOS gesture maps resolved from device-owned HID++ raw XY, keyed by
+    /// the button their captured swipes dispatch as: Back/Forward always, plus
+    /// Middle Click on a device whose control table declares it the gesture
+    /// button (the capture layer arms only the device-confirmed request).
     /// These remain available while an old diversion is draining.
     pub side_gesture_bindings: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
     /// This device's effective thumb-wheel sensitivity (device override or the
@@ -95,6 +98,30 @@ pub(crate) fn hidpp_side_gesture_maps_for(
         .collect()
 }
 
+/// Preserved Middle Click gesture maps for devices whose middle button is the
+/// gesture button — the MX Anywhere 2S reports `0x0052` with the
+/// `Gesture Button Navigation` task, so its press never reaches the OS hook.
+///
+/// This only *requests* device-owned capture: the capture layer arms the
+/// request only when the device's own control metadata confirms the gesture
+/// task, because on most mice the same CID is an ordinary middle button that
+/// must stay on the OS-hook path. The hook therefore keeps dispatching the
+/// map as the fail-open owner, exactly as before.
+#[must_use]
+pub(crate) fn hidpp_middle_gesture_maps_for(
+    config: &Config,
+    config_key: &str,
+    app: Option<&str>,
+) -> BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>> {
+    if !cfg!(target_os = "macos") || !config.app_settings.capture_mouse_events {
+        return BTreeMap::new();
+    }
+    oshook_gestures_for(config, Some(config_key), app)
+        .into_iter()
+        .filter(|(button, _)| *button == ButtonId::MiddleClick)
+        .collect()
+}
+
 /// Build one device's plan from the config (per-app effective for `app`).
 #[must_use]
 pub fn plan_for_device(
@@ -113,16 +140,25 @@ pub fn plan_for_device(
     // unattributed.
     let oshook = oshook_gestures_for(config, Some(config_key), app);
     let side_gesture_bindings = hidpp_side_gesture_maps_for(config, config_key, app);
+    // Middle Click is routed to HID++ only for devices whose control table
+    // declares the gesture task; everything else keeps it on the hook.
+    let middle_gesture_bindings = hidpp_middle_gesture_maps_for(config, config_key, app);
     // One direction map per HID++ source in gesture mode — several may
     // gesture at once, each armed with its own raw-XY divert (the capture
     // target below derives the CIDs to divert from this map's keys).
     let gesture_bindings = hidpp_gesture_maps_for(config, Some(config_key), app);
     let mut divert_gesture_buttons = Vec::new();
+    let mut divert_gesture_navigation = Vec::new();
     if os_mouse_hook_available {
         divert_gesture_buttons.extend(
             DIVERTABLE_STANDARD_BUTTONS
                 .into_iter()
                 .filter(|(_, button)| side_gesture_bindings.contains_key(button)),
+        );
+        divert_gesture_navigation.extend(
+            DIVERTABLE_STANDARD_BUTTONS
+                .into_iter()
+                .filter(|(_, button)| middle_gesture_bindings.contains_key(button)),
         );
     }
     if gesture_bindings.contains_key(&ButtonId::DpiToggle) {
@@ -191,6 +227,7 @@ pub fn plan_for_device(
                     .map(|(cid, _)| cid)
                     .collect(),
                 divert_gesture_buttons,
+                divert_gesture_navigation,
                 divert_buttons,
             },
             rearm_generation,
@@ -199,7 +236,10 @@ pub fn plan_for_device(
             config_key: config_key.to_owned(),
             bindings,
             gesture_bindings,
-            side_gesture_bindings,
+            side_gesture_bindings: side_gesture_bindings
+                .into_iter()
+                .chain(middle_gesture_bindings)
+                .collect(),
             thumbwheel_sensitivity,
         },
     }
@@ -603,8 +643,9 @@ mod tests {
                     .keys()
                     .copied()
                     .collect::<Vec<_>>(),
-                vec![ButtonId::Back, ButtonId::Forward],
-                "only the senderless side buttons use device-owned gesture dispatch"
+                vec![ButtonId::MiddleClick, ButtonId::Back, ButtonId::Forward],
+                "senderless side buttons and a preserved Middle Click map use \
+                 device-owned gesture dispatch"
             );
             let expected: Vec<_> = DIVERTABLE_STANDARD_BUTTONS
                 .into_iter()
@@ -614,14 +655,19 @@ mod tests {
                 plan.target.spec.divert_gesture_buttons, expected,
                 "every known Back/Forward CID must be requested as a HID++ raw-XY gesture source"
             );
+            assert_eq!(
+                plan.target.spec.divert_gesture_navigation,
+                vec![(0x0052, ButtonId::MiddleClick)],
+                "the middle button is only a candidate: the capture layer arms it \
+                 when the device declares the gesture task"
+            );
             assert!(
                 !plan
                     .target
                     .spec
                     .divert_buttons
                     .iter()
-                    .any(|&(_, button)| matches!(button, ButtonId::Back | ButtonId::Forward)),
-                "a side-button gesture hold must not also be a plain divert"
+                    .any(|&(_, button)| matches!(button, ButtonId::Back | ButtonId::Forward))
             );
             assert!(
                 !plan
@@ -629,11 +675,64 @@ mod tests {
                     .spec
                     .divert_gesture_buttons
                     .iter()
-                    .any(|&(_, button)| button == ButtonId::MiddleClick)
+                    .any(|&(_, button)| button == ButtonId::MiddleClick),
+                "an unconfirmed middle button must not bypass the device task check"
             );
         } else {
             assert!(plan.dispatch.side_gesture_bindings.is_empty());
             assert!(plan.target.spec.divert_gesture_buttons.is_empty());
+            assert!(plan.target.spec.divert_gesture_navigation.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_single_middle_click_binding_stays_out_of_device_gesture_capture() {
+        // The regression guard: only a stored Middle Click *gesture* map asks
+        // for device-owned capture; an ordinary rebound middle click keeps its
+        // plain HID++/hook path.
+        let mut cfg = Config::default();
+        cfg.set_binding(
+            "2b01a",
+            ButtonId::MiddleClick,
+            Binding::Single(Action::Paste),
+        );
+
+        let plan = plan_for_device(&cfg, "2b01a", route(), None, 0, true);
+        assert!(plan.target.spec.divert_gesture_navigation.is_empty());
+        assert!(
+            !plan
+                .dispatch
+                .side_gesture_bindings
+                .contains_key(&ButtonId::MiddleClick)
+        );
+        assert!(
+            plan.target
+                .spec
+                .divert_buttons
+                .contains(&(0x0052, ButtonId::MiddleClick)),
+            "a rebound middle click is still delivered as a plain HID++ divert"
+        );
+    }
+
+    #[test]
+    fn middle_click_capture_waits_for_the_mouse_hook_like_side_gestures() {
+        let mut cfg = Config::default();
+        cfg.set_gesture_mode("2b01a", ButtonId::MiddleClick, true);
+
+        let plan = plan_for_device(&cfg, "2b01a", route(), None, 0, false);
+        assert!(
+            plan.target.spec.divert_gesture_navigation.is_empty(),
+            "HID++ diversion must wait for the movement hook"
+        );
+        if cfg!(target_os = "macos") {
+            assert!(
+                plan.dispatch
+                    .side_gesture_bindings
+                    .contains_key(&ButtonId::MiddleClick),
+                "a draining session must retain its dispatch map until disarm completes"
+            );
+        } else {
+            assert!(plan.dispatch.side_gesture_bindings.is_empty());
         }
     }
 
