@@ -159,10 +159,14 @@ fn dispatch_native(action: &Action, native: NativeAction) {
         NativeAction::NextDesktop => press_key(&[ctrl, alt], KeyCode::KEY_RIGHT),
         // logind LockSession() via the system bus; falls back to Super+L.
         NativeAction::LockScreen => lock_screen(),
-        // Region vs full-screen capture depends on the desktop environment's
-        // screenshot handler for Print Screen, so both map to the same key.
-        NativeAction::Screenshot | NativeAction::CaptureRegion => {
-            press_key(&[], KeyCode::KEY_SYSRQ);
+        NativeAction::Screenshot => press_key(&[], KeyCode::KEY_SYSRQ),
+        // Print alone only opens the region selector on GNOME >= 42; other
+        // desktops need an extra chord (see `capture_region_mods`).
+        NativeAction::CaptureRegion => {
+            press_key(
+                &capture_region_mods(current_desktop().as_deref()),
+                KeyCode::KEY_SYSRQ,
+            );
         }
         // logind Suspend() via the system bus.
         NativeAction::Sleep => sleep_system(),
@@ -633,6 +637,35 @@ fn lock_screen() {
     press_key(&[KeyCode::KEY_LEFTMETA], KeyCode::KEY_L);
 }
 
+/// `$XDG_CURRENT_DESKTOP`, lowercased, or `None` if unset.
+fn current_desktop() -> Option<String> {
+    std::env::var("XDG_CURRENT_DESKTOP")
+        .ok()
+        .map(|d| d.to_lowercase())
+}
+
+/// The extra modifiers Print needs to open the region selector instead of
+/// taking a full-screen shot, chosen from the (colon-separated)
+/// `$XDG_CURRENT_DESKTOP` value.
+///
+/// GNOME >= 42 already opens the interactive selector on a bare Print, and
+/// that is what an unset or unrecognised desktop keeps. Cinnamon, MATE and
+/// XFCE bind region capture to Shift+Print; KDE Plasma binds it to
+/// Meta+Shift+Print.
+fn capture_region_mods(desktop: Option<&str>) -> Vec<KeyCode> {
+    let Some(desktop) = desktop else {
+        return Vec::new();
+    };
+    let mut desktops = desktop.split(':');
+    if desktops.clone().any(|d| d == "kde") {
+        vec![KeyCode::KEY_LEFTMETA, KeyCode::KEY_LEFTSHIFT]
+    } else if desktops.any(|d| matches!(d, "x-cinnamon" | "cinnamon" | "mate" | "xfce")) {
+        vec![KeyCode::KEY_LEFTSHIFT]
+    } else {
+        Vec::new()
+    }
+}
+
 /// Suspend the system via logind's `Suspend()` on the system bus. The
 /// `false` argument declines the "interactive" polkit prompt — if the
 /// session isn't allowed to suspend, the call fails and is logged rather
@@ -715,7 +748,10 @@ mod tests {
     use evdev::KeyCode;
     use openlogi_core::binding::{KeyCombo, Shortcut};
 
-    use super::{combo, hid_usage_to_linux, key_ev, key_phase_events, modifiers_to_keycodes, syn};
+    use super::{
+        capture_region_mods, combo, hid_usage_to_linux, key_ev, key_phase_events,
+        modifiers_to_keycodes, syn,
+    };
     use crate::inject::KeyPhase;
 
     #[test]
@@ -788,5 +824,31 @@ mod tests {
                 "{shortcut:?} table entry has no Linux keycode mapping"
             );
         }
+    }
+
+    #[test]
+    fn capture_region_mods_picks_the_desktops_chord() {
+        assert_eq!(capture_region_mods(None), vec![]);
+        assert_eq!(capture_region_mods(Some("gnome")), vec![]);
+        assert_eq!(capture_region_mods(Some("unity")), vec![]);
+        assert_eq!(
+            capture_region_mods(Some("x-cinnamon")),
+            vec![KeyCode::KEY_LEFTSHIFT]
+        );
+        assert_eq!(
+            capture_region_mods(Some("mate")),
+            vec![KeyCode::KEY_LEFTSHIFT]
+        );
+        assert_eq!(
+            capture_region_mods(Some("xfce")),
+            vec![KeyCode::KEY_LEFTSHIFT]
+        );
+        assert_eq!(
+            capture_region_mods(Some("kde")),
+            vec![KeyCode::KEY_LEFTMETA, KeyCode::KEY_LEFTSHIFT]
+        );
+        // GNOME-on-Ubuntu reports "ubuntu:gnome" — the compound string must
+        // still resolve to the GNOME (no-op) branch, not fall through.
+        assert_eq!(capture_region_mods(Some("ubuntu:gnome")), vec![]);
     }
 }
