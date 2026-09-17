@@ -13,8 +13,7 @@ use evdev::{AttributeSet, EventType, InputEvent, KeyCode, RelativeAxisCode};
 use zbus::blocking::Connection as DbusConn;
 
 use openlogi_core::binding::{
-    Action, Effect, HeldInput, KeyCombo, MediaKey, MouseButton, NativeAction, Script, Shortcut,
-    WorkflowStep,
+    Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Script, Shortcut, WorkflowStep,
 };
 use openlogi_core::scroll::ScrollDelta;
 
@@ -40,13 +39,13 @@ pub(super) fn execute(action: &Action) {
         // buttons ("back"/"forward") browsers handle natively.
         Effect::Click(button) => click(mouse_button_code(button)),
         Effect::Shortcut(shortcut) => press_combo(&combo(shortcut)),
-        Effect::Key(combo) | Effect::HeldKey(HeldInput::Shortcut(combo)) => press_combo(combo),
-        Effect::HeldKey(HeldInput::Globe) => {
-            tracing::warn!(
-                action = "HoldGlobeKey",
-                reason = "unsupported_platform",
-                "input rejected"
-            );
+        Effect::Key(combo) => super::tap_keys(combo),
+        Effect::HeldKey(combo) => {
+            if action.requires_physical_release() {
+                tracing::warn!(chord = %combo.rendered_label(), "held keyboard input requires a physical release");
+            } else {
+                super::tap_keys(combo);
+            }
         }
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
         Effect::Media(key) => dispatch_media(key),
@@ -115,14 +114,13 @@ fn parse_shortcut(text: &str) -> KeyCombo {
 /// Press an already-resolved chord: a table lookup from [`combo`] or a
 /// user-recorded [`Action::CustomShortcut`]/`WorkflowStep::PressKey`.
 fn press_combo(combo: &KeyCombo) {
-    let Some(key) = hid_usage_to_linux(combo.key().code()) else {
-        tracing::warn!(
-            usage = combo.key().code(),
-            "shortcut usage has no Linux mapping — press ignored"
-        );
+    if combo.has_fn() || combo.key().is_none() {
+        super::tap_keys(combo);
         return;
-    };
-    press_key(&modifiers_to_keycodes(combo), key);
+    }
+    if let Some(key) = combo.key().and_then(|key| hid_usage_to_linux(key.code())) {
+        press_key(&modifiers_to_keycodes(combo), key);
+    }
 }
 
 /// Emit one edge for the physical keys whose ownership changed.
@@ -216,16 +214,7 @@ fn run_workflow(steps: &[WorkflowStep]) {
                     "workflow TypeText injection is not implemented on Linux yet"
                 );
             }
-            WorkflowStep::PressKey(combo) => {
-                let Some(key) = hid_usage_to_linux(combo.key().code()) else {
-                    tracing::warn!(
-                        usage = combo.key().code(),
-                        "workflow PressKey usage has no Linux mapping; step ignored"
-                    );
-                    continue;
-                };
-                press_key(&modifiers_to_keycodes(combo), key);
-            }
+            WorkflowStep::PressKey(combo) => super::tap_keys(combo),
             WorkflowStep::Delay { millis } => {
                 std::thread::sleep(std::time::Duration::from_millis(*millis));
             }
@@ -790,7 +779,7 @@ mod tests {
         // variant is checked here automatically instead of depending on
         // someone remembering to extend a second, independent list.
         for &shortcut in Shortcut::ALL {
-            let key = combo(shortcut).key().code();
+            let key = combo(shortcut).key().unwrap().code();
             assert!(
                 hid_usage_to_linux(key).is_some(),
                 "{shortcut:?} table entry has no Linux keycode mapping"

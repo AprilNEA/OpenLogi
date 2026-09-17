@@ -1,9 +1,9 @@
-# Globe / Fn button action
+# Keyboard keys and Globe / Fn holds
 
 ## Scope and prerequisites
 
-Applies to `feat/hold-globe-key` and versions containing `Action::HoldGlobeKey`
-(IPC protocol 31). macOS only. This is keyboard-event synthesis, not a voice
+Applies to keyboard-chord and double-click builds using IPC protocol 33.
+Globe/Fn is macOS only; ordinary keyboard chords also support Linux and Windows. This is keyboard-event synthesis, not a voice
 recognizer, microphone bridge, or system input-source configuration feature.
 
 - Build and run the matching GUI and agent together. See [DEVELOPMENT.md](DEVELOPMENT.md).
@@ -36,8 +36,59 @@ recognizer, microphone bridge, or system input-source configuration feature.
 Failure: missing/untranslated label, blank icon, lost setting, incorrect profile,
 cut-off controls, or offering the action in a context without a physical hold.
 
+## Generic keyboard keys
+
+The mouse action picker offers **Press keyboard keys…** and **Hold keyboard keys…**.
+Both use the same checkbox-and-key-picker editor as double click. Select modifiers
+with labeled checkboxes, choose the ordinary key from a searchable list, and inspect
+the live chord preview. No special-symbol typing is needed. Supported examples include `T`,
+`Fn` (also `Globe` or `🌐`), `Ctrl`, `Ctrl+Fn`, `Fn+T`, and `⌃⌥⇧T`.
+A chord has zero or more modifiers and at most one ordinary key; modifier-only
+chords are valid. Unknown keys, extra ordinary keys, and malformed separators fail
+validation. Fn is a macOS modifier, never a fabricated USB usage; other platforms
+reject the entire Fn-containing chord rather than send a partial shortcut.
+
+`CustomShortcut` emits a balanced tap; `HoldShortcut` owns the down/up lifecycle.
+Both share physical-key ownership, so releasing a tapped chord preserves modifiers
+held by another binding. Legacy `HoldGlobeKey` configurations remain readable and
+resolve to the same `KeyCombo::FN` input. Editing them writes the generic form.
+
+## Double-click shortcut with a Globe hold
+
+In the default mouse profile, select **Hold Globe / Fn (macOS)**, then use
+**Double-click shortcut → Set shortcut…**. Check **Control**, **Option / Alt**,
+and **Shift**, choose **T** from the ordinary-key list, and save. The preview
+shows `Ctrl+Alt+Shift+T`. Saving an empty selection keeps the editor open.
+Removing double click restores the original immediate Globe hold.
+
+For an MX Anywhere 3S sensitivity switch, the device binding is:
+
+```toml
+[devices."<existing-device-key>".bindings.DpiToggle]
+short = "None"
+long = { HoldShortcut = "Fn" }
+double_click = "Ctrl+Alt+Shift+T"
+```
+
+- Hold for **300 ms**: Globe/Fn goes down once, and stays down until release.
+- Two short presses, with at most **200 ms from first release to second down**:
+  the second release sends the shortcut exactly once, without Globe events.
+- One short press: no output. A third click begins a new pair.
+- Holding the second press triggers Globe/Fn and suppresses the double click.
+- Configuration/profile changes, capture loss, and shutdown clear pending clicks
+  and release owned held input. A queued release wins over an overdue hold timer;
+  it must not produce a delayed Globe pulse after the physical button is up.
+- Per-app action overrides still replace the whole default button binding.
+- Existing short/long bindings without `double_click` retain their 500 ms delay.
+
+Verify the shortcut at its destination and hold behavior on the physical mouse.
+Check the inspector and shortcut dialog in light/dark appearances, invalid input,
+Cancel/Escape, persistence after restart, and removal of double click.
+
 ## Physical and voice behavior
 
+The immediate-start cases below apply when double click is disabled; with double
+click enabled, expect the 300 ms hold threshold described above.
 Run each case against the real mouse and each intended voice tool separately.
 An observed Fn event is not proof that the tool began recording or inserted text.
 
@@ -52,7 +103,7 @@ An observed Fn event is not proof that the tool began recording or inserted text
 | Disconnect | Disconnect/power off the mouse during a hold; reconnect and retry. | When the capture backend reports cancellation, the hold releases. Record whether this hardware actually reports disconnect/lost release; do not infer it from unit tests. |
 | Permission interruption | Revoke the agent's capture permission while held, restore it, and retry. | Capture interruption cleans up; no stuck voice session. Permission loss can also prevent OS event delivery, so observe the real target and collect logs. |
 | Exit | Quit the agent normally during a hold; restart and retry. | Graceful shutdown releases held output. SIGKILL/process crash is outside RAII cleanup guarantees. |
-| One-shot rejection | Try a hand-authored Actions Ring slot, pulse-only source, deferred gesture/short/long action, or direct `execute` with `HoldGlobeKey`. | Ring config is rejected; other unsupported contexts log rejection, not an instantaneous voice session. |
+| One-shot rejection | Try a hand-authored Actions Ring slot, pulse-only source, deferred gesture/short action, or direct `execute` with `HoldGlobeKey`. | Ring config is rejected; other unsupported contexts log rejection, not an instantaneous voice session. |
 | Stable actions | Recheck native clicks, Back/Forward, Copy/Paste, volume and an existing held shortcut. | Behavior is unchanged after Fn use and after restart. |
 
 OpenLogi only injects Fn events. It does **not** guarantee macOS's built-in
@@ -104,7 +155,7 @@ speech/text, credentials or unrelated application data in shared evidence.
 - Real Logitech capture, permission interruption, WeChat Input Method voice input,
   audio integrity and text insertion require the manual cases above.
 
-### Local implementation verification
+### Historical 0.8.3 verification (before double-click support)
 
 The implementation was checked on an Apple Silicon macOS host with Command Line
 Tools, using `DEVELOPER_DIR=/Library/Developer/CommandLineTools` to override the
@@ -235,3 +286,27 @@ no runtime logic or bytes in the already-verified App/DMG changed.
 
 These checks do not establish macOS Intel runtime behavior, native Linux/Windows
 CI, or completion of the manual hardware/voice-tool matrix.
+
+
+### Double-click and keyboard editor verification (2026-09-17)
+
+Rebased onto upstream master `b9c8fede`. On Apple Silicon macOS, with
+`RUSTFLAGS="-D warnings"`:
+
+- `cargo fmt --all -- --check` and full-workspace Clippy: passed.
+- `cargo test --workspace --all-targets`: **1,694 passed**, one opt-in real-event
+  test ignored by default. Includes 233 desktop tests, real checkbox interactions,
+  299/300 ms hold boundaries, 199/200/201 ms click gaps, cancellation, second-click
+  holds, modifier ownership, configuration round trips and wire-format goldens.
+- Non-GUI rustdoc with `RUSTDOCFLAGS="-D warnings"`: passed.
+- `cargo xtask ci wasm clippy-windows`: both passed, none skipped.
+- The Linux-musl cross-Clippy recipe above: passed.
+- Locale checks, `typos --config .config/typos.toml .`, and `git diff --check`: passed.
+
+The additional opt-in Fn event-tap test was attempted separately and received no
+injected events. Read-only preflight checks on the command process reported
+Accessibility, event-posting and event-listening access as false. This is not a
+successful live-event test; no permissions were changed. The installed agent has
+its own identity, so the command process's result does not establish the agent's
+permission state. Physical mouse timing and the destination application's response
+still require the manual cases above.

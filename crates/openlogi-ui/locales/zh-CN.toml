@@ -235,6 +235,17 @@ wheel_resolution_other_connection = "此设备通过其他连接时支持滚轮�
 smartshift = "SmartShift"
 
 [actions]
+choose_keyboard_keys = "请至少勾选一个修饰键或选择一个普通按键。"
+ordinary_key = "普通按键"
+modifiers_only = "不使用普通按键"
+press_keyboard_keys = "按键盘按键…"
+hold_keyboard_keys = "按住键盘按键…"
+keyboard_keys_help = "勾选修饰键，再选择普通按键。仅使用 Fn 时无需选择普通按键。"
+hold_and_double_click = "%{hold} · %{shortcut}"
+double_click_shortcut = "双击快捷键"
+set_double_click_shortcut = "设置快捷键…"
+remove_double_click_shortcut = "移除双击"
+double_click_hold_help = "按住 300 毫秒后按下所设按键；两次短按间隔不超过 200 毫秒触发快捷键。单次短按不执行动作。"
 hold_globe_key = "地球键 / Fn（按住，macOS）"
 bind_control = "绑定 %{name}"
 bind_control_in_app = "在 %{app} 中绑定 %{name}"

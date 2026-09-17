@@ -197,9 +197,8 @@ impl ButtonEventHandler {
                 }
             }
             ButtonRuntimeEvent::Triggered { press, action } => {
-                // Globe is a direct press binding, not a gesture/long-press
-                // outcome (which may arrive only once the button is released).
-                if action.requires_physical_release() {
+                // A threshold hold owns a future release; a short click or gesture does not.
+                if action.requires_physical_release() && !press.is_long_fired() {
                     warn!(
                         action = "HoldGlobeKey",
                         reason = "deferred_trigger",

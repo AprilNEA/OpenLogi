@@ -2300,3 +2300,40 @@ fn a_failed_save_keeps_the_forgotten_device() {
         "the persisted entry must survive the failed save"
     );
 }
+
+#[test]
+fn globe_double_click_edits_preserve_scope_and_restore_immediate_hold() {
+    let mut state = state_with_a_known_mouse();
+    state.commit_binding(ButtonId::DpiToggle, Action::HoldGlobeKey);
+    let combo = "Ctrl+Alt+Shift+T".parse().unwrap();
+    state.commit_double_click(KNOWN_MOUSE_KEY, ButtonId::DpiToggle, Some(combo));
+    let Some(Binding::LongPress(binding)) = state.default_button_binding(ButtonId::DpiToggle)
+    else {
+        panic!("timed binding expected")
+    };
+    assert_eq!(binding.short(), &Action::None);
+    assert_eq!(
+        binding.long(),
+        &Action::HoldShortcut(openlogi_core::binding::KeyCombo::FN)
+    );
+    assert!(binding.double_click().is_some());
+    state.commit_double_click("another-device", ButtonId::DpiToggle, None);
+    assert!(matches!(
+        state.default_button_binding(ButtonId::DpiToggle),
+        Some(Binding::LongPress(_))
+    ));
+    state.set_editing_app(Some("com.apple.Safari".into()));
+    state.commit_double_click(KNOWN_MOUSE_KEY, ButtonId::DpiToggle, None);
+    assert!(matches!(
+        state.default_button_binding(ButtonId::DpiToggle),
+        Some(Binding::LongPress(_))
+    ));
+    state.set_editing_app(None);
+    state.commit_double_click(KNOWN_MOUSE_KEY, ButtonId::DpiToggle, None);
+    assert_eq!(
+        state.default_button_binding(ButtonId::DpiToggle),
+        Some(&Binding::Single(Action::HoldShortcut(
+            openlogi_core::binding::KeyCombo::FN
+        )))
+    );
+}

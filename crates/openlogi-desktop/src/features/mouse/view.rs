@@ -13,7 +13,7 @@ use gpui_component::{
     input::{InputEvent, InputState},
     v_flex,
 };
-use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
+use openlogi_core::binding::{Action, Binding, ButtonId, GestureDirection, default_binding};
 
 use super::geometry::{
     LABEL_H, LabelDistribution, asset_dimensions_for_png, asset_has_button_labels,
@@ -307,7 +307,7 @@ impl Render for MouseModelView {
             .child(breathing_art)
             .child(leader_canvas)
             .children(labels_outer.iter().enumerate().map(|(idx, label)| {
-                let binding = binding_label_for_control(label.id, bindings, &gesture_buttons);
+                let binding = binding_label_for_control(label.id, bindings, &gesture_buttons, cx);
                 label_control(
                     idx,
                     *label,
@@ -741,7 +741,21 @@ fn binding_label_for_control(
     control: MouseControlId,
     bindings: &std::collections::BTreeMap<ButtonId, Action>,
     gesture_buttons: &[ButtonId],
+    cx: &App,
 ) -> BindingLabel {
+    if let Some(button) = control.button()
+        && let Some(state) = AppState::try_read(cx)
+        && !state
+            .editing_app_overrides()
+            .is_some_and(|overrides| overrides.contains_key(&button))
+        && let Some(Binding::LongPress(binding)) = state.default_button_binding(button)
+        && let Some(shortcut) = binding.double_click()
+    {
+        return BindingLabel {
+            text: tr!("actions.hold_and_double_click", hold => localized_action_label(binding.long()), shortcut => shortcut.rendered_label()),
+            icon: Some(action_icon_path(binding.long())),
+        };
+    }
     if control
         .button()
         .is_some_and(|button| gesture_buttons.contains(&button))

@@ -46,8 +46,8 @@ fn hold_shortcut_has_distinct_lifecycle_semantics() {
 
     assert_eq!(held.label(), "Hold Alt+Space");
     assert_eq!(held.category(), Category::Editing);
-    assert_eq!(held.held_input(), Some(HeldInput::Shortcut(&combo)));
-    assert_matches!(held.effect(), Effect::HeldKey(HeldInput::Shortcut(actual)) if actual == &combo);
+    assert_eq!(held.held_input(), Some(&combo));
+    assert_matches!(held.effect(), Effect::HeldKey(actual) if actual == &combo);
     assert!(!held.requires_physical_release());
     assert_eq!(Action::CustomShortcut(combo).held_input(), None);
 }
@@ -58,13 +58,15 @@ fn globe_is_a_catalog_action_with_physical_hold_semantics() {
     assert_eq!(roundtrip(&action), action);
     assert_eq!(action.category(), Category::System);
     assert_eq!(action.translation_key(), Some("actions.hold_globe_key"));
-    assert_eq!(action.held_input(), Some(HeldInput::Globe));
-    assert_eq!(action.effect(), Effect::HeldKey(HeldInput::Globe));
+    assert_eq!(action.held_input(), Some(&KeyCombo::FN));
+    assert_eq!(action.effect(), Effect::HeldKey(&KeyCombo::FN));
     assert!(action.requires_physical_release());
     assert!(Action::catalog().contains(&action));
     assert_eq!(ActionRingIcon::for_action(&action), ActionRingIcon::Globe);
-    assert!(
-        "Fn".parse::<KeyCombo>().is_err(),
+    assert_eq!("Fn".parse::<KeyCombo>().unwrap(), KeyCombo::FN);
+    assert_eq!(
+        KeyCombo::FN.key(),
+        None,
         "Fn must not become a fake USB usage"
     );
     assert_eq!(
@@ -682,5 +684,29 @@ fn scroll_actions_lower_to_unit_direction() {
     assert_eq!(
         Action::HorizontalScrollRight.effect(),
         Effect::Scroll { dx: 1, dy: 0 }
+    );
+}
+
+#[test]
+fn double_click_binding_round_trips_and_preserves_legacy_thresholds() {
+    let old: LongPressBinding = toml::from_str("short = 'Copy'\nlong = 'Paste'").unwrap();
+    assert!(old.double_click().is_none());
+    assert_eq!(old.hold_threshold(), std::time::Duration::from_millis(500));
+    let binding = Binding::LongPress(
+        LongPressBinding::new(Action::None, Action::HoldGlobeKey)
+            .with_double_click("Ctrl+Alt+Shift+T".parse().unwrap()),
+    );
+    let encoded = toml::to_string(&binding).unwrap();
+    assert_eq!(toml::from_str::<Binding>(&encoded).unwrap(), binding);
+    let Binding::LongPress(timed) = binding else {
+        unreachable!()
+    };
+    assert_eq!(
+        timed.hold_threshold(),
+        std::time::Duration::from_millis(300)
+    );
+    assert_eq!(
+        super::DOUBLE_CLICK_INTERVAL,
+        std::time::Duration::from_millis(200)
     );
 }

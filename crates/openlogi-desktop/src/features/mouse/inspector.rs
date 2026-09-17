@@ -4,17 +4,21 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use gpui::{
-    Context, Entity, InteractiveElement, IntoElement, ParentElement, Role,
-    StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rgb, svg,
+    App, Context, Entity, InteractiveElement, IntoElement, ParentElement, Role,
+    StatefulInteractiveElement as _, Styled, Window, div, prelude::FluentBuilder as _, px, rgb,
+    svg,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
     Disableable as _, Icon, IconName, Selectable as _, Sizable as _, button::Button, h_flex,
     input::InputState, scroll::ScrollableElement as _, v_flex,
 };
-use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
+use openlogi_core::binding::{
+    Action, Binding, ButtonId, GestureDirection, KeyCombo, default_binding,
+};
 
 use super::hotspots::MouseControlId;
+use super::keyboard::{edit_keys, keyboard_actions};
 use super::picker::{
     ActionActivation, GESTURE_BUTTON_ICON, PickFn, action_icon_path, action_rows_matching,
     editor_section, gesture_direction_icon,
@@ -148,11 +152,20 @@ fn button_inspector(
         return inherited_gesture_inspector(button, app, picker, pal, cx);
     }
 
+    let timed = AppState::try_read(cx)
+        .and_then(|state| state.default_button_binding(button))
+        .and_then(|binding| match binding {
+            Binding::LongPress(binding) => Some(binding),
+            _ => None,
+        })
+        .filter(|_| data.editing_app.is_none() || !overridden);
     let action = data
         .bindings
         .get(&button)
         .cloned()
         .unwrap_or_else(|| default_binding(button));
+    let action = timed.map_or(action, |binding| binding.long().clone());
+    let double_click = timed.and_then(|binding| binding.double_click());
     let status = match (
         data.editing_app,
         overridden,
@@ -180,6 +193,21 @@ fn button_inspector(
             pal,
         ))
         .child(current_action_card(&action, picker, pal))
+        .when(
+            data.editing_app.is_none() && action.held_input().is_some(),
+            |panel| panel.child(double_click_controls(button, double_click, pal)),
+        )
+        .when(
+            data.editing_app.is_some() && double_click.is_some(),
+            |panel| {
+                panel.child(
+                    div()
+                        .text_caption()
+                        .text_color(pal.text_muted)
+                        .child(tr!("actions.double_click_hold_help")),
+                )
+            },
+        )
         .when(overridden, |panel| {
             let observer = picker.view.clone();
             panel.child(
@@ -238,6 +266,80 @@ fn button_inspector(
                 cx,
             ))
         })
+}
+
+fn double_click_controls(
+    button: ButtonId,
+    shortcut: Option<&KeyCombo>,
+    pal: Palette,
+) -> impl IntoElement {
+    let current = shortcut.cloned();
+    v_flex()
+        .gap_2()
+        .child(editor_section(tr!("actions.double_click_shortcut"), pal))
+        .child(div().text_body().child(shortcut.map_or_else(
+            || tr!("actions.unbound"),
+            |combo| combo.rendered_label().into(),
+        )))
+        .when(shortcut.is_some(), |panel| {
+            panel.child(
+                div()
+                    .text_caption()
+                    .text_color(pal.text_muted)
+                    .child(tr!("actions.double_click_hold_help")),
+            )
+        })
+        .child(
+            control_button("edit-double-click-shortcut")
+                .w_full()
+                .label(tr!("actions.set_double_click_shortcut"))
+                .on_click(move |_, window, cx| {
+                    open_double_click_editor(button, current.as_ref(), window, cx);
+                }),
+        )
+        .when(shortcut.is_some(), |panel| {
+            panel.child(
+                control_button("remove-double-click-shortcut")
+                    .w_full()
+                    .label(tr!("actions.remove_double_click_shortcut"))
+                    .on_click(move |_, _, cx| {
+                        AppState::update_bindings(cx, |state| {
+                            if let Some(key) = state
+                                .current_record()
+                                .map(|record| record.config_key.clone())
+                            {
+                                state.commit_double_click(&key, button, None);
+                            }
+                        });
+                    }),
+            )
+        })
+}
+
+fn open_double_click_editor(
+    button: ButtonId,
+    shortcut: Option<&KeyCombo>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some(key) = AppState::try_read(cx)
+        .and_then(|state| state.current_record())
+        .map(|record| record.config_key.clone())
+    else {
+        return;
+    };
+    let initial = shortcut.map_or_else(|| "Ctrl+Alt+Shift+T".to_string(), KeyCombo::rendered_label);
+    edit_keys(
+        &initial,
+        tr!("actions.double_click_shortcut"),
+        Rc::new(move |combo, _, cx| {
+            AppState::update_bindings(cx, |state| {
+                state.commit_double_click(&key, button, Some(combo));
+            });
+        }),
+        window,
+        cx,
+    );
 }
 
 fn inherited_gesture_inspector(
@@ -677,6 +779,7 @@ fn action_library(
         .gap_2()
         .pt_1()
         .child(editor_section(tr!("actions.actions"), pal))
+        .child(keyboard_actions(id_prefix, activation, current, on_pick))
         .child(control_input(action_search).cleanable(true))
         .child(
             v_flex()

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::application_target::ApplicationTarget;
 use super::category::Category;
-use super::effect::{Effect, HeldInput};
+use super::effect::Effect;
 use super::key_combo::KeyCombo;
 
 /// What pressing a [`ButtonId`](crate::binding::ButtonId) should do.
@@ -188,11 +188,12 @@ pub enum Action {
     /// cancellation and shutdown. Dispatchers without a release context must
     /// degrade this action to a balanced tap rather than leave keys held.
     HoldShortcut(KeyCombo),
-    /// Hold the macOS Globe/Fn key from physical press to release, without a
-    /// long-press threshold. Cancellation and shutdown release it too.
+    /// Hold the macOS Globe/Fn key until physical release. Single bindings
+    /// start immediately; long-press bindings start at their threshold.
+    /// Cancellation and shutdown release it too.
     ///
-    /// Requires a single binding with physical down/up edges, not a deferred
-    /// gesture, long-press outcome, pulse, or Actions Ring activation. This
+    /// Requires physical down/up edges, not a released click, deferred
+    /// gesture, pulse, or Actions Ring activation. This
     /// injects key events only; it does not configure an input method or audio.
     HoldGlobeKey,
 }
@@ -405,7 +406,7 @@ impl Action {
     /// Keyboard output owned by the originating press, or `None` for an
     /// instantaneous action.
     #[must_use]
-    pub fn held_input(&self) -> Option<HeldInput<'_>> {
+    pub fn held_input(&self) -> Option<&KeyCombo> {
         match self.effect() {
             Effect::HeldKey(input) => Some(input),
             _ => None,
@@ -416,6 +417,6 @@ impl Action {
     /// Existing held shortcuts keep their historical balanced-tap fallback.
     #[must_use]
     pub fn requires_physical_release(&self) -> bool {
-        matches!(self, Self::HoldGlobeKey)
+        self.held_input().is_some_and(KeyCombo::has_fn)
     }
 }

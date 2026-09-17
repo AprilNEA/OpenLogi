@@ -13,7 +13,7 @@ use std::sync::{LazyLock, Mutex, PoisonError};
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use openlogi_core::binding::KeyboardUsage;
-use openlogi_core::binding::{Action, HeldInput};
+use openlogi_core::binding::{Action, KeyCombo};
 use openlogi_core::scroll::ScrollDelta;
 
 #[cfg(target_os = "macos")]
@@ -149,23 +149,13 @@ static HELD_OUTPUT: LazyLock<Mutex<HeldOutput>> =
     LazyLock::new(|| Mutex::new(HeldOutput::default()));
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-fn held_keys(input: HeldInput<'_>) -> Vec<HeldKey> {
-    let combo = match input {
-        HeldInput::Shortcut(combo) => combo,
-        HeldInput::Globe => {
-            #[cfg(target_os = "macos")]
-            return vec![HeldKey::Globe];
-            #[cfg(not(target_os = "macos"))]
-            {
-                tracing::warn!(
-                    action = "HoldGlobeKey",
-                    reason = "unsupported_platform",
-                    "held input rejected"
-                );
-                return Vec::new();
-            }
-        }
-    };
+fn held_keys(input: &KeyCombo) -> Vec<HeldKey> {
+    let combo = input;
+    #[cfg(not(target_os = "macos"))]
+    if combo.has_fn() {
+        tracing::warn!(chord = %combo.rendered_label(), "Globe/Fn is unsupported on this platform; entire chord rejected");
+        return Vec::new();
+    }
     let mut keys = Vec::with_capacity(5);
     #[cfg(target_os = "macos")]
     if combo.has_command() {
@@ -185,7 +175,13 @@ fn held_keys(input: HeldInput<'_>) -> Vec<HeldKey> {
     if combo.has_option() {
         keys.push(HeldKey::Alt);
     }
-    keys.push(HeldKey::Key(combo.key()));
+    #[cfg(target_os = "macos")]
+    if combo.has_fn() {
+        keys.push(HeldKey::Globe);
+    }
+    if let Some(key) = combo.key() {
+        keys.push(HeldKey::Key(key));
+    }
     keys
 }
 
@@ -267,7 +263,7 @@ pub struct HeldInputGuard {
 
 impl HeldInputGuard {
     /// Replace the output without releasing keys shared by both inputs.
-    pub fn replace(&mut self, input: HeldInput<'_>) {
+    pub fn replace(&mut self, input: &KeyCombo) {
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         {
             let old = std::mem::replace(&mut self.keys, held_keys(input));
@@ -285,12 +281,19 @@ impl Drop for HeldInputGuard {
     }
 }
 
+/// Press and release one keyboard chord using the same ownership as physical holds.
+/// Shared modifiers remain down until their last owner releases them.
+pub fn tap_keys(input: &KeyCombo) {
+    drop(press_hold(input));
+}
+
 /// Submit the down edge and return the physical press's release owner.
 ///
 /// Keep the guard until release or cancellation. This submits OS events; it
 /// cannot confirm that a target application accepted them. Globe/Fn is macOS
-/// only and is rejected by one-shot [`execute`] rather than tapped.
-pub fn press_hold(input: HeldInput<'_>) -> HeldInputGuard {
+/// only. Use [`tap_keys`] for a balanced tap; `HoldShortcut` containing Fn
+/// requires a physical lifecycle when dispatched through [`execute`].
+pub fn press_hold(input: &KeyCombo) -> HeldInputGuard {
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     {
         // Own cleanup before posting, including if the backend unwinds.
@@ -541,7 +544,7 @@ mod tests {
     use super::{HeldKey, HeldOutput, HoldTransition, held_keys};
     use super::{QuantizedScroll, ScrollQuantizer};
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-    use openlogi_core::binding::{HeldInput, KeyboardUsage};
+    use openlogi_core::binding::KeyboardUsage;
 
     /// Synthetic high-resolution input: eight eighth-ticks must total exactly
     /// one Windows/Linux wheel detent (120 raw units). This is deterministic
@@ -573,7 +576,7 @@ mod tests {
         let combo = label
             .parse::<KeyCombo>()
             .expect("test shortcut must be valid");
-        held_keys(HeldInput::Shortcut(&combo))
+        held_keys(&combo)
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
@@ -713,7 +716,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn globe_is_shared_and_each_rapid_session_has_exactly_two_edges() {
-        let globe = held_keys(HeldInput::Globe);
+        let globe = held_keys(&KeyCombo::FN);
         let mut output = HeldOutput::default();
         assert_eq!(globe, vec![HeldKey::Globe]);
         for _ in 0..3 {
@@ -743,7 +746,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn globe_replacement_does_not_release_another_chords_keys() {
-        let globe = held_keys(HeldInput::Globe);
+        let globe = held_keys(&KeyCombo::FN);
         let shortcut = chord("Cmd+A");
         let mut output = HeldOutput::default();
         output.transition(&[], &shortcut);
@@ -772,7 +775,26 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     #[test]
     fn globe_has_no_substitute_key_on_other_platforms() {
-        assert!(held_keys(HeldInput::Globe).is_empty());
+        assert!(held_keys(&KeyCombo::FN).is_empty());
+        assert!(chord("Ctrl+Fn+T").is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn tapping_a_chord_preserves_a_separately_held_fn_and_control() {
+        let held = chord("Ctrl+Fn");
+        let tapped = chord("⌃⌥⇧T");
+        let mut output = HeldOutput::default();
+        output.transition(&[], &held);
+        let down = output.transition(&[], &tapped);
+        assert!(!down.down.contains(&HeldKey::Control));
+        assert!(down.down.contains(&key(0x17)));
+        let up = output.transition(&tapped, &[]);
+        assert!(!up.up.contains(&HeldKey::Control));
+        assert!(output.modifiers().contains(HeldKey::Control));
+        assert!(output.modifiers().contains(HeldKey::Globe));
+        output.transition(&held, &[]);
+        assert!(output.owners.is_empty());
     }
 
     #[test]

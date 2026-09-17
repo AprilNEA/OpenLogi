@@ -12,8 +12,7 @@ use core_graphics::geometry::CGPoint;
 use objc2_application_services::{AXError, AXUIElement};
 use objc2_core_foundation::{CFArray, CFRetained, CFString, CFType, Type as _};
 use openlogi_core::binding::{
-    Action, Effect, HeldInput, KeyCombo, MediaKey, MouseButton, NativeAction, Script, Shortcut,
-    WorkflowStep,
+    Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Script, Shortcut, WorkflowStep,
 };
 use openlogi_core::scroll::ScrollDelta;
 
@@ -51,13 +50,13 @@ pub(super) fn execute(action: &Action) {
         // this — the hook passes it straight through to the OS.
         Effect::Click(button) => dispatch_click(button),
         Effect::Shortcut(shortcut) => post_keycombo(&combo(shortcut)),
-        Effect::Key(combo) | Effect::HeldKey(HeldInput::Shortcut(combo)) => post_keycombo(combo),
-        Effect::HeldKey(HeldInput::Globe) => {
-            tracing::warn!(
-                action = "HoldGlobeKey",
-                reason = "physical_release_required",
-                "one-shot input rejected"
-            );
+        Effect::Key(combo) => super::tap_keys(combo),
+        Effect::HeldKey(combo) => {
+            if action.requires_physical_release() {
+                tracing::warn!(chord = %combo.rendered_label(), "held keyboard input requires a physical release");
+            } else {
+                super::tap_keys(combo);
+            }
         }
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
         // Media/volume controls are NX system-defined keys, not ordinary
@@ -263,9 +262,7 @@ fn post_key_phase(vk: u16, flags: CGEventFlags, phase: KeyPhase) -> bool {
         return false;
     };
     event.set_flags(flags);
-    if vk == 0x3f {
-        tag_synthetic(&event);
-    }
+    tag_synthetic(&event);
     event.post(CGEventTapLocation::HID);
     true
 }
@@ -297,15 +294,14 @@ fn post_unicode(text: &str) {
 }
 
 /// Press a key chord described by a `KeyCombo` modifier bitmask + virtual
-/// keycode. Used by the workflow sequencer's `PressKey` step.
+/// keycode. Used by the built-in shortcut table.
 fn post_keycombo(combo: &KeyCombo) {
-    if let Some(vk) = hid_usage_to_macos(combo.key().code()) {
+    if combo.has_fn() || combo.key().is_none() {
+        super::tap_keys(combo);
+        return;
+    }
+    if let Some(vk) = combo.key().and_then(|key| hid_usage_to_macos(key.code())) {
         post_key(vk, combo_flags(combo));
-    } else {
-        tracing::warn!(
-            usage = combo.key().code(),
-            "shortcut usage has no macOS mapping"
-        );
     }
 }
 
@@ -482,12 +478,12 @@ mod tests {
         assert_eq!(combo(Shortcut::NextTab).rendered_label(), "Ctrl+Tab");
         // hid_usage_to_macos must actually resolve every table entry, or a
         // `Shortcut` silently no-ops instead of pressing anything (see
-        // `post_keycombo`'s warn-and-drop path). Iterates `Shortcut::ALL`
+        // `post_keycombo`'s unmapped-key path). Iterates `Shortcut::ALL`
         // rather than a hand-copied list, so a newly added `Shortcut`
         // variant is checked here automatically instead of depending on
         // someone remembering to extend a second, independent list.
         for &shortcut in Shortcut::ALL {
-            let key = combo(shortcut).key().code();
+            let key = combo(shortcut).key().unwrap().code();
             assert!(
                 hid_usage_to_macos(key).is_some(),
                 "{shortcut:?} table entry has no macOS virtual-key mapping"
@@ -510,7 +506,7 @@ mod tests {
             CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType,
             CallbackResult, EventField,
         };
-        use openlogi_core::binding::HeldInput;
+        use openlogi_core::binding::KeyCombo;
         use std::cell::RefCell;
         use std::time::Duration;
 
@@ -540,10 +536,10 @@ mod tests {
             },
             || {
                 for _ in 0..3 {
-                    let first = press_hold(HeldInput::Globe);
+                    let first = press_hold(&KeyCombo::FN);
                     pump();
-                    let mut second = press_hold(HeldInput::Globe);
-                    second.replace(HeldInput::Globe);
+                    let mut second = press_hold(&KeyCombo::FN);
+                    second.replace(&KeyCombo::FN);
                     pump();
                     drop(first);
                     pump();
@@ -580,6 +576,42 @@ mod tests {
     }
 
     #[test]
+    fn generic_keys_generate_balanced_macos_edges() {
+        for (text, keycodes, final_flags) in [
+            ("Fn", vec![63], CGEventFlags::CGEventFlagSecondaryFn),
+            ("T", vec![17], CGEventFlags::CGEventFlagNull),
+            (
+                "⌃⌥⇧T",
+                vec![59, 56, 58, 17],
+                CGEventFlags::CGEventFlagControl
+                    | CGEventFlags::CGEventFlagAlternate
+                    | CGEventFlags::CGEventFlagShift,
+            ),
+            ("Fn+T", vec![63, 17], CGEventFlags::CGEventFlagSecondaryFn),
+        ] {
+            let chord: openlogi_core::binding::KeyCombo = text.parse().unwrap();
+            let keys = super::super::held_keys(&chord);
+            let mut modifiers = HeldModifiers::default();
+            let down: Vec<_> = keys
+                .iter()
+                .map(|key| held_key_event(*key, KeyPhase::Down, &mut modifiers).unwrap())
+                .collect();
+            assert_eq!(down.iter().map(|edge| edge.0).collect::<Vec<_>>(), keycodes);
+            assert_eq!(down.last().unwrap().1, final_flags);
+            let up: Vec<_> = keys
+                .iter()
+                .rev()
+                .map(|key| held_key_event(*key, KeyPhase::Up, &mut modifiers).unwrap())
+                .collect();
+            assert_eq!(
+                up.iter().map(|edge| edge.0).collect::<Vec<_>>(),
+                keycodes.into_iter().rev().collect::<Vec<_>>()
+            );
+            assert_eq!(up.last().unwrap().1, CGEventFlags::CGEventFlagNull);
+        }
+    }
+
+    #[test]
     fn held_edges_carry_the_aggregate_modifier_state() {
         let mut modifiers = HeldModifiers::default();
         let (_, flags) = held_key_event(HeldKey::Command, KeyPhase::Down, &mut modifiers)
@@ -591,7 +623,7 @@ mod tests {
         assert!(flags.contains(CGEventFlags::CGEventFlagCommand));
         assert!(flags.contains(CGEventFlags::CGEventFlagControl));
 
-        let key = combo(Shortcut::Copy).key();
+        let key = combo(Shortcut::Copy).key().unwrap();
         let (_, flags) = held_key_event(HeldKey::Key(key), KeyPhase::Up, &mut modifiers)
             .expect("Copy's key has a macOS virtual-key mapping");
         assert!(flags.contains(CGEventFlags::CGEventFlagCommand));
@@ -621,7 +653,7 @@ fn run_workflow(steps: &[WorkflowStep]) {
     for step in steps {
         match step {
             WorkflowStep::TypeText(text) => post_unicode(text),
-            WorkflowStep::PressKey(combo) => post_keycombo(combo),
+            WorkflowStep::PressKey(combo) => super::tap_keys(combo),
             WorkflowStep::Delay { millis } => {
                 std::thread::sleep(std::time::Duration::from_millis(*millis));
             }

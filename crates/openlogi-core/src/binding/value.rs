@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use super::KeyCombo;
 use super::action::Action;
 use super::defaults::default_gesture_binding;
 use super::gesture::GestureDirection;
@@ -12,6 +13,12 @@ use super::gesture::GestureDirection;
 /// How long a physical button must remain down before its independent long
 /// action fires.
 pub const LONG_PRESS_THRESHOLD: Duration = Duration::from_millis(500);
+
+/// Maximum interval from the first release to the second press of a double click.
+pub const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(200);
+
+/// Hold threshold when a button also has a double-click shortcut.
+pub const DOUBLE_CLICK_HOLD_THRESHOLD: Duration = Duration::from_millis(300);
 
 /// The mutually exclusive actions of a threshold-based button binding.
 ///
@@ -22,13 +29,43 @@ pub const LONG_PRESS_THRESHOLD: Duration = Duration::from_millis(500);
 pub struct LongPressBinding {
     short: Action,
     long: Action,
+    #[serde(default)]
+    double_click: Option<KeyCombo>,
 }
 
 impl LongPressBinding {
     /// Pair the release-before-threshold action with the threshold action.
     #[must_use]
     pub const fn new(short: Action, long: Action) -> Self {
-        Self { short, long }
+        Self {
+            short,
+            long,
+            double_click: None,
+        }
+    }
+
+    /// Add a shortcut for two short presses. A single click waits for
+    /// [`DOUBLE_CLICK_INTERVAL`]; a long press suppresses both click actions.
+    #[must_use]
+    pub fn with_double_click(mut self, shortcut: KeyCombo) -> Self {
+        self.double_click = Some(shortcut);
+        self
+    }
+
+    /// Shortcut fired on the second short release, if double click is enabled.
+    #[must_use]
+    pub const fn double_click(&self) -> Option<&KeyCombo> {
+        self.double_click.as_ref()
+    }
+
+    /// Hold threshold for this binding; double click uses a shorter hold delay.
+    #[must_use]
+    pub const fn hold_threshold(&self) -> Duration {
+        if self.double_click.is_some() {
+            DOUBLE_CLICK_HOLD_THRESHOLD
+        } else {
+            LONG_PRESS_THRESHOLD
+        }
     }
 
     /// Action fired by a normal release before the threshold.

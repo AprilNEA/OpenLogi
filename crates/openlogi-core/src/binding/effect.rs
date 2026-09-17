@@ -40,7 +40,7 @@ pub enum Effect<'a> {
     Key(&'a KeyCombo),
     /// Keyboard output owned by a physical press lifecycle. Shortcuts retain
     /// their balanced-tap fallback; Globe requires a matching physical release.
-    HeldKey(HeldInput<'a>),
+    HeldKey(&'a KeyCombo),
     /// Synthesise one scroll tick. `dx`/`dy` are unit direction (-1/0/1);
     /// each backend applies its own tick magnitude.
     Scroll {
@@ -71,18 +71,6 @@ pub enum Effect<'a> {
     /// through any per-OS synthesis path), so from a backend's point of
     /// view it is exactly as much a no-op as the DPI actions.
     AgentSide,
-}
-
-/// Keyboard output held until the originating physical press ends.
-///
-/// Globe/Fn is an Apple modifier, not a USB keyboard-page usage. Keeping it
-/// distinct avoids inventing a fake usage in the portable shortcut schema.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HeldInput<'a> {
-    /// A portable keyboard chord.
-    Shortcut(&'a KeyCombo),
-    /// The macOS Globe/Fn modifier. Unsupported on other platforms.
-    Globe,
 }
 
 /// A physical mouse button an [`Effect::Click`] should press.
@@ -285,8 +273,8 @@ impl Action {
             Action::HorizontalScrollRight => Effect::Scroll { dx: 1, dy: 0 },
 
             Action::CustomShortcut(combo) => Effect::Key(combo),
-            Action::HoldShortcut(combo) => Effect::HeldKey(HeldInput::Shortcut(combo)),
-            Action::HoldGlobeKey => Effect::HeldKey(HeldInput::Globe),
+            Action::HoldShortcut(combo) => Effect::HeldKey(combo),
+            Action::HoldGlobeKey => Effect::HeldKey(&KeyCombo::FN),
 
             Action::TypeText(text) => Effect::Text(text),
             Action::RunAppleScript(src) => Effect::Script(Script::AppleScript(src)),
