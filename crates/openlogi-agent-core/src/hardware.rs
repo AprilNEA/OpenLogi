@@ -122,9 +122,9 @@ impl<'a> DeviceOp<'a> {
     /// would likely still succeed on the stale handle, but anything that
     /// caches a feature off it (see the haptic feature cache's
     /// `EpochGuarded` note) would then pin a channel the enumerator can never
-    /// reopen. Used by every awaited device call: the IPC server's
-    /// DPI/SmartShift/lighting reads and writes, and the Actions Ring haptic
-    /// path.
+    /// reopen. Used by the IPC server's ordinary reads and writes and the
+    /// Actions Ring haptic path. Lighting uses [`Self::lighting`] so rollback
+    /// outlives the requester's deadline.
     pub async fn run<F, Fut, T>(self, op: HidppOperation, f: F) -> Result<T, WriteError>
     where
         F: FnOnce(SharedChannel) -> Fut,
@@ -136,6 +136,43 @@ impl<'a> DeviceOp<'a> {
         let _lease = self.receiver_access.acquire_for_io().await;
         let shared = self.resolve()?;
         timed(op, f(shared)).await
+    }
+
+    /// Own the whole lighting transaction outside the requester runtime. The
+    /// worker leases and resolves AFTER obtaining its lighting route lock and
+    /// retains that lease through any RGB rollback after requester cancellation.
+    pub fn lighting(
+        self,
+        lighting: &Lighting,
+    ) -> Result<openlogi_hid::lighting::LightingJob, WriteError> {
+        let capture = self.capture.clone();
+        let registry = self.registry.clone();
+        let receiver_access = self.receiver_access.clone();
+        let device_io = self.device_io.clone();
+        let route = self.route.clone();
+        let (r, g, b) = lighting_rgb(lighting);
+        let write = openlogi_hid::write::LightingWrite {
+            method: openlogi_hid::LightingMethod::Auto,
+            color: openlogi_core::color::Rgb::new(r, g, b),
+        };
+        openlogi_hid::lighting::LightingJob::spawn(&self.route, move |cancel| async move {
+            let _lease = tokio::time::timeout(WRITE_BUDGET, receiver_access.acquire_for_io())
+                .await
+                .map_err(|_| WriteError::RequestTimedOut {
+                    operation: HidppOperation::Lighting,
+                })?;
+            if !device_io.allows_io() {
+                return Err(WriteError::DeviceNotFound);
+            }
+            let channel = authoritative_channel(Some(&capture), &registry, &route)?;
+            write
+                .apply_on(
+                    &channel,
+                    || cancel.is_cancelled(),
+                    || device_io.allows_io() && registry.is_current(&channel),
+                )
+                .await
+        })
     }
 
     /// Fire-and-forget `f` on its own OS thread and one-shot runtime, with the
@@ -505,19 +542,10 @@ pub fn write_scroll_wheel_mode_in_background(
 /// [`openlogi_hid::set_keyboard_color_on`]. A registry miss and write
 /// failures are logged, not surfaced.
 pub fn set_lighting_in_background(op: DeviceOp<'_>, lighting: &Lighting) {
-    let (r, g, b) = lighting_rgb(lighting);
-    op.spawn_write(
-        "lighting write",
-        move |c| async move { openlogi_hid::set_keyboard_color_on(&c, r, g, b).await },
-        move |result| match result {
-            Ok(Ok(())) => debug!(r, g, b, "lighting written to keyboard"),
-            Ok(Err(e)) => warn!(error = ?e, "lighting write failed"),
-            Err(_) => warn!(
-                r,
-                g, b, "lighting write timed out (device asleep/unresponsive)"
-            ),
-        },
-    );
+    match op.lighting(lighting) {
+        Ok(job) => job.detach(),
+        Err(error) => warn!(?error, "could not start background lighting"),
+    }
 }
 
 /// Resolve a [`Lighting`] config to an `(r, g, b)` triple: the configured

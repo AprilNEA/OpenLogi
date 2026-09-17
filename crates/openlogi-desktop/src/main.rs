@@ -46,6 +46,7 @@ use openlogi_core::config::{Config, ConfigFile};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
+use crate::platform::app_icon::AppIconExt as _;
 use crate::services::assets::sync::{AssetCommand, AssetControl};
 use crate::services::{i18n, ipc};
 use crate::state::ConfigPersistence;
@@ -143,7 +144,7 @@ fn main() -> Result<()> {
 
         // Wear the icon the user picked. An update replaces the bundle and
         // takes the icon with it, so this is a repair as much as a restore.
-        platform::app_icon::restore(initial_config.app_settings.app_icon);
+        initial_config.app_settings.app_icon.restore();
 
         // On-demand GUI: quit when the last window closes. The agent stays
         // resident and keeps remapping (and hosts the menu-bar item from which

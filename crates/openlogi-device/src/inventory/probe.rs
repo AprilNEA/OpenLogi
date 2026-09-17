@@ -1,5 +1,7 @@
 use std::{
     collections::HashMap,
+    fmt::Debug,
+    future::Future,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -25,13 +27,27 @@ use tracing::{debug, warn};
 use super::events::EventSubscriptionHandle;
 use super::mappings::{map_kind, map_unifying_kind, resolve_device_kind};
 use crate::backend::NodeInfo;
-use crate::channel::route::DIRECT_DEVICE_INDEX;
+use crate::channel::route::{DIRECT_DEVICE_INDEX, is_receiver_pid};
+use crate::host_lock::{self, ReceiverRegisterPhase};
 
 use super::cache::{CacheKey, CacheOutcome, Cached, is_stale, probe_or_reuse, seen};
 use super::features::ProbedFeatures;
-use super::{BOLT_SLOT_PROBE, MAX_BOLT_SLOTS, UNIFYING_CACHED_SLOT_PROBE, UNIFYING_SLOT_PROBE};
+use super::{
+    MAX_BOLT_SLOTS, ProbeDeadlines, RECEIVER_OPERATION_TIMEOUT, RECEIVER_UID_TIMEOUT,
+    UNIFYING_TRIGGER_ATTEMPT_TIMEOUT, UNIFYING_TRIGGER_RETRY_DELAY,
+};
 
-/// One node probe's verdict about its own trustworthiness. Three-valued on
+/// What every probe of one pass shares: the cache it reads, the pass's
+/// clock, the event sink, and the deadlines it runs under.
+#[derive(Clone, Copy)]
+pub(super) struct PassContext<'a> {
+    pub(super) cache: &'a HashMap<CacheKey, Cached>,
+    pub(super) now: Instant,
+    pub(super) subscriptions: Option<&'a EventSubscriptionHandle>,
+    pub(super) deadlines: &'a ProbeDeadlines,
+}
+
+/// One node probe's verdict about its own trustworthiness. An enum on
 /// purpose: the old `healthy`/`complete` bool pair could also express
 /// "couldn't check, but the check is complete", which no probe path means —
 /// the invariant lived in a comment at every construction site.
@@ -41,9 +57,21 @@ pub(super) enum ProbeVerdict {
     /// feature walk that never finished): the ledger replays the last-good
     /// snapshot instead of presenting the failure as truth.
     Failed,
-    /// The node answered — the only verdict that counts as stability
-    /// evidence. `complete` reports whether every expected device was seen,
-    /// which is what lets the one-shot retry stop early.
+    /// The receiver answered a liveness register, but the only operation that
+    /// can produce an authoritative device list failed. The ledger may replay
+    /// its last-good snapshot briefly, but must eventually reopen the channel.
+    AliveButIncomplete,
+    /// The node was not checked at all: another OpenLogi process held its
+    /// receiver register phase, so this probe skipped the node's I/O and has
+    /// no evidence either way. The ledger replays the last-good snapshot
+    /// without counting a failure — a channel that was never asked cannot
+    /// have failed, and must not be retired for it — and the node's cache
+    /// entries are held out of miss aging, while the one-shot retry
+    /// re-probes as it would after a failure.
+    Deferred,
+    /// The node produced an authoritative inventory — the only verdict that
+    /// counts as stability evidence. `complete` reports whether every expected
+    /// device was seen, which is what lets the one-shot retry stop early.
     Healthy {
         /// Every expected device is present in this probe's inventory.
         complete: bool,
@@ -61,9 +89,14 @@ impl ProbeVerdict {
         }
     }
 
-    /// The node answered this tick (the ledger's replay gate).
+    /// The node produced an authoritative inventory this tick.
     pub(super) fn is_healthy(self) -> bool {
         matches!(self, Self::Healthy { .. })
+    }
+
+    /// The node was never asked this tick: another process held it.
+    pub(super) fn is_deferred(self) -> bool {
+        matches!(self, Self::Deferred)
     }
 
     /// Every expected device was seen (the one-shot retry's stop signal).
@@ -91,39 +124,76 @@ impl NodeProbe {
             outcomes: Vec::new(),
         }
     }
+
+    /// A Unifying receiver that answered `count_pairings` but rejected the
+    /// synthetic arrival trigger remains usable for existing control capture.
+    fn arrival_replay_failed() -> Self {
+        Self {
+            inventory: None,
+            verdict: ProbeVerdict::AliveButIncomplete,
+            outcomes: Vec::new(),
+        }
+    }
+
+    /// A probe that never ran: another process held the receiver's register
+    /// phase for longer than it was willing to wait.
+    pub(super) fn deferred() -> Self {
+        Self {
+            inventory: None,
+            verdict: ProbeVerdict::Deferred,
+            outcomes: Vec::new(),
+        }
+    }
 }
 
-/// Probe one open HID++ node (channel reused across ticks by the caller).
+/// Probe one open HID++ node (channel reused across ticks by the caller),
+/// under the pass's deadlines.
+///
+/// A receiver's probe first takes the node's register phase
+/// ([`host_lock::lock_receiver_registers`]) — or settles as
+/// [`ProbeVerdict::Deferred`] when another OpenLogi process still holds it
+/// after [`ProbeDeadlines::register_lock_wait`] — and only then starts its
+/// I/O budget. The wait is time spent not talking to the receiver, so it
+/// must not count against the budget the receiver's real worst case was
+/// sized for: taken together, a four-second wait plus a legitimate deep
+/// slot walk would have tripped the budget, and a budget timeout is a
+/// *failure* — two in a row retire the channel — not a deferral.
 pub(super) async fn probe_one(
     info: NodeInfo,
     channel: Arc<HidppChannel>,
-    cache: &HashMap<CacheKey, Cached>,
-    now: Instant,
-    arrival_drain: Duration,
-    subscriptions: Option<&EventSubscriptionHandle>,
+    pass: PassContext<'_>,
 ) -> NodeProbe {
+    // Receivers answer register reads over local USB in milliseconds; only
+    // direct (esp. Bluetooth) devices need the long feature-walk budget. A
+    // tight receiver budget bounds the outage when its channel's input-report
+    // delivery dies (writes accepted, replies never seen — observed on macOS
+    // with concurrent opens of one node).
+    let receiver = is_receiver_pid(info.product_id);
+    let budget = if receiver {
+        pass.deadlines.receiver_budget
+    } else {
+        pass.deadlines.direct_budget
+    };
     match receiver::detect(Arc::clone(&channel)) {
         Some(Receiver::Bolt(bolt)) => {
-            probe_bolt_receiver(
-                channel,
-                info,
-                bolt,
-                cache,
-                now,
-                arrival_drain,
-                subscriptions,
+            let Some(registers) = lock_receiver_registers(&info, pass.deadlines).await else {
+                return NodeProbe::deferred();
+            };
+            within_budget(
+                budget,
+                receiver,
+                probe_bolt_receiver(channel, info, bolt, registers, pass),
             )
             .await
         }
         Some(Receiver::Unifying(unifying)) => {
-            probe_unifying_receiver(
-                channel,
-                info,
-                unifying,
-                cache,
-                now,
-                arrival_drain,
-                subscriptions,
+            let Some(registers) = lock_receiver_registers(&info, pass.deadlines).await else {
+                return NodeProbe::deferred();
+            };
+            within_budget(
+                budget,
+                receiver,
+                probe_unifying_receiver(channel, info, unifying, registers, pass),
             )
             .await
         }
@@ -132,25 +202,55 @@ pub(super) async fn probe_one(
             // (Bluetooth-direct, USB-C cable). HID++ at device-index 0xff
             // addresses the device's own features. Probe in case it answers.
             // P2.4 — verified path; no Bolt-pairing slot indirection needed.
-            probe_direct(channel, &info, cache, now, subscriptions).await
+            within_budget(budget, receiver, probe_direct(channel, &info, pass)).await
         }
     }
 }
 
+/// Take the receiver's register phase for this probe, or `None` to defer it.
+async fn lock_receiver_registers(
+    info: &NodeInfo,
+    deadlines: &ProbeDeadlines,
+) -> Option<ReceiverRegisterPhase> {
+    host_lock::lock_receiver_registers(&info.id, deadlines.register_lock_wait).await
+}
+
+/// Bound a probe's device I/O by `budget`. Burning the whole budget — an
+/// asleep direct device, or a channel whose input-report delivery died
+/// (writes accepted, replies never seen) — is "couldn't check", not
+/// "nothing there": a failed probe, for the ledger to replay through.
+async fn within_budget(
+    budget: Duration,
+    receiver: bool,
+    probe: impl Future<Output = NodeProbe>,
+) -> NodeProbe {
+    if let Ok(probe) = timeout(budget, probe).await {
+        return probe;
+    }
+    warn!(
+        ?budget,
+        receiver, "device probe timed out — treating as a failed probe"
+    );
+    NodeProbe::failed()
+}
+
+/// Probe a Bolt receiver under its register phase, which is dropped once the
+/// register reads are done: the slot walks that follow address each device
+/// by index under this process's own software id, and another process may
+/// have the receiver's registers meanwhile.
 async fn probe_bolt_receiver(
     channel: Arc<HidppChannel>,
     info: NodeInfo,
     bolt: BoltReceiver,
-    cache: &HashMap<CacheKey, Cached>,
-    now: Instant,
-    arrival_drain: Duration,
-    subscriptions: Option<&EventSubscriptionHandle>,
+    registers: ReceiverRegisterPhase,
+    pass: PassContext<'_>,
 ) -> NodeProbe {
     let unique_id = bolt.get_unique_id().await.ok();
     let pairing_count = bolt.count_pairings().await.ok();
     debug!(?pairing_count, "receiver reports pairing count");
 
-    let connections = drain_device_arrival(&bolt, arrival_drain, subscriptions).await;
+    let connections =
+        drain_device_arrival(&bolt, pass.subscriptions, pass.deadlines.arrival_drain).await;
     debug!(events = connections.len(), "drained device-arrival events");
     let by_slot: HashMap<u8, BoltDeviceConnection> =
         connections.into_iter().map(|c| (c.index, c)).collect();
@@ -169,16 +269,17 @@ async fn probe_bolt_receiver(
             identities.push(identity);
         }
     }
+    drop(registers);
 
     // Phase 2 — walk each occupied slot's feature table concurrently. Every walk
     // addresses its own device index, so responses route by index (no
     // cross-talk), and this per-device walk is the slow part a laggy device
     // would otherwise serialize the rest of the receiver behind. Each is bounded
-    // independently by `BOLT_SLOT_PROBE`; the ordered identity list keeps the
+    // independently by `bolt_slot_probe`; the ordered identity list keeps the
     // device list stable across ticks without an explicit sort.
     let slot_results = identities
         .iter()
-        .map(|identity| walk_bolt_slot(&channel, identity, cache, now, subscriptions))
+        .map(|identity| walk_bolt_slot(&channel, identity, pass))
         .collect::<Vec<_>>()
         .join()
         .await;
@@ -228,29 +329,44 @@ pub(super) fn assemble_bolt_probe(
     }
 }
 
+/// Probe a Unifying receiver under its register phase, held to the end: a
+/// slot whose feature walk exposes no marketing name reads its codename from
+/// the receiver's `0xB5` register *after* the walk, and an error reply to
+/// one `0xB5` sub-register is indistinguishable from another's, so the
+/// phase cannot be released before the last register read the probe may
+/// make. Unlike Bolt, then, the slot walks run under it — a few seconds at
+/// most, which [`host_lock::RECEIVER_REGISTER_WAIT`] allows for.
 async fn probe_unifying_receiver(
     channel: Arc<HidppChannel>,
     info: NodeInfo,
     unifying: UnifyingReceiver,
-    cache: &HashMap<CacheKey, Cached>,
-    now: Instant,
-    arrival_drain: Duration,
-    subscriptions: Option<&EventSubscriptionHandle>,
+    registers: ReceiverRegisterPhase,
+    pass: PassContext<'_>,
 ) -> NodeProbe {
     // Pairing count is the health gate for this path: without it the result is
     // settled as a failed probe regardless of any later arrival events. Check
     // it first and stop immediately on failure instead of spending two more
     // request timeouts enabling notifications and triggering arrivals on a
     // channel that has already stopped delivering receiver replies.
-    let pairing_count = match unifying.count_pairings().await {
-        Ok(count) => count,
-        Err(error) => {
+    let pairing_count = match timeout(RECEIVER_OPERATION_TIMEOUT, unifying.count_pairings()).await {
+        Ok(Ok(count)) => count,
+        Ok(Err(error)) => {
             debug!(?error, "receiver pairing-count read failed");
+            return NodeProbe::failed();
+        }
+        Err(_) => {
+            debug!(
+                budget = ?RECEIVER_OPERATION_TIMEOUT,
+                "receiver pairing-count read timed out"
+            );
             return NodeProbe::failed();
         }
     };
     debug!(pairing_count, "receiver reports pairing count");
-    let unique_id = unifying.get_unique_id().await.ok();
+    let unique_id = timeout(RECEIVER_UID_TIMEOUT, unifying.get_unique_id())
+        .await
+        .ok()
+        .and_then(Result::ok);
 
     // Trigger device-arrival events and collect one event per paired slot.
     // Each event carries the slot index, kind, wpid, and a link-status bit —
@@ -261,13 +377,19 @@ async fn probe_unifying_receiver(
     // A slot whose re-broadcast goes missing this tick cannot be backfilled
     // until that register format is resolved.
     //
-    // The drain is therefore the *only* device source on this path, so a
-    // failed arrival trigger is "couldn't check", not "no devices online":
-    // settle it as a failed probe and let the ledger replay the last snapshot.
-    let Some(connections) =
-        drain_device_arrival_unifying(&unifying, pairing_count, arrival_drain, subscriptions).await
+    // The drain is therefore the only source of a fresh device list. A failed
+    // trigger leaves that list unchanged, but the successful pairing-count
+    // read above proves the receiver channel is still live; don't tear down a
+    // working capture session for this narrower transient.
+    let Some(connections) = drain_device_arrival_unifying(
+        &unifying,
+        pairing_count,
+        pass.subscriptions,
+        pass.deadlines.arrival_drain,
+    )
+    .await
     else {
-        return NodeProbe::failed();
+        return NodeProbe::arrival_replay_failed();
     };
     debug!(events = connections.len(), "drained device-arrival events");
 
@@ -302,10 +424,13 @@ async fn probe_unifying_receiver(
     };
     let slot_results = connections
         .iter()
-        .map(|conn| probe_unifying_slot(&channel, conn, receiver_uid, cache, now, subscriptions))
+        .map(|conn| probe_unifying_slot(&channel, conn, receiver_uid, pass))
         .collect::<Vec<_>>()
         .join()
         .await;
+    // The last register read this probe can make — a slot's codename — is
+    // behind the walks, so the phase is released only here.
+    drop(registers);
 
     let (paired, outcomes): (Vec<_>, Vec<_>) = slot_results.into_iter().flatten().unzip();
 
@@ -417,9 +542,7 @@ async fn read_bolt_slot_identity(
 async fn walk_bolt_slot(
     channel: &Arc<HidppChannel>,
     identity: &BoltSlotIdentity,
-    cache: &HashMap<CacheKey, Cached>,
-    now: Instant,
-    subscriptions: Option<&EventSubscriptionHandle>,
+    pass: PassContext<'_>,
 ) -> (PairedDevice, CacheOutcome) {
     let &BoltSlotIdentity {
         slot,
@@ -429,30 +552,31 @@ async fn walk_bolt_slot(
         ..
     } = identity;
     let id = identity.id.clone();
-    let cached = id.as_ref().and_then(|i| cache.get(i));
+    let cached = id.as_ref().and_then(|i| pass.cache.get(i));
 
     // Cap the feature walk per slot so one device that stops answering can't
-    // burn the whole receiver's `PROBE_BUDGET` and time out `probe_one` — which
-    // would drop *every* device on the receiver. A timed-out slot falls back to
-    // its cached probe (its pairing-register identity read fine in phase 1),
+    // burn the whole receiver's budget and time out `probe_one` — which would
+    // drop *every* device on the receiver. A timed-out slot falls back to its
+    // cached probe (its pairing-register identity read fine in phase 1),
     // mirroring the Unifying path (#218).
+    let slot_budget = pass.deadlines.bolt_slot_probe;
     let probe_result = timeout(
-        BOLT_SLOT_PROBE,
+        slot_budget,
         probe_or_reuse(
             channel,
             slot,
             id.clone(),
             cached,
             online,
-            now,
-            subscriptions,
+            pass.now,
+            pass.subscriptions,
         ),
     )
     .await;
     let (probe, outcome) = if let Ok(r) = probe_result {
         r
     } else {
-        debug!(slot, budget = ?BOLT_SLOT_PROBE,
+        debug!(slot, budget = ?slot_budget,
             "Bolt slot probe timed out; using cached data if available");
         let probe = cached.map_or_else(ProbedFeatures::default, |c| c.probe.clone());
         (probe, seen(id))
@@ -509,12 +633,10 @@ pub(super) fn preferred_direct_codename(marketing_name: Option<&str>, os_name: &
 async fn probe_direct(
     channel: Arc<HidppChannel>,
     info: &NodeInfo,
-    cache: &HashMap<CacheKey, Cached>,
-    now: Instant,
-    subscriptions: Option<&EventSubscriptionHandle>,
+    pass: PassContext<'_>,
 ) -> NodeProbe {
     let id = CacheKey::Direct(info.id.clone());
-    let cached = cache.get(&id);
+    let cached = pass.cache.get(&id);
     // A direct device is always "present" (its HID node is the candidate), so
     // treat it as online: reuse the cached probe while fresh, otherwise probe.
     let (probe, outcome) = probe_or_reuse(
@@ -523,8 +645,8 @@ async fn probe_direct(
         Some(id),
         cached,
         true,
-        now,
-        subscriptions,
+        pass.now,
+        pass.subscriptions,
     )
     .await;
     // Hybrid peripheral discriminator. A genuine directly-attached device is
@@ -614,8 +736,8 @@ async fn probe_direct(
 
 async fn drain_device_arrival(
     bolt: &BoltReceiver,
-    arrival_drain: Duration,
     subscriptions: Option<&EventSubscriptionHandle>,
+    drain: Duration,
 ) -> Vec<BoltDeviceConnection> {
     let rx = bolt.listen();
     // Triggering a snapshot fabricates the same connection messages as a real
@@ -641,7 +763,7 @@ async fn drain_device_arrival(
 
     let mut out = Vec::new();
     loop {
-        match timeout(arrival_drain, rx.recv()).await {
+        match timeout(drain, rx.recv()).await {
             Ok(Ok(BoltEvent::DeviceConnection(c))) => out.push(c),
             Ok(Ok(_)) => {} // BoltEvent is non_exhaustive; ignore future variants
             Ok(Err(_)) | Err(_) => break,
@@ -658,8 +780,8 @@ async fn drain_device_arrival(
 async fn drain_device_arrival_unifying(
     unifying: &UnifyingReceiver,
     pairing_count: u8,
-    arrival_drain: Duration,
     subscriptions: Option<&EventSubscriptionHandle>,
+    drain: Duration,
 ) -> Option<Vec<UnifyingDeviceConnection>> {
     let rx = unifying.listen();
     let _receiver_snapshot = subscriptions.map(EventSubscriptionHandle::begin_receiver_snapshot);
@@ -668,13 +790,15 @@ async fn drain_device_arrival_unifying(
     // flag). Ask first: c54d has been observed to answer this trigger while
     // occasionally withholding the ACK for the notification-register setup,
     // which otherwise stalls discovery before it reaches the useful request.
-    if let Err(e) = unifying.trigger_device_arrival().await {
-        debug!(error = ?e, "trigger_device_arrival failed; receiver may report no devices");
-        return None;
-    }
+    retry_arrival_trigger(
+        || unifying.trigger_device_arrival(),
+        UNIFYING_TRIGGER_ATTEMPT_TIMEOUT,
+        UNIFYING_TRIGGER_RETRY_DELAY,
+    )
+    .await?;
     let mut out = Vec::new();
     loop {
-        match timeout(arrival_drain, rx.recv()).await {
+        match timeout(drain, rx.recv()).await {
             Ok(Ok(UnifyingEvent::DeviceConnection(connection))) => out.push(connection),
             Ok(Ok(_)) => {}
             Ok(Err(_)) | Err(_) => break,
@@ -682,12 +806,18 @@ async fn drain_device_arrival_unifying(
     }
     // Keep unsolicited lifecycle notifications enabled after the triggered
     // snapshot. This is read-modify-write and a no-op when already enabled.
-    let notification_result = unifying.set_wireless_notifications(true).await;
+    let notification_result = timeout(
+        RECEIVER_OPERATION_TIMEOUT,
+        unifying.set_wireless_notifications(true),
+    )
+    .await
+    .map_err(|_| ())
+    .and_then(|result| result.map_err(|_| ()));
     // A receiver with no pairings legitimately emits nothing: don't pay a
     // second drain window for it on every reconciliation.
     if !out.is_empty() || pairing_count == 0 {
-        if let Err(error) = notification_result {
-            debug!(?error, "enable persistent wireless notifications failed");
+        if notification_result.is_err() {
+            debug!("enable persistent wireless notifications failed");
         }
         return Some(out);
     }
@@ -695,25 +825,67 @@ async fn drain_device_arrival_unifying(
     // Classic Unifying receivers only re-broadcast 0x41 arrival events while
     // wireless notifications are on. Fall back to enabling that flag when the
     // direct trigger produced no device, then retry once on the same listener.
-    if let Err(error) = notification_result {
+    if notification_result.is_err() {
         // A register write the receiver stopped ACK'ing is "couldn't check",
         // exactly like a failed trigger: settle it as a failed probe so the
         // ledger replays the last snapshot, instead of publishing an
         // authoritative empty inventory that overwrites the node's last-good
         // device list.
-        debug!(?error, "enable wireless notifications failed");
+        debug!("enable wireless notifications failed");
         return None;
     }
-    if let Err(error) = unifying.trigger_device_arrival().await {
-        debug!(?error, "arrival retry after enabling notifications failed");
-        return None;
-    }
+    retry_arrival_trigger(
+        || unifying.trigger_device_arrival(),
+        UNIFYING_TRIGGER_ATTEMPT_TIMEOUT,
+        UNIFYING_TRIGGER_RETRY_DELAY,
+    )
+    .await?;
     out.clear();
     loop {
-        match timeout(arrival_drain, rx.recv()).await {
+        match timeout(drain, rx.recv()).await {
             Ok(Ok(UnifyingEvent::DeviceConnection(connection))) => out.push(connection),
             Ok(Ok(_)) => {}
             Ok(Err(_)) | Err(_) => return Some(out),
+        }
+    }
+}
+
+/// Retry one transient receiver refusal without hiding persistent failures
+/// from the inventory ledger.
+pub(super) async fn retry_arrival_trigger<F, Fut, E>(
+    mut trigger: F,
+    attempt_timeout: Duration,
+    retry_delay: Duration,
+) -> Option<()>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<(), E>>,
+    E: Debug,
+{
+    match timeout(attempt_timeout, trigger()).await {
+        Ok(Ok(())) => return Some(()),
+        Ok(Err(error)) => debug!(?error, "trigger_device_arrival failed; retrying once"),
+        Err(_) => debug!(
+            ?attempt_timeout,
+            "trigger_device_arrival timed out; retrying once"
+        ),
+    }
+    tokio::time::sleep(retry_delay).await;
+    match timeout(attempt_timeout, trigger()).await {
+        Ok(Ok(())) => Some(()),
+        Ok(Err(error)) => {
+            debug!(
+                ?error,
+                "trigger_device_arrival retry failed; receiver may report no devices"
+            );
+            None
+        }
+        Err(_) => {
+            debug!(
+                ?attempt_timeout,
+                "trigger_device_arrival retry timed out; receiver may report no devices"
+            );
+            None
         }
     }
 }
@@ -730,9 +902,7 @@ pub(super) async fn probe_unifying_slot(
     channel: &Arc<HidppChannel>,
     event: &UnifyingDeviceConnection,
     receiver_uid: &str,
-    cache: &HashMap<CacheKey, Cached>,
-    now: Instant,
-    subscriptions: Option<&EventSubscriptionHandle>,
+    pass: PassContext<'_>,
 ) -> Option<(PairedDevice, CacheOutcome)> {
     let slot = event.index;
     // Cache key: full receiver serial + slot so two Unifying receivers with
@@ -741,7 +911,7 @@ pub(super) async fn probe_unifying_slot(
         receiver_uid: receiver_uid.to_string(),
         slot,
     };
-    let cached = cache.get(&id);
+    let cached = pass.cache.get(&id);
     let register_kind = map_unifying_kind(event.kind);
 
     // The 0x41 re-broadcast is the receiver's own slot report and its
@@ -751,7 +921,7 @@ pub(super) async fn probe_unifying_slot(
     // announced itself into "offline" — and don't probe an offline slot at
     // all, which would burn the budget on a link the receiver just reported
     // as not established.
-    let probe_budget = unifying_probe_budget(cached, now);
+    let probe_budget = unifying_probe_budget(cached, pass.now, pass.deadlines);
     let probe_result = timeout(
         probe_budget,
         probe_or_reuse(
@@ -760,8 +930,8 @@ pub(super) async fn probe_unifying_slot(
             Some(id.clone()),
             cached,
             event.online,
-            now,
-            subscriptions,
+            pass.now,
+            pass.subscriptions,
         ),
     )
     .await;
@@ -808,11 +978,15 @@ pub(super) async fn probe_unifying_slot(
 
 /// A fresh cache hit needs only an optional battery refresh; first-sight and
 /// stale entries retain the larger budget needed for a complete feature walk.
-pub(super) fn unifying_probe_budget(cached: Option<&Cached>, now: Instant) -> std::time::Duration {
+pub(super) fn unifying_probe_budget(
+    cached: Option<&Cached>,
+    now: Instant,
+    deadlines: &ProbeDeadlines,
+) -> Duration {
     if cached.is_some_and(|entry| !is_stale(entry, now)) {
-        UNIFYING_CACHED_SLOT_PROBE
+        deadlines.unifying_cached_slot_probe
     } else {
-        UNIFYING_SLOT_PROBE
+        deadlines.unifying_slot_probe
     }
 }
 
@@ -843,7 +1017,7 @@ pub(super) fn assemble_unifying_device(
 /// receiver, so it reads even while the device is offline (e.g. moved to BT).
 async fn read_codename_unifying(channel: &HidppChannel, slot: u8) -> Option<String> {
     let response = channel
-        .read_long_register(0xFF, 0xB5, [0x40 + slot - 1, 0x00, 0x00])
+        .read_long_sub_register(0xFF, 0xB5, 0x40 + slot - 1, [0x00, 0x00])
         .await
         .ok()?;
     parse_codename_unifying(&response)
@@ -870,7 +1044,7 @@ async fn read_codename(channel: &HidppChannel, slot: u8) -> Option<String> {
     // 0xFF = receiver device index, 0xB5 = ReceiverInfo register,
     // 0x60+slot = DeviceCodename sub-register, 0x01 = first chunk.
     let response = channel
-        .read_long_register(0xFF, 0xB5, [0x60 + slot, 0x01, 0x00])
+        .read_long_sub_register(0xFF, 0xB5, 0x60 + slot, [0x01, 0x00])
         .await
         .ok()?;
     let len = usize::from(response[2]).min(13);

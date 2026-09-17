@@ -309,6 +309,7 @@ native_controls_when_disabled = "Når funksjonen er av, bruker kontrollene stand
 overridden_in_app = "Overstyrt i %{app}"
 use_a_single_action = "Bruk én handling"
 use_gestures = "Bruk bevegelser"
+dpi_gestures_unavailable = "Denne enheten har ikke rapportert støtte for bevegelser med DPI-knappen."
 action_key_summary = "%{action} · %{key}"
 search_actions = "Søk etter handlinger…"
 workflow_key_summary = "Arbeidsflyt · %{key}"
@@ -487,6 +488,8 @@ input_interception_detected = "En annen app fanger opp museinndata, noe som kan 
 [camera]
 camera = "Kamera"
 starting_preview = "Starter forhåndsvisning…"
+camera_resources_unavailable = "Kameraressurser er ikke tilgjengelige. Det kan hende at en annen app bruker kameraet."
+camera_preview_start_failed = "Kunne ikke starte kameraforhåndsvisningen."
 camera_preview_permission_required = "Aktiver kameratilgang i Innstillinger for å forhåndsvise."
 click_to_enable_camera_access = "Klikk for å aktivere kameratilgang."
 brightness = "Lysstyrke"

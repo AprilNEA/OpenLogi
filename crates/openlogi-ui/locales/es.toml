@@ -309,6 +309,7 @@ native_controls_when_disabled = "Al desactivarlo, los controles recuperan su fun
 overridden_in_app = "Sustituido en %{app}"
 use_a_single_action = "Usar una sola acción"
 use_gestures = "Usar gestos"
+dpi_gestures_unavailable = "Este dispositivo no ha indicado que admita gestos con el botón DPI."
 action_key_summary = "%{action} · %{key}"
 search_actions = "Buscar acciones…"
 workflow_key_summary = "Flujo de trabajo · %{key}"
@@ -487,6 +488,8 @@ input_interception_detected = "Otra aplicación está interceptando la entrada d
 [camera]
 camera = "Cámara"
 starting_preview = "Iniciando vista previa…"
+camera_resources_unavailable = "Los recursos de la cámara no están disponibles. Es posible que otra aplicación esté usando la cámara."
+camera_preview_start_failed = "No se pudo iniciar la vista previa de la cámara."
 camera_preview_permission_required = "Activa el acceso a la cámara en Ajustes del Sistema para ver la vista previa."
 click_to_enable_camera_access = "Haz clic para activar el acceso a la cámara."
 brightness = "Brillo"
