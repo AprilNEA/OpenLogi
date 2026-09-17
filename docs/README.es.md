@@ -45,7 +45,7 @@ Cosas que hace OpenLogi y Options+ no:
 
 - **No pesar.** Rust nativo + GPUI.
 - **Funcionar en Linux.** En OpenLogi, Linux es una plataforma de primera.
-- **Gestos en el botón que quieras.** Asigna los gestos a cualquier botón físico, o desactívalos del todo.
+- **Gestos en los botones compatibles.** Asigna acciones de gestos a los controles compatibles, o desactiva los gestos por completo.
 - **Configuración en texto plano.** Todo cabe en un único fichero TOML que puedes sincronizar entre máquinas como te convenga.
 - **Automatizar.** Una CLI de verdad junto a la interfaz gráfica.
 
@@ -59,7 +59,9 @@ Cosas que hace OpenLogi y Options+ no:
 **Ratón**
 
 - Captura y reasignación del botón central, el de cambio de modo y la rueda lateral (el central en todos los dispositivos; el resto, donde el dispositivo lo permita)
-- Asignación de gestos por dirección con captura en directo, en cualquier botón compatible
+- Asignación de gestos por dirección con captura en directo en los botones compatibles: Atrás/Adelante, DPI/ModeShift, el botón de gestos dedicado y el panel háptico
+  - Los gestos de DPI/ModeShift requieren que el dispositivo indique compatibilidad con la redirección de eventos (diversion) y con raw-XY.
+  - Los clics izquierdo y derecho y los controles de las ruedas no admiten nuevas asignaciones de gestos; las asignaciones de gestos que ya tenga el clic central se conservan.
 - Anillo de acciones: una superposición de ocho huecos centrada en el cursor (`ShowActionsRing`), con distribuciones por aplicación
 - Control de DPI con preajustes y acciones de recorrer y fijar preajuste (`0x2201`)
 - Rueda SmartShift: cambio de modo, sensibilidad y panel de trinquete permanente (`0x2111`)
