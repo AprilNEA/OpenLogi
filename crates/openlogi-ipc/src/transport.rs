@@ -101,3 +101,95 @@ where
 {
     Transport::from((stream, Bincode::default()))
 }
+
+/// Whether `stream`'s connecting peer runs as the same OS user as this agent
+/// process.
+///
+/// On Unix, `~/.config/openlogi/agent.sock`'s parent directory already
+/// restricts the filesystem path to this OS user, but any *other* process
+/// running as that same user — not just the trusted GUI — can still connect
+/// and drive privileged RPCs (`reload_config`, `action_ring_activate`, and
+/// through the config's `RunShellCommand` / `RunAppleScript` / `TypeText`
+/// actions). This is defense in depth, not a privilege boundary: `config.toml`
+/// is already user-writable by anything running as that user.
+///
+/// Windows named pipes need no equivalent check here — their default DACL
+/// already restricts the pipe to its creator and administrators, so this
+/// always reports `true` there.
+#[must_use]
+pub fn is_same_user(stream: &Stream) -> bool {
+    #[cfg(unix)]
+    {
+        stream
+            .peer_creds()
+            .ok()
+            .and_then(|creds| creds.euid())
+            .is_some_and(|peer_euid| peer_euid == own_euid())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = stream;
+        true
+    }
+}
+
+#[cfg(unix)]
+#[expect(
+    unsafe_code,
+    reason = "libc::geteuid is the only way to read this process's own effective UID"
+)]
+fn own_euid() -> libc::uid_t {
+    // SAFETY: geteuid takes no arguments and always succeeds.
+    unsafe { libc::geteuid() }
+}
+
+#[cfg(test)]
+#[cfg(unix)]
+mod tests {
+    use interprocess::local_socket::{GenericFilePath, ToFsName};
+
+    use super::*;
+
+    /// A throwaway filesystem-path socket, unique per test run so parallel
+    /// tests and a real running agent never collide.
+    ///
+    /// `GenericNamespaced` (Linux's abstract socket namespace) has no macOS
+    /// equivalent — `to_ns_name` fails there — so this uses the same
+    /// `GenericFilePath` scheme [`endpoint_name`] uses in production, under
+    /// the OS temp directory rather than the real config path.
+    fn unique_test_name() -> interprocess::local_socket::Name<'static> {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the clock reads after the epoch")
+            .as_nanos();
+        std::env::temp_dir()
+            .join(format!(
+                "openlogi-ipc-test-{}-{nanos}.sock",
+                std::process::id()
+            ))
+            .to_fs_name::<GenericFilePath>()
+            .expect("a valid filesystem socket path")
+    }
+
+    /// The common case this check exists to leave working: the real GUI
+    /// connecting to the real agent, both running as the same user, must
+    /// never be rejected.
+    #[tokio::test]
+    async fn a_same_process_connection_is_recognized_as_the_same_user() {
+        let name = unique_test_name();
+        let listener = ListenerOptions::new()
+            .name(name.clone())
+            .create_tokio()
+            .expect("binding a throwaway test socket");
+
+        let connect = tokio::spawn(Stream::connect(name));
+        let server_side = listener.accept().await.expect("accept the test connection");
+        let client_side = connect
+            .await
+            .expect("join the connect task")
+            .expect("connect the test stream");
+
+        assert!(is_same_user(&server_side));
+        assert!(is_same_user(&client_side));
+    }
+}

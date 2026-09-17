@@ -5862,11 +5862,13 @@ version = "0.8.5"
 dependencies = [
  "bincode",
  "interprocess",
+ "libc",
  "openlogi-core",
  "serde",
  "succession",
  "tarpc",
  "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

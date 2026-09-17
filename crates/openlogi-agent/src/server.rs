@@ -604,6 +604,10 @@ pub async fn run(server: AgentServer) {
                 continue;
             }
         };
+        if !transport::is_same_user(&stream) {
+            warn!("rejected IPC connection from a different OS user");
+            continue;
+        }
         let server = server.clone();
         let channel = BaseChannel::with_defaults(transport::wrap(stream));
         tokio::spawn(
