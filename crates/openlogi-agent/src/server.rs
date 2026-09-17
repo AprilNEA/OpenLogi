@@ -11,7 +11,6 @@ use std::time::{Duration, Instant};
 use futures::StreamExt as _;
 use openlogi_agent_core::action_ring::ActionRingManager;
 use openlogi_agent_core::event_monitor::SharedEventMonitor;
-use openlogi_agent_core::hardware;
 use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedRuntime};
 use openlogi_agent_core::runtime::ActionDispatcher;
@@ -19,8 +18,8 @@ use openlogi_core::binding::ActionRingSlot;
 use openlogi_core::config::{Config, Lighting};
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
-    DeviceRoute, Dpi, DpiInfo, HapticWaveform, HidppOperation, LightCommand, ReceiverSelector,
-    SmartShiftStatus, WriteError,
+    BacklightState, DeviceRoute, Dpi, DpiInfo, HapticWaveform, HidppOperation, LightCommand,
+    ReceiverSelector, ScrollWheelMode, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
@@ -164,13 +163,7 @@ impl Agent for AgentServer {
         route: DeviceRoute,
         lighting: Lighting,
     ) -> Result<(), WriteError> {
-        let (r, g, b) = hardware::lighting_rgb(&lighting);
-        self.shared
-            .device(&route)
-            .run(HidppOperation::Lighting, |c| async move {
-                openlogi_hid::set_keyboard_color_on(&c, r, g, b).await
-            })
-            .await
+        self.shared.device(&route).lighting(&lighting)?.wait().await
     }
 
     async fn set_smartshift(
@@ -205,6 +198,32 @@ impl Agent for AgentServer {
             .device(&route)
             .run(HidppOperation::ReadSmartShift, |c| async move {
                 openlogi_hid::get_smartshift_status_on(&c).await
+            })
+            .await
+    }
+
+    async fn read_wheel(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<ScrollWheelMode, WriteError> {
+        self.shared
+            .device(&route)
+            .run(HidppOperation::ReadWheelMode, |c| async move {
+                openlogi_hid::get_scroll_wheel_mode_on(&c).await
+            })
+            .await
+    }
+
+    async fn read_backlight(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<BacklightState, WriteError> {
+        self.shared
+            .device(&route)
+            .run(HidppOperation::ReadBacklight, |c| async move {
+                openlogi_hid::get_backlight_on(&c).await
             })
             .await
     }
@@ -251,8 +270,7 @@ impl Agent for AgentServer {
         route: DeviceRoute,
         command: LightCommand,
     ) -> Result<(), WriteError> {
-        hardware::cancel_light_reapply(&route);
-        hardware::apply_light(&self.shared.device_io, &route, command).await
+        self.shared.hardware().apply_light(&route, command).await
     }
 
     async fn set_light_manual_power(
@@ -261,8 +279,10 @@ impl Agent for AgentServer {
         route: DeviceRoute,
         enabled: bool,
     ) -> Result<(), WriteError> {
-        hardware::cancel_light_reapply(&route);
-        hardware::apply_light(&self.shared.device_io, &route, LightCommand::Power(enabled)).await?;
+        self.shared
+            .hardware()
+            .apply_light(&route, LightCommand::Power(enabled))
+            .await?;
         if !self
             .orchestrator
             .lock()

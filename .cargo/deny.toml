@@ -1,8 +1,8 @@
 # cargo-deny configuration — advisories, licenses, and source hygiene.
 #
 # Scope: the graph rooted at the CLI, which is exactly what OpenLogi publishes to
-# crates.io. The app crates (gui/agent) are not covered: they pull the git-pinned
-# gpui/zed tree, which currently trips advisories, licenses, and sources alike.
+# crates.io. The app crates (gui/agent) are not covered; auditing their broader
+# native UI graph remains a separate policy decision.
 # The `allow-git` list below is written for that wider graph and is therefore
 # unmatched today — kept so widening the scope is a policy decision, not an
 # archaeology exercise.
@@ -48,23 +48,16 @@ allow = [
 ]
 
 [bans]
-# The zed/gpui tree inevitably carries duplicate versions; keep this advisory
+# The GPUI tree carries duplicate dependency versions; keep this advisory
 # rather than blocking.
 multiple-versions = "warn"
 
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
-# The two deliberate direct git deps, plus the git sources they pull in
-# transitively (zed's forks and the gpui-updater sibling crate) — everything
+# The deliberate direct git deps — everything
 # that appears as `git+…` in Cargo.lock must be listed here.
 allow-git = [
-    "https://github.com/zed-industries/zed",
-    "https://github.com/longbridge/gpui-component",
-    "https://github.com/AprilNEA/gpui-updater",
-    "https://github.com/zed-industries/font-kit",
-    "https://github.com/zed-industries/reqwest.git",
-    "https://github.com/zed-industries/scap",
-    "https://github.com/zed-industries/wgpu.git",
-    "https://github.com/zed-industries/xim-rs.git",
+    "https://github.com/AprilNEA/appicon",
+    "https://github.com/longbridge/gpui-kit",
 ]

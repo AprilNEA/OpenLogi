@@ -14,15 +14,16 @@ devenv.local.yaml
 # never copied or vendored. Cloned at the project root for convenience.
 /local-reference/
 
-# Claude Code skill plumbing — local per-developer, not part of the project.
-# `/*` instead of the bare directory so the committed Amp orb lifecycle
-# scripts can be re-included below: git cannot un-ignore a file whose parent
-# directory is excluded, and a tracked-but-ignored file makes release-plz
-# treat every checkout as dirty (`git ls-files -ci --exclude-standard`).
+# Track the orb lifecycle and the two project GPUI skills. Other agent state
+# and skills stay local. Keep parent directories visible for these exceptions.
 /.agents/*
 !/.agents/resume
 !/.agents/setup
-/skills-lock.json
+!/.agents/skills/
+/.agents/skills/*
+!/.agents/skills/gpui-kit/
+!/.agents/skills/gpui-kit-design-guides/
+!/.agents/skills/LICENSE-APACHE
 
 # Local planning docs — kept on disk, never committed.
 /UI.md
@@ -40,6 +41,8 @@ devenv.local.yaml
 !/.claude/skills/
 /.claude/skills/*
 !/.claude/skills/openlogi-macos-permissions/
+!/.claude/skills/gpui-kit
+!/.claude/skills/gpui-kit-design-guides
 
 # Node dependencies for the JS helper scripts under .github/scripts/.
 node_modules/

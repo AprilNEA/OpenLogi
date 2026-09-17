@@ -9,8 +9,8 @@ use gpui::{
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
-    Icon, IconName, Selectable as _, Sizable as _, button::Button, h_flex, input::InputState,
-    scroll::ScrollableElement as _, v_flex,
+    Disableable as _, Icon, IconName, Selectable as _, Sizable as _, button::Button, h_flex,
+    input::InputState, scroll::ScrollableElement as _, v_flex,
 };
 use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
 
@@ -35,6 +35,7 @@ pub(super) struct BindingInspectorData<'a> {
     pub action_picker_open: bool,
     pub bindings: &'a BTreeMap<ButtonId, Action>,
     pub gesture_maps: &'a BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
+    pub dpi_gestures: bool,
     pub editing_app: Option<&'a str>,
     pub overridden: Option<&'a BTreeMap<ButtonId, Action>>,
 }
@@ -120,6 +121,10 @@ fn empty_inspector(app: Option<&str>, override_count: usize, pal: Palette) -> gp
         .child(div().text_body().text_color(pal.text_muted).child(summary))
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the button inspector is clearest as one declarative UI tree"
+)]
 fn button_inspector(
     button: ButtonId,
     data: &BindingInspectorData<'_>,
@@ -193,16 +198,16 @@ fn button_inspector(
                     }),
             )
         })
-        .when(
-            data.editing_app.is_none()
-                && (button.is_hidpp_gesture_source() || button.is_os_hook_button()),
-            |panel| {
-                let observer = picker.view.clone();
-                panel.child(
+        .when(can_enable_gestures(button, data.editing_app), |panel| {
+            let observer = picker.view.clone();
+            let unavailable = button == ButtonId::DpiToggle && !data.dpi_gestures;
+            panel
+                .child(
                     control_button("inspector-use-gestures")
                         .w_full()
                         .icon(Icon::empty().path(GESTURE_BUTTON_ICON))
                         .label(tr!("actions.use_gestures"))
+                        .disabled(unavailable)
                         .on_click(move |_, _, cx| {
                             AppState::update_bindings(cx, |state| {
                                 state.commit_gesture_mode(button, true);
@@ -213,8 +218,15 @@ fn button_inspector(
                             });
                         }),
                 )
-            },
-        )
+                .when(unavailable, |panel| {
+                    panel.child(
+                        div()
+                            .text_body()
+                            .text_color(pal.text_muted)
+                            .child(tr!("actions.dpi_gestures_unavailable")),
+                    )
+                })
+        })
         .when(picker.open, |panel| {
             panel.child(action_library(
                 "inspector-action",
@@ -407,6 +419,13 @@ fn gesture_directions(
         )
 }
 
+/// Whether the default-profile inspector may promote `button` into gesture
+/// mode. Per-app bindings are single-action overrides, so they cannot carry a
+/// direction map.
+fn can_enable_gestures(button: ButtonId, editing_app: Option<&str>) -> bool {
+    editing_app.is_none() && button.supports_gesture_mode()
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "the thumb-wheel inspector is clearest as one declarative UI tree"
@@ -582,6 +601,7 @@ fn selection_card(
         .aria_expanded(picker.open)
         .flex()
         .flex_col()
+        .items_stretch()
         .gap_2()
         .rounded(pal.control_radius)
         .border_1()
@@ -682,4 +702,36 @@ fn gesture_action(
             Action::None
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_profile_offers_gestures_for_every_supported_button() {
+        let supported: Vec<_> = ButtonId::ALL
+            .into_iter()
+            .filter(|button| can_enable_gestures(*button, None))
+            .collect();
+
+        assert_eq!(
+            supported,
+            vec![
+                ButtonId::Back,
+                ButtonId::Forward,
+                ButtonId::DpiToggle,
+                ButtonId::GestureButton,
+                ButtonId::HapticPanel,
+            ]
+        );
+    }
+
+    #[test]
+    fn per_app_profile_does_not_offer_forward_gesture_mode() {
+        assert!(!can_enable_gestures(
+            ButtonId::Forward,
+            Some("com.apple.Safari")
+        ));
+    }
 }

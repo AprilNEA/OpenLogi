@@ -189,10 +189,11 @@ impl Receiver {
     pub async fn get_receiver_info(&self) -> Result<ReceiverInfo, ReceiverError> {
         let response = self
             .chan
-            .read_long_register(
+            .read_long_sub_register(
                 RECEIVER_DEVICE_INDEX,
                 Register::ReceiverInfo.into(),
-                [InfoSubRegister::ReceiverInfo.into(), 0, 0],
+                InfoSubRegister::ReceiverInfo.into(),
+                [0, 0],
             )
             .await?;
 
@@ -210,14 +211,11 @@ impl Receiver {
     ) -> Result<DevicePairingInformation, ReceiverError> {
         let response = self
             .chan
-            .read_long_register(
+            .read_long_sub_register(
                 RECEIVER_DEVICE_INDEX,
                 Register::ReceiverInfo.into(),
-                [
-                    u8::from(InfoSubRegister::DevicePairingInformation) | (device_index & 0x0f),
-                    0x00,
-                    0x00,
-                ],
+                u8::from(InfoSubRegister::DevicePairingInformation) | (device_index & 0x0f),
+                [0x00, 0x00],
             )
             .await?;
 

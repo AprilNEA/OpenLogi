@@ -308,6 +308,7 @@ native_controls_when_disabled = "Όταν είναι ανενεργό, όλα τ
 overridden_in_app = "Παράκαμψη στο %{app}"
 use_a_single_action = "Χρήση μίας ενέργειας"
 use_gestures = "Χρήση χειρονομιών"
+dpi_gestures_unavailable = "Αυτή η συσκευή δεν έχει αναφέρει υποστήριξη χειρονομιών με το κουμπί DPI."
 action_key_summary = "%{action} · %{key}"
 search_actions = "Αναζήτηση ενεργειών…"
 workflow_key_summary = "Ροή εργασίας · %{key}"
@@ -479,6 +480,8 @@ input_interception_detected = "Μια άλλη εφαρμογή υποκλέπτ
 [camera]
 camera = "Κάμερα"
 starting_preview = "Έναρξη προεπισκόπησης…"
+camera_resources_unavailable = "Οι πόροι της κάμερας δεν είναι διαθέσιμοι. Μια άλλη εφαρμογή ενδέχεται να χρησιμοποιεί την κάμερα."
+camera_preview_start_failed = "Δεν ήταν δυνατή η έναρξη της προεπισκόπησης της κάμερας."
 camera_preview_permission_required = "Ενεργοποιήστε την πρόσβαση στην κάμερα στις Ρυθμίσεις για προεπισκόπηση."
 click_to_enable_camera_access = "Κάντε κλικ για να ενεργοποιήσετε την πρόσβαση στην κάμερα."
 brightness = "Φωτεινότητα"
