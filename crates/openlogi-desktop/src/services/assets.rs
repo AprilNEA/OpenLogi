@@ -26,13 +26,16 @@ use std::sync::Arc;
 
 use openlogi_assets::http::safe_component_path;
 use openlogi_assets::{
-    BUTTONS_RENDER_FILES, DeviceEntry, FRONT_RENDER_FILES, Index, METADATA_FILES, Metadata,
+    BUTTONS_RENDER_FILES, DepotManifest, DeviceEntry, FRONT_RENDER_FILES, Index, METADATA_FILES,
+    Metadata,
 };
 use openlogi_core::device::{DeviceKind, DeviceModelInfo};
 use tracing::{debug, warn};
 use walkdir::WalkDir;
 
-use self::images::{buttons_image_for, load_manifest, read_png_dimensions, variant_image_for};
+use self::images::{
+    buttons_image_for, load_manifest, metadata_for, read_png_dimensions, variant_image_for,
+};
 use self::paths::{bundle_assets_root, load_index, user_cache_root};
 
 /// Total bytes of the per-user asset cache — the tier [`sync`] writes and
@@ -225,13 +228,6 @@ impl AssetResolver {
                 );
                 continue;
             };
-            // Hotspot metadata in whichever schema this depot cached:
-            // `core_metadata.json` (newer) or `metadata.json` (older).
-            let Some(&meta_name) = METADATA_FILES.iter().find(|n| dir.join(n).exists()) else {
-                continue;
-            };
-            let meta_path = dir.join(meta_name);
-
             // Pick the colour variant matching this device's HID++
             // extended_model_id byte. Logi calibrates the assignment
             // markers against the *buttons* image (typically
@@ -246,6 +242,13 @@ impl AssetResolver {
             // colour render resolves regardless of which pid Logi keyed on.
             // Parse the manifest once and consult it for every candidate.
             let manifest = load_manifest(&dir);
+
+            let Some((meta_name, meta_path)) =
+                resolve_metadata(&dir, entry, manifest.as_ref(), model.extended_model_id)
+            else {
+                continue;
+            };
+
             let buttons_name = manifest.as_ref().and_then(|m| {
                 entry
                     .model_id_candidates()
@@ -289,7 +292,7 @@ impl AssetResolver {
             let metadata = match Metadata::load_from(&meta_path) {
                 Ok(m) => m,
                 Err(e) => {
-                    warn!(depot, root = %root.display(), file = meta_name, error = ?e, "device metadata unparseable — rendering image without hotspots");
+                    warn!(depot, root = %root.display(), file = meta_name.as_str(), error = ?e, "device metadata unparseable — rendering image without hotspots");
                     Metadata::default()
                 }
             };
@@ -397,6 +400,36 @@ impl Default for AssetResolver {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Resolve a depot's hotspot-metadata file inside `dir`, as `(filename, path)`.
+///
+/// The manifest's `image_metadata` for this colour variant comes first, then
+/// the well-known schema names ([`METADATA_FILES`]). Depots whose variants are
+/// *handed* rather than coloured ship none of the well-known names — the Lift
+/// keys its metadata `core_metadata_left.json` / `core_metadata_right.json` —
+/// so a name-only lookup skips the depot outright and the GUI falls back to the
+/// generic silhouette. Manifest-sourced names are attacker-influenced, so they
+/// pass the same component check as every other asset file.
+fn resolve_metadata(
+    dir: &Path,
+    entry: &DeviceEntry,
+    manifest: Option<&DepotManifest>,
+    ext: u8,
+) -> Option<(String, PathBuf)> {
+    let mut candidates: Vec<String> = manifest
+        .and_then(|m| {
+            entry
+                .model_id_candidates()
+                .find_map(|base| metadata_for(m, base, ext))
+        })
+        .into_iter()
+        .collect();
+    candidates.extend(METADATA_FILES.map(str::to_string));
+    candidates.into_iter().find_map(|name| {
+        let path = safe_component_path(dir, &name, "asset file").ok()?;
+        path.exists().then_some((name, path))
+    })
 }
 
 /// Match a connected device's HID++ model info against a loaded index,

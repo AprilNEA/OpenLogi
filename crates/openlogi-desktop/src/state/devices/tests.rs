@@ -267,6 +267,7 @@ fn mouse_identity(name: &str) -> DeviceIdentity {
             thumbwheel: false,
             haptic_feedback: false,
             haptic_panel: false,
+            dpi_gestures: false,
         },
         light_capabilities: None,
         model_info: None,

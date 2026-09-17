@@ -11,7 +11,6 @@ use std::time::{Duration, Instant};
 use futures::StreamExt as _;
 use openlogi_agent_core::action_ring::ActionRingManager;
 use openlogi_agent_core::event_monitor::SharedEventMonitor;
-use openlogi_agent_core::hardware;
 use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedRuntime};
 use openlogi_agent_core::runtime::ActionDispatcher;
@@ -164,13 +163,7 @@ impl Agent for AgentServer {
         route: DeviceRoute,
         lighting: Lighting,
     ) -> Result<(), WriteError> {
-        let (r, g, b) = hardware::lighting_rgb(&lighting);
-        self.shared
-            .device(&route)
-            .run(HidppOperation::Lighting, |c| async move {
-                openlogi_hid::set_keyboard_color_on(&c, r, g, b).await
-            })
-            .await
+        self.shared.device(&route).lighting(&lighting)?.wait().await
     }
 
     async fn set_smartshift(

@@ -418,6 +418,13 @@ impl ReplayRawHidChannel {
         Self::build_scripted(responder, Some(fails))
     }
 
+    /// Present a scripted receiver's product id to HID++ receiver detection.
+    #[cfg(test)]
+    pub(crate) fn presenting_as(mut self, product_id: u16) -> Self {
+        self.product_id = product_id;
+        self
+    }
+
     #[cfg(test)]
     fn build_scripted(
         responder: impl Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync + 'static,

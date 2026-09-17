@@ -495,6 +495,10 @@ fn choice_card(id: &'static str, label: &'static str, selected: bool, pal: Palet
         .bg(pal.control)
         .hover(move |style| style.bg(pal.control_hover))
         .focus_visible(move |style| style.border_color(theme::accent()))
+        .gap_1()
+        // A preview strip above the label: the stacked shape the settings
+        // pickers rely on.
+        .child(div().h(px(6.)).rounded_full().bg(pal.border))
         .child(div().text_body().child(label))
 }
 

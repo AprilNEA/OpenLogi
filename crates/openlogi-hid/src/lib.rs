@@ -17,6 +17,7 @@
 mod transport;
 
 pub mod host;
+pub mod lighting;
 pub mod permissions;
 pub mod probe_cache;
 pub mod recording;
@@ -37,4 +38,5 @@ pub use host::{
     set_scroll_inversion, set_scroll_resolution, set_scroll_wheel_mode, set_smartshift,
     set_smartshift_sensitivity, toggle_smartshift, watch_hotplug,
 };
+pub use lighting::{set_keyboard_color_on, set_keyboard_color_with_on};
 pub use probe_cache::FileProbeCacheStore;

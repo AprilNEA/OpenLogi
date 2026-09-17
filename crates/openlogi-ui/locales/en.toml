@@ -308,6 +308,7 @@ native_controls_when_disabled = "When off, controls use their default behavior a
 overridden_in_app = "Overridden in %{app}"
 use_a_single_action = "Use a single action"
 use_gestures = "Use gestures"
+dpi_gestures_unavailable = "This device has not reported support for DPI button gestures."
 action_key_summary = "%{action} · %{key}"
 search_actions = "Search actions…"
 workflow_key_summary = "Workflow · %{key}"
@@ -479,6 +480,8 @@ input_interception_detected = "Another app is intercepting mouse input, which ca
 [camera]
 camera = "Camera"
 starting_preview = "Starting preview…"
+camera_resources_unavailable = "Camera resources are unavailable. Another application may be using the camera."
+camera_preview_start_failed = "The camera preview couldn't start."
 camera_preview_permission_required = "Enable Camera access in System Settings to see a preview."
 click_to_enable_camera_access = "Click to enable camera access."
 brightness = "Brightness"
