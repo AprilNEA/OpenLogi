@@ -15,7 +15,7 @@ use gpui_component::{
     v_flex,
 };
 
-use super::catalog::{AppCatalogPicker, AppIconState, ProfileIconCache};
+use super::catalog::{AppCatalogPicker, ApplicationIconState, ProfileIconCache};
 use super::shell::application_mark;
 use super::{AddAppChoices, CatalogPresentation, ProfileChoice, ProfileScopeActions};
 use crate::features::mouse::picker::{compact_panel, divider, title};
@@ -286,7 +286,7 @@ fn profile_matches_query(choice: &ProfileChoice, query: &str) -> bool {
 fn application_row(
     id_base: &'static str,
     choice: ProfileChoice,
-    icon: AppIconState,
+    icon: ApplicationIconState,
     actions: ProfileScopeActions,
     pal: Palette,
     popover: WeakEntity<PopoverState>,

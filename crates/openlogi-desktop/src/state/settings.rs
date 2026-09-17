@@ -1,6 +1,7 @@
 //! App-level settings (launch-at-login, theme, assets, language).
 
 use super::{AppState, StateEvent};
+use crate::platform::app_icon::AppIconExt as _;
 use gpui::Context;
 use openlogi_core::config::{
     AppIcon, AppSettings, Appearance, AssetSourcePreference, DeviceViewMode, ThumbwheelSensitivity,
@@ -132,7 +133,7 @@ impl AppState {
         // back, and an icon applied over that would outlive the choice it came
         // from — Finder would show one thing and Settings another.
         if self.persist_and_reload("app icon setting") {
-            crate::platform::app_icon::apply(icon);
+            icon.apply();
         }
     }
     /// Persist the UI corner-radius override (`None` = each theme's own radius).
