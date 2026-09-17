@@ -65,7 +65,7 @@ pub use succession::Identity;
 /// v31: `Capabilities::dpi_gestures` appended.
 /// v32: `Action::HoldGlobeKey` appended for physical Globe/Fn holds.
 /// v33: Double-click shortcuts; `KeyCombo` adds Fn and modifier-only chords.
-pub const PROTOCOL_VERSION: u32 = 33;
+pub const PROTOCOL_VERSION: u32 = 34;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to

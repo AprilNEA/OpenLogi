@@ -261,7 +261,7 @@ impl Config {
         // behavior means gestures were off.
         if matches!(
             bindings.get(&ButtonId::GestureButton),
-            Some(Binding::Single(_) | Binding::LongPress(_))
+            Some(Binding::Single(_) | Binding::LongPress(_) | Binding::Clicks(_))
         ) {
             return None;
         }
@@ -539,7 +539,7 @@ impl Config {
         let is_old_default = |binding: Option<&Binding>, old: &Action| match binding {
             None => true,
             Some(Binding::Single(action)) => action == old,
-            Some(Binding::Gesture(_) | Binding::LongPress(_)) => false,
+            Some(Binding::Gesture(_) | Binding::LongPress(_) | Binding::Clicks(_)) => false,
         };
 
         for device in self.devices.values_mut() {

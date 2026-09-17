@@ -81,6 +81,93 @@ impl LongPressBinding {
     }
 }
 
+/// Which mutually exclusive button action is being configured.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ButtonPress {
+    /// A short press and release.
+    Click,
+    /// A press held for 300 milliseconds.
+    Hold,
+    /// Two short presses separated by at most 200 milliseconds.
+    DoubleClick,
+}
+
+impl ButtonPress {
+    /// The presentation order of the three independent actions.
+    pub const ALL: [Self; 3] = [Self::Click, Self::Hold, Self::DoubleClick];
+}
+
+/// Independent click, hold, and double-click actions for a physical button.
+/// Existing single and long-press bindings retain their original serialization.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ButtonActions {
+    click: Action,
+    hold: Action,
+    double: Action,
+}
+
+impl ButtonActions {
+    /// Build the three actions. `None` disables the corresponding gesture.
+    #[must_use]
+    pub const fn new(click: Action, hold: Action, double: Action) -> Self {
+        Self {
+            click,
+            hold,
+            double,
+        }
+    }
+
+    /// Project an existing binding into the three-card editor without losing actions.
+    #[must_use]
+    pub fn from_binding(binding: &Binding) -> Self {
+        match binding {
+            Binding::Clicks(actions) => actions.clone(),
+            Binding::LongPress(actions) => Self::new(
+                actions.short().clone(),
+                actions.long().clone(),
+                actions
+                    .double_click()
+                    .cloned()
+                    .map_or(Action::None, Action::CustomShortcut),
+            ),
+            Binding::Single(action) if action.requires_physical_release() => {
+                Self::new(Action::None, action.clone(), Action::None)
+            }
+            binding => Self::new(binding.click_action(), Action::None, Action::None),
+        }
+    }
+
+    /// Read one action without flattening the other two.
+    #[must_use]
+    pub const fn action(&self, press: ButtonPress) -> &Action {
+        match press {
+            ButtonPress::Click => &self.click,
+            ButtonPress::Hold => &self.hold,
+            ButtonPress::DoubleClick => &self.double,
+        }
+    }
+
+    /// Replace one action while preserving the other two.
+    pub fn set_action(&mut self, press: ButtonPress, action: Action) {
+        *match press {
+            ButtonPress::Click => &mut self.click,
+            ButtonPress::Hold => &mut self.hold,
+            ButtonPress::DoubleClick => &mut self.double,
+        } = action;
+    }
+
+    /// Preserve immediate response when no hold or double-click action is enabled.
+    #[must_use]
+    pub fn into_binding(self) -> Binding {
+        if self.hold == Action::None && self.double == Action::None {
+            Binding::Single(self.click)
+        } else {
+            Binding::Clicks(self)
+        }
+    }
+}
+
 /// What a single rebindable [`ButtonId`](crate::binding::ButtonId) does: one
 /// immediate [`Action`], an independent short/long action pair, or — for a
 /// raw-XY-capable button placed in gesture mode — a per-[`GestureDirection`]
@@ -113,6 +200,8 @@ pub enum Binding {
     Gesture(BTreeMap<GestureDirection, Action>),
     /// Independent release-before-threshold and threshold actions.
     LongPress(LongPressBinding),
+    /// Independent click, hold, and double-click actions.
+    Clicks(ButtonActions),
 }
 
 impl Binding {
@@ -132,6 +221,7 @@ impl Binding {
                 .cloned()
                 .unwrap_or(Action::None),
             Binding::LongPress(binding) => binding.short().clone(),
+            Binding::Clicks(actions) => actions.click.clone(),
         }
     }
 
@@ -140,9 +230,15 @@ impl Binding {
     #[must_use]
     pub fn direction_action(&self, direction: GestureDirection) -> Option<&Action> {
         match self {
-            Binding::Single(_) | Binding::LongPress(_) => None,
+            Binding::Single(_) | Binding::LongPress(_) | Binding::Clicks(_) => None,
             Binding::Gesture(map) => map.get(&direction),
         }
+    }
+
+    /// Whether this binding needs physical edges and timed recognition.
+    #[must_use]
+    pub const fn is_timed(&self) -> bool {
+        matches!(self, Self::LongPress(_) | Self::Clicks(_))
     }
 
     /// Whether this binding drives raw-XY swipe capture (the
@@ -162,6 +258,7 @@ impl Binding {
         let click = match self {
             Binding::Single(action) => action.clone(),
             Binding::LongPress(binding) => binding.short().clone(),
+            Binding::Clicks(actions) => actions.click.clone(),
             Binding::Gesture(_) => return,
         };
         *self = Binding::Gesture(BTreeMap::from([(GestureDirection::Click, click)]));

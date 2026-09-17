@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use gpui::App;
 use openlogi_core::binding::{
-    Action, Binding, ButtonId, GestureDirection, KeyCombo, LongPressBinding,
+    Action, Binding, ButtonActions, ButtonId, ButtonPress, GestureDirection,
 };
 use openlogi_core::bindings::{bindings_for, hidpp_gesture_maps_for, oshook_gestures_for};
 use openlogi_core::config::{Config, KeyTrigger};
@@ -234,41 +234,31 @@ impl AppState {
         self.config.devices.get(key)?.bindings.get(&button)
     }
 
-    /// Pair a keyboard hold with a double-click chord, or restore an immediate hold.
-    /// The dialog's device identity prevents a stale edit from changing another mouse.
-    pub(crate) fn commit_double_click(
+    /// Change one activation without overwriting the other two or another device.
+    pub(crate) fn commit_button_action(
         &mut self,
         device_key: &str,
         button: ButtonId,
-        shortcut: Option<KeyCombo>,
+        press: ButtonPress,
+        action: Action,
     ) {
         if self.editing_app().is_some()
             || self
                 .current_record()
                 .and_then(DeviceRecord::persistent_config_key)
                 != Some(device_key)
+            || (press != ButtonPress::Hold && action.requires_physical_release())
         {
             return;
         }
-        let action = match self.default_button_binding(button) {
-            Some(Binding::Single(action)) => action,
-            Some(Binding::LongPress(binding)) => binding.long(),
-            _ => return,
-        };
-        let Some(keys) = action.held_input().cloned() else {
-            return;
-        };
-        let action = Action::HoldShortcut(keys);
-        let binding = match shortcut {
-            Some(shortcut) => Binding::LongPress(
-                LongPressBinding::new(Action::None, action).with_double_click(shortcut),
-            ),
-            None => Binding::Single(action),
-        };
+        let fallback = Binding::Single(openlogi_core::binding::default_binding(button));
+        let mut actions =
+            ButtonActions::from_binding(self.default_button_binding(button).unwrap_or(&fallback));
+        actions.set_action(press, action);
         self.config
-            .edit(|config| config.set_binding(device_key, button, binding));
+            .edit(|config| config.set_binding(device_key, button, actions.into_binding()));
         self.refresh_binding_projections();
-        self.persist_and_reload("double-click shortcut");
+        self.persist_and_reload("button action");
     }
 
     /// Drop `button`'s override in the open per-app profile, so it inherits the

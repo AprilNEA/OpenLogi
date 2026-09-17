@@ -102,7 +102,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 33);
+    assert_eq!(PROTOCOL_VERSION, 34);
 }
 
 #[test]
@@ -677,4 +677,13 @@ fn generic_fn_keys_preserve_existing_shortcut_wire_encodings() {
     assert_wire(&"Ctrl".parse::<KeyCombo>().unwrap(), "0400");
     assert_wire(&"⌃⌥⇧T".parse::<KeyCombo>().unwrap(), "0e17");
     assert_wire(&Action::HoldShortcut(KeyCombo::FN), "341000");
+}
+
+#[test]
+fn three_button_actions_have_independent_wire_fields() {
+    use openlogi_core::binding::ButtonActions;
+    assert_wire(
+        &ButtonActions::new(Action::Copy, Action::Paste, Action::None),
+        "060700",
+    );
 }

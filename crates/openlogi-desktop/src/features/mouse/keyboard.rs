@@ -4,14 +4,17 @@ use std::collections::BTreeSet;
 use std::rc::Rc;
 
 use gpui::{
-    App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement,
-    Render, SharedString, Styled, Subscription, Window, div,
+    App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, Keystroke,
+    Modifiers, ParentElement, Render, SharedString, Styled, Subscription, Window, div,
+    prelude::FluentBuilder as _,
 };
 use gpui_component::{
     Disableable as _, IndexPath, WindowExt as _,
+    button::ButtonVariants as _,
     checkbox::Checkbox,
-    dialog::DialogButtonProps,
+    dialog::{Cancel, Confirm, DialogFooter},
     h_flex,
+    kbd::Kbd,
     select::{SelectEvent, SelectItem, SelectState},
     v_flex,
 };
@@ -192,19 +195,67 @@ impl KeyboardEditor {
     }
 }
 
+pub(super) fn shortcut_keycaps(keys: &KeyCombo) -> impl IntoElement {
+    let stroke = Keystroke {
+        modifiers: Modifiers {
+            control: keys.has_control(),
+            alt: keys.has_option(),
+            shift: keys.has_shift(),
+            platform: keys.has_command(),
+            ..Modifiers::default()
+        },
+        key: keys
+            .key()
+            .map_or_else(String::new, |key| key.label().to_lowercase()),
+        key_char: None,
+    };
+    h_flex()
+        .gap_1()
+        .when(keys.has_fn(), |row| {
+            row.child(
+                Kbd::new(Keystroke {
+                    key: "Fn".into(),
+                    modifiers: Modifiers::default(),
+                    key_char: None,
+                })
+                .text_body(),
+            )
+        })
+        .when(
+            keys.key().is_some()
+                || keys.has_control()
+                || keys.has_option()
+                || keys.has_shift()
+                || keys.has_command(),
+            |row| row.child(Kbd::new(stroke).text_body()),
+        )
+}
+
 impl Render for KeyboardEditor {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = theme::palette(cx);
         let preview = self.keys(cx).map_or_else(
-            |_| tr!("actions.choose_keyboard_keys"),
-            |keys| keys.rendered_label().into(),
+            |_| {
+                div()
+                    .text_caption()
+                    .text_color(pal.text_muted)
+                    .child(tr!("actions.choose_keyboard_keys"))
+                    .into_any_element()
+            },
+            |keys| shortcut_keycaps(&keys).into_any_element(),
         );
         v_flex()
             .gap_3()
-            .child(div().text_body().child(tr!("actions.keyboard_keys_help")))
             .child(
-                h_flex()
-                    .flex_wrap()
+                div()
+                    .text_caption()
+                    .text_color(pal.text_muted)
+                    .child(tr!("actions.keyboard_keys_help")),
+            )
+            .child(
+                div()
+                    .grid()
+                    .grid_cols(2)
                     .gap_3()
                     .children(Modifier::ALL.into_iter().map(|modifier| {
                         Checkbox::new(SharedString::from(format!(
@@ -229,7 +280,19 @@ impl Render for KeyboardEditor {
             )
             .child(div().text_body().child(tr!("actions.ordinary_key")))
             .child(control_select(&self.key).accessibility_label(tr!("actions.ordinary_key")))
-            .child(div().text_body().text_color(pal.text_muted).child(preview))
+            .child(
+                h_flex()
+                    .min_h_8()
+                    .gap_3()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_caption()
+                            .text_color(pal.text_muted)
+                            .child(tr!("actions.shortcut_preview")),
+                    )
+                    .child(preview),
+            )
     }
 }
 
@@ -248,11 +311,23 @@ pub(super) fn edit_keys(
         dialog
             .title(title.clone())
             .child(editor.clone())
-            .button_props(
-                DialogButtonProps::default()
-                    .ok_text(tr!("common.save"))
-                    .cancel_text(tr!("common.cancel"))
-                    .show_cancel(true),
+            .footer(
+                DialogFooter::new()
+                    .child(
+                        control_button("keyboard-cancel")
+                            .debug_selector(|| "keyboard-cancel".into())
+                            .label(tr!("common.cancel"))
+                            .on_click(|_, window, cx| window.dispatch_action(Box::new(Cancel), cx)),
+                    )
+                    .child(
+                        control_button("keyboard-save")
+                            .debug_selector(|| "keyboard-save".into())
+                            .label(tr!("common.confirm"))
+                            .primary()
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(Confirm { secondary: false }), cx);
+                            }),
+                    ),
             )
             .on_ok(move |_, window, cx| {
                 let Ok(keys) = submit.read(cx).keys(cx) else {
@@ -325,6 +400,121 @@ mod tests {
             }
         });
         drop(editor);
+        visual.update(|window, _| window.remove_window());
+        visual.run_until_parked();
+    }
+    #[gpui::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one real dialog flow verifies commit, cancellation, and invalid submission against the same owner"
+    )]
+    fn keyboard_dialog_confirms_cancels_and_rejects_empty_keys(cx: &mut TestAppContext) {
+        use crate::services::assets::AssetResolver;
+        use crate::state::{AgentLink, AppState, ConfigPersistence};
+        use gpui_component::Root;
+        use openlogi_core::config::Config;
+        use openlogi_ipc::{AgentStatus, InventoryHealth, PROTOCOL_VERSION};
+        use std::cell::RefCell;
+        let _locale = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            let (commands, _) = tokio::sync::mpsc::unbounded_channel();
+            let mut state = AppState::with_runtime(
+                Config::ephemeral(),
+                &[],
+                &[],
+                &AssetResolver::new(),
+                &[],
+                ConfigPersistence::MemoryOnly,
+                commands,
+            );
+            state.set_agent_link(AgentLink::Ready(AgentStatus {
+                accessibility_granted: true,
+                hook_installed: true,
+                launch_at_login: false,
+                inventory: InventoryHealth::Ready,
+                protocol_version: PROTOCOL_VERSION,
+                agent_version: "keyboard-dialog-test".into(),
+                input_monitoring_granted: true,
+                hid_open_failures: false,
+            }));
+            let state = cx.new(|_| state);
+            AppState::set_global(state, cx);
+        });
+        let (root, visual) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| crate::app::AppView::new(&[], window, cx));
+            Root::new(view, window, cx)
+        });
+        visual.simulate_resize(size(px(1000.), px(800.)));
+        let saved = Rc::new(RefCell::new(Vec::new()));
+        let output = saved.clone();
+        let save: SaveKeys = Rc::new(move |keys, _, _| output.borrow_mut().push(keys));
+        visual.update(|window, cx| {
+            edit_keys("T", "Keyboard shortcut".into(), save.clone(), window, cx);
+            window.draw(cx).clear(cx);
+        });
+        // The upstream dialog slides using wall-clock animation (250 ms).
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        // Actual footer buttons must be present and separate; Enter alone isn't enough.
+        let cancel = visual.debug_bounds("keyboard-cancel").unwrap();
+        let confirm = visual.debug_bounds("keyboard-save").unwrap();
+        assert!(cancel.right() <= confirm.left());
+        for selector in [
+            "keyboard-modifier-Ctrl",
+            "keyboard-modifier-Alt",
+            "keyboard-modifier-Shift",
+            "keyboard-save",
+        ] {
+            let bounds = visual.debug_bounds(selector).unwrap();
+            visual.simulate_click(bounds.center(), Modifiers::default());
+            visual.run_until_parked();
+            visual.update(|window, cx| window.draw(cx).clear(cx));
+        }
+        assert_eq!(
+            *saved.borrow(),
+            ["Ctrl+Alt+Shift+T".parse::<KeyCombo>().unwrap()]
+        );
+        assert!(visual.debug_bounds("dialog-layer").is_none());
+        // Changes in a canceled dialog must never reach the owner.
+        visual.update(|window, cx| {
+            edit_keys(
+                "Ctrl+T",
+                "Keyboard shortcut".into(),
+                save.clone(),
+                window,
+                cx,
+            );
+            window.draw(cx).clear(cx);
+        });
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        for selector in ["keyboard-modifier-Shift", "keyboard-cancel"] {
+            let bounds = visual.debug_bounds(selector).unwrap();
+            visual.simulate_click(bounds.center(), Modifiers::default());
+            visual.run_until_parked();
+            visual.update(|window, cx| window.draw(cx).clear(cx));
+        }
+        assert_eq!(saved.borrow().len(), 1);
+        assert!(visual.debug_bounds("dialog-layer").is_none());
+        visual.update(|window, cx| {
+            edit_keys("", "Keyboard shortcut".into(), save.clone(), window, cx);
+            window.draw(cx).clear(cx);
+        });
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let confirm = visual.debug_bounds("keyboard-save").unwrap();
+        visual.simulate_click(confirm.center(), Modifiers::default());
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(saved.borrow().len(), 1);
+        assert!(visual.debug_bounds("dialog-layer").is_some());
+        visual.simulate_keystrokes("escape");
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(visual.debug_bounds("dialog-layer").is_none());
+        drop(root);
         visual.update(|window, _| window.remove_window());
         visual.run_until_parked();
     }

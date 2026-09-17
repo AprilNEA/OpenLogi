@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{Action, Binding};
+use openlogi_core::binding::Action;
 use openlogi_core::bindings::{button_bindings_for, oshook_gestures_for};
 use openlogi_core::config::{Config, LightSettings, ScrollResolution, canonical_device_key};
 use openlogi_core::device::{
@@ -364,8 +364,7 @@ impl Orchestrator {
             .iter()
             .filter(|(_, button)| {
                 bindings.get(button).is_some_and(|binding| {
-                    matches!(binding, Binding::LongPress(_))
-                        || binding.click_action() != Action::None
+                    binding.is_timed() || binding.click_action() != Action::None
                 })
             })
             .copied()

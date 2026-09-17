@@ -710,3 +710,26 @@ fn double_click_binding_round_trips_and_preserves_legacy_thresholds() {
         std::time::Duration::from_millis(200)
     );
 }
+
+#[test]
+fn three_button_actions_round_trip_and_import_legacy_chords() {
+    let legacy: Binding =
+        toml::from_str("short = 'None'\nlong = 'HoldGlobeKey'\ndouble_click = 'Ctrl+Alt+Shift+T'")
+            .unwrap();
+    let actions = ButtonActions::from_binding(&legacy);
+    assert_eq!(actions.action(ButtonPress::Click), &Action::None);
+    assert_eq!(actions.action(ButtonPress::Hold), &Action::HoldGlobeKey);
+    assert_eq!(
+        actions.action(ButtonPress::DoubleClick),
+        &Action::CustomShortcut("Ctrl+Alt+Shift+T".parse().unwrap())
+    );
+    let binding = actions.into_binding();
+    assert_eq!(
+        toml::from_str::<Binding>(&toml::to_string(&binding).unwrap()).unwrap(),
+        binding
+    );
+    assert_eq!(
+        ButtonActions::new(Action::Copy, Action::None, Action::None).into_binding(),
+        Binding::Single(Action::Copy)
+    );
+}

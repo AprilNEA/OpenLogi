@@ -4,24 +4,28 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use gpui::{
-    App, Context, Entity, InteractiveElement, IntoElement, ParentElement, Role,
-    StatefulInteractiveElement as _, Styled, Window, div, prelude::FluentBuilder as _, px, rgb,
-    svg,
+    Context, Entity, InteractiveElement, IntoElement, ParentElement, Role,
+    StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
-    Disableable as _, Icon, IconName, Selectable as _, Sizable as _, button::Button, h_flex,
-    input::InputState, scroll::ScrollableElement as _, v_flex,
+    Disableable as _, Icon, IconName, Selectable as _, Sizable as _,
+    button::Button,
+    h_flex,
+    input::InputState,
+    menu::{DropdownMenu as _, PopupMenu, PopupMenuItem},
+    scroll::ScrollableElement as _,
+    v_flex,
 };
 use openlogi_core::binding::{
-    Action, Binding, ButtonId, GestureDirection, KeyCombo, default_binding,
+    Action, Binding, ButtonActions, ButtonId, ButtonPress, GestureDirection, default_binding,
 };
 
 use super::hotspots::MouseControlId;
-use super::keyboard::{edit_keys, keyboard_actions};
+use super::keyboard::{edit_keys, keyboard_actions, shortcut_keycaps};
 use super::picker::{
     ActionActivation, GESTURE_BUTTON_ICON, PickFn, action_icon_path, action_rows_matching,
-    editor_section, gesture_direction_icon,
+    editor_section, gesture_direction_icon, grouped_catalog,
 };
 use super::thumbwheel::ThumbwheelPreset;
 use super::view::MouseModelView;
@@ -152,24 +156,18 @@ fn button_inspector(
         return inherited_gesture_inspector(button, app, picker, pal, cx);
     }
 
-    let timed = AppState::try_read(cx)
-        .and_then(|state| state.default_button_binding(button))
-        .and_then(|binding| match binding {
-            Binding::LongPress(binding) => Some(binding),
-            _ => None,
-        })
-        .filter(|_| data.editing_app.is_none() || !overridden);
     let action = data
         .bindings
         .get(&button)
         .cloned()
         .unwrap_or_else(|| default_binding(button));
-    let action = timed.map_or(action, |binding| binding.long().clone());
-    let double_click = timed.and_then(|binding| binding.double_click());
     let status = match (
         data.editing_app,
         overridden,
-        action == default_binding(button),
+        action == default_binding(button)
+            && !AppState::try_read(cx)
+                .and_then(|state| state.default_button_binding(button))
+                .is_some_and(Binding::is_timed),
     ) {
         (Some(app), true, _) => tr!("actions.overridden_in_app", app => app.to_string()),
         (Some(_), false, _) => tr!("profiles.inherited_from_default"),
@@ -192,22 +190,34 @@ fn button_inspector(
             Some(status),
             pal,
         ))
-        .child(current_action_card(&action, picker, pal))
-        .when(
-            data.editing_app.is_none() && action.held_input().is_some(),
-            |panel| panel.child(double_click_controls(button, double_click, pal)),
-        )
-        .when(
-            data.editing_app.is_some() && double_click.is_some(),
-            |panel| {
-                panel.child(
-                    div()
-                        .text_caption()
-                        .text_color(pal.text_muted)
-                        .child(tr!("actions.double_click_hold_help")),
+        .when(data.editing_app.is_none(), |panel| {
+            let fallback = Binding::Single(action.clone());
+            let binding = AppState::try_read(cx)
+                .and_then(|state| state.default_button_binding(button))
+                .unwrap_or(&fallback);
+            let actions = ButtonActions::from_binding(binding);
+            let hold_hint = match binding {
+                Binding::Single(action) if action.requires_physical_release() => tr!("actions.hold_immediate"),
+                Binding::LongPress(binding) => tr!("actions.hold_delay", ms => binding.hold_threshold().as_millis().to_string()),
+                _ => tr!("actions.hold_delay", ms => "300"),
+            };
+            let device_key = AppState::try_read(cx)
+                .and_then(|state| state.current_record())
+                .map(|record| record.config_key.clone());
+            panel.children(ButtonPress::ALL.into_iter().map(|press| {
+                button_action_card(
+                    button,
+                    press,
+                    actions.action(press),
+                    device_key.clone(),
+                    hold_hint.clone(),
+                    pal,
                 )
-            },
-        )
+            }))
+        })
+        .when(data.editing_app.is_some(), |panel| {
+            panel.child(current_action_card(&action, picker, pal))
+        })
         .when(overridden, |panel| {
             let observer = picker.view.clone();
             panel.child(
@@ -268,78 +278,183 @@ fn button_inspector(
         })
 }
 
-fn double_click_controls(
-    button: ButtonId,
-    shortcut: Option<&KeyCombo>,
-    pal: Palette,
-) -> impl IntoElement {
-    let current = shortcut.cloned();
-    v_flex()
-        .gap_2()
-        .child(editor_section(tr!("actions.double_click_shortcut"), pal))
-        .child(div().text_body().child(shortcut.map_or_else(
-            || tr!("actions.unbound"),
-            |combo| combo.rendered_label().into(),
-        )))
-        .when(shortcut.is_some(), |panel| {
-            panel.child(
-                div()
-                    .text_caption()
-                    .text_color(pal.text_muted)
-                    .child(tr!("actions.double_click_hold_help")),
-            )
-        })
-        .child(
-            control_button("edit-double-click-shortcut")
-                .w_full()
-                .label(tr!("actions.set_double_click_shortcut"))
-                .on_click(move |_, window, cx| {
-                    open_double_click_editor(button, current.as_ref(), window, cx);
-                }),
-        )
-        .when(shortcut.is_some(), |panel| {
-            panel.child(
-                control_button("remove-double-click-shortcut")
-                    .w_full()
-                    .label(tr!("actions.remove_double_click_shortcut"))
-                    .on_click(move |_, _, cx| {
-                        AppState::update_bindings(cx, |state| {
-                            if let Some(key) = state
-                                .current_record()
-                                .map(|record| record.config_key.clone())
-                            {
-                                state.commit_double_click(&key, button, None);
-                            }
-                        });
-                    }),
-            )
-        })
+fn button_press_label(press: ButtonPress) -> gpui::SharedString {
+    match press {
+        ButtonPress::Click => tr!("actions.single_click"),
+        ButtonPress::Hold => tr!("actions.long_press"),
+        ButtonPress::DoubleClick => tr!("actions.double_click"),
+    }
 }
 
-fn open_double_click_editor(
+fn button_action_card(
     button: ButtonId,
-    shortcut: Option<&KeyCombo>,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let Some(key) = AppState::try_read(cx)
-        .and_then(|state| state.current_record())
-        .map(|record| record.config_key.clone())
-    else {
-        return;
+    press: ButtonPress,
+    action: &Action,
+    device_key: Option<String>,
+    hold_hint: gpui::SharedString,
+    pal: Palette,
+) -> impl IntoElement {
+    let id = match press {
+        ButtonPress::Click => "button-action-click",
+        ButtonPress::Hold => "button-action-hold",
+        ButtonPress::DoubleClick => "button-action-double",
     };
-    let initial = shortcut.map_or_else(|| "Ctrl+Alt+Shift+T".to_string(), KeyCombo::rendered_label);
-    edit_keys(
-        &initial,
-        tr!("actions.double_click_shortcut"),
-        Rc::new(move |combo, _, cx| {
-            AppState::update_bindings(cx, |state| {
-                state.commit_double_click(&key, button, Some(combo));
-            });
-        }),
-        window,
-        cx,
-    );
+    let caption = button_press_label(press);
+    let accessible_label = format!("{}: {}", caption, localized_action_label(action));
+    let value = match action {
+        Action::CustomShortcut(keys) | Action::HoldShortcut(keys) => {
+            shortcut_keycaps(keys).into_any_element()
+        }
+        Action::HoldGlobeKey => {
+            shortcut_keycaps(&openlogi_core::binding::KeyCombo::FN).into_any_element()
+        }
+        action => div()
+            .min_w_0()
+            .truncate()
+            .text_body()
+            .child(localized_action_label(action))
+            .into_any_element(),
+    };
+    Button::new(id)
+        .debug_selector(move || id.to_string())
+        .accessibility_label(accessible_label)
+        .w_full()
+        .h_auto()
+        .p_3()
+        .rounded(pal.control_radius)
+        .border_1()
+        .border_color(pal.border)
+        .bg(pal.control)
+        .disabled(device_key.is_none())
+        .child(
+            v_flex()
+                .w_full()
+                .gap_2()
+                .child(
+                    h_flex()
+                        .justify_between()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_caption()
+                                .text_color(pal.text_muted)
+                                .child(caption),
+                        )
+                        .children(
+                            match press {
+                                ButtonPress::Click => None,
+                                ButtonPress::Hold => Some(hold_hint),
+                                ButtonPress::DoubleClick => Some(tr!("actions.double_click_delay")),
+                            }
+                            .map(|hint| {
+                                div().text_caption().text_color(pal.text_muted).child(hint)
+                            }),
+                        ),
+                )
+                .child(
+                    h_flex()
+                        .w_full()
+                        .min_h_6()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            svg()
+                                .path(action_icon_path(action))
+                                .size_4()
+                                .flex_none()
+                                .text_color(pal.text_muted),
+                        )
+                        .child(div().flex_1().min_w_0().child(value))
+                        .child(
+                            Icon::new(IconName::ChevronsUpDown)
+                                .size_3()
+                                .text_color(pal.text_muted),
+                        ),
+                ),
+        )
+        .dropdown_menu(button_action_menu(
+            button,
+            press,
+            action.clone(),
+            device_key,
+        ))
+}
+
+fn button_action_menu(
+    button: ButtonId,
+    press: ButtonPress,
+    current: Action,
+    device_key: Option<String>,
+) -> impl Fn(PopupMenu, &mut gpui::Window, &mut Context<PopupMenu>) -> PopupMenu {
+    move |menu, window, _| {
+        let device_key = device_key.clone();
+        let pick: PickFn = Rc::new(move |action, _, cx| {
+            if let Some(key) = &device_key {
+                AppState::update_bindings(cx, |state| {
+                    state.commit_button_action(key, button, press, action);
+                });
+            }
+        });
+        let shortcut_pick = pick.clone();
+        let initial = match &current {
+            Action::CustomShortcut(keys) | Action::HoldShortcut(keys) => keys.rendered_label(),
+            Action::HoldGlobeKey => "Fn".to_string(),
+            _ => String::new(),
+        };
+        let mut menu = menu.scrollable(true).max_h(window.rem_size() * 24.).item(
+            PopupMenuItem::new(tr!("actions.keyboard_shortcut"))
+                .icon(Icon::empty().path("action-icons/keyboard.svg"))
+                .checked(matches!(
+                    current,
+                    Action::CustomShortcut(_) | Action::HoldShortcut(_)
+                ))
+                .on_click(move |_, window, cx| {
+                    let on_save = shortcut_pick.clone();
+                    edit_keys(
+                        &initial,
+                        tr!("actions.keyboard_shortcut_title"),
+                        Rc::new(move |keys, window, cx| {
+                            let action = if press == ButtonPress::Hold {
+                                Action::HoldShortcut(keys)
+                            } else {
+                                Action::CustomShortcut(keys)
+                            };
+                            on_save(action, window, cx);
+                        }),
+                        window,
+                        cx,
+                    );
+                }),
+        );
+        let clear = pick.clone();
+        menu = menu.item(
+            PopupMenuItem::new(localized_action_label(&Action::None))
+                .icon(Icon::empty().path(action_icon_path(&Action::None)))
+                .checked(current == Action::None)
+                .on_click(move |_, window, cx| clear(Action::None, window, cx)),
+        );
+        for (category, actions) in grouped_catalog() {
+            menu = menu
+                .item(PopupMenuItem::separator())
+                .item(PopupMenuItem::label(tr!(category.translation_key())));
+            for action in actions {
+                if action == Action::None {
+                    continue;
+                }
+                if press != ButtonPress::Hold && action.requires_physical_release() {
+                    continue;
+                }
+                let on_pick = pick.clone();
+                menu = menu.item(
+                    PopupMenuItem::new(localized_action_label(&action))
+                        .icon(Icon::empty().path(action_icon_path(&action)))
+                        .checked(current == action)
+                        .on_click(move |_, window, cx| on_pick(action.clone(), window, cx)),
+                );
+            }
+        }
+        menu
+    }
 }
 
 fn inherited_gesture_inspector(

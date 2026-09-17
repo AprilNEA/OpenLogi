@@ -2302,38 +2302,76 @@ fn a_failed_save_keeps_the_forgotten_device() {
 }
 
 #[test]
-fn globe_double_click_edits_preserve_scope_and_restore_immediate_hold() {
+fn three_button_actions_preserve_other_cards_and_device_scope() {
+    use openlogi_core::binding::{ButtonActions, ButtonPress, KeyCombo};
     let mut state = state_with_a_known_mouse();
     state.commit_binding(ButtonId::DpiToggle, Action::HoldGlobeKey);
-    let combo = "Ctrl+Alt+Shift+T".parse().unwrap();
-    state.commit_double_click(KNOWN_MOUSE_KEY, ButtonId::DpiToggle, Some(combo));
-    let Some(Binding::LongPress(binding)) = state.default_button_binding(ButtonId::DpiToggle)
-    else {
-        panic!("timed binding expected")
-    };
-    assert_eq!(binding.short(), &Action::None);
-    assert_eq!(
-        binding.long(),
-        &Action::HoldShortcut(openlogi_core::binding::KeyCombo::FN)
+    let shortcut = Action::CustomShortcut("Ctrl+Alt+Shift+T".parse().unwrap());
+    state.commit_button_action(
+        KNOWN_MOUSE_KEY,
+        ButtonId::DpiToggle,
+        ButtonPress::DoubleClick,
+        shortcut.clone(),
     );
-    assert!(binding.double_click().is_some());
-    state.commit_double_click("another-device", ButtonId::DpiToggle, None);
-    assert!(matches!(
-        state.default_button_binding(ButtonId::DpiToggle),
-        Some(Binding::LongPress(_))
-    ));
-    state.set_editing_app(Some("com.apple.Safari".into()));
-    state.commit_double_click(KNOWN_MOUSE_KEY, ButtonId::DpiToggle, None);
-    assert!(matches!(
-        state.default_button_binding(ButtonId::DpiToggle),
-        Some(Binding::LongPress(_))
-    ));
-    state.set_editing_app(None);
-    state.commit_double_click(KNOWN_MOUSE_KEY, ButtonId::DpiToggle, None);
+    let expected =
+        ButtonActions::new(Action::None, Action::HoldGlobeKey, shortcut.clone()).into_binding();
     assert_eq!(
         state.default_button_binding(ButtonId::DpiToggle),
-        Some(&Binding::Single(Action::HoldShortcut(
-            openlogi_core::binding::KeyCombo::FN
-        )))
+        Some(&expected)
+    );
+    state.commit_button_action(
+        "another-device",
+        ButtonId::DpiToggle,
+        ButtonPress::Click,
+        Action::Copy,
+    );
+    state.set_editing_app(Some("com.apple.Safari".into()));
+    state.commit_button_action(
+        KNOWN_MOUSE_KEY,
+        ButtonId::DpiToggle,
+        ButtonPress::Click,
+        Action::Copy,
+    );
+    assert_eq!(
+        state.default_button_binding(ButtonId::DpiToggle),
+        Some(&expected)
+    );
+    state.set_editing_app(None);
+    // Release-only activations reject holds: no future up edge exists for them.
+    state.commit_button_action(
+        KNOWN_MOUSE_KEY,
+        ButtonId::DpiToggle,
+        ButtonPress::Click,
+        Action::HoldShortcut(KeyCombo::FN),
+    );
+    assert_eq!(
+        state.default_button_binding(ButtonId::DpiToggle),
+        Some(&expected)
+    );
+    state.commit_button_action(
+        KNOWN_MOUSE_KEY,
+        ButtonId::DpiToggle,
+        ButtonPress::Click,
+        Action::Copy,
+    );
+    state.commit_button_action(
+        KNOWN_MOUSE_KEY,
+        ButtonId::DpiToggle,
+        ButtonPress::Hold,
+        Action::None,
+    );
+    assert_eq!(
+        state.default_button_binding(ButtonId::DpiToggle),
+        Some(&ButtonActions::new(Action::Copy, Action::None, shortcut).into_binding())
+    );
+    state.commit_button_action(
+        KNOWN_MOUSE_KEY,
+        ButtonId::DpiToggle,
+        ButtonPress::DoubleClick,
+        Action::None,
+    );
+    assert_eq!(
+        state.default_button_binding(ButtonId::DpiToggle),
+        Some(&Binding::Single(Action::Copy))
     );
 }

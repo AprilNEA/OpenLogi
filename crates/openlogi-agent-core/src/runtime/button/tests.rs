@@ -2,7 +2,9 @@
 
 use std::time::Instant;
 
-use openlogi_core::binding::{DOUBLE_CLICK_HOLD_THRESHOLD, LONG_PRESS_THRESHOLD, LongPressBinding};
+use openlogi_core::binding::{
+    ButtonActions, DOUBLE_CLICK_HOLD_THRESHOLD, KeyCombo, LONG_PRESS_THRESHOLD, LongPressBinding,
+};
 
 use super::*;
 
@@ -1020,10 +1022,12 @@ fn shutdown_deadline_includes_a_blocked_terminal_handler() {
 
 fn double_click_press(id: u64, at: Instant) -> ActivePress {
     let mut press = hook_press(id, ButtonId::DpiToggle);
-    let binding = Binding::LongPress(
-        LongPressBinding::new(Action::None, Action::HoldShortcut(KeyCombo::FN))
-            .with_double_click("Ctrl+Alt+Shift+T".parse().unwrap()),
-    );
+    let binding = ButtonActions::new(
+        Action::None,
+        Action::HoldShortcut(KeyCombo::FN),
+        Action::CustomShortcut("Ctrl+Alt+Shift+T".parse().unwrap()),
+    )
+    .into_binding();
     press.behavior = PressBehavior::new(Some(&binding), at);
     press
 }
@@ -1249,4 +1253,82 @@ fn double_clicks_do_not_cross_controls_or_capture_sessions() {
         events.push(event);
     });
     assert!(output_actions(&events).is_empty());
+}
+
+#[test]
+fn three_button_actions_dispatch_independently_on_every_captured_button() {
+    for button in [
+        ButtonId::MiddleClick,
+        ButtonId::Back,
+        ButtonId::Forward,
+        ButtonId::DpiToggle,
+        ButtonId::GestureButton,
+    ] {
+        let now = Instant::now();
+        let binding = ButtonActions::new(Action::Copy, Action::Paste, Action::Undo).into_binding();
+        let press_at = |id, at| {
+            let mut press = hook_press(id, button);
+            press.behavior = PressBehavior::new(Some(&binding), at);
+            press
+        };
+        // One click waits for the double-click interval, then fires only Copy.
+        let mut state = ButtonState::default();
+        let mut events = Vec::new();
+        let first = press_at(1, now);
+        input_at(&mut state, &first, None, &mut events);
+        input_at(
+            &mut state,
+            &first,
+            Some(now + Duration::from_millis(30)),
+            &mut events,
+        );
+        emit_due_long_presses(&mut state, now + Duration::from_millis(229), &mut |event| {
+            events.push(event);
+        });
+        assert!(output_actions(&events).is_empty());
+        emit_due_long_presses(&mut state, now + Duration::from_millis(230), &mut |event| {
+            events.push(event);
+        });
+        assert_eq!(output_actions(&events), [Action::Copy]);
+        // A second short press within 200 ms replaces both single clicks.
+        let mut state = ButtonState::default();
+        let mut events = Vec::new();
+        input_at(&mut state, &first, None, &mut events);
+        input_at(
+            &mut state,
+            &first,
+            Some(now + Duration::from_millis(30)),
+            &mut events,
+        );
+        let second = press_at(2, now + Duration::from_millis(230));
+        input_at(&mut state, &second, None, &mut events);
+        input_at(
+            &mut state,
+            &second,
+            Some(now + Duration::from_millis(250)),
+            &mut events,
+        );
+        emit_due_long_presses(&mut state, now + Duration::from_secs(1), &mut |event| {
+            events.push(event);
+        });
+        assert_eq!(output_actions(&events), [Action::Undo]);
+        // A hold fires at 300 ms and its release never fires Copy or Undo.
+        let mut state = ButtonState::default();
+        let mut events = Vec::new();
+        input_at(&mut state, &first, None, &mut events);
+        emit_due_long_presses(&mut state, now + Duration::from_millis(299), &mut |event| {
+            events.push(event);
+        });
+        assert!(output_actions(&events).is_empty());
+        emit_due_long_presses(&mut state, now + Duration::from_millis(300), &mut |event| {
+            events.push(event);
+        });
+        input_at(
+            &mut state,
+            &first,
+            Some(now + Duration::from_millis(350)),
+            &mut events,
+        );
+        assert_eq!(output_actions(&events), [Action::Paste]);
+    }
 }

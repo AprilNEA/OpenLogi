@@ -2,6 +2,7 @@
 _version = 1
 
 [common]
+confirm = "Confirm"
 grid = "Siatka"
 list = "Lista"
 carousel = "Karuzela"
@@ -235,17 +236,22 @@ wheel_resolution_other_connection = "To urządzenie obsługuje rozdzielczość k
 smartshift = "SmartShift"
 
 [actions]
+single_click = "Single click"
+long_press = "Long press"
+double_click = "Double click"
+hold_delay = "%{ms} ms"
+hold_immediate = "On press"
+double_click_delay = "Within 200 ms"
+keyboard_shortcut = "Keyboard shortcut…"
+keyboard_shortcut_title = "Keyboard shortcut"
+shortcut_preview = "Preview"
+multiple_actions = "Multiple actions"
 choose_keyboard_keys = "Choose at least one modifier or key."
 ordinary_key = "Ordinary key"
 modifiers_only = "No ordinary key"
 press_keyboard_keys = "Press keyboard keys…"
 hold_keyboard_keys = "Hold keyboard keys…"
-keyboard_keys_help = "Choose modifiers and an ordinary key. For Fn alone, leave the ordinary key unset."
-hold_and_double_click = "%{hold} · %{shortcut}"
-double_click_shortcut = "Double-click shortcut"
-set_double_click_shortcut = "Set shortcut…"
-remove_double_click_shortcut = "Remove double click"
-double_click_hold_help = "Hold for 300 ms to press the held keys. Release, then press again within 200 ms for the shortcut. A single click does nothing."
+keyboard_keys_help = "Choose modifiers and a key. Fn can be used on its own."
 hold_globe_key = "Hold Globe / Fn (macOS)"
 bind_control = "Przypisz %{name}"
 bind_control_in_app = "Przypisz %{name} w %{app}"

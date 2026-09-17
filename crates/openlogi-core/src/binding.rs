@@ -41,6 +41,6 @@ pub use swipe::{
     detect_swipe,
 };
 pub use value::{
-    Binding, DOUBLE_CLICK_HOLD_THRESHOLD, DOUBLE_CLICK_INTERVAL, LONG_PRESS_THRESHOLD,
-    LongPressBinding,
+    Binding, ButtonActions, ButtonPress, DOUBLE_CLICK_HOLD_THRESHOLD, DOUBLE_CLICK_INTERVAL,
+    LONG_PRESS_THRESHOLD, LongPressBinding,
 };

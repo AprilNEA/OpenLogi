@@ -14,7 +14,9 @@ use std::sync::mpsc;
 use std::thread::{self, JoinHandle, ThreadId};
 use std::time::{Duration, Instant};
 
-use openlogi_core::binding::{Action, Binding, ButtonId, DOUBLE_CLICK_INTERVAL, KeyCombo};
+use openlogi_core::binding::{
+    Action, Binding, ButtonId, ButtonPress, DOUBLE_CLICK_HOLD_THRESHOLD, DOUBLE_CLICK_INTERVAL,
+};
 use tracing::warn;
 
 use super::ActionDispatchTarget;
@@ -191,7 +193,7 @@ enum PressBehavior {
     LongPressPending {
         short: Action,
         long: Action,
-        double_click: Option<KeyCombo>,
+        double_click: Option<Action>,
         pressed_at: Instant,
         deadline: Instant,
     },
@@ -208,9 +210,17 @@ impl PressBehavior {
             Some(Binding::LongPress(binding)) => Self::LongPressPending {
                 short: binding.short().clone(),
                 long: binding.long().clone(),
-                double_click: binding.double_click().cloned(),
+                double_click: binding.double_click().cloned().map(Action::CustomShortcut),
                 pressed_at,
                 deadline: pressed_at + binding.hold_threshold(),
+            },
+            Some(Binding::Clicks(actions)) => Self::LongPressPending {
+                short: actions.action(ButtonPress::Click).clone(),
+                long: actions.action(ButtonPress::Hold).clone(),
+                double_click: (actions.action(ButtonPress::DoubleClick) != &Action::None)
+                    .then(|| actions.action(ButtonPress::DoubleClick).clone()),
+                pressed_at,
+                deadline: pressed_at + DOUBLE_CLICK_HOLD_THRESHOLD,
             },
         }
     }
@@ -384,7 +394,7 @@ impl PendingClick {
         {
             return false;
         }
-        *next_short = Action::CustomShortcut(combo.clone());
+        *next_short = combo.clone();
         *double_click = None;
         true
     }
@@ -600,6 +610,7 @@ impl ButtonInputHandle {
     ) -> bool {
         if binding.is_some_and(|binding| {
             binding.click_action().requires_physical_release()
+                || matches!(binding, Binding::Clicks(_))
                 || matches!(binding, Binding::LongPress(long) if long.double_click().is_some())
         }) {
             warn!(

@@ -325,7 +325,7 @@ fn handle_button(
 }
 
 fn binding_is_native_click(id: ButtonId, binding: &Binding) -> bool {
-    !matches!(binding, Binding::LongPress(_)) && is_native_click(id, &binding.click_action())
+    !binding.is_timed() && is_native_click(id, &binding.click_action())
 }
 
 /// Press of a remapped single-action button: suppress when the action was

@@ -748,12 +748,13 @@ fn binding_label_for_control(
         && !state
             .editing_app_overrides()
             .is_some_and(|overrides| overrides.contains_key(&button))
-        && let Some(Binding::LongPress(binding)) = state.default_button_binding(button)
-        && let Some(shortcut) = binding.double_click()
+        && state
+            .default_button_binding(button)
+            .is_some_and(Binding::is_timed)
     {
         return BindingLabel {
-            text: tr!("actions.hold_and_double_click", hold => localized_action_label(binding.long()), shortcut => shortcut.rendered_label()),
-            icon: Some(action_icon_path(binding.long())),
+            text: tr!("actions.multiple_actions"),
+            icon: Some("action-icons/keyboard.svg"),
         };
     }
     if control
@@ -1021,6 +1022,39 @@ mod tests {
         drop(view);
         cx.update(|window, _| window.remove_window());
         cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn button_activation_cards_share_alignment_and_spacing(cx: &mut TestAppContext) {
+        let _locale = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("zh-CN");
+        cx.update(gpui_component::init);
+        install_app_state(cx);
+        let (view, visual) = cx.add_window_view(MouseModelView::new);
+        visual.simulate_resize(size(px(1000.), px(800.)));
+        for button in [
+            ButtonId::MiddleClick,
+            ButtonId::Back,
+            ButtonId::Forward,
+            ButtonId::DpiToggle,
+        ] {
+            view.update(visual, |view, cx| {
+                view.select(MouseControlId::Button(button));
+                cx.notify();
+            });
+            visual.update(|window, cx| window.draw(cx).clear(cx));
+            let click = visual.debug_bounds("button-action-click").unwrap();
+            let hold = visual.debug_bounds("button-action-hold").unwrap();
+            let double = visual.debug_bounds("button-action-double").unwrap();
+            assert_eq!(click.left(), hold.left());
+            assert_eq!(hold.left(), double.left());
+            assert_eq!(click.size, hold.size);
+            assert_eq!(hold.size, double.size);
+            assert_eq!(hold.top() - click.bottom(), double.top() - hold.bottom());
+        }
+        drop(view);
+        visual.update(|window, _| window.remove_window());
+        visual.run_until_parked();
     }
 
     #[gpui::test]

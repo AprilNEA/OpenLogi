@@ -55,19 +55,26 @@ resolve to the same `KeyCombo::FN` input. Editing them writes the generic form.
 
 ## Double-click shortcut with a Globe hold
 
-In the default mouse profile, select **Hold Globe / Fn (macOS)**, then use
-**Double-click shortcut → Set shortcut…**. Check **Control**, **Option / Alt**,
-and **Shift**, choose **T** from the ordinary-key list, and save. The preview
-shows `Ctrl+Alt+Shift+T`. Saving an empty selection keeps the editor open.
-Removing double click restores the original immediate Globe hold.
+Each remappable mouse button in the default profile has three matching cards:
+**Single click**, **Long press**, and **Double click**. Each card opens the action
+menu; **Keyboard shortcut…** opens modifier checkboxes and a searchable ordinary-key
+picker with **Confirm** and **Cancel**. The preview uses platform key symbols.
+An empty selection stays in the editor, and Cancel/Escape leaves the binding intact.
+
+For a Globe hold with a double-click shortcut, leave Single click as **None**,
+choose **Fn / Globe** with no ordinary key in Long press, then check **Control**,
+**Option / Alt**, and **Shift** and select **T** in Double click. Editing one card
+preserves the other two. Setting both Long press and Double click to None restores
+the single action's immediate response. Long press remains 300 ms when Double click
+is removed but a hold action remains configured.
 
 For an MX Anywhere 3S sensitivity switch, the device binding is:
 
 ```toml
 [devices."<existing-device-key>".bindings.DpiToggle]
-short = "None"
-long = { HoldShortcut = "Fn" }
-double_click = "Ctrl+Alt+Shift+T"
+click = "None"
+hold = { HoldShortcut = "Fn" }
+double = { CustomShortcut = "Ctrl+Alt+Shift+T" }
 ```
 
 - Hold for **300 ms**: Globe/Fn goes down once, and stays down until release.
@@ -79,7 +86,9 @@ double_click = "Ctrl+Alt+Shift+T"
   and release owned held input. A queued release wins over an overdue hold timer;
   it must not produce a delayed Globe pulse after the physical button is up.
 - Per-app action overrides still replace the whole default button binding.
-- Existing short/long bindings without `double_click` retain their 500 ms delay.
+- Legacy `short`/`long`/`double_click` configurations remain readable. Existing
+  short/long pairs without double click retain their 500 ms delay until edited.
+  The inspector shows the stored delay; editing uses the new 300 ms behavior.
 
 Verify the shortcut at its destination and hold behavior on the physical mouse.
 Check the inspector and shortcut dialog in light/dark appearances, invalid input,
@@ -294,14 +303,22 @@ Rebased onto upstream master `b9c8fede`. On Apple Silicon macOS, with
 `RUSTFLAGS="-D warnings"`:
 
 - `cargo fmt --all -- --check` and full-workspace Clippy: passed.
-- `cargo test --workspace --all-targets`: **1,695 passed**, one opt-in real-event
-  test ignored by default. Includes 234 desktop tests, main-window dialog rendering, real checkbox interactions,
+- `cargo test --workspace --all-targets`: **1,700 passed**, one opt-in real-event
+  test ignored by default. Includes 236 desktop tests, main-window dialog rendering, actual dialog Confirm/Cancel/empty-input interactions,
+  matching card geometry across mouse buttons, real checkbox interactions,
   299/300 ms hold boundaries, 199/200/201 ms click gaps, cancellation, second-click
   holds, modifier ownership, configuration round trips and wire-format goldens.
 - Non-GUI rustdoc with `RUSTDOCFLAGS="-D warnings"`: passed.
 - `cargo xtask ci wasm clippy-windows`: both passed, none skipped.
 - The Linux-musl cross-Clippy recipe above: passed.
 - Locale checks, `typos --config .config/typos.toml .`, and `git diff --check`: passed.
+
+The default-profile button inspector now renders three action cards. Native macOS
+inspection verified the light appearance, action dropdown, modifier checkboxes,
+visible Confirm/Cancel buttons, and cancellation preserving the original chord.
+The unit tests also exercise arbitrary click/hold/double actions and legacy config
+import. Protocol 34 adds the independent action triple while retaining legacy
+single and short/long config encodings.
 
 The additional opt-in Fn event-tap test was attempted separately and received no
 injected events. Read-only preflight checks on the command process reported
