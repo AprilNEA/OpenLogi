@@ -621,6 +621,7 @@ fn theme_card(
                 .gap_1()
                 .child(
                     div()
+                        .min_w_0()
                         .overflow_hidden()
                         .text_caption()
                         .text_color(pal.text_primary)
