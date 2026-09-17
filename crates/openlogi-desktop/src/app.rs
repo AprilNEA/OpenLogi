@@ -5,7 +5,7 @@ use gpui::{
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
-    Icon, IconName, TitleBar,
+    Icon, IconName, Root, TitleBar,
     button::{Button, ButtonVariants as _},
     v_flex,
 };
@@ -637,6 +637,7 @@ impl Render for AppView {
         root.child(header_el)
             .child(content_el)
             .when(!granted, |this| this.child(status::attention_footer(cx)))
+            .children(Root::render_dialog_layer(window, cx))
             .into_any_element()
     }
 }

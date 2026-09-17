@@ -294,8 +294,8 @@ Rebased onto upstream master `b9c8fede`. On Apple Silicon macOS, with
 `RUSTFLAGS="-D warnings"`:
 
 - `cargo fmt --all -- --check` and full-workspace Clippy: passed.
-- `cargo test --workspace --all-targets`: **1,694 passed**, one opt-in real-event
-  test ignored by default. Includes 233 desktop tests, real checkbox interactions,
+- `cargo test --workspace --all-targets`: **1,695 passed**, one opt-in real-event
+  test ignored by default. Includes 234 desktop tests, main-window dialog rendering, real checkbox interactions,
   299/300 ms hold boundaries, 199/200/201 ms click gaps, cancellation, second-click
   holds, modifier ownership, configuration round trips and wire-format goldens.
 - Non-GUI rustdoc with `RUSTDOCFLAGS="-D warnings"`: passed.
