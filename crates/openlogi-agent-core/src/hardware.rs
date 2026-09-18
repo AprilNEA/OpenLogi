@@ -320,6 +320,26 @@ pub fn write_fn_lock_in_background(op: DeviceOp, on: bool) {
     );
 }
 
+/// The settings a mouse forgets when it power-cycles, as one reapply pushes
+/// them. `None` leaves that setting alone.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VolatileMouseSettings {
+    /// Native HiResWheel resolution and inversion.
+    pub wheel: Option<WheelModeChange>,
+    /// Sensor DPI.
+    pub dpi: Option<Dpi>,
+    /// SmartShift mode and thresholds.
+    pub smartshift: Option<SmartShiftStatus>,
+}
+
+impl VolatileMouseSettings {
+    /// Whether there is nothing to push.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// Re-apply every volatile mouse setting for `op`'s device on a **single**
 /// background thread, sequentially, on the current inventory-owned channel.
 ///
@@ -334,12 +354,12 @@ pub fn write_fn_lock_in_background(op: DeviceOp, on: bool) {
 /// on the one OS thread spawned here. Takes `op` by reference (unlike every
 /// other function here) because it only ever reads its fields — it never
 /// hands the operation itself to [`DeviceOp::run`] or [`DeviceOp::detach`].
-pub fn reapply_mouse_volatile_in_background(
-    op: &DeviceOp,
-    wheel: Option<WheelModeChange>,
-    dpi: Option<Dpi>,
-    smartshift: Option<SmartShiftStatus>,
-) {
+pub fn reapply_mouse_volatile_in_background(op: &DeviceOp, settings: VolatileMouseSettings) {
+    let VolatileMouseSettings {
+        wheel,
+        dpi,
+        smartshift,
+    } = settings;
     let Ok(shared) = op.resolve() else {
         debug!(route = %op.route, "no inventory channel — volatile reapply skipped");
         return;

@@ -34,7 +34,9 @@ use crate::action_ring::ActionRingSessionSpec;
 use crate::capture_plan::{
     DeviceCapturePlan, SharedCapturePlans, hidpp_side_gesture_maps_for, plan_for_device,
 };
-use crate::hardware::{DeviceAccess, DeviceOp, HardwareContext, WheelModeChange};
+use crate::hardware::{
+    DeviceAccess, DeviceOp, HardwareContext, VolatileMouseSettings, WheelModeChange,
+};
 use crate::observable::ObservableState;
 use crate::receiver_access::ReceiverAccess;
 use crate::runtime::hook::{HookMaps, SharedHookMaps};
@@ -603,17 +605,17 @@ impl Orchestrator {
         let key = &dev.config_key;
         let route_key = stable_id(dev).route_key();
         let device = self.config.devices.get(key.as_str());
-        let wheel = configured_wheel_mode(&self.config, dev);
-        let dpi = device.and_then(|d| d.effective_dpi(&route_key));
-        let smartshift = device
-            .and_then(|d| d.effective_smartshift(&route_key))
-            .map(openlogi_hid::SmartShiftStatus::from);
-        if wheel.is_some() || dpi.is_some() || smartshift.is_some() {
+        let settings = VolatileMouseSettings {
+            wheel: configured_wheel_mode(&self.config, dev),
+            dpi: device.and_then(|d| d.effective_dpi(&route_key)),
+            smartshift: device
+                .and_then(|d| d.effective_smartshift(&route_key))
+                .map(openlogi_hid::SmartShiftStatus::from),
+        };
+        if !settings.is_empty() {
             crate::hardware::reapply_mouse_volatile_in_background(
                 &self.shared.device(&route),
-                wheel,
-                dpi,
-                smartshift,
+                settings,
             );
         }
         if let Some(lighting) = device
