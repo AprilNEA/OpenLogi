@@ -993,13 +993,7 @@ fn build_devices(
         }
     }
     for device in standalone {
-        let route = DeviceRoute::RawHid {
-            vendor_id: device.address.vendor_id,
-            product_id: device.address.product_id,
-            usage_page: device.address.usage_page,
-            usage_id: device.address.usage_id,
-            identity: device.address.identity.clone(),
-        };
+        let route = device.route();
         let stable_id = DeviceStableId::from_parts(
             Some(&route),
             DIRECT_DEVICE_INDEX,

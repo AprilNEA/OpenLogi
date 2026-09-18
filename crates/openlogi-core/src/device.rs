@@ -6,6 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::hid::DeviceRoute;
+
 mod light;
 
 pub use light::{LightCapabilities, LightValueRange, LightValueRangeError, LightValueUnit};
@@ -412,6 +414,14 @@ pub struct StandaloneDevice {
     /// append-only GUI↔agent bincode wire format.
     #[serde(default)]
     pub registry_model_id: Option<String>,
+}
+
+impl StandaloneDevice {
+    /// The route that reaches this device.
+    #[must_use]
+    pub fn route(&self) -> DeviceRoute {
+        DeviceRoute::from(&self.address)
+    }
 }
 
 /// One receiver and its paired devices — the unit the agent's inventory

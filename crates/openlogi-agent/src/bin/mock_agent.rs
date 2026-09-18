@@ -542,9 +542,10 @@ impl State {
                 })
             })
             .or_else(|| {
-                self.profile.standalone.iter().find_map(|device| {
-                    (standalone_route(device) == *route).then_some(device.online)
-                })
+                self.profile
+                    .standalone
+                    .iter()
+                    .find_map(|device| (device.route() == *route).then_some(device.online))
             })
     }
 
@@ -607,16 +608,6 @@ fn profile_value_mut<'a, T>(
         ProfileSetting::Unavailable => Err(WriteError::DeviceUnreachable {
             index: route.device_index(),
         }),
-    }
-}
-
-fn standalone_route(device: &StandaloneDevice) -> DeviceRoute {
-    DeviceRoute::RawHid {
-        vendor_id: device.address.vendor_id,
-        product_id: device.address.product_id,
-        usage_page: device.address.usage_page,
-        usage_id: device.address.usage_id,
-        identity: device.address.identity.clone(),
     }
 }
 

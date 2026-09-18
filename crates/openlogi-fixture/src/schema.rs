@@ -358,13 +358,7 @@ impl ProfileValidation {
         let owner = format!("standalone device {}", device.display_name);
         validate_unit_id(&mut self.unit_ids, device.unit_id, &owner)?;
         self.push_route(ProfileRouteFacts {
-            route: DeviceRoute::RawHid {
-                vendor_id: device.address.vendor_id,
-                product_id: device.address.product_id,
-                usage_page: device.address.usage_page,
-                usage_id: device.address.usage_id,
-                identity: device.address.identity.clone(),
-            },
+            route: device.route(),
             capabilities: device.capabilities,
             standalone: true,
             light_capabilities: device.light_capabilities,

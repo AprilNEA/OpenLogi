@@ -60,7 +60,7 @@ pub(super) fn target_candidates(
         .iter()
         .enumerate()
         .map(|(device, standalone)| TargetCandidate {
-            route: standalone_route(standalone),
+            route: standalone.route(),
             name: standalone.display_name.clone(),
             location: TargetLocation::Standalone { device },
         });
@@ -72,14 +72,4 @@ pub(super) fn select_target(
     query: Option<&str>,
 ) -> Result<TargetCandidate> {
     target_selection::select_target(candidates, query)
-}
-
-pub(super) fn standalone_route(device: &StandaloneDevice) -> DeviceRoute {
-    DeviceRoute::RawHid {
-        vendor_id: device.address.vendor_id,
-        product_id: device.address.product_id,
-        usage_page: device.address.usage_page,
-        usage_id: device.address.usage_id,
-        identity: device.address.identity.clone(),
-    }
 }

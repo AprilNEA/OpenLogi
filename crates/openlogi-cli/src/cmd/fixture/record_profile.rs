@@ -352,7 +352,7 @@ fn safe_read_error(family: &str) -> anyhow::Error {
 fn capture_standalone(source: &StandaloneDevice) -> Result<ProfileCaptureParts> {
     let mut retained = source.clone();
     sanitize::standalone(&mut retained)?;
-    let route = selection::standalone_route(&retained);
+    let route = retained.route();
     let light_supported = retained.light_capabilities.is_some_and(|capabilities| {
         capabilities.power
             || capabilities.brightness.is_some()

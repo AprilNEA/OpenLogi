@@ -25,7 +25,7 @@ pub use openlogi_device_registry::receiver::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::device::DeviceInventory;
+use crate::device::{DeviceInventory, RawDeviceAddress};
 
 /// HID++ device index that addresses a directly-attached device's own
 /// features (USB-cable or Bluetooth, no receiver indirection).
@@ -109,6 +109,20 @@ pub fn receiver_display_name(product_id: u16) -> &'static str {
         "Lightspeed Receiver"
     } else {
         "Unifying Receiver"
+    }
+}
+
+/// The route that reaches a standalone raw-HID interface: its address,
+/// field for field. The one place an address becomes a route.
+impl From<&RawDeviceAddress> for DeviceRoute {
+    fn from(address: &RawDeviceAddress) -> Self {
+        Self::RawHid {
+            vendor_id: address.vendor_id,
+            product_id: address.product_id,
+            usage_page: address.usage_page,
+            usage_id: address.usage_id,
+            identity: address.identity.clone(),
+        }
     }
 }
 

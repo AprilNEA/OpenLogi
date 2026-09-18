@@ -348,13 +348,7 @@ fn append_standalone(
     config: &Config,
 ) {
     for device in devices {
-        let route = Some(DeviceRoute::RawHid {
-            vendor_id: device.address.vendor_id,
-            product_id: device.address.product_id,
-            usage_page: device.address.usage_page,
-            usage_id: device.address.usage_id,
-            identity: device.address.identity.clone(),
-        });
+        let route = Some(device.route());
         let stable_id = DeviceStableId::from_parts(
             route.as_ref(),
             openlogi_core::hid::DIRECT_DEVICE_INDEX,
