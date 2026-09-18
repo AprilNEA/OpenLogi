@@ -151,7 +151,7 @@ fn signed_with(app: &Path) -> Option<String> {
 /// Where the choice is kept: under the dev profile's config directory, which
 /// `cargo clean` does not touch.
 fn state_path() -> Result<PathBuf> {
-    Ok(paths::config_dir_for(paths::Profile::Dev)
+    Ok(paths::config_dir_for(super::CHANNEL.into())
         .context("resolving the dev profile's config directory")?
         .join("codesign-identity"))
 }

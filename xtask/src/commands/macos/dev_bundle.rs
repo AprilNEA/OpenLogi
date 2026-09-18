@@ -145,7 +145,7 @@ fn start_agent(app: &Path) -> Result<()> {
 
     // The dev agent serves the sibling dev profile's socket; xtask itself is
     // not a dev-profile process, so it asks for that profile's path by name.
-    let socket = openlogi_core::paths::agent_socket_path_for(openlogi_core::paths::Profile::Dev)
+    let socket = openlogi_core::paths::agent_socket_path_for(CHANNEL.into())
         .map_err(|error| anyhow::anyhow!("could not resolve the dev socket: {error}"))?;
     let started = std::time::Instant::now();
     while started.elapsed() < AGENT_SOCKET_DEADLINE {

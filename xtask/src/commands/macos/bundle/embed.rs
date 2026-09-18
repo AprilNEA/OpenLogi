@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, anyhow};
 use openlogi_core::brand;
+use openlogi_core::paths::Profile;
 use xshell::{Shell, cmd};
 
 use super::identity::{Channel, Component};
@@ -132,14 +133,10 @@ fn embed_helper(
     Ok(())
 }
 
-/// The launchd service label `channel`'s bundle carries — what its embedded
-/// LaunchAgent plist declares, `SMAppService` registers, and `launchctl`
-/// addresses. Frozen once shipped; see [`brand::AGENT_SERVICE_LABEL`].
+/// The launchd service label `channel`'s bundle carries: the one the profile
+/// it runs under will look for.
 pub(crate) fn agent_service_label(channel: Channel) -> String {
-    match channel {
-        Channel::Production => brand::AGENT_SERVICE_LABEL.to_owned(),
-        Channel::Dev => brand::dev_id(brand::AGENT_SERVICE_LABEL),
-    }
+    Profile::from(channel).agent_service_label()
 }
 
 /// The launchd property list `SMAppService` registers the agent from.
