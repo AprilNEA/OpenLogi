@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use hidpp::channel::RawHidChannel;
-use openlogi_fixture::{HidCassette, ReportSupport, RequestMatch};
+use openlogi_fixture::{HidCassette, ReportSupport, RequestMatch, format_hex};
 use tokio::sync::mpsc;
 
 use crate::backend::{BackendError, RawWriter};
@@ -527,16 +527,6 @@ fn disconnected_error() -> Box<dyn Error + Send + Sync> {
         io::ErrorKind::BrokenPipe,
         "replay HID channel is disconnected",
     ))
-}
-
-fn format_hex(report: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut formatted = String::with_capacity(report.len() * 2);
-    for &byte in report {
-        formatted.push(char::from(HEX[usize::from(byte >> 4)]));
-        formatted.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    formatted
 }
 
 /// A raw output-report sink that records every successful write.

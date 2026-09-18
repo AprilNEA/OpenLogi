@@ -844,7 +844,11 @@ fn normalize_hidpp20(request: &[u8]) -> Vec<u8> {
     normalized
 }
 
-fn format_hex(report: &[u8]) -> String {
+/// A report as a cassette spells it: lowercase hex, two digits per byte, no
+/// separators. Replay diagnostics quote reports the same way, so a mismatch
+/// message can be pasted back against the cassette.
+#[must_use]
+pub fn format_hex(report: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut formatted = String::with_capacity(report.len() * 2);
     for &byte in report {
