@@ -211,22 +211,55 @@ diff requires which job) is [`.claude/rules/ci.md`](../.claude/rules/ci.md).
 
 ### Pre-push gate
 
-Before pushing, the host-OS subset must pass:
+Before pushing, read [the local gate and push checklist](../.claude/rules/ci.md#local-gate-hard-stop-before-push--scale-it-to-the-affected-graph).
+That file owns tier selection, exact commands, and additional checks required by
+the diff. `devenv tasks run openlogi:check` runs the full host-OS tier, not the
+whole CI pipeline. A Rust-bearing rebase or conflict resolution requires the
+full tier. Non-Rust changes use the applicable non-Rust checks.
 
-```sh
-export RUSTFLAGS="-D warnings"
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps \
-  --document-private-items --exclude openlogi-ui --exclude openlogi-desktop \
-  --exclude openlogi-overlay --exclude openlogi-agent
-```
+## GitHub workflow
 
-Equivalent to `devenv tasks run openlogi:check`. That is **not** the full
-pipeline: typos, Linux clippy, Windows clippy, MSRV, cargo-deny, and the shell
-lint (shellcheck + shfmt) are separate CI jobs. Reproduce those with
-`cargo xtask ci` or the commands in `.claude/rules/ci.md`.
+Read this section before preparing, adopting, reviewing, or merging a PR.
+These procedures do not authorize remote writes: obtain approval before pushing,
+opening or merging PRs, publishing, or approving/rerunning workflows.
+
+### Preparing and merging PRs
+
+- **Always `git fetch upstream master` (or origin) immediately before a rebase.** Rebase
+  onto the refreshed tip, not a stale local `master`.
+- Merging PRs: **squash by default** with a hand-written subject
+  `type(scope): description (#N)` (release-plz parses it; merge commits are disabled).
+  Rebase-merge only when every commit on the branch is already release-quality
+  conventional. Wait for the Greptile review check and CI before merging — findings get
+  fixed, replied to, and resolved, not ignored.
+- PR bodies: `## Summary`, `## Changes` (per-crate bullets), `## Testing` listing the
+  exact commands run plus hardware-verification status (say "not runtime-tested on
+  hardware" when true — real-hardware verification is the maintainer's job, so every
+  fix PR states how to test it), and a closing `Fixes #N` line. Screenshots for UI
+  changes.
+- Issues use the bug/feature/device forms and the `type:`/`area:`/`platform:`/`needs:`/
+  `status:` label families. Deferred or out-of-scope work becomes a linked issue, not a
+  TODO comment.
+
+### Adopting contributor PRs
+
+Contributor PRs are adopted, not rejected: check `maintainerCanModify`, rebase onto
+**fresh** master in a worktree, fix review findings, run the applicable local gate
+on the rebased tip (a Rust-bearing rebase takes the full tier), **then** push to the
+fork branch; preserve authorship (`Co-authored-by` when re-homing work).
+Squash-then-rebase is fine when the PR is far behind and commit-by-commit conflicts
+thrash.
+
+### CI / Actions when adopting PRs
+
+- CI concurrency is **per branch** (`ci-${{ workflow }}-${{ ref }}` with
+  `cancel-in-progress: true`). Approving or re-running an **old SHA** on the same
+  branch cancels the current-head run. Only approve / re-run workflows whose
+  `head_sha` equals the PR's current head.
+- After a force-push, wait for the new runs; do not re-approve stale
+  `action_required` jobs from earlier commits on that branch.
+- First-time-fork PRs may sit in `action_required` until a maintainer approves the
+  workflow run — that is fine; still do not push until the local gate is green.
 
 ## Packaging the macOS DMG
 

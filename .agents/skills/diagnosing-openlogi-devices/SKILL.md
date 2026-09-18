@@ -1,9 +1,9 @@
 ---
-name: triaging-openlogi-devices
-description: "Diagnoses OpenLogi HID/HID++ reports by separating enumeration, open, probe, IPC, and UI failures. Use for missing devices, failed opens or pairing, unsupported controls, or disagreement between the CLI and GUI."
+name: diagnosing-openlogi-devices
+description: "Diagnoses OpenLogi HID/HID++ failures across enumeration, open, probe, IPC, and UI layers. Use for missing devices, failed opens or pairing, stale inventory, disconnect/reconnect failures, unsupported controls, or CLI/GUI disagreement."
 ---
 
-# Triage OpenLogi Devices
+# Diagnose OpenLogi Devices
 
 Find the first failing layer before proposing a permission change or code fix.
 
@@ -66,6 +66,21 @@ overlap, do not treat it as unique selection. Resolve the target before writes.
 Get authorization for setting writes or pairing/unpairing; do not run them as
 default triage. Stop if ownership, target selection, or restoration is uncertain.
 
+## Reproduce in the owning layer
+
+Use [change verification](../verifying-openlogi-changes/SKILL.md#reproduce-regressions-before-fixing-them)
+for the before/after test requirements. Start with an existing test seam:
+
+- Enumeration, stale channels, and recovery: [device replay tests](../../../crates/openlogi-device/src/inventory/replay_tests.rs).
+- Agent lifecycle: [injected inventory tests](../../../crates/openlogi-agent-core/src/watchers/inventory/replay_tests.rs)
+  or [pairing tests](../../../crates/openlogi-agent-core/src/watchers/pairing/replay_tests.rs).
+- IPC delivery and replacement: [IPC client tests](../../../crates/openlogi-ipc/src/client.rs)
+  or [desktop IPC tests](../../../crates/openlogi-desktop/src/services/ipc.rs).
+- Presentation only: [UI testing](../testing-openlogi-ui/SKILL.md), not a second mock framework.
+
+Keep node presence, channel connectivity, paired-slot state, and published inventory
+distinct. Assert intermediate cleanup and replacement, not only the final online state.
+
 ## Return actionable evidence
 
 - Separate observed facts, suspected cause, and the next discriminating check.
@@ -75,7 +90,7 @@ default triage. Stop if ownership, target selection, or restoration is uncertain
   Do not request full config or raw traffic when a sanitized excerpt is enough.
 - For code changes, follow the owning crate's rules and
   [verification workflow](../verifying-openlogi-changes/SKILL.md).
-  Reproduce protocol regressions with an existing sanitized fixture when possible.
+  Use sanitized fixtures; derive expected values independently of the parser under test.
 - If a new capture is justified, use
   [fixture contribution](../contributing-device-fixtures/SKILL.md).
   Report hardware verification separately. Checks without the affected physical

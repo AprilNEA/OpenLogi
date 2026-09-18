@@ -1,6 +1,6 @@
 ---
 name: verifying-openlogi-changes
-description: "Selects and runs OpenLogi verification based on the final diff, affected packages, host OS, and work stage. Use after repository changes, when reviewing test coverage, or before an authorized commit or push."
+description: "Plans regression proofs and runs OpenLogi verification based on the diff, affected packages, host OS, and work stage. Use when planning a bug fix, after repository changes, when reviewing test coverage, or before an authorized commit or push."
 ---
 
 # Verify OpenLogi Changes
@@ -13,15 +13,30 @@ Use the smallest check that can disprove the change, then apply the required fin
    For branch work, include all changes against the intended base, not only the last
    commit. Preserve unrelated work. Check whether Rust-bearing rebases or conflict
    resolution occurred since the last full gate.
-2. Read the root [verification and gate policy](../../../AGENTS.md#build-run-verify).
-   Read each changed area's scoped rules. This skill selects that policy; it does
-   not replace it or make the pre-push gate mandatory for every local edit.
+2. Read the root [iteration policy](../../../AGENTS.md#verification-while-iterating-fast-path)
+   and each changed area's scoped rules. For a push, also read the
+   [local gate](../../../.claude/rules/ci.md#local-gate-hard-stop-before-push--scale-it-to-the-affected-graph).
+   This skill applies those policies; it does not make the pre-push gate mandatory
+   for every local edit.
 3. Classify the diff by what it controls, not only by extension:
    - Prose, skill text, or images alone are non-Rust; do not compile Rust for them.
    - Rust source **or build/validation inputs** are Rust-bearing. A `Cargo.toml`,
      lockfile, toolchain, or CI change is not a docs-only change.
 4. State the proof before editing: affected behavior, likely wrong implementation,
    and an input or interaction where the expected result differs from that mistake.
+
+## Reproduce regressions before fixing them
+
+- For a bug fix, run the smallest reproducer before changing production code.
+  Drive normal actions or the existing injected backend, not corrupt private state.
+  Confirm failure on the reported path, not a compile error or unrelated setup failure.
+- Use the test layer's existing barriers, events, or logical time. Do not add sleeps
+  or retries to hide an ordering bug.
+- Record the violated invariant, its owner, reproduction command, and observed failure.
+  If reproduction is unavailable, state the missing evidence and what a substitute
+  test proves. Do not claim the original bug is verified fixed.
+- After the fix, run the same reproducer and a nearby non-failing case that would
+  catch an overbroad change. Report both before and after results.
 
 ## Iterate, then stabilize
 
@@ -37,11 +52,9 @@ Use the smallest check that can disprove the change, then apply the required fin
 
 ## Select the pre-push gate only when pushing
 
-1. For a non-Rust diff, run its applicable non-Rust checks.
-2. For Rust-bearing work, apply the root policy's full-tier triggers first.
-   A Rust-bearing rebase or any conflict resolution since the last full gate
-   requires the full tier. So does a workspace build/validation input, an uncertain
-   affected set, or a stricter subsystem rule.
+1. Use the local gate's non-Rust checks or Rust-bearing tier selection.
+2. For Rust-bearing work, apply the local gate's full-tier triggers first.
+   Do not select the affected-package tier merely because few files changed.
 3. Otherwise derive the affected set from the final dependency graph:
 
    ```sh
@@ -49,9 +62,9 @@ Use the smallest check that can disprove the change, then apply the required fin
    ```
 
    Repeat for every changed package. Take the union of workspace packages,
-   including transitive consumers. Run the root policy's affected-package tier
+   including transitive consumers. Run the local gate's affected-package tier
    for that entire set, not just the edited crate directories.
-4. Use the exact commands and compiler flags in the root policy. Keep Git hooks
+4. Use the exact commands and compiler flags in the local gate. Keep Git hooks
    enabled. After a failure, fix the cause with a focused check, then rerun the
    applicable tier on the final tree. Do not push a known-red tree.
 

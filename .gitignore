@@ -24,7 +24,7 @@ devenv.local.yaml
 !/.agents/skills/gpui-kit/
 !/.agents/skills/gpui-kit-design-guides/
 !/.agents/skills/testing-openlogi-ui/
-!/.agents/skills/triaging-openlogi-devices/
+!/.agents/skills/diagnosing-openlogi-devices/
 !/.agents/skills/verifying-openlogi-changes/
 !/.agents/skills/contributing-device-fixtures/
 !/.agents/skills/LICENSE-APACHE
@@ -48,7 +48,7 @@ devenv.local.yaml
 !/.claude/skills/gpui-kit
 !/.claude/skills/gpui-kit-design-guides
 !/.claude/skills/testing-openlogi-ui
-!/.claude/skills/triaging-openlogi-devices
+!/.claude/skills/diagnosing-openlogi-devices
 !/.claude/skills/verifying-openlogi-changes
 !/.claude/skills/contributing-device-fixtures
 
