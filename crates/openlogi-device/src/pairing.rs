@@ -34,8 +34,8 @@ use tracing::{debug, trace};
 
 pub use hidpp::receiver::bolt::DeviceKind as BoltDeviceKind;
 // Click / PasskeyMethod / ReceiverSelector / PairingError are pure data with
-// no HID++/backend I/O, so they live in `openlogi_core::hid::pairing`;
-// re-exported here unchanged so this module's own API surface doesn't churn.
+// no HID++/backend I/O, so they live in `openlogi_core::hid::pairing`; the
+// pairing API names them through here.
 pub use openlogi_core::hid::pairing::{Click, PairingError, PasskeyMethod, ReceiverSelector};
 
 use crate::backend::{HidBackend, NodeId};
