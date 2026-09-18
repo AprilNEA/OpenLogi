@@ -39,7 +39,7 @@ pub use context::HardwareContext;
 /// own, so without this an asleep / unresponsive device would hang (and leak)
 /// this background thread forever; a write to a live device completes in well
 /// under a second.
-const WRITE_BUDGET: Duration = Duration::from_secs(5);
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Select the only Agent-authoritative channel for `route`.
 fn authoritative_channel(
@@ -113,7 +113,7 @@ impl<'a> DeviceOp<'a> {
     }
 
     /// Lease the receiver, resolve the authoritative channel, then run `f`
-    /// against it under `WRITE_BUDGET`, mapping a timeout to
+    /// against it under `WRITE_TIMEOUT`, mapping a timeout to
     /// [`WriteError::RequestTimedOut`].
     ///
     /// Lease-then-resolve, not the other way around: the lease wait is
@@ -156,7 +156,7 @@ impl<'a> DeviceOp<'a> {
             color: openlogi_core::color::Rgb::new(r, g, b),
         };
         openlogi_hid::lighting::LightingJob::spawn(&self.route, move |cancel| async move {
-            let _lease = tokio::time::timeout(WRITE_BUDGET, receiver_access.acquire_for_io())
+            let _lease = tokio::time::timeout(WRITE_TIMEOUT, receiver_access.acquire_for_io())
                 .await
                 .map_err(|_| WriteError::RequestTimedOut {
                     operation: HidppOperation::Lighting,
@@ -178,7 +178,7 @@ impl<'a> DeviceOp<'a> {
     /// Fire-and-forget `f` on its own OS thread and one-shot runtime, with the
     /// standard three-arm outcome logging: a completed write and a failed
     /// write both log at their own level, keyed by `label`; a device that
-    /// never answers within `WRITE_BUDGET` warns instead of hanging the
+    /// never answers within `WRITE_TIMEOUT` warns instead of hanging the
     /// thread forever.
     ///
     /// Resolves the channel on the calling thread before spawning — every
@@ -235,7 +235,7 @@ impl<'a> DeviceOp<'a> {
                 if !device_io.allows_io() {
                     return None;
                 }
-                Some(tokio::time::timeout(WRITE_BUDGET, f(shared)).await)
+                Some(tokio::time::timeout(WRITE_TIMEOUT, f(shared)).await)
             });
             if let Some(result) = result {
                 log(result);
@@ -354,14 +354,14 @@ pub fn reapply_mouse_volatile_in_background(
                 return;
             }
             if resolution.is_some() || inverted.is_some() {
-                let result = tokio::time::timeout(WRITE_BUDGET, async {
+                let result = tokio::time::timeout(WRITE_TIMEOUT, async {
                     apply_wheel_mode(&shared, resolution, inverted).await
                 })
                 .await;
                 log_wheel_result(index, resolution, inverted, result);
             }
             if let Some(dpi) = dpi {
-                let result = tokio::time::timeout(WRITE_BUDGET, async {
+                let result = tokio::time::timeout(WRITE_TIMEOUT, async {
                     openlogi_hid::set_dpi_on(&shared, dpi).await
                 })
                 .await;
@@ -377,7 +377,7 @@ pub fn reapply_mouse_volatile_in_background(
                 }
             }
             if let Some(ss) = smartshift {
-                let result = tokio::time::timeout(WRITE_BUDGET, async {
+                let result = tokio::time::timeout(WRITE_TIMEOUT, async {
                     openlogi_hid::set_smartshift_on(&shared, ss).await
                 })
                 .await;
@@ -558,13 +558,13 @@ pub fn lighting_rgb(lighting: &Lighting) -> (u8, u8, u8) {
     (scale(r), scale(g), scale(b))
 }
 
-/// Bound any single HID++ call by [`WRITE_BUDGET`] so an asleep / unresponsive
+/// Bound any single HID++ call by [`WRITE_TIMEOUT`] so an asleep / unresponsive
 /// device can't hang the awaiting IPC handler indefinitely.
 async fn timed<T>(
     operation: HidppOperation,
     fut: impl Future<Output = Result<T, WriteError>>,
 ) -> Result<T, WriteError> {
-    tokio::time::timeout(WRITE_BUDGET, fut)
+    tokio::time::timeout(WRITE_TIMEOUT, fut)
         .await
         .map_err(|_| WriteError::RequestTimedOut { operation })?
 }
@@ -706,9 +706,9 @@ mod tests {
     }
 
     /// The timeout every [`DeviceOp::run`] call relies on: a write that never
-    /// resolves within `WRITE_BUDGET` must map to
+    /// resolves within `WRITE_TIMEOUT` must map to
     /// [`WriteError::RequestTimedOut`] carrying the operation, not hang
-    /// forever. Uses a paused clock so the test doesn't spend `WRITE_BUDGET`
+    /// forever. Uses a paused clock so the test doesn't spend `WRITE_TIMEOUT`
     /// (5s) of real wall-clock time.
     #[tokio::test(start_paused = true)]
     async fn timed_maps_an_elapsed_deadline_to_request_timed_out() {
@@ -719,7 +719,7 @@ mod tests {
         // Let the spawned task run up to its first await point so the
         // underlying sleep is armed before we fast-forward the clock past it.
         tokio::task::yield_now().await;
-        tokio::time::advance(WRITE_BUDGET + Duration::from_millis(1)).await;
+        tokio::time::advance(WRITE_TIMEOUT + Duration::from_millis(1)).await;
 
         let result = handle.await.expect("timed task must not panic");
 
