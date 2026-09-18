@@ -6,7 +6,7 @@ use openlogi_core::hid::{DeviceRoute, SmartShiftStatus};
 use tracing::debug;
 
 use super::device_key::DeviceKey;
-use super::devices::DeviceRecord;
+use super::events::StateEvents;
 use super::load::SmartShiftLoad;
 use super::{AppState, SmartShiftWriteStatus, StateEvent};
 
@@ -115,21 +115,21 @@ impl AppState {
         }
     }
 
-    pub(crate) fn retry_smartshift_read(cx: &mut App, key: DeviceKey) {
-        Self::update(cx, |state, cx| {
-            state.retry_smartshift(&key);
-            cx.emit(StateEvent::SmartShiftChanged(key));
-        });
+    /// Re-run `key`'s SmartShift read — the "click to retry" affordance on a
+    /// failed read or a failed write confirmation.
+    pub(crate) fn retry_smartshift_read(&mut self, key: &DeviceKey) -> StateEvents {
+        self.retry_smartshift(key);
+        StateEvent::SmartShiftChanged(key.clone()).into()
     }
 
+    /// Write `status` to the active device and start the read that confirms
+    /// it. Not an [`AppState::apply`] call because the confirming read is a
+    /// query subscription, which only the entity's own context can open.
     pub(crate) fn update_smartshift(cx: &mut App, status: SmartShiftStatus) {
         Self::update(cx, |state, cx| {
-            let key = state.current_record().map(DeviceRecord::device_key);
-            state.commit_smartshift(status);
+            let events = state.commit_smartshift(status);
             state.confirm_current_smartshift(cx);
-            if let Some(key) = key {
-                cx.emit(StateEvent::SmartShiftChanged(key));
-            }
+            events.emit(cx);
         });
     }
 
@@ -211,10 +211,11 @@ impl AppState {
     /// `config.toml` — the values live in device RAM and reset on a power
     /// cycle (#189), so the agent re-applies them when the device reconnects.
     /// No-op when no device is selected.
-    pub fn commit_smartshift(&mut self, status: SmartShiftStatus) {
+    pub fn commit_smartshift(&mut self, status: SmartShiftStatus) -> StateEvents {
+        let events = self.for_current_device(StateEvent::SmartShiftChanged);
         let Some(record) = self.current_record() else {
             debug!("no active device — SmartShift change ignored");
-            return;
+            return events;
         };
         let key = record.device_key();
         let persistent_key = record.persistent_config_key().map(str::to_string);
@@ -228,7 +229,7 @@ impl AppState {
                 );
             });
             if !self.persist_and_reload("SmartShift") {
-                return;
+                return events;
             }
         }
         if let Some(route) = route {
@@ -256,6 +257,7 @@ impl AppState {
         if write_id.is_none() {
             self.devices.runtime.entry(key).or_default().smartshift = SmartShiftDeviceState::Failed;
         }
+        events
     }
     /// Take the active device's pending SmartShift confirm, if any. Returns
     /// the `(device key, route, write_id)` for a one-shot re-read that

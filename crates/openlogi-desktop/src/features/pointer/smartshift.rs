@@ -364,7 +364,7 @@ impl Render for SmartShiftPanel {
 fn retry_smartshift_closure(key: Option<DeviceKey>) -> impl Fn(&mut App) + 'static {
     move |cx| {
         if let Some(key) = &key {
-            AppState::retry_smartshift_read(cx, key.clone());
+            AppState::apply(cx, |state| state.retry_smartshift_read(key));
         }
     }
 }
