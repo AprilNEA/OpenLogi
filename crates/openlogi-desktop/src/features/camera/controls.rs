@@ -12,22 +12,18 @@
 //! a single batched device-open.
 
 use gpui::{
-    AppContext as _, ClickEvent, Context, ElementId, Entity, InteractiveElement, IntoElement,
-    MouseButton, MouseDownEvent, ParentElement, Render, Role, SharedString,
-    StatefulInteractiveElement as _, Styled, Subscription, Toggled, Window, div,
-    prelude::FluentBuilder as _, px, rgb,
+    App, ClickEvent, Context, ElementId, InteractiveElement, IntoElement, MouseButton,
+    MouseDownEvent, ParentElement, Render, Role, SharedString, StatefulInteractiveElement as _,
+    Styled, Subscription, Toggled, Window, div, prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_base::Button as BaseButton;
-use gpui_component::{
-    IconName, Selectable as _, h_flex,
-    slider::{Slider, SliderEvent, SliderState},
-    v_flex,
-};
+use gpui_component::{IconName, Selectable as _, h_flex, slider::Slider, v_flex};
 use openlogi_camera::{AutoToggle, CameraControl, CameraState, ControlRange};
 use openlogi_core::config::CameraControls;
 use tracing::debug;
 
 use crate::state::{AppState, StateEvent};
+use crate::ui::commit_slider::{CommitSlider, SliderRange};
 use crate::ui::components::ProfileTab;
 use crate::ui::section::section_label;
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
@@ -82,9 +78,20 @@ struct ControlSlider {
     control: CameraControl,
     label: SharedString,
     range: ControlRange,
-    state: Entity<SliderState>,
-    #[expect(dead_code, reason = "held to keep the slider subscription alive")]
-    sub: Subscription,
+    slider: CommitSlider<i32>,
+}
+
+impl ControlSlider {
+    /// The control value under the thumb. The slider is this panel's record of
+    /// what the hardware holds, so every row and profile reads it from here.
+    fn value(&self, cx: &App) -> i32 {
+        self.slider.value(cx)
+    }
+
+    /// Put the thumb on a value the hardware has just taken.
+    fn seat(&self, value: i32, window: &mut Window, cx: &mut App) {
+        self.slider.seat(value, window, cx);
+    }
 }
 
 /// Live UI state for one device-supported auto mode.
@@ -289,39 +296,25 @@ impl CameraControlsPanel {
         key: &str,
         cx: &mut Context<Self>,
     ) {
-        let state = cx.new(|_| {
-            let (lo, hi) = (to_slider(range.min), to_slider(range.max));
-            // `SliderState` defaults to [0, 100] and re-clamps its value on every
-            // builder call, panicking if min > max even transiently. A fully
-            // negative range (UVC exposure reports e.g. -11..-2) would make
-            // `.max(-2)` clamp against the default min of 0 — so set the min
-            // first for negative ranges, and the max first otherwise.
-            let bounded = if lo < 0.0 {
-                SliderState::new().min(lo).max(hi)
-            } else {
-                SliderState::new().max(hi).min(lo)
-            };
-            bounded.step(1.0).default_value(to_slider(shown))
-        });
         let uid_for_event = uid.to_string();
         let key_for_event = key.to_string();
-        let sub = cx.subscribe(&state, move |panel, _slider, event: &SliderEvent, cx| {
-            match event {
-                // Drag updates the label; the USB write lands once on release
-                // so we don't flood the camera with intermediate values.
-                SliderEvent::Change(_) => cx.notify(),
-                SliderEvent::Release(value) => {
-                    let v = from_slider(value.start());
-                    panel.commit_release(control, &uid_for_event, &key_for_event, v, cx);
-                }
-            }
-        });
+        // A drag updates the label; the USB write lands once on release so we
+        // don't flood the camera with intermediate values. UVC ranges can be
+        // entirely negative (exposure reports e.g. -11..-2), which
+        // `SliderRange` builds in the order `SliderState` tolerates.
+        let slider = CommitSlider::new(
+            SliderRange::new(range.min, range.max),
+            shown,
+            cx,
+            move |panel: &mut Self, v, cx| {
+                panel.commit_release(control, &uid_for_event, &key_for_event, v, cx);
+            },
+        );
         self.sliders.push(ControlSlider {
             control,
             label: control_label(control),
             range,
-            state,
-            sub,
+            slider,
         });
     }
 
@@ -389,10 +382,7 @@ impl CameraControlsPanel {
                 .iter()
                 .find(|s| s.control.auto_toggle() == Some(toggle))
         {
-            values.push((
-                slider.control,
-                from_slider(slider.state.read(cx).value().start()),
-            ));
+            values.push((slider.control, slider.value(cx)));
         }
         if let Err(e) = openlogi_camera::apply_settings(&uid, &[(toggle, on)], &values) {
             debug!(?toggle, on, error = %e, "camera auto write failed");
@@ -454,9 +444,7 @@ impl CameraControlsPanel {
         }
         for (control, value) in values {
             if let Some(slider) = self.sliders.iter().find(|s| s.control == *control) {
-                slider.state.clone().update(cx, |s, cx| {
-                    s.set_value(to_slider(*value), window, cx);
-                });
+                slider.seat(*value, window, cx);
             }
         }
         AppState::apply(cx, |state| state.commit_camera_settings(key, autos, values));
@@ -468,10 +456,7 @@ impl CameraControlsPanel {
         let (Some(key), Some(uid)) = (self.key.clone(), self.uid.clone()) else {
             return;
         };
-        let Some((control, default, state)) = self
-            .sliders
-            .get(ix)
-            .map(|s| (s.control, s.range.default, s.state.clone()))
+        let Some((control, default)) = self.sliders.get(ix).map(|s| (s.control, s.range.default))
         else {
             return;
         };
@@ -495,9 +480,9 @@ impl CameraControlsPanel {
                 state.commit_camera_auto(&key, toggle, auto_default)
             });
         }
-        state.update(cx, |slider, cx| {
-            slider.set_value(to_slider(default), window, cx);
-        });
+        if let Some(slider) = self.sliders.get(ix) {
+            slider.seat(default, window, cx);
+        }
         AppState::apply(cx, |state| {
             state.commit_camera_control(&key, control, default)
         });
@@ -538,7 +523,7 @@ impl CameraControlsPanel {
                         slider.control,
                         CameraControl::PowerLineFrequency | CameraControl::LowLightCompensation
                     ) {
-                    from_slider(slider.state.read(cx).value().start())
+                    slider.value(cx)
                 } else {
                     slider.range.default
                 };
@@ -590,10 +575,8 @@ impl CameraControlsPanel {
     fn snapshot(&self, cx: &Context<Self>) -> CameraControls {
         let mut snap = CameraControls::default();
         for slider in &self.sliders {
-            snap.0.insert(
-                slider.control.name().to_string(),
-                from_slider(slider.state.read(cx).value().start()),
-            );
+            snap.0
+                .insert(slider.control.name().to_string(), slider.value(cx));
         }
         for row in &self.autos {
             snap.0
@@ -785,7 +768,7 @@ fn control_row(
     {
         return binary_control_row(panel, ix, cx, pal);
     }
-    let value = from_slider(slider.state.read(cx).value().start());
+    let value = slider.value(cx);
     let auto_on = panel.auto_state_for(slider.control);
     let dimmed = auto_on == Some(true);
 
@@ -821,7 +804,7 @@ fn control_row(
                 // Dimmed while auto owns the value, but still draggable —
                 // grabbing the slider takes the control over to manual.
                 .when(dimmed, |s| s.opacity(0.55))
-                .child(Slider::new(&slider.state).horizontal()),
+                .child(Slider::new(slider.slider.slider()).horizontal()),
         )
         .child(
             div()
@@ -883,7 +866,7 @@ fn frequency_row(
     pal: Palette,
 ) -> gpui::Stateful<gpui::Div> {
     let slider = &panel.sliders[ix];
-    let current = from_slider(slider.state.read(cx).value().start());
+    let current = slider.value(cx);
     let mut choices = h_flex().flex_1().justify_end().gap_1();
     for (value, id, label) in [
         (1, 1_u32, SharedString::from("50 Hz")),
@@ -930,9 +913,7 @@ fn frequency_row(
                     let (Some(key), Some(uid)) = (panel.key.clone(), panel.uid.clone()) else {
                         return;
                     };
-                    panel.sliders[ix].state.clone().update(cx, |state, cx| {
-                        state.set_value(to_slider(value), window, cx);
-                    });
+                    panel.sliders[ix].seat(value, window, cx);
                     panel.commit_release(CameraControl::PowerLineFrequency, &uid, &key, value, cx);
                 })),
         );
@@ -962,7 +943,7 @@ fn binary_control_row(
     pal: Palette,
 ) -> gpui::Stateful<gpui::Div> {
     let slider = &panel.sliders[ix];
-    let on = from_slider(slider.state.read(cx).value().start()) != 0;
+    let on = slider.value(cx) != 0;
     let accent = rgb(ACCENT_BLUE);
     h_flex()
         .id(("camera-control-row", ix))
@@ -1009,9 +990,7 @@ fn binary_control_row(
                         return;
                     };
                     let value = i32::from(!on);
-                    panel.sliders[ix].state.clone().update(cx, |state, cx| {
-                        state.set_value(to_slider(value), window, cx);
-                    });
+                    panel.sliders[ix].seat(value, window, cx);
                     panel.commit_release(
                         CameraControl::LowLightCompensation,
                         &uid,
