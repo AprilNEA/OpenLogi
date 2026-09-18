@@ -468,7 +468,7 @@ fn canonical_profile_light_setting_errors_reach_desktop_state() {
         .iter()
         .position(|record| record.unit_id == [79, 76, 68, 4])
         .expect("canonical light is projected");
-    state.set_current_device(light_index);
+    let _ = state.set_current_device(light_index);
     let mut reloads = 0;
     loop {
         match receiver.try_recv() {
@@ -573,9 +573,9 @@ fn failed_fold_persist_does_not_orphan_the_device_list() {
     let changed = state.refresh_inventories(&[receiver_inventory()], &[], &cache, &[]);
 
     assert!(
-        !changed,
+        changed.is_empty(),
         "a failed fold-persist must not report a change — a caller \
-         acting on `true` would treat the now-discarded `merged_list` as live"
+         acting on it would treat the now-discarded `merged_list` as live"
     );
     assert!(
         state.devices().is_empty(),
@@ -774,7 +774,7 @@ fn custom_device_name_updates_the_ui_and_can_restore_the_model_name() {
         .model_name
         .clone();
 
-    state.set_device_custom_name(KNOWN_MOUSE_KEY, "  Office mouse  ");
+    let _ = state.set_device_custom_name(KNOWN_MOUSE_KEY, "  Office mouse  ");
 
     assert_eq!(
         state
@@ -787,7 +787,7 @@ fn custom_device_name_updates_the_ui_and_can_restore_the_model_name() {
         Some("Office mouse")
     );
 
-    state.set_device_custom_name(KNOWN_MOUSE_KEY, "   ");
+    let _ = state.set_device_custom_name(KNOWN_MOUSE_KEY, "   ");
 
     assert_eq!(
         state
@@ -803,7 +803,7 @@ fn same_model_serial_less_cameras_keep_independent_names() {
     let mut state = state_with_same_model_cameras(Config::ephemeral());
     let second_key = camera_record(&state, CAMERA_B_ID).record_key();
 
-    state.set_device_custom_name(&second_key, "Desk camera");
+    let _ = state.set_device_custom_name(&second_key, "Desk camera");
 
     assert_eq!(
         camera_record(&state, CAMERA_A_ID).display_name,
@@ -1192,17 +1192,17 @@ fn a_profile_belongs_to_the_device_it_was_opened_on() {
         .position(|record| record.config_key == KNOWN_MOUSE_KEY)
         .expect("the fixture pairs the known mouse");
 
-    state.set_current_device(known);
+    let _ = state.set_current_device(known);
     let _ = state.set_editing_app(Some("com.apple.Safari".into()));
 
-    state.set_current_device(other);
+    let _ = state.set_current_device(other);
     assert_eq!(
         state.editing_app(),
         None,
         "another device falls back to its own global profile"
     );
 
-    state.set_current_device(known);
+    let _ = state.set_current_device(known);
     assert_eq!(
         state.editing_app(),
         Some("com.apple.Safari"),
@@ -1215,7 +1215,7 @@ fn invalid_device_selection_preserves_the_valid_current_device() {
     let mut state = state_with_a_known_mouse();
     let selected = state.selected_device_index();
 
-    assert_eq!(state.set_current_device(usize::MAX), None);
+    assert!(state.set_current_device(usize::MAX).is_empty());
     assert_eq!(state.selected_device_index(), selected);
     assert!(state.current_record().is_some());
 }
@@ -1224,7 +1224,7 @@ fn invalid_device_selection_preserves_the_valid_current_device() {
 fn the_active_profile_is_the_default_until_the_app_in_front_is_overridden() {
     let mut state = state_with_a_known_mouse();
     let safari = app("com.apple.Safari", "Safari");
-    state.set_foreground(ForegroundApps {
+    let _ = state.set_foreground(ForegroundApps {
         current: Some(safari.clone()),
         recent: vec![safari],
     });
@@ -1262,7 +1262,7 @@ fn the_profile_shown_is_the_apps_even_while_this_window_has_focus() {
             Some(Action::Undo),
         );
     });
-    state.set_foreground(ForegroundApps {
+    let _ = state.set_foreground(ForegroundApps {
         current: Some(app(openlogi_core::brand::APP_ID, "OpenLogi")),
         recent: vec![app("com.apple.Safari", "Safari")],
     });
@@ -1283,7 +1283,7 @@ fn a_host_with_no_readable_foreground_app_reports_the_default_profile() {
     });
     // A pure-Wayland session with no usable backend, or a watcher that could
     // not start: the agent reports nothing and no profile can be in effect.
-    assert!(!state.set_foreground(ForegroundApps::default()));
+    assert!(state.set_foreground(ForegroundApps::default()).is_empty());
     assert_eq!(state.active_profile_name(), None);
 }
 
@@ -1486,7 +1486,7 @@ fn a_route_shared_by_two_online_twins_is_never_adopted() {
         commands,
     );
 
-    state.refresh_inventories(
+    let _ = state.refresh_inventories(
         &[
             direct_inventory([1, 1, 1, 1]),
             direct_inventory([2, 2, 2, 2]),
@@ -2058,7 +2058,7 @@ fn camera_automation_preserves_manual_power_and_clears_transient_override() {
     });
 
     assert!(!state.light_enabled());
-    assert!(state.set_camera_active(true));
+    assert_eq!(state.set_camera_active(true), [StateEvent::CameraChanged]);
     assert!(state.light_enabled());
     assert!(!state.light().enabled);
 
@@ -2071,8 +2071,8 @@ fn camera_automation_preserves_manual_power_and_clears_transient_override() {
         ))
     ));
 
-    assert!(state.set_camera_active(false));
-    assert!(state.set_camera_active(true));
+    assert_eq!(state.set_camera_active(false), [StateEvent::CameraChanged]);
+    assert_eq!(state.set_camera_active(true), [StateEvent::CameraChanged]);
     assert!(state.light_enabled());
     assert!(!state.light().enabled);
 }
@@ -2112,7 +2112,7 @@ fn enabling_camera_automation_queues_effective_camera_power() {
         ConfigPersistence::MemoryOnly,
         commands,
     );
-    state.set_camera_active(true);
+    let _ = state.set_camera_active(true);
     let mut settings = state.light();
     settings.enabled = false;
     settings.auto_camera = true;
@@ -2205,7 +2205,11 @@ fn a_battery_only_change_reaches_the_device_list() {
     let changed =
         state.refresh_inventories(&[inventory_with_battery(unit_id, 40)], &[], &cache, &[]);
 
-    assert!(changed, "a battery change is a change");
+    assert_eq!(
+        changed,
+        [StateEvent::InventoryChanged],
+        "a battery change is a change"
+    );
     assert_eq!(
         state.devices()[0].battery.as_ref().map(|b| b.percentage),
         Some(40),
@@ -2231,7 +2235,11 @@ fn an_identical_snapshot_is_still_a_no_op() {
         commands,
     );
 
-    assert!(!state.refresh_inventories(&[inventory_with_battery(unit_id, 50)], &[], &cache, &[]));
+    assert!(
+        state
+            .refresh_inventories(&[inventory_with_battery(unit_id, 50)], &[], &cache, &[])
+            .is_empty()
+    );
 }
 
 fn inventory_with_battery(unit_id: [u8; 4], percentage: u8) -> DeviceInventory {
@@ -2288,7 +2296,10 @@ fn forgetting_an_offline_device_drops_its_card_and_config_entry() {
     assert_eq!(state.devices().len(), 1);
     let record_key = state.devices()[0].record_key();
 
-    assert!(state.forget_device(&record_key));
+    assert_eq!(
+        state.forget_device(&record_key),
+        [StateEvent::InventoryChanged]
+    );
 
     assert!(state.devices().is_empty());
     assert!(
@@ -2306,7 +2317,7 @@ fn a_live_device_refuses_to_be_forgotten() {
     let mut state = state_with_a_known_mouse();
     let record_key = state.devices()[0].record_key();
 
-    assert!(!state.forget_device(&record_key));
+    assert!(state.forget_device(&record_key).is_empty());
     assert_eq!(state.devices().len(), 1);
 }
 
@@ -2318,7 +2329,7 @@ fn a_failed_save_keeps_the_forgotten_device() {
     let mut state = state_with_an_offline_identity(ConfigPersistence::ReadOnly("read-only".into()));
     let record_key = state.devices()[0].record_key();
 
-    assert!(!state.forget_device(&record_key));
+    assert!(state.forget_device(&record_key).is_empty());
 
     assert_eq!(state.devices().len(), 1, "the card must stay");
     assert!(

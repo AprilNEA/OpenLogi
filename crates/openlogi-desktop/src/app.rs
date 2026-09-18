@@ -25,7 +25,7 @@ use crate::features::pointer::dpi::DpiPanel;
 use crate::features::pointer::smartshift::SmartShiftPanel;
 use crate::features::profiles::{AppCatalogPicker, ProfileIconCache};
 use crate::services::assets::AssetResolver;
-use crate::state::{AgentLink, AppState, DeviceRecord, StateEvent};
+use crate::state::{AgentLink, AppState, DeviceRecord, StateEvent, StateEvents};
 use crate::ui::theme::{self, ContentWidth, Typography as _};
 
 pub(crate) mod deeplink;
@@ -318,15 +318,12 @@ impl AppView {
     /// selection follow [`AppState::set_current_device`]) and switches the
     /// route to its detail screen.
     fn open_device(&mut self, record_key: String, cx: &mut Context<Self>) {
-        AppState::global(cx).update(cx, |state, cx| {
-            if let Some(idx) = state
+        AppState::apply(cx, |state| {
+            state
                 .devices()
                 .iter()
                 .position(|record| record.record_key() == record_key)
-                && let Some(key) = state.set_current_device(idx)
-            {
-                cx.emit(StateEvent::DeviceSelected(key));
-            }
+                .map_or_else(StateEvents::none, |idx| state.set_current_device(idx))
         });
         AppState::load_current_device_reads(cx);
         self.route = Route::Device { record_key };

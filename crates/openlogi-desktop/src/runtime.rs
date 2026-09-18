@@ -24,7 +24,7 @@ use tracing::warn;
 use crate::services::assets::sync::{AssetCommand, AssetTarget};
 use crate::services::assets::{self, sync};
 use crate::services::ipc;
-use crate::state::{self, AppState, ConfigPersistence, StateEvent};
+use crate::state::{self, AppState, ConfigPersistence};
 use crate::{app, windows};
 
 /// How often the UI re-enumerates USB cameras. They are UVC devices the agent
@@ -307,9 +307,7 @@ impl Runtime {
             let (changes, auto_download, asset_source, models) =
                 AppState::update(cx, |state, cx| {
                     let changes = state.apply_agent_snapshot(snapshot, &self.cache, &self.cams);
-                    for event in &changes.events {
-                        cx.emit(event.clone());
-                    }
+                    changes.events.clone().emit(cx);
                     let settings = state.app_settings();
                     (
                         changes,
@@ -428,15 +426,14 @@ impl Runtime {
     fn refresh_devices(&self, cx: &AsyncApp) {
         cx.update(|cx| {
             let changed = AppState::update(cx, |state, cx| {
-                let changed = state.refresh_inventories(
+                let events = state.refresh_inventories(
                     &self.inventories,
                     &self.standalone,
                     &self.cache,
                     &self.cams,
                 );
-                if changed {
-                    cx.emit(StateEvent::InventoryChanged);
-                }
+                let changed = !events.is_empty();
+                events.emit(cx);
                 changed
             });
             if changed {
@@ -552,11 +549,7 @@ fn camera_targets(cams: &[Camera]) -> impl Iterator<Item = AssetTarget> + '_ {
 /// actually changed (the IPC client may repeat a notice across reconnect
 /// episodes).
 fn set_agent_link(link: state::AgentLink, cx: &mut gpui::App) {
-    AppState::update(cx, |state, cx| {
-        if state.set_agent_link(link) {
-            cx.emit(StateEvent::AgentChanged);
-        }
-    });
+    AppState::apply(cx, |state| state.set_agent_link(link));
 }
 
 #[cfg(test)]

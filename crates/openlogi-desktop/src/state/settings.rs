@@ -176,19 +176,19 @@ impl AppState {
     /// clear the alias and restore the hardware model name. `record_key` is
     /// distinct per live serial-less camera even though their hardware settings
     /// intentionally share a model-scoped config key.
-    pub fn set_device_custom_name(&mut self, record_key: &str, custom_name: &str) {
+    pub fn set_device_custom_name(&mut self, record_key: &str, custom_name: &str) -> StateEvents {
         let custom_name = match custom_name.trim() {
             "" => None,
             name => Some(name.to_string()),
         };
         if self.config.device_custom_name(record_key) == custom_name.as_deref() {
-            return;
+            return StateEvent::InventoryChanged.into();
         }
         self.config.edit(|config| {
             config.set_device_custom_name(record_key, custom_name.clone());
         });
         if !self.persist_config("device name") {
-            return;
+            return StateEvent::InventoryChanged.into();
         }
         for record in self
             .devices
@@ -200,6 +200,7 @@ impl AppState {
                 .clone()
                 .unwrap_or_else(|| record.model_name.clone());
         }
+        StateEvent::InventoryChanged.into()
     }
 
     /// Enable or disable OpenLogi's management of `key` and persist it. The

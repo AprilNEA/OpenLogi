@@ -37,7 +37,7 @@ use super::widgets::{
 };
 use crate::features::lighting::visual as light_visual;
 use crate::services::assets::GlowGeometry;
-use crate::state::{AppState, DeviceRecord, StateEvent};
+use crate::state::{AppState, DeviceRecord};
 use crate::ui::battery::{BatteryIndicator, glance_hint};
 use crate::ui::components::control_input;
 use crate::ui::theme::{self, ContentWidth, HEADER_H, Palette, Typography as _};
@@ -424,11 +424,7 @@ fn open_delete_confirmation(window: &mut Window, cx: &mut App, record_key: Strin
             .on_ok({
                 let record_key = record_key.clone();
                 move |_event, _window, cx| {
-                    AppState::update(cx, |state, cx| {
-                        if state.forget_device(&record_key) {
-                            cx.emit(StateEvent::InventoryChanged);
-                        }
-                    });
+                    AppState::apply(cx, |state| state.forget_device(&record_key));
                     true
                 }
             })
@@ -471,9 +467,8 @@ fn open_rename_dialog(
                 let record_key = record_key.clone();
                 move |_, _, cx| {
                     let custom_name = input.read(cx).value().to_string();
-                    AppState::update(cx, |state, cx| {
-                        state.set_device_custom_name(&record_key, &custom_name);
-                        cx.emit(StateEvent::InventoryChanged);
+                    AppState::apply(cx, |state| {
+                        state.set_device_custom_name(&record_key, &custom_name)
                     });
                     true
                 }

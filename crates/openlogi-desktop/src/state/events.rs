@@ -71,6 +71,16 @@ impl StateEvents {
         Self::default()
     }
 
+    /// Whether the change needs no announcement.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Whether `event` is one of them.
+    pub(crate) fn contains(&self, event: &StateEvent) -> bool {
+        self.0.contains(event)
+    }
+
     /// These events followed by `next`'s, each distinct event once — so a
     /// change built from several mutators announces itself the way a single
     /// one would.

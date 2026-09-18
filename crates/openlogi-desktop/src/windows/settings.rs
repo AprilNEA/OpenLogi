@@ -237,13 +237,7 @@ impl SettingsView {
                     Vec::new()
                 };
                 cx.update(|cx| {
-                    AppState::update(cx, |state, cx| {
-                        state.set_event_taps(taps);
-                        if !events.is_empty() {
-                            state.push_monitor_events(events);
-                        }
-                        cx.emit(StateEvent::DiagnosticsChanged);
-                    });
+                    AppState::apply(cx, |state| state.record_monitor_poll(taps, events));
                 });
                 cx.background_executor()
                     .timer(std::time::Duration::from_millis(300))

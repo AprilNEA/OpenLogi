@@ -116,8 +116,9 @@ impl AppState {
     }
 
     /// Update the runtime camera state used by camera-linked light rendering.
-    /// A real transition clears every transient manual override.
-    pub fn set_camera_active(&mut self, active: bool) -> bool {
+    /// A real transition clears every transient manual override, and is the
+    /// only case reported.
+    pub fn set_camera_active(&mut self, active: bool) -> StateEvents {
         let changed = self.lighting.camera_active != active;
         if changed {
             for entry in self.devices.runtime.values_mut() {
@@ -125,7 +126,7 @@ impl AppState {
             }
         }
         self.lighting.camera_active = active;
-        changed
+        changed.then_some(StateEvent::CameraChanged).into()
     }
 
     /// Whether the selected light is currently governed by a supported camera

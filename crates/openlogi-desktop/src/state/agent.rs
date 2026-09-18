@@ -4,6 +4,7 @@ use openlogi_camera::Camera;
 use openlogi_core::device::DeviceInventory;
 use openlogi_ipc::{AgentSnapshot, ForegroundApps, InventoryHealth};
 
+use super::events::StateEvents;
 use super::{AgentLink, AppState, StateEvent};
 use crate::services::assets::AssetResolver;
 
@@ -11,7 +12,7 @@ use crate::services::assets::AssetResolver;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SnapshotChanges {
     pub(crate) inventory_ready: bool,
-    pub(crate) events: Vec<StateEvent>,
+    pub(crate) events: StateEvents,
 }
 
 impl SnapshotChanges {
@@ -62,8 +63,11 @@ impl AppState {
         // Merge only completed enumerations. A scanning agent serves an empty
         // pre-enumeration list, which must not burn the GUI's miss grace or
         // replace the last known device set.
-        let inventory = inventory_ready
-            && self.refresh_inventories(&snapshot.inventory, &snapshot.standalone, cache, cameras);
+        let inventory = if inventory_ready {
+            self.refresh_inventories(&snapshot.inventory, &snapshot.standalone, cache, cameras)
+        } else {
+            StateEvents::none()
+        };
         if inventory_ready {
             self.store_inventory_snapshot(&snapshot.inventory);
         }
@@ -71,30 +75,32 @@ impl AppState {
         let agent = self.set_agent_link(AgentLink::Ready(snapshot.status.clone()));
         let camera = self.set_camera_active(snapshot.camera_active);
         let foreground = self.set_foreground(snapshot.foreground.clone());
-        let mut events = Vec::new();
-        if inventory {
-            events.push(StateEvent::InventoryChanged);
-        }
-        if agent {
-            events.push(StateEvent::AgentChanged);
-        }
-        if camera {
-            events.push(StateEvent::CameraChanged);
-        }
-        if foreground {
-            events.push(StateEvent::ForegroundChanged);
-        }
 
         SnapshotChanges {
             inventory_ready,
-            events,
+            events: inventory.and(agent).and(camera).and(foreground),
         }
     }
 
+    /// Fold one live-monitor poll into what the Diagnostics page renders: the
+    /// refreshed event-tap snapshot, and whatever events arrived since the
+    /// last poll.
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    pub fn record_monitor_poll(
+        &mut self,
+        taps: Vec<openlogi_hook::EventTapInfo>,
+        events: Vec<openlogi_ipc::MonitorEvent>,
+    ) -> StateEvents {
+        self.set_event_taps(taps);
+        if !events.is_empty() {
+            self.push_monitor_events(events);
+        }
+        StateEvent::DiagnosticsChanged.into()
+    }
     /// Append a batch of live-monitor events, capping the retained history so the
     /// buffer can't grow without bound while the monitor is open.
     #[cfg(all(target_os = "macos", debug_assertions))]
-    pub fn push_monitor_events(&mut self, events: Vec<openlogi_ipc::MonitorEvent>) {
+    fn push_monitor_events(&mut self, events: Vec<openlogi_ipc::MonitorEvent>) {
         const MAX: usize = 200;
         self.agent.monitor_events.extend(events);
         let overflow = self.agent.monitor_events.len().saturating_sub(MAX);
@@ -109,7 +115,7 @@ impl AppState {
     /// Replace the cached event-tap snapshot the Diagnostics page renders.
     /// Refreshed on the live-monitor poll tick; see [`Self::event_taps`].
     #[cfg(all(target_os = "macos", debug_assertions))]
-    pub fn set_event_taps(&mut self, taps: Vec<openlogi_hook::EventTapInfo>) {
+    fn set_event_taps(&mut self, taps: Vec<openlogi_hook::EventTapInfo>) {
         self.agent.event_taps = taps;
     }
     /// The cached event-tap snapshot for the Diagnostics page.
@@ -140,15 +146,15 @@ impl AppState {
             _ => None,
         }
     }
-    /// Replace the link, reporting whether it actually changed — the steady
-    /// IPC poll mostly delivers identical snapshots, and the caller skips the
-    /// window refresh for those.
-    pub fn set_agent_link(&mut self, link: AgentLink) -> bool {
+    /// Replace the link, reporting it only when it actually changed — the
+    /// steady IPC poll mostly delivers identical snapshots, and those must not
+    /// refresh the window.
+    pub fn set_agent_link(&mut self, link: AgentLink) -> StateEvents {
         if self.agent.link == link {
-            return false;
+            return StateEvents::none();
         }
         self.agent.link = link;
-        true
+        StateEvent::AgentChanged.into()
     }
 
     /// Cache a completed inventory snapshot for diagnostics.
@@ -163,12 +169,12 @@ impl AppState {
     }
 
     /// Adopt the agent's foreground application snapshot.
-    pub fn set_foreground(&mut self, foreground: ForegroundApps) -> bool {
+    pub fn set_foreground(&mut self, foreground: ForegroundApps) -> StateEvents {
         if self.agent.foreground == foreground {
-            return false;
+            return StateEvents::none();
         }
         self.agent.foreground = foreground;
-        true
+        StateEvent::ForegroundChanged.into()
     }
 
     pub(super) fn foreground(&self) -> &ForegroundApps {
