@@ -201,10 +201,13 @@ impl AppState {
                 continue;
             }
 
-            // An all-zero direct unit id is only a transient probe result. If
-            // the next snapshot resolves a physical serial/unit key, retaining
-            // this record through the normal miss grace would show both cards.
-            if !previous.is_persistent() {
+            // An all-zero direct unit id is only a transient probe result — or,
+            // for an online Direct device with no identity at all, the
+            // route-only fallback key (#1213), which is no more stable than
+            // the transient shape once a real identity shows up. If the next
+            // snapshot resolves a physical serial/unit key, retaining this
+            // record through the normal miss grace would show both cards.
+            if !previous.is_persistent() || is_route_only_key(&previous.config_key) {
                 clear_inventory_misses(&mut self.devices.runtime, &inv);
                 continue;
             }
@@ -277,9 +280,13 @@ impl AppState {
         &self,
         by_key: &mut BTreeMap<String, DeviceRecord>,
     ) -> BTreeMap<String, DeviceRecord> {
+        // A record already carrying a route-only key (`Config::resolve_device_key`'s
+        // online-Direct-with-no-identity fallback, #1213) is persistent, but that
+        // fallback cannot see siblings — it still needs this same disambiguation,
+        // same as a genuinely non-persistent transient probe.
         let transient_keys: Vec<(String, Option<String>)> = by_key
             .values()
-            .filter(|record| !record.is_persistent())
+            .filter(|record| !record.is_persistent() || is_route_only_key(&record.config_key))
             .map(|record| (record.config_key.clone(), record_wire_pid(record)))
             .collect();
         let mut adopted = BTreeMap::new();
@@ -323,12 +330,24 @@ impl AppState {
                 }
             }
             let [known_key] = candidates.as_slice() else {
-                if candidates.is_empty()
-                    && by_key
+                if candidates.is_empty() {
+                    if by_key
                         .iter()
-                        .any(|(_, record)| same_wire(record) && record.online)
-                {
-                    by_key.remove(&key);
+                        .any(|(k, record)| *k != key && same_wire(record) && record.online)
+                    {
+                        by_key.remove(&key);
+                    }
+                    // Otherwise this probe is the only device on this wire in
+                    // sight: the route-only fallback's persistent key already
+                    // stands, whether it was set just now or on an earlier
+                    // tick.
+                } else if let Some(mut record) = by_key.remove(&key) {
+                    // Two or more known same-model siblings are absent, so the
+                    // probe could be either — it must not keep a persistent
+                    // key that would silently claim one of them.
+                    record.persistent = false;
+                    record.config_key = format!("{prefix}:unit:00000000");
+                    by_key.insert(record.config_key.clone(), record);
                 }
                 continue;
             };
@@ -535,4 +554,12 @@ fn clear_inventory_misses(runtime: &mut BTreeMap<DeviceKey, DeviceRuntimeState>,
     if let Some(entry) = runtime.get_mut(key) {
         entry.inventory_misses = 0;
     }
+}
+
+/// Whether `key` is `Config::resolve_device_key`'s online-Direct-with-no-identity
+/// fallback (#1213) rather than a device's own physical identity — persistent,
+/// but still ambiguous between same-model siblings until [`AppState::adopt_transient_records`]
+/// has had a chance to disambiguate it.
+fn is_route_only_key(key: &str) -> bool {
+    direct_key_prefix(key).is_some_and(|prefix| key == format!("{prefix}:route"))
 }

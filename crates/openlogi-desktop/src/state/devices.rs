@@ -96,12 +96,12 @@ impl DeviceRecord {
     }
 
     /// Return the configuration key only when it is safe to persist settings.
-    pub(super) fn persistent_config_key(&self) -> Option<&str> {
+    pub(crate) fn persistent_config_key(&self) -> Option<&str> {
         self.persistent.then_some(self.config_key.as_str())
     }
 
     /// Whether this record may participate in persistent configuration.
-    pub(super) fn is_persistent(&self) -> bool {
+    pub(crate) fn is_persistent(&self) -> bool {
         self.persistent
     }
 

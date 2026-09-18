@@ -188,9 +188,17 @@ fn build_devices_still_finds_settings_left_under_a_pre_upgrade_receiver_key() {
 }
 
 #[test]
-fn build_devices_skips_transient_zero_unit_direct_identity() {
-    assert!(build_devices(&Config::default(), &[direct_inventory(None, [0; 4])], &[]).is_empty());
+fn build_devices_keeps_an_online_zero_unit_direct_device_keyed_by_route() {
+    // #1213: an online Bluetooth-direct device with no serial and an
+    // all-zero unit id (an M535) must still get a config key, or nothing it
+    // stores ever persists and the agent can't remap it either.
+    let devices = build_devices(&Config::default(), &[direct_inventory(None, [0; 4])], &[]);
+    assert_eq!(devices.len(), 1);
+    assert_eq!(devices[0].config_key, "direct:046d:b023:route");
+}
 
+#[test]
+fn build_devices_skips_transient_zero_unit_direct_identity() {
     let devices = build_devices(
         &Config::default(),
         &[direct_inventory(Some("ABC123"), [0; 4])],
