@@ -11,7 +11,7 @@
 
 use std::collections::BTreeMap;
 
-use gpui::{App, Context, Entity, EventEmitter, Global};
+use gpui::{App, Context, Entity, Global};
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::config::Config;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
@@ -22,6 +22,7 @@ use tracing::warn;
 pub use config::ConfigPersistence;
 pub(crate) use device_key::DeviceKey;
 pub use devices::DeviceRecord;
+pub(crate) use events::StateEvent;
 pub use light::LightCommandStatus;
 pub(crate) use load::Load;
 pub use load::{DpiStatus, SmartShiftLoad};
@@ -64,6 +65,7 @@ mod device_runtime;
 mod device_store;
 mod devices;
 mod dpi;
+mod events;
 mod inventory;
 mod light;
 mod lighting;
@@ -79,52 +81,6 @@ mod tests;
 /// Default DPI value applied to a fresh AppState. Matches a common Logitech
 /// mid-range mouse and keeps the dot-preview visually obvious from frame one.
 pub const DEFAULT_DPI: Dpi = Dpi::new(1600);
-
-/// Semantic changes emitted by the shared application-state entity.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum StateEvent {
-    /// Agent connection or permission state changed.
-    AgentChanged,
-    /// The foreground application or recent-application list changed.
-    ForegroundChanged,
-    /// Cached diagnostics/event-monitor data changed.
-    #[cfg_attr(
-        not(all(target_os = "macos", debug_assertions)),
-        expect(dead_code, reason = "the live event monitor is macOS debug-only")
-    )]
-    DiagnosticsChanged,
-    /// The merged device inventory changed.
-    InventoryChanged,
-    /// The active device changed.
-    DeviceSelected(DeviceKey),
-    /// Mouse, keyboard, gesture, or Actions Ring bindings changed.
-    BindingsChanged(DeviceKey),
-    /// DPI data or the active DPI value changed.
-    DpiChanged(DeviceKey),
-    /// SmartShift data or write status changed.
-    SmartShiftChanged(DeviceKey),
-    /// Device or standalone-light settings changed.
-    LightingChanged(DeviceKey),
-    /// Camera settings or activity changed.
-    CameraChanged,
-    /// Host camera-permission status may have changed.
-    #[cfg_attr(
-        not(any(target_os = "macos", test)),
-        expect(
-            dead_code,
-            reason = "camera consent polling is macOS-only outside tests"
-        )
-    )]
-    CameraPermissionChanged,
-    /// Per-device preferences outside the feature-specific events changed.
-    DeviceConfigChanged(DeviceKey),
-    /// Application-wide preferences changed.
-    SettingsChanged,
-    /// The interface language switched live. Views re-render localized strings
-    /// on the accompanying refresh; this event is for localized text *cached
-    /// in state*, which must be recomputed in the new locale.
-    LanguageChanged,
-}
 
 struct GlobalAppState(Entity<AppState>);
 
@@ -460,5 +416,3 @@ impl AppState {
             .then_some(app.display_name.as_str())
     }
 }
-
-impl EventEmitter<StateEvent> for AppState {}
