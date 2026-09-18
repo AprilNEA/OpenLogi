@@ -1,8 +1,14 @@
+use hidpp::device::Device;
+
 use super::accum::handle_reprog;
+use super::arm::arm_controls_into;
 use super::*;
 use crate::backend::NodeId;
 use crate::channel::scripted::{ScriptedRawHidChannel, scripted_channel};
 use crate::reprog_controls::RawControlEvent;
+use crate::session::capture_restore::{
+    ArmedReporting, ReprogRestore, divert_change, rollback_capture_start, undivert_change,
+};
 
 const GESTURE: &[u16] = &[reprog_controls::GESTURE_BUTTON_CID];
 const PANEL: &[u16] = &[reprog_controls::HAPTIC_PANEL_CID];
