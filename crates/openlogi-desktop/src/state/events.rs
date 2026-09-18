@@ -1,9 +1,15 @@
-//! The events [`AppState`] emits.
+//! The events [`AppState`] emits, and the one place that emits them.
+//!
+//! A mutator decides which [`StateEvent`] its change causes and returns it as
+//! [`StateEvents`]; [`AppState::apply`] emits what the mutation reported. Views
+//! therefore never pick an event, and mutators stay free of a GPUI context so
+//! plain `#[test]`s can drive them.
 
-use gpui::EventEmitter;
+use gpui::{App, Context, EventEmitter};
 
 use super::AppState;
 use super::device_key::DeviceKey;
+use super::devices::DeviceRecord;
 
 /// Semantic changes emitted by the shared application-state entity.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,3 +58,47 @@ pub(crate) enum StateEvent {
 }
 
 impl EventEmitter<StateEvent> for AppState {}
+
+/// The [`StateEvent`]s one change to [`AppState`] causes, in the order they
+/// happened.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[must_use = "a change nobody announces leaves subscribed views stale; return it from `AppState::apply`"]
+pub(crate) struct StateEvents(Vec<StateEvent>);
+
+impl StateEvents {
+    /// Emit every event from the state entity's own context.
+    pub(crate) fn emit(self, cx: &mut Context<AppState>) {
+        for event in self.0 {
+            cx.emit(event);
+        }
+    }
+}
+
+impl From<StateEvent> for StateEvents {
+    fn from(event: StateEvent) -> Self {
+        Self(vec![event])
+    }
+}
+
+impl From<Option<StateEvent>> for StateEvents {
+    fn from(event: Option<StateEvent>) -> Self {
+        Self(event.into_iter().collect())
+    }
+}
+
+impl AppState {
+    /// Run one mutation against the shared state and emit the events it
+    /// reports.
+    pub(crate) fn apply(cx: &mut App, mutate: impl FnOnce(&mut Self) -> StateEvents) {
+        Self::update(cx, |state, cx| mutate(state).emit(cx));
+    }
+
+    /// `event` about the active device, or nothing when no device is selected:
+    /// what every editor of the active device announces its change as.
+    pub(super) fn for_current_device(&self, event: fn(DeviceKey) -> StateEvent) -> StateEvents {
+        self.current_record()
+            .map(DeviceRecord::device_key)
+            .map(event)
+            .into()
+    }
+}

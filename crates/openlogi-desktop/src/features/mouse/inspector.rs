@@ -121,10 +121,6 @@ fn empty_inspector(app: Option<&str>, override_count: usize, pal: Palette) -> gp
         .child(div().text_body().text_color(pal.text_muted).child(summary))
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "the button inspector is clearest as one declarative UI tree"
-)]
 fn button_inspector(
     button: ButtonId,
     data: &BindingInspectorData<'_>,
@@ -165,7 +161,7 @@ fn button_inspector(
     };
     let observer = picker.view.clone();
     let on_pick: PickFn = Rc::new(move |action, _window, cx| {
-        AppState::update_bindings(cx, |state| state.commit_binding(button, action));
+        AppState::apply(cx, |state| state.commit_binding(button, action));
         observer.update(cx, |view, cx| {
             view.close_action_picker();
             cx.notify();
@@ -188,9 +184,7 @@ fn button_inspector(
                     .icon(IconName::Undo)
                     .label(tr!("profiles.use_the_default_profile"))
                     .on_click(move |_, _, cx| {
-                        AppState::update_bindings(cx, |state| {
-                            state.clear_app_binding(button);
-                        });
+                        AppState::apply(cx, |state| state.clear_app_binding(button));
                         observer.update(cx, |view, cx| {
                             view.close_action_picker();
                             cx.notify();
@@ -209,9 +203,7 @@ fn button_inspector(
                         .label(tr!("actions.use_gestures"))
                         .disabled(unavailable)
                         .on_click(move |_, _, cx| {
-                            AppState::update_bindings(cx, |state| {
-                                state.commit_gesture_mode(button, true);
-                            });
+                            AppState::apply(cx, |state| state.commit_gesture_mode(button, true));
                             observer.update(cx, |view, cx| {
                                 view.set_gesture_selected_dir(Some(GestureDirection::Click));
                                 cx.notify();
@@ -248,7 +240,7 @@ fn inherited_gesture_inspector(
 ) -> gpui::Div {
     let observer = picker.view.clone();
     let on_pick: PickFn = Rc::new(move |action, _window, cx| {
-        AppState::update_bindings(cx, |state| state.commit_binding(button, action));
+        AppState::apply(cx, |state| state.commit_binding(button, action));
         observer.update(cx, |view, cx| {
             view.close_action_picker();
             cx.notify();
@@ -273,7 +265,7 @@ fn inherited_gesture_inspector(
                 .w_full()
                 .label(tr!("actions.edit_default_gestures"))
                 .on_click(move |_, _, cx| {
-                    AppState::update_bindings(cx, |state| state.set_editing_app(None));
+                    AppState::apply(cx, |state| state.set_editing_app(None));
                     edit_default.update(cx, |view, cx| {
                         view.set_gesture_selected_dir(Some(GestureDirection::Click));
                         cx.notify();
@@ -304,8 +296,8 @@ fn gesture_inspector(
     let current = gesture_action(gesture_map, button, direction);
     let observer = picker.view.clone();
     let on_pick: PickFn = Rc::new(move |action, _window, cx| {
-        AppState::update_bindings(cx, |state| {
-            state.commit_gesture_binding(button, direction, action);
+        AppState::apply(cx, |state| {
+            state.commit_gesture_binding(button, direction, action)
         });
         observer.update(cx, |view, cx| {
             view.close_action_picker();
@@ -334,9 +326,7 @@ fn gesture_inspector(
                 .w_full()
                 .label(tr!("actions.use_a_single_action"))
                 .on_click(move |_, _, cx| {
-                    AppState::update_bindings(cx, |state| {
-                        state.commit_gesture_mode(button, false);
-                    });
+                    AppState::apply(cx, |state| state.commit_gesture_mode(button, false));
                     turn_off.update(cx, |view, cx| {
                         view.set_gesture_selected_dir(None);
                         cx.notify();
@@ -426,10 +416,6 @@ fn can_enable_gestures(button: ButtonId, editing_app: Option<&str>) -> bool {
     editing_app.is_none() && button.supports_gesture_mode()
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "the thumb-wheel inspector is clearest as one declarative UI tree"
-)]
 fn thumbwheel_inspector(
     bindings: &BTreeMap<ButtonId, Action>,
     editing_app: Option<&str>,
@@ -509,8 +495,8 @@ fn thumbwheel_inspector(
                                     )
                                 })
                                 .on_click(move |_, _, cx| {
-                                    AppState::update_bindings(cx, |state| {
-                                        state.commit_thumbwheel_preset(preset);
+                                    AppState::apply(cx, |state| {
+                                        state.commit_thumbwheel_preset(preset)
                                     });
                                     observer.update(cx, |view, cx| {
                                         view.close_action_picker();
@@ -530,9 +516,7 @@ fn thumbwheel_inspector(
                     .icon(IconName::Undo)
                     .label(tr!("profiles.use_the_default_profile"))
                     .on_click(move |_, _, cx| {
-                        AppState::update_bindings(cx, |state| {
-                            state.clear_app_thumbwheel();
-                        });
+                        AppState::apply(cx, AppState::clear_app_thumbwheel);
                         observer.update(cx, |view, cx| {
                             view.close_action_picker();
                             cx.notify();

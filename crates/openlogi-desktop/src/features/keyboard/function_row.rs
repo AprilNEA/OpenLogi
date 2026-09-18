@@ -44,7 +44,7 @@ use crate::features::mouse::picker::{
     editor_section,
 };
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
-use crate::state::{AppState, DeviceRecord, StateEvent};
+use crate::state::{AppState, StateEvent};
 use crate::ui::action::localized_action_label;
 use crate::ui::components::MenuRow;
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
@@ -817,12 +817,8 @@ impl FunctionRowView {
         let view_for_pick = view.clone();
         let trigger_for_pick = trigger.clone();
         let on_pick: PickFn = Rc::new(move |action, _window, cx| {
-            AppState::update(cx, |state, cx| {
-                let key = state.current_record().map(DeviceRecord::device_key);
-                state.commit_keyboard_binding(trigger_for_pick.clone(), Some(action));
-                if let Some(key) = key {
-                    cx.emit(StateEvent::BindingsChanged(key));
-                }
+            AppState::apply(cx, |state| {
+                state.commit_keyboard_binding(trigger_for_pick.clone(), Some(action))
             });
             view_for_pick.update(cx, |_, vcx| vcx.notify());
         });

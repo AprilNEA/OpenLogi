@@ -22,7 +22,7 @@ use tracing::warn;
 pub use config::ConfigPersistence;
 pub(crate) use device_key::DeviceKey;
 pub use devices::DeviceRecord;
-pub(crate) use events::StateEvent;
+pub(crate) use events::{StateEvent, StateEvents};
 pub use light::LightCommandStatus;
 pub(crate) use load::Load;
 pub use load::{DpiStatus, SmartShiftLoad};
