@@ -232,6 +232,10 @@ scrolls_once_per_physical_ratchet_step = "물리적 래칫 한 단계마다 한 
 high_resolution_scrolling_description = "래칫 단계 사이의 미세한 움직임을 감지합니다."
 wheel_resolution_unsupported = "이 기기는 휠 해상도 제어를 지원하지 않습니다."
 wheel_resolution_other_connection = "다른 연결 방식에서는 휠 해상도를 지원하지만 현재 연결에서는 지원하지 않습니다."
+side_button_horizontal_scroll = "측면 버튼 + 휠로 가로 스크롤"
+side_button_horizontal_scroll_description = "뒤로 또는 앞으로 버튼을 누른 채 메인 휠을 굴리면 가로로 스크롤됩니다. 스크롤 없이 누르면 그대로 클릭됩니다."
+side_button_hscroll_app_scope = "%{app}에만 적용 — 이 토글이 해당 앱의 재정의 값을 편집합니다."
+side_button_hscroll_use_device_default = "장치 기본값 사용"
 smartshift = "SmartShift"
 
 [actions]

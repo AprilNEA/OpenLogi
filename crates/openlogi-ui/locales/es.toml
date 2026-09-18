@@ -232,6 +232,10 @@ scrolls_once_per_physical_ratchet_step = "Se desplaza una vez por cada paso fís
 high_resolution_scrolling_description = "Detecta movimientos más finos entre los pasos del trinquete."
 wheel_resolution_unsupported = "Este dispositivo no admite el control de resolución de la rueda."
 wheel_resolution_other_connection = "Este dispositivo admite la resolución de la rueda en su otra conexión, pero no en esta."
+side_button_horizontal_scroll = "Botón lateral + rueda: desplazamiento horizontal"
+side_button_horizontal_scroll_description = "Mantén Atrás o Adelante pulsado y gira la rueda principal para desplazarte lateralmente. Una pulsación sin desplazamiento sigue haciendo clic."
+side_button_hscroll_app_scope = "Se aplica solo a %{app}: el interruptor edita el ajuste de esta app."
+side_button_hscroll_use_device_default = "Usar el valor del dispositivo"
 smartshift = "SmartShift"
 
 [actions]

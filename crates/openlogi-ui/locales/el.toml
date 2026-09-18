@@ -232,6 +232,10 @@ scrolls_once_per_physical_ratchet_step = "Κύλιση μία φορά ανά φ
 high_resolution_scrolling_description = "Ανιχνεύει λεπτότερη κίνηση μεταξύ των βημάτων καστάνιας."
 wheel_resolution_unsupported = "Αυτή η συσκευή δεν υποστηρίζει έλεγχο ανάλυσης τροχού."
 wheel_resolution_other_connection = "Η συσκευή υποστηρίζει ανάλυση τροχού στην άλλη σύνδεσή της, όχι όμως σε αυτή."
+side_button_horizontal_scroll = "Πλαϊνό κουμπί + ροδέλα: οριζόντια κύλιση"
+side_button_horizontal_scroll_description = "Κράτα πατημένο το Πίσω ή το Εμπρός και κύλισε την κύρια ροδέλα για πλευρική κύλιση. Ένα πάτημα χωρίς κύλιση εξακολουθεί να κάνει κλικ."
+side_button_hscroll_app_scope = "Ισχύει μόνο για το %{app} — ο διακόπτης επεξεργάζεται τη ρύθμιση αυτής της εφαρμογής."
+side_button_hscroll_use_device_default = "Χρήση προεπιλογής συσκευής"
 smartshift = "SmartShift"
 
 [actions]

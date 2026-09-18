@@ -232,6 +232,10 @@ scrolls_once_per_physical_ratchet_step = "Ruller én gang pr. fysisk rastertrin.
 high_resolution_scrolling_description = "Registrerer finere bevægelser mellem rastertrin."
 wheel_resolution_unsupported = "Denne enhed understøtter ikke styring af hjulopløsning."
 wheel_resolution_other_connection = "Enheden understøtter hjulopløsning via sin anden forbindelse, men ikke denne."
+side_button_horizontal_scroll = "Sideknap + hjul: vandret rulning"
+side_button_horizontal_scroll_description = "Hold Tilbage eller Frem nede, og rul med hovedhjulet for at rulle sidelæns. Et tryk uden rulning klikker stadig."
+side_button_hscroll_app_scope = "Gælder kun for %{app} — kontakten redigerer denne apps indstilling."
+side_button_hscroll_use_device_default = "Brug enhedsstandard"
 smartshift = "SmartShift"
 
 [actions]

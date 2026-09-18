@@ -232,6 +232,10 @@ scrolls_once_per_physical_ratchet_step = "每個實體棘輪段落捲動一次�
 high_resolution_scrolling_description = "偵測棘輪段落之間更細微的移動。"
 wheel_resolution_unsupported = "此裝置不支援滾輪解析度控制。"
 wheel_resolution_other_connection = "此裝置使用另一種連線時支援滾輪解像度，但目前連線不支援。"
+side_button_horizontal_scroll = "側鍵 + 滾輪實現水平捲動"
+side_button_horizontal_scroll_description = "㩒住「返轉頭」或者「向前」鍵再碌主滾輪，就可以橫向捲動。唔碌淨撳依然係普通點擊。"
+side_button_hscroll_app_scope = "只適用於%{app}——呢個開關編輯緊呢個應用程式嘅覆寫設定。"
+side_button_hscroll_use_device_default = "使用裝置預設值"
 smartshift = "SmartShift"
 
 [actions]

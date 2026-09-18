@@ -232,6 +232,10 @@ scrolls_once_per_physical_ratchet_step = "Прокручує один раз н�
 high_resolution_scrolling_description = "Розпізнає дрібніші рухи між кроками покрокового обертання."
 wheel_resolution_unsupported = "Цей пристрій не підтримує керування роздільністю коліщатка."
 wheel_resolution_other_connection = "Пристрій підтримує налаштування роздільності коліщатка за іншого типу з'єднання, але не за поточного."
+side_button_horizontal_scroll = "Бічна кнопка + колесо: горизонтальне прокручування"
+side_button_horizontal_scroll_description = "Утримуйте «Назад» або «Вперед» і обертайте основне колесо, щоб прокручувати вбік. Натискання без прокручування все одно спрацьовує як клік."
+side_button_hscroll_app_scope = "Стосується лише %{app} — перемикач редагує налаштування цієї програми."
+side_button_hscroll_use_device_default = "Використати налаштування пристрою"
 smartshift = "SmartShift"
 
 [actions]

@@ -232,6 +232,10 @@ scrolls_once_per_physical_ratchet_step = "Ruller én gang per fysiske hakk."
 high_resolution_scrolling_description = "Oppdager finere bevegelse mellom hakkene."
 wheel_resolution_unsupported = "Denne enheten støtter ikke styring av hjuloppløsning."
 wheel_resolution_other_connection = "Enheten støtter hjuloppløsning via den andre tilkoblingen, men ikke denne."
+side_button_horizontal_scroll = "Sideknapp + hjul: vannrett rulling"
+side_button_horizontal_scroll_description = "Hold Tilbake eller Fremover nede og rull hovedhjulet for å rulle sidelengs. Et trykk uten rulling klikker fortsatt."
+side_button_hscroll_app_scope = "Gjelder bare %{app} — bryteren redigerer denne appens innstilling."
+side_button_hscroll_use_device_default = "Bruk enhetsstandard"
 smartshift = "SmartShift"
 
 [actions]

@@ -47,6 +47,75 @@ impl AppState {
             .edit(|config| config.set_invert_scroll(&key, invert));
         self.persist_and_reload("invert scroll");
     }
+    /// Whether hold-to-scroll-horizontally (issue #1053) is effective for the
+    /// active device in the open profile scope: the per-app override when the
+    /// binding panels are editing one, else the device default. `false` with
+    /// no selected device.
+    #[must_use]
+    pub fn current_side_button_hscroll(&self) -> bool {
+        let app = self.editing_app().map(str::to_string);
+        self.current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .is_some_and(|key| {
+                self.config
+                    .effective_side_button_horizontal_scroll(key, app.as_deref())
+            })
+    }
+    /// The explicit per-app hold-to-scroll-horizontally override for the open
+    /// profile scope, if the user stored one. `None` means the app inherits
+    /// the device default — or that no app scope is open at all.
+    #[must_use]
+    pub fn current_side_button_hscroll_override(&self) -> Option<bool> {
+        let app = self.editing_app()?;
+        let key = self.current_record()?.persistent_config_key()?;
+        self.config.per_app_side_button_hscroll(key, app)
+    }
+    /// The display name of the app whose profile scope is open, if any.
+    #[must_use]
+    pub fn side_button_hscroll_scope_name(&self) -> Option<String> {
+        let app = self.editing_app()?;
+        Some(
+            self.recent_app_name(app)
+                .map_or_else(|| app.to_string(), str::to_string),
+        )
+    }
+    /// Commit hold-to-scroll-horizontally for the active device: into the open
+    /// app profile's override when the binding panels are editing one, else
+    /// into the device default. Persists and reloads the agent. No-op without
+    /// a selected persistent device.
+    pub fn commit_side_button_hscroll(&mut self, enabled: bool) {
+        let key = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .map(str::to_string);
+        let app = self.editing_app().map(str::to_string);
+        let Some(key) = key else {
+            debug!("no persistent device key — side-button scroll change ignored");
+            return;
+        };
+        self.config.edit(|config| match &app {
+            Some(app) => config.set_per_app_side_button_hscroll(&key, app, Some(enabled)),
+            None => config.set_side_button_horizontal_scroll(&key, enabled),
+        });
+        self.persist_and_reload("side-button horizontal scroll");
+    }
+    /// Clear the open app profile's hold-to-scroll-horizontally override so it
+    /// inherits the device default again. No-op without an open app scope.
+    pub fn clear_side_button_hscroll_override(&mut self) {
+        let key = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .map(str::to_string);
+        let app = self.editing_app().map(str::to_string);
+        let (Some(key), Some(app)) = (key, app) else {
+            debug!("no open app scope — side-button scroll reset ignored");
+            return;
+        };
+        self.config.edit(|config| {
+            config.set_per_app_side_button_hscroll(&key, &app, None);
+        });
+        self.persist_and_reload("side-button horizontal scroll");
+    }
     /// The active device's persisted wheel resolution, or `None` when OpenLogi
     /// leaves the device default untouched.
     #[must_use]
@@ -230,5 +299,55 @@ mod tests {
     fn a_device_that_never_had_it_is_not_excused() {
         let state = state_with_links(&[("direct:046d:b012", false)]);
         assert!(!state.hires_wheel_supported_on_another_link());
+    }
+
+    fn state_with_mouse() -> AppState {
+        let mut config = Config::default();
+        config
+            .devices
+            .insert("unit:6be9d300".to_string(), DeviceConfig::default());
+        let mut state = test_state(config);
+        state.set_current_record_for_test("unit:6be9d300", "receiver:AA00:slot:1");
+        state
+    }
+
+    #[test]
+    fn side_button_hscroll_commits_the_device_default() {
+        let mut state = state_with_mouse();
+        assert!(!state.current_side_button_hscroll());
+        assert_eq!(state.current_side_button_hscroll_override(), None);
+
+        state.commit_side_button_hscroll(true);
+        assert!(state.current_side_button_hscroll());
+        assert!(state.config.side_button_horizontal_scroll("unit:6be9d300"));
+    }
+
+    #[test]
+    fn side_button_hscroll_in_an_app_scope_commits_an_override() {
+        let mut state = state_with_mouse();
+        state.set_editing_app(Some("com.example.Editor".to_string()));
+        assert!(!state.current_side_button_hscroll());
+
+        state.commit_side_button_hscroll(true);
+        assert!(state.current_side_button_hscroll());
+        assert_eq!(state.current_side_button_hscroll_override(), Some(true));
+        assert!(
+            !state.config.side_button_horizontal_scroll("unit:6be9d300"),
+            "the device default must stay untouched"
+        );
+
+        state.clear_side_button_hscroll_override();
+        assert_eq!(state.current_side_button_hscroll_override(), None);
+        assert!(!state.current_side_button_hscroll());
+    }
+
+    #[test]
+    fn side_button_hscroll_commits_are_no_ops_without_a_device() {
+        let mut state = test_state(Config::default());
+        state.commit_side_button_hscroll(true);
+        state.clear_side_button_hscroll_override();
+        assert!(!state.current_side_button_hscroll());
+        assert_eq!(state.current_side_button_hscroll_override(), None);
+        assert_eq!(state.side_button_hscroll_scope_name(), None);
     }
 }

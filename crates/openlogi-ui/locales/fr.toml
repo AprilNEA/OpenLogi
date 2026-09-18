@@ -232,6 +232,10 @@ scrolls_once_per_physical_ratchet_step = "Défile une fois par cran physique."
 high_resolution_scrolling_description = "Détecte les mouvements plus fins entre les crans."
 wheel_resolution_unsupported = "Cet appareil ne prend pas en charge le réglage de la résolution de la molette."
 wheel_resolution_other_connection = "L’appareil prend en charge la résolution de molette avec son autre connexion, mais pas celle-ci."
+side_button_horizontal_scroll = "Bouton latéral + molette : défilement horizontal"
+side_button_horizontal_scroll_description = "Maintenez Précédent ou Suivant enfoncé et faites rouler la molette principale pour défiler horizontalement. Un appui sans défilement clique normalement."
+side_button_hscroll_app_scope = "S’applique uniquement à %{app} — l’interrupteur modifie le réglage de cette app."
+side_button_hscroll_use_device_default = "Utiliser le réglage de l’appareil"
 smartshift = "SmartShift"
 
 [actions]
