@@ -6,12 +6,12 @@
 //!    packaging time by `openlogi assets sync` and shipped with every
 //!    release. Zero network at end-user runtime.
 //! 2. The per-user cache at `~/.local/share/openlogi/assets/` —
-//!    populated by [`sync::sync`] when it runs (debug builds and the
-//!    bundle-missing safety net).
+//!    populated by [`sync::load_registry`] and [`sync::sync_target`] when
+//!    they run (debug builds and the bundle-missing safety net).
 //!
 //! Either tier missing the requested files falls through to the next, and
-//! ultimately to the synthetic silhouette. The write side ([`sync::sync`])
-//! always targets the user cache — the bundle is read-only.
+//! ultimately to the synthetic silhouette. The write side ([`sync`]) always
+//! targets the user cache — the bundle is read-only.
 
 mod glow;
 mod images;
@@ -139,10 +139,10 @@ pub struct ResolvedAsset {
 pub struct AssetResolver {
     /// Read-time search order. Bundle root (if present) comes first so
     /// release builds never touch the user cache; the user cache comes
-    /// second so `sync::sync` writes are immediately visible.
+    /// second so what [`sync`] writes is immediately visible.
     read_roots: Vec<PathBuf>,
-    /// Where [`sync::sync`] is allowed to write. Always the per-user dir
-    /// — the bundle is read-only inside the signed `.app`.
+    /// Where [`sync`] is allowed to write. Always the per-user dir — the
+    /// bundle is read-only inside the signed `.app`.
     write_root: PathBuf,
     /// `true` when a populated bundle root was discovered; release builds
     /// skip the network sync in that case.
@@ -170,8 +170,7 @@ impl AssetResolver {
         }
     }
 
-    /// Where [`sync::sync`] writes. Public so the sync module can build
-    /// destination paths.
+    /// The per-user cache root, where [`sync`] writes.
     pub fn cache_root(&self) -> &Path {
         &self.write_root
     }
