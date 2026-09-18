@@ -14,7 +14,7 @@
 // crate this one already depends on for locale negotiation.
 rust_i18n::i18n!("../openlogi-ui/locales", fallback = "en");
 
-mod agent;
+mod ipc;
 mod platform;
 mod ring;
 mod session;
@@ -28,7 +28,7 @@ use tracing_subscriber::EnvFilter;
 
 use openlogi_core::action_ring::DISPLAY_LIFETIME;
 
-use crate::agent::{Ipc, OverlayCommand, spawn_ipc};
+use crate::ipc::{Ipc, OverlayCommand, spawn_ipc};
 use crate::platform::RingPlacement;
 use crate::ring::RingView;
 use crate::session::{ClickAwaySession, claim_the_role, spawn_click_away_dismissal};
