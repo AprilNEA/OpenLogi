@@ -30,7 +30,7 @@ use tracing::warn;
 
 /// How long the agent holds a `next_pairing` long-poll before returning `None`.
 /// Comfortably under the client's request deadline so the agent answers first.
-const HOLD: Duration = Duration::from_secs(20);
+const PAIRING_HOLD: Duration = Duration::from_secs(20);
 
 /// How long pairing waits for HID++ capture to release the receiver lease.
 const RECEIVER_LEASE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -238,7 +238,10 @@ impl PairingManager {
     /// Long-poll the next pairing step; `None` when the hold window elapses.
     pub async fn next_update(&self) -> Option<PairingUpdate> {
         let mut rx = self.updates.lock().await;
-        tokio::time::timeout(HOLD, rx.recv()).await.ok().flatten()
+        tokio::time::timeout(PAIRING_HOLD, rx.recv())
+            .await
+            .ok()
+            .flatten()
     }
 }
 
