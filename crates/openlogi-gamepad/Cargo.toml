@@ -1,0 +1,25 @@
+[package]
+name = "openlogi-gamepad"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Virtual HID gamepad backends for OpenLogi's auxiliary mouse→controller mode."
+# Bundled inside the agent; never published alone.
+publish = false
+
+[dependencies]
+openlogi-core = { path = "../openlogi-core", version = "0.8.3", default-features = false }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+evdev = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = { workspace = true }

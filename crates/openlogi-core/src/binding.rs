@@ -16,6 +16,7 @@ mod button;
 mod category;
 mod defaults;
 mod effect;
+mod gamepad;
 mod gesture;
 mod key_combo;
 mod swipe;
@@ -34,6 +35,10 @@ pub use button::ButtonId;
 pub use category::Category;
 pub use defaults::{default_binding, default_binding_for, default_gesture_binding};
 pub use effect::{Effect, MediaKey, MouseButton, NativeAction, Script, Shortcut};
+pub use gamepad::{
+    DpadDirection, GamepadAxis, GamepadBinding, GamepadConfig, GamepadFaceButton,
+    GamepadGestureMap, GamepadMap,
+};
 pub use gesture::GestureDirection;
 pub use key_combo::{KeyCombo, KeyComboParseError, KeyboardUsage, KeyboardUsageError};
 pub use swipe::{
