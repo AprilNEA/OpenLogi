@@ -12,7 +12,7 @@ use openlogi_core::hid::DeviceRoute;
 use openlogi_ipc::{InventoryHealth, PROTOCOL_VERSION};
 
 use crate::services::assets::AssetResolver;
-use crate::state::{AppState, DpiStatus};
+use crate::state::{AppState, DpiLoad};
 
 /// Build the report from the current app state, defaulting to an empty report before the entity is installed.
 #[must_use]
@@ -172,19 +172,19 @@ fn connection_for(
     }
 }
 
-fn dpi_summary(status: Option<DpiStatus>) -> Option<String> {
+fn dpi_summary(status: Option<DpiLoad>) -> Option<String> {
     match status? {
-        DpiStatus::Unknown => None,
-        DpiStatus::Loading => Some("querying…".to_string()),
-        DpiStatus::Ready(info) => Some(format!(
+        DpiLoad::Unknown => None,
+        DpiLoad::Loading => Some("querying…".to_string()),
+        DpiLoad::Ready(info) => Some(format!(
             "{} dpi (range {}–{}, {} steps)",
             info.current,
             info.capabilities.min(),
             info.capabilities.max(),
             info.capabilities.values().len(),
         )),
-        DpiStatus::Unsupported(_) => Some("unsupported".to_string()),
-        DpiStatus::Failed(_) => Some("read failed".to_string()),
+        DpiLoad::Unsupported(_) => Some("unsupported".to_string()),
+        DpiLoad::Failed(_) => Some("read failed".to_string()),
     }
 }
 

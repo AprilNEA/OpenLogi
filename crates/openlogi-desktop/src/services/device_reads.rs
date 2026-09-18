@@ -13,7 +13,7 @@ use swr_gpui::Query;
 use tokio::sync::mpsc;
 
 use super::ipc::{Command, ReadDpi, ReadSmartShift};
-use crate::state::{AppState, DeviceKey, DpiStatus, Load, SmartShiftLoad, StateEvent};
+use crate::state::{AppState, DeviceKey, DpiLoad, Load, SmartShiftLoad, StateEvent};
 
 const ROOT: &str = "device-read";
 const DPI: &str = "dpi";
@@ -216,14 +216,14 @@ impl DeviceReads {
     }
 
     #[must_use]
-    pub(crate) fn dpi_status(&self, key: &DeviceKey) -> DpiStatus {
+    pub(crate) fn dpi_status(&self, key: &DeviceKey) -> DpiLoad {
         self.dpi
             .get(key)
             .map_or(Load::Unknown, |read| read.load.clone())
     }
 
     #[must_use]
-    pub(crate) fn dpi_load(&self, key: &DeviceKey) -> Option<&DpiStatus> {
+    pub(crate) fn dpi_load(&self, key: &DeviceKey) -> Option<&DpiLoad> {
         self.dpi.get(key).map(|read| &read.load)
     }
 
@@ -335,7 +335,7 @@ impl DeviceReads {
         flight
     }
 
-    fn update_dpi(&mut self, key: &DeviceKey, flight: u64, load: DpiStatus) -> bool {
+    fn update_dpi(&mut self, key: &DeviceKey, flight: u64, load: DpiLoad) -> bool {
         let Some(read) = self.dpi.get_mut(key).filter(|read| read.flight == flight) else {
             return false;
         };

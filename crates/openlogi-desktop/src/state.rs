@@ -25,7 +25,7 @@ pub use devices::DeviceRecord;
 pub(crate) use events::{StateEvent, StateEvents};
 pub use light::LightCommandStatus;
 pub(crate) use load::Load;
-pub use load::{DpiStatus, SmartShiftLoad};
+pub use load::{DpiLoad, SmartShiftLoad};
 
 /// Result of confirming a SmartShift write by reading the value back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -9,7 +9,7 @@ use crate::state::devices::DeviceRecord;
 
 use super::device_key::DeviceKey;
 use super::events::StateEvents;
-use super::load::DpiStatus;
+use super::load::DpiLoad;
 use super::{AppState, DEFAULT_DPI, StateEvent};
 
 impl AppState {
@@ -27,7 +27,7 @@ impl AppState {
     }
 
     /// Re-run `key`'s exhausted DPI read — the "click to retry" affordance on
-    /// a [`DpiStatus::Failed`] device.
+    /// a [`DpiLoad::Failed`] device.
     pub(crate) fn retry_dpi_read(&mut self, key: &DeviceKey) -> StateEvents {
         self.pointer.reads.retry_dpi(key);
         StateEvent::DpiChanged(key.clone()).into()
@@ -72,7 +72,7 @@ impl AppState {
         self.current_record()
             .and_then(|record| self.pointer.reads.dpi_load(&record.device_key()))
             .and_then(|status| match status {
-                DpiStatus::Ready(info) => Some(info.current),
+                DpiLoad::Ready(info) => Some(info.current),
                 _ => None,
             })
             .unwrap_or(DEFAULT_DPI)
@@ -84,7 +84,7 @@ impl AppState {
         if !self.is_current_device(key) {
             return;
         }
-        if let Some(DpiStatus::Ready(info)) = self.pointer.reads.dpi_load(key) {
+        if let Some(DpiLoad::Ready(info)) = self.pointer.reads.dpi_load(key) {
             self.pointer.dpi = info.current;
         }
     }
@@ -94,11 +94,11 @@ impl AppState {
         self.current_record()
             .and_then(|record| self.pointer.reads.dpi_load(&record.device_key()))
             .and_then(|status| match status {
-                DpiStatus::Ready(info) => Some(&info.capabilities),
-                DpiStatus::Unknown
-                | DpiStatus::Loading
-                | DpiStatus::Failed(_)
-                | DpiStatus::Unsupported(_) => None,
+                DpiLoad::Ready(info) => Some(&info.capabilities),
+                DpiLoad::Unknown
+                | DpiLoad::Loading
+                | DpiLoad::Failed(_)
+                | DpiLoad::Unsupported(_) => None,
             })
     }
     /// Snap `dpi` to the active device's supported list when known.
@@ -150,11 +150,11 @@ impl AppState {
         self.for_current_device(StateEvent::DpiChanged)
     }
 
-    pub(crate) fn dpi_load_for(&self, key: &DeviceKey) -> Option<&DpiStatus> {
+    pub(crate) fn dpi_load_for(&self, key: &DeviceKey) -> Option<&DpiLoad> {
         self.pointer.reads.dpi_load(key)
     }
 
-    pub(crate) fn dpi_status_for(&self, key: &DeviceKey) -> DpiStatus {
+    pub(crate) fn dpi_status_for(&self, key: &DeviceKey) -> DpiLoad {
         self.pointer.reads.dpi_status(key)
     }
 }

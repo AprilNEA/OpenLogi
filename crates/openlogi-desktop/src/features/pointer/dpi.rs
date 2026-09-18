@@ -19,7 +19,7 @@ use gpui_component::{
 use openlogi_core::hid::{Dpi, DpiCapabilities};
 use tracing::debug;
 
-use crate::state::{AppState, DeviceKey, DpiStatus, StateEvent};
+use crate::state::{AppState, DeviceKey, DpiLoad, StateEvent};
 use crate::ui::commit_slider::{CommitSlider, SliderRange};
 use crate::ui::components::PresetChip;
 use crate::ui::status::{retry_line, status_line};
@@ -50,7 +50,7 @@ struct DpiPanelSnapshot {
     device_key: DeviceKey,
     dpi: Dpi,
     presets: Vec<Dpi>,
-    status: DpiStatus,
+    status: DpiLoad,
     /// Whether the active device currently has a usable route. An offline
     /// device sits in `Unknown` forever (discovery can't start without a
     /// route), so the UI must say "offline" rather than "reading…".
@@ -141,7 +141,7 @@ impl Render for DpiPanel {
         let snapshot = dpi_panel_snapshot(cx);
         let pal = theme::palette(cx);
 
-        if let DpiStatus::Ready(info) = &snapshot.status {
+        if let DpiLoad::Ready(info) = &snapshot.status {
             self.ensure_slider(
                 snapshot.device_key.as_str(),
                 &info.capabilities,
@@ -242,14 +242,14 @@ fn dpi_panel_snapshot(cx: &mut Context<DpiPanel>) -> DpiPanelSnapshot {
             device_key: DeviceKey::default(),
             dpi: crate::state::DEFAULT_DPI,
             presets: Vec::new(),
-            status: DpiStatus::Unsupported(tr!("device.no_active_device").to_string()),
+            status: DpiLoad::Unsupported(tr!("device.no_active_device").to_string()),
             reachable: false,
         })
 }
 
-fn dpi_range_label(status: &DpiStatus, reachable: bool) -> AnyElement {
+fn dpi_range_label(status: &DpiLoad, reachable: bool) -> AnyElement {
     match status {
-        DpiStatus::Ready(info) => h_flex()
+        DpiLoad::Ready(info) => h_flex()
             .gap_1()
             .child(format!(
                 "{}–{}",
@@ -259,23 +259,23 @@ fn dpi_range_label(status: &DpiStatus, reachable: bool) -> AnyElement {
             .child(Icon::empty().path("action-icons/dot.svg").size_3())
             .child(tr!("pointer.dpi_step", step => info.capabilities.step_hint()))
             .into_any_element(),
-        DpiStatus::Unknown | DpiStatus::Loading if !reachable => {
+        DpiLoad::Unknown | DpiLoad::Loading if !reachable => {
             tr!("pointer.dpi_range_device_offline").into_any_element()
         }
-        DpiStatus::Unknown | DpiStatus::Loading => {
+        DpiLoad::Unknown | DpiLoad::Loading => {
             tr!("pointer.loading_device_dpi_range").into_any_element()
         }
-        DpiStatus::Failed(message) => {
+        DpiLoad::Failed(message) => {
             tr!("pointer.dpi_read_failed", message => message).into_any_element()
         }
-        DpiStatus::Unsupported(message) => {
+        DpiLoad::Unsupported(message) => {
             tr!("pointer.dpi_range_unavailable", message => message).into_any_element()
         }
     }
 }
 
 fn slider_element(
-    status: &DpiStatus,
+    status: &DpiLoad,
     slider_state: Option<&Entity<SliderState>>,
     reachable: bool,
     key: DeviceKey,
@@ -283,35 +283,35 @@ fn slider_element(
 ) -> AnyElement {
     match (status, slider_state) {
         // A device with one supported DPI has nothing to drag — show the value.
-        (DpiStatus::Ready(info), _) if info.capabilities.min() == info.capabilities.max() => {
+        (DpiLoad::Ready(info), _) if info.capabilities.min() == info.capabilities.max() => {
             status_line(
                 tr!("pointer.fixed_dpi_value", dpi => info.capabilities.min()),
                 pal,
             )
             .into_any_element()
         }
-        (DpiStatus::Ready(_), Some(slider_state)) => {
+        (DpiLoad::Ready(_), Some(slider_state)) => {
             Slider::new(slider_state).horizontal().into_any_element()
         }
-        (DpiStatus::Ready(_), None) => {
+        (DpiLoad::Ready(_), None) => {
             status_line(tr!("pointer.preparing_dpi_slider"), pal).into_any_element()
         }
-        (DpiStatus::Unknown | DpiStatus::Loading, _) if !reachable => {
+        (DpiLoad::Unknown | DpiLoad::Loading, _) if !reachable => {
             status_line(tr!("pointer.device_offline_dpi_is_unavailable"), pal).into_any_element()
         }
-        (DpiStatus::Unknown | DpiStatus::Loading, _) => {
+        (DpiLoad::Unknown | DpiLoad::Loading, _) => {
             status_line(tr!("pointer.reading_supported_dpi_values"), pal).into_any_element()
         }
         // Clickable: reselecting is a no-op for a single-device gallery, so the
         // retry must work in place.
-        (DpiStatus::Failed(_), _) => retry_line(
+        (DpiLoad::Failed(_), _) => retry_line(
             "dpi-retry",
             tr!("pointer.couldnt_read_dpi_click_to_retry"),
             pal,
             move |cx| AppState::apply(cx, |state| state.retry_dpi_read(&key)),
         )
         .into_any_element(),
-        (DpiStatus::Unsupported(_), _) => {
+        (DpiLoad::Unsupported(_), _) => {
             status_line(tr!("pointer.adjustable_dpi_unsupported"), pal).into_any_element()
         }
     }
