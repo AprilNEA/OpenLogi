@@ -15,7 +15,7 @@ use crate::state::devices::{
 };
 
 use super::device_key::DeviceKey;
-use super::device_runtime::DeviceSession;
+use super::device_session::DeviceSession;
 use super::events::StateEvents;
 use super::load::Load;
 use super::{AppState, INVENTORY_MISS_GRACE, StateEvent};

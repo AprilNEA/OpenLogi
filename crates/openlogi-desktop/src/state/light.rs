@@ -7,7 +7,7 @@ use openlogi_core::hid::{DeviceRoute, LightCommand, WriteError};
 use tracing::debug;
 
 use super::device_key::DeviceKey;
-use super::device_runtime::DeviceSession;
+use super::device_session::DeviceSession;
 use super::events::StateEvents;
 use super::{AppState, StateEvent};
 

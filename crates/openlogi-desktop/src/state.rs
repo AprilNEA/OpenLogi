@@ -61,7 +61,7 @@ mod bindings;
 mod camera;
 mod config;
 mod device_key;
-mod device_runtime;
+mod device_session;
 mod device_store;
 mod devices;
 mod dpi;

@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use super::device_key::DeviceKey;
-use super::device_runtime::DeviceSession;
+use super::device_session::DeviceSession;
 use super::devices::DeviceRecord;
 
 /// Owns the merged device catalog and keeps its active index valid.
