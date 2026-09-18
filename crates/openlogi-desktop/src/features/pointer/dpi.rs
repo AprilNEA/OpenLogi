@@ -34,7 +34,7 @@ pub struct DpiPanel {
 
 /// The slider together with what it was built for.
 struct DpiSlider {
-    key: String,
+    key: DeviceKey,
     shape: SliderShape,
     slider: CommitSlider<Dpi>,
 }
@@ -47,7 +47,8 @@ struct SliderShape {
 }
 
 struct DpiPanelSnapshot {
-    device_key: DeviceKey,
+    /// The active device, or `None` when nothing is selected.
+    device_key: Option<DeviceKey>,
     dpi: Dpi,
     presets: Vec<Dpi>,
     status: DpiLoad,
@@ -74,7 +75,7 @@ impl DpiPanel {
 
     fn ensure_slider(
         &mut self,
-        key: &str,
+        key: &DeviceKey,
         capabilities: &DpiCapabilities,
         dpi: Dpi,
         window: &mut Window,
@@ -88,7 +89,7 @@ impl DpiPanel {
         if let Some(current) = self
             .slider
             .as_ref()
-            .filter(|current| current.key == key && current.shape == shape)
+            .filter(|current| current.key == *key && current.shape == shape)
         {
             // Only re-seat the thumb when `dpi` resolves to a *different
             // supported value* than the thumb currently rests on. Comparing in
@@ -129,7 +130,7 @@ impl DpiPanel {
             },
         );
         self.slider = Some(DpiSlider {
-            key: key.to_string(),
+            key: key.clone(),
             shape,
             slider,
         });
@@ -141,14 +142,8 @@ impl Render for DpiPanel {
         let snapshot = dpi_panel_snapshot(cx);
         let pal = theme::palette(cx);
 
-        if let DpiLoad::Ready(info) = &snapshot.status {
-            self.ensure_slider(
-                snapshot.device_key.as_str(),
-                &info.capabilities,
-                snapshot.dpi,
-                window,
-                cx,
-            );
+        if let (DpiLoad::Ready(info), Some(key)) = (&snapshot.status, &snapshot.device_key) {
+            self.ensure_slider(key, &info.capabilities, snapshot.dpi, window, cx);
         } else {
             self.slider = None;
         }
@@ -232,14 +227,14 @@ fn dpi_panel_snapshot(cx: &mut Context<DpiPanel>) -> DpiPanelSnapshot {
             let device_key = record.device_key();
             Some(DpiPanelSnapshot {
                 status: s.dpi_load_for(&device_key),
-                device_key,
+                device_key: Some(device_key),
                 dpi: s.dpi(),
                 presets: s.dpi_presets(),
                 reachable: record.route.is_some(),
             })
         })
         .unwrap_or_else(|| DpiPanelSnapshot {
-            device_key: DeviceKey::default(),
+            device_key: None,
             dpi: crate::state::DEFAULT_DPI,
             presets: Vec::new(),
             status: DpiLoad::Unsupported(tr!("device.no_active_device").to_string()),
@@ -278,7 +273,7 @@ fn slider_element(
     status: &DpiLoad,
     slider_state: Option<&Entity<SliderState>>,
     reachable: bool,
-    key: DeviceKey,
+    key: Option<DeviceKey>,
     pal: Palette,
 ) -> AnyElement {
     match (status, slider_state) {
@@ -308,7 +303,11 @@ fn slider_element(
             "dpi-retry",
             tr!("pointer.couldnt_read_dpi_click_to_retry"),
             pal,
-            move |cx| AppState::apply(cx, |state| state.retry_dpi_read(&key)),
+            move |cx| {
+                if let Some(key) = &key {
+                    AppState::apply(cx, |state| state.retry_dpi_read(key));
+                }
+            },
         )
         .into_any_element(),
         (DpiLoad::Unsupported(_), _) => {

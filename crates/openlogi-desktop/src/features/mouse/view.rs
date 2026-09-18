@@ -27,7 +27,7 @@ use crate::app::{glow_canvas, keyboard_glow};
 use crate::features::binding_editor::{GESTURE_BUTTON_ICON, action_icon_path};
 use crate::features::profiles::{friendly_app_name, profile_canvas_status};
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
-use crate::state::{AppState, StateEvent};
+use crate::state::{AppState, DeviceKey, DeviceRecord, StateEvent};
 use crate::ui::action::localized_action_label;
 use crate::ui::theme::{self, ACCENT_BLUE, Typography as _};
 
@@ -57,7 +57,7 @@ const MODEL_HORIZONTAL_RESERVE: f32 =
 const MODEL_MIN_CONTENT_W: f32 = 200.;
 
 struct MouseWorkspaceData<'a> {
-    device_key: Option<&'a str>,
+    device_key: Option<DeviceKey>,
     asset: Option<&'a ResolvedAsset>,
     active: Option<MouseControlId>,
     bindings: &'a BTreeMap<ButtonId, Action>,
@@ -72,9 +72,7 @@ struct MouseWorkspaceData<'a> {
 impl<'a> MouseWorkspaceData<'a> {
     fn read(cx: &'a App) -> Option<Self> {
         AppState::try_read(cx).map(|state| Self {
-            device_key: state
-                .current_record()
-                .map(|record| record.config_key.as_str()),
+            device_key: state.current_record().map(DeviceRecord::device_key),
             asset: state
                 .current_record()
                 .and_then(|record| record.asset.as_ref()),
@@ -125,7 +123,7 @@ impl<'a> MouseWorkspaceData<'a> {
 /// Interactive mouse model with button hotspots.
 pub struct MouseModelView {
     focus_handle: FocusHandle,
-    current_device_key: Option<String>,
+    current_device_key: Option<DeviceKey>,
     hovered: Option<MouseControlId>,
     selected: Option<MouseControlId>,
     /// The gesture direction whose action is open in the fixed inspector.
@@ -181,11 +179,11 @@ impl MouseModelView {
         self.action_picker_open = false;
     }
 
-    fn reset_for_device(&mut self, device_key: Option<&str>) {
-        if self.current_device_key.as_deref() == device_key {
+    fn reset_for_device(&mut self, device_key: Option<DeviceKey>) {
+        if self.current_device_key == device_key {
             return;
         }
-        self.current_device_key = device_key.map(str::to_string);
+        self.current_device_key = device_key;
         self.hovered = None;
         self.selected = None;
         self.gesture_active_dir = None;

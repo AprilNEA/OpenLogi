@@ -1,6 +1,6 @@
 //! Controls for standalone lights.
 
-use crate::state::{AppState, LightCommandStatus, StateEvent};
+use crate::state::{AppState, DeviceKey, DeviceRecord, LightCommandStatus, StateEvent};
 use crate::ui::commit_slider::{CommitSlider, SliderRange};
 use crate::ui::components::Toggle;
 
@@ -21,7 +21,7 @@ use openlogi_core::{
 /// first driver.
 pub struct LightPanel {
     /// The device the sliders below were shaped for.
-    device_key: Option<String>,
+    device_key: Option<DeviceKey>,
     brightness: Option<LightSlider>,
     temperature: Option<LightSlider>,
     _state_obs: Subscription,
@@ -53,21 +53,21 @@ impl LightPanel {
 
     fn ensure_sliders(
         &mut self,
-        key: Option<&str>,
+        key: Option<DeviceKey>,
         capabilities: Option<LightCapabilities>,
         settings: LightSettings,
         cx: &mut Context<Self>,
     ) {
         let brightness_range = capabilities.and_then(|caps| caps.brightness);
         let temperature_range = capabilities.and_then(|caps| caps.temperature);
-        if self.device_key.as_deref() == key
+        if self.device_key == key
             && self.brightness.as_ref().map(|slider| slider.range) == brightness_range
             && self.temperature.as_ref().map(|slider| slider.range) == temperature_range
         {
             return;
         }
 
-        self.device_key = key.map(str::to_string);
+        self.device_key = key;
         self.brightness = brightness_range.map(|range| LightSlider {
             range,
             slider: CommitSlider::new(
@@ -142,7 +142,7 @@ impl Render for LightPanel {
         let capabilities = record.as_ref().and_then(|record| record.light_capabilities);
 
         self.ensure_sliders(
-            record.as_ref().map(|record| record.config_key.as_str()),
+            record.as_ref().map(DeviceRecord::device_key),
             capabilities,
             settings,
             cx,
