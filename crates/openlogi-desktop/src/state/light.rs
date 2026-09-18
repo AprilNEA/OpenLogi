@@ -197,7 +197,7 @@ impl AppState {
         if !self.send_ipc(crate::services::ipc::SetLight {
             route,
             command,
-            key: key.to_string(),
+            key: key.clone(),
             request_id,
         }) {
             self.settle_light_command(
@@ -233,12 +233,11 @@ impl AppState {
     /// overwrite the status of a newer slider release.
     pub fn apply_light_command_result(
         &mut self,
-        key: String,
+        key: DeviceKey,
         request_id: u64,
         command: LightCommand,
         result: Result<(), WriteError>,
     ) -> StateEvents {
-        let key = DeviceKey::from(key);
         if self.settle_light_command(key.clone(), request_id, command, result) {
             StateEvent::LightingChanged(key).into()
         } else {
@@ -604,7 +603,7 @@ impl AppState {
             if !self.send_ipc(crate::services::ipc::SetLightManualPower {
                 route,
                 enabled,
-                key: runtime_key.to_string(),
+                key: runtime_key.clone(),
                 request_id,
             }) {
                 self.settle_light_command(

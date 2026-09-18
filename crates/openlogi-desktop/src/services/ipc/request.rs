@@ -27,6 +27,7 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
 use super::GuiUpdate;
+use crate::state::DeviceKey;
 
 /// The GPUI-bound update stream a request may deliver through.
 pub(super) type UpdateSender = mpsc::UnboundedSender<GuiUpdate>;
@@ -165,7 +166,7 @@ impl Request for SetSmartShift {
 /// status of a newer slider release.
 fn report_light_result(
     updates: &UpdateSender,
-    key: String,
+    key: DeviceKey,
     request_id: u64,
     command: LightCommand,
     outcome: Result<Result<(), WriteError>, Unavailable>,
@@ -183,7 +184,7 @@ fn report_light_result(
 pub struct SetLight {
     pub route: DeviceRoute,
     pub command: LightCommand,
-    pub key: String,
+    pub key: DeviceKey,
     pub request_id: u64,
 }
 
@@ -206,7 +207,7 @@ impl Request for SetLight {
 pub struct SetLightManualPower {
     pub route: DeviceRoute,
     pub enabled: bool,
-    pub key: String,
+    pub key: DeviceKey,
     pub request_id: u64,
 }
 

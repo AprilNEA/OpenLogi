@@ -45,6 +45,8 @@ use tarpc::client::RpcError;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
+use crate::state::DeviceKey;
+
 mod launch;
 mod link;
 mod reflex;
@@ -84,8 +86,8 @@ pub enum GuiUpdate {
     /// Result of an agent-owned standalone-light command. The typed failure
     /// reaches the GPUI state model instead of being reduced to a log line.
     LightCommandResult {
-        /// Runtime/config key of the light that issued the command.
-        key: String,
+        /// The light that issued the command.
+        key: DeviceKey,
         /// Monotonic request id used to ignore stale results.
         request_id: u64,
         /// The control whose write produced this result.

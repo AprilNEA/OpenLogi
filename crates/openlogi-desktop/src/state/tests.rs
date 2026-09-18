@@ -459,7 +459,7 @@ fn canonical_profile_light_setting_errors_reach_desktop_state() {
         .len(),
         3
     );
-    let key = light.config_key.clone();
+    let key = light.device_key();
 
     let _ = state.commit_light(LightSettings::new(false, 50, Some(3000)));
     let mut pending = Vec::new();
@@ -658,8 +658,8 @@ fn transient_thumbwheel_pair_stays_in_memory_without_persistence() {
 }
 
 /// What a light-write result that belonged to a live request announces.
-fn lighting_changed(key: &str) -> StateEvent {
-    StateEvent::LightingChanged(DeviceKey::from(key))
+fn lighting_changed(key: &DeviceKey) -> StateEvent {
+    StateEvent::LightingChanged(key.clone())
 }
 
 /// A state holding the one persistent mouse, so per-device config has a key.
@@ -1683,11 +1683,7 @@ fn light_write_failure_reaches_the_gui_state() {
         standalone: &[light],
         ..Sources::in_memory(Config::default(), &AssetResolver::new(), commands)
     });
-    let key = state
-        .current_record()
-        .expect("light record")
-        .config_key
-        .clone();
+    let key = state.current_record().expect("light record").device_key();
     let requested = LightSettings::new(false, 50, None);
     let _ = state.commit_light(requested);
     let Ok(crate::services::ipc::Command::SetLight(SetLight {
@@ -1708,7 +1704,7 @@ fn light_write_failure_reaches_the_gui_state() {
     };
     assert_eq!(brightness_request_id, request_id);
     assert_eq!(state.light(), requested);
-    assert_eq!(state.config.light(&key), None);
+    assert_eq!(state.config.light(key.as_str()), None);
     assert!(matches!(
         state.light_command_status(),
         Some(LightCommandStatus::Pending)
@@ -1740,7 +1736,7 @@ fn light_write_failure_reaches_the_gui_state() {
         state.light(),
         LightSettings::new(false, LightSettings::default().brightness_percent, None)
     );
-    assert_eq!(state.config.light(&key), Some(state.light()));
+    assert_eq!(state.config.light(key.as_str()), Some(state.light()));
 }
 
 #[test]
@@ -1751,11 +1747,7 @@ fn superseded_light_write_keeps_prior_successes_for_reconciliation() {
         standalone: &[light],
         ..Sources::in_memory(Config::default(), &AssetResolver::new(), commands)
     });
-    let key = state
-        .current_record()
-        .expect("light record")
-        .config_key
-        .clone();
+    let key = state.current_record().expect("light record").device_key();
 
     let _ = state.commit_light(LightSettings::new(false, 40, None));
     let (first_power, first_request_id) = next_light_command(&mut receiver);
@@ -1826,7 +1818,7 @@ fn superseded_light_write_keeps_prior_successes_for_reconciliation() {
         Some(LightCommandStatus::Failed(message)) if message.contains("multiple raw HID")
     ));
     assert_eq!(state.light(), LightSettings::new(true, 40, None));
-    assert_eq!(state.config.light(&key), Some(state.light()));
+    assert_eq!(state.config.light(key.as_str()), Some(state.light()));
 }
 
 #[test]
@@ -1907,14 +1899,10 @@ fn camera_automation_preserves_manual_power_and_clears_transient_override() {
         standalone: &[light],
         ..Sources::in_memory(Config::default(), &AssetResolver::new(), commands)
     });
-    let key = state
-        .current_record()
-        .expect("light record")
-        .config_key
-        .clone();
+    let key = state.current_record().expect("light record").device_key();
     state.config.edit(|config| {
         config.set_light(
-            &key,
+            key.as_str(),
             LightSettings {
                 enabled: false,
                 auto_camera: true,
