@@ -151,7 +151,7 @@ pub(super) fn plan(job: Job, sh: &Shell, host: Host) -> Result<Plan> {
         Job::Clippy => Ok(clippy(job, host)),
         Job::Msrv => msrv(job, sh, host),
         Job::Rustdoc => Ok(rustdoc(job)),
-        Job::TestsLinux => Ok(Plan::run(
+        Job::TestsLinux | Job::TestsWindows => Ok(Plan::run(
             job,
             [Step::new("cargo").args(["test", "--workspace", "--exclude", "openlogi-desktop"])],
         )),

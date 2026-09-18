@@ -62,6 +62,7 @@ fn ci_yml_runs_what_this_runner_runs() {
         Job::Rustdoc,
         Job::TestsLinux,
         Job::TestsMacos,
+        Job::TestsWindows,
     ] {
         let host = *job.spec().hosts.first().expect("every job names a host");
         let plan = job.plan(&sh, host).expect("a plan");
@@ -164,10 +165,10 @@ fn matrix_leg_names_resolve() {
 }
 
 #[test]
-fn tests_names_both_test_jobs() {
+fn tests_names_every_test_job() {
     assert_eq!(
         Job::resolve("tests").as_deref(),
-        Some(&[Job::TestsLinux, Job::TestsMacos][..])
+        Some(&[Job::TestsLinux, Job::TestsMacos, Job::TestsWindows][..])
     );
 }
 
@@ -216,6 +217,7 @@ fn jobs_name_the_hosts_ci_gives_them() {
     let hosts = |job: Job| job.spec().hosts.to_vec();
     assert_eq!(hosts(Job::TestsLinux), vec![Host::Linux]);
     assert_eq!(hosts(Job::TestsMacos), vec![Host::Macos]);
+    assert_eq!(hosts(Job::TestsWindows), vec![Host::Windows]);
     // CI's msrv matrix is macos-latest + ubuntu-latest — there is no
     // Windows leg to reproduce.
     assert_eq!(hosts(Job::Msrv), vec![Host::Linux, Host::Macos]);
