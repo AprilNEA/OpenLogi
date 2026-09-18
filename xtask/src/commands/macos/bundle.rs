@@ -44,7 +44,7 @@ impl DistributionTarget {
 /// Build `OpenLogi.app` wearing `channel`'s identity, signing it with whatever
 /// local identity is available (dev) or leaving it unsigned (production).
 pub(crate) fn run(channel: Channel) -> Result<()> {
-    run_with_channel(channel, None, None)
+    build_bundle(channel, None, None)
 }
 
 /// Build the bundle that ships: always the production identity, signed with the
@@ -53,10 +53,10 @@ pub(crate) fn run_for_distribution(
     sign_identity: Option<&str>,
     target: Option<DistributionTarget>,
 ) -> Result<()> {
-    run_with_channel(Channel::Production, sign_identity, target)
+    build_bundle(Channel::Production, sign_identity, target)
 }
 
-fn run_with_channel(
+fn build_bundle(
     channel: Channel,
     sign_identity: Option<&str>,
     target: Option<DistributionTarget>,
