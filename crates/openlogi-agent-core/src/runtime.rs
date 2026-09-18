@@ -15,15 +15,13 @@ use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
 use openlogi_core::binding::{Action, Binding, ButtonId};
-use openlogi_hid::{CaptureChannelSlot, ChannelRegistry, DeviceIoGate};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use self::button::{
     ButtonInputHandle, ButtonRuntimeEvent, ButtonRuntimeOwner, EndReason, PressControl,
 };
 pub(crate) use self::button::{HidppSessionId, PressToken};
-use crate::hardware::{toggle_smartshift_in_background, write_dpi_in_background};
-use crate::receiver_access::ReceiverAccess;
+use crate::hardware::{DeviceAccess, toggle_smartshift_in_background, write_dpi_in_background};
 use crate::{DpiCycleState, DpiCycles};
 
 /// Application identity captured with a physical press and retained through
@@ -74,10 +72,7 @@ impl HeldShortcuts {
 #[derive(Clone)]
 struct ActionExecutor {
     dpi_cycle: Arc<RwLock<DpiCycles>>,
-    capture: CaptureChannelSlot,
-    registry: ChannelRegistry,
-    receiver_access: ReceiverAccess,
-    device_io: DeviceIoGate,
+    access: DeviceAccess,
     action_ring: tokio::sync::mpsc::UnboundedSender<Option<String>>,
 }
 
@@ -122,13 +117,11 @@ impl ActionExecutor {
                     .ok()
                     .and_then(|cycles| cycles.target_for(device_key));
                 info!("SmartShift toggle → flipping wheel mode");
-                toggle_smartshift_in_background(
-                    &self.capture,
-                    &self.registry,
-                    &self.receiver_access,
-                    &self.device_io,
-                    target,
-                );
+                if let Some(target) = target {
+                    toggle_smartshift_in_background(self.access.op(&target));
+                } else {
+                    debug!("no target device — SmartShift toggle skipped");
+                }
                 return;
             }
             // Browser navigation uses Safari's captured Accessibility target
@@ -159,14 +152,12 @@ impl ActionExecutor {
         };
         if let Some((dpi, target)) = next {
             info!(%dpi, "DPI action → writing to device");
-            write_dpi_in_background(
-                &self.capture,
-                &self.registry,
-                &self.receiver_access,
-                &self.device_io,
-                target,
-                dpi,
-            );
+            // No target: a dev environment without a real device.
+            if let Some(target) = target {
+                write_dpi_in_background(self.access.op(&target), dpi);
+            } else {
+                debug!(%dpi, "no target device — DPI write skipped");
+            }
         } else if matches!(action, Action::CycleDpiPresets | Action::SetDpiPreset(_)) {
             info!(
                 action = %action.label(),
@@ -249,18 +240,12 @@ impl ActionRuntime {
     /// Build the action executor and its source-independent button worker.
     pub fn new(
         dpi_cycle: Arc<RwLock<DpiCycles>>,
-        capture: CaptureChannelSlot,
-        registry: ChannelRegistry,
-        receiver_access: ReceiverAccess,
-        device_io: DeviceIoGate,
+        access: DeviceAccess,
         action_ring: tokio::sync::mpsc::UnboundedSender<Option<String>>,
     ) -> io::Result<Self> {
         let executor = ActionExecutor {
             dpi_cycle,
-            capture,
-            registry,
-            receiver_access,
-            device_io,
+            access,
             action_ring,
         };
         let mut button_handler = ButtonEventHandler::new(executor.clone());

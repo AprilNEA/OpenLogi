@@ -34,7 +34,7 @@ use crate::action_ring::ActionRingSessionSpec;
 use crate::capture_plan::{
     DeviceCapturePlan, SharedCapturePlans, hidpp_side_gesture_maps_for, plan_for_device,
 };
-use crate::hardware::{DeviceOp, HardwareContext};
+use crate::hardware::{DeviceAccess, DeviceOp, HardwareContext};
 use crate::observable::ObservableState;
 use crate::receiver_access::ReceiverAccess;
 use crate::runtime::hook::{HookMaps, SharedHookMaps};
@@ -120,32 +120,41 @@ impl SharedHandles {
         self.hardware.clone()
     }
 
-    /// Bind a device operation to `route` on the mouse/pointer capture
-    /// channel — the registry-confirmed capture channel or the exact current
-    /// inventory channel that every device write already resolves through.
+    /// Device access through the mouse/pointer capture channel — the
+    /// registry-confirmed capture channel or the exact current inventory
+    /// channel that every device write already resolves through.
     #[must_use]
-    pub fn device(&self, route: &DeviceRoute) -> DeviceOp<'_> {
-        DeviceOp::new(
-            &self.capture_channel,
-            &self.channel_registry,
-            &self.receiver_access,
-            &self.device_io,
-            route,
-        )
+    pub fn device_access(&self) -> DeviceAccess {
+        self.access_through(&self.capture_channel)
     }
 
-    /// Same, but against the keyboard capture channel — Fn-lock writes run on
+    /// Same, but through the keyboard capture channel — Fn-lock writes run on
     /// the keyboard's own capture session, not the mouse-oriented
     /// [`Self::capture_channel`].
     #[must_use]
-    pub fn keyboard_device(&self, route: &DeviceRoute) -> DeviceOp<'_> {
-        DeviceOp::new(
-            &self.keyboard_channel,
-            &self.channel_registry,
-            &self.receiver_access,
-            &self.device_io,
-            route,
-        )
+    pub fn keyboard_access(&self) -> DeviceAccess {
+        self.access_through(&self.keyboard_channel)
+    }
+
+    fn access_through(&self, channel: &CaptureChannelSlot) -> DeviceAccess {
+        DeviceAccess {
+            channel: channel.clone(),
+            registry: self.channel_registry.clone(),
+            receiver_access: self.receiver_access.clone(),
+            device_io: self.device_io.clone(),
+        }
+    }
+
+    /// Bind a device operation to `route` through [`Self::device_access`].
+    #[must_use]
+    pub fn device(&self, route: &DeviceRoute) -> DeviceOp {
+        self.device_access().op(route)
+    }
+
+    /// Bind a device operation to `route` through [`Self::keyboard_access`].
+    #[must_use]
+    pub fn keyboard_device(&self, route: &DeviceRoute) -> DeviceOp {
+        self.keyboard_access().op(route)
     }
 }
 

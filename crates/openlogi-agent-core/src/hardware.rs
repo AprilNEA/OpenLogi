@@ -70,46 +70,59 @@ fn choose_authoritative<T>(
     }
 }
 
-/// One device's HID++ write or read, bound to the agent's capture and
-/// inventory channels for `route`. Built via
-/// [`crate::orchestrator::SharedHandles::device`] or
-/// [`crate::orchestrator::SharedHandles::keyboard_device`] — the receiver-side
-/// counterpart of `openlogi_hid::write::with_route`'s "boilerplate-eater"
-/// pattern, applied to an already-open channel instead of a fresh one.
-pub struct DeviceOp<'a> {
-    capture: &'a CaptureChannelSlot,
-    registry: &'a ChannelRegistry,
-    receiver_access: &'a ReceiverAccess,
-    device_io: &'a DeviceIoGate,
-    route: DeviceRoute,
+/// The four handles every device read and write goes through: the capture
+/// session's channel slot, inventory's channel registry, the receiver lease
+/// and the host device-I/O gate. Cheap to clone; bind it to a device with
+/// [`Self::op`].
+#[derive(Clone)]
+pub struct DeviceAccess {
+    /// The capture session's open channel, preferred for as long as inventory
+    /// still publishes it.
+    pub channel: CaptureChannelSlot,
+    /// Exact-route channels owned and published by the inventory enumerator.
+    pub registry: ChannelRegistry,
+    /// Receiver access shared with HID++ sessions and pairing.
+    pub receiver_access: ReceiverAccess,
+    /// Host-lifecycle gate shared by every producer of proactive device I/O.
+    pub device_io: DeviceIoGate,
 }
 
-impl<'a> DeviceOp<'a> {
-    pub(crate) fn new(
-        capture: &'a CaptureChannelSlot,
-        registry: &'a ChannelRegistry,
-        receiver_access: &'a ReceiverAccess,
-        device_io: &'a DeviceIoGate,
-        route: &DeviceRoute,
-    ) -> Self {
-        Self {
-            capture,
-            registry,
-            receiver_access,
-            device_io,
+impl DeviceAccess {
+    /// Bind a device operation to `route`.
+    #[must_use]
+    pub fn op(&self, route: &DeviceRoute) -> DeviceOp {
+        DeviceOp {
+            access: self.clone(),
             route: route.clone(),
         }
     }
+}
 
+/// One device's HID++ write or read, bound to the agent's capture and
+/// inventory channels for `route`. Built via [`DeviceAccess::op`], usually
+/// through [`crate::orchestrator::SharedHandles::device`] or
+/// [`crate::orchestrator::SharedHandles::keyboard_device`] — the receiver-side
+/// counterpart of `openlogi_hid::write::with_route`'s "boilerplate-eater"
+/// pattern, applied to an already-open channel instead of a fresh one.
+pub struct DeviceOp {
+    access: DeviceAccess,
+    route: DeviceRoute,
+}
+
+impl DeviceOp {
     /// Resolve the authoritative channel without acquiring the receiver
     /// lease. Callers that manage their own lease/thread lifecycle across
     /// more than one write (the volatile-settings reapply sequence) resolve
     /// once up front through this instead of [`Self::run`]/[`Self::detach`].
     fn resolve(&self) -> Result<SharedChannel, WriteError> {
-        if !self.device_io.allows_io() {
+        if !self.access.device_io.allows_io() {
             return Err(WriteError::DeviceNotFound);
         }
-        authoritative_channel(Some(self.capture), self.registry, &self.route)
+        authoritative_channel(
+            Some(&self.access.channel),
+            &self.access.registry,
+            &self.route,
+        )
     }
 
     /// Lease the receiver, resolve the authoritative channel, then run `f`
@@ -130,10 +143,10 @@ impl<'a> DeviceOp<'a> {
         F: FnOnce(SharedChannel) -> Fut,
         Fut: Future<Output = Result<T, WriteError>>,
     {
-        if !self.device_io.allows_io() {
+        if !self.access.device_io.allows_io() {
             return Err(WriteError::DeviceNotFound);
         }
-        let _lease = self.receiver_access.acquire_for_io().await;
+        let _lease = self.access.receiver_access.acquire_for_io().await;
         let shared = self.resolve()?;
         timed(op, f(shared)).await
     }
@@ -145,10 +158,12 @@ impl<'a> DeviceOp<'a> {
         self,
         lighting: &Lighting,
     ) -> Result<openlogi_hid::lighting::LightingJob, WriteError> {
-        let capture = self.capture.clone();
-        let registry = self.registry.clone();
-        let receiver_access = self.receiver_access.clone();
-        let device_io = self.device_io.clone();
+        let DeviceAccess {
+            channel: capture,
+            registry,
+            receiver_access,
+            device_io,
+        } = self.access;
         let route = self.route.clone();
         let (r, g, b) = lighting_rgb(lighting);
         let write = openlogi_hid::write::LightingWrite {
@@ -224,8 +239,11 @@ impl<'a> DeviceOp<'a> {
             debug!(route = %self.route, label, "no inventory channel — write skipped");
             return;
         };
-        let receiver_access = self.receiver_access.clone();
-        let device_io = self.device_io.clone();
+        let DeviceAccess {
+            receiver_access,
+            device_io,
+            ..
+        } = self.access;
         std::thread::spawn(move || {
             let Some(rt) = one_shot_runtime(label) else {
                 return;
@@ -262,23 +280,13 @@ fn one_shot_runtime(label: &str) -> Option<tokio::runtime::Runtime> {
     }
 }
 
-/// Spawn an OS thread that toggles SmartShift (free ↔ ratchet) on the
-/// device at `target` via its current shared channel. Returns
-/// immediately; failures (incl. devices that expose neither `0x2111` nor
-/// the older `0x2110` SmartShift feature) are logged.
-pub fn toggle_smartshift_in_background(
-    capture: &CaptureChannelSlot,
-    registry: &ChannelRegistry,
-    receiver_access: &ReceiverAccess,
-    device_io: &DeviceIoGate,
-    target: Option<DeviceRoute>,
-) {
-    let Some(target) = target else {
-        debug!("no target device — SmartShift toggle skipped");
-        return;
-    };
-    let index = target.device_index();
-    DeviceOp::new(capture, registry, receiver_access, device_io, &target).spawn_write(
+/// Spawn an OS thread that toggles SmartShift (free ↔ ratchet) on `op`'s
+/// device via its current shared channel. Returns immediately; failures
+/// (incl. devices that expose neither `0x2111` nor the older `0x2110`
+/// SmartShift feature) are logged.
+pub fn toggle_smartshift_in_background(op: DeviceOp) {
+    let index = op.route.device_index();
+    op.spawn_write(
         "SmartShift toggle",
         |c| async move { openlogi_hid::toggle_smartshift_on(&c).await },
         move |result| match result {
@@ -296,7 +304,7 @@ pub fn toggle_smartshift_in_background(
 /// via [`openlogi_hid::set_fn_lock_on`]. Returns immediately; failures (incl.
 /// keyboards that expose neither `0x40a3` nor `0x40a2` fn inversion) are
 /// logged.
-pub fn write_fn_lock_in_background(op: DeviceOp<'_>, on: bool) {
+pub fn write_fn_lock_in_background(op: DeviceOp, on: bool) {
     let index = op.route.device_index();
     op.spawn_write(
         "Fn-lock write",
@@ -327,7 +335,7 @@ pub fn write_fn_lock_in_background(op: DeviceOp<'_>, on: bool) {
 /// other function here) because it only ever reads its fields — it never
 /// hands the operation itself to [`DeviceOp::run`] or [`DeviceOp::detach`].
 pub fn reapply_mouse_volatile_in_background(
-    op: &DeviceOp<'_>,
+    op: &DeviceOp,
     resolution: Option<ScrollResolution>,
     inverted: Option<bool>,
     dpi: Option<Dpi>,
@@ -337,8 +345,8 @@ pub fn reapply_mouse_volatile_in_background(
         debug!(route = %op.route, "no inventory channel — volatile reapply skipped");
         return;
     };
-    let receiver_access = op.receiver_access.clone();
-    let device_io = op.device_io.clone();
+    let receiver_access = op.access.receiver_access.clone();
+    let device_io = op.access.device_io.clone();
     let index = op.route.device_index();
     std::thread::spawn(move || {
         let Some(rt) = one_shot_runtime("volatile reapply") else {
@@ -442,24 +450,11 @@ fn log_wheel_result(
     }
 }
 
-/// Spawn an OS thread that writes `dpi` to the device at `target` via its
-/// current shared channel. Returns immediately; failures are logged.
-///
-/// `target == None` is a no-op (dev environment without a real device).
-pub fn write_dpi_in_background(
-    capture: &CaptureChannelSlot,
-    registry: &ChannelRegistry,
-    receiver_access: &ReceiverAccess,
-    device_io: &DeviceIoGate,
-    target: Option<DeviceRoute>,
-    dpi: Dpi,
-) {
-    let Some(target) = target else {
-        debug!(%dpi, "no target device — DPI write skipped");
-        return;
-    };
-    let index = target.device_index();
-    DeviceOp::new(capture, registry, receiver_access, device_io, &target).spawn_write(
+/// Spawn an OS thread that writes `dpi` to `op`'s device via its current
+/// shared channel. Returns immediately; failures are logged.
+pub fn write_dpi_in_background(op: DeviceOp, dpi: Dpi) {
+    let index = op.route.device_index();
+    op.spawn_write(
         "DPI write",
         move |c| async move { openlogi_hid::set_dpi_on(&c, dpi).await },
         move |result| match result {
@@ -491,7 +486,7 @@ enum ScrollWheelModeChange {
 /// must be set by the caller. Unsupported devices are expected and only logged
 /// at debug level.
 pub fn write_scroll_wheel_mode_in_background(
-    op: DeviceOp<'_>,
+    op: DeviceOp,
     resolution: Option<ScrollResolution>,
     inverted: Option<bool>,
 ) {
@@ -538,7 +533,7 @@ pub fn write_scroll_wheel_mode_in_background(
 /// lighting is off) and writes every key over HID++ via
 /// [`openlogi_hid::set_keyboard_color_on`]. A registry miss and write
 /// failures are logged, not surfaced.
-pub fn set_lighting_in_background(op: DeviceOp<'_>, lighting: &Lighting) {
+pub fn set_lighting_in_background(op: DeviceOp, lighting: &Lighting) {
     match op.lighting(lighting) {
         Ok(job) => job.detach(),
         Err(error) => warn!(?error, "could not start background lighting"),
@@ -577,6 +572,22 @@ mod tests {
 
     use super::*;
     use openlogi_hid::device_io_channel;
+
+    fn device_op(
+        capture: &CaptureChannelSlot,
+        registry: &ChannelRegistry,
+        receiver_access: &ReceiverAccess,
+        device_io: &DeviceIoGate,
+        route: &DeviceRoute,
+    ) -> DeviceOp {
+        DeviceAccess {
+            channel: capture.clone(),
+            registry: registry.clone(),
+            receiver_access: receiver_access.clone(),
+            device_io: device_io.clone(),
+        }
+        .op(route)
+    }
 
     #[test]
     fn current_capture_wins_without_consulting_the_registry_again() {
@@ -631,7 +642,7 @@ mod tests {
         let called = std::sync::Arc::new(AtomicBool::new(false));
         let called_for_closure = std::sync::Arc::clone(&called);
 
-        let result = DeviceOp::new(&capture, &registry, &receiver_access, &device_io, &route)
+        let result = device_op(&capture, &registry, &receiver_access, &device_io, &route)
             .run(HidppOperation::WriteDpi, move |_shared| {
                 called_for_closure.store(true, Ordering::SeqCst);
                 async move { Ok::<(), WriteError>(()) }
@@ -661,7 +672,7 @@ mod tests {
 
         let result = tokio::time::timeout(
             Duration::from_millis(10),
-            DeviceOp::new(&capture, &registry, &receiver_access, &device_io, &route).run(
+            device_op(&capture, &registry, &receiver_access, &device_io, &route).run(
                 HidppOperation::WriteDpi,
                 move |_shared| {
                     called_for_closure.store(true, Ordering::SeqCst);
@@ -691,7 +702,7 @@ mod tests {
         let called = std::sync::Arc::new(AtomicBool::new(false));
         let called_for_closure = std::sync::Arc::clone(&called);
 
-        DeviceOp::new(&capture, &registry, &receiver_access, &device_io, &route).detach(
+        device_op(&capture, &registry, &receiver_access, &device_io, &route).detach(
             "test write",
             move |_shared| {
                 called_for_closure.store(true, Ordering::SeqCst);

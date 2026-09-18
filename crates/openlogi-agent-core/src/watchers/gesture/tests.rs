@@ -162,10 +162,12 @@ async fn recovery_manager_waits_for_control_events_and_shutdown_between_retries(
         let (ring, _ring_rx) = mpsc::unbounded_channel();
         let mut actions = crate::runtime::ActionRuntime::new(
             Arc::default(),
-            capture.clone(),
-            registry.clone(),
-            access.clone(),
-            device_io.clone(),
+            crate::hardware::DeviceAccess {
+                channel: capture.clone(),
+                registry: registry.clone(),
+                receiver_access: access.clone(),
+                device_io: device_io.clone(),
+            },
             ring,
         )
         .unwrap();
