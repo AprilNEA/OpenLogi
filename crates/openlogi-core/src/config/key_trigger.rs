@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use super::FunctionKey;
 use crate::binding::Action;
 
 /// Detectable modifier state: what a keyboard trigger requires, and what the
@@ -40,7 +41,7 @@ impl KeyModifiers {
 /// A keyboard trigger: a keycode plus an optional modifier mask. The parse
 /// format is `[mod+]+key`, e.g. `"f1"`, `"shift+cmd+f5"`. Modifier names:
 /// `shift`, `control` (alias `ctrl`), `option` (alias `alt`), `command`
-/// (alias `cmd`). Key names: `esc`, `f1`..`f19` (macOS virtual keycodes).
+/// (alias `cmd`). Key names are [`FunctionKey`]'s: `esc`, `f1`..`f19`.
 ///
 /// Serializes as its string form (via `Display`) so it can be a TOML map key:
 /// `[keyboard.bindings]` keys are `"f1"`, `"shift+f2"`, etc.
@@ -67,40 +68,9 @@ impl std::fmt::Display for KeyTrigger {
                 separator = "+";
             }
         }
-        write!(
-            f,
-            "{separator}{}",
-            keycode_to_name(self.keycode).ok_or(std::fmt::Error)?
-        )
+        let key = FunctionKey::from_keycode(self.keycode).ok_or(std::fmt::Error)?;
+        write!(f, "{separator}{}", key.name())
     }
-}
-
-/// Reverse lookup for the parse table — needed so `Display` can render a
-/// parsed trigger back to its canonical name.
-fn keycode_to_name(code: u16) -> Option<&'static str> {
-    Some(match code {
-        0x35 => "esc",
-        0x7A => "f1",
-        0x78 => "f2",
-        0x63 => "f3",
-        0x76 => "f4",
-        0x60 => "f5",
-        0x61 => "f6",
-        0x62 => "f7",
-        0x64 => "f8",
-        0x65 => "f9",
-        0x6D => "f10",
-        0x67 => "f11",
-        0x6F => "f12",
-        0x69 => "f13",
-        0x6B => "f14",
-        0x71 => "f15",
-        0x6A => "f16",
-        0x40 => "f17",
-        0x4F => "f18",
-        0x50 => "f19",
-        _ => return None,
-    })
 }
 
 // String-form serde so KeyTrigger can be a TOML map key.
@@ -140,29 +110,10 @@ impl std::str::FromStr for KeyTrigger {
                 other => return Err(ParseTriggerError(format!("unknown modifier '{other}'"))),
             }
         }
-        let keycode = match key_part[0].to_ascii_lowercase().as_str() {
-            "esc" => 0x35,
-            "f1" => 0x7A,
-            "f2" => 0x78,
-            "f3" => 0x63,
-            "f4" => 0x76,
-            "f5" => 0x60,
-            "f6" => 0x61,
-            "f7" => 0x62,
-            "f8" => 0x64,
-            "f9" => 0x65,
-            "f10" => 0x6D,
-            "f11" => 0x67,
-            "f12" => 0x6F,
-            "f13" => 0x69,
-            "f14" => 0x6B,
-            "f15" => 0x71,
-            "f16" => 0x6A,
-            "f17" => 0x40,
-            "f18" => 0x4F,
-            "f19" => 0x50,
-            other => return Err(ParseTriggerError(format!("unknown key '{other}'"))),
-        };
+        let key = key_part[0].to_ascii_lowercase();
+        let keycode = FunctionKey::from_name(&key)
+            .ok_or_else(|| ParseTriggerError(format!("unknown key '{key}'")))?
+            .keycode();
         Ok(KeyTrigger {
             keycode,
             modifiers: mods,
