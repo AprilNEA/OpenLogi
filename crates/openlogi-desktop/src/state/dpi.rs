@@ -74,7 +74,7 @@ impl AppState {
             })
             .unwrap_or(DEFAULT_DPI)
     }
-    /// Seed the active panel from the latest query. Query generations fence
+    /// Seed the active panel from the latest query. Query flights fence
     /// disconnected routes; this selected-device check prevents an old
     /// gallery card from changing the shared visible value.
     pub(crate) fn apply_dpi_read(&mut self, key: &DeviceKey) {
@@ -132,7 +132,7 @@ impl AppState {
             );
         }
         if let Some(route) = route {
-            self.send_ipc(crate::services::ipc::Command::SetDpi(route, dpi));
+            self.send_ipc(crate::services::ipc::SetDpi { route, dpi });
         }
     }
 

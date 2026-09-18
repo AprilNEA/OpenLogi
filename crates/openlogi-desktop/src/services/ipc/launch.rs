@@ -90,7 +90,7 @@ fn launch_agent(path: &std::path::Path) -> std::io::Result<()> {
     // TCC responsible process; a direct exec attributes its Accessibility
     // check to the parent GUI and the grant flips with the launch path (#192).
     #[cfg(target_os = "macos")]
-    if let Some(bundle) = helper_bundle(path) {
+    if let Some(bundle) = openlogi_core::brand::helper_bundle_root(path) {
         let mut child = std::process::Command::new("/usr/bin/open")
             .arg("-g")
             .arg("-n")
@@ -163,13 +163,6 @@ fn current_uid() -> Option<u32> {
     std::fs::metadata(home).ok().map(|meta| meta.uid())
 }
 
-/// The `.app` root of a packaged helper binary, `None` for a bare dev binary.
-#[cfg(target_os = "macos")]
-fn helper_bundle(path: &std::path::Path) -> Option<&std::path::Path> {
-    let bundle = path.ancestors().nth(3)?;
-    (bundle.extension()? == "app").then_some(bundle)
-}
-
 /// Resolve the agent executable relative to the running GUI: a sibling in the
 /// cargo target dir (dev, and the flat Windows install layout), else the
 /// embedded `OpenLogi Agent.app` login-item helper (packaged macOS build).
@@ -178,22 +171,21 @@ fn agent_binary_path() -> Option<PathBuf> {
     let dir = exe.parent()?;
     // EXE_SUFFIX, or the Windows lookup misses `openlogi-agent.exe` and the
     // spawn retry — the only agent restart path there — silently never works.
-    let sibling = dir.join(format!("openlogi-agent{}", std::env::consts::EXE_SUFFIX));
+    let sibling = dir.join(format!(
+        "{}{}",
+        openlogi_core::brand::Helper::Agent.executable(),
+        std::env::consts::EXE_SUFFIX
+    ));
     if sibling.exists() {
         return Some(sibling);
     }
-    // Packaged: the login-item helper inside the outer bundle. Directories
-    // carry the display name (the privacy panes' filename fallback shows it);
-    // the last entry still finds pre-rename bundles.
+    // Packaged: the login-item helper inside the outer bundle, at every
+    // layout it has shipped under (`brand::Helper`).
     #[cfg(target_os = "macos")]
     {
-        let contents = dir.parent()?;
-        for relative in [
-            "Library/LoginItems/OpenLogi Agent Dev.app/Contents/MacOS/openlogi-agent",
-            "Library/LoginItems/OpenLogi Agent.app/Contents/MacOS/openlogi-agent",
-            "Library/LoginItems/OpenLogiAgent.app/Contents/MacOS/openlogi-agent",
-        ] {
-            let helper = contents.join(relative);
+        let app = dir.parent()?.parent()?;
+        for relative in openlogi_core::brand::Helper::Agent.executable_candidates() {
+            let helper = app.join(relative);
             if helper.exists() {
                 return Some(helper);
             }
@@ -202,38 +194,4 @@ fn agent_binary_path() -> Option<PathBuf> {
     }
     #[cfg(not(target_os = "macos"))]
     None
-}
-
-#[cfg(test)]
-#[cfg(target_os = "macos")]
-mod tests {
-    use std::path::Path;
-
-    use super::*;
-
-    #[test]
-    fn helper_bundle_resolves_only_the_packaged_layout() {
-        let packaged = Path::new(
-            "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app/Contents/MacOS/openlogi-agent",
-        );
-        assert_eq!(
-            helper_bundle(packaged),
-            Some(Path::new(
-                "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app"
-            ))
-        );
-        let dev = Path::new(
-            "/Users/me/OpenLogi/target/dev/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent Dev.app/Contents/MacOS/openlogi-agent",
-        );
-        assert_eq!(
-            helper_bundle(dev),
-            Some(Path::new(
-                "/Users/me/OpenLogi/target/dev/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent Dev.app"
-            ))
-        );
-        assert_eq!(
-            helper_bundle(Path::new("target/debug/openlogi-agent")),
-            None
-        );
-    }
 }

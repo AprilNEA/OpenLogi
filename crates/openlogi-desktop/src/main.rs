@@ -61,17 +61,18 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let _guard = match openlogi_core::single_instance::acquire("openlogi.lock") {
-        Ok(g) => g,
-        Err(openlogi_core::single_instance::InstanceError::AlreadyRunning { path }) => {
-            info!(
-                path = %path.display(),
-                "another OpenLogi instance is already running — exiting"
-            );
-            return Ok(());
-        }
-        Err(e) => return Err(anyhow::Error::from(e).context("single-instance check")),
-    };
+    let _guard =
+        match openlogi_core::single_instance::acquire(openlogi_core::single_instance::Role::Gui) {
+            Ok(g) => g,
+            Err(openlogi_core::single_instance::InstanceError::AlreadyRunning { path }) => {
+                info!(
+                    path = %path.display(),
+                    "another OpenLogi instance is already running — exiting"
+                );
+                return Ok(());
+            }
+            Err(e) => return Err(anyhow::Error::from(e).context("single-instance check")),
+        };
 
     let (initial_config, config_persistence) = match ConfigFile::load_or_default() {
         Ok((config, file)) => (config, ConfigPersistence::UserFile(file)),
@@ -176,7 +177,8 @@ fn init_tracing() {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
-            EnvFilter::try_from_env("OPENLOGI_LOG").unwrap_or_else(|_| EnvFilter::new("info")),
+            EnvFilter::try_from_env(openlogi_core::env::LOG)
+                .unwrap_or_else(|_| EnvFilter::new(openlogi_core::env::LOG_DEFAULT)),
         )
         .init();
 }

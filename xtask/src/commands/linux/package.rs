@@ -25,8 +25,8 @@ pub(crate) struct Args {
 const PACKAGED_BINS: [&str; 4] = [
     "openlogi",
     "openlogi-desktop",
-    "openlogi-overlay",
-    "openlogi-agent",
+    openlogi_core::brand::Helper::Overlay.executable(),
+    openlogi_core::brand::Helper::Agent.executable(),
 ];
 
 pub(crate) fn run(args: &Args) -> Result<()> {

@@ -8,6 +8,8 @@ paths:
   - ".editorconfig"
   - "rust-toolchain.toml"
   - "prek.toml"
+  - ".ast-grep/**"
+  - "sgconfig.yml"
 ---
 
 # Reproduce CI locally
@@ -51,6 +53,7 @@ warning that host clippy `-D warnings` does not surface still fails CI.
 |---|---|---|
 | `rustfmt` | `cargo fmt --all -- --check` | any |
 | `typos` | `typos --config .config/typos.toml .` | any (needs `typos`; included in the devenv shell) |
+| `ast-grep` | `ast-grep scan` | any (needs `ast-grep`; included in the devenv shell). The single-source-of-truth guards in `.ast-grep/rules/`, configured by `sgconfig.yml` |
 | `publish closure` | `cargo xtask release check-publish` | any |
 | `shell` | `git ls-files -z \| xargs -0 shfmt -f` piped into `xargs shellcheck` and `xargs shfmt -d` | any (needs `shellcheck` + `shfmt`; both are in the devenv shell) |
 | `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` | **Linux** is the CI job. Host clippy on macOS/Windows compiles a different `cfg` |
@@ -98,7 +101,8 @@ only on macOS CI (`cargo test -p openlogi-desktop i18n`).
 
 | Diff | Run |
 |---|---|
-| anything Rust | the local-gate tier selected in `AGENTS.md`; the pre-push hook always runs full-workspace Clippy and non-GUI rustdoc |
+| anything Rust | the local-gate tier selected in `AGENTS.md`; the pre-push hook always runs full-workspace Clippy and non-GUI rustdoc; `ast-grep` (the prek hook runs it over the staged files at commit) |
+| `.ast-grep/**`, `sgconfig.yml` | `ast-grep` — a new rule must flag nothing on the current tree and must flag the copy it was written against (check out the commit before the consolidation) |
 | crate publish flags, workspace path dependencies, `release-plz.toml` | `publish-closure` |
 | any `*.sh`, any file with a shell shebang, `.editorconfig` | `shell` (the prek hooks run the same two tools at commit) |
 | `#[cfg(target_os = …)]`, hook/inject/hid/camera platform files | `clippy-windows` proxy + the linux-musl recipe; say so if you cannot |

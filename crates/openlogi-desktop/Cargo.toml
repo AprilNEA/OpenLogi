@@ -17,7 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 appcatalog = "0.1.1"
-openlogi-core = { path = "../openlogi-core" }
+openlogi-core = { path = "../openlogi-core", features = ["worker"] }
 openlogi-ui = { path = "../openlogi-ui" }
 openlogi-camera = { path = "../openlogi-camera" }
 openlogi-hook = { path = "../openlogi-hook" }
@@ -72,10 +72,12 @@ objc2-service-management = { workspace = true, features = ["std", "SMAppService"
 workspace = true
 
 [dev-dependencies]
+openlogi-ipc = { path = "../openlogi-ipc", features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
 openlogi-device = { path = "../openlogi-device" }
 openlogi-fixture = { workspace = true }
 tempfile = "3.27.0"
+tokio = { workspace = true, features = ["test-util"] }
 
 [package.metadata.bundle]
 name = "OpenLogi"

@@ -142,6 +142,7 @@ pub(super) fn plan(job: Job, sh: &Shell, host: Host) -> Result<Plan> {
             [Step::new("cargo").args(["fmt", "--all", "--", "--check"])],
         )),
         Job::Typos => Ok(typos(job)),
+        Job::AstGrep => Ok(ast_grep(job)),
         Job::PublishClosure => Ok(Plan::run(
             job,
             [Step::new("cargo").args(["xtask", "release", "check-publish"])],
@@ -180,6 +181,15 @@ fn typos(job: Job) -> Plan {
         job,
         [Step::new("typos").args(["--config", ".config/typos.toml", "."])],
     )
+}
+
+/// The single-source-of-truth guards under `.ast-grep/rules`, over the whole
+/// tree; `sgconfig.yml` at the root names the rule directory.
+fn ast_grep(job: Job) -> Plan {
+    if !command_exists("ast-grep") {
+        return Plan::skip(job, "needs ast-grep (included in the devenv shell)");
+    }
+    Plan::run(job, [Step::new("ast-grep").args(["scan"])])
 }
 
 /// shellcheck and shfmt over every tracked shell script.
