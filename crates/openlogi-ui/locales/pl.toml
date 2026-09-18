@@ -232,6 +232,10 @@ scrolls_once_per_physical_ratchet_step = "Przewija raz na każdy fizyczny skok z
 high_resolution_scrolling_description = "Wykrywa drobniejsze ruchy między skokami zapadki."
 wheel_resolution_unsupported = "To urządzenie nie obsługuje sterowania rozdzielczością kółka."
 wheel_resolution_other_connection = "To urządzenie obsługuje rozdzielczość kółka przy innym rodzaju połączenia, ale nie przy tym."
+side_button_horizontal_scroll = "Przycisk boczny + kółko: przewijanie w poziomie"
+side_button_horizontal_scroll_description = "Przytrzymaj Wstecz lub Dalej i obróć główne kółko, aby przewijać w bok. Naciśnięcie bez przewijania nadal klika."
+side_button_hscroll_app_scope = "Dotyczy tylko %{app} — przełącznik edytuje ustawienie tej aplikacji."
+side_button_hscroll_use_device_default = "Użyj ustawienia urządzenia"
 smartshift = "SmartShift"
 
 [actions]

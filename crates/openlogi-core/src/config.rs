@@ -972,6 +972,83 @@ impl Config {
             .invert_scroll = invert;
     }
 
+    /// Whether holding a side button redirects the main wheel to horizontal
+    /// scroll (issue #1053). `false` for an unconfigured or absent device.
+    #[must_use]
+    pub fn side_button_horizontal_scroll(&self, device_key: &str) -> bool {
+        self.devices
+            .get(device_key)
+            .is_some_and(|d| d.side_button_horizontal_scroll)
+    }
+
+    /// Set the device default for hold-to-scroll-horizontally. The agent
+    /// reads this on the next `ReloadConfig` and arms it in the OS hook.
+    pub fn set_side_button_horizontal_scroll(&mut self, device_key: &str, enabled: bool) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .side_button_horizontal_scroll = enabled;
+    }
+
+    /// The effective hold-to-scroll-horizontally state for `device_key` while
+    /// `app` is frontmost: the per-app override when one is stored for it
+    /// (with the same `exe:` fallback as binding overlays), else the device
+    /// default. `None` app always resolves to the device default.
+    #[must_use]
+    pub fn effective_side_button_horizontal_scroll(
+        &self,
+        device_key: &str,
+        app: Option<&str>,
+    ) -> bool {
+        let Some(device) = self.devices.get(device_key) else {
+            return false;
+        };
+        if let Some(app) = app
+            && let Some(overridden) = app_overlay(&device.per_app_side_button_hscroll, app)
+        {
+            return *overridden;
+        }
+        device.side_button_horizontal_scroll
+    }
+
+    /// The explicit per-app hold-to-scroll-horizontally override `device_key`
+    /// stores under the exact key `app`, or `None` when the app inherits the
+    /// device default. Exact key, deliberately — same contract as
+    /// [`Self::per_app_overrides`].
+    #[must_use]
+    pub fn per_app_side_button_hscroll(&self, device_key: &str, app: &str) -> Option<bool> {
+        self.devices
+            .get(device_key)?
+            .per_app_side_button_hscroll
+            .get(app)
+            .copied()
+    }
+
+    /// Record a per-app hold-to-scroll-horizontally override. Creates the
+    /// device entry as needed; `None` removes the override so the app
+    /// inherits the device default again. No pruning pass is needed — the
+    /// map is flat, so removing the key removes the override entirely.
+    pub fn set_per_app_side_button_hscroll(
+        &mut self,
+        device_key: &str,
+        app: &str,
+        enabled: Option<bool>,
+    ) {
+        let map = &mut self
+            .devices
+            .entry(device_key.to_string())
+            .or_default()
+            .per_app_side_button_hscroll;
+        match enabled {
+            Some(value) => {
+                map.insert(app.to_string(), value);
+            }
+            None => {
+                map.remove(app);
+            }
+        }
+    }
+
     /// The configured wheel resolution for `device_key`, or `None` when
     /// OpenLogi should leave the device's current resolution unchanged.
     #[must_use]

@@ -6,7 +6,7 @@ use super::{
     pick_current, plan_reapply, reapply_targets, stable_id,
 };
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{Action, Binding, ButtonId};
+use openlogi_core::binding::{Action, Binding, ButtonId, LongPressBinding, default_binding};
 use openlogi_core::config::{
     Config, DeviceConfig, LightSettings, LinkConfig, ScrollResolution, VerticalScrollSensitivity,
 };
@@ -843,6 +843,96 @@ fn config_reload_publishes_scroll_preferences_without_restarting_the_hook() {
     assert_eq!(
         preferences.vertical_sensitivity(),
         VerticalScrollSensitivity::try_new(7).expect("valid sensitivity")
+    );
+}
+
+#[test]
+fn config_reload_publishes_side_button_hscroll_without_restarting_the_hook() {
+    use std::collections::BTreeMap;
+
+    let replay_map = |orch: &Orchestrator| {
+        orch.shared
+            .hook_maps
+            .read()
+            .expect("hook maps")
+            .side_button_hscroll
+            .clone()
+    };
+    let native_both = BTreeMap::from([
+        (ButtonId::Back, Action::MouseBack),
+        (ButtonId::Forward, Action::MouseForward),
+    ]);
+    let mut config = Config::default();
+    config.set_side_button_horizontal_scroll("a", true);
+    let mut orch = orchestrator(config);
+    orch.devices = vec![dev("a", 1, true)];
+    orch.rebuild();
+    assert_eq!(
+        replay_map(&orch),
+        native_both,
+        "device default on arms both native side buttons"
+    );
+
+    // A per-app override disarms the redirect for that app only.
+    let mut config = Config::default();
+    config.set_side_button_horizontal_scroll("a", true);
+    config.set_per_app_side_button_hscroll("a", "com.example.editor", Some(false));
+    orch.reload_config(config);
+    assert_eq!(
+        replay_map(&orch),
+        native_both,
+        "no app in front — device default applies"
+    );
+    orch.set_current_app(Some(ForegroundApp::unnamed("com.example.editor".into())));
+    assert!(
+        replay_map(&orch).is_empty(),
+        "per-app override off disarms the redirect"
+    );
+    orch.set_current_app(None);
+    assert_eq!(
+        replay_map(&orch),
+        native_both,
+        "leaving the app restores the device default"
+    );
+
+    // A rebound side button redirects while keeping its remap: the release
+    // replays the bound action instead of the native click.
+    let mut config = Config::default();
+    config.set_side_button_horizontal_scroll("a", true);
+    config.set_binding("a", ButtonId::Back, Binding::Single(Action::Copy));
+    config.set_binding(
+        "a",
+        ButtonId::Forward,
+        Binding::Single(Action::PreviousDesktop),
+    );
+    orch.reload_config(config);
+    assert_eq!(
+        replay_map(&orch),
+        BTreeMap::from([
+            (ButtonId::Back, Action::Copy),
+            (ButtonId::Forward, Action::PreviousDesktop),
+        ]),
+        "rebound buttons redirect with their bound replay actions"
+    );
+
+    // Hold-semantics bindings can never replay as one shot: with both side
+    // buttons long-press bound, nothing arms.
+    let mut config = Config::default();
+    config.set_side_button_horizontal_scroll("a", true);
+    for button in [ButtonId::Back, ButtonId::Forward] {
+        config.set_binding(
+            "a",
+            button,
+            Binding::LongPress(LongPressBinding::new(
+                default_binding(button),
+                Action::MissionControl,
+            )),
+        );
+    }
+    orch.reload_config(config);
+    assert!(
+        replay_map(&orch).is_empty(),
+        "long-press side buttons keep their normal path"
     );
 }
 

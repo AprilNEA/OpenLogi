@@ -200,7 +200,7 @@ fn hidpp_edges_and_pulses_retain_their_press_time_targets() {
     let safari = ActionDispatchTarget::SafariProcess(417);
 
     input
-        .try_hidpp_down(&session, ButtonId::Back, None, safari)
+        .try_hidpp_down(&session, ButtonId::Back, None, None, safari)
         .expect("HID++ down should be queued");
     let ButtonRuntimeEvent::Started(started) = recv_event(&received) else {
         panic!("HID++ down should start a lifecycle");
@@ -230,6 +230,52 @@ fn hidpp_edges_and_pulses_retain_their_press_time_targets() {
 }
 
 #[test]
+fn hidpp_hscroll_down_parks_and_quick_release_replays_through_the_worker() {
+    let (sent, received) = mpsc::channel();
+    let mut owner = ButtonRuntimeOwner::spawn(move |event| {
+        sent.send(event)
+            .expect("test receiver should stay connected");
+    })
+    .expect("button worker should start");
+    let input = owner.input();
+    let session = HidppSessionId::with_epoch("mouse-a", 7);
+
+    input
+        .try_hidpp_down(
+            &session,
+            ButtonId::Back,
+            None,
+            Some(HscrollParkSpec {
+                replay: Action::PreviousDesktop,
+                source_ids: Some((0x046d, 0xb034)),
+            }),
+            ActionDispatchTarget::Keyboard,
+        )
+        .expect("parked down should be queued");
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Started(_)
+    ));
+    // No Triggered follows the down edge: the press is parked, not fired.
+    assert!(input.try_hidpp_up(&session, ButtonId::Back));
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Triggered {
+            action: Action::PreviousDesktop,
+            ..
+        }
+    ));
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Ended {
+            reason: EndReason::Released,
+            ..
+        }
+    ));
+    assert!(owner.shutdown());
+}
+
+#[test]
 fn source_cancellation_invalidates_queued_gesture_work() {
     let (sent, received) = mpsc::channel();
     let mut owner = ButtonRuntimeOwner::spawn(move |event| {
@@ -243,6 +289,7 @@ fn source_cancellation_invalidates_queued_gesture_work() {
         .try_hidpp_down(
             &session,
             ButtonId::Back,
+            None,
             None,
             ActionDispatchTarget::Keyboard,
         )
@@ -346,7 +393,13 @@ fn worker_drops_input_queued_before_generation_invalidation() {
             .expect("test receiver should stay connected");
     };
 
-    run_worker(&queued, &shutdown, &generation, &mut emit);
+    run_worker(
+        &queued,
+        &shutdown,
+        &generation,
+        Arc::new(RwLock::new(Vec::new())),
+        &mut emit,
+    );
 
     assert!(
         received.try_recv().is_err(),
@@ -505,6 +558,224 @@ fn cancellation_never_fires_a_pending_short_or_long_action() {
             ..
         }
     ));
+}
+
+fn hscroll_parked_press(replay: Action) -> ActivePress {
+    ActivePress {
+        token: PressToken::hook_for_test(1, ButtonId::Back),
+        behavior: PressBehavior::HscrollParked {
+            spec: HscrollParkSpec {
+                replay,
+                source_ids: None,
+            },
+            deadline: Instant::now() + HSCROLL_TAP_THRESHOLD,
+        },
+        target: ActionDispatchTarget::Keyboard,
+    }
+}
+
+fn release_at(
+    state: &mut ButtonState,
+    key: &PressKey,
+    released_at: Instant,
+) -> Vec<ButtonRuntimeEvent> {
+    let mut events = Vec::new();
+    process_input(
+        state,
+        ButtonInput::Up {
+            key: key.clone(),
+            released_at,
+        },
+        &mut |event| events.push(event),
+    );
+    events
+}
+
+#[test]
+fn hscroll_snapshot_tracks_parks_and_nothing_else() {
+    let sink: SharedHidppHscroll = Arc::new(RwLock::new(Vec::new()));
+    let mut state = ButtonState::default();
+    state.set_hscroll_sink(Arc::clone(&sink));
+    assert!(sink.read().expect("snapshot").is_empty());
+
+    // An ordinary lifecycle never appears in the snapshot.
+    let immediate = hook_press(1, ButtonId::Back);
+    state.press(immediate.clone());
+    assert!(sink.read().expect("snapshot").is_empty());
+
+    // A parked HID++ press appears with its device and button.
+    let session = HidppSessionId::with_epoch("mouse-a", 7);
+    let parked = ActivePress {
+        token: PressToken {
+            id: PressId(2),
+            key: PressKey::new(ButtonSource::Hidpp(session), ButtonId::Forward),
+            generation: 0,
+        },
+        behavior: PressBehavior::HscrollParked {
+            spec: HscrollParkSpec {
+                replay: Action::NextDesktop,
+                source_ids: Some((0x046d, 0xb034)),
+            },
+            deadline: Instant::now() + HSCROLL_TAP_THRESHOLD,
+        },
+        target: ActionDispatchTarget::Keyboard,
+    };
+    state.press(parked.clone());
+    assert_eq!(
+        *sink.read().expect("snapshot"),
+        vec![HidppHscrollPark {
+            device_key: Arc::from("mouse-a"),
+            button: ButtonId::Forward,
+            source_ids: Some((0x046d, 0xb034)),
+        }]
+    );
+
+    // Release clears it; unrelated lifecycles never leak in.
+    state.release(&parked.token.key);
+    assert!(sink.read().expect("snapshot").is_empty());
+    state.release(&immediate.token.key);
+    let _ = state.cancel_all();
+    assert!(sink.read().expect("snapshot").is_empty());
+}
+
+#[test]
+fn hscroll_snapshot_clears_on_source_cancel() {
+    let sink: SharedHidppHscroll = Arc::new(RwLock::new(Vec::new()));
+    let mut state = ButtonState::default();
+    state.set_hscroll_sink(Arc::clone(&sink));
+    let session = HidppSessionId::with_epoch("mouse-a", 7);
+    state.press(ActivePress {
+        token: PressToken {
+            id: PressId(3),
+            key: PressKey::new(ButtonSource::Hidpp(session.clone()), ButtonId::Back),
+            generation: 0,
+        },
+        behavior: PressBehavior::HscrollParked {
+            spec: HscrollParkSpec {
+                replay: Action::PreviousDesktop,
+                source_ids: None,
+            },
+            deadline: Instant::now() + HSCROLL_TAP_THRESHOLD,
+        },
+        target: ActionDispatchTarget::Keyboard,
+    });
+    assert_eq!(sink.read().expect("snapshot").len(), 1);
+
+    let _ = state.cancel_source(&ButtonSource::Hidpp(session));
+    assert!(sink.read().expect("snapshot").is_empty());
+}
+
+#[test]
+fn hscroll_park_fires_nothing_on_down_and_replays_on_a_quick_release() {
+    let mut state = ButtonState::default();
+    let press = hscroll_parked_press(Action::PreviousDesktop);
+    let mut events = Vec::new();
+    process_input(&mut state, ButtonInput::Down(press.clone()), &mut |event| {
+        events.push(event);
+    });
+    // Down starts the lifecycle but fires no action — the press is parked.
+    assert_eq!(events.len(), 1);
+    assert!(matches!(events[0], ButtonRuntimeEvent::Started(_)));
+
+    let events = release_at(&mut state, &press.token.key, Instant::now());
+    assert_eq!(events.len(), 2);
+    assert!(matches!(
+        &events[0],
+        ButtonRuntimeEvent::Triggered {
+            action: Action::PreviousDesktop,
+            ..
+        }
+    ));
+    assert!(matches!(
+        &events[1],
+        ButtonRuntimeEvent::Ended {
+            reason: EndReason::Released,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn hscroll_park_swallows_a_release_past_the_deadline() {
+    let mut state = ButtonState::default();
+    let press = hscroll_parked_press(Action::PreviousDesktop);
+    state.press(press.clone());
+
+    let events = release_at(
+        &mut state,
+        &press.token.key,
+        Instant::now() + HSCROLL_TAP_THRESHOLD + Duration::from_secs(1),
+    );
+    assert_eq!(events.len(), 1);
+    assert!(matches!(
+        &events[0],
+        ButtonRuntimeEvent::Ended {
+            reason: EndReason::Released,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn hscroll_park_sets_no_timer_wakeup() {
+    let press = hscroll_parked_press(Action::Copy);
+    assert_eq!(press.behavior.deadline(), None);
+    assert_eq!(press.start_action(), None);
+
+    // Even far in the future the parked press never joins the due set, so
+    // the worker never wakes for it — the release edge decides alone.
+    let mut state = ButtonState::default();
+    state.press(press);
+    assert!(
+        state
+            .due_long_presses(Instant::now() + Duration::from_secs(3600))
+            .is_empty()
+    );
+    assert!(!state.has_due_long_press(Instant::now() + Duration::from_secs(3600)));
+}
+
+#[test]
+fn hscroll_park_cancels_silently_like_any_lifecycle() {
+    let mut state = ButtonState::default();
+    state.press(hscroll_parked_press(Action::Copy));
+    let mut events = Vec::new();
+    emit_canceled(
+        state.cancel_all(),
+        CancelReason::Invalidated,
+        &mut |event| events.push(event),
+    );
+    assert_eq!(events.len(), 1);
+    assert!(matches!(
+        &events[0],
+        ButtonRuntimeEvent::Ended {
+            reason: EndReason::Canceled(CancelReason::Invalidated),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn hscroll_parked_down_replaces_a_stale_park_without_replaying() {
+    // A duplicate down (lost release) cancels the old park silently, then
+    // parks the fresh press — the same recovery contract as every lifecycle.
+    let mut state = ButtonState::default();
+    let old = hscroll_parked_press(Action::Copy);
+    state.press(old.clone());
+    let mut events = Vec::new();
+    process_input(
+        &mut state,
+        ButtonInput::Down(hscroll_parked_press(Action::Copy)),
+        &mut |event| events.push(event),
+    );
+    assert_eq!(events.len(), 2);
+    assert!(matches!(
+        &events[0],
+        ButtonRuntimeEvent::Ended {
+            reason: EndReason::Canceled(CancelReason::RepeatedDown),
+            ..
+        }
+    ));
+    assert!(matches!(events[1], ButtonRuntimeEvent::Started(_)));
 }
 
 #[test]
@@ -681,10 +952,16 @@ fn continuous_commands_cannot_starve_a_long_press_deadline() {
     let worker_generation = Arc::clone(&generation);
     let (sent, received) = mpsc::channel();
     let worker = thread::spawn(move || {
-        run_worker(&queued, &shutdown_rx, &worker_generation, &mut |event| {
-            sent.send(event)
-                .expect("test receiver should stay connected");
-        });
+        run_worker(
+            &queued,
+            &shutdown_rx,
+            &worker_generation,
+            Arc::new(RwLock::new(Vec::new())),
+            &mut |event| {
+                sent.send(event)
+                    .expect("test receiver should stay connected");
+            },
+        );
     });
 
     let wait_until = pressed_at + LONG_PRESS_THRESHOLD + Duration::from_millis(250);

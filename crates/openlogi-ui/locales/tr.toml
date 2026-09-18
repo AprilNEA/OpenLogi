@@ -232,6 +232,10 @@ scrolls_once_per_physical_ratchet_step = "Her fiziksel kademe adımında bir kez
 high_resolution_scrolling_description = "Kademeler arasındaki daha ince hareketi algılar."
 wheel_resolution_unsupported = "Bu cihaz tekerlek çözünürlüğü denetimini desteklemiyor."
 wheel_resolution_other_connection = "Bu cihaz diğer bağlantısında tekerlek çözünürlüğünü destekliyor, ancak bu bağlantıda desteklemiyor."
+side_button_horizontal_scroll = "Yan düğme + tekerlek yatay kaydırır"
+side_button_horizontal_scroll_description = "Yana kaydırmak için Geri veya İleri düğmesini basılı tutun ve ana tekerleği çevirin. Kaydırmadan yapılan basma yine de tıklar."
+side_button_hscroll_app_scope = "Yalnızca %{app} için geçerli — düğme bu uygulamanın ayarını düzenler."
+side_button_hscroll_use_device_default = "Cihaz varsayılanını kullan"
 smartshift = "SmartShift"
 
 [actions]

@@ -232,6 +232,10 @@ scrolls_once_per_physical_ratchet_step = "每个物理棘轮刻度滚动一次�
 high_resolution_scrolling_description = "检测棘轮刻度之间更细微的移动。"
 wheel_resolution_unsupported = "此设备不支持滚轮分辨率控制。"
 wheel_resolution_other_connection = "此设备通过其他连接时支持滚轮分辨率控制，但当前连接不支持。"
+side_button_horizontal_scroll = "侧键 + 滚轮实现水平滚动"
+side_button_horizontal_scroll_description = "按住“后退”或“前进”键并滚动主滚轮，即可横向滚动。不滚动直接点按仍为普通点击。"
+side_button_hscroll_app_scope = "仅适用于%{app}——此开关编辑该应用的重写设置。"
+side_button_hscroll_use_device_default = "使用设备默认值"
 smartshift = "SmartShift"
 
 [actions]

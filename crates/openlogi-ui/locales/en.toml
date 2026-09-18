@@ -232,6 +232,10 @@ scrolls_once_per_physical_ratchet_step = "Scrolls once per physical ratchet step
 high_resolution_scrolling_description = "Detects finer movement between ratchet steps."
 wheel_resolution_unsupported = "This device does not support wheel resolution control."
 wheel_resolution_other_connection = "This device supports wheel resolution on its other connection, but not this one."
+side_button_horizontal_scroll = "Side button + wheel scrolls horizontally"
+side_button_horizontal_scroll_description = "Hold Back or Forward and roll the main wheel to scroll sideways. A press without scrolling still clicks."
+side_button_hscroll_app_scope = "Applies to %{app} only — the toggle edits this app's override."
+side_button_hscroll_use_device_default = "Use device default"
 smartshift = "SmartShift"
 
 [actions]

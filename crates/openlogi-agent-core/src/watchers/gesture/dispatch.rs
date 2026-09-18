@@ -14,8 +14,7 @@ use self::wheel::{ScrollScale, WheelAccumulators, WheelOutput, WheelRotation};
 use super::GestureOutputs;
 use crate::capture_plan::DispatchPlan;
 use crate::runtime::hook::SharedHookMaps;
-use crate::runtime::{HidppSessionId, PressToken};
-
+use crate::runtime::{HidppSessionId, HscrollParkSpec, PressToken};
 /// Effective thumb-wheel configuration whose continuity is tied to one
 /// dispatch plan. A binding or sensitivity update clears accumulated state
 /// without cycling an unchanged HID++ diversion.
@@ -101,6 +100,18 @@ pub(super) struct InputDispatcher {
     gesture_presses: GesturePresses,
 }
 
+/// The hold-to-scroll-horizontally park spec for `button`, or `None` when
+/// the redirect is disarmed for it (see
+/// [`DispatchPlan::side_button_hscroll`]). The spec carries the route's
+/// VID:PID so the OS hook can attribute unattributed wheel events to this
+/// device.
+fn hscroll_park_spec(plan: &DispatchPlan, button: ButtonId) -> Option<HscrollParkSpec> {
+    Some(HscrollParkSpec {
+        replay: plan.side_button_hscroll.get(&button)?.clone(),
+        source_ids: plan.park_source_ids,
+    })
+}
+
 impl InputDispatcher {
     /// Build a dispatcher for session-owned capture-plan snapshots.
     pub(super) fn new(outputs: GestureOutputs) -> Self {
@@ -177,6 +188,12 @@ impl InputDispatcher {
                 let is_gesture = plan.gesture_bindings.contains_key(&button)
                     || plan.side_gesture_bindings.contains_key(&button);
                 let binding = (!is_gesture).then(|| plan.bindings.get(&button)).flatten();
+                // Hold-to-scroll-horizontally (issue #1053): an armed side
+                // button parks instead of dispatching — a quick release
+                // replays, a hold swallows. Gesture-owned buttons never park.
+                let hscroll = (!is_gesture)
+                    .then(|| hscroll_park_spec(plan, button))
+                    .flatten();
                 if let Some(binding) = binding {
                     debug!(key, ?button, action = %binding.click_action().label(), "HID++ button → binding");
                 } else {
@@ -185,7 +202,7 @@ impl InputDispatcher {
                 let press = self
                     .outputs
                     .actions
-                    .try_hidpp_button_down(session, button, binding);
+                    .try_hidpp_button_down(session, button, binding, hscroll);
                 if is_gesture {
                     if let Some(press) = press {
                         self.gesture_presses.start(session, button, press);

@@ -63,6 +63,21 @@ Common device fields are:
 
 - `custom_name`, `enabled`, `dpi`, `dpi_presets`, thumb-wheel sensitivity,
   scroll inversion, and scroll resolution
+- `side_button_horizontal_scroll`: hold Back or Forward and roll the main
+  wheel to scroll horizontally (mice without a thumb wheel, e.g. Signature
+  M650L, whose firmware already converts the gesture natively — the option
+  additionally suppresses the accidental side-button click). Works with
+  remapped side buttons too. Where the OS hook sees the press, a clean
+  press+release fires the bound action (on release, not press) while any
+  horizontal motion swallows it; where the button stays HID++-diverted, a
+  quick tap replays the bound action on release and a hold past ~500 ms
+  swallows it, and unattributed wheel ticks redirect while exactly one such
+  hold is open. Buttons stay diverted wherever the hook cannot attribute
+  their presses — notably Bluetooth-direct on macOS, whose devices expose
+  a product name without a vendor id, defeating the Logitech source check. Long-press pairs, held
+  shortcuts, and gesture-mode buttons keep their existing behavior.
+  `per_app_side_button_hscroll` holds sparse per-app true/false overrides
+  under the same keys as `per_app_bindings`
 - `bindings`: a button maps to one action, an independent short/long action
   pair, or a gesture-direction map.
   `Thumbwheel` is the thumb wheel's capacitive tap — it has no GUI control and

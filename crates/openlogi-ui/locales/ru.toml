@@ -232,6 +232,10 @@ scrolls_once_per_physical_ratchet_step = "Прокручивает один ра
 high_resolution_scrolling_description = "Обнаруживает более мелкие движения между шагами трещотки."
 wheel_resolution_unsupported = "Это устройство не поддерживает управление разрешением колеса."
 wheel_resolution_other_connection = "Устройство поддерживает настройку разрешения колеса при другом типе подключения, но не при текущем."
+side_button_horizontal_scroll = "Боковая кнопка + колесо: горизонтальная прокрутка"
+side_button_horizontal_scroll_description = "Удерживайте «Назад» или «Вперёд» и вращайте основное колесо для прокрутки вбок. Нажатие без прокрутки по-прежнему работает как клик."
+side_button_hscroll_app_scope = "Применяется только к %{app} — переключатель изменяет настройку этого приложения."
+side_button_hscroll_use_device_default = "Использовать настройку устройства"
 smartshift = "SmartShift"
 
 [actions]

@@ -11,6 +11,7 @@ use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
+use std::sync::{PoisonError, RwLock};
 use std::thread::{self, JoinHandle, ThreadId};
 use std::time::{Duration, Instant};
 
@@ -23,6 +24,14 @@ use super::ActionDispatchTarget;
 const EVENT_QUEUE_CAPACITY: usize = 128;
 /// Bounds how long graceful process exit waits for terminal handlers.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
+/// Tap-vs-hold boundary for a parked hold-to-scroll-horizontally press
+/// (issue #1053): a diverted side button released before this long replays
+/// its bound action; a longer hold was a scroll modifier and swallows the
+/// release. Matches [`LONG_PRESS_THRESHOLD`] — a scroll-modifier hold is
+/// inherently long, a click is a tap — and applies only while the redirect
+/// is armed, so untoggled devices never feel it. Flagged for maintainer
+/// tuning in the #1053 discussion.
+const HSCROLL_TAP_THRESHOLD: Duration = Duration::from_millis(500);
 /// Lets the worker observe the out-of-band shutdown channel even while idle.
 const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
@@ -186,6 +195,17 @@ enum PressBehavior {
         long: Action,
         deadline: Instant,
     },
+    /// A diverted side button parked while hold-to-scroll-horizontally is
+    /// armed (issue #1053): fires nothing on down, replays `replay` when
+    /// released before `deadline`, swallows a longer hold. Decided at up
+    /// time only, so — unlike long-press — it sets no timer wakeup. Covers
+    /// the transports the OS hook cannot see (notably Bluetooth-direct on
+    /// macOS, whose senderless events fail the hook's source policy): the
+    /// HID++ capture session owns both edges there.
+    HscrollParked {
+        spec: HscrollParkSpec,
+        deadline: Instant,
+    },
     /// The long action fired; release must not also fire the short action.
     LongPressFired,
 }
@@ -204,24 +224,53 @@ impl PressBehavior {
         }
     }
 
+    /// Park a diverted side-button press while the redirect is armed: no
+    /// down-edge dispatch; the up edge replays `replay` (tap) or swallows.
+    fn hscroll_parked(spec: HscrollParkSpec, parked_at: Instant) -> Self {
+        Self::HscrollParked {
+            spec,
+            deadline: parked_at + HSCROLL_TAP_THRESHOLD,
+        }
+    }
+
     fn deadline(&self) -> Option<Instant> {
         match self {
             Self::LongPressPending { deadline, .. } => Some(*deadline),
-            Self::LifecycleOnly | Self::Immediate(_) | Self::LongPressFired => None,
+            Self::LifecycleOnly
+            | Self::Immediate(_)
+            | Self::LongPressFired
+            | Self::HscrollParked { .. } => None,
         }
     }
 
     fn start_action(&self) -> Option<&Action> {
         match self {
             Self::Immediate(action) => Some(action),
-            Self::LifecycleOnly | Self::LongPressPending { .. } | Self::LongPressFired => None,
+            Self::LifecycleOnly
+            | Self::LongPressPending { .. }
+            | Self::LongPressFired
+            | Self::HscrollParked { .. } => None,
         }
     }
 
-    fn release_action(&self) -> Option<&Action> {
+    fn release_action(&self, now: Instant) -> Option<&Action> {
         match self {
             Self::LongPressPending { short, .. } => Some(short),
+            // A tap replays; a hold past the deadline was a scroll modifier.
+            Self::HscrollParked { spec, deadline } => (now < *deadline).then_some(&spec.replay),
             Self::LifecycleOnly | Self::Immediate(_) | Self::LongPressFired => None,
+        }
+    }
+
+    /// VID:PID of the parked device's direct route, or `None` — the
+    /// attribution anchor the OS hook compares unattributed wheel against.
+    fn park_source_ids(&self) -> Option<(u16, u16)> {
+        match self {
+            Self::HscrollParked { spec, .. } => spec.source_ids,
+            Self::LifecycleOnly
+            | Self::Immediate(_)
+            | Self::LongPressPending { .. }
+            | Self::LongPressFired => None,
         }
     }
 
@@ -259,8 +308,8 @@ impl ActivePress {
         self.target
     }
 
-    fn release_action(&self) -> Option<&Action> {
-        self.behavior.release_action()
+    fn release_action(&self, now: Instant) -> Option<&Action> {
+        self.behavior.release_action(now)
     }
 
     fn fire_long(&mut self, now: Instant) -> Option<Action> {
@@ -327,19 +376,94 @@ struct ShutdownRequest {
     done: mpsc::SyncSender<()>,
 }
 
+/// One open hold-to-scroll-horizontally park on the HID++ path: a diverted
+/// side button held as a scroll modifier while armed (issue #1053).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HidppHscrollPark {
+    /// Hardware capture incarnation that owns the held button.
+    pub device_key: Arc<str>,
+    /// The held side button.
+    pub button: ButtonId,
+    /// VID:PID of the parked device's direct route, when its route is
+    /// direct — the attribution anchor the OS hook compares unattributed
+    /// wheel events against. `None` for receiver routes (their wheel
+    /// senders name the receiver, not the mouse).
+    pub source_ids: Option<(u16, u16)>,
+}
+
+/// Read view of the worker's open HID++ redirect parks, shared with the OS
+/// hook so unattributed wheel events (notably Bluetooth-direct on macOS) can
+/// redirect while exactly one park is open. The worker is the sole writer;
+/// the hook reads with `try_read` and fails open to passthrough on
+/// contention, so the freeze-sensitive callback never blocks.
+pub type SharedHidppHscroll = Arc<RwLock<Vec<HidppHscrollPark>>>;
+
+/// Hold-to-scroll-horizontally park spec carried with one diverted side
+/// button's down edge (issue #1053).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct HscrollParkSpec {
+    /// The click action a clean (wheel-less) release replays.
+    pub(crate) replay: Action,
+    /// VID:PID of the parked device's direct route, when the route is
+    /// direct — see [`HidppHscrollPark::source_ids`].
+    pub(crate) source_ids: Option<(u16, u16)>,
+}
+
 /// Sole owner of active press records.
 #[derive(Default)]
 struct ButtonState {
     active: HashMap<PressKey, ActivePress>,
+    /// Sink publishing the open-park snapshot; `None` (the default) keeps
+    /// state-level tests hermetic without a shared handle.
+    hscroll_sink: Option<SharedHidppHscroll>,
 }
 
 impl ButtonState {
+    /// Attach the snapshot sink the worker publishes open parks into.
+    /// Called once by the runtime owner before the worker loop starts.
+    fn set_hscroll_sink(&mut self, sink: SharedHidppHscroll) {
+        self.hscroll_sink = Some(sink);
+        self.publish_hscroll_parks();
+    }
+
+    /// Publish the currently open HID++ redirect parks, if a sink is
+    /// attached. Called after every mutation that can change park
+    /// membership, so readers never observe a stale set longer than one
+    /// worker event.
+    fn publish_hscroll_parks(&self) {
+        let Some(sink) = self.hscroll_sink.as_ref() else {
+            return;
+        };
+        let mut guard = sink.write().unwrap_or_else(PoisonError::into_inner);
+        guard.clear();
+        guard.extend(self.active.values().filter_map(|press| {
+            if !matches!(press.behavior, PressBehavior::HscrollParked { .. }) {
+                return None;
+            }
+            let ButtonSource::Hidpp(session) = &press.token.key.source else {
+                return None;
+            };
+            let PressControl::Button(button) = press.token.key.control else {
+                return None;
+            };
+            Some(HidppHscrollPark {
+                device_key: Arc::clone(&session.device_key),
+                button,
+                source_ids: press.behavior.park_source_ids(),
+            })
+        }));
+    }
+
     fn press(&mut self, press: ActivePress) -> Option<ActivePress> {
-        self.active.insert(press.token.key.clone(), press)
+        let stale = self.active.insert(press.token.key.clone(), press);
+        self.publish_hscroll_parks();
+        stale
     }
 
     fn release(&mut self, key: &PressKey) -> Option<ActivePress> {
-        self.active.remove(key)
+        let press = self.active.remove(key);
+        self.publish_hscroll_parks();
+        press
     }
 
     fn active(&self, token: &PressToken) -> Option<&ActivePress> {
@@ -350,7 +474,9 @@ impl ButtonState {
 
     fn cancel_press(&mut self, token: &PressToken) -> Option<ActivePress> {
         self.active(token)?;
-        self.active.remove(&token.key)
+        let press = self.active.remove(&token.key);
+        self.publish_hscroll_parks();
+        press
     }
 
     fn cancel_source(&mut self, source: &ButtonSource) -> Vec<ActivePress> {
@@ -362,7 +488,9 @@ impl ButtonState {
     }
 
     fn cancel_all(&mut self) -> Vec<ActivePress> {
-        self.active.drain().map(|(_, press)| press).collect()
+        let presses: Vec<ActivePress> = self.active.drain().map(|(_, press)| press).collect();
+        self.publish_hscroll_parks();
+        presses
     }
 
     fn fire_selected_long_presses(
@@ -409,9 +537,12 @@ impl ButtonState {
             .filter(|key| matches(key))
             .cloned()
             .collect();
-        keys.into_iter()
+        let presses: Vec<ActivePress> = keys
+            .into_iter()
             .filter_map(|key| self.active.remove(&key))
-            .collect()
+            .collect();
+        self.publish_hscroll_parks();
+        presses
     }
 }
 
@@ -422,9 +553,16 @@ pub(crate) struct ButtonInputHandle {
     generation: Arc<AtomicU64>,
     accepting: Arc<AtomicBool>,
     next_press: Arc<AtomicU64>,
+    hscroll_parks: SharedHidppHscroll,
 }
 
 impl ButtonInputHandle {
+    /// Read view of the worker's open HID++ redirect parks, shared with the
+    /// OS hook (see [`SharedHidppHscroll`]).
+    pub(crate) fn hidpp_hscroll_parks(&self) -> SharedHidppHscroll {
+        Arc::clone(&self.hscroll_parks)
+    }
+
     #[cfg(test)]
     pub(crate) fn try_hook_down(
         &self,
@@ -440,7 +578,7 @@ impl ButtonInputHandle {
         binding: Option<&Binding>,
         target: ActionDispatchTarget,
     ) -> Option<PressToken> {
-        self.try_down(ButtonSource::current_hook(), button, binding, target)
+        self.try_down(ButtonSource::current_hook(), button, binding, None, target)
     }
 
     pub(crate) fn try_hook_up(&self, button: ButtonId) -> bool {
@@ -489,12 +627,14 @@ impl ButtonInputHandle {
         session: &HidppSessionId,
         button: ButtonId,
         binding: Option<&Binding>,
+        hscroll: Option<HscrollParkSpec>,
         target: ActionDispatchTarget,
     ) -> Option<PressToken> {
         self.try_down(
             ButtonSource::Hidpp(session.clone()),
             button,
             binding,
+            hscroll,
             target,
         )
     }
@@ -554,15 +694,16 @@ impl ButtonInputHandle {
         source: ButtonSource,
         button: ButtonId,
         binding: Option<&Binding>,
+        hscroll: Option<HscrollParkSpec>,
         target: ActionDispatchTarget,
     ) -> Option<PressToken> {
         let generation = self.generation.load(Ordering::Acquire);
-        let press = self.new_press(
-            PressKey::new(source, button),
-            PressBehavior::new(binding, Instant::now()),
-            generation,
-            target,
-        );
+        let now = Instant::now();
+        let behavior = match hscroll {
+            Some(spec) => PressBehavior::hscroll_parked(spec, now),
+            None => PressBehavior::new(binding, now),
+        };
+        let press = self.new_press(PressKey::new(source, button), behavior, generation, target);
         let token = press.token.clone();
         self.try_input(generation, ButtonInput::Down(press))
             .then_some(token)
@@ -639,15 +780,25 @@ impl ButtonRuntimeOwner {
         let (events, event_rx) = mpsc::sync_channel(EVENT_QUEUE_CAPACITY);
         let (shutdown, shutdown_rx) = mpsc::channel();
         let generation = Arc::new(AtomicU64::new(0));
+        let hscroll_parks: SharedHidppHscroll = Arc::new(RwLock::new(Vec::new()));
         let input = ButtonInputHandle {
             events,
             generation: Arc::clone(&generation),
             accepting: Arc::new(AtomicBool::new(true)),
             next_press: Arc::new(AtomicU64::new(1)),
+            hscroll_parks: Arc::clone(&hscroll_parks),
         };
         let worker = thread::Builder::new()
             .name("openlogi-buttons".into())
-            .spawn(move || run_worker(&event_rx, &shutdown_rx, &generation, &mut on_event))?;
+            .spawn(move || {
+                run_worker(
+                    &event_rx,
+                    &shutdown_rx,
+                    &generation,
+                    hscroll_parks,
+                    &mut on_event,
+                );
+            })?;
         Ok(Self {
             input,
             shutdown,
@@ -697,9 +848,11 @@ fn run_worker(
     events: &mpsc::Receiver<ButtonCommand>,
     shutdown: &mpsc::Receiver<ShutdownRequest>,
     shared_generation: &AtomicU64,
+    hscroll_sink: SharedHidppHscroll,
     emit: &mut impl FnMut(ButtonRuntimeEvent),
 ) {
     let mut state = ButtonState::default();
+    state.set_hscroll_sink(hscroll_sink);
     let mut generation = shared_generation.load(Ordering::Acquire);
     loop {
         if finish_shutdown_if_requested(shutdown, &mut state, emit) {
@@ -958,7 +1111,7 @@ fn process_input(
                         action,
                     });
                 }
-                emit_released(press, emit);
+                emit_released(press, released_at, emit);
             }
         }
         ButtonInput::Pulse(press) => {
@@ -970,7 +1123,7 @@ fn process_input(
             }
             emit(ButtonRuntimeEvent::Started(press.clone()));
             if let Some(press) = state.release(&press.token.key) {
-                emit_released(press, emit);
+                emit_released(press, Instant::now(), emit);
             }
         }
         ButtonInput::TriggerWhilePressed { token, action } => {
@@ -992,8 +1145,12 @@ fn emit_selected_long_presses(
     }
 }
 
-fn emit_released(press: ActivePress, emit: &mut impl FnMut(ButtonRuntimeEvent)) {
-    if let Some(action) = press.release_action().cloned() {
+fn emit_released(
+    press: ActivePress,
+    released_at: Instant,
+    emit: &mut impl FnMut(ButtonRuntimeEvent),
+) {
+    if let Some(action) = press.release_action(released_at).cloned() {
         emit(ButtonRuntimeEvent::Triggered {
             press: press.clone(),
             action,

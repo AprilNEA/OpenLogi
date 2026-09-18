@@ -369,6 +369,16 @@ struct ScrollingFacts {
     inversion_supported: bool,
     resolution: Option<openlogi_core::config::ScrollResolution>,
     hires: HiresWheel,
+    /// The effective hold-to-scroll-horizontally state (device default or the
+    /// open app profile's override). Host-side only, so — unlike inversion —
+    /// it needs no capability gate.
+    hscroll: bool,
+    /// The open app profile's explicit override, when one is stored. `Some`
+    /// while an app scope is open and overriding; `None` for the device
+    /// default (or no scope).
+    hscroll_override: Option<bool>,
+    /// Display name of the app scope the toggle currently edits, if any.
+    hscroll_scope: Option<String>,
 }
 
 /// Where the device offers hi-res wheel control.
@@ -392,6 +402,9 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
         inversion_supported,
         resolution,
         hires,
+        hscroll,
+        hscroll_override,
+        hscroll_scope,
     } = AppState::try_read(cx).map_or_else(ScrollingFacts::default, |state| ScrollingFacts {
         inverted: state.current_invert_scroll(),
         inversion_supported: state.current_scroll_inversion_supported(),
@@ -403,46 +416,11 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
         } else {
             HiresWheel::Nowhere
         },
+        hscroll: state.current_side_button_hscroll(),
+        hscroll_override: state.current_side_button_hscroll_override(),
+        hscroll_scope: state.side_button_hscroll_scope_name(),
     });
-    let inversion_description = if inversion_supported {
-        tr!("pointer.scroll_direction_description")
-    } else {
-        tr!("pointer.scroll_inversion_unsupported")
-    };
-    let inversion_row = h_flex()
-        .justify_between()
-        .items_center()
-        .gap_4()
-        .child(
-            v_flex()
-                .child(
-                    div()
-                        .text_body()
-                        .text_color(pal.text_primary)
-                        .child(tr!("pointer.invert_scroll_direction")),
-                )
-                .child(
-                    div()
-                        .text_caption()
-                        .text_color(pal.text_muted)
-                        .child(inversion_description),
-                ),
-        )
-        .child(
-            Toggle::new("invert-scroll-toggle")
-                .selected(inverted)
-                .disabled(!inversion_supported)
-                .label((!inversion_supported).then(|| tr!("common.unavailable")))
-                .on_change(|inverted, _window, cx| {
-                    AppState::update(cx, |state, cx| {
-                        let key = state.current_record().map(DeviceRecord::device_key);
-                        state.commit_invert_scroll(*inverted);
-                        if let Some(key) = key {
-                            cx.emit(StateEvent::DeviceConfigChanged(key));
-                        }
-                    });
-                }),
-        );
+    let inversion_row = scroll_inversion_row(pal, inverted, inversion_supported);
     let resolution_description = match hires {
         HiresWheel::Here => match resolution {
             None => tr!("pointer.wheel_resolution_device_default_description"),
@@ -480,10 +458,130 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
     PanelCard::new(
         tr!("pointer.scrolling"),
         Icon::empty().path("action-icons/mouse.svg"),
-        v_flex().gap_4().child(inversion_row).child(resolution_row),
+        v_flex()
+            .gap_4()
+            .child(inversion_row)
+            .child(resolution_row)
+            .child(side_button_hscroll_row(
+                pal,
+                hscroll,
+                hscroll_override,
+                hscroll_scope.as_deref(),
+            )),
     )
 }
 
+/// Scroll-inversion row: the toggle plus its support-dependent description.
+/// Extracted so `scrolling_card` stays under the line-count lint; the row
+/// itself is unchanged behavior.
+fn scroll_inversion_row(
+    pal: Palette,
+    inverted: bool,
+    inversion_supported: bool,
+) -> impl IntoElement {
+    let description = if inversion_supported {
+        tr!("pointer.scroll_direction_description")
+    } else {
+        tr!("pointer.scroll_inversion_unsupported")
+    };
+    h_flex()
+        .justify_between()
+        .items_center()
+        .gap_4()
+        .child(
+            v_flex()
+                .child(
+                    div()
+                        .text_body()
+                        .text_color(pal.text_primary)
+                        .child(tr!("pointer.invert_scroll_direction")),
+                )
+                .child(
+                    div()
+                        .text_caption()
+                        .text_color(pal.text_muted)
+                        .child(description),
+                ),
+        )
+        .child(
+            Toggle::new("invert-scroll-toggle")
+                .selected(inverted)
+                .disabled(!inversion_supported)
+                .label((!inversion_supported).then(|| tr!("common.unavailable")))
+                .on_change(|inverted, _window, cx| {
+                    AppState::update(cx, |state, cx| {
+                        let key = state.current_record().map(DeviceRecord::device_key);
+                        state.commit_invert_scroll(*inverted);
+                        if let Some(key) = key {
+                            cx.emit(StateEvent::DeviceConfigChanged(key));
+                        }
+                    });
+                }),
+        )
+}
+
+/// Hold-to-scroll-horizontally row (issue #1053): when an app profile scope is
+/// open (chosen on the Buttons tab), the toggle edits that app's override and
+/// offers a reset back to the device default; otherwise it edits the device
+/// default directly.
+fn side_button_hscroll_row(
+    pal: Palette,
+    hscroll: bool,
+    hscroll_override: Option<bool>,
+    hscroll_scope: Option<&str>,
+) -> impl IntoElement {
+    let description = match hscroll_scope {
+        Some(app) => tr!("pointer.side_button_hscroll_app_scope", app => app.to_string()),
+        None => tr!("pointer.side_button_horizontal_scroll_description"),
+    };
+    h_flex()
+        .justify_between()
+        .items_center()
+        .gap_4()
+        .child(
+            v_flex()
+                .child(
+                    div()
+                        .text_body()
+                        .text_color(pal.text_primary)
+                        .child(tr!("pointer.side_button_horizontal_scroll")),
+                )
+                .child(
+                    div()
+                        .text_caption()
+                        .text_color(pal.text_muted)
+                        .child(description),
+                )
+                .when_some(hscroll_override, |this, _| {
+                    this.child(
+                        Button::new("side-button-hscroll-reset")
+                            .label(tr!("pointer.side_button_hscroll_use_device_default"))
+                            .on_click(|_event, _window, cx| {
+                                AppState::update(cx, |state, cx| {
+                                    let key = state.current_record().map(DeviceRecord::device_key);
+                                    state.clear_side_button_hscroll_override();
+                                    if let Some(key) = key {
+                                        cx.emit(StateEvent::DeviceConfigChanged(key));
+                                    }
+                                });
+                            }),
+                    )
+                }),
+        )
+        .child(
+            Toggle::new("side-button-hscroll-toggle")
+                .selected(hscroll)
+                .on_change(|enabled, _window, cx| {
+                    AppState::update(cx, |state, cx| {
+                        let key = state.current_record().map(DeviceRecord::device_key);
+                        state.commit_side_button_hscroll(*enabled);
+                        if let Some(key) = key {
+                            cx.emit(StateEvent::DeviceConfigChanged(key));
+                        }
+                    });
+                }),
+        )
+}
 fn wheel_resolution_control(selected: Option<ScrollResolution>, enabled: bool) -> impl IntoElement {
     let values = [
         None,

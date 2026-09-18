@@ -232,6 +232,10 @@ scrolls_once_per_physical_ratchet_step = "Rullar en gång per fysiskt spärrsteg
 high_resolution_scrolling_description = "Upptäcker finare rörelser mellan spärrstegen."
 wheel_resolution_unsupported = "Den här enheten stöder inte styrning av hjulupplösning."
 wheel_resolution_other_connection = "Enheten stöder hjulupplösning via den andra anslutningen, men inte denna."
+side_button_horizontal_scroll = "Sidoknapp + hjul: vågrät rullning"
+side_button_horizontal_scroll_description = "Håll Bakåt eller Framåt intryckt och rulla huvudhjulet för att rulla sidledes. Ett tryck utan rullning klickar fortfarande."
+side_button_hscroll_app_scope = "Gäller endast %{app} — reglaget redigerar den här appens inställning."
+side_button_hscroll_use_device_default = "Använd enhetsstandard"
 smartshift = "SmartShift"
 
 [actions]

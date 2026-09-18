@@ -460,6 +460,7 @@ impl Running {
             self.inputs.dispatcher.clone(),
             self.inputs.scroll_input.clone(),
             Arc::clone(&self.event_monitor),
+            self.inputs.dispatcher.hidpp_hscroll_parks(),
         )
     }
 

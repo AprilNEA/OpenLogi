@@ -232,6 +232,10 @@ scrolls_once_per_physical_ratchet_step = "Scorre una volta per ogni scatto fisic
 high_resolution_scrolling_description = "Rileva movimenti più fini tra gli scatti."
 wheel_resolution_unsupported = "Questo dispositivo non supporta il controllo della risoluzione della rotellina."
 wheel_resolution_other_connection = "Il dispositivo supporta la risoluzione della rotellina con l'altra connessione, ma non con questa."
+side_button_horizontal_scroll = "Pulsante laterale + rotella: scorrimento orizzontale"
+side_button_horizontal_scroll_description = "Tieni premuto Indietro o Avanti e ruota la rotella principale per scorrere lateralmente. Una pressione senza scorrimento fa comunque clic."
+side_button_hscroll_app_scope = "Si applica solo a %{app}: l'interruttore modifica l'impostazione di questa app."
+side_button_hscroll_use_device_default = "Usa l'impostazione del dispositivo"
 smartshift = "SmartShift"
 
 [actions]

@@ -232,6 +232,10 @@ scrolls_once_per_physical_ratchet_step = "Desloca uma vez por cada passo físico
 high_resolution_scrolling_description = "Deteta movimentos mais finos entre os passos da catraca."
 wheel_resolution_unsupported = "Este dispositivo não suporta o controlo da resolução da roda."
 wheel_resolution_other_connection = "O dispositivo suporta a resolução da roda na outra ligação, mas não nesta."
+side_button_horizontal_scroll = "Botão lateral + roda: deslocamento horizontal"
+side_button_horizontal_scroll_description = "Mantenha Retroceder ou Avançar premido e rode a roda principal para deslocar lateralmente. Uma pressão sem deslocamento continua a clicar."
+side_button_hscroll_app_scope = "Aplica-se apenas a %{app} — o interruptor edita a definição desta app."
+side_button_hscroll_use_device_default = "Usar a predefinição do dispositivo"
 smartshift = "SmartShift"
 
 [actions]

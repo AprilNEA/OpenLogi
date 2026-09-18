@@ -258,6 +258,24 @@ pub struct DeviceConfig {
     /// current resolution unmanaged and omits the field from `config.toml`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scroll_resolution: Option<ScrollResolution>,
+    /// Hold-to-scroll-horizontally (issue #1053): while either side button
+    /// (Back/Forward) is held, the OS hook reinterprets main-wheel vertical
+    /// ticks as horizontal scroll — the Options+ behavior for mice without a
+    /// thumb wheel (e.g. Signature M650L, MX Anywhere 3). A press+release with
+    /// no wheel motion still fires the button's own click; the click is only
+    /// swallowed when a wheel tick actually redirected. `false` (default) is
+    /// omitted from `config.toml`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub side_button_horizontal_scroll: bool,
+    /// Per-application overrides of
+    /// [`Self::side_button_horizontal_scroll`], keyed by the same bundle
+    /// identifier space as [`Self::per_app_bindings`]. A present entry wins
+    /// over the device default for that app; anything not listed inherits it.
+    /// Unlike `per_app_bindings` the value is a plain toggle, not an action —
+    /// a profile never redefines *which* buttons redirect, only whether the
+    /// hold gesture is armed there.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub per_app_side_button_hscroll: BTreeMap<String, bool>,
     /// Physical config keys of pointing devices that follow this keyboard's
     /// host switch channel. The relationship is keyboard-initiated: pressing
     /// one of this device's host keys switches every listed target first, then
@@ -368,6 +386,8 @@ impl Default for DeviceConfig {
             thumbwheel_sensitivity: None,
             invert_scroll: false,
             scroll_resolution: None,
+            side_button_horizontal_scroll: false,
+            per_app_side_button_hscroll: BTreeMap::new(),
             host_switch_targets: Vec::new(),
             fn_lock: None,
         }
@@ -487,6 +507,10 @@ struct RawDeviceConfig {
     #[serde(default)]
     scroll_resolution: Option<ScrollResolution>,
     #[serde(default)]
+    side_button_horizontal_scroll: bool,
+    #[serde(default)]
+    per_app_side_button_hscroll: BTreeMap<String, bool>,
+    #[serde(default)]
     host_switch_targets: Vec<String>,
     #[serde(default)]
     fn_lock: Option<bool>,
@@ -548,6 +572,8 @@ impl From<RawDeviceConfig> for DeviceConfig {
             thumbwheel_sensitivity: raw.thumbwheel_sensitivity,
             invert_scroll: raw.invert_scroll,
             scroll_resolution: raw.scroll_resolution,
+            side_button_horizontal_scroll: raw.side_button_horizontal_scroll,
+            per_app_side_button_hscroll: raw.per_app_side_button_hscroll,
             host_switch_targets: raw.host_switch_targets,
             fn_lock: raw.fn_lock,
         }

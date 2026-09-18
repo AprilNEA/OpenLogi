@@ -232,6 +232,10 @@ scrolls_once_per_physical_ratchet_step = "Scrollt einmal pro physischer Rasterst
 high_resolution_scrolling_description = "Erkennt feinere Bewegungen zwischen den Rasterstufen."
 wheel_resolution_unsupported = "Dieses Gerät unterstützt keine Steuerung der Mausradauflösung."
 wheel_resolution_other_connection = "Dieses Gerät unterstützt die Mausradauflösung über seine andere Verbindung, aber nicht über diese."
+side_button_horizontal_scroll = "Seitliche Taste + Rad scrollt horizontal"
+side_button_horizontal_scroll_description = "Halte Zurück oder Weiter gedrückt und drehe das Hauptrad, um seitlich zu scrollen. Ein Druck ohne Scrollen klickt weiterhin."
+side_button_hscroll_app_scope = "Gilt nur für %{app} — der Schalter bearbeitet den Wert dieser App."
+side_button_hscroll_use_device_default = "Gerätestandard verwenden"
 smartshift = "SmartShift"
 
 [actions]

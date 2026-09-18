@@ -178,7 +178,7 @@ fn dispatch_input(
             } else {
                 debug!(?button, "keyboard key with no binding — ignored");
             }
-            dispatcher.try_hidpp_button_down(session, button, binding);
+            dispatcher.try_hidpp_button_down(session, button, binding, None);
         }
         CapturedInput::ButtonUp(button) => {
             dispatcher.try_hidpp_button_up(session, button);

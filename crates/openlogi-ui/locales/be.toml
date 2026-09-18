@@ -232,6 +232,10 @@ scrolls_once_per_physical_ratchet_step = "Прагортвае адзін раз
 high_resolution_scrolling_description = "Выяўляе драбнейшыя рухі паміж крокамі кола."
 wheel_resolution_unsupported = "Гэта прылада не падтрымлівае кіраванне раздзяляльнасцю кола."
 wheel_resolution_other_connection = "Гэта прылада падтрымлівае раздзяляльнасць кола на іншым падключэнні, але не на гэтым."
+side_button_horizontal_scroll = "Бакавая кнопка + кола: гарызантальная пракрутка"
+side_button_horizontal_scroll_description = "Утрымлівайце «Назад» або «Наперад» і круціце асноўнае кола, каб пракручваць убок. Націск без пракруткі па-ранейшаму спрацоўвае як клік."
+side_button_hscroll_app_scope = "Тычыцца толькі %{app} — пераключальнік змяняе наладу гэтай праграмы."
+side_button_hscroll_use_device_default = "Выкарыстаць наладу прылады"
 smartshift = "SmartShift"
 
 [actions]

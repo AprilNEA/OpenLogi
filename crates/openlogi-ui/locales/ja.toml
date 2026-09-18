@@ -232,6 +232,10 @@ scrolls_once_per_physical_ratchet_step = "物理的なラチェット1段ごと�
 high_resolution_scrolling_description = "ラチェットの段間にある細かな動きを検出します。"
 wheel_resolution_unsupported = "このデバイスはホイール解像度の制御に対応していません。"
 wheel_resolution_other_connection = "別の接続方式ではホイール解像度に対応していますが、現在の接続では利用できません。"
+side_button_horizontal_scroll = "サイドボタン + ホイールで水平スクロール"
+side_button_horizontal_scroll_description = "「戻る」または「進む」を押しながらメインホイールを回すと横にスクロールします。スクロールせずに押した場合は通常のクリックになります。"
+side_button_hscroll_app_scope = "%{app} にのみ適用 — この切替はこのアプリの上書きを編集します。"
+side_button_hscroll_use_device_default = "デバイスの既定値を使う"
 smartshift = "SmartShift"
 
 [actions]

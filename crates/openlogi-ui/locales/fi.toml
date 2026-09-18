@@ -232,6 +232,10 @@ scrolls_once_per_physical_ratchet_step = "Vierittää kerran fyysistä pykälä�
 high_resolution_scrolling_description = "Tunnistaa hienovaraisemman liikkeen pykälien välillä."
 wheel_resolution_unsupported = "Tämä laite ei tue vierityspyörän tarkkuuden hallintaa."
 wheel_resolution_other_connection = "Laite tukee rullan tarkkuutta toisella yhteydellään, mutta ei tällä."
+side_button_horizontal_scroll = "Sivupainike + rulla: vaakavieritys"
+side_button_horizontal_scroll_description = "Pidä Edellinen tai Seuraava painettuna ja vieritä pääpyörää vierittääksesi sivuttain. Painallus ilman vieritystä napsauttaa silti."
+side_button_hscroll_app_scope = "Koskee vain %{app} — kytkin muokkaa tämän sovelluksen asetusta."
+side_button_hscroll_use_device_default = "Käytä laitteen oletusta"
 smartshift = "SmartShift"
 
 [actions]

@@ -232,6 +232,10 @@ scrolls_once_per_physical_ratchet_step = "Scrolt één keer per fysieke ratelsta
 high_resolution_scrolling_description = "Detecteert fijnere bewegingen tussen ratelstappen."
 wheel_resolution_unsupported = "Dit apparaat ondersteunt geen regeling van de wielresolutie."
 wheel_resolution_other_connection = "Dit apparaat ondersteunt wielresolutie via de andere verbinding, maar niet via deze."
+side_button_horizontal_scroll = "Zijknop + wiel: horizontaal scrollen"
+side_button_horizontal_scroll_description = "Houd Vorige of Volgende ingedrukt en rol het hoofdwiel om zijwaarts te scrollen. Een klik zonder scrollen klikt nog steeds."
+side_button_hscroll_app_scope = "Geldt alleen voor %{app} — de schakelaar bewerkt de instelling van deze app."
+side_button_hscroll_use_device_default = "Apparaatstandaard gebruiken"
 smartshift = "SmartShift"
 
 [actions]

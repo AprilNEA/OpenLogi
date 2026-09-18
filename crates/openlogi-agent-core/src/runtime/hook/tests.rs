@@ -259,12 +259,19 @@ fn safari_target_never_relaxes_device_isolation() {
         if source.is_none() && !cfg!(target_os = "macos") {
             continue;
         }
+        let (actions, _queued) = mpsc::sync_channel(4);
         for id in [ButtonId::Back, ButtonId::Forward] {
             for pressed in [true, false] {
                 assert_eq!(
-                    handle_button(id, pressed, source.as_ref(), &hooks, &dispatcher, || {
-                        ActionDispatchTarget::SafariProcess(417)
-                    }),
+                    handle_button(
+                        id,
+                        pressed,
+                        source.as_ref(),
+                        &hooks,
+                        &dispatcher,
+                        &actions,
+                        || { ActionDispatchTarget::SafariProcess(417) }
+                    ),
                     EventDisposition::PassThrough
                 );
             }
@@ -380,6 +387,426 @@ fn long_press_never_passes_through_as_a_native_click() {
         Action::MissionControl,
     ));
     assert!(!binding_is_native_click(ButtonId::Back, &binding));
+}
+
+/// Clear the thread-local side-button hold so redirect tests stay hermetic
+/// no matter which pooled test thread they land on.
+fn clear_hscroll_hold() {
+    HSCROLL.with_borrow_mut(|hold| *hold = None);
+}
+
+fn logitech_device() -> EventDevice {
+    EventDevice {
+        vendor_id: Some(openlogi_hook::LOGITECH_VENDOR_ID),
+        product_name: Some("Logitech Signature M650L".into()),
+        ..EventDevice::default()
+    }
+}
+
+#[test]
+fn side_button_replay_lookup_serves_only_side_buttons() {
+    let maps = HookMaps {
+        side_button_hscroll: BTreeMap::from([
+            (ButtonId::Back, Action::MouseBack),
+            (ButtonId::Forward, Action::Copy),
+            // A malformed snapshot must never hijack the middle button.
+            (ButtonId::MiddleClick, Action::Copy),
+        ]),
+        ..HookMaps::default()
+    };
+    assert_eq!(
+        hscroll_replay_action(&maps, ButtonId::Back),
+        Some(Action::MouseBack)
+    );
+    assert_eq!(
+        hscroll_replay_action(&maps, ButtonId::Forward),
+        Some(Action::Copy)
+    );
+    assert_eq!(hscroll_replay_action(&maps, ButtonId::MiddleClick), None);
+
+    let disarmed = HookMaps::default();
+    assert_eq!(hscroll_replay_action(&disarmed, ButtonId::Back), None);
+    assert_eq!(hscroll_replay_action(&disarmed, ButtonId::Forward), None);
+}
+
+#[test]
+fn redirect_conversion_needs_an_open_hold_and_pure_vertical_ticks() {
+    use openlogi_core::scroll::ScrollDelta;
+
+    clear_hscroll_hold();
+    assert_eq!(
+        hscroll_redirect_delta(ScrollDelta::wheel_ticks(0.0, 1.0)),
+        None
+    );
+
+    HSCROLL.with_borrow_mut(|hold| {
+        *hold = Some(HScrollHold {
+            button: ButtonId::Back,
+            click: Action::MouseBack,
+            scrolled: false,
+            target: ActionDispatchTarget::Keyboard,
+        });
+    });
+    // Wheel-up maps to scroll-right; wheel-down to scroll-left. The polarity
+    // is MUST-VERIFY on hardware (issue #1053).
+    assert_eq!(
+        hscroll_redirect_delta(ScrollDelta::wheel_ticks(0.0, 1.0)),
+        Some(ScrollDelta::wheel_ticks(1.0, 0.0))
+    );
+    assert_eq!(
+        hscroll_redirect_delta(ScrollDelta::wheel_ticks(0.0, -2.0)),
+        Some(ScrollDelta::wheel_ticks(-2.0, 0.0))
+    );
+    // Native horizontal, mixed two-axis, and pixel-precise input keep their
+    // normal paths — horizontal is never swallowed.
+    assert_eq!(
+        hscroll_redirect_delta(ScrollDelta::wheel_ticks(1.0, 0.0)),
+        None
+    );
+    assert_eq!(
+        hscroll_redirect_delta(ScrollDelta::wheel_ticks(1.0, 1.0)),
+        None
+    );
+    assert_eq!(hscroll_redirect_delta(ScrollDelta::pixels(0.0, 10.0)), None);
+    assert_eq!(
+        hscroll_redirect_delta(ScrollDelta::wheel_ticks(0.0, 0.0)),
+        None
+    );
+    clear_hscroll_hold();
+}
+
+#[test]
+fn side_button_hold_without_wheel_replays_the_native_click() {
+    use openlogi_core::scroll::ScrollDelta;
+
+    clear_hscroll_hold();
+    let (dispatcher, mut owner, _events) = test_dispatcher();
+    let hooks = Arc::new(RwLock::new(HookMaps {
+        side_button_hscroll: BTreeMap::from([(ButtonId::Back, Action::MouseBack)]),
+        ..HookMaps::default()
+    }));
+    let (actions, queued) = mpsc::sync_channel(4);
+    let device = logitech_device();
+
+    assert_eq!(
+        handle_button(
+            ButtonId::Back,
+            true,
+            Some(&device),
+            &hooks,
+            &dispatcher,
+            &actions,
+            || ActionDispatchTarget::Keyboard
+        ),
+        EventDisposition::Suppress
+    );
+    // No wheel motion: the release replays the native click off-thread.
+    assert_eq!(
+        hscroll_redirect_delta(ScrollDelta::wheel_ticks(0.0, 0.0)),
+        None,
+        "zero motion must not arm the swallow"
+    );
+    assert_eq!(
+        handle_button(
+            ButtonId::Back,
+            false,
+            Some(&device),
+            &hooks,
+            &dispatcher,
+            &actions,
+            || ActionDispatchTarget::Keyboard
+        ),
+        EventDisposition::Suppress
+    );
+    assert_eq!(
+        queued.recv().expect("replayed click should be queued"),
+        (Action::MouseBack, ActionDispatchTarget::Keyboard)
+    );
+    assert!(owner.shutdown());
+    clear_hscroll_hold();
+}
+
+#[test]
+fn side_button_hold_without_wheel_replays_the_rebound_action() {
+    // A rebound side button redirects while keeping its remap: a clean
+    // release fires the bound action (here PreviousDesktop, the reporter's
+    // binding) instead of the native click.
+    clear_hscroll_hold();
+    let (dispatcher, mut owner, _events) = test_dispatcher();
+    let hooks = Arc::new(RwLock::new(HookMaps {
+        side_button_hscroll: BTreeMap::from([(ButtonId::Back, Action::PreviousDesktop)]),
+        ..HookMaps::default()
+    }));
+    let (actions, queued) = mpsc::sync_channel(4);
+    let device = logitech_device();
+
+    assert_eq!(
+        handle_button(
+            ButtonId::Back,
+            true,
+            Some(&device),
+            &hooks,
+            &dispatcher,
+            &actions,
+            || ActionDispatchTarget::Keyboard
+        ),
+        EventDisposition::Suppress
+    );
+    assert_eq!(
+        handle_button(
+            ButtonId::Back,
+            false,
+            Some(&device),
+            &hooks,
+            &dispatcher,
+            &actions,
+            || ActionDispatchTarget::Keyboard
+        ),
+        EventDisposition::Suppress
+    );
+    assert_eq!(
+        queued.recv().expect("replayed action should be queued"),
+        (Action::PreviousDesktop, ActionDispatchTarget::Keyboard)
+    );
+    assert!(owner.shutdown());
+    clear_hscroll_hold();
+}
+
+#[test]
+fn side_button_hold_replays_the_press_time_action_across_a_reload() {
+    // The replay action snapshots at press: a config change mid-hold must
+    // not retarget the release.
+    clear_hscroll_hold();
+    let (dispatcher, mut owner, _events) = test_dispatcher();
+    let hooks = Arc::new(RwLock::new(HookMaps {
+        side_button_hscroll: BTreeMap::from([(ButtonId::Back, Action::MouseBack)]),
+        ..HookMaps::default()
+    }));
+    let (actions, queued) = mpsc::sync_channel(4);
+    let device = logitech_device();
+
+    assert_eq!(
+        handle_button(
+            ButtonId::Back,
+            true,
+            Some(&device),
+            &hooks,
+            &dispatcher,
+            &actions,
+            || ActionDispatchTarget::Keyboard
+        ),
+        EventDisposition::Suppress
+    );
+    // A reload rebinds Back mid-hold; the release still replays MouseBack.
+    hooks
+        .write()
+        .expect("hook maps")
+        .side_button_hscroll
+        .insert(ButtonId::Back, Action::Copy);
+    assert_eq!(
+        handle_button(
+            ButtonId::Back,
+            false,
+            Some(&device),
+            &hooks,
+            &dispatcher,
+            &actions,
+            || ActionDispatchTarget::Keyboard
+        ),
+        EventDisposition::Suppress
+    );
+    assert_eq!(
+        queued.recv().expect("replayed click should be queued"),
+        (Action::MouseBack, ActionDispatchTarget::Keyboard)
+    );
+    assert!(owner.shutdown());
+    clear_hscroll_hold();
+}
+
+#[test]
+fn hidpp_redirect_admits_unattributed_and_own_device_wheels() {
+    use openlogi_core::scroll::ScrollDelta;
+
+    let park = HidppHscrollPark {
+        device_key: Arc::from("serial:2302lz00fn58"),
+        button: ButtonId::Back,
+        source_ids: Some((0x046d, 0xb02a)),
+    };
+    let one = [park.clone()];
+    let two = [
+        park.clone(),
+        HidppHscrollPark {
+            device_key: Arc::from("receiver:cafe:slot:2"),
+            button: ButtonId::Forward,
+            source_ids: None,
+        },
+    ];
+    let own_device = EventDevice {
+        vendor_id: Some(0x046d),
+        product_id: Some(0xb02a),
+        ..EventDevice::default()
+    };
+    let other_mouse = EventDevice {
+        vendor_id: Some(0x046d),
+        product_id: Some(0xc52b),
+        ..EventDevice::default()
+    };
+    let microsoft = EventDevice {
+        vendor_id: Some(0x045e),
+        product_name: Some("Microsoft Mouse".into()),
+        ..EventDevice::default()
+    };
+    // The reporter's exact shape: BLE-direct devices expose a product name
+    // but no vendor id ("Signature M650 L"), so `is_logitech` fails and the
+    // vendor-less wheel cannot be attributed to anyone.
+    let named_without_vendor = EventDevice {
+        vendor_id: None,
+        product_name: Some("Signature M650 L".into()),
+        ..EventDevice::default()
+    };
+    let empty_identity = EventDevice::default();
+
+    // Unattributed sources: senderless, empty identity, and — the fix — a
+    // product name without vendor id. All redirect while parked.
+    for device in [None, Some(&empty_identity), Some(&named_without_vendor)] {
+        assert_eq!(
+            hidpp_redirect_delta(ScrollDelta::wheel_ticks(0.0, 2.0), device, &one),
+            Some(ScrollDelta::wheel_ticks(2.0, 0.0)),
+            "device {device:?} should redirect while parked"
+        );
+    }
+    // The parked device's own attributed wheel (wired links) matches its
+    // carried route ids.
+    assert_eq!(
+        hidpp_redirect_delta(ScrollDelta::wheel_ticks(0.0, 2.0), Some(&own_device), &one),
+        Some(ScrollDelta::wheel_ticks(2.0, 0.0))
+    );
+    // Never hijack: no park, ambiguous parks, someone else's wheel.
+    assert_eq!(
+        hidpp_redirect_delta(ScrollDelta::wheel_ticks(0.0, 2.0), None, &[]),
+        None
+    );
+    assert_eq!(
+        hidpp_redirect_delta(ScrollDelta::wheel_ticks(0.0, 2.0), None, &two),
+        None
+    );
+    for device in [&other_mouse, &microsoft] {
+        assert_eq!(
+            hidpp_redirect_delta(ScrollDelta::wheel_ticks(0.0, 2.0), Some(device), &one),
+            None,
+            "device {device:?} must never redirect"
+        );
+    }
+    // A vendor-bearing wheel with a park that carries no ids (receiver
+    // route) cannot be matched: refuse.
+    assert_eq!(
+        hidpp_redirect_delta(ScrollDelta::wheel_ticks(0.0, 2.0), Some(&own_device), &two),
+        None
+    );
+    // Axis and unit guards are unchanged.
+    assert_eq!(
+        hidpp_redirect_delta(ScrollDelta::wheel_ticks(2.0, 0.0), None, &one),
+        None
+    );
+    assert_eq!(
+        hidpp_redirect_delta(ScrollDelta::wheel_ticks(1.0, 1.0), None, &one),
+        None
+    );
+    assert_eq!(
+        hidpp_redirect_delta(ScrollDelta::pixels(0.0, 10.0), None, &one),
+        None
+    );
+    assert_eq!(
+        hidpp_redirect_delta(ScrollDelta::wheel_ticks(0.0, 0.0), None, &one),
+        None
+    );
+}
+
+#[test]
+fn native_horizontal_motion_while_held_swallows_the_click() {
+    use openlogi_core::scroll::ScrollDelta;
+
+    // Firmware that converts hold+wheel itself (e.g. M650L) emits real
+    // horizontal ticks: they pass through untouched, but the hold must
+    // still swallow the release.
+    clear_hscroll_hold();
+    HSCROLL.with_borrow_mut(|hold| {
+        *hold = Some(HScrollHold {
+            button: ButtonId::Back,
+            click: Action::PreviousDesktop,
+            scrolled: false,
+            target: ActionDispatchTarget::Keyboard,
+        });
+    });
+    mark_hscroll_native_horizontal(ScrollDelta::wheel_ticks(2.0, 0.0));
+    assert!(
+        HSCROLL.with_borrow(|hold| hold.as_ref().is_some_and(|held| held.scrolled)),
+        "native horizontal must arm the swallow"
+    );
+    // Pure vertical and pixel-precise motion never mark the hold.
+    clear_hscroll_hold();
+    HSCROLL.with_borrow_mut(|hold| {
+        *hold = Some(HScrollHold {
+            button: ButtonId::Back,
+            click: Action::PreviousDesktop,
+            scrolled: false,
+            target: ActionDispatchTarget::Keyboard,
+        });
+    });
+    mark_hscroll_native_horizontal(ScrollDelta::wheel_ticks(0.0, 1.0));
+    mark_hscroll_native_horizontal(ScrollDelta::pixels(10.0, 0.0));
+    assert!(
+        HSCROLL.with_borrow(|hold| hold.as_ref().is_some_and(|held| !held.scrolled)),
+        "vertical and pixel motion must not arm the swallow"
+    );
+    clear_hscroll_hold();
+}
+
+#[test]
+fn side_button_hold_with_wheel_swallows_the_click() {
+    clear_hscroll_hold();
+    let (dispatcher, mut owner, _events) = test_dispatcher();
+    let hooks = Arc::new(RwLock::new(HookMaps {
+        side_button_hscroll: BTreeMap::from([(ButtonId::Forward, Action::MouseForward)]),
+        ..HookMaps::default()
+    }));
+    let (actions, queued) = mpsc::sync_channel(4);
+    let device = logitech_device();
+
+    assert_eq!(
+        handle_button(
+            ButtonId::Forward,
+            true,
+            Some(&device),
+            &hooks,
+            &dispatcher,
+            &actions,
+            || ActionDispatchTarget::Keyboard
+        ),
+        EventDisposition::Suppress
+    );
+    // Simulate the scroll arm accepting one redirected tick.
+    HSCROLL.with_borrow_mut(|hold| {
+        hold.as_mut().expect("hold should be open").scrolled = true;
+    });
+    assert_eq!(
+        handle_button(
+            ButtonId::Forward,
+            false,
+            Some(&device),
+            &hooks,
+            &dispatcher,
+            &actions,
+            || ActionDispatchTarget::Keyboard
+        ),
+        EventDisposition::Suppress
+    );
+    assert!(
+        matches!(queued.try_recv(), Err(mpsc::TryRecvError::Empty)),
+        "a scrolled hold must queue no click"
+    );
+    assert!(owner.shutdown());
+    clear_hscroll_hold();
 }
 
 #[test]

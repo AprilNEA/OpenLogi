@@ -210,6 +210,35 @@ impl ScrollInputHandle {
         self.try_enqueue(ScrollSource::current_hook(), scaled, output)
     }
 
+    /// Queue one redirected horizontal impulse from the current OS-hook
+    /// thread: a vertical wheel tick the side-button hold reinterpreted as
+    /// horizontal (issue #1053).
+    ///
+    /// Unlike [`Self::try_hook_scroll`], main-wheel sensitivity never applies
+    /// (it scales vertical distance only) and a pure-horizontal impulse is
+    /// always meaningful work — not a native pass-through candidate — so with
+    /// smoothing disabled the impulse goes out direct instead of being
+    /// rejected. Pixel input, zero/non-finite distance, a full queue, or an
+    /// unavailable worker are rejected so the callback fails open.
+    #[must_use]
+    pub fn try_hook_redirected_scroll(&self, delta: ScrollDelta) -> bool {
+        if !self.accepting.load(Ordering::Acquire) {
+            return false;
+        }
+        let Ok(impulse) = WheelDelta::try_from(delta) else {
+            return false;
+        };
+        if impulse.y != 0.0 || impulse.x == 0.0 {
+            return false;
+        }
+        let output = if self.preferences.smooth_scroll_enabled() {
+            ScrollOutputMode::Smooth { at: Instant::now() }
+        } else {
+            ScrollOutputMode::Direct
+        };
+        self.try_enqueue(ScrollSource::current_hook(), impulse, output)
+    }
+
     /// Queue one diverted thumb-wheel impulse from an active HID++ session.
     ///
     /// Rejection tells the already-diverted caller to inject the distance
@@ -550,6 +579,44 @@ mod tests {
         let queued = queued_input(&receiver);
         assert_eq!(queued.impulse, WheelDelta { x: 2.0, y: 1.0 });
         assert!(matches!(queued.output, ScrollOutputMode::Smooth { .. }));
+    }
+
+    #[test]
+    fn redirected_horizontal_scroll_is_admitted_even_without_smoothing() {
+        // The ordinary hook path rejects pure-horizontal input when there is
+        // nothing to scale or smooth (it stays native instead) — the
+        // redirected path exists precisely because a side-button hold has
+        // already suppressed the native vertical event, so dropping the
+        // converted impulse would swallow the tick entirely.
+        let (input, receiver, _controls) = standalone_input(2, preferences(false, 7));
+        assert!(!input.try_hook_scroll(ScrollDelta::wheel_ticks(2.0, 0.0)));
+        assert!(input.try_hook_redirected_scroll(ScrollDelta::wheel_ticks(2.0, 0.0)));
+
+        let queued = queued_input(&receiver);
+        assert_eq!(queued.impulse, WheelDelta { x: 2.0, y: 0.0 });
+        assert!(matches!(queued.output, ScrollOutputMode::Direct));
+    }
+
+    #[test]
+    fn redirected_horizontal_scroll_does_not_apply_vertical_sensitivity() {
+        let (input, receiver, _controls) = standalone_input(2, preferences(true, 7));
+        assert!(input.try_hook_redirected_scroll(ScrollDelta::wheel_ticks(2.0, 0.0)));
+
+        let queued = queued_input(&receiver);
+        assert_eq!(queued.impulse, WheelDelta { x: 2.0, y: 0.0 });
+        assert!(matches!(queued.output, ScrollOutputMode::Smooth { .. }));
+    }
+
+    #[test]
+    fn redirected_scroll_rejects_anything_but_pure_horizontal_ticks() {
+        let (input, _commands, _controls) = standalone_input(
+            1,
+            preferences(true, u8::from(VerticalScrollSensitivity::DEFAULT)),
+        );
+        assert!(!input.try_hook_redirected_scroll(ScrollDelta::pixels(2.0, 0.0)));
+        assert!(!input.try_hook_redirected_scroll(ScrollDelta::wheel_ticks(0.0, 1.0)));
+        assert!(!input.try_hook_redirected_scroll(ScrollDelta::wheel_ticks(2.0, 1.0)));
+        assert!(!input.try_hook_redirected_scroll(ScrollDelta::wheel_ticks(0.0, 0.0)));
     }
 
     #[test]
