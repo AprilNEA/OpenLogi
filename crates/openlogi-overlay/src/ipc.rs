@@ -64,7 +64,7 @@ pub(crate) fn spawn() -> Handle {
     let started = openlogi_core::worker::spawn("openlogi-overlay-ipc", move |runtime| {
         runtime.block_on(async {
             tokio::join!(
-                poll_invocations(invocation_tx),
+                observe_invocations(invocation_tx),
                 send_commands(&mut command_rx)
             );
         });
@@ -128,17 +128,18 @@ const GIVE_UP_AFTER: Duration = Duration::from_mins(1);
 /// How long to wait between attempts to reach an agent.
 const RETRY_PERIOD: Duration = Duration::from_secs(1);
 
-/// Invocation observer phase and the state meaningful within each phase.
+/// The connection that carries invocations: its phase, and the state
+/// meaningful within each phase.
 ///
 /// A successful connection owns its [`Observer`], and with it the generation
 /// cursor; a reconnect episode owns its give-up clock. Transitioning between
 /// them resets the fact from the previous phase by construction.
-enum InvocationPollState {
+enum InvocationLink {
     Reconnecting { unreachable_since: Option<Instant> },
     Observing(Observer<RingObservation>),
 }
 
-impl Default for InvocationPollState {
+impl Default for InvocationLink {
     fn default() -> Self {
         Self::Reconnecting {
             unreachable_since: None,
@@ -146,7 +147,7 @@ impl Default for InvocationPollState {
     }
 }
 
-impl InvocationPollState {
+impl InvocationLink {
     fn connected(&mut self, client: AgentClient) {
         *self = Self::Observing(Observer::action_ring(client));
     }
@@ -166,25 +167,25 @@ impl InvocationPollState {
     }
 }
 
-async fn poll_invocations(tx: mpsc::UnboundedSender<Option<ActionRingInvocation>>) {
-    let mut state = InvocationPollState::default();
+async fn observe_invocations(tx: mpsc::UnboundedSender<Option<ActionRingInvocation>>) {
+    let mut link = InvocationLink::default();
     loop {
-        if matches!(&state, InvocationPollState::Reconnecting { .. }) {
+        if matches!(&link, InvocationLink::Reconnecting { .. }) {
             if let Some(client) = connect().await {
                 // Generation 0 says "I have seen nothing", so the first
                 // answer is whatever is showing right now. A replacement
                 // agent numbers its own generations, so every connection
                 // starts there independently.
-                state.connected(client);
+                link.connected(client);
             } else {
-                if state.connect_failed(Instant::now()) {
+                if link.connect_failed(Instant::now()) {
                     stand_down(&format!("no agent has answered for {GIVE_UP_AFTER:?}"));
                 }
                 tokio::time::sleep(RETRY_PERIOD).await;
                 continue;
             }
         }
-        let InvocationPollState::Observing(observer) = &mut state else {
+        let InvocationLink::Observing(observer) = &mut link else {
             continue;
         };
         match observer.next().await {
@@ -198,7 +199,7 @@ async fn poll_invocations(tx: mpsc::UnboundedSender<Option<ActionRingInvocation>
             }
             Err(error) => {
                 debug!(?error, "Actions Ring state channel disconnected");
-                state.disconnected();
+                link.disconnected();
             }
         }
     }

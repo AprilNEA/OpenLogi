@@ -9,12 +9,12 @@ fn unserved_client() -> AgentClient {
 
 #[test]
 fn the_first_failed_attempt_only_arms_the_give_up_clock() {
-    let mut state = InvocationPollState::default();
+    let mut link = InvocationLink::default();
     let now = Instant::now();
-    assert!(!state.connect_failed(now));
+    assert!(!link.connect_failed(now));
     assert!(matches!(
-        state,
-        InvocationPollState::Reconnecting {
+        link,
+        InvocationLink::Reconnecting {
             unreachable_since: Some(armed)
         } if armed == now
     ));
@@ -23,16 +23,16 @@ fn the_first_failed_attempt_only_arms_the_give_up_clock() {
 #[test]
 fn an_agent_that_stays_away_past_the_deadline_ends_the_overlay() {
     let start = Instant::now();
-    let mut state = InvocationPollState::default();
-    assert!(!state.connect_failed(start));
-    assert!(!state.connect_failed(start + GIVE_UP_AFTER / 2));
-    assert!(state.connect_failed(start + GIVE_UP_AFTER));
+    let mut link = InvocationLink::default();
+    assert!(!link.connect_failed(start));
+    assert!(!link.connect_failed(start + GIVE_UP_AFTER / 2));
+    assert!(link.connect_failed(start + GIVE_UP_AFTER));
 }
 
 #[tokio::test]
 async fn an_agent_that_keeps_coming_back_never_accumulates_its_way_to_an_exit() {
     let start = Instant::now();
-    let mut state = InvocationPollState::default();
+    let mut link = InvocationLink::default();
     // Each round the agent is gone for half the deadline, then answers —
     // which moves the clock out of the reconnecting phase. Five rounds is
     // two and a half deadlines in total, so a version that kept the clock
@@ -40,11 +40,11 @@ async fn an_agent_that_keeps_coming_back_never_accumulates_its_way_to_an_exit() 
     for round in 1..=5 {
         let gone = start + (GIVE_UP_AFTER / 2) * round;
         assert!(
-            !state.connect_failed(gone),
+            !link.connect_failed(gone),
             "a reachable agent must not inherit the previous outage's clock"
         );
-        state.connected(unserved_client());
-        state.disconnected();
+        link.connected(unserved_client());
+        link.disconnected();
     }
 }
 

@@ -146,9 +146,9 @@ impl AppState {
             _ => None,
         }
     }
-    /// Replace the link, reporting it only when it actually changed — the
-    /// steady IPC poll mostly delivers identical snapshots, and those must not
-    /// refresh the window.
+    /// Replace the link, reporting it only when it actually changed — most
+    /// observed snapshots leave the link as it was, and those must not refresh
+    /// the window.
     pub fn set_agent_link(&mut self, link: AgentLink) -> StateEvents {
         if self.agent.link == link {
             return StateEvents::none();
