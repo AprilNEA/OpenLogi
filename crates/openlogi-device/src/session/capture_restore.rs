@@ -20,7 +20,7 @@ pub type CaptureChannel = Arc<RwLock<Option<SharedChannel>>>;
 
 /// Why a capture session could not start (or had to stop).
 #[derive(Debug, Error)]
-pub enum GestureError {
+pub enum CaptureError {
     /// HID transport-level failure while enumerating or opening the device.
     #[error("HID transport error")]
     Hid(#[from] BackendError),
@@ -35,13 +35,13 @@ pub enum GestureError {
     Hidpp(String),
 }
 
-impl From<Hidpp20Error> for GestureError {
+impl From<Hidpp20Error> for CaptureError {
     fn from(error: Hidpp20Error) -> Self {
         Self::Hidpp(format!("{error:?}"))
     }
 }
 
-impl From<IoSuspended> for GestureError {
+impl From<IoSuspended> for CaptureError {
     fn from(error: IoSuspended) -> Self {
         Self::Hid(error.into())
     }
@@ -105,19 +105,19 @@ pub enum CaptureSessionOutcome {
 #[error("{error}")]
 pub struct CaptureSessionFailure {
     #[source]
-    error: GestureError,
+    error: CaptureError,
     pending_restore: Option<PendingCaptureRestore>,
 }
 
 impl CaptureSessionFailure {
-    pub(crate) fn clean(error: GestureError) -> Self {
+    pub(crate) fn clean(error: CaptureError) -> Self {
         Self {
             error,
             pending_restore: None,
         }
     }
 
-    pub(crate) fn with_pending(error: GestureError, pending: PendingCaptureRestore) -> Self {
+    pub(crate) fn with_pending(error: CaptureError, pending: PendingCaptureRestore) -> Self {
         Self {
             error,
             pending_restore: Some(pending),
@@ -126,13 +126,13 @@ impl CaptureSessionFailure {
 
     /// Split the setup error from firmware ownership the caller must retain.
     #[must_use]
-    pub fn into_parts(self) -> (GestureError, Option<PendingCaptureRestore>) {
+    pub fn into_parts(self) -> (CaptureError, Option<PendingCaptureRestore>) {
         (self.error, self.pending_restore)
     }
 }
 
-impl From<GestureError> for CaptureSessionFailure {
-    fn from(error: GestureError) -> Self {
+impl From<CaptureError> for CaptureSessionFailure {
+    fn from(error: CaptureError) -> Self {
         Self::clean(error)
     }
 }
@@ -238,7 +238,7 @@ impl PendingCaptureRestore {
 /// Roll back a partially armed session without losing firmware ownership when
 /// any compensating write fails.
 pub(crate) async fn rollback_capture_start(
-    error: GestureError,
+    error: CaptureError,
     pending: Option<PendingCaptureRestore>,
     registry: &ChannelRegistry,
 ) -> CaptureSessionFailure {

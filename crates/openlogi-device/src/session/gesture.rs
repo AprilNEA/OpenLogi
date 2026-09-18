@@ -49,7 +49,7 @@ use super::capture_restore::{
     wait_for_channel_change,
 };
 pub use super::capture_restore::{
-    CaptureChannel, CaptureSessionFailure, CaptureSessionOutcome, GestureError,
+    CaptureChannel, CaptureError, CaptureSessionFailure, CaptureSessionOutcome,
     PendingCaptureRestore,
 };
 use crate::reprog_controls::{self, RawControlEvent, ReprogControlsV4};
@@ -238,7 +238,7 @@ pub struct CaptureSpec {
 /// Runs on the inventory-owned channel `registry` currently publishes for
 /// `route`: sharing that connection avoids splitting HID++ replies and input
 /// reports across two readers, and a registry miss
-/// ([`GestureError::DeviceNotFound`]) is retried by the caller after a later
+/// ([`CaptureError::DeviceNotFound`]) is retried by the caller after a later
 /// inventory publication. Diverts whichever of those controls the device
 /// exposes, and listens. Returns once `shutdown` fires (or its sender is
 /// dropped). A normal stop restores every diverted control before returning;
@@ -256,7 +256,7 @@ pub async fn run_capture_session(
 ) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
     let shared = registry
         .lookup(&route)
-        .ok_or(GestureError::DeviceNotFound)?;
+        .ok_or(CaptureError::DeviceNotFound)?;
     run_capture_session_on(
         shared,
         spec,
@@ -278,7 +278,7 @@ async fn run_capture_session_on(
     registry: &ChannelRegistry,
     device_io: DeviceIoGate,
 ) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
-    device_io.ensure_allowed().map_err(GestureError::from)?;
+    device_io.ensure_allowed().map_err(CaptureError::from)?;
     let chan = Arc::clone(shared.channel());
     let device_index = shared.device_index();
     let armed = arm_controls(&chan, device_index, &spec, &shared, registry).await?;
@@ -696,7 +696,7 @@ async fn arm_controls(
 ) -> Result<ArmedControls, CaptureSessionFailure> {
     let device = Device::new(Arc::clone(chan), slot)
         .await
-        .map_err(|_| GestureError::DeviceUnreachable(slot))?;
+        .map_err(|_| CaptureError::DeviceUnreachable(slot))?;
     let mut armed = ArmedControls::default();
     if let Err(error) = arm_controls_into(&device, chan, slot, spec, &mut armed).await {
         let pending = armed.into_pending(shared);
@@ -722,7 +722,7 @@ async fn arm_controls_into(
     slot: u8,
     spec: &CaptureSpec,
     armed: &mut ArmedControls,
-) -> Result<(), GestureError> {
+) -> Result<(), CaptureError> {
     if let Some(info) = device
         .root()
         .get_feature(reprog_controls::FEATURE_ID)
@@ -823,7 +823,7 @@ async fn arm_reprog_control(
     cid: u16,
     raw_xy: bool,
     reporting: &mut Vec<ArmedReporting>,
-) -> Result<(), GestureError> {
+) -> Result<(), CaptureError> {
     let original = rc.get_cid_reporting(cid).await?;
     if original.diverted {
         // Left over from a session that never tore down (agent killed, or
@@ -863,7 +863,7 @@ fn captured_gesture_button(cid: u16, gesture_button_cids: &[(u16, ButtonId)]) ->
 /// test several CIDs without rescanning per control.
 pub(crate) async fn enumerate_controls(
     rc: &ReprogControlsV4,
-) -> Result<Vec<reprog_controls::CtrlIdInfo>, GestureError> {
+) -> Result<Vec<reprog_controls::CtrlIdInfo>, CaptureError> {
     let count = rc.get_count().await?;
     let mut controls = Vec::with_capacity(usize::from(count));
     for index in 0..count {

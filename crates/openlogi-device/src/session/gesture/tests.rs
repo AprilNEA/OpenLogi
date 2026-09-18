@@ -230,7 +230,7 @@ async fn failed_setup_rollback_returns_its_restore_capability() {
     );
 
     let failure = rollback_capture_start(
-        GestureError::Hidpp("diversion failed".into()),
+        CaptureError::Hidpp("diversion failed".into()),
         pending,
         &registry,
     )

@@ -34,7 +34,7 @@ use super::capture_restore::{
     wait_for_channel_change,
 };
 use super::gesture::{
-    CaptureChannel, CaptureSessionFailure, CaptureSessionOutcome, CapturedInput, GestureError,
+    CaptureChannel, CaptureError, CaptureSessionFailure, CaptureSessionOutcome, CapturedInput,
     PendingCaptureRestore, enumerate_controls,
 };
 use crate::channel::route::DeviceRoute;
@@ -68,7 +68,7 @@ pub const KEYBOARD_KEY_CIDS: [(u16, ButtonId); 9] = [
 /// partially-supported keyboard degrades per key rather than failing whole.
 ///
 /// Runs on the exact channel currently published by `registry`. A registry
-/// miss returns [`GestureError::DeviceNotFound`] without falling back to route
+/// miss returns [`CaptureError::DeviceNotFound`] without falling back to route
 /// enumeration/opening; the agent watcher retries after a later inventory
 /// publication.
 pub async fn run_keyboard_capture_session(
@@ -82,7 +82,7 @@ pub async fn run_keyboard_capture_session(
 ) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
     let shared = registry
         .lookup(&route)
-        .ok_or(GestureError::DeviceNotFound)?;
+        .ok_or(CaptureError::DeviceNotFound)?;
     run_keyboard_capture_session_on(
         shared,
         wanted,
@@ -104,19 +104,19 @@ async fn run_keyboard_capture_session_on(
     registry: &ChannelRegistry,
     device_io: DeviceIoGate,
 ) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
-    device_io.ensure_allowed().map_err(GestureError::from)?;
+    device_io.ensure_allowed().map_err(CaptureError::from)?;
     let chan = Arc::clone(shared.channel());
     let device_index = shared.device_index();
     let device = Device::new(Arc::clone(&chan), device_index)
         .await
-        .map_err(|_| GestureError::DeviceUnreachable(device_index))?;
+        .map_err(|_| CaptureError::DeviceUnreachable(device_index))?;
 
     let info = device
         .root()
         .get_feature(reprog_controls::FEATURE_ID)
         .await
-        .map_err(GestureError::from)?
-        .ok_or_else(|| GestureError::Hidpp("keyboard exposes no 0x1b04 reprog controls".into()))?;
+        .map_err(CaptureError::from)?
+        .ok_or_else(|| CaptureError::Hidpp("keyboard exposes no 0x1b04 reprog controls".into()))?;
     let rc = ReprogControlsV4::new(Arc::clone(&chan), device_index, info.index);
     let controls = enumerate_controls(&rc).await?;
     let mut armed = ArmedKeys {
@@ -314,7 +314,7 @@ async fn arm_keys(
     controls: &[reprog_controls::CtrlIdInfo],
     wanted: &BTreeMap<u16, ButtonId>,
     armed: &mut ArmedKeys,
-) -> Result<(), GestureError> {
+) -> Result<(), CaptureError> {
     for (&cid, &button) in wanted {
         if controls.iter().any(|c| c.cid == cid && c.is_divertable()) {
             let original = armed.controls.get_cid_reporting(cid).await?;
