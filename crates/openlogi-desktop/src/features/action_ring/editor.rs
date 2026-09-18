@@ -14,7 +14,7 @@ use openlogi_core::binding::{
 };
 
 use super::action_icons::action_icon_path;
-use crate::features::mouse::picker::editor_section;
+use crate::features::binding_editor::editor_section;
 use crate::state::AppState;
 use crate::ui::action::localized_action_label;
 use crate::ui::components::{MenuRow, control_input};

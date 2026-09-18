@@ -38,11 +38,11 @@ use super::editors::{
     PowerUserKind, text_editor_placeholder, text_editor_seed, workflow_editor_seed,
 };
 use crate::app::{glow_canvas, keyboard_glow};
-use crate::features::mouse::geometry::asset_dimensions_for_png;
-use crate::features::mouse::picker::{
+use crate::features::binding_editor::{
     PickFn, action_icon_path, action_rows, compact_panel, divider, editor_scroll_list,
     editor_section,
 };
+use crate::features::mouse::geometry::asset_dimensions_for_png;
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
 use crate::state::{AppState, StateEvent};
 use crate::ui::action::localized_action_label;

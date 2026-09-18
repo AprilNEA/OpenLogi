@@ -6,7 +6,7 @@
 //! returns to the action list; the panel itself closes when the key is
 //! deselected.
 //!
-//! [`compact_panel`]: crate::features::mouse::picker::compact_panel
+//! [`compact_panel`]: crate::features::binding_editor::compact_panel
 
 #![expect(
     clippy::needless_pass_by_value,
@@ -28,7 +28,7 @@ use openlogi_core::binding::{Action, KeyCombo, WorkflowStep};
 use openlogi_core::config::KeyTrigger;
 
 use super::function_row::FunctionRowView;
-use crate::features::mouse::picker::{compact_panel, divider, editor_scroll_list, title};
+use crate::features::binding_editor::{compact_panel, divider, editor_scroll_list, title};
 use crate::state::AppState;
 use crate::ui::components::{MenuRow, control_input};
 use crate::ui::theme::{self, Palette, Typography as _};

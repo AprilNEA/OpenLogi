@@ -16,7 +16,7 @@ use gpui_component::{
 use super::catalog::{AppCatalogPicker, ApplicationIconState, ProfileIconCache};
 use super::picker::add_app_popover;
 use super::{ProfileChoice, ProfileScopeActions, ProfileScopeModel};
-use crate::features::mouse::picker::{compact_panel, divider, title};
+use crate::features::binding_editor::{compact_panel, divider, title};
 use crate::ui::components::MenuRow;
 use crate::ui::theme::{self, Palette, SelectableStyle as _, Typography as _};
 

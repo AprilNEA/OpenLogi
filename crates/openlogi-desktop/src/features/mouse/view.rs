@@ -22,9 +22,9 @@ use super::geometry::{
 use super::hotspots::{Hotspot, MOUSE_MODEL_SIZE, MouseControlId, default_hotspots};
 use super::inspector::{BindingInspectorData, binding_inspector};
 use super::leader_lines::{Geometry as LeaderGeometry, Label, Side, paint as paint_leader_lines};
-use super::picker::{GESTURE_BUTTON_ICON, action_icon_path};
 use super::thumbwheel::ThumbwheelPreset;
 use crate::app::{glow_canvas, keyboard_glow};
+use crate::features::binding_editor::{GESTURE_BUTTON_ICON, action_icon_path};
 use crate::features::profiles::{friendly_app_name, profile_canvas_status};
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
 use crate::state::{AppState, StateEvent};

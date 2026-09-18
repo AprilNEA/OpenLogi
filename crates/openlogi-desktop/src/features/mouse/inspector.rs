@@ -15,12 +15,12 @@ use gpui_component::{
 use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
 
 use super::hotspots::MouseControlId;
-use super::picker::{
+use super::thumbwheel::ThumbwheelPreset;
+use super::view::MouseModelView;
+use crate::features::binding_editor::{
     GESTURE_BUTTON_ICON, PickFn, action_icon_path, action_rows_matching, editor_section,
     gesture_direction_icon,
 };
-use super::thumbwheel::ThumbwheelPreset;
-use super::view::MouseModelView;
 use crate::state::AppState;
 use crate::ui::action::localized_action_label;
 use crate::ui::components::{MenuRow, control_button, control_input};
