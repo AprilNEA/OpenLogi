@@ -2,7 +2,6 @@
 
 use std::future::Future;
 use std::path::PathBuf;
-use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Args;
@@ -13,15 +12,14 @@ use openlogi_fixture::{
 };
 use openlogi_ipc::client::ConnectError;
 use openlogi_ipc::{AgentClient, AgentSnapshot};
-use tarpc::client::RpcError;
 use tarpc::context;
+
+use crate::agent::{self, CallFailure};
 
 mod sanitize;
 mod selection;
 
 use selection::TargetLocation;
-
-const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Arguments for one privacy-safe semantic device profile capture.
 #[derive(Debug, Args)]
@@ -74,7 +72,7 @@ pub(super) async fn capture_for_contribution(
 }
 
 async fn connect_to_agent() -> Result<AgentClient> {
-    crate::agent::connect()
+    agent::connect()
         .await
         .map_err(|error| safe_connect_error(&error))
 }
@@ -123,7 +121,7 @@ async fn capture_connected_profile(
     id: String,
     name: String,
 ) -> Result<CapturedProfile> {
-    let snapshot = crate::agent::snapshot(client).await?;
+    let snapshot = agent::snapshot(client).await?;
 
     let captured = capture_profile(client, snapshot, selector, id, name).await?;
     captured
@@ -260,7 +258,7 @@ async fn capture_hidpp_settings(
         None => {
             semantic_read(
                 "DPI",
-                client.read_dpi(context::current(), source_route.clone()),
+                agent::call(client.read_dpi(context::current(), source_route.clone())),
             )
             .await?
         }
@@ -268,7 +266,7 @@ async fn capture_hidpp_settings(
     let smartshift = if device.online {
         semantic_read(
             "SmartShift",
-            client.read_smartshift(context::current(), source_route.clone()),
+            agent::call(client.read_smartshift(context::current(), source_route.clone())),
         )
         .await?
     } else {
@@ -279,7 +277,7 @@ async fn capture_hidpp_settings(
         None => {
             semantic_read(
                 "wheel",
-                client.read_wheel(context::current(), source_route.clone()),
+                agent::call(client.read_wheel(context::current(), source_route.clone())),
             )
             .await?
         }
@@ -291,7 +289,7 @@ async fn capture_hidpp_settings(
     } else if device.online {
         semantic_read(
             "backlight",
-            client.read_backlight(context::current(), source_route.clone()),
+            agent::call(client.read_backlight(context::current(), source_route.clone())),
         )
         .await?
     } else {
@@ -328,12 +326,9 @@ fn unknown_offline_support(family: &str) -> anyhow::Error {
 
 async fn semantic_read<T>(
     family: &'static str,
-    request: impl Future<Output = Result<Result<T, WriteError>, RpcError>>,
+    call: impl Future<Output = Result<Result<T, WriteError>, CallFailure>>,
 ) -> Result<ProfileSetting<T>> {
-    let result = tokio::time::timeout(READ_TIMEOUT, request)
-        .await
-        .map_err(|_| safe_read_error(family))?
-        .map_err(|_| safe_read_error(family))?;
+    let result = call.await.map_err(|_| safe_read_error(family))?;
     match result {
         Ok(value) => Ok(ProfileSetting::Supported(value)),
         Err(WriteError::FeatureUnsupported { .. }) => Ok(ProfileSetting::Unsupported),
