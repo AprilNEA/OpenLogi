@@ -48,7 +48,7 @@ use crate::{autostart, overlay, server};
 /// seconds a kickstarting GUI needs, and the window costs only an idle
 /// process that has opened no device and prompted for nothing.
 #[cfg(target_os = "macos")]
-const DORMANT_DEADLINE: Duration = Duration::from_secs(60);
+const DORMANT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Walk the whole lifecycle: bootstrap, gate, arm, run. This is the async
 /// core's entry point; `main` only decides which thread it runs on.
@@ -137,7 +137,7 @@ impl Booted {
         info!("launch_at_login is off — dormant until a client demands arming");
         // The deadline is absolute: a served-but-not-arming client does not
         // buy the dormant agent more time.
-        let deadline = tokio::time::sleep(DORMANT_DEADLINE);
+        let deadline = tokio::time::sleep(DORMANT_TIMEOUT);
         tokio::pin!(deadline);
         loop {
             tokio::select! {
