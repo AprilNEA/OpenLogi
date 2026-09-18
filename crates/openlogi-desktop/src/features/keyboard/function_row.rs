@@ -32,7 +32,7 @@ use gpui::{
 };
 use gpui_component::{Selectable as _, h_flex, input::InputState, v_flex};
 use openlogi_core::binding::{Action, WorkflowStep};
-use openlogi_core::config::{KeyModifiers, KeyTrigger};
+use openlogi_core::config::{FunctionKey, KeyModifiers, KeyTrigger};
 
 use super::editors::{
     PowerUserKind, text_editor_placeholder, text_editor_seed, workflow_editor_seed,
@@ -51,33 +51,11 @@ use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
 use gpui::ease_in_out;
 use gpui::{Animation, AnimationExt, img};
 
-/// The full programmable top row: Esc, then F1-F19. Each entry is the display
-/// label (on the key) + the [`KeyTrigger`] keycode it binds. MX Keys-class
-/// boards expose all 20; boards with a shorter F-row (a G513 has F1-F12)
-/// surface a prefix of this list, sized by the asset's key markers — see
-/// [`key_points`].
-const FUNCTION_KEYS: [(&str, u16); 20] = [
-    ("Esc", 0x35),
-    ("F1", 0x7A),
-    ("F2", 0x78),
-    ("F3", 0x63),
-    ("F4", 0x76),
-    ("F5", 0x60),
-    ("F6", 0x61),
-    ("F7", 0x62),
-    ("F8", 0x64),
-    ("F9", 0x65),
-    ("F10", 0x6D),
-    ("F11", 0x67),
-    ("F12", 0x6F),
-    ("F13", 0x69),
-    ("F14", 0x6B),
-    ("F15", 0x71),
-    ("F16", 0x6A),
-    ("F17", 0x40),
-    ("F18", 0x4F),
-    ("F19", 0x50),
-];
+/// The full programmable top row: Esc, then F1-F19 — each key carries its
+/// legend and the [`KeyTrigger`] keycode it binds. MX Keys-class boards expose
+/// all 20; boards with a shorter F-row (a G513 has F1-F12) surface a prefix of
+/// this list, sized by the asset's key markers — see [`key_points`].
+const FUNCTION_KEYS: [FunctionKey; 20] = FunctionKey::ALL;
 
 /// Width of the config panel (CSS px) when a key is selected.
 const PANEL_W: f32 = 320.;
@@ -259,15 +237,15 @@ impl Render for FunctionRowView {
             .iter()
             .zip(points.iter())
             .enumerate()
-            .map(|(idx, ((label, keycode), point))| {
+            .map(|(idx, (key, point))| {
                 let trigger = KeyTrigger {
-                    keycode: *keycode,
+                    keycode: key.keycode(),
                     modifiers: KeyModifiers::default(),
                 };
                 let bound = bindings.and_then(|bindings| bindings.get(&trigger));
                 KeySlot {
                     idx,
-                    label,
+                    label: key.label(),
                     trigger,
                     x_frac: point.x_frac,
                     y_frac: point.y_frac,
