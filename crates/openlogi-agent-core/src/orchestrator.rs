@@ -17,7 +17,7 @@ use std::sync::{Arc, RwLock};
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{Action, Binding};
 use openlogi_core::bindings::{button_bindings_for, oshook_gestures_for};
-use openlogi_core::config::{Config, LightSettings, ScrollResolution, canonical_device_key};
+use openlogi_core::config::{Config, LightSettings, canonical_device_key};
 use openlogi_core::device::{
     Capabilities, DeviceInventory, DeviceKind, LightCapabilities, StandaloneDevice,
 };
@@ -34,7 +34,7 @@ use crate::action_ring::ActionRingSessionSpec;
 use crate::capture_plan::{
     DeviceCapturePlan, SharedCapturePlans, hidpp_side_gesture_maps_for, plan_for_device,
 };
-use crate::hardware::{DeviceAccess, DeviceOp, HardwareContext};
+use crate::hardware::{DeviceAccess, DeviceOp, HardwareContext, WheelModeChange};
 use crate::observable::ObservableState;
 use crate::receiver_access::ReceiverAccess;
 use crate::runtime::hook::{HookMaps, SharedHookMaps};
@@ -603,16 +603,15 @@ impl Orchestrator {
         let key = &dev.config_key;
         let route_key = stable_id(dev).route_key();
         let device = self.config.devices.get(key.as_str());
-        let (resolution, inverted) = configured_wheel_mode(&self.config, dev);
+        let wheel = configured_wheel_mode(&self.config, dev);
         let dpi = device.and_then(|d| d.effective_dpi(&route_key));
         let smartshift = device
             .and_then(|d| d.effective_smartshift(&route_key))
             .map(openlogi_hid::SmartShiftStatus::from);
-        if resolution.is_some() || inverted.is_some() || dpi.is_some() || smartshift.is_some() {
+        if wheel.is_some() || dpi.is_some() || smartshift.is_some() {
             crate::hardware::reapply_mouse_volatile_in_background(
                 &self.shared.device(&route),
-                resolution,
-                inverted,
+                wheel,
                 dpi,
                 smartshift,
             );
@@ -714,11 +713,13 @@ impl Orchestrator {
             let Some(route) = dev.route.clone() else {
                 continue;
             };
-            let (resolution, inverted) = configured_wheel_mode(&self.config, dev);
+            let Some(change) = configured_wheel_mode(&self.config, dev) else {
+                debug!("no configured wheel mode fields — write skipped");
+                continue;
+            };
             crate::hardware::write_scroll_wheel_mode_in_background(
                 self.shared.device(&route),
-                resolution,
-                inverted,
+                change,
             );
         }
     }
@@ -927,15 +928,12 @@ impl Orchestrator {
     }
 }
 
-/// Resolve the two independently-gated HiResWheel settings for one device.
-/// `None` means preserve the device's current value.
-fn configured_wheel_mode(
-    config: &Config,
-    dev: &AgentDevice,
-) -> (Option<ScrollResolution>, Option<bool>) {
-    let Some(capabilities) = dev.capabilities else {
-        return (None, None);
-    };
+/// Resolve the two independently-gated HiResWheel settings for one device
+/// into the change that applies them. A setting the device cannot take, or
+/// that is not configured, is left out of the change and keeps the device's
+/// current value; `None` when that leaves nothing to write.
+fn configured_wheel_mode(config: &Config, dev: &AgentDevice) -> Option<WheelModeChange> {
+    let capabilities = dev.capabilities?;
     let route_key = stable_id(dev).route_key();
     let device = config.devices.get(dev.config_key.as_str());
     let resolution = capabilities
@@ -945,7 +943,7 @@ fn configured_wheel_mode(
     let inverted = capabilities
         .scroll_inversion
         .then(|| device.is_some_and(|d| d.effective_invert_scroll(&route_key)));
-    (resolution, inverted)
+    WheelModeChange::new(resolution, inverted)
 }
 
 /// Build the agent device list from an inventory snapshot. Mirrors the GUI's

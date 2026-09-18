@@ -5,6 +5,7 @@ use super::{
     any_device_needs_capture_rearm, build_devices, configured_wheel_mode, host_switch_links,
     pick_current, plan_reapply, reapply_targets, stable_id,
 };
+use crate::hardware::WheelModeChange;
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{Action, Binding, ButtonId};
 use openlogi_core::config::{
@@ -349,7 +350,7 @@ fn configured_wheel_mode_gates_resolution_and_inversion_independently() {
     });
     assert_eq!(
         configured_wheel_mode(&config, &device),
-        (Some(ScrollResolution::Low), None)
+        Some(WheelModeChange::Resolution(ScrollResolution::Low))
     );
 
     device.capabilities = Some(Capabilities {
@@ -357,10 +358,13 @@ fn configured_wheel_mode_gates_resolution_and_inversion_independently() {
         scroll_inversion: true,
         ..Capabilities::default()
     });
-    assert_eq!(configured_wheel_mode(&config, &device), (None, Some(true)));
+    assert_eq!(
+        configured_wheel_mode(&config, &device),
+        Some(WheelModeChange::Inversion(true))
+    );
 
     device.capabilities = None;
-    assert_eq!(configured_wheel_mode(&config, &device), (None, None));
+    assert_eq!(configured_wheel_mode(&config, &device), None);
 }
 
 #[test]
@@ -373,7 +377,7 @@ fn configured_wheel_mode_leaves_unset_resolution_unmanaged() {
         ..Capabilities::default()
     });
 
-    assert_eq!(configured_wheel_mode(&config, &device), (None, None));
+    assert_eq!(configured_wheel_mode(&config, &device), None);
 }
 
 #[test]

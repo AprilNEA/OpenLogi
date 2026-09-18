@@ -336,8 +336,7 @@ pub fn write_fn_lock_in_background(op: DeviceOp, on: bool) {
 /// hands the operation itself to [`DeviceOp::run`] or [`DeviceOp::detach`].
 pub fn reapply_mouse_volatile_in_background(
     op: &DeviceOp,
-    resolution: Option<ScrollResolution>,
-    inverted: Option<bool>,
+    wheel: Option<WheelModeChange>,
     dpi: Option<Dpi>,
     smartshift: Option<SmartShiftStatus>,
 ) {
@@ -361,12 +360,9 @@ pub fn reapply_mouse_volatile_in_background(
                 );
                 return;
             }
-            if resolution.is_some() || inverted.is_some() {
-                let result = tokio::time::timeout(WRITE_TIMEOUT, async {
-                    apply_wheel_mode(&shared, resolution, inverted).await
-                })
-                .await;
-                log_wheel_result(index, resolution, inverted, result);
+            if let Some(change) = wheel {
+                let result = tokio::time::timeout(WRITE_TIMEOUT, change.apply_on(&shared)).await;
+                log_wheel_result(index, change, result);
             }
             if let Some(dpi) = dpi {
                 let result = tokio::time::timeout(WRITE_TIMEOUT, async {
@@ -406,45 +402,82 @@ pub fn reapply_mouse_volatile_in_background(
     });
 }
 
-async fn apply_wheel_mode(
-    shared: &SharedChannel,
-    resolution: Option<ScrollResolution>,
-    inverted: Option<bool>,
-) -> Result<(), WriteError> {
-    match (resolution, inverted) {
-        (Some(resolution), Some(inverted)) => {
-            openlogi_hid::set_scroll_wheel_mode_on(shared, resolution, inverted)
-                .await
-                .map(|_| ())
+/// A change to a device's native HiResWheel mode. What a variant leaves out
+/// keeps the device's current value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WheelModeChange {
+    /// Set the resolution and preserve the inversion bit.
+    Resolution(ScrollResolution),
+    /// Set the inversion bit and preserve the resolution.
+    Inversion(bool),
+    /// Set both.
+    ResolutionAndInversion {
+        /// The resolution to set.
+        resolution: ScrollResolution,
+        /// The inversion bit to set.
+        inverted: bool,
+    },
+}
+
+impl WheelModeChange {
+    /// The change that sets whichever of the two is configured, or `None`
+    /// when neither is and the wheel stays unmanaged.
+    #[must_use]
+    pub fn new(resolution: Option<ScrollResolution>, inverted: Option<bool>) -> Option<Self> {
+        match (resolution, inverted) {
+            (Some(resolution), Some(inverted)) => Some(Self::ResolutionAndInversion {
+                resolution,
+                inverted,
+            }),
+            (Some(resolution), None) => Some(Self::Resolution(resolution)),
+            (None, Some(inverted)) => Some(Self::Inversion(inverted)),
+            (None, None) => None,
         }
-        (Some(resolution), None) => openlogi_hid::set_scroll_resolution_on(shared, resolution)
-            .await
-            .map(|_| ()),
-        (None, Some(inverted)) => openlogi_hid::set_scroll_inversion_on(shared, inverted).await,
-        (None, None) => Ok(()),
+    }
+
+    /// Write the change through `shared`.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the HiResWheel write reports, including
+    /// [`WriteError::FeatureUnsupported`] on a wheel without the feature.
+    pub async fn apply_on(self, shared: &SharedChannel) -> Result<(), WriteError> {
+        match self {
+            Self::ResolutionAndInversion {
+                resolution,
+                inverted,
+            } => openlogi_hid::set_scroll_wheel_mode_on(shared, resolution, inverted)
+                .await
+                .map(|_| ()),
+            Self::Resolution(resolution) => {
+                openlogi_hid::set_scroll_resolution_on(shared, resolution)
+                    .await
+                    .map(|_| ())
+            }
+            Self::Inversion(inverted) => {
+                openlogi_hid::set_scroll_inversion_on(shared, inverted).await
+            }
+        }
     }
 }
 
 fn log_wheel_result(
     index: u8,
-    resolution: Option<ScrollResolution>,
-    inverted: Option<bool>,
+    change: WheelModeChange,
     result: Result<Result<(), WriteError>, Elapsed>,
 ) {
     match result {
-        Ok(Ok(())) => debug!(index, ?resolution, ?inverted, "native wheel mode written"),
+        Ok(Ok(())) => debug!(index, ?change, "native wheel mode written"),
         Ok(Err(WriteError::FeatureUnsupported { feature_hex })) => debug!(
             index,
-            ?resolution,
-            ?inverted,
+            ?change,
             feature = format_args!("{feature_hex:#06x}"),
             "native wheel mode unsupported"
         ),
         Ok(Err(e)) => warn!(error = ?e, "wheel mode write failed"),
         Err(_) => warn!(
             index,
-            ?resolution,
-            ?inverted,
+            ?change,
             "wheel mode write timed out (device asleep/unresponsive)"
         ),
     }
@@ -468,62 +501,15 @@ pub fn write_dpi_in_background(op: DeviceOp, dpi: Dpi) {
     );
 }
 
-#[derive(Debug, Clone, Copy)]
-enum ScrollWheelModeChange {
-    Resolution(ScrollResolution),
-    Inversion(bool),
-    ResolutionAndInversion {
-        resolution: ScrollResolution,
-        inverted: bool,
-    },
-}
-
 /// Spawn an OS thread that reconciles the configured native HiResWheel mode
-/// for `op`'s device.
-///
-/// `resolution == None` preserves the current device resolution;
-/// `inverted == None` preserves the current inversion bit. At least one field
-/// must be set by the caller. Unsupported devices are expected and only logged
-/// at debug level.
-pub fn write_scroll_wheel_mode_in_background(
-    op: DeviceOp,
-    resolution: Option<ScrollResolution>,
-    inverted: Option<bool>,
-) {
-    let change = match (resolution, inverted) {
-        (Some(resolution), Some(inverted)) => ScrollWheelModeChange::ResolutionAndInversion {
-            resolution,
-            inverted,
-        },
-        (Some(resolution), None) => ScrollWheelModeChange::Resolution(resolution),
-        (None, Some(inverted)) => ScrollWheelModeChange::Inversion(inverted),
-        (None, None) => {
-            debug!("no configured wheel mode fields — write skipped");
-            return;
-        }
-    };
+/// for `op`'s device. Unsupported devices are expected and only logged at
+/// debug level.
+pub fn write_scroll_wheel_mode_in_background(op: DeviceOp, change: WheelModeChange) {
     let index = op.route.device_index();
     op.spawn_write(
         "wheel mode write",
-        move |shared| async move {
-            match change {
-                ScrollWheelModeChange::ResolutionAndInversion {
-                    resolution,
-                    inverted,
-                } => openlogi_hid::set_scroll_wheel_mode_on(&shared, resolution, inverted)
-                    .await
-                    .map(|_| ()),
-                ScrollWheelModeChange::Resolution(resolution) => {
-                    openlogi_hid::set_scroll_resolution_on(&shared, resolution)
-                        .await
-                        .map(|_| ())
-                }
-                ScrollWheelModeChange::Inversion(inverted) => {
-                    openlogi_hid::set_scroll_inversion_on(&shared, inverted).await
-                }
-            }
-        },
-        move |result| log_wheel_result(index, resolution, inverted, result),
+        move |shared| async move { change.apply_on(&shared).await },
+        move |result| log_wheel_result(index, change, result),
     );
 }
 
@@ -687,6 +673,30 @@ mod tests {
         assert!(
             !called.load(Ordering::SeqCst),
             "the write closure must not run while host device I/O is suspended",
+        );
+    }
+
+    /// Every combination of the two independently configured wheel settings.
+    /// `Some(false)` is a configured inversion, not an absent one.
+    #[test]
+    fn a_wheel_mode_change_sets_exactly_what_is_configured() {
+        let low = ScrollResolution::Low;
+
+        assert_eq!(WheelModeChange::new(None, None), None);
+        assert_eq!(
+            WheelModeChange::new(Some(low), None),
+            Some(WheelModeChange::Resolution(low))
+        );
+        assert_eq!(
+            WheelModeChange::new(None, Some(false)),
+            Some(WheelModeChange::Inversion(false))
+        );
+        assert_eq!(
+            WheelModeChange::new(Some(low), Some(true)),
+            Some(WheelModeChange::ResolutionAndInversion {
+                resolution: low,
+                inverted: true,
+            })
         );
     }
 
