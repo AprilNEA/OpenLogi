@@ -55,7 +55,10 @@ receiver discovery can enable notifications and request arrival reports.
 | `openlogi diag features` | Reads feature/firmware tables for all online devices; has no `--device` flag |
 | `diag controls`, `diag battery` | Read the selected device; use `--device` and inspect the printed route |
 | `diag wheel` without `--resolution` | Reads wheel mode; adding `--resolution` writes hardware |
-| `diag dpi`, `diag smartshift` | Write test values and attempt restoration; failures can prevent restoration |
+| `diag dpi` | Writes a test DPI and attempts restoration; failures can prevent restoration |
+| `diag smartshift` without `--sensitivity` or `--leave-flipped` | Toggles mode and attempts restoration; failures can prevent restoration |
+| `diag smartshift --sensitivity N` | Sets sensitivity without restoring the previous value; preserves the current mode |
+| `diag smartshift --leave-flipped` | Toggles mode and intentionally skips restoration |
 | `diag lighting` | Writes lighting; not an observation-only diagnostic |
 
 Diagnostic `--device` uses the first case-insensitive substring match. If names
@@ -75,5 +78,5 @@ default triage. Stop if ownership, target selection, or restoration is uncertain
   Reproduce protocol regressions with an existing sanitized fixture when possible.
 - If a new capture is justified, use
   [fixture contribution](../contributing-device-fixtures/SKILL.md).
-  Report hardware verification separately; an orb without the device cannot
-  establish that the physical failure is fixed.
+  Report hardware verification separately. Checks without the affected physical
+  device do not establish that the physical failure is fixed.
