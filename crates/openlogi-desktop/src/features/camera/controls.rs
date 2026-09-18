@@ -109,20 +109,12 @@ enum Reapplied {
 
 impl CameraControlsPanel {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let state_obs = cx.subscribe(
-            &AppState::global(cx),
-            |_panel, _, event: &StateEvent, cx| {
-                if matches!(
-                    event,
-                    StateEvent::InventoryChanged
-                        | StateEvent::DeviceSelected(_)
-                        | StateEvent::CameraChanged
-                        | StateEvent::CameraPermissionChanged
-                ) {
-                    cx.notify();
-                }
-            },
-        );
+        let state_obs = AppState::repaint_on(cx, |event| {
+            matches!(
+                event,
+                StateEvent::CameraChanged | StateEvent::CameraPermissionChanged
+            )
+        });
         Self {
             key: None,
             uid: None,

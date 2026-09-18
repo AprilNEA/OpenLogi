@@ -1,11 +1,14 @@
-//! The events [`AppState`] emits, and the one place that emits them.
+//! The events [`AppState`] emits, the one place that emits them, and the one
+//! filter device panels listen through.
 //!
 //! A mutator decides which [`StateEvent`] its change causes and returns it as
 //! [`StateEvents`]; [`AppState::apply`] emits what the mutation reported. Views
 //! therefore never pick an event, and mutators stay free of a GPUI context so
-//! plain `#[test]`s can drive them.
+//! plain `#[test]`s can drive them. On the receiving side a panel names the
+//! events it renders and [`AppState::repaint_on`] decides whether one of them
+//! is about the device on screen.
 
-use gpui::{App, Context, EventEmitter};
+use gpui::{App, Context, EventEmitter, Subscription};
 
 use super::AppState;
 use super::device_key::DeviceKey;
@@ -55,6 +58,28 @@ pub(crate) enum StateEvent {
     /// on the accompanying refresh; this event is for localized text *cached
     /// in state*, which must be recomputed in the new locale.
     LanguageChanged,
+}
+
+impl StateEvent {
+    /// The device this event is about, or `None` for an app-wide one.
+    pub(crate) fn device(&self) -> Option<&DeviceKey> {
+        match self {
+            Self::DeviceSelected(key)
+            | Self::BindingsChanged(key)
+            | Self::DpiChanged(key)
+            | Self::SmartShiftChanged(key)
+            | Self::LightingChanged(key)
+            | Self::DeviceConfigChanged(key) => Some(key),
+            Self::AgentChanged
+            | Self::ForegroundChanged
+            | Self::DiagnosticsChanged
+            | Self::InventoryChanged
+            | Self::CameraChanged
+            | Self::CameraPermissionChanged
+            | Self::SettingsChanged
+            | Self::LanguageChanged => None,
+        }
+    }
 }
 
 impl EventEmitter<StateEvent> for AppState {}
@@ -146,6 +171,54 @@ impl AppState {
         Self::update(cx, |state, cx| mutate(state).emit(cx));
     }
 
+    /// Repaint `cx`'s view — a panel of the active device — whenever that
+    /// device or what is known about it changes, and on every event `topic`
+    /// picks that is app-wide or about that device. An event about another
+    /// device never repaints the panel, whatever `topic` says.
+    pub(crate) fn repaint_on<V: 'static>(
+        cx: &mut Context<V>,
+        topic: impl Fn(&StateEvent) -> bool + 'static,
+    ) -> Subscription {
+        cx.subscribe(&Self::global(cx), move |_, state, event, cx| {
+            if state.read(cx).concerns_device_panel(event, &topic) {
+                cx.notify();
+            }
+        })
+    }
+
+    /// Whether `key` is the device on screen.
+    pub(crate) fn is_current_device(&self, key: &DeviceKey) -> bool {
+        self.current_record()
+            .is_some_and(|record| record.device_key() == *key)
+    }
+
+    /// The rule behind [`Self::repaint_on`]. Exhaustive on purpose: a new
+    /// event has to say here whether every device panel repaints on it, or
+    /// only the panels that asked.
+    fn concerns_device_panel(
+        &self,
+        event: &StateEvent,
+        topic: impl Fn(&StateEvent) -> bool,
+    ) -> bool {
+        match event {
+            StateEvent::InventoryChanged | StateEvent::DeviceSelected(_) => true,
+            StateEvent::AgentChanged
+            | StateEvent::ForegroundChanged
+            | StateEvent::DiagnosticsChanged
+            | StateEvent::BindingsChanged(_)
+            | StateEvent::DpiChanged(_)
+            | StateEvent::SmartShiftChanged(_)
+            | StateEvent::LightingChanged(_)
+            | StateEvent::CameraChanged
+            | StateEvent::CameraPermissionChanged
+            | StateEvent::DeviceConfigChanged(_)
+            | StateEvent::SettingsChanged
+            | StateEvent::LanguageChanged => {
+                topic(event) && event.device().is_none_or(|key| self.is_current_device(key))
+            }
+        }
+    }
+
     /// `event` about the active device, or nothing when no device is selected:
     /// what every editor of the active device announces its change as.
     pub(super) fn for_current_device(&self, event: fn(DeviceKey) -> StateEvent) -> StateEvents {
@@ -213,5 +286,46 @@ mod tests {
             merged,
             [StateEvent::LanguageChanged, StateEvent::SettingsChanged]
         );
+    }
+
+    #[test]
+    fn a_device_panel_repaints_for_its_topic_only_when_it_concerns_the_device_on_screen() {
+        let state = state_with_a_known_mouse();
+        let on_screen = || DeviceKey::from(KNOWN_MOUSE_KEY);
+        let elsewhere = || DeviceKey::from("unit:00000001");
+        let topic = |event: &StateEvent| {
+            matches!(
+                event,
+                StateEvent::BindingsChanged(_) | StateEvent::CameraChanged
+            )
+        };
+
+        for (event, repaints) in [
+            // Whatever the topic, a change of the device on screen repaints.
+            (StateEvent::InventoryChanged, true),
+            (StateEvent::DeviceSelected(elsewhere()), true),
+            (StateEvent::BindingsChanged(on_screen()), true),
+            (StateEvent::BindingsChanged(elsewhere()), false),
+            (StateEvent::CameraChanged, true),
+            // Off topic, even about the device on screen or app-wide.
+            (StateEvent::DpiChanged(on_screen()), false),
+            (StateEvent::SettingsChanged, false),
+        ] {
+            assert_eq!(
+                state.concerns_device_panel(&event, topic),
+                repaints,
+                "{event:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_device_on_screen_means_no_device_event_concerns_a_panel() {
+        let state = state_without_devices();
+
+        assert!(!state.concerns_device_panel(
+            &StateEvent::BindingsChanged(DeviceKey::from(KNOWN_MOUSE_KEY)),
+            |_| true
+        ));
     }
 }

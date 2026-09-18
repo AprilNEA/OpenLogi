@@ -42,19 +42,11 @@ impl LightPanel {
         let settings = AppState::try_read(cx)
             .map(AppState::light)
             .unwrap_or_default();
-        let state_obs = cx.subscribe(&AppState::global(cx), |_, _, event: &StateEvent, cx| {
-            let relevant = match event {
-                StateEvent::InventoryChanged
-                | StateEvent::DeviceSelected(_)
-                | StateEvent::CameraChanged => true,
-                StateEvent::LightingChanged(key) => AppState::try_read(cx)
-                    .and_then(AppState::current_record)
-                    .is_some_and(|record| record.device_key() == *key),
-                _ => false,
-            };
-            if relevant {
-                cx.notify();
-            }
+        let state_obs = AppState::repaint_on(cx, |event| {
+            matches!(
+                event,
+                StateEvent::CameraChanged | StateEvent::LightingChanged(_)
+            )
         });
         Self {
             brightness: None,

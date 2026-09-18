@@ -146,22 +146,13 @@ impl MouseModelView {
             }
         })
         .detach();
-        let state = AppState::global(cx);
-        let state_obs = cx.subscribe(&state, |_view, _, event: &StateEvent, cx| {
-            let relevant = match event {
-                StateEvent::InventoryChanged
-                | StateEvent::DeviceSelected(_)
-                | StateEvent::ForegroundChanged => true,
-                StateEvent::BindingsChanged(key) | StateEvent::LightingChanged(key) => {
-                    AppState::try_read(cx)
-                        .and_then(AppState::current_record)
-                        .is_some_and(|record| record.device_key() == *key)
-                }
-                _ => false,
-            };
-            if relevant {
-                cx.notify();
-            }
+        let state_obs = AppState::repaint_on(cx, |event| {
+            matches!(
+                event,
+                StateEvent::ForegroundChanged
+                    | StateEvent::BindingsChanged(_)
+                    | StateEvent::LightingChanged(_)
+            )
         });
         Self {
             focus_handle: cx.focus_handle(),

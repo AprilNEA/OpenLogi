@@ -56,21 +56,8 @@ impl DpiPanel {
         // completes. The slider entity is rebuilt in `render` whenever the
         // selected device or reported range changes, because SliderState's
         // range is builder-only.
-        let state_obs = cx.subscribe(
-            &AppState::global(cx),
-            |_panel, _, event: &StateEvent, cx| {
-                let relevant = match event {
-                    StateEvent::InventoryChanged | StateEvent::DeviceSelected(_) => true,
-                    StateEvent::DpiChanged(key) => AppState::try_read(cx)
-                        .and_then(AppState::current_record)
-                        .is_some_and(|record| record.device_key() == *key),
-                    _ => false,
-                };
-                if relevant {
-                    cx.notify();
-                }
-            },
-        );
+        let state_obs =
+            AppState::repaint_on(cx, |event| matches!(event, StateEvent::DpiChanged(_)));
 
         Self {
             slider_state: None,

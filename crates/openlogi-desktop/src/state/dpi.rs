@@ -81,10 +81,7 @@ impl AppState {
     /// disconnected routes; this selected-device check prevents an old
     /// gallery card from changing the shared visible value.
     pub(crate) fn apply_dpi_read(&mut self, key: &DeviceKey) {
-        if self
-            .current_record()
-            .is_none_or(|record| record.device_key() != *key)
-        {
+        if !self.is_current_device(key) {
             return;
         }
         if let Some(DpiStatus::Ready(info)) = self.pointer.reads.dpi_load(key) {

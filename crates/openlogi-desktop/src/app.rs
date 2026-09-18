@@ -233,9 +233,8 @@ impl AppView {
         let app_catalog = cx.new(|cx| AppCatalogPicker::new(profile_icons.clone(), window, cx));
         let app_catalog_obs = cx.observe(&app_catalog, |_, _, cx| cx.notify());
         let state_obs = cx.subscribe(&state, |view, _, event: &StateEvent, cx| {
-            let active_key = AppState::try_read(cx)
-                .and_then(AppState::current_record)
-                .map(DeviceRecord::device_key);
+            let is_current =
+                |key| AppState::try_read(cx).is_some_and(|state| state.is_current_device(key));
             let on_home = matches!(view.route, Route::Home);
             let relevant = match event {
                 StateEvent::AgentChanged
@@ -248,21 +247,18 @@ impl AppView {
                             view.active_tab,
                             DetailTab::Buttons | DetailTab::ActionsRing | DetailTab::Device
                         )
-                        && active_key.as_ref() == Some(key)
+                        && is_current(key)
                 }
                 StateEvent::DpiChanged(key) => {
-                    !on_home
-                        && view.active_tab == DetailTab::Device
-                        && active_key.as_ref() == Some(key)
+                    !on_home && view.active_tab == DetailTab::Device && is_current(key)
                 }
                 StateEvent::LightingChanged(key) => {
-                    on_home
-                        || (view.active_tab == DetailTab::Light && active_key.as_ref() == Some(key))
+                    on_home || (view.active_tab == DetailTab::Light && is_current(key))
                 }
                 StateEvent::DeviceConfigChanged(key) => {
                     on_home
                         || (matches!(view.active_tab, DetailTab::Pointer | DetailTab::Device)
-                            && active_key.as_ref() == Some(key))
+                            && is_current(key))
                 }
                 StateEvent::CameraChanged => on_home || view.active_tab == DetailTab::Light,
                 // Child entities own these surfaces and subscribe directly. A
