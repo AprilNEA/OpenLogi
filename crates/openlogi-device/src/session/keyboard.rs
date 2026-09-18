@@ -2,12 +2,11 @@
 //! HID++ `0x1b04` and turn their physical edges into [`CapturedInput`] the agent can
 //! dispatch.
 //!
-//! [`run_keyboard_capture_session_with_registry`] is the keyboard counterpart
-//! of [`crate::session::gesture::run_capture_session_with_registry_spec`]: one
-//! open channel, diversion armed on exactly the controls the caller asks for
-//! (an unbound key is never diverted, so it keeps its native firmware
-//! function), one message listener, and every diverted control handed back to
-//! the firmware on shutdown.
+//! [`run_keyboard_capture_session`] is the keyboard counterpart of
+//! [`crate::session::gesture::run_capture_session`]: one open channel, diversion armed
+//! on exactly the controls the caller asks for (an unbound key is never
+//! diverted, so it keeps its native firmware function), one message listener,
+//! and every diverted control handed back to the firmware on shutdown.
 //!
 //! Diversion works on the key's *control* — the printed media/shortcut
 //! function — so it fires when Fn-lock is off (or via Fn+key when it is on).
@@ -73,7 +72,7 @@ pub const KEYBOARD_KEY_CIDS: [(u16, ButtonId); 9] = [
 /// miss returns [`GestureError::DeviceNotFound`] without falling back to route
 /// enumeration/opening; the agent watcher retries after a later inventory
 /// publication.
-pub async fn run_keyboard_capture_session_with_registry(
+pub async fn run_keyboard_capture_session(
     route: DeviceRoute,
     wanted: BTreeMap<u16, ButtonId>,
     sink: mpsc::UnboundedSender<CapturedInput>,

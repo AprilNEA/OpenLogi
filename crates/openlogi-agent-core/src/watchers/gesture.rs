@@ -1,10 +1,10 @@
 //! Background HID++ control-capture watcher, one session per online device.
 //!
-//! Runs [`openlogi_hid::run_capture_session_with_registry_spec`] concurrently
-//! for every device in the shared capture-plan list (not just the GUI's
-//! selection), restarts a session when its device's plan — route, diverted
-//! controls, thumb-wheel arming — changes, and dispatches each captured input
-//! against the binding maps of the device it arrived on:
+//! Runs [`openlogi_hid::run_capture_session`] concurrently for every device in
+//! the shared capture-plan list (not just the GUI's selection), restarts a
+//! session when its device's plan — route, diverted controls, thumb-wheel
+//! arming — changes, and dispatches each captured input against the binding
+//! maps of the device it arrived on:
 //!
 //! - a gesture swipe through the gesture binding map,
 //! - a DPI/ModeShift or thumb-wheel-tap press through the button binding map,
@@ -31,7 +31,7 @@ use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_core::scroll::ScrollDelta;
 use openlogi_hid::{
     CaptureChannel, CaptureSessionOutcome, CapturedInput, DeviceIoGate, PendingCaptureRestore,
-    run_capture_session_with_registry_spec,
+    run_capture_session,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
@@ -734,7 +734,7 @@ fn spawn_session(
     let device_io = channels.device_io.clone();
     tokio::spawn(async move {
         let _lease = lease;
-        let pending_restore = match run_capture_session_with_registry_spec(
+        let pending_restore = match run_capture_session(
             session_route,
             session_spec,
             session_tx,

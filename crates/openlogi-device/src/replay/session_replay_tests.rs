@@ -14,7 +14,7 @@ use crate::session::gesture::CaptureSpec;
 use crate::{
     CaptureChannel, CaptureSessionOutcome, ChannelRegistry, DeviceRoute, Enumerator, NodeId,
     NodeInfo, PairingCommand, PairingEvent, ReceiverSelector, device_io_channel, reprog_controls,
-    run_capture_session_with_registry_spec, run_pairing,
+    run_capture_session, run_pairing,
 };
 
 const GESTURE_CHANNEL: &str = "gesture-capture-session";
@@ -69,7 +69,7 @@ async fn gesture_capture_replay_restores_original_reporting_on_normal_shutdown()
     let (shutdown, shutdown_rx) = oneshot::channel();
     let channel_slot: CaptureChannel = Arc::new(RwLock::new(None));
     let (_io_signal, io_gate) = device_io_channel();
-    let capture = run_capture_session_with_registry_spec(
+    let capture = run_capture_session(
         route.clone(),
         CaptureSpec {
             divert_gesture_sources: vec![GESTURE_CID],

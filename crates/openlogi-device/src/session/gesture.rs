@@ -3,12 +3,12 @@
 //! haptic panel), and the thumb wheel over HID++ and turn their events
 //! into [`CapturedInput`] the GUI can dispatch.
 //!
-//! [`run_capture_session_with_registry_spec`] runs on the HID++ channel
-//! inventory already holds open for one device, enables diversion on whichever
-//! of those controls it exposes, registers one message listener, and restores
-//! every control's default mapping on shutdown. Using that one channel
-//! matters: a second channel to the same device would split its input-report
-//! stream, so all captured controls share this session.
+//! [`run_capture_session`] runs on the HID++ channel inventory already holds
+//! open for one device, enables diversion on whichever of those controls it
+//! exposes, registers one message listener, and restores every control's
+//! default mapping on shutdown. Using that one channel matters: a second
+//! channel to the same device would split its input-report stream, so all
+//! captured controls share this session.
 //!
 //! The session is transport-only — it has no opinion on what an input *does*.
 //! The GUI maps each [`CapturedInput`] to the user's bound action and dispatches
@@ -235,7 +235,7 @@ pub struct CaptureSpec {
 /// transport replacement or loss may return
 /// [`CaptureSessionOutcome::RestorePending`] for the caller to retry on the
 /// current inventory channel.
-pub async fn run_capture_session_with_registry_spec(
+pub async fn run_capture_session(
     route: DeviceRoute,
     spec: CaptureSpec,
     sink: mpsc::UnboundedSender<CapturedInput>,

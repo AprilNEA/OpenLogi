@@ -1,10 +1,10 @@
 //! Background HID++ key-capture watcher for a bound keyboard.
 //!
-//! Runs [`openlogi_hid::run_keyboard_capture_session_with_registry`] on a
-//! dedicated thread for the keyboard the orchestrator publishes in
-//! [`SharedKeyboardSpec`], restarts it when the keyboard (or the set of bound
-//! keys) changes, and dispatches each captured key press through the common
-//! action path ([`crate::runtime::ActionDispatcher`]).
+//! Runs [`openlogi_hid::run_keyboard_capture_session`] on a dedicated thread
+//! for the keyboard the orchestrator publishes in [`SharedKeyboardSpec`],
+//! restarts it when the keyboard (or the set of bound keys) changes, and
+//! dispatches each captured key press through the common action path
+//! ([`crate::runtime::ActionDispatcher`]).
 //!
 //! The mouse capture watcher ([`super::gesture`]) and this one hold *shared*
 //! receiver leases, so both run concurrently; pairing still waits for (and
@@ -19,7 +19,7 @@ use std::time::Duration;
 use openlogi_core::binding::{Binding, ButtonId};
 use openlogi_hid::{
     CaptureChannel, CaptureSessionOutcome, CapturedInput, ChannelRegistry, DeviceIoGate,
-    DeviceRoute, PendingCaptureRestore, run_keyboard_capture_session_with_registry,
+    DeviceRoute, PendingCaptureRestore, run_keyboard_capture_session,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{debug, info, warn};
@@ -643,7 +643,7 @@ fn spawn_session(
     let device_io = channels.device_io.clone();
     tokio::spawn(async move {
         let _receiver_lease = receiver_lease;
-        let pending_restore = match run_keyboard_capture_session_with_registry(
+        let pending_restore = match run_keyboard_capture_session(
             route,
             wanted,
             sink,
