@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use openlogi_core::binding::{
     Action, Binding, ButtonId, GestureDirection, SwipeAccumulator, default_binding,
 };
-use openlogi_core::config::{KeyModifiers, KeyTrigger};
+use openlogi_core::config::KeyTrigger;
 use openlogi_hook::{
     EventDevice, EventDisposition, Hook, HookEvent, KeyEvent, MouseEvent, source_is_remappable,
 };
@@ -57,18 +57,6 @@ pub type SharedHookMaps = Arc<RwLock<HookMaps>>;
 /// non-goals), so a single map suffices. Keyed by the config `KeyTrigger`
 /// (keycode + modifiers).
 pub type SharedKeyboardBindings = Arc<RwLock<BTreeMap<KeyTrigger, Action>>>;
-
-/// Convert the hook-layer modifier state into the config-layer type (the two
-/// live in different crates — core is leaf-level and duplicates the four
-/// bools). Drop-in identity once the field names align.
-fn convert_modifiers(m: openlogi_hook::KeyModifiers) -> KeyModifiers {
-    KeyModifiers {
-        shift: m.shift,
-        control: m.control,
-        option: m.option,
-        command: m.command,
-    }
-}
 
 /// Tracks which OS-hook gesture button (Back/Forward) is mid-hold and defers the
 /// swipe detection itself to a shared [`SwipeAccumulator`], which commits a swipe
@@ -415,10 +403,7 @@ fn handle_key(
     if HELD_KEYS.with_borrow(|keys| keys.contains(&keycode)) {
         return EventDisposition::Suppress;
     }
-    let trigger = KeyTrigger {
-        keycode,
-        modifiers: convert_modifiers(modifiers),
-    };
+    let trigger = KeyTrigger { keycode, modifiers };
     let Some(action) = bindings
         .try_read()
         .ok()

@@ -7,17 +7,16 @@ use thiserror::Error;
 
 use crate::binding::Action;
 
-/// Detectable modifier state for a keyboard trigger. A leaf-level duplicate of
-/// `openlogi_hook::KeyModifiers` — core must not depend on hook, so the four
-/// bools are mirrored here and converted at the agent boundary (which depends
-/// on both crates). `Fn` is absent: firmware-internal, unusable as a trigger
-/// (function-key-remapper spec, Appendix A).
+/// Detectable modifier state: what a keyboard trigger requires, and what the
+/// OS hook reports with each key event (`openlogi-hook` re-exports this type).
+/// `Fn` is absent: firmware-internal, never reported on non-function-row keys,
+/// and so unusable as a trigger (function-key-remapper spec, Appendix A).
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
 )]
 #[expect(
     clippy::struct_excessive_bools,
-    reason = "four independent modifier flags mirrored from the OS hook"
+    reason = "four independent modifier flags, as the OS reports them"
 )]
 pub struct KeyModifiers {
     /// Shift held.

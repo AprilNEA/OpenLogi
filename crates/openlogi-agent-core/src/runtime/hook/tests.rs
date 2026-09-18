@@ -2,6 +2,7 @@
 
 use super::*;
 use openlogi_core::binding::{GESTURE_SWIPE_THRESHOLD, LongPressBinding};
+use openlogi_core::config::KeyModifiers;
 
 fn token(id: u64, button: ButtonId) -> PressToken {
     PressToken::hook_for_test(id, button)
@@ -216,7 +217,7 @@ fn queued_key_action_retains_its_press_time_target() {
             KeyEvent {
                 keycode,
                 pressed: true,
-                modifiers: openlogi_hook::KeyModifiers::default(),
+                modifiers: KeyModifiers::default(),
             },
             &bindings,
             &actions,
