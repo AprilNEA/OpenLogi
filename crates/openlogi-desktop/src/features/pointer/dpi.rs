@@ -19,7 +19,7 @@ use gpui_component::{
 use openlogi_core::hid::{Dpi, DpiCapabilities};
 use tracing::debug;
 
-use crate::state::{AppState, DeviceKey, DeviceRecord, DpiStatus, StateEvent};
+use crate::state::{AppState, DeviceKey, DpiStatus, StateEvent};
 use crate::ui::components::PresetChip;
 use crate::ui::status::{retry_line, status_line};
 use crate::ui::theme::{self, Palette, Typography as _};
@@ -138,13 +138,7 @@ impl DpiPanel {
                         let dpi = AppState::try_read(cx)
                             .map_or(dpi, |state| state.normalize_active_dpi(dpi));
                         debug!(%dpi, "slider change → AppState.dpi");
-                        AppState::update(cx, |state, cx| {
-                            let key = state.current_record().map(DeviceRecord::device_key);
-                            state.set_dpi_preview(dpi);
-                            if let Some(key) = key {
-                                cx.emit(StateEvent::DpiChanged(key));
-                            }
-                        });
+                        AppState::apply(cx, |state| state.set_dpi_preview(dpi));
                         cx.notify();
                     }
                     SliderEvent::Release(value) => {
@@ -155,13 +149,7 @@ impl DpiPanel {
                         // gallery-driven device switches route the write to the
                         // now-current device, not whichever was active when this
                         // slider entity was constructed.
-                        AppState::update(cx, |state, cx| {
-                            let key = state.current_record().map(DeviceRecord::device_key);
-                            state.commit_dpi(dpi);
-                            if let Some(key) = key {
-                                cx.emit(StateEvent::DpiChanged(key));
-                            }
-                        });
+                        AppState::apply(cx, |state| state.commit_dpi(dpi));
                     }
                 },
             );
@@ -348,9 +336,7 @@ fn slider_element(
             "dpi-retry",
             tr!("pointer.couldnt_read_dpi_click_to_retry"),
             pal,
-            move |cx| {
-                AppState::retry_dpi_read(cx, key.clone());
-            },
+            move |cx| AppState::apply(cx, |state| state.retry_dpi_read(&key)),
         )
         .into_any_element(),
         (DpiStatus::Unsupported(_), _) => {
@@ -385,13 +371,7 @@ fn preset_chip(idx: usize, value: Dpi, active: bool, presets: &[Dpi]) -> impl In
                     else {
                         return;
                     };
-                    AppState::update(cx, |state, cx| {
-                        let key = state.current_record().map(DeviceRecord::device_key);
-                        state.commit_dpi(dpi);
-                        if let Some(key) = key {
-                            cx.emit(StateEvent::DpiChanged(key));
-                        }
-                    });
+                    AppState::apply(cx, |state| state.commit_dpi(dpi));
                 }),
         )
         .child(
@@ -404,13 +384,7 @@ fn preset_chip(idx: usize, value: Dpi, active: bool, presets: &[Dpi]) -> impl In
                     if idx < next.len() {
                         next.remove(idx);
                     }
-                    AppState::update(cx, |state, cx| {
-                        let key = state.current_record().map(DeviceRecord::device_key);
-                        state.commit_dpi_presets(next);
-                        if let Some(key) = key {
-                            cx.emit(StateEvent::DpiChanged(key));
-                        }
-                    });
+                    AppState::apply(cx, |state| state.commit_dpi_presets(next));
                 }),
         )
 }
@@ -427,14 +401,10 @@ fn add_preset_chip() -> impl IntoElement {
             // Append the current DPI to the active device's preset list.
             // Duplicates are allowed — the user might want the same value
             // appearing at multiple cycle positions for muscle-memory reasons.
-            AppState::update(cx, |state, cx| {
-                let key = state.current_record().map(DeviceRecord::device_key);
+            AppState::apply(cx, |state| {
                 let mut presets = state.dpi_presets();
                 presets.push(state.dpi());
-                state.commit_dpi_presets(presets);
-                if let Some(key) = key {
-                    cx.emit(StateEvent::DpiChanged(key));
-                }
+                state.commit_dpi_presets(presets)
             });
         })
 }

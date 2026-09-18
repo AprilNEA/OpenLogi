@@ -1294,7 +1294,7 @@ fn transient_identity_is_not_persisted_or_retained_after_resolution() {
 
     assert_eq!(state.devices().len(), 1);
     assert!(state.config.device_identity(transient_key).is_none());
-    state.commit_dpi(Dpi::new(2400));
+    let _ = state.commit_dpi(Dpi::new(2400));
     assert!(state.config.dpi(transient_key).is_none());
 
     let stable_list = build_device_list(
