@@ -24,7 +24,7 @@ use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
 use crate::features::pointer::smartshift::SmartShiftPanel;
 use crate::features::profiles::{AppCatalogPicker, ProfileIconCache};
-use crate::services::assets::AssetResolver;
+use crate::services::assets::user_cache_root;
 use crate::state::{AgentLink, AppState, DeviceRecord, StateEvent, StateEvents};
 use crate::ui::theme::{self, ContentWidth, Typography as _};
 
@@ -197,7 +197,6 @@ impl Focusable for AppView {
 impl AppView {
     /// Construct the root view and its child entities.
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let resolver = AssetResolver::new();
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
         // `AppState` is installed as an entity by `main` (with the IPC command
@@ -214,7 +213,7 @@ impl AppView {
                 );
             } else {
                 info!(
-                    root = ?resolver.cache_root(),
+                    root = ?user_cache_root(),
                     "no devices with HID++ model info — using synthetic silhouette"
                 );
             }

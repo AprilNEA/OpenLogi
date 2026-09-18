@@ -36,7 +36,8 @@ use walkdir::WalkDir;
 use self::images::{
     buttons_image_for, load_manifest, metadata_for, read_png_dimensions, variant_image_for,
 };
-use self::paths::{bundle_assets_root, load_index, user_cache_root};
+pub(crate) use self::paths::user_cache_root;
+use self::paths::{bundle_assets_root, load_index};
 
 /// Total bytes of the per-user asset cache — the tier [`sync`] writes and
 /// [`clear_cache`] removes. The read-only app bundle (release builds) is a

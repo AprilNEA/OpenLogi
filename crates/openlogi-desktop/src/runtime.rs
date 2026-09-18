@@ -73,13 +73,15 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
         // unresponsive device must not be able to wedge the main thread before
         // the window opens. The agent's first snapshot wires up devices,
         // bindings and the hook live.
+        // Built once: the initial device list resolves against it here, and the
+        // event loop below keeps resolving against the same one.
+        let resolver = assets::AssetResolver::new();
         let swr = cx.update(|cx| {
             let swr_runtime: Arc<dyn swr_core::Runtime> = Arc::new(GpuiRuntime::new(cx));
             let swr = SwrClient::builder()
                 .default_options(assets::queries::default_options())
                 .build(swr_runtime.clone());
             if AppState::try_global(cx).is_none() {
-                let resolver = assets::AssetResolver::new();
                 let state = cx.new(|_| {
                     let mut state = AppState::with_runtime(
                         config,
@@ -123,7 +125,7 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
         ensure_registration_at_startup(cx);
 
         let (sync_tx, mut sync_done) = tokio::sync::mpsc::unbounded_channel::<bool>();
-        let mut rt = Runtime::new(cams, sync_tx, swr);
+        let mut rt = Runtime::new(cams, sync_tx, swr, resolver);
         let mut camera_scan = Box::pin(cx.background_executor().timer(CAMERA_SCAN_PERIOD));
         // Cleared when the IPC update channel closes (the client thread died),
         // so the select stops polling a closed receiver.
@@ -230,8 +232,12 @@ struct Runtime {
 }
 
 impl Runtime {
-    fn new(cams: Vec<Camera>, sync_tx: UnboundedSender<bool>, swr: SwrClient) -> Self {
-        let resolver = assets::AssetResolver::new();
+    fn new(
+        cams: Vec<Camera>,
+        sync_tx: UnboundedSender<bool>,
+        swr: SwrClient,
+        resolver: assets::AssetResolver,
+    ) -> Self {
         let auto_sync = sync::should_run(resolver.has_bundle_root());
         Self {
             cams,
