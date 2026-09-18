@@ -38,7 +38,7 @@ Two more things this crate is not:
 | `runtime.rs` | Everything the app does that isn't a render: one task, one `select!` arm per source that can change long-lived state (agent updates, camera scan, asset commands, finished downloads, `openlogi://` deeplinks). |
 | `app.rs`, `app/` | The main window's shell — home gallery, device detail, menu bar, status line, deeplink handling. |
 | `windows.rs`, `windows/` | The windows themselves plus the registry that keeps each a singleton. About and Updates are **pages inside Settings**, not windows of their own. |
-| `features/` | One module per device-feature panel: `mouse`, `pointer`, `keyboard`, `lighting`, `camera`, `action_ring`, `profiles`. |
+| `features/` | One module per device-feature panel: `mouse`, `pointer`, `keyboard`, `lighting`, `camera`, `action_ring`, `profiles` — plus `binding_editor`, the binding-editor chrome the mouse, keyboard, profile and Actions Ring editors share. |
 | `state.rs`, `state/` | `AppState`, the GPUI global every view reads. Anything two views share belongs here; per-component scratch (hover index, open popover) stays in the owning entity. |
 | `services/` | Infrastructure, not UI: the IPC client, asset resolution and download, device reads, diagnostics, i18n. |
 | `ui/` | Shared components and the hand-painted `Palette` (`theme.rs`). |

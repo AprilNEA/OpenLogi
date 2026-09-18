@@ -40,7 +40,7 @@ you MUST either:
 2. Manually re-read every changed cfg-gated file against **current master** for:
    - name collisions with existing `pub use` / `pub const` items
    - type mismatches (`u16` vs `u32`, `Option` arity, new enum fields)
-   - call sites that gained args on master (e.g. `with_runtime`, `build_device_list`,
+   - call sites that gained args on master (e.g. `AppState::new`, `build_device_list`,
      `dispatch_action`) but the PR still uses the old signature
 
 Do not claim "cross-platform green" without CI (or a local cross-lint) having
