@@ -174,17 +174,28 @@ impl CaptureAccum {
 /// as divertable — the same mechanism Options+ uses to rebind a tilt. Arming
 /// only ever diverts what a device's own `getCtrlIdInfo` reports, so listing
 /// them here is inert on a mouse whose wheel does not tilt.
-pub const DIVERTABLE_STANDARD_BUTTONS: [(u16, ButtonId); 9] = [
-    (0x0052, ButtonId::MiddleClick),
-    (0x0053, ButtonId::Back),
-    (0x00BD, ButtonId::Back),
-    (0x00CE, ButtonId::Back),
-    (0x00DB, ButtonId::Back),
-    (0x0056, ButtonId::Forward),
-    (0x00CF, ButtonId::Forward),
-    (0x005b, ButtonId::WheelTiltLeft),
-    (0x005d, ButtonId::WheelTiltRight),
-];
+pub const DIVERTABLE_STANDARD_BUTTONS: [(u16, ButtonId); 9] = {
+    // Destructured rather than indexed: a family that gains a CID stops
+    // compiling here instead of silently staying out of the table.
+    let [
+        back,
+        back_multiplatform,
+        back_multiplatform_alt,
+        back_generic,
+    ] = reprog_controls::BACK_CIDS;
+    let [forward, forward_multiplatform] = reprog_controls::FORWARD_CIDS;
+    [
+        (0x0052, ButtonId::MiddleClick),
+        (back, ButtonId::Back),
+        (back_multiplatform, ButtonId::Back),
+        (back_multiplatform_alt, ButtonId::Back),
+        (back_generic, ButtonId::Back),
+        (forward, ButtonId::Forward),
+        (forward_multiplatform, ButtonId::Forward),
+        (0x005b, ButtonId::WheelTiltLeft),
+        (0x005d, ButtonId::WheelTiltRight),
+    ]
+};
 
 /// HID++ gesture sources: the `0x1b04` control ID and the [`ButtonId`] it
 /// delivers — the dedicated gesture button on most MX mice, and the Haptic
