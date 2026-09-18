@@ -38,7 +38,9 @@ mod observation;
 mod raw;
 
 #[cfg(test)]
-pub(crate) mod tests;
+pub(crate) mod mock;
+#[cfg(test)]
+mod tests;
 
 pub use error::ChannelError;
 pub use message::{

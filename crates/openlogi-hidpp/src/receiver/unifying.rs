@@ -385,7 +385,7 @@ mod tests {
         DeviceConnection, DeviceKind, DevicePairingInformation, Event, InfoSubRegister, Receiver,
         Register, decode_notification, update_wireless_notification_flag,
     };
-    use crate::channel::tests::{MockRawHidChannel, channel_with_reader};
+    use crate::channel::mock::{MockRawHidChannel, channel_with_reader};
     use crate::protocol::v10::{Message, MessageHeader, MessageType};
 
     /// Builds the long notification the receiver broadcasts, with `payload`

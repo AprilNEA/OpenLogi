@@ -1,20 +1,14 @@
-//! Tests for the HID++ channel, and the mock transport they run on.
-//!
-//! `MockRawHidChannel` is also used by `device.rs`, so this module is
-//! `pub(crate)` rather than private.
+//! Tests for the HID++ channel.
 
+use super::mock::{MockRawHidChannel, channel_with_reader};
 use super::*;
 use std::{
-    error::Error,
-    io,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
-
-use async_trait::async_trait;
 
 use crate::{
     nibble,
@@ -25,13 +19,6 @@ static RELEASED_SW_IDS: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 static ORDERING_RAW_CHANNEL_DROPPED: AtomicBool = AtomicBool::new(false);
 static ORDERING_RELEASE_AFTER_RAW_DROP: AtomicBool = AtomicBool::new(false);
 static ORDERING_RELEASE_COUNT: AtomicUsize = AtomicUsize::new(0);
-
-/// A live channel over the mock transport.
-pub(crate) async fn channel_with_reader(raw: MockRawHidChannel) -> HidppChannel {
-    HidppChannel::from_raw_channel(raw)
-        .await
-        .expect("the mock transport speaks HID++")
-}
 
 #[test]
 fn replacing_and_dropping_leased_policies_releases_each_exactly_once() {
@@ -689,159 +676,6 @@ fn v20_error_frame(request_header: v20::MessageHeader, error_code: u8) -> v20::M
     v20::Message::Short(error_header, payload)
 }
 
-#[derive(Clone)]
-pub(crate) struct MockRawHidHandle {
-    incoming_tx: async_channel::Sender<Vec<u8>>,
-    written_reports: Arc<Mutex<Vec<Vec<u8>>>>,
-    responses_on_write: Arc<Mutex<VecDeque<Vec<u8>>>>,
-    park_writes: Arc<AtomicBool>,
-    fail_writes: Arc<AtomicBool>,
-}
-
-impl MockRawHidHandle {
-    pub(crate) fn queue_response(&self, msg: HidppMessage) {
-        self.responses_on_write
-            .lock()
-            .unwrap()
-            .push_back(raw_report(msg));
-    }
-
-    pub(crate) async fn send_incoming(&self, msg: HidppMessage) {
-        self.incoming_tx.send(raw_report(msg)).await.unwrap();
-    }
-
-    pub(crate) async fn send_incoming_raw(&self, report: Vec<u8>) {
-        self.incoming_tx.send(report).await.unwrap();
-    }
-
-    pub(crate) fn written_reports(&self) -> Vec<Vec<u8>> {
-        self.written_reports.lock().unwrap().clone()
-    }
-
-    pub(crate) fn park_writes(&self) {
-        self.park_writes.store(true, Ordering::SeqCst);
-    }
-
-    pub(crate) fn release_writes(&self) {
-        self.park_writes.store(false, Ordering::SeqCst);
-    }
-
-    pub(crate) fn fail_writes(&self) {
-        self.fail_writes.store(true, Ordering::SeqCst);
-    }
-}
-
-pub(crate) struct MockRawHidChannel {
-    incoming_tx: async_channel::Sender<Vec<u8>>,
-    incoming_rx: async_channel::Receiver<Vec<u8>>,
-    written_reports: Arc<Mutex<Vec<Vec<u8>>>>,
-    responses_on_write: Arc<Mutex<VecDeque<Vec<u8>>>>,
-    park_writes: Arc<AtomicBool>,
-    fail_writes: Arc<AtomicBool>,
-    report_support: (bool, bool),
-    drop_flag: Option<&'static AtomicBool>,
-}
-
-impl MockRawHidChannel {
-    pub(crate) fn new() -> (Self, MockRawHidHandle) {
-        Self::with_drop_flag(None)
-    }
-
-    pub(crate) fn long_only() -> (Self, MockRawHidHandle) {
-        Self::with_configuration(None, (false, true))
-    }
-
-    fn with_drop_flag(drop_flag: Option<&'static AtomicBool>) -> (Self, MockRawHidHandle) {
-        Self::with_configuration(drop_flag, (true, true))
-    }
-
-    fn with_configuration(
-        drop_flag: Option<&'static AtomicBool>,
-        report_support: (bool, bool),
-    ) -> (Self, MockRawHidHandle) {
-        let (incoming_tx, incoming_rx) = async_channel::unbounded();
-        let written_reports = Arc::new(Mutex::new(Vec::new()));
-        let responses_on_write = Arc::new(Mutex::new(VecDeque::new()));
-        let park_writes = Arc::new(AtomicBool::new(false));
-        let fail_writes = Arc::new(AtomicBool::new(false));
-
-        let handle = MockRawHidHandle {
-            incoming_tx: incoming_tx.clone(),
-            written_reports: Arc::clone(&written_reports),
-            responses_on_write: Arc::clone(&responses_on_write),
-            park_writes: Arc::clone(&park_writes),
-            fail_writes: Arc::clone(&fail_writes),
-        };
-
-        (
-            Self {
-                incoming_tx,
-                incoming_rx,
-                written_reports,
-                responses_on_write,
-                park_writes,
-                fail_writes,
-                report_support,
-                drop_flag,
-            },
-            handle,
-        )
-    }
-}
-
-impl Drop for MockRawHidChannel {
-    fn drop(&mut self) {
-        if let Some(drop_flag) = self.drop_flag {
-            drop_flag.store(true, Ordering::SeqCst);
-        }
-    }
-}
-
-#[async_trait]
-impl RawHidChannel for MockRawHidChannel {
-    fn vendor_id(&self) -> u16 {
-        0x046d
-    }
-
-    fn product_id(&self) -> u16 {
-        0xc539
-    }
-
-    async fn write_report(&self, src: &[u8]) -> Result<usize, Box<dyn Error + Sync + Send>> {
-        self.written_reports.lock().unwrap().push(src.to_vec());
-        if self.fail_writes.load(Ordering::SeqCst) {
-            return Err(mock_error());
-        }
-        while self.park_writes.load(Ordering::SeqCst) {
-            futures_timer::Delay::new(Duration::from_millis(1)).await;
-        }
-        let response = self.responses_on_write.lock().unwrap().pop_front();
-        if let Some(response) = response {
-            self.incoming_tx.send(response).await.unwrap();
-        }
-
-        Ok(src.len())
-    }
-
-    async fn read_report(&self, buf: &mut [u8]) -> Result<usize, Box<dyn Error + Sync + Send>> {
-        let report = self.incoming_rx.recv().await.map_err(|_| mock_error())?;
-        let len = report.len().min(buf.len());
-        buf[..len].copy_from_slice(&report[..len]);
-        Ok(len)
-    }
-
-    fn supports_short_long_hidpp(&self) -> Option<(bool, bool)> {
-        Some(self.report_support)
-    }
-
-    async fn get_report_descriptor(
-        &self,
-        _buf: &mut [u8],
-    ) -> Result<usize, Box<dyn Error + Sync + Send>> {
-        unreachable!("mock declares HID++ support")
-    }
-}
-
 fn short_msg(marker: u8) -> HidppMessage {
     HidppMessage::Short([0xff, marker, 0x10, marker, marker, marker])
 }
@@ -882,12 +716,6 @@ fn record_ordered_sw_id_release(_id: u8) {
         Ordering::SeqCst,
     );
     ORDERING_RELEASE_COUNT.fetch_add(1, Ordering::SeqCst);
-}
-
-fn raw_report(msg: HidppMessage) -> Vec<u8> {
-    let mut buf = [0u8; LONG_REPORT_LENGTH];
-    let len = msg.write_raw(&mut buf);
-    buf[..len].to_vec()
 }
 
 fn assert_pending_empty(channel: &HidppChannel) {
@@ -1360,11 +1188,4 @@ async fn wait_for_atomic_count(count: &AtomicUsize, expected: usize) {
     }
 
     panic!("timed out waiting for atomic count {expected}");
-}
-
-fn mock_error() -> Box<dyn Error + Sync + Send> {
-    Box::new(io::Error::new(
-        io::ErrorKind::BrokenPipe,
-        "mock channel closed",
-    ))
 }

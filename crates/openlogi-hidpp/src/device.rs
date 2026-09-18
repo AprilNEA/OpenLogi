@@ -256,7 +256,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::{
-        channel::tests::{MockRawHidChannel, channel_with_reader},
+        channel::mock::{MockRawHidChannel, channel_with_reader},
         feature::{CreatableFeature as _, feature_set::FeatureSetFeature},
         protocol::v20::Hidpp20Error,
     };
