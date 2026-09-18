@@ -2,9 +2,9 @@
 
 The event-tap crate: CGEventTap on macOS, evdev+uinput on Linux, WH_MOUSE_LL
 on Windows. Cross-platform cfg discipline is
-[`.claude/rules/cross-platform.md`](../../.claude/rules/cross-platform.md), and
+[`.agents/rules/cross-platform.md`](../../.agents/rules/cross-platform.md), and
 the macOS FFI contract is
-[`.claude/rules/objc-ffi.md`](../../.claude/rules/objc-ffi.md); this file is the
+[`.agents/rules/objc-ffi.md`](../../.agents/rules/objc-ffi.md); this file is the
 crate's own load-bearing behavior.
 
 - macOS: the CGEventTap freeze-hazard state machine is load-bearing. The tap must
@@ -12,7 +12,7 @@ crate's own load-bearing behavior.
   run-loop slice — a stopped watcher after grant once froze all input on the machine.
   Don't restructure it casually, and don't migrate the tap to `objc2-core-graphics`.
   The `NSWorkspace` read and the Accessibility-trust check/prompt are the parts that
-  did move to the objc2 framework crates — see `.claude/rules/objc-ffi.md` for the rule that
+  did move to the objc2 framework crates — see `.agents/rules/objc-ffi.md` for the rule that
   every TCC call uses a typed binding rather than a hand-written `extern` block.
 - `AXIsProcessTrusted()` is **not** a revocation signal: it keeps returning `true`
   after the user deletes the app's row from System Settings, which is how #674 froze

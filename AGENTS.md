@@ -50,9 +50,9 @@ access devices directly.
 - Three processes ship in the bundle — GUI, agent, overlay — and the overlay is a
   *sibling* of the GUI, not a part of it: it links `openlogi-ui`, never
   `openlogi-desktop`. Anything both need goes in `openlogi-ui`, and every dependency
-  added there lands in the overlay too (`.claude/rules/gui.md` has the rule).
+  added there lands in the overlay too (`.agents/rules/gui.md` has the rule).
 - Platform code is cfg-gated per crate (`[target.'cfg(target_os = …)'.dependencies]`).
-  `.claude/rules/objc-ffi.md` is the contract for the workspace's macOS native FFI and
+  `.agents/rules/objc-ffi.md` is the contract for the workspace's macOS native FFI and
   maintains the canonical file-by-file inventory — read it before editing that surface.
 
 ## Evidence and root-cause discipline
@@ -104,7 +104,7 @@ one; report the targeted verification that was actually relevant.
 
 ### Local gate (hard stop before push — scale it to the affected graph)
 
-Before any push, read and follow the [local gate and push checklist](.claude/rules/ci.md#local-gate-hard-stop-before-push--scale-it-to-the-affected-graph).
+Before any push, read and follow the [local gate and push checklist](.agents/rules/ci.md#local-gate-hard-stop-before-push--scale-it-to-the-affected-graph).
 That file owns tier selection, commands, and the CI job map. Run the applicable
 gate on the final tree; do not push a known-red tree or bypass the hooks.
 A skipped job is **not** a pass. These procedures do not authorize a push.
@@ -136,7 +136,7 @@ floor tracks stable instead of trailing it — raise it the day a release ships
 something worth using, and run `devenv update rust-overlay` with it so the local
 toolchain stops being older than CI's. The full standards — the
 lint table and what it changes day to day, typed-invariant style, house rules on
-refactoring, dependencies, and module layout — live in `.claude/rules/rust.md`,
+refactoring, dependencies, and module layout — live in `.agents/rules/rust.md`,
 loaded for any Rust or `Cargo.toml` edit.
 
 ## Git & GitHub
@@ -170,7 +170,9 @@ never re-run a failed release job or re-dispatch on an existing tag.
 ## Maintaining agent guidance
 
 - Keep one source for each instruction. `AGENTS.md` owns global guidance;
-  `CLAUDE.md` imports it. Put subsystem constraints in the narrowest rule file
+  `CLAUDE.md` imports it. Shared rule files live in `.agents/rules/`;
+  `.claude/rules` is only a relative symlink to that directory. Edit and link
+  the canonical files. Keep crate-specific contracts in their own `AGENTS.md`
   and task procedures in skills. Link shared skills instead of copying them.
 - Add a rule only for a **non-obvious, recurring, actionable** problem. Cite the
   repeated failure or review evidence. Put architecture explanations and long
@@ -185,30 +187,35 @@ never re-run a failed release job or re-dispatch on an existing tag.
 
 ## Subsystem rules — read before touching
 
-Claude Code loads the `.claude/rules/` files per matching path and a crate's
-own `AGENTS.md` when working inside it; other agents: read the listed file
-before editing that area.
+All agents must read the matching rules below and a crate's own `AGENTS.md`
+before editing that area. `.agents/rules/` is the canonical store, not a
+cross-client automatic loader. Claude Code discovers those files through the
+`.claude/rules` symlink and applies their `paths` metadata. Other clients use
+this index; do not assume they interpret Claude's `paths` field.
+Keep this index as ordinary links, not unconditional imports of every rule.
+See [agent guidance setup](docs/DEVELOPMENT.md#agent-guidance) for checkout and
+client-loading checks, including Windows symlink requirements.
 
 | Area | Rule file |
 |---|---|
-| reproducing CI jobs locally (every `ci.yml` job → command) | `.claude/rules/ci.md` |
-| any `*.rs` / `Cargo.toml` (workspace Rust standards) | `.claude/rules/rust.md` |
-| `crates/openlogi-desktop/**`, `crates/openlogi-ui/**`, `crates/openlogi-overlay/**` (GPUI) | `.claude/rules/gui.md` |
+| reproducing CI jobs locally (every `ci.yml` job → command) | [.agents/rules/ci.md](.agents/rules/ci.md) |
+| any `*.rs` / `Cargo.toml` (workspace Rust standards) | [.agents/rules/rust.md](.agents/rules/rust.md) |
+| `crates/openlogi-desktop/**`, `crates/openlogi-ui/**`, `crates/openlogi-overlay/**` (GPUI) | [.agents/rules/gui.md](.agents/rules/gui.md) |
 | `crates/openlogi-desktop/**` (that crate's own contract and map) | `crates/openlogi-desktop/AGENTS.md` |
-| locale catalogs/negotiation and each binary's `rust_i18n::i18n!` wiring | `.claude/rules/i18n.md` |
+| locale catalogs/negotiation and each binary's `rust_i18n::i18n!` wiring | [.agents/rules/i18n.md](.agents/rules/i18n.md) |
 | `crates/openlogi-ipc/**`, plus every crate whose serde types ride the wire (`openlogi-agent-core`, `openlogi-agent`, `openlogi-core`, `openlogi-hid`) | `crates/openlogi-ipc/AGENTS.md` |
-| cfg-gated platform code, including hook/inject/hid, camera, and agent autostart/resume | `.claude/rules/cross-platform.md` |
+| cfg-gated platform code, including hook/inject/hid, camera, and agent autostart/resume | [.agents/rules/cross-platform.md](.agents/rules/cross-platform.md) |
 | `crates/openlogi-hidpp/**` (hard fork of `hidpp`) | `crates/openlogi-hidpp/AGENTS.md` |
 | `crates/openlogi-device/**`, `crates/openlogi-hid/**` (the HID++ layer seam) | `crates/openlogi-device/AGENTS.md` |
 | `crates/openlogi-hook/**` (event taps) | `crates/openlogi-hook/AGENTS.md` |
 | `xtask/**`, `packaging/**`, `.github/scripts/**` | `xtask/AGENTS.md` (+ `xtask/README.md`) |
-| macOS native FFI (the rule carries the canonical path inventory) | `.claude/rules/objc-ffi.md` |
+| macOS native FFI (the rule carries the canonical path inventory) | [.agents/rules/objc-ffi.md](.agents/rules/objc-ffi.md) |
 
 ## Task skills — invoke when the task matches
 
 Load the skill when its task matches. If the client cannot invoke skills, read
 the linked `SKILL.md` and the references it requires. For GPUI work, use the
-upstream skills as the default design and coding practice; `.claude/rules/gui.md`
+upstream skills as the default design and coding practice; `.agents/rules/gui.md`
 contains only OpenLogi integration constraints and verification entrypoints.
 
 | Task | Skill |

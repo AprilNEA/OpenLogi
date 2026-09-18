@@ -14,11 +14,12 @@ devenv.local.yaml
 # never copied or vendored. Cloned at the project root for convenience.
 /local-reference/
 
-# Track the orb lifecycle and curated project skills. Other agent state
+# Track the orb lifecycle, shared rules, and curated project skills. Other agent state
 # and skills stay local. Keep parent directories visible for these exceptions.
 /.agents/*
 !/.agents/resume
 !/.agents/setup
+!/.agents/rules/
 !/.agents/skills/
 /.agents/skills/*
 !/.agents/skills/gpui-kit/
@@ -37,9 +38,9 @@ devenv.local.yaml
 .worktrees/
 
 # Claude Code worktrees, transcripts, local settings — per-developer state.
-# The path-scoped agent rules in .claude/rules/ are project config and stay tracked.
+# Track only the rules symlink here; shared rule files live in .agents/rules/.
 /.claude/*
-!/.claude/rules/
+!/.claude/rules
 # Project skills are named explicitly and tracked; everything else under
 # .claude/skills/ is the per-developer symlink farm into .agents/skills/.
 !/.claude/skills/

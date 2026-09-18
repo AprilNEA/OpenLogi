@@ -15,7 +15,7 @@ Use the smallest check that can disprove the change, then apply the required fin
    resolution occurred since the last full gate.
 2. Read the root [iteration policy](../../../AGENTS.md#verification-while-iterating-fast-path)
    and each changed area's scoped rules. For a push, also read the
-   [local gate](../../../.claude/rules/ci.md#local-gate-hard-stop-before-push--scale-it-to-the-affected-graph).
+   [local gate](../../../.agents/rules/ci.md#local-gate-hard-stop-before-push--scale-it-to-the-affected-graph).
    This skill applies those policies; it does not make the pre-push gate mandatory
    for every local edit.
 3. Classify the diff by what it controls, not only by extension:
@@ -48,7 +48,7 @@ Use the smallest check that can disprove the change, then apply the required fin
   changes. Do not run full-workspace checks after every edit.
 - For non-Rust changes, check the actual files: spelling, whitespace, links,
   manifests, or executable behavior. Select shell/Nix/packaging checks from the
-  [CI map](../../../.claude/rules/ci.md#if-you-changed-x-run-y), not Rust by habit.
+  [CI map](../../../.agents/rules/ci.md#if-you-changed-x-run-y), not Rust by habit.
 
 ## Select the pre-push gate only when pushing
 
@@ -70,7 +70,7 @@ Use the smallest check that can disprove the change, then apply the required fin
 
 ## Add checks for the affected boundary
 
-Consult the [CI job map](../../../.claude/rules/ci.md) for exact commands:
+Consult the [CI job map](../../../.agents/rules/ci.md) for exact commands:
 `cargo xtask ci --list` lists jobs; `cargo xtask ci --dry-run` prints planned
 commands but does not verify them. Run required named jobs rather than assuming
 the host gate reproduces all CI.
@@ -78,8 +78,8 @@ the host gate reproduces all CI.
 | Changed boundary | Additional evidence |
 | --- | --- |
 | IPC or serialized wire types | [IPC rules](../../../crates/openlogi-ipc/AGENTS.md), version discipline, fixed-byte `wire_format` tests; roundtrips alone are insufficient |
-| Platform `cfg` code | [Cross-platform rules](../../../.claude/rules/cross-platform.md), target checks or the required manual audit; host-green is not cross-platform-green |
-| UI or localization | [UI workflow](../testing-openlogi-ui/SKILL.md), [i18n rules](../../../.claude/rules/i18n.md), rendered/interaction evidence and catalog checks |
+| Platform `cfg` code | [Cross-platform rules](../../../.agents/rules/cross-platform.md), target checks or the required manual audit; host-green is not cross-platform-green |
+| UI or localization | [UI workflow](../testing-openlogi-ui/SKILL.md), [i18n rules](../../../.agents/rules/i18n.md), rendered/interaction evidence and catalog checks |
 | Fixtures | [Fixture workflow](../contributing-device-fixtures/SKILL.md), strict offline verification and independent semantic review |
 | Dependencies, portable crates, MSRV, docs, packaging | The corresponding extra jobs in the CI map, including wasm/rustdoc when applicable |
 

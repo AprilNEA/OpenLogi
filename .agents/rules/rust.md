@@ -167,7 +167,7 @@ House style:
   (`HidBackend`) — never as ceremony around a compile-time-exclusive choice. A
   single small divergent function (`platform/os.rs`) stays inline. Splitting does
   not lift the cross-platform rule: the non-host files are only ever compiled by
-  that platform's CI or a cross-lint, so `.claude/rules/cross-platform.md` applies
+  that platform's CI or a cross-lint, so `.agents/rules/cross-platform.md` applies
   with full force.
 - File size, coverage percentage, and complexity scores are investigation signals, not
   goals. Split a large file when it contains a coherent responsibility that deserves a
@@ -192,6 +192,6 @@ naming that trait's methods.
 ## Reproducing CI
 
 `openlogi:check` is the host-OS gate, not the pipeline. To run a `ci.yml` job
-locally: `cargo xtask ci --list` and `.claude/rules/ci.md`. Host
+locally: `cargo xtask ci --list` and `.agents/rules/ci.md`. Host
 clippy on macOS does not compile linux cfg; MSRV needs `RUSTUP_TOOLCHAIN`;
 cargo-deny is its own job.

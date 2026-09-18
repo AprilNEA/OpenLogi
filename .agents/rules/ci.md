@@ -95,7 +95,7 @@ lint. The GPUI crates are excluded because documenting them drags in the whole
 graphics toolchain; everything else is covered by exclusion rather than by a list, so
 a new crate is documented by default. The classic silent breakage — handing a trait
 impl to a derive macro kills every `Type::trait_method` doc link — is explained in
-`.claude/rules/rust.md`.
+`.agents/rules/rust.md`.
 
 prek hooks (`prek.toml`): typos and `cargo fmt` at commit; full-workspace clippy
 **and rustdoc** at push (rust-scoped, so non-Rust pushes skip it). Hooks are a
@@ -112,14 +112,14 @@ backstop, not a substitute for running the gate yourself after a rebase.
    green. Mapping: [If you changed X, run Y](#if-you-changed-x-run-y).
 4. If cfg-gated files changed (any `#[cfg(target_os = …)]` block, in any crate):
    cross-lint or hand-audit against master — macOS-green proves nothing there; see
-   `.claude/rules/cross-platform.md`.
+   `.agents/rules/cross-platform.md`.
 5. If wire types changed: `PROTOCOL_VERSION` bumped and
    `cargo test -p openlogi-ipc --test wire_format` green — see
    `crates/openlogi-ipc/AGENTS.md`.
 6. If locales changed: every `crates/openlogi-ui/locales/*.toml` carries the same keys
    as `en.toml` (new keys at the same position); run `cargo test -p openlogi-ui locale`
    for catalog parity and `cargo test -p openlogi-desktop i18n` for catalog wiring and
-   desktop resolution — see `.claude/rules/i18n.md`.
+   desktop resolution — see `.agents/rules/i18n.md`.
 7. Only then `git push` / force-push to the PR branch.
 
 ## How to run it
@@ -181,7 +181,7 @@ cargo clippy --target aarch64-unknown-linux-musl \
 ```
 
 `openlogi-camera`'s Linux backend needs kernel headers and does not
-cross-compile from macOS. Details: `.claude/rules/cross-platform.md`.
+cross-compile from macOS. Details: `.agents/rules/cross-platform.md`.
 
 Linux CI tests **exclude** `openlogi-desktop`, but still run `openlogi-ui`'s
 portable locale-parity test. The desktop end-to-end key-resolution tests run

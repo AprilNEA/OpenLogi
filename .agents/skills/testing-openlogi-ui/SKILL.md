@@ -9,7 +9,7 @@ Choose evidence that proves the affected behavior, then inspect the rendered res
 
 ## Choose the test surface
 
-1. Read [GUI integration rules](../../../.claude/rules/gui.md) and load
+1. Read [GUI integration rules](../../../.agents/rules/gui.md) and load
    [gpui-kit](../gpui-kit/SKILL.md). For visual or interaction changes, also load
    [gpui-kit-design-guides](../gpui-kit-design-guides/SKILL.md).
 2. Name the expected result and a failing case before editing. Use pure tests for
@@ -73,7 +73,7 @@ cargo test -p openlogi-desktop gallery_renders_without_application_state
   and inspect them. Check affected light/dark themes, supported interface scales,
   narrow layouts, and open menus or dialogs. A smoke test is not pixel verification.
 - For localized UI, change language while the view is open and inspect cached text.
-  Apply the catalog and wiring checks in [i18n rules](../../../.claude/rules/i18n.md).
+  Apply the catalog and wiring checks in [i18n rules](../../../.agents/rules/i18n.md).
 - Apply [change verification](../verifying-openlogi-changes/SKILL.md) once stable.
   Desktop tests run on macOS in CI; a Linux CI pass does not cover those tests.
 

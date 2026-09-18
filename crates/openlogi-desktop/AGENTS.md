@@ -5,7 +5,7 @@ panels, Settings, pairing. It is one of three processes in the bundle and the
 only one with a settings UI.
 
 This file is the crate's contract and map. Read
-[`.claude/rules/gui.md`](../../.claude/rules/gui.md) before GUI work: it loads the
+[`.agents/rules/gui.md`](../../.agents/rules/gui.md) before GUI work: it loads the
 upstream GPUI skills and lists OpenLogi integration constraints. Workspace
 standards and checks are in the root [`AGENTS.md`](../../AGENTS.md).
 
@@ -45,7 +45,7 @@ Two more things this crate is not:
 | `platform/` | OS integration — app icon, OS facts, updater. |
 | `app_assets.rs` | The GPUI asset source, composed in order: embedded logo → `openlogi-ui`'s `action-icons/` → gpui-component's bundled lucide set. A new icon path that resolves nowhere renders blank rather than failing to build. |
 
-Panel selection and settings writes follow `.claude/rules/gui.md`.
+Panel selection and settings writes follow `.agents/rules/gui.md`.
 
 ## Running and verifying
 
@@ -83,8 +83,8 @@ Panel selection and settings writes follow `.claude/rules/gui.md`.
 
 | When you touch | Read |
 |---|---|
-| any `.rs` here (GPUI house style) | [`.claude/rules/gui.md`](../../.claude/rules/gui.md) |
-| `services/i18n.rs`, any user-facing string | [`.claude/rules/i18n.md`](../../.claude/rules/i18n.md) |
+| any `.rs` here (GPUI house style) | [`.agents/rules/gui.md`](../../.agents/rules/gui.md) |
+| `services/i18n.rs`, any user-facing string | [`.agents/rules/i18n.md`](../../.agents/rules/i18n.md) |
 | anything crossing the agent boundary | [`crates/openlogi-ipc/AGENTS.md`](../openlogi-ipc/AGENTS.md) |
-| `platform/**` or any macOS FFI | [`.claude/rules/objc-ffi.md`](../../.claude/rules/objc-ffi.md) |
+| `platform/**` or any macOS FFI | [`.agents/rules/objc-ffi.md`](../../.agents/rules/objc-ffi.md) |
 | a permission symptom or the bundle identity | [`.claude/skills/openlogi-macos-permissions/SKILL.md`](../../.claude/skills/openlogi-macos-permissions/SKILL.md) |

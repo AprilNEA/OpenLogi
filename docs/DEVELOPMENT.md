@@ -193,6 +193,55 @@ crates/
   openlogi-overlay/ the `openlogi-overlay` binary — the cursor-centred Actions Ring
 ```
 
+## Agent guidance
+
+Shared rules have one tracked source: [`.agents/rules/`](../.agents/rules/).
+Edit and link those `.md` files, not a client-specific copy. The tracked
+`.claude/rules` symlink points to `../.agents/rules` inside the checkout.
+Existing references to `.claude/rules/<name>.md` still resolve through that alias.
+Crate-specific contracts stay in each crate's `AGENTS.md`; task workflows stay
+in `.agents/skills/`. No rule generator or install step is required.
+
+The root [AGENTS.md](../AGENTS.md) holds global instructions and the rule index.
+`CLAUDE.md` imports only that entrypoint. Claude Code discovers `.md` rules
+through `.claude/rules` and uses their `paths` metadata for conditional loading.
+Other clients must follow the index; `.agents/rules/` is not a universal
+automatic discovery path. Keep the index as ordinary Markdown links: importing
+every rule from the root would load unrelated guidance into Claude's context.
+
+### Check the checkout and client loading
+
+From the repository root, in a POSIX shell or Git Bash:
+
+```sh
+git ls-files --stage -- .claude/rules .agents/rules
+test -L .claude/rules && test -f .claude/rules/rust.md
+readlink .claude/rules
+```
+
+Expect regular rule files under `.agents/rules/` and one `120000` entry
+for `.claude/rules`, whose link target is `../.agents/rules`. The file checks
+must succeed too: the index mode alone does not prove a working symlink.
+
+On Windows, enable Developer Mode or obtain symlink creation permission before
+cloning with `git clone -c core.symlinks=true <repository-url> <new-directory>`.
+With `core.symlinks=false`, Git writes a text file containing the target instead
+of a directory link; Claude cannot discover the rules through it. Changing the
+config alone does not repair an existing checkout. Preserve local changes and
+use a fresh symlink-enabled checkout. Until then, read the canonical rules via
+the root index; do not replace the alias with independently maintained copies.
+
+Verify loading in the client, not only the filesystem. In a fresh Claude Code
+session, use `/context` or an `InstructionsLoaded` hook to inspect loaded files:
+
+- Read `README.md`: Rust and GUI path rules should not load solely from that read.
+- Read `crates/openlogi-core/src/lib.rs`: the Rust rule should load, but not GUI.
+- Read `crates/openlogi-desktop/src/app.rs`: the GUI rule should now load too.
+
+Follow [Claude's loading diagnostics](https://code.claude.com/docs/en/memory#troubleshoot-memory-issues)
+if those results differ. Filesystem checks and unchanged `paths` metadata are
+not evidence that a particular client version loaded the rules correctly.
+
 ## Local CI
 
 The PR test pipeline is `.github/workflows/ci.yml`. To run every job this
@@ -207,11 +256,11 @@ devenv tasks run openlogi:ci                 # same, from devenv
 
 The runner sets `RUSTFLAGS=-D warnings` the way CI does. Jobs that need another
 OS are reported as skipped; a skip is not a pass. The full job map (and which
-diff requires which job) is [`.claude/rules/ci.md`](../.claude/rules/ci.md).
+diff requires which job) is [`.agents/rules/ci.md`](../.agents/rules/ci.md).
 
 ### Pre-push gate
 
-Before pushing, read [the local gate and push checklist](../.claude/rules/ci.md#local-gate-hard-stop-before-push--scale-it-to-the-affected-graph).
+Before pushing, read [the local gate and push checklist](../.agents/rules/ci.md#local-gate-hard-stop-before-push--scale-it-to-the-affected-graph).
 That file owns tier selection, exact commands, and additional checks required by
 the diff. `devenv tasks run openlogi:check` runs the full host-OS tier, not the
 whole CI pipeline. A Rust-bearing rebase or conflict resolution requires the
