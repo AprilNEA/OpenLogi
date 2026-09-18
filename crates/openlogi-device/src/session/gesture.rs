@@ -20,7 +20,6 @@
 
 mod accum;
 mod arm;
-mod liveness;
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -39,10 +38,10 @@ use tracing::{debug, info, warn};
 use crate::channel::route::DeviceRoute;
 use crate::{ChannelRegistry, DeviceIoGate, SharedChannel};
 
+use super::capture::liveness::{CaptureLiveness, ChannelActivity, LivenessDecision, PingOutcome};
 use accum::CaptureAccum;
 pub(crate) use arm::enumerate_controls;
 use arm::{ArmedControls, ArmedThumbwheel, arm_controls};
-use liveness::{CaptureLiveness, ChannelActivity, LivenessDecision, PingOutcome};
 
 pub use super::capture_restore::{
     CaptureChannelSlot, CaptureError, CaptureSessionFailure, CaptureSessionOutcome,

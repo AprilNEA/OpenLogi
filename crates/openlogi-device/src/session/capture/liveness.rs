@@ -7,7 +7,7 @@ use tokio::sync::Notify;
 use tokio::time::Instant;
 
 /// A channel must be wholly idle for this long before capture probes it.
-pub(super) const IDLE_INTERVAL: Duration = Duration::from_secs(20);
+pub(in crate::session) const IDLE_INTERVAL: Duration = Duration::from_secs(20);
 
 /// Consecutive all-silent probes after which capture replaces the channel.
 const SILENT_STRIKES_BEFORE_RESTART: u8 = 2;
@@ -19,26 +19,26 @@ const SILENT_STRIKES_BEFORE_RESTART: u8 = 2;
 /// unbounded queue. The sequence number preserves activity that races waiter
 /// setup; `Notify` only avoids waiting for the next change to it.
 #[derive(Default)]
-pub(super) struct ChannelActivity {
+pub(in crate::session) struct ChannelActivity {
     seq: AtomicU64,
     changed: Notify,
 }
 
 impl ChannelActivity {
     /// Record one or more inbound reports as the next sequence number.
-    pub(super) fn record(&self) {
+    pub(in crate::session) fn record(&self) {
         self.seq.fetch_add(1, Ordering::Release);
         self.changed.notify_one();
     }
 
     /// Return the latest coalesced activity sequence number.
-    pub(super) fn seq(&self) -> u64 {
+    pub(in crate::session) fn seq(&self) -> u64 {
         self.seq.load(Ordering::Acquire)
     }
 
     /// Wait until activity differs from `observed`, including activity that
     /// lands immediately before or during waiter registration.
-    pub(super) async fn changed_after(&self, observed: u64) -> u64 {
+    pub(in crate::session) async fn changed_after(&self, observed: u64) -> u64 {
         loop {
             let notified = self.changed.notified();
             tokio::pin!(notified);
@@ -58,7 +58,7 @@ impl ChannelActivity {
 
 /// Whether one completed probe observed delivery on the capture channel.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum PingOutcome {
+pub(in crate::session) enum PingOutcome {
     /// A response arrived, regardless of whether it was a pong or HID++ error.
     Delivered,
     /// Neither a response nor any other report arrived before the timeout.
@@ -69,20 +69,20 @@ pub(super) enum PingOutcome {
 
 /// What capture should do after accounting for a completed probe.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum LivenessDecision {
+pub(in crate::session) enum LivenessDecision {
     Continue,
     Restart,
 }
 
 /// Pure deadline and strike state for one capture channel.
-pub(super) struct CaptureLiveness {
+pub(in crate::session) struct CaptureLiveness {
     activity_seq: u64,
     idle_deadline: Instant,
     silent_strikes: u8,
 }
 
 impl CaptureLiveness {
-    pub(super) fn new(now: Instant, activity_seq: u64) -> Self {
+    pub(in crate::session) fn new(now: Instant, activity_seq: u64) -> Self {
         Self {
             activity_seq,
             idle_deadline: now + IDLE_INTERVAL,
@@ -90,30 +90,30 @@ impl CaptureLiveness {
         }
     }
 
-    pub(super) fn activity_seq(&self) -> u64 {
+    pub(in crate::session) fn activity_seq(&self) -> u64 {
         self.activity_seq
     }
 
-    pub(super) fn idle_deadline(&self) -> Instant {
+    pub(in crate::session) fn idle_deadline(&self) -> Instant {
         self.idle_deadline
     }
 
     /// Account for delivered reports and defer probing until another complete
     /// idle interval has elapsed. Any delivery also clears a silent strike.
-    pub(super) fn record_activity(&mut self, now: Instant, seq: u64) {
+    pub(in crate::session) fn record_activity(&mut self, now: Instant, seq: u64) {
         let _ = self.take_activity(now, seq);
     }
 
     /// Re-check activity when the current timer expires. This closes the race
     /// where a report lands as the deadline becomes ready.
-    pub(super) fn ping_due(&mut self, now: Instant, seq: u64) -> bool {
+    pub(in crate::session) fn ping_due(&mut self, now: Instant, seq: u64) -> bool {
         !self.take_activity(now, seq) && now >= self.idle_deadline
     }
 
     /// Account for a completed probe and schedule the next one after another
     /// full interval. Activity racing an all-silent result proves delivery and
     /// wins over the strike.
-    pub(super) fn finish_ping(
+    pub(in crate::session) fn finish_ping(
         &mut self,
         now: Instant,
         seq: u64,
