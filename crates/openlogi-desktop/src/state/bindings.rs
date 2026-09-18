@@ -14,10 +14,11 @@ use super::events::StateEvents;
 use super::{AppState, StateEvent};
 
 /// The per-app profile the binding panels are editing, and the device it was
-/// chosen for. Pairing them prevents a scope opened for one mouse from
-/// carrying over when selection moves to another.
+/// chosen for, by the persistent config key its profiles are stored under.
+/// Pairing them prevents a scope opened for one mouse from carrying over when
+/// selection moves to another.
 struct EditingScope {
-    device_key: String,
+    persistent_key: String,
     app: String,
 }
 
@@ -51,7 +52,7 @@ impl BindingState {
         let key = persistent_key?;
         self.editing_scope
             .as_ref()
-            .filter(|scope| scope.device_key == key)
+            .filter(|scope| scope.persistent_key == key)
             .map(|scope| scope.app.as_str())
     }
 
@@ -61,9 +62,12 @@ impl BindingState {
         persistent_key: Option<&str>,
         app: Option<String>,
     ) {
-        self.editing_scope = app
-            .zip(persistent_key.map(str::to_string))
-            .map(|(app, device_key)| EditingScope { device_key, app });
+        self.editing_scope =
+            app.zip(persistent_key.map(str::to_string))
+                .map(|(app, persistent_key)| EditingScope {
+                    persistent_key,
+                    app,
+                });
         self.refresh_device(config, persistent_key);
     }
 
