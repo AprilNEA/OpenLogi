@@ -10,12 +10,13 @@ use tracing::{debug, warn};
 
 use super::{CaptureSpec, CapturedInput};
 use crate::reprog_controls::{self, ReprogControlsV4};
+use crate::session::capture::open_device;
 use crate::session::capture_restore::{
     ArmedReporting, CaptureError, CaptureSessionFailure, PendingCaptureRestore, ReprogRestore,
     divert_change, rollback_capture_start,
 };
 use crate::thumbwheel::{self, Thumbwheel, ThumbwheelInfo, WheelDirection, WheelResolution};
-use crate::{ChannelRegistry, DeviceIoGate, SharedChannel};
+use crate::{ChannelRegistry, SharedChannel};
 
 /// The set of controls a session has diverted, kept so they can be handed back
 /// to the firmware on teardown.
@@ -93,14 +94,8 @@ impl ArmedControls {
         )
     }
 
-    /// Reapply volatile diversion after a wireless reconnect broadcast. The
-    /// broadcast can precede the device accepting feature writes, so allow a
-    /// short settling window like the keyboard capture path does.
-    pub(super) async fn rearm(&self, device_io: &DeviceIoGate) {
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        if !device_io.allows_io() {
-            return;
-        }
+    /// Reapply volatile diversion after a wireless reconnect broadcast.
+    pub(super) async fn rearm(&self) {
         if let Some(rc) = self.reprog.as_ref() {
             for &reporting in &self.reporting {
                 let raw_xy = self.gesture_cids.contains(&reporting.cid)
@@ -136,15 +131,13 @@ impl ArmedControls {
 /// firmware. If compensation is incomplete, the returned failure carries an
 /// opaque restore capability for the manager to retain and retry.
 pub(super) async fn arm_controls(
-    chan: &Arc<HidppChannel>,
-    slot: u8,
-    spec: &CaptureSpec,
     shared: &SharedChannel,
+    spec: &CaptureSpec,
     registry: &ChannelRegistry,
 ) -> Result<ArmedControls, CaptureSessionFailure> {
-    let device = Device::new(Arc::clone(chan), slot)
-        .await
-        .map_err(|_| CaptureError::DeviceUnreachable(slot))?;
+    let device = open_device(shared).await?;
+    let chan = shared.channel();
+    let slot = shared.device_index();
     let mut armed = ArmedControls::default();
     if let Err(error) = arm_controls_into(&device, chan, slot, spec, &mut armed).await {
         let pending = armed.into_pending(shared);

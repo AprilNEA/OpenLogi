@@ -1,0 +1,26 @@
+# Owner: openlogi_device::session::capture::run_capture — a capture session's
+# channel lifecycle: the listener it installs, and the restore that must finish
+# before that listener drops. The host-switch session is not a capture session
+# and keeps its own listener.
+id: device-capture-lifecycle-owner
+language: rust
+severity: error
+message: session::capture::run_capture installs a capture session's listener and drops it only after restore; implement ArmedCapture::report_handler instead of managing a listener here.
+note: |
+  The gesture and keyboard sessions each installed a listener and each ended
+  with drop_listener_after(restore_after_stop(..)), the ordering that keeps a
+  session the owner of every report its still-diverted controls send. See
+  "Single source of truth" in AGENTS.md.
+files:
+  - crates/openlogi-device/src/session/**/*.rs
+ignores:
+  - crates/openlogi-device/src/session/capture.rs
+  - crates/openlogi-device/src/session/capture_restore.rs
+  - crates/openlogi-device/src/session/host_switch.rs
+  - crates/openlogi-device/src/session/host_switch/**
+  - "**/tests.rs"
+rule:
+  any:
+    - pattern: $CHAN.add_msg_listener_guarded($$$ARGS)
+    - pattern: $CHAN.add_msg_listener($$$ARGS)
+    - pattern: drop_listener_after($$$ARGS)

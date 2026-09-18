@@ -8,7 +8,9 @@
 //! exposes, registers one message listener, and restores every control's
 //! default mapping on shutdown. Using that one channel matters: a second
 //! channel to the same device would split its input-report stream, so all
-//! captured controls share this session.
+//! captured controls share this session. The channel lifecycle itself is
+//! `session::capture`'s, shared with the keyboard session; this module owns
+//! what is armed (`arm`) and what its reports mean (`accum`).
 //!
 //! The session is transport-only — it has no opinion on what an input *does*.
 //! The GUI maps each [`CapturedInput`] to the user's bound action and dispatches
@@ -23,23 +25,16 @@ mod arm;
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-use hidpp::{
-    feature::{
-        CreatableFeature, EmittingFeature,
-        root::RootFeature,
-        wireless_device_status::{WirelessDeviceStatusEvent, WirelessDeviceStatusFeature},
-    },
-    protocol::v20,
-};
+use hidpp::protocol::v20;
 use openlogi_core::binding::{ButtonId, GestureDirection};
-use tokio::sync::oneshot;
-use tracing::{debug, info, warn};
+use tokio::sync::mpsc;
+use tracing::info;
 
+use crate::SharedChannel;
 use crate::channel::route::DeviceRoute;
-use crate::{ChannelRegistry, DeviceIoGate, SharedChannel};
 
 pub use super::capture::CaptureHost;
-use super::capture::liveness::{CaptureLiveness, ChannelActivity, LivenessDecision, PingOutcome};
+use super::capture::{ArmedCapture, Liveness, run_capture};
 use accum::CaptureAccum;
 pub(crate) use arm::enumerate_controls;
 use arm::{ArmedControls, ArmedThumbwheel, arm_controls};
@@ -47,10 +42,6 @@ use arm::{ArmedControls, ArmedThumbwheel, arm_controls};
 pub use super::capture_restore::{
     CaptureChannelSlot, CaptureError, CaptureSessionFailure, CaptureSessionOutcome,
     PendingCaptureRestore,
-};
-use super::capture_restore::{
-    CaptureStop, drop_listener_after, restore_after_stop, stop_for_current_publication,
-    wait_for_channel_change,
 };
 use crate::reprog_controls::{self, ReprogControlsV4};
 use crate::thumbwheel::{self, WheelResolution};
@@ -156,8 +147,8 @@ pub struct CaptureSpec {
     pub divert_buttons: Vec<(u16, ButtonId)>,
 }
 
-/// Capture the controls selected by `spec` on `route` until `shutdown`
-/// resolves, forwarding each event to `sink`.
+/// Capture the controls selected by `spec` on `route` until `host.shutdown`
+/// resolves, forwarding each event to `host.sink`.
 ///
 /// Each gesture source in `spec.divert_gesture_sources` is diverted with
 /// raw-XY. A source not in gesture mode keeps its native behavior — unless a
@@ -166,12 +157,12 @@ pub struct CaptureSpec {
 /// CID, so this is the binding's only delivery path). The DPI/ModeShift
 /// capture and the channel-reuse slot are independent of this.
 ///
-/// Runs on the inventory-owned channel `registry` currently publishes for
-/// `route`: sharing that connection avoids splitting HID++ replies and input
-/// reports across two readers, and a registry miss
+/// Runs on the inventory-owned channel `host.registry` currently publishes
+/// for `route`: sharing that connection avoids splitting HID++ replies and
+/// input reports across two readers, and a registry miss
 /// ([`CaptureError::DeviceNotFound`]) is retried by the caller after a later
 /// inventory publication. Diverts whichever of those controls the device
-/// exposes, and listens. Returns once `shutdown` fires (or its sender is
+/// exposes, and listens. Returns once `host.shutdown` fires (or its sender is
 /// dropped). A normal stop restores every diverted control before returning;
 /// transport replacement or loss may return
 /// [`CaptureSessionOutcome::RestorePending`] for the caller to retry on the
@@ -181,69 +172,73 @@ pub async fn run_capture_session(
     spec: CaptureSpec,
     host: CaptureHost<'_>,
 ) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
-    let shared = host
-        .registry
-        .lookup(&route)
-        .ok_or(CaptureError::DeviceNotFound)?;
-    run_capture_session_on(shared, spec, host).await
+    let shared = host.channel_for(&route)?;
+    let armed = arm_controls(&shared, &spec, host.registry).await?;
+    if let Some(direction) = armed.thumbwheel_direction() {
+        let _ = host.sink.send(direction);
+    }
+    Ok(run_capture(shared, GestureCapture::new(armed), host).await)
 }
 
-async fn run_capture_session_on(
-    shared: SharedChannel,
-    spec: CaptureSpec,
-    host: CaptureHost<'_>,
-) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
-    let CaptureHost {
-        sink,
-        shutdown,
-        channel_slot,
-        registry,
-        device_io,
-    } = host;
-    device_io.ensure_allowed().map_err(CaptureError::from)?;
-    let chan = Arc::clone(shared.channel());
-    let device_index = shared.device_index();
-    let armed = arm_controls(&chan, device_index, &spec, &shared, registry).await?;
+/// Gesture capture as [`run_capture`] drives it: the armed controls, and the
+/// accumulator their reports feed.
+struct GestureCapture {
+    armed: ArmedControls,
+    /// Behind a `Mutex` because the channel's read thread invokes the report
+    /// handler by shared reference.
+    accum: Arc<Mutex<CaptureAccum>>,
+}
 
-    if let Some(direction) = armed.thumbwheel_direction() {
-        let _ = sink.send(direction);
+impl GestureCapture {
+    fn new(armed: ArmedControls) -> Self {
+        Self {
+            armed,
+            accum: Arc::default(),
+        }
+    }
+}
+
+impl ArmedCapture for GestureCapture {
+    const NAME: &'static str = "control";
+    const LIVENESS: Liveness = Liveness::Watched;
+
+    fn log_active(&self, device_index: u8, wake_rearm: bool) {
+        let armed = &self.armed;
+        info!(
+            index = device_index,
+            gesture_sources = armed.gesture_cids.len(),
+            gesture_buttons = armed.gesture_button_cids.len(),
+            dpi_buttons = armed.dpi_cids.len(),
+            buttons = armed.button_cids.len(),
+            thumbwheel = armed.thumb.is_some(),
+            wake_rearm,
+            "control capture active"
+        );
     }
 
-    // Publish this device's open channel so DPI/SmartShift writes reuse it
-    // instead of opening their own. Cleared on the way out.
-    if let Ok(mut slot) = channel_slot.write() {
-        *slot = Some(shared.clone());
-    }
-
-    let accum = Arc::new(Mutex::new(CaptureAccum::default()));
-    let reprog_index = armed.reprog.as_ref().map(ReprogControlsV4::feature_index);
-    let gesture_cids = armed.gesture_cids.clone();
-    let gesture_button_set = armed.gesture_button_cids.clone();
-    let thumb_index = armed
-        .thumb
-        .as_ref()
-        .map(|thumb| thumb.wheel.feature_index());
-    let thumb_resolution = armed
-        .thumb
-        .as_ref()
-        .map_or(WheelResolution::UNKNOWN, ArmedThumbwheel::resolution);
-    let dpi_set = armed.dpi_cids.clone();
-    let button_set = armed.button_cids.clone();
-    let activity = Arc::new(ChannelActivity::default());
-    let listener = chan.add_msg_listener_guarded({
-        let accum = Arc::clone(&accum);
-        let activity = Arc::clone(&activity);
-        let sink = sink.clone();
-        move |raw, matched| {
-            // Every parsed inbound HID++ report proves this channel's read
-            // path is alive, including responses matched to another request.
-            activity.record();
-            if matched {
-                return;
-            }
-            let msg = v20::Message::from(raw);
+    fn report_handler(
+        &self,
+        device_index: u8,
+        sink: mpsc::UnboundedSender<CapturedInput>,
+    ) -> impl Fn(&v20::Message) + Send + Sync + 'static {
+        let armed = &self.armed;
+        let accum = Arc::clone(&self.accum);
+        let reprog_index = armed.reprog.as_ref().map(ReprogControlsV4::feature_index);
+        let gesture_cids = armed.gesture_cids.clone();
+        let gesture_button_set = armed.gesture_button_cids.clone();
+        let thumb_index = armed
+            .thumb
+            .as_ref()
+            .map(|thumb| thumb.wheel.feature_index());
+        let thumb_resolution = armed
+            .thumb
+            .as_ref()
+            .map_or(WheelResolution::UNKNOWN, ArmedThumbwheel::resolution);
+        let dpi_set = armed.dpi_cids.clone();
+        let button_set = armed.button_cids.clone();
+        move |msg| {
             if let Some(idx) = reprog_index
-                && let Some(event) = reprog_controls::decode_event(&msg, device_index, idx)
+                && let Some(event) = reprog_controls::decode_event(msg, device_index, idx)
             {
                 // Recover the guard even if a prior holder panicked — the
                 // critical section is panic-free, so the data is consistent.
@@ -259,76 +254,25 @@ async fn run_capture_session_on(
                 return;
             }
             if let Some(idx) = thumb_index
-                && let Some(event) = thumbwheel::decode_event(&msg, device_index, idx)
+                && let Some(event) = thumbwheel::decode_event(msg, device_index, idx)
                 && let Some(input) = thumbwheel_input(event, thumb_resolution)
             {
                 let _ = sink.send(input);
             }
         }
-    });
-
-    // Liveness watchdog: this session's channel is the sole delivery path for
-    // every diverted control, and a channel whose input-report delivery dies
-    // (observed on macOS with concurrent opens of one node: writes accepted,
-    // replies and events silently routed elsewhere) turns every captured
-    // button to dead air with nothing to notice. Ping the device through this
-    // channel; consecutive all-silent pings mean the channel — not the device
-    // — is gone (a sleeping/unreachable device can still send an HID++ error
-    // reply, which proves delivery and resets the count). A transport/setup
-    // error proves neither delivery nor silence, so it restarts immediately.
-    // Exiting lets the manager re-arm on a fresh channel.
-    let root = RootFeature::new(Arc::clone(&chan), device_index, 0);
-    let wireless = root
-        .get_feature(WirelessDeviceStatusFeature::ID)
-        .await
-        .ok()
-        .flatten()
-        .map(|info| WirelessDeviceStatusFeature::new(Arc::clone(&chan), device_index, info.index));
-    log_capture_active(device_index, &armed, wireless.is_some());
-    let stop = monitor_capture(
-        CaptureMonitor {
-            root: &root,
-            armed: &armed,
-            accum: &accum,
-            device_index,
-            registry,
-            shared: &shared,
-            activity: &activity,
-        },
-        wireless,
-        shutdown,
-        device_io,
-    )
-    .await;
-
-    // The slot is one last-writer-wins cell shared by every session, so a
-    // sibling may have published its own channel after ours. Clear it only
-    // while it still holds *this* session's channel — evicting the sibling's
-    // would silently demote its DPI/SmartShift writes to the fresh-open slow
-    // path.
-    if let Ok(mut slot) = channel_slot.write()
-        && slot
-            .as_ref()
-            .is_some_and(|shared| Arc::ptr_eq(shared.channel(), &chan))
-    {
-        *slot = None;
     }
-    let outcome = finish_capture(listener, stop, armed, shared, registry).await;
-    debug!(index = device_index, "control capture stopped");
-    Ok(outcome)
-}
 
-/// Restore or hand off one stopped session while its listener still owns every
-/// diverted input report.
-async fn finish_capture<T>(
-    listener: T,
-    stop: CaptureStop,
-    armed: ArmedControls,
-    retired: SharedChannel,
-    registry: &ChannelRegistry,
-) -> CaptureSessionOutcome {
-    let pending = armed.into_pending(&retired);
-    drop_listener_after(listener, restore_after_stop(stop, pending, registry)).await
+    fn reset_input_state(&self) {
+        *self.accum.lock().unwrap_or_else(PoisonError::into_inner) = CaptureAccum::default();
+    }
+
+    async fn rearm(&self) {
+        self.armed.rearm().await;
+    }
+
+    fn into_pending(self, retired: &SharedChannel) -> Option<PendingCaptureRestore> {
+        self.armed.into_pending(retired)
+    }
 }
 
 /// The single input one diverted thumb-wheel report stands for, if any.
@@ -360,133 +304,6 @@ fn thumbwheel_input(
     event
         .single_tap
         .then_some(CapturedInput::ButtonPulse(ButtonId::Thumbwheel))
-}
-
-fn log_capture_active(device_index: u8, armed: &ArmedControls, wake_rearm: bool) {
-    info!(
-        index = device_index,
-        gesture_sources = armed.gesture_cids.len(),
-        gesture_buttons = armed.gesture_button_cids.len(),
-        dpi_buttons = armed.dpi_cids.len(),
-        buttons = armed.button_cids.len(),
-        thumbwheel = armed.thumb.is_some(),
-        wake_rearm,
-        "control capture active"
-    );
-}
-
-/// Borrowed state used while monitoring one armed capture session.
-struct CaptureMonitor<'a> {
-    root: &'a RootFeature,
-    armed: &'a ArmedControls,
-    accum: &'a Arc<Mutex<CaptureAccum>>,
-    device_index: u8,
-    registry: &'a ChannelRegistry,
-    shared: &'a SharedChannel,
-    activity: &'a ChannelActivity,
-}
-
-/// Keep a capture session alive and reapply its volatile diversions whenever
-/// the device announces a reconnect. Returns only the typed reason capture
-/// stopped; restoration performs a fresh registry lookup after monitoring.
-async fn monitor_capture(
-    context: CaptureMonitor<'_>,
-    wireless: Option<WirelessDeviceStatusFeature>,
-    shutdown: oneshot::Receiver<()>,
-    mut device_io: DeviceIoGate,
-) -> CaptureStop {
-    let mut wake_events = wireless.as_ref().map(EmittingFeature::listen);
-    let mut shutdown = std::pin::pin!(shutdown);
-    let mut liveness = CaptureLiveness::new(tokio::time::Instant::now(), context.activity.seq());
-    loop {
-        if !device_io.allows_io() {
-            if !device_io.wait_until_allowed().await {
-                return stop_for_current_publication(context.registry, context.shared);
-            }
-            // Time asleep is not channel idleness. Give the transport a full
-            // quiet interval after visible resume and clear any pre-sleep
-            // strike before considering a liveness ping.
-            liveness.record_activity(tokio::time::Instant::now(), context.activity.seq());
-        }
-        let activity_seq = liveness.activity_seq();
-        let idle_deadline = liveness.idle_deadline();
-        tokio::select! {
-            biased;
-
-            allowed = device_io.changed() => {
-                match allowed {
-                    Some(true) => liveness.record_activity(
-                        tokio::time::Instant::now(),
-                        context.activity.seq(),
-                    ),
-                    Some(false) => {}
-                    None => return stop_for_current_publication(context.registry, context.shared),
-                }
-            }
-            transition = wait_for_channel_change(
-                context.registry,
-                context.shared,
-            ) => {
-                info!(index = context.device_index, "inventory replaced or removed capture channel — restarting session");
-                return transition;
-            }
-            _ = &mut shutdown => {
-                // Shutdown and inventory replacement can become ready on the
-                // same turn. Prefer the typed channel transition so teardown
-                // never blindly writes through a transport already known to
-                // be obsolete.
-                return stop_for_current_publication(context.registry, context.shared);
-            }
-            event = async {
-                match wake_events.as_ref() {
-                    Some(events) => events.recv().await.ok(),
-                    None => std::future::pending().await,
-                }
-            } => {
-                let Some(WirelessDeviceStatusEvent::StatusBroadcast(broadcast)) = event else {
-                    wake_events = None;
-                    continue;
-                };
-                info!(?broadcast, "device reconnected — re-arming control capture");
-                *context.accum.lock().unwrap_or_else(PoisonError::into_inner) =
-                    CaptureAccum::default();
-                context.armed.rearm(&device_io).await;
-            }
-            seq = context.activity.changed_after(activity_seq) => {
-                liveness.record_activity(tokio::time::Instant::now(), seq);
-            }
-            () = tokio::time::sleep_until(idle_deadline) => {
-                if !liveness.ping_due(
-                    tokio::time::Instant::now(),
-                    context.activity.seq(),
-                ) {
-                    continue;
-                }
-                let outcome = match context.root.ping(0x5a).await {
-                    Err(v20::Hidpp20Error::Channel(
-                        hidpp::channel::ChannelError::Timeout
-                        | hidpp::channel::ChannelError::NoResponse,
-                    )) => PingOutcome::AllSilent,
-                    // A pong, feature error, or unsupported response all prove
-                    // that this channel still receives device replies.
-                    Ok(_)
-                    | Err(
-                        v20::Hidpp20Error::Feature(_)
-                        | v20::Hidpp20Error::UnsupportedResponse,
-                    ) => PingOutcome::Delivered,
-                    Err(_) => PingOutcome::ChannelFailed,
-                };
-                if liveness.finish_ping(
-                    tokio::time::Instant::now(),
-                    context.activity.seq(),
-                    outcome,
-                ) == LivenessDecision::Restart {
-                    warn!(index = context.device_index, "capture channel stopped delivering — restarting session on a fresh channel");
-                    return stop_for_current_publication(context.registry, context.shared);
-                }
-            }
-        }
-    }
 }
 
 #[cfg(test)]
