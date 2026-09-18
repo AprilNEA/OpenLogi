@@ -199,7 +199,7 @@ fn device_carousel(cx: &mut Context<AppView>) -> impl IntoElement {
                 let Some(&idx) = select_order.get(*position) else {
                     return;
                 };
-                AppState::apply(cx, |state| state.set_current_device(idx));
+                AppState::apply(cx, |state| state.select_device(idx));
                 AppState::load_current_device_reads(cx);
             })),
     )

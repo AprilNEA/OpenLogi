@@ -360,7 +360,7 @@ impl AppState {
     /// stable across restarts), reloads bindings for the new device, and
     /// pushes the new map into the hook-shared `Arc`. Reports
     /// [`StateEvent::DeviceSelected`] only when the selection changed.
-    pub fn set_current_device(&mut self, idx: usize) -> StateEvents {
+    pub fn select_device(&mut self, idx: usize) -> StateEvents {
         if !self.devices.select(idx) {
             return StateEvents::none();
         }

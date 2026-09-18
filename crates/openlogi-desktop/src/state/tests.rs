@@ -433,7 +433,7 @@ fn canonical_profile_light_setting_errors_reach_desktop_state() {
         .iter()
         .position(|record| record.unit_id == [79, 76, 68, 4])
         .expect("canonical light is projected");
-    let _ = state.set_current_device(light_index);
+    let _ = state.select_device(light_index);
     let mut reloads = 0;
     loop {
         match receiver.try_recv() {
@@ -1132,17 +1132,17 @@ fn a_profile_belongs_to_the_device_it_was_opened_on() {
         .position(|record| record.config_key == KNOWN_MOUSE_KEY)
         .expect("the fixture pairs the known mouse");
 
-    let _ = state.set_current_device(known);
+    let _ = state.select_device(known);
     let _ = state.set_editing_app(Some("com.apple.Safari".into()));
 
-    let _ = state.set_current_device(other);
+    let _ = state.select_device(other);
     assert_eq!(
         state.editing_app(),
         None,
         "another device falls back to its own global profile"
     );
 
-    let _ = state.set_current_device(known);
+    let _ = state.select_device(known);
     assert_eq!(
         state.editing_app(),
         Some("com.apple.Safari"),
@@ -1155,7 +1155,7 @@ fn invalid_device_selection_preserves_the_valid_current_device() {
     let mut state = state_with_a_known_mouse();
     let selected = state.selected_device_index();
 
-    assert!(state.set_current_device(usize::MAX).is_empty());
+    assert!(state.select_device(usize::MAX).is_empty());
     assert_eq!(state.selected_device_index(), selected);
     assert!(state.current_record().is_some());
 }

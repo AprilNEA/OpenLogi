@@ -310,7 +310,7 @@ impl AppView {
 
     /// Drill into a device's settings from the gallery. Makes it the
     /// functionally active device too (hook bindings, DPI, and the persisted
-    /// selection follow [`AppState::set_current_device`]) and switches the
+    /// selection follow [`AppState::select_device`]) and switches the
     /// route to its detail screen.
     fn open_device(&mut self, record_key: String, cx: &mut Context<Self>) {
         AppState::apply(cx, |state| {
@@ -318,7 +318,7 @@ impl AppView {
                 .devices()
                 .iter()
                 .position(|record| record.record_key() == record_key)
-                .map_or_else(StateEvents::none, |idx| state.set_current_device(idx))
+                .map_or_else(StateEvents::none, |idx| state.select_device(idx))
         });
         AppState::load_current_device_reads(cx);
         self.route = Route::Device { record_key };
