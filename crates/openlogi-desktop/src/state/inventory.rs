@@ -191,14 +191,15 @@ impl AppState {
 
         for previous in &self.devices.records {
             let inv = previous.inventory_key();
+            let key = previous.device_key();
             if let Some(record) = by_key.remove(&inv) {
-                clear_inventory_misses(&mut self.devices.sessions, &inv);
+                clear_inventory_misses(&mut self.devices.sessions, &key);
                 merged.push(record);
                 continue;
             }
 
             if let Some(record) = adopted.remove(&inv) {
-                clear_inventory_misses(&mut self.devices.sessions, &inv);
+                clear_inventory_misses(&mut self.devices.sessions, &key);
                 merged.push(record);
                 continue;
             }
@@ -207,22 +208,18 @@ impl AppState {
             // the next snapshot resolves a physical serial/unit key, retaining
             // this record through the normal miss grace would show both cards.
             if !previous.is_persistent() {
-                clear_inventory_misses(&mut self.devices.sessions, &inv);
+                clear_inventory_misses(&mut self.devices.sessions, &key);
                 continue;
             }
 
             // Cameras reappear under a new capture id after a port change —
             // do not grace-keep a stale cam-live entry beside the new one.
             if previous.kind == openlogi_core::device::DeviceKind::Camera {
-                clear_inventory_misses(&mut self.devices.sessions, &inv);
+                clear_inventory_misses(&mut self.devices.sessions, &key);
                 continue;
             }
 
-            let entry = self
-                .devices
-                .sessions
-                .entry(DeviceKey::from(inv.as_str()))
-                .or_default();
+            let entry = self.devices.sessions.entry(key).or_default();
             entry.inventory_misses = entry.inventory_misses.saturating_add(1);
             let misses = entry.inventory_misses;
             if misses <= INVENTORY_MISS_GRACE {
@@ -235,17 +232,15 @@ impl AppState {
             }
         }
 
-        for (key, record) in by_key {
-            clear_inventory_misses(&mut self.devices.sessions, &key);
+        for record in by_key.into_values() {
+            clear_inventory_misses(&mut self.devices.sessions, &record.device_key());
             merged.push(record);
         }
         // Adopted records whose known card was never in the previous list
         // (identity known only from config) still belong in the gallery.
         merged.extend(adopted.into_values());
-        let live: HashSet<String> = merged.iter().map(DeviceRecord::inventory_key).collect();
-        self.devices
-            .sessions
-            .retain(|key, _| live.contains(key.as_str()));
+        let live: HashSet<DeviceKey> = merged.iter().map(DeviceRecord::device_key).collect();
+        self.devices.sessions.retain(|key, _| live.contains(key));
         // `merged` is `previous-order + newly-appeared`, so re-apply the
         // canonical route order or a new device would be stuck at the end of
         // the gallery permanently.
@@ -534,7 +529,7 @@ pub(super) fn adopt_routes(config: &mut Config, list: &[DeviceRecord]) -> bool {
 /// grace (transient, camera). Leaves the rest of the device's session row
 /// untouched. A free function, not an `AppState` method, so callers can hold
 /// it alongside a live borrow of the device catalog.
-fn clear_inventory_misses(sessions: &mut BTreeMap<DeviceKey, DeviceSession>, key: &str) {
+fn clear_inventory_misses(sessions: &mut BTreeMap<DeviceKey, DeviceSession>, key: &DeviceKey) {
     if let Some(entry) = sessions.get_mut(key) {
         entry.inventory_misses = 0;
     }
