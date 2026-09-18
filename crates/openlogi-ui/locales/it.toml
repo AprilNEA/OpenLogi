@@ -538,6 +538,7 @@ custom_shortcut = "Scorciatoia personalizzata"
 shortcut_e_g_cmd_plus_shift_plus_p = "Scorciatoia, ad es. Cmd+Shift+P"
 application_folder_path_or_url = "Applicazione, percorso cartella o URL"
 open_application_or_folder = "Apri applicazione o cartella"
+custom_action_invalid_input = "Couldn't recognize that input."
 
 [keyboard]
 editor_unavailable = "Editor non disponibile"

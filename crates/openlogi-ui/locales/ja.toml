@@ -538,6 +538,7 @@ custom_shortcut = "カスタムショートカット"
 shortcut_e_g_cmd_plus_shift_plus_p = "ショートカット（例：Cmd+Shift+P）"
 application_folder_path_or_url = "アプリ、フォルダのパス、またはURL"
 open_application_or_folder = "アプリまたはフォルダを開く"
+custom_action_invalid_input = "Couldn't recognize that input."
 
 [keyboard]
 editor_unavailable = "エディターを利用できません"

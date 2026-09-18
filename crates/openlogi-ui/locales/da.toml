@@ -538,6 +538,7 @@ custom_shortcut = "Brugerdefineret genvej"
 shortcut_e_g_cmd_plus_shift_plus_p = "Genvej, f.eks. Cmd+Shift+P"
 application_folder_path_or_url = "Program, mappesti eller URL"
 open_application_or_folder = "Åbn program eller mappe"
+custom_action_invalid_input = "Couldn't recognize that input."
 
 [keyboard]
 editor_unavailable = "Editor ikke tilgængelig"

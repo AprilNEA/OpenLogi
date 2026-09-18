@@ -538,6 +538,7 @@ custom_shortcut = "Atalho personalizado"
 shortcut_e_g_cmd_plus_shift_plus_p = "Atalho, por exemplo, Cmd+Shift+P"
 application_folder_path_or_url = "Aplicação, caminho de pasta ou URL"
 open_application_or_folder = "Abrir aplicação ou pasta"
+custom_action_invalid_input = "Couldn't recognize that input."
 
 [keyboard]
 editor_unavailable = "Editor indisponível"
