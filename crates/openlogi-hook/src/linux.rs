@@ -32,6 +32,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc,
 };
+use std::task::{Context, Poll, Waker};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -580,6 +581,8 @@ struct StopState {
     requested: AtomicBool,
     wait_lock: Mutex<()>,
     changed: Condvar,
+    /// Async observers parked on [`StopToken::stopped`].
+    wakers: Mutex<Vec<Waker>>,
 }
 
 impl StopState {
@@ -588,6 +591,7 @@ impl StopState {
             requested: AtomicBool::new(false),
             wait_lock: Mutex::new(()),
             changed: Condvar::new(),
+            wakers: Mutex::new(Vec::new()),
         }
     }
 
@@ -595,8 +599,29 @@ impl StopState {
         if self.requested.swap(true, Ordering::AcqRel) {
             return;
         }
-        let _guard = lock_unpoisoned(&self.wait_lock);
-        self.changed.notify_all();
+        {
+            let _guard = lock_unpoisoned(&self.wait_lock);
+            self.changed.notify_all();
+        }
+        for waker in lock_unpoisoned(&self.wakers).drain(..) {
+            waker.wake();
+        }
+    }
+
+    fn poll_stopped(&self, cx: &mut Context<'_>) -> Poll<()> {
+        if self.is_requested() {
+            return Poll::Ready(());
+        }
+        let mut wakers = lock_unpoisoned(&self.wakers);
+        // `request` sets the flag before draining under this lock, so a
+        // request racing this poll is either seen here or drains our waker.
+        if self.is_requested() {
+            return Poll::Ready(());
+        }
+        if !wakers.iter().any(|waker| waker.will_wake(cx.waker())) {
+            wakers.push(cx.waker().clone());
+        }
+        Poll::Pending
     }
 
     fn is_requested(&self) -> bool {
@@ -655,12 +680,14 @@ impl StopToken {
         self.state.wait_timeout(timeout)
     }
 
-    pub(super) fn wake_fd(&self) -> RawFd {
-        self.wake.as_raw_fd()
+    /// Resolves once stop is requested, for observers that wait on async
+    /// transports and must not tear their transport down to be woken.
+    pub(super) async fn stopped(&self) {
+        std::future::poll_fn(|cx| self.state.poll_stopped(cx)).await;
     }
 
-    fn state(&self) -> Arc<StopState> {
-        Arc::clone(&self.state)
+    pub(super) fn wake_fd(&self) -> RawFd {
+        self.wake.as_raw_fd()
     }
 }
 
@@ -1393,6 +1420,41 @@ mod tests {
         fn name(&self) -> &'static str {
             "fake"
         }
+    }
+
+    #[test]
+    fn stop_token_wakes_a_parked_async_observer() {
+        struct CountingWaker(std::sync::atomic::AtomicUsize);
+        impl std::task::Wake for CountingWaker {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let (control, token) = stop_pair().expect("stop pipe must open");
+        let counter = Arc::new(CountingWaker(std::sync::atomic::AtomicUsize::new(0)));
+        let waker = Waker::from(Arc::clone(&counter));
+        let mut cx = Context::from_waker(&waker);
+        let mut stopped = std::pin::pin!(token.stopped());
+
+        assert!(stopped.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(counter.0.load(Ordering::SeqCst), 0);
+
+        control.request();
+        assert_eq!(
+            counter.0.load(Ordering::SeqCst),
+            1,
+            "request must wake the parked observer"
+        );
+        assert!(stopped.as_mut().poll(&mut cx).is_ready());
+    }
+
+    #[test]
+    fn stop_token_resolves_immediately_once_requested() {
+        let (control, token) = stop_pair().expect("stop pipe must open");
+        control.request();
+
+        futures_lite::future::block_on(token.stopped());
     }
 
     #[test]
