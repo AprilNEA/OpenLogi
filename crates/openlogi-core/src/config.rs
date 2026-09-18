@@ -39,7 +39,7 @@ pub use settings::{
 
 use crate::binding::{
     Action, ActionRingConfig, ActionRingIcon, ActionRingSlot, Binding, ButtonId, GestureDirection,
-    RingAction, default_binding, default_binding_for, default_gesture_binding,
+    GestureResponse, RingAction, default_binding, default_binding_for, default_gesture_binding,
 };
 use crate::device_order::PhysicalDeviceKey;
 use crate::hid::Dpi;
@@ -52,7 +52,8 @@ use settings::GestureOwner;
 /// v7 aligns the thumb-wheel scroll defaults with its normalised physical
 /// direction. Pre-v7 explicit default pairs are migrated in device and
 /// per-application profiles so they remain native rather than becoming a
-/// reversal (see `Config::migrate_thumbwheel_native_direction`).
+/// reversal (see `Config::migrate_thumbwheel_native_direction`). It also adds
+/// per-control `gesture_responses` containing both hold and travel thresholds.
 ///
 /// v6 adds threshold-based `{ short = ..., long = ... }` button bindings.
 ///
@@ -1030,6 +1031,35 @@ impl Config {
             .entry(device_key.to_string())
             .or_default()
             .thumbwheel_sensitivity = sensitivity;
+    }
+
+    /// The effective gesture response for one control on `device_key`.
+    /// An unset control retains [`GestureResponse::default`].
+    #[must_use]
+    pub fn gesture_response(&self, device_key: &str, button: ButtonId) -> GestureResponse {
+        self.devices
+            .get(device_key)
+            .map_or_else(GestureResponse::default, |device| {
+                device
+                    .gesture_responses
+                    .get(&button)
+                    .copied()
+                    .unwrap_or_default()
+            })
+    }
+
+    /// Set one gesture control's response on `device_key`.
+    pub fn set_gesture_response(
+        &mut self,
+        device_key: &str,
+        button: ButtonId,
+        response: GestureResponse,
+    ) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .gesture_responses
+            .insert(button, response);
     }
 }
 
