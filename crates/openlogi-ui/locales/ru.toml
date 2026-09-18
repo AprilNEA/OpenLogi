@@ -98,6 +98,7 @@ leave_blank_to_use_the_model_name = "Оставьте пустым, чтобы �
 pointer_tuning = "Настройка указателя"
 device_details = "Сведения об устройстве"
 configuration = "Конфигурация"
+host_switch_targets = "Follow host switches from"
 connection = "Подключение"
 slot = "Слот"
 receiver_slot_number = "Слот %{number}"

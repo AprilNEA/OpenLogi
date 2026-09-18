@@ -35,7 +35,7 @@ use crate::features::pointer::smartshift::SmartShiftPanel;
 use crate::features::profiles::{
     AppCatalogPicker, ProfileIconCache, action_ring_profile_scope_bar, button_profile_scope_bar,
 };
-use crate::state::{AppState, DeviceRecord, StateEvent};
+use crate::state::{AppState, DeviceRecord, HostSwitchCandidate, StateEvent};
 use crate::ui::battery::BatteryIndicator;
 use crate::ui::components::{PanelCard, Toggle};
 use crate::ui::theme::{
@@ -635,13 +635,59 @@ fn light_tab(
 /// Device tab: device details and configuration cards stacked.
 fn device_tab(cx: &mut Context<AppView>) -> impl IntoElement {
     let pal = theme::palette(cx);
+    let host_switch_candidates = AppState::try_read(cx)
+        .map(AppState::host_switch_candidates)
+        .unwrap_or_default();
     tab_body(
         ContentWidth::Small,
         v_flex()
             .w_full()
             .gap_3()
             .child(device_details_card(pal, cx))
-            .child(configuration_card(pal, cx)),
+            .child(configuration_card(pal, cx))
+            .when(!host_switch_candidates.is_empty(), |content| {
+                content.child(host_switch_card(host_switch_candidates))
+            }),
+    )
+}
+
+/// "Follow host switches from:" — a checkbox per other configured keyboard,
+/// letting this pointing device be added to that keyboard's
+/// `host_switch_targets` so it follows when the keyboard's Easy-Switch key
+/// changes host. Shown only for a persistent mouse/trackball with at least
+/// one other configured keyboard to follow.
+fn host_switch_card(candidates: Vec<HostSwitchCandidate>) -> impl IntoElement {
+    let content = v_flex().gap_2().children(candidates.into_iter().map(
+        |HostSwitchCandidate {
+             config_key,
+             display_name,
+             following,
+         }| {
+            h_flex()
+                .justify_between()
+                .items_center()
+                .child(div().text_body().child(display_name))
+                .child(
+                    Switch::new(gpui::ElementId::Name(
+                        format!("host-switch-follow-{config_key}").into(),
+                    ))
+                    .checked(following)
+                    .on_click(move |checked, _window, cx| {
+                        let checked = *checked;
+                        let keyboard_key = config_key.clone();
+                        AppState::update(cx, |state, cx| {
+                            state.set_host_switch_follow(&keyboard_key, checked);
+                            cx.emit(StateEvent::DeviceConfigChanged(keyboard_key.into()));
+                        });
+                    }),
+                )
+        },
+    ));
+
+    PanelCard::new(
+        tr!("device.host_switch_targets"),
+        Icon::empty().path("action-icons/keyboard.svg"),
+        content,
     )
 }
 

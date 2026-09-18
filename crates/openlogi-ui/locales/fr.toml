@@ -98,6 +98,7 @@ leave_blank_to_use_the_model_name = "Laissez ce champ vide pour utiliser le nom 
 pointer_tuning = "Réglage du pointeur"
 device_details = "Détails de l’appareil"
 configuration = "Configuration"
+host_switch_targets = "Follow host switches from"
 connection = "Connexion"
 slot = "Emplacement"
 receiver_slot_number = "Emplacement %{number}"

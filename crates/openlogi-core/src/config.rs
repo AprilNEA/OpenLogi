@@ -767,6 +767,26 @@ impl Config {
             .dpi_presets = presets;
     }
 
+    /// The pointing-device config keys that follow `device_key`'s (a
+    /// keyboard's) host-switch channel, or an empty `Vec` if none are
+    /// configured yet.
+    #[must_use]
+    pub fn host_switch_targets(&self, device_key: &str) -> Vec<String> {
+        self.devices
+            .get(device_key)
+            .map(|d| d.host_switch_targets.clone())
+            .unwrap_or_default()
+    }
+
+    /// Replace the set of pointing devices that follow `device_key`'s host
+    /// switch. Pass an empty `Vec` to clear.
+    pub fn set_host_switch_targets(&mut self, device_key: &str, targets: Vec<String>) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .host_switch_targets = targets;
+    }
+
     /// The last-known [`DeviceIdentity`] for `device_key`, or `None` if the
     /// device has never been seen online (or was configured before identities
     /// were recorded).

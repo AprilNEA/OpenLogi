@@ -21,7 +21,7 @@ use openlogi_core::device::{
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
-use crate::reprog_controls::DPI_MODE_SHIFT_CIDS;
+use crate::reprog_controls::{DPI_MODE_SHIFT_CIDS, HOST_SWITCH_CIDS};
 
 use super::events::{EventFeatureIndices, EventSubscriptionHandle};
 use super::mappings::{
@@ -341,6 +341,7 @@ async fn probe_extra_capabilities(
         let count = feature.get_count().await.map_err(|_| ())?;
         let mut haptic_panel = false;
         let mut dpi_gestures = false;
+        let mut host_switch_source = false;
         for index in 0..count {
             let info = feature.get_cid_info(index).await.map_err(|_| ())?;
             haptic_panel |= probe_haptic_controls
@@ -349,11 +350,14 @@ async fn probe_extra_capabilities(
             dpi_gestures |= DPI_MODE_SHIFT_CIDS.contains(&info.cid.0)
                 && info.flags.is_divertable()
                 && info.flags.supports_raw_xy();
+            host_switch_source |= HOST_SWITCH_CIDS.contains(&info.cid.0)
+                && (info.flags.is_divertable() || info.flags.supports_analytics_key_events());
         }
         // Publish only a complete control walk. A lost reply must retain the
         // cache's last-good capabilities and schedule repair, not hide support.
         caps.haptic_panel = haptic_panel;
         caps.dpi_gestures = dpi_gestures;
+        caps.host_switch_source = host_switch_source;
     }
     Ok(())
 }

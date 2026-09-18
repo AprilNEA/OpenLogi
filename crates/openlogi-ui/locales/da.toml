@@ -98,6 +98,7 @@ leave_blank_to_use_the_model_name = "Lad feltet være tomt for at bruge modelnav
 pointer_tuning = "Markørjustering"
 device_details = "Enhedsoplysninger"
 configuration = "Konfiguration"
+host_switch_targets = "Follow host switches from"
 connection = "Forbindelse"
 slot = "Plads"
 receiver_slot_number = "Plads %{number}"

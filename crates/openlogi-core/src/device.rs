@@ -132,6 +132,17 @@ pub struct Capabilities {
     /// both diversion and raw-XY reporting for hold-and-swipe gestures.
     #[serde(default)]
     pub dpi_gestures: bool,
+    /// This device can be switched to by another device's Easy-Switch host
+    /// change — HID++ `0x1814`/`0x1815 ChangeHost`. A pointing device needs
+    /// this to be a host-switch link's *target*.
+    #[serde(default)]
+    pub host_switch_target: bool,
+    /// A host-switch-channel control in the device's `0x1b04` control table
+    /// is divertable or reports analytics key events, so pressing it can be
+    /// detected and used to trigger a linked device's host change. A
+    /// keyboard needs this to be a host-switch link's *source*.
+    #[serde(default)]
+    pub host_switch_source: bool,
 }
 
 impl Capabilities {
@@ -144,6 +155,7 @@ impl Capabilities {
         // Every family here is driven by `set_keyboard_color`, which tries
         // effect engines before per-zone paths. Backlight (0x198x) stays out.
         const LIGHTING: [u16; 4] = [0x8070, 0x8071, 0x8081, 0x8080];
+        const CHANGE_HOST: [u16; 2] = [0x1814, 0x1815];
         let has = |family: &[u16]| ids.iter().any(|id| family.contains(id));
         Self {
             buttons: has(&BUTTONS),
@@ -155,6 +167,8 @@ impl Capabilities {
             haptic_feedback: ids.contains(&0x19b0),
             haptic_panel: false,
             dpi_gestures: false,
+            host_switch_target: has(&CHANGE_HOST),
+            host_switch_source: false,
         }
     }
 
@@ -176,6 +190,8 @@ impl Capabilities {
                 haptic_feedback: false,
                 haptic_panel: false,
                 dpi_gestures: false,
+                host_switch_target: false,
+                host_switch_source: false,
             },
             DeviceKind::Keyboard => Self {
                 lighting: true,
@@ -482,6 +498,8 @@ mod tests {
                     haptic_feedback: false,
                     haptic_panel: false,
                     dpi_gestures: false,
+                    host_switch_target: false,
+                    host_switch_source: false,
                 }),
             }],
         }
@@ -553,6 +571,8 @@ mod tests {
                 haptic_feedback: false,
                 haptic_panel: false,
                 dpi_gestures: false,
+                host_switch_target: false,
+                host_switch_source: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
@@ -570,6 +590,8 @@ mod tests {
                 haptic_feedback: false,
                 haptic_panel: false,
                 dpi_gestures: false,
+                host_switch_target: false,
+                host_switch_source: false,
             }
         );
         // No driving features → nothing offered.

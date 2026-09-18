@@ -63,6 +63,16 @@ pub const HAPTIC_PANEL_CID: u16 = control_ids::HAPTIC_PANEL.0;
 /// cross-checked against Solaar `special_keys.py`.
 pub const DPI_MODE_SHIFT_CIDS: [u16; 3] = [0x00c4, 0x00ed, 0x00fd];
 
+/// Control IDs of the host-switch-channel buttons, used both to arm a live
+/// host-switch session (see `crate::session::host_switch`) and to derive
+/// [`openlogi_core::device::Capabilities::host_switch_source`] from a
+/// one-time control-table walk.
+pub const HOST_SWITCH_CIDS: [u16; 3] = [
+    control_ids::HOST_SWITCH_CHANNEL_1.0,
+    control_ids::HOST_SWITCH_CHANNEL_2.0,
+    control_ids::HOST_SWITCH_CHANNEL_3.0,
+];
+
 /// Control IDs of the Back button family. MX Vertical and similar devices
 /// report Back via HID++ `0x1b04` rather than a standard OS mouse button,
 /// so macOS never translates them into `OtherMouseDown` events. Whichever a

@@ -98,6 +98,7 @@ leave_blank_to_use_the_model_name = "Lämna tomt för att använda modellnamnet.
 pointer_tuning = "Pekarjustering"
 device_details = "Enhetsinformation"
 configuration = "Konfiguration"
+host_switch_targets = "Follow host switches from"
 connection = "Anslutning"
 slot = "Plats"
 receiver_slot_number = "Plats %{number}"
