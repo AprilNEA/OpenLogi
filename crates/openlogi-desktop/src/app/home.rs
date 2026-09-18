@@ -468,7 +468,7 @@ fn open_rename_dialog(
                 move |_, _, cx| {
                     let custom_name = input.read(cx).value().to_string();
                     AppState::apply(cx, |state| {
-                        state.set_device_custom_name(&record_key, &custom_name)
+                        state.commit_device_custom_name(&record_key, &custom_name)
                     });
                     true
                 }

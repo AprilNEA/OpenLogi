@@ -11,8 +11,8 @@ use openlogi_core::config::{
 
 impl AppState {
     /// App-wide settings backing the Settings window (launch-at-login,
-    /// update check). Read-only view; mutate via the setters below so the
-    /// change is persisted.
+    /// update check). Read-only view; mutate via the `commit_*` methods below
+    /// so the change is persisted.
     #[must_use]
     pub fn app_settings(&self) -> &AppSettings {
         &self.config.app_settings
@@ -23,7 +23,7 @@ impl AppState {
     /// is only ensured opportunistically here, healing drift without
     /// re-prompting — and giving a dev build its explicit way in. Disk
     /// failures restore the persisted value and surface a config error.
-    pub fn set_launch_at_login(&mut self, enabled: bool) -> StateEvents {
+    pub fn commit_launch_at_login(&mut self, enabled: bool) -> StateEvents {
         if self.config.app_settings.launch_at_login == enabled {
             return StateEvent::SettingsChanged.into();
         }
@@ -48,7 +48,7 @@ impl AppState {
     /// shown only where there's a tray (macOS + Windows), so the setter is
     /// gated the same way to stay dead-code-clean on Linux.
     #[cfg(any(target_os = "macos", target_os = "windows"))]
-    pub fn set_show_in_menu_bar(&mut self, enabled: bool) -> StateEvents {
+    pub fn commit_show_in_menu_bar(&mut self, enabled: bool) -> StateEvents {
         if self.config.app_settings.show_in_menu_bar == enabled {
             return StateEvent::SettingsChanged.into();
         }
@@ -60,7 +60,7 @@ impl AppState {
     /// Toggle the opt-in update check and persist it. No immediate side effect
     /// beyond the next launch reading the new value. An already-set value
     /// writes nothing and is still reported.
-    pub fn set_check_for_updates(&mut self, enabled: bool) -> StateEvents {
+    pub fn commit_check_for_updates(&mut self, enabled: bool) -> StateEvents {
         if self.config.app_settings.check_for_updates == enabled {
             return StateEvent::SettingsChanged.into();
         }
@@ -73,7 +73,7 @@ impl AppState {
     /// observer reads this live, so a newer version found after this is enabled
     /// downloads and stages on its own; no immediate side effect here. An
     /// already-set value writes nothing and is still reported.
-    pub fn set_auto_install_updates(&mut self, enabled: bool) -> StateEvents {
+    pub fn commit_auto_install_updates(&mut self, enabled: bool) -> StateEvents {
         if self.config.app_settings.auto_install_updates == enabled {
             return StateEvent::SettingsChanged.into();
         }
@@ -86,7 +86,7 @@ impl AppState {
     /// live theme via [`crate::ui::theme::apply_from_settings`]; this only
     /// writes the choice. An already-set value writes nothing and is still
     /// reported.
-    pub fn set_appearance(&mut self, appearance: Appearance) -> StateEvents {
+    pub fn commit_appearance(&mut self, appearance: Appearance) -> StateEvents {
         if self.config.app_settings.appearance == appearance {
             return StateEvent::SettingsChanged.into();
         }
@@ -98,7 +98,7 @@ impl AppState {
     /// Persist the text and interface scale. Open window roots apply the new
     /// rem size when the caller refreshes them. An already-set value writes
     /// nothing and is still reported.
-    pub fn set_ui_scale(&mut self, scale: UiScale) -> StateEvents {
+    pub fn commit_ui_scale(&mut self, scale: UiScale) -> StateEvents {
         if self.config.app_settings.ui_scale == scale {
             return StateEvent::SettingsChanged.into();
         }
@@ -109,7 +109,7 @@ impl AppState {
     }
     /// Persist the chosen theme name for one mode (`None` = the OpenLogi brand
     /// theme). An already-set value writes nothing and is still reported.
-    pub fn set_theme(&mut self, dark: bool, name: Option<String>) -> StateEvents {
+    pub fn commit_theme(&mut self, dark: bool, name: Option<String>) -> StateEvents {
         let current = if dark {
             &self.config.app_settings.theme_dark
         } else {
@@ -134,7 +134,7 @@ impl AppState {
     /// bundle so it survives a quit, and the agent is told so it can restyle
     /// the menu-bar item — the one surface showing an icon that the GUI cannot
     /// reach. An already-set value writes nothing and is still reported.
-    pub fn set_app_icon(&mut self, icon: AppIcon) -> StateEvents {
+    pub fn commit_app_icon(&mut self, icon: AppIcon) -> StateEvents {
         if self.config.app_settings.app_icon == icon {
             return StateEvent::SettingsChanged.into();
         }
@@ -150,7 +150,7 @@ impl AppState {
     }
     /// Persist the UI corner-radius override (`None` = each theme's own
     /// radius). An already-set value writes nothing and is still reported.
-    pub fn set_ui_radius(&mut self, radius: Option<u8>) -> StateEvents {
+    pub fn commit_ui_radius(&mut self, radius: Option<u8>) -> StateEvents {
         if self.config.app_settings.ui_radius == radius {
             return StateEvent::SettingsChanged.into();
         }
@@ -161,7 +161,7 @@ impl AppState {
     }
     /// Persist the Home device-gallery layout. An already-set value writes
     /// nothing and is still reported.
-    pub fn set_device_view_mode(&mut self, mode: DeviceViewMode) -> StateEvents {
+    pub fn commit_device_view_mode(&mut self, mode: DeviceViewMode) -> StateEvents {
         if self.config.app_settings.device_view_mode == mode {
             return StateEvent::SettingsChanged.into();
         }
@@ -180,7 +180,11 @@ impl AppState {
     /// clear the alias and restore the hardware model name. `record_key` is
     /// distinct per live serial-less camera even though their hardware settings
     /// intentionally share a model-scoped config key.
-    pub fn set_device_custom_name(&mut self, record_key: &str, custom_name: &str) -> StateEvents {
+    pub fn commit_device_custom_name(
+        &mut self,
+        record_key: &str,
+        custom_name: &str,
+    ) -> StateEvents {
         let custom_name = match custom_name.trim() {
             "" => None,
             name => Some(name.to_string()),
@@ -209,7 +213,7 @@ impl AppState {
 
     /// Enable or disable OpenLogi's management of `key` and persist it. The
     /// agent tears down or re-arms the device's capture session on reload.
-    pub fn set_device_enabled(&mut self, key: &DeviceKey, enabled: bool) -> StateEvents {
+    pub fn commit_device_enabled(&mut self, key: &DeviceKey, enabled: bool) -> StateEvents {
         let events = StateEvent::DeviceConfigChanged(key.clone()).into();
         let key = key.as_str();
         if self.config.device_enabled(key) == enabled {
@@ -235,7 +239,7 @@ impl AppState {
     /// General instead of pinning today's default forever. The agent picks the
     /// change up through the reloaded capture plans. A stored override that
     /// would not change writes nothing and is still reported.
-    pub fn set_device_thumbwheel_sensitivity(
+    pub fn commit_device_thumbwheel_sensitivity(
         &mut self,
         key: &DeviceKey,
         sensitivity: ThumbwheelSensitivity,
@@ -264,7 +268,7 @@ impl AppState {
     /// capture plans. An already-set value writes nothing and is still
     /// reported. Disk failures restore the persisted value and surface a
     /// configuration error.
-    pub fn set_thumbwheel_sensitivity(
+    pub fn commit_thumbwheel_sensitivity(
         &mut self,
         sensitivity: ThumbwheelSensitivity,
     ) -> StateEvents {
@@ -280,7 +284,7 @@ impl AppState {
     /// it. The agent publishes the change to the scroll worker on config
     /// reload. An already-set value writes nothing and is still reported; disk
     /// failures restore the persisted value.
-    pub fn set_smooth_scroll(&mut self, enabled: bool) -> StateEvents {
+    pub fn commit_smooth_scroll(&mut self, enabled: bool) -> StateEvents {
         if self.config.app_settings.smooth_scroll == enabled {
             return StateEvent::SettingsChanged.into();
         }
@@ -293,7 +297,7 @@ impl AppState {
     /// agent publishes the value to its scroll worker on config reload. An
     /// already-set value writes nothing and is still reported; disk failures
     /// restore the persisted value.
-    pub fn set_vertical_scroll_sensitivity(
+    pub fn commit_vertical_scroll_sensitivity(
         &mut self,
         sensitivity: VerticalScrollSensitivity,
     ) -> StateEvents {
@@ -305,7 +309,7 @@ impl AppState {
         self.persist_and_reload("vertical scroll sensitivity");
         StateEvent::SettingsChanged.into()
     }
-    pub fn set_auto_download_assets(&mut self, enabled: bool) -> StateEvents {
+    pub fn commit_auto_download_assets(&mut self, enabled: bool) -> StateEvents {
         if self.config.app_settings.auto_download_assets == enabled {
             return StateEvent::SettingsChanged.into();
         }
@@ -317,7 +321,7 @@ impl AppState {
     /// Persist the preferred device-asset source. The Settings view requests a
     /// refresh separately when automatic downloads are enabled, so this setter
     /// remains side-effect-free beyond configuration I/O.
-    pub fn set_asset_source(&mut self, source: AssetSourcePreference) -> StateEvents {
+    pub fn commit_asset_source(&mut self, source: AssetSourcePreference) -> StateEvents {
         if self.config.app_settings.asset_source == source {
             return StateEvent::SettingsChanged.into();
         }
@@ -349,7 +353,7 @@ impl AppState {
     /// process-global locale via [`openlogi_core::locale`]. Emitting the
     /// [`StateEvent::LanguageChanged`] this reports is what repaints open UI.
     /// An already-set value writes nothing and is still reported.
-    pub fn set_language(&mut self, language: Option<String>) -> StateEvents {
+    pub fn commit_language(&mut self, language: Option<String>) -> StateEvents {
         if self.config.app_settings.language == language {
             return StateEvent::SettingsChanged.into();
         }

@@ -52,9 +52,9 @@ fn read_only_config_rolls_back_mutations_and_does_not_reload_agent() {
         ..Sources::in_memory(Config::ephemeral(), &resolver, commands)
     });
 
-    let _ = state.set_thumbwheel_sensitivity(ThumbwheelSensitivity::from_rounded(50.0));
-    let _ = state.set_smooth_scroll(true);
-    let _ = state.set_vertical_scroll_sensitivity(VerticalScrollSensitivity::from_rounded(7.0));
+    let _ = state.commit_thumbwheel_sensitivity(ThumbwheelSensitivity::from_rounded(50.0));
+    let _ = state.commit_smooth_scroll(true);
+    let _ = state.commit_vertical_scroll_sensitivity(VerticalScrollSensitivity::from_rounded(7.0));
 
     assert_eq!(
         state.app_settings().thumbwheel_sensitivity,
@@ -75,7 +75,7 @@ fn smooth_scroll_change_reloads_the_agent_once() {
     let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let mut state = AppState::new(Sources::in_memory(Config::ephemeral(), &resolver, commands));
 
-    let _ = state.set_smooth_scroll(true);
+    let _ = state.commit_smooth_scroll(true);
 
     assert!(state.app_settings().smooth_scroll);
     assert!(matches!(
@@ -83,7 +83,7 @@ fn smooth_scroll_change_reloads_the_agent_once() {
         Ok(crate::services::ipc::Command::ReloadConfig(_))
     ));
 
-    let _ = state.set_smooth_scroll(true);
+    let _ = state.commit_smooth_scroll(true);
     assert!(receiver.try_recv().is_err());
 }
 
@@ -102,7 +102,7 @@ fn language_switch_rebuilds_menus_after_the_state_update(cx: &mut gpui::TestAppC
 
     cx.update(|cx| {
         AppState::set_global(cx.new(|_| state), cx);
-        AppState::apply(cx, |state| state.set_language(Some("zh-CN".into())));
+        AppState::apply(cx, |state| state.commit_language(Some("zh-CN".into())));
     });
 
     cx.read(|cx| {
@@ -724,7 +724,7 @@ fn custom_device_name_updates_the_ui_and_can_restore_the_model_name() {
         .model_name
         .clone();
 
-    let _ = state.set_device_custom_name(KNOWN_MOUSE_KEY, "  Office mouse  ");
+    let _ = state.commit_device_custom_name(KNOWN_MOUSE_KEY, "  Office mouse  ");
 
     assert_eq!(
         state
@@ -737,7 +737,7 @@ fn custom_device_name_updates_the_ui_and_can_restore_the_model_name() {
         Some("Office mouse")
     );
 
-    let _ = state.set_device_custom_name(KNOWN_MOUSE_KEY, "   ");
+    let _ = state.commit_device_custom_name(KNOWN_MOUSE_KEY, "   ");
 
     assert_eq!(
         state
@@ -753,7 +753,7 @@ fn same_model_serial_less_cameras_keep_independent_names() {
     let mut state = state_with_same_model_cameras(Config::ephemeral());
     let second_key = camera_record(&state, CAMERA_B_ID).record_key();
 
-    let _ = state.set_device_custom_name(&second_key, "Desk camera");
+    let _ = state.commit_device_custom_name(&second_key, "Desk camera");
 
     assert_eq!(
         camera_record(&state, CAMERA_A_ID).display_name,

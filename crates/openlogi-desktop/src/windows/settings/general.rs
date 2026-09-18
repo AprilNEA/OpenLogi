@@ -68,7 +68,7 @@ pub(super) fn general_page(
             SettingField::switch(
                 |cx| AppState::try_read(cx).is_some_and(|s| s.app_settings().show_in_menu_bar),
                 |enabled, cx| {
-                    AppState::apply(cx, |state| state.set_show_in_menu_bar(enabled));
+                    AppState::apply(cx, |state| state.commit_show_in_menu_bar(enabled));
                 },
             ),
         )
@@ -92,7 +92,7 @@ fn smooth_scrolling_item() -> SettingItem {
         SettingField::switch(
             |cx| AppState::try_read(cx).is_some_and(|s| s.app_settings().smooth_scroll),
             |enabled, cx| {
-                AppState::apply(cx, |state| state.set_smooth_scroll(enabled));
+                AppState::apply(cx, |state| state.commit_smooth_scroll(enabled));
             },
         ),
     )
@@ -161,7 +161,7 @@ fn launch_at_login_item() -> SettingItem {
         SettingField::switch(
             |cx| AppState::try_read(cx).is_some_and(|s| s.app_settings().launch_at_login),
             |enabled, cx| {
-                AppState::apply(cx, |state| state.set_launch_at_login(enabled));
+                AppState::apply(cx, |state| state.commit_launch_at_login(enabled));
             },
         ),
     )

@@ -94,7 +94,7 @@ impl SmartShiftPanel {
                         .current_record()
                         .map(DeviceRecord::device_key)
                         .map_or_else(StateEvents::none, |key| {
-                            state.set_device_thumbwheel_sensitivity(&key, sensitivity)
+                            state.commit_device_thumbwheel_sensitivity(&key, sensitivity)
                         })
                 });
             },

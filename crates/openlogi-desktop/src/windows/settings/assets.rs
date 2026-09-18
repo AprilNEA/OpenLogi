@@ -81,7 +81,7 @@ pub(super) fn assets_page(
                         AppState::try_read(cx).is_none_or(|s| s.app_settings().auto_download_assets)
                     },
                     |enabled, cx| {
-                        AppState::apply(cx, |state| state.set_auto_download_assets(enabled));
+                        AppState::apply(cx, |state| state.commit_auto_download_assets(enabled));
                         // Re-enabling should fetch right away, not wait for the
                         // next device event.
                         if enabled {

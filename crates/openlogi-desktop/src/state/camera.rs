@@ -203,7 +203,7 @@ impl AppState {
         self.config.camera_active_profile(config_key)
     }
     /// Record (and persist) which camera profile `config_key` last applied.
-    pub fn set_camera_active_profile(
+    pub fn commit_camera_active_profile(
         &mut self,
         config_key: &str,
         name: Option<String>,

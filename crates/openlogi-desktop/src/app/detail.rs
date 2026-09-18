@@ -726,7 +726,7 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
                                     .current_record()
                                     .map(DeviceRecord::device_key)
                                     .map_or_else(StateEvents::none, |key| {
-                                        state.set_device_enabled(&key, enabled)
+                                        state.commit_device_enabled(&key, enabled)
                                     })
                             });
                         }),

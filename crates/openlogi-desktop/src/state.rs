@@ -8,6 +8,10 @@
 //! [`AppState::new`] resolves every paired device's asset + DPI target up
 //! front so views can switch instantly when the active device changes — no
 //! synchronous I/O during the device switch.
+//!
+//! A mutator's prefix says where the change goes: `commit_*` persists it to
+//! `config.toml` (and tells the agent or the device when they care), `set_*`
+//! changes this process's memory and nothing else.
 
 use std::collections::BTreeMap;
 

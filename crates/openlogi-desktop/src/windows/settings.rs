@@ -297,7 +297,7 @@ impl SettingsView {
             current,
             cx,
             |_, sensitivity, cx| {
-                AppState::apply(cx, |state| state.set_thumbwheel_sensitivity(sensitivity));
+                AppState::apply(cx, |state| state.commit_thumbwheel_sensitivity(sensitivity));
             },
         )
     }
@@ -318,7 +318,7 @@ impl SettingsView {
             cx,
             |_, sensitivity, cx| {
                 AppState::apply(cx, |state| {
-                    state.set_vertical_scroll_sensitivity(sensitivity)
+                    state.commit_vertical_scroll_sensitivity(sensitivity)
                 });
             },
         )
@@ -340,7 +340,7 @@ impl SettingsView {
             .filter(|code| !code.is_empty())
             .map(ToOwned::to_owned);
 
-        AppState::apply(cx, |state| state.set_language(language));
+        AppState::apply(cx, |state| state.commit_language(language));
     }
 
     fn on_asset_source_select(
@@ -361,7 +361,7 @@ impl SettingsView {
             state.app_settings().asset_source != source && state.app_settings().auto_download_assets
         });
 
-        AppState::apply(cx, |state| state.set_asset_source(source));
+        AppState::apply(cx, |state| state.commit_asset_source(source));
         if refresh {
             assets::send_asset_command(cx, AssetCommand::Refresh);
         }

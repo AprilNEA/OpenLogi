@@ -175,7 +175,7 @@ impl CameraControlsPanel {
         // would immediately retry forever instead of waiting for a real UI or
         // inventory event.
         AppState::update(cx, |state, _| {
-            let _ = state.set_camera_active_profile(key, None);
+            let _ = state.commit_camera_active_profile(key, None);
         });
         match openlogi_camera::read_camera_state(uid) {
             Ok(live) => Reapplied::Live(live),
@@ -567,7 +567,7 @@ impl CameraControlsPanel {
         }
         self.commit_batch(&key, &autos, &values, window, cx);
         AppState::apply(cx, |state| {
-            state.set_camera_active_profile(&key, Some(id.to_string()))
+            state.commit_camera_active_profile(&key, Some(id.to_string()))
         });
         cx.notify();
     }
@@ -607,7 +607,7 @@ impl CameraControlsPanel {
     fn resync_after_failed_write(&mut self, cx: &mut Context<Self>) {
         self.uid = None;
         if let Some(key) = self.key.take() {
-            AppState::apply(cx, |state| state.set_camera_active_profile(&key, None));
+            AppState::apply(cx, |state| state.commit_camera_active_profile(&key, None));
         }
         cx.notify();
     }
@@ -630,7 +630,7 @@ impl CameraControlsPanel {
             }
             state
                 .save_camera_profile(&key, &name, snap)
-                .and(state.set_camera_active_profile(&key, Some(name)))
+                .and(state.commit_camera_active_profile(&key, Some(name)))
         });
         cx.notify();
     }
