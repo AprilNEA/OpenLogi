@@ -1,15 +1,14 @@
 use std::{
     fmt::{self, Write as _},
     process::ExitCode,
-    time::Duration,
 };
 
 use anyhow::{Context, Result};
 use clap::Args;
 use openlogi_camera::Camera;
 use openlogi_core::device::{BatteryInfo, DeviceInventory, DeviceModelInfo, PairedDevice};
-use openlogi_ipc::{AgentSnapshot, AgentStatus, ClientKind, PROTOCOL_VERSION, client};
-use tarpc::context;
+use openlogi_ipc::client::ConnectError;
+use openlogi_ipc::{AgentSnapshot, AgentStatus};
 
 #[derive(Debug, Args)]
 pub struct ListArgs {}
@@ -74,35 +73,15 @@ pub async fn run(_args: ListArgs) -> Result<ExitCode> {
 /// no agent listening, a hung handshake, a protocol mismatch, or a stalled
 /// snapshot call.
 async fn agent_snapshot() -> Option<AgentSnapshot> {
-    let conn = tokio::time::timeout(Duration::from_secs(2), client::connect())
-        .await
-        .ok()?
-        .ok()?;
-    if conn.version != PROTOCOL_VERSION {
-        eprintln!(
-            "note: the agent speaks protocol v{}, this CLI expects v{PROTOCOL_VERSION} — \
-             reading hardware directly",
-            conn.version
-        );
-        return None;
-    }
-    // Identify as a CLI so a dormant agent (launch-at-login off, started at
-    // login) serves this query without arming its whole input stack.
-    tokio::time::timeout(
-        Duration::from_secs(2),
-        conn.client
-            .declare_client(context::current(), ClientKind::Cli),
-    )
-    .await
-    .ok()?
-    .ok()?;
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        conn.client.snapshot(context::current()),
-    )
-    .await
-    .ok()?
-    .ok()
+    let client = match crate::agent::connect().await {
+        Ok(client) => client,
+        Err(ConnectError::Skew(skew)) => {
+            eprintln!("note: {skew} — reading hardware directly");
+            return None;
+        }
+        Err(_) => return None,
+    };
+    crate::agent::snapshot(&client).await.ok()
 }
 
 /// Why the list is empty. With an agent status in hand the reason is known;

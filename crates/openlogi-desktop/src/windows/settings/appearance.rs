@@ -11,7 +11,7 @@ use super::{
     StateEvent, StatefulInteractiveElement, Styled, Theme, ThemeColor, ThemeConfig, ThemeFilter,
     ThemeMode, ThemeRegistry, UiScale, div, h_flex, px, rgb, theme, v_flex,
 };
-use crate::platform::app_icon;
+use crate::platform::app_icon::AppIconExt as _;
 use crate::ui::choice_card::ChoiceCard;
 use crate::ui::components::control_input;
 use crate::ui::theme::Typography as _;
@@ -252,7 +252,7 @@ fn icon_picker(cx: &App) -> gpui::Div {
 /// One icon card: the preview above a radio + label, ringed when it is the icon
 /// the app is wearing.
 fn icon_card(icon: AppIcon, selected: bool, accent: Hsla, pal: Palette) -> impl IntoElement {
-    let preview = app_icon::preview(icon);
+    let preview = icon.preview();
     ChoiceCard::new(SharedString::from(icon.to_string()), icon_label(icon))
         .selected(selected)
         .gap(px(6.))

@@ -59,7 +59,7 @@ impl AppState {
             debug!("transient device lighting applied without persistence");
         }
         if let Some(route) = target {
-            self.send_ipc(crate::services::ipc::Command::SetLighting(route, lighting));
+            self.send_ipc(crate::services::ipc::SetLighting { route, lighting });
         }
     }
 }

@@ -3,12 +3,11 @@
 use std::fmt::Write as _;
 use std::io;
 use std::path::PathBuf;
-use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, ValueEnum};
 use openlogi_core::device::DeviceInventory;
-use openlogi_core::single_instance::{self, InstanceGuard};
+use openlogi_core::single_instance::{self, InstanceGuard, Role};
 use openlogi_device::write::{
     self, FeatureEntry, FirmwareEntity, ReprogControlEntry, ScrollWheelMode, WriteError,
 };
@@ -26,7 +25,6 @@ mod replay;
 
 pub(super) const DEFAULT_RECORDING_CAPACITY: usize = 8_192;
 const MAX_RECORDING_CAPACITY: usize = 65_536;
-const AGENT_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Arguments for one read-only HID++ cassette capture.
 #[derive(Debug, Args)]
@@ -305,13 +303,13 @@ fn validate_metadata(args: &RecordCaseArgs) -> Result<()> {
 async fn acquire_capture_ownership() -> Result<InstanceGuard> {
     // The agent acquires this same lock before any HID I/O. An endpoint probe
     // alone misses both early startup and a relaunch after the probe returns.
-    let guard = single_instance::acquire("agent.lock").context(
-        "refusing direct fixture capture: could not acquire agent.lock; \
+    let guard = single_instance::acquire(Role::Agent).context(
+        "refusing direct fixture capture: could not take the agent's instance lock; \
          stop the OpenLogi agent and any other fixture capture before retrying",
     )?;
-    match tokio::time::timeout(AGENT_PROBE_TIMEOUT, client::connect()).await {
-        Ok(Err(ConnectError::Endpoint(error))) if endpoint_is_unreachable(&error) => Ok(guard),
-        Ok(Ok(_) | Err(ConnectError::Handshake(_) | ConnectError::Endpoint(_))) | Err(_) => bail!(
+    match client::probe_version().await {
+        Err(ConnectError::Endpoint(error)) if endpoint_is_unreachable(&error) => Ok(guard),
+        Ok(_) | Err(_) => bail!(
             "refusing direct fixture capture because the agent endpoint is active or accepted a \
              connection without completing a healthy handshake; this command uses the CLI's own \
              HID permission and identity, so stop the OpenLogi agent before retrying"
@@ -491,7 +489,7 @@ mod tests {
             Ok("contender") => {
                 // This is the same lock acquisition that precedes agent HID I/O.
                 assert!(matches!(
-                    single_instance::acquire("agent.lock"),
+                    single_instance::acquire(Role::Agent),
                     Err(InstanceError::AlreadyRunning { .. })
                 ));
                 return;
@@ -502,7 +500,10 @@ mod tests {
                 let output = child("exercise")
                     .env("XDG_CONFIG_HOME", home.path())
                     .env_remove("XDG_RUNTIME_DIR")
-                    .env("OPENLOGI_PROFILE", "prod")
+                    .env(
+                        openlogi_core::env::PROFILE,
+                        openlogi_core::paths::Profile::Production.env_value(),
+                    )
                     .output()
                     .unwrap();
                 assert!(
@@ -515,56 +516,52 @@ mod tests {
             }
         }
 
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(async {
-                {
-                    let _agent = single_instance::acquire("agent.lock").unwrap();
-                    let error = prepare_contribution_target(None)
-                        .await
-                        .err()
-                        .expect("an agent starting before its socket binds must exclude capture");
-                    assert!(matches!(
-                        error.downcast_ref::<InstanceError>(),
-                        Some(InstanceError::AlreadyRunning { .. })
-                    ));
-                }
-                {
-                    let _capture = CaptureTarget {
-                        target: direct("Synthetic", 0xb034),
-                        _agent_guard: acquire_capture_ownership().await.unwrap(),
-                    };
-                    let output = child("contender").output().unwrap();
-                    assert!(
-                        output.status.success(),
-                        "agent must remain excluded after the endpoint check: {}",
-                        String::from_utf8_lossy(&output.stderr)
-                    );
-                }
-                // Successful capture scope releases ownership.
-                drop(single_instance::acquire("agent.lock").unwrap());
-
-                // An endpoint accepting connections but not serving a handshake
-                // must still fail closed, even when no agent holds the lock.
-                let _listener = openlogi_ipc::transport::bind().unwrap();
-                acquire_capture_ownership()
+        openlogi_core::worker::runtime().unwrap().block_on(async {
+            {
+                let _agent = single_instance::acquire(Role::Agent).unwrap();
+                let error = prepare_contribution_target(None)
                     .await
                     .err()
-                    .expect("an unresponsive endpoint must refuse capture");
-                drop(single_instance::acquire("agent.lock").unwrap());
-
-                // Cancelling a pending admission also releases the acquired lock.
-                let mut pending = Box::pin(acquire_capture_ownership());
-                assert!(futures::poll!(&mut pending).is_pending());
+                    .expect("an agent starting before its socket binds must exclude capture");
                 assert!(matches!(
-                    single_instance::acquire("agent.lock"),
-                    Err(InstanceError::AlreadyRunning { .. })
+                    error.downcast_ref::<InstanceError>(),
+                    Some(InstanceError::AlreadyRunning { .. })
                 ));
-                drop(pending);
-                drop(single_instance::acquire("agent.lock").unwrap());
-            });
+            }
+            {
+                let _capture = CaptureTarget {
+                    target: direct("Synthetic", 0xb034),
+                    _agent_guard: acquire_capture_ownership().await.unwrap(),
+                };
+                let output = child("contender").output().unwrap();
+                assert!(
+                    output.status.success(),
+                    "agent must remain excluded after the endpoint check: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            // Successful capture scope releases ownership.
+            drop(single_instance::acquire(Role::Agent).unwrap());
+
+            // An endpoint accepting connections but not serving a handshake
+            // must still fail closed, even when no agent holds the lock.
+            let _listener = openlogi_ipc::transport::bind().unwrap();
+            acquire_capture_ownership()
+                .await
+                .err()
+                .expect("an unresponsive endpoint must refuse capture");
+            drop(single_instance::acquire(Role::Agent).unwrap());
+
+            // Cancelling a pending admission also releases the acquired lock.
+            let mut pending = Box::pin(acquire_capture_ownership());
+            assert!(futures::poll!(&mut pending).is_pending());
+            assert!(matches!(
+                single_instance::acquire(Role::Agent),
+                Err(InstanceError::AlreadyRunning { .. })
+            ));
+            drop(pending);
+            drop(single_instance::acquire(Role::Agent).unwrap());
+        });
     }
 
     #[test]

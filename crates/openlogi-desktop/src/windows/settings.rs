@@ -229,7 +229,7 @@ impl SettingsView {
                 let sender = cx.update(|cx| AppState::global(cx).read(cx).ipc_sender());
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 let events = if sender
-                    .send(crate::services::ipc::Command::PollEventMonitor(tx))
+                    .send(crate::services::ipc::PollEventMonitor { reply: tx }.into())
                     .is_ok()
                 {
                     rx.await.unwrap_or_default()

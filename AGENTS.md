@@ -23,7 +23,7 @@ access devices directly.
 | Crate | Role |
 |---|---|
 | `crates/openlogi` | The CLI binary — thin wrapper over `openlogi-cli` |
-| `crates/openlogi-core` | Pure types: TOML config, device model, action catalog, locale negotiation. No I/O, no async (feature-gated host reads: `fs`, `locale`) |
+| `crates/openlogi-core` | Pure types: TOML config, device model, action catalog, locale negotiation. No I/O, no async (feature-gated host plumbing: `fs`, `locale`, and the `worker` thread) |
 | `crates/openlogi-device-registry` | Pure hardware identity registry: receiver protocols and standalone-device driver metadata |
 | `crates/openlogi-hidpp` | Hard fork of the `hidpp` protocol crate (**lib name `hidpp`**, 0BSD) |
 | `crates/openlogi-hidpp-derive` | Private derive macro for `openlogi-hidpp` feature boilerplate |
@@ -61,6 +61,24 @@ access devices directly.
   current head and the most direct available evidence before accepting its diagnosis.
 - Fix the verified root cause at its owning module and lifecycle boundary. Do not hide
   a broken owner or lifecycle behind a shim, fallback, or one-use abstraction.
+
+## Single source of truth
+
+- A decision every consumer must make the same way — a handshake step, a version
+  policy, a deadline, a threshold, an encoding — has exactly one owner, and the owner
+  exports the *decision*, not the ingredients. Clients call
+  `openlogi_ipc::client::connect_as(kind)` and match `ConnectError::Skew`; they never
+  see a raw version number to compare. Whatever consumers must not recombine stays
+  private, or leaves the public surface with the consolidation.
+- The second copy is the trigger, not the third. About to write a decision that already
+  exists elsewhere — in another crate, in a test, in a different shape — stop, move the
+  first copy to its owner, and consume it from both sites. Copies that differ are an
+  investigation signal (`.agents/rules/rust.md`), never a licence to keep both.
+- Every consolidation ships its guard: an ast-grep rule under `.ast-grep/rules/` that
+  names the owner and fails on the ingredients anywhere else, so the next copy is a red
+  `ast-grep` CI job (`cargo xtask ci ast-grep`; the prek hook runs it at commit), not a
+  review comment. Token-level clone detectors were evaluated for this and rejected:
+  they find copied text, and these copies were re-derivations that shared none.
 
 ## Build, run, verify
 
@@ -199,6 +217,7 @@ client-loading checks, including Windows symlink requirements.
 | Area | Rule file |
 |---|---|
 | reproducing CI jobs locally (every `ci.yml` job → command) | [.agents/rules/ci.md](.agents/rules/ci.md) |
+| `.ast-grep/**`, `sgconfig.yml` (the single-source-of-truth guards) | [.agents/rules/ci.md](.agents/rules/ci.md) |
 | any `*.rs` / `Cargo.toml` (workspace Rust standards) | [.agents/rules/rust.md](.agents/rules/rust.md) |
 | `crates/openlogi-desktop/**`, `crates/openlogi-ui/**`, `crates/openlogi-overlay/**` (GPUI) | [.agents/rules/gui.md](.agents/rules/gui.md) |
 | `crates/openlogi-desktop/**` (that crate's own contract and map) | `crates/openlogi-desktop/AGENTS.md` |

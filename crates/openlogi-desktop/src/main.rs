@@ -46,6 +46,7 @@ use openlogi_core::config::{Config, ConfigFile};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
+use crate::platform::app_icon::AppIconExt as _;
 use crate::services::assets::sync::{AssetCommand, AssetControl};
 use crate::services::{i18n, ipc};
 use crate::state::ConfigPersistence;
@@ -60,17 +61,18 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let _guard = match openlogi_core::single_instance::acquire("openlogi.lock") {
-        Ok(g) => g,
-        Err(openlogi_core::single_instance::InstanceError::AlreadyRunning { path }) => {
-            info!(
-                path = %path.display(),
-                "another OpenLogi instance is already running — exiting"
-            );
-            return Ok(());
-        }
-        Err(e) => return Err(anyhow::Error::from(e).context("single-instance check")),
-    };
+    let _guard =
+        match openlogi_core::single_instance::acquire(openlogi_core::single_instance::Role::Gui) {
+            Ok(g) => g,
+            Err(openlogi_core::single_instance::InstanceError::AlreadyRunning { path }) => {
+                info!(
+                    path = %path.display(),
+                    "another OpenLogi instance is already running — exiting"
+                );
+                return Ok(());
+            }
+            Err(e) => return Err(anyhow::Error::from(e).context("single-instance check")),
+        };
 
     let (initial_config, config_persistence) = match ConfigFile::load_or_default() {
         Ok((config, file)) => (config, ConfigPersistence::UserFile(file)),
@@ -143,7 +145,7 @@ fn main() -> Result<()> {
 
         // Wear the icon the user picked. An update replaces the bundle and
         // takes the icon with it, so this is a repair as much as a restore.
-        platform::app_icon::restore(initial_config.app_settings.app_icon);
+        initial_config.app_settings.app_icon.restore();
 
         // On-demand GUI: quit when the last window closes. The agent stays
         // resident and keeps remapping (and hosts the menu-bar item from which
@@ -175,7 +177,8 @@ fn init_tracing() {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
-            EnvFilter::try_from_env("OPENLOGI_LOG").unwrap_or_else(|_| EnvFilter::new("info")),
+            EnvFilter::try_from_env(openlogi_core::env::LOG)
+                .unwrap_or_else(|_| EnvFilter::new(openlogi_core::env::LOG_DEFAULT)),
         )
         .init();
 }

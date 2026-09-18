@@ -11,8 +11,8 @@ use openlogi_core::hid::{DeviceRoute, WriteError};
 use openlogi_fixture::{
     DeviceProfile, FIXTURE_SCHEMA_VERSION, ProfileDeviceSettings, ProfileSetting, ProfileSupport,
 };
-use openlogi_ipc::client::{self, ConnectError, Connection};
-use openlogi_ipc::{AgentClient, AgentSnapshot, ClientKind, PROTOCOL_VERSION};
+use openlogi_ipc::client::ConnectError;
+use openlogi_ipc::{AgentClient, AgentSnapshot};
 use tarpc::client::RpcError;
 use tarpc::context;
 
@@ -21,9 +21,6 @@ mod selection;
 
 use selection::TargetLocation;
 
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
-const DECLARE_TIMEOUT: Duration = Duration::from_secs(2);
-const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(5);
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Arguments for one privacy-safe semantic device profile capture.
@@ -51,8 +48,8 @@ pub struct RecordProfileArgs {
 pub async fn run(args: RecordProfileArgs) -> Result<()> {
     validate_metadata(&args)?;
     super::output::ensure_output_available(&args.output, args.force)?;
-    let connection = connect_to_agent().await?;
-    capture_connected(args, connection).await
+    let client = connect_to_agent().await?;
+    capture_connected(args, client).await
 }
 
 pub(super) struct CapturedProfile {
@@ -76,15 +73,10 @@ pub(super) async fn capture_for_contribution(
     capture_connected_profile(&connection, selector, id, name).await
 }
 
-async fn connect_to_agent() -> Result<Connection> {
-    match tokio::time::timeout(CONNECT_TIMEOUT, client::connect()).await {
-        Err(_) => bail!(
-            "timed out connecting to the running OpenLogi Agent; semantic profile capture \
-             requires a responsive Agent and will not access hardware directly"
-        ),
-        Ok(Err(error)) => Err(safe_connect_error(&error)),
-        Ok(Ok(connection)) => Ok(connection),
-    }
+async fn connect_to_agent() -> Result<AgentClient> {
+    crate::agent::connect()
+        .await
+        .map_err(|error| safe_connect_error(&error))
 }
 
 fn safe_connect_error(error: &ConnectError) -> anyhow::Error {
@@ -97,12 +89,19 @@ fn safe_connect_error(error: &ConnectError) -> anyhow::Error {
             "the running OpenLogi Agent did not complete a healthy IPC handshake; restart it and \
              retry (no profile was written)"
         ),
+        ConnectError::Skew(skew) => anyhow!(
+            "{skew}; update or restart OpenLogi so both processes match (no profile was written)"
+        ),
+        ConnectError::Timeout => anyhow!(
+            "timed out reaching the running OpenLogi Agent; restart it and retry (semantic \
+             profile capture has no direct-hardware fallback, and no profile was written)"
+        ),
     }
 }
 
-async fn capture_connected(args: RecordProfileArgs, connection: Connection) -> Result<()> {
+async fn capture_connected(args: RecordProfileArgs, client: AgentClient) -> Result<()> {
     let captured =
-        capture_connected_profile(&connection, args.device.as_deref(), args.id, args.name).await?;
+        capture_connected_profile(&client, args.device.as_deref(), args.id, args.name).await?;
     let profile = captured.profile;
     super::output::write_json_atomically(&args.output, &profile, args.force, "device profile")?;
 
@@ -119,38 +118,14 @@ async fn capture_connected(args: RecordProfileArgs, connection: Connection) -> R
 }
 
 async fn capture_connected_profile(
-    connection: &Connection,
+    client: &AgentClient,
     selector: Option<&str>,
     id: String,
     name: String,
 ) -> Result<CapturedProfile> {
-    if connection.version != PROTOCOL_VERSION {
-        bail!(
-            "the running Agent speaks protocol v{}, but this CLI requires v{PROTOCOL_VERSION}; \
-             update or restart OpenLogi so both processes match (no profile was written)",
-            connection.version
-        );
-    }
+    let snapshot = crate::agent::snapshot(client).await?;
 
-    tokio::time::timeout(
-        DECLARE_TIMEOUT,
-        connection
-            .client
-            .declare_client(context::current(), ClientKind::Cli),
-    )
-    .await
-    .map_err(|_| anyhow!("the running Agent timed out before semantic capture could begin"))?
-    .map_err(|_| anyhow!("the running Agent disconnected before semantic capture could begin"))?;
-
-    let snapshot = tokio::time::timeout(
-        SNAPSHOT_TIMEOUT,
-        connection.client.snapshot(context::current()),
-    )
-    .await
-    .map_err(|_| anyhow!("the running Agent timed out while providing its device snapshot"))?
-    .map_err(|_| anyhow!("the running Agent disconnected while providing its device snapshot"))?;
-
-    let captured = capture_profile(&connection.client, snapshot, selector, id, name).await?;
+    let captured = capture_profile(client, snapshot, selector, id, name).await?;
     captured
         .profile
         .validate()

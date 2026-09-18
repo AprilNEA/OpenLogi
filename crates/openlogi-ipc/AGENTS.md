@@ -21,3 +21,17 @@ tarpc encodes the **method order**, so the wire format is positional:
   NOT produce matching bytes.
 - Debug-build agents never take over a running release agent — that is by design (a
   dev agent must not displace the user's production agent), not a bug.
+
+## The client policy lives here too
+
+`src/client.rs` owns everything a client must do identically: `connect_as(kind)` is
+the handshake (connect, judge the version in both directions, declare — all within
+`HANDSHAKE_TIMEOUT`, so no caller adds a timeout of its own),
+`probe_version` the agent's takeover probe, and `Ledger` and `observe_context` the
+observe bookkeeping (the thread a client loop runs on is `openlogi_core::worker`'s).
+Consumers
+never compare `PROTOCOL_VERSION`, call `declare_client`, or open the transport
+themselves — the `.ast-grep/rules/ipc-*.yml` guards fail the `ast-grep` CI job on any
+of that outside this crate. A new decision every client must share goes here, with
+its guard, not into the first client that needs it. `testing::in_memory_agent`
+(feature `test-support`) is the scripted agent for client tests.

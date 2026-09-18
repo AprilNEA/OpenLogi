@@ -245,8 +245,8 @@ not evidence that a particular client version loaded the rules correctly.
 ## Local CI
 
 The PR test pipeline is `.github/workflows/ci.yml`. To run every job this
-machine can reproduce — including typos, MSRV, cargo-deny, and the Windows
-cross-lint the host-OS gate does not run:
+machine can reproduce — including typos, the ast-grep guards, MSRV, cargo-deny,
+and the Windows cross-lint the host-OS gate does not run:
 
 ```sh
 cargo xtask ci

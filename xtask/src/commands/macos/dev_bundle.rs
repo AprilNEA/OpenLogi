@@ -26,7 +26,7 @@ use strum::VariantArray as _;
 use xshell::{Shell, cmd};
 
 use super::bundle::identity::{self, Channel, Component};
-use super::bundle::{HELPERS, Helper, write_agent_launch_plist};
+use super::bundle::{EmbeddedHelper, HELPERS, write_agent_launch_plist};
 use crate::icon::IconPipeline as _;
 use crate::icon::macos::AppBundle;
 use crate::support::fs::{ensure_file, repo_root};
@@ -60,7 +60,7 @@ pub(crate) struct Args {
 pub(crate) fn run(args: &Args) -> Result<()> {
     let root = repo_root()?;
     let app = root.join("target/dev/OpenLogi.app");
-    let profile = Profile::of(&args.binary)?;
+    let profile = BuildProfile::of(&args.binary)?;
 
     processes::reap_leftovers(&app, &root.join("target"))?;
 
@@ -86,8 +86,8 @@ pub(crate) fn run(args: &Args) -> Result<()> {
     // leftover from an older checkout is a second row in every macOS list that
     // names these processes. Same for the launchd service plists: one from an
     // earlier build could name a helper this build does not embed.
-    remove_bundle(&app.join("Contents/Library/LoginItems"))?;
-    remove_bundle(&app.join("Contents/Library/LaunchAgents"))?;
+    remove_bundle(&app.join(openlogi_core::brand::LOGIN_ITEMS_DIR))?;
+    remove_bundle(&app.join(openlogi_core::brand::LAUNCH_AGENTS_DIR))?;
     let components = if helpers_wanted() {
         for helper in &HELPERS {
             embed_helper(&root, &app, &profile, helper, &icon, &signing)?;
@@ -143,13 +143,10 @@ fn start_agent(app: &Path) -> Result<()> {
     println!("==> agent (start)");
     cmd!(sh, "open -g -n {agent_bundle}").run()?;
 
-    // The dev agent serves the sibling `openlogi-dev` profile's socket; xtask
-    // itself is not a dev-profile process, so build the path by hand the way
-    // `signing::state_path` does rather than via `paths::agent_socket_path`.
-    let socket = openlogi_core::paths::xdg_config_home()
-        .map_err(|error| anyhow::anyhow!("could not resolve the dev socket: {error}"))?
-        .join(openlogi_core::paths::DEV_APP_DIR)
-        .join("agent.sock");
+    // The dev agent serves the sibling dev profile's socket; xtask itself is
+    // not a dev-profile process, so it asks for that profile's path by name.
+    let socket = openlogi_core::paths::agent_socket_path_for(openlogi_core::paths::Profile::Dev)
+        .map_err(|error| anyhow::anyhow!("could not resolve the dev socket: {error}"))?;
     let started = std::time::Instant::now();
     while started.elapsed() < AGENT_SOCKET_DEADLINE {
         if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
@@ -169,12 +166,12 @@ fn start_agent(app: &Path) -> Result<()> {
 fn embed_helper(
     root: &Path,
     app: &Path,
-    profile: &Profile,
-    helper: &Helper,
+    profile: &BuildProfile,
+    helper: &EmbeddedHelper,
     icon: &Path,
     signing: &signing::Signing,
 ) -> Result<()> {
-    let Helper {
+    let EmbeddedHelper {
         component,
         package,
         binary,
@@ -240,7 +237,7 @@ fn remove_bundle(path: &Path) -> Result<()> {
 fn sign_order(app: &Path, components: &[Component]) -> Vec<PathBuf> {
     let mut targets: Vec<PathBuf> = components
         .iter()
-        .filter(|component| component.nested_bundle(CHANNEL).is_some())
+        .filter(|component| component.nested_bundle_dir(CHANNEL).is_some())
         .map(|component| component.root(app, CHANNEL))
         .collect();
     targets.push(app.to_path_buf());
@@ -280,7 +277,7 @@ fn helpers_wanted() -> bool {
 /// `<root>/target`, which `CARGO_TARGET_DIR`, a shared target directory or a
 /// git worktree all move somewhere else.
 #[derive(Clone, PartialEq, Eq, Debug)]
-struct Profile {
+struct BuildProfile {
     /// The directory the helpers will be built into as well.
     dir: PathBuf,
     /// Whether to pass `--release` when building them. Helpers match the GUI:
@@ -288,7 +285,7 @@ struct Profile {
     release: bool,
 }
 
-impl Profile {
+impl BuildProfile {
     fn of(binary: &Path) -> Result<Self> {
         let dir = binary
             .parent()
