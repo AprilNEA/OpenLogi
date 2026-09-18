@@ -8,27 +8,21 @@ use std::borrow::Borrow;
 /// per-device row
 /// ([`DeviceSession`](super::device_session::DeviceSession)).
 ///
-/// Wraps a device's config key — see
+/// Wraps a device's config key, and is only ever made from one by
 /// [`DeviceRecord::device_key`](super::devices::DeviceRecord::device_key) —
 /// so a plain `String` computed for some unrelated purpose (a display name, a
-/// model key, a capture id) can't be passed to one of these maps by
-/// accident: every call site has to go through that one conversion point.
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    Default,
-    derive_more::Display,
-    derive_more::From,
-)]
-#[from(forward)]
+/// model key, an inventory key, a capture id) can't be passed to one of these
+/// maps by accident: there is no conversion from a string, and every call
+/// site has to go through that one accessor.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, derive_more::Display)]
 pub(crate) struct DeviceKey(String);
 
 impl DeviceKey {
+    /// The key of the record whose config key is `config_key`.
+    pub(super) fn of_record(config_key: &str) -> Self {
+        Self(config_key.to_owned())
+    }
+
     /// Borrow the underlying key as a string slice.
     pub(crate) fn as_str(&self) -> &str {
         &self.0
@@ -42,6 +36,14 @@ impl DeviceKey {
 impl Borrow<str> for DeviceKey {
     fn borrow(&self) -> &str {
         &self.0
+    }
+}
+
+/// Tests name devices that no record stands for.
+#[cfg(test)]
+impl From<&str> for DeviceKey {
+    fn from(key: &str) -> Self {
+        Self(key.to_owned())
     }
 }
 
@@ -60,7 +62,8 @@ mod tests {
 
     #[test]
     fn equality_and_ordering_are_value_based() {
-        assert_eq!(DeviceKey::from("a"), DeviceKey::from("a".to_string()));
+        let (a, again) = (DeviceKey::from("a"), DeviceKey::from("a"));
+        assert_eq!(a, again);
         assert_ne!(DeviceKey::from("a"), DeviceKey::from("b"));
         assert!(DeviceKey::from("a") < DeviceKey::from("b"));
     }

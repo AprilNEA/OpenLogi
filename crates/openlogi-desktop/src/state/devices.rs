@@ -92,7 +92,7 @@ impl DeviceRecord {
     /// state, standalone-light overrides, inventory-miss counters). Wraps
     /// [`Self::config_key`] — see [`DeviceKey`].
     pub(crate) fn device_key(&self) -> DeviceKey {
-        DeviceKey::from(self.config_key.as_str())
+        DeviceKey::of_record(&self.config_key)
     }
 
     /// Return the configuration key only when it is safe to persist settings.
