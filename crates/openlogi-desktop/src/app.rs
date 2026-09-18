@@ -17,6 +17,7 @@ use self::menu::{APP_KEY_CONTEXT, CloseWindow, Minimize, NavigateBack, Zoom};
 use crate::features::action_ring::ActionRingPanel;
 use crate::features::camera::controls::CameraControlsPanel;
 use crate::features::camera::preview::CameraPreview;
+use crate::features::keyboard::disable_keys::DisableKeysPanel;
 use crate::features::keyboard::function_row::FunctionRowView;
 use crate::features::lighting::device::LightingPanel;
 use crate::features::lighting::standalone::LightPanel;
@@ -165,6 +166,7 @@ pub struct AppView {
     mouse_model: Entity<MouseModelView>,
     action_ring_panel: Entity<ActionRingPanel>,
     keyboard_model: Entity<FunctionRowView>,
+    disable_keys_panel: Entity<DisableKeysPanel>,
     dpi_panel: Entity<DpiPanel>,
     smartshift_panel: Entity<SmartShiftPanel>,
     lighting_panel: Entity<LightingPanel>,
@@ -227,6 +229,7 @@ impl AppView {
         let mouse_model = cx.new(|cx| MouseModelView::new(window, cx));
         let action_ring_panel = cx.new(ActionRingPanel::new);
         let keyboard_model = cx.new(FunctionRowView::new);
+        let disable_keys_panel = cx.new(DisableKeysPanel::new);
         let dpi_panel = cx.new(DpiPanel::new);
         let smartshift_panel = cx.new(SmartShiftPanel::new);
         let lighting_panel = cx.new(LightingPanel::new);
@@ -236,7 +239,36 @@ impl AppView {
         let profile_icons = ProfileIconCache::default();
         let app_catalog = cx.new(|cx| AppCatalogPicker::new(profile_icons.clone(), window, cx));
         let app_catalog_obs = cx.observe(&app_catalog, |_, _, cx| cx.notify());
-        let state_obs = cx.subscribe(&state, |view, _, event: &StateEvent, cx| {
+        let state_obs = Self::subscribe_to_relevant_state(&state, cx);
+        Self {
+            focus_handle,
+            route: Route::Home,
+            mouse_model,
+            action_ring_panel,
+            keyboard_model,
+            disable_keys_panel,
+            dpi_panel,
+            smartshift_panel,
+            lighting_panel,
+            camera_preview,
+            camera_controls,
+            light_panel,
+            profile_icons,
+            app_catalog,
+            _app_catalog_obs: app_catalog_obs,
+            appearance_obs: None,
+            state_obs,
+            config_issue_visible: false,
+            accessibility_dismissed: false,
+            active_tab: DetailTab::Buttons,
+        }
+    }
+
+    fn subscribe_to_relevant_state(
+        state: &Entity<AppState>,
+        cx: &mut Context<Self>,
+    ) -> Subscription {
+        cx.subscribe(state, |view, _, event: &StateEvent, cx| {
             let active_key = AppState::try_read(cx)
                 .and_then(AppState::current_record)
                 .map(DeviceRecord::device_key);
@@ -273,6 +305,7 @@ impl AppView {
                 // language switch already refreshes every window, and the root
                 // caches no localized text.
                 StateEvent::SmartShiftChanged(_)
+                | StateEvent::DisableKeysChanged(_)
                 | StateEvent::CameraPermissionChanged
                 | StateEvent::DiagnosticsChanged
                 | StateEvent::LanguageChanged => false,
@@ -288,28 +321,7 @@ impl AppView {
             if relevant {
                 cx.notify();
             }
-        });
-        Self {
-            focus_handle,
-            route: Route::Home,
-            mouse_model,
-            action_ring_panel,
-            keyboard_model,
-            dpi_panel,
-            smartshift_panel,
-            lighting_panel,
-            camera_preview,
-            camera_controls,
-            light_panel,
-            profile_icons,
-            app_catalog,
-            _app_catalog_obs: app_catalog_obs,
-            appearance_obs: None,
-            state_obs,
-            config_issue_visible: false,
-            accessibility_dismissed: false,
-            active_tab: DetailTab::Buttons,
-        }
+        })
     }
 
     /// Keep the OS-appearance observer alive.
@@ -601,6 +613,7 @@ impl Render for AppView {
                         mouse_model: &self.mouse_model,
                         action_ring: &self.action_ring_panel,
                         keyboard_model: &self.keyboard_model,
+                        disable_keys_panel: &self.disable_keys_panel,
                         dpi_panel: &self.dpi_panel,
                         smartshift_panel: &self.smartshift_panel,
                         lighting_panel: &self.lighting_panel,

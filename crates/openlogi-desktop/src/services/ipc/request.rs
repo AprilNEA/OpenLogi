@@ -18,7 +18,8 @@ use std::future::Future;
 
 use openlogi_core::config::Lighting;
 use openlogi_core::hid::{
-    DeviceRoute, Dpi, DpiInfo, LightCommand, ReceiverSelector, SmartShiftStatus, WriteError,
+    DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiInfo, LightCommand, ReceiverSelector,
+    SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::{AgentClient, ConfigReloadError, PairingCommandError, PairingFailure};
 use tarpc::client::RpcError;
@@ -26,7 +27,7 @@ use tarpc::context;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
-use super::GuiUpdate;
+use super::{ConfigReloadContext, DisableKeysRequestContext, GuiUpdate};
 
 /// The GPUI-bound update stream a request may deliver through.
 pub(super) type UpdateSender = mpsc::UnboundedSender<GuiUpdate>;
@@ -256,6 +257,50 @@ pub struct ReadSmartShift {
     pub reply: oneshot::Sender<Result<SmartShiftStatus, WriteError>>,
 }
 
+/// Read a device's Disable Keys state; the answer goes back over `reply`.
+pub struct ReadDisableKeys {
+    pub route: DeviceRoute,
+    pub reply: oneshot::Sender<Result<DisableKeysState, WriteError>>,
+}
+
+impl Request for ReadDisableKeys {
+    type Answer = Result<DisableKeysState, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .read_disable_keys(context::current(), self.route.clone())
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
+        let _ = self.reply.send(or_unavailable(outcome));
+    }
+}
+
+/// Guardedly replace a device's Disable Keys mask and report the confirmed
+/// device state to the transaction that requested it.
+pub struct SetDisableKeys {
+    pub context: DisableKeysRequestContext,
+    pub desired: DisableKeysMask,
+}
+
+impl Request for SetDisableKeys {
+    type Answer = Result<DisableKeysState, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .set_disable_keys(context::current(), self.context.route.clone(), self.desired)
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        let _ = updates.send(GuiUpdate::DisableKeysWriteResult {
+            context: self.context,
+            result: or_unavailable(outcome),
+        });
+    }
+}
+
 impl Request for ReadSmartShift {
     type Answer = Result<SmartShiftStatus, WriteError>;
 
@@ -275,7 +320,38 @@ impl Request for ReadSmartShift {
 /// The loop holds this one until a connection exists and never answers it
 /// locally (module doc), so `deliver` only ever reports the agent's own
 /// verdict: a reload that did not happen is not one the agent refused.
-pub struct ReloadConfig;
+#[derive(Clone)]
+pub struct ReloadConfig {
+    pub(crate) contexts: Vec<ConfigReloadContext>,
+}
+
+impl ReloadConfig {
+    pub(crate) fn empty() -> Self {
+        Self {
+            contexts: Vec::new(),
+        }
+    }
+
+    pub(crate) fn general() -> Self {
+        Self {
+            contexts: vec![ConfigReloadContext::General],
+        }
+    }
+
+    pub(crate) fn disable_keys(context: DisableKeysRequestContext) -> Self {
+        Self {
+            contexts: vec![ConfigReloadContext::DisableKeys(context)],
+        }
+    }
+
+    pub(super) fn merge(&mut self, other: Self) {
+        for context in other.contexts {
+            if !self.contexts.contains(&context) {
+                self.contexts.push(context);
+            }
+        }
+    }
+}
 
 impl Request for ReloadConfig {
     type Answer = Result<(), ConfigReloadError>;
@@ -286,7 +362,12 @@ impl Request for ReloadConfig {
 
     fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
         if let Ok(verdict) = outcome {
-            let _ = updates.send(GuiUpdate::ConfigReloadResult(verdict));
+            for context in self.contexts {
+                let _ = updates.send(GuiUpdate::ConfigReloadResult {
+                    context,
+                    result: verdict.clone(),
+                });
+            }
         }
     }
 }
@@ -448,6 +529,8 @@ commands! {
     SetSmartShift,
     ReadDpi,
     ReadSmartShift,
+    ReadDisableKeys,
+    SetDisableKeys,
     ReloadConfig,
     RequestAccessibilityPrompt,
     StartPairing,
@@ -502,7 +585,7 @@ mod tests {
     fn a_reload_that_never_reached_the_agent_is_not_a_verdict() {
         let (updates, mut received) = mpsc::unbounded_channel();
 
-        ReloadConfig.deliver(Err(Unavailable), &updates);
+        ReloadConfig::general().deliver(Err(Unavailable), &updates);
 
         assert!(received.try_recv().is_err());
     }

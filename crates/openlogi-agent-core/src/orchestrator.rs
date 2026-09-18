@@ -24,7 +24,7 @@ use openlogi_core::device::{
 use openlogi_core::device_order::{DeviceIdentity, DeviceStableId, PhysicalDeviceKey};
 use openlogi_hid::{
     CaptureChannel, ChannelPool, ChannelRegistry, DIRECT_DEVICE_INDEX, DeviceIoGate, DeviceRoute,
-    KEYBOARD_KEY_CIDS,
+    DisableKeysMask, KEYBOARD_KEY_CIDS,
 };
 use openlogi_ipc::InventoryHealth;
 use tokio::sync::watch;
@@ -170,9 +170,10 @@ pub struct Orchestrator {
     /// atomically with the inventory so no observation pairs a fresh device
     /// set with a stale flag.
     hid_open_failures: bool,
-    /// Config keys of devices first sighted (or targeted after wake) recently,
-    /// with remaining confirming re-apply budget: the first write can race the
-    /// device's own boot or reconnect and be lost.
+    /// Config keys of devices recently targeted after discovery, reconnect,
+    /// or system wake, with their remaining confirming re-apply budget. An
+    /// online inventory state does not guarantee that every HID++ feature is
+    /// ready, so the first detached write can still time out or fail.
     reapply_followup: HashMap<String, u8>,
     /// Last successful aggregate camera-use sample. `None` means the macOS
     /// watcher has not produced its first usable observation yet.
@@ -504,6 +505,29 @@ impl Orchestrator {
         standalone: &[StandaloneDevice],
         hid_open_failures: bool,
     ) {
+        self.refresh_inventory_inner(inventories, standalone, hid_open_failures, false);
+    }
+
+    /// Apply the inventory pass whose delayed purpose is confirming volatile
+    /// settings. Only this path consumes one bounded confirmation attempt;
+    /// ordinary HID and hotplug snapshots may arrive much sooner and must not
+    /// exhaust the retry run while a device's feature path is still booting.
+    pub fn refresh_inventory_for_settings_confirmation(
+        &mut self,
+        inventories: &[DeviceInventory],
+        standalone: &[StandaloneDevice],
+        hid_open_failures: bool,
+    ) {
+        self.refresh_inventory_inner(inventories, standalone, hid_open_failures, true);
+    }
+
+    fn refresh_inventory_inner(
+        &mut self,
+        inventories: &[DeviceInventory],
+        standalone: &[StandaloneDevice],
+        hid_open_failures: bool,
+        confirm_reapply: bool,
+    ) {
         // Even an empty snapshot is a *completed* enumeration — the watcher
         // skips failed ticks — so the device set is now known either way (and
         // a recovered backend upgrades `Unavailable` back to live data).
@@ -524,8 +548,13 @@ impl Orchestrator {
         let next_current = pick_current(&devices, self.config.selected_device());
         let rearm_capture = any_device_needs_capture_rearm(&self.devices, &devices, reapply_all);
         let followup = std::mem::take(&mut self.reapply_followup);
-        let (targets, next_followup) =
-            plan_reapply(&self.devices, &devices, &followup, reapply_all);
+        let (targets, next_followup) = plan_reapply(
+            &self.devices,
+            &devices,
+            &followup,
+            reapply_all,
+            confirm_reapply,
+        );
         self.reapply_followup = next_followup;
         for idx in targets {
             self.reapply_volatile_settings(&devices[idx]);
@@ -618,6 +647,12 @@ impl Orchestrator {
             crate::hardware::write_fn_lock_in_background(
                 self.shared.keyboard_device(&route),
                 fn_lock,
+            );
+        }
+        if let Some(desired) = configured_disabled_keys(&self.config, key) {
+            crate::hardware::write_disabled_keys_in_background(
+                self.shared.keyboard_device(&route),
+                desired,
             );
         }
         if let Some(capabilities) = dev.light_capabilities
@@ -939,6 +974,13 @@ fn configured_wheel_mode(
     (resolution, inverted)
 }
 
+fn configured_disabled_keys(config: &Config, device_key: &str) -> Option<DisableKeysMask> {
+    config.disabled_keys(device_key).map(|keys| {
+        keys.iter()
+            .fold(DisableKeysMask::EMPTY, |mask, key| mask | key.mask())
+    })
+}
+
 /// Build the agent device list from an inventory snapshot. Mirrors the GUI's
 /// `build_device_list` minus the asset/display fields: a device is included
 /// only once its HID++ DeviceInformation (`model_info`) has resolved, since the
@@ -1113,36 +1155,30 @@ fn any_device_needs_capture_rearm(
     !reapply_targets(prev, next, reapply_all).is_empty()
 }
 
-/// How many explicit confirmation passes a first-sighted or wake-targeted
-/// device keeps re-applying its volatile settings after the initial write. A
-/// cold restart leaves a Bolt/Unifying mouse slow to enumerate — and a system
-/// wake can enumerate a receiver whose mouse link is still re-establishing —
-/// so the first write (and a single confirm) can both time out against a
-/// still-booting device. Four confirmations are requested at two-second
-/// intervals; any intervening authoritative reconciliation satisfies one.
+/// How many inventory ticks a newly available device keeps re-applying its
+/// volatile settings after the initial write. A cold restart, device wake, or
+/// system wake can expose an online route while its HID++ feature path is
+/// still re-establishing, so the first write (and a single confirm) can both
+/// fail. Four confirmation passes at the two-second cadence keep trying for
+/// about eight seconds, so the write can land once the path is ready.
 const VOLATILE_REAPPLY_CONFIRM_RETRIES: u8 = 4;
 
 /// Plan this refresh's volatile-settings writes: the [`reapply_targets`] set
-/// plus a bounded run of confirming re-applies for devices first sighted
-/// recently or targeted by a system wake, and the follow-up keys (with
-/// remaining retry counts) to confirm next refresh. Reconnects
-/// (offline→online) re-apply once — the device was already booted, so it
-/// needs no boot-race retry.
+/// plus a bounded run of confirming re-applies, and the follow-up keys (with
+/// remaining retry counts) to confirm on a delayed confirmation refresh.
+/// Ordinary lifecycle snapshots preserve that run without consuming it:
+/// inventory availability only proves that the route was observed, not that
+/// each detached HID++ write completed successfully.
 fn plan_reapply(
     prev: &[AgentDevice],
     next: &[AgentDevice],
     followup: &HashMap<String, u8>,
     reapply_all: bool,
+    confirm_followup: bool,
 ) -> (Vec<usize>, HashMap<String, u8>) {
     let mut targets = reapply_targets(prev, next, reapply_all);
     let mut next_followup: HashMap<String, u8> = targets
         .iter()
-        .filter(|&&idx| {
-            reapply_all || {
-                let id = stable_id(&next[idx]);
-                !prev.iter().any(|p| stable_id(p) == id)
-            }
-        })
         .map(|&idx| {
             (
                 next[idx].config_key.clone(),
@@ -1151,15 +1187,19 @@ fn plan_reapply(
         })
         .collect();
     for (idx, dev) in next.iter().enumerate() {
-        if dev.online
-            && dev.route.is_some()
-            && !targets.contains(&idx)
-            && let Some(&remaining) = followup.get(&dev.config_key)
-        {
+        let Some(&remaining) = followup.get(&dev.config_key) else {
+            continue;
+        };
+        if !dev.online || dev.route.is_none() || targets.contains(&idx) || remaining == 0 {
+            continue;
+        }
+        if confirm_followup {
             targets.push(idx);
             if remaining > 1 {
                 next_followup.insert(dev.config_key.clone(), remaining - 1);
             }
+        } else {
+            next_followup.insert(dev.config_key.clone(), remaining);
         }
     }
     (targets, next_followup)

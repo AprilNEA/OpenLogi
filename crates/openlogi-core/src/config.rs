@@ -23,7 +23,7 @@ mod settings;
 #[cfg(feature = "fs")]
 mod tests;
 
-pub use device::{DeviceConfig, DeviceIdentity, LinkConfig, LinkOverrides};
+pub use device::{DeviceConfig, DeviceIdentity, DisableKey, LinkConfig, LinkOverrides};
 #[cfg(feature = "fs")]
 pub use file::{ConfigError, ConfigFile};
 #[cfg(all(test, feature = "fs"))]
@@ -930,6 +930,37 @@ impl Config {
     /// re-apply it when the device reconnects (#189).
     pub fn set_dpi(&mut self, device_key: &str, dpi: Dpi) {
         self.devices.entry(device_key.to_string()).or_default().dpi = Some(dpi);
+    }
+
+    /// Known keys managed for `device_key`, or `None` when OpenLogi should not
+    /// change the keyboard's current `DisableKeys` state.
+    #[must_use]
+    pub fn disabled_keys(
+        &self,
+        device_key: &str,
+    ) -> Option<&std::collections::BTreeSet<DisableKey>> {
+        self.devices
+            .get(device_key)
+            .and_then(|device| device.disabled_keys.as_ref())
+    }
+
+    /// Persist the complete desired known-key set for `device_key`.
+    pub fn set_disabled_keys(
+        &mut self,
+        device_key: &str,
+        disabled_keys: std::collections::BTreeSet<DisableKey>,
+    ) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .disabled_keys = Some(disabled_keys);
+    }
+
+    /// Return `device_key` to unmanaged Disable Keys state.
+    pub fn clear_disabled_keys(&mut self, device_key: &str) {
+        if let Some(device) = self.devices.get_mut(device_key) {
+            device.disabled_keys = None;
+        }
     }
 
     /// The SmartShift wheel config for `device_key`, or `None` if never set.
