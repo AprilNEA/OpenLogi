@@ -30,8 +30,8 @@ use std::time::Duration;
 use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_core::scroll::ScrollDelta;
 use openlogi_hid::{
-    CaptureChannelSlot, CaptureSessionOutcome, CapturedInput, DeviceIoGate, PendingCaptureRestore,
-    run_capture_session,
+    CaptureChannelSlot, CaptureHost, CaptureSessionOutcome, CapturedInput, DeviceIoGate,
+    PendingCaptureRestore, run_capture_session,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
@@ -737,11 +737,13 @@ fn spawn_session(
         let pending_restore = match run_capture_session(
             session_route,
             session_spec,
-            session_tx,
-            stop_rx,
-            slot,
-            &registry,
-            device_io,
+            CaptureHost {
+                sink: session_tx,
+                shutdown: stop_rx,
+                channel_slot: slot,
+                registry: &registry,
+                device_io,
+            },
         )
         .await
         {

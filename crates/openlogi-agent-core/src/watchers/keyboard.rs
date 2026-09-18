@@ -18,8 +18,8 @@ use std::time::Duration;
 
 use openlogi_core::binding::{Binding, ButtonId};
 use openlogi_hid::{
-    CaptureChannelSlot, CaptureSessionOutcome, CapturedInput, ChannelRegistry, DeviceIoGate,
-    DeviceRoute, PendingCaptureRestore, run_keyboard_capture_session,
+    CaptureChannelSlot, CaptureHost, CaptureSessionOutcome, CapturedInput, ChannelRegistry,
+    DeviceIoGate, DeviceRoute, PendingCaptureRestore, run_keyboard_capture_session,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{debug, info, warn};
@@ -646,11 +646,13 @@ fn spawn_session(
         let pending_restore = match run_keyboard_capture_session(
             route,
             wanted,
-            sink,
-            stop_rx,
-            slot,
-            &session_registry,
-            device_io,
+            CaptureHost {
+                sink,
+                shutdown: stop_rx,
+                channel_slot: slot,
+                registry: &session_registry,
+                device_io,
+            },
         )
         .await
         {

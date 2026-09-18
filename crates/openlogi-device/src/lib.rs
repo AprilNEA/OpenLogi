@@ -53,8 +53,8 @@ pub use pairing::{
     PasskeyMethod, ReceiverFamily, ReceiverSelector, list_pairing_receivers, run_pairing, unpair,
 };
 pub use session::gesture::{
-    CaptureChannelSlot, CaptureError, CaptureSessionFailure, CaptureSessionOutcome, CapturedInput,
-    PendingCaptureRestore, run_capture_session,
+    CaptureChannelSlot, CaptureError, CaptureHost, CaptureSessionFailure, CaptureSessionOutcome,
+    CapturedInput, PendingCaptureRestore, run_capture_session,
 };
 pub use session::host_switch::{
     HostSwitchError, HostSwitchRestoreOutcome, HostSwitchSessionFailure, HostSwitchSessionOutcome,

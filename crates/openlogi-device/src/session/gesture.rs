@@ -32,12 +32,13 @@ use hidpp::{
     protocol::v20,
 };
 use openlogi_core::binding::{ButtonId, GestureDirection};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 use tracing::{debug, info, warn};
 
 use crate::channel::route::DeviceRoute;
 use crate::{ChannelRegistry, DeviceIoGate, SharedChannel};
 
+pub use super::capture::CaptureHost;
 use super::capture::liveness::{CaptureLiveness, ChannelActivity, LivenessDecision, PingOutcome};
 use accum::CaptureAccum;
 pub(crate) use arm::enumerate_controls;
@@ -178,36 +179,27 @@ pub struct CaptureSpec {
 pub async fn run_capture_session(
     route: DeviceRoute,
     spec: CaptureSpec,
-    sink: mpsc::UnboundedSender<CapturedInput>,
-    shutdown: oneshot::Receiver<()>,
-    channel_slot: CaptureChannelSlot,
-    registry: &ChannelRegistry,
-    device_io: DeviceIoGate,
+    host: CaptureHost<'_>,
 ) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
-    let shared = registry
+    let shared = host
+        .registry
         .lookup(&route)
         .ok_or(CaptureError::DeviceNotFound)?;
-    run_capture_session_on(
-        shared,
-        spec,
-        sink,
-        shutdown,
-        channel_slot,
-        registry,
-        device_io,
-    )
-    .await
+    run_capture_session_on(shared, spec, host).await
 }
 
 async fn run_capture_session_on(
     shared: SharedChannel,
     spec: CaptureSpec,
-    sink: mpsc::UnboundedSender<CapturedInput>,
-    shutdown: oneshot::Receiver<()>,
-    channel_slot: CaptureChannelSlot,
-    registry: &ChannelRegistry,
-    device_io: DeviceIoGate,
+    host: CaptureHost<'_>,
 ) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
+    let CaptureHost {
+        sink,
+        shutdown,
+        channel_slot,
+        registry,
+        device_io,
+    } = host;
     device_io.ensure_allowed().map_err(CaptureError::from)?;
     let chan = Arc::clone(shared.channel());
     let device_index = shared.device_index();

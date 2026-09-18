@@ -28,13 +28,14 @@ use openlogi_core::binding::ButtonId;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
+use super::capture::CaptureHost;
 use super::capture_restore::{
     ArmedReporting, CaptureStop, ReprogRestore, divert_change, drop_listener_after,
     restore_after_stop, rollback_capture_start, stop_for_current_publication,
     wait_for_channel_change,
 };
 use super::gesture::{
-    CaptureChannelSlot, CaptureError, CaptureSessionFailure, CaptureSessionOutcome, CapturedInput,
+    CaptureError, CaptureSessionFailure, CaptureSessionOutcome, CapturedInput,
     PendingCaptureRestore, enumerate_controls,
 };
 use crate::channel::route::DeviceRoute;
@@ -74,36 +75,27 @@ pub const KEYBOARD_KEY_CIDS: [(u16, ButtonId); 9] = [
 pub async fn run_keyboard_capture_session(
     route: DeviceRoute,
     wanted: BTreeMap<u16, ButtonId>,
-    sink: mpsc::UnboundedSender<CapturedInput>,
-    shutdown: oneshot::Receiver<()>,
-    channel_slot: CaptureChannelSlot,
-    registry: &ChannelRegistry,
-    device_io: DeviceIoGate,
+    host: CaptureHost<'_>,
 ) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
-    let shared = registry
+    let shared = host
+        .registry
         .lookup(&route)
         .ok_or(CaptureError::DeviceNotFound)?;
-    run_keyboard_capture_session_on(
-        shared,
-        wanted,
-        sink,
-        shutdown,
-        channel_slot,
-        registry,
-        device_io,
-    )
-    .await
+    run_keyboard_capture_session_on(shared, wanted, host).await
 }
 
 async fn run_keyboard_capture_session_on(
     shared: SharedChannel,
     wanted: BTreeMap<u16, ButtonId>,
-    sink: mpsc::UnboundedSender<CapturedInput>,
-    shutdown: oneshot::Receiver<()>,
-    channel_slot: CaptureChannelSlot,
-    registry: &ChannelRegistry,
-    device_io: DeviceIoGate,
+    host: CaptureHost<'_>,
 ) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
+    let CaptureHost {
+        sink,
+        shutdown,
+        channel_slot,
+        registry,
+        device_io,
+    } = host;
     device_io.ensure_allowed().map_err(CaptureError::from)?;
     let chan = Arc::clone(shared.channel());
     let device_index = shared.device_index();

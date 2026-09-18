@@ -1,4 +1,5 @@
 use hidpp::device::Device;
+use tokio::sync::mpsc;
 
 use super::accum::handle_reprog;
 use super::arm::arm_controls_into;

@@ -12,9 +12,9 @@ use super::{
 };
 use crate::session::gesture::CaptureSpec;
 use crate::{
-    CaptureChannelSlot, CaptureSessionOutcome, ChannelRegistry, DeviceRoute, Enumerator, NodeId,
-    NodeInfo, PairingCommand, PairingEvent, ReceiverSelector, device_io_channel, reprog_controls,
-    run_capture_session, run_pairing,
+    CaptureChannelSlot, CaptureHost, CaptureSessionOutcome, ChannelRegistry, DeviceRoute,
+    Enumerator, NodeId, NodeInfo, PairingCommand, PairingEvent, ReceiverSelector,
+    device_io_channel, reprog_controls, run_capture_session, run_pairing,
 };
 
 const GESTURE_CHANNEL: &str = "gesture-capture-session";
@@ -75,11 +75,13 @@ async fn gesture_capture_replay_restores_original_reporting_on_normal_shutdown()
             divert_gesture_sources: vec![GESTURE_CID],
             ..CaptureSpec::default()
         },
-        sink,
-        shutdown_rx,
-        Arc::clone(&channel_slot),
-        &registry,
-        io_gate,
+        CaptureHost {
+            sink,
+            shutdown: shutdown_rx,
+            channel_slot: Arc::clone(&channel_slot),
+            registry: &registry,
+            device_io: io_gate,
+        },
     );
     let stop_after_arm = async {
         armed.request_written().await;
