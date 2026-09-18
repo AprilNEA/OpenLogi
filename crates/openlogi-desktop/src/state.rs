@@ -159,7 +159,7 @@ pub struct AppState {
     config: ConfigState,
     /// Agent-owned observations accepted by this GUI session.
     agent: AgentSession,
-    /// Merged device catalog, valid active selection, and per-device runtime.
+    /// Merged device catalog, valid active selection, and per-device sessions.
     devices: DeviceStore,
     /// Binding-editor scope and projections derived from config.
     bindings: BindingState,

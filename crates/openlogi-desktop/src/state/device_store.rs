@@ -1,16 +1,16 @@
-//! Device catalog, active selection, and per-device runtime rows.
+//! Device catalog, active selection, and per-device session rows.
 
 use std::collections::BTreeMap;
 
 use super::device_key::DeviceKey;
-use super::device_runtime::DeviceRuntimeState;
+use super::device_runtime::DeviceSession;
 use super::devices::DeviceRecord;
 
 /// Owns the merged device catalog and keeps its active index valid.
 pub(super) struct DeviceStore {
     selected: Option<usize>,
     pub(super) records: Vec<DeviceRecord>,
-    pub(super) runtime: BTreeMap<DeviceKey, DeviceRuntimeState>,
+    pub(super) sessions: BTreeMap<DeviceKey, DeviceSession>,
 }
 
 impl DeviceStore {
@@ -19,7 +19,7 @@ impl DeviceStore {
         Self {
             selected,
             records,
-            runtime: BTreeMap::new(),
+            sessions: BTreeMap::new(),
         }
     }
 

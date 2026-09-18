@@ -158,7 +158,7 @@ impl AppState {
     pub fn current_smartshift_write_status(&self) -> Option<SmartShiftWriteStatus> {
         self.current_record().and_then(|record| {
             self.devices
-                .runtime
+                .sessions
                 .get(&record.device_key())
                 .and_then(|entry| entry.smartshift.status())
         })
@@ -169,7 +169,7 @@ impl AppState {
     /// device and on a failed write confirmation.
     pub fn retry_smartshift(&mut self, key: &DeviceKey) {
         self.pointer.reads.retry_smartshift(key);
-        if let Some(entry) = self.devices.runtime.get_mut(key) {
+        if let Some(entry) = self.devices.sessions.get_mut(key) {
             entry.smartshift.reset();
         }
     }
@@ -177,7 +177,11 @@ impl AppState {
     /// the current write. The service's flight guard independently rejects
     /// callbacks from queries replaced by a newer confirmation.
     pub(crate) fn apply_smartshift_read(&mut self, key: &DeviceKey, write_id: Option<u64>) {
-        let current_write = self.devices.runtime.get(key).map(|entry| &entry.smartshift);
+        let current_write = self
+            .devices
+            .sessions
+            .get(key)
+            .map(|entry| &entry.smartshift);
         if !smartshift_read_is_current(write_id, current_write) {
             debug!(key = %key, ?write_id, "stale SmartShift read result ignored");
             return;
@@ -187,7 +191,7 @@ impl AppState {
         };
         let expected = self
             .devices
-            .runtime
+            .sessions
             .get(key)
             .and_then(|entry| entry.smartshift.confirming_expected(write_id));
         let Some(expected) = expected else {
@@ -197,7 +201,7 @@ impl AppState {
             smartshift_write_outcome(expected, self.pointer.reads.smartshift_load(key))
         {
             self.devices
-                .runtime
+                .sessions
                 .entry(key.clone())
                 .or_default()
                 .smartshift = match outcome {
@@ -247,7 +251,7 @@ impl AppState {
             self.pointer.next_smartshift_write_id =
                 self.pointer.next_smartshift_write_id.saturating_add(1);
             self.devices
-                .runtime
+                .sessions
                 .entry(key.clone())
                 .or_default()
                 .smartshift
@@ -255,7 +259,8 @@ impl AppState {
             write_id
         });
         if write_id.is_none() {
-            self.devices.runtime.entry(key).or_default().smartshift = SmartShiftDeviceState::Failed;
+            self.devices.sessions.entry(key).or_default().smartshift =
+                SmartShiftDeviceState::Failed;
         }
         events
     }
@@ -269,7 +274,7 @@ impl AppState {
         let route = record.route.clone()?;
         let write_id = self
             .devices
-            .runtime
+            .sessions
             .get_mut(&key)?
             .smartshift
             .begin_confirmation()?;
@@ -277,7 +282,7 @@ impl AppState {
     }
     /// Mark a post-write confirmation as failed when its reply channel closes.
     pub fn fail_smartshift_confirm(&mut self, key: &DeviceKey, write_id: u64) {
-        if let Some(entry) = self.devices.runtime.get_mut(key) {
+        if let Some(entry) = self.devices.sessions.get_mut(key) {
             entry.smartshift.fail_confirmation(write_id);
         }
     }

@@ -6,7 +6,7 @@ use std::borrow::Borrow;
 /// caches: the DPI/SmartShift query state
 /// ([`DeviceReads`](crate::services::device_reads::DeviceReads)) and the consolidated
 /// per-device row
-/// ([`DeviceRuntimeState`](super::device_runtime::DeviceRuntimeState)).
+/// ([`DeviceSession`](super::device_runtime::DeviceSession)).
 ///
 /// Wraps a device's config key — see
 /// [`DeviceRecord::device_key`](super::devices::DeviceRecord::device_key) —

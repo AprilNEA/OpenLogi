@@ -1,10 +1,11 @@
-//! Consolidated per-device runtime-state row.
+//! What this GUI session knows about one device and never persists.
 
 use super::light::LightDeviceState;
 use super::smartshift::SmartShiftDeviceState;
 
 /// Everything `AppState` tracks per device outside persisted configuration and
-/// the swr-backed DPI/SmartShift reads.
+/// the swr-backed DPI/SmartShift reads: the per-device counterpart of
+/// [`AgentSession`](super::agent::AgentSession), gone with the process.
 ///
 /// Replaces six parallel `BTreeMap<String, _>` fields that all shared the
 /// same device-key domain — manual camera-light override, volatile light
@@ -14,7 +15,7 @@ use super::smartshift::SmartShiftDeviceState;
 /// produced it. A device absent from the owning map is equivalent to every
 /// field here at its default.
 #[derive(Debug, Default)]
-pub(super) struct DeviceRuntimeState {
+pub(super) struct DeviceSession {
     /// Consecutive inventory snapshots that omitted this device.
     pub(super) inventory_misses: u8,
     pub(super) smartshift: SmartShiftDeviceState,
