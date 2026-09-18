@@ -1,8 +1,15 @@
 use super::*;
 
+/// A client nobody serves: all a phase transition needs to stand for "an agent
+/// answered", because an observe call is only sent once it is polled.
+fn unserved_client() -> AgentClient {
+    let (transport, _server) = tarpc::transport::channel::unbounded();
+    AgentClient::new(tarpc::client::Config::default(), transport).spawn()
+}
+
 #[test]
 fn the_first_failed_attempt_only_arms_the_give_up_clock() {
-    let mut state = InvocationPollState::<()>::default();
+    let mut state = InvocationPollState::default();
     let now = Instant::now();
     assert!(!state.connect_failed(now));
     assert!(matches!(
@@ -16,14 +23,14 @@ fn the_first_failed_attempt_only_arms_the_give_up_clock() {
 #[test]
 fn an_agent_that_stays_away_past_the_deadline_ends_the_overlay() {
     let start = Instant::now();
-    let mut state = InvocationPollState::<()>::default();
+    let mut state = InvocationPollState::default();
     assert!(!state.connect_failed(start));
     assert!(!state.connect_failed(start + GIVE_UP_AFTER / 2));
     assert!(state.connect_failed(start + GIVE_UP_AFTER));
 }
 
-#[test]
-fn an_agent_that_keeps_coming_back_never_accumulates_its_way_to_an_exit() {
+#[tokio::test]
+async fn an_agent_that_keeps_coming_back_never_accumulates_its_way_to_an_exit() {
     let start = Instant::now();
     let mut state = InvocationPollState::default();
     // Each round the agent is gone for half the deadline, then answers —
@@ -36,40 +43,9 @@ fn an_agent_that_keeps_coming_back_never_accumulates_its_way_to_an_exit() {
             !state.connect_failed(gone),
             "a reachable agent must not inherit the previous outage's clock"
         );
-        state.connected(());
-        assert_eq!(
-            state.observation().map(|observation| observation.1),
-            Some(0)
-        );
+        state.connected(unserved_client());
         state.disconnected();
     }
-}
-
-#[test]
-fn a_replacement_agent_starts_with_its_own_generation_cursor() {
-    let mut state = InvocationPollState::default();
-    state.connected(());
-    assert!(
-        state
-            .answered(RingObservation {
-                generation: 17,
-                invocation: None,
-            })
-            .is_some(),
-        "the first answer on a connection is news"
-    );
-    assert_eq!(
-        state.observation().map(|observation| observation.1),
-        Some(17)
-    );
-
-    state.disconnected();
-    state.connected(());
-
-    assert_eq!(
-        state.observation().map(|observation| observation.1),
-        Some(0)
-    );
 }
 
 #[test]

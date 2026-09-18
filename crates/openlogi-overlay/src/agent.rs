@@ -16,8 +16,8 @@ use std::{
 
 use openlogi_core::action_ring::DISPLAY_LIFETIME;
 use openlogi_core::binding::ActionRingSlot;
-use openlogi_ipc::client::{self, ConnectError, Ledger};
-use openlogi_ipc::{ActionRingInvocation, AgentClient, ClientKind, Generation, RingObservation};
+use openlogi_ipc::client::{self, ConnectError, Observer};
+use openlogi_ipc::{ActionRingInvocation, AgentClient, ClientKind, RingObservation};
 use succession::Standing;
 use tarpc::context;
 use tokio::sync::mpsc;
@@ -127,15 +127,15 @@ const RETRY_PERIOD: Duration = Duration::from_secs(1);
 
 /// Invocation observer phase and the state meaningful within each phase.
 ///
-/// A successful connection owns its generation cursor; a reconnect episode
-/// owns its give-up clock. Transitioning between them resets the fact from the
-/// previous phase by construction.
-enum InvocationPollState<C> {
+/// A successful connection owns its [`Observer`], and with it the generation
+/// cursor; a reconnect episode owns its give-up clock. Transitioning between
+/// them resets the fact from the previous phase by construction.
+enum InvocationPollState {
     Reconnecting { unreachable_since: Option<Instant> },
-    Observing { client: C, ledger: Ledger },
+    Observing(Observer<RingObservation>),
 }
 
-impl<C> Default for InvocationPollState<C> {
+impl Default for InvocationPollState {
     fn default() -> Self {
         Self::Reconnecting {
             unreachable_since: None,
@@ -143,12 +143,9 @@ impl<C> Default for InvocationPollState<C> {
     }
 }
 
-impl<C> InvocationPollState<C> {
-    fn connected(&mut self, client: C) {
-        *self = Self::Observing {
-            client,
-            ledger: Ledger::new(),
-        };
+impl InvocationPollState {
+    fn connected(&mut self, client: AgentClient) {
+        *self = Self::Observing(Observer::action_ring(client));
     }
 
     fn connect_failed(&mut self, now: Instant) -> bool {
@@ -157,22 +154,6 @@ impl<C> InvocationPollState<C> {
         };
         let armed = *unreachable_since.get_or_insert(now);
         now.duration_since(armed) >= GIVE_UP_AFTER
-    }
-
-    fn observation(&self) -> Option<(&C, Generation)> {
-        match self {
-            Self::Observing { client, ledger } => Some((client, ledger.seen())),
-            Self::Reconnecting { .. } => None,
-        }
-    }
-
-    /// Fold an answer into this connection's ledger: `Some` only when it is
-    /// newer than everything seen on it.
-    fn answered(&mut self, observed: RingObservation) -> Option<RingObservation> {
-        match self {
-            Self::Observing { ledger, .. } => ledger.accept(observed),
-            Self::Reconnecting { .. } => None,
-        }
     }
 
     fn disconnected(&mut self) {
@@ -200,20 +181,15 @@ async fn poll_invocations(tx: mpsc::UnboundedSender<Option<ActionRingInvocation>
                 continue;
             }
         }
-        let Some((active, seen)) = state.observation() else {
+        let InvocationPollState::Observing(observer) = &mut state else {
             continue;
         };
-        match active
-            .observe_action_ring(client::observe_context(), seen)
-            .await
-        {
-            Ok(observed) => {
-                // The hold elapsing with nothing new, or a stale reply: still
-                // alive, nothing to show.
-                let Some(observed) = state.answered(observed) else {
-                    continue;
-                };
-                if tx.send(observed.invocation).is_err() {
+        match observer.next().await {
+            // The hold elapsing with nothing new, or a stale reply: still
+            // alive, nothing to show.
+            Ok(None) => {}
+            Ok(Some(ring)) => {
+                if tx.send(ring.invocation).is_err() {
                     return;
                 }
             }
