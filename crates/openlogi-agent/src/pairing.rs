@@ -20,7 +20,9 @@ use std::time::Duration;
 use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::SharedHandles;
 use openlogi_agent_core::receiver_access::{ExclusiveAccessReason, ExclusiveReceiverLease};
-use openlogi_agent_core::watchers::pairing::{self, Control, SessionEvent, SessionId};
+use openlogi_agent_core::watchers::pairing::{
+    self, PairingControl, PairingSessionEvent, PairingSessionId,
+};
 use openlogi_hid::{DiscoveredDevice, PairingEvent, ReceiverSelector};
 use openlogi_ipc::{FoundDevice, PairingCommandError, PairingFailure, PairingPhase, PairingUpdate};
 use tokio::sync::{Mutex, mpsc};
@@ -46,12 +48,12 @@ struct SessionOwner {
 
 enum SessionState {
     Idle,
-    Admitting(SessionId),
+    Admitting(PairingSessionId),
     Active(ActiveSession),
 }
 
 struct ActiveSession {
-    id: SessionId,
+    id: PairingSessionId,
     devices: DeviceCache,
     phase: ActivePhase,
     _receiver_lease: ExclusiveReceiverLease,
@@ -73,17 +75,17 @@ impl Default for SessionOwner {
 }
 
 impl SessionOwner {
-    fn begin_admission(&mut self) -> Result<SessionId, PairingCommandError> {
+    fn begin_admission(&mut self) -> Result<PairingSessionId, PairingCommandError> {
         if !matches!(self.state, SessionState::Idle) {
             return Err(PairingCommandError::AlreadyActive);
         }
-        let id = SessionId::new(self.next_id);
+        let id = PairingSessionId::new(self.next_id);
         self.next_id = self.next_id.wrapping_add(1);
         self.state = SessionState::Admitting(id);
         Ok(id)
     }
 
-    fn activate(&mut self, id: SessionId, receiver_lease: ExclusiveReceiverLease) -> bool {
+    fn activate(&mut self, id: PairingSessionId, receiver_lease: ExclusiveReceiverLease) -> bool {
         if !matches!(self.state, SessionState::Admitting(admitted) if admitted == id) {
             return false;
         }
@@ -96,7 +98,7 @@ impl SessionOwner {
         true
     }
 
-    fn roll_back_admission(&mut self, id: SessionId) {
+    fn roll_back_admission(&mut self, id: PairingSessionId) {
         if matches!(self.state, SessionState::Admitting(admitted) if admitted == id) {
             self.state = SessionState::Idle;
         }
@@ -109,7 +111,7 @@ impl SessionOwner {
         }
     }
 
-    fn end(&mut self, id: SessionId) -> bool {
+    fn end(&mut self, id: PairingSessionId) -> bool {
         if matches!(&self.state, SessionState::Active(session) if session.id == id) {
             self.state = SessionState::Idle;
             true
@@ -129,7 +131,7 @@ impl SessionOwner {
 
 /// Owns the pairing watcher and translates its event stream for the IPC layer.
 pub struct PairingManager {
-    ctrl: mpsc::UnboundedSender<Control>,
+    ctrl: mpsc::UnboundedSender<PairingControl>,
     updates: Mutex<mpsc::UnboundedReceiver<PairingUpdate>>,
     session: SharedSessionOwner,
     shared: SharedHandles,
@@ -201,7 +203,7 @@ impl PairingManager {
                 return Err(PairingCommandError::UnknownDevice);
             };
             self.ctrl
-                .send(Control::Pair {
+                .send(PairingControl::Pair {
                     session: session.id,
                     device,
                 })
@@ -226,7 +228,7 @@ impl PairingManager {
                 return Ok(());
             };
             self.ctrl
-                .send(Control::Cancel {
+                .send(PairingControl::Cancel {
                     session: session.id,
                 })
                 .map_err(|_| PairingCommandError::WatcherUnavailable)
@@ -256,7 +258,7 @@ fn with_session_owner<T>(
 
 struct SessionAdmission {
     owner: SharedSessionOwner,
-    id: SessionId,
+    id: PairingSessionId,
     finished: bool,
 }
 
@@ -274,7 +276,7 @@ impl SessionAdmission {
         mut self,
         receiver_lease: ExclusiveReceiverLease,
         selector: ReceiverSelector,
-        ctrl: &mpsc::UnboundedSender<Control>,
+        ctrl: &mpsc::UnboundedSender<PairingControl>,
         observable: &ObservableState,
     ) -> Result<(), PairingCommandError> {
         let result = with_session_owner(&self.owner, |owner| {
@@ -285,7 +287,7 @@ impl SessionAdmission {
             // Publish before the watcher can emit a terminal result; otherwise
             // this call could overwrite that result with `Searching`.
             observable.set_pairing(Some(PairingPhase::Searching));
-            if let Err(error) = ctrl.send(Control::Start {
+            if let Err(error) = ctrl.send(PairingControl::Start {
                 session: self.id,
                 selector,
             }) {
@@ -315,7 +317,7 @@ impl Drop for SessionAdmission {
 /// phase. Events from an ended session are ignored, including duplicate
 /// terminals, so they cannot clean up a replacement session.
 fn apply_session_event(
-    event: SessionEvent,
+    event: PairingSessionEvent,
     session: &SharedSessionOwner,
     observable: &ObservableState,
 ) -> Option<PairingUpdate> {
@@ -373,10 +375,10 @@ fn apply_session_event(
     })
 }
 
-/// Translate raw [`SessionEvent`]s into wire [`PairingUpdate`]s and release the
+/// Translate raw [`PairingSessionEvent`]s into wire [`PairingUpdate`]s and release the
 /// active session's receiver lease on its one terminal event.
 async fn translate(
-    mut raw: mpsc::UnboundedReceiver<SessionEvent>,
+    mut raw: mpsc::UnboundedReceiver<PairingSessionEvent>,
     upd_tx: mpsc::UnboundedSender<PairingUpdate>,
     session: SharedSessionOwner,
     observable: Arc<ObservableState>,

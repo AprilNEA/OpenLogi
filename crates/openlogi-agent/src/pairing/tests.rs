@@ -12,7 +12,7 @@ fn shared_handles() -> SharedHandles {
     .shared()
 }
 
-fn manager_with_ctrl(ctrl: mpsc::UnboundedSender<Control>) -> PairingManager {
+fn manager_with_ctrl(ctrl: mpsc::UnboundedSender<PairingControl>) -> PairingManager {
     let (_, upd_rx) = mpsc::unbounded_channel();
     PairingManager {
         ctrl,
@@ -25,14 +25,14 @@ fn manager_with_ctrl(ctrl: mpsc::UnboundedSender<Control>) -> PairingManager {
 
 async fn start_session(
     manager: &PairingManager,
-    ctrl_rx: &mut mpsc::UnboundedReceiver<Control>,
-) -> SessionId {
+    ctrl_rx: &mut mpsc::UnboundedReceiver<PairingControl>,
+) -> PairingSessionId {
     manager
         .start(ReceiverSelector::First)
         .await
         .expect("test session should start");
     match ctrl_rx.recv().await.expect("start control") {
-        Control::Start { session, .. } => session,
+        PairingControl::Start { session, .. } => session,
         control => panic!("expected start control, got {control:?}"),
     }
 }
@@ -138,7 +138,7 @@ async fn audit_queued_device_found_cannot_revert_selected_phase() {
     let session = start_session(&manager, &mut ctrl_rx).await;
     let selected = discovered_device();
     apply_session_event(
-        SessionEvent {
+        PairingSessionEvent {
             session,
             event: PairingEvent::DeviceFound(selected.clone()),
         },
@@ -152,7 +152,7 @@ async fn audit_queued_device_found_cannot_revert_selected_phase() {
     };
     let (raw_tx, mut raw_rx) = mpsc::unbounded_channel();
     raw_tx
-        .send(SessionEvent {
+        .send(PairingSessionEvent {
             session,
             event: PairingEvent::DeviceFound(queued.clone()),
         })
@@ -182,7 +182,7 @@ async fn audit_queued_device_found_cannot_revert_selected_phase() {
         Err(PairingCommandError::UnknownDevice)
     );
     let searching = apply_session_event(
-        SessionEvent {
+        PairingSessionEvent {
             session,
             event: PairingEvent::Searching,
         },
@@ -206,7 +206,7 @@ async fn queued_discovery_cannot_revert_passkey() {
         let session = start_session(&manager, &mut ctrl_rx).await;
         let device = discovered_device();
         apply_session_event(
-            SessionEvent {
+            PairingSessionEvent {
                 session,
                 event: PairingEvent::DeviceFound(device.clone()),
             },
@@ -221,14 +221,14 @@ async fn queued_discovery_cannot_revert_passkey() {
             }),
             PairingEvent::Searching,
         ] {
-            raw_tx.send(SessionEvent { session, event }).unwrap();
+            raw_tx.send(PairingSessionEvent { session, event }).unwrap();
         }
         if select_first {
             manager.pair(device.address).unwrap();
         }
         let method = openlogi_hid::PasskeyMethod::Keyboard("572901".to_string());
         let update = apply_session_event(
-            SessionEvent {
+            PairingSessionEvent {
                 session,
                 event: PairingEvent::Passkey(method.clone()),
             },
@@ -244,7 +244,7 @@ async fn queued_discovery_cannot_revert_passkey() {
             assert_eq!(manager.observable.snapshot().pairing, expected);
         }
         let terminal = apply_session_event(
-            SessionEvent {
+            PairingSessionEvent {
                 session,
                 event: PairingEvent::Paired { slot: 2 },
             },
@@ -267,7 +267,7 @@ async fn initial_discovery_keeps_devices_available_for_repeat_selection() {
     let manager = manager_with_ctrl(ctrl_tx);
     let session = start_session(&manager, &mut ctrl_rx).await;
     let searching = apply_session_event(
-        SessionEvent {
+        PairingSessionEvent {
             session,
             event: PairingEvent::Searching,
         },
@@ -293,7 +293,7 @@ async fn initial_discovery_keeps_devices_available_for_repeat_selection() {
             name: device.name.clone(),
         };
         let update = apply_session_event(
-            SessionEvent {
+            PairingSessionEvent {
                 session,
                 event: PairingEvent::DeviceFound(device.clone()),
             },
@@ -311,7 +311,7 @@ async fn initial_discovery_keeps_devices_available_for_repeat_selection() {
         manager.pair(device.address).unwrap();
         let control = ctrl_rx.try_recv().unwrap();
         assert!(
-            matches!(control, Control::Pair { session: id, device: sent }
+            matches!(control, PairingControl::Pair { session: id, device: sent }
             if id == session && sent.address == device.address
                 && sent.authentication == device.authentication && sent.name == device.name)
         );
@@ -320,7 +320,7 @@ async fn initial_discovery_keeps_devices_available_for_repeat_selection() {
             Some(PairingPhase::Pairing)
         );
         apply_session_event(
-            SessionEvent {
+            PairingSessionEvent {
                 session,
                 event: PairingEvent::Passkey(openlogi_hid::PasskeyMethod::Keyboard(
                     "572901".to_string(),
@@ -331,7 +331,7 @@ async fn initial_discovery_keeps_devices_available_for_repeat_selection() {
         );
     }
     let terminal = apply_session_event(
-        SessionEvent {
+        PairingSessionEvent {
             session,
             event: PairingEvent::Failed(PairingError::Timeout),
         },
@@ -365,7 +365,7 @@ async fn unsuccessful_pair_keeps_discovery_open() {
             ..discovered_device()
         };
         apply_session_event(
-            SessionEvent {
+            PairingSessionEvent {
                 session,
                 event: PairingEvent::DeviceFound(first.clone()),
             },
@@ -387,7 +387,7 @@ async fn unsuccessful_pair_keeps_discovery_open() {
             "failed pair must not send a command"
         );
         let update = apply_session_event(
-            SessionEvent {
+            PairingSessionEvent {
                 session,
                 event: PairingEvent::DeviceFound(second.clone()),
             },
@@ -418,7 +418,7 @@ async fn start_ignores_overlapping_session_without_clearing_or_sending() {
     let manager = manager_with_ctrl(ctrl_tx);
     let session = start_session(&manager, &mut ctrl_rx).await;
     apply_session_event(
-        SessionEvent {
+        PairingSessionEvent {
             session,
             event: PairingEvent::DeviceFound(discovered_device()),
         },
@@ -448,7 +448,7 @@ async fn terminal_cleanup_is_exactly_once_and_releases_receiver_lease() {
     let manager = manager_with_ctrl(ctrl_tx);
     let first = start_session(&manager, &mut ctrl_rx).await;
     apply_session_event(
-        SessionEvent {
+        PairingSessionEvent {
             session: first,
             event: PairingEvent::DeviceFound(discovered_device()),
         },
@@ -456,9 +456,14 @@ async fn terminal_cleanup_is_exactly_once_and_releases_receiver_lease() {
         &manager.observable,
     );
     manager.pair(discovered_device().address).unwrap();
-    assert!(matches!(ctrl_rx.try_recv().unwrap(), Control::Pair { .. }));
+    assert!(matches!(
+        ctrl_rx.try_recv().unwrap(),
+        PairingControl::Pair { .. }
+    ));
     manager.cancel().unwrap();
-    assert!(matches!(ctrl_rx.try_recv().unwrap(), Control::Cancel { session } if session == first));
+    assert!(
+        matches!(ctrl_rx.try_recv().unwrap(), PairingControl::Cancel { session } if session == first)
+    );
     assert_eq!(
         manager.observable.snapshot().pairing,
         Some(PairingPhase::Pairing)
@@ -471,7 +476,7 @@ async fn terminal_cleanup_is_exactly_once_and_releases_receiver_lease() {
     );
 
     let first_terminal = apply_session_event(
-        SessionEvent {
+        PairingSessionEvent {
             session: first,
             event: PairingEvent::Failed(PairingError::Cancelled),
         },
@@ -503,7 +508,7 @@ async fn terminal_cleanup_is_exactly_once_and_releases_receiver_lease() {
         PairingEvent::Passkey(openlogi_hid::PasskeyMethod::Keyboard("572901".to_string())),
     ] {
         let stale = apply_session_event(
-            SessionEvent {
+            PairingSessionEvent {
                 session: first,
                 event,
             },
@@ -529,7 +534,7 @@ async fn terminal_cleanup_is_exactly_once_and_releases_receiver_lease() {
     );
 
     let second_terminal = apply_session_event(
-        SessionEvent {
+        PairingSessionEvent {
             session: second,
             event: PairingEvent::Paired { slot: 4 },
         },
