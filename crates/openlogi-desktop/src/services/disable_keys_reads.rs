@@ -23,7 +23,7 @@ type Cached = Option<Arc<DisableKeysState>>;
 
 struct DisableKeysRead {
     route: DeviceRoute,
-    generation: u64,
+    route_generation: u64,
     load: DisableKeysLoad,
     query: Query<Cached, WriteError>,
     _observer: Subscription,
@@ -66,7 +66,7 @@ impl DisableKeysReads {
         let Some(runtime) = self.runtime.clone() else {
             return;
         };
-        let generation = self.take_generation();
+        let route_generation = self.take_generation();
         let fetch_route = route.clone();
         let fetcher = Retry::new(
             runtime,
@@ -95,7 +95,7 @@ impl DisableKeysReads {
             let load = project_load(query_state.read(cx));
             if state
                 .disable_keys_reads_mut()
-                .update(&observed_key, generation, load)
+                .update(&observed_key, route_generation, load)
             {
                 cx.emit(StateEvent::DisableKeysChanged(observed_key.clone()));
             }
@@ -104,7 +104,7 @@ impl DisableKeysReads {
             key,
             DisableKeysRead {
                 route,
-                generation,
+                route_generation,
                 load,
                 query,
                 _observer: observer,
@@ -183,7 +183,7 @@ impl DisableKeysReads {
     /// Generation of the active subscription, or `None` when detached/offline.
     pub(crate) fn generation(&self, key: &DeviceKey) -> Option<u64> {
         if let Some(read) = self.reads.get(key) {
-            return Some(read.generation);
+            return Some(read.route_generation);
         }
         #[cfg(test)]
         {
@@ -206,11 +206,11 @@ impl DisableKeysReads {
         generation
     }
 
-    fn update(&mut self, key: &DeviceKey, generation: u64, load: DisableKeysLoad) -> bool {
+    fn update(&mut self, key: &DeviceKey, route_generation: u64, load: DisableKeysLoad) -> bool {
         let Some(read) = self
             .reads
             .get_mut(key)
-            .filter(|read| read.generation == generation)
+            .filter(|read| read.route_generation == route_generation)
         else {
             return false;
         };
