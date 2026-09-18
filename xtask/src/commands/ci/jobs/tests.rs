@@ -25,13 +25,29 @@ fn workflow() -> Option<String> {
 
 /// The workflow with its line continuations joined back up and every run of
 /// whitespace collapsed, so a command it wraps for readability is one line
-/// again.
+/// again — under either line ending, since a Windows checkout hands this test
+/// the file with CRLF.
 fn workflow_commands(workflow: &str) -> String {
     workflow
-        .replace("\\\n", " ")
-        .split_whitespace()
+        .lines()
+        .map(|line| {
+            let line = line.trim_end();
+            line.strip_suffix('\\').unwrap_or(line)
+        })
+        .flat_map(str::split_whitespace)
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+#[test]
+fn wrapped_commands_join_under_either_line_ending() {
+    let joined = "cargo doc --workspace --exclude openlogi-ui";
+    for wrapped in [
+        "cargo doc --workspace \\\n    --exclude openlogi-ui\n",
+        "cargo doc --workspace \\\r\n    --exclude openlogi-ui\r\n",
+    ] {
+        assert_eq!(workflow_commands(wrapped), joined);
+    }
 }
 
 /// `ci.yml` is the pipeline's source of truth and this runner is a copy of it.
