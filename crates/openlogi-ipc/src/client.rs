@@ -19,12 +19,14 @@
 //! agent that cannot accept a connection and answer the two handshake calls
 //! from memory in that window is wedged, not busy.
 //!
-//! The rest of what every observing client repeats lives here too: the
-//! per-connection generation [`Ledger`] and the request [`observe_context`]
-//! whose deadline outlasts the agent's hold.
+//! The rest of what every observing client repeats lives here too, as
+//! [`Observer`]: a connection that owns its generation [`Ledger`] and keeps
+//! exactly one observe call in flight, under a request deadline
+//! ([`observe_context`]) that outlasts the agent's hold.
 
 use std::cmp::Ordering;
 use std::future::Future;
+use std::pin::Pin;
 use std::time::{Duration, Instant};
 
 use tarpc::client::{self, RpcError};
@@ -266,6 +268,90 @@ pub fn observe_context() -> Context {
     ctx
 }
 
+/// An observe call in flight. Boxed because it is stored across the turns of
+/// a client's loop; it owns a clone of the client.
+type InFlight<T> = Pin<Box<dyn Future<Output = Result<T, RpcError>> + Send>>;
+
+/// One connection observing the agent: the client, what that connection has
+/// seen, and the one observe call it keeps in flight.
+///
+/// The three live and die together. A [`Ledger`] carried over to the next
+/// connection would make a replacement agent's first answers look stale, and
+/// an answer from a replaced connection must never reach the client's state;
+/// dropping the `Observer` with its connection rules out both, because the
+/// call in flight goes with it.
+pub struct Observer<T: Stamped> {
+    client: AgentClient,
+    ledger: Ledger,
+    in_flight: InFlight<T>,
+    arm: fn(&AgentClient, Generation) -> InFlight<T>,
+}
+
+impl Observer<Observation> {
+    /// Observe the agent's state over `client`.
+    #[must_use]
+    pub fn state(client: AgentClient) -> Self {
+        Self::new(client, |client, since| {
+            let client = client.clone();
+            Box::pin(async move { client.observe(observe_context(), since).await })
+        })
+    }
+}
+
+impl Observer<RingObservation> {
+    /// Observe the ring the overlay should be showing over `client`.
+    #[must_use]
+    pub fn action_ring(client: AgentClient) -> Self {
+        Self::new(client, |client, since| {
+            let client = client.clone();
+            Box::pin(async move { client.observe_action_ring(observe_context(), since).await })
+        })
+    }
+}
+
+impl<T: Stamped> Observer<T> {
+    fn new(client: AgentClient, arm: fn(&AgentClient, Generation) -> InFlight<T>) -> Self {
+        let ledger = Ledger::new();
+        let in_flight = arm(&client, ledger.seen());
+        Self {
+            client,
+            ledger,
+            in_flight,
+            arm,
+        }
+    }
+
+    /// The connection, for the other calls that share it. tarpc multiplexes
+    /// requests, so they never disturb the observe call in flight.
+    #[must_use]
+    pub fn client(&self) -> &AgentClient {
+        &self.client
+    }
+
+    /// Wait for the call in flight, then arm the next one.
+    ///
+    /// `Ok(Some)` is an answer newer than everything this connection has
+    /// seen. `Ok(None)` is the agent's hold elapsing as a heartbeat, or a
+    /// stale reply: the connection is alive and there is nothing to apply.
+    ///
+    /// Cancel-safe: the call in flight is a field, not part of this future,
+    /// so a `select!` that drops this future loses nothing and the next call
+    /// picks the same request up again.
+    ///
+    /// # Errors
+    ///
+    /// The transport's error once the connection is gone. The `Observer` has
+    /// nothing left to offer then; drop it with the connection.
+    pub async fn next(&mut self) -> Result<Option<T>, RpcError> {
+        let answered = (&mut self.in_flight).await;
+        let fresh = answered.map(|answer| self.ledger.accept(answer));
+        // A finished call must never be polled again, whatever the caller
+        // does with this result. The next one is only sent once it is polled.
+        self.in_flight = (self.arm)(&self.client, self.ledger.seen());
+        fresh
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
@@ -410,5 +496,145 @@ mod tests {
 
         assert!(ledger.accept(Stamp(3)).is_some());
         assert_eq!(ledger.seen(), 3);
+    }
+
+    /// An agent whose ring channel answers with `generations` in turn and
+    /// then holds the request open, as a quiet agent does. Every `since` it is
+    /// asked with is recorded; `release` lets the first answer out, so a test
+    /// can keep a request in flight for as long as it needs.
+    fn ring_agent(
+        generations: impl IntoIterator<Item = Generation>,
+        release: Arc<tokio::sync::Notify>,
+    ) -> (AgentClient, Arc<Mutex<Vec<Generation>>>) {
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let answers = Arc::new(Mutex::new(
+            generations
+                .into_iter()
+                .collect::<std::collections::VecDeque<_>>(),
+        ));
+        let recorded = asked.clone();
+        let client = in_memory_agent(
+            move |request| {
+                let recorded = recorded.clone();
+                let answers = answers.clone();
+                let release = release.clone();
+                Box::pin(async move {
+                    let AgentRequest::ObserveActionRing { since } = request else {
+                        panic!("an observer sent an unexpected request: {request:?}");
+                    };
+                    let first = {
+                        let mut recorded = recorded.lock().unwrap();
+                        recorded.push(since);
+                        recorded.len() == 1
+                    };
+                    if first {
+                        release.notified().await;
+                    }
+                    let next = answers.lock().unwrap().pop_front();
+                    match next {
+                        Some(generation) => Ok(AgentResponse::ObserveActionRing(RingObservation {
+                            generation,
+                            invocation: None,
+                        })),
+                        None => std::future::pending().await,
+                    }
+                })
+            },
+            std::future::pending(),
+        );
+        (client, asked)
+    }
+
+    /// A released [`ring_agent`]: every answer goes out at once.
+    fn answering(
+        generations: impl IntoIterator<Item = Generation>,
+    ) -> (AgentClient, Arc<Mutex<Vec<Generation>>>) {
+        let release = Arc::new(tokio::sync::Notify::new());
+        release.notify_one();
+        ring_agent(generations, release)
+    }
+
+    /// Poll `observer` until the agent has heard from it and gone quiet.
+    async fn until_held(observer: &mut Observer<RingObservation>) {
+        let held = tokio::time::timeout(Duration::from_secs(1), observer.next()).await;
+        assert!(held.is_err(), "a quiet agent holds the request open");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn only_a_newer_generation_is_an_answer_and_every_reply_rearms() {
+        let (client, asked) = answering([2, 2, 1, 3]);
+        let mut observer = Observer::action_ring(client);
+
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            let fresh = observer.next().await.expect("the agent is up");
+            seen.push(fresh.map(|observed| observed.generation));
+        }
+
+        assert_eq!(
+            seen,
+            [Some(2), None, None, Some(3)],
+            "the heartbeat and the stale reply are not answers"
+        );
+        assert_eq!(
+            *asked.lock().unwrap(),
+            [0, 2, 2, 2],
+            "each reply armed the next call with what the connection had seen"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_replacement_connection_starts_from_generation_zero() {
+        // A replacement agent numbers its own generations from 1 again; a
+        // cursor carried across the reconnect would make its first answers
+        // look stale.
+        let (first, first_asked) = answering([17]);
+        let mut observer = Observer::action_ring(first);
+        assert!(
+            observer.next().await.expect("the agent is up").is_some(),
+            "the first answer on a connection is news"
+        );
+        until_held(&mut observer).await;
+        assert_eq!(*first_asked.lock().unwrap(), [0, 17]);
+
+        let (replacement, replacement_asked) = answering([]);
+        let mut observer = Observer::action_ring(replacement);
+        until_held(&mut observer).await;
+
+        assert_eq!(*replacement_asked.lock().unwrap(), [0]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dropping_next_mid_hold_keeps_the_same_call_in_flight() {
+        // A client loop selects over `next()` and its other sources, so the
+        // future is dropped every time another arm wins. The request the
+        // agent is holding must survive that, or every command would restart
+        // the hold and an answer racing the drop would be lost.
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (client, asked) = ring_agent([5], release.clone());
+        let mut observer = Observer::action_ring(client);
+
+        until_held(&mut observer).await;
+        release.notify_one();
+        let fresh = observer.next().await.expect("the agent is up");
+
+        assert_eq!(fresh.map(|observed| observed.generation), Some(5));
+        assert_eq!(
+            *asked.lock().unwrap(),
+            [0],
+            "the answer came from the call the dropped future had started"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_closed_connection_is_an_error_every_time_it_is_asked() {
+        let gone = in_memory_agent(|_| Box::pin(std::future::pending()), std::future::ready(()));
+        let mut observer = Observer::action_ring(gone);
+
+        observer.next().await.unwrap_err();
+        assert!(
+            observer.next().await.is_err(),
+            "asking again must not poll the finished call"
+        );
     }
 }
