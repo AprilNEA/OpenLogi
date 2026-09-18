@@ -155,3 +155,63 @@ impl AppState {
             .into()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use openlogi_core::binding::{Action, ButtonId};
+    use openlogi_core::config::Config;
+
+    use super::{StateEvent, StateEvents};
+    use crate::services::assets::AssetResolver;
+    use crate::state::tests::{KNOWN_MOUSE_KEY, state_with_a_known_mouse};
+    use crate::state::{AppState, ConfigPersistence, DeviceKey};
+
+    fn state_without_devices() -> AppState {
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        AppState::with_runtime(
+            Config::ephemeral(),
+            &[],
+            &[],
+            &AssetResolver::new(),
+            &[],
+            ConfigPersistence::MemoryOnly,
+            commands,
+        )
+    }
+
+    #[test]
+    fn a_device_edit_is_announced_for_the_device_on_screen() {
+        let mut state = state_with_a_known_mouse();
+
+        assert_eq!(
+            state.commit_binding(ButtonId::Back, Action::Undo),
+            [StateEvent::BindingsChanged(DeviceKey::from(
+                KNOWN_MOUSE_KEY
+            ))]
+        );
+    }
+
+    #[test]
+    fn a_device_edit_with_no_device_selected_announces_nothing() {
+        let mut state = state_without_devices();
+
+        assert!(
+            state
+                .commit_binding(ButtonId::Back, Action::Undo)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn merged_changes_announce_each_event_once_in_first_seen_order() {
+        let merged = StateEvents::from(StateEvent::LanguageChanged)
+            .and(StateEvent::SettingsChanged)
+            .and(StateEvents::none())
+            .and(StateEvent::LanguageChanged);
+
+        assert_eq!(
+            merged,
+            [StateEvent::LanguageChanged, StateEvent::SettingsChanged]
+        );
+    }
+}

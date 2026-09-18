@@ -164,7 +164,7 @@ fn agent_reload_error_stays_visible_until_a_successful_confirmation() {
 /// The transport-free identity, not the `direct:046d:b023:…` route it is
 /// reached on: a device whose unit id is known resolves to its identity key,
 /// which is what settings are now written under.
-const KNOWN_MOUSE_KEY: &str = "unit:a393cae0";
+pub(super) const KNOWN_MOUSE_KEY: &str = "unit:a393cae0";
 
 fn direct_inventory(unit_id: [u8; 4]) -> DeviceInventory {
     DeviceInventory {
@@ -703,7 +703,7 @@ fn lighting_changed(key: &str) -> StateEvent {
 }
 
 /// A state holding the one persistent mouse, so per-device config has a key.
-fn state_with_a_known_mouse() -> AppState {
+pub(super) fn state_with_a_known_mouse() -> AppState {
     let cache = AssetResolver::new();
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
     let mut inventory = direct_inventory([0xa3, 0x93, 0xca, 0xe0]);
