@@ -13,7 +13,6 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 use openlogi_core::binding::{Binding, ButtonId};
 use openlogi_hid::{
@@ -24,6 +23,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{debug, info, warn};
 
 use super::capture_session::{CaptureRecovery, CaptureSession, CaptureSlot, ReconcileAction};
+use super::retry::{RETRY_DELAY, wait_for_deadline};
 use super::shutdown::{ManagerCompletion, WatcherHandle};
 use crate::receiver_access::{ReceiverAccess, ReceiverRequestState, SessionReceiverLease};
 use crate::runtime::{ActionDispatcher, HidppSessionId};
@@ -115,8 +115,6 @@ struct KeyboardManagerContext {
     dispatcher: ActionDispatcher,
     shutdown: oneshot::Receiver<()>,
 }
-
-const RETRY_DELAY: Duration = Duration::from_secs(1);
 
 /// Spawn the keyboard-capture manager thread. It owns a current-thread tokio
 /// runtime that keeps one capture session pointed at the bound keyboard and
@@ -577,14 +575,6 @@ async fn manage(context: KeyboardManagerContext) -> ManagerCompletion {
                 reconcile = true;
             }
         }
-    }
-}
-
-async fn wait_for_deadline(deadline: Option<tokio::time::Instant>) {
-    if let Some(deadline) = deadline {
-        tokio::time::sleep_until(deadline).await;
-    } else {
-        std::future::pending::<()>().await;
     }
 }
 

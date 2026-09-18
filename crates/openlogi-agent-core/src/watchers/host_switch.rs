@@ -10,11 +10,11 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 use tracing::{debug, warn};
 
+use super::retry::{RETRY_DELAY, wait_for_deadline};
 use super::shutdown::{ManagerCompletion, WatcherHandle};
 use crate::receiver_access::{ExclusiveAccessReason, ReceiverAccess, ReceiverRequestState};
 
 const DEPARTURE_TIMEOUT: Duration = Duration::from_secs(10);
-const RETRY_DELAY: Duration = Duration::from_secs(1);
 
 /// One resolved link. Config keys are converted to live routes by the
 /// orchestrator so the transport watcher never needs to understand inventory.
@@ -655,14 +655,6 @@ fn expedite_pending_restores(state: &mut HostSwitchManagerState) {
         {
             *retry_at = now;
         }
-    }
-}
-
-async fn wait_for_deadline(deadline: Option<Instant>) {
-    if let Some(deadline) = deadline {
-        tokio::time::sleep_until(deadline).await;
-    } else {
-        std::future::pending::<()>().await;
     }
 }
 

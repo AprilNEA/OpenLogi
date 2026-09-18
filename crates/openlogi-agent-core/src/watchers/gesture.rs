@@ -24,7 +24,6 @@ mod dispatch;
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_core::scroll::ScrollDelta;
@@ -38,14 +37,13 @@ use tracing::{debug, warn};
 
 use self::dispatch::InputDispatcher;
 use super::capture_session::{CaptureRecovery, CaptureSession, CaptureSlot, ReconcileAction};
+use super::retry::{RETRY_DELAY, wait_for_deadline};
 use super::shutdown::{ManagerCompletion, WatcherHandle};
 use crate::capture_plan::{CaptureTarget, DeviceCapturePlan, DispatchPlan, SharedCapturePlans};
 use crate::receiver_access::{ReceiverAccess, ReceiverRequestState, SessionReceiverLease};
 use crate::runtime::hook::SharedHookMaps;
 use crate::runtime::scroll::ScrollInputHandle;
 use crate::runtime::{ActionDispatcher, HidppSessionId};
-
-const RETRY_DELAY: Duration = Duration::from_secs(1);
 
 /// Output capabilities shared by every HID++ gesture capture session.
 #[derive(Clone)]
@@ -251,14 +249,6 @@ fn reconcile_published_session(
             .find(|plan| plan.target.physical_key == *key)
             .map(|plan| (&plan.target, &plan.dispatch));
         reconcile_session(session, wanted, dispatcher);
-    }
-}
-
-async fn wait_for_deadline(deadline: Option<Instant>) {
-    if let Some(deadline) = deadline {
-        tokio::time::sleep_until(deadline).await;
-    } else {
-        std::future::pending::<()>().await;
     }
 }
 

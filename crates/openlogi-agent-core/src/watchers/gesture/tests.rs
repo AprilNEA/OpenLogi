@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use super::*;
 use openlogi_core::binding::{Action, Binding, ButtonId, GestureDirection};
 use openlogi_core::config::{ThumbwheelSensitivity, VerticalScrollSensitivity};
