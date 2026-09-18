@@ -1,17 +1,13 @@
-//! Owned firmware restoration state for host-switch capture.
+//! What a host-switch session owes the firmware, and how its teardown reports
+//! it. The token that carries an unfinished restore is `session::restore`'s.
 
-use std::{
-    fmt,
-    sync::{Arc, Weak},
-};
-
-use hidpp::channel::HidppChannel;
-use thiserror::Error;
+use std::{fmt, sync::Arc};
 
 use super::{ArmedControl, HostSwitchError, restore_host_controls};
-use crate::{
-    ChannelRegistry, DeviceIoGate, DeviceRoute, SharedChannel, reprog_controls::ReprogControlsV4,
+use crate::session::restore::{
+    PendingRestore, RestoreOutcome, RestorePlan, SessionFailure, rollback_start,
 };
+use crate::{ChannelRegistry, DeviceIoGate, SharedChannel, reprog_controls::ReprogControlsV4};
 
 /// How a host-switch session released its temporary firmware reporting state.
 #[must_use = "pending firmware restoration must be retained by the session manager"]
@@ -44,154 +40,81 @@ impl HostSwitchSessionOutcome {
     }
 }
 
-/// A host-switch setup failure plus any rollback state still owned by OpenLogi.
-#[derive(Debug, Error)]
-#[error("{error}")]
-pub struct HostSwitchSessionFailure {
-    #[source]
-    error: HostSwitchError,
-    pending_restore: Option<PendingHostSwitchRestore>,
-}
-
-impl HostSwitchSessionFailure {
-    pub(super) fn clean(error: HostSwitchError) -> Self {
-        Self {
-            error,
-            pending_restore: None,
-        }
-    }
-
-    pub(super) fn with_pending(
-        error: HostSwitchError,
-        pending_restore: PendingHostSwitchRestore,
-    ) -> Self {
-        Self {
-            error,
-            pending_restore: Some(pending_restore),
-        }
-    }
-
-    /// Split the setup error from firmware ownership the caller must retain.
-    #[must_use]
-    pub fn into_parts(self) -> (HostSwitchError, Option<PendingHostSwitchRestore>) {
-        (self.error, self.pending_restore)
-    }
-}
-
-impl From<HostSwitchError> for HostSwitchSessionFailure {
-    fn from(error: HostSwitchError) -> Self {
-        Self::clean(error)
-    }
-}
-
-/// Result of one bounded pending-restoration attempt.
-#[must_use = "a failed restoration returns ownership that must be retained"]
-pub enum HostSwitchRestoreOutcome {
-    /// Every host control was restored on a publication that remained current.
-    Restored,
-    /// Restoration remains incomplete.
-    RestorePending(PendingHostSwitchRestore),
-}
-
-#[derive(Clone, Copy)]
-enum RetiredChannelPolicy {
-    ReplacementOnly,
-    CurrentAllowed,
-}
-
-/// Opaque host-control restoration state that outlives its original channel.
+/// What a host-switch session writes to hand the keyboard's host controls
+/// back: the exact feature index, reporting mode, and original reporting bits
+/// of every control it armed.
 ///
-/// The token retains the exact route, feature index, reporting mode, and
-/// original reporting bits. It deliberately holds only a weak reference to
-/// the retired channel; every retry resolves the exact-route winner from the
-/// current inventory publication.
-pub struct PendingHostSwitchRestore {
-    route: DeviceRoute,
-    retired_channel: Weak<HidppChannel>,
-    retired_policy: RetiredChannelPolicy,
+/// Each write is bounded and tried twice (`restore_host_controls`); a control
+/// that still fails leaves the whole plan owed.
+pub struct HostSwitchRestorePlan {
     feature_index: u8,
     controls: Vec<ArmedControl>,
 }
 
-impl fmt::Debug for PendingHostSwitchRestore {
+impl fmt::Debug for HostSwitchRestorePlan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PendingHostSwitchRestore")
-            .field("route", &self.route)
+        f.debug_struct("HostSwitchRestorePlan")
             .field("reporting_count", &self.controls.len())
             .finish_non_exhaustive()
     }
 }
 
-impl PendingHostSwitchRestore {
-    pub(super) fn new(
-        retired: &SharedChannel,
-        feature_index: u8,
-        controls: Vec<ArmedControl>,
-    ) -> Option<Self> {
-        (!controls.is_empty()).then(|| Self {
-            route: retired.route().clone(),
-            retired_channel: Arc::downgrade(retired.channel()),
-            retired_policy: RetiredChannelPolicy::ReplacementOnly,
-            feature_index,
-            controls,
-        })
-    }
-
-    pub(super) fn allow_current_channel(mut self) -> Self {
-        self.retired_policy = RetiredChannelPolicy::CurrentAllowed;
-        self
-    }
-
-    /// Retry through the exact-route channel currently published by inventory.
-    ///
-    /// A successful write is accepted only if that same publication remains
-    /// current after all awaited writes. If it was replaced during the pass,
-    /// all original controls remain pending for the replacement.
-    pub async fn retry(self, registry: &ChannelRegistry) -> HostSwitchRestoreOutcome {
-        let Some(current) = registry.lookup(&self.route) else {
-            return HostSwitchRestoreOutcome::RestorePending(self);
-        };
-        if matches!(self.retired_policy, RetiredChannelPolicy::ReplacementOnly)
-            && self
-                .retired_channel
-                .upgrade()
-                .is_some_and(|retired| Arc::ptr_eq(current.channel(), &retired))
-        {
-            return HostSwitchRestoreOutcome::RestorePending(self);
-        }
-
+impl RestorePlan for HostSwitchRestorePlan {
+    async fn restore_on(&self, current: &SharedChannel) -> bool {
         let controls = ReprogControlsV4::new(
             Arc::clone(current.channel()),
             current.device_index(),
             self.feature_index,
         );
-        let restored = restore_host_controls(&controls, &self.controls).await;
-        if restored && registry.is_current(&current) {
-            HostSwitchRestoreOutcome::Restored
-        } else {
-            HostSwitchRestoreOutcome::RestorePending(self)
-        }
+        restore_host_controls(&controls, &self.controls).await
     }
 }
 
+/// Host-control restoration state that outlives the channel it was armed on.
+pub type PendingHostSwitchRestore = PendingRestore<HostSwitchRestorePlan>;
+
+/// Result of one bounded pending-restoration attempt.
+pub type HostSwitchRestoreOutcome = RestoreOutcome<HostSwitchRestorePlan>;
+
+/// A host-switch setup failure plus any rollback state still owned by OpenLogi.
+pub type HostSwitchSessionFailure = SessionFailure<HostSwitchError, HostSwitchRestorePlan>;
+
+impl PendingHostSwitchRestore {
+    /// The restore owed for `controls`, or `None` when nothing was armed.
+    pub(super) fn new(
+        retired: &SharedChannel,
+        feature_index: u8,
+        controls: Vec<ArmedControl>,
+    ) -> Option<Self> {
+        (!controls.is_empty()).then(|| {
+            Self::owing(
+                retired,
+                HostSwitchRestorePlan {
+                    feature_index,
+                    controls,
+                },
+            )
+        })
+    }
+}
+
+/// Roll back a partially armed session. Unlike capture's rollback this writes
+/// nothing while host device I/O is suspended: the ownership is returned for
+/// the manager to retry once the gate reopens.
 pub(super) async fn rollback_host_switch_start(
     error: HostSwitchError,
     pending: Option<PendingHostSwitchRestore>,
     registry: &ChannelRegistry,
     device_io: &DeviceIoGate,
 ) -> HostSwitchSessionFailure {
-    let Some(pending) = pending else {
-        return HostSwitchSessionFailure::clean(error);
-    };
-    let pending = pending.allow_current_channel();
-    if !device_io.allows_io() {
-        return HostSwitchSessionFailure::with_pending(error, pending);
+    if device_io.allows_io() {
+        return rollback_start(error, pending, registry).await;
     }
-    match pending.retry(registry).await {
-        HostSwitchRestoreOutcome::Restored => HostSwitchSessionFailure::clean(error),
-        HostSwitchRestoreOutcome::RestorePending(pending) => {
-            HostSwitchSessionFailure::with_pending(error, pending)
+    match pending {
+        Some(pending) => {
+            HostSwitchSessionFailure::with_pending(error, pending.allow_current_channel())
         }
+        None => HostSwitchSessionFailure::clean(error),
     }
 }
 
@@ -199,6 +122,7 @@ pub(super) async fn rollback_host_switch_start(
 mod tests {
     use super::super::{HostSwitchStopReason, monitor_host_switch, run_host_switch_session};
     use super::*;
+    use crate::DeviceRoute;
     use crate::backend::NodeId;
     use crate::channel::scripted::{ScriptedRawHidChannel, feature_error, scripted_channel};
     use crate::reprog_controls::{CidReporting, ControlId};

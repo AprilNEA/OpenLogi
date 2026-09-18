@@ -24,13 +24,12 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use super::capture::{ArmedCapture, CaptureHost, Liveness, open_device, run_capture};
-use super::capture_restore::{
-    ArmedReporting, ReprogRestore, divert_change, rollback_capture_start,
-};
+use super::capture_restore::{ArmedReporting, ReprogRestore, divert_change};
 use super::gesture::{
     CaptureError, CaptureSessionFailure, CaptureSessionOutcome, CapturedInput,
     PendingCaptureRestore, enumerate_controls,
 };
+use super::restore::rollback_start;
 use crate::channel::route::DeviceRoute;
 use crate::{ChannelRegistry, SharedChannel};
 
@@ -105,7 +104,7 @@ async fn arm_keyboard(
     };
     if let Err(error) = arm_keys(&controls, wanted, &mut armed).await {
         let pending = armed.into_pending(shared);
-        return Err(rollback_capture_start(error, pending, registry).await);
+        return Err(rollback_start(error, pending, registry).await);
     }
     Ok(armed)
 }

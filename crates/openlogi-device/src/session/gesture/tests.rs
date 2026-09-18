@@ -9,8 +9,9 @@ use crate::channel::scripted::{ScriptedRawHidChannel, scripted_channel};
 use crate::reprog_controls::RawControlEvent;
 use crate::session::capture_restore::{
     ArmedReporting, CaptureStop, ReprogRestore, divert_change, drop_listener_after,
-    rollback_capture_start, stop_for_current_publication, undivert_change, wait_for_channel_change,
+    stop_for_current_publication, undivert_change, wait_for_channel_change,
 };
+use crate::session::restore::rollback_start;
 use crate::{ChannelRegistry, DeviceRoute};
 
 const GESTURE: &[u16] = &[reprog_controls::GESTURE_BUTTON_CID];
@@ -240,7 +241,7 @@ async fn failed_setup_rollback_returns_its_restore_capability() {
         None,
     );
 
-    let failure = rollback_capture_start(
+    let failure = rollback_start(
         CaptureError::Hidpp("diversion failed".into()),
         pending,
         &registry,

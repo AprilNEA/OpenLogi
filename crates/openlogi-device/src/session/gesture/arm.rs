@@ -13,8 +13,9 @@ use crate::reprog_controls::{self, ReprogControlsV4};
 use crate::session::capture::open_device;
 use crate::session::capture_restore::{
     ArmedReporting, CaptureError, CaptureSessionFailure, PendingCaptureRestore, ReprogRestore,
-    divert_change, rollback_capture_start,
+    divert_change,
 };
+use crate::session::restore::rollback_start;
 use crate::thumbwheel::{self, Thumbwheel, ThumbwheelInfo, WheelDirection, WheelResolution};
 use crate::{ChannelRegistry, SharedChannel};
 
@@ -141,7 +142,7 @@ pub(super) async fn arm_controls(
     let mut armed = ArmedControls::default();
     if let Err(error) = arm_controls_into(&device, chan, slot, spec, &mut armed).await {
         let pending = armed.into_pending(shared);
-        return Err(rollback_capture_start(error, pending, registry).await);
+        return Err(rollback_start(error, pending, registry).await);
     }
     if armed.gesture_cids.is_empty()
         && armed.gesture_button_cids.is_empty()
