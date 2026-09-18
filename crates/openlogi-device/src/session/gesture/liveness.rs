@@ -16,24 +16,24 @@ const SILENT_STRIKES_BEFORE_RESTART: u8 = 2;
 ///
 /// Recording activity is one atomic increment plus a notification: routine
 /// captured input never takes a lock, blocks the read thread, or builds an
-/// unbounded queue. The generation preserves activity that races waiter setup;
-/// `Notify` only avoids waiting for the next generation change.
+/// unbounded queue. The sequence number preserves activity that races waiter
+/// setup; `Notify` only avoids waiting for the next change to it.
 #[derive(Default)]
 pub(super) struct ChannelActivity {
-    generation: AtomicU64,
+    seq: AtomicU64,
     changed: Notify,
 }
 
 impl ChannelActivity {
-    /// Record one or more inbound reports as a new delivery generation.
+    /// Record one or more inbound reports as the next sequence number.
     pub(super) fn record(&self) {
-        self.generation.fetch_add(1, Ordering::Release);
+        self.seq.fetch_add(1, Ordering::Release);
         self.changed.notify_one();
     }
 
-    /// Return the latest coalesced activity generation.
-    pub(super) fn generation(&self) -> u64 {
-        self.generation.load(Ordering::Acquire)
+    /// Return the latest coalesced activity sequence number.
+    pub(super) fn seq(&self) -> u64 {
+        self.seq.load(Ordering::Acquire)
     }
 
     /// Wait until activity differs from `observed`, including activity that
@@ -43,11 +43,11 @@ impl ChannelActivity {
             let notified = self.changed.notified();
             tokio::pin!(notified);
 
-            // Register before checking the generation. An activity report
-            // between these operations either changes the generation or makes
-            // this already-registered future ready, so no wakeup is lost.
+            // Register before checking the sequence number. An activity report
+            // between these operations either changes it or makes this
+            // already-registered future ready, so no wakeup is lost.
             let _ = notified.as_mut().enable();
-            let current = self.generation();
+            let current = self.seq();
             if current != observed {
                 return current;
             }
@@ -76,22 +76,22 @@ pub(super) enum LivenessDecision {
 
 /// Pure deadline and strike state for one capture channel.
 pub(super) struct CaptureLiveness {
-    activity_generation: u64,
+    activity_seq: u64,
     idle_deadline: Instant,
     silent_strikes: u8,
 }
 
 impl CaptureLiveness {
-    pub(super) fn new(now: Instant, activity_generation: u64) -> Self {
+    pub(super) fn new(now: Instant, activity_seq: u64) -> Self {
         Self {
-            activity_generation,
+            activity_seq,
             idle_deadline: now + IDLE_INTERVAL,
             silent_strikes: 0,
         }
     }
 
-    pub(super) fn activity_generation(&self) -> u64 {
-        self.activity_generation
+    pub(super) fn activity_seq(&self) -> u64 {
+        self.activity_seq
     }
 
     pub(super) fn idle_deadline(&self) -> Instant {
@@ -100,14 +100,14 @@ impl CaptureLiveness {
 
     /// Account for delivered reports and defer probing until another complete
     /// idle interval has elapsed. Any delivery also clears a silent strike.
-    pub(super) fn record_activity(&mut self, now: Instant, generation: u64) {
-        let _ = self.take_activity(now, generation);
+    pub(super) fn record_activity(&mut self, now: Instant, seq: u64) {
+        let _ = self.take_activity(now, seq);
     }
 
     /// Re-check activity when the current timer expires. This closes the race
     /// where a report lands as the deadline becomes ready.
-    pub(super) fn ping_due(&mut self, now: Instant, generation: u64) -> bool {
-        !self.take_activity(now, generation) && now >= self.idle_deadline
+    pub(super) fn ping_due(&mut self, now: Instant, seq: u64) -> bool {
+        !self.take_activity(now, seq) && now >= self.idle_deadline
     }
 
     /// Account for a completed probe and schedule the next one after another
@@ -116,10 +116,10 @@ impl CaptureLiveness {
     pub(super) fn finish_ping(
         &mut self,
         now: Instant,
-        generation: u64,
+        seq: u64,
         outcome: PingOutcome,
     ) -> LivenessDecision {
-        let activity = self.take_activity(now, generation);
+        let activity = self.take_activity(now, seq);
         self.idle_deadline = now + IDLE_INTERVAL;
         if outcome == PingOutcome::ChannelFailed {
             return LivenessDecision::Restart;
@@ -137,11 +137,11 @@ impl CaptureLiveness {
         }
     }
 
-    fn take_activity(&mut self, now: Instant, generation: u64) -> bool {
-        if generation == self.activity_generation {
+    fn take_activity(&mut self, now: Instant, seq: u64) -> bool {
+        if seq == self.activity_seq {
             return false;
         }
-        self.activity_generation = generation;
+        self.activity_seq = seq;
         self.idle_deadline = now + IDLE_INTERVAL;
         self.silent_strikes = 0;
         true
@@ -155,89 +155,69 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn active_traffic_defers_the_idle_ping() {
         let activity = ChannelActivity::default();
-        let mut liveness = CaptureLiveness::new(Instant::now(), activity.generation());
+        let mut liveness = CaptureLiveness::new(Instant::now(), activity.seq());
         let almost_idle = IDLE_INTERVAL
             .checked_sub(Duration::from_secs(1))
             .expect("the test offset is shorter than the idle interval");
 
         tokio::time::advance(almost_idle).await;
         activity.record();
-        liveness.record_activity(Instant::now(), activity.generation());
+        liveness.record_activity(Instant::now(), activity.seq());
         tokio::time::advance(Duration::from_secs(1)).await;
 
-        assert!(!liveness.ping_due(Instant::now(), activity.generation()));
+        assert!(!liveness.ping_due(Instant::now(), activity.seq()));
         tokio::time::advance(almost_idle).await;
-        assert!(liveness.ping_due(Instant::now(), activity.generation()));
+        assert!(liveness.ping_due(Instant::now(), activity.seq()));
     }
 
     #[tokio::test(start_paused = true)]
     async fn idle_ping_is_scheduled_after_each_full_interval() {
         let activity = ChannelActivity::default();
-        let mut liveness = CaptureLiveness::new(Instant::now(), activity.generation());
+        let mut liveness = CaptureLiveness::new(Instant::now(), activity.seq());
         let almost_idle = IDLE_INTERVAL
             .checked_sub(Duration::from_millis(1))
             .expect("the test offset is shorter than the idle interval");
 
         tokio::time::advance(almost_idle).await;
-        assert!(!liveness.ping_due(Instant::now(), activity.generation()));
+        assert!(!liveness.ping_due(Instant::now(), activity.seq()));
         tokio::time::advance(Duration::from_millis(1)).await;
-        assert!(liveness.ping_due(Instant::now(), activity.generation()));
+        assert!(liveness.ping_due(Instant::now(), activity.seq()));
         assert!(matches!(
-            liveness.finish_ping(
-                Instant::now(),
-                activity.generation(),
-                PingOutcome::AllSilent,
-            ),
+            liveness.finish_ping(Instant::now(), activity.seq(), PingOutcome::AllSilent,),
             LivenessDecision::Continue
         ));
 
         tokio::time::advance(almost_idle).await;
-        assert!(!liveness.ping_due(Instant::now(), activity.generation()));
+        assert!(!liveness.ping_due(Instant::now(), activity.seq()));
         tokio::time::advance(Duration::from_millis(1)).await;
-        assert!(liveness.ping_due(Instant::now(), activity.generation()));
+        assert!(liveness.ping_due(Instant::now(), activity.seq()));
     }
 
     #[tokio::test(start_paused = true)]
     async fn delivery_resets_a_silent_strike() {
         let activity = ChannelActivity::default();
-        let mut liveness = CaptureLiveness::new(Instant::now(), activity.generation());
+        let mut liveness = CaptureLiveness::new(Instant::now(), activity.seq());
 
         tokio::time::advance(IDLE_INTERVAL).await;
         assert!(matches!(
-            liveness.finish_ping(
-                Instant::now(),
-                activity.generation(),
-                PingOutcome::AllSilent,
-            ),
+            liveness.finish_ping(Instant::now(), activity.seq(), PingOutcome::AllSilent,),
             LivenessDecision::Continue
         ));
 
         tokio::time::advance(IDLE_INTERVAL).await;
         assert!(matches!(
-            liveness.finish_ping(
-                Instant::now(),
-                activity.generation(),
-                PingOutcome::Delivered,
-            ),
+            liveness.finish_ping(Instant::now(), activity.seq(), PingOutcome::Delivered,),
             LivenessDecision::Continue
         ));
 
         tokio::time::advance(IDLE_INTERVAL).await;
         assert!(matches!(
-            liveness.finish_ping(
-                Instant::now(),
-                activity.generation(),
-                PingOutcome::AllSilent,
-            ),
+            liveness.finish_ping(Instant::now(), activity.seq(), PingOutcome::AllSilent,),
             LivenessDecision::Continue
         ));
         tokio::time::advance(IDLE_INTERVAL).await;
         assert!(matches!(
-            liveness.finish_ping(
-                Instant::now(),
-                activity.generation(),
-                PingOutcome::AllSilent,
-            ),
+            liveness.finish_ping(Instant::now(), activity.seq(), PingOutcome::AllSilent,),
             LivenessDecision::Restart
         ));
     }
@@ -245,15 +225,11 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn channel_failure_restarts_without_a_second_probe() {
         let activity = ChannelActivity::default();
-        let mut liveness = CaptureLiveness::new(Instant::now(), activity.generation());
+        let mut liveness = CaptureLiveness::new(Instant::now(), activity.seq());
 
         tokio::time::advance(IDLE_INTERVAL).await;
         assert!(matches!(
-            liveness.finish_ping(
-                Instant::now(),
-                activity.generation(),
-                PingOutcome::ChannelFailed,
-            ),
+            liveness.finish_ping(Instant::now(), activity.seq(), PingOutcome::ChannelFailed,),
             LivenessDecision::Restart
         ));
     }
@@ -263,10 +239,10 @@ mod tests {
         let activity = ChannelActivity::default();
         activity.record();
 
-        let generation = tokio::time::timeout(Duration::from_secs(1), activity.changed_after(0))
+        let seq = tokio::time::timeout(Duration::from_secs(1), activity.changed_after(0))
             .await
             .expect("pre-existing activity must make the waiter ready");
 
-        assert_eq!(generation, activity.generation());
+        assert_eq!(seq, activity.seq());
     }
 }

@@ -585,8 +585,7 @@ async fn monitor_capture(
 ) -> CaptureStop {
     let mut wake_events = wireless.as_ref().map(EmittingFeature::listen);
     let mut shutdown = std::pin::pin!(shutdown);
-    let mut liveness =
-        CaptureLiveness::new(tokio::time::Instant::now(), context.activity.generation());
+    let mut liveness = CaptureLiveness::new(tokio::time::Instant::now(), context.activity.seq());
     loop {
         if !device_io.allows_io() {
             if !device_io.wait_until_allowed().await {
@@ -595,9 +594,9 @@ async fn monitor_capture(
             // Time asleep is not channel idleness. Give the transport a full
             // quiet interval after visible resume and clear any pre-sleep
             // strike before considering a liveness ping.
-            liveness.record_activity(tokio::time::Instant::now(), context.activity.generation());
+            liveness.record_activity(tokio::time::Instant::now(), context.activity.seq());
         }
-        let activity_generation = liveness.activity_generation();
+        let activity_seq = liveness.activity_seq();
         let idle_deadline = liveness.idle_deadline();
         tokio::select! {
             biased;
@@ -606,7 +605,7 @@ async fn monitor_capture(
                 match allowed {
                     Some(true) => liveness.record_activity(
                         tokio::time::Instant::now(),
-                        context.activity.generation(),
+                        context.activity.seq(),
                     ),
                     Some(false) => {}
                     None => return stop_for_current_publication(context.registry, context.shared),
@@ -641,13 +640,13 @@ async fn monitor_capture(
                     CaptureAccum::default();
                 context.armed.rearm(&device_io).await;
             }
-            generation = context.activity.changed_after(activity_generation) => {
-                liveness.record_activity(tokio::time::Instant::now(), generation);
+            seq = context.activity.changed_after(activity_seq) => {
+                liveness.record_activity(tokio::time::Instant::now(), seq);
             }
             () = tokio::time::sleep_until(idle_deadline) => {
                 if !liveness.ping_due(
                     tokio::time::Instant::now(),
-                    context.activity.generation(),
+                    context.activity.seq(),
                 ) {
                     continue;
                 }
@@ -667,7 +666,7 @@ async fn monitor_capture(
                 };
                 if liveness.finish_ping(
                     tokio::time::Instant::now(),
-                    context.activity.generation(),
+                    context.activity.seq(),
                     outcome,
                 ) == LivenessDecision::Restart {
                     warn!(index = context.device_index, "capture channel stopped delivering — restarting session on a fresh channel");
