@@ -18,7 +18,7 @@ use gpui_component::{
 use openlogi_core::color::Rgb;
 use openlogi_core::config::Lighting;
 
-use crate::state::{AppState, DeviceRecord, StateEvent};
+use crate::state::{AppState, StateEvent};
 use crate::ui::components::Toggle;
 use crate::ui::theme::{self, Palette, Typography as _};
 
@@ -65,15 +65,11 @@ impl LightingPanel {
             cx.subscribe(&brightness, |_panel, _slider, event: &SliderEvent, cx| {
                 if let SliderEvent::Release(value) = event {
                     let pct = clamp_brightness(value.start());
-                    AppState::update(cx, |state, cx| {
-                        let key = state.current_record().map(DeviceRecord::device_key);
+                    AppState::apply(cx, |state| {
                         let mut lighting = state.lighting();
                         lighting.enabled = true;
                         lighting.brightness = pct;
-                        state.commit_lighting(lighting);
-                        if let Some(key) = key {
-                            cx.emit(StateEvent::LightingChanged(key));
-                        }
+                        state.commit_lighting(lighting)
                     });
                     cx.notify();
                 }
@@ -138,14 +134,10 @@ impl Render for LightingPanel {
                         Toggle::new("light-toggle")
                             .selected(lighting.enabled)
                             .on_change(|enabled, _window, cx| {
-                                AppState::update(cx, |state, cx| {
-                                    let key = state.current_record().map(DeviceRecord::device_key);
+                                AppState::apply(cx, |state| {
                                     let mut next = state.lighting();
                                     next.enabled = *enabled;
-                                    state.commit_lighting(next);
-                                    if let Some(key) = key {
-                                        cx.emit(StateEvent::LightingChanged(key));
-                                    }
+                                    state.commit_lighting(next)
                                 });
                             }),
                     ),
@@ -201,15 +193,11 @@ fn swatch(color: Rgb, current: &Lighting, pal: Palette) -> impl IntoElement {
         .cursor_pointer()
         .focus_visible(|style| style.border_color(theme::accent()))
         .on_click(move |_event, _window, cx| {
-            AppState::update(cx, |state, cx| {
-                let key = state.current_record().map(DeviceRecord::device_key);
+            AppState::apply(cx, |state| {
                 let mut next = state.lighting();
                 next.enabled = true;
                 next.color = color;
-                state.commit_lighting(next);
-                if let Some(key) = key {
-                    cx.emit(StateEvent::LightingChanged(key));
-                }
+                state.commit_lighting(next)
             });
         })
 }

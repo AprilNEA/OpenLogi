@@ -1,13 +1,13 @@
 //! Controls for standalone lights.
 
-use crate::state::{AppState, DeviceRecord, LightCommandStatus, StateEvent};
+use crate::state::{AppState, LightCommandStatus, StateEvent};
 use crate::ui::components::Toggle;
 
 use super::visual::LightView;
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
 use gpui::{
-    App, AppContext as _, BoxShadow, Context, Entity, Hsla, IntoElement, ParentElement, Render,
-    Styled, Subscription, Window, div, hsla, point, prelude::FluentBuilder as _, px, rgb,
+    AppContext as _, BoxShadow, Context, Entity, Hsla, IntoElement, ParentElement, Render, Styled,
+    Subscription, Window, div, hsla, point, prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_component::{
     Icon, IconName, Selectable as _, h_flex,
@@ -18,16 +18,6 @@ use openlogi_core::{
     config::LightSettings,
     device::{LightCapabilities, LightValueRange, LightValueUnit},
 };
-
-fn update_light(cx: &mut App, update: impl FnOnce(&mut AppState)) {
-    AppState::update(cx, |state, cx| {
-        let key = state.current_record().map(DeviceRecord::device_key);
-        update(state);
-        if let Some(key) = key {
-            cx.emit(StateEvent::LightingChanged(key));
-        }
-    });
-}
 
 /// Standalone-light panel. The UI is driven by the active device's advertised
 /// capabilities; the panel is not Litra-specific even though Litra is the
@@ -122,13 +112,13 @@ impl LightPanel {
                         let Some(percent) = range.percent_for_native(native) else {
                             return;
                         };
-                        update_light(cx, |state| {
+                        AppState::apply(cx, |state| {
                             let mut light = state.light();
                             if !state.camera_automation_active() {
                                 light.enabled = true;
                             }
                             light.brightness_percent = percent;
-                            state.commit_light(light);
+                            state.commit_light(light)
                         });
                         cx.notify();
                     }
@@ -152,13 +142,13 @@ impl LightPanel {
                 cx.subscribe(&slider, move |_panel, _slider, event: &SliderEvent, cx| {
                     if let SliderEvent::Release(value) = event {
                         let kelvin = range.quantize(round_u16(value.start()));
-                        update_light(cx, |state| {
+                        AppState::apply(cx, |state| {
                             let mut light = state.light();
                             if !state.camera_automation_active() {
                                 light.enabled = true;
                             }
                             light.temperature_kelvin = Some(kelvin);
-                            state.commit_light(light);
+                            state.commit_light(light)
                         });
                         cx.notify();
                     }
@@ -301,9 +291,7 @@ fn light_hero(device_name: &str, view: LightView, pal: Palette) -> impl IntoElem
                 })
                 .min_width(px(72.))
                 .on_change(|enabled, _window, cx| {
-                    update_light(cx, |state| {
-                        state.commit_manual_light_power(*enabled);
-                    });
+                    AppState::apply(cx, |state| state.commit_manual_light_power(*enabled));
                 }),
         )
 }
@@ -387,10 +375,10 @@ fn camera_automation(current: LightSettings, pal: Palette) -> impl IntoElement {
                 .selected(current.auto_camera)
                 .min_width(px(72.))
                 .on_change(|auto_camera, _window, cx| {
-                    update_light(cx, |state| {
+                    AppState::apply(cx, |state| {
                         let mut light = state.light();
                         light.auto_camera = *auto_camera;
-                        state.commit_light(light);
+                        state.commit_light(light)
                     });
                 }),
         )

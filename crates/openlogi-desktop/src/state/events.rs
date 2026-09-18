@@ -66,11 +66,23 @@ impl EventEmitter<StateEvent> for AppState {}
 pub(crate) struct StateEvents(Vec<StateEvent>);
 
 impl StateEvents {
+    /// A change no view needs to hear about.
+    pub(crate) fn none() -> Self {
+        Self::default()
+    }
+
     /// Emit every event from the state entity's own context.
     pub(crate) fn emit(self, cx: &mut Context<AppState>) {
         for event in self.0 {
             cx.emit(event);
         }
+    }
+}
+
+/// Lets a test state the exact events a mutation must report.
+impl<const N: usize> PartialEq<[StateEvent; N]> for StateEvents {
+    fn eq(&self, other: &[StateEvent; N]) -> bool {
+        self.0 == *other
     }
 }
 

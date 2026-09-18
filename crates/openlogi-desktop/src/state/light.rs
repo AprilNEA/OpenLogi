@@ -6,9 +6,10 @@ use openlogi_core::config::LightSettings;
 use openlogi_core::hid::{DeviceRoute, LightCommand, WriteError};
 use tracing::debug;
 
-use super::AppState;
 use super::device_key::DeviceKey;
 use super::device_runtime::DeviceRuntimeState;
+use super::events::StateEvents;
+use super::{AppState, StateEvent};
 
 const fn camera_policy_applies(light: LightSettings) -> bool {
     cfg!(target_os = "macos") && light.auto_camera
@@ -198,8 +199,8 @@ impl AppState {
             key: key.to_string(),
             request_id,
         }) {
-            self.apply_light_command_result(
-                key.to_string(),
+            self.settle_light_command(
+                key.clone(),
                 request_id,
                 command,
                 Err(WriteError::AgentUnavailable),
@@ -235,8 +236,24 @@ impl AppState {
         request_id: u64,
         command: LightCommand,
         result: Result<(), WriteError>,
-    ) -> bool {
+    ) -> StateEvents {
         let key = DeviceKey::from(key);
+        if self.settle_light_command(key.clone(), request_id, command, result) {
+            StateEvent::LightingChanged(key).into()
+        } else {
+            StateEvents::none()
+        }
+    }
+
+    /// Record one write result against the request it belongs to, reporting
+    /// whether it belonged to a live one.
+    fn settle_light_command(
+        &mut self,
+        key: DeviceKey,
+        request_id: u64,
+        command: LightCommand,
+        result: Result<(), WriteError>,
+    ) -> bool {
         let Some(pending) = self
             .devices
             .runtime
@@ -444,7 +461,8 @@ impl AppState {
     /// Persist and apply standalone-light settings through the agent-owned
     /// raw-HID path. Online persistent changes are committed only after every
     /// advertised device command succeeds; failures roll optimistic state back.
-    pub fn commit_light(&mut self, light: LightSettings) {
+    pub fn commit_light(&mut self, light: LightSettings) -> StateEvents {
+        let events = self.for_current_device(StateEvent::LightingChanged);
         let Some((runtime_key, key, route, online, capabilities)) =
             self.current_record().map(|record| {
                 (
@@ -457,7 +475,7 @@ impl AppState {
             })
         else {
             debug!("no active device — light change ignored");
-            return;
+            return events;
         };
         let previous = self.light_for(&runtime_key);
         let camera_mode_changed =
@@ -509,7 +527,7 @@ impl AppState {
                 for command in commands {
                     self.queue_light_command(&runtime_key, request_id, route.clone(), command);
                 }
-                return;
+                return events;
             }
             self.begin_light_command(&runtime_key, None);
         }
@@ -527,12 +545,14 @@ impl AppState {
                 .light
                 .volatile_settings = Some(light);
         }
+        events
     }
 
     /// Apply a transient manual power choice while camera automation remains
     /// enabled. The persisted `enabled` field is updated as the manual fallback,
     /// but the runtime override lasts only until the next camera transition.
-    pub fn commit_manual_light_power(&mut self, enabled: bool) {
+    pub fn commit_manual_light_power(&mut self, enabled: bool) -> StateEvents {
+        let events = self.for_current_device(StateEvent::LightingChanged);
         let Some((runtime_key, key, route, online)) = self.current_record().map(|record| {
             (
                 record.device_key(),
@@ -542,13 +562,12 @@ impl AppState {
             )
         }) else {
             debug!("no active device — manual light power ignored");
-            return;
+            return events;
         };
         let mut light = self.light_for(&runtime_key);
         if !camera_policy_applies(light) {
             light.enabled = enabled;
-            self.commit_light(light);
-            return;
+            return self.commit_light(light);
         }
 
         let (rollback_settings, previous_volatile) = self.light_write_rollback(&runtime_key, light);
@@ -583,14 +602,14 @@ impl AppState {
                 key: runtime_key.to_string(),
                 request_id,
             }) {
-                self.apply_light_command_result(
-                    runtime_key.to_string(),
+                self.settle_light_command(
+                    runtime_key,
                     request_id,
                     LightCommand::Power(enabled),
                     Err(WriteError::AgentUnavailable),
                 );
             }
-            return;
+            return events;
         }
         self.begin_light_command(&runtime_key, None);
 
@@ -601,6 +620,7 @@ impl AppState {
             self.config.edit(|config| config.set_light(&key, light));
             self.persist_and_reload("manual light power");
         }
+        events
     }
 }
 

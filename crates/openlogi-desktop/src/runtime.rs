@@ -24,7 +24,7 @@ use tracing::warn;
 use crate::services::assets::sync::{AssetCommand, AssetTarget};
 use crate::services::assets::{self, sync};
 use crate::services::ipc;
-use crate::state::{self, AppState, ConfigPersistence, DeviceKey, StateEvent};
+use crate::state::{self, AppState, ConfigPersistence, StateEvent};
 use crate::{app, windows};
 
 /// How often the UI re-enumerates USB cameras. They are UVC devices the agent
@@ -267,11 +267,8 @@ impl Runtime {
                 result,
             } => {
                 cx.update(|cx| {
-                    let event_key = DeviceKey::from(key.as_str());
-                    AppState::update(cx, |state, cx| {
-                        if state.apply_light_command_result(key, request_id, command, result) {
-                            cx.emit(StateEvent::LightingChanged(event_key));
-                        }
+                    AppState::apply(cx, |state| {
+                        state.apply_light_command_result(key, request_id, command, result)
                     });
                 });
             }

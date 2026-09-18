@@ -39,7 +39,7 @@ use super::smartshift::{
     ConfirmationOutcome, SmartShiftDeviceState, smartshift_read_is_current,
     smartshift_write_outcome,
 };
-use super::{AppState, ConfigPersistence, LightCommandStatus, Load};
+use super::{AppState, ConfigPersistence, DeviceKey, LightCommandStatus, Load, StateEvent};
 
 #[test]
 fn read_only_config_rolls_back_mutations_and_does_not_reload_agent() {
@@ -493,7 +493,7 @@ fn canonical_profile_light_setting_errors_reach_desktop_state() {
     );
     let key = light.config_key.clone();
 
-    state.commit_light(LightSettings::new(false, 50, Some(3000)));
+    let _ = state.commit_light(LightSettings::new(false, 50, Some(3000)));
     let mut pending = Vec::new();
     loop {
         match receiver.try_recv() {
@@ -530,7 +530,10 @@ fn canonical_profile_light_setting_errors_reach_desktop_state() {
         } else {
             Ok(())
         };
-        assert!(state.apply_light_command_result(key.clone(), request_id, command, result));
+        assert_eq!(
+            state.apply_light_command_result(key.clone(), request_id, command, result),
+            [lighting_changed(&key)]
+        );
     }
     assert!(matches!(
         state.light_command_status(),
@@ -689,6 +692,11 @@ fn transient_thumbwheel_pair_stays_in_memory_without_persistence() {
     ));
     assert_eq!(bindings.len(), 2);
     assert!(config.bindings_for("missing").is_empty());
+}
+
+/// What a light-write result that belonged to a live request announces.
+fn lighting_changed(key: &str) -> StateEvent {
+    StateEvent::LightingChanged(DeviceKey::from(key))
 }
 
 /// A state holding the one persistent mouse, so per-device config has a key.
@@ -1795,7 +1803,7 @@ fn light_write_failure_reaches_the_gui_state() {
         .config_key
         .clone();
     let requested = LightSettings::new(false, 50, None);
-    state.commit_light(requested);
+    let _ = state.commit_light(requested);
     let Ok(crate::services::ipc::Command::SetLight(SetLight {
         command: openlogi_core::hid::LightCommand::Power(false),
         request_id,
@@ -1819,19 +1827,25 @@ fn light_write_failure_reaches_the_gui_state() {
         state.light_command_status(),
         Some(LightCommandStatus::Pending)
     ));
-    assert!(state.apply_light_command_result(
-        key.clone(),
-        request_id,
-        openlogi_core::hid::LightCommand::Power(false),
-        Ok(()),
-    ));
+    assert_eq!(
+        state.apply_light_command_result(
+            key.clone(),
+            request_id,
+            openlogi_core::hid::LightCommand::Power(false),
+            Ok(()),
+        ),
+        [lighting_changed(&key)]
+    );
     assert_eq!(state.light(), requested);
-    assert!(state.apply_light_command_result(
-        key.clone(),
-        request_id,
-        openlogi_core::hid::LightCommand::BrightnessPercent(50),
-        Err(WriteError::AmbiguousRawDevice),
-    ));
+    assert_eq!(
+        state.apply_light_command_result(
+            key.clone(),
+            request_id,
+            openlogi_core::hid::LightCommand::BrightnessPercent(50),
+            Err(WriteError::AmbiguousRawDevice),
+        ),
+        [lighting_changed(&key)]
+    );
     assert!(matches!(
         state.light_command_status(),
         Some(LightCommandStatus::Failed(message)) if message.contains("multiple raw HID")
@@ -1862,7 +1876,7 @@ fn superseded_light_write_keeps_prior_successes_for_reconciliation() {
         .config_key
         .clone();
 
-    state.commit_light(LightSettings::new(false, 40, None));
+    let _ = state.commit_light(LightSettings::new(false, 40, None));
     let (first_power, first_request_id) = next_light_command(&mut receiver);
     let (first_brightness, first_brightness_request_id) = next_light_command(&mut receiver);
     assert_eq!(first_power, openlogi_core::hid::LightCommand::Power(false));
@@ -1872,7 +1886,7 @@ fn superseded_light_write_keeps_prior_successes_for_reconciliation() {
     );
     assert_eq!(first_brightness_request_id, first_request_id);
 
-    state.commit_light(LightSettings::new(true, 60, None));
+    let _ = state.commit_light(LightSettings::new(true, 60, None));
     let (second_power, second_request_id) = next_light_command(&mut receiver);
     let (second_brightness, second_brightness_request_id) = next_light_command(&mut receiver);
     assert_eq!(second_power, openlogi_core::hid::LightCommand::Power(true));
@@ -1883,36 +1897,48 @@ fn superseded_light_write_keeps_prior_successes_for_reconciliation() {
     assert_ne!(second_request_id, first_request_id);
     assert_eq!(second_brightness_request_id, second_request_id);
 
-    assert!(state.apply_light_command_result(
-        key.clone(),
-        second_request_id,
-        openlogi_core::hid::LightCommand::Power(true),
-        Ok(()),
-    ));
-    assert!(state.apply_light_command_result(
-        key.clone(),
-        second_request_id,
-        openlogi_core::hid::LightCommand::BrightnessPercent(60),
-        Err(WriteError::AmbiguousRawDevice),
-    ));
+    assert_eq!(
+        state.apply_light_command_result(
+            key.clone(),
+            second_request_id,
+            openlogi_core::hid::LightCommand::Power(true),
+            Ok(()),
+        ),
+        [lighting_changed(&key)]
+    );
+    assert_eq!(
+        state.apply_light_command_result(
+            key.clone(),
+            second_request_id,
+            openlogi_core::hid::LightCommand::BrightnessPercent(60),
+            Err(WriteError::AmbiguousRawDevice),
+        ),
+        [lighting_changed(&key)]
+    );
     assert_eq!(state.light(), LightSettings::new(true, 60, None));
     assert!(matches!(
         state.light_command_status(),
         Some(LightCommandStatus::Pending)
     ));
 
-    assert!(state.apply_light_command_result(
-        key.clone(),
-        first_request_id,
-        openlogi_core::hid::LightCommand::Power(false),
-        Ok(()),
-    ));
-    assert!(state.apply_light_command_result(
-        key.clone(),
-        first_request_id,
-        openlogi_core::hid::LightCommand::BrightnessPercent(40),
-        Ok(()),
-    ));
+    assert_eq!(
+        state.apply_light_command_result(
+            key.clone(),
+            first_request_id,
+            openlogi_core::hid::LightCommand::Power(false),
+            Ok(()),
+        ),
+        [lighting_changed(&key)]
+    );
+    assert_eq!(
+        state.apply_light_command_result(
+            key.clone(),
+            first_request_id,
+            openlogi_core::hid::LightCommand::BrightnessPercent(40),
+            Ok(()),
+        ),
+        [lighting_changed(&key)]
+    );
 
     assert!(matches!(
         state.light_command_status(),
@@ -1961,7 +1987,7 @@ fn transient_light_state_is_kept_in_memory_and_only_supported_commands_are_sent(
     );
     let settings = LightSettings::new(false, 37, None);
 
-    state.commit_light(settings);
+    let _ = state.commit_light(settings);
 
     assert_eq!(state.light(), settings);
     assert!(!state.light_enabled());
@@ -2033,7 +2059,7 @@ fn camera_automation_preserves_manual_power_and_clears_transient_override() {
     assert!(state.light_enabled());
     assert!(!state.light().enabled);
 
-    state.commit_manual_light_power(false);
+    let _ = state.commit_manual_light_power(false);
     assert!(!state.light_enabled());
     assert!(matches!(
         receiver.try_recv(),
@@ -2088,7 +2114,7 @@ fn enabling_camera_automation_queues_effective_camera_power() {
     settings.enabled = false;
     settings.auto_camera = true;
 
-    state.commit_light(settings);
+    let _ = state.commit_light(settings);
 
     assert!(matches!(
         receiver.try_recv(),
