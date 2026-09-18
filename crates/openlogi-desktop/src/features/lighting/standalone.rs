@@ -1,19 +1,16 @@
 //! Controls for standalone lights.
 
 use crate::state::{AppState, LightCommandStatus, StateEvent};
+use crate::ui::commit_slider::{CommitSlider, SliderRange};
 use crate::ui::components::Toggle;
 
 use super::visual::LightView;
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
 use gpui::{
-    AppContext as _, BoxShadow, Context, Entity, Hsla, IntoElement, ParentElement, Render, Styled,
-    Subscription, Window, div, hsla, point, prelude::FluentBuilder as _, px, rgb,
+    BoxShadow, Context, Hsla, IntoElement, ParentElement, Render, Styled, Subscription, Window,
+    div, hsla, point, prelude::FluentBuilder as _, px, rgb,
 };
-use gpui_component::{
-    Icon, IconName, Selectable as _, h_flex,
-    slider::{Slider, SliderEvent, SliderState},
-    v_flex,
-};
+use gpui_component::{Icon, IconName, Selectable as _, h_flex, slider::Slider, v_flex};
 use openlogi_core::{
     config::LightSettings,
     device::{LightCapabilities, LightValueRange, LightValueUnit},
@@ -23,25 +20,23 @@ use openlogi_core::{
 /// capabilities; the panel is not Litra-specific even though Litra is the
 /// first driver.
 pub struct LightPanel {
-    brightness: Option<Entity<SliderState>>,
-    temperature: Option<Entity<SliderState>>,
-    brightness_range: Option<LightValueRange>,
-    temperature_range: Option<LightValueRange>,
+    /// The device the sliders below were shaped for.
     device_key: Option<String>,
-    last_brightness: u8,
-    last_temperature: Option<u16>,
-    brightness_sub: Option<Subscription>,
-    temperature_sub: Option<Subscription>,
+    brightness: Option<LightSlider>,
+    temperature: Option<LightSlider>,
     _state_obs: Subscription,
+}
+
+/// One capability-shaped slider, in the range's native units.
+struct LightSlider {
+    range: LightValueRange,
+    slider: CommitSlider<u16>,
 }
 
 impl LightPanel {
     /// Construct the panel. Capability-shaped sliders are created lazily when
     /// the selected device is known.
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let settings = AppState::try_read(cx)
-            .map(AppState::light)
-            .unwrap_or_default();
         let state_obs = AppState::repaint_on(cx, |event| {
             matches!(
                 event,
@@ -49,15 +44,9 @@ impl LightPanel {
             )
         });
         Self {
+            device_key: None,
             brightness: None,
             temperature: None,
-            brightness_range: None,
-            temperature_range: None,
-            device_key: None,
-            last_brightness: settings.brightness_percent,
-            last_temperature: settings.temperature_kelvin,
-            brightness_sub: None,
-            temperature_sub: None,
             _state_obs: state_obs,
         }
     }
@@ -72,83 +61,73 @@ impl LightPanel {
         let brightness_range = capabilities.and_then(|caps| caps.brightness);
         let temperature_range = capabilities.and_then(|caps| caps.temperature);
         if self.device_key.as_deref() == key
-            && self.brightness_range == brightness_range
-            && self.temperature_range == temperature_range
+            && self.brightness.as_ref().map(|slider| slider.range) == brightness_range
+            && self.temperature.as_ref().map(|slider| slider.range) == temperature_range
         {
             return;
         }
 
-        self.brightness = None;
-        self.temperature = None;
-        self.brightness_sub = None;
-        self.temperature_sub = None;
         self.device_key = key.map(str::to_string);
-        self.brightness_range = brightness_range;
-        self.temperature_range = temperature_range;
-
-        if let Some(range) = brightness_range {
-            let value = range
-                .native_for_percent(settings.brightness_percent)
-                .unwrap_or_else(|| range.min());
-            let slider = cx.new(|_| {
-                SliderState::new()
-                    .max(f32::from(range.max()))
-                    .min(f32::from(range.min()))
-                    .step(f32::from(range.step()))
-                    .default_value(f32::from(value))
-            });
-            let subscription =
-                cx.subscribe(&slider, move |_panel, _slider, event: &SliderEvent, cx| {
-                    if let SliderEvent::Release(value) = event {
-                        let native = round_u16(value.start());
-                        let Some(percent) = range.percent_for_native(native) else {
-                            return;
-                        };
-                        AppState::apply(cx, |state| {
-                            let mut light = state.light();
-                            if !state.camera_automation_active() {
-                                light.enabled = true;
-                            }
-                            light.brightness_percent = percent;
-                            state.commit_light(light)
-                        });
-                        cx.notify();
-                    }
-                });
-            self.brightness = Some(slider);
-            self.brightness_sub = Some(subscription);
-        }
-
-        if let Some(range) = temperature_range {
-            let value = settings
-                .temperature_kelvin
-                .map_or_else(|| midpoint(range), |value| range.quantize(value));
-            let slider = cx.new(|_| {
-                SliderState::new()
-                    .max(f32::from(range.max()))
-                    .min(f32::from(range.min()))
-                    .step(f32::from(range.step()))
-                    .default_value(f32::from(value))
-            });
-            let subscription =
-                cx.subscribe(&slider, move |_panel, _slider, event: &SliderEvent, cx| {
-                    if let SliderEvent::Release(value) = event {
-                        let kelvin = range.quantize(round_u16(value.start()));
-                        AppState::apply(cx, |state| {
-                            let mut light = state.light();
-                            if !state.camera_automation_active() {
-                                light.enabled = true;
-                            }
-                            light.temperature_kelvin = Some(kelvin);
-                            state.commit_light(light)
-                        });
-                        cx.notify();
-                    }
-                });
-            self.temperature = Some(slider);
-            self.temperature_sub = Some(subscription);
-        }
+        self.brightness = brightness_range.map(|range| LightSlider {
+            range,
+            slider: CommitSlider::new(
+                slider_range(range),
+                brightness_native(range, settings),
+                cx,
+                move |_, native, cx| {
+                    let Some(percent) = range.percent_for_native(native) else {
+                        return;
+                    };
+                    AppState::apply(cx, |state| {
+                        let mut light = state.light();
+                        if !state.camera_automation_active() {
+                            light.enabled = true;
+                        }
+                        light.brightness_percent = percent;
+                        state.commit_light(light)
+                    });
+                },
+            ),
+        });
+        self.temperature = temperature_range.map(|range| LightSlider {
+            range,
+            slider: CommitSlider::new(
+                slider_range(range),
+                temperature_native(range, settings),
+                cx,
+                move |_, kelvin, cx| {
+                    let kelvin = range.quantize(kelvin);
+                    AppState::apply(cx, |state| {
+                        let mut light = state.light();
+                        if !state.camera_automation_active() {
+                            light.enabled = true;
+                        }
+                        light.temperature_kelvin = Some(kelvin);
+                        state.commit_light(light)
+                    });
+                },
+            ),
+        });
     }
+}
+
+fn slider_range(range: LightValueRange) -> SliderRange<u16> {
+    SliderRange::new(range.min(), range.max()).step(f32::from(range.step()))
+}
+
+/// Where the brightness thumb rests for the saved percentage.
+fn brightness_native(range: LightValueRange, settings: LightSettings) -> u16 {
+    range
+        .native_for_percent(settings.brightness_percent)
+        .unwrap_or_else(|| range.min())
+}
+
+/// Where the temperature thumb rests: the saved value on the range's grid, or
+/// the middle of the range while none is saved.
+fn temperature_native(range: LightValueRange, settings: LightSettings) -> u16 {
+    settings
+        .temperature_kelvin
+        .map_or_else(|| midpoint(range), |kelvin| range.quantize(kelvin))
 }
 
 impl Render for LightPanel {
@@ -169,27 +148,11 @@ impl Render for LightPanel {
             cx,
         );
 
-        if settings.brightness_percent != self.last_brightness {
-            self.last_brightness = settings.brightness_percent;
-            if let (Some(range), Some(slider)) = (self.brightness_range, &self.brightness) {
-                let value = range
-                    .native_for_percent(settings.brightness_percent)
-                    .unwrap_or_else(|| range.min());
-                slider.update(cx, |slider, cx| {
-                    slider.set_value(f32::from(value), window, cx);
-                });
-            }
+        if let Some(LightSlider { range, slider }) = &self.brightness {
+            slider.sync(brightness_native(*range, settings), window, cx);
         }
-        if settings.temperature_kelvin != self.last_temperature {
-            self.last_temperature = settings.temperature_kelvin;
-            if let (Some(range), Some(slider)) = (self.temperature_range, &self.temperature) {
-                let value = settings
-                    .temperature_kelvin
-                    .map_or_else(|| midpoint(range), |kelvin| range.quantize(kelvin));
-                slider.update(cx, |slider, cx| {
-                    slider.set_value(f32::from(value), window, cx);
-                });
-            }
+        if let Some(LightSlider { range, slider }) = &self.temperature {
+            slider.sync(temperature_native(*range, settings), window, cx);
         }
 
         let device_name = record.as_ref().map_or_else(
@@ -200,8 +163,8 @@ impl Render for LightPanel {
         let effective_enabled = AppState::try_read(cx).is_some_and(AppState::light_enabled);
         let power = capabilities.is_some_and(|caps| caps.power);
 
-        let brightness = self.brightness_range.zip(self.brightness.as_ref());
-        let temperature = self.temperature_range.zip(self.temperature.as_ref());
+        let brightness = self.brightness.as_ref();
+        let temperature = self.temperature.as_ref();
         let status = AppState::try_read(cx).and_then(AppState::light_command_status);
 
         v_flex()
@@ -220,27 +183,21 @@ impl Render for LightPanel {
                 let panel = panel.child(camera_automation(settings, pal));
                 panel.child(div().h(px(1.)).w_full().bg(pal.border.opacity(0.55)))
             })
-            .when_some(brightness, |panel, (range, slider)| {
-                let value = range
-                    .native_for_percent(settings.brightness_percent)
-                    .unwrap_or_else(|| range.min());
+            .when_some(brightness, |panel, LightSlider { range, slider }| {
                 panel.child(control_well(
                     tr!("camera.brightness"),
-                    format_light_value(value, range.unit()),
-                    format_range_endpoints(range),
-                    Slider::new(slider).horizontal(),
+                    format_light_value(brightness_native(*range, settings), range.unit()),
+                    format_range_endpoints(*range),
+                    Slider::new(slider.slider()).horizontal(),
                     pal,
                 ))
             })
-            .when_some(temperature, |panel, (range, slider)| {
-                let value = settings
-                    .temperature_kelvin
-                    .map_or_else(|| midpoint(range), |kelvin| range.quantize(kelvin));
+            .when_some(temperature, |panel, LightSlider { range, slider }| {
                 panel.child(control_well(
                     tr!("lighting.colour_temperature"),
-                    format_light_value(value, range.unit()),
-                    format_range_endpoints(range),
-                    Slider::new(slider).horizontal(),
+                    format_light_value(temperature_native(*range, settings), range.unit()),
+                    format_range_endpoints(*range),
+                    Slider::new(slider.slider()).horizontal(),
                     pal,
                 ))
             })
@@ -449,15 +406,6 @@ fn format_light_value(value: u16, unit: LightValueUnit) -> String {
 
 fn midpoint(range: LightValueRange) -> u16 {
     range.quantize(range.min() + (range.max() - range.min()) / 2)
-}
-
-#[expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "the slider value is clamped to the u16 range before conversion"
-)]
-fn round_u16(raw: f32) -> u16 {
-    raw.clamp(0., f32::from(u16::MAX)).round() as u16
 }
 
 fn light_command_status(status: LightCommandStatus, pal: Palette) -> impl IntoElement {
