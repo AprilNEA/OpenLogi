@@ -196,16 +196,6 @@ impl PendingCaptureRestore {
         }
     }
 
-    /// Restore on the original standalone channel, where no registry
-    /// publication can supersede the session.
-    pub(crate) async fn restore_standalone(self, retired: &SharedChannel) -> CaptureSessionOutcome {
-        if self.restore_on(retired).await {
-            CaptureSessionOutcome::Restored
-        } else {
-            CaptureSessionOutcome::RestorePending(self)
-        }
-    }
-
     /// Permit a retry on the original channel after a normal teardown write
     /// failed while that publication was still current.
     pub(crate) fn allow_current_channel(mut self) -> Self {
@@ -237,18 +227,12 @@ impl PendingCaptureRestore {
 pub(crate) async fn rollback_capture_start(
     error: GestureError,
     pending: Option<PendingCaptureRestore>,
-    retired: &SharedChannel,
-    registry: Option<&ChannelRegistry>,
+    registry: &ChannelRegistry,
 ) -> CaptureSessionFailure {
     let Some(pending) = pending else {
         return CaptureSessionFailure::clean(error);
     };
-    let pending = pending.allow_current_channel();
-    let outcome = match registry {
-        Some(registry) => pending.retry(registry).await,
-        None => pending.restore_standalone(retired).await,
-    };
-    match outcome {
+    match pending.allow_current_channel().retry(registry).await {
         CaptureSessionOutcome::Restored => CaptureSessionFailure::clean(error),
         CaptureSessionOutcome::RestorePending(pending) => {
             CaptureSessionFailure::with_pending(error, pending)
@@ -260,38 +244,27 @@ pub(crate) async fn rollback_capture_start(
 pub(crate) async fn restore_after_stop(
     stop: CaptureStop,
     pending: Option<PendingCaptureRestore>,
-    retired: &SharedChannel,
-    registry: Option<&ChannelRegistry>,
+    registry: &ChannelRegistry,
 ) -> CaptureSessionOutcome {
     let Some(pending) = pending else {
         return CaptureSessionOutcome::Restored;
     };
     match stop {
-        CaptureStop::Shutdown => {
-            let pending = pending.allow_current_channel();
-            match registry {
-                Some(registry) => pending.retry(registry).await,
-                None => pending.restore_standalone(retired).await,
-            }
-        }
-        CaptureStop::ChannelChanged => match registry {
-            Some(registry) => pending.retry(registry).await,
-            None => CaptureSessionOutcome::RestorePending(pending),
-        },
+        CaptureStop::Shutdown => pending.allow_current_channel().retry(registry).await,
+        CaptureStop::ChannelChanged => pending.retry(registry).await,
     }
 }
 
 /// Re-check inventory at shutdown so a simultaneously ready stop request does
 /// not win over publication replacement and write through a retired channel.
 pub(crate) fn stop_for_current_publication(
-    registry: Option<&ChannelRegistry>,
+    registry: &ChannelRegistry,
     retired: &SharedChannel,
 ) -> CaptureStop {
-    if registry.is_some_and(|registry| !registry.is_current(retired)) {
-        CaptureStop::ChannelChanged
-    } else {
-        // A standalone session has no publication that can supersede it.
+    if registry.is_current(retired) {
         CaptureStop::Shutdown
+    } else {
+        CaptureStop::ChannelChanged
     }
 }
 
@@ -299,12 +272,9 @@ pub(crate) fn stop_for_current_publication(
 /// armed. The returned reason never carries a cached replacement across an
 /// await; restoration performs a fresh registry lookup instead.
 pub(crate) async fn wait_for_channel_change(
-    registry: Option<&ChannelRegistry>,
+    registry: &ChannelRegistry,
     retired: &SharedChannel,
 ) -> CaptureStop {
-    let Some(registry) = registry else {
-        return std::future::pending().await;
-    };
     let mut changes = registry.subscribe();
     loop {
         if !registry.is_current(retired) {
@@ -312,8 +282,8 @@ pub(crate) async fn wait_for_channel_change(
         }
         if changes.changed().await.is_err() {
             // The borrowed registry owns the sender, so this is unreachable;
-            // preserve standalone-like pending semantics if that invariant is
-            // ever changed rather than inventing a channel transition.
+            // stay pending if that invariant ever changes rather than
+            // inventing a channel transition.
             return std::future::pending().await;
         }
     }

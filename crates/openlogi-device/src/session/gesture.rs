@@ -3,11 +3,12 @@
 //! haptic panel), and the thumb wheel over HID++ and turn their events
 //! into [`CapturedInput`] the GUI can dispatch.
 //!
-//! [`run_capture_session`] holds a single HID++ channel open for one device,
-//! enables diversion on whichever of those controls it exposes, registers one
-//! message listener, and restores every control's default mapping on shutdown.
-//! Using one channel matters: a second channel to the same device would split
-//! its input-report stream, so all captured controls share this session.
+//! [`run_capture_session_with_registry_spec`] runs on the HID++ channel
+//! inventory already holds open for one device, enables diversion on whichever
+//! of those controls it exposes, registers one message listener, and restores
+//! every control's default mapping on shutdown. Using that one channel
+//! matters: a second channel to the same device would split its input-report
+//! stream, so all captured controls share this session.
 //!
 //! The session is transport-only — it has no opinion on what an input *does*.
 //! The GUI maps each [`CapturedInput`] to the user's bound action and dispatches
@@ -35,8 +36,8 @@ use openlogi_core::binding::{ButtonId, GestureDirection, SwipeAccumulator};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
-use crate::backend::{BackendError, HidBackend};
-use crate::channel::route::{DeviceRoute, open_route_channel};
+use crate::backend::BackendError;
+use crate::channel::route::DeviceRoute;
 use crate::{ChannelRegistry, DeviceIoGate, SharedChannel};
 
 use liveness::{CaptureLiveness, ChannelActivity, LivenessDecision, PingOutcome};
@@ -224,39 +225,16 @@ pub struct CaptureSpec {
 /// CID, so this is the binding's only delivery path). The DPI/ModeShift
 /// capture and the channel-reuse slot are independent of this.
 ///
-/// Opens and holds one HID++ channel, diverts whichever of those controls the
-/// device exposes, and listens. Returns once `shutdown` fires (or its sender is
+/// Runs on the inventory-owned channel `registry` currently publishes for
+/// `route`: sharing that connection avoids splitting HID++ replies and input
+/// reports across two readers, and a registry miss
+/// ([`GestureError::DeviceNotFound`]) is retried by the caller after a later
+/// inventory publication. Diverts whichever of those controls the device
+/// exposes, and listens. Returns once `shutdown` fires (or its sender is
 /// dropped). A normal stop restores every diverted control before returning;
 /// transport replacement or loss may return
 /// [`CaptureSessionOutcome::RestorePending`] for the caller to retry on the
 /// current inventory channel.
-pub async fn run_capture_session(
-    backend: &dyn HidBackend,
-    route: DeviceRoute,
-    spec: CaptureSpec,
-    sink: mpsc::UnboundedSender<CapturedInput>,
-    shutdown: oneshot::Receiver<()>,
-    channel_slot: CaptureChannel,
-    device_io: DeviceIoGate,
-) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
-    if !device_io.allows_io() {
-        return Err(GestureError::Hid(BackendError::Backend(
-            "host device I/O is suspended".into(),
-        ))
-        .into());
-    }
-    let chan = open_route_channel(backend, &route)
-        .await
-        .map_err(GestureError::from)?
-        .ok_or(GestureError::DeviceNotFound)?;
-    let shared = SharedChannel::new(chan, route.clone());
-    run_capture_session_on(shared, spec, sink, shutdown, channel_slot, None, device_io).await
-}
-
-/// Capture through the inventory-owned channel currently published for
-/// `route`. Sharing that connection avoids splitting HID++ replies and input
-/// reports across two readers; a registry miss is retried by the caller after
-/// a later inventory publication.
 pub async fn run_capture_session_with_registry_spec(
     route: DeviceRoute,
     spec: CaptureSpec,
@@ -275,7 +253,7 @@ pub async fn run_capture_session_with_registry_spec(
         sink,
         shutdown,
         channel_slot,
-        Some(registry),
+        registry,
         device_io,
     )
     .await
@@ -287,7 +265,7 @@ async fn run_capture_session_on(
     sink: mpsc::UnboundedSender<CapturedInput>,
     shutdown: oneshot::Receiver<()>,
     channel_slot: CaptureChannel,
-    registry: Option<&ChannelRegistry>,
+    registry: &ChannelRegistry,
     device_io: DeviceIoGate,
 ) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
     if !device_io.allows_io() {
@@ -421,14 +399,10 @@ async fn finish_capture<T>(
     stop: CaptureStop,
     armed: ArmedControls,
     retired: SharedChannel,
-    registry: Option<&ChannelRegistry>,
+    registry: &ChannelRegistry,
 ) -> CaptureSessionOutcome {
     let pending = armed.into_pending(&retired);
-    drop_listener_after(
-        listener,
-        restore_after_stop(stop, pending, &retired, registry),
-    )
-    .await
+    drop_listener_after(listener, restore_after_stop(stop, pending, registry)).await
 }
 
 /// The single input one diverted thumb-wheel report stands for, if any.
@@ -590,7 +564,7 @@ struct CaptureMonitor<'a> {
     armed: &'a ArmedControls,
     accum: &'a Arc<Mutex<CaptureAccum>>,
     device_index: u8,
-    registry: Option<&'a ChannelRegistry>,
+    registry: &'a ChannelRegistry,
     shared: &'a SharedChannel,
     activity: &'a ChannelActivity,
 }
@@ -713,7 +687,7 @@ async fn arm_controls(
     slot: u8,
     spec: &CaptureSpec,
     shared: &SharedChannel,
-    registry: Option<&ChannelRegistry>,
+    registry: &ChannelRegistry,
 ) -> Result<ArmedControls, CaptureSessionFailure> {
     let device = Device::new(Arc::clone(chan), slot)
         .await
@@ -721,7 +695,7 @@ async fn arm_controls(
     let mut armed = ArmedControls::default();
     if let Err(error) = arm_controls_into(&device, chan, slot, spec, &mut armed).await {
         let pending = armed.into_pending(shared);
-        return Err(rollback_capture_start(error, pending, shared, registry).await);
+        return Err(rollback_capture_start(error, pending, registry).await);
     }
     if armed.gesture_cids.is_empty()
         && armed.gesture_button_cids.is_empty()

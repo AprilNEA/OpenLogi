@@ -207,9 +207,15 @@ async fn failed_setup_rollback_returns_its_restore_capability() {
         vendor_id: 0x046d,
         product_id: 0xb35b,
     };
-    let (raw, _) =
+    let (raw, handle) =
         ScriptedRawHidChannel::with_failing_writes(|request| Some(request.to_vec()), |_| true);
     let channel = scripted_channel(raw).await;
+    let registry = ChannelRegistry::default();
+    registry.replace_node(
+        NodeId::from("mouse-node".to_owned()),
+        [route.clone()],
+        channel.clone(),
+    );
     let shared = SharedChannel::new(channel, route.clone());
     let pending = PendingCaptureRestore::new(
         &shared,
@@ -226,12 +232,15 @@ async fn failed_setup_rollback_returns_its_restore_capability() {
     let failure = rollback_capture_start(
         GestureError::Hidpp("diversion failed".into()),
         pending,
-        &shared,
-        None,
+        &registry,
     )
     .await;
     let (_, pending) = failure.into_parts();
 
+    assert!(
+        !handle.written_reports().is_empty(),
+        "rollback must attempt the compensating write on the current publication"
+    );
     assert!(
         pending.is_some(),
         "a failed compensating write must not discard firmware ownership"
@@ -294,11 +303,11 @@ async fn channel_change_takes_teardown_precedence_over_ready_shutdown() {
     // explicit shutdown branch re-checks the publication, so both preserve the
     // typed replacement teardown rather than restoring through `retired`.
     assert!(matches!(
-        stop_for_current_publication(Some(&registry), &retired),
+        stop_for_current_publication(&registry, &retired),
         CaptureStop::ChannelChanged
     ));
     assert!(matches!(
-        wait_for_channel_change(Some(&registry), &retired).await,
+        wait_for_channel_change(&registry, &retired).await,
         CaptureStop::ChannelChanged
     ));
 }

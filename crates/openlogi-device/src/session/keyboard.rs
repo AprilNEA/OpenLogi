@@ -2,11 +2,12 @@
 //! HID++ `0x1b04` and turn their physical edges into [`CapturedInput`] the agent can
 //! dispatch.
 //!
-//! [`run_keyboard_capture_session`] is the keyboard counterpart of
-//! [`crate::session::gesture::run_capture_session`]: one open channel, diversion armed
-//! on exactly the controls the caller asks for (an unbound key is never
-//! diverted, so it keeps its native firmware function), one message listener,
-//! and every diverted control handed back to the firmware on shutdown.
+//! [`run_keyboard_capture_session_with_registry`] is the keyboard counterpart
+//! of [`crate::session::gesture::run_capture_session_with_registry_spec`]: one
+//! open channel, diversion armed on exactly the controls the caller asks for
+//! (an unbound key is never diverted, so it keeps its native firmware
+//! function), one message listener, and every diverted control handed back to
+//! the firmware on shutdown.
 //!
 //! Diversion works on the key's *control* — the printed media/shortcut
 //! function — so it fires when Fn-lock is off (or via Fn+key when it is on).
@@ -37,8 +38,8 @@ use super::gesture::{
     CaptureChannel, CaptureSessionFailure, CaptureSessionOutcome, CapturedInput, GestureError,
     PendingCaptureRestore, enumerate_controls,
 };
-use crate::backend::{BackendError, HidBackend};
-use crate::channel::route::{DeviceRoute, open_route_channel};
+use crate::backend::BackendError;
+use crate::channel::route::DeviceRoute;
 use crate::{ChannelRegistry, DeviceIoGate, SharedChannel};
 
 use crate::reprog_controls::{self, RawControlEvent, ReprogControlsV4};
@@ -67,40 +68,11 @@ pub const KEYBOARD_KEY_CIDS: [(u16, ButtonId); 9] = [
 /// the caller passes only the keys that carry a real binding. Controls the
 /// device doesn't expose (or can't divert) are skipped with a debug log, so a
 /// partially-supported keyboard degrades per key rather than failing whole.
-pub async fn run_keyboard_capture_session(
-    backend: &dyn HidBackend,
-    route: DeviceRoute,
-    wanted: BTreeMap<u16, ButtonId>,
-    sink: mpsc::UnboundedSender<CapturedInput>,
-    shutdown: oneshot::Receiver<()>,
-    channel_slot: CaptureChannel,
-    device_io: DeviceIoGate,
-) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
-    if !device_io.allows_io() {
-        return Err(device_io_suspended().into());
-    }
-    let chan = open_route_channel(backend, &route)
-        .await
-        .map_err(GestureError::from)?
-        .ok_or(GestureError::DeviceNotFound)?;
-    let shared = SharedChannel::new(chan, route.clone());
-    run_keyboard_capture_session_on(
-        shared,
-        wanted,
-        sink,
-        shutdown,
-        channel_slot,
-        None,
-        device_io,
-    )
-    .await
-}
-
-/// Run keyboard capture on the exact channel currently published by `registry`.
 ///
-/// A registry miss returns [`GestureError::DeviceNotFound`] without falling
-/// back to route enumeration/opening; the agent watcher retries after a later
-/// inventory publication.
+/// Runs on the exact channel currently published by `registry`. A registry
+/// miss returns [`GestureError::DeviceNotFound`] without falling back to route
+/// enumeration/opening; the agent watcher retries after a later inventory
+/// publication.
 pub async fn run_keyboard_capture_session_with_registry(
     route: DeviceRoute,
     wanted: BTreeMap<u16, ButtonId>,
@@ -119,7 +91,7 @@ pub async fn run_keyboard_capture_session_with_registry(
         sink,
         shutdown,
         channel_slot,
-        Some(registry),
+        registry,
         device_io,
     )
     .await
@@ -131,7 +103,7 @@ async fn run_keyboard_capture_session_on(
     sink: mpsc::UnboundedSender<CapturedInput>,
     shutdown: oneshot::Receiver<()>,
     channel_slot: CaptureChannel,
-    registry: Option<&ChannelRegistry>,
+    registry: &ChannelRegistry,
     device_io: DeviceIoGate,
 ) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
     if !device_io.allows_io() {
@@ -158,7 +130,7 @@ async fn run_keyboard_capture_session_on(
     };
     if let Err(error) = arm_keys(&controls, &wanted, &mut armed).await {
         let pending = armed.into_pending(&shared);
-        return Err(rollback_capture_start(error, pending, &shared, registry).await);
+        return Err(rollback_capture_start(error, pending, registry).await);
     }
 
     // Physical press state per CID. Behind a `Mutex` because the channel's
@@ -242,11 +214,7 @@ async fn run_keyboard_capture_session_on(
     // drains this listener's forwarding task before publishing ordered Done,
     // so this session remains the sole owner of every input captured while
     // its controls could still be diverted.
-    let outcome = drop_listener_after(
-        listener,
-        restore_after_stop(stop, pending, &shared, registry),
-    )
-    .await;
+    let outcome = drop_listener_after(listener, restore_after_stop(stop, pending, registry)).await;
     debug!(index = device_index, "keyboard key capture stopped");
     Ok(outcome)
 }
@@ -254,7 +222,7 @@ async fn run_keyboard_capture_session_on(
 struct KeyboardMonitor<'a> {
     armed: &'a ArmedKeys,
     device_index: u8,
-    registry: Option<&'a ChannelRegistry>,
+    registry: &'a ChannelRegistry,
     shared: &'a SharedChannel,
 }
 

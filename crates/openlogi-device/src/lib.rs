@@ -54,15 +54,13 @@ pub use pairing::{
 };
 pub use session::gesture::{
     CaptureChannel, CaptureSessionFailure, CaptureSessionOutcome, CapturedInput, GestureError,
-    PendingCaptureRestore, run_capture_session, run_capture_session_with_registry_spec,
+    PendingCaptureRestore, run_capture_session_with_registry_spec,
 };
 pub use session::host_switch::{
     HostSwitchError, HostSwitchRestoreOutcome, HostSwitchSessionFailure, HostSwitchSessionOutcome,
     HostSwitchStopReason, PendingHostSwitchRestore, run_host_switch_session, switch_linked_hosts,
 };
-pub use session::keyboard::{
-    KEYBOARD_KEY_CIDS, run_keyboard_capture_session, run_keyboard_capture_session_with_registry,
-};
+pub use session::keyboard::{KEYBOARD_KEY_CIDS, run_keyboard_capture_session_with_registry};
 pub use write::{
     Dpi, DpiCapabilities, DpiInfo, FeatureEntry, FirmwareEntity, FirmwareEntityInfo,
     HapticWaveform, HidppFeatureErrorKind, HidppOperation, LITRA_BEAM_PRODUCT_ID,
