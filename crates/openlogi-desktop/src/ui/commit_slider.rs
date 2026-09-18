@@ -182,6 +182,7 @@ impl<T: Copy + PartialEq> Thumb<T> {
 /// A slider that commits once, on release.
 pub(crate) struct CommitSlider<T> {
     state: Entity<SliderState>,
+    range: SliderRange<T>,
     thumb: Rc<Cell<Thumb<T>>>,
     _subscription: Subscription,
 }
@@ -230,6 +231,7 @@ impl<T: SliderUnit> CommitSlider<T> {
         });
         Self {
             state,
+            range,
             thumb,
             _subscription: subscription,
         }
@@ -238,6 +240,11 @@ impl<T: SliderUnit> CommitSlider<T> {
     /// The state to render a `Slider` from.
     pub(crate) fn slider(&self) -> &Entity<SliderState> {
         &self.state
+    }
+
+    /// The value under the thumb right now.
+    pub(crate) fn value(&self, cx: &App) -> T {
+        self.range.value_at(self.state.read(cx).value().start())
     }
 
     /// What to show for this slider: the value being dragged, else `committed`.
@@ -258,6 +265,22 @@ impl<T: SliderUnit> CommitSlider<T> {
         }
     }
 
+    /// [`Self::sync`] for a slider whose stops are coarser than its step: the
+    /// thumb only moves when it resolves, through `snap`, to a value other
+    /// than `committed`, so a thumb dropped between two stops is not yanked
+    /// back every frame.
+    pub(crate) fn sync_snapped(
+        &self,
+        committed: T,
+        snap: impl Fn(T) -> T,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        if snap(self.value(cx)) != committed {
+            self.seat(committed, window, cx);
+        }
+    }
+
     /// Put the thumb on `value`, whatever it was doing.
     pub(crate) fn seat(&self, value: T, window: &mut Window, cx: &mut App) {
         self.thumb.set(Thumb::seated_on(value));
@@ -275,7 +298,7 @@ mod tests {
     use gpui::{Context, Empty, IntoElement, Render, TestAppContext, Window};
     use gpui_component::slider::SliderEvent;
 
-    use super::{CommitSlider, SliderRange, SliderUnit as _, Thumb};
+    use super::{CommitSlider, SliderRange, Thumb};
 
     /// `SliderState` panics when its bounds cross, even between two builder
     /// calls. Every shape a device has reported — and the ones it should not —
@@ -407,9 +430,35 @@ mod tests {
         });
 
         owner.read_with(cx, |owner, cx| {
-            let raw = owner.slider.slider().read(cx).value().start();
-            assert_eq!(u8::from_slider(raw), 40);
+            assert_eq!(owner.slider.value(cx), 40);
             assert_eq!(owner.slider.seated(), 40);
         });
+    }
+
+    /// A device's supported values can be coarser than the slider's step. A
+    /// thumb dropped between two of them already shows the committed one and
+    /// must stay where the user left it.
+    #[gpui::test]
+    fn a_thumb_between_two_stops_only_moves_when_the_committed_stop_changes(
+        cx: &mut TestAppContext,
+    ) {
+        let (owner, cx) = cx.add_window_view(|_, cx| Owner::new(cx));
+        let nearest_ten = |value: u8| (value + 5) / 10 * 10;
+        let sync = |committed, cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                owner.update(cx, |owner, cx| {
+                    owner
+                        .slider
+                        .sync_snapped(committed, nearest_ten, window, cx);
+                });
+            });
+            owner.read_with(cx, |owner, cx| owner.slider.value(cx))
+        };
+        cx.update(|window, cx| {
+            owner.update(cx, |owner, cx| owner.slider.seat(44, window, cx));
+        });
+
+        assert_eq!(sync(40, cx), 44, "44 already resolves to 40");
+        assert_eq!(sync(70, cx), 70);
     }
 }

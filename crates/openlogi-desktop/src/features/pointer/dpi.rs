@@ -6,30 +6,37 @@
 //! exposes exact device-supported values once the list is known.
 
 use gpui::{
-    AnyElement, AppContext as _, Context, Entity, IntoElement, ParentElement, Render, Styled,
-    Subscription, Window, div, px,
+    AnyElement, Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, Window,
+    div, px,
 };
 use gpui_component::{
     Icon, IconName, Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    slider::{Slider, SliderEvent, SliderState},
+    slider::{Slider, SliderState},
     v_flex,
 };
 use openlogi_core::hid::{Dpi, DpiCapabilities};
 use tracing::debug;
 
 use crate::state::{AppState, DeviceKey, DpiStatus, StateEvent};
+use crate::ui::commit_slider::{CommitSlider, SliderRange};
 use crate::ui::components::PresetChip;
 use crate::ui::status::{retry_line, status_line};
 use crate::ui::theme::{self, Palette, Typography as _};
 
 pub struct DpiPanel {
-    slider_state: Option<Entity<SliderState>>,
-    slider_sub: Option<Subscription>,
-    slider_key: Option<String>,
-    slider_shape: Option<SliderShape>,
+    /// Rebuilt whenever the selected device or its reported range changes,
+    /// because a slider's range is fixed when it is built.
+    slider: Option<DpiSlider>,
     _state_obs: Subscription,
+}
+
+/// The slider together with what it was built for.
+struct DpiSlider {
+    key: String,
+    shape: SliderShape,
+    slider: CommitSlider<Dpi>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,10 +67,7 @@ impl DpiPanel {
             AppState::repaint_on(cx, |event| matches!(event, StateEvent::DpiChanged(_)));
 
         Self {
-            slider_state: None,
-            slider_sub: None,
-            slider_key: None,
-            slider_shape: None,
+            slider: None,
             _state_obs: state_obs,
         }
     }
@@ -81,70 +85,54 @@ impl DpiPanel {
             max: capabilities.max(),
             step: capabilities.step_hint(),
         };
-        if self.slider_key.as_deref() == Some(key) && self.slider_shape == Some(shape) {
-            if let Some(slider_state) = &self.slider_state {
-                let target = capabilities.nearest(dpi);
-                slider_state.update(cx, |state, cx| {
-                    // Only re-seat the thumb when `dpi` resolves to a *different
-                    // supported value* than the thumb currently rests on.
-                    // Comparing in the device's supported space (not raw slider
-                    // units) keeps a drag that lands between supported stops —
-                    // possible because the slider step is uniform but the
-                    // supported set may not be — from yanking the thumb back
-                    // every frame.
-                    let thumb = capabilities.nearest(Dpi::from_rounded(state.value().start()));
-                    if thumb != target {
-                        state.set_value(f32::from(target), window, cx);
-                    }
-                });
-            }
+        if let Some(current) = self
+            .slider
+            .as_ref()
+            .filter(|current| current.key == key && current.shape == shape)
+        {
+            // Only re-seat the thumb when `dpi` resolves to a *different
+            // supported value* than the thumb currently rests on. Comparing in
+            // the device's supported space (not raw slider units) keeps a drag
+            // that lands between supported stops — possible because the slider
+            // step is uniform but the supported set may not be — from yanking
+            // the thumb back every frame.
+            current.slider.sync_snapped(
+                capabilities.nearest(dpi),
+                |thumb| capabilities.nearest(thumb),
+                window,
+                cx,
+            );
             return;
         }
 
-        let snapped = capabilities.nearest(dpi);
-        // Order matters: `SliderState` defaults to max=100, and `.min(N)`
-        // clamps the value against the current max. Setting max first keeps
-        // the intermediate state coherent for high-DPI devices.
-        let slider_state = cx.new(|_| {
-            SliderState::new()
-                .max(shape.max.into())
-                .min(shape.min.into())
-                .step(shape.step.into())
-                .default_value(f32::from(snapped))
+        let slider = CommitSlider::previewing(
+            SliderRange::new(shape.min, shape.max).step(shape.step.into()),
+            capabilities.nearest(dpi),
+            cx,
+            // Dragging drives the in-process state so the numeric label tracks
+            // the thumb. The HID write happens once on release to keep us from
+            // spamming the device with intermediate values.
+            |_, dpi, cx| {
+                let dpi =
+                    AppState::try_read(cx).map_or(dpi, |state| state.normalize_active_dpi(dpi));
+                debug!(%dpi, "slider change → AppState.dpi");
+                AppState::apply(cx, |state| state.set_dpi_preview(dpi));
+            },
+            |_, dpi, cx| {
+                let dpi =
+                    AppState::try_read(cx).map_or(dpi, |state| state.normalize_active_dpi(dpi));
+                // `commit_dpi` resolves the target at fire-time, so
+                // gallery-driven device switches route the write to the
+                // now-current device, not whichever was active when this
+                // slider was built.
+                AppState::apply(cx, |state| state.commit_dpi(dpi));
+            },
+        );
+        self.slider = Some(DpiSlider {
+            key: key.to_string(),
+            shape,
+            slider,
         });
-
-        let slider_sub =
-            cx.subscribe(
-                &slider_state,
-                |_panel, _slider, event: &SliderEvent, cx| match event {
-                    // Continuous Change drives the in-process state so the numeric
-                    // label tracks the drag. The HID write happens once on Release
-                    // to keep us from spamming the device with intermediate values.
-                    SliderEvent::Change(value) => {
-                        let dpi = Dpi::from_rounded(value.start());
-                        let dpi = AppState::try_read(cx)
-                            .map_or(dpi, |state| state.normalize_active_dpi(dpi));
-                        debug!(%dpi, "slider change → AppState.dpi");
-                        AppState::apply(cx, |state| state.set_dpi_preview(dpi));
-                        cx.notify();
-                    }
-                    SliderEvent::Release(value) => {
-                        let dpi = Dpi::from_rounded(value.start());
-                        let dpi = AppState::try_read(cx)
-                            .map_or(dpi, |state| state.normalize_active_dpi(dpi));
-                        // `commit_dpi` resolves the target at fire-time, so
-                        // gallery-driven device switches route the write to the
-                        // now-current device, not whichever was active when this
-                        // slider entity was constructed.
-                        AppState::apply(cx, |state| state.commit_dpi(dpi));
-                    }
-                },
-            );
-
-        self.slider_state = Some(slider_state);
-        self.slider_sub = Some(slider_sub);
-        self.slider_key = Some(key.to_string());
-        self.slider_shape = Some(shape);
     }
 }
 
@@ -162,10 +150,7 @@ impl Render for DpiPanel {
                 cx,
             );
         } else {
-            self.slider_state = None;
-            self.slider_sub = None;
-            self.slider_key = None;
-            self.slider_shape = None;
+            self.slider = None;
         }
 
         // Highlight at most one chip: when several presets snap to the same
@@ -187,7 +172,7 @@ impl Render for DpiPanel {
         let range_label = dpi_range_label(&snapshot.status, snapshot.reachable);
         let slider = slider_element(
             &snapshot.status,
-            self.slider_state.as_ref(),
+            self.slider.as_ref().map(|current| current.slider.slider()),
             snapshot.reachable,
             snapshot.device_key.clone(),
             pal,
