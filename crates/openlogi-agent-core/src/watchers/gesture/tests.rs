@@ -4,7 +4,7 @@ use super::*;
 use crate::watchers::retry::wait_for_deadline;
 use openlogi_core::binding::{Action, Binding, ButtonId, GestureDirection};
 use openlogi_core::config::{ThumbwheelSensitivity, VerticalScrollSensitivity};
-use openlogi_hid::DeviceRoute;
+use openlogi_hid::{CaptureChannelSlot, DeviceRoute};
 
 fn route() -> DeviceRoute {
     DeviceRoute::Direct {
@@ -160,17 +160,15 @@ async fn recovery_manager_waits_for_control_events_and_shutdown_between_retries(
         let access = ReceiverAccess::default();
         let (_signal, device_io) = openlogi_hid::device_io_channel();
         let (ring, _ring_rx) = mpsc::unbounded_channel();
-        let mut actions = crate::runtime::ActionRuntime::new(
-            Arc::default(),
-            crate::hardware::DeviceAccess {
-                channel: capture.clone(),
-                registry: registry.clone(),
-                receiver_access: access.clone(),
-                device_io: device_io.clone(),
-            },
-            ring,
-        )
-        .unwrap();
+        let device_access = DeviceAccess {
+            channel: capture,
+            registry,
+            receiver_access: access.clone(),
+            device_io,
+        };
+        let mut actions =
+            crate::runtime::ActionRuntime::new(Arc::default(), device_access.clone(), ring)
+                .unwrap();
         let mut scroll = ScrollRuntime::spawn(Arc::new(ScrollPreferences::new(
             false,
             VerticalScrollSensitivity::default(),
@@ -179,11 +177,8 @@ async fn recovery_manager_waits_for_control_events_and_shutdown_between_retries(
         let (shutdown_tx, shutdown) = oneshot::channel();
         let mut manager = std::pin::pin!(manage(GestureManagerContext {
             capture_plans,
-            capture_channel: capture,
             receiver_requests: access.subscribe_requests(),
-            receiver_access: access,
-            channel_registry: registry,
-            device_io,
+            access: device_access,
             outputs: GestureOutputs::new(actions.dispatcher(), scroll.input(), Arc::default()),
             shutdown,
         }));

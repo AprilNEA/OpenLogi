@@ -28,8 +28,7 @@ use std::sync::Arc;
 use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_core::scroll::ScrollDelta;
 use openlogi_hid::{
-    CaptureChannelSlot, CaptureHost, CaptureSessionOutcome, CapturedInput, DeviceIoGate,
-    PendingCaptureRestore, run_capture_session,
+    CaptureHost, CaptureSessionOutcome, CapturedInput, PendingCaptureRestore, run_capture_session,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
@@ -41,6 +40,7 @@ use super::capture_session::{CaptureRecovery, CaptureSession, CaptureSlot, Recon
 use super::retry::RETRY_DELAY;
 use super::shutdown::{ManagerCompletion, WatcherHandle};
 use crate::capture_plan::{CaptureTarget, DeviceCapturePlan, DispatchPlan, SharedCapturePlans};
+use crate::hardware::DeviceAccess;
 use crate::receiver_access::{ReceiverAccess, ReceiverRequestState, SessionReceiverLease};
 use crate::runtime::hook::SharedHookMaps;
 use crate::runtime::scroll::ScrollInputHandle;
@@ -89,22 +89,16 @@ impl GestureOutputs {
 #[must_use]
 pub fn spawn(
     capture_plans: &SharedCapturePlans,
-    capture_channel: CaptureChannelSlot,
-    receiver_access: ReceiverAccess,
-    channel_registry: openlogi_hid::ChannelRegistry,
-    device_io: DeviceIoGate,
+    access: DeviceAccess,
     outputs: GestureOutputs,
 ) -> WatcherHandle {
     let plans = capture_plans.clone();
-    let receiver_requests = receiver_access.subscribe_requests();
+    let receiver_requests = access.receiver_access.subscribe_requests();
     WatcherHandle::spawn("openlogi-gesture-watcher", move |shutdown| {
         manage(GestureManagerContext {
             capture_plans: plans,
-            capture_channel,
-            receiver_access,
+            access,
             receiver_requests,
-            channel_registry,
-            device_io,
             outputs,
             shutdown,
         })
@@ -140,18 +134,13 @@ struct GestureManagerState {
 #[derive(Clone)]
 struct SessionChannels {
     events: mpsc::UnboundedSender<SessionEvent>,
-    capture: CaptureChannelSlot,
-    registry: openlogi_hid::ChannelRegistry,
-    device_io: DeviceIoGate,
+    access: DeviceAccess,
 }
 
 struct GestureManagerContext {
     capture_plans: watch::Receiver<Arc<Vec<DeviceCapturePlan>>>,
-    capture_channel: CaptureChannelSlot,
-    receiver_access: ReceiverAccess,
+    access: DeviceAccess,
     receiver_requests: watch::Receiver<ReceiverRequestState>,
-    channel_registry: openlogi_hid::ChannelRegistry,
-    device_io: DeviceIoGate,
     outputs: GestureOutputs,
     shutdown: oneshot::Receiver<()>,
 }
@@ -346,9 +335,9 @@ impl GestureManagerState {
         requests: ReceiverRequestState,
         device_io_allowed: bool,
         published: &Arc<Vec<DeviceCapturePlan>>,
-        receiver_access: &ReceiverAccess,
         channels: &SessionChannels,
     ) {
+        let receiver_access = &channels.access.receiver_access;
         // Keep existing passive listeners and their firmware ownership intact
         // while the display/session is asleep. Retiring them here would issue
         // restoration writes during DarkWake; retries and successors wait for
@@ -398,7 +387,7 @@ impl GestureManagerState {
             None
         };
         if restore_lease.is_some() {
-            retry_pending_restores(&mut self.slots, &channels.registry, now).await;
+            retry_pending_restores(&mut self.slots, &channels.access.registry, now).await;
         }
 
         for plan in wanted {
@@ -502,7 +491,6 @@ impl GestureManagerState {
 async fn drain_for_shutdown(
     state: &mut GestureManagerState,
     event_rx: &mut mpsc::UnboundedReceiver<SessionEvent>,
-    receiver_access: &ReceiverAccess,
     receiver_requests: &watch::Receiver<ReceiverRequestState>,
     capture_plans: &watch::Receiver<Arc<Vec<DeviceCapturePlan>>>,
     channels: &SessionChannels,
@@ -520,7 +508,7 @@ async fn drain_for_shutdown(
         };
         state.handle_session_event(
             event,
-            channels.device_io.allows_io(),
+            channels.access.device_io.allows_io(),
             receiver_requests,
             capture_plans,
         );
@@ -530,7 +518,7 @@ async fn drain_for_shutdown(
     if state.has_pending_restores() {
         warn!("capture watcher is waiting for pending firmware restoration before stopping");
     }
-    let mut device_io = channels.device_io.clone();
+    let mut device_io = channels.access.device_io.clone();
     while state.has_pending_restores() {
         if !device_io.allows_io() && !device_io.wait_until_allowed().await {
             // A closed suspended gate cannot prove firmware is native. The
@@ -538,8 +526,11 @@ async fn drain_for_shutdown(
             // deliberately remains here rather than losing these tokens.
             std::future::pending::<()>().await;
         }
-        if let Some(_lease) = acquire_session_lease(receiver_access, &mut state.lease) {
-            retry_pending_restores(&mut state.slots, &channels.registry, Instant::now()).await;
+        if let Some(_lease) =
+            acquire_session_lease(&channels.access.receiver_access, &mut state.lease)
+        {
+            retry_pending_restores(&mut state.slots, &channels.access.registry, Instant::now())
+                .await;
         }
         if state.has_pending_restores() {
             tokio::time::sleep(RETRY_DELAY).await;
@@ -552,7 +543,6 @@ async fn drain_for_shutdown(
 /// receiver lease shared by every session.
 struct GestureManager {
     state: GestureManagerState,
-    receiver_access: ReceiverAccess,
     channels: SessionChannels,
 }
 
@@ -562,13 +552,7 @@ impl CaptureManager for GestureManager {
 
     async fn reconcile(&mut self, requests: ReceiverRequestState, published: &Self::Published) {
         self.state
-            .reconcile(
-                requests,
-                true,
-                published,
-                &self.receiver_access,
-                &self.channels,
-            )
+            .reconcile(requests, true, published, &self.channels)
             .await;
     }
 
@@ -604,7 +588,6 @@ impl CaptureManager for GestureManager {
         drain_for_shutdown(
             &mut self.state,
             events,
-            &self.receiver_access,
             receiver_requests,
             published,
             &self.channels,
@@ -619,16 +602,14 @@ impl CaptureManager for GestureManager {
 async fn manage(context: GestureManagerContext) -> ManagerCompletion {
     let GestureManagerContext {
         capture_plans,
-        capture_channel,
-        receiver_access,
+        access,
         receiver_requests,
-        channel_registry,
-        device_io,
         outputs,
         shutdown,
     } = context;
     let (events, event_rx) = mpsc::unbounded_channel::<SessionEvent>();
-    let registry_changes = channel_registry.subscribe();
+    let registry_changes = access.registry.subscribe();
+    let device_io = access.device_io.clone();
     // Capture sessions run as detached tasks, so an unexpected exit (a transient
     // HID++ read error, a sleep-wake glitch, brief radio loss) would otherwise go
     // unnoticed. Each session reports its completion here, tagged with its device
@@ -636,16 +617,10 @@ async fn manage(context: GestureManagerContext) -> ManagerCompletion {
     // retry deadline, a deliberately stopped one immediately frees its key for the
     // replacement once its teardown has drained, and stale completions are
     // ignored by the shared capture-session lifecycle.
-    let channels = SessionChannels {
-        events,
-        capture: capture_channel,
-        registry: channel_registry,
-        device_io: device_io.clone(),
-    };
+    let channels = SessionChannels { events, access };
     capture_manager::run(
         GestureManager {
             state: GestureManagerState::new(outputs),
-            receiver_access,
             channels,
         },
         ManagerInputs {
@@ -687,9 +662,9 @@ fn spawn_session(
     let done_key = physical_key;
     let session_route = target.route.clone();
     let session_spec = target.spec.clone();
-    let slot = Arc::clone(&channels.capture);
-    let registry = channels.registry.clone();
-    let device_io = channels.device_io.clone();
+    let slot = Arc::clone(&channels.access.channel);
+    let registry = channels.access.registry.clone();
+    let device_io = channels.access.device_io.clone();
     tokio::spawn(async move {
         let _lease = lease;
         let pending_restore = match run_capture_session(

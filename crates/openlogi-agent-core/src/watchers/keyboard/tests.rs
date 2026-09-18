@@ -1,5 +1,7 @@
 use super::*;
+use crate::receiver_access::ReceiverAccess;
 use openlogi_core::binding::Action;
+use openlogi_hid::{CaptureChannelSlot, ChannelRegistry};
 
 fn target() -> KeyboardTarget {
     KeyboardTarget {
@@ -182,25 +184,20 @@ async fn recovery_manager_waits_for_control_events_and_shutdown_between_retries(
         let access = ReceiverAccess::default();
         let (_signal, device_io) = openlogi_hid::device_io_channel();
         let (ring, _ring_rx) = mpsc::unbounded_channel();
-        let mut actions = crate::runtime::ActionRuntime::new(
-            Arc::default(),
-            crate::hardware::DeviceAccess {
-                channel: capture.clone(),
-                registry: registry.clone(),
-                receiver_access: access.clone(),
-                device_io: device_io.clone(),
-            },
-            ring,
-        )
-        .unwrap();
+        let device_access = DeviceAccess {
+            channel: capture,
+            registry,
+            receiver_access: access.clone(),
+            device_io,
+        };
+        let mut actions =
+            crate::runtime::ActionRuntime::new(Arc::default(), device_access.clone(), ring)
+                .unwrap();
         let (shutdown_tx, shutdown) = oneshot::channel();
         let mut manager = std::pin::pin!(manage(KeyboardManagerContext {
             spec,
-            keyboard_channel: capture,
             receiver_requests: access.subscribe_requests(),
-            receiver_access: access,
-            registry,
-            device_io,
+            access: device_access,
             dispatcher: actions.dispatcher(),
             shutdown,
         }));

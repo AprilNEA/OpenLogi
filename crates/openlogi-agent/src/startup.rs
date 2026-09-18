@@ -192,10 +192,7 @@ pub(crate) fn spawn_hidpp_watchers(
 ) -> HidppWatcherHandles {
     let gesture = watchers::gesture::spawn(
         &shared.capture_plans,
-        shared.capture_channel.clone(),
-        shared.receiver_access.clone(),
-        shared.channel_registry.clone(),
-        shared.device_io.clone(),
+        shared.device_access(),
         GestureOutputs::new(
             inputs.dispatcher.clone(),
             inputs.scroll_input.clone(),
@@ -211,10 +208,7 @@ pub(crate) fn spawn_hidpp_watchers(
     );
     let keyboard = watchers::keyboard::spawn(
         &shared.keyboard_spec,
-        shared.keyboard_channel.clone(),
-        shared.receiver_access.clone(),
-        shared.channel_registry.clone(),
-        shared.device_io.clone(),
+        shared.keyboard_access(),
         inputs.dispatcher.clone(),
     );
     HidppWatcherHandles {
