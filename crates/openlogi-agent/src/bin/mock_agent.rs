@@ -112,12 +112,12 @@ const PAIRING_HOLD: Duration = Duration::from_secs(2);
 /// How often that hold checks for an event. Short enough that a scripted step
 /// reaches the GUI promptly; see [`MockAgent::next_pairing`] for why the hold
 /// polls instead of awaiting the receiver.
-const PAIRING_POLL_TICK: Duration = Duration::from_millis(100);
+const PAIRING_POLL_PERIOD: Duration = Duration::from_millis(100);
 
 /// How often a held `observe` re-renders the scripted state looking for a
 /// change. The real agent is told by its watchers and needs no tick at all; a
 /// mock has nothing to be told by, so it compares instead.
-const OBSERVE_TICK: Duration = Duration::from_millis(250);
+const OBSERVE_POLL_PERIOD: Duration = Duration::from_millis(250);
 
 fn main() -> ExitCode {
     default_to_dev_profile();
@@ -919,7 +919,7 @@ impl Agent for MockAgent {
             if let Some(update) = self.state.lock().await.next_pairing_update() {
                 return Some(update);
             }
-            tokio::time::sleep(PAIRING_POLL_TICK).await;
+            tokio::time::sleep(PAIRING_POLL_PERIOD).await;
         }
         None
     }
@@ -935,7 +935,7 @@ impl Agent for MockAgent {
             if current.generation != since || Instant::now() >= deadline {
                 return current;
             }
-            tokio::time::sleep(OBSERVE_TICK).await;
+            tokio::time::sleep(OBSERVE_POLL_PERIOD).await;
         }
     }
 

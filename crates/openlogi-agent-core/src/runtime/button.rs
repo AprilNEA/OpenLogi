@@ -24,7 +24,7 @@ const EVENT_QUEUE_CAPACITY: usize = 128;
 /// Bounds how long graceful process exit waits for terminal handlers.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 /// Lets the worker observe the out-of-band shutdown channel even while idle.
-const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const SHUTDOWN_POLL_PERIOD: Duration = Duration::from_millis(10);
 
 /// Process-unique identity of one HID++ hardware capture incarnation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -705,7 +705,7 @@ fn run_worker(
         if finish_shutdown_if_requested(shutdown, &mut state, emit) {
             return;
         }
-        let command = match events.recv_timeout(SHUTDOWN_POLL_INTERVAL) {
+        let command = match events.recv_timeout(SHUTDOWN_POLL_PERIOD) {
             Ok(command) => command,
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if settle_due_long_presses(
