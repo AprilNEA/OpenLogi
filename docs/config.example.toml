@@ -27,6 +27,11 @@ dpi_presets = [800, 1600, 3200]
 thumbwheel_sensitivity = 20
 invert_scroll = false
 scroll_resolution = "high"
+# Hold Back/Forward and roll the main wheel to scroll horizontally (#1053).
+side_button_horizontal_scroll = false
+
+[devices."receiver:aabbccdd:slot:1".per_app_side_button_hscroll]
+"com.microsoft.VSCode" = true
 
 [devices."receiver:aabbccdd:slot:1".bindings]
 Back = "BrowserBack"

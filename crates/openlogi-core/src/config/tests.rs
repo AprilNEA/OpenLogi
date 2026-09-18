@@ -420,6 +420,76 @@ fn default_invert_scroll_is_omitted_from_toml() {
 }
 
 #[test]
+fn side_button_horizontal_scroll_roundtrips_per_device() {
+    let mut cfg = Config::default();
+    // Default is off for any device, present or not.
+    assert!(!cfg.side_button_horizontal_scroll("2b042"));
+    assert!(!cfg.effective_side_button_horizontal_scroll("2b042", None));
+    assert!(!cfg.effective_side_button_horizontal_scroll("2b042", Some("com.example.Editor")));
+    cfg.set_side_button_horizontal_scroll("2b042", true);
+    let restored = write_and_read(&cfg);
+    assert!(restored.side_button_horizontal_scroll("2b042"));
+    assert!(restored.effective_side_button_horizontal_scroll("2b042", None));
+    assert!(restored.effective_side_button_horizontal_scroll("2b042", Some("com.example.Editor")));
+    assert!(!restored.side_button_horizontal_scroll("absent"));
+}
+
+#[test]
+fn default_side_button_horizontal_scroll_is_omitted_from_toml() {
+    // Same `skip_serializing_if` contract as `invert_scroll`: an untouched
+    // toggle stays out of `config.toml`.
+    let mut cfg = Config::default();
+    cfg.set_binding("2b042", ButtonId::Back, Binding::Single(Action::Copy));
+    cfg.set_side_button_horizontal_scroll("2b042", false);
+    let body = toml::to_string_pretty(&cfg).expect("serialize");
+    assert!(
+        !body.contains("side_button_horizontal_scroll"),
+        "default side_button_horizontal_scroll should be omitted: {body}"
+    );
+    assert!(
+        !body.contains("per_app_side_button_hscroll"),
+        "empty per-app overrides should be omitted: {body}"
+    );
+}
+
+#[test]
+fn per_app_side_button_hscroll_overrides_the_device_default() {
+    let mut cfg = Config::default();
+    // No override stored: the app inherits the device default either way.
+    assert_eq!(
+        cfg.per_app_side_button_hscroll("2b042", "com.example.Editor"),
+        None
+    );
+    assert!(!cfg.effective_side_button_horizontal_scroll("2b042", Some("com.example.Editor")));
+
+    cfg.set_side_button_horizontal_scroll("2b042", true);
+    cfg.set_per_app_side_button_hscroll("2b042", "com.example.Editor", Some(false));
+    assert_eq!(
+        cfg.per_app_side_button_hscroll("2b042", "com.example.Editor"),
+        Some(false)
+    );
+    assert!(!cfg.effective_side_button_horizontal_scroll("2b042", Some("com.example.Editor")));
+    // Other apps still inherit the device default.
+    assert!(cfg.effective_side_button_horizontal_scroll("2b042", Some("com.example.Other")));
+    assert!(cfg.effective_side_button_horizontal_scroll("2b042", None));
+
+    // Clearing the override restores inheritance.
+    cfg.set_per_app_side_button_hscroll("2b042", "com.example.Editor", None);
+    assert_eq!(
+        cfg.per_app_side_button_hscroll("2b042", "com.example.Editor"),
+        None
+    );
+    assert!(cfg.effective_side_button_horizontal_scroll("2b042", Some("com.example.Editor")));
+
+    // And an override can arm the gesture where the device default is off.
+    cfg.set_side_button_horizontal_scroll("2b042", false);
+    cfg.set_per_app_side_button_hscroll("2b042", "com.example.Editor", Some(true));
+    let restored = write_and_read(&cfg);
+    assert!(restored.effective_side_button_horizontal_scroll("2b042", Some("com.example.Editor")));
+    assert!(!restored.effective_side_button_horizontal_scroll("2b042", None));
+}
+
+#[test]
 fn scroll_resolution_roundtrips_all_three_states() {
     let mut cfg = Config::default();
     assert_eq!(cfg.scroll_resolution("mouse"), None);
