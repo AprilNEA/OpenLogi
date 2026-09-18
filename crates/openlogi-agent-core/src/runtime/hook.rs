@@ -14,11 +14,13 @@ use openlogi_core::binding::{
     Action, Binding, ButtonId, GestureDirection, SwipeAccumulator, default_binding,
 };
 use openlogi_core::config::{KeyModifiers, KeyTrigger};
+use openlogi_core::scroll::ScrollDelta;
 use openlogi_hook::{
     EventDevice, EventDisposition, Hook, HookEvent, KeyEvent, MouseEvent, source_is_remappable,
 };
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
+use super::button::{HidppHscrollPark, SharedHidppHscroll};
 use super::scroll::ScrollInputHandle;
 use super::{ActionDispatchTarget, ActionDispatcher, PressToken};
 use crate::event_monitor::SharedEventMonitor;
@@ -46,6 +48,16 @@ pub struct HookMaps {
     /// Entries survive map rebuilds because they are hardware observations,
     /// not configuration.
     pub(crate) thumbwheel_positive_is_forward: BTreeMap<String, bool>,
+    /// Hold-to-scroll-horizontally (issue #1053) for this snapshot's device +
+    /// foreground app: each eligible side button mapped to the click action a
+    /// clean (wheel-less) release replays. Fully resolved by the orchestrator
+    /// — device toggle, per-app override, gesture-mode and macOS HID++
+    /// side-gesture yield, long-press / held-shortcut exclusion — so the
+    /// callback opens a hold exactly for the buttons present here, with the
+    /// replay action snapshotted at press time (race-free across reloads).
+    /// Empty when the redirect is disarmed: rebound-then-unconfigured buttons
+    /// keep their normal dispatch path.
+    pub side_button_hscroll: BTreeMap<ButtonId, Action>,
 }
 
 /// Shared, atomically-published [`HookMaps`], threaded between the config owner
@@ -181,6 +193,10 @@ thread_local! {
     /// Thread-local rather than a shared `Mutex` keeps the hot path lock-free and
     /// free of cross-thread contention on the freeze-sensitive callback.
     static HOLD: RefCell<HoldState> = RefCell::new(HoldState::default());
+    /// Hold-to-scroll-horizontally (issue #1053): the side button whose press
+    /// was suppressed while it redirects the main wheel. Disjoint from
+    /// [`HOLD`], which only ever tracks gesture-mode buttons.
+    static HSCROLL: RefCell<Option<HScrollHold>> = const { RefCell::new(None) };
     /// Buttons whose physical press was delivered because the action queue
     /// rejected the remap. Their matching release must also pass through so
     /// apps never see a stuck auxiliary button (down without up).
@@ -189,6 +205,143 @@ thread_local! {
     /// key-down events are auto-repeat, not replacement presses; their first
     /// matching key-up ends the lifecycle.
     static HELD_KEYS: RefCell<HashSet<u16>> = RefCell::new(HashSet::new());
+}
+
+/// A suppressed side-button press waiting to see whether the main wheel
+/// moves: wheel motion redirects to horizontal scroll (and swallows the
+/// click), while a clean release replays the press-time click action —
+/// the native click, or the rebound action when the button is remapped.
+struct HScrollHold {
+    button: ButtonId,
+    /// The click action to replay on a clean release, snapshotted from the
+    /// hook maps at press time so a mid-hold reload can't change it.
+    click: Action,
+    /// Whether horizontal motion already happened during this hold, via the
+    /// redirect path or natively (firmware-converted ticks, thumbwheel).
+    scrolled: bool,
+    /// Press-time dispatch target for the replayed click.
+    target: ActionDispatchTarget,
+}
+
+/// Look up the replay action that opens a hold-to-scroll-horizontally hold
+/// for `id` under `maps`, or `None` when the button keeps its normal path.
+///
+/// Presence in the snapshot map is the whole eligibility answer — the
+/// orchestrator resolves the device toggle, per-app override, gesture-mode
+/// and macOS HID++ side-gesture yield, and the long-press / held-shortcut
+/// exclusions per button when it builds the snapshot.
+fn hscroll_replay_action(maps: &HookMaps, id: ButtonId) -> Option<Action> {
+    if !matches!(id, ButtonId::Back | ButtonId::Forward) {
+        return None;
+    }
+    maps.side_button_hscroll.get(&id).cloned()
+}
+
+/// Convert one vertical wheel tick into its horizontal redirect while a
+/// side-button hold is open, or `None` when there is nothing to redirect:
+/// no hold, pixel-precise input, no vertical distance, or a mixed two-axis
+/// event (native horizontal is never swallowed — such an event keeps its
+/// normal path). Pure, so unit tests can pin the conversion without a scroll
+/// worker.
+fn hscroll_redirect_delta(delta: ScrollDelta) -> Option<ScrollDelta> {
+    if !matches!(delta, ScrollDelta::WheelTicks { .. }) || delta.y() == 0.0 || delta.x() != 0.0 {
+        return None;
+    }
+    if !HSCROLL.with_borrow(Option::is_some) {
+        return None;
+    }
+    Some(ScrollDelta::wheel_ticks(delta.y(), 0.0))
+}
+
+/// Redirect one vertical wheel tick to horizontal while a side-button hold is
+/// open. Returns `true` when the converted impulse was accepted (caller
+/// suppresses the original); `false` leaves the hold untouched so the caller
+/// fails open to the native vertical tick.
+///
+/// Wheel-up (positive y) maps to scroll-right (positive x), matching the
+/// Options+ feel — MUST-VERIFY on hardware (issue #1053): if M650L users
+/// report inverted motion, flip the sign here and in the unit tests.
+fn try_redirect_side_button_scroll(delta: ScrollDelta, scroll: &ScrollInputHandle) -> bool {
+    let Some(redirected) = hscroll_redirect_delta(delta) else {
+        return false;
+    };
+    if !scroll.try_hook_redirected_scroll(redirected) {
+        return false;
+    }
+    HSCROLL.with_borrow_mut(|hold| {
+        if let Some(held) = hold.as_mut() {
+            held.scrolled = true;
+        }
+    });
+    true
+}
+
+/// Record natively-horizontal motion against an open side-button hold.
+///
+/// Firmware that converts hold+wheel itself (e.g. M650L), a thumbwheel tick,
+/// or any other horizontal source passes through the normal path untouched —
+/// but the user did scroll while holding, so a later release must swallow
+/// the click rather than replay it. Only wheel ticks count: pixel-precise
+/// streams stay on their existing path entirely.
+fn mark_hscroll_native_horizontal(delta: ScrollDelta) {
+    if !matches!(delta, ScrollDelta::WheelTicks { .. }) || delta.x() == 0.0 {
+        return;
+    }
+    HSCROLL.with_borrow_mut(|hold| {
+        if let Some(held) = hold.as_mut() {
+            held.scrolled = true;
+        }
+    });
+}
+
+/// Decide whether an unattributed wheel tick redirects through an open
+/// diverted side-button park (issue #1053), or `None` when it keeps its
+/// normal path: no park, several parks (ambiguous — passthrough is the safe
+/// default), pixel-precise input, no vertical distance, a mixed two-axis
+/// event, or a wheel attributable to someone else's device. Pure, so unit
+/// tests can pin the matrix without a scroll worker.
+///
+/// The park is the hold evidence here: the hook never saw the diverted
+/// press (notably Bluetooth-direct on macOS, whose senderless events fail
+/// the source policy), so wheel evidence alone cannot open a hold — but a
+/// genuinely open park means the user is holding a side button as a scroll
+/// modifier. `from_trackpad` is deliberately ignored: a real trackpad only
+/// ever produces pixel-precise streams, so the [`ScrollDelta::WheelTicks`]
+/// check below already excludes trackpads even when the OS phase heuristic
+/// misclassifies a senderless wheel.
+fn hidpp_redirect_delta(
+    delta: ScrollDelta,
+    device: Option<&EventDevice>,
+    parks: &[HidppHscrollPark],
+) -> Option<ScrollDelta> {
+    if !matches!(delta, ScrollDelta::WheelTicks { .. }) || delta.y() == 0.0 || delta.x() != 0.0 {
+        return None;
+    }
+    if parks.len() != 1 {
+        return None;
+    }
+    hidpp_redirect_source_admissible(device, &parks[0])
+        .then(|| ScrollDelta::wheel_ticks(delta.y(), 0.0))
+}
+
+/// Whether a wheel event's source may redirect through an open diverted
+/// side-button park: unattributed (no sender, or a sender whose identity
+/// carries no vendor id — how Bluetooth-direct arrives on macOS, whose
+/// product name alone cannot anchor attribution), or attributable to the
+/// parked device itself (VID:PID match against the route ids the park
+/// carries). A vendor-bearing wheel from any other device belongs to
+/// someone else: never hijack it.
+fn hidpp_redirect_source_admissible(device: Option<&EventDevice>, park: &HidppHscrollPark) -> bool {
+    let Some(device) = device else {
+        return true;
+    };
+    let Some(vid) = device.vendor_id else {
+        return true;
+    };
+    let Some((park_vid, pid)) = park.source_ids else {
+        return false;
+    };
+    vid == u32::from(park_vid) && device.product_id == Some(u32::from(pid))
 }
 
 /// Whether a button event's physical source may be remapped/suppressed.
@@ -254,11 +407,49 @@ fn handle_button(
     device: Option<&EventDevice>,
     hooks: &SharedHookMaps,
     dispatcher: &ActionDispatcher,
+    action_tx: &mpsc::SyncSender<QueuedAction>,
     capture_target: impl FnOnce() -> ActionDispatchTarget,
 ) -> EventDisposition {
     // Primary L/R always pass through (suppressing them would brick the mouse).
     if !id.is_os_hook_button() || !button_source_may_remap(device) {
         return EventDisposition::PassThrough;
+    }
+    // Hold-to-scroll-horizontally (issue #1053): a side button with a replay
+    // entry opens a wheel-redirect hold instead of dispatching. The press is
+    // suppressed speculatively — a clean release replays the press-time click
+    // action (native click, or the rebound action) off-thread, while wheel
+    // motion swallows it. A second side button pressed mid-hold keeps its
+    // normal path; the first hold wins.
+    if pressed {
+        let replay = hooks
+            .try_read()
+            .ok()
+            .and_then(|maps| hscroll_replay_action(&maps, id));
+        let first_hold_wins =
+            HSCROLL.with_borrow(|hold| hold.as_ref().is_none_or(|held| held.button == id));
+        if let Some(click) = replay
+            && first_hold_wins
+        {
+            HSCROLL.with_borrow_mut(|hold| {
+                *hold = Some(HScrollHold {
+                    button: id,
+                    click,
+                    scrolled: false,
+                    target: capture_target(),
+                });
+            });
+            info!(button = %id, "side-button hold → redirecting wheel to horizontal");
+            return EventDisposition::Suppress;
+        }
+    } else if let Some(held) =
+        HSCROLL.with_borrow_mut(|hold| hold.take_if(|held| held.button == id))
+    {
+        if held.scrolled {
+            info!(button = %id, "side-button hold → horizontal motion, click swallowed");
+            return EventDisposition::Suppress;
+        }
+        info!(button = %id, action = %held.click.label(), "side-button hold → clean release, replaying click");
+        return queued_event_disposition(try_queue_action(action_tx, held.click, held.target));
     }
     let action_target = if pressed {
         capture_target()
@@ -443,6 +634,87 @@ fn handle_key(
     queued_event_disposition(queued)
 }
 
+/// Remap one scroll-wheel tick without blocking the hook callback: the
+/// hook-hold redirect, then the diverted-park redirect (issue #1053), else
+/// the native smooth/direct output decision.
+fn handle_scroll(
+    delta: ScrollDelta,
+    from_trackpad: bool,
+    device: Option<&EventDevice>,
+    #[cfg_attr(
+        not(target_os = "windows"),
+        expect(
+            unused_variables,
+            reason = "read only by the Windows native-wheel fallback"
+        )
+    )]
+    hooks: &SharedHookMaps,
+    #[cfg_attr(
+        not(target_os = "windows"),
+        expect(
+            unused_variables,
+            reason = "read only by the Windows native-wheel fallback"
+        )
+    )]
+    action_tx: &mpsc::SyncSender<QueuedAction>,
+    scroll: &ScrollInputHandle,
+    hidpp_hscroll: &SharedHidppHscroll,
+) -> EventDisposition {
+    if scroll_source_may_intercept(from_trackpad, device)
+        && try_redirect_side_button_scroll(delta, scroll)
+    {
+        return EventDisposition::Suppress;
+    }
+    // Diverted-park redirect: the hook never saw the suppressed press, so
+    // the open park is the hold evidence. Runs whenever the hook-hold path
+    // above did not consume the tick — including attributed wheels from the
+    // parked device itself — and before the smooth/direct output below, so
+    // a converted tick is never also emitted as vertical.
+    let park_redirect = hidpp_hscroll
+        .try_read()
+        .ok()
+        .and_then(|parks| hidpp_redirect_delta(delta, device, &parks));
+    match park_redirect {
+        Some(converted) if scroll.try_hook_redirected_scroll(converted) => {
+            info!("hidpp side-button park → redirecting wheel to horizontal");
+            return EventDisposition::Suppress;
+        }
+        Some(_) => {
+            debug!(
+                ?delta,
+                from_trackpad,
+                ?device,
+                "hidpp side-button park open — wheel kept native"
+            );
+        }
+        None => {}
+    }
+    #[cfg(target_os = "windows")]
+    if delta.y() == 0.0
+        && let Some((button, action)) = hooks
+            .try_read()
+            .ok()
+            .and_then(|maps| rebound_thumbwheel_action(&maps, delta.x()))
+    {
+        info!(button = %button, action = %action.label(), "native thumb wheel → executing bound action");
+        return queued_event_disposition(try_queue_action(
+            action_tx,
+            action,
+            ActionDispatchTarget::capture(),
+        ));
+    }
+    if scroll_source_may_intercept(from_trackpad, device) {
+        // A hook hold is open but this tick took its native path:
+        // firmware-converted horizontal (e.g. M650L), thumbwheel, or
+        // anything else horizontal still counts as scrolling, so the
+        // release swallows the click. Trackpad motion never reaches this
+        // branch.
+        mark_hscroll_native_horizontal(delta);
+        return queued_event_disposition(scroll.try_hook_scroll(delta));
+    }
+    EventDisposition::PassThrough
+}
+
 /// Attempt to start the OS hook. Returns `None` if Accessibility is not
 /// granted or on an unsupported platform — the app continues without crashing.
 pub fn start(
@@ -451,6 +723,7 @@ pub fn start(
     dispatcher: ActionDispatcher,
     scroll: ScrollInputHandle,
     monitor: SharedEventMonitor,
+    hidpp_hscroll: SharedHidppHscroll,
 ) -> Option<Hook> {
     if !Hook::has_accessibility() {
         warn!(
@@ -479,6 +752,7 @@ pub fn start(
                     device.as_ref(),
                     &hooks,
                     &dispatcher,
+                    &action_tx,
                     ActionDispatchTarget::capture,
                 ),
                 MouseEvent::Moved { delta_x, delta_y } => {
@@ -486,6 +760,7 @@ pub fn start(
                 }
                 MouseEvent::CaptureInterrupted => {
                     HOLD.with_borrow_mut(HoldState::cancel);
+                    HSCROLL.with_borrow_mut(|hold| *hold = None);
                     HELD_KEYS.with_borrow_mut(HashSet::clear);
                     dispatcher.cancel_hook_thread_buttons();
                     scroll.cancel_hooks();
@@ -495,26 +770,15 @@ pub fn start(
                     delta,
                     from_trackpad,
                     device,
-                } => {
-                    #[cfg(target_os = "windows")]
-                    if delta.y() == 0.0
-                        && let Some((button, action)) = hooks
-                            .try_read()
-                            .ok()
-                            .and_then(|maps| rebound_thumbwheel_action(&maps, delta.x()))
-                    {
-                        info!(button = %button, action = %action.label(), "native thumb wheel → executing bound action");
-                        return queued_event_disposition(try_queue_action(
-                            &action_tx,
-                            action,
-                            ActionDispatchTarget::capture(),
-                        ));
-                    }
-                    if scroll_source_may_intercept(from_trackpad, device.as_ref()) {
-                        return queued_event_disposition(scroll.try_hook_scroll(delta));
-                    }
-                    EventDisposition::PassThrough
-                }
+                } => handle_scroll(
+                    delta,
+                    from_trackpad,
+                    device.as_ref(),
+                    &hooks,
+                    &action_tx,
+                    &scroll,
+                    &hidpp_hscroll,
+                ),
             }
         }
         // Function-key remapper: ordinary actions remain one-shot, while a
@@ -593,7 +857,11 @@ fn resolve_gesture_click(
 /// the hook should pass the event through to the OS rather than suppress and
 /// re-synthesise it. For Back/Forward this keeps the genuine hardware button
 /// 4/5 intact instead of round-tripping it through synthesis.
-fn is_native_click(id: ButtonId, action: &Action) -> bool {
+///
+/// Read through [`binding_is_native_click`], which additionally keeps
+/// long-press bindings on the remap path even when their short action is
+/// native.
+pub(crate) fn is_native_click(id: ButtonId, action: &Action) -> bool {
     matches!(
         (id, action),
         (ButtonId::LeftClick, Action::LeftClick)

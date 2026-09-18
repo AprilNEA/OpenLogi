@@ -18,10 +18,11 @@ use openlogi_core::binding::{Action, Binding, ButtonId};
 use openlogi_hid::{CaptureChannel, ChannelRegistry, DeviceIoGate};
 use tracing::{info, warn};
 
+pub use self::button::SharedHidppHscroll;
 use self::button::{
     ButtonInputHandle, ButtonRuntimeEvent, ButtonRuntimeOwner, EndReason, PressControl,
 };
-pub(crate) use self::button::{HidppSessionId, PressToken};
+pub(crate) use self::button::{HidppSessionId, HscrollParkSpec, PressToken};
 use crate::hardware::{toggle_smartshift_in_background, write_dpi_in_background};
 use crate::receiver_access::ReceiverAccess;
 use crate::{DpiCycleState, DpiCycles};
@@ -293,6 +294,14 @@ impl ActionDispatcher {
         self.executor.dispatch(action, device_key);
     }
 
+    /// Read view of the button worker's open HID++ redirect parks, shared
+    /// with the OS hook so unattributed wheel can redirect while parked
+    /// (see [`SharedHidppHscroll`]).
+    #[must_use]
+    pub fn hidpp_hscroll_parks(&self) -> SharedHidppHscroll {
+        self.buttons.hidpp_hscroll_parks()
+    }
+
     /// Queue one OS-hook down edge without blocking the callback. The returned
     /// token uniquely identifies this accepted press.
     pub(crate) fn try_hook_button_down(
@@ -345,15 +354,24 @@ impl ActionDispatcher {
         self.buttons.cancel_hook_thread();
     }
 
-    /// Queue one HID++ down edge for a specific capture session.
+    /// Queue one HID++ down edge for a specific capture session. `hscroll`
+    /// carries the hold-to-scroll-horizontally park spec when the redirect
+    /// is armed for this button (issue #1053): the press parks instead of
+    /// dispatching, replaying on a quick release and swallowing a hold.
     pub(crate) fn try_hidpp_button_down(
         &self,
         session: &HidppSessionId,
         button: ButtonId,
         binding: Option<&Binding>,
+        hscroll: Option<HscrollParkSpec>,
     ) -> Option<PressToken> {
-        self.buttons
-            .try_hidpp_down(session, button, binding, ActionDispatchTarget::capture())
+        self.buttons.try_hidpp_down(
+            session,
+            button,
+            binding,
+            hscroll,
+            ActionDispatchTarget::capture(),
+        )
     }
 
     /// Queue one HID++ up edge for a specific capture session.

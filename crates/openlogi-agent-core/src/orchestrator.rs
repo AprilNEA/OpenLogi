@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{Action, Binding};
+use openlogi_core::binding::{Action, Binding, ButtonId, GestureDirection, default_binding};
 use openlogi_core::bindings::{button_bindings_for, oshook_gestures_for};
 use openlogi_core::config::{Config, LightSettings, ScrollResolution, canonical_device_key};
 use openlogi_core::device::{
@@ -211,6 +211,50 @@ enum InventoryState {
     Unavailable,
 }
 
+/// Hold-to-scroll-horizontally replay map (issue #1053) for the snapshot
+/// `hook_maps_for` is building: each eligible side button mapped to the click
+/// action a clean release replays.
+///
+/// A button qualifies when the device toggle (or its per-app override for
+/// `app`) is on, the button is not gesture-owned here or by a macOS HID++
+/// side-gesture session (`hidpp_owned`), and its binding is a plain
+/// single action — never a long-press pair or a held shortcut, whose
+/// hold-while-pressed semantics cannot be replayed as one shot. An unset
+/// binding replays the canonical native click. A rebound Back therefore
+/// redirects while keeping its remap; a gesturing one stays with its path.
+fn side_button_hscroll_replay_map(
+    config: &Config,
+    key: Option<&str>,
+    app: Option<&str>,
+    bindings: &BTreeMap<ButtonId, Binding>,
+    gestures: &BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
+    hidpp_owned: &BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
+) -> BTreeMap<ButtonId, Action> {
+    let Some(key) = key else {
+        return BTreeMap::new();
+    };
+    if !config.effective_side_button_horizontal_scroll(key, app) {
+        return BTreeMap::new();
+    }
+    [ButtonId::Back, ButtonId::Forward]
+        .into_iter()
+        .filter(|button| {
+            !gestures.contains_key(button)
+                && !hidpp_owned.contains_key(button)
+                && bindings.get(button).is_none_or(|binding| {
+                    !matches!(binding, Binding::LongPress(_))
+                        && binding.click_action().held_combo().is_none()
+                })
+        })
+        .map(|button| {
+            let replay = bindings
+                .get(&button)
+                .map_or_else(|| default_binding(button), Binding::click_action);
+            (button, replay)
+        })
+        .collect()
+}
+
 impl Orchestrator {
     /// Build from a loaded config. Creates the shared runtime handles and seeds
     /// them from the config with no devices yet; the first inventory tick fills
@@ -305,19 +349,29 @@ impl Orchestrator {
         }
         let mut bindings = button_bindings_for(&self.config, key, app);
         let mut gestures = oshook_gestures_for(&self.config, key, app);
-        if let Some(key) = key {
-            for button in hidpp_side_gesture_maps_for(&self.config, key, app).keys() {
-                // HID++ owns both edges for these controls. Keeping their
-                // projected click or gesture map in the global hook would
-                // reintroduce a second, unattributed dispatch path.
-                bindings.remove(button);
-                gestures.remove(button);
-            }
+        let hidpp_owned = key
+            .map(|key| hidpp_side_gesture_maps_for(&self.config, key, app))
+            .unwrap_or_default();
+        for button in hidpp_owned.keys() {
+            // HID++ owns both edges for these controls. Keeping their
+            // projected click or gesture map in the global hook would
+            // reintroduce a second, unattributed dispatch path.
+            bindings.remove(button);
+            gestures.remove(button);
         }
+        let side_button_hscroll = side_button_hscroll_replay_map(
+            &self.config,
+            key,
+            app,
+            &bindings,
+            &gestures,
+            &hidpp_owned,
+        );
         HookMaps {
             bindings,
             gestures,
             selected_device: key.map(str::to_owned),
+            side_button_hscroll,
             ..HookMaps::default()
         }
     }
