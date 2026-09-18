@@ -61,3 +61,8 @@ node_modules/
 
 # Packaging output.
 *.dmg
+
+# flatpak-builder output and scratch state.
+/.flatpak-builder/
+/build/
+/repo/
