@@ -2,9 +2,8 @@
 
 use openlogi_camera::CameraControl;
 
-use super::AppState;
-#[cfg(target_os = "macos")]
-use super::StateEvent;
+use super::events::StateEvents;
+use super::{AppState, StateEvent};
 
 impl AppState {
     /// Request Camera access and retain the permission poll for the app
@@ -78,8 +77,14 @@ impl AppState {
     }
     /// Persist a UVC control for `config_key`. No agent IPC — webcams are
     /// driven straight from the GUI over USB, so the agent never sees this.
-    pub fn commit_camera_control(&mut self, config_key: &str, control: CameraControl, value: i32) {
+    pub fn commit_camera_control(
+        &mut self,
+        config_key: &str,
+        control: CameraControl,
+        value: i32,
+    ) -> StateEvents {
         self.commit_camera_entry(config_key, control.name(), value);
+        StateEvent::CameraChanged.into()
     }
     /// Persist a camera auto toggle for `config_key` (stored as 0/1).
     pub fn commit_camera_auto(
@@ -87,8 +92,25 @@ impl AppState {
         config_key: &str,
         toggle: openlogi_camera::AutoToggle,
         on: bool,
-    ) {
+    ) -> StateEvents {
         self.commit_camera_entry(config_key, toggle.name(), i32::from(on));
+        StateEvent::CameraChanged.into()
+    }
+    /// Persist a batch of auto toggles and control values for `config_key` as
+    /// one announced change — what a reset or an applied profile writes.
+    pub fn commit_camera_settings(
+        &mut self,
+        config_key: &str,
+        autos: &[(openlogi_camera::AutoToggle, bool)],
+        values: &[(CameraControl, i32)],
+    ) -> StateEvents {
+        for (toggle, on) in autos {
+            self.commit_camera_entry(config_key, toggle.name(), i32::from(*on));
+        }
+        for (control, value) in values {
+            self.commit_camera_entry(config_key, control.name(), *value);
+        }
+        StateEvent::CameraChanged.into()
     }
     fn commit_camera_entry(&mut self, config_key: &str, name: &str, value: i32) {
         let mut controls = self.config.camera_controls(config_key).unwrap_or_default();
@@ -146,16 +168,34 @@ impl AppState {
         config_key: &str,
         name: &str,
         snap: openlogi_core::config::CameraControls,
-    ) {
+    ) -> StateEvents {
         self.config
             .edit(|config| config.save_camera_profile(config_key, name, snap));
         self.persist_config("camera profile");
+        StateEvent::CameraChanged.into()
+    }
+    /// Write `snap` back into the active profile when it is a saved custom
+    /// one, so a profile is always what was last seen while it was selected.
+    /// Built-in profiles are never edited.
+    pub fn sync_active_camera_profile(
+        &mut self,
+        config_key: &str,
+        snap: openlogi_core::config::CameraControls,
+    ) -> StateEvents {
+        let Some(active) = self.camera_active_profile(config_key) else {
+            return StateEvent::CameraChanged.into();
+        };
+        if self.camera_profiles(config_key).contains_key(&active) {
+            return self.save_camera_profile(config_key, &active, snap);
+        }
+        StateEvent::CameraChanged.into()
     }
     /// Delete a custom camera profile and persist the removal.
-    pub fn delete_camera_profile(&mut self, config_key: &str, name: &str) {
+    pub fn delete_camera_profile(&mut self, config_key: &str, name: &str) -> StateEvents {
         self.config
             .edit(|config| config.delete_camera_profile(config_key, name));
         self.persist_config("camera profile removal");
+        StateEvent::CameraChanged.into()
     }
     /// The camera profile last applied for `config_key`, if any.
     #[must_use]
@@ -163,9 +203,14 @@ impl AppState {
         self.config.camera_active_profile(config_key)
     }
     /// Record (and persist) which camera profile `config_key` last applied.
-    pub fn set_camera_active_profile(&mut self, config_key: &str, name: Option<String>) {
+    pub fn set_camera_active_profile(
+        &mut self,
+        config_key: &str,
+        name: Option<String>,
+    ) -> StateEvents {
         self.config
             .edit(|config| config.set_camera_active_profile(config_key, name));
         self.persist_config("camera profile selection");
+        StateEvent::CameraChanged.into()
     }
 }

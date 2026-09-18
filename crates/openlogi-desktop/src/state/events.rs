@@ -71,6 +71,18 @@ impl StateEvents {
         Self::default()
     }
 
+    /// These events followed by `next`'s, each distinct event once — so a
+    /// change built from several mutators announces itself the way a single
+    /// one would.
+    pub(crate) fn and(mut self, next: Self) -> Self {
+        for event in next.0 {
+            if !self.0.contains(&event) {
+                self.0.push(event);
+            }
+        }
+        self
+    }
+
     /// Emit every event from the state entity's own context.
     pub(crate) fn emit(self, cx: &mut Context<AppState>) {
         for event in self.0 {

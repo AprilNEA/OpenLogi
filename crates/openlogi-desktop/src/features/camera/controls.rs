@@ -12,7 +12,7 @@
 //! a single batched device-open.
 
 use gpui::{
-    App, AppContext as _, ClickEvent, Context, ElementId, Entity, InteractiveElement, IntoElement,
+    AppContext as _, ClickEvent, Context, ElementId, Entity, InteractiveElement, IntoElement,
     MouseButton, MouseDownEvent, ParentElement, Render, Role, SharedString,
     StatefulInteractiveElement as _, Styled, Subscription, Toggled, Window, div,
     prelude::FluentBuilder as _, px, rgb,
@@ -59,13 +59,6 @@ const BUILTIN_PROFILES: [BuiltinProfile; 3] = [
         ],
     },
 ];
-
-fn update_camera(cx: &mut App, update: impl FnOnce(&mut AppState)) {
-    AppState::update(cx, |state, cx| {
-        update(state);
-        cx.emit(StateEvent::CameraChanged);
-    });
-}
 
 /// One built-in profile: an id for persistence plus range-relative targets
 /// (an empty list means "device defaults for everything").
@@ -177,7 +170,7 @@ impl CameraControlsPanel {
         // would immediately retry forever instead of waiting for a real UI or
         // inventory event.
         AppState::update(cx, |state, _| {
-            state.set_camera_active_profile(key, None);
+            let _ = state.set_camera_active_profile(key, None);
         });
         match openlogi_camera::read_camera_state(uid) {
             Ok(live) => Reapplied::Live(live),
@@ -373,13 +366,9 @@ impl CameraControlsPanel {
         }
         if let Some((toggle, ix)) = takeover {
             self.autos[ix].on = false;
-            update_camera(cx, |state| {
-                state.commit_camera_auto(key, toggle, false);
-            });
+            AppState::apply(cx, |state| state.commit_camera_auto(key, toggle, false));
         }
-        update_camera(cx, |state| {
-            state.commit_camera_control(key, control, v);
-        });
+        AppState::apply(cx, |state| state.commit_camera_control(key, control, v));
         self.sync_active_custom(cx);
         cx.notify();
     }
@@ -421,9 +410,7 @@ impl CameraControlsPanel {
             return;
         }
         self.autos[ix].on = on;
-        update_camera(cx, |state| {
-            state.commit_camera_auto(&key, toggle, on);
-        });
+        AppState::apply(cx, |state| state.commit_camera_auto(&key, toggle, on));
         self.sync_active_custom(cx);
         cx.notify();
     }
@@ -480,14 +467,7 @@ impl CameraControlsPanel {
                 });
             }
         }
-        update_camera(cx, |state| {
-            for (toggle, on) in autos {
-                state.commit_camera_auto(key, *toggle, *on);
-            }
-            for (control, value) in values {
-                state.commit_camera_control(key, *control, *value);
-            }
-        });
+        AppState::apply(cx, |state| state.commit_camera_settings(key, autos, values));
     }
 
     /// Reset one control to its device default — auto mode back to the
@@ -519,15 +499,15 @@ impl CameraControlsPanel {
         if let Some(pos) = auto_pos {
             let (toggle, auto_default) = autos[0];
             self.autos[pos].on = auto_default;
-            update_camera(cx, |state| {
-                state.commit_camera_auto(&key, toggle, auto_default);
+            AppState::apply(cx, |state| {
+                state.commit_camera_auto(&key, toggle, auto_default)
             });
         }
         state.update(cx, |slider, cx| {
             slider.set_value(to_slider(default), window, cx);
         });
-        update_camera(cx, |state| {
-            state.commit_camera_control(&key, control, default);
+        AppState::apply(cx, |state| {
+            state.commit_camera_control(&key, control, default)
         });
         self.sync_active_custom(cx);
         cx.notify();
@@ -608,8 +588,8 @@ impl CameraControlsPanel {
             return;
         }
         self.commit_batch(&key, &autos, &values, window, cx);
-        update_camera(cx, |state| {
-            state.set_camera_active_profile(&key, Some(id.to_string()));
+        AppState::apply(cx, |state| {
+            state.set_camera_active_profile(&key, Some(id.to_string()))
         });
         cx.notify();
     }
@@ -638,14 +618,7 @@ impl CameraControlsPanel {
             return;
         };
         let snap = self.snapshot(cx);
-        update_camera(cx, |state| {
-            let Some(active) = state.camera_active_profile(&key) else {
-                return;
-            };
-            if state.camera_profiles(&key).contains_key(&active) {
-                state.save_camera_profile(&key, &active, snap);
-            }
-        });
+        AppState::apply(cx, |state| state.sync_active_camera_profile(&key, snap));
     }
 
     /// Recover after a batched device write failed partway through.
@@ -658,9 +631,7 @@ impl CameraControlsPanel {
     fn resync_after_failed_write(&mut self, cx: &mut Context<Self>) {
         self.uid = None;
         if let Some(key) = self.key.take() {
-            update_camera(cx, |state| {
-                state.set_camera_active_profile(&key, None);
-            });
+            AppState::apply(cx, |state| state.set_camera_active_profile(&key, None));
         }
         cx.notify();
     }
@@ -672,7 +643,7 @@ impl CameraControlsPanel {
             return;
         };
         let snap = self.snapshot(cx);
-        update_camera(cx, |state| {
+        AppState::apply(cx, |state| {
             let existing = state.camera_profiles(&key);
             let mut n = existing.len() + 1;
             let mut name =
@@ -681,8 +652,9 @@ impl CameraControlsPanel {
                 n += 1;
                 name = tr!("actions.custom_profile_number", number => n.to_string()).to_string();
             }
-            state.save_camera_profile(&key, &name, snap);
-            state.set_camera_active_profile(&key, Some(name));
+            state
+                .save_camera_profile(&key, &name, snap)
+                .and(state.set_camera_active_profile(&key, Some(name)))
         });
         cx.notify();
     }
@@ -693,9 +665,7 @@ impl CameraControlsPanel {
         let Some(key) = self.key.clone() else {
             return;
         };
-        update_camera(cx, |state| {
-            state.delete_camera_profile(&key, name);
-        });
+        AppState::apply(cx, |state| state.delete_camera_profile(&key, name));
         cx.notify();
     }
 }
