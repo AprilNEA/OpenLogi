@@ -25,6 +25,18 @@ mod linux;
 #[cfg(target_os = "windows")]
 mod windows;
 
+/// Source name for button-bound zoom. A button press is a gesture of its own,
+/// distinct from any wheel, so the two must never share zoom progress. Lives
+/// here rather than beside the quantizer because every backend names this
+/// source, while only the quantized ones keep an accumulator.
+const BUTTON_ZOOM_SOURCE: &str = "\0button";
+
+// Quantizing zoom into Ctrl+wheel notches is Windows/Linux business, but the
+// logic is pure and its boundaries are exactly where the bugs live, so it is
+// compiled for tests on every host too.
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+mod zoom_notch;
+
 /// Which isolated edge of a held keyboard chord to synthesize.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum KeyPhase {
@@ -389,6 +401,38 @@ pub fn post_scroll(delta: ScrollDelta) {
         }
         _ => {
             let _ = delta;
+        }
+    }
+}
+
+/// Apply one continuous magnification step at the current focus.
+///
+/// `magnification` is a signed fraction of the current zoom, the unit a
+/// trackpad pinch reports. Successive calls belong to one gesture: the backend
+/// opens the gesture on the first step and closes it once the input stops, so
+/// applications see the same begin/change/end session a real pinch produces.
+///
+/// A per-step self-contained gesture is deliberately *not* what this does.
+/// Apps that read the raw wheel event in their own code accept one, but a
+/// browser's own page zoom discards a gesture that begins and ends inside a
+/// single step — which is exactly how zoom ends up working on a canvas app
+/// while an ordinary page only scrolls.
+pub fn post_zoom(magnification: f64, source: &str) {
+    if !magnification.is_finite() || magnification == 0.0 {
+        return;
+    }
+    cfg_select! {
+        target_os = "macos" => {
+            macos::post_zoom(magnification, source);
+        }
+        target_os = "linux" => {
+            linux::post_zoom(magnification, source);
+        }
+        target_os = "windows" => {
+            windows::post_zoom(magnification, source);
+        }
+        _ => {
+            let _ = magnification;
         }
     }
 }

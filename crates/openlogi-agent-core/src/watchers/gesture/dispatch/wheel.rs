@@ -107,6 +107,9 @@ impl WheelDirection {
         if let Some(binding) = ScrollBinding::from_action(action) {
             return self.advance_scroll(binding, magnitude, scale);
         }
+        if let Some(binding) = ZoomBinding::from_action(action) {
+            return self.advance_zoom(binding, magnitude, scale);
+        }
         self.advance_action(action, magnitude, scale.sensitivity, now)
     }
 
@@ -128,6 +131,33 @@ impl WheelDirection {
             WheelOutput::Idle
         } else {
             binding.output(distance)
+        }
+    }
+
+    /// Emit continuous magnification the same way [`Self::advance_scroll`]
+    /// emits distance: every increment turns into a proportional amount right
+    /// away.
+    ///
+    /// Zoom deliberately does not take the discrete path. A threshold plus a
+    /// cooldown is right for a volume step, where one flick should mean one
+    /// step, but it turns zoom into a stutter: the wheel keeps turning while
+    /// the binding sits out its cooldown, so a smooth spin lands as a few
+    /// jumps instead of a continuous change.
+    fn advance_zoom(
+        &mut self,
+        binding: ZoomBinding,
+        magnitude: i32,
+        scale: ScrollScale,
+    ) -> WheelOutput {
+        let context = ZoomContext { binding, scale };
+        if !matches!(&self.state, WheelState::Zoom(previous) if *previous == context) {
+            self.state = WheelState::Zoom(context);
+        }
+        let ticks = f64::from(magnitude) * scale.zoom_per_increment();
+        if ticks == 0.0 {
+            WheelOutput::Idle
+        } else {
+            WheelOutput::Zoom(binding.magnification(ticks))
         }
     }
 
@@ -189,6 +219,8 @@ enum WheelState {
     Idle,
     /// Continuous scrolling under one exact axis, resolution, and sensitivity.
     Scroll(ScrollContext),
+    /// Continuous magnification under one exact direction and sensitivity.
+    Zoom(ZoomContext),
     /// Increment progress and timing retained for one exact discrete binding.
     Action {
         binding: DiscreteBinding,
@@ -203,6 +235,45 @@ enum WheelState {
 struct ScrollContext {
     binding: ScrollBinding,
     scale: ScrollScale,
+}
+
+/// Identity of one continuous-zoom mode.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ZoomContext {
+    binding: ZoomBinding,
+    scale: ScrollScale,
+}
+
+/// Direction encoded by a continuous-zoom action.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ZoomBinding {
+    In,
+    Out,
+}
+
+impl ZoomBinding {
+    /// Fraction of the current zoom one full wheel tick applies at 1×
+    /// sensitivity. The zoom slider scales this, so the constant only has to
+    /// put the default in a usable place and leave headroom in both
+    /// directions.
+    const PER_TICK: f64 = 0.15;
+
+    const fn from_action(action: &Action) -> Option<Self> {
+        match action {
+            Action::ZoomIn => Some(Self::In),
+            Action::ZoomOut => Some(Self::Out),
+            _ => None,
+        }
+    }
+
+    /// Signed magnification for `ticks` of physical rotation.
+    fn magnification(self, ticks: f64) -> f64 {
+        let amount = ticks * Self::PER_TICK;
+        match self {
+            Self::In => amount,
+            Self::Out => -amount,
+        }
+    }
 }
 
 /// Identity of one discrete binding, including the threshold it uses.
@@ -251,6 +322,8 @@ pub(super) enum WheelOutput {
     Idle,
     /// Typed fractional distance for the smooth-scroll runtime or injector.
     Scroll(ScrollDelta),
+    /// Signed fraction of the current zoom to apply as one magnification step.
+    Zoom(f64),
     /// Fire the direction's bound discrete action.
     FireAction,
 }
@@ -262,23 +335,38 @@ pub(super) struct ScrollScale {
     resolution: WheelResolution,
     /// User multiplier relative to the device's native amount.
     sensitivity: ThumbwheelSensitivity,
+    /// Separate multiplier for a wheel bound to zoom.
+    zoom_sensitivity: ThumbwheelSensitivity,
 }
 
 impl ScrollScale {
-    /// Pair one captured event's device resolution with the active setting.
+    /// Pair one captured event's device resolution with the active settings.
     pub(super) const fn new(
         resolution: WheelResolution,
         sensitivity: ThumbwheelSensitivity,
+        zoom_sensitivity: ThumbwheelSensitivity,
     ) -> Self {
         Self {
             resolution,
             sensitivity,
+            zoom_sensitivity,
         }
     }
 
     /// Native scroll ticks one diverted increment contributes.
     fn per_increment(self) -> f64 {
         self.resolution.native_per_increment() * self.sensitivity.scroll_multiplier()
+    }
+
+    /// Rotation one diverted increment contributes for zoom, in the same tick
+    /// unit as [`Self::per_increment`] but under the zoom setting.
+    ///
+    /// Zoom deliberately does not read the scroll multiplier: a user who wants
+    /// unhurried horizontal scrolling and fast zoom (or the reverse) cannot
+    /// express that through one slider, and binding the wheel to zoom does not
+    /// change how its scroll speed should feel if it is rebound later.
+    fn zoom_per_increment(self) -> f64 {
+        self.resolution.native_per_increment() * self.zoom_sensitivity.scroll_multiplier()
     }
 }
 

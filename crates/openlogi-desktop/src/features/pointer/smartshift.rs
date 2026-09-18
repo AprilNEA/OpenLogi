@@ -65,12 +65,63 @@ pub struct SmartShiftPanel {
     /// The per-device thumb-wheel sensitivity slider (device override; devices
     /// without one follow the app-wide default from Settings → General).
     wheel_sensitivity: Entity<SliderState>,
+    zoom_sensitivity: Entity<SliderState>,
     /// Last committed sensitivity, to re-seat the thumb on a device switch.
     last_wheel_sensitivity: ThumbwheelSensitivity,
+    last_zoom_sensitivity: ThumbwheelSensitivity,
     /// Live drag value shown in the numeric label until release commits.
     pending_wheel_sensitivity: Option<ThumbwheelSensitivity>,
+    pending_zoom_sensitivity: Option<ThumbwheelSensitivity>,
     _wheel_sensitivity_sub: Subscription,
+    _zoom_sensitivity_sub: Subscription,
     _state_obs: Subscription,
+}
+
+/// Build one thumb-wheel sensitivity slider and the subscription that drives
+/// it. Scroll and zoom speed are separate settings but the same control: the
+/// numeric label follows the drag, and only release commits — a drag would
+/// otherwise stream a write burst through the config and the agent. The two
+/// differ solely in which field caches the value and which setter persists it,
+/// so they share this body rather than drifting apart as near-copies.
+fn sensitivity_slider(
+    cx: &mut Context<SmartShiftPanel>,
+    pending: fn(&mut SmartShiftPanel) -> &mut Option<ThumbwheelSensitivity>,
+    last: fn(&mut SmartShiftPanel) -> &mut ThumbwheelSensitivity,
+    commit: fn(&mut AppState, &str, ThumbwheelSensitivity),
+) -> (Entity<SliderState>, Subscription) {
+    let slider = cx.new(|_| {
+        SliderState::new()
+            .min(f32::from(ThumbwheelSensitivity::MIN))
+            .max(f32::from(ThumbwheelSensitivity::MAX))
+            .step(1.)
+            .default_value(f32::from(ThumbwheelSensitivity::DEFAULT))
+    });
+    let subscription =
+        cx.subscribe(
+            &slider,
+            move |panel, _slider, event: &SliderEvent, cx| match event {
+                SliderEvent::Change(value) => {
+                    *pending(panel) = Some(ThumbwheelSensitivity::from_rounded(value.start()));
+                    cx.notify();
+                }
+                SliderEvent::Release(value) => {
+                    let sensitivity = ThumbwheelSensitivity::from_rounded(value.start());
+                    *pending(panel) = None;
+                    *last(panel) = sensitivity;
+                    AppState::update(cx, |state, cx| {
+                        let record = state
+                            .current_record()
+                            .map(|record| (record.config_key.clone(), record.device_key()));
+                        if let Some((config_key, event_key)) = record {
+                            commit(state, &config_key, sensitivity);
+                            cx.emit(StateEvent::DeviceConfigChanged(event_key));
+                        }
+                    });
+                    cx.notify();
+                }
+            },
+        );
+    (slider, subscription)
 }
 
 impl SmartShiftPanel {
@@ -112,37 +163,17 @@ impl SmartShiftPanel {
                     }
                 },
             );
-        let wheel_sensitivity = cx.new(|_| {
-            SliderState::new()
-                .min(f32::from(ThumbwheelSensitivity::MIN))
-                .max(f32::from(ThumbwheelSensitivity::MAX))
-                .step(1.)
-                .default_value(f32::from(ThumbwheelSensitivity::DEFAULT))
-        });
-        let wheel_sensitivity_sub = cx.subscribe(
-            &wheel_sensitivity,
-            |panel, _slider, event: &SliderEvent, cx| match event {
-                SliderEvent::Change(value) => {
-                    panel.pending_wheel_sensitivity =
-                        Some(ThumbwheelSensitivity::from_rounded(value.start()));
-                    cx.notify();
-                }
-                SliderEvent::Release(value) => {
-                    let sensitivity = ThumbwheelSensitivity::from_rounded(value.start());
-                    panel.pending_wheel_sensitivity = None;
-                    panel.last_wheel_sensitivity = sensitivity;
-                    AppState::update(cx, |state, cx| {
-                        let record = state
-                            .current_record()
-                            .map(|record| (record.config_key.clone(), record.device_key()));
-                        if let Some((config_key, event_key)) = record {
-                            state.set_device_thumbwheel_sensitivity(&config_key, sensitivity);
-                            cx.emit(StateEvent::DeviceConfigChanged(event_key));
-                        }
-                    });
-                    cx.notify();
-                }
-            },
+        let (wheel_sensitivity, wheel_sensitivity_sub) = sensitivity_slider(
+            cx,
+            |panel| &mut panel.pending_wheel_sensitivity,
+            |panel| &mut panel.last_wheel_sensitivity,
+            AppState::set_device_thumbwheel_sensitivity,
+        );
+        let (zoom_sensitivity, zoom_sensitivity_sub) = sensitivity_slider(
+            cx,
+            |panel| &mut panel.pending_zoom_sensitivity,
+            |panel| &mut panel.last_zoom_sensitivity,
+            AppState::set_device_zoom_sensitivity,
         );
         let state_obs = cx.subscribe(&AppState::global(cx), |_, _, event: &StateEvent, cx| {
             let relevant = match event {
@@ -167,6 +198,10 @@ impl SmartShiftPanel {
             last_wheel_sensitivity: ThumbwheelSensitivity::DEFAULT,
             pending_wheel_sensitivity: None,
             _wheel_sensitivity_sub: wheel_sensitivity_sub,
+            zoom_sensitivity,
+            last_zoom_sensitivity: ThumbwheelSensitivity::DEFAULT,
+            pending_zoom_sensitivity: None,
+            _zoom_sensitivity_sub: zoom_sensitivity_sub,
             _state_obs: state_obs,
         }
     }
@@ -263,6 +298,7 @@ impl SmartShiftPanel {
             );
 
         let wheel_row = self.wheel_sensitivity_row(window, cx);
+        let zoom_row = self.zoom_sensitivity_row(window, cx);
 
         let permanent_row = permanent_row(permanent, ratchet, restore_threshold, status, pal);
 
@@ -273,6 +309,7 @@ impl SmartShiftPanel {
             .child(sensitivity_row)
             .child(permanent_row)
             .child(wheel_row)
+            .child(zoom_row)
     }
 }
 
@@ -311,6 +348,42 @@ impl SmartShiftPanel {
                     ),
             )
             .child(Slider::new(&self.wheel_sensitivity).horizontal())
+    }
+
+    /// The per-device zoom sensitivity row. Same shape as
+    /// [`Self::wheel_sensitivity_row`], reading the zoom setting so a wheel
+    /// bound to zoom can be tuned without touching scroll speed.
+    fn zoom_sensitivity_row(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
+        let pal = theme::palette(cx);
+        let committed = AppState::try_read(cx)
+            .and_then(|state| {
+                state
+                    .current_record()
+                    .map(|r| state.device_zoom_sensitivity(&r.config_key))
+            })
+            .unwrap_or(ThumbwheelSensitivity::DEFAULT);
+        if self.pending_zoom_sensitivity.is_none() && committed != self.last_zoom_sensitivity {
+            self.last_zoom_sensitivity = committed;
+            self.zoom_sensitivity.update(cx, |s, cx| {
+                s.set_value(f32::from(committed), window, cx);
+            });
+        }
+        let display = self.pending_zoom_sensitivity.unwrap_or(committed);
+        v_flex()
+            .gap_2()
+            .child(
+                h_flex()
+                    .justify_between()
+                    .items_baseline()
+                    .child(section_label(tr!("pointer.zoom_sensitivity"), pal))
+                    .child(
+                        div()
+                            .text_body()
+                            .text_color(rgb(ACCENT_BLUE))
+                            .child(format!("{display}")),
+                    ),
+            )
+            .child(Slider::new(&self.zoom_sensitivity).horizontal())
     }
 }
 

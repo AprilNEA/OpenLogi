@@ -187,6 +187,19 @@ pub enum Action {
     /// cancellation and shutdown. Dispatchers without a release context must
     /// degrade this action to a balanced tap rather than leave keys held.
     HoldShortcut(KeyCombo),
+    /// Zoom in one step in the frontmost application.
+    ///
+    /// Synthesised as a modifier-held scroll tick (macOS ⌘+scroll, Windows and
+    /// Linux Ctrl+scroll) rather than a `Cmd+=` / `Ctrl+=` chord. The chord is
+    /// document-only and steps in coarse, app-defined increments; the modified
+    /// scroll is the gesture browsers, image viewers, canvas editors, map views,
+    /// and file managers already treat as continuous zoom, which is what a wheel
+    /// or thumb wheel needs to feel like a zoom control rather than a repeated
+    /// keypress.
+    ZoomIn,
+    /// Zoom out one step in the frontmost application. Counterpart to
+    /// [`Action::ZoomIn`]; see it for why this is a modified scroll tick.
+    ZoomOut,
 }
 
 /// One step in a [`Action::Workflow`]. A workflow is a `Vec<WorkflowStep>`
@@ -285,6 +298,9 @@ macro_rules! for_each_unit_action {
             ScrollDown "Scroll Down" "actions.scroll_down" Scroll ArrowDown,
             HorizontalScrollLeft "Scroll Left" "actions.scroll_left" Scroll ScrollLeft,
             HorizontalScrollRight "Scroll Right" "actions.scroll_right" Scroll ScrollRight,
+            // Zoom
+            ZoomIn "Zoom In" "actions.zoom_in" Zoom ZoomIn,
+            ZoomOut "Zoom Out" "actions.zoom_out" Zoom ZoomOut,
         }
     };
 }

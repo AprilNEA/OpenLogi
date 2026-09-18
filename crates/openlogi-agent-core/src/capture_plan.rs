@@ -64,6 +64,9 @@ pub struct DispatchPlan {
     /// This device's effective thumb-wheel sensitivity (device override or the
     /// app-wide default).
     pub thumbwheel_sensitivity: ThumbwheelSensitivity,
+    /// This device's effective zoom sensitivity (device override or the
+    /// app-wide default), scaling a wheel bound to zoom.
+    pub zoom_sensitivity: ThumbwheelSensitivity,
 }
 
 /// One device's independently versioned hardware target and dispatch plan.
@@ -178,6 +181,7 @@ pub fn plan_for_device(
             .is_some_and(|binding| binding.click_action() != default_binding(*button))
     });
     let thumbwheel_sensitivity = config.thumbwheel_sensitivity(config_key);
+    let zoom_sensitivity = config.zoom_sensitivity(config_key);
     DeviceCapturePlan {
         target: CaptureTarget {
             physical_key,
@@ -201,6 +205,7 @@ pub fn plan_for_device(
             gesture_bindings,
             side_gesture_bindings,
             thumbwheel_sensitivity,
+            zoom_sensitivity,
         },
     }
 }

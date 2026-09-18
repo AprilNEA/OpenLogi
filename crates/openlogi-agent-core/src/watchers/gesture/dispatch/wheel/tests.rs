@@ -14,7 +14,13 @@ const UNSCALED: WheelResolution = WheelResolution {
 };
 
 fn unscaled(sensitivity: ThumbwheelSensitivity) -> ScrollScale {
-    ScrollScale::new(UNSCALED, sensitivity)
+    ScrollScale::new(UNSCALED, sensitivity, sensitivity)
+}
+
+/// Scroll and zoom sensitivities set independently, to prove which one each
+/// path reads.
+fn split(scroll: ThumbwheelSensitivity, zoom: ThumbwheelSensitivity) -> ScrollScale {
+    ScrollScale::new(UNSCALED, scroll, zoom)
 }
 
 fn scroll_delta(output: WheelOutput) -> ScrollDelta {
@@ -59,7 +65,11 @@ fn action_threshold_drops_with_sensitivity_and_floors_at_one() {
 
 #[test]
 fn an_unreported_resolution_leaves_increments_unscaled() {
-    let scale = ScrollScale::new(WheelResolution::UNKNOWN, ThumbwheelSensitivity::DEFAULT);
+    let scale = ScrollScale::new(
+        WheelResolution::UNKNOWN,
+        ThumbwheelSensitivity::DEFAULT,
+        ThumbwheelSensitivity::DEFAULT,
+    );
     assert!((scale.per_increment() - 1.0).abs() < f64::EPSILON);
 }
 
@@ -77,7 +87,11 @@ fn rotation_separates_direction_and_positive_magnitude() {
 
 #[test]
 fn a_revolution_scrolls_its_native_amount_however_finely_the_wheel_reports() {
-    let scale = ScrollScale::new(TRACED, ThumbwheelSensitivity::DEFAULT);
+    let scale = ScrollScale::new(
+        TRACED,
+        ThumbwheelSensitivity::DEFAULT,
+        ThumbwheelSensitivity::DEFAULT,
+    );
     let mut direction = WheelDirection::default();
     let now = Instant::now();
     let mut distance = 0.0;
@@ -90,7 +104,11 @@ fn a_revolution_scrolls_its_native_amount_however_finely_the_wheel_reports() {
 
 #[test]
 fn sensitivity_multiplies_the_native_amount() {
-    let scale = ScrollScale::new(TRACED, ThumbwheelSensitivity::from_rounded(28.0));
+    let scale = ScrollScale::new(
+        TRACED,
+        ThumbwheelSensitivity::from_rounded(28.0),
+        ThumbwheelSensitivity::from_rounded(28.0),
+    );
     let mut direction = WheelDirection::default();
     let now = Instant::now();
     let mut distance = 0.0;
@@ -142,7 +160,11 @@ fn all_scroll_bindings_emit_on_their_configured_axis_and_sign() {
 fn scroll_scale_changes_apply_only_to_the_current_delta() {
     let mut direction = WheelDirection::default();
     let now = Instant::now();
-    let traced = ScrollScale::new(TRACED, ThumbwheelSensitivity::DEFAULT);
+    let traced = ScrollScale::new(
+        TRACED,
+        ThumbwheelSensitivity::DEFAULT,
+        ThumbwheelSensitivity::DEFAULT,
+    );
 
     assert_distance(
         scroll_delta(direction.advance(&Action::HorizontalScrollRight, 1, traced, now)).x(),
@@ -200,6 +222,91 @@ fn physical_directions_accumulate_independently() {
             now,
         ),
         WheelOutput::FireAction
+    );
+}
+
+#[test]
+fn zoom_emits_on_every_increment_instead_of_a_threshold_and_cooldown() {
+    // The bug this pins: zoom on the discrete path fired once per threshold
+    // and then sat out a cooldown, so a steady spin arrived as a few jumps.
+    let mut direction = WheelDirection::default();
+    let now = Instant::now();
+    let scale = unscaled(ThumbwheelSensitivity::DEFAULT);
+
+    let WheelOutput::Zoom(first) = direction.advance(&Action::ZoomIn, 1, scale, now) else {
+        panic!("a single increment must already produce magnification");
+    };
+    assert!(first > 0.0, "zoom in magnifies");
+
+    // Immediately again, well inside what would have been the cooldown.
+    let WheelOutput::Zoom(second) = direction.advance(&Action::ZoomIn, 1, scale, now) else {
+        panic!("consecutive increments must keep producing magnification");
+    };
+    assert!(
+        (first - second).abs() < f64::EPSILON,
+        "equal rotation yields equal magnification: {first} vs {second}"
+    );
+
+    let WheelOutput::Zoom(out) = direction.advance(&Action::ZoomOut, 1, scale, now) else {
+        panic!("zoom out must also be continuous");
+    };
+    assert!(
+        (out + first).abs() < f64::EPSILON,
+        "the two directions are symmetric: {out} vs {first}"
+    );
+}
+
+#[test]
+fn zoom_reads_the_zoom_sensitivity_and_scrolling_ignores_it() {
+    // Guards against the setting existing but never reaching the wheel: raise
+    // only the zoom slider and only zoom may change.
+    let now = Instant::now();
+    let slow = ThumbwheelSensitivity::DEFAULT;
+    let fast = ThumbwheelSensitivity::MAX;
+
+    let mut baseline = WheelDirection::default();
+    let WheelOutput::Zoom(at_default) =
+        baseline.advance(&Action::ZoomIn, 1, split(slow, slow), now)
+    else {
+        panic!("expected magnification");
+    };
+
+    let mut raised = WheelDirection::default();
+    let WheelOutput::Zoom(at_max) = raised.advance(&Action::ZoomIn, 1, split(slow, fast), now)
+    else {
+        panic!("expected magnification");
+    };
+    assert!(
+        at_max > at_default,
+        "raising zoom sensitivity must magnify more per increment: {at_max} vs {at_default}"
+    );
+
+    // The scroll path keeps reading the scroll slider, which did not move.
+    let mut scroller = WheelDirection::default();
+    let with_zoom_raised = scroller.advance(&Action::ScrollUp, 1, split(slow, fast), now);
+    let mut reference = WheelDirection::default();
+    let unchanged = reference.advance(&Action::ScrollUp, 1, split(slow, slow), now);
+    assert_eq!(
+        with_zoom_raised, unchanged,
+        "the zoom slider must not change scroll distance"
+    );
+}
+
+#[test]
+fn zoom_magnification_scales_with_rotation() {
+    let mut direction = WheelDirection::default();
+    let now = Instant::now();
+    let scale = unscaled(ThumbwheelSensitivity::DEFAULT);
+
+    let WheelOutput::Zoom(one) = direction.advance(&Action::ZoomIn, 1, scale, now) else {
+        panic!("expected magnification");
+    };
+    let WheelOutput::Zoom(four) = direction.advance(&Action::ZoomIn, 4, scale, now) else {
+        panic!("expected magnification");
+    };
+    assert!(
+        (four - one * 4.0).abs() < f64::EPSILON,
+        "four increments must magnify four times as much as one: {four} vs {one}"
     );
 }
 

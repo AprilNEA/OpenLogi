@@ -29,10 +29,12 @@ pub(crate) enum ThumbwheelPreset {
     VerticalScrollReversed,
     HorizontalScroll,
     HorizontalScrollReversed,
+    Zoom,
+    ZoomReversed,
 }
 
 impl ThumbwheelPreset {
-    pub(crate) const ALL: [Self; 13] = [
+    pub(crate) const ALL: [Self; 15] = [
         Self::BackForward,
         Self::UndoRedo,
         Self::BrowserHistory,
@@ -46,6 +48,8 @@ impl ThumbwheelPreset {
         Self::VerticalScrollReversed,
         Self::HorizontalScroll,
         Self::HorizontalScrollReversed,
+        Self::Zoom,
+        Self::ZoomReversed,
     ];
 
     #[must_use]
@@ -69,6 +73,10 @@ impl ThumbwheelPreset {
             Self::HorizontalScrollReversed => {
                 (Action::HorizontalScrollLeft, Action::HorizontalScrollRight)
             }
+            // Forward/up magnifies, matching the wheel-toward-the-screen
+            // direction every zoom-capable app already treats as zoom in.
+            Self::Zoom => (Action::ZoomOut, Action::ZoomIn),
+            Self::ZoomReversed => (Action::ZoomIn, Action::ZoomOut),
         };
         ThumbwheelPair { backward, forward }
     }
@@ -99,6 +107,8 @@ impl ThumbwheelPreset {
             Self::VerticalScrollReversed => "pointer.vertical_scroll_reversed",
             Self::HorizontalScroll => "pointer.horizontal_scroll",
             Self::HorizontalScrollReversed => "pointer.horizontal_scroll_reversed",
+            Self::Zoom => "pointer.zoom",
+            Self::ZoomReversed => "pointer.zoom_reversed",
         }
     }
 
@@ -117,6 +127,7 @@ impl ThumbwheelPreset {
             Self::HorizontalScroll | Self::HorizontalScrollReversed => {
                 "action-icons/chevrons-right.svg"
             }
+            Self::Zoom | Self::ZoomReversed => "action-icons/zoom-in.svg",
         }
     }
 }
@@ -141,6 +152,8 @@ mod tests {
             (Action::ScrollUp, Action::ScrollDown),
             (Action::HorizontalScrollRight, Action::HorizontalScrollLeft),
             (Action::HorizontalScrollLeft, Action::HorizontalScrollRight),
+            (Action::ZoomOut, Action::ZoomIn),
+            (Action::ZoomIn, Action::ZoomOut),
         ];
 
         for (preset, (backward, forward)) in ThumbwheelPreset::ALL.into_iter().zip(expected) {
