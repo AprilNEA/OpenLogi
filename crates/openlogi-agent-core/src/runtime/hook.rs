@@ -66,7 +66,7 @@ pub type SharedKeyboardBindings = Arc<RwLock<BTreeMap<KeyTrigger, Action>>>;
 /// A gesture hold this old is presumed stale — real hold+swipe interactions
 /// finish in well under a second, and only a lost button-up (with no OS
 /// interrupt to trigger [`HoldState::cancel`]) leaves one lingering.
-const STALE_HOLD: Duration = Duration::from_secs(10);
+const HOLD_STALE_AFTER: Duration = Duration::from_secs(10);
 
 #[derive(Default)]
 struct HoldState {
@@ -95,13 +95,13 @@ impl HoldState {
     /// clears it when the OS drops a release without an interrupt): a re-press
     /// of the held button itself — a button cannot be pressed while down, so
     /// this is proof the release was lost — and any press once the hold has
-    /// aged past [`STALE_HOLD`], without which every other gesture button
+    /// aged past [`HOLD_STALE_AFTER`], without which every other gesture button
     /// would stay refused indefinitely.
     fn prepare_begin(&mut self, button: ButtonId) -> HoldAdmission {
         let Some(held) = self.current.take() else {
             return HoldAdmission::Begin;
         };
-        if held.button != button && held.started_at.elapsed() < STALE_HOLD {
+        if held.button != button && held.started_at.elapsed() < HOLD_STALE_AFTER {
             self.current = Some(held);
             return HoldAdmission::Refuse;
         }
@@ -155,7 +155,7 @@ impl HoldState {
     #[cfg(test)]
     fn backdate_for_test(&mut self) {
         if let Some(held) = &mut self.current
-            && let Some(aged) = Instant::now().checked_sub(STALE_HOLD)
+            && let Some(aged) = Instant::now().checked_sub(HOLD_STALE_AFTER)
         {
             held.started_at = aged;
         }
