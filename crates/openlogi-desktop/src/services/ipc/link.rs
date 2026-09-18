@@ -1,18 +1,16 @@
 //! The agent link as the loop sees it: one typestate, each phase owning the
 //! facts that are true only in that phase.
 //!
-//! [`Up`] owns the client, the generation [`Ledger`], and the one `observe` in
-//! flight — so dropping it cancels the poll, and no answer from a replaced
-//! connection can ever be mistaken for the live one's. [`Down`] owns the outage
-//! clock and what the GUI has already been told about it, so a fresh outage
-//! starts with a clean slate by construction rather than by resetting flags at
-//! every reconnect site.
+//! While up the link is an [`Observer`], which owns the client, the generation
+//! ledger, and the one `observe` call in flight — so dropping it cancels the
+//! call, and no answer from a replaced connection can ever be mistaken for the
+//! live one's. [`Down`] owns the outage clock and what the GUI has already been
+//! told about it, so a fresh outage starts with a clean slate by construction
+//! rather than by resetting flags at every reconnect site.
 
-use std::future::Future;
-use std::pin::Pin;
 use std::time::{Duration, Instant};
 
-use openlogi_ipc::client::{ConnectError, Ledger, ProtocolSkew, observe_context};
+use openlogi_ipc::client::{ConnectError, Observer, ProtocolSkew};
 use openlogi_ipc::{AgentClient, AgentSnapshot, Observation};
 use tarpc::client::RpcError;
 use tokio::sync::mpsc;
@@ -28,7 +26,8 @@ const UNREACHABLE_AFTER: Duration = Duration::from_secs(15);
 /// The connection to the agent, or the outage in its place.
 pub(super) enum Link {
     Down(Down),
-    Up(Up),
+    /// A declared, version-matched connection with its observe call in flight.
+    Up(Observer<Observation>),
 }
 
 /// Why there is no connection. The two differ in who else might act.
@@ -115,44 +114,6 @@ impl Down {
     }
 }
 
-/// A declared, version-matched connection with its long-poll in flight.
-pub(super) struct Up {
-    pub(super) client: AgentClient,
-    ledger: Ledger,
-    poll: ObserveFuture,
-}
-
-impl Up {
-    pub(super) fn new(client: AgentClient) -> Self {
-        let ledger = Ledger::new();
-        let poll = observe(&client, ledger);
-        Self {
-            client,
-            ledger,
-            poll,
-        }
-    }
-
-    /// Fold an answered poll in and arm the next one. `Some` only for a
-    /// genuinely newer snapshot: an equal generation is the hold elapsing as a
-    /// heartbeat, and neither that nor a stale reply moves the window back.
-    fn answered(&mut self, observation: Observation) -> Option<AgentSnapshot> {
-        let fresh = self.ledger.accept(observation);
-        self.poll = observe(&self.client, self.ledger);
-        fresh.map(|observed| observed.snapshot)
-    }
-}
-
-/// A long-poll in flight. Boxed because it is stored across loop turns; it
-/// owns a clone of the client and dies with the [`Up`] that holds it.
-type ObserveFuture = Pin<Box<dyn Future<Output = Result<Observation, RpcError>> + Send>>;
-
-/// Ask for the next state newer than what this connection has seen.
-fn observe(client: &AgentClient, ledger: Ledger) -> ObserveFuture {
-    let client = client.clone();
-    Box::pin(async move { client.observe(observe_context(), ledger.seen()).await })
-}
-
 impl Link {
     /// Down since process start.
     pub(super) fn cold(now: Instant) -> Self {
@@ -181,7 +142,7 @@ impl Link {
     /// The live client, if any.
     pub(super) fn client(&self) -> Option<&AgentClient> {
         match self {
-            Self::Up(up) => Some(&up.client),
+            Self::Up(observer) => Some(observer.client()),
             Self::Down(_) => None,
         }
     }
@@ -197,7 +158,7 @@ impl Link {
             match effects.connect().await {
                 Ok(client) => {
                     debug!("connected to agent IPC socket");
-                    *self = Self::Up(Up::new(client));
+                    *self = Self::Up(Observer::state(client));
                 }
                 Err(error) => {
                     if let Some(notice) = down.connect_failed(&error) {
@@ -210,20 +171,15 @@ impl Link {
         self.client()
     }
 
-    /// The in-flight poll's answer. Pends forever while down, so a select arm
-    /// on it is simply inert until there is a connection.
-    pub(super) async fn observed(&mut self) -> Result<Observation, RpcError> {
+    /// The next snapshot newer than everything this connection has seen.
+    /// `Ok(None)` is the hold elapsing as a heartbeat, or a stale reply:
+    /// neither moves the window back. Pends forever while down, so a select
+    /// arm on it is simply inert until there is a connection, and cancel-safe
+    /// like the [`Observer::next`] it waits on.
+    pub(super) async fn observed(&mut self) -> Result<Option<AgentSnapshot>, RpcError> {
         match self {
-            Self::Up(up) => (&mut up.poll).await,
+            Self::Up(observer) => Ok(observer.next().await?.map(|observed| observed.snapshot)),
             Self::Down(_) => std::future::pending().await,
-        }
-    }
-
-    /// Fold an answered poll into the live connection and re-arm it.
-    pub(super) fn answered(&mut self, observation: Observation) -> Option<AgentSnapshot> {
-        match self {
-            Self::Up(up) => up.answered(observation),
-            Self::Down(_) => None,
         }
     }
 }
@@ -313,7 +269,7 @@ mod tests {
     #[tokio::test]
     async fn losing_the_link_starts_one_fresh_outage() {
         let client = in_memory_agent(|_| Box::pin(std::future::pending()), std::future::pending());
-        let mut link = Link::Up(Up::new(client));
+        let mut link = Link::Up(Observer::state(client));
         let lost_at = Instant::now();
 
         link.lose(lost_at);
