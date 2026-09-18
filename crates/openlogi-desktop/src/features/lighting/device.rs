@@ -6,19 +6,16 @@
 //! (the agent, over IPC — the GUI has no device I/O of its own).
 
 use gpui::{
-    AppContext as _, Context, Entity, InteractiveElement, IntoElement, ParentElement, Render, Role,
+    Context, InteractiveElement, IntoElement, ParentElement, Render, Role,
     StatefulInteractiveElement as _, Styled, Subscription, Toggled, Window, div, px, rgb,
 };
 use gpui_base::Button as BaseButton;
-use gpui_component::{
-    Selectable as _, h_flex,
-    slider::{Slider, SliderEvent, SliderState},
-    v_flex,
-};
+use gpui_component::{Selectable as _, h_flex, slider::Slider, v_flex};
 use openlogi_core::color::Rgb;
 use openlogi_core::config::Lighting;
 
 use crate::state::{AppState, StateEvent};
+use crate::ui::commit_slider::{CommitSlider, SliderRange};
 use crate::ui::components::Toggle;
 use crate::ui::theme::{self, Palette, Typography as _};
 
@@ -39,47 +36,32 @@ const PALETTE: &[Rgb] = &[
 ];
 
 pub struct LightingPanel {
-    brightness: Entity<SliderState>,
-    /// Last brightness pushed into the slider from `AppState`. A change here
-    /// (device switch, swatch/toggle that re-reads config) means the slider
-    /// must be resynced; an unchanged value during a drag must not, or we'd
-    /// fight the user's in-progress drag (which only commits on release).
-    last_brightness: u8,
-    _brightness_sub: Subscription,
+    brightness: CommitSlider<u8>,
     _state_obs: Subscription,
 }
 
 impl LightingPanel {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let initial = AppState::try_read(cx).map_or(100, |s| s.lighting().brightness);
-        let brightness = cx.new(|_| {
-            SliderState::new()
-                .max(100.)
-                .min(0.)
-                .step(5.)
-                .default_value(f32::from(initial))
-        });
         // The slider drives the device only on release, to avoid streaming a
         // frame burst to the keyboard for every intermediate drag value.
-        let brightness_sub =
-            cx.subscribe(&brightness, |_panel, _slider, event: &SliderEvent, cx| {
-                if let SliderEvent::Release(value) = event {
-                    let pct = clamp_brightness(value.start());
-                    AppState::apply(cx, |state| {
-                        let mut lighting = state.lighting();
-                        lighting.enabled = true;
-                        lighting.brightness = pct;
-                        state.commit_lighting(lighting)
-                    });
-                    cx.notify();
-                }
-            });
+        let brightness = CommitSlider::new(
+            SliderRange::new(0, 100).step(5.),
+            initial,
+            cx,
+            |_, pct, cx| {
+                AppState::apply(cx, |state| {
+                    let mut lighting = state.lighting();
+                    lighting.enabled = true;
+                    lighting.brightness = pct;
+                    state.commit_lighting(lighting)
+                });
+            },
+        );
         let state_obs =
             AppState::repaint_on(cx, |event| matches!(event, StateEvent::LightingChanged(_)));
         Self {
             brightness,
-            last_brightness: initial,
-            _brightness_sub: brightness_sub,
             _state_obs: state_obs,
         }
     }
@@ -94,13 +76,8 @@ impl Render for LightingPanel {
 
         // Pull the slider thumb to the active device's brightness whenever it
         // changed in `AppState` (device switch / external edit), without
-        // disturbing an in-progress drag — see `last_brightness`.
-        if lighting.brightness != self.last_brightness {
-            self.last_brightness = lighting.brightness;
-            let value = f32::from(lighting.brightness);
-            self.brightness
-                .update(cx, |slider, cx| slider.set_value(value, window, cx));
-        }
+        // disturbing an in-progress drag.
+        self.brightness.sync(lighting.brightness, window, cx);
 
         let swatches: Vec<_> = PALETTE
             .iter()
@@ -150,7 +127,7 @@ impl Render for LightingPanel {
                             .child(format!("{}%", lighting.brightness)),
                     ),
             )
-            .child(Slider::new(&self.brightness).horizontal())
+            .child(Slider::new(self.brightness.slider()).horizontal())
     }
 }
 
@@ -190,14 +167,4 @@ fn swatch(color: Rgb, current: &Lighting, pal: Palette) -> impl IntoElement {
                 state.commit_lighting(next)
             });
         })
-}
-
-/// Snap a raw slider read to a 0–100 brightness percent.
-#[expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "value is rounded and clamped into 0..=100 before the cast"
-)]
-fn clamp_brightness(raw: f32) -> u8 {
-    raw.clamp(0., 100.).round() as u8
 }

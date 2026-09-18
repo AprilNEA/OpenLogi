@@ -117,6 +117,12 @@ impl<T: SliderUnit> SliderRange<T> {
         Self { min, max, step: 1. }
     }
 
+    /// Step by `step` slider units instead of one.
+    pub(crate) fn step(mut self, step: f32) -> Self {
+        self.step = step;
+        self
+    }
+
     /// A `SliderState` over this range with the thumb on `initial`.
     ///
     /// `SliderState` starts as `0..=100` and clamps against the bound it has
