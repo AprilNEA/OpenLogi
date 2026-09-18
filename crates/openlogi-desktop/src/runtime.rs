@@ -79,13 +79,13 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
                 .default_options(assets::queries::default_options())
                 .build(swr_runtime.clone());
             if AppState::try_global(cx).is_none() {
-                let cache = assets::AssetResolver::new();
+                let resolver = assets::AssetResolver::new();
                 let state = cx.new(|_| {
                     let mut state = AppState::with_runtime(
                         config,
                         &[],
                         &[],
-                        &cache,
+                        &resolver,
                         &cams,
                         persistence,
                         ipc_commands,
@@ -210,7 +210,7 @@ struct Runtime {
     /// snapshots — rebuilt only when a sync lands new assets. Rebuilding per
     /// snapshot was pure waste: the unchanged-list early-return discarded the
     /// fresh records anyway.
-    cache: assets::AssetResolver,
+    resolver: assets::AssetResolver,
     /// The process-wide swr cache, shared with `AppState`'s device reads. This
     /// runtime owns the asset mirror probe and depot-download subscriptions —
     /// see [`assets::queries`].
@@ -231,13 +231,13 @@ struct Runtime {
 
 impl Runtime {
     fn new(cams: Vec<Camera>, sync_tx: UnboundedSender<bool>, swr: SwrClient) -> Self {
-        let cache = assets::AssetResolver::new();
-        let auto_sync = sync::should_run(cache.has_bundle_root());
+        let resolver = assets::AssetResolver::new();
+        let auto_sync = sync::should_run(resolver.has_bundle_root());
         Self {
             cams,
             camera_misses: 0,
             snapshot: None,
-            cache,
+            resolver,
             swr,
             auto_sync,
             asset_subs: Subscriptions::new(),
@@ -306,7 +306,7 @@ impl Runtime {
         let (auto_download, asset_source, models) = cx.update(|cx| {
             let (changes, auto_download, asset_source, models) =
                 AppState::update(cx, |state, cx| {
-                    let changes = state.apply_agent_snapshot(snapshot, &self.cache, &self.cams);
+                    let changes = state.apply_agent_snapshot(snapshot, &self.resolver, &self.cams);
                     changes.events.clone().emit(cx);
                     let settings = state.app_settings();
                     (
@@ -401,7 +401,7 @@ impl Runtime {
             // The on-disk cache is gone: rebuild the resolver and repaint so
             // cleared art falls back to the silhouette (or bundled art)
             // immediately.
-            self.cache = assets::AssetResolver::new();
+            self.resolver = assets::AssetResolver::new();
             self.refresh_devices(cx);
         }
         assets::queries::invalidate_all(&self.swr);
@@ -417,7 +417,7 @@ impl Runtime {
     /// anything actually changed.
     fn on_sync_finished(&mut self, ok: bool, cx: &AsyncApp) {
         if ok {
-            self.cache = assets::AssetResolver::new();
+            self.resolver = assets::AssetResolver::new();
             self.refresh_devices(cx);
         }
     }
@@ -429,7 +429,7 @@ impl Runtime {
                 let events = state.refresh_inventories(
                     &self.inventories,
                     &self.standalone,
-                    &self.cache,
+                    &self.resolver,
                     &self.cams,
                 );
                 let changed = !events.is_empty();

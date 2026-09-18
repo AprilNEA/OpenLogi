@@ -56,7 +56,7 @@ impl AppState {
     pub(crate) fn apply_agent_snapshot(
         &mut self,
         snapshot: &AgentSnapshot,
-        cache: &AssetResolver,
+        resolver: &AssetResolver,
         cameras: &[Camera],
     ) -> SnapshotChanges {
         let inventory_ready = snapshot.status.inventory == InventoryHealth::Ready;
@@ -64,7 +64,7 @@ impl AppState {
         // pre-enumeration list, which must not burn the GUI's miss grace or
         // replace the last known device set.
         let inventory = if inventory_ready {
-            self.refresh_inventories(&snapshot.inventory, &snapshot.standalone, cache, cameras)
+            self.refresh_inventories(&snapshot.inventory, &snapshot.standalone, resolver, cameras)
         } else {
             StateEvents::none()
         };

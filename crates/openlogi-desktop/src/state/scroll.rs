@@ -182,13 +182,13 @@ mod tests {
 
     /// An in-memory-only `AppState` around `config`, with no live inventory.
     fn test_state(config: Config) -> AppState {
-        let cache = AssetResolver::new();
+        let resolver = AssetResolver::new();
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
         AppState::with_runtime(
             config,
             &[],
             &[],
-            &cache,
+            &resolver,
             &[],
             ConfigPersistence::MemoryOnly,
             commands,

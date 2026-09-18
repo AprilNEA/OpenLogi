@@ -133,8 +133,8 @@ fn cabled_inventory() -> DeviceInventory {
 /// resolves one config key for a device sighted on two routes in the same
 /// snapshot.
 fn records_from(config: &Config, inventories: &[DeviceInventory]) -> Vec<DeviceRecord> {
-    let cache = AssetResolver::new();
-    let list = build_device_list(inventories, &[], &cache, config, &[]);
+    let resolver = AssetResolver::new();
+    let list = build_device_list(inventories, &[], &resolver, config, &[]);
     fold_by_inventory_key(list).into_values().collect()
 }
 
@@ -234,8 +234,8 @@ fn adoption_folds_the_pre_upgrade_entry_and_converges() {
     // `config_key`. Folding onto `config_key` would fold the legacy entry
     // onto itself and nothing would ever move.
     let mut config = receiver_only_config();
-    let cache = AssetResolver::new();
-    let list = build_device_list(&[receiver_inventory()], &[], &cache, &config, &[]);
+    let resolver = AssetResolver::new();
+    let list = build_device_list(&[receiver_inventory()], &[], &resolver, &config, &[]);
     assert!(adopt_routes(&mut config, &list), "the fold is a change");
 
     assert_eq!(
@@ -247,7 +247,7 @@ fn adoption_folds_the_pre_upgrade_entry_and_converges() {
         !config.devices.contains_key("receiver:82839805:slot:1"),
         "the legacy entry is consumed"
     );
-    let list = build_device_list(&[receiver_inventory()], &[], &cache, &config, &[]);
+    let list = build_device_list(&[receiver_inventory()], &[], &resolver, &config, &[]);
     assert_eq!(
         list[0].config_key, "unit:6be9d300",
         "the next build reads the canonical key"
@@ -319,8 +319,8 @@ fn standalone_registry_identity_is_preserved_without_hidpp_model_info() {
 #[test]
 fn no_model_info_uses_receiver_slot_as_config_key() {
     let inv = inventory_with(vec![paired_device_no_model_info(1, Some(0x4076))]);
-    let cache = AssetResolver::new();
-    let list = build_device_list(&[inv], &[], &cache, &Config::default(), &[]);
+    let resolver = AssetResolver::new();
+    let list = build_device_list(&[inv], &[], &resolver, &Config::default(), &[]);
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].config_key, "receiver:da2699e1:slot:1");
     assert_eq!(list[0].model_key, "wpid4076");
@@ -331,8 +331,8 @@ fn no_model_info_uses_receiver_slot_as_config_key() {
 #[test]
 fn no_model_info_falls_back_to_slot_when_no_wpid() {
     let inv = inventory_with(vec![paired_device_no_model_info(3, None)]);
-    let cache = AssetResolver::new();
-    let list = build_device_list(&[inv], &[], &cache, &Config::default(), &[]);
+    let resolver = AssetResolver::new();
+    let list = build_device_list(&[inv], &[], &resolver, &Config::default(), &[]);
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].config_key, "receiver:da2699e1:slot:3");
     assert_eq!(list[0].model_key, "slot3");
@@ -341,8 +341,8 @@ fn no_model_info_falls_back_to_slot_when_no_wpid() {
 #[test]
 fn no_model_info_display_name_falls_back_to_slot() {
     let inv = inventory_with(vec![paired_device_no_model_info(2, Some(0x4051))]);
-    let cache = AssetResolver::new();
-    let list = build_device_list(&[inv], &[], &cache, &Config::default(), &[]);
+    let resolver = AssetResolver::new();
+    let list = build_device_list(&[inv], &[], &resolver, &Config::default(), &[]);
     assert_eq!(list[0].display_name, "Slot 2");
 }
 
@@ -364,8 +364,8 @@ fn offline_record_is_present_but_inert() {
     // measured capabilities (so its panels show) but no route (so writes are
     // no-ops until it wakes).
     let id = mouse_identity("MX Master 3S");
-    let cache = AssetResolver::new();
-    let rec = offline_record("2b034", &id, &cache);
+    let resolver = AssetResolver::new();
+    let rec = offline_record("2b034", &id, &resolver);
     assert_eq!(rec.config_key, "2b034");
     assert_eq!(rec.display_name, "MX Master 3S");
     assert!(!rec.online);
@@ -411,11 +411,11 @@ fn known_devices_are_appended_only_when_absent_from_live() {
     let mut list = vec![online_record("A")];
     let a = mouse_identity("live A overwritten?");
     let b = mouse_identity("asleep B");
-    let cache = AssetResolver::new();
+    let resolver = AssetResolver::new();
     append_offline_known(
         &mut list,
         [("A", &a), ("B", &b)].into_iter(),
-        &cache,
+        &resolver,
         &HashSet::new(),
         &Config::default(),
     );
@@ -444,11 +444,11 @@ fn model_info(ext: u8, pid: u16) -> DeviceModelInfo {
 
 #[test]
 fn zero_unit_direct_inventory_is_transient() {
-    let cache = AssetResolver::new();
+    let resolver = AssetResolver::new();
     let list = build_device_list(
         &[direct_inventory(model_info(2, 0xb034))],
         &[],
-        &cache,
+        &resolver,
         &Config::default(),
         &[],
     );
@@ -462,13 +462,13 @@ fn zero_unit_direct_inventory_is_transient() {
 #[test]
 fn historical_zero_unit_identity_does_not_create_offline_card() {
     let id = mouse_identity("MX Master 3S");
-    let cache = AssetResolver::new();
+    let resolver = AssetResolver::new();
     let mut list = Vec::new();
 
     append_offline_known(
         &mut list,
         [("direct:046d:b023:unit:00000000", &id)].into_iter(),
-        &cache,
+        &resolver,
         &HashSet::new(),
         &Config::default(),
     );
@@ -481,7 +481,7 @@ fn same_model_physical_bluetooth_devices_remain_distinct() {
     let mut id_a = mouse_identity("MX Master 3S");
     id_a.model_info = Some(model_info(2, 0xb034));
     let id_b = id_a.clone();
-    let cache = AssetResolver::new();
+    let resolver = AssetResolver::new();
     let mut list = Vec::new();
 
     append_offline_known(
@@ -491,7 +491,7 @@ fn same_model_physical_bluetooth_devices_remain_distinct() {
             ("direct:046d:b023:unit:05060708", &id_b),
         ]
         .into_iter(),
-        &cache,
+        &resolver,
         &HashSet::new(),
         &Config::default(),
     );
@@ -517,12 +517,12 @@ fn placeholders_for_absent_receivers_are_hidden() {
     // The work receiver's mouse must not haunt the list at home: with its
     // receiver unplugged the device is unreachable, so no card is shown.
     let id = mouse_identity("MX Master 3S");
-    let cache = AssetResolver::new();
+    let resolver = AssetResolver::new();
     let mut list = Vec::new();
     append_offline_known(
         &mut list,
         [("receiver:aabb:slot:1", &id)].into_iter(),
-        &cache,
+        &resolver,
         &HashSet::new(),
         &Config::default(),
     );
@@ -530,7 +530,7 @@ fn placeholders_for_absent_receivers_are_hidden() {
     append_offline_known(
         &mut list,
         [("receiver:aabb:slot:1", &id)].into_iter(),
-        &cache,
+        &resolver,
         &HashSet::from(["aabb".to_string()]),
         &Config::default(),
     );
@@ -550,13 +550,13 @@ fn adopted_placeholder_is_hidden_when_its_linked_receiver_is_absent() {
         .insert("receiver:aabb:slot:1".to_string(), LinkConfig::default());
     config.devices.insert("unit:6be9d300".to_string(), device);
     let id = mouse_identity("MX Master 3S");
-    let cache = AssetResolver::new();
+    let resolver = AssetResolver::new();
 
     let mut list = Vec::new();
     append_offline_known(
         &mut list,
         [("unit:6be9d300", &id)].into_iter(),
-        &cache,
+        &resolver,
         &HashSet::new(),
         &config,
     );
@@ -565,7 +565,7 @@ fn adopted_placeholder_is_hidden_when_its_linked_receiver_is_absent() {
     append_offline_known(
         &mut list,
         [("unit:6be9d300", &id)].into_iter(),
-        &cache,
+        &resolver,
         &HashSet::from(["aabb".to_string()]),
         &config,
     );
@@ -589,13 +589,13 @@ fn adopted_placeholder_stays_visible_with_a_non_receiver_link_too() {
         .insert("direct:046d:c08d".to_string(), LinkConfig::default());
     config.devices.insert("unit:cafebabe".to_string(), device);
     let id = mouse_identity("MX Master 3S");
-    let cache = AssetResolver::new();
+    let resolver = AssetResolver::new();
 
     let mut list = Vec::new();
     append_offline_known(
         &mut list,
         [("unit:cafebabe", &id)].into_iter(),
-        &cache,
+        &resolver,
         &HashSet::new(),
         &config,
     );
@@ -616,11 +616,11 @@ fn same_model_placeholder_is_blocked_by_a_live_unit() {
     live.model_info = Some(model_info(2, 0xb034));
     let mut list = vec![live];
     let id = mouse_identity("MX Master 3S");
-    let cache = AssetResolver::new();
+    let resolver = AssetResolver::new();
     append_offline_known(
         &mut list,
         [("0b034", &id)].into_iter(),
-        &cache,
+        &resolver,
         &HashSet::new(),
         &Config::default(),
     );
@@ -633,12 +633,12 @@ fn legacy_same_model_placeholders_collapse_to_one_card() {
     // offline card carries no information, only confusion.
     let id_a = mouse_identity("MX Master 3S");
     let id_b = mouse_identity("MX Master 3S");
-    let cache = AssetResolver::new();
+    let resolver = AssetResolver::new();
     let mut list = Vec::new();
     append_offline_known(
         &mut list,
         [("0b034", &id_a), ("2b034", &id_b)].into_iter(),
-        &cache,
+        &resolver,
         &HashSet::new(),
         &Config::default(),
     );
@@ -701,8 +701,8 @@ fn webcams_are_appended_as_camera_records() {
         max_resolution: Some((1920, 1080)),
         max_fps: Some(60),
     };
-    let cache = AssetResolver::new();
-    let list = build_device_list(&[], &[], &cache, &Config::default(), &[camera]);
+    let resolver = AssetResolver::new();
+    let list = build_device_list(&[], &[], &resolver, &Config::default(), &[camera]);
 
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].kind, DeviceKind::Camera);
@@ -727,8 +727,8 @@ fn webcam_without_serial_uses_model_scoped_key() {
         max_resolution: None,
         max_fps: None,
     };
-    let cache = AssetResolver::new();
-    let list = build_device_list(&[], &[], &cache, &Config::default(), &[camera]);
+    let resolver = AssetResolver::new();
+    let list = build_device_list(&[], &[], &resolver, &Config::default(), &[camera]);
     // Port-stable even without a serial: settings follow the model, not the
     // OS capture id (which embeds the USB location on macOS/Windows).
     assert_eq!(list[0].config_key, "camera:046d:082d");
@@ -750,9 +750,9 @@ fn webcam_config_key_survives_a_usb_port_change() {
         unique_id: "0x14110000046d0893".to_string(),
         ..port_a.clone()
     };
-    let cache = AssetResolver::new();
-    let a = build_device_list(&[], &[], &cache, &Config::default(), &[port_a]);
-    let b = build_device_list(&[], &[], &cache, &Config::default(), &[port_b]);
+    let resolver = AssetResolver::new();
+    let a = build_device_list(&[], &[], &resolver, &Config::default(), &[port_a]);
+    let b = build_device_list(&[], &[], &resolver, &Config::default(), &[port_b]);
     assert_eq!(a[0].config_key, b[0].config_key);
     assert_eq!(a[0].record_key(), b[0].record_key());
     assert_ne!(a[0].capture_id, b[0].capture_id);
@@ -776,8 +776,8 @@ fn two_serial_less_same_model_cameras_stay_distinct() {
         unique_id: "0x14110000046d0893".to_string(),
         ..a.clone()
     };
-    let cache = AssetResolver::new();
-    let list = build_device_list(&[], &[], &cache, &Config::default(), &[a, b]);
+    let resolver = AssetResolver::new();
+    let list = build_device_list(&[], &[], &resolver, &Config::default(), &[a, b]);
     assert_eq!(list.len(), 2);
     assert_eq!(list[0].config_key, list[1].config_key);
     assert_eq!(list[0].config_key, "camera:046d:0893");

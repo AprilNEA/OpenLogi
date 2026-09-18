@@ -43,13 +43,13 @@ use super::{AppState, ConfigPersistence, DeviceKey, LightCommandStatus, Load, St
 
 #[test]
 fn read_only_config_rolls_back_mutations_and_does_not_reload_agent() {
-    let cache = AssetResolver::new();
+    let resolver = AssetResolver::new();
     let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let mut state = AppState::with_runtime(
         Config::ephemeral(),
         &[],
         &[],
-        &cache,
+        &resolver,
         &[],
         ConfigPersistence::ReadOnly("invalid config".into()),
         commands,
@@ -74,13 +74,13 @@ fn read_only_config_rolls_back_mutations_and_does_not_reload_agent() {
 
 #[test]
 fn smooth_scroll_change_reloads_the_agent_once() {
-    let cache = AssetResolver::new();
+    let resolver = AssetResolver::new();
     let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let mut state = AppState::with_runtime(
         Config::ephemeral(),
         &[],
         &[],
-        &cache,
+        &resolver,
         &[],
         ConfigPersistence::MemoryOnly,
         commands,
@@ -107,13 +107,13 @@ fn smooth_scroll_change_reloads_the_agent_once() {
 #[gpui::test]
 fn language_switch_rebuilds_menus_after_the_state_update(cx: &mut gpui::TestAppContext) {
     let _locale = crate::services::i18n::LOCALE_LOCK.lock();
-    let cache = AssetResolver::new();
+    let resolver = AssetResolver::new();
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
     let state = AppState::with_runtime(
         Config::ephemeral(),
         &[],
         &[],
-        &cache,
+        &resolver,
         &[],
         ConfigPersistence::MemoryOnly,
         commands,
@@ -134,13 +134,13 @@ fn language_switch_rebuilds_menus_after_the_state_update(cx: &mut gpui::TestAppC
 
 #[test]
 fn agent_reload_error_stays_visible_until_a_successful_confirmation() {
-    let cache = AssetResolver::new();
+    let resolver = AssetResolver::new();
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
     let mut state = AppState::with_runtime(
         Config::ephemeral(),
         &[],
         &[],
-        &cache,
+        &resolver,
         &[],
         ConfigPersistence::MemoryOnly,
         commands,
@@ -269,12 +269,12 @@ fn snapshot_candidate(profile: &DeviceProfile) -> AgentSnapshot {
 fn canonical_profile_state(
     commands: tokio::sync::mpsc::UnboundedSender<crate::services::ipc::Command>,
 ) -> AppState {
-    let cache = AssetResolver::new();
+    let resolver = AssetResolver::new();
     AppState::with_runtime(
         Config::ephemeral(),
         &[],
         &[],
-        &cache,
+        &resolver,
         &[],
         ConfigPersistence::MemoryOnly,
         commands,
@@ -293,11 +293,11 @@ fn profile_device(state: &AppState, unit_id: [u8; 4]) -> &super::DeviceRecord {
 fn canonical_profile_projects_identity_routes_capabilities_and_battery() {
     let profile = canonical_device_profile();
     let snapshot = snapshot_candidate(&profile);
-    let cache = AssetResolver::new();
+    let resolver = AssetResolver::new();
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
     let mut state = canonical_profile_state(commands);
 
-    let changes = state.apply_agent_snapshot(&snapshot, &cache, &[]);
+    let changes = state.apply_agent_snapshot(&snapshot, &resolver, &[]);
 
     assert!(changes.inventory_ready);
     assert_eq!(
@@ -400,10 +400,10 @@ fn canonical_profile_projects_identity_routes_capabilities_and_battery() {
 #[test]
 fn canonical_profile_snapshots_replace_online_state_and_remove_absent_receivers() {
     let profile = canonical_device_profile();
-    let cache = AssetResolver::new();
+    let resolver = AssetResolver::new();
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
     let mut state = canonical_profile_state(commands);
-    state.apply_agent_snapshot(&snapshot_candidate(&profile), &cache, &[]);
+    state.apply_agent_snapshot(&snapshot_candidate(&profile), &resolver, &[]);
     assert!(
         state
             .devices()
@@ -418,7 +418,7 @@ fn canonical_profile_snapshots_replace_online_state_and_remove_absent_receivers(
     replaced.inventory[1].paired[0].online = false;
     replaced.inventory[1].paired[0].battery = None;
     replaced.inventory[1].paired[0].capabilities = None;
-    state.apply_agent_snapshot(&replaced, &cache, &[]);
+    state.apply_agent_snapshot(&replaced, &resolver, &[]);
     let receiver_mouse = profile_device(&state, [79, 76, 68, 1]);
     assert!(!receiver_mouse.online);
     assert_eq!(receiver_mouse.battery, None);
@@ -431,7 +431,7 @@ fn canonical_profile_snapshots_replace_online_state_and_remove_absent_receivers(
     let mut without_receiver = replaced;
     without_receiver.inventory.remove(0);
     for _ in 0..=super::INVENTORY_MISS_GRACE {
-        state.apply_agent_snapshot(&without_receiver, &cache, &[]);
+        state.apply_agent_snapshot(&without_receiver, &resolver, &[]);
     }
 
     assert!(
@@ -459,10 +459,10 @@ fn canonical_profile_light_setting_errors_reach_desktop_state() {
         .expect("canonical raw-HID settings");
     assert_eq!(raw_settings.light, ProfileSupport::Supported);
 
-    let cache = AssetResolver::new();
+    let resolver = AssetResolver::new();
     let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let mut state = canonical_profile_state(commands);
-    state.apply_agent_snapshot(&snapshot_candidate(&profile), &cache, &[]);
+    state.apply_agent_snapshot(&snapshot_candidate(&profile), &resolver, &[]);
     let light_index = state
         .devices()
         .iter()
@@ -555,7 +555,7 @@ fn failed_fold_persist_does_not_orphan_the_device_list() {
     // now-stale, folded `merged_list`. From then on `device_list` names a
     // `config_key` that does not exist in `config`, so every
     // `config.devices.get(record.config_key)` lookup silently misses.
-    let cache = AssetResolver::new();
+    let resolver = AssetResolver::new();
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
     let mut config = Config::ephemeral();
     config.set_dpi("receiver:82839805:slot:1", Dpi::new(3200));
@@ -563,14 +563,14 @@ fn failed_fold_persist_does_not_orphan_the_device_list() {
         config,
         &[],
         &[],
-        &cache,
+        &resolver,
         &[],
         ConfigPersistence::ReadOnly("simulated unwritable config.toml".to_string()),
         commands,
     );
     assert!(state.devices().is_empty(), "no inventory seen yet");
 
-    let changed = state.refresh_inventories(&[receiver_inventory()], &[], &cache, &[]);
+    let changed = state.refresh_inventories(&[receiver_inventory()], &[], &resolver, &[]);
 
     assert!(
         changed.is_empty(),
@@ -704,7 +704,7 @@ fn lighting_changed(key: &str) -> StateEvent {
 
 /// A state holding the one persistent mouse, so per-device config has a key.
 pub(super) fn state_with_a_known_mouse() -> AppState {
-    let cache = AssetResolver::new();
+    let resolver = AssetResolver::new();
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
     let mut inventory = direct_inventory([0xa3, 0x93, 0xca, 0xe0]);
     inventory.paired[0]
@@ -716,7 +716,7 @@ pub(super) fn state_with_a_known_mouse() -> AppState {
         Config::ephemeral(),
         &[inventory],
         &[],
-        &cache,
+        &resolver,
         &[],
         ConfigPersistence::MemoryOnly,
         commands,
@@ -1113,13 +1113,13 @@ fn a_stored_middle_click_gesture_remains_editable_until_it_is_disabled() {
         ButtonId::MiddleClick,
         Binding::Gesture(middle.clone()),
     );
-    let cache = AssetResolver::new();
+    let resolver = AssetResolver::new();
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
     let mut state = AppState::with_runtime(
         config,
         &[direct_inventory([0xa3, 0x93, 0xca, 0xe0])],
         &[],
-        &cache,
+        &resolver,
         &[],
         ConfigPersistence::MemoryOnly,
         commands,
@@ -1167,7 +1167,7 @@ fn a_stored_middle_click_gesture_remains_editable_until_it_is_disabled() {
 fn a_profile_belongs_to_the_device_it_was_opened_on() {
     // Overlays are per-device, so a scope must not follow the selection onto
     // another mouse and silently edit a profile the user never opened.
-    let cache = AssetResolver::new();
+    let resolver = AssetResolver::new();
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
     let mut state = AppState::with_runtime(
         Config::ephemeral(),
@@ -1176,7 +1176,7 @@ fn a_profile_belongs_to_the_device_it_was_opened_on() {
             second_mouse_inventory(),
         ],
         &[],
-        &cache,
+        &resolver,
         &[],
         ConfigPersistence::MemoryOnly,
         commands,
@@ -1289,14 +1289,14 @@ fn a_host_with_no_readable_foreground_app_reports_the_default_profile() {
 
 #[test]
 fn transient_identity_is_not_persisted_or_retained_after_resolution() {
-    let cache = AssetResolver::new();
+    let resolver = AssetResolver::new();
     let transient_inventory = direct_inventory([0; 4]);
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
     let mut state = AppState::with_runtime(
         Config::ephemeral(),
         &[transient_inventory],
         &[],
-        &cache,
+        &resolver,
         &[],
         ConfigPersistence::MemoryOnly,
         commands,
@@ -1311,7 +1311,7 @@ fn transient_identity_is_not_persisted_or_retained_after_resolution() {
     let stable_list = build_device_list(
         &[direct_inventory([0xa3, 0x93, 0xca, 0xe0])],
         &[],
-        &cache,
+        &resolver,
         &state.config,
         &[],
     );
@@ -1329,13 +1329,13 @@ fn transient_probe_folds_into_its_known_card() {
     // #482: a half-read probe (all-zero unit id) of the only known device
     // with that vid/pid must not evict the known card or appear beside it —
     // the card keeps its identity and takes the live volatile state.
-    let cache = AssetResolver::new();
+    let resolver = AssetResolver::new();
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
     let mut state = AppState::with_runtime(
         Config::ephemeral(),
         &[direct_inventory([0xa3, 0x93, 0xca, 0xe0])],
         &[],
-        &cache,
+        &resolver,
         &[],
         ConfigPersistence::MemoryOnly,
         commands,
@@ -1345,8 +1345,13 @@ fn transient_probe_folds_into_its_known_card() {
     let stable_key = "unit:a393cae0";
     assert_eq!(state.devices()[0].config_key, stable_key);
 
-    let transient_list =
-        build_device_list(&[direct_inventory([0; 4])], &[], &cache, &state.config, &[]);
+    let transient_list = build_device_list(
+        &[direct_inventory([0; 4])],
+        &[],
+        &resolver,
+        &state.config,
+        &[],
+    );
     let merged = state.merge_inventory_snapshot(transient_list);
 
     assert_eq!(merged.len(), 1, "no second card for the half-read probe");
@@ -1360,13 +1365,13 @@ fn transient_probe_folds_into_its_known_card() {
 fn transient_record_beside_its_live_device_is_dropped() {
     // Both a full and a half-read probe of the same wire product in one
     // snapshot: the transient record is probe noise, not a second device.
-    let cache = AssetResolver::new();
+    let resolver = AssetResolver::new();
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
     let mut state = AppState::with_runtime(
         Config::ephemeral(),
         &[direct_inventory([0xa3, 0x93, 0xca, 0xe0])],
         &[],
-        &cache,
+        &resolver,
         &[],
         ConfigPersistence::MemoryOnly,
         commands,
@@ -1378,7 +1383,7 @@ fn transient_record_beside_its_live_device_is_dropped() {
             direct_inventory([0; 4]),
         ],
         &[],
-        &cache,
+        &resolver,
         &state.config,
         &[],
     );
@@ -1396,7 +1401,7 @@ fn transient_probe_adopts_the_absent_sibling_of_a_live_twin() {
     // The live twin must not get the transient discarded as its own noise:
     // the half-read probe can only be the sibling, which keeps its card
     // online and routed.
-    let cache = AssetResolver::new();
+    let resolver = AssetResolver::new();
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
     let mut state = AppState::with_runtime(
         Config::ephemeral(),
@@ -1405,7 +1410,7 @@ fn transient_probe_adopts_the_absent_sibling_of_a_live_twin() {
             direct_inventory([2, 2, 2, 2]),
         ],
         &[],
-        &cache,
+        &resolver,
         &[],
         ConfigPersistence::MemoryOnly,
         commands,
@@ -1414,7 +1419,7 @@ fn transient_probe_adopts_the_absent_sibling_of_a_live_twin() {
     let snapshot = build_device_list(
         &[direct_inventory([1, 1, 1, 1]), direct_inventory([0; 4])],
         &[],
-        &cache,
+        &resolver,
         &state.config,
         &[],
     );
@@ -1437,7 +1442,7 @@ fn transient_probe_adopts_the_absent_sibling_of_a_live_twin() {
 fn ambiguous_transient_probe_is_not_adopted() {
     // Two same-model devices are known; a half-read probe could be either,
     // so neither card may steal it.
-    let cache = AssetResolver::new();
+    let resolver = AssetResolver::new();
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
     let mut state = AppState::with_runtime(
         Config::ephemeral(),
@@ -1446,15 +1451,20 @@ fn ambiguous_transient_probe_is_not_adopted() {
             direct_inventory([2, 2, 2, 2]),
         ],
         &[],
-        &cache,
+        &resolver,
         &[],
         ConfigPersistence::MemoryOnly,
         commands,
     );
     assert_eq!(state.devices().len(), 2);
 
-    let transient_list =
-        build_device_list(&[direct_inventory([0; 4])], &[], &cache, &state.config, &[]);
+    let transient_list = build_device_list(
+        &[direct_inventory([0; 4])],
+        &[],
+        &resolver,
+        &state.config,
+        &[],
+    );
     let merged = state.merge_inventory_snapshot(transient_list);
 
     assert_eq!(merged.len(), 3, "both known cards survive on grace");
@@ -1474,13 +1484,13 @@ fn a_route_shared_by_two_online_twins_is_never_adopted() {
     // stolen back by the other on the very next tick — a persist-and-reload
     // storm. The route cannot be attributed to either by route alone, so
     // neither claims it, and nothing is persisted or reloaded.
-    let cache = AssetResolver::new();
+    let resolver = AssetResolver::new();
     let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let mut state = AppState::with_runtime(
         Config::ephemeral(),
         &[],
         &[],
-        &cache,
+        &resolver,
         &[],
         ConfigPersistence::MemoryOnly,
         commands,
@@ -1492,7 +1502,7 @@ fn a_route_shared_by_two_online_twins_is_never_adopted() {
             direct_inventory([2, 2, 2, 2]),
         ],
         &[],
-        &cache,
+        &resolver,
         &[],
     );
 
@@ -2185,14 +2195,14 @@ fn gesture_maps_cover_every_gesture_mode_button() {
 /// compared field happened to move.
 #[test]
 fn a_battery_only_change_reaches_the_device_list() {
-    let cache = AssetResolver::new();
+    let resolver = AssetResolver::new();
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
     let unit_id = [1, 2, 3, 4];
     let mut state = AppState::with_runtime(
         Config::ephemeral(),
         &[inventory_with_battery(unit_id, 50)],
         &[],
-        &cache,
+        &resolver,
         &[],
         ConfigPersistence::MemoryOnly,
         commands,
@@ -2203,7 +2213,7 @@ fn a_battery_only_change_reaches_the_device_list() {
     );
 
     let changed =
-        state.refresh_inventories(&[inventory_with_battery(unit_id, 40)], &[], &cache, &[]);
+        state.refresh_inventories(&[inventory_with_battery(unit_id, 40)], &[], &resolver, &[]);
 
     assert_eq!(
         changed,
@@ -2222,14 +2232,14 @@ fn a_battery_only_change_reaches_the_device_list() {
 /// by simply always returning `true`.
 #[test]
 fn an_identical_snapshot_is_still_a_no_op() {
-    let cache = AssetResolver::new();
+    let resolver = AssetResolver::new();
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
     let unit_id = [1, 2, 3, 4];
     let mut state = AppState::with_runtime(
         Config::ephemeral(),
         &[inventory_with_battery(unit_id, 50)],
         &[],
-        &cache,
+        &resolver,
         &[],
         ConfigPersistence::MemoryOnly,
         commands,
@@ -2237,7 +2247,7 @@ fn an_identical_snapshot_is_still_a_no_op() {
 
     assert!(
         state
-            .refresh_inventories(&[inventory_with_battery(unit_id, 50)], &[], &cache, &[])
+            .refresh_inventories(&[inventory_with_battery(unit_id, 50)], &[], &resolver, &[])
             .is_empty()
     );
 }

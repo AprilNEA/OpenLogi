@@ -85,14 +85,14 @@ impl Drop for FakeStream {
 fn preview(cx: &mut TestAppContext) -> (Entity<CameraPreview>, Rc<FakeCapture>) {
     cx.update(gpui_component::init);
     cx.update(|cx| {
-        let cache = AssetResolver::new();
+        let resolver = AssetResolver::new();
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
         let state = cx.new(|_| {
             AppState::with_runtime(
                 Config::ephemeral(),
                 &[],
                 &[],
-                &cache,
+                &resolver,
                 &[],
                 ConfigPersistence::MemoryOnly,
                 commands,

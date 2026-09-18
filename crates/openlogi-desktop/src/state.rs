@@ -191,13 +191,13 @@ impl AppState {
         config: Config,
         inventories: &[DeviceInventory],
         standalone: &[StandaloneDevice],
-        cache: &AssetResolver,
+        resolver: &AssetResolver,
         cameras: &[openlogi_camera::Camera],
         config_persistence: ConfigPersistence,
         ipc_commands: mpsc::UnboundedSender<crate::services::ipc::Command>,
     ) -> Self {
         let mut config = ConfigState::new(config, config_persistence);
-        let device_list = build_device_list(inventories, standalone, cache, &config, cameras);
+        let device_list = build_device_list(inventories, standalone, resolver, &config, cameras);
         // Fold each online device's route into its canonical entry before
         // anything writes to the config — the first frame after a schema-5
         // upgrade is the earliest moment this can happen, and the ordering
@@ -207,7 +207,7 @@ impl AppState {
         let adopted = config.edit(|config| inventory::adopt_routes(config, &device_list));
         // Adoption re-keyed entries, so rebuild before reading the list again.
         let device_list = if adopted {
-            build_device_list(inventories, standalone, cache, &config, cameras)
+            build_device_list(inventories, standalone, resolver, &config, cameras)
         } else {
             device_list
         };
