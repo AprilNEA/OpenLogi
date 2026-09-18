@@ -132,6 +132,10 @@ device = "Laite"
 manage_this_device = "Hallitse tätä laitetta"
 usb = "USB"
 
+easy_switch_followers = "Laitteet, jotka seuraavat tätä näppäimistöä"
+easy_switch_description = "Kun painat Easy-Switch-näppäintä, nämä laitteet vaihtavat tietokonetta näppäimistön mukana."
+easy_switch_no_followers = "Tähän tietokoneeseen ei ole liitetty hiirtä eikä ohjauslevyä."
+
 [profiles]
 active_profile = "Aktiivinen profiili"
 default_profile = "Oletusprofiili"

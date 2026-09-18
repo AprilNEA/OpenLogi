@@ -132,6 +132,10 @@ device = "Устройство"
 manage_this_device = "Управлять устройством"
 usb = "USB"
 
+easy_switch_followers = "Устройства, которые следуют за этой клавиатурой"
+easy_switch_description = "При нажатии клавиши Easy-Switch эти устройства переключаются на другой компьютер вместе с клавиатурой."
+easy_switch_no_followers = "С этим компьютером не сопряжены мышь или сенсорная панель."
+
 [profiles]
 active_profile = "Активный профиль"
 default_profile = "Профиль по умолчанию"

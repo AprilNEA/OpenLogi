@@ -132,6 +132,10 @@ device = "Dispositivo"
 manage_this_device = "Gerenciar este dispositivo"
 usb = "USB"
 
+easy_switch_followers = "Dispositivos que seguem este teclado"
+easy_switch_description = "Ao pressionar uma tecla Easy-Switch, estes dispositivos mudam de computador junto com o teclado."
+easy_switch_no_followers = "Nenhum mouse ou trackpad está pareado com este computador."
+
 [profiles]
 active_profile = "Perfil ativo"
 default_profile = "Perfil padrão"

@@ -132,6 +132,10 @@ device = "Пристрій"
 manage_this_device = "Керувати пристроєм"
 usb = "USB"
 
+easy_switch_followers = "Пристрої, які прямують за цією клавіатурою"
+easy_switch_description = "Коли ви натискаєте клавішу Easy-Switch, ці пристрої перемикаються на інший комп'ютер разом із клавіатурою."
+easy_switch_no_followers = "З цим комп'ютером не з'єднано мишу або трекпад."
+
 [profiles]
 active_profile = "Активний профіль"
 default_profile = "Профіль за замовчуванням"

@@ -559,6 +559,27 @@ mod tests {
     use super::DeviceConfig;
 
     #[test]
+    fn setting_host_switch_targets_sorts_and_dedupes() {
+        let mut config = crate::config::Config::default();
+
+        config.set_host_switch_targets("kbd", vec!["b".into(), "a".into(), "b".into()]);
+
+        assert_eq!(
+            config.host_switch_targets("kbd"),
+            ["a".to_string(), "b".to_string()]
+        );
+    }
+
+    #[test]
+    fn host_switch_targets_are_empty_for_an_unknown_device() {
+        assert!(
+            crate::config::Config::default()
+                .host_switch_targets("nobody")
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn host_switch_targets_round_trip_as_physical_keys() -> Result<(), Box<dyn std::error::Error>> {
         let config: DeviceConfig = toml::from_str(
             r#"host_switch_targets = [

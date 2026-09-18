@@ -132,6 +132,10 @@ device = "Urządzenie"
 manage_this_device = "Zarządzaj tym urządzeniem"
 usb = "USB"
 
+easy_switch_followers = "Urządzenia, które podążają za tą klawiaturą"
+easy_switch_description = "Po naciśnięciu klawisza Easy-Switch te urządzenia zmieniają komputer razem z klawiaturą."
+easy_switch_no_followers = "Z tym komputerem nie sparowano myszy ani gładzika."
+
 [profiles]
 active_profile = "Aktywny profil"
 default_profile = "Profil domyślny"

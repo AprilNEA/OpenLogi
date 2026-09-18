@@ -132,6 +132,10 @@ device = "设备"
 manage_this_device = "管理此设备"
 usb = "USB"
 
+easy_switch_followers = "跟随此键盘的设备"
+easy_switch_description = "按下 Easy-Switch 键时，这些设备会与键盘一起切换电脑。"
+easy_switch_no_followers = "没有鼠标或触控板与这台电脑配对。"
+
 [profiles]
 active_profile = "当前配置文件"
 default_profile = "默认配置文件"

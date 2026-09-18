@@ -132,6 +132,10 @@ device = "Dispositivo"
 manage_this_device = "Gestisci questo dispositivo"
 usb = "USB"
 
+easy_switch_followers = "Dispositivi che seguono questa tastiera"
+easy_switch_description = "Quando premi un tasto Easy-Switch, questi dispositivi cambiano computer insieme alla tastiera."
+easy_switch_no_followers = "Nessun mouse o touchpad è associato a questo computer."
+
 [profiles]
 active_profile = "Profilo attivo"
 default_profile = "Profilo predefinito"

@@ -972,6 +972,30 @@ impl Config {
             .invert_scroll = invert;
     }
 
+    /// Physical config keys of the pointing devices that follow `device_key`'s
+    /// host switch. Empty for a device that leads nothing, which is every
+    /// device until the user says otherwise.
+    #[must_use]
+    pub fn host_switch_targets(&self, device_key: &str) -> &[String] {
+        self.devices
+            .get(device_key)
+            .map_or(&[], |device| device.host_switch_targets.as_slice())
+    }
+
+    /// Replace the devices that follow `device_key`'s host switch.
+    ///
+    /// Order is not meaningful and duplicates are dropped, so the list is
+    /// sorted and deduplicated: two configurations that name the same devices
+    /// should produce the same `config.toml`.
+    pub fn set_host_switch_targets(&mut self, device_key: &str, mut targets: Vec<String>) {
+        targets.sort_unstable();
+        targets.dedup();
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .host_switch_targets = targets;
+    }
+
     /// The configured wheel resolution for `device_key`, or `None` when
     /// OpenLogi should leave the device's current resolution unchanged.
     #[must_use]
