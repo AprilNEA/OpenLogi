@@ -870,10 +870,9 @@ fn a_side_gesture_button_uses_its_hidpp_raw_xy() {
     let buttons = [(cid, ButtonId::Forward)];
     let down = RawControlEvent::DivertedButtons([cid, 0, 0, 0]);
 
-    handle_reprog_with_gesture_buttons(&mut acc, down, &[], &[], &buttons, &[], &tx);
+    acc.on_event(down, &[], &[], &buttons, &[], &tx);
     acc.backdate_hold_for_test();
-    handle_reprog_with_gesture_buttons(
-        &mut acc,
+    acc.on_event(
         RawControlEvent::RawXy { dx: -120, dy: 5 },
         &[],
         &[],
@@ -881,7 +880,7 @@ fn a_side_gesture_button_uses_its_hidpp_raw_xy() {
         &[],
         &tx,
     );
-    handle_reprog_with_gesture_buttons(&mut acc, release(), &[], &[], &buttons, &[], &tx);
+    acc.on_event(release(), &[], &[], &buttons, &[], &tx);
 
     assert_eq!(
         rx.try_recv(),
@@ -912,8 +911,8 @@ fn a_side_gesture_button_tap_is_a_click() {
     let buttons = [(cid, ButtonId::Forward)];
     let down = RawControlEvent::DivertedButtons([cid, 0, 0, 0]);
 
-    handle_reprog_with_gesture_buttons(&mut acc, down, &[], &[], &buttons, &[], &tx);
-    handle_reprog_with_gesture_buttons(&mut acc, release(), &[], &[], &buttons, &[], &tx);
+    acc.on_event(down, &[], &[], &buttons, &[], &tx);
+    acc.on_event(release(), &[], &[], &buttons, &[], &tx);
 
     assert_eq!(
         rx.try_recv(),
@@ -941,10 +940,9 @@ fn a_dpi_gesture_button_uses_the_shared_raw_xy_path() {
     let buttons = [(cid, ButtonId::DpiToggle)];
     let down = RawControlEvent::DivertedButtons([cid, 0, 0, 0]);
 
-    handle_reprog_with_gesture_buttons(&mut acc, down, &[], &[], &buttons, &[], &tx);
+    acc.on_event(down, &[], &[], &buttons, &[], &tx);
     acc.backdate_hold_for_test();
-    handle_reprog_with_gesture_buttons(
-        &mut acc,
+    acc.on_event(
         RawControlEvent::RawXy { dx: 5, dy: -120 },
         &[],
         &[],
@@ -952,7 +950,7 @@ fn a_dpi_gesture_button_uses_the_shared_raw_xy_path() {
         &[],
         &tx,
     );
-    handle_reprog_with_gesture_buttons(&mut acc, release(), &[], &[], &buttons, &[], &tx);
+    acc.on_event(release(), &[], &[], &buttons, &[], &tx);
 
     assert_eq!(
         rx.try_recv(),

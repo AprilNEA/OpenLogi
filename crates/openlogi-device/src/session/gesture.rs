@@ -39,7 +39,7 @@ use tracing::{debug, info, warn};
 use crate::channel::route::DeviceRoute;
 use crate::{ChannelRegistry, DeviceIoGate, SharedChannel};
 
-use accum::{CaptureAccum, handle_reprog_with_gesture_buttons};
+use accum::CaptureAccum;
 pub(crate) use arm::enumerate_controls;
 use arm::{ArmedControls, ArmedThumbwheel, arm_controls};
 use liveness::{CaptureLiveness, ChannelActivity, LivenessDecision, PingOutcome};
@@ -257,8 +257,7 @@ async fn run_capture_session_on(
                 // Recover the guard even if a prior holder panicked — the
                 // critical section is panic-free, so the data is consistent.
                 let mut acc = accum.lock().unwrap_or_else(PoisonError::into_inner);
-                handle_reprog_with_gesture_buttons(
-                    &mut acc,
+                acc.on_event(
                     event,
                     &gesture_cids,
                     &dpi_set,
