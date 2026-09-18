@@ -59,6 +59,22 @@ contents:
     file_info:
       mode: 0644
 
+  # ── GNOME Shell companion extension ─────────────────────────────────────────
+  # Per-app profiles need the focused window's WM_CLASS, and Mutter exposes it
+  # through no protocol or portal — the extension is the only way to read it on
+  # GNOME/Wayland. Shipping it system-wide means a user has to enable it and
+  # log back in, rather than first hunting the files down and copying them by
+  # hand. Not enabled here: GNOME only loads an extension the user opted into,
+  # and Wayland cannot reload the shell without a new session.
+  - src: crates/openlogi-hook/gnome-shell-extension/openlogi-frontmost@openlogi.dev/metadata.json
+    dst: /usr/share/gnome-shell/extensions/openlogi-frontmost@openlogi.dev/metadata.json
+    file_info:
+      mode: 0644
+  - src: crates/openlogi-hook/gnome-shell-extension/openlogi-frontmost@openlogi.dev/extension.js
+    dst: /usr/share/gnome-shell/extensions/openlogi-frontmost@openlogi.dev/extension.js
+    file_info:
+      mode: 0644
+
   # ── icon ────────────────────────────────────────────────────────────────────
   # Every standard indexed hicolor size, not just the 1024 master: a stock
   # `hicolor/index.theme` stops at 512x512, so a launcher that resolves icons
