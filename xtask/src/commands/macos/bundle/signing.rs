@@ -13,13 +13,17 @@ use xshell::{Shell, cmd};
 use super::identity::{Channel, Component};
 use crate::support::fs::{ensure_file, repo_root};
 
+/// The Developer ID identity a release is signed with — read by the bundle
+/// step here and by `macos dmg`'s `--sign-identity`.
+pub(in crate::commands::macos) const SIGN_IDENTITY_ENV: &str = "OPENLOGI_SIGN_IDENTITY";
+
 pub(super) fn local_sign_app_if_available(channel: Channel) -> Result<()> {
     if env::var("OPENLOGI_LOCAL_CODESIGN").as_deref() == Ok("0") {
         println!("==> local codesign: skipped (OPENLOGI_LOCAL_CODESIGN=0)");
         return Ok(());
     }
 
-    if let Some(identity) = env_nonempty("OPENLOGI_SIGN_IDENTITY") {
+    if let Some(identity) = env_nonempty(SIGN_IDENTITY_ENV) {
         sign_app_with_timestamp(&identity, TimestampMode::Secure, channel)?;
         return Ok(());
     }
@@ -35,7 +39,7 @@ pub(super) fn local_sign_app_if_available(channel: Channel) -> Result<()> {
     }
 
     println!(
-        "==> local codesign: skipped (no Apple Development identity found;          set OPENLOGI_LOCAL_CODESIGN_IDENTITY or OPENLOGI_SIGN_IDENTITY to sign)"
+        "==> local codesign: skipped (no Apple Development identity found;          set OPENLOGI_LOCAL_CODESIGN_IDENTITY or {SIGN_IDENTITY_ENV} to sign)"
     );
     println!(
         "    warning: an unsigned bundle is re-signed ad-hoc on every build, so its own Accessibility grant goes stale each time"

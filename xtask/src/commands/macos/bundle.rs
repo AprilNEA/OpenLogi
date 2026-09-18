@@ -22,7 +22,7 @@ use identity::{Channel, Component};
 // The rest of the macOS domain reaches these through `bundle::`, which is the
 // module that owns them conceptually even now that the code sits deeper.
 pub(super) use embed::{EmbeddedHelper, HELPERS, agent_service_label, write_agent_launch_plist};
-pub(super) use signing::quoted_identity;
+pub(super) use signing::{SIGN_IDENTITY_ENV, quoted_identity};
 
 #[derive(Clone, Copy, ValueEnum)]
 pub(crate) enum DistributionTarget {
@@ -129,7 +129,7 @@ fn run_with_channel(
             signing::sign_app_with_timestamp(identity, signing::TimestampMode::Secure, channel)?;
         }
         (Channel::Production, None) => {
-            println!("==> codesign: skipped (unsigned — set OPENLOGI_SIGN_IDENTITY to sign)");
+            println!("==> codesign: skipped (unsigned — set {SIGN_IDENTITY_ENV} to sign)");
         }
         (Channel::Dev, _) => signing::local_sign_app_if_available(channel)?,
     }
