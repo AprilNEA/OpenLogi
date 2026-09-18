@@ -21,7 +21,7 @@ fs = ["dep:atomic-write-file", "dep:etcetera", "dep:toml_edit"]
 # preference and `rust-i18n` owns the process-global locale.
 locale = ["dep:fluent-langneg", "dep:rust-i18n", "dep:sys-locale"]
 # The dedicated tokio worker thread the host crates run async work on
-# (`runtime` module). Off by default: the portable core stays free of tokio.
+# (`worker` module). Off by default: the portable core stays free of tokio.
 worker = ["dep:tokio"]
 
 [dependencies]

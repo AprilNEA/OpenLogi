@@ -1,17 +1,21 @@
-//! How to reach a controllable HID++ device — addressing data only, no I/O.
+//! How to reach a controllable device — addressing data only, no I/O.
 //!
-//! Two addressing modes:
+//! Four addressing modes:
 //!
 //! - [`DeviceRoute::Bolt`] — a device paired to a Logi Bolt receiver, reached
 //!   through the receiver channel at a pairing slot.
+//! - [`DeviceRoute::Unifying`] — the same addressing through a Unifying
+//!   receiver, which speaks HID++ 1.0.
 //! - [`DeviceRoute::Direct`] — a device attached straight to the host over a
 //!   USB cable or Bluetooth, reached on its own channel at the HID++
 //!   self-index [`DIRECT_DEVICE_INDEX`].
+//! - [`DeviceRoute::RawHid`] — a standalone raw-HID device such as a Litra
+//!   light, which never reaches HID++ channel code.
 //!
-//! Opening the channel a route names is `openlogi_hid::channel::route::open_route_channel`
-//! — the one place both the write path and the capture session resolve a
-//! route to an open channel, so the Bolt-vs-direct branch lives in exactly
-//! one place.
+//! Opening the channel a HID++ route names is `open_route_channel` in
+//! `openlogi-device`'s `channel::route` — the one place both the write path
+//! and the capture session resolve a route to an open channel, so the
+//! receiver-vs-direct branch lives in exactly one place.
 
 use std::fmt;
 

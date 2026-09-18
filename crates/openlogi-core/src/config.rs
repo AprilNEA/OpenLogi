@@ -2,8 +2,9 @@
 //! path.
 //!
 //! Per-device state (button bindings, …) lives under the
-//! [`Config::devices`] map, keyed by a stable physical-device identifier such
-//! as `"receiver:abc123:slot:2"`. Schema migrations branch on
+//! [`Config::devices`] map, keyed by the device's own identity such as
+//! `"unit:6be9d300"` — or, for a device that reports none, by the route it was
+//! reached on, such as `"receiver:abc123:slot:2"`. Schema migrations branch on
 //! [`Config::schema_version`].
 
 use std::{collections::BTreeMap, path::Path};
