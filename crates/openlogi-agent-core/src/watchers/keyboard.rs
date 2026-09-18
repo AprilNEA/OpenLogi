@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use openlogi_core::binding::{Binding, ButtonId};
 use openlogi_hid::{
-    CaptureChannel, CaptureSessionOutcome, CapturedInput, ChannelRegistry, DeviceIoGate,
+    CaptureChannelSlot, CaptureSessionOutcome, CapturedInput, ChannelRegistry, DeviceIoGate,
     DeviceRoute, PendingCaptureRestore, run_keyboard_capture_session,
 };
 use tokio::sync::{mpsc, oneshot, watch};
@@ -100,7 +100,7 @@ struct KeyboardManagerState {
 }
 
 struct KeyboardSessionChannels {
-    capture: CaptureChannel,
+    capture: CaptureChannelSlot,
     registry: ChannelRegistry,
     device_io: DeviceIoGate,
     events: mpsc::UnboundedSender<KeyboardSessionEvent>,
@@ -108,7 +108,7 @@ struct KeyboardSessionChannels {
 
 struct KeyboardManagerContext {
     spec: watch::Receiver<Option<Arc<KeyboardSpec>>>,
-    keyboard_channel: CaptureChannel,
+    keyboard_channel: CaptureChannelSlot,
     receiver_access: ReceiverAccess,
     receiver_requests: watch::Receiver<ReceiverRequestState>,
     registry: ChannelRegistry,
@@ -125,7 +125,7 @@ const RETRY_DELAY: Duration = Duration::from_secs(1);
 #[must_use]
 pub fn spawn(
     spec: &SharedKeyboardSpec,
-    keyboard_channel: CaptureChannel,
+    keyboard_channel: CaptureChannelSlot,
     receiver_access: ReceiverAccess,
     registry: ChannelRegistry,
     device_io: DeviceIoGate,

@@ -34,7 +34,7 @@ use super::capture_restore::{
     wait_for_channel_change,
 };
 use super::gesture::{
-    CaptureChannel, CaptureError, CaptureSessionFailure, CaptureSessionOutcome, CapturedInput,
+    CaptureChannelSlot, CaptureError, CaptureSessionFailure, CaptureSessionOutcome, CapturedInput,
     PendingCaptureRestore, enumerate_controls,
 };
 use crate::channel::route::DeviceRoute;
@@ -76,7 +76,7 @@ pub async fn run_keyboard_capture_session(
     wanted: BTreeMap<u16, ButtonId>,
     sink: mpsc::UnboundedSender<CapturedInput>,
     shutdown: oneshot::Receiver<()>,
-    channel_slot: CaptureChannel,
+    channel_slot: CaptureChannelSlot,
     registry: &ChannelRegistry,
     device_io: DeviceIoGate,
 ) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
@@ -100,7 +100,7 @@ async fn run_keyboard_capture_session_on(
     wanted: BTreeMap<u16, ButtonId>,
     sink: mpsc::UnboundedSender<CapturedInput>,
     shutdown: oneshot::Receiver<()>,
-    channel_slot: CaptureChannel,
+    channel_slot: CaptureChannelSlot,
     registry: &ChannelRegistry,
     device_io: DeviceIoGate,
 ) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {

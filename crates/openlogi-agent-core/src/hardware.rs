@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use openlogi_core::config::Lighting;
 use openlogi_hid::{
-    CaptureChannel, ChannelRegistry, DeviceIoGate, DeviceRoute, Dpi, HidppOperation,
+    CaptureChannelSlot, ChannelRegistry, DeviceIoGate, DeviceRoute, Dpi, HidppOperation,
     ScrollResolution, SharedChannel, SmartShiftStatus, WriteError,
 };
 use tokio::time::error::Elapsed;
@@ -43,7 +43,7 @@ const WRITE_BUDGET: Duration = Duration::from_secs(5);
 
 /// Select the only Agent-authoritative channel for `route`.
 fn authoritative_channel(
-    capture: Option<&CaptureChannel>,
+    capture: Option<&CaptureChannelSlot>,
     registry: &ChannelRegistry,
     route: &DeviceRoute,
 ) -> Result<SharedChannel, WriteError> {
@@ -77,7 +77,7 @@ fn choose_authoritative<T>(
 /// counterpart of `openlogi_hid::write::with_route`'s "boilerplate-eater"
 /// pattern, applied to an already-open channel instead of a fresh one.
 pub struct DeviceOp<'a> {
-    capture: &'a CaptureChannel,
+    capture: &'a CaptureChannelSlot,
     registry: &'a ChannelRegistry,
     receiver_access: &'a ReceiverAccess,
     device_io: &'a DeviceIoGate,
@@ -86,7 +86,7 @@ pub struct DeviceOp<'a> {
 
 impl<'a> DeviceOp<'a> {
     pub(crate) fn new(
-        capture: &'a CaptureChannel,
+        capture: &'a CaptureChannelSlot,
         registry: &'a ChannelRegistry,
         receiver_access: &'a ReceiverAccess,
         device_io: &'a DeviceIoGate,
@@ -267,7 +267,7 @@ fn one_shot_runtime(label: &str) -> Option<tokio::runtime::Runtime> {
 /// immediately; failures (incl. devices that expose neither `0x2111` nor
 /// the older `0x2110` SmartShift feature) are logged.
 pub fn toggle_smartshift_in_background(
-    capture: &CaptureChannel,
+    capture: &CaptureChannelSlot,
     registry: &ChannelRegistry,
     receiver_access: &ReceiverAccess,
     device_io: &DeviceIoGate,
@@ -447,7 +447,7 @@ fn log_wheel_result(
 ///
 /// `target == None` is a no-op (dev environment without a real device).
 pub fn write_dpi_in_background(
-    capture: &CaptureChannel,
+    capture: &CaptureChannelSlot,
     registry: &ChannelRegistry,
     receiver_access: &ReceiverAccess,
     device_io: &DeviceIoGate,
@@ -623,7 +623,7 @@ mod tests {
     /// no-op.
     #[tokio::test]
     async fn run_on_a_registry_miss_returns_device_not_found_without_calling_f() {
-        let capture: CaptureChannel = std::sync::Arc::new(RwLock::new(None));
+        let capture: CaptureChannelSlot = std::sync::Arc::new(RwLock::new(None));
         let registry = ChannelRegistry::default();
         let receiver_access = ReceiverAccess::default();
         let (_device_io_signal, device_io) = device_io_channel();
@@ -647,7 +647,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_while_device_io_is_suspended_does_not_wait_for_a_receiver_or_call_f() {
-        let capture: CaptureChannel = std::sync::Arc::new(RwLock::new(None));
+        let capture: CaptureChannelSlot = std::sync::Arc::new(RwLock::new(None));
         let registry = ChannelRegistry::default();
         let receiver_access = ReceiverAccess::default();
         let (device_io_signal, device_io) = device_io_channel();
@@ -683,7 +683,7 @@ mod tests {
     /// return synchronously (no thread, no lease wait) and never call `f`.
     #[tokio::test]
     async fn detach_on_a_registry_miss_never_calls_f() {
-        let capture: CaptureChannel = std::sync::Arc::new(RwLock::new(None));
+        let capture: CaptureChannelSlot = std::sync::Arc::new(RwLock::new(None));
         let registry = ChannelRegistry::default();
         let receiver_access = ReceiverAccess::default();
         let (_device_io_signal, device_io) = device_io_channel();

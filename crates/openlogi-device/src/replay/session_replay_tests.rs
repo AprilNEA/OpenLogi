@@ -12,7 +12,7 @@ use super::{
 };
 use crate::session::gesture::CaptureSpec;
 use crate::{
-    CaptureChannel, CaptureSessionOutcome, ChannelRegistry, DeviceRoute, Enumerator, NodeId,
+    CaptureChannelSlot, CaptureSessionOutcome, ChannelRegistry, DeviceRoute, Enumerator, NodeId,
     NodeInfo, PairingCommand, PairingEvent, ReceiverSelector, device_io_channel, reprog_controls,
     run_capture_session, run_pairing,
 };
@@ -67,7 +67,7 @@ async fn gesture_capture_replay_restores_original_reporting_on_normal_shutdown()
         .expect("wireless feature lookup can be held");
     let (sink, _captured) = mpsc::unbounded_channel();
     let (shutdown, shutdown_rx) = oneshot::channel();
-    let channel_slot: CaptureChannel = Arc::new(RwLock::new(None));
+    let channel_slot: CaptureChannelSlot = Arc::new(RwLock::new(None));
     let (_io_signal, io_gate) = device_io_channel();
     let capture = run_capture_session(
         route.clone(),

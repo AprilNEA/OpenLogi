@@ -175,7 +175,7 @@ async fn recovery_manager_waits_for_control_events_and_shutdown_between_retries(
             wanted: target().wanted,
             bindings: dispatch(Action::MissionControl).bindings,
         })));
-        let capture = CaptureChannel::default();
+        let capture = CaptureChannelSlot::default();
         // A missing inventory channel makes the real session task fail without
         // opening hardware; ordered Done then drives normal restart recovery.
         let registry = ChannelRegistry::default();

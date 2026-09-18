@@ -23,8 +23,8 @@ use openlogi_core::device::{
 };
 use openlogi_core::device_order::{DeviceIdentity, DeviceStableId, PhysicalDeviceKey};
 use openlogi_hid::{
-    CaptureChannel, ChannelPool, ChannelRegistry, DIRECT_DEVICE_INDEX, DeviceIoGate, DeviceRoute,
-    KEYBOARD_KEY_CIDS,
+    CaptureChannelSlot, ChannelPool, ChannelRegistry, DIRECT_DEVICE_INDEX, DeviceIoGate,
+    DeviceRoute, KEYBOARD_KEY_CIDS,
 };
 use openlogi_ipc::InventoryHealth;
 use tokio::sync::watch;
@@ -89,7 +89,7 @@ pub struct SharedRuntime {
     /// dispatch, keyed by the device the events arrive on. Carries each
     /// device's effective thumb-wheel sensitivity.
     pub capture_plans: SharedCapturePlans,
-    pub capture_channel: CaptureChannel,
+    pub capture_channel: CaptureChannelSlot,
     /// Exact-route channels owned and published by the inventory enumerator.
     pub channel_registry: ChannelRegistry,
     /// Host-lifecycle gate shared by every producer of proactive device I/O.
@@ -101,7 +101,7 @@ pub struct SharedRuntime {
     pub keyboard_spec: SharedKeyboardSpec,
     /// The keyboard capture session's open channel, reused by Fn-lock writes
     /// (the mouse-oriented [`Self::capture_channel`] points elsewhere).
-    pub keyboard_channel: CaptureChannel,
+    pub keyboard_channel: CaptureChannelSlot,
     /// Incremented when a device reconnects or the system wakes, so capture
     /// sessions re-arm volatile HID++ control diversion even when route and
     /// online flags look unchanged.

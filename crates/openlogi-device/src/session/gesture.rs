@@ -49,7 +49,7 @@ use super::capture_restore::{
     wait_for_channel_change,
 };
 pub use super::capture_restore::{
-    CaptureChannel, CaptureError, CaptureSessionFailure, CaptureSessionOutcome,
+    CaptureChannelSlot, CaptureError, CaptureSessionFailure, CaptureSessionOutcome,
     PendingCaptureRestore,
 };
 use crate::reprog_controls::{self, RawControlEvent, ReprogControlsV4};
@@ -250,7 +250,7 @@ pub async fn run_capture_session(
     spec: CaptureSpec,
     sink: mpsc::UnboundedSender<CapturedInput>,
     shutdown: oneshot::Receiver<()>,
-    channel_slot: CaptureChannel,
+    channel_slot: CaptureChannelSlot,
     registry: &ChannelRegistry,
     device_io: DeviceIoGate,
 ) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
@@ -274,7 +274,7 @@ async fn run_capture_session_on(
     spec: CaptureSpec,
     sink: mpsc::UnboundedSender<CapturedInput>,
     shutdown: oneshot::Receiver<()>,
-    channel_slot: CaptureChannel,
+    channel_slot: CaptureChannelSlot,
     registry: &ChannelRegistry,
     device_io: DeviceIoGate,
 ) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {

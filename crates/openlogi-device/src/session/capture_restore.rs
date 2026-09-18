@@ -16,7 +16,7 @@ use crate::{ChannelRegistry, DeviceRoute, IoSuspended, SharedChannel};
 
 /// Shared slot holding the active capture session's open channel, so bounded
 /// hardware writes can reuse it instead of opening a second connection.
-pub type CaptureChannel = Arc<RwLock<Option<SharedChannel>>>;
+pub type CaptureChannelSlot = Arc<RwLock<Option<SharedChannel>>>;
 
 /// Why a capture session could not start (or had to stop).
 #[derive(Debug, Error)]

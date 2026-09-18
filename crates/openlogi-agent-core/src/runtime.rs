@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
 use openlogi_core::binding::{Action, Binding, ButtonId};
-use openlogi_hid::{CaptureChannel, ChannelRegistry, DeviceIoGate};
+use openlogi_hid::{CaptureChannelSlot, ChannelRegistry, DeviceIoGate};
 use tracing::{info, warn};
 
 use self::button::{
@@ -74,7 +74,7 @@ impl HeldShortcuts {
 #[derive(Clone)]
 struct ActionExecutor {
     dpi_cycle: Arc<RwLock<DpiCycles>>,
-    capture: CaptureChannel,
+    capture: CaptureChannelSlot,
     registry: ChannelRegistry,
     receiver_access: ReceiverAccess,
     device_io: DeviceIoGate,
@@ -249,7 +249,7 @@ impl ActionRuntime {
     /// Build the action executor and its source-independent button worker.
     pub fn new(
         dpi_cycle: Arc<RwLock<DpiCycles>>,
-        capture: CaptureChannel,
+        capture: CaptureChannelSlot,
         registry: ChannelRegistry,
         receiver_access: ReceiverAccess,
         device_io: DeviceIoGate,

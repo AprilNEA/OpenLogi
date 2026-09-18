@@ -150,7 +150,7 @@ async fn recovery_manager_waits_for_control_events_and_shutdown_between_retries(
 
     for shutdown_requested in [false, true] {
         let (plans_tx, capture_plans) = watch::channel(Arc::new(vec![plan()]));
-        let capture = CaptureChannel::default();
+        let capture = CaptureChannelSlot::default();
         // A missing inventory channel makes the real session task fail without
         // opening hardware; ordered Done then drives normal restart recovery.
         let registry = openlogi_hid::ChannelRegistry::default();

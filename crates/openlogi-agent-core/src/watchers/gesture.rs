@@ -30,7 +30,7 @@ use std::time::Duration;
 use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_core::scroll::ScrollDelta;
 use openlogi_hid::{
-    CaptureChannel, CaptureSessionOutcome, CapturedInput, DeviceIoGate, PendingCaptureRestore,
+    CaptureChannelSlot, CaptureSessionOutcome, CapturedInput, DeviceIoGate, PendingCaptureRestore,
     run_capture_session,
 };
 use tokio::sync::{mpsc, oneshot, watch};
@@ -91,7 +91,7 @@ impl GestureOutputs {
 #[must_use]
 pub fn spawn(
     capture_plans: &SharedCapturePlans,
-    capture_channel: CaptureChannel,
+    capture_channel: CaptureChannelSlot,
     receiver_access: ReceiverAccess,
     channel_registry: openlogi_hid::ChannelRegistry,
     device_io: DeviceIoGate,
@@ -163,14 +163,14 @@ struct GestureManagerState {
 #[derive(Clone)]
 struct SessionChannels {
     events: mpsc::UnboundedSender<SessionEvent>,
-    capture: CaptureChannel,
+    capture: CaptureChannelSlot,
     registry: openlogi_hid::ChannelRegistry,
     device_io: DeviceIoGate,
 }
 
 struct GestureManagerContext {
     capture_plans: watch::Receiver<Arc<Vec<DeviceCapturePlan>>>,
-    capture_channel: CaptureChannel,
+    capture_channel: CaptureChannelSlot,
     receiver_access: ReceiverAccess,
     receiver_requests: watch::Receiver<ReceiverRequestState>,
     channel_registry: openlogi_hid::ChannelRegistry,
