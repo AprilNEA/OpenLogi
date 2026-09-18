@@ -28,7 +28,7 @@ pub enum LightCommandStatus {
 
 /// Process-session state shared by standalone-light devices.
 #[derive(Debug, Default)]
-pub(super) struct LightingState {
+pub(super) struct LightSession {
     camera_active: bool,
     next_request_id: u64,
 }
@@ -109,7 +109,7 @@ impl AppState {
                 .sessions
                 .get(key)
                 .and_then(|entry| entry.light.manual_override)
-                .unwrap_or(self.lighting.camera_active)
+                .unwrap_or(self.lights.camera_active)
         } else {
             light.enabled
         }
@@ -119,13 +119,13 @@ impl AppState {
     /// A real transition clears every transient manual override, and is the
     /// only case reported.
     pub fn set_camera_active(&mut self, active: bool) -> StateEvents {
-        let changed = self.lighting.camera_active != active;
+        let changed = self.lights.camera_active != active;
         if changed {
             for entry in self.devices.sessions.values_mut() {
                 entry.light.manual_override = None;
             }
         }
-        self.lighting.camera_active = active;
+        self.lights.camera_active = active;
         changed.then_some(StateEvent::CameraChanged).into()
     }
 
@@ -152,8 +152,8 @@ impl AppState {
     /// [`PendingLightSetup`] becomes the pending entry in one step, while
     /// `None` (device offline / no route) records only the Offline status.
     fn begin_light_command(&mut self, key: &DeviceKey, setup: Option<PendingLightSetup>) -> u64 {
-        self.lighting.next_request_id = self.lighting.next_request_id.wrapping_add(1);
-        let request_id = self.lighting.next_request_id;
+        self.lights.next_request_id = self.lights.next_request_id.wrapping_add(1);
+        let request_id = self.lights.next_request_id;
         let entry = self.devices.sessions.entry(key.clone()).or_default();
         match setup {
             Some(setup) => {
@@ -483,7 +483,7 @@ impl AppState {
             cfg!(target_os = "macos") && previous.auto_camera != light.auto_camera;
         let effective_enabled = if camera_policy_applies(light) {
             if camera_mode_changed {
-                self.lighting.camera_active
+                self.lights.camera_active
             } else {
                 self.light_enabled_for(&runtime_key)
             }

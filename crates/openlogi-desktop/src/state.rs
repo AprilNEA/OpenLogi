@@ -47,7 +47,7 @@ use agent::AgentSession;
 use bindings::BindingState;
 use device_store::DeviceStore;
 pub(crate) use devices::camera_model_info;
-use light::LightingState;
+use light::LightSession;
 use pointer::PointerState;
 
 use crate::services::assets::AssetResolver;
@@ -168,7 +168,7 @@ pub struct AppState {
     /// DPI/SmartShift reads and the active pointer editor value.
     pointer: PointerState,
     /// Standalone-light sequencing and aggregate camera activity.
-    lighting: LightingState,
+    lights: LightSession,
     /// Sender to the IPC client thread. The agent owns the hook and device I/O.
     ipc_commands: mpsc::UnboundedSender<crate::services::ipc::Command>,
     /// Camera-consent poll started by an in-app macOS prompt. The app-state
@@ -267,7 +267,7 @@ impl AppState {
             bindings,
             action_ring_editing_apps: BTreeMap::new(),
             pointer: PointerState::default(),
-            lighting: LightingState::default(),
+            lights: LightSession::default(),
             ipc_commands,
             #[cfg(target_os = "macos")]
             camera_permission_poll: None,
