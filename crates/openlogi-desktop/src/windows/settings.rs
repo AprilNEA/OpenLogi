@@ -341,10 +341,7 @@ impl SettingsView {
     ) {
         if let SliderEvent::Release(value) = event {
             let sensitivity = ThumbwheelSensitivity::from_rounded(value.start());
-            AppState::update(cx, |state, cx| {
-                state.set_thumbwheel_sensitivity(sensitivity);
-                cx.emit(StateEvent::SettingsChanged);
-            });
+            AppState::apply(cx, |state| state.set_thumbwheel_sensitivity(sensitivity));
         }
         cx.notify();
     }
@@ -363,11 +360,13 @@ impl SettingsView {
     ) {
         if let SliderEvent::Release(value) = event {
             let sensitivity = VerticalScrollSensitivity::from_rounded(value.start());
-            let committed = AppState::update(cx, |state, cx| {
-                state.set_vertical_scroll_sensitivity(sensitivity);
-                cx.emit(StateEvent::SettingsChanged);
-                state.app_settings().vertical_scroll_sensitivity
+            AppState::apply(cx, |state| {
+                state.set_vertical_scroll_sensitivity(sensitivity)
             });
+            let committed = AppState::global(cx)
+                .read(cx)
+                .app_settings()
+                .vertical_scroll_sensitivity;
             // A failed write restores AppState's persisted configuration. Re-seat
             // this independently owned slider so it cannot keep presenting the
             // rejected value after that rollback.
@@ -394,10 +393,7 @@ impl SettingsView {
             .filter(|code| !code.is_empty())
             .map(ToOwned::to_owned);
 
-        AppState::update(cx, |state, cx| {
-            state.set_language(language, cx);
-            cx.emit(StateEvent::SettingsChanged);
-        });
+        AppState::apply(cx, |state| state.set_language(language));
     }
 
     fn on_asset_source_select(
@@ -418,10 +414,7 @@ impl SettingsView {
             state.app_settings().asset_source != source && state.app_settings().auto_download_assets
         });
 
-        AppState::update(cx, |state, cx| {
-            state.set_asset_source(source);
-            cx.emit(StateEvent::SettingsChanged);
-        });
+        AppState::apply(cx, |state| state.set_asset_source(source));
         if refresh {
             assets::send_asset_command(cx, AssetCommand::Refresh);
         }

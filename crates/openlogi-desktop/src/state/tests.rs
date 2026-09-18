@@ -55,9 +55,9 @@ fn read_only_config_rolls_back_mutations_and_does_not_reload_agent() {
         commands,
     );
 
-    state.set_thumbwheel_sensitivity(ThumbwheelSensitivity::from_rounded(50.0));
-    state.set_smooth_scroll(true);
-    state.set_vertical_scroll_sensitivity(VerticalScrollSensitivity::from_rounded(7.0));
+    let _ = state.set_thumbwheel_sensitivity(ThumbwheelSensitivity::from_rounded(50.0));
+    let _ = state.set_smooth_scroll(true);
+    let _ = state.set_vertical_scroll_sensitivity(VerticalScrollSensitivity::from_rounded(7.0));
 
     assert_eq!(
         state.app_settings().thumbwheel_sensitivity,
@@ -86,7 +86,7 @@ fn smooth_scroll_change_reloads_the_agent_once() {
         commands,
     );
 
-    state.set_smooth_scroll(true);
+    let _ = state.set_smooth_scroll(true);
 
     assert!(state.app_settings().smooth_scroll);
     assert!(matches!(
@@ -94,7 +94,7 @@ fn smooth_scroll_change_reloads_the_agent_once() {
         Ok(crate::services::ipc::Command::ReloadConfig(_))
     ));
 
-    state.set_smooth_scroll(true);
+    let _ = state.set_smooth_scroll(true);
     assert!(receiver.try_recv().is_err());
 }
 
@@ -102,7 +102,8 @@ fn smooth_scroll_change_reloads_the_agent_once() {
 /// it schedules reads the same entity (the Device menu lists devices). Rebuilt
 /// synchronously that read is re-entrant and panics ("cannot read … while it is
 /// already being updated"), which crashed 0.8.0 on every language change —
-/// `set_language` must defer the rebuild until the update returns the lease.
+/// announcing the switch must defer the rebuild until the update returns the
+/// lease.
 #[gpui::test]
 fn language_switch_rebuilds_menus_after_the_state_update(cx: &mut gpui::TestAppContext) {
     let _locale = crate::services::i18n::LOCALE_LOCK.lock();
@@ -120,9 +121,7 @@ fn language_switch_rebuilds_menus_after_the_state_update(cx: &mut gpui::TestAppC
 
     cx.update(|cx| {
         AppState::set_global(cx.new(|_| state), cx);
-        AppState::update(cx, |state, cx| {
-            state.set_language(Some("zh-CN".into()), cx);
-        });
+        AppState::apply(cx, |state| state.set_language(Some("zh-CN".into())));
     });
 
     cx.read(|cx| {
@@ -146,13 +145,17 @@ fn agent_reload_error_stays_visible_until_a_successful_confirmation() {
         ConfigPersistence::MemoryOnly,
         commands,
     );
-    assert!(
+    assert_eq!(
         state.apply_config_reload_result(Err(openlogi_ipc::ConfigReloadError {
             message: "agent rejected config".into(),
-        }))
+        })),
+        [StateEvent::SettingsChanged]
     );
     assert_eq!(state.config_issue(), Some("agent rejected config"));
-    assert!(state.apply_config_reload_result(Ok(())));
+    assert_eq!(
+        state.apply_config_reload_result(Ok(())),
+        [StateEvent::SettingsChanged]
+    );
     assert_eq!(state.config_issue(), None);
 }
 

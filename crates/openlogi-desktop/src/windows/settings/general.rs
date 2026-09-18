@@ -2,7 +2,7 @@
 
 use super::{
     App, AppState, Entity, FluentBuilder, IconName, InteractiveElement, ParentElement,
-    SettingField, SettingGroup, SettingItem, SettingPage, Slider, SliderState, StateEvent, Styled,
+    SettingField, SettingGroup, SettingItem, SettingPage, Slider, SliderState, Styled,
     ThumbwheelSensitivity, VerticalScrollSensitivity, div, h_flex, px, theme, v_flex,
 };
 use crate::ui::theme::Typography as _;
@@ -68,10 +68,7 @@ pub(super) fn general_page(
             SettingField::switch(
                 |cx| AppState::try_read(cx).is_some_and(|s| s.app_settings().show_in_menu_bar),
                 |enabled, cx| {
-                    AppState::update(cx, move |state, cx| {
-                        state.set_show_in_menu_bar(enabled);
-                        cx.emit(StateEvent::SettingsChanged);
-                    });
+                    AppState::apply(cx, |state| state.set_show_in_menu_bar(enabled));
                 },
             ),
         )
@@ -95,10 +92,7 @@ fn smooth_scrolling_item() -> SettingItem {
         SettingField::switch(
             |cx| AppState::try_read(cx).is_some_and(|s| s.app_settings().smooth_scroll),
             |enabled, cx| {
-                AppState::update(cx, move |state, cx| {
-                    state.set_smooth_scroll(enabled);
-                    cx.emit(StateEvent::SettingsChanged);
-                });
+                AppState::apply(cx, |state| state.set_smooth_scroll(enabled));
             },
         ),
     )
@@ -167,10 +161,7 @@ fn launch_at_login_item() -> SettingItem {
         SettingField::switch(
             |cx| AppState::try_read(cx).is_some_and(|s| s.app_settings().launch_at_login),
             |enabled, cx| {
-                AppState::update(cx, move |state, cx| {
-                    state.set_launch_at_login(enabled);
-                    cx.emit(StateEvent::SettingsChanged);
-                });
+                AppState::apply(cx, |state| state.set_launch_at_login(enabled));
             },
         ),
     )

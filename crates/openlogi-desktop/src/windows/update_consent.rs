@@ -15,7 +15,7 @@ use gpui_component::{button::ButtonVariants as _, h_flex, scroll::ScrollableElem
 use gpui_updater::Updater;
 
 use crate::app::menu::{CloseWindow, Minimize, Zoom};
-use crate::state::{AppState, StateEvent};
+use crate::state::AppState;
 use crate::ui::components::control_button;
 use crate::ui::theme;
 use crate::windows::{self, AuxWindow};
@@ -56,10 +56,7 @@ pub fn open(cx: &mut App) {
 
 /// Persist the user's answer, run one check if they opted in, and close.
 fn answer(enabled: bool, window: &mut Window, cx: &mut App) {
-    AppState::update(cx, |state, cx| {
-        state.record_update_consent(enabled);
-        cx.emit(StateEvent::SettingsChanged);
-    });
+    AppState::apply(cx, |state| state.record_update_consent(enabled));
     if enabled && let Some(updater) = crate::platform::updater::shared(cx) {
         updater.update(cx, Updater::check);
     }

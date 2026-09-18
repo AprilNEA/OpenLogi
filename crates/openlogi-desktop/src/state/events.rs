@@ -74,8 +74,8 @@ impl StateEvents {
     /// These events followed by `next`'s, each distinct event once — so a
     /// change built from several mutators announces itself the way a single
     /// one would.
-    pub(crate) fn and(mut self, next: Self) -> Self {
-        for event in next.0 {
+    pub(crate) fn and(mut self, next: impl Into<Self>) -> Self {
+        for event in next.into().0 {
             if !self.0.contains(&event) {
                 self.0.push(event);
             }
@@ -86,9 +86,28 @@ impl StateEvents {
     /// Emit every event from the state entity's own context.
     pub(crate) fn emit(self, cx: &mut Context<AppState>) {
         for event in self.0 {
+            let language_changed = event == StateEvent::LanguageChanged;
             cx.emit(event);
+            if language_changed {
+                relocalize_windows(cx);
+            }
         }
     }
+}
+
+/// Repaint what a live language switch reaches beyond the subscribed views.
+fn relocalize_windows(cx: &mut Context<AppState>) {
+    // Locale lookup is process-global, so every open window must repaint;
+    // localized text cached in view state re-derives on the event itself.
+    cx.refresh_windows();
+    // Deferred: the Device menu reads the state entity, whose lease is still
+    // held here (events are emitted inside `AppState::update`), and a
+    // re-entrant read panics. The native window titles ride along — they are
+    // stamped at open and don't re-render with the refresh.
+    cx.defer(|cx| {
+        crate::app::menu::rebuild(cx);
+        crate::windows::retitle_open(cx);
+    });
 }
 
 /// Lets a test state the exact events a mutation must report.

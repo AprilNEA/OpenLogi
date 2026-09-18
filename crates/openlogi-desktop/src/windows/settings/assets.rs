@@ -9,8 +9,7 @@ use crate::ui::components::control_select;
 use super::{
     App, AppState, AssetCommand, AssetControl, AssetSourcePreference, Entity, IconName, IndexPath,
     InteractiveElement, IntoElement, Palette, ParentElement, SelectItem, SelectState, SettingField,
-    SettingGroup, SettingItem, SettingPage, SettingsView, SharedString, StateEvent, Styled, div,
-    px,
+    SettingGroup, SettingItem, SettingPage, SettingsView, SharedString, Styled, div, px,
 };
 
 #[derive(Clone)]
@@ -82,10 +81,7 @@ pub(super) fn assets_page(
                         AppState::try_read(cx).is_none_or(|s| s.app_settings().auto_download_assets)
                     },
                     |enabled, cx| {
-                        AppState::update(cx, move |state, cx| {
-                            state.set_auto_download_assets(enabled);
-                            cx.emit(StateEvent::SettingsChanged);
-                        });
+                        AppState::apply(cx, |state| state.set_auto_download_assets(enabled));
                         // Re-enabling should fetch right away, not wait for the
                         // next device event.
                         if enabled {

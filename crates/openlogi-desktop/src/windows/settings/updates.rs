@@ -3,7 +3,7 @@
 use super::{
     App, AppState, Button, ButtonVariants, Disableable, Entity, FontWeight, IconName,
     ParentElement, RELEASES_URL, SettingField, SettingGroup, SettingItem, SettingPage, Sizable,
-    StateEvent, Styled, Tag, UpdateStatus, Updater, div, h_flex, img, px, v_flex,
+    Styled, Tag, UpdateStatus, Updater, div, h_flex, img, px, v_flex,
 };
 use crate::ui::theme::Typography as _;
 
@@ -22,10 +22,7 @@ pub(super) fn updates_page(updater: Entity<Updater>) -> SettingPage {
                 SettingField::switch(
                     |cx| AppState::try_read(cx).is_some_and(|s| s.app_settings().check_for_updates),
                     |enabled, cx| {
-                        AppState::update(cx, move |state, cx| {
-                            state.set_check_for_updates(enabled);
-                            cx.emit(StateEvent::SettingsChanged);
-                        });
+                        AppState::apply(cx, |state| state.set_check_for_updates(enabled));
                     },
                 ),
             )
@@ -40,10 +37,7 @@ pub(super) fn updates_page(updater: Entity<Updater>) -> SettingPage {
                             .is_some_and(|s| s.app_settings().auto_install_updates)
                     },
                     |enabled, cx| {
-                        AppState::update(cx, move |state, cx| {
-                            state.set_auto_install_updates(enabled);
-                            cx.emit(StateEvent::SettingsChanged);
-                        });
+                        AppState::apply(cx, |state| state.set_auto_install_updates(enabled));
                     },
                 ),
             )

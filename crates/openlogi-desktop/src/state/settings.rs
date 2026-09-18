@@ -4,7 +4,6 @@ use super::device_key::DeviceKey;
 use super::events::StateEvents;
 use super::{AppState, StateEvent};
 use crate::platform::app_icon::AppIconExt as _;
-use gpui::Context;
 use openlogi_core::config::{
     AppIcon, AppSettings, Appearance, AssetSourcePreference, DeviceViewMode, ThumbwheelSensitivity,
     UiScale, VerticalScrollSensitivity,
@@ -24,9 +23,9 @@ impl AppState {
     /// is only ensured opportunistically here, healing drift without
     /// re-prompting — and giving a dev build its explicit way in. Disk
     /// failures restore the persisted value and surface a config error.
-    pub fn set_launch_at_login(&mut self, enabled: bool) {
+    pub fn set_launch_at_login(&mut self, enabled: bool) -> StateEvents {
         if self.config.app_settings.launch_at_login == enabled {
-            return;
+            return StateEvent::SettingsChanged.into();
         }
         self.config
             .edit(|config| config.app_settings.launch_at_login = enabled);
@@ -35,6 +34,7 @@ impl AppState {
         {
             tracing::warn!(error, enabled, "service registration failed");
         }
+        StateEvent::SettingsChanged.into()
     }
     /// Toggle the menu-bar (status item) icon preference and persist it. The
     /// icon is hosted by the always-on agent, which reads this on startup and
@@ -47,68 +47,73 @@ impl AppState {
     /// shown only where there's a tray (macOS + Windows), so the setter is
     /// gated the same way to stay dead-code-clean on Linux.
     #[cfg(any(target_os = "macos", target_os = "windows"))]
-    pub fn set_show_in_menu_bar(&mut self, enabled: bool) {
+    pub fn set_show_in_menu_bar(&mut self, enabled: bool) -> StateEvents {
         if self.config.app_settings.show_in_menu_bar == enabled {
-            return;
+            return StateEvent::SettingsChanged.into();
         }
         self.config
             .edit(|config| config.app_settings.show_in_menu_bar = enabled);
         self.persist_and_reload("show-in-menu-bar setting");
+        StateEvent::SettingsChanged.into()
     }
     /// Toggle the opt-in update check and persist it. No immediate side
     /// effect beyond the next launch reading the new value. No-op when
     /// unchanged.
-    pub fn set_check_for_updates(&mut self, enabled: bool) {
+    pub fn set_check_for_updates(&mut self, enabled: bool) -> StateEvents {
         if self.config.app_settings.check_for_updates == enabled {
-            return;
+            return StateEvent::SettingsChanged.into();
         }
         self.config
             .edit(|config| config.app_settings.check_for_updates = enabled);
         self.persist_config("update-check setting");
+        StateEvent::SettingsChanged.into()
     }
     /// Toggle opt-in automatic install and persist it. The launch-time updater
     /// observer reads this live, so a newer version found after this is enabled
     /// downloads and stages on its own; no immediate side effect here. No-op
     /// when unchanged.
-    pub fn set_auto_install_updates(&mut self, enabled: bool) {
+    pub fn set_auto_install_updates(&mut self, enabled: bool) -> StateEvents {
         if self.config.app_settings.auto_install_updates == enabled {
-            return;
+            return StateEvent::SettingsChanged.into();
         }
         self.config
             .edit(|config| config.app_settings.auto_install_updates = enabled);
         self.persist_config("auto-install setting");
+        StateEvent::SettingsChanged.into()
     }
     /// Persist the light/dark appearance preference. The caller re-applies the
     /// live theme via [`crate::ui::theme::apply_from_settings`]; this only writes the
     /// choice. No-op when unchanged.
-    pub fn set_appearance(&mut self, appearance: Appearance) {
+    pub fn set_appearance(&mut self, appearance: Appearance) -> StateEvents {
         if self.config.app_settings.appearance == appearance {
-            return;
+            return StateEvent::SettingsChanged.into();
         }
         self.config
             .edit(|config| config.app_settings.appearance = appearance);
         self.persist_config("appearance setting");
+        StateEvent::SettingsChanged.into()
     }
     /// Persist the text and interface scale. Open window roots apply the new
     /// rem size when the caller refreshes them. No-op when unchanged.
-    pub fn set_ui_scale(&mut self, scale: UiScale) {
+    pub fn set_ui_scale(&mut self, scale: UiScale) -> StateEvents {
         if self.config.app_settings.ui_scale == scale {
-            return;
+            return StateEvent::SettingsChanged.into();
         }
         self.config
             .edit(|config| config.app_settings.ui_scale = scale);
         self.persist_config("UI scale setting");
+        StateEvent::SettingsChanged.into()
     }
     /// Persist the chosen theme name for one mode (`None` = the OpenLogi brand
     /// theme). No-op when unchanged.
-    pub fn set_theme(&mut self, dark: bool, name: Option<String>) {
+    pub fn set_theme(&mut self, dark: bool, name: Option<String>) -> StateEvents {
         let current = if dark {
             &self.config.app_settings.theme_dark
         } else {
             &self.config.app_settings.theme_light
         };
         if *current == name {
-            return;
+            return StateEvent::SettingsChanged.into();
         }
         self.config.edit(|config| {
             let slot = if dark {
@@ -119,15 +124,16 @@ impl AppState {
             *slot = name;
         });
         self.persist_config("theme setting");
+        StateEvent::SettingsChanged.into()
     }
     /// Persist the chosen app icon and wear it now. Unlike the theme settings
     /// this one leaves the process twice over: the icon is written onto the app
     /// bundle so it survives a quit, and the agent is told so it can restyle the
     /// menu-bar item — the one surface showing an icon that the GUI cannot
     /// reach. No-op when unchanged.
-    pub fn set_app_icon(&mut self, icon: AppIcon) {
+    pub fn set_app_icon(&mut self, icon: AppIcon) -> StateEvents {
         if self.config.app_settings.app_icon == icon {
-            return;
+            return StateEvent::SettingsChanged.into();
         }
         self.config
             .edit(|config| config.app_settings.app_icon = icon);
@@ -137,25 +143,28 @@ impl AppState {
         if self.persist_and_reload("app icon setting") {
             icon.apply();
         }
+        StateEvent::SettingsChanged.into()
     }
     /// Persist the UI corner-radius override (`None` = each theme's own radius).
     /// No-op when unchanged.
-    pub fn set_ui_radius(&mut self, radius: Option<u8>) {
+    pub fn set_ui_radius(&mut self, radius: Option<u8>) -> StateEvents {
         if self.config.app_settings.ui_radius == radius {
-            return;
+            return StateEvent::SettingsChanged.into();
         }
         self.config
             .edit(|config| config.app_settings.ui_radius = radius);
         self.persist_config("UI radius setting");
+        StateEvent::SettingsChanged.into()
     }
     /// Persist the Home device-gallery layout. No-op when unchanged.
-    pub fn set_device_view_mode(&mut self, mode: DeviceViewMode) {
+    pub fn set_device_view_mode(&mut self, mode: DeviceViewMode) -> StateEvents {
         if self.config.app_settings.device_view_mode == mode {
-            return;
+            return StateEvent::SettingsChanged.into();
         }
         self.config
             .edit(|config| config.app_settings.device_view_mode = mode);
         self.persist_config("device view mode");
+        StateEvent::SettingsChanged.into()
     }
     /// Whether OpenLogi manages `key` (capture + volatile re-apply).
     #[must_use]
@@ -249,64 +258,76 @@ impl AppState {
     /// devices without a per-device override follow it
     /// through the reloaded capture plans. No-op when unchanged. Disk failures
     /// restore the persisted value and surface a configuration error.
-    pub fn set_thumbwheel_sensitivity(&mut self, sensitivity: ThumbwheelSensitivity) {
+    pub fn set_thumbwheel_sensitivity(
+        &mut self,
+        sensitivity: ThumbwheelSensitivity,
+    ) -> StateEvents {
         if self.config.app_settings.thumbwheel_sensitivity == sensitivity {
-            return;
+            return StateEvent::SettingsChanged.into();
         }
         self.config
             .edit(|config| config.app_settings.thumbwheel_sensitivity = sensitivity);
         self.persist_and_reload("thumbwheel sensitivity");
+        StateEvent::SettingsChanged.into()
     }
     /// Toggle finite animation for traditional mouse-wheel input and persist
     /// it. The agent publishes the change to the scroll worker on config
     /// reload. No-op when unchanged; disk failures restore the persisted value.
-    pub fn set_smooth_scroll(&mut self, enabled: bool) {
+    pub fn set_smooth_scroll(&mut self, enabled: bool) -> StateEvents {
         if self.config.app_settings.smooth_scroll == enabled {
-            return;
+            return StateEvent::SettingsChanged.into();
         }
         self.config
             .edit(|config| config.app_settings.smooth_scroll = enabled);
         self.persist_and_reload("smooth scroll");
+        StateEvent::SettingsChanged.into()
     }
     /// Set traditional vertical mouse-wheel sensitivity and persist it. The
     /// agent publishes the value to its scroll worker on config reload. No-op
     /// when unchanged; disk failures restore the persisted value.
-    pub fn set_vertical_scroll_sensitivity(&mut self, sensitivity: VerticalScrollSensitivity) {
+    pub fn set_vertical_scroll_sensitivity(
+        &mut self,
+        sensitivity: VerticalScrollSensitivity,
+    ) -> StateEvents {
         if self.config.app_settings.vertical_scroll_sensitivity == sensitivity {
-            return;
+            return StateEvent::SettingsChanged.into();
         }
         self.config
             .edit(|config| config.app_settings.vertical_scroll_sensitivity = sensitivity);
         self.persist_and_reload("vertical scroll sensitivity");
+        StateEvent::SettingsChanged.into()
     }
-    pub fn set_auto_download_assets(&mut self, enabled: bool) {
+    pub fn set_auto_download_assets(&mut self, enabled: bool) -> StateEvents {
         if self.config.app_settings.auto_download_assets == enabled {
-            return;
+            return StateEvent::SettingsChanged.into();
         }
         self.config
             .edit(|config| config.app_settings.auto_download_assets = enabled);
         self.persist_config("auto-download-assets setting");
+        StateEvent::SettingsChanged.into()
     }
     /// Persist the preferred device-asset source. The Settings view requests a
     /// refresh separately when automatic downloads are enabled, so this setter
     /// remains side-effect-free beyond configuration I/O.
-    pub fn set_asset_source(&mut self, source: AssetSourcePreference) {
+    pub fn set_asset_source(&mut self, source: AssetSourcePreference) -> StateEvents {
         if self.config.app_settings.asset_source == source {
-            return;
+            return StateEvent::SettingsChanged.into();
         }
         self.config
             .edit(|config| config.app_settings.asset_source = source);
         self.persist_config("asset-source setting");
+        StateEvent::SettingsChanged.into()
     }
     /// Record the answer to the first-run update-check prompt: enable (or leave
     /// disabled) the check, and mark the prompt as seen so it never reappears.
     /// Persists once.
-    pub fn record_update_consent(&mut self, enabled: bool) {
+    pub fn record_update_consent(&mut self, enabled: bool) -> StateEvents {
         self.config.edit(|config| {
             config.app_settings.check_for_updates = enabled;
             config.app_settings.update_prompt_seen = true;
         });
         self.persist_config("update-check consent");
+        StateEvent::SettingsChanged.into()
     }
     /// The stored UI-language preference: `Some(code)` for an explicit choice,
     /// `None` for "follow system". Distinct from the *active* locale that
@@ -316,12 +337,13 @@ impl AppState {
     pub fn language(&self) -> Option<&str> {
         self.config.app_settings.language.as_deref()
     }
-    /// Set the UI language (`None` = follow system), persist it, switch the
-    /// process-global locale via [`openlogi_core::locale`], and repaint open UI.
+    /// Set the UI language (`None` = follow system), persist it, and switch the
+    /// process-global locale via [`openlogi_core::locale`]. Emitting the
+    /// [`StateEvent::LanguageChanged`] this reports is what repaints open UI.
     /// No-op when unchanged.
-    pub fn set_language(&mut self, language: Option<String>, cx: &mut Context<Self>) {
+    pub fn set_language(&mut self, language: Option<String>) -> StateEvents {
         if self.config.app_settings.language == language {
-            return;
+            return StateEvent::SettingsChanged.into();
         }
         self.config
             .edit(|config| config.app_settings.language = language);
@@ -329,17 +351,6 @@ impl AppState {
         // configured language and relocalizes it on config reload.
         self.persist_and_reload("language setting");
         openlogi_core::locale::activate(self.config.app_settings.language.as_deref());
-        // Locale lookup is process-global, so every open window must repaint;
-        // localized text cached in view state re-derives on this event.
-        cx.emit(StateEvent::LanguageChanged);
-        cx.refresh_windows();
-        // Deferred: the Device menu reads this entity, whose lease is still
-        // held here (callers switch language inside `AppState::update`), and a
-        // re-entrant read panics. The native window titles ride along — they
-        // are stamped at open and don't re-render with the refresh.
-        cx.defer(|cx| {
-            crate::app::menu::rebuild(cx);
-            crate::windows::retitle_open(cx);
-        });
+        StateEvents::from(StateEvent::LanguageChanged).and(StateEvent::SettingsChanged)
     }
 }

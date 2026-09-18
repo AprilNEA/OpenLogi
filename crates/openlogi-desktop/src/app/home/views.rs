@@ -43,10 +43,7 @@ pub(super) fn device_view_switcher(
                     if !checked {
                         return;
                     }
-                    AppState::update(cx, |state, cx| {
-                        state.set_device_view_mode(mode);
-                        cx.emit(StateEvent::SettingsChanged);
-                    });
+                    AppState::apply(cx, |state| state.set_device_view_mode(mode));
                     view.update(cx, |_, cx| cx.notify());
                 })
         };

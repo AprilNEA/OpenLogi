@@ -8,8 +8,8 @@ use super::{
     ActiveTheme, App, AppState, Appearance, Axis, Button, ButtonGroup, Entity, FluentBuilder, Hsla,
     IconName, InputState, InteractiveElement, IntoElement, Palette, ParentElement, Rc, SelectState,
     Selectable, SettingField, SettingGroup, SettingItem, SettingPage, SettingsView, SharedString,
-    StateEvent, StatefulInteractiveElement, Styled, Theme, ThemeColor, ThemeConfig, ThemeFilter,
-    ThemeMode, ThemeRegistry, UiScale, div, h_flex, px, rgb, theme, v_flex,
+    StatefulInteractiveElement, Styled, Theme, ThemeColor, ThemeConfig, ThemeFilter, ThemeMode,
+    ThemeRegistry, UiScale, div, h_flex, px, rgb, theme, v_flex,
 };
 use crate::platform::app_icon::AppIconExt as _;
 use crate::ui::choice_card::ChoiceCard;
@@ -101,20 +101,14 @@ fn appearance_of(cx: &App) -> Appearance {
 
 /// Persist an appearance-mode choice and re-apply the live theme.
 fn set_appearance(cx: &mut App, appearance: Appearance) {
-    AppState::update(cx, |state, cx| {
-        state.set_appearance(appearance);
-        cx.emit(StateEvent::SettingsChanged);
-    });
+    AppState::apply(cx, |state| state.set_appearance(appearance));
     theme::apply_from_settings(None, cx);
 }
 
 /// Persist a corner-radius choice and re-apply the live theme. `None` defers to
 /// the active theme's own radius.
 fn set_radius(cx: &mut App, radius: Option<u8>) {
-    AppState::update(cx, |state, cx| {
-        state.set_ui_radius(radius);
-        cx.emit(StateEvent::SettingsChanged);
-    });
+    AppState::apply(cx, |state| state.set_ui_radius(radius));
     theme::apply_from_settings(None, cx);
 }
 
@@ -122,10 +116,7 @@ fn set_radius(cx: &mut App, radius: Option<u8>) {
 /// root applies its own rem size on that repaint, avoiding a re-entrant update
 /// of the Settings window currently dispatching this click.
 fn set_scale(cx: &mut App, scale: UiScale) {
-    AppState::update(cx, |state, cx| {
-        state.set_ui_scale(scale);
-        cx.emit(StateEvent::SettingsChanged);
-    });
+    AppState::apply(cx, |state| state.set_ui_scale(scale));
     cx.refresh_windows();
 }
 
@@ -281,12 +272,7 @@ fn icon_card(icon: AppIcon, selected: bool, accent: Hsla, pal: Palette) -> impl 
                 .child(radio_dot(selected, accent, pal))
                 .child(div().text_body().child(icon_label(icon))),
         )
-        .on_click(move |_, _, cx| {
-            AppState::update(cx, |state, cx| {
-                state.set_app_icon(icon);
-                cx.emit(StateEvent::SettingsChanged);
-            });
-        })
+        .on_click(move |_, _, cx| AppState::apply(cx, |state| state.set_app_icon(icon)))
 }
 
 /// What an icon is called in the picker. Proper nouns, so they are not
@@ -640,21 +626,21 @@ fn theme_card(
         )
         .on_click(move |_, _, cx| {
             let chosen = stored.to_string();
-            AppState::update(cx, move |s, cx| {
-                s.set_theme(dark, Some(chosen.clone()));
+            AppState::apply(cx, move |s| {
+                let events = s.set_theme(dark, Some(chosen.clone()));
                 // Picking a theme configures the light or dark *slot*. Only pin
                 // the mode when the user has already chosen an explicit
                 // Light/Dark mode — a "Follow System" preference must survive so
                 // configuring (say) the dark slot doesn't force the whole app to
                 // dark.
                 if s.app_settings().appearance != Appearance::System {
-                    s.set_appearance(if dark {
+                    return events.and(s.set_appearance(if dark {
                         Appearance::Dark
                     } else {
                         Appearance::Light
-                    });
+                    }));
                 }
-                cx.emit(StateEvent::SettingsChanged);
+                events
             });
             theme::apply_from_settings(None, cx);
         })

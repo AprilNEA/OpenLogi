@@ -277,11 +277,7 @@ impl Runtime {
             }
             ipc::GuiUpdate::ConfigReloadResult(result) => {
                 cx.update(|cx| {
-                    AppState::update(cx, |state, cx| {
-                        if state.apply_config_reload_result(result) {
-                            cx.emit(StateEvent::SettingsChanged);
-                        }
-                    });
+                    AppState::apply(cx, |state| state.apply_config_reload_result(result));
                 });
             }
         }

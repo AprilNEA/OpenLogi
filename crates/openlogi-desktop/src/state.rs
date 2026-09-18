@@ -305,8 +305,12 @@ impl AppState {
     pub fn apply_config_reload_result(
         &mut self,
         result: Result<(), openlogi_ipc::ConfigReloadError>,
-    ) -> bool {
-        self.config.apply_reload_result(result)
+    ) -> StateEvents {
+        if self.config.apply_reload_result(result) {
+            StateEvent::SettingsChanged.into()
+        } else {
+            StateEvents::none()
+        }
     }
     /// A clone of the IPC command sender used by the state entity to issue
     /// device reads and writes through the agent.
