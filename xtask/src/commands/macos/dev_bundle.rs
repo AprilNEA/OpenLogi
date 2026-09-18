@@ -126,9 +126,9 @@ pub(crate) fn run(args: &Args) -> Result<()> {
 /// matters when the agent is broken, and then the GUI's own retry loop is the
 /// backstop.
 #[cfg(unix)]
-const AGENT_SOCKET_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+const AGENT_SOCKET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 #[cfg(unix)]
-const AGENT_SOCKET_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+const AGENT_SOCKET_POLL_PERIOD: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// Launch the dev agent helper and wait for its IPC socket.
 ///
@@ -148,16 +148,16 @@ fn start_agent(app: &Path) -> Result<()> {
     let socket = openlogi_core::paths::agent_socket_path_for(CHANNEL.into())
         .map_err(|error| anyhow::anyhow!("could not resolve the dev socket: {error}"))?;
     let started = std::time::Instant::now();
-    while started.elapsed() < AGENT_SOCKET_DEADLINE {
+    while started.elapsed() < AGENT_SOCKET_TIMEOUT {
         if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
             println!("    agent ready ({:.1}s)", started.elapsed().as_secs_f32());
             return Ok(());
         }
-        std::thread::sleep(AGENT_SOCKET_POLL);
+        std::thread::sleep(AGENT_SOCKET_POLL_PERIOD);
     }
     println!(
         "    warning: agent socket not reachable after {}s — the GUI will keep retrying",
-        AGENT_SOCKET_DEADLINE.as_secs()
+        AGENT_SOCKET_TIMEOUT.as_secs()
     );
     Ok(())
 }
