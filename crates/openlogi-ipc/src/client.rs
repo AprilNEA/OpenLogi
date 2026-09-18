@@ -20,9 +20,9 @@
 //! from memory in that window is wedged, not busy.
 //!
 //! The rest of what every observing client repeats lives here too, as
-//! [`Observer`]: a connection that owns its generation [`Ledger`] and keeps
-//! exactly one observe call in flight, under a request deadline
-//! ([`observe_context`]) that outlasts the agent's hold.
+//! [`Observer`]: a connection that owns its generation ledger and keeps
+//! exactly one observe call in flight, under a request deadline that outlasts
+//! the agent's hold.
 
 use std::cmp::Ordering;
 use std::future::Future;
@@ -196,7 +196,8 @@ async fn handshake(client: AgentClient, kind: ClientKind) -> Result<AgentClient,
 }
 
 /// An answer to an observe call: anything stamped with the agent's
-/// [`Generation`].
+/// [`Generation`]. Public only because it bounds [`Observer`]; the ledger that
+/// reads the stamp is not.
 pub trait Stamped {
     /// The generation this answer describes.
     fn generation(&self) -> Generation;
@@ -221,7 +222,7 @@ impl Stamped for RingObservation {
 /// numbers its own generations from 1 again, so a ledger carried across a
 /// reconnect would make the new agent's first answers look stale.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct Ledger {
+pub(crate) struct Ledger {
     seen: Generation,
 }
 
@@ -262,7 +263,7 @@ const OBSERVE_GRACE: Duration = Duration::from_secs(5);
 /// deadline passes, so a shorter one would kill the hold instead of waiting it
 /// out.
 #[must_use]
-pub fn observe_context() -> Context {
+pub(crate) fn observe_context() -> Context {
     let mut ctx = context::current();
     ctx.deadline = Instant::now() + OBSERVE_HOLD + OBSERVE_GRACE;
     ctx
@@ -275,7 +276,7 @@ type InFlight<T> = Pin<Box<dyn Future<Output = Result<T, RpcError>> + Send>>;
 /// One connection observing the agent: the client, what that connection has
 /// seen, and the one observe call it keeps in flight.
 ///
-/// The three live and die together. A [`Ledger`] carried over to the next
+/// The three live and die together. A ledger carried over to the next
 /// connection would make a replacement agent's first answers look stale, and
 /// an answer from a replaced connection must never reach the client's state;
 /// dropping the `Observer` with its connection rules out both, because the
