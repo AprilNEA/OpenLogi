@@ -208,10 +208,13 @@ struct Runtime {
     /// merge without waiting for the agent to change something of its own.
     snapshot: Option<AgentSnapshot>,
     /// The asset resolver stats the cache roots and parses the (possibly
-    /// hundreds-of-KB) index.json, so it is built once and reused across
-    /// snapshots — rebuilt only when a sync lands new assets. Rebuilding per
-    /// snapshot was pure waste: the unchanged-list early-return discarded the
-    /// fresh records anyway.
+    /// hundreds-of-KB) index.json, and remembers every asset it has read from
+    /// disk, so it is built once and reused across snapshots: each one
+    /// rebuilds the device list, and a keyboard render alone costs
+    /// milliseconds to read. Replacing it is the only way its answers change,
+    /// so every path that changes the files on disk does — a settled download
+    /// ([`Self::on_sync_finished`]) and a cleared cache
+    /// ([`Self::on_asset_command`]).
     resolver: assets::AssetResolver,
     /// The process-wide swr cache, shared with `AppState`'s device reads. This
     /// runtime owns the asset mirror probe and depot-download subscriptions —
@@ -404,9 +407,9 @@ impl Runtime {
             if let Err(e) = assets::clear_cache() {
                 warn!(error = %e, "could not clear asset cache");
             }
-            // The on-disk cache is gone: rebuild the resolver and repaint so
-            // cleared art falls back to the silhouette (or bundled art)
-            // immediately.
+            // The on-disk cache is gone: replace the resolver, which would go
+            // on answering from memory, and repaint so cleared art falls back
+            // to the silhouette (or bundled art) immediately.
             self.resolver = assets::AssetResolver::new();
             self.refresh_devices(cx);
         }
@@ -418,9 +421,10 @@ impl Runtime {
         self.ensure_assets(asset_source, targets.into_iter(), cx);
     }
 
-    /// A download landed. Re-resolve against the enlarged cache and repaint;
-    /// the whole-record comparison in `refresh_inventories` decides whether
-    /// anything actually changed.
+    /// A download landed. Replace the resolver — the one that was here keeps
+    /// answering with what it found before the download — re-resolve against
+    /// the enlarged cache and repaint; the whole-record comparison in
+    /// `refresh_inventories` decides whether anything actually changed.
     fn on_sync_finished(&mut self, ok: bool, cx: &AsyncApp) {
         if ok {
             self.resolver = assets::AssetResolver::new();
