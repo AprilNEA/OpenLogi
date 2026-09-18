@@ -36,8 +36,9 @@ use tokio::time::Instant;
 use tracing::{debug, warn};
 
 use self::dispatch::InputDispatcher;
+use super::capture_manager::{self, CaptureManager, ManagerInputs, PendingRestore};
 use super::capture_session::{CaptureRecovery, CaptureSession, CaptureSlot, ReconcileAction};
-use super::retry::{RETRY_DELAY, wait_for_deadline};
+use super::retry::RETRY_DELAY;
 use super::shutdown::{ManagerCompletion, WatcherHandle};
 use crate::capture_plan::{CaptureTarget, DeviceCapturePlan, DispatchPlan, SharedCapturePlans};
 use crate::receiver_access::{ReceiverAccess, ReceiverRequestState, SessionReceiverLease};
@@ -128,11 +129,6 @@ struct SessionDone {
 enum SessionEvent {
     Input(CapturedEvent),
     Done(SessionDone),
-}
-
-struct PendingRestore {
-    token: PendingCaptureRestore,
-    retry_at: Instant,
 }
 
 struct GestureManagerState {
@@ -250,16 +246,6 @@ fn reconcile_published_session(
             .map(|plan| (&plan.target, &plan.dispatch));
         reconcile_session(session, wanted, dispatcher);
     }
-}
-
-async fn wait_for_registry_change(
-    changes: &mut watch::Receiver<()>,
-    has_pending_restore: bool,
-) -> bool {
-    if !has_pending_restore {
-        return std::future::pending().await;
-    }
-    changes.changed().await.is_ok()
 }
 
 fn acquire_session_lease(
@@ -562,22 +548,87 @@ async fn drain_for_shutdown(
     }
 }
 
+/// The gesture manager as the shared loop drives it: many slots, one weak
+/// receiver lease shared by every session.
+struct GestureManager {
+    state: GestureManagerState,
+    receiver_access: ReceiverAccess,
+    channels: SessionChannels,
+}
+
+impl CaptureManager for GestureManager {
+    type Published = Arc<Vec<DeviceCapturePlan>>;
+    type Event = SessionEvent;
+
+    async fn reconcile(&mut self, requests: ReceiverRequestState, published: &Self::Published) {
+        self.state
+            .reconcile(
+                requests,
+                true,
+                published,
+                &self.receiver_access,
+                &self.channels,
+            )
+            .await;
+    }
+
+    fn handle_session_event(
+        &mut self,
+        event: SessionEvent,
+        device_io_allowed: bool,
+        receiver_requests: &watch::Receiver<ReceiverRequestState>,
+        published: &watch::Receiver<Self::Published>,
+    ) -> bool {
+        self.state
+            .handle_session_event(event, device_io_allowed, receiver_requests, published)
+    }
+
+    fn deadline(&self, requests: ReceiverRequestState, device_io_allowed: bool) -> Option<Instant> {
+        self.state.deadline(requests, device_io_allowed)
+    }
+
+    fn has_pending_restores(&self) -> bool {
+        self.state.has_pending_restores()
+    }
+
+    fn expedite_pending_restores(&mut self) {
+        self.state.expedite_pending_restores();
+    }
+
+    async fn drain_for_shutdown(
+        &mut self,
+        events: &mut mpsc::UnboundedReceiver<SessionEvent>,
+        receiver_requests: &watch::Receiver<ReceiverRequestState>,
+        published: &watch::Receiver<Self::Published>,
+    ) {
+        drain_for_shutdown(
+            &mut self.state,
+            events,
+            &self.receiver_access,
+            receiver_requests,
+            published,
+            &self.channels,
+        )
+        .await;
+    }
+}
+
 /// Keep one capture session alive per online device, restarting a session when
 /// its device's plan changes, and dispatch incoming inputs against the plan of
 /// the device they arrived on. Runs for the lifetime of the process.
 async fn manage(context: GestureManagerContext) -> ManagerCompletion {
     let GestureManagerContext {
-        mut capture_plans,
+        capture_plans,
         capture_channel,
         receiver_access,
-        mut receiver_requests,
+        receiver_requests,
         channel_registry,
-        mut device_io,
+        device_io,
         outputs,
-        mut shutdown,
+        shutdown,
     } = context;
-    let (events, mut event_rx) = mpsc::unbounded_channel::<SessionEvent>();
-    let mut registry_changes = channel_registry.subscribe();
+    let (events, event_rx) = mpsc::unbounded_channel::<SessionEvent>();
+    let registry_changes = channel_registry.subscribe();
     // Capture sessions run as detached tasks, so an unexpected exit (a transient
     // HID++ read error, a sleep-wake glitch, brief radio loss) would otherwise go
     // unnoticed. Each session reports its completion here, tagged with its device
@@ -591,88 +642,22 @@ async fn manage(context: GestureManagerContext) -> ManagerCompletion {
         registry: channel_registry,
         device_io: device_io.clone(),
     };
-    let mut state = GestureManagerState::new(outputs);
-    let mut reconcile = true;
-
-    loop {
-        if reconcile {
-            reconcile = false;
-            let device_io_allowed = device_io.allows_io();
-            if device_io_allowed {
-                let requests = *receiver_requests.borrow_and_update();
-                let published = Arc::clone(&capture_plans.borrow_and_update());
-                state
-                    .reconcile(
-                        requests,
-                        device_io_allowed,
-                        &published,
-                        &receiver_access,
-                        &channels,
-                    )
-                    .await;
-            }
-        }
-
-        let requests = *receiver_requests.borrow();
-        let deadline = state.deadline(requests, device_io.allows_io());
-        if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
-            reconcile = true;
-            continue;
-        }
-
-        tokio::select! {
-            biased;
-
-            _ = &mut shutdown => {
-                drain_for_shutdown(
-                    &mut state,
-                    &mut event_rx,
-                    &receiver_access,
-                    &receiver_requests,
-                    &capture_plans,
-                    &channels,
-                )
-                .await;
-                return ManagerCompletion::Graceful;
-            }
-            Some(event) = event_rx.recv() => {
-                reconcile |= state.handle_session_event(
-                    event,
-                    device_io.allows_io(),
-                    &receiver_requests,
-                    &capture_plans,
-                );
-            }
-            result = capture_plans.changed() => match result {
-                Ok(()) => reconcile = true,
-                Err(_) => return ManagerCompletion::Unexpected,
-            },
-            result = receiver_requests.changed() => match result {
-                Ok(()) => reconcile = true,
-                Err(_) => return ManagerCompletion::Unexpected,
-            },
-            allowed = device_io.changed() => match allowed {
-                Some(true) => reconcile = true,
-                Some(false) => {}
-                None => return ManagerCompletion::Unexpected,
-            },
-            open = wait_for_registry_change(
-                &mut registry_changes,
-                state.has_pending_restores(),
-            ) => {
-                if !open {
-                    return ManagerCompletion::Unexpected;
-                }
-                if device_io.allows_io() {
-                    state.expedite_pending_restores();
-                    reconcile = true;
-                }
-            }
-            () = wait_for_deadline(deadline) => {
-                reconcile = true;
-            }
-        }
-    }
+    capture_manager::run(
+        GestureManager {
+            state: GestureManagerState::new(outputs),
+            receiver_access,
+            channels,
+        },
+        ManagerInputs {
+            published: capture_plans,
+            receiver_requests,
+            registry_changes,
+            device_io,
+            events: event_rx,
+            shutdown,
+        },
+    )
+    .await
 }
 
 /// Start one device's capture session plus its input-forwarding task, and

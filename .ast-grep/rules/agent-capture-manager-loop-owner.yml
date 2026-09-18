@@ -1,0 +1,30 @@
+# Owner: openlogi_agent_core::watchers::capture_manager::run — the select loop
+# of the gesture and keyboard capture managers: what it waits on, in which
+# biased order, and which closed source ends the manager how. The managers
+# keep their own state machines behind CaptureManager.
+id: agent-capture-manager-loop-owner
+language: rust
+severity: error
+message: The capture managers run on watchers::capture_manager::run; implement CaptureManager instead of deciding a ManagerCompletion in a second select loop here.
+note: |
+  gesture::manage and keyboard::manage were the same 82-line select loop. See
+  "Single source of truth" in AGENTS.md.
+files:
+  - crates/openlogi-agent-core/src/watchers/gesture.rs
+  - crates/openlogi-agent-core/src/watchers/gesture/**/*.rs
+  - crates/openlogi-agent-core/src/watchers/keyboard.rs
+  - crates/openlogi-agent-core/src/watchers/keyboard/**/*.rs
+ignores:
+  - "**/tests.rs"
+rule:
+  any:
+    - all:
+        - kind: scoped_identifier
+        - regex: '^ManagerCompletion::'
+    # Inside `tokio::select!` the path is loose tokens, not an expression.
+    - all:
+        - kind: identifier
+        - regex: '^ManagerCompletion$'
+        - inside:
+            kind: token_tree
+            stopBy: end

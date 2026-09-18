@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use super::*;
+use crate::watchers::retry::wait_for_deadline;
 use openlogi_core::binding::{Action, Binding, ButtonId, GestureDirection};
 use openlogi_core::config::{ThumbwheelSensitivity, VerticalScrollSensitivity};
 use openlogi_hid::DeviceRoute;
