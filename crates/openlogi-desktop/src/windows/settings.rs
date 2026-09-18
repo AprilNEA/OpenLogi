@@ -412,11 +412,16 @@ impl Render for SettingsView {
             cx,
         );
         // A failed write restores AppState's persisted configuration. Re-seat
-        // this independently owned slider so it cannot keep presenting the
+        // these independently owned sliders so neither can keep presenting the
         // rejected value after that rollback.
         if let Some(settings) = AppState::try_read(cx).map(AppState::app_settings) {
-            let committed = settings.vertical_scroll_sensitivity;
-            self.vertical_scroll_sensitivity.sync(committed, window, cx);
+            let (vertical_scroll, thumbwheel) = (
+                settings.vertical_scroll_sensitivity,
+                settings.thumbwheel_sensitivity,
+            );
+            self.vertical_scroll_sensitivity
+                .sync(vertical_scroll, window, cx);
+            self.thumbwheel_sensitivity.sync(thumbwheel, window, cx);
         }
         let pal = theme::palette(cx);
         let view = cx.entity();
