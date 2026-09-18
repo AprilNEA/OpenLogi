@@ -726,8 +726,7 @@ async fn arm_controls_into(
     if let Some(info) = device
         .root()
         .get_feature(reprog_controls::FEATURE_ID)
-        .await
-        .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?
+        .await?
     {
         let rc = ReprogControlsV4::new(Arc::clone(chan), slot, info.index);
         let controls = enumerate_controls(&rc).await?;
@@ -789,16 +788,9 @@ async fn arm_controls_into(
     }
 
     if spec.capture_thumbwheel
-        && let Some(info) = device
-            .root()
-            .get_feature(thumbwheel::FEATURE_ID)
-            .await
-            .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?
+        && let Some(info) = device.root().get_feature(thumbwheel::FEATURE_ID).await?
     {
         let tw = Thumbwheel::new(Arc::clone(chan), slot, info.index);
-        // Consume the getInfo error here, before the next await: Hidpp20Error
-        // isn't Send, so holding it across an await would make this future
-        // (spawned on tokio) non-Send.
         let wheel_info = match tw.get_info().await {
             Ok(twinfo) => Some(twinfo),
             Err(e) => {
@@ -819,10 +811,8 @@ async fn arm_controls_into(
             wheel: tw,
             info: wheel_info,
         });
-        if let Some(thumb) = armed.thumb.as_ref()
-            && let Err(error) = thumb.wheel.divert(thumb.direction()).await
-        {
-            return Err(GestureError::Hidpp(format!("{error:?}")));
+        if let Some(thumb) = armed.thumb.as_ref() {
+            thumb.wheel.divert(thumb.direction()).await?;
         }
     }
     Ok(())
@@ -834,10 +824,7 @@ async fn arm_reprog_control(
     raw_xy: bool,
     reporting: &mut Vec<ArmedReporting>,
 ) -> Result<(), GestureError> {
-    let original = rc
-        .get_cid_reporting(cid)
-        .await
-        .map_err(|error| GestureError::Hidpp(format!("{error:?}")))?;
+    let original = rc.get_cid_reporting(cid).await?;
     if original.diverted {
         // Left over from a session that never tore down (agent killed, or
         // another Logitech app). Worth a line: it is the state that used to be
@@ -848,9 +835,7 @@ async fn arm_reprog_control(
     // Record ownership before the write: a transport error does not prove the
     // firmware rejected the command, so rollback must cover this CID too.
     reporting.push(ArmedReporting { cid, original });
-    rc.set_cid_reporting_full(cid, change)
-        .await
-        .map_err(|error| GestureError::Hidpp(format!("{error:?}")))?;
+    rc.set_cid_reporting_full(cid, change).await?;
     Ok(())
 }
 
@@ -879,17 +864,10 @@ fn captured_gesture_button(cid: u16, gesture_button_cids: &[(u16, ButtonId)]) ->
 pub(crate) async fn enumerate_controls(
     rc: &ReprogControlsV4,
 ) -> Result<Vec<reprog_controls::CtrlIdInfo>, GestureError> {
-    let count = rc
-        .get_count()
-        .await
-        .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?;
+    let count = rc.get_count().await?;
     let mut controls = Vec::with_capacity(usize::from(count));
     for index in 0..count {
-        controls.push(
-            rc.get_ctrl_id_info(index)
-                .await
-                .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?,
-        );
+        controls.push(rc.get_ctrl_id_info(index).await?);
     }
     Ok(controls)
 }

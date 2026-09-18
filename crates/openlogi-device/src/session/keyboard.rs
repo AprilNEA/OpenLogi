@@ -115,7 +115,7 @@ async fn run_keyboard_capture_session_on(
         .root()
         .get_feature(reprog_controls::FEATURE_ID)
         .await
-        .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?
+        .map_err(GestureError::from)?
         .ok_or_else(|| GestureError::Hidpp("keyboard exposes no 0x1b04 reprog controls".into()))?;
     let rc = ReprogControlsV4::new(Arc::clone(&chan), device_index, info.index);
     let controls = enumerate_controls(&rc).await?;
@@ -317,19 +317,14 @@ async fn arm_keys(
 ) -> Result<(), GestureError> {
     for (&cid, &button) in wanted {
         if controls.iter().any(|c| c.cid == cid && c.is_divertable()) {
-            let original = armed
-                .controls
-                .get_cid_reporting(cid)
-                .await
-                .map_err(|error| GestureError::Hidpp(format!("{error:?}")))?;
+            let original = armed.controls.get_cid_reporting(cid).await?;
             // A transport failure does not prove the firmware rejected the
             // command, so include this CID in rollback before writing.
             armed.reporting.push(ArmedReporting { cid, original });
             armed
                 .controls
                 .set_cid_reporting_full(cid, divert_change(original, false))
-                .await
-                .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?;
+                .await?;
             armed.diverted.insert(cid, button);
         } else {
             debug!(

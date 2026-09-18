@@ -6,6 +6,7 @@ use std::future::Future;
 use std::sync::{Arc, RwLock, Weak};
 
 use hidpp::channel::HidppChannel;
+use hidpp::protocol::v20::Hidpp20Error;
 use thiserror::Error;
 
 use crate::backend::BackendError;
@@ -32,6 +33,12 @@ pub enum GestureError {
     /// A HID++ feature call returned an error; inner string carries context.
     #[error("HID++ protocol error: {0}")]
     Hidpp(String),
+}
+
+impl From<Hidpp20Error> for GestureError {
+    fn from(error: Hidpp20Error) -> Self {
+        Self::Hidpp(format!("{error:?}"))
+    }
 }
 
 impl From<IoSuspended> for GestureError {
