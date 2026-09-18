@@ -932,22 +932,14 @@ mod tests {
     use super::*;
     use crate::services::assets::AssetResolver;
     use crate::services::i18n::LOCALE_LOCK;
-    use crate::state::ConfigPersistence;
+    use crate::state::Sources;
 
     fn install_app_state(cx: &mut TestAppContext) {
         cx.update(|cx| {
             let resolver = AssetResolver::new();
             let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
             let state = cx.new(|_| {
-                AppState::with_runtime(
-                    Config::ephemeral(),
-                    &[],
-                    &[],
-                    &resolver,
-                    &[],
-                    ConfigPersistence::MemoryOnly,
-                    commands,
-                )
+                AppState::new(Sources::in_memory(Config::ephemeral(), &resolver, commands))
             });
             AppState::set_global(state, cx);
         });

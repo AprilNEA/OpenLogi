@@ -24,7 +24,7 @@ use tracing::warn;
 use crate::services::assets::sync::{AssetCommand, AssetTarget};
 use crate::services::assets::{self, sync};
 use crate::services::ipc;
-use crate::state::{self, AppState, ConfigPersistence};
+use crate::state::{self, AppState, ConfigPersistence, Sources};
 use crate::{app, windows};
 
 /// How often the UI re-enumerates USB cameras. They are UVC devices the agent
@@ -83,15 +83,15 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
                 .build(swr_runtime.clone());
             if AppState::try_global(cx).is_none() {
                 let state = cx.new(|_| {
-                    let mut state = AppState::with_runtime(
+                    let mut state = AppState::new(Sources {
                         config,
-                        &[],
-                        &[],
-                        &resolver,
-                        &cams,
+                        inventories: &[],
+                        standalone: &[],
+                        resolver: &resolver,
+                        cameras: &cams,
                         persistence,
                         ipc_commands,
-                    );
+                    });
                     state.connect_device_reads(swr.clone(), swr_runtime.clone());
                     state
                 });

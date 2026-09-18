@@ -5,9 +5,9 @@
 //! here. Per-component scratch state (hover index) stays
 //! in the owning entity.
 //!
-//! [`AppState::with_runtime`] resolves every paired device's asset + DPI
-//! target up front so views can switch instantly when the active device
-//! changes — no synchronous I/O during the device switch.
+//! [`AppState::new`] resolves every paired device's asset + DPI target up
+//! front so views can switch instantly when the active device changes — no
+//! synchronous I/O during the device switch.
 
 use std::collections::BTreeMap;
 
@@ -81,6 +81,44 @@ mod tests;
 /// Default DPI value applied to a fresh AppState. Matches a common Logitech
 /// mid-range mouse and keeps the dot-preview visually obvious from frame one.
 pub const DEFAULT_DPI: Dpi = Dpi::new(1600);
+
+/// Everything a fresh [`AppState`] is built from.
+pub struct Sources<'a> {
+    /// The configuration as loaded.
+    pub config: Config,
+    /// The receivers and paired devices the agent has enumerated so far.
+    pub inventories: &'a [DeviceInventory],
+    /// The standalone raw-HID devices the agent has recognized so far.
+    pub standalone: &'a [StandaloneDevice],
+    /// Resolves each device's art.
+    pub resolver: &'a AssetResolver,
+    /// The webcams this process enumerated itself; they never come over IPC.
+    pub cameras: &'a [openlogi_camera::Camera],
+    /// Where changes to `config` may be written.
+    pub persistence: ConfigPersistence,
+    /// Sender to the IPC client thread.
+    pub ipc_commands: mpsc::UnboundedSender<crate::services::ipc::Command>,
+}
+
+#[cfg(test)]
+impl<'a> Sources<'a> {
+    /// No devices and nothing written to disk: where most state tests start.
+    pub(crate) fn in_memory(
+        config: Config,
+        resolver: &'a AssetResolver,
+        ipc_commands: mpsc::UnboundedSender<crate::services::ipc::Command>,
+    ) -> Self {
+        Self {
+            config,
+            inventories: &[],
+            standalone: &[],
+            resolver,
+            cameras: &[],
+            persistence: ConfigPersistence::MemoryOnly,
+            ipc_commands,
+        }
+    }
+}
 
 struct GlobalAppState(Entity<AppState>);
 
@@ -187,16 +225,17 @@ impl AppState {
     /// The initial selection prefers [`Config::selected_device`] if it still
     /// matches one of the paired devices; otherwise it falls back to index 0.
     #[must_use]
-    pub fn with_runtime(
-        config: Config,
-        inventories: &[DeviceInventory],
-        standalone: &[StandaloneDevice],
-        resolver: &AssetResolver,
-        cameras: &[openlogi_camera::Camera],
-        config_persistence: ConfigPersistence,
-        ipc_commands: mpsc::UnboundedSender<crate::services::ipc::Command>,
-    ) -> Self {
-        let mut config = ConfigState::new(config, config_persistence);
+    pub fn new(sources: Sources<'_>) -> Self {
+        let Sources {
+            config,
+            inventories,
+            standalone,
+            resolver,
+            cameras,
+            persistence,
+            ipc_commands,
+        } = sources;
+        let mut config = ConfigState::new(config, persistence);
         let device_list = build_device_list(inventories, standalone, resolver, &config, cameras);
         // Fold each online device's route into its canonical entry before
         // anything writes to the config — the first frame after a schema-5

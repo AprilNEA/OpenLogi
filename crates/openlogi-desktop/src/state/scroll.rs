@@ -140,7 +140,7 @@ mod tests {
     use openlogi_core::device::{Capabilities, DeviceKind};
 
     use crate::services::assets::AssetResolver;
-    use crate::state::ConfigPersistence;
+    use crate::state::Sources;
     use crate::state::devices::DeviceRecord;
 
     use super::AppState;
@@ -184,15 +184,7 @@ mod tests {
     fn test_state(config: Config) -> AppState {
         let resolver = AssetResolver::new();
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
-        AppState::with_runtime(
-            config,
-            &[],
-            &[],
-            &resolver,
-            &[],
-            ConfigPersistence::MemoryOnly,
-            commands,
-        )
+        AppState::new(Sources::in_memory(config, &resolver, commands))
     }
 
     /// An `AppState` whose selected device is on the **first** listed link and

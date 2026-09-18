@@ -39,21 +39,18 @@ use super::smartshift::{
     ConfirmationOutcome, SmartShiftDeviceState, smartshift_read_is_current,
     smartshift_write_outcome,
 };
-use super::{AppState, ConfigPersistence, DeviceKey, LightCommandStatus, Load, StateEvent};
+use super::{
+    AppState, ConfigPersistence, DeviceKey, LightCommandStatus, Load, Sources, StateEvent,
+};
 
 #[test]
 fn read_only_config_rolls_back_mutations_and_does_not_reload_agent() {
     let resolver = AssetResolver::new();
     let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-    let mut state = AppState::with_runtime(
-        Config::ephemeral(),
-        &[],
-        &[],
-        &resolver,
-        &[],
-        ConfigPersistence::ReadOnly("invalid config".into()),
-        commands,
-    );
+    let mut state = AppState::new(Sources {
+        persistence: ConfigPersistence::ReadOnly("invalid config".into()),
+        ..Sources::in_memory(Config::ephemeral(), &resolver, commands)
+    });
 
     let _ = state.set_thumbwheel_sensitivity(ThumbwheelSensitivity::from_rounded(50.0));
     let _ = state.set_smooth_scroll(true);
@@ -76,15 +73,7 @@ fn read_only_config_rolls_back_mutations_and_does_not_reload_agent() {
 fn smooth_scroll_change_reloads_the_agent_once() {
     let resolver = AssetResolver::new();
     let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-    let mut state = AppState::with_runtime(
-        Config::ephemeral(),
-        &[],
-        &[],
-        &resolver,
-        &[],
-        ConfigPersistence::MemoryOnly,
-        commands,
-    );
+    let mut state = AppState::new(Sources::in_memory(Config::ephemeral(), &resolver, commands));
 
     let _ = state.set_smooth_scroll(true);
 
@@ -109,15 +98,7 @@ fn language_switch_rebuilds_menus_after_the_state_update(cx: &mut gpui::TestAppC
     let _locale = crate::services::i18n::LOCALE_LOCK.lock();
     let resolver = AssetResolver::new();
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
-    let state = AppState::with_runtime(
-        Config::ephemeral(),
-        &[],
-        &[],
-        &resolver,
-        &[],
-        ConfigPersistence::MemoryOnly,
-        commands,
-    );
+    let state = AppState::new(Sources::in_memory(Config::ephemeral(), &resolver, commands));
 
     cx.update(|cx| {
         AppState::set_global(cx.new(|_| state), cx);
@@ -136,15 +117,7 @@ fn language_switch_rebuilds_menus_after_the_state_update(cx: &mut gpui::TestAppC
 fn agent_reload_error_stays_visible_until_a_successful_confirmation() {
     let resolver = AssetResolver::new();
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
-    let mut state = AppState::with_runtime(
-        Config::ephemeral(),
-        &[],
-        &[],
-        &resolver,
-        &[],
-        ConfigPersistence::MemoryOnly,
-        commands,
-    );
+    let mut state = AppState::new(Sources::in_memory(Config::ephemeral(), &resolver, commands));
     assert_eq!(
         state.apply_config_reload_result(Err(openlogi_ipc::ConfigReloadError {
             message: "agent rejected config".into(),
@@ -270,15 +243,7 @@ fn canonical_profile_state(
     commands: tokio::sync::mpsc::UnboundedSender<crate::services::ipc::Command>,
 ) -> AppState {
     let resolver = AssetResolver::new();
-    AppState::with_runtime(
-        Config::ephemeral(),
-        &[],
-        &[],
-        &resolver,
-        &[],
-        ConfigPersistence::MemoryOnly,
-        commands,
-    )
+    AppState::new(Sources::in_memory(Config::ephemeral(), &resolver, commands))
 }
 
 fn profile_device(state: &AppState, unit_id: [u8; 4]) -> &super::DeviceRecord {
@@ -559,15 +524,10 @@ fn failed_fold_persist_does_not_orphan_the_device_list() {
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
     let mut config = Config::ephemeral();
     config.set_dpi("receiver:82839805:slot:1", Dpi::new(3200));
-    let mut state = AppState::with_runtime(
-        config,
-        &[],
-        &[],
-        &resolver,
-        &[],
-        ConfigPersistence::ReadOnly("simulated unwritable config.toml".to_string()),
-        commands,
-    );
+    let mut state = AppState::new(Sources {
+        persistence: ConfigPersistence::ReadOnly("simulated unwritable config.toml".to_string()),
+        ..Sources::in_memory(config, &resolver, commands)
+    });
     assert!(state.devices().is_empty(), "no inventory seen yet");
 
     let changed = state.refresh_inventories(&[receiver_inventory()], &[], &resolver, &[]);
@@ -712,15 +672,10 @@ pub(super) fn state_with_a_known_mouse() -> AppState {
         .as_mut()
         .unwrap()
         .dpi_gestures = true;
-    AppState::with_runtime(
-        Config::ephemeral(),
-        &[inventory],
-        &[],
-        &resolver,
-        &[],
-        ConfigPersistence::MemoryOnly,
-        commands,
-    )
+    AppState::new(Sources {
+        inventories: &[inventory],
+        ..Sources::in_memory(Config::ephemeral(), &resolver, commands)
+    })
 }
 
 const CAMERA_A_ID: &str = "0x1123000046d0893";
@@ -746,15 +701,10 @@ fn serial_less_same_model_cameras() -> [Camera; 2] {
 fn state_with_same_model_cameras(config: Config) -> AppState {
     let cameras = serial_less_same_model_cameras();
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
-    AppState::with_runtime(
-        config,
-        &[],
-        &[],
-        &AssetResolver::new(),
-        &cameras,
-        ConfigPersistence::MemoryOnly,
-        commands,
-    )
+    AppState::new(Sources {
+        cameras: &cameras,
+        ..Sources::in_memory(config, &AssetResolver::new(), commands)
+    })
 }
 
 fn camera_record<'a>(state: &'a AppState, capture_id: &str) -> &'a super::DeviceRecord {
@@ -1115,15 +1065,10 @@ fn a_stored_middle_click_gesture_remains_editable_until_it_is_disabled() {
     );
     let resolver = AssetResolver::new();
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
-    let mut state = AppState::with_runtime(
-        config,
-        &[direct_inventory([0xa3, 0x93, 0xca, 0xe0])],
-        &[],
-        &resolver,
-        &[],
-        ConfigPersistence::MemoryOnly,
-        commands,
-    );
+    let mut state = AppState::new(Sources {
+        inventories: &[direct_inventory([0xa3, 0x93, 0xca, 0xe0])],
+        ..Sources::in_memory(config, &resolver, commands)
+    });
 
     assert_eq!(
         state.current_gesture_maps().get(&ButtonId::MiddleClick),
@@ -1169,18 +1114,13 @@ fn a_profile_belongs_to_the_device_it_was_opened_on() {
     // another mouse and silently edit a profile the user never opened.
     let resolver = AssetResolver::new();
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
-    let mut state = AppState::with_runtime(
-        Config::ephemeral(),
-        &[
+    let mut state = AppState::new(Sources {
+        inventories: &[
             direct_inventory([0xa3, 0x93, 0xca, 0xe0]),
             second_mouse_inventory(),
         ],
-        &[],
-        &resolver,
-        &[],
-        ConfigPersistence::MemoryOnly,
-        commands,
-    );
+        ..Sources::in_memory(Config::ephemeral(), &resolver, commands)
+    });
     let other = state
         .devices()
         .iter()
@@ -1292,15 +1232,10 @@ fn transient_identity_is_not_persisted_or_retained_after_resolution() {
     let resolver = AssetResolver::new();
     let transient_inventory = direct_inventory([0; 4]);
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
-    let mut state = AppState::with_runtime(
-        Config::ephemeral(),
-        &[transient_inventory],
-        &[],
-        &resolver,
-        &[],
-        ConfigPersistence::MemoryOnly,
-        commands,
-    );
+    let mut state = AppState::new(Sources {
+        inventories: &[transient_inventory],
+        ..Sources::in_memory(Config::ephemeral(), &resolver, commands)
+    });
     let transient_key = "direct:046d:b023:unit:00000000";
 
     assert_eq!(state.devices().len(), 1);
@@ -1331,15 +1266,10 @@ fn transient_probe_folds_into_its_known_card() {
     // the card keeps its identity and takes the live volatile state.
     let resolver = AssetResolver::new();
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
-    let mut state = AppState::with_runtime(
-        Config::ephemeral(),
-        &[direct_inventory([0xa3, 0x93, 0xca, 0xe0])],
-        &[],
-        &resolver,
-        &[],
-        ConfigPersistence::MemoryOnly,
-        commands,
-    );
+    let mut state = AppState::new(Sources {
+        inventories: &[direct_inventory([0xa3, 0x93, 0xca, 0xe0])],
+        ..Sources::in_memory(Config::ephemeral(), &resolver, commands)
+    });
     // The device's own unit id is known and online: the transport-free
     // identity key wins over the direct-route runtime key.
     let stable_key = "unit:a393cae0";
@@ -1367,15 +1297,10 @@ fn transient_record_beside_its_live_device_is_dropped() {
     // snapshot: the transient record is probe noise, not a second device.
     let resolver = AssetResolver::new();
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
-    let mut state = AppState::with_runtime(
-        Config::ephemeral(),
-        &[direct_inventory([0xa3, 0x93, 0xca, 0xe0])],
-        &[],
-        &resolver,
-        &[],
-        ConfigPersistence::MemoryOnly,
-        commands,
-    );
+    let mut state = AppState::new(Sources {
+        inventories: &[direct_inventory([0xa3, 0x93, 0xca, 0xe0])],
+        ..Sources::in_memory(Config::ephemeral(), &resolver, commands)
+    });
 
     let both = build_device_list(
         &[
@@ -1403,18 +1328,13 @@ fn transient_probe_adopts_the_absent_sibling_of_a_live_twin() {
     // online and routed.
     let resolver = AssetResolver::new();
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
-    let mut state = AppState::with_runtime(
-        Config::ephemeral(),
-        &[
+    let mut state = AppState::new(Sources {
+        inventories: &[
             direct_inventory([1, 1, 1, 1]),
             direct_inventory([2, 2, 2, 2]),
         ],
-        &[],
-        &resolver,
-        &[],
-        ConfigPersistence::MemoryOnly,
-        commands,
-    );
+        ..Sources::in_memory(Config::ephemeral(), &resolver, commands)
+    });
 
     let snapshot = build_device_list(
         &[direct_inventory([1, 1, 1, 1]), direct_inventory([0; 4])],
@@ -1444,18 +1364,13 @@ fn ambiguous_transient_probe_is_not_adopted() {
     // so neither card may steal it.
     let resolver = AssetResolver::new();
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
-    let mut state = AppState::with_runtime(
-        Config::ephemeral(),
-        &[
+    let mut state = AppState::new(Sources {
+        inventories: &[
             direct_inventory([1, 1, 1, 1]),
             direct_inventory([2, 2, 2, 2]),
         ],
-        &[],
-        &resolver,
-        &[],
-        ConfigPersistence::MemoryOnly,
-        commands,
-    );
+        ..Sources::in_memory(Config::ephemeral(), &resolver, commands)
+    });
     assert_eq!(state.devices().len(), 2);
 
     let transient_list = build_device_list(
@@ -1486,15 +1401,7 @@ fn a_route_shared_by_two_online_twins_is_never_adopted() {
     // neither claims it, and nothing is persisted or reloaded.
     let resolver = AssetResolver::new();
     let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-    let mut state = AppState::with_runtime(
-        Config::ephemeral(),
-        &[],
-        &[],
-        &resolver,
-        &[],
-        ConfigPersistence::MemoryOnly,
-        commands,
-    );
+    let mut state = AppState::new(Sources::in_memory(Config::ephemeral(), &resolver, commands));
 
     let _ = state.refresh_inventories(
         &[
@@ -1529,15 +1436,7 @@ fn historical_transient_lighting_is_not_exposed_without_a_live_record() {
     config.set_lighting(transient_key, Lighting::default());
     assert!(config.lighting(transient_key).is_some());
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
-    let state = AppState::with_runtime(
-        config,
-        &[],
-        &[],
-        &AssetResolver::new(),
-        &[],
-        ConfigPersistence::MemoryOnly,
-        commands,
-    );
+    let state = AppState::new(Sources::in_memory(config, &AssetResolver::new(), commands));
 
     assert!(state.devices().is_empty());
     assert!(state.lighting_for(transient_key, transient_key).is_none());
@@ -1627,15 +1526,7 @@ fn known_offline_device_is_an_asset_sync_target() {
         },
     );
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
-    let state = AppState::with_runtime(
-        config,
-        &[],
-        &[],
-        &AssetResolver::new(),
-        &[],
-        ConfigPersistence::MemoryOnly,
-        commands,
-    );
+    let state = AppState::new(Sources::in_memory(config, &AssetResolver::new(), commands));
 
     assert_eq!(
         state.asset_models(),
@@ -1653,15 +1544,10 @@ fn identical_standalone_units_share_one_model_asset_target() {
     second.address.identity = "serial:glow-second".into();
     second.serial_number = Some("glow-second".into());
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
-    let state = AppState::with_runtime(
-        Config::default(),
-        &[],
-        &[first, second],
-        &AssetResolver::new(),
-        &[],
-        ConfigPersistence::MemoryOnly,
-        commands,
-    );
+    let state = AppState::new(Sources {
+        standalone: &[first, second],
+        ..Sources::in_memory(Config::default(), &AssetResolver::new(), commands)
+    });
 
     assert_eq!(
         state.asset_models(),
@@ -1715,15 +1601,7 @@ fn camera_controls(brightness: i32) -> openlogi_core::config::CameraControls {
 
 fn camera_state(config: Config) -> AppState {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    AppState::with_runtime(
-        config,
-        &[],
-        &[],
-        &AssetResolver::new(),
-        &[],
-        ConfigPersistence::MemoryOnly,
-        tx,
-    )
+    AppState::new(Sources::in_memory(config, &AssetResolver::new(), tx))
 }
 
 #[test]
@@ -1801,15 +1679,10 @@ fn light_write_failure_reaches_the_gui_state() {
         registry_model_id: Some("8c900".into()),
     };
     let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-    let mut state = AppState::with_runtime(
-        Config::default(),
-        &[],
-        &[light],
-        &AssetResolver::new(),
-        &[],
-        ConfigPersistence::MemoryOnly,
-        commands,
-    );
+    let mut state = AppState::new(Sources {
+        standalone: &[light],
+        ..Sources::in_memory(Config::default(), &AssetResolver::new(), commands)
+    });
     let key = state
         .current_record()
         .expect("light record")
@@ -1874,15 +1747,10 @@ fn light_write_failure_reaches_the_gui_state() {
 fn superseded_light_write_keeps_prior_successes_for_reconciliation() {
     let light = superseded_litra_light();
     let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-    let mut state = AppState::with_runtime(
-        Config::default(),
-        &[],
-        &[light],
-        &AssetResolver::new(),
-        &[],
-        ConfigPersistence::MemoryOnly,
-        commands,
-    );
+    let mut state = AppState::new(Sources {
+        standalone: &[light],
+        ..Sources::in_memory(Config::default(), &AssetResolver::new(), commands)
+    });
     let key = state
         .current_record()
         .expect("light record")
@@ -1989,15 +1857,10 @@ fn transient_light_state_is_kept_in_memory_and_only_supported_commands_are_sent(
         registry_model_id: None,
     };
     let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-    let mut state = AppState::with_runtime(
-        Config::default(),
-        &[],
-        &[light],
-        &AssetResolver::new(),
-        &[],
-        ConfigPersistence::MemoryOnly,
-        commands,
-    );
+    let mut state = AppState::new(Sources {
+        standalone: &[light],
+        ..Sources::in_memory(Config::default(), &AssetResolver::new(), commands)
+    });
     let settings = LightSettings::new(false, 37, None);
 
     let _ = state.commit_light(settings);
@@ -2040,15 +1903,10 @@ fn camera_automation_preserves_manual_power_and_clears_transient_override() {
         registry_model_id: Some("8c900".into()),
     };
     let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-    let mut state = AppState::with_runtime(
-        Config::default(),
-        &[],
-        &[light],
-        &AssetResolver::new(),
-        &[],
-        ConfigPersistence::MemoryOnly,
-        commands,
-    );
+    let mut state = AppState::new(Sources {
+        standalone: &[light],
+        ..Sources::in_memory(Config::default(), &AssetResolver::new(), commands)
+    });
     let key = state
         .current_record()
         .expect("light record")
@@ -2113,15 +1971,10 @@ fn enabling_camera_automation_queues_effective_camera_power() {
         registry_model_id: Some("8c900".into()),
     };
     let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-    let mut state = AppState::with_runtime(
-        Config::default(),
-        &[],
-        &[light],
-        &AssetResolver::new(),
-        &[],
-        ConfigPersistence::MemoryOnly,
-        commands,
-    );
+    let mut state = AppState::new(Sources {
+        standalone: &[light],
+        ..Sources::in_memory(Config::default(), &AssetResolver::new(), commands)
+    });
     let _ = state.set_camera_active(true);
     let mut settings = state.light();
     settings.enabled = false;
@@ -2163,15 +2016,7 @@ fn gesture_maps_cover_every_gesture_mode_button() {
     );
     config.set_gesture_mode("2b042", ButtonId::Back, true);
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
-    let state = AppState::with_runtime(
-        config,
-        &[],
-        &[],
-        &AssetResolver::new(),
-        &[],
-        ConfigPersistence::MemoryOnly,
-        commands,
-    );
+    let state = AppState::new(Sources::in_memory(config, &AssetResolver::new(), commands));
 
     let maps = state.current_gesture_maps();
     let dedicated = maps
@@ -2198,15 +2043,10 @@ fn a_battery_only_change_reaches_the_device_list() {
     let resolver = AssetResolver::new();
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
     let unit_id = [1, 2, 3, 4];
-    let mut state = AppState::with_runtime(
-        Config::ephemeral(),
-        &[inventory_with_battery(unit_id, 50)],
-        &[],
-        &resolver,
-        &[],
-        ConfigPersistence::MemoryOnly,
-        commands,
-    );
+    let mut state = AppState::new(Sources {
+        inventories: &[inventory_with_battery(unit_id, 50)],
+        ..Sources::in_memory(Config::ephemeral(), &resolver, commands)
+    });
     assert_eq!(
         state.devices()[0].battery.as_ref().map(|b| b.percentage),
         Some(50)
@@ -2235,15 +2075,10 @@ fn an_identical_snapshot_is_still_a_no_op() {
     let resolver = AssetResolver::new();
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
     let unit_id = [1, 2, 3, 4];
-    let mut state = AppState::with_runtime(
-        Config::ephemeral(),
-        &[inventory_with_battery(unit_id, 50)],
-        &[],
-        &resolver,
-        &[],
-        ConfigPersistence::MemoryOnly,
-        commands,
-    );
+    let mut state = AppState::new(Sources {
+        inventories: &[inventory_with_battery(unit_id, 50)],
+        ..Sources::in_memory(Config::ephemeral(), &resolver, commands)
+    });
 
     assert!(
         state
@@ -2287,15 +2122,10 @@ fn state_with_an_offline_identity(persistence: ConfigPersistence) -> AppState {
         },
     );
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
-    AppState::with_runtime(
-        config,
-        &[],
-        &[],
-        &AssetResolver::new(),
-        &[],
+    AppState::new(Sources {
         persistence,
-        commands,
-    )
+        ..Sources::in_memory(config, &AssetResolver::new(), commands)
+    })
 }
 
 /// Forgetting an offline device removes both its placeholder card and its

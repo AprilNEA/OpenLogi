@@ -237,19 +237,15 @@ mod tests {
     use super::{StateEvent, StateEvents};
     use crate::services::assets::AssetResolver;
     use crate::state::tests::{KNOWN_MOUSE_KEY, state_with_a_known_mouse};
-    use crate::state::{AppState, ConfigPersistence, DeviceKey};
+    use crate::state::{AppState, DeviceKey, Sources};
 
     fn state_without_devices() -> AppState {
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
-        AppState::with_runtime(
+        AppState::new(Sources::in_memory(
             Config::ephemeral(),
-            &[],
-            &[],
             &AssetResolver::new(),
-            &[],
-            ConfigPersistence::MemoryOnly,
             commands,
-        )
+        ))
     }
 
     #[test]

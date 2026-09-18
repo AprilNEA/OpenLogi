@@ -151,7 +151,7 @@ mod tests {
 
     use super::*;
     use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
-    use crate::state::ConfigPersistence;
+    use crate::state::Sources;
 
     #[gpui::test]
     fn consent_actions_stay_visible_while_long_copy_scrolls(cx: &mut TestAppContext) {
@@ -172,15 +172,7 @@ mod tests {
                 config.app_settings.ui_scale = scale;
                 let (commands, _) = tokio::sync::mpsc::unbounded_channel();
                 let state = cx.new(|_| {
-                    AppState::with_runtime(
-                        config,
-                        &[],
-                        &[],
-                        &AssetResolver::new(),
-                        &[],
-                        ConfigPersistence::MemoryOnly,
-                        commands,
-                    )
+                    AppState::new(Sources::in_memory(config, &AssetResolver::new(), commands))
                 });
                 AppState::set_global(state, cx);
                 open(cx);
