@@ -13,7 +13,6 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::thread;
 use std::time::Duration;
 
 use openlogi_core::binding::{Binding, ButtonId};
@@ -133,18 +132,8 @@ pub fn spawn(
 ) -> WatcherHandle {
     let spec = spec.clone();
     let receiver_requests = receiver_access.subscribe_requests();
-    let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let (shutdown_done_tx, shutdown_done_rx) = oneshot::channel();
-    thread::spawn(move || {
-        let runtime = match openlogi_core::worker::runtime() {
-            Ok(rt) => rt,
-            Err(e) => {
-                warn!(error = %e, "keyboard watcher: could not build tokio runtime");
-                let _ = shutdown_done_tx.send(ManagerCompletion::Graceful);
-                return;
-            }
-        };
-        let completion = runtime.block_on(manage(KeyboardManagerContext {
+    WatcherHandle::spawn("openlogi-keyboard-watcher", move |shutdown| {
+        manage(KeyboardManagerContext {
             spec,
             keyboard_channel,
             receiver_access,
@@ -152,15 +141,9 @@ pub fn spawn(
             registry,
             device_io,
             dispatcher,
-            shutdown: shutdown_rx,
-        }));
-        // Completion is a process-replacement boundary: acknowledge only
-        // after the runtime has cancelled any detached task left by an
-        // unexpected manager return.
-        drop(runtime);
-        let _ = shutdown_done_tx.send(completion);
-    });
-    WatcherHandle::new(shutdown_tx, shutdown_done_rx)
+            shutdown,
+        })
+    })
 }
 
 /// Route one accepted keyboard edge through the shared HID++ lifecycle.

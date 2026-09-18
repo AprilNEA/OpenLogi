@@ -1,6 +1,5 @@
 //! Keep configured keyboard → pointing-device host-switch links armed.
 
-use std::thread;
 use std::time::Duration;
 
 use openlogi_hid::{
@@ -51,32 +50,17 @@ pub fn spawn(
 ) -> WatcherHandle {
     let links = links.clone();
     let receiver_requests = receiver_access.subscribe_requests();
-    let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let (shutdown_done_tx, shutdown_done_rx) = oneshot::channel();
-    thread::spawn(move || {
-        let runtime = match openlogi_core::worker::runtime() {
-            Ok(runtime) => runtime,
-            Err(error) => {
-                warn!(%error, "host switch watcher: could not build tokio runtime");
-                let _ = shutdown_done_tx.send(ManagerCompletion::Unexpected);
-                return;
-            }
-        };
-        let completion = runtime.block_on(manage(HostSwitchManagerContext {
+    WatcherHandle::spawn("openlogi-host-switch-watcher", move |shutdown| {
+        manage(HostSwitchManagerContext {
             links,
             channel_pool,
             registry,
             receiver_access,
             receiver_requests,
             device_io,
-            shutdown: shutdown_rx,
-        }));
-        // A manager return can strand detached task supervisors. Destroy their
-        // runtime before reporting that no old firmware writer remains.
-        drop(runtime);
-        let _ = shutdown_done_tx.send(completion);
-    });
-    WatcherHandle::new(shutdown_tx, shutdown_done_rx)
+            shutdown,
+        })
+    })
 }
 
 /// Identity of one spawned host-switch session. A completion settles only the

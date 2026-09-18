@@ -24,7 +24,6 @@ mod dispatch;
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::thread;
 use std::time::Duration;
 
 use openlogi_core::device_order::PhysicalDeviceKey;
@@ -99,18 +98,8 @@ pub fn spawn(
 ) -> WatcherHandle {
     let plans = capture_plans.clone();
     let receiver_requests = receiver_access.subscribe_requests();
-    let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let (shutdown_done_tx, shutdown_done_rx) = oneshot::channel();
-    thread::spawn(move || {
-        let runtime = match openlogi_core::worker::runtime() {
-            Ok(rt) => rt,
-            Err(e) => {
-                warn!(error = %e, "capture watcher: could not build tokio runtime");
-                let _ = shutdown_done_tx.send(ManagerCompletion::Graceful);
-                return;
-            }
-        };
-        let completion = runtime.block_on(manage(GestureManagerContext {
+    WatcherHandle::spawn("openlogi-gesture-watcher", move |shutdown| {
+        manage(GestureManagerContext {
             capture_plans: plans,
             capture_channel,
             receiver_access,
@@ -118,15 +107,9 @@ pub fn spawn(
             channel_registry,
             device_io,
             outputs,
-            shutdown: shutdown_rx,
-        }));
-        // Detached session tasks belong to this current-thread runtime. Drop
-        // it before acknowledging so even an unexpected manager return cannot
-        // leave a late firmware writer behind the process boundary.
-        drop(runtime);
-        let _ = shutdown_done_tx.send(completion);
-    });
-    WatcherHandle::new(shutdown_tx, shutdown_done_rx)
+            shutdown,
+        })
+    })
 }
 
 type RunningSession = CaptureSession<CaptureTarget, DispatchPlan>;
