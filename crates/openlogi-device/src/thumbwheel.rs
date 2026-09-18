@@ -223,6 +223,10 @@ pub struct Thumbwheel {
     chan: Arc<HidppChannel>,
     device_index: u8,
     feature_index: u8,
+    /// Whether this endpoint stamps requests with the channel's secondary
+    /// software id (see [`HidppChannel::get_secondary_sw_id`]) rather than
+    /// its primary one.
+    secondary: bool,
 }
 
 impl Thumbwheel {
@@ -233,6 +237,21 @@ impl Thumbwheel {
             chan,
             device_index,
             feature_index,
+            secondary: false,
+        }
+    }
+
+    /// [`Self::new`], stamping requests with the channel's secondary software
+    /// id instead of its primary one — for a second, distinct in-process
+    /// consumer of a channel another consumer already holds open (e.g. input
+    /// capture reusing an inventory-owned channel).
+    #[must_use]
+    pub fn new_secondary(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
+        Self {
+            chan,
+            device_index,
+            feature_index,
+            secondary: true,
         }
     }
 
@@ -245,6 +264,11 @@ impl Thumbwheel {
 
     /// Send a feature function call carrying a full long-message payload.
     async fn call(&self, function_id: u8, params: [u8; 16]) -> Result<[u8; 16], Hidpp20Error> {
+        let software_id = if self.secondary {
+            self.chan.get_secondary_sw_id()
+        } else {
+            self.chan.get_sw_id()
+        };
         let response = self
             .chan
             .send_v20(v20::Message::Long(
@@ -252,7 +276,7 @@ impl Thumbwheel {
                     device_index: self.device_index,
                     feature_index: self.feature_index,
                     function_id: U4::from_lo(function_id),
-                    software_id: self.chan.get_sw_id(),
+                    software_id,
                 },
                 params,
             ))

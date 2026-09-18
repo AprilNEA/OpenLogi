@@ -84,6 +84,47 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         }
     };
 
+    let new_secondary_fn = if event_ty.is_some() {
+        quote! {
+            /// [`CreatableFeature::new`], stamping requests with the
+            /// channel's secondary software id (see
+            /// [`crate::channel::HidppChannel::get_secondary_sw_id`]) instead
+            /// of its primary one — for a second, distinct in-process
+            /// consumer of a channel another consumer already holds open.
+            #[must_use]
+            pub fn new_secondary(
+                chan: ::std::sync::Arc<crate::channel::HidppChannel>,
+                device_index: u8,
+                feature_index: u8,
+            ) -> Self {
+                let events =
+                    crate::feature::EventSource::attach(&chan, device_index, feature_index);
+                Self {
+                    endpoint: crate::feature::FeatureEndpoint::new_secondary(chan, device_index, feature_index),
+                    events,
+                }
+            }
+        }
+    } else {
+        quote! {
+            /// [`CreatableFeature::new`], stamping requests with the
+            /// channel's secondary software id (see
+            /// [`crate::channel::HidppChannel::get_secondary_sw_id`]) instead
+            /// of its primary one — for a second, distinct in-process
+            /// consumer of a channel another consumer already holds open.
+            #[must_use]
+            pub fn new_secondary(
+                chan: ::std::sync::Arc<crate::channel::HidppChannel>,
+                device_index: u8,
+                feature_index: u8,
+            ) -> Self {
+                Self {
+                    endpoint: crate::feature::FeatureEndpoint::new_secondary(chan, device_index, feature_index),
+                }
+            }
+        }
+    };
+
     let emitting_impl = event_ty.map(|event_ty| {
         quote! {
             impl crate::feature::EmittingFeature<#event_ty> for #ident {
@@ -100,6 +141,10 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             const STARTING_VERSION: u8 = #version;
 
             #new_fn
+        }
+
+        impl #ident {
+            #new_secondary_fn
         }
 
         impl crate::feature::Feature for #ident {}

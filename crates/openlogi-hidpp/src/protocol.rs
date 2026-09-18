@@ -49,6 +49,26 @@ pub async fn determine_version(
     chan: &HidppChannel,
     device_index: u8,
 ) -> Result<Option<ProtocolVersion>, ChannelError> {
+    determine_version_inner(chan, device_index, false).await
+}
+
+/// [`determine_version`], stamped with the channel's secondary software id
+/// (see [`HidppChannel::get_secondary_sw_id`]) instead of its primary one —
+/// for a second, distinct in-process consumer of a channel another consumer
+/// already holds open, so this call's correlation key does not collide with
+/// the other consumer's own version/feature probing.
+pub async fn determine_version_secondary(
+    chan: &HidppChannel,
+    device_index: u8,
+) -> Result<Option<ProtocolVersion>, ChannelError> {
+    determine_version_inner(chan, device_index, true).await
+}
+
+async fn determine_version_inner(
+    chan: &HidppChannel,
+    device_index: u8,
+    secondary: bool,
+) -> Result<Option<ProtocolVersion>, ChannelError> {
     // To determine the protocol version, we send a HID++2.0 ping message
     // feature with index 0x00, function 0x01).
     // Devices supporting protocol >=2.0 will respond with a defined response
@@ -57,7 +77,11 @@ pub async fn determine_version(
     // indicating 0x00 is no valid sub ID. We make use of this to pin them to
     // version 1.0.
 
-    let sw_id = chan.get_sw_id();
+    let sw_id = if secondary {
+        chan.get_secondary_sw_id()
+    } else {
+        chan.get_sw_id()
+    };
     let msg = v20::Message::Short(
         v20::MessageHeader {
             device_index,

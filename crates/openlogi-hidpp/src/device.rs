@@ -51,7 +51,33 @@ impl Device {
     /// Returns [`DeviceError::UnsupportedProtocolVersion`] if the device only
     /// supports [`ProtocolVersion::V10`].
     pub async fn new(chan: Arc<HidppChannel>, device_index: u8) -> Result<Self, DeviceError> {
-        let Some(version) = protocol::determine_version(&chan, device_index).await? else {
+        Self::new_inner(chan, device_index, false).await
+    }
+
+    /// [`Self::new`], stamping requests with the channel's secondary software
+    /// id (see [`HidppChannel::get_secondary_sw_id`]) instead of its primary
+    /// one — for a second, distinct in-process consumer of a channel another
+    /// consumer already holds open (e.g. input capture reusing an
+    /// inventory-owned channel), so its version/feature probing does not
+    /// share a correlation key, and queue behind, the other consumer's own.
+    pub async fn new_secondary(
+        chan: Arc<HidppChannel>,
+        device_index: u8,
+    ) -> Result<Self, DeviceError> {
+        Self::new_inner(chan, device_index, true).await
+    }
+
+    async fn new_inner(
+        chan: Arc<HidppChannel>,
+        device_index: u8,
+        secondary: bool,
+    ) -> Result<Self, DeviceError> {
+        let version = if secondary {
+            protocol::determine_version_secondary(&chan, device_index).await?
+        } else {
+            protocol::determine_version(&chan, device_index).await?
+        };
+        let Some(version) = version else {
             return Err(DeviceError::DeviceNotFound);
         };
 
@@ -62,10 +88,12 @@ impl Device {
         // Every HID++2.0 device supports the root feature.
         // We implicitly verified that using [`protocol::determine_version`].
         let mut features: HashMap<TypeId, Arc<dyn Feature>> = HashMap::new();
-        let root = insert_feature(
-            &mut features,
-            RootFeature::new(Arc::clone(&chan), device_index, 0),
-        );
+        let root_feature = if secondary {
+            RootFeature::new_secondary(Arc::clone(&chan), device_index, 0)
+        } else {
+            RootFeature::new(Arc::clone(&chan), device_index, 0)
+        };
+        let root = insert_feature(&mut features, root_feature);
 
         Ok(Self {
             chan,

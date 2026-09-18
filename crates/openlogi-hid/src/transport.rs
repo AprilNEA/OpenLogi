@@ -123,8 +123,10 @@ fn node_info(info: &DeviceInfo) -> NodeInfo {
 /// rest of a session: DPI writes fail with `InvalidFunctionId`, control diverts
 /// with `InvalidArgument`, and the agent's capture comes up with no buttons.
 /// Each channel therefore leases one **fixed** id for its lifetime (no
-/// rotation — offset rotating sequences still collide) and returns it on drop
-/// via [`SwIdPolicy::Leased`].
+/// rotation — offset rotating sequences still collide), plus a best-effort
+/// second fixed id for a second in-process consumer sharing the channel
+/// (e.g. capture reusing an inventory-owned channel), and returns them on
+/// drop via [`SwIdPolicy::Leased`].
 ///
 /// Ids are scoped to the node: report streams of different nodes never meet,
 /// so each node has the whole pool, and fifteen channels on one node do not
@@ -446,15 +448,27 @@ fn try_lease_sw_id(node: &NodeId) -> Option<SwIdLease> {
 /// it would silently recreate the response cross-matching this allocator
 /// exists to prevent. A refused open surfaces as a failed probe, which the
 /// ledger replays and retries next tick.
+///
+/// Also leases a second, best-effort id for a second in-process consumer of
+/// this channel: input capture reuses an inventory-owned channel (see
+/// `openlogi-device`'s channel registry), so inventory's own probe traffic
+/// and a capture session's setup/liveness calls can otherwise land on the
+/// exact same correlation key and queue behind each other on the wire,
+/// occasionally past either side's own timeout. Failing to spare a second id
+/// (pool near exhaustion) is not fatal — that consumer falls back to the
+/// primary id, exactly the pre-existing single-id behavior.
 fn configure_channel_sw_ids(channel: &mut HidppChannel, node: &NodeId) -> Result<(), BackendError> {
     let lease = try_lease_sw_id(node).ok_or_else(|| {
         BackendError::Backend(
             "all 15 HID++ software ids on this node are leased by this or other OpenLogi processes — refusing an open that would share one".into(),
         )
     })?;
+    let secondary_lease = try_lease_sw_id(node);
+    let secondary = secondary_lease.as_ref().map(SwIdLease::id);
     channel.set_sw_id_policy(SwIdPolicy::Leased {
         id: lease.id(),
-        lease: Box::new(lease),
+        secondary,
+        lease: Box::new((lease, secondary_lease)),
     });
     Ok(())
 }

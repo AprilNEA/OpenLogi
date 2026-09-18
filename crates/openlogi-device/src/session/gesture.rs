@@ -373,13 +373,23 @@ async fn run_capture_session_on(
     // reply, which proves delivery and resets the count). A transport/setup
     // error proves neither delivery nor silence, so it restarts immediately.
     // Exiting lets the manager re-arm on a fresh channel.
-    let root = RootFeature::new(Arc::clone(&chan), device_index, 0);
+    // `new_secondary`, not `new`: this channel may be inventory-owned (shared
+    // per PR #522), and inventory's own probing resolves features through
+    // `getFeature` too. Sharing the primary software id would put this call
+    // and inventory's own probe traffic on the same correlation key, so a
+    // concurrent probe and session setup queue behind each other on the wire
+    // — occasionally past either side's own timeout, read by inventory as a
+    // dead channel to retire and by capture as a session that ended
+    // unexpectedly.
+    let root = RootFeature::new_secondary(Arc::clone(&chan), device_index, 0);
     let wireless = root
         .get_feature(WirelessDeviceStatusFeature::ID)
         .await
         .ok()
         .flatten()
-        .map(|info| WirelessDeviceStatusFeature::new(Arc::clone(&chan), device_index, info.index));
+        .map(|info| {
+            WirelessDeviceStatusFeature::new_secondary(Arc::clone(&chan), device_index, info.index)
+        });
     log_capture_active(device_index, &armed, wireless.is_some());
     let stop = monitor_capture(
         CaptureMonitor {
@@ -715,7 +725,14 @@ async fn arm_controls(
     shared: &SharedChannel,
     registry: Option<&ChannelRegistry>,
 ) -> Result<ArmedControls, CaptureSessionFailure> {
-    let device = Device::new(Arc::clone(chan), slot)
+    // `new_secondary`, not `new`: `chan` may be inventory-owned (shared per
+    // PR #522), and inventory's own probing resolves the device's version and
+    // features the same way. Sharing the primary software id would put this
+    // arming pass's `getFeature` calls (reprog controls, thumbwheel) on the
+    // same correlation key as a concurrent inventory probe, and the two
+    // requests would queue behind each other on the wire — occasionally past
+    // either side's own timeout.
+    let device = Device::new_secondary(Arc::clone(chan), slot)
         .await
         .map_err(|_| GestureError::DeviceUnreachable(slot))?;
     let mut armed = ArmedControls::default();
@@ -750,7 +767,11 @@ async fn arm_controls_into(
         .await
         .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?
     {
-        let rc = ReprogControlsV4::new(Arc::clone(chan), slot, info.index);
+        // `new_secondary`, matching `device`'s own construction above: this
+        // control-table walk (`getCount`/`getCidInfo`) must not share a
+        // correlation key with a concurrent inventory probe on the same
+        // shared channel — see #1128.
+        let rc = ReprogControlsV4::new_secondary(Arc::clone(chan), slot, info.index);
         let controls = enumerate_controls(&rc).await?;
         // Register an accessor before the first divert, so a failure on any
         // divert (including the first) can become a restore capability.
@@ -816,7 +837,8 @@ async fn arm_controls_into(
             .await
             .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?
     {
-        let tw = Thumbwheel::new(Arc::clone(chan), slot, info.index);
+        // `new_secondary`, same reasoning as the reprog-controls walk above.
+        let tw = Thumbwheel::new_secondary(Arc::clone(chan), slot, info.index);
         // Consume the getInfo error here, before the next await: Hidpp20Error
         // isn't Send, so holding it across an await would make this future
         // (spawned on tokio) non-Send.

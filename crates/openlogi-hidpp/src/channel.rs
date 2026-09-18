@@ -165,7 +165,13 @@ pub enum SwIdPolicy {
     Leased {
         /// The leased id every request carries.
         id: RequestSwId,
-        /// Owns the lease; dropping it returns the id to the allocator.
+        /// A second leased id for a distinct in-process consumer sharing this
+        /// channel (e.g. input capture reusing an inventory-owned channel),
+        /// so its requests correlate independently of `id`'s. `None` when the
+        /// allocator could not spare a second id — those requests fall back
+        /// to `id` and queue behind it as before. (OpenLogi local addition.)
+        secondary: Option<RequestSwId>,
+        /// Owns the lease(s); dropping it returns the id(s) to the allocator.
         lease: Box<dyn Any + Send + Sync>,
     },
 }
@@ -711,6 +717,23 @@ impl HidppChannel {
                     };
                 U4::from_lo(previous)
             }
+        }
+    }
+
+    /// The software id a second, distinct in-process consumer of this channel
+    /// should use — e.g. input capture, when it reuses an inventory-owned
+    /// channel per its own session lifetime, alongside inventory's own probe
+    /// traffic. Falls back to [`Self::get_sw_id`] when the policy has no
+    /// second id reserved, which is exactly the pre-existing single-consumer
+    /// behavior: the two consumers then share a correlation key and queue
+    /// behind each other, as they always did.
+    pub fn get_secondary_sw_id(&self) -> U4 {
+        match &self.sw_id_policy {
+            SwIdPolicy::Leased {
+                secondary: Some(id),
+                ..
+            } => id.get(),
+            _ => self.get_sw_id(),
         }
     }
 
