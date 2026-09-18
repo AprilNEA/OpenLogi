@@ -11,7 +11,7 @@ use thiserror::Error;
 use crate::backend::BackendError;
 use crate::reprog_controls::{self, ReprogControlsV4};
 use crate::thumbwheel::Thumbwheel;
-use crate::{ChannelRegistry, DeviceRoute, SharedChannel};
+use crate::{ChannelRegistry, DeviceRoute, IoSuspended, SharedChannel};
 
 /// Shared slot holding the active capture session's open channel, so bounded
 /// hardware writes can reuse it instead of opening a second connection.
@@ -32,6 +32,12 @@ pub enum GestureError {
     /// A HID++ feature call returned an error; inner string carries context.
     #[error("HID++ protocol error: {0}")]
     Hidpp(String),
+}
+
+impl From<IoSuspended> for GestureError {
+    fn from(error: IoSuspended) -> Self {
+        Self::Hid(error.into())
+    }
 }
 
 /// One `0x1b04` control whose original reporting state can restore a failed

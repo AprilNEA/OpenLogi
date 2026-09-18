@@ -37,7 +37,6 @@ use super::gesture::{
     CaptureChannel, CaptureSessionFailure, CaptureSessionOutcome, CapturedInput, GestureError,
     PendingCaptureRestore, enumerate_controls,
 };
-use crate::backend::BackendError;
 use crate::channel::route::DeviceRoute;
 use crate::{ChannelRegistry, DeviceIoGate, SharedChannel};
 
@@ -105,9 +104,7 @@ async fn run_keyboard_capture_session_on(
     registry: &ChannelRegistry,
     device_io: DeviceIoGate,
 ) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
-    if !device_io.allows_io() {
-        return Err(device_io_suspended().into());
-    }
+    device_io.ensure_allowed().map_err(GestureError::from)?;
     let chan = Arc::clone(shared.channel());
     let device_index = shared.device_index();
     let device = Device::new(Arc::clone(&chan), device_index)
@@ -367,10 +364,6 @@ async fn rearm_keys(armed: &ArmedKeys, device_io: &DeviceIoGate) {
             );
         }
     }
-}
-
-fn device_io_suspended() -> GestureError {
-    GestureError::Hid(BackendError::Backend("host device I/O is suspended".into()))
 }
 
 #[cfg(test)]

@@ -36,7 +36,6 @@ use openlogi_core::binding::{ButtonId, GestureDirection, SwipeAccumulator};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
-use crate::backend::BackendError;
 use crate::channel::route::DeviceRoute;
 use crate::{ChannelRegistry, DeviceIoGate, SharedChannel};
 
@@ -279,12 +278,7 @@ async fn run_capture_session_on(
     registry: &ChannelRegistry,
     device_io: DeviceIoGate,
 ) -> Result<CaptureSessionOutcome, CaptureSessionFailure> {
-    if !device_io.allows_io() {
-        return Err(GestureError::Hid(BackendError::Backend(
-            "host device I/O is suspended".into(),
-        ))
-        .into());
-    }
+    device_io.ensure_allowed().map_err(GestureError::from)?;
     let chan = Arc::clone(shared.channel());
     let device_index = shared.device_index();
     let armed = arm_controls(&chan, device_index, &spec, &shared, registry).await?;

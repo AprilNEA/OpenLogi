@@ -34,7 +34,7 @@ pub use restore::{
 };
 
 use crate::{
-    ChannelPool, ChannelRegistry, DeviceIoGate, DeviceRoute, SharedChannel,
+    ChannelPool, ChannelRegistry, DeviceIoGate, DeviceRoute, IoSuspended, SharedChannel,
     backend::BackendError,
     reprog_controls::{self, ReprogControlsV4},
 };
@@ -107,6 +107,12 @@ pub enum HostSwitchError {
     },
 }
 
+impl From<IoSuspended> for HostSwitchError {
+    fn from(error: IoSuspended) -> Self {
+        Self::Hid(error.into())
+    }
+}
+
 /// Capture host switch keys until a press, shutdown, or channel retirement.
 ///
 /// Returns any requested host together with the restoration outcome. The caller
@@ -118,12 +124,7 @@ pub async fn run_host_switch_session(
     registry: &ChannelRegistry,
     device_io: DeviceIoGate,
 ) -> Result<HostSwitchSessionOutcome, HostSwitchSessionFailure> {
-    if !device_io.allows_io() {
-        return Err(HostSwitchError::Hid(BackendError::Backend(
-            "host device I/O is suspended".into(),
-        ))
-        .into());
-    }
+    device_io.ensure_allowed().map_err(HostSwitchError::from)?;
     let shared = registry
         .lookup(&keyboard)
         .ok_or(HostSwitchError::KeyboardNotFound)?;
