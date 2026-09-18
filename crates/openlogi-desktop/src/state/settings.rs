@@ -4,6 +4,7 @@ use super::device_key::DeviceKey;
 use super::events::StateEvents;
 use super::{AppState, StateEvent};
 use crate::platform::app_icon::AppIconExt as _;
+use gpui_component::ThemeMode;
 use openlogi_core::config::{
     AppIcon, AppSettings, Appearance, AssetSourcePreference, DeviceViewMode, ThumbwheelSensitivity,
     UiScale, VerticalScrollSensitivity,
@@ -107,22 +108,20 @@ impl AppState {
         self.persist_config("UI scale setting");
         StateEvent::SettingsChanged.into()
     }
-    /// Persist the chosen theme name for one mode (`None` = the OpenLogi brand
-    /// theme). An already-set value writes nothing and is still reported.
-    pub fn commit_theme(&mut self, dark: bool, name: Option<String>) -> StateEvents {
-        let current = if dark {
-            &self.config.app_settings.theme_dark
-        } else {
-            &self.config.app_settings.theme_light
+    /// Persist the chosen theme name for one mode's slot (`None` = the OpenLogi
+    /// brand theme). An already-set value writes nothing and is still reported.
+    pub fn commit_theme(&mut self, mode: ThemeMode, name: Option<String>) -> StateEvents {
+        let current = match mode {
+            ThemeMode::Light => &self.config.app_settings.theme_light,
+            ThemeMode::Dark => &self.config.app_settings.theme_dark,
         };
         if *current == name {
             return StateEvent::SettingsChanged.into();
         }
         self.config.edit(|config| {
-            let slot = if dark {
-                &mut config.app_settings.theme_dark
-            } else {
-                &mut config.app_settings.theme_light
+            let slot = match mode {
+                ThemeMode::Light => &mut config.app_settings.theme_light,
+                ThemeMode::Dark => &mut config.app_settings.theme_dark,
             };
             *slot = name;
         });

@@ -627,17 +627,16 @@ fn theme_card(
         .on_click(move |_, _, cx| {
             let chosen = stored.to_string();
             AppState::apply(cx, move |s| {
-                let events = s.commit_theme(dark, Some(chosen.clone()));
+                let events = s.commit_theme(mode, Some(chosen.clone()));
                 // Picking a theme configures the light or dark *slot*. Only pin
                 // the mode when the user has already chosen an explicit
                 // Light/Dark mode — a "Follow System" preference must survive so
                 // configuring (say) the dark slot doesn't force the whole app to
                 // dark.
                 if s.app_settings().appearance != Appearance::System {
-                    return events.and(s.commit_appearance(if dark {
-                        Appearance::Dark
-                    } else {
-                        Appearance::Light
+                    return events.and(s.commit_appearance(match mode {
+                        ThemeMode::Light => Appearance::Light,
+                        ThemeMode::Dark => Appearance::Dark,
                     }));
                 }
                 events
