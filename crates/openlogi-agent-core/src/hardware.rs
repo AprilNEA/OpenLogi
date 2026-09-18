@@ -207,13 +207,10 @@ impl DeviceOp {
         Fut: Future<Output = Result<T, WriteError>>,
     {
         let index = self.route.device_index();
-        self.spawn_write(label, f, move |result| match result {
-            Ok(Ok(_)) => debug!(index, label, "background write completed"),
-            Ok(Err(e)) => warn!(error = ?e, label, "background write failed"),
-            Err(_) => warn!(
-                index,
-                label, "background write timed out (device asleep/unresponsive)"
-            ),
+        self.spawn_write(label, f, move |result| {
+            log_outcome(index, label, result, |_| {
+                debug!(index, label, "background write completed");
+            });
         });
     }
 
@@ -267,6 +264,23 @@ impl DeviceOp {
     }
 }
 
+/// Log how one bounded background write ended. Only the success line differs
+/// between writes, because it carries the value written, so `written` logs
+/// it. A failed write and one that timed out (an asleep or unresponsive
+/// device) both warn, naming `what` and the device.
+fn log_outcome<T>(
+    index: u8,
+    what: &str,
+    result: Result<Result<T, WriteError>, Elapsed>,
+    written: impl FnOnce(T),
+) {
+    match result {
+        Ok(Ok(value)) => written(value),
+        Ok(Err(error)) => warn!(index, ?error, "{what} failed"),
+        Err(_) => warn!(index, "{what} timed out (device asleep/unresponsive)"),
+    }
+}
+
 /// Build the one-shot current-thread runtime every background write spawns
 /// its OS thread onto. Logs and returns `None` on the rare case that
 /// initialization itself fails (e.g. OS resource exhaustion).
@@ -289,13 +303,10 @@ pub fn toggle_smartshift_in_background(op: DeviceOp) {
     op.spawn_write(
         "SmartShift toggle",
         |c| async move { openlogi_hid::toggle_smartshift_on(&c).await },
-        move |result| match result {
-            Ok(Ok(mode)) => debug!(index, ?mode, "SmartShift toggled"),
-            Ok(Err(e)) => warn!(error = ?e, "SmartShift toggle failed"),
-            Err(_) => warn!(
-                index,
-                "SmartShift toggle timed out (device asleep/unresponsive)"
-            ),
+        move |result| {
+            log_outcome(index, "SmartShift toggle", result, |mode| {
+                debug!(index, ?mode, "SmartShift toggled");
+            });
         },
     );
 }
@@ -309,13 +320,10 @@ pub fn write_fn_lock_in_background(op: DeviceOp, on: bool) {
     op.spawn_write(
         "Fn-lock write",
         move |c| async move { openlogi_hid::set_fn_lock_on(&c, on).await },
-        move |result| match result {
-            Ok(Ok(())) => debug!(index, on, "Fn-lock written"),
-            Ok(Err(e)) => warn!(error = ?e, "Fn-lock write failed"),
-            Err(_) => warn!(
-                index,
-                "Fn-lock write timed out (device asleep/unresponsive)"
-            ),
+        move |result| {
+            log_outcome(index, "Fn-lock write", result, |()| {
+                debug!(index, on, "Fn-lock written");
+            });
         },
     );
 }
@@ -389,34 +397,18 @@ pub fn reapply_mouse_volatile_in_background(op: &DeviceOp, settings: VolatileMou
                     openlogi_hid::set_dpi_on(&shared, dpi).await
                 })
                 .await;
-                match result {
-                    Ok(Ok(())) => {
-                        debug!(index, %dpi, "DPI written to device");
-                    }
-                    Ok(Err(e)) => warn!(error = ?e, "DPI write failed"),
-                    Err(_) => warn!(
-                        %dpi,
-                        "DPI write timed out (device asleep/unresponsive)"
-                    ),
-                }
+                log_outcome(index, "DPI write", result, |()| {
+                    debug!(index, %dpi, "DPI written to device");
+                });
             }
             if let Some(ss) = smartshift {
                 let result = tokio::time::timeout(WRITE_TIMEOUT, async {
                     openlogi_hid::set_smartshift_on(&shared, ss).await
                 })
                 .await;
-                match result {
-                    Ok(Ok(())) => debug!(
-                        index,
-                        status = ?ss,
-                        "SmartShift config written"
-                    ),
-                    Ok(Err(e)) => warn!(error = ?e, "SmartShift write failed"),
-                    Err(_) => warn!(
-                        index,
-                        "SmartShift write timed out (device asleep/unresponsive)"
-                    ),
-                }
+                log_outcome(index, "SmartShift write", result, |()| {
+                    debug!(index, status = ?ss, "SmartShift config written");
+                });
             }
         });
     });
@@ -486,21 +478,20 @@ fn log_wheel_result(
     change: WheelModeChange,
     result: Result<Result<(), WriteError>, Elapsed>,
 ) {
-    match result {
-        Ok(Ok(())) => debug!(index, ?change, "native wheel mode written"),
-        Ok(Err(WriteError::FeatureUnsupported { feature_hex })) => debug!(
+    // Plenty of mice have no HiResWheel or no inversion bit, so that refusal
+    // is expected and stays out of the warnings every other write earns.
+    if let Ok(Err(WriteError::FeatureUnsupported { feature_hex })) = &result {
+        debug!(
             index,
             ?change,
             feature = format_args!("{feature_hex:#06x}"),
             "native wheel mode unsupported"
-        ),
-        Ok(Err(e)) => warn!(error = ?e, "wheel mode write failed"),
-        Err(_) => warn!(
-            index,
-            ?change,
-            "wheel mode write timed out (device asleep/unresponsive)"
-        ),
+        );
+        return;
     }
+    log_outcome(index, "wheel mode write", result, |()| {
+        debug!(index, ?change, "native wheel mode written");
+    });
 }
 
 /// Spawn an OS thread that writes `dpi` to `op`'s device via its current
@@ -510,13 +501,10 @@ pub fn write_dpi_in_background(op: DeviceOp, dpi: Dpi) {
     op.spawn_write(
         "DPI write",
         move |c| async move { openlogi_hid::set_dpi_on(&c, dpi).await },
-        move |result| match result {
-            Ok(Ok(())) => debug!(index, %dpi, "DPI written to device"),
-            Ok(Err(e)) => warn!(error = ?e, "DPI write failed"),
-            Err(_) => warn!(
-                %dpi,
-                "DPI write timed out (device asleep/unresponsive)"
-            ),
+        move |result| {
+            log_outcome(index, "DPI write", result, |()| {
+                debug!(index, %dpi, "DPI written to device");
+            });
         },
     );
 }
