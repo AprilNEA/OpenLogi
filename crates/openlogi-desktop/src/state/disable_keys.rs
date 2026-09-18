@@ -595,7 +595,7 @@ mod tests {
     #[test]
     fn save_failure_is_local_and_retry_merges_external_edit_without_second_write() {
         let temp = tempfile::tempdir().expect("temp config");
-        let path = temp.path().join("config.toml");
+        let path = temp.path().join(openlogi_core::paths::CONFIG_FILE);
         Config::default().save_to_path(&path).expect("seed config");
         let (_, file) = ConfigFile::load_from_path(&path).expect("tracked config");
         let inventory = keyboard_inventory(0xb35b, [1, 2, 3, 4]);
