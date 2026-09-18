@@ -48,7 +48,6 @@ gpui-updater = { package = "gpui-updater-pre", version = "0.1" }
 disclaim = "0.1"
 url = "2.5.8"
 walkdir = "2.5.0"
-backon.workspace = true
 opener = { workspace = true }
 derive_more = { version = "2.1.1", default-features = false, features = ["display", "from"] }
 # The user-picked app icon (Settings -> Appearance). Cross-platform: every

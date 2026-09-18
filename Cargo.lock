@@ -5681,7 +5681,6 @@ dependencies = [
  "anyhow",
  "appcatalog",
  "appicon",
- "backon",
  "derive_more",
  "disclaim",
  "embed-resource",
