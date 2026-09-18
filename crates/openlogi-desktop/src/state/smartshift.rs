@@ -149,8 +149,14 @@ impl AppState {
             })
     }
 
-    pub(crate) fn smartshift_status_for(&self, key: &DeviceKey) -> SmartShiftLoad {
-        self.pointer.reads.smartshift_status(key)
+    /// What is known of `key`'s SmartShift config; [`SmartShiftLoad::Unknown`]
+    /// for a device nobody has queried.
+    pub(crate) fn smartshift_load_for(&self, key: &DeviceKey) -> SmartShiftLoad {
+        self.pointer
+            .reads
+            .smartshift_load(key)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Post-write confirmation status for the active device.

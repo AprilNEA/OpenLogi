@@ -150,11 +150,13 @@ impl AppState {
         self.for_current_device(StateEvent::DpiChanged)
     }
 
-    pub(crate) fn dpi_load_for(&self, key: &DeviceKey) -> Option<&DpiLoad> {
-        self.pointer.reads.dpi_load(key)
-    }
-
-    pub(crate) fn dpi_status_for(&self, key: &DeviceKey) -> DpiLoad {
-        self.pointer.reads.dpi_status(key)
+    /// What is known of `key`'s DPI; [`DpiLoad::Unknown`] for a device nobody
+    /// has queried.
+    pub(crate) fn dpi_load_for(&self, key: &DeviceKey) -> DpiLoad {
+        self.pointer
+            .reads
+            .dpi_load(key)
+            .cloned()
+            .unwrap_or_default()
     }
 }

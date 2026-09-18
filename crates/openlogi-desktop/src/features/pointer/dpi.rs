@@ -231,7 +231,7 @@ fn dpi_panel_snapshot(cx: &mut Context<DpiPanel>) -> DpiPanelSnapshot {
             let record = s.current_record()?;
             let device_key = record.device_key();
             Some(DpiPanelSnapshot {
-                status: s.dpi_status_for(&device_key),
+                status: s.dpi_load_for(&device_key),
                 device_key,
                 dpi: s.dpi(),
                 presets: s.dpi_presets(),

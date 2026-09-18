@@ -125,7 +125,7 @@ fn collect_devices(state: &AppState) -> Vec<DeviceDiag> {
                 online: record.online,
                 battery: record.battery.clone(),
                 capabilities: record.capabilities,
-                dpi: dpi_summary(state.dpi_load_for(&record.device_key()).cloned()),
+                dpi: dpi_summary(state.dpi_load_for(&record.device_key())),
                 // Diagnostics are model-level by contract. The runtime config
                 // key may contain a receiver UID or raw-device serial.
                 config_key: record.model_key.clone(),
@@ -172,8 +172,8 @@ fn connection_for(
     }
 }
 
-fn dpi_summary(status: Option<DpiLoad>) -> Option<String> {
-    match status? {
+fn dpi_summary(load: DpiLoad) -> Option<String> {
+    match load {
         DpiLoad::Unknown => None,
         DpiLoad::Loading => Some("querying…".to_string()),
         DpiLoad::Ready(info) => Some(format!(

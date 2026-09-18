@@ -215,25 +215,13 @@ impl DeviceReads {
         true
     }
 
-    #[must_use]
-    pub(crate) fn dpi_status(&self, key: &DeviceKey) -> DpiLoad {
-        self.dpi
-            .get(key)
-            .map_or(Load::Unknown, |read| read.load.clone())
-    }
-
+    /// `key`'s DPI load, or `None` while nothing has subscribed to it.
     #[must_use]
     pub(crate) fn dpi_load(&self, key: &DeviceKey) -> Option<&DpiLoad> {
         self.dpi.get(key).map(|read| &read.load)
     }
 
-    #[must_use]
-    pub(crate) fn smartshift_status(&self, key: &DeviceKey) -> SmartShiftLoad {
-        self.smartshift
-            .get(key)
-            .map_or(Load::Unknown, |read| read.load.clone())
-    }
-
+    /// `key`'s SmartShift load, or `None` while nothing has subscribed to it.
     #[must_use]
     pub(crate) fn smartshift_load(&self, key: &DeviceKey) -> Option<&SmartShiftLoad> {
         self.smartshift.get(key).map(|read| &read.load)

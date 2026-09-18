@@ -6,9 +6,11 @@ use openlogi_core::hid::{DpiInfo, SmartShiftStatus};
 
 /// State projected from an swr-backed device query: unqueried, in flight,
 /// resolved, transiently failed, or permanently unsupported.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum Load<T> {
-    /// The selected device has not been queried yet.
+    /// The selected device has not been queried yet. Also what a device
+    /// nobody has asked about reads as.
+    #[default]
     Unknown,
     /// A background HID++ read is in flight.
     Loading,
