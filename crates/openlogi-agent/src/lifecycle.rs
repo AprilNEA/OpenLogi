@@ -27,7 +27,7 @@ use std::time::Duration;
 use futures::StreamExt as _;
 use openlogi_agent_core::event_monitor::EventMonitor;
 use openlogi_agent_core::observable::ObservableState;
-use openlogi_agent_core::orchestrator::{Orchestrator, SharedRuntime};
+use openlogi_agent_core::orchestrator::{Orchestrator, SharedHandles};
 use openlogi_agent_core::runtime::hook;
 use openlogi_agent_core::watchers::foreground_app::ForegroundUpdate;
 use openlogi_agent_core::watchers::inventory::{InventoryEvent, InventoryRefresh};
@@ -251,7 +251,7 @@ struct Armed {
 /// remain distinct lifecycle phases.
 struct Running {
     orchestrator: Arc<Mutex<Orchestrator>>,
-    shared: SharedRuntime,
+    shared: SharedHandles,
     observable: Arc<ObservableState>,
     event_monitor: Arc<EventMonitor>,
     inputs: InputServices,

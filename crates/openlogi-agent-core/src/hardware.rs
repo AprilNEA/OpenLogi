@@ -2,9 +2,9 @@
 //! and the OS-event hook thread (bound button press).
 //!
 //! [`DeviceOp`] is the seam every device write and read goes through: it binds
-//! a [`DeviceRoute`] to this runtime's capture/inventory channels (built via
-//! [`crate::orchestrator::SharedRuntime::device`] or
-//! [`crate::orchestrator::SharedRuntime::keyboard_device`]), then either
+//! a [`DeviceRoute`] to the agent's capture/inventory channels (built via
+//! [`crate::orchestrator::SharedHandles::device`] or
+//! [`crate::orchestrator::SharedHandles::keyboard_device`]), then either
 //! awaits [`DeviceOp::run`] (the IPC server's reads/writes, which must report
 //! their result to the GUI) or fires [`DeviceOp::detach`] (the OS-hook and
 //! reconnect paths, which must never block their caller). Both resolve the
@@ -70,10 +70,10 @@ fn choose_authoritative<T>(
     }
 }
 
-/// One device's HID++ write or read, bound to this runtime's capture and
+/// One device's HID++ write or read, bound to the agent's capture and
 /// inventory channels for `route`. Built via
-/// [`crate::orchestrator::SharedRuntime::device`] or
-/// [`crate::orchestrator::SharedRuntime::keyboard_device`] — the receiver-side
+/// [`crate::orchestrator::SharedHandles::device`] or
+/// [`crate::orchestrator::SharedHandles::keyboard_device`] — the receiver-side
 /// counterpart of `openlogi_hid::write::with_route`'s "boilerplate-eater"
 /// pattern, applied to an already-open channel instead of a fresh one.
 pub struct DeviceOp<'a> {

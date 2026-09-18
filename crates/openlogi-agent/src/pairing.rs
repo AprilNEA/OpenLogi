@@ -8,7 +8,7 @@
 //! long-poll for the event stream).
 //!
 //! While a session runs, the agent holds an exclusive receiver lease through
-//! [`SharedRuntime::receiver_access`], so `run_pairing` can own the receiver's
+//! [`SharedHandles::receiver_access`], so `run_pairing` can own the receiver's
 //! HID node. Dropping that lease lets HID++ capture resume when the session ends
 //! (every end — including cancel — emits a terminal event).
 
@@ -18,7 +18,7 @@ use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 
 use openlogi_agent_core::observable::ObservableState;
-use openlogi_agent_core::orchestrator::SharedRuntime;
+use openlogi_agent_core::orchestrator::SharedHandles;
 use openlogi_agent_core::receiver_access::{ExclusiveAccessReason, ExclusiveReceiverLease};
 use openlogi_agent_core::watchers::pairing::{self, Control, SessionEvent, SessionId};
 use openlogi_hid::{DiscoveredDevice, PairingEvent, ReceiverSelector};
@@ -132,7 +132,7 @@ pub struct PairingManager {
     ctrl: mpsc::UnboundedSender<Control>,
     updates: Mutex<mpsc::UnboundedReceiver<PairingUpdate>>,
     session: SharedSessionOwner,
-    shared: SharedRuntime,
+    shared: SharedHandles,
     /// Where the session's progress is published for the GUI to observe. The
     /// event channel above is the same information as a stream; this is the
     /// form that survives a missed poll or a reconnect.
@@ -143,7 +143,7 @@ impl PairingManager {
     /// Spawn the pairing watcher and its event translator. One per agent; must
     /// be called inside the tokio runtime (it spawns the translator task).
     #[must_use]
-    pub fn new(shared: SharedRuntime, observable: Arc<ObservableState>) -> Self {
+    pub fn new(shared: SharedHandles, observable: Arc<ObservableState>) -> Self {
         let (ctrl, raw_events) = pairing::spawn_with_hardware(shared.hardware());
         let (upd_tx, upd_rx) = mpsc::unbounded_channel();
         let session = Arc::new(StdMutex::new(SessionOwner::default()));

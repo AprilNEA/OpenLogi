@@ -13,7 +13,7 @@ use futures::stream::{self, Stream};
 use openlogi_agent_core::action_ring::ActionRingManager;
 use openlogi_agent_core::event_monitor::EventMonitor;
 use openlogi_agent_core::observable::ObservableState;
-use openlogi_agent_core::orchestrator::{Orchestrator, SharedRuntime};
+use openlogi_agent_core::orchestrator::{Orchestrator, SharedHandles};
 use openlogi_agent_core::runtime::scroll::{ScrollInputHandle, ScrollRuntime};
 use openlogi_agent_core::runtime::{ActionDispatcher, ActionRuntime};
 use openlogi_agent_core::watchers::shutdown::{StopOutcome, WatcherHandle};
@@ -31,7 +31,7 @@ use crate::{pairing, server};
 /// plus the running IPC server's handles.
 pub(crate) struct Core {
     pub(crate) orchestrator: Arc<Mutex<Orchestrator>>,
-    pub(crate) shared: SharedRuntime,
+    pub(crate) shared: SharedHandles,
     pub(crate) observable: Arc<ObservableState>,
     pub(crate) event_monitor: Arc<EventMonitor>,
     pub(crate) inputs: InputServices,
@@ -92,7 +92,7 @@ pub(crate) async fn bootstrap(config: Config) -> Option<Core> {
 
 fn spawn_ipc_server(
     orchestrator: Arc<Mutex<Orchestrator>>,
-    shared: &SharedRuntime,
+    shared: &SharedHandles,
     observable: Arc<ObservableState>,
     pairing: Arc<pairing::PairingManager>,
     event_monitor: Arc<EventMonitor>,
@@ -127,7 +127,7 @@ pub(crate) struct InputServices {
 }
 
 impl InputServices {
-    fn start(shared: &SharedRuntime) -> Option<Self> {
+    fn start(shared: &SharedHandles) -> Option<Self> {
         let ring = Arc::new(ActionRingManager::default());
         let (sender, triggers) = tokio::sync::mpsc::unbounded_channel();
         let action_runtime = match ActionRuntime::new(
@@ -193,7 +193,7 @@ impl HidppWatcherHandles {
 
 /// Start the HID++ background sessions that do not need Accessibility.
 pub(crate) fn spawn_hidpp_watchers(
-    shared: &SharedRuntime,
+    shared: &SharedHandles,
     inputs: &InputServices,
 ) -> HidppWatcherHandles {
     let gesture = watchers::gesture::spawn(
@@ -264,7 +264,7 @@ pub(crate) enum Watcher {
 /// Spawn the per-source state watchers at arming, merged into one tagged
 /// stream.
 pub(crate) fn spawn_state_watchers(
-    shared: &SharedRuntime,
+    shared: &SharedHandles,
 ) -> (
     impl Stream<Item = WatcherEvent> + Unpin + use<>,
     watchers::inventory::InventoryRefresh,

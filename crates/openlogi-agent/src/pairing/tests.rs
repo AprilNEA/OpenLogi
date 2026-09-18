@@ -4,7 +4,7 @@ use openlogi_agent_core::orchestrator::Orchestrator;
 use openlogi_core::config::Config;
 use openlogi_hid::PairingError;
 
-fn shared_runtime() -> SharedRuntime {
+fn shared_handles() -> SharedHandles {
     Orchestrator::new(
         Config::default(),
         Arc::new(ObservableState::new("test".to_string())),
@@ -18,7 +18,7 @@ fn manager_with_ctrl(ctrl: mpsc::UnboundedSender<Control>) -> PairingManager {
         ctrl,
         updates: Mutex::new(upd_rx),
         session: Arc::new(StdMutex::new(SessionOwner::default())),
-        shared: shared_runtime(),
+        shared: shared_handles(),
         observable: Arc::new(ObservableState::new("test".to_string())),
     }
 }

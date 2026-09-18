@@ -66,11 +66,11 @@ struct AgentDevice {
     online: bool,
 }
 
-/// Cheaply cloneable runtime handles handed to hooks and background managers.
+/// Cheaply cloneable handles handed to hooks and background managers.
 /// The orchestrator remains the sole producer for its watch-backed projections;
 /// consumers receive only read capabilities through this type.
 #[derive(Clone)]
-pub struct SharedRuntime {
+pub struct SharedHandles {
     /// Backend identity, I/O gate, channel pool, and inventory source shared by
     /// every hardware-dependent agent service.
     hardware: HardwareContext,
@@ -113,8 +113,8 @@ pub struct SharedRuntime {
     pub host_switch_links: HostSwitchLinks,
 }
 
-impl SharedRuntime {
-    /// The hardware context used to build this runtime.
+impl SharedHandles {
+    /// The hardware context these handles were built on.
     #[must_use]
     pub fn hardware(&self) -> HardwareContext {
         self.hardware.clone()
@@ -149,7 +149,7 @@ impl SharedRuntime {
     }
 }
 
-/// Owns the config + device selection and keeps [`SharedRuntime`] in sync.
+/// Owns the config + device selection and keeps [`SharedHandles`] in sync.
 pub struct Orchestrator {
     config: Config,
     devices: Vec<AgentDevice>,
@@ -190,7 +190,7 @@ pub struct Orchestrator {
     capture_plans_tx: watch::Sender<Arc<Vec<DeviceCapturePlan>>>,
     keyboard_spec_tx: watch::Sender<Option<Arc<KeyboardSpec>>>,
     host_switch_links_tx: watch::Sender<Arc<Vec<HostSwitchLink>>>,
-    shared: SharedRuntime,
+    shared: SharedHandles,
     /// The state the GUI observes. Every mutator below that changes one of its
     /// facts republishes here, so the cell cannot go stale behind a new code
     /// path — see [`ObservableState`].
@@ -212,7 +212,7 @@ enum InventoryState {
 }
 
 impl Orchestrator {
-    /// Build from a loaded config. Creates the shared runtime handles and seeds
+    /// Build from a loaded config. Creates the shared handles and seeds
     /// them from the config with no devices yet; the first inventory tick fills
     /// in the routes and presets.
     ///
@@ -235,7 +235,7 @@ impl Orchestrator {
         let (capture_plans_tx, capture_plans) = watch::channel(Arc::new(Vec::new()));
         let (keyboard_spec_tx, keyboard_spec) = watch::channel(None);
         let (host_switch_links_tx, host_switch_links) = watch::channel(Arc::new(Vec::new()));
-        let shared = SharedRuntime {
+        let shared = SharedHandles {
             device_io: hardware.device_io(),
             channel_pool: hardware.channel_pool(),
             hardware,
@@ -281,7 +281,7 @@ impl Orchestrator {
 
     /// A cheap clone of the shared `Arc`s to hand to the watchers and hook.
     #[must_use]
-    pub fn shared(&self) -> SharedRuntime {
+    pub fn shared(&self) -> SharedHandles {
         self.shared.clone()
     }
 
