@@ -120,7 +120,9 @@ pub(super) async fn rollback_host_switch_start(
 
 #[cfg(test)]
 mod tests {
-    use super::super::{HostSwitchStopReason, monitor_host_switch, run_host_switch_session};
+    use super::super::{
+        HostSwitchStop, HostSwitchStopReason, monitor_host_switch, run_host_switch_session,
+    };
     use super::*;
     use crate::DeviceRoute;
     use crate::backend::NodeId;
@@ -256,7 +258,66 @@ mod tests {
         )
         .await
         .expect("a retired publication needs no further notification");
-        assert_eq!(result, (None, false));
+        assert_eq!(result, HostSwitchStop::ChannelChanged);
+    }
+
+    #[tokio::test]
+    async fn monitor_names_why_it_stopped_on_a_current_channel() {
+        let route = DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xb35b,
+        };
+        let registry = ChannelRegistry::default();
+        let (raw, _) = ScriptedRawHidChannel::with_responder(|_| None);
+        registry.replace_node(
+            NodeId::from("keyboard-node".to_owned()),
+            [route.clone()],
+            scripted_channel(raw).await,
+        );
+        let current = registry
+            .lookup(&route)
+            .expect("the keyboard channel should be published");
+        let monitored = |stopped, mut presses| {
+            let (registry, current) = (registry.clone(), current.clone());
+            async move {
+                let (_signal, gate) = crate::device_io_channel();
+                tokio::time::timeout(
+                    std::time::Duration::from_millis(100),
+                    monitor_host_switch(stopped, &mut presses, &registry, &current, gate),
+                )
+                .await
+                .expect("a ready stop source needs no further event")
+            }
+        };
+
+        for (reason, expected) in [
+            (
+                Some(HostSwitchStopReason::Graceful),
+                HostSwitchStop::Shutdown,
+            ),
+            (
+                Some(HostSwitchStopReason::DeviceLost),
+                HostSwitchStop::ChannelChanged,
+            ),
+            // A dropped stop sender is a lost owner, not a graceful request.
+            (None, HostSwitchStop::ChannelChanged),
+        ] {
+            let (stop, stopped) = tokio::sync::oneshot::channel();
+            match reason {
+                Some(reason) => stop.send(reason).unwrap(),
+                None => drop(stop),
+            }
+            let (_press, presses) = tokio::sync::mpsc::unbounded_channel();
+            assert_eq!(monitored(stopped, presses).await, expected, "{reason:?}");
+        }
+
+        let (_stop, stopped) = tokio::sync::oneshot::channel();
+        let (press, presses) = tokio::sync::mpsc::unbounded_channel();
+        press.send(2).unwrap();
+        assert_eq!(
+            monitored(stopped, presses).await,
+            HostSwitchStop::Pressed(2)
+        );
     }
 
     #[tokio::test]

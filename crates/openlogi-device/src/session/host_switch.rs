@@ -175,7 +175,7 @@ pub async fn run_host_switch_session(
         controls = armed.len(),
         "host switch link active"
     );
-    let (requested_host, permit_retired_channel) = monitor_host_switch(
+    let stop = monitor_host_switch(
         shutdown,
         &mut press_rx,
         registry,
@@ -185,11 +185,19 @@ pub async fn run_host_switch_session(
     .await;
 
     drop(listener);
+    let requested_host = stop.requested_host();
     let Some(mut pending) = PendingHostSwitchRestore::new(&shared, controls.feature_index(), armed)
     else {
         return Ok(HostSwitchSessionOutcome::Restored { requested_host });
     };
-    if permit_retired_channel {
+    let reuse_armed_channel = match stop {
+        // A press does not retire the channel: teardown may write through it
+        // for as long as inventory still publishes it.
+        HostSwitchStop::Pressed(_) => registry.is_current(&shared),
+        HostSwitchStop::Shutdown => true,
+        HostSwitchStop::ChannelChanged => false,
+    };
+    if reuse_armed_channel {
         pending = pending.allow_current_channel();
     }
     if !device_io.allows_io() {
@@ -209,41 +217,77 @@ pub async fn run_host_switch_session(
     })
 }
 
+/// Why monitoring an armed host-switch session stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostSwitchStop {
+    /// The keyboard asked for this zero-based host.
+    Pressed(u8),
+    /// Teardown was requested while inventory still published the channel
+    /// that armed the session.
+    Shutdown,
+    /// The channel that armed the session must not be written through again:
+    /// inventory removed or replaced it, or the owner reported the keyboard
+    /// lost.
+    ChannelChanged,
+}
+
+impl HostSwitchStop {
+    fn requested_host(self) -> Option<u8> {
+        match self {
+            Self::Pressed(host) => Some(host),
+            Self::Shutdown | Self::ChannelChanged => None,
+        }
+    }
+
+    /// A stop that did not itself retire the channel. Re-checking inventory
+    /// keeps a simultaneously ready replacement from being written underneath.
+    fn for_current_publication(registry: &ChannelRegistry, shared: &SharedChannel) -> Self {
+        if registry.is_current(shared) {
+            Self::Shutdown
+        } else {
+            Self::ChannelChanged
+        }
+    }
+}
+
 async fn monitor_host_switch(
     mut shutdown: oneshot::Receiver<HostSwitchStopReason>,
     presses: &mut mpsc::UnboundedReceiver<u8>,
     registry: &ChannelRegistry,
     shared: &SharedChannel,
     mut device_io: DeviceIoGate,
-) -> (Option<u8>, bool) {
+) -> HostSwitchStop {
     let mut registry_changes = registry.subscribe();
     loop {
         if !registry.is_current(shared) {
             info!(route = %shared.route(), "inventory replaced or removed host-switch channel");
-            return (None, false);
+            return HostSwitchStop::ChannelChanged;
         }
         tokio::select! {
             biased;
 
             changed = registry_changes.changed() => {
                 if changed.is_err() {
-                    return (None, false);
+                    return HostSwitchStop::ChannelChanged;
                 }
             }
             reason = &mut shutdown => {
-                let reason = reason.unwrap_or(HostSwitchStopReason::DeviceLost);
-                let current = registry.is_current(shared);
-                return (
-                    None,
-                    reason == HostSwitchStopReason::Graceful && current,
-                );
+                return match reason.unwrap_or(HostSwitchStopReason::DeviceLost) {
+                    HostSwitchStopReason::Graceful => {
+                        HostSwitchStop::for_current_publication(registry, shared)
+                    }
+                    HostSwitchStopReason::DeviceLost => HostSwitchStop::ChannelChanged,
+                };
             }
             host = presses.recv() => {
-                return (host, registry.is_current(shared));
+                return match host {
+                    Some(host) => HostSwitchStop::Pressed(host),
+                    None => HostSwitchStop::for_current_publication(registry, shared),
+                };
             }
             allowed = device_io.changed() => {
                 if allowed.is_none() {
-                    return (None, registry.is_current(shared));
+                    return HostSwitchStop::for_current_publication(registry, shared);
                 }
             }
         }
