@@ -104,7 +104,7 @@ pub enum GuiUpdate {
 /// Handle the GUI holds to talk to the agent: a stream of state updates and a
 /// sender for device commands. Pairing progress arrives through the same state
 /// updates as everything else.
-pub struct IpcClient {
+pub struct Handle {
     pub updates: mpsc::UnboundedReceiver<GuiUpdate>,
     pub commands: mpsc::UnboundedSender<Command>,
 }
@@ -112,7 +112,7 @@ pub struct IpcClient {
 /// Spawn the IPC client thread. Returns immediately; the thread connects (and
 /// reconnects) on its own.
 #[must_use]
-pub fn spawn() -> IpcClient {
+pub fn spawn() -> Handle {
     let (update_tx, updates) = mpsc::unbounded_channel();
     let (commands, mut cmd_rx) = mpsc::unbounded_channel::<Command>();
 
@@ -123,7 +123,7 @@ pub fn spawn() -> IpcClient {
         warn!(%error, "could not start the IPC client thread — agent state unavailable");
     }
 
-    IpcClient { updates, commands }
+    Handle { updates, commands }
 }
 
 /// Where the agent is reached and how it is brought up — the loop's only two

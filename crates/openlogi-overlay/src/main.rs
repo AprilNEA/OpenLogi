@@ -28,7 +28,7 @@ use tracing_subscriber::EnvFilter;
 
 use openlogi_core::action_ring::DISPLAY_LIFETIME;
 
-use crate::ipc::{Ipc, OverlayCommand, spawn_ipc};
+use crate::ipc::OverlayCommand;
 use crate::platform::RingPlacement;
 use crate::ring::RingView;
 use crate::session::{ClickAwaySession, claim_the_role, spawn_click_away_dismissal};
@@ -45,10 +45,10 @@ fn main() -> Result<()> {
     openlogi_core::locale::activate(None);
     // Held for the whole run: dropping it hands the role to the replacement.
     let _tenancy = claim_the_role()?;
-    let Ipc {
+    let ipc::Handle {
         mut invocations,
         commands,
-    } = spawn_ipc();
+    } = ipc::spawn();
 
     let mut app = gpui_platform::application().with_assets(openlogi_ui::action_icons::ActionIcons);
     app = app.with_quit_mode(gpui::QuitMode::Explicit);

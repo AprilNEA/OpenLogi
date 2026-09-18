@@ -92,7 +92,7 @@ fn main() -> Result<()> {
     // The always-on agent owns the hook, the HID++ capture, and all device I/O.
     // The GUI is a client: it observes inventory + status and forwards device
     // commands over IPC. Started here so the first state is already on its way.
-    let ipc::IpcClient {
+    let ipc::Handle {
         updates,
         commands: ipc_commands,
     } = ipc::spawn();

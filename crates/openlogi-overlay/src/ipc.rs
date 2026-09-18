@@ -1,5 +1,5 @@
-//! The agent side: connecting, receiving ring invocations, and reporting what
-//! the user does with them.
+//! The overlay's IPC client: connecting to the agent, receiving ring
+//! invocations, and reporting what the user does with them.
 //!
 //! Reporting is not fire-and-forget. A hover that never lands leaves the ring
 //! showing the wrong slot, and a dropped activation loses the user's click
@@ -46,7 +46,8 @@ impl OverlayCommand {
     }
 }
 
-pub(crate) struct Ipc {
+/// What the view holds to talk to the agent.
+pub(crate) struct Handle {
     /// The ring the agent says should be showing, each time that changes.
     /// `None` is no ring — including a dismissal, which is why there is no
     /// separate "close" message to recognise.
@@ -55,7 +56,9 @@ pub(crate) struct Ipc {
     pub(crate) commands: mpsc::UnboundedSender<OverlayCommand>,
 }
 
-pub(crate) fn spawn_ipc() -> Ipc {
+/// Spawn the IPC client thread. Returns immediately; the thread connects (and
+/// reconnects) on its own.
+pub(crate) fn spawn() -> Handle {
     let (invocation_tx, invocations) = mpsc::unbounded_channel();
     let (commands, mut command_rx) = mpsc::unbounded_channel();
     let started = openlogi_core::worker::spawn("openlogi-overlay-ipc", move |runtime| {
@@ -69,7 +72,7 @@ pub(crate) fn spawn_ipc() -> Ipc {
     if let Err(error) = started {
         warn!(%error, "overlay IPC client thread could not start");
     }
-    Ipc {
+    Handle {
         invocations,
         commands,
     }
