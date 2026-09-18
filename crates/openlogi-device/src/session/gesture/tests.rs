@@ -1,6 +1,8 @@
+use super::accum::handle_reprog;
 use super::*;
 use crate::backend::NodeId;
 use crate::channel::scripted::{ScriptedRawHidChannel, scripted_channel};
+use crate::reprog_controls::RawControlEvent;
 
 const GESTURE: &[u16] = &[reprog_controls::GESTURE_BUTTON_CID];
 const PANEL: &[u16] = &[reprog_controls::HAPTIC_PANEL_CID];
