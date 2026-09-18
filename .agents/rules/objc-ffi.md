@@ -8,6 +8,7 @@ paths:
   - "crates/openlogi-agent/src/status_item.rs"
   - "crates/openlogi-agent-core/src/watchers/camera.rs"
   - "crates/openlogi-hook/src/macos.rs"
+  - "crates/openlogi-hook/src/macos/**"
   - "crates/openlogi-inject/src/inject/macos.rs"
   - "crates/openlogi-hid/src/permissions.rs"
 ---
@@ -31,7 +32,9 @@ files; **keep this table in sync when you add or move one**:
 | `openlogi-desktop/src/platform/registration/macos.rs` | `SMAppService` registration of the agent's launchd service (the login-item side of the agent lifecycle; the GUI must own it — the API resolves the plist against the calling app's bundle) |
 | `openlogi-desktop/src/platform/os.rs` | `NSProcessInfo` OS version + the `NSAppearance` titlebar sync |
 | `openlogi-hid/src/permissions.rs` | `IOHIDCheckAccess` / `IOHIDRequestAccess` (the prompting half of Input Monitoring) |
-| `openlogi-hook/src/macos.rs` | the CGEventTap (on `core-graphics`, see below), the off-tap `NSWorkspace` frontmost-app read and Safari PID snapshot, the Accessibility-trust check/prompt, and the HID sender-id lookup |
+| `openlogi-hook/src/macos.rs` | the CGEventTap (on `core-graphics`, see below), the Accessibility-trust check/prompt, the off-tap `NSWorkspace` frontmost-app read, and the `CGGetEventTapList` enumeration |
+| `openlogi-hook/src/macos/foreground.rs` | the `NSWorkspace` activation observer, the `NSRunningApplication` conversion behind every frontmost-app read, and the Safari PID snapshot |
+| `openlogi-hook/src/macos/sender.rs` | the HID sender-id lookup and the IOKit registry walk that resolves it to a device |
 | `openlogi-inject/src/inject/macos.rs` | CGEvent synthesis, media-key `NSEvent`s, off-thread `NSWorkspace` validation, typed `AXUIElement` navigation with `CFRetained` ownership, and the `dlopen`'d private SPIs |
 | `openlogi-overlay/src/platform.rs` | the Actions Ring helper's window policy: accessory activation, non-activating panel, the `NSEvent` global click-away monitor (`block2`), and `CGGetActiveDisplayList` / `CGDisplayBounds` |
 | `openlogi-permissions/src/macos.rs` | non-prompting permission reads + System-Settings deep links; `+[CBManager authorization]` via an `AnyClass` lookup |
@@ -219,10 +222,14 @@ under a `SAFETY` comment. Where it currently lives on macOS:
   `addObserver:selector:name:object:`, and the `NSWorkspace*Notification` name
   statics.
 - `hook/macos.rs` — the whole tap (Core Graphics / Core Foundation C APIs),
-  the `NSWorkspace` activation-observer registration and typed notification
-  payload, `AXIsProcessTrusted[WithOptions]` and the two extern statics they
-  need (`kAXTrustedCheckOptionPrompt`, `kCFBooleanTrue`), and
-  `NSString::to_str(pool)` (the borrow is tied to the pool).
+  and `AXIsProcessTrusted[WithOptions]` with the two extern statics they need
+  (`kAXTrustedCheckOptionPrompt`, `kCFBooleanTrue`). Its module-wide
+  `#![expect(unsafe_code)]` covers the two files below as well.
+- `hook/macos/foreground.rs` — the `NSWorkspace` activation-observer
+  registration and typed notification payload, and `NSString::to_str(pool)`
+  (the borrow is tied to the pool).
+- `hook/macos/sender.rs` — the sender-id `extern` calls and the IOKit registry
+  walk, including the Create-rule `CFString` / `CFNumber` wraps.
 - `inject/macos.rs` — typed AX creation, attribute-copy out-pointers, CF array
   element typing, `AXPress`, and `NSString::to_str(pool)` for Safari validation.
 - `permissions/macos.rs` — the CoreBluetooth force-link and the `CBManager`
