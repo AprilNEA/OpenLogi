@@ -70,7 +70,6 @@ use tarpc::server::{BaseChannel, Channel as _};
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tracing::{info, warn};
-use tracing_subscriber::EnvFilter;
 
 #[path = "mock_agent/profile.rs"]
 mod profile;
@@ -122,13 +121,7 @@ const OBSERVE_TICK: Duration = Duration::from_millis(250);
 
 fn main() -> ExitCode {
     default_to_dev_profile();
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(
-            EnvFilter::try_from_env(openlogi_core::env::LOG)
-                .unwrap_or_else(|_| EnvFilter::new(openlogi_core::env::LOG_DEFAULT)),
-        )
-        .init();
+    openlogi_core::logging::init_stderr();
 
     let state = match state_from_args(std::env::args_os().skip(1)) {
         Ok(state) => state,

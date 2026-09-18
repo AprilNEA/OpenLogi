@@ -23,6 +23,9 @@ locale = ["dep:fluent-langneg", "dep:rust-i18n", "dep:sys-locale"]
 # The dedicated tokio worker thread the host crates run async work on
 # (`worker` module). Off by default: the portable core stays free of tokio.
 worker = ["dep:tokio"]
+# The `tracing` filter and stderr subscriber every process installs (`logging`
+# module). Off by default for the same reason as `worker`.
+logging = ["dep:tracing-subscriber"]
 
 [dependencies]
 openlogi-device-registry = { workspace = true }
@@ -36,6 +39,7 @@ fluent-langneg = { version = "0.14.2", optional = true }
 rust-i18n = { version = "4", optional = true }
 sys-locale = { version = "0.3.2", optional = true }
 tokio = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
 num_enum = { workspace = true }
 strum = { version = "0.27", features = ["derive"] }
 toml_edit = { version = "0.22", optional = true }

@@ -5647,7 +5647,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -5672,6 +5671,7 @@ dependencies = [
  "toml 0.8.23",
  "toml_edit 0.22.27",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -5715,7 +5715,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "url",
  "walkdir",
 ]
@@ -5893,7 +5892,6 @@ dependencies = [
  "tarpc",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "windows-sys 0.61.2",
 ]
 

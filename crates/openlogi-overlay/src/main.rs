@@ -24,7 +24,6 @@ use std::sync::Arc;
 use anyhow::Result;
 use gpui::AppContext as _;
 use tracing::warn;
-use tracing_subscriber::EnvFilter;
 
 use openlogi_core::action_ring::DISPLAY_LIFETIME;
 
@@ -34,13 +33,7 @@ use crate::ring::RingView;
 use crate::session::{ClickAwaySession, claim_the_role, spawn_click_away_dismissal};
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(
-            EnvFilter::try_from_env(openlogi_core::env::LOG)
-                .unwrap_or_else(|_| EnvFilter::new(openlogi_core::env::LOG_DEFAULT)),
-        )
-        .init();
+    openlogi_core::logging::init_stderr();
 
     openlogi_core::locale::activate(None);
     // Held for the whole run: dropping it hands the role to the replacement.

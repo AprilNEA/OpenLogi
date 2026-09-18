@@ -17,7 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 appcatalog = "0.1.1"
-openlogi-core = { path = "../openlogi-core", features = ["worker"] }
+openlogi-core = { path = "../openlogi-core", features = ["logging", "worker"] }
 openlogi-ui = { path = "../openlogi-ui" }
 openlogi-camera = { path = "../openlogi-camera" }
 openlogi-hook = { path = "../openlogi-hook" }
@@ -35,7 +35,6 @@ swr-gpui = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 image = { version = "0.25", default-features = false, features = ["png"] }

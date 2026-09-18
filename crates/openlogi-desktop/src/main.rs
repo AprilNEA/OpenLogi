@@ -44,7 +44,6 @@ use anyhow::Result;
 use openlogi_core::brand::DeeplinkCommand;
 use openlogi_core::config::{Config, ConfigFile};
 use tracing::{info, warn};
-use tracing_subscriber::EnvFilter;
 
 use crate::platform::app_icon::AppIconExt as _;
 use crate::services::assets::sync::{AssetCommand, AssetControl};
@@ -174,11 +173,5 @@ fn main() -> Result<()> {
 }
 
 fn init_tracing() {
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(
-            EnvFilter::try_from_env(openlogi_core::env::LOG)
-                .unwrap_or_else(|_| EnvFilter::new(openlogi_core::env::LOG_DEFAULT)),
-        )
-        .init();
+    openlogi_core::logging::init_stderr();
 }

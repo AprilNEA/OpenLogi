@@ -28,6 +28,8 @@ pub mod env;
 pub mod hid;
 #[cfg(feature = "locale")]
 pub mod locale;
+#[cfg(feature = "logging")]
+pub mod logging;
 #[cfg(feature = "fs")]
 pub mod paths;
 pub mod scroll;

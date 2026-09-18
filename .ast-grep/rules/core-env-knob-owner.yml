@@ -1,10 +1,10 @@
 # Owner: openlogi_core::env — the environment variables more than one process
-# reads, and the log filter every process falls back to when its variable is
-# unset.
+# reads — and openlogi_core::logging, which turns the log variable and its
+# fallback into the filter every process installs.
 id: core-env-knob-owner
 language: rust
 severity: error
-message: The environment knobs read in more than one place are openlogi_core::env's (PROFILE, LOG and its LOG_DEFAULT fallback, ASSETS, FORCE_DEPOT); use the constant instead of the literal here.
+message: The environment knobs read in more than one place are openlogi_core::env's (PROFILE, LOG, ASSETS, FORCE_DEPOT), and the log filter is openlogi_core::logging's (env_filter, init_stderr); use them instead of a literal or a hand-built filter here.
 note: |
   Five binaries spelled the log filter variable and its default by hand. See
   "Single source of truth" in AGENTS.md.
@@ -22,6 +22,9 @@ rule:
     # A fallback filter spelled inline instead of env::LOG_DEFAULT.
     - pattern: EnvFilter::new($FILTER)
     - pattern: tracing_subscriber::EnvFilter::new($FILTER)
+    # The filter assembled from its ingredients instead of logging::env_filter.
+    - pattern: EnvFilter::try_from_env($$$)
+    - pattern: tracing_subscriber::EnvFilter::try_from_env($$$)
 constraints:
   FILTER:
     kind: string_literal
