@@ -31,7 +31,10 @@ use openlogi_core::hid::{
     SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold,
 };
 
-use crate::state::{AppState, DeviceKey, SmartShiftLoad, SmartShiftWriteStatus, StateEvent};
+use crate::state::{
+    AppState, DeviceKey, DeviceRecord, SmartShiftLoad, SmartShiftWriteStatus, StateEvent,
+    StateEvents,
+};
 use crate::ui::components::Toggle;
 use crate::ui::section::section_label;
 use crate::ui::status::{retry_line, status_line};
@@ -131,14 +134,13 @@ impl SmartShiftPanel {
                     let sensitivity = ThumbwheelSensitivity::from_rounded(value.start());
                     panel.pending_wheel_sensitivity = None;
                     panel.last_wheel_sensitivity = sensitivity;
-                    AppState::update(cx, |state, cx| {
-                        let record = state
+                    AppState::apply(cx, |state| {
+                        state
                             .current_record()
-                            .map(|record| (record.config_key.clone(), record.device_key()));
-                        if let Some((config_key, event_key)) = record {
-                            state.set_device_thumbwheel_sensitivity(&config_key, sensitivity);
-                            cx.emit(StateEvent::DeviceConfigChanged(event_key));
-                        }
+                            .map(DeviceRecord::device_key)
+                            .map_or_else(StateEvents::none, |key| {
+                                state.set_device_thumbwheel_sensitivity(&key, sensitivity)
+                            })
                     });
                     cx.notify();
                 }

@@ -1,5 +1,7 @@
 //! App-level settings (launch-at-login, theme, assets, language).
 
+use super::device_key::DeviceKey;
+use super::events::StateEvents;
 use super::{AppState, StateEvent};
 use crate::platform::app_icon::AppIconExt as _;
 use gpui::Context;
@@ -193,13 +195,16 @@ impl AppState {
 
     /// Enable or disable OpenLogi's management of `key` and persist it. The
     /// agent tears down or re-arms the device's capture session on reload.
-    pub fn set_device_enabled(&mut self, key: &str, enabled: bool) {
+    pub fn set_device_enabled(&mut self, key: &DeviceKey, enabled: bool) -> StateEvents {
+        let events = StateEvent::DeviceConfigChanged(key.clone()).into();
+        let key = key.as_str();
         if self.config.device_enabled(key) == enabled {
-            return;
+            return events;
         }
         self.config
             .edit(|config| config.set_device_enabled(key, enabled));
         self.persist_and_reload("device enabled");
+        events
     }
 
     /// The effective thumb-wheel sensitivity for `key` (its per-device
@@ -218,9 +223,11 @@ impl AppState {
     /// capture plans. No-op when the stored override would not change.
     pub fn set_device_thumbwheel_sensitivity(
         &mut self,
-        key: &str,
+        key: &DeviceKey,
         sensitivity: ThumbwheelSensitivity,
-    ) {
+    ) -> StateEvents {
+        let events = StateEvent::DeviceConfigChanged(key.clone()).into();
+        let key = key.as_str();
         let override_value =
             (sensitivity != self.config.app_settings.thumbwheel_sensitivity).then_some(sensitivity);
         let stored = self
@@ -229,12 +236,13 @@ impl AppState {
             .get(key)
             .and_then(|d| d.thumbwheel_sensitivity);
         if stored == override_value {
-            return;
+            return events;
         }
         self.config.edit(|config| {
             config.set_device_thumbwheel_sensitivity(key, override_value);
         });
         self.persist_and_reload("device thumbwheel sensitivity");
+        events
     }
 
     /// Set the app-wide default thumb-wheel sensitivity and persist it —

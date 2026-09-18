@@ -6,7 +6,8 @@ use openlogi_core::config::Config;
 
 use crate::state::devices::DeviceRecord;
 
-use super::AppState;
+use super::events::StateEvents;
+use super::{AppState, StateEvent};
 
 impl AppState {
     /// Whether the active device's scroll wheel is inverted (issue #126).
@@ -30,10 +31,11 @@ impl AppState {
     /// Set the active device's scroll-wheel inversion, persist it, and reload
     /// the agent so it writes the device's native HID++ wheel inversion. No-op
     /// when no device is selected or the active device does not report support.
-    pub fn commit_invert_scroll(&mut self, invert: bool) {
+    pub fn commit_invert_scroll(&mut self, invert: bool) -> StateEvents {
+        let events = self.for_current_device(StateEvent::DeviceConfigChanged);
         if !self.current_scroll_inversion_supported() {
             debug!("active device does not support native scroll inversion");
-            return;
+            return events;
         }
         let Some(key) = self
             .current_record()
@@ -41,11 +43,12 @@ impl AppState {
             .map(str::to_string)
         else {
             debug!("no persistent device key — invert-scroll change ignored");
-            return;
+            return events;
         };
         self.config
             .edit(|config| config.set_invert_scroll(&key, invert));
         self.persist_and_reload("invert scroll");
+        events
     }
     /// The active device's persisted wheel resolution, or `None` when OpenLogi
     /// leaves the device default untouched.
@@ -92,7 +95,8 @@ impl AppState {
     pub fn commit_scroll_resolution(
         &mut self,
         resolution: Option<openlogi_core::config::ScrollResolution>,
-    ) {
+    ) -> StateEvents {
+        let events = self.for_current_device(StateEvent::DeviceConfigChanged);
         let Some((key, supported)) = self.current_record().and_then(|record| {
             let key = record.persistent_config_key()?.to_string();
             Some((
@@ -103,16 +107,17 @@ impl AppState {
             ))
         }) else {
             debug!("no persistent device key — wheel-resolution change ignored");
-            return;
+            return events;
         };
         if !self
             .config
             .edit(|config| set_scroll_resolution_if_supported(config, &key, supported, resolution))
         {
             debug!("active device does not support HiResWheel");
-            return;
+            return events;
         }
         self.persist_and_reload("wheel resolution");
+        events
     }
 }
 

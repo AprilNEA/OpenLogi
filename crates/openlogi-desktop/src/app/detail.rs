@@ -35,7 +35,7 @@ use crate::features::pointer::smartshift::SmartShiftPanel;
 use crate::features::profiles::{
     AppCatalogPicker, ProfileIconCache, action_ring_profile_scope_bar, button_profile_scope_bar,
 };
-use crate::state::{AppState, DeviceRecord, StateEvent};
+use crate::state::{AppState, DeviceRecord, StateEvents};
 use crate::ui::battery::BatteryIndicator;
 use crate::ui::components::{PanelCard, Toggle};
 use crate::ui::theme::{
@@ -434,13 +434,7 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
                 .disabled(!inversion_supported)
                 .label((!inversion_supported).then(|| tr!("common.unavailable")))
                 .on_change(|inverted, _window, cx| {
-                    AppState::update(cx, |state, cx| {
-                        let key = state.current_record().map(DeviceRecord::device_key);
-                        state.commit_invert_scroll(*inverted);
-                        if let Some(key) = key {
-                            cx.emit(StateEvent::DeviceConfigChanged(key));
-                        }
-                    });
+                    AppState::apply(cx, |state| state.commit_invert_scroll(*inverted));
                 }),
         );
     let resolution_description = match hires {
@@ -516,13 +510,7 @@ fn wheel_resolution_control(selected: Option<ScrollResolution>, enabled: bool) -
             let Some(value) = indices.first().and_then(|index| values.get(*index)) else {
                 return;
             };
-            AppState::update(cx, |state, cx| {
-                let key = state.current_record().map(DeviceRecord::device_key);
-                state.commit_scroll_resolution(*value);
-                if let Some(key) = key {
-                    cx.emit(StateEvent::DeviceConfigChanged(key));
-                }
-            });
+            AppState::apply(cx, |state| state.commit_scroll_resolution(*value));
         })
 }
 
@@ -733,14 +721,13 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
                         .checked(device_enabled)
                         .on_click(|checked, _window, cx| {
                             let enabled = *checked;
-                            AppState::update(cx, |state, cx| {
-                                let record = state
+                            AppState::apply(cx, |state| {
+                                state
                                     .current_record()
-                                    .map(|record| (record.config_key.clone(), record.device_key()));
-                                if let Some((config_key, event_key)) = record {
-                                    state.set_device_enabled(&config_key, enabled);
-                                    cx.emit(StateEvent::DeviceConfigChanged(event_key));
-                                }
+                                    .map(DeviceRecord::device_key)
+                                    .map_or_else(StateEvents::none, |key| {
+                                        state.set_device_enabled(&key, enabled)
+                                    })
                             });
                         }),
                 ),
