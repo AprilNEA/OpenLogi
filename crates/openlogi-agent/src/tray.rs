@@ -36,8 +36,11 @@ use objc2_app_kit::{
     NSWorkspaceSessionDidBecomeActiveNotification, NSWorkspaceSessionDidResignActiveNotification,
     NSWorkspaceWillSleepNotification,
 };
-use objc2_core_graphics::{CGDisplayIsAsleep, CGMainDisplayID};
-use objc2_foundation::{NSNotification, NSString};
+use objc2_core_foundation::{CFBoolean, CFString, CFType};
+use objc2_core_graphics::{
+    CGDisplayIsActive, CGDisplayIsAsleep, CGMainDisplayID, CGSessionCopyCurrentDictionary,
+};
+use objc2_foundation::{NSNotification, NSString, NSTimer};
 use openlogi_core::brand::{self, DeeplinkCommand};
 use openlogi_core::config::AppIcon;
 use openlogi_hid::DeviceIoSignal;
@@ -125,6 +128,39 @@ const SCREEN_SLEEP: u8 = 1 << 1;
 const SESSION_INACTIVE: u8 = 1 << 2;
 const STARTUP: u8 = 1 << 3;
 
+/// A read-only host snapshot; unavailable state must never authorize HID I/O.
+#[derive(Clone, Copy, Debug)]
+enum ActivitySnapshot {
+    VisibleSession,
+    DisplayAsleep,
+    SessionInactive,
+    Unavailable,
+}
+
+impl ActivitySnapshot {
+    fn read() -> Self {
+        let display = CGMainDisplayID();
+        if display == 0 || !CGDisplayIsActive(display) || CGDisplayIsAsleep(display) {
+            return Self::DisplayAsleep;
+        }
+        let Some(session) = CGSessionCopyCurrentDictionary() else {
+            return Self::Unavailable;
+        };
+        // SAFETY: CGSession.h specifies CFString keys and CoreFoundation values
+        // in the immutable dictionary returned by CGSessionCopyCurrentDictionary.
+        let session = unsafe { session.cast_unchecked::<CFString, CFType>() };
+        // CGSession.h defines this key as a CFSTR macro, not an exported symbol.
+        let Some(on_console) = session.get(&CFString::from_str("kCGSSessionOnConsoleKey")) else {
+            return Self::Unavailable;
+        };
+        match on_console.downcast_ref::<CFBoolean>() {
+            Some(value) if value.as_bool() => Self::VisibleSession,
+            Some(_) => Self::SessionInactive,
+            None => Self::Unavailable,
+        }
+    }
+}
+
 define_class!(
     // SAFETY: NSObject has no subclassing requirements, and `ActivityTarget`
     // does not implement `Drop`.
@@ -134,6 +170,11 @@ define_class!(
     struct ActivityTarget;
 
     impl ActivityTarget {
+        #[unsafe(method(reconcileActivity:))]
+        fn reconcile_activity(&self, _timer: &NSTimer) {
+            self.reconcile_snapshot(ActivitySnapshot::read());
+        }
+
         #[unsafe(method(workspaceWillSleep:))]
         fn workspace_will_sleep(&self, _notification: &NSNotification) {
             self.suspend_from(SYSTEM_SLEEP);
@@ -182,6 +223,18 @@ impl ActivityTarget {
         self.resume_from(STARTUP);
     }
 
+    /// Native notifications are hints, not a complete history. A missing wake
+    /// must not leave inventory (including its recovery scan) parked forever.
+    /// Only a visible console session can repair stale suspension flags; a
+    /// maintenance DarkWake or another user's session cannot authorize HID.
+    fn reconcile_snapshot(&self, snapshot: ActivitySnapshot) {
+        if matches!(snapshot, ActivitySnapshot::VisibleSession)
+            && self.resume_from(SYSTEM_SLEEP | SCREEN_SLEEP | SESSION_INACTIVE)
+        {
+            warn!("visible console session recovered a stale device I/O suspension");
+        }
+    }
+
     fn suspend_from(&self, source: u8) {
         let changed = {
             let mut suspended_by = self
@@ -189,29 +242,46 @@ impl ActivityTarget {
                 .suspended_by
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
-            let was_allowed = *suspended_by == 0;
+            let previous = *suspended_by;
             *suspended_by |= source;
-            was_allowed && self.ivars().signal.suspend()
+            if previous != *suspended_by {
+                info!(
+                    source,
+                    previous,
+                    remaining = *suspended_by,
+                    "workspace activity suspended"
+                );
+            }
+            previous == 0 && self.ivars().signal.suspend()
         };
         if changed {
             info!("display/session suspended — pausing device I/O");
         }
     }
 
-    fn resume_from(&self, sources: u8) {
+    fn resume_from(&self, sources: u8) -> bool {
         let changed = {
             let mut suspended_by = self
                 .ivars()
                 .suspended_by
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
-            let was_suspended = *suspended_by != 0;
+            let previous = *suspended_by;
             *suspended_by &= !sources;
-            was_suspended && *suspended_by == 0 && self.ivars().signal.resume()
+            if previous != *suspended_by {
+                info!(
+                    sources,
+                    previous,
+                    remaining = *suspended_by,
+                    "workspace activity resumed"
+                );
+            }
+            previous != 0 && *suspended_by == 0 && self.ivars().signal.resume()
         };
         if changed {
             info!("display/session resumed — enabling device I/O");
         }
+        changed
     }
 }
 
@@ -337,6 +407,20 @@ pub fn run_app_loop(
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 
     let activity_target = install_activity_observer(device_io_signal);
+    // Read-only reconciliation does not open HID or assert user activity. Keep
+    // it in the lifecycle owner: the inventory recovery timer is itself gated.
+    // SAFETY: The selector takes one NSTimer argument and the timer retains its
+    // target for the AppKit loop's lifetime. No userInfo is passed or accessed.
+    let activity_recovery = unsafe {
+        NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
+            5.0,
+            &activity_target,
+            sel!(reconcileActivity:),
+            None,
+            true,
+        )
+    };
+    activity_recovery.setTolerance(1.0);
     // Bind the status item (+ its target/menu) so they outlive `run()` — the
     // menu items only weakly reference the target. `None` when hidden.
     let _tray = show_in_menu_bar.then(|| install_status_item(mtm, app_icon));
@@ -351,6 +435,7 @@ pub fn run_app_loop(
     info!(show_in_menu_bar, "agent AppKit loop started");
 
     app.run();
+    activity_recovery.invalidate();
     info!("agent AppKit loop ended — requesting graceful core shutdown");
     let requests = SHUTDOWN_TX.with_borrow(Clone::clone);
     shutdown::request_tray_quit(requests.as_ref(), 0);
@@ -560,6 +645,45 @@ mod tests {
 
         // SAFETY: This is the same live target registered with `center` above.
         unsafe { center.removeObserver(&target) };
+    }
+
+    #[test]
+    fn visible_session_recovers_when_wake_notifications_are_missing() {
+        let (signal, gate) = device_io_channel();
+        let target = ActivityTarget::new(signal);
+        target.finish_startup(false);
+        target.suspend_from(SYSTEM_SLEEP | SCREEN_SLEEP | SESSION_INACTIVE);
+
+        // Neither wake notification arrived. Recovery must not depend on a
+        // hotplug event or the inventory timer, which both wait behind this gate.
+        target.reconcile_snapshot(ActivitySnapshot::VisibleSession);
+        assert!(gate.allows_io());
+
+        // A late sleep notification can leave the state stale again. The next
+        // authoritative snapshot repairs it without requiring another wake.
+        target.suspend_from(SCREEN_SLEEP);
+        target.reconcile_snapshot(ActivitySnapshot::VisibleSession);
+        assert!(gate.allows_io());
+    }
+
+    #[test]
+    fn recovery_never_opens_io_for_darkwake_inactive_or_unknown_sessions() {
+        let (signal, gate) = device_io_channel();
+        let target = ActivityTarget::new(signal);
+        target.reconcile_snapshot(ActivitySnapshot::VisibleSession);
+        assert!(!gate.allows_io(), "recovery must not bypass startup");
+        target.finish_startup(false);
+        target.suspend_from(SYSTEM_SLEEP | SCREEN_SLEEP | SESSION_INACTIVE);
+        for snapshot in [
+            ActivitySnapshot::DisplayAsleep,
+            ActivitySnapshot::SessionInactive,
+            ActivitySnapshot::Unavailable,
+        ] {
+            target.reconcile_snapshot(snapshot);
+            assert!(!gate.allows_io());
+        }
+        target.reconcile_snapshot(ActivitySnapshot::VisibleSession);
+        assert!(gate.allows_io());
     }
 
     #[test]
