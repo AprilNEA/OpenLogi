@@ -694,6 +694,9 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
                 .map(|r| state.device_enabled(&r.config_key))
         })
         .unwrap_or(true);
+    let fn_lock_supported =
+        AppState::try_read(cx).is_some_and(AppState::current_device_supports_fn_lock);
+    let fn_lock = AppState::try_read(cx).is_some_and(AppState::current_fn_lock);
     let (binding_count, gesture_count, preset_count, app_profile) = AppState::try_read(cx)
         .map_or_else(
             || (0, 0, 0, tr!("profiles.default_profile").to_string()),
@@ -745,6 +748,9 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
                         }),
                 ),
         )
+        .when(fn_lock_supported, |content| {
+            content.child(fn_lock_row(fn_lock, pal))
+        })
         .child(
             DescriptionList::new()
                 .columns(1)
@@ -793,6 +799,37 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
         Icon::new(IconName::Folder),
         content,
     )
+}
+
+/// The Fn-lock toggle row, shown only for a keyboard.
+fn fn_lock_row(fn_lock: bool, pal: Palette) -> impl IntoElement {
+    h_flex()
+        .justify_between()
+        .items_center()
+        .child(
+            v_flex()
+                .child(div().text_body().child(tr!("device.fn_lock")))
+                .child(
+                    div()
+                        .text_caption()
+                        .text_color(pal.text_muted)
+                        .child(tr!("device.fn_lock_description")),
+                ),
+        )
+        .child(
+            Switch::new("fn-lock")
+                .checked(fn_lock)
+                .on_click(|checked, _window, cx| {
+                    let fn_lock = *checked;
+                    AppState::update(cx, |state, cx| {
+                        let key = state.current_record().map(DeviceRecord::device_key);
+                        state.commit_fn_lock(fn_lock);
+                        if let Some(key) = key {
+                            cx.emit(StateEvent::DeviceConfigChanged(key));
+                        }
+                    });
+                }),
+        )
 }
 
 fn device_summary(

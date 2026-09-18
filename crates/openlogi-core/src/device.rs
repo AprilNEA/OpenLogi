@@ -132,6 +132,10 @@ pub struct Capabilities {
     /// both diversion and raw-XY reporting for hold-and-swipe gestures.
     #[serde(default)]
     pub dpi_gestures: bool,
+    /// Fn-lock (F-row default behavior) can be read and toggled — HID++
+    /// `0x40a2 FnInversionForMultiHostDevices` or `0x40a3 FnInversion`.
+    #[serde(default)]
+    pub fn_lock: bool,
 }
 
 impl Capabilities {
@@ -155,6 +159,7 @@ impl Capabilities {
             haptic_feedback: ids.contains(&0x19b0),
             haptic_panel: false,
             dpi_gestures: false,
+            fn_lock: ids.contains(&0x40a2) || ids.contains(&0x40a3),
         }
     }
 
@@ -176,6 +181,7 @@ impl Capabilities {
                 haptic_feedback: false,
                 haptic_panel: false,
                 dpi_gestures: false,
+                fn_lock: false,
             },
             DeviceKind::Keyboard => Self {
                 lighting: true,
@@ -482,6 +488,7 @@ mod tests {
                     haptic_feedback: false,
                     haptic_panel: false,
                     dpi_gestures: false,
+                    fn_lock: false,
                 }),
             }],
         }
@@ -553,6 +560,7 @@ mod tests {
                 haptic_feedback: false,
                 haptic_panel: false,
                 dpi_gestures: false,
+                fn_lock: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
@@ -570,6 +578,7 @@ mod tests {
                 haptic_feedback: false,
                 haptic_panel: false,
                 dpi_gestures: false,
+                fn_lock: false,
             }
         );
         // No driving features → nothing offered.

@@ -945,6 +945,15 @@ impl Config {
         self.devices.get(device_key).and_then(|d| d.fn_lock)
     }
 
+    /// Set `device_key`'s Fn-lock state. The agent re-applies it like
+    /// [`Self::dpi_presets`] — reconnect, wake, and the next `ReloadConfig`.
+    pub fn set_fn_lock(&mut self, device_key: &str, fn_lock: bool) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .fn_lock = Some(fn_lock);
+    }
+
     /// Record the SmartShift wheel config for `device_key`, so the agent can
     /// re-apply it when the device reconnects (#189).
     pub fn set_smartshift(&mut self, device_key: &str, smartshift: SmartShift) {
