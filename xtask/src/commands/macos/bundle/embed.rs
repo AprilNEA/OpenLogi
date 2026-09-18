@@ -209,21 +209,25 @@ pub(crate) fn write_agent_launch_plist(app: &Path, channel: Channel) -> Result<(
 
 pub(super) fn embed_cli(release_dir: &Path, app: &Path) -> Result<()> {
     println!("==> cli (embed)");
-    let cli_bin = release_dir.join("openlogi");
+    let cli_bin = release_dir.join(brand::CLI_EXECUTABLE);
     ensure_file(&cli_bin)?;
 
     let macos = app.join("Contents/MacOS");
-    fs_err::copy(&cli_bin, macos.join("openlogi"))
+    let embedded = macos.join(brand::CLI_EXECUTABLE);
+    fs_err::copy(&cli_bin, &embedded)
         .with_context(|| "could not copy the CLI binary into the app bundle".to_string())?;
 
-    println!("    embedded {}", macos.join("openlogi").display());
+    println!("    embedded {}", embedded.display());
     Ok(())
 }
 
 /// Every Mach-O the finished bundle must ship, for `channel`'s helper layout.
 fn required_bundle_binaries(app: &Path, channel: Channel) -> Vec<PathBuf> {
     let macos = app.join("Contents/MacOS");
-    let mut required = vec![macos.join("openlogi"), macos.join("openlogi-desktop")];
+    let mut required = vec![
+        macos.join(brand::CLI_EXECUTABLE),
+        macos.join(brand::GUI_EXECUTABLE),
+    ];
     required.extend(HELPERS.iter().map(|helper| {
         helper
             .component

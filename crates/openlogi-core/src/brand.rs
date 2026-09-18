@@ -70,6 +70,15 @@ pub fn dev_id(id: &str) -> String {
 /// `CFBundleDisplayName`, and the root the helpers' names are formed from.
 pub const APP_NAME: &str = "OpenLogi";
 
+/// The GUI's executable, as cargo builds it and as the macOS bundle and the
+/// Linux packages ship it. The helpers' executables are [`Helper::executable`].
+pub const GUI_EXECUTABLE: &str = "openlogi-desktop";
+
+/// The CLI's executable — the command users type, so it never changes. The
+/// Windows installer ships the GUI under the same name in another case
+/// (`OpenLogi.exe`), which the case-insensitive match below covers.
+pub const CLI_EXECUTABLE: &str = "openlogi";
+
 /// `name`'s dev-channel counterpart, the way [`dev_id`] is for identifiers:
 /// what System Settings shows for a local build's bundle, and the directory a
 /// dev helper lives in.
@@ -204,18 +213,18 @@ pub fn is_dev_id(id: &str) -> bool {
 /// without this OpenLogi would offer itself as a target for a per-app profile.
 /// Both identifier shapes are recognised: the bundle-id family above (macOS
 /// bundle ids, and the `WM_CLASS` / `app_id` the GUI advertises on Linux), dev
-/// builds included; and the Windows executable path, matched on its file name.
-/// `packaging/windows/OpenLogi.wxs` carries its own literal copy of those names
-/// (it can't reference Rust) — keep the two in sync.
+/// builds included; and the Windows executable path, matched on its file name
+/// — the installed names from `packaging/windows/OpenLogi.wxs` (which carries
+/// its own literal copy, since it can't reference Rust — keep the two in sync)
+/// plus the cargo artifact name a dev build's GUI runs under.
 #[must_use]
 pub fn is_openlogi_foreground_id(id: &str) -> bool {
-    /// Installed names from `OpenLogi.wxs`, plus the cargo artifact name a dev
-    /// build runs under.
-    const EXECUTABLES: [&str; 4] = [
-        "openlogi.exe",
-        "openlogi-agent.exe",
-        "openlogi-overlay.exe",
-        "openlogi-desktop.exe",
+    const WINDOWS_SUFFIX: &str = ".exe";
+    let executables = [
+        CLI_EXECUTABLE,
+        GUI_EXECUTABLE,
+        Helper::Agent.executable(),
+        Helper::Overlay.executable(),
     ];
 
     let base = strip_dev_suffix(id);
@@ -225,7 +234,9 @@ pub fn is_openlogi_foreground_id(id: &str) -> bool {
         || id
             .rsplit(['\\', '/'])
             .next()
-            .is_some_and(|file| EXECUTABLES.iter().any(|exe| file.eq_ignore_ascii_case(exe)))
+            .filter(|file| ends_with_ignore_ascii_case(file, WINDOWS_SUFFIX))
+            .and_then(|file| file.get(..file.len() - WINDOWS_SUFFIX.len()))
+            .is_some_and(|stem| executables.iter().any(|exe| stem.eq_ignore_ascii_case(exe)))
 }
 
 /// The dev suffix before it was hyphenated. Recognised, never produced.
