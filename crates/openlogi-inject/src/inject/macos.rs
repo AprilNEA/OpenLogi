@@ -14,6 +14,7 @@ use objc2_core_foundation::{CFArray, CFRetained, CFString, CFType, Type as _};
 use openlogi_core::binding::{
     Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Script, Shortcut, WorkflowStep,
 };
+use openlogi_core::config::FunctionKey;
 use openlogi_core::scroll::ScrollDelta;
 
 use super::{
@@ -389,17 +390,17 @@ fn hid_usage_to_macos(usage: u8) -> Option<u16> {
         0x23, 0x0c, 0x0f, 0x01, 0x11, 0x20, 0x09, 0x0d, 0x07, 0x10, 0x06,
     ];
     const DIGITS: [u16; 10] = [0x12, 0x13, 0x14, 0x15, 0x17, 0x16, 0x1a, 0x1c, 0x19, 0x1d];
-    const FUNCTIONS: [u16; 20] = [
-        0x7a, 0x78, 0x63, 0x76, 0x60, 0x61, 0x62, 0x64, 0x65, 0x6d, 0x67, 0x6f, 0x69, 0x6b, 0x71,
-        0x6a, 0x40, 0x4f, 0x50, 0x5a,
-    ];
+    /// `kVK_F20`, one past the programmable row [`FunctionKey`] covers.
+    const F20: u16 = 0x5a;
+    let function = |n: u8| FunctionKey::nth_f(u16::from(n)).map(FunctionKey::keycode);
     match usage {
         0x04..=0x1d => LETTERS.get(usize::from(usage - 0x04)).copied(),
         0x1e..=0x27 => DIGITS.get(usize::from(usage - 0x1e)).copied(),
-        0x3a..=0x45 => FUNCTIONS.get(usize::from(usage - 0x3a)).copied(),
-        0x68..=0x6f => FUNCTIONS.get(usize::from(usage - 0x68 + 12)).copied(),
+        0x3a..=0x45 => function(usage - 0x3a + 1),
+        0x68..=0x6e => function(usage - 0x68 + 13),
+        0x6f => Some(F20),
         0x28 => Some(0x24),
-        0x29 => Some(0x35),
+        0x29 => Some(FunctionKey::Esc.keycode()),
         0x2a => Some(0x33),
         0x2b => Some(0x30),
         0x2c => Some(0x31),
