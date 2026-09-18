@@ -122,7 +122,7 @@ fn main() -> Result<()> {
     });
 
     // Reopen the window when the app is relaunched with none open (dock click).
-    app.on_reopen(|cx| windows::main_window::open(&[], cx));
+    app.on_reopen(windows::main_window::open);
 
     app.run(move |cx| {
         gpui_component::init(cx);

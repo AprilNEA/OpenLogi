@@ -9,7 +9,7 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     v_flex,
 };
-use openlogi_core::device::{Capabilities, DeviceInventory, DeviceKind};
+use openlogi_core::device::{Capabilities, DeviceKind};
 use openlogi_ipc::InventoryHealth;
 use tracing::info;
 
@@ -196,11 +196,7 @@ impl Focusable for AppView {
 
 impl AppView {
     /// Construct the root view and its child entities.
-    pub fn new(
-        _inventories: &[DeviceInventory],
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let cache = AssetResolver::new();
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);

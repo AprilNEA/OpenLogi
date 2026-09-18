@@ -100,7 +100,7 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
                     state.connect_device_reads(swr.clone(), swr_runtime);
                 });
             }
-            windows::main_window::open(&[], cx);
+            windows::main_window::open(cx);
             swr
         });
 
