@@ -201,7 +201,7 @@ fn insert_feature<F: Feature>(
 /// report used to consume the caller's entire probe budget and abort
 /// enumeration. A HID++ round trip that is going to answer answers in tens of
 /// milliseconds; past this the report is lost, and re-asking beats waiting.
-const FEATURE_READ_ATTEMPT: Duration = Duration::from_millis(700);
+const FEATURE_READ_TIMEOUT: Duration = Duration::from_millis(700);
 
 /// Attempts per feature-table entry before enumeration gives up on it.
 ///
@@ -229,7 +229,7 @@ async fn read_feature_entry(
         let mut read = std::pin::pin!(feature_set.get_feature(index).fuse());
         let outcome = select! {
             result = read => Some(result),
-            () = futures_timer::Delay::new(FEATURE_READ_ATTEMPT).fuse() => None,
+            () = futures_timer::Delay::new(FEATURE_READ_TIMEOUT).fuse() => None,
         };
         match outcome {
             Some(Ok(info)) => return Ok(info),
