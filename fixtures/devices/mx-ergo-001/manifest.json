@@ -1,0 +1,212 @@
+{
+  "schema_version": 1,
+  "id": "mx-ergo-001",
+  "profile_id": "mx-ergo-001-profile",
+  "cases": [
+    {
+      "name": "feature-table",
+      "channel": "target",
+      "relationship": {
+        "kind": "device",
+        "device": "device-1"
+      }
+    },
+    {
+      "name": "firmware-entities",
+      "channel": "target",
+      "relationship": {
+        "kind": "device",
+        "device": "device-1"
+      }
+    },
+    {
+      "name": "reprogrammable-controls",
+      "channel": "target",
+      "relationship": {
+        "kind": "device",
+        "device": "device-1"
+      }
+    },
+    {
+      "name": "raw-battery",
+      "channel": "target",
+      "relationship": {
+        "kind": "device",
+        "device": "device-1"
+      }
+    },
+    {
+      "name": "dpi-info",
+      "channel": "target",
+      "relationship": {
+        "kind": "device",
+        "device": "device-1"
+      }
+    },
+    {
+      "name": "smartshift-status",
+      "channel": "target",
+      "relationship": {
+        "kind": "device",
+        "device": "device-1"
+      }
+    },
+    {
+      "name": "wheel-mode",
+      "channel": "target",
+      "relationship": {
+        "kind": "device",
+        "device": "device-1"
+      }
+    },
+    {
+      "name": "backlight-state",
+      "channel": "target",
+      "relationship": {
+        "kind": "device",
+        "device": "device-1"
+      }
+    }
+  ],
+  "identity_ledger": [
+    {
+      "principal": {
+        "kind": "receiver",
+        "id": "receiver-1"
+      },
+      "representations": [
+        {
+          "kind": "unifying_receiver_serial",
+          "value": [
+            79,
+            76,
+            82,
+            1
+          ],
+          "profile_route": "4F4C5201",
+          "binary_occurrences": [
+            {
+              "location": {
+                "asset": "cassette",
+                "case": "backlight-state",
+                "channel": "target"
+              },
+              "count": 1
+            },
+            {
+              "location": {
+                "asset": "cassette",
+                "case": "dpi-info",
+                "channel": "target"
+              },
+              "count": 1
+            },
+            {
+              "location": {
+                "asset": "cassette",
+                "case": "feature-table",
+                "channel": "target"
+              },
+              "count": 1
+            },
+            {
+              "location": {
+                "asset": "cassette",
+                "case": "firmware-entities",
+                "channel": "target"
+              },
+              "count": 1
+            },
+            {
+              "location": {
+                "asset": "cassette",
+                "case": "raw-battery",
+                "channel": "target"
+              },
+              "count": 1
+            },
+            {
+              "location": {
+                "asset": "cassette",
+                "case": "reprogrammable-controls",
+                "channel": "target"
+              },
+              "count": 1
+            },
+            {
+              "location": {
+                "asset": "cassette",
+                "case": "smartshift-status",
+                "channel": "target"
+              },
+              "count": 1
+            },
+            {
+              "location": {
+                "asset": "cassette",
+                "case": "wheel-mode",
+                "channel": "target"
+              },
+              "count": 1
+            }
+          ],
+          "route_occurrences": [
+            {
+              "location": {
+                "asset": "profile",
+                "field": "receiver_identity"
+              },
+              "count": 1
+            },
+            {
+              "location": {
+                "asset": "profile",
+                "field": "receiver_route"
+              },
+              "count": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "principal": {
+        "kind": "device",
+        "id": "device-1",
+        "route": {
+          "kind": "unifying",
+          "receiver": "receiver-1",
+          "slot": 1
+        }
+      },
+      "representations": [
+        {
+          "kind": "device_unit_id",
+          "value": [
+            79,
+            76,
+            68,
+            1
+          ],
+          "occurrences": [
+            {
+              "location": {
+                "asset": "profile",
+                "field": "device_unit_id"
+              },
+              "count": 1
+            },
+            {
+              "location": {
+                "asset": "cassette",
+                "case": "firmware-entities",
+                "channel": "target"
+              },
+              "count": 1
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
