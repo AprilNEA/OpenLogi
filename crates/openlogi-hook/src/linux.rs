@@ -287,7 +287,17 @@ fn is_hookable_mouse(
 }
 
 fn build_virtual_device(device: &Device) -> io::Result<evdev::uinput::VirtualDevice> {
-    let builder = VirtualDevice::builder()?.name(VIRTUAL_DEVICE_NAME);
+    // Mirror the physical device's bus/vendor/product/version rather than
+    // uinput's default sample ID (0x1234/0x5678): libinput and desktop
+    // environments key per-device settings — pointer acceleration, scroll
+    // behavior, GNOME's remembered mouse speed — off the reported vendor and
+    // product ID. Leaving the sample ID in place made every re-injected mouse
+    // look identical and unrecognized, so those settings silently fell back
+    // to their defaults instead of the ones configured for this hardware
+    // (issue #1075).
+    let builder = VirtualDevice::builder()?
+        .name(VIRTUAL_DEVICE_NAME)
+        .input_id(device.input_id());
 
     let builder = if let Some(keys) = device.supported_keys() {
         builder.with_keys(keys)?
