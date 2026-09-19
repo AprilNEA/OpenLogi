@@ -85,6 +85,18 @@ animate_desktop_switch = "Masaüstü geçişini canlandır"
 animate_desktop_switch_description = "Önceki Masaüstü ve Sonraki Masaüstü, üç parmakla kaydırma gibi yandaki masaüstüne kayar. Anında geçmek için kapatın."
 openlogi = "OpenLogi"
 
+[battery_widget]
+setting = "Show batteries in macOS widget"
+description = "Show battery levels for devices connected through Bolt or Unifying. macOS only."
+starting = "Starting"
+waiting = "Waiting for OpenLogi agent"
+active_singular = "Active · %{count} device"
+active_plural = "Active · %{count} devices"
+empty = "Connect a battery-powered device through Bolt or Unifying."
+unavailable = "Unavailable on this version of macOS"
+failed_singular = "Battery updates failed · %{count} device published"
+failed_plural = "Battery updates failed · %{count} devices published"
+
 [device]
 no_devices_connected = "Bağlı cihaz yok"
 devices = "Cihazlar"

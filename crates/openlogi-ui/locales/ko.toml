@@ -85,6 +85,18 @@ animate_desktop_switch = "데스크톱 전환 애니메이션"
 animate_desktop_switch_description = "이전 데스크톱과 다음 데스크톱이 세 손가락으로 쓸어넘기듯 옆 데스크톱으로 밀려 이동합니다. 끄면 즉시 전환됩니다."
 openlogi = "OpenLogi"
 
+[battery_widget]
+setting = "Show batteries in macOS widget"
+description = "Show battery levels for devices connected through Bolt or Unifying. macOS only."
+starting = "Starting"
+waiting = "Waiting for OpenLogi agent"
+active_singular = "Active · %{count} device"
+active_plural = "Active · %{count} devices"
+empty = "Connect a battery-powered device through Bolt or Unifying."
+unavailable = "Unavailable on this version of macOS"
+failed_singular = "Battery updates failed · %{count} device published"
+failed_plural = "Battery updates failed · %{count} devices published"
+
 [device]
 no_devices_connected = "연결된 기기가 없습니다"
 devices = "기기"
