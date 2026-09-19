@@ -186,12 +186,19 @@ pub const DIVERTABLE_STANDARD_BUTTONS: [(u16, ButtonId); 9] = [
 ];
 
 /// HID++ gesture sources: the `0x1b04` control ID and the [`ButtonId`] it
-/// delivers — the dedicated gesture button on most MX mice, and the Haptic
-/// Sense Panel on MX Master 4 (two distinct physical controls). Each source in
+/// delivers — the dedicated gesture button on most MX mice (or its
+/// non-MX-line alternate CID, [`reprog_controls::GESTURE_BUTTON_ALT_CID`]),
+/// and the Haptic Sense Panel on MX Master 4 (a distinct physical control).
+/// A device exposes at most one of the two gesture-button CIDs, never both,
+/// so there is no ambiguity in listing them side by side. Each source in
 /// gesture mode is diverted with raw-XY; one with a non-default single binding
 /// instead is plain-diverted like a standard button.
-pub const GESTURE_SOURCE_BUTTONS: [(u16, ButtonId); 2] = [
+pub const GESTURE_SOURCE_BUTTONS: [(u16, ButtonId); 3] = [
     (reprog_controls::GESTURE_BUTTON_CID, ButtonId::GestureButton),
+    (
+        reprog_controls::GESTURE_BUTTON_ALT_CID,
+        ButtonId::GestureButton,
+    ),
     (reprog_controls::HAPTIC_PANEL_CID, ButtonId::HapticPanel),
 ];
 

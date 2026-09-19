@@ -363,6 +363,22 @@ fn release() -> RawControlEvent {
     RawControlEvent::DivertedButtons([0, 0, 0, 0])
 }
 
+/// The non-MX-line alternate gesture-button CID (Lift, Logi POP Mouse — see
+/// #1199 and #859) resolves to the same [`ButtonId::GestureButton`] the
+/// MX-line CID does, and an unrelated CID stays unresolved.
+#[test]
+fn the_alternate_gesture_button_cid_resolves_like_the_mx_line_one() {
+    assert_eq!(
+        gesture_source_button(reprog_controls::GESTURE_BUTTON_ALT_CID),
+        Some(ButtonId::GestureButton)
+    );
+    assert_eq!(
+        gesture_source_button(reprog_controls::GESTURE_BUTTON_CID),
+        Some(ButtonId::GestureButton)
+    );
+    assert_eq!(gesture_source_button(0x0052), None);
+}
+
 /// Read the next completed gesture while leaving lifecycle assertions to the
 /// dedicated edge tests below.
 fn next_gesture(

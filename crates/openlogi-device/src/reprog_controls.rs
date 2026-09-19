@@ -55,6 +55,21 @@ pub const GESTURE_BUTTON_CID: u16 = 0x00c3;
 /// The typed source of truth is [`control_ids::HAPTIC_PANEL`].
 pub const HAPTIC_PANEL_CID: u16 = control_ids::HAPTIC_PANEL.0;
 
+/// Control ID of the dedicated gesture button on non-MX-line devices that use
+/// a different CID than [`GESTURE_BUTTON_CID`] for the same physical role — a
+/// single round button below/beside the wheel with hold-and-swipe gesture
+/// support.
+///
+/// Confirmed on real hardware from two independently reported devices
+/// (`openlogi diag controls`, issues #1199 and #859): the Lift (B031) and the
+/// Logi POP Mouse (b030) both report this CID, and only this CID, with the
+/// `divertable | raw-xy | force-raw-xy` flag combination — the same signature
+/// [`GESTURE_BUTTON_CID`] carries on MX-line devices, and one no other CID in
+/// either device's control table shares. Neither device exposes `0x00c3` at
+/// all, so the two CIDs are mutually exclusive per device rather than
+/// competing for the same physical control.
+pub const GESTURE_BUTTON_ALT_CID: u16 = 0x00d7;
+
 /// Control IDs of the "DPI / ModeShift" button family. Whichever a device
 /// exposes (and can divert) is captured and mapped to
 /// [`ButtonId::DpiToggle`](openlogi_core::binding::ButtonId::DpiToggle): the MX
