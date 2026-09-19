@@ -192,6 +192,39 @@ fn online_without_telemetry_cancels_offline_deadline_and_keeps_last_reading() {
 }
 
 #[test]
+fn rename_without_telemetry_preserves_battery_and_cancels_offline_deadline() {
+    let mut config = enabled_config();
+    let key = "receiver:test-receiver:slot:1";
+    config.set_device_custom_name(key, Some("Office Mouse".into()));
+    let mut inv = inventory();
+    inv.paired[0].battery.as_mut().unwrap().status = BatteryStatus::ChargingSlow;
+    let mut publisher = PowerSourcePublisher::new(FakeBackend::default());
+    let now = Instant::now();
+    publisher.reconcile(&config, std::slice::from_ref(&inv), now);
+    assert_eq!(publisher.backend.live[key].name, "Office Mouse");
+
+    publisher.reconcile(&config, &[], now + Duration::from_secs(1));
+    assert!(publisher.next_deadline().is_some());
+    inv.paired[0].battery = None;
+    config.set_device_custom_name(key, Some("Renamed Mouse".into()));
+    publisher.reconcile(
+        &config,
+        std::slice::from_ref(&inv),
+        now + Duration::from_secs(2),
+    );
+    let accessory = &publisher.backend.live[key];
+    assert_eq!(accessory.name, "Renamed Mouse");
+    assert_eq!(accessory.percentage, 77);
+    assert_eq!(accessory.status, BatteryStatus::ChargingSlow);
+    assert_eq!(publisher.next_deadline(), None);
+    assert_eq!(publisher.backend.writes, 2);
+
+    publisher.reconcile(&config, &[inv], now + OFFLINE_GRACE * 2);
+    assert_eq!(publisher.backend.live.len(), 1);
+    assert_eq!(publisher.backend.writes, 2);
+}
+
+#[test]
 fn filters_receivers_vendor_direct_devices_and_unsupported_kinds() {
     for (vendor, product, kind, expected) in [
         (0x046d, 0xc548, DeviceKind::Mouse, 1),

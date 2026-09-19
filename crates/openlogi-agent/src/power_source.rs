@@ -164,7 +164,7 @@ impl<B: PowerSourceBackend> PowerSourcePublisher<B> {
             return;
         }
 
-        let online = online_accessories(config, inventories);
+        let online = online_accessories(config, inventories, &self.tracked);
         let mut error = None;
         for (identifier, accessory) in &online {
             // Presence is independent of telemetry and cancels any offline deadline.
@@ -237,6 +237,7 @@ impl<B: PowerSourceBackend> Drop for PowerSourcePublisher<B> {
 fn online_accessories(
     config: &Config,
     inventories: &[DeviceInventory],
+    tracked: &BTreeMap<String, Tracked>,
 ) -> BTreeMap<String, Option<AccessoryPower>> {
     let mut online = BTreeMap::new();
     for inventory in inventories {
@@ -271,7 +272,19 @@ fn online_accessories(
                 DeviceIdentity::from_parts(model.serial_number.as_deref(), model.unit_id)
             });
             let config_key = config.resolve_device_key(&stable_id, identity.as_ref());
-            let reading = paired.battery.as_ref().map(|battery| AccessoryPower {
+            // Metadata can change while telemetry is missing. Reuse only an
+            // accepted reading, never invent a battery level for a new device.
+            let battery = paired
+                .battery
+                .as_ref()
+                .map(|battery| (battery.percentage.min(100), battery.status))
+                .or_else(|| {
+                    tracked
+                        .get(&identifier)
+                        .and_then(|tracked| tracked.published.as_ref())
+                        .map(|published| (published.percentage, published.status))
+                });
+            let reading = battery.map(|(percentage, status)| AccessoryPower {
                 name: config_key
                     .as_ref()
                     .and_then(|key| config.device_custom_name(key.as_str()))
@@ -280,8 +293,8 @@ fn online_accessories(
                     .to_owned(),
                 identifier: identifier.clone(),
                 category,
-                percentage: battery.percentage.min(100),
-                status: battery.status,
+                percentage,
+                status,
             });
             online.insert(identifier, reading);
         }
