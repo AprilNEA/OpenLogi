@@ -266,7 +266,7 @@ impl FromStr for KeyCombo {
 
 fn parse_modifier(token: &str) -> Option<u8> {
     match token.to_ascii_lowercase().as_str() {
-        "cmd" | "command" | "meta" | "win" => Some(MOD_COMMAND),
+        "cmd" | "command" | "meta" | "win" | "super" => Some(MOD_COMMAND),
         "shift" => Some(MOD_SHIFT),
         "ctrl" | "control" => Some(MOD_CONTROL),
         "alt" | "option" => Some(MOD_OPTION),
@@ -347,6 +347,21 @@ mod tests {
         assert!(combo.has_option());
         assert_eq!(combo.key().code(), 0x50);
         assert_eq!(combo.rendered_label(), "Ctrl+Alt+Left");
+    }
+
+    #[test]
+    fn command_meta_win_and_super_are_the_same_modifier() {
+        for alias in ["Cmd", "Command", "Meta", "Win", "Super"] {
+            let combo = format!("{alias}+A")
+                .parse::<KeyCombo>()
+                .unwrap_or_else(|e| panic!("{alias}+A must parse: {e:?}"));
+            assert!(combo.has_command(), "{alias} must set the command bit");
+            assert_eq!(
+                combo.rendered_label(),
+                "Cmd+A",
+                "{alias} must render identically to Cmd"
+            );
+        }
     }
 
     #[test]
