@@ -394,3 +394,137 @@ fn shutdown_cleans_up_a_failed_initial_publication() {
     drop(publisher);
     assert_eq!(removals.get(), 1);
 }
+
+#[test]
+fn replacement_without_telemetry_does_not_inherit_previous_occupant_reading() {
+    for same_model in [false, true] {
+        let config = enabled_config();
+        let now = Instant::now();
+        let mut inv = inventory();
+        inv.paired[0].model_info = Some(DeviceModelInfo {
+            entity_count: 1,
+            serial_number: None,
+            unit_id: [1, 2, 3, 4],
+            transports: DeviceTransports::default(),
+            model_ids: [0xb034, 0, 0],
+            extended_model_id: 0,
+        });
+        let mut publisher = PowerSourcePublisher::new(FakeBackend::default());
+        publisher.reconcile(&config, std::slice::from_ref(&inv), now);
+        publisher.reconcile(&config, &[], now + Duration::from_secs(1));
+        inv.paired[0].battery = None;
+        if same_model {
+            inv.paired[0].model_info.as_mut().unwrap().unit_id = [5, 6, 7, 8];
+        } else {
+            inv.paired[0].wpid = Some(0xb035);
+            inv.paired[0].codename = Some("Replacement Mouse".into());
+            inv.paired[0].model_info = None;
+        }
+        publisher.reconcile(
+            &config,
+            std::slice::from_ref(&inv),
+            now + Duration::from_secs(2),
+        );
+        assert!(
+            publisher.backend.live.is_empty(),
+            "replacement must wait for its own reading"
+        );
+        assert_eq!(publisher.backend.writes, 1);
+        assert_eq!(publisher.backend.removals.get(), 1);
+        assert_eq!(
+            publisher.status(),
+            BatteryWidgetStatus::Active {
+                published_devices: 0
+            }
+        );
+        inv.paired[0].battery = Some(BatteryInfo {
+            percentage: 42,
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Charging,
+        });
+        publisher.reconcile(&config, &[inv], now + Duration::from_secs(3));
+        let reading = publisher.backend.live.values().next().unwrap();
+        assert_eq!(reading.percentage, 42);
+        assert_eq!(reading.status, BatteryStatus::Charging);
+    }
+}
+
+#[test]
+fn cleanup_failure_survives_repeated_empty_reconciliation_until_publication_recovers() {
+    for disabled in [false, true] {
+        let mut publisher = PowerSourcePublisher::new(FakeBackend::default());
+        let config = enabled_config();
+        let now = Instant::now();
+        publisher.reconcile(&config, &[inventory()], now);
+        publisher.backend.fail_remove = true;
+        let cleanup_config = if disabled {
+            Config::default()
+        } else {
+            enabled_config()
+        };
+        publisher.reconcile(&cleanup_config, &[], now);
+        publisher.reconcile(&cleanup_config, &[], now + OFFLINE_GRACE);
+        let failure = publisher.status();
+        assert!(matches!(
+            failure,
+            BatteryWidgetStatus::Failed {
+                published_devices: 0,
+                ..
+            }
+        ));
+        for offset in [1, 2, 3] {
+            publisher.reconcile(
+                &cleanup_config,
+                &[],
+                now + OFFLINE_GRACE + Duration::from_secs(offset),
+            );
+            assert_eq!(publisher.status(), failure);
+        }
+        publisher.clear_all();
+        assert_eq!(publisher.status(), failure);
+        assert_eq!(publisher.backend.removals.get(), 1);
+        publisher.backend.fail_remove = false;
+        publisher.reconcile(&config, &[inventory()], now + OFFLINE_GRACE);
+        assert_eq!(
+            publisher.status(),
+            BatteryWidgetStatus::Active {
+                published_devices: 1
+            }
+        );
+        publisher.reconcile(&Config::default(), &[], now + OFFLINE_GRACE);
+        assert_eq!(publisher.status(), BatteryWidgetStatus::Disabled);
+        assert_eq!(publisher.backend.removals.get(), 2);
+    }
+}
+
+#[test]
+fn replacement_publication_does_not_hide_same_pass_cleanup_failure() {
+    let mut publisher = PowerSourcePublisher::new(FakeBackend::default());
+    let config = enabled_config();
+    let now = Instant::now();
+    let mut inv = inventory();
+    publisher.reconcile(&config, std::slice::from_ref(&inv), now);
+    publisher.backend.fail_remove = true;
+    inv.paired[0].wpid = Some(0xb035);
+    inv.paired[0].battery.as_mut().unwrap().percentage = 42;
+    publisher.reconcile(&config, std::slice::from_ref(&inv), now);
+    let failure = publisher.status();
+    assert!(matches!(
+        failure,
+        BatteryWidgetStatus::Failed {
+            published_devices: 1,
+            ..
+        }
+    ));
+    assert_eq!(
+        publisher.backend.live.values().next().unwrap().percentage,
+        42
+    );
+    assert_eq!(publisher.backend.removals.get(), 1);
+    publisher.reconcile(&config, &[inv], now);
+    assert_eq!(publisher.status(), failure);
+    publisher.backend.fail_remove = false;
+    let removals = publisher.backend.removals.clone();
+    drop(publisher);
+    assert_eq!(removals.get(), 2, "each occupant is released exactly once");
+}
