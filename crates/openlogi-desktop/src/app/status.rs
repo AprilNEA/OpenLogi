@@ -11,7 +11,7 @@ use gpui_component::{
     v_flex,
 };
 
-use crate::app::menu::OpenConfigFolder;
+use crate::app::menu::file_url;
 use crate::ui::theme::{self, ContentWidth, FOOTER_H, Palette, Typography as _};
 
 /// Centered spinner over a muted one-line caption — the quiet "still working"
@@ -110,7 +110,23 @@ pub(super) fn config_issue_body(message: SharedString, cx: &App) -> Div {
                 .child(
                     Button::new("open-config-folder")
                         .label(tr!("app.open_configuration_folder"))
-                        .on_click(|_, _, cx| cx.dispatch_action(&OpenConfigFolder)),
+                        // Not `cx.dispatch_action(&OpenConfigFolder)`: that
+                        // routes through gpui's *active* window and silently
+                        // drops the action when the handle can't be
+                        // resolved (`.log_err()` in `App::dispatch_action`).
+                        // This frame is the one place a second window (the
+                        // update-consent prompt, opened whenever a
+                        // fresh/ephemeral config hasn't seen it yet) is
+                        // reliably in play alongside it, which is exactly
+                        // when that resolution can fail on Windows — call
+                        // the handler's own logic directly instead.
+                        .on_click(|_, _, cx| {
+                            if let Ok(path) = openlogi_core::paths::config_dir()
+                                && let Some(url) = file_url(&path)
+                            {
+                                cx.open_url(&url);
+                            }
+                        }),
                 )
                 .child(
                     Button::new("restart-after-config-error")
