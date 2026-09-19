@@ -542,6 +542,10 @@ open_application_or_folder = "Відкрити програму або папк�
 [keyboard]
 editor_unavailable = "Редактор недоступний"
 no_keyboard_image_available = "Зображення клавіатури недоступне"
+home_key = "Клавіша Додому"
+app_switch_key = "Клавіша перемикання застосунків"
+menu_key = "Клавіша меню"
+back_key = "Клавіша Назад"
 search_key = "Клавіша пошуку"
 dictation_key = "Клавіша диктування"
 emoji_key = "Клавіша емодзі"

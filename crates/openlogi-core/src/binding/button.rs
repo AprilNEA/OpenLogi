@@ -73,10 +73,22 @@ pub enum ButtonId {
     /// Tilting the main wheel right — `0x1b04` CID `0x005d` ("Right Scroll"),
     /// Logi metadata slot `SLOT_NAME_RIGHT_SCROLL_BUTTON`. Counterpart to
     /// [`ButtonId::WheelTiltLeft`].
+    WheelTiltRight,
+    /// Keyboard "Home" control (`0x1b04` CID `0x00bb`, task
+    /// `MultiPlatform Home`, `0x97`) — F4 on the K380.
+    KeyHome,
+    /// Keyboard "App Switch" control (CID `0x00ba`, task
+    /// `MultiPlatform App Switch`, `0x96`) — F5 on the K380.
+    KeyAppSwitch,
+    /// Keyboard "Menu" control (CID `0x00bc`, task `MultiPlatform Menu`,
+    /// `0x98`) — F6 on the K380.
+    KeyMenu,
+    /// Keyboard "Back" control (CID `0x00bd`, task `MultiPlatform Back`,
+    /// `0x99`) — F7 on the K380.
     ///
     /// Declared last: the TOML config and any serialized form encode the
     /// variant identifier / index, so new buttons are append-only.
-    WheelTiltRight,
+    KeyBack,
 }
 
 impl ButtonId {
@@ -103,7 +115,11 @@ impl ButtonId {
     /// [`ButtonId::ALL`]: that array seeds mouse defaults and the mouse
     /// popover trigger list, while keyboard keys stay native unless the user
     /// binds them (an unbound key is never diverted).
-    pub const KEYBOARD_KEYS: [ButtonId; 9] = [
+    pub const KEYBOARD_KEYS: [ButtonId; 13] = [
+        ButtonId::KeyHome,
+        ButtonId::KeyAppSwitch,
+        ButtonId::KeyMenu,
+        ButtonId::KeyBack,
         ButtonId::KeySearch,
         ButtonId::KeyDictation,
         ButtonId::KeyEmoji,
@@ -188,6 +204,10 @@ impl ButtonId {
             ButtonId::KeyVolumeDown => "Volume Down Key",
             ButtonId::KeyVolumeUp => "Volume Up Key",
             ButtonId::HapticPanel => "Haptic Panel",
+            ButtonId::KeyHome => "Home Key",
+            ButtonId::KeyAppSwitch => "App Switch Key",
+            ButtonId::KeyMenu => "Menu Key",
+            ButtonId::KeyBack => "Back Key",
         }
     }
 
@@ -217,6 +237,10 @@ impl ButtonId {
             ButtonId::KeyVolumeDown => "keyboard.volume_down_key",
             ButtonId::KeyVolumeUp => "keyboard.volume_up_key",
             ButtonId::HapticPanel => "actions.haptic_panel",
+            ButtonId::KeyHome => "keyboard.home_key",
+            ButtonId::KeyAppSwitch => "keyboard.app_switch_key",
+            ButtonId::KeyMenu => "keyboard.menu_key",
+            ButtonId::KeyBack => "keyboard.back_key",
         }
     }
 }

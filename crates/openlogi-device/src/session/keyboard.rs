@@ -47,7 +47,14 @@ use crate::reprog_controls::{self, RawControlEvent, ReprogControlsV4};
 /// `(0x1b04 control ID, ButtonId)` pairs. CID values match Logitech's control
 /// catalog (cross-checked against Solaar's `special_keys.py`); the F-row
 /// positions are the Signature-series layout.
-pub const KEYBOARD_KEY_CIDS: [(u16, ButtonId); 9] = [
+pub const KEYBOARD_KEY_CIDS: [(u16, ButtonId); 13] = [
+    // K380 F4-F7: MultiPlatform task-id family, cross-checked against
+    // `openlogi diag controls` output and Solaar's `special_keys.py`
+    // (task ids 0x96-0x99 in the official 0x1b04 task list).
+    (0x00bb, ButtonId::KeyHome),
+    (0x00ba, ButtonId::KeyAppSwitch),
+    (0x00bc, ButtonId::KeyMenu),
+    (0x00bd, ButtonId::KeyBack),
     (0x00d4, ButtonId::KeySearch),
     (0x0103, ButtonId::KeyDictation),
     (0x0108, ButtonId::KeyEmoji),

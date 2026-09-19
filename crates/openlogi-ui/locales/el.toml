@@ -542,6 +542,10 @@ open_application_or_folder = "Άνοιγμα εφαρμογής ή φακέλο�
 [keyboard]
 editor_unavailable = "Ο επεξεργαστής δεν είναι διαθέσιμος"
 no_keyboard_image_available = "Δεν υπάρχει διαθέσιμη εικόνα πληκτρολογίου"
+home_key = "Πλήκτρο αρχικής σελίδας"
+app_switch_key = "Πλήκτρο εναλλαγής εφαρμογών"
+menu_key = "Πλήκτρο μενού"
+back_key = "Πλήκτρο πίσω"
 search_key = "Πλήκτρο αναζήτησης"
 dictation_key = "Πλήκτρο υπαγόρευσης"
 emoji_key = "Πλήκτρο emoji"
