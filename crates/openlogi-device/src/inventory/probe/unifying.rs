@@ -23,7 +23,7 @@ use tokio::time::timeout;
 use tracing::debug;
 
 use super::{
-    NodeProbe, PassContext, ProbeDeadlines, ProbeVerdict, RECEIVER_OPERATION_TIMEOUT,
+    NodeProbe, PassContext, ProbeTimeouts, ProbeVerdict, RECEIVER_OPERATION_TIMEOUT,
     RECEIVER_UID_TIMEOUT, UNIFYING_TRIGGER_ATTEMPT_TIMEOUT, UNIFYING_TRIGGER_RETRY_DELAY,
 };
 use crate::backend::NodeInfo;
@@ -91,7 +91,7 @@ pub(super) async fn probe_unifying_receiver(
         &unifying,
         pairing_count,
         pass.subscriptions,
-        pass.deadlines.arrival_drain,
+        pass.timeouts.arrival_drain,
     )
     .await
     else {
@@ -326,7 +326,7 @@ pub(in crate::inventory) async fn probe_unifying_slot(
     // announced itself into "offline" — and don't probe an offline slot at
     // all, which would burn the budget on a link the receiver just reported
     // as not established.
-    let probe_budget = unifying_probe_budget(cached, pass.now, pass.deadlines);
+    let probe_budget = unifying_probe_budget(cached, pass.now, pass.timeouts);
     let probe_result = timeout(
         probe_budget,
         probe_or_reuse(
@@ -386,12 +386,12 @@ pub(in crate::inventory) async fn probe_unifying_slot(
 pub(in crate::inventory) fn unifying_probe_budget(
     cached: Option<&Cached>,
     now: Instant,
-    deadlines: &ProbeDeadlines,
+    timeouts: &ProbeTimeouts,
 ) -> Duration {
     if cached.is_some_and(|entry| !is_stale(entry, now)) {
-        deadlines.unifying_cached_slot_probe
+        timeouts.unifying_cached_slot_probe
     } else {
-        deadlines.unifying_slot_probe
+        timeouts.unifying_slot_probe
     }
 }
 

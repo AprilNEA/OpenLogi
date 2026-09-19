@@ -39,7 +39,7 @@ pub(super) async fn probe_bolt_receiver(
     debug!(?pairing_count, "receiver reports pairing count");
 
     let connections =
-        drain_device_arrival(&bolt, pass.subscriptions, pass.deadlines.arrival_drain).await;
+        drain_device_arrival(&bolt, pass.subscriptions, pass.timeouts.arrival_drain).await;
     debug!(events = connections.len(), "drained device-arrival events");
     let by_slot: HashMap<u8, BoltDeviceConnection> =
         connections.into_iter().map(|c| (c.index, c)).collect();
@@ -206,7 +206,7 @@ async fn walk_bolt_slot(
     // drop *every* device on the receiver. A timed-out slot falls back to its
     // cached probe (its pairing-register identity read fine in phase 1),
     // mirroring the Unifying path (#218).
-    let slot_budget = pass.deadlines.bolt_slot_probe;
+    let slot_budget = pass.timeouts.bolt_slot_probe;
     let probe_result = timeout(
         slot_budget,
         probe_or_reuse(

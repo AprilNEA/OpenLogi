@@ -33,7 +33,7 @@ use cache::{CACHE_MISS_GRACE, CacheKey, CacheOutcome, Cached};
 use channel_cache::ChannelCache;
 use events::{ChannelEventSubscriptions, EventNotifier, EventSubscriptionHandle};
 use persist::{ProbeCacheSnapshot, ProbeCacheStore};
-use probe::{NodeProbe, PassContext, ProbeDeadlines, ProbeVerdict, probe_one};
+use probe::{NodeProbe, PassContext, ProbeTimeouts, ProbeVerdict, probe_one};
 #[cfg(test)]
 use probe::{UNIFYING_CACHED_SLOT_PROBE, UNIFYING_SLOT_PROBE};
 
@@ -90,8 +90,8 @@ pub struct Enumerator {
     retry_needed_last_tick: bool,
     /// Coalesced lifecycle-event sink installed on newly opened channels.
     event_notifier: Option<EventNotifier>,
-    /// The deadlines every pass's probes run under.
-    deadlines: ProbeDeadlines,
+    /// The timeouts every pass's probes run under.
+    timeouts: ProbeTimeouts,
 }
 
 /// An open channel to a receiver / direct-device HID node, held across
@@ -351,7 +351,7 @@ impl Enumerator {
             open_failures_last_tick: false,
             retry_needed_last_tick: false,
             event_notifier: None,
-            deadlines: ProbeDeadlines::DEFAULT,
+            timeouts: ProbeTimeouts::DEFAULT,
         }
     }
 
@@ -532,10 +532,10 @@ impl Enumerator {
 
         // Probe each open channel concurrently, sharing `&cache` read-only;
         // updates are collected and applied afterwards (no `RefCell`). Each
-        // probe bounds its own I/O by the pass's deadlines (`probe_one`).
+        // probe bounds its own I/O by the pass's timeouts (`probe_one`).
         let results = {
             let cache = &self.cache;
-            let deadlines = &self.deadlines;
+            let timeouts = &self.timeouts;
             active
                 .into_iter()
                 .map(|(info, channel, events)| async move {
@@ -544,7 +544,7 @@ impl Enumerator {
                         cache,
                         now,
                         subscriptions: events.as_ref(),
-                        deadlines,
+                        timeouts,
                     };
                     let probe = probe_one(info, Arc::clone(&channel), pass).await;
                     (node, channel, probe)

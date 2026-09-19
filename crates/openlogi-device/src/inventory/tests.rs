@@ -21,7 +21,7 @@ use super::probe::{
     retry_arrival_trigger, unifying_probe_budget,
 };
 use super::{
-    ChannelCache, Enumerator, ONESHOT_ATTEMPTS, OneShotScan, ProbeDeadlines, ScanPass,
+    ChannelCache, Enumerator, ONESHOT_ATTEMPTS, OneShotScan, ProbeTimeouts, ScanPass,
     UNIFYING_CACHED_SLOT_PROBE, UNIFYING_SLOT_PROBE, retained_nodes, routes_for_inventories,
     settle_probe, settle_unhealthy_node,
 };
@@ -439,22 +439,18 @@ fn cached_probe_is_reused_until_refresh_interval() {
 #[test]
 fn unifying_cache_hits_use_only_the_battery_refresh_budget() {
     let cached = cache_entry();
-    let deadlines = &ProbeDeadlines::DEFAULT;
+    let timeouts = &ProbeTimeouts::DEFAULT;
     assert_eq!(
-        unifying_probe_budget(Some(&cached), cached.probed_at, deadlines),
+        unifying_probe_budget(Some(&cached), cached.probed_at, timeouts),
         UNIFYING_CACHED_SLOT_PROBE
     );
     assert_eq!(
-        unifying_probe_budget(
-            Some(&cached),
-            cached.probed_at + REFRESH_INTERVAL,
-            deadlines
-        ),
+        unifying_probe_budget(Some(&cached), cached.probed_at + REFRESH_INTERVAL, timeouts),
         UNIFYING_SLOT_PROBE,
         "stale entries still get enough time for a full feature walk"
     );
     assert_eq!(
-        unifying_probe_budget(None, Instant::now(), deadlines),
+        unifying_probe_budget(None, Instant::now(), timeouts),
         UNIFYING_SLOT_PROBE,
         "first sight still gets the full feature-walk budget"
     );
@@ -486,7 +482,7 @@ async fn offline_arrival_rebroadcasts_surface_without_probing_the_device() {
         cache: &cache,
         now: Instant::now(),
         subscriptions: None,
-        deadlines: &ProbeDeadlines::DEFAULT,
+        timeouts: &ProbeTimeouts::DEFAULT,
     };
     let (device, _) = probe_unifying_slot(&channel, &event, "SERIAL", pass)
         .await
@@ -1236,11 +1232,11 @@ fn bolt_receiver_node(tag: &str) -> NodeInfo {
     info
 }
 
-/// Deadlines shrunk to test scale, in the production proportions: the slot
+/// Timeouts shrunk to test scale, in the production proportions: the slot
 /// probe and the drain fit the receiver budget with room, and the register
 /// lock wait is long enough for a holder to release inside it.
-fn quick_deadlines() -> ProbeDeadlines {
-    ProbeDeadlines {
+fn quick_timeouts() -> ProbeTimeouts {
+    ProbeTimeouts {
         register_lock_wait: Duration::from_secs(2),
         receiver_budget: Duration::from_millis(900),
         direct_budget: Duration::from_millis(900),
@@ -1276,7 +1272,7 @@ fn stale_silent_slot_cache() -> (CacheKey, HashMap<CacheKey, Cached>) {
 #[tokio::test]
 async fn a_receiver_probe_that_waited_for_its_register_phase_keeps_its_whole_io_budget() {
     let info = bolt_receiver_node("register-phase-wait");
-    let deadlines = quick_deadlines();
+    let timeouts = quick_timeouts();
     let lock_held_for = Duration::from_millis(600);
     // Another process (here: this test) holds the receiver's register phase,
     // releasing it inside the wait but late enough that wait + I/O outruns
@@ -1295,16 +1291,16 @@ async fn a_receiver_probe_that_waited_for_its_register_phase_keeps_its_whole_io_
         cache: &cache,
         now: Instant::now(),
         subscriptions: None,
-        deadlines: &deadlines,
+        timeouts: &timeouts,
     };
 
     let started = Instant::now();
     let probe = probe_one(info, channel, pass).await;
     release.await.unwrap();
 
-    let io_floor = deadlines.arrival_drain + deadlines.bolt_slot_probe;
+    let io_floor = timeouts.arrival_drain + timeouts.bolt_slot_probe;
     assert!(
-        lock_held_for + io_floor > deadlines.receiver_budget,
+        lock_held_for + io_floor > timeouts.receiver_budget,
         "the test must compose a wait and an I/O floor that together outrun the budget"
     );
     assert!(
@@ -1344,9 +1340,9 @@ async fn a_receiver_probe_that_waited_for_its_register_phase_keeps_its_whole_io_
 #[tokio::test]
 async fn a_receiver_probe_defers_when_the_register_phase_is_held_past_the_wait() {
     let info = bolt_receiver_node("register-phase-held");
-    let deadlines = ProbeDeadlines {
+    let timeouts = ProbeTimeouts {
         register_lock_wait: Duration::from_millis(100),
-        ..quick_deadlines()
+        ..quick_timeouts()
     };
     let _held = host_lock::try_lock(&host_lock::node_lock_name(&info.id))
         .unwrap()
@@ -1358,7 +1354,7 @@ async fn a_receiver_probe_defers_when_the_register_phase_is_held_past_the_wait()
         cache: &cache,
         now: Instant::now(),
         subscriptions: None,
-        deadlines: &deadlines,
+        timeouts: &timeouts,
     };
 
     let probe = probe_one(info, channel, pass).await;
@@ -1377,9 +1373,9 @@ async fn a_receiver_probe_defers_when_the_register_phase_is_held_past_the_wait()
 #[tokio::test]
 async fn a_receiver_probe_whose_io_outruns_the_budget_is_failed() {
     let info = bolt_receiver_node("io-outruns-budget");
-    let deadlines = ProbeDeadlines {
+    let timeouts = ProbeTimeouts {
         receiver_budget: Duration::from_millis(150),
-        ..quick_deadlines()
+        ..quick_timeouts()
     };
     let (raw, _handle) = ScriptedRawHidChannel::with_responder(bolt_receiver_with_a_silent_slot);
     let channel = scripted_channel(raw.presenting_as(BOLT_RECEIVER_PID)).await;
@@ -1388,7 +1384,7 @@ async fn a_receiver_probe_whose_io_outruns_the_budget_is_failed() {
         cache: &cache,
         now: Instant::now(),
         subscriptions: None,
-        deadlines: &deadlines,
+        timeouts: &timeouts,
     };
 
     let probe = probe_one(info, channel, pass).await;

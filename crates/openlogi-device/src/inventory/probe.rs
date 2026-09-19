@@ -73,7 +73,7 @@ const MAX_BOLT_SLOTS: u8 = 6;
 /// no timeout of its own, so without this a single unresponsive (e.g. asleep)
 /// device wedges the whole enumeration, so a permanent hang would stall every
 /// later event or recovery reconciliation. Time spent waiting for the node's
-/// register phase is not I/O and sits outside it — see [`ProbeDeadlines`].
+/// register phase is not I/O and sits outside it — see [`ProbeTimeouts`].
 ///
 /// A timed-out node is skipped and re-probed by the bounded two-second repair
 /// deadline, and the first probe usually wakes the device so the retry succeeds
@@ -110,7 +110,7 @@ const PROBE_BUDGET: Duration = Duration::from_secs(25);
 /// recovery (dead buttons until restart). 13 s clears the honest worst case
 /// — and only that: the wait for the receiver's register phase, up to
 /// [`host_lock::RECEIVER_REGISTER_WAIT`] on its own, is taken before this
-/// budget starts (see [`ProbeDeadlines`]), or the two together would trip
+/// budget starts (see [`ProbeTimeouts`]), or the two together would trip
 /// it on a working receiver.
 const RECEIVER_PROBE_BUDGET: Duration = Duration::from_secs(13);
 
@@ -152,7 +152,7 @@ pub(super) const UNIFYING_CACHED_SLOT_PROBE: Duration = Duration::from_millis(75
 /// after the 1.5 s arrival drain and Bolt's sequential pairing-register pass.
 const BOLT_SLOT_PROBE: Duration = Duration::from_secs(10);
 
-/// The deadlines one probe pass runs under, kept together so their
+/// The timeouts one probe pass runs under, kept together so their
 /// composition — which waits sit inside which budget — is one place to read,
 /// and one value for a test to shrink.
 ///
@@ -161,7 +161,7 @@ const BOLT_SLOT_PROBE: Duration = Duration::from_secs(10);
 /// under that budget runs an `arrival_drain` and slot walks each bounded by
 /// their own slot probe. A direct device runs under `direct_budget` alone.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct ProbeDeadlines {
+pub(crate) struct ProbeTimeouts {
     /// How long a receiver probe waits for another OpenLogi process to
     /// release the node's register phase before settling as deferred
     /// ([`probe::ProbeVerdict::Deferred`]). Outside the I/O budget.
@@ -182,8 +182,8 @@ pub(crate) struct ProbeDeadlines {
     pub(crate) unifying_cached_slot_probe: Duration,
 }
 
-impl ProbeDeadlines {
-    /// The production deadlines.
+impl ProbeTimeouts {
+    /// The production timeouts.
     pub(crate) const DEFAULT: Self = Self {
         register_lock_wait: host_lock::RECEIVER_REGISTER_WAIT,
         receiver_budget: RECEIVER_PROBE_BUDGET,
@@ -196,13 +196,13 @@ impl ProbeDeadlines {
 }
 
 /// What every probe of one pass shares: the cache it reads, the pass's
-/// clock, the event sink, and the deadlines it runs under.
+/// clock, the event sink, and the timeouts it runs under.
 #[derive(Clone, Copy)]
 pub(super) struct PassContext<'a> {
     pub(super) cache: &'a HashMap<CacheKey, Cached>,
     pub(super) now: Instant,
     pub(super) subscriptions: Option<&'a EventSubscriptionHandle>,
-    pub(super) deadlines: &'a ProbeDeadlines,
+    pub(super) timeouts: &'a ProbeTimeouts,
 }
 
 /// One node probe's verdict about its own trustworthiness. An enum on
@@ -305,12 +305,12 @@ impl NodeProbe {
 }
 
 /// Probe one open HID++ node (channel reused across ticks by the caller),
-/// under the pass's deadlines.
+/// under the pass's timeouts.
 ///
 /// A receiver's probe first takes the node's register phase
 /// ([`host_lock::lock_receiver_registers`]) — or settles as
 /// [`ProbeVerdict::Deferred`] when another OpenLogi process still holds it
-/// after [`ProbeDeadlines::register_lock_wait`] — and only then starts its
+/// after [`ProbeTimeouts::register_lock_wait`] — and only then starts its
 /// I/O budget. The wait is time spent not talking to the receiver, so it
 /// must not count against the budget the receiver's real worst case was
 /// sized for: taken together, a four-second wait plus a legitimate deep
@@ -328,13 +328,13 @@ pub(super) async fn probe_one(
     // with concurrent opens of one node).
     let receiver = is_receiver_pid(info.product_id);
     let budget = if receiver {
-        pass.deadlines.receiver_budget
+        pass.timeouts.receiver_budget
     } else {
-        pass.deadlines.direct_budget
+        pass.timeouts.direct_budget
     };
     match receiver::detect(Arc::clone(&channel)) {
         Some(Receiver::Bolt(bolt)) => {
-            let Some(registers) = lock_receiver_registers(&info, pass.deadlines).await else {
+            let Some(registers) = lock_receiver_registers(&info, pass.timeouts).await else {
                 return NodeProbe::deferred();
             };
             within_budget(
@@ -345,7 +345,7 @@ pub(super) async fn probe_one(
             .await
         }
         Some(Receiver::Unifying(unifying)) => {
-            let Some(registers) = lock_receiver_registers(&info, pass.deadlines).await else {
+            let Some(registers) = lock_receiver_registers(&info, pass.timeouts).await else {
                 return NodeProbe::deferred();
             };
             within_budget(
@@ -368,9 +368,9 @@ pub(super) async fn probe_one(
 /// Take the receiver's register phase for this probe, or `None` to defer it.
 async fn lock_receiver_registers(
     info: &NodeInfo,
-    deadlines: &ProbeDeadlines,
+    timeouts: &ProbeTimeouts,
 ) -> Option<ReceiverRegisterPhase> {
-    host_lock::lock_receiver_registers(&info.id, deadlines.register_lock_wait).await
+    host_lock::lock_receiver_registers(&info.id, timeouts.register_lock_wait).await
 }
 
 /// Bound a probe's device I/O by `budget`. Burning the whole budget — an
