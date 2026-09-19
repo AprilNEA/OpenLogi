@@ -34,12 +34,13 @@ pub enum Action {
     /// Middle mouse button (wheel click).
     MiddleClick,
     /// Mouse "back" side button (extra button 4). Synthesizes the real mouse
-    /// button event, which browsers and most apps interpret as "navigate back"
-    /// natively — unlike [`Action::BrowserBack`], which sends ⌘[ and is ignored
-    /// by many apps.
+    /// button event, which the Chromium/Firefox-family browsers interpret as
+    /// "navigate back" — but on macOS, Finder and Safari both ignore it.
+    /// [`Action::BrowserBack`] is honoured by Finder, Safari, Chrome and
+    /// Firefox alike on every platform.
     MouseBack,
     /// Mouse "forward" side button (extra button 5). Native counterpart to
-    /// [`Action::MouseBack`]; see [`Action::BrowserForward`] for the ⌘] form.
+    /// [`Action::MouseBack`]; see [`Action::BrowserForward`].
     MouseForward,
 
     // ── Editing ──────────────────────────────────────────────────────────────
@@ -66,9 +67,16 @@ pub enum Action {
     Save,
 
     // ── Browser / Navigation ──────────────────────────────────────────────────
-    /// Navigate backward in browser history.
+    /// Navigate backward — despite the name, this is honoured by Finder as
+    /// well as Safari, Chrome and Firefox on macOS, unlike
+    /// [`Action::MouseBack`]'s native button event. The synthesis differs per
+    /// platform: ⌘[ on macOS, `Alt+Left` on Linux (Ctrl+[ is not a browser
+    /// shortcut there), and Windows' own dedicated hardware back key
+    /// (`VK_BROWSER_BACK`), not a chord at all.
     BrowserBack,
-    /// Navigate forward in browser history.
+    /// Navigate forward — see [`Action::BrowserBack`]; the per-platform
+    /// mirror is ⌘] on macOS, `Alt+Right` on Linux, and Windows'
+    /// `VK_BROWSER_FORWARD` hardware key.
     BrowserForward,
     /// Open a new tab (⌘T / Ctrl+T).
     NewTab,
