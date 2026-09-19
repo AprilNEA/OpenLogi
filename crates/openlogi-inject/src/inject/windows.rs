@@ -4,6 +4,14 @@
 use std::mem::size_of;
 use std::sync::{LazyLock, Mutex};
 
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LUID};
+use windows_sys::Win32::Security::{
+    AdjustTokenPrivileges, LUID_AND_ATTRIBUTES, LookupPrivilegeValueW, SE_PRIVILEGE_ENABLED,
+    TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
+};
+use windows_sys::Win32::System::Power::SetSuspendState;
+use windows_sys::Win32::System::Shutdown::LockWorkStation;
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, MOUSEEVENTF_HWHEEL,
     MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
@@ -25,7 +33,6 @@ static SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
     LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
 
 const VK_D: u16 = 0x44;
-const VK_L: u16 = 0x4C;
 const VK_S: u16 = 0x53;
 const VK_TAB: u16 = 0x09;
 const VK_LEFT: u16 = 0x25;
@@ -125,8 +132,7 @@ fn press_shortcut(shortcut: Shortcut) {
 }
 
 /// Dispatch a window-manager or power [`NativeAction`]. macOS window-manager
-/// concepts map to their nearest Windows shortcut; `Sleep` has no clean
-/// synthesis (see the comment below) and is skipped.
+/// concepts map to their nearest Windows shortcut.
 fn dispatch_native(native: NativeAction) {
     match native {
         NativeAction::MissionControl | NativeAction::AppExpose => post_key(VK_TAB, &[VK_LWIN]),
@@ -134,19 +140,142 @@ fn dispatch_native(native: NativeAction) {
         NativeAction::NextDesktop => post_key(VK_RIGHT, &[VK_LWIN, VK_CONTROL]),
         NativeAction::ShowDesktop => post_key(VK_D, &[VK_LWIN]),
         NativeAction::LaunchpadShow => post_key(VK_LWIN, &[]),
-        NativeAction::LockScreen => post_key(VK_L, &[VK_LWIN]),
+        // Win+L is handled by winlogon's own secure-desktop hotkey, which
+        // does not reliably react to a `SendInput`-synthesised Win key (#1266)
+        // — call the documented API directly instead, as the macOS backend
+        // already does for `Sleep` below.
+        NativeAction::LockScreen => lock_workstation(),
         // Win+Shift+S opens the snip overlay, which serves both full-screen
         // and region capture on Windows.
         NativeAction::Screenshot | NativeAction::CaptureRegion => {
             post_key(VK_S, &[VK_LWIN, VK_SHIFT]);
         }
-        // Suspending reliably needs `SetSuspendState` (powrprof.dll), which
-        // hibernates instead when hibernation is enabled — no clean win from
-        // a background agent, so the action is skipped on Windows for now.
-        NativeAction::Sleep => {
-            tracing::debug!("Sleep has no Windows synthesis yet — action skipped");
-        }
+        NativeAction::Sleep => sleep_system(),
     }
+}
+
+/// Lock the session via the documented `LockWorkStation` API. Needs no
+/// special privilege, unlike [`sleep_system`].
+fn lock_workstation() {
+    // SAFETY: `LockWorkStation` takes no arguments and returns a plain BOOL;
+    // a `0` result only means the call failed, which we simply log.
+    if unsafe { LockWorkStation() } == 0 {
+        tracing::warn!("LockWorkStation failed");
+    }
+}
+
+/// Serializes the enable-suspend-disable sequence in [`sleep_system`] so two
+/// concurrent Sleep requests cannot interleave their privilege toggles (e.g.
+/// one disabling the shared process-wide privilege while the other's
+/// `SetSuspendState` call still needs it enabled).
+static SLEEP_LOCK: Mutex<()> = Mutex::new(());
+
+/// Suspend the system via `SetSuspendState`. Unlike `LockWorkStation`, this
+/// needs the `SeShutdownPrivilege` privilege enabled on the process token
+/// first — every process has the privilege available but disabled by
+/// default, per the standard Win32 shutdown-privilege dance. The privilege is
+/// disabled again afterward (success or failure): it is a process-wide
+/// attribute of the token, not scoped to this call, so leaving it enabled
+/// would grant every later line of code in this long-running agent process
+/// authority it never asked for.
+///
+/// `bHibernate = FALSE` requests sleep (S3), not hibernation, but Windows may
+/// still hibernate anyway under Hybrid Sleep — the same caveat applies to the
+/// Start menu's own Sleep button, so it isn't treated as a failure here.
+fn sleep_system() {
+    let _guard = SLEEP_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    let Some(token) = open_process_token() else {
+        tracing::warn!("could not open process token — Sleep skipped");
+        return;
+    };
+    if !adjust_shutdown_privilege(token, SE_PRIVILEGE_ENABLED) {
+        tracing::warn!("could not enable SeShutdownPrivilege — Sleep skipped");
+        // SAFETY: `token` was successfully opened by `open_process_token`.
+        unsafe {
+            CloseHandle(token);
+        }
+        return;
+    }
+
+    // SAFETY: no pointers involved; `bforce = false` and
+    // `bwakeupeventsdisabled = false` request a normal, wake-capable suspend.
+    if !unsafe { SetSuspendState(false, false, false) } {
+        tracing::warn!("SetSuspendState failed");
+    }
+
+    if !adjust_shutdown_privilege(token, 0) {
+        tracing::warn!("could not disable SeShutdownPrivilege after Sleep");
+    }
+    // SAFETY: `token` was successfully opened by `open_process_token`.
+    unsafe {
+        CloseHandle(token);
+    }
+}
+
+/// Open the current process token for privilege query+adjust. `None` on
+/// failure.
+fn open_process_token() -> Option<HANDLE> {
+    let mut token: HANDLE = std::ptr::null_mut();
+    // SAFETY: `GetCurrentProcess` returns a pseudo-handle needing no closing;
+    // `token` is a valid out-pointer for `OpenProcessToken` to fill in.
+    let opened = unsafe {
+        OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+            &raw mut token,
+        )
+    };
+    (opened != 0).then_some(token)
+}
+
+/// Set `SeShutdownPrivilege`'s attributes on `token` — `SE_PRIVILEGE_ENABLED`
+/// to enable it, `0` to disable it — following the standard Win32 pattern:
+/// look up the privilege's LUID, then apply `attributes`. `false` on any
+/// step's failure. Does not close `token`; the caller owns its lifetime.
+fn adjust_shutdown_privilege(token: HANDLE, attributes: u32) -> bool {
+    let privilege_name: Vec<u16> = "SeShutdownPrivilege\0".encode_utf16().collect();
+
+    let mut luid = LUID {
+        LowPart: 0,
+        HighPart: 0,
+    };
+    // SAFETY: `privilege_name` is a valid null-terminated UTF-16 string, kept
+    // alive for the duration of this call; `luid` is a valid out-pointer.
+    let looked_up =
+        unsafe { LookupPrivilegeValueW(std::ptr::null(), privilege_name.as_ptr(), &raw mut luid) };
+    if looked_up == 0 {
+        return false;
+    }
+
+    let privileges = TOKEN_PRIVILEGES {
+        PrivilegeCount: 1,
+        Privileges: [LUID_AND_ATTRIBUTES {
+            Luid: luid,
+            Attributes: attributes,
+        }],
+    };
+    // SAFETY: `token` is a valid, adjustable handle owned by the caller;
+    // `privileges` describes exactly one entry, matching `PrivilegeCount`;
+    // the remaining pointers are documented as optional and null here.
+    let adjusted = unsafe {
+        AdjustTokenPrivileges(
+            token,
+            0,
+            &raw const privileges,
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    // `AdjustTokenPrivileges` returns nonzero even when it silently applied
+    // none of the requested changes — `GetLastError` is the only way to
+    // tell, per its own documentation. Read it immediately: any further call
+    // can overwrite the thread's last error.
+    let fully_applied = std::io::Error::last_os_error().raw_os_error() == Some(0);
+    adjusted != 0 && fully_applied
 }
 
 fn dispatch_media(key: MediaKey) {
