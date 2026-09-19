@@ -97,11 +97,39 @@ pub trait PowerSourceBackend {
     fn remove(&mut self, identifier: &str) -> Result<(), PowerSourceError>;
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 struct AccessoryIdentity {
     wpid: Option<u16>,
-    physical: Option<DeviceIdentity>,
+    serial: Option<String>,
+    unit: Option<[u8; 4]>,
     category: AccessoryCategory,
+}
+
+impl AccessoryIdentity {
+    fn conflicts_with(&self, current: &Self) -> bool {
+        if self.category != current.category {
+            return true;
+        }
+        // Physical identity is stronger evidence than the model identifier,
+        // which Bolt may omit when no arrival event was received this pass.
+        if let Some((previous, current)) = self.serial.as_ref().zip(current.serial.as_ref()) {
+            return previous != current;
+        }
+        if let Some((previous, current)) = self.unit.zip(current.unit) {
+            return previous != current;
+        }
+        self.wpid
+            .zip(current.wpid)
+            .is_some_and(|(previous, current)| previous != current)
+    }
+
+    fn remember(&mut self, current: &Self) {
+        self.wpid = current.wpid.or(self.wpid);
+        self.unit = current.unit.or(self.unit);
+        if current.serial.is_some() {
+            self.serial.clone_from(&current.serial);
+        }
+    }
 }
 
 struct OnlineAccessory {
@@ -188,7 +216,7 @@ impl<B: PowerSourceBackend> PowerSourcePublisher<B> {
             if self
                 .tracked
                 .get(identifier)
-                .is_some_and(|tracked| tracked.identity != online_accessory.identity)
+                .is_some_and(|tracked| tracked.identity.conflicts_with(&online_accessory.identity))
             {
                 // Receiver slots can be reassigned. Retire the old occupant even
                 // when the replacement has not supplied battery telemetry yet.
@@ -200,6 +228,7 @@ impl<B: PowerSourceBackend> PowerSourcePublisher<B> {
             // Presence is independent of telemetry and cancels any offline deadline.
             if let Some(tracked) = self.tracked.get_mut(identifier) {
                 tracked.offline_since = None;
+                tracked.identity.remember(&online_accessory.identity);
             }
             let Some(accessory) = &online_accessory.reading else {
                 continue;
@@ -321,7 +350,15 @@ fn online_accessories(
             let config_key = config.resolve_device_key(&stable_id, identity.as_ref());
             let identity = AccessoryIdentity {
                 wpid: paired.wpid,
-                physical: identity,
+                serial: match identity {
+                    Some(DeviceIdentity::Serial(serial)) => Some(serial),
+                    _ => None,
+                },
+                unit: paired
+                    .model_info
+                    .as_ref()
+                    .map(|model| model.unit_id)
+                    .filter(|unit| *unit != [0; 4]),
                 category,
             };
             // Metadata can change while telemetry is missing. Reuse only an
@@ -333,7 +370,7 @@ fn online_accessories(
                 .or_else(|| {
                     tracked
                         .get(&identifier)
-                        .filter(|tracked| tracked.identity == identity)
+                        .filter(|tracked| !tracked.identity.conflicts_with(&identity))
                         .and_then(|tracked| tracked.published.as_ref())
                         .map(|published| (published.percentage, published.status))
                 });
