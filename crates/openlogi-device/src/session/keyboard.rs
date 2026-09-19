@@ -47,11 +47,17 @@ use crate::reprog_controls::{self, RawControlEvent, ReprogControlsV4};
 /// `(0x1b04 control ID, ButtonId)` pairs. CID values match Logitech's control
 /// catalog (cross-checked against Solaar's `special_keys.py`); the F-row
 /// positions are the Signature-series layout.
-pub const KEYBOARD_KEY_CIDS: [(u16, ButtonId); 9] = [
+pub const KEYBOARD_KEY_CIDS: [(u16, ButtonId); 10] = [
     (0x00d4, ButtonId::KeySearch),
     (0x0103, ButtonId::KeyDictation),
     (0x0108, ButtonId::KeyEmoji),
     (0x010a, ButtonId::KeyScreenCapture),
+    // Same physical function as 0x010a, a different CID on the MX Keys for
+    // Mac (`Screen_Capture__Print_Screen` in Solaar's special_keys.py). Only
+    // one of the two is ever present on a given keyboard's control table, so
+    // both entries coexist safely — `arm_keys` skips whichever the connected
+    // device doesn't report (see #1254).
+    (0x00bf, ButtonId::KeyScreenCapture),
     (0x011c, ButtonId::KeyMicMute),
     (0x00e5, ButtonId::KeyPlayPause),
     (0x00e7, ButtonId::KeyMute),
@@ -433,6 +439,21 @@ mod tests {
                 CapturedInput::ButtonUp(ButtonId::KeySearch),
                 CapturedInput::ButtonUp(ButtonId::KeyDictation),
             ]
+        );
+    }
+
+    #[test]
+    fn screen_capture_has_both_known_cids() {
+        let screen_capture_cids: Vec<u16> = KEYBOARD_KEY_CIDS
+            .iter()
+            .filter(|(_, button)| *button == ButtonId::KeyScreenCapture)
+            .map(|(cid, _)| *cid)
+            .collect();
+
+        assert_eq!(
+            screen_capture_cids,
+            vec![0x010a, 0x00bf],
+            "both the Signature-series and MX Keys for Mac Screen Capture CIDs must resolve to KeyScreenCapture"
         );
     }
 }
