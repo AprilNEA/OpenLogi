@@ -1,36 +1,64 @@
 //! Platform helpers for synthesising OS-level input events on macOS.
 
-use std::sync::{LazyLock, Mutex};
-
 use core_graphics::event::{
     CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton, EventField,
-    ScrollEventUnit,
 };
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::CGPoint;
 
-use objc2_application_services::{AXError, AXUIElement};
-use objc2_core_foundation::{CFArray, CFRetained, CFString, CFType, Type as _};
 use openlogi_core::binding::{
     Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Shortcut,
 };
 use openlogi_core::config::FunctionKey;
-use openlogi_core::scroll::ScrollDelta;
 
-use super::{
-    HeldKey, HeldModifiers, KeyPhase, QuantizedScroll, ScrollQuantizer, SmoothScrollPhase,
-};
+use super::{HeldKey, HeldModifiers, KeyPhase};
 
-static LINE_SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
-    LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
-static PIXEL_SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
-    LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
-static SMOOTH_SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
-    LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
+/// Shared resolver for private ApplicationServices SPI used by the Dock and
+/// symbolic-hotkey helpers.
+#[expect(
+    unsafe_code,
+    reason = "private ApplicationServices SPI symbols are resolved via dlopen/dlsym FFI"
+)]
+mod app_services;
+mod browser;
+/// WindowServer window/space actions (Mission Control, App Exposé, Show
+/// Desktop, Launchpad).
+///
+/// These are driven by the Dock, and synthesising their keyboard shortcut is
+/// unreliable — the WindowServer matcher needs the exact configured key
+/// (incl. the Fn flag) and Show Desktop's in particular doesn't respond. So
+/// we post the action straight to the Dock via the private
+/// `CoreDockSendNotification` SPI, which fires it regardless of the user's
+/// Keyboard settings.
+///
+/// Isolated in its own submodule so the `unsafe` the `dlopen`/`dlsym` FFI
+/// needs is scoped here rather than spread across the platform helpers.
+#[expect(
+    unsafe_code,
+    reason = "the private CoreDockSendNotification SPI is only reachable via dlopen/dlsym FFI"
+)]
+mod dock;
+mod scroll;
+/// macOS Space switching actions.
+///
+/// Use the system symbolic hotkey records for "Move left a space" (79) and
+/// "Move right a space" (81). That respects the user's configured shortcut
+/// instead of assuming Ctrl+Left/Right, and temporarily enables the symbolic
+/// hotkey when the user has disabled it.
+#[expect(
+    unsafe_code,
+    reason = "CGS symbolic hotkey SPI is only reachable via dlopen/dlsym FFI"
+)]
+mod symbolic_hotkey;
+#[cfg(test)]
+mod tests;
 
-// `core-graphics` 0.25 does not expose these `CGEventTypes.h` fields.
-const SCROLL_PHASE: u32 = 99; // kCGScrollWheelEventScrollPhase
-const MOMENTUM_PHASE: u32 = 123; // kCGScrollWheelEventMomentumPhase
+use app_services::symbol as app_services_symbol;
+pub(super) use browser::ax_browser_navigate;
+use dock::{app_expose, launchpad, mission_control, show_desktop};
+use scroll::dispatch_scroll;
+pub(super) use scroll::{post_scroll, post_smooth_scroll};
+use symbolic_hotkey::{next_desktop, previous_desktop};
 
 // NX_KEYTYPE_* constants from <IOKit/hidsystem/ev_keymap.h>.
 const NX_KEYTYPE_SOUND_UP: i32 = 0;
@@ -410,75 +438,6 @@ fn hid_usage_to_macos(usage: u8) -> Option<u16> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use core_graphics::event::CGEventFlags;
-    use openlogi_core::binding::Shortcut;
-
-    use super::{combo, held_key_event, hid_usage_to_macos};
-    use crate::inject::{HeldKey, HeldModifiers, KeyPhase};
-
-    #[test]
-    fn hid_usages_map_to_macos_virtual_keys() {
-        assert_eq!(hid_usage_to_macos(0x04), Some(0x00));
-        assert_eq!(hid_usage_to_macos(0x13), Some(0x23));
-        assert_eq!(hid_usage_to_macos(0x50), Some(0x7b));
-        assert_eq!(hid_usage_to_macos(0x3a), Some(0x7a));
-        assert_eq!(hid_usage_to_macos(0x6f), Some(0x5a));
-        assert_eq!(hid_usage_to_macos(0xff), None);
-    }
-
-    /// Pin a handful of representative `Shortcut -> KeyCombo` rows so an
-    /// edit to the table can't silently change what ⌘C sends. macOS and
-    /// Linux only overlap on the letter-key chords: both `BrowserBack` and
-    /// `Redo` differ across the three backends by design (see the module
-    /// doc on `combo`), so each backend pins its own rows independently.
-    #[test]
-    fn combo_table_pins_representative_shortcuts() {
-        assert_eq!(combo(Shortcut::Copy).rendered_label(), "Cmd+C");
-        assert_eq!(combo(Shortcut::Redo).rendered_label(), "Cmd+Shift+Z");
-        assert_eq!(combo(Shortcut::BrowserBack).rendered_label(), "Cmd+[");
-        assert_eq!(combo(Shortcut::NextTab).rendered_label(), "Ctrl+Tab");
-        // hid_usage_to_macos must actually resolve every table entry, or a
-        // `Shortcut` silently no-ops instead of pressing anything (see
-        // `press_combo`'s warn-and-drop path). Iterates `Shortcut::ALL`
-        // rather than a hand-copied list, so a newly added `Shortcut`
-        // variant is checked here automatically instead of depending on
-        // someone remembering to extend a second, independent list.
-        for &shortcut in Shortcut::ALL {
-            let key = combo(shortcut).key().code();
-            assert!(
-                hid_usage_to_macos(key).is_some(),
-                "{shortcut:?} table entry has no macOS virtual-key mapping"
-            );
-        }
-    }
-
-    #[test]
-    fn held_edges_carry_the_aggregate_modifier_state() {
-        let mut modifiers = HeldModifiers::default();
-        let (_, flags) = held_key_event(HeldKey::Command, KeyPhase::Down, &mut modifiers)
-            .expect("Command has a macOS virtual-key mapping");
-        assert!(flags.contains(CGEventFlags::CGEventFlagCommand));
-
-        let (_, flags) = held_key_event(HeldKey::Control, KeyPhase::Down, &mut modifiers)
-            .expect("Control has a macOS virtual-key mapping");
-        assert!(flags.contains(CGEventFlags::CGEventFlagCommand));
-        assert!(flags.contains(CGEventFlags::CGEventFlagControl));
-
-        let key = combo(Shortcut::Copy).key();
-        let (_, flags) = held_key_event(HeldKey::Key(key), KeyPhase::Up, &mut modifiers)
-            .expect("Copy's key has a macOS virtual-key mapping");
-        assert!(flags.contains(CGEventFlags::CGEventFlagCommand));
-        assert!(flags.contains(CGEventFlags::CGEventFlagControl));
-
-        let (_, flags) = held_key_event(HeldKey::Command, KeyPhase::Up, &mut modifiers)
-            .expect("Command has a macOS virtual-key mapping");
-        assert!(!flags.contains(CGEventFlags::CGEventFlagCommand));
-        assert!(flags.contains(CGEventFlags::CGEventFlagControl));
-    }
-}
-
 pub(super) fn run_apple_script(src: &str) {
     let _ = std::process::Command::new("osascript")
         .args(["-e", src])
@@ -552,579 +511,5 @@ fn sleep_system() {
             });
         }
         Err(e) => tracing::warn!(error = %e, "pmset sleepnow spawn failed"),
-    }
-}
-
-/// Post a synthetic scroll event for one tick in direction `(dx, dy)`. Unit
-/// direction (-1/0/1) scaled by the fixed "one tick" pixel magnitude the
-/// four `Scroll*`/`HorizontalScroll*` actions have always used.
-fn dispatch_scroll(dx: i8, dy: i8) {
-    let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
-        tracing::warn!("CGEventSource::new failed for scroll");
-        return;
-    };
-    let v = i32::from(dy) * 3;
-    let h = i32::from(dx) * 3;
-    let Ok(ev) = CGEvent::new_scroll_event(src, ScrollEventUnit::PIXEL, 2, v, h, 0) else {
-        tracing::warn!("CGEvent::new_scroll_event failed");
-        return;
-    };
-    tag_synthetic(&ev);
-    ev.post(CGEventTapLocation::HID);
-}
-
-pub(super) fn post_scroll(delta: ScrollDelta) {
-    let (quantizer, unit) = match delta {
-        ScrollDelta::Pixels { .. } => (&PIXEL_SCROLL_QUANTIZER, ScrollEventUnit::PIXEL),
-        ScrollDelta::WheelTicks { .. } => (&LINE_SCROLL_QUANTIZER, ScrollEventUnit::LINE),
-    };
-    let Ok(mut quantizer) = quantizer.lock() else {
-        tracing::warn!("macOS scroll quantizer mutex poisoned");
-        return;
-    };
-    let delta = quantizer.quantize(delta, 1.0);
-    drop(quantizer);
-    if delta == QuantizedScroll::default() {
-        return;
-    }
-
-    let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
-        tracing::warn!("CGEventSource::new failed for precise scroll");
-        return;
-    };
-    let Ok(ev) = CGEvent::new_scroll_event(src, unit, 2, delta.y, delta.x, 0) else {
-        tracing::warn!("CGEvent::new_scroll_event failed for precise scroll");
-        return;
-    };
-    if unit == ScrollEventUnit::PIXEL {
-        set_continuous_scroll_fields(&ev, delta);
-    }
-    tag_synthetic(&ev);
-    ev.post(CGEventTapLocation::HID);
-}
-
-pub(super) fn post_smooth_scroll(delta: ScrollDelta, phase: SmoothScrollPhase) {
-    const POINTS_PER_WHEEL_TICK: f64 = 10.0;
-
-    let units_per_input = match delta {
-        ScrollDelta::Pixels { .. } => 1.0,
-        ScrollDelta::WheelTicks { .. } => POINTS_PER_WHEEL_TICK,
-    };
-    let Ok(mut quantizer) = SMOOTH_SCROLL_QUANTIZER.lock() else {
-        tracing::warn!("macOS smooth-scroll quantizer mutex poisoned");
-        return;
-    };
-    let delta = quantizer.quantize(delta, units_per_input);
-    drop(quantizer);
-
-    let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
-        tracing::warn!("CGEventSource::new failed for smooth scroll");
-        return;
-    };
-    let Ok(ev) = CGEvent::new_scroll_event(src, ScrollEventUnit::PIXEL, 2, delta.y, delta.x, 0)
-    else {
-        tracing::warn!("CGEvent::new_scroll_event failed for smooth scroll");
-        return;
-    };
-    set_continuous_scroll_fields(&ev, delta);
-    ev.set_integer_value_field(SCROLL_PHASE, scroll_phase_value(phase));
-    ev.set_integer_value_field(MOMENTUM_PHASE, 0);
-    tag_synthetic(&ev);
-    ev.post(CGEventTapLocation::HID);
-}
-
-const fn scroll_phase_value(phase: SmoothScrollPhase) -> i64 {
-    match phase {
-        SmoothScrollPhase::Began => 1,
-        SmoothScrollPhase::Changed => 2,
-        SmoothScrollPhase::Ended => 4,
-        SmoothScrollPhase::Cancelled => 8,
-    }
-}
-
-fn set_continuous_scroll_fields(event: &CGEvent, delta: QuantizedScroll) {
-    event.set_integer_value_field(EventField::SCROLL_WHEEL_EVENT_IS_CONTINUOUS, 1);
-    set_continuous_axis(
-        event,
-        delta.y,
-        EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_1,
-        EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_1,
-        EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_1,
-    );
-    set_continuous_axis(
-        event,
-        delta.x,
-        EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_2,
-        EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_2,
-        EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_2,
-    );
-}
-
-fn set_continuous_axis(
-    event: &CGEvent,
-    points: i32,
-    line_field: u32,
-    fixed_field: u32,
-    point_field: u32,
-) {
-    const POINTS_PER_LINE: i64 = 10;
-    const FIXED_POINT_SCALE: i64 = 1 << 16;
-    let points = i64::from(points);
-    event.set_integer_value_field(point_field, points);
-    event.set_integer_value_field(line_field, points / POINTS_PER_LINE);
-    event.set_integer_value_field(fixed_field, points * FIXED_POINT_SCALE / POINTS_PER_LINE);
-}
-
-/// The AX attribute names needed by [`find_button`], bundled so its argument
-/// list does not grow with the tree depth it searches.
-struct AxAttrs {
-    role: CFRetained<CFString>,
-    identifier: CFRetained<CFString>,
-    children: CFRetained<CFString>,
-}
-
-/// Adopt the Copy-rule output once; all callers own a releasing smart pointer.
-#[expect(unsafe_code, reason = "AX attribute copying uses an out-pointer")]
-fn copy_attr(el: &AXUIElement, attr: &CFString) -> Option<CFRetained<CFType>> {
-    use std::ptr::NonNull;
-
-    let mut value = std::ptr::null();
-    // SAFETY: both framework objects and the writable out-pointer remain
-    // valid for the call; AX initializes the output on success.
-    let error = unsafe { el.copy_attribute_value(attr, NonNull::from(&mut value)) };
-    if error != AXError::Success {
-        return None;
-    }
-    let value = NonNull::new(value.cast_mut())?;
-    // SAFETY: successful AX Copy output is a valid CF object at +1 ownership.
-    Some(unsafe { CFRetained::from_raw(value) })
-}
-
-fn attr_string(el: &AXUIElement, attr: &CFString) -> Option<String> {
-    Some(
-        copy_attr(el, attr)?
-            .downcast::<CFString>()
-            .ok()?
-            .to_string(),
-    )
-}
-
-/// Retain the matching button independently of the parent arrays as we unwind.
-#[expect(unsafe_code, reason = "AXChildren guarantees a CF-object array")]
-fn find_button(
-    el: &AXUIElement,
-    target_ids: &[&str],
-    attrs: &AxAttrs,
-    depth: u8,
-) -> Option<CFRetained<AXUIElement>> {
-    if depth == 0 {
-        return None;
-    }
-    if let Some(role) = attr_string(el, &attrs.role) {
-        // Skip tab-bar subtrees before searching the toolbar.
-        if matches!(
-            role.as_str(),
-            "AXSplitGroup" | "AXTabGroup" | "AXOpaqueProviderGroup" | "AXRadioButton"
-        ) {
-            return None;
-        }
-        if role == "AXButton" {
-            return attr_string(el, &attrs.identifier)
-                .as_deref()
-                .is_some_and(|identifier| target_ids.contains(&identifier))
-                .then(|| el.retain());
-        }
-    }
-    let children = copy_attr(el, &attrs.children)?.downcast::<CFArray>().ok()?;
-    // SAFETY: the outer array type was checked; AXChildren contains CF objects.
-    // Each member is separately downcast before it is used as an AXUIElement.
-    let children = unsafe { CFRetained::cast_unchecked::<CFArray<CFType>>(children) };
-    for child in children {
-        if let Ok(child) = child.downcast::<AXUIElement>()
-            && let Some(button) = find_button(&child, target_ids, attrs, depth - 1)
-        {
-            return Some(button);
-        }
-    }
-    None
-}
-
-/// Press Safari's Back (`forward=false`) or Forward (`forward=true`)
-/// navigation button when Safari is frontmost via the Accessibility API.
-///
-/// Stable `AXIdentifier`s avoid localized descriptions and positional guesses.
-/// All AppKit/AX work runs on the action worker, never in the event tap.
-///
-/// Returns `true` when an AX button was found and pressed (result `kAXErrorSuccess`),
-/// or `false` when the captured Safari process is stale or navigation fails.
-#[expect(unsafe_code, reason = "typed AX creation and action calls require FFI")]
-pub(super) fn ax_browser_navigate(forward: bool, pid: i32) -> bool {
-    use objc2::rc::autoreleasepool;
-
-    let attr_focused_window = CFString::from_static_str("AXFocusedWindow");
-    let attrs = AxAttrs {
-        role: CFString::from_static_str("AXRole"),
-        identifier: CFString::from_static_str("AXIdentifier"),
-        children: CFString::from_static_str("AXChildren"),
-    };
-    let ax_press = CFString::from_static_str("AXPress");
-    let target_identifiers = if forward {
-        ["ForwardButton", "BackForwardToolbarButton_Forward"]
-    } else {
-        ["BackButton", "BackForwardToolbarButton_Back"]
-    };
-
-    autoreleasepool(|pool| {
-        if !safari_is_frontmost(pid, pool) {
-            return None;
-        }
-        // SAFETY: pid identifies the live frontmost Safari process.
-        let app = unsafe { AXUIElement::new_application(pid) };
-        let window = copy_attr(&app, &attr_focused_window)?
-            .downcast::<AXUIElement>()
-            .ok()?;
-        let button = find_button(&window, &target_identifiers, &attrs, 6);
-        let result = button.map(|btn| {
-            // AX traversal can block. Revalidate immediately before dispatch
-            // so switching apps during the search cancels navigation.
-            if !safari_is_frontmost(pid, pool) {
-                return false;
-            }
-            // SAFETY: btn is a retained AXUIElement and ax_press is a valid string.
-            unsafe { btn.perform_action(&ax_press) == AXError::Success }
-        });
-
-        match result {
-            Some(true) => {
-                tracing::debug!(forward, "AX browser navigate succeeded");
-                Some(())
-            }
-            Some(false) => {
-                tracing::debug!(forward, "AX browser navigate: AXPress failed");
-                None
-            }
-            None => {
-                tracing::debug!(forward, "AX browser navigate: button not found");
-                None
-            }
-        }
-    })
-    .is_some()
-}
-
-#[expect(
-    unsafe_code,
-    reason = "NSString UTF-8 view borrows from the autorelease pool"
-)]
-fn safari_is_frontmost(pid: i32, pool: objc2::rc::AutoreleasePool<'_>) -> bool {
-    objc2_app_kit::NSWorkspace::sharedWorkspace()
-        .frontmostApplication()
-        .is_some_and(|app| {
-            app.processIdentifier() == pid
-                && app.bundleIdentifier().is_some_and(|id| {
-                    // SAFETY: the UTF-8 view is consumed before the pool drains.
-                    unsafe { id.to_str(pool) == "com.apple.Safari" }
-                })
-        })
-}
-
-use dock::{app_expose, launchpad, mission_control, show_desktop};
-use symbolic_hotkey::{next_desktop, previous_desktop};
-
-use app_services::symbol as app_services_symbol;
-
-/// Shared resolver for private ApplicationServices SPI used by the Dock and
-/// symbolic-hotkey helpers.
-#[expect(
-    unsafe_code,
-    reason = "private ApplicationServices SPI symbols are resolved via dlopen/dlsym FFI"
-)]
-mod app_services {
-    use std::ffi::{CStr, c_char, c_int, c_void};
-    use std::sync::OnceLock;
-
-    /// Resolve a symbol from ApplicationServices, caching the `dlopen`
-    /// handle for the process lifetime. Returns `None` if the framework or
-    /// symbol is unavailable on this macOS version.
-    pub(super) fn symbol(symbol: &CStr) -> Option<*mut c_void> {
-        const RTLD_LAZY: c_int = 0x1;
-        const APP_SERVICES: &CStr =
-            c"/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices";
-        static HANDLE: OnceLock<usize> = OnceLock::new();
-
-        // SAFETY: `dlopen`/`dlsym` come from libSystem; APP_SERVICES and
-        // `symbol` are valid C strings. The handle is cached and
-        // intentionally never closed.
-        let sym = unsafe {
-            let handle = *HANDLE.get_or_init(|| dlopen(APP_SERVICES.as_ptr(), RTLD_LAZY) as usize);
-            if handle == 0 {
-                return None;
-            }
-            dlsym(handle as *mut c_void, symbol.as_ptr())
-        };
-        (!sym.is_null()).then_some(sym)
-    }
-
-    unsafe extern "C" {
-        fn dlopen(filename: *const c_char, flag: c_int) -> *mut c_void;
-        fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
-    }
-}
-
-/// WindowServer window/space actions (Mission Control, App Exposé, Show
-/// Desktop, Launchpad).
-///
-/// These are driven by the Dock, and synthesising their keyboard shortcut is
-/// unreliable — the WindowServer matcher needs the exact configured key
-/// (incl. the Fn flag) and Show Desktop's in particular doesn't respond. So
-/// we post the action straight to the Dock via the private
-/// `CoreDockSendNotification` SPI, which fires it regardless of the user's
-/// Keyboard settings.
-///
-/// Isolated in its own submodule so the `unsafe` the `dlopen`/`dlsym` FFI
-/// needs is scoped here rather than spread across the platform helpers.
-#[expect(
-    unsafe_code,
-    reason = "the private CoreDockSendNotification SPI is only reachable via dlopen/dlsym FFI"
-)]
-mod dock {
-    use std::ffi::{c_int, c_void};
-
-    use core_foundation::base::TCFType;
-    use core_foundation::string::CFString;
-
-    use super::app_services_symbol;
-
-    /// Show all windows across spaces (Mission Control).
-    pub(super) fn mission_control() {
-        send("com.apple.expose.awake");
-    }
-
-    /// Show the front app's windows (App Exposé).
-    pub(super) fn app_expose() {
-        send("com.apple.expose.front.awake");
-    }
-
-    /// Move all windows aside to reveal the desktop.
-    pub(super) fn show_desktop() {
-        send("com.apple.showdesktop.awake");
-    }
-
-    /// Toggle Launchpad. A no-op on macOS 26, which removed Launchpad.
-    pub(super) fn launchpad() {
-        send("com.apple.launchpad.toggle");
-    }
-
-    /// Post `notification` to the Dock. Logs and returns on any failure.
-    fn send(notification: &str) {
-        let Some(core_dock_send) = core_dock_send_notification() else {
-            tracing::warn!(notification, "CoreDockSendNotification unavailable");
-            return;
-        };
-        let name = CFString::new(notification);
-        // SAFETY: resolved AppServices symbol called with its documented
-        // signature; `name` is a live CFString for the call's duration.
-        let err = unsafe { core_dock_send(name.as_concrete_TypeRef().cast(), 0) };
-        if err != 0 {
-            tracing::warn!(notification, err, "CoreDockSendNotification failed");
-        }
-    }
-
-    type CoreDockSendNotificationFn = unsafe extern "C" fn(*const c_void, c_int) -> c_int;
-
-    /// Resolve `CoreDockSendNotification` from `ApplicationServices`, caching
-    /// the `dlopen` handle for the process lifetime. `None` if unavailable.
-    fn core_dock_send_notification() -> Option<CoreDockSendNotificationFn> {
-        let sym = app_services_symbol(c"CoreDockSendNotification")?;
-        // SAFETY: the symbol, when present, has the documented signature.
-        Some(unsafe { std::mem::transmute::<*mut c_void, CoreDockSendNotificationFn>(sym) })
-    }
-}
-
-/// macOS Space switching actions.
-///
-/// Use the system symbolic hotkey records for "Move left a space" (79) and
-/// "Move right a space" (81). That respects the user's configured shortcut
-/// instead of assuming Ctrl+Left/Right, and temporarily enables the symbolic
-/// hotkey when the user has disabled it.
-#[expect(
-    unsafe_code,
-    reason = "CGS symbolic hotkey SPI is only reachable via dlopen/dlsym FFI"
-)]
-mod symbolic_hotkey {
-    use std::ffi::{c_int, c_uint, c_ushort, c_void};
-
-    use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation};
-    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
-
-    use super::app_services_symbol;
-
-    const SPACE_LEFT: u32 = 79;
-    const SPACE_RIGHT: u32 = 81;
-
-    /// Switch to the previous desktop / Space.
-    pub(super) fn previous_desktop() {
-        post_symbolic_hotkey(SPACE_LEFT);
-    }
-
-    /// Switch to the next desktop / Space.
-    pub(super) fn next_desktop() {
-        post_symbolic_hotkey(SPACE_RIGHT);
-    }
-
-    fn post_symbolic_hotkey(hotkey: u32) {
-        let Some(cgs) = cgs_hotkey_api() else {
-            tracing::warn!(hotkey, "CGS symbolic hotkey API unavailable");
-            return;
-        };
-
-        let mut key_equivalent = 0_u16;
-        let mut virtual_key = 0_u16;
-        let mut modifiers = 0_u32;
-
-        // SAFETY: resolved AppServices symbols are called with their
-        // expected signatures and valid out-parameters.
-        let err = unsafe {
-            (cgs.get_value)(
-                hotkey,
-                &raw mut key_equivalent,
-                &raw mut virtual_key,
-                &raw mut modifiers,
-            )
-        };
-        if err != 0 {
-            tracing::warn!(hotkey, err, "CGSGetSymbolicHotKeyValue failed");
-            return;
-        }
-
-        // SAFETY: resolved AppServices symbol called with its expected
-        // signature.
-        let was_enabled = unsafe { (cgs.is_enabled)(hotkey) };
-        let _restore = if was_enabled {
-            None
-        } else {
-            // SAFETY: resolved AppServices symbol called with its expected
-            // signature.
-            let err = unsafe { (cgs.set_enabled)(hotkey, true) };
-            if err != 0 {
-                tracing::warn!(hotkey, err, "CGSSetSymbolicHotKeyEnabled(true) failed");
-            }
-            // Restore even when the enable call reported an error: the SPI may
-            // have changed state before returning it, and this preserves the
-            // old unconditional best-effort disable behavior.
-            Some(HotkeyRestore {
-                hotkey,
-                set_enabled: cgs.set_enabled,
-            })
-        };
-
-        post_key(virtual_key, modifiers);
-    }
-
-    fn post_key(vk: u16, modifiers: u32) {
-        let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
-            tracing::warn!("CGEventSource::new failed for symbolic hotkey");
-            return;
-        };
-        let Ok(down) = CGEvent::new_keyboard_event(src.clone(), vk, true) else {
-            tracing::warn!(vk, "CGEvent::new_keyboard_event(down) failed");
-            return;
-        };
-        let flags = CGEventFlags::from_bits_truncate(u64::from(modifiers));
-        down.set_flags(flags);
-        down.post(CGEventTapLocation::Session);
-
-        let Ok(up) = CGEvent::new_keyboard_event(src, vk, false) else {
-            tracing::warn!(vk, "CGEvent::new_keyboard_event(up) failed");
-            return;
-        };
-        up.set_flags(flags);
-        up.post(CGEventTapLocation::Session);
-    }
-
-    #[derive(Clone, Copy)]
-    struct CgsHotkeyApi {
-        get_value: CgsGetSymbolicHotKeyValueFn,
-        is_enabled: CgsIsSymbolicHotKeyEnabledFn,
-        set_enabled: CgsSetSymbolicHotKeyEnabledFn,
-    }
-
-    type CgsGetSymbolicHotKeyValueFn =
-        unsafe extern "C" fn(c_uint, *mut c_ushort, *mut c_ushort, *mut c_uint) -> c_int;
-    type CgsIsSymbolicHotKeyEnabledFn = unsafe extern "C" fn(c_uint) -> bool;
-    type CgsSetSymbolicHotKeyEnabledFn = unsafe extern "C" fn(c_uint, bool) -> c_int;
-
-    struct HotkeyRestore {
-        hotkey: u32,
-        set_enabled: CgsSetSymbolicHotKeyEnabledFn,
-    }
-
-    impl Drop for HotkeyRestore {
-        fn drop(&mut self) {
-            // SAFETY: this is the same resolved AppServices function and hotkey
-            // id used to open the temporary enable window.
-            let err = unsafe { (self.set_enabled)(self.hotkey, false) };
-            if err != 0 {
-                tracing::warn!(
-                    hotkey = self.hotkey,
-                    err,
-                    "CGSSetSymbolicHotKeyEnabled(false) failed"
-                );
-            }
-        }
-    }
-
-    fn cgs_hotkey_api() -> Option<CgsHotkeyApi> {
-        let get_value = app_services_symbol(c"CGSGetSymbolicHotKeyValue")?;
-        let is_enabled = app_services_symbol(c"CGSIsSymbolicHotKeyEnabled")?;
-        let set_enabled = app_services_symbol(c"CGSSetSymbolicHotKeyEnabled")?;
-
-        // SAFETY: the symbols, when present, have the private SPI
-        // signatures declared above.
-        Some(unsafe {
-            CgsHotkeyApi {
-                get_value: std::mem::transmute::<*mut c_void, CgsGetSymbolicHotKeyValueFn>(
-                    get_value,
-                ),
-                is_enabled: std::mem::transmute::<*mut c_void, CgsIsSymbolicHotKeyEnabledFn>(
-                    is_enabled,
-                ),
-                set_enabled: std::mem::transmute::<*mut c_void, CgsSetSymbolicHotKeyEnabledFn>(
-                    set_enabled,
-                ),
-            }
-        })
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use std::panic::{AssertUnwindSafe, catch_unwind};
-        use std::sync::atomic::{AtomicU32, Ordering};
-
-        use super::HotkeyRestore;
-
-        static RESTORED_HOTKEY: AtomicU32 = AtomicU32::new(0);
-
-        unsafe extern "C" fn record_restore(hotkey: u32, enabled: bool) -> i32 {
-            if !enabled {
-                RESTORED_HOTKEY.store(hotkey, Ordering::Relaxed);
-            }
-            0
-        }
-
-        #[test]
-        fn temporary_enable_is_restored_during_unwind() {
-            RESTORED_HOTKEY.store(0, Ordering::Relaxed);
-            let result = catch_unwind(AssertUnwindSafe(|| {
-                let _restore = HotkeyRestore {
-                    hotkey: super::SPACE_LEFT,
-                    set_enabled: record_restore,
-                };
-                panic!("exercise unwind cleanup");
-            }));
-
-            assert!(result.is_err());
-            assert_eq!(RESTORED_HOTKEY.load(Ordering::Relaxed), super::SPACE_LEFT);
-        }
     }
 }

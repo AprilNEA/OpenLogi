@@ -10,6 +10,7 @@ paths:
   - "crates/openlogi-hook/src/macos.rs"
   - "crates/openlogi-hook/src/macos/**"
   - "crates/openlogi-inject/src/inject/macos.rs"
+  - "crates/openlogi-inject/src/inject/macos/**"
   - "crates/openlogi-hid/src/permissions.rs"
 ---
 
@@ -35,7 +36,10 @@ files; **keep this table in sync when you add or move one**:
 | `openlogi-hook/src/macos.rs` | the CGEventTap (on `core-graphics`, see below), the Accessibility-trust check/prompt, the off-tap `NSWorkspace` frontmost-app read, and the `CGGetEventTapList` enumeration |
 | `openlogi-hook/src/macos/foreground.rs` | the `NSWorkspace` activation observer, the `NSRunningApplication` conversion behind every frontmost-app read, and the Safari PID snapshot |
 | `openlogi-hook/src/macos/sender.rs` | the HID sender-id lookup and the IOKit registry walk that resolves it to a device |
-| `openlogi-inject/src/inject/macos.rs` | CGEvent synthesis, media-key `NSEvent`s, off-thread `NSWorkspace` validation, typed `AXUIElement` navigation with `CFRetained` ownership, and the `dlopen`'d private SPIs |
+| `openlogi-inject/src/inject/macos.rs` | CGEvent key and click synthesis, media-key `NSEvent`s |
+| `openlogi-inject/src/inject/macos/scroll.rs` | CGEvent scroll synthesis, including the continuous-scroll phase fields |
+| `openlogi-inject/src/inject/macos/browser.rs` | typed `AXUIElement` navigation with `CFRetained` ownership, and the off-thread `NSWorkspace` Safari validation |
+| `openlogi-inject/src/inject/macos/{app_services,dock,symbolic_hotkey}.rs` | the `dlopen`'d private SPIs: `CoreDockSendNotification` and the CGS symbolic-hotkey trio |
 | `openlogi-overlay/src/platform.rs` | the Actions Ring helper's window policy: accessory activation, non-activating panel, the `NSEvent` global click-away monitor (`block2`), and `CGGetActiveDisplayList` / `CGDisplayBounds` |
 | `openlogi-permissions/src/macos.rs` | non-prompting permission reads + System-Settings deep links; `+[CBManager authorization]` via an `AnyClass` lookup |
 
@@ -230,7 +234,7 @@ under a `SAFETY` comment. Where it currently lives on macOS:
   (the borrow is tied to the pool).
 - `hook/macos/sender.rs` — the sender-id `extern` calls and the IOKit registry
   walk, including the Create-rule `CFString` / `CFNumber` wraps.
-- `inject/macos.rs` — typed AX creation, attribute-copy out-pointers, CF array
+- `inject/macos/browser.rs` — typed AX creation, attribute-copy out-pointers, CF array
   element typing, `AXPress`, and `NSString::to_str(pool)` for Safari validation.
 - `permissions/macos.rs` — the CoreBluetooth force-link and the `CBManager`
   class-method send. `IOHIDCheckAccess` needs none: `objc2-io-kit` exposes it as
