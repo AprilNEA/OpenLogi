@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(core)* add the Calculator hotkey as a divertable keyboard key slot
+
 ## [0.8.5] - 2026-09-16
 
 ### Added

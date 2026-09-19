@@ -63,7 +63,9 @@ pub use succession::Identity;
 ///      the macOS dormancy gate.
 /// v30: `Agent::read_wheel` and `Agent::read_backlight` appended.
 /// v31: `Capabilities::dpi_gestures` appended.
-pub const PROTOCOL_VERSION: u32 = 31;
+/// v32: `ButtonId::KeyCalculator` appended — the Calculator hotkey becomes a
+///      divertable slot, the only way to reach it in the keyboard's macOS mode.
+pub const PROTOCOL_VERSION: u32 = 32;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
