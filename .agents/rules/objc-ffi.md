@@ -6,6 +6,7 @@ paths:
   - "crates/openlogi-camera/**"
   - "crates/openlogi-agent/src/activity_macos.rs"
   - "crates/openlogi-agent/src/tray.rs"
+  - "crates/openlogi-agent/src/power_source/**"
   - "crates/openlogi-agent/src/status_item.rs"
   - "crates/openlogi-agent/src/lifecycle/armed_session.rs"
   - "crates/openlogi-agent-core/src/watchers/camera.rs"
@@ -27,6 +28,7 @@ files; **keep this table in sync when you add or move one**:
 | File | What it carries |
 |---|---|
 | `openlogi-agent/src/activity_macos.rs` | the device-I/O gate's levels: the `IOPMConnection` powerd subscription (hand-declared SPI, see below) and the `CGSessionCopyCurrentDictionary` console read |
+| `openlogi-agent/src/power_source/iokit.rs` | opt-in Batteries-widget publisher: `dlopen`/`dlsym` of private `IOPSCreatePowerSource` / `IOPSSetPowerSourceDetails` / `IOPSReleasePowerSource` |
 | `openlogi-agent/src/status_item.rs` | safe `objc2` wrappers over `NSStatusItem` / `NSMenu` / `NSMenuItem` |
 | `openlogi-agent/src/tray.rs` | the menu-bar semantics, `MenuTarget` + `SessionTarget` (`define_class!`), the Accessory `NSApplication` loop, the `NSWorkspace` session (fast-user-switch) notifications |
 | `openlogi-agent-core/src/watchers/camera.rs` | the CoreMediaIO "camera is running" property read |
@@ -232,6 +234,8 @@ its single user. The current set, all deliberate:
   `UCKeyTranslate` — `objc2-carbon` skips HIToolbox and `objc2-core-services`
   skips CarbonCore. `UCKeyTranslate`'s lengths are `UniCharCount`, an
   `unsigned long`: `usize`, not `u32`.
+- `openlogi-agent/src/power_source/iokit.rs`: private `IOPS*` power-source SPI
+  (experimental Batteries-widget integration).
 - the `disclaim` crate: `responsibility_spawnattrs_setdisclaim` (private SPI).
 
 `openlogi-camera`'s `AVAuthorizationStatus` integers remain on the
