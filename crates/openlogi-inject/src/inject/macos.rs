@@ -12,7 +12,7 @@ use core_graphics::geometry::CGPoint;
 use objc2_application_services::{AXError, AXUIElement};
 use objc2_core_foundation::{CFArray, CFRetained, CFString, CFType, Type as _};
 use openlogi_core::binding::{
-    Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Script, Shortcut, WorkflowStep,
+    Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Shortcut,
 };
 use openlogi_core::config::FunctionKey;
 use openlogi_core::scroll::ScrollDelta;
@@ -50,17 +50,17 @@ pub(super) fn execute(action: &Action) {
         // MiddleClick). A button left on its own native click never reaches
         // this — the hook passes it straight through to the OS.
         Effect::Click(button) => dispatch_click(button),
-        Effect::Shortcut(shortcut) => post_keycombo(&combo(shortcut)),
-        Effect::Key(combo) | Effect::HeldKey(combo) => post_keycombo(combo),
+        Effect::Shortcut(shortcut) => press_combo(&combo(shortcut)),
+        Effect::Key(combo) | Effect::HeldKey(combo) => press_combo(combo),
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
         // Media/volume controls are NX system-defined keys, not ordinary
         // keyboard virtual-key events. Posting kVK_Volume* through
         // CGEventCreateKeyboardEvent is ignored by macOS' volume handler.
         Effect::Media(key) => post_media_key(nx_key(key)),
         Effect::Native(native) => dispatch_native(native),
-        Effect::Script(script) => dispatch_script(script),
+        Effect::Script(script) => super::dispatch_script(script),
         // TypeText emits a unicode string, layout-independent.
-        Effect::Text(text) => post_unicode(text),
+        Effect::Text(text) => type_text(text),
         Effect::AgentSide => {
             tracing::debug!(
                 action = action.label(),
@@ -110,12 +110,7 @@ fn combo(shortcut: Shortcut) -> KeyCombo {
         Shortcut::PrevTab => "Ctrl+Shift+Tab",
         Shortcut::ReloadPage => "Cmd+R",
     };
-    parse_shortcut(text)
-}
-
-fn parse_shortcut(text: &str) -> KeyCombo {
-    text.parse()
-        .unwrap_or_else(|error| unreachable!("hardcoded shortcut table entry {text:?}: {error}"))
+    super::parse_shortcut(text)
 }
 
 /// Dispatch a window-manager or power [`NativeAction`].
@@ -155,19 +150,6 @@ fn nx_key(key: MediaKey) -> i32 {
         MediaKey::VolumeUp => NX_KEYTYPE_SOUND_UP,
         MediaKey::VolumeDown => NX_KEYTYPE_SOUND_DOWN,
         MediaKey::Mute => NX_KEYTYPE_MUTE,
-    }
-}
-
-/// Dispatch a power-user scripting [`Script`] action.
-///
-/// All three spawn off the tap thread: the callback must not block (posting
-/// a key while waiting on a child process, or sleeping through a workflow
-/// `Delay`, would wedge input).
-fn dispatch_script(script: Script<'_>) {
-    match script {
-        Script::AppleScript(src) => run_apple_script_async(src.to_string()),
-        Script::ShellCommand(cmd) => run_shell_command_async(cmd.to_string()),
-        Script::Workflow(steps) => run_workflow_async(steps.to_vec()),
     }
 }
 
@@ -267,16 +249,16 @@ fn post_key(vk: u16, flags: CGEventFlags) {
 
 /// Type an arbitrary unicode string by emitting one key event per character,
 /// each carrying its unicode payload via `CGEventKeyboardSetUnicodeString`.
-fn post_unicode(text: &str) {
+pub(super) fn type_text(text: &str) {
     let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
-        tracing::warn!("CGEventSource::new failed for post_unicode");
+        tracing::warn!("CGEventSource::new failed for type_text");
         return;
     };
     for ch in text.chars() {
         // Keycode 0 (A) is a placeholder; the unicode payload determines the
         // actual inserted character.
         let Ok(ev) = CGEvent::new_keyboard_event(src.clone(), 0, true) else {
-            tracing::warn!("CGEvent::new_keyboard_event failed in post_unicode");
+            tracing::warn!("CGEvent::new_keyboard_event failed in type_text");
             continue;
         };
         let s = ch.to_string();
@@ -287,7 +269,7 @@ fn post_unicode(text: &str) {
 
 /// Press a key chord described by a `KeyCombo` modifier bitmask + virtual
 /// keycode. Used by the workflow sequencer's `PressKey` step.
-fn post_keycombo(combo: &KeyCombo) {
+pub(super) fn press_combo(combo: &KeyCombo) {
     if let Some(vk) = hid_usage_to_macos(combo.key().code()) {
         post_key(vk, combo_flags(combo));
     } else {
@@ -459,7 +441,7 @@ mod tests {
         assert_eq!(combo(Shortcut::NextTab).rendered_label(), "Ctrl+Tab");
         // hid_usage_to_macos must actually resolve every table entry, or a
         // `Shortcut` silently no-ops instead of pressing anything (see
-        // `post_keycombo`'s warn-and-drop path). Iterates `Shortcut::ALL`
+        // `press_combo`'s warn-and-drop path). Iterates `Shortcut::ALL`
         // rather than a hand-copied list, so a newly added `Shortcut`
         // variant is checked here automatically instead of depending on
         // someone remembering to extend a second, independent list.
@@ -497,40 +479,13 @@ mod tests {
     }
 }
 
-fn run_apple_script_async(src: String) {
-    std::thread::spawn(move || run_apple_script(&src));
-}
-
-fn run_shell_command_async(cmd: String) {
-    std::thread::spawn(move || run_shell_command(&cmd));
-}
-
-fn run_workflow_async(steps: Vec<WorkflowStep>) {
-    std::thread::spawn(move || run_workflow(&steps));
-}
-
-/// Run workflow steps on a worker thread, so `Delay` never stalls the event tap.
-fn run_workflow(steps: &[WorkflowStep]) {
-    for step in steps {
-        match step {
-            WorkflowStep::TypeText(text) => post_unicode(text),
-            WorkflowStep::PressKey(combo) => post_keycombo(combo),
-            WorkflowStep::Delay { millis } => {
-                std::thread::sleep(std::time::Duration::from_millis(*millis));
-            }
-            WorkflowStep::RunAppleScript(src) => run_apple_script(src),
-            WorkflowStep::RunShellCommand(cmd) => run_shell_command(cmd),
-        }
-    }
-}
-
-fn run_apple_script(src: &str) {
+pub(super) fn run_apple_script(src: &str) {
     let _ = std::process::Command::new("osascript")
         .args(["-e", src])
         .output();
 }
 
-fn run_shell_command(cmd: &str) {
+pub(super) fn run_shell_command(cmd: &str) {
     let _ = std::process::Command::new("/bin/sh")
         .args(["-c", cmd])
         .output();
