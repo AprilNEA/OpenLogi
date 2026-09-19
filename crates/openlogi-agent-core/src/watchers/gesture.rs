@@ -30,8 +30,8 @@ use std::time::Duration;
 use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_core::scroll::ScrollDelta;
 use openlogi_hid::{
-    CaptureChannel, CaptureSessionOutcome, CapturedInput, DeviceIoGate, PendingCaptureRestore,
-    run_capture_session_with_registry_spec,
+    CaptureChannel, CaptureSessionOutcome, CaptureSessionStop, CapturedInput, DeviceIoGate,
+    PendingCaptureRestore, run_capture_session_with_registry_spec,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
@@ -129,8 +129,8 @@ pub fn spawn(
     WatcherHandle::new(shutdown_tx, shutdown_done_rx)
 }
 
-type RunningSession = CaptureSession<CaptureTarget, DispatchPlan>;
-type GestureSlot = CaptureSlot<CaptureTarget, DispatchPlan, PendingRestore>;
+type RunningSession = CaptureSession<CaptureTarget, DispatchPlan, CaptureSessionStop>;
+type GestureSlot = CaptureSlot<CaptureTarget, DispatchPlan, PendingRestore, CaptureSessionStop>;
 
 struct CapturedEvent {
     physical_key: PhysicalDeviceKey,
@@ -242,11 +242,24 @@ fn reconcile_session(
     wanted: Option<(&CaptureTarget, &DispatchPlan)>,
     dispatcher: &mut InputDispatcher,
 ) {
-    if session.reconcile(wanted) == ReconcileAction::DispatchChanged {
+    if session.reconcile_with(wanted, stop_for_target_change) == ReconcileAction::DispatchChanged {
         dispatcher.cancel_session(session.id());
         let config_key = session.dispatch().config_key.clone();
         session.rekey(&config_key);
     }
+}
+
+fn stop_for_target_change(
+    current: &CaptureTarget,
+    wanted: Option<&CaptureTarget>,
+) -> CaptureSessionStop {
+    wanted.map_or(CaptureSessionStop::Shutdown, |next| {
+        if next.route == current.route {
+            CaptureSessionStop::Shutdown
+        } else {
+            CaptureSessionStop::Handoff(next.route.clone())
+        }
+    })
 }
 
 /// Reconcile one tracked slot directly against the latest publication. Input
@@ -304,6 +317,7 @@ fn acquire_session_lease(
 async fn retry_pending_restores(
     slots: &mut HashMap<PhysicalDeviceKey, GestureSlot>,
     registry: &openlogi_hid::ChannelRegistry,
+    wanted: &[DeviceCapturePlan],
     now: Instant,
 ) {
     let keys: Vec<_> = slots
@@ -323,7 +337,16 @@ async fn retry_pending_restores(
             slots.insert(key, GestureSlot::Recovering(recovery));
             continue;
         };
-        if let CaptureSessionOutcome::RestorePending(token) = pending.token.retry(registry).await {
+        let outcome = match wanted.iter().find(|plan| plan.target.physical_key == key) {
+            Some(plan) => {
+                pending
+                    .token
+                    .retry_via(plan.target.route.clone(), registry)
+                    .await
+            }
+            None => pending.token.retry(registry).await,
+        };
+        if let CaptureSessionOutcome::RestorePending(token) = outcome {
             recovery.pending_restore = Some(PendingRestore {
                 token,
                 retry_at: Instant::now() + RETRY_DELAY,
@@ -439,7 +462,7 @@ impl GestureManagerState {
             None
         };
         if restore_lease.is_some() {
-            retry_pending_restores(&mut self.slots, &channels.registry, now).await;
+            retry_pending_restores(&mut self.slots, &channels.registry, wanted, now).await;
         }
 
         for plan in wanted {
@@ -580,7 +603,7 @@ async fn drain_for_shutdown(
             std::future::pending::<()>().await;
         }
         if let Some(_lease) = acquire_session_lease(receiver_access, &mut state.lease) {
-            retry_pending_restores(&mut state.slots, &channels.registry, Instant::now()).await;
+            retry_pending_restores(&mut state.slots, &channels.registry, &[], Instant::now()).await;
         }
         if state.has_pending_restores() {
             tokio::time::sleep(RETRY_DELAY).await;

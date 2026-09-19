@@ -12,9 +12,9 @@ use super::{
 };
 use crate::session::gesture::CaptureSpec;
 use crate::{
-    CaptureChannel, CaptureSessionOutcome, ChannelRegistry, DeviceRoute, Enumerator, NodeId,
-    NodeInfo, PairingCommand, PairingEvent, ReceiverSelector, device_io_channel, reprog_controls,
-    run_capture_session_with_registry_spec, run_pairing,
+    CaptureChannel, CaptureSessionOutcome, CaptureSessionStop, ChannelRegistry, DeviceRoute,
+    Enumerator, NodeId, NodeInfo, PairingCommand, PairingEvent, ReceiverSelector,
+    device_io_channel, reprog_controls, run_capture_session_with_registry_spec, run_pairing,
 };
 
 const GESTURE_CHANNEL: &str = "gesture-capture-session";
@@ -90,7 +90,7 @@ async fn gesture_capture_replay_restores_original_reporting_on_normal_shutdown()
             .expect("capture channel is published after arming");
         assert!(registry.is_current(&published));
         shutdown
-            .send(())
+            .send(CaptureSessionStop::Shutdown)
             .expect("capture session still owns its shutdown receiver");
         armed.release();
     };
