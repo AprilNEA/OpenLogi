@@ -58,6 +58,17 @@ impl AppState {
         self.persist_and_reload("show-in-menu-bar setting");
         StateEvent::SettingsChanged.into()
     }
+    /// Persist the battery-widget preference and reconcile the running agent.
+    #[cfg(target_os = "macos")]
+    pub fn commit_macos_battery_widget(&mut self, enabled: bool) -> StateEvents {
+        if self.config.app_settings.macos_battery_widget == enabled {
+            return StateEvent::SettingsChanged.into();
+        }
+        self.config
+            .edit(|config| config.app_settings.macos_battery_widget = enabled);
+        self.persist_and_reload("macOS battery-widget setting");
+        StateEvent::SettingsChanged.into()
+    }
     /// Toggle the opt-in update check and persist it. No immediate side effect
     /// beyond the next launch reading the new value. An already-set value
     /// writes nothing and is still reported.
@@ -194,7 +205,7 @@ impl AppState {
         self.config.edit(|config| {
             config.set_device_custom_name(record_key, custom_name.clone());
         });
-        if !self.persist_config("device name") {
+        if !self.persist_and_reload("device name") {
             return StateEvent::InventoryChanged.into();
         }
         for record in self

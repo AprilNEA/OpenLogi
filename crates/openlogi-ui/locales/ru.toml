@@ -77,6 +77,18 @@ show_in_the_notification_area = "Показывать в области увед
 notification_area_visibility_description = "Значок OpenLogi останется в области уведомлений панели задач. Вступает в силу при следующем запуске фонового агента."
 openlogi = "OpenLogi"
 
+[battery_widget]
+setting = "Show batteries in macOS widget"
+description = "Show battery levels for devices connected through Bolt or Unifying. macOS only."
+starting = "Starting"
+waiting = "Waiting for OpenLogi agent"
+active_singular = "Active · %{count} device"
+active_plural = "Active · %{count} devices"
+empty = "Connect a battery-powered device through Bolt or Unifying."
+unavailable = "Unavailable on this version of macOS"
+failed_singular = "Battery updates failed · %{count} device published"
+failed_plural = "Battery updates failed · %{count} devices published"
+
 [device]
 no_devices_connected = "Устройство не подключено"
 devices = "Устройства"
