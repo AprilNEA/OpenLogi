@@ -124,7 +124,7 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
         #[cfg(target_os = "macos")]
         ensure_registration_at_startup(cx);
 
-        let (sync_tx, mut sync_done) = tokio::sync::mpsc::unbounded_channel::<bool>();
+        let (sync_tx, mut sync_done) = tokio::sync::mpsc::unbounded_channel::<()>();
         let mut rt = Runtime::new(cams, sync_tx, swr, resolver);
         let mut camera_scan = Box::pin(cx.background_executor().timer(CAMERA_SCAN_PERIOD));
         // Cleared when the IPC update channel closes (the client thread died),
@@ -163,7 +163,7 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
                 // fire, which the always-armed camera timer above already makes
                 // unreachable. Manual commands no longer queue behind a sync —
                 // per-key in-flight state makes the exclusion the cache's job.
-                Some(ok) = sync_done.recv() => rt.on_sync_finished(ok, cx),
+                Some(()) = sync_done.recv() => rt.on_sync_finished(cx),
                 Some(cmd) = deeplinks.recv() => {
                     cx.update(|cx| app::deeplink::dispatch(cmd, cx));
                 }
@@ -227,7 +227,7 @@ struct Runtime {
     /// Holding the task is what holds the subscription; dropping it
     /// unsubscribes.
     asset_subs: Subscriptions<Task<()>>,
-    sync_tx: UnboundedSender<bool>,
+    sync_tx: UnboundedSender<()>,
     /// Most recent completed enumeration, kept so a manual Refresh / Clear can
     /// sync the current devices without waiting for the next snapshot.
     inventories: Vec<DeviceInventory>,
@@ -237,7 +237,7 @@ struct Runtime {
 impl Runtime {
     fn new(
         cams: Vec<Camera>,
-        sync_tx: UnboundedSender<bool>,
+        sync_tx: UnboundedSender<()>,
         swr: SwrClient,
         resolver: assets::AssetResolver,
     ) -> Self {
@@ -421,15 +421,15 @@ impl Runtime {
         self.ensure_assets(asset_source, targets.into_iter(), cx);
     }
 
-    /// A download landed. Replace the resolver — the one that was here keeps
-    /// answering with what it found before the download — re-resolve against
-    /// the enlarged cache and repaint; the whole-record comparison in
-    /// `refresh_inventories` decides whether anything actually changed.
-    fn on_sync_finished(&mut self, ok: bool, cx: &AsyncApp) {
-        if ok {
-            self.resolver = assets::AssetResolver::new();
-            self.refresh_devices(cx);
-        }
+    /// A sync settled, successfully or not. Replace the resolver either way: a
+    /// depot syncs file by file, so a failed sync may still have written some
+    /// of them, and the one that was here keeps answering with what it found
+    /// before the download. Re-resolve against the changed cache and repaint;
+    /// the whole-record comparison in `refresh_inventories` decides whether
+    /// anything actually changed.
+    fn on_sync_finished(&mut self, cx: &AsyncApp) {
+        self.resolver = assets::AssetResolver::new();
+        self.refresh_devices(cx);
     }
 
     /// Rebuild the UI's device records against the current resolver.
