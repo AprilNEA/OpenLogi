@@ -47,6 +47,14 @@ contents:
     file_info:
       mode: 0644
 
+  # ── uinput module load ──────────────────────────────────────────────────────
+  # The udev rule alone cannot grant /dev/uinput on a machine that has never
+  # loaded the module; see the file's own comment.
+  - src: packaging/linux/modules-load/openlogi.conf
+    dst: /etc/modules-load.d/openlogi.conf
+    file_info:
+      mode: 0644
+
   # ── systemd user unit ───────────────────────────────────────────────────────
   - src: packaging/linux/systemd/openlogi-agent.service
     dst: /usr/lib/systemd/user/openlogi-agent.service
