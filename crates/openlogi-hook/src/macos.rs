@@ -164,13 +164,23 @@ fn foreground_app_from_running_application(
     app: &NSRunningApplication,
     pool: objc2::rc::AutoreleasePool<'_>,
 ) -> Option<ForegroundApp> {
-    let bundle_id = app.bundleIdentifier()?;
+    // A process that is not an app bundle (a bare Mach-O launched from a
+    // shell script, a QEMU front-end) still becomes NSWorkspace's frontmost
+    // application normally — only its bundle identifier is nil. Fall back to
+    // its executable path so its window can still be addressed by a per-app
+    // profile: `ForegroundApp::id`'s own doc already documents the executable
+    // path as a legitimate identity namespace (it's what Windows always
+    // uses), so this reuses an existing contract rather than inventing one.
+    let id_string = match app.bundleIdentifier() {
+        Some(bundle_id) => bundle_id,
+        None => app.executableURL().and_then(|url| url.path())?,
+    };
     let name = app.localizedName();
     // SAFETY: Both UTF-8 views are copied into owned Strings before `pool`
     // drains, so no borrowed Objective-C storage escapes.
     let (id, name) = unsafe {
         (
-            bundle_id.to_str(pool).to_owned(),
+            id_string.to_str(pool).to_owned(),
             name.as_ref().map(|name| name.to_str(pool).to_owned()),
         )
     };
