@@ -157,6 +157,11 @@ fn dispatch_media(key: MediaKey) {
         MediaKey::VolumeUp => post_key(VK_VOLUME_UP, &[]),
         MediaKey::VolumeDown => post_key(VK_VOLUME_DOWN, &[]),
         MediaKey::Mute => post_key(VK_VOLUME_MUTE, &[]),
+        // Windows has no virtual key for display brightness — it is a WMI /
+        // Monitor Configuration API concern, not an input event.
+        MediaKey::BrightnessUp | MediaKey::BrightnessDown => {
+            tracing::debug!("no Windows key event for display brightness — action skipped");
+        }
     }
 }
 
