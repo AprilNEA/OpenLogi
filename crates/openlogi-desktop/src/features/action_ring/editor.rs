@@ -14,17 +14,28 @@ use openlogi_core::binding::{
 };
 
 use super::action_icons::action_icon_path;
+use crate::features::keyboard::editors::PowerUserKind;
 use crate::features::mouse::picker::editor_section;
 use crate::state::{AppState, DeviceRecord, StateEvent};
 use crate::ui::action::localized_action_label;
 use crate::ui::components::{MenuRow, control_input};
 use crate::ui::theme::{self, Palette, Typography as _};
 
+/// The three single-field Power User inputs the ring's slot editor exposes.
+/// [`PowerUserKind::Workflow`] needs a multi-step list editor this panel
+/// doesn't have yet, so it stays keyboard-only for now.
+pub(super) struct PowerUserInputs {
+    pub(super) type_text: Entity<InputState>,
+    pub(super) applescript: Entity<InputState>,
+    pub(super) shell_command: Entity<InputState>,
+}
+
 pub(super) fn action_library(
     slot: ActionRingSlot,
     current: Option<&ActionRingEntry>,
     application_input: &Entity<InputState>,
     shortcut_input: &Entity<InputState>,
+    power_user: &PowerUserInputs,
     library_scroll: &ScrollHandle,
     pal: Palette,
 ) -> impl IntoElement {
@@ -86,6 +97,30 @@ pub(super) fn action_library(
                 })
                 .child(shortcut_editor(slot, shortcut_input, pal))
                 .child(path_editor(slot, application_input, pal))
+                .child(text_action_editor(
+                    slot,
+                    PowerUserKind::TypeText,
+                    &power_user.type_text,
+                    pal,
+                ))
+                // RunAppleScript has no execution path outside macOS
+                // (`openlogi-inject`'s Linux/Windows backends only log a
+                // warning and do nothing) — hide the editor there instead of
+                // letting a binding be saved that silently never fires.
+                .when(cfg!(target_os = "macos"), |library| {
+                    library.child(text_action_editor(
+                        slot,
+                        PowerUserKind::RunAppleScript,
+                        &power_user.applescript,
+                        pal,
+                    ))
+                })
+                .child(text_action_editor(
+                    slot,
+                    PowerUserKind::RunShellCommand,
+                    &power_user.shell_command,
+                    pal,
+                ))
                 .children(action_sections(slot, current_action.as_ref(), pal)),
             library_scroll,
         ))
@@ -217,6 +252,56 @@ fn path_editor(slot: ActionRingSlot, input: &Entity<InputState>, pal: Palette) -
                         }),
                 ),
         )
+}
+
+/// Single-field Power User editor shared by TypeText, RunAppleScript and
+/// RunShellCommand — each is one text field committed as its own [`Action`]
+/// variant, the same shape as [`shortcut_editor`]/[`path_editor`].
+fn text_action_editor(
+    slot: ActionRingSlot,
+    kind: PowerUserKind,
+    input: &Entity<InputState>,
+    pal: Palette,
+) -> impl IntoElement {
+    let submit_input = input.clone();
+    v_flex()
+        .gap_1()
+        .child(editor_section(tr!(kind.heading_key()), pal))
+        .child(
+            h_flex()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(control_input(input).cleanable(true)),
+                )
+                .child(
+                    Button::new(("ring-add-power-user", kind as usize))
+                        .compact()
+                        .label(tr!("common.add"))
+                        .on_click(move |_, _, cx| {
+                            let text = submit_input.read(cx).value().to_string();
+                            if let Some(action) = power_user_action(kind, text) {
+                                commit_action(slot, action, cx);
+                            }
+                        }),
+                ),
+        )
+}
+
+/// Build the [`Action`] a Power User editor's text commits as, or `None` for
+/// empty input or [`PowerUserKind::Workflow`] (no single-field editor here).
+fn power_user_action(kind: PowerUserKind, text: String) -> Option<Action> {
+    if text.is_empty() {
+        return None;
+    }
+    match kind {
+        PowerUserKind::TypeText => Some(Action::TypeText(text)),
+        PowerUserKind::RunAppleScript => Some(Action::RunAppleScript(text)),
+        PowerUserKind::RunShellCommand => Some(Action::RunShellCommand(text)),
+        PowerUserKind::Workflow => None,
+    }
 }
 
 fn action_sections(
@@ -395,5 +480,33 @@ mod tests {
         assert!(actions.contains(&Action::MissionControl));
         assert!(!actions.contains(&Action::None));
         assert!(!actions.contains(&Action::ShowActionsRing));
+    }
+
+    #[test]
+    fn power_user_action_builds_the_matching_variant() {
+        assert_eq!(
+            power_user_action(PowerUserKind::TypeText, "hello".to_string()),
+            Some(Action::TypeText("hello".to_string()))
+        );
+        assert_eq!(
+            power_user_action(PowerUserKind::RunAppleScript, "beep".to_string()),
+            Some(Action::RunAppleScript("beep".to_string()))
+        );
+        assert_eq!(
+            power_user_action(PowerUserKind::RunShellCommand, "echo hi".to_string()),
+            Some(Action::RunShellCommand("echo hi".to_string()))
+        );
+    }
+
+    #[test]
+    fn power_user_action_rejects_empty_text_and_workflow() {
+        assert_eq!(
+            power_user_action(PowerUserKind::TypeText, String::new()),
+            None
+        );
+        assert_eq!(
+            power_user_action(PowerUserKind::Workflow, "irrelevant".to_string()),
+            None
+        );
     }
 }

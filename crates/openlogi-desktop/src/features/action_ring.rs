@@ -19,7 +19,8 @@ use openlogi_core::binding::{
 use openlogi_ui::action_icons::RING_CANCEL_ICON;
 
 use self::action_icons::action_icon_path;
-use self::editor::action_library;
+use self::editor::{PowerUserInputs, action_library};
+use crate::features::keyboard::editors::{PowerUserKind, text_editor_placeholder};
 use crate::state::{AppState, DeviceRecord, StateEvent};
 use crate::ui::action::localized_action_label;
 use crate::ui::theme::{self, Palette, Typography as _};
@@ -31,6 +32,9 @@ pub struct ActionRingPanel {
     selected_slot: ActionRingSlot,
     application_input: Option<Entity<InputState>>,
     shortcut_input: Option<Entity<InputState>>,
+    type_text_input: Option<Entity<InputState>>,
+    applescript_input: Option<Entity<InputState>>,
+    shell_command_input: Option<Entity<InputState>>,
     library_scroll: ScrollHandle,
     #[expect(dead_code, reason = "held to keep the AppState subscription alive")]
     state_obs: Subscription,
@@ -56,8 +60,40 @@ impl ActionRingPanel {
             selected_slot: ActionRingSlot::Top,
             application_input: None,
             shortcut_input: None,
+            type_text_input: None,
+            applescript_input: None,
+            shell_command_input: None,
             library_scroll: ScrollHandle::new(),
             state_obs,
+        }
+    }
+
+    /// Get-or-create the three Power User text inputs, split out of `render`
+    /// to keep it under clippy's line budget.
+    fn power_user_inputs(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> PowerUserInputs {
+        PowerUserInputs {
+            type_text: editor_input(
+                &mut self.type_text_input,
+                text_editor_placeholder(PowerUserKind::TypeText),
+                window,
+                cx,
+            ),
+            applescript: editor_input(
+                &mut self.applescript_input,
+                text_editor_placeholder(PowerUserKind::RunAppleScript),
+                window,
+                cx,
+            ),
+            shell_command: editor_input(
+                &mut self.shell_command_input,
+                text_editor_placeholder(PowerUserKind::RunShellCommand),
+                window,
+                cx,
+            ),
         }
     }
 }
@@ -85,6 +121,7 @@ impl Render for ActionRingPanel {
             window,
             cx,
         );
+        let power_user = self.power_user_inputs(window, cx);
         let view = cx.entity();
 
         v_flex()
@@ -119,59 +156,58 @@ impl Render for ActionRingPanel {
                         layout.slots.get(&self.selected_slot),
                         &application_input,
                         &shortcut_input,
+                        &power_user,
                         &self.library_scroll,
                         pal,
                     )),
             )
-            .child(
-                h_flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_3()
-                    .child(
-                        v_flex()
-                            .child(div().text_body().child(tr!("action_ring.actions_ring")))
-                            .child(
-                                div()
-                                    .text_caption()
-                                    .text_color(pal.text_muted)
-                                    .child(tr!("action_ring.open_at_the_current_cursor_position")),
-                            ),
-                    )
-                    .child(toggle_button(
-                        "ring-enabled",
-                        ring.enabled,
-                        |state, enabled| {
-                            state.commit_action_ring_enabled(enabled);
-                        },
-                    )),
-            )
+            .child(enabled_row(ring.enabled, pal))
             .when(haptics_supported, |panel| {
-                panel.child(
-                    h_flex()
-                        .items_center()
-                        .justify_between()
-                        .gap_3()
-                        .child(
-                            v_flex()
-                                .child(div().text_body().child(tr!("action_ring.haptic_feedback")))
-                                .child(
-                                    div()
-                                        .text_caption()
-                                        .text_color(pal.text_muted)
-                                        .child(tr!("action_ring.action_ring_haptic_description")),
-                                ),
-                        )
-                        .child(toggle_button(
-                            "ring-haptics",
-                            ring.haptics,
-                            |state, enabled| {
-                                state.commit_action_ring_haptics(enabled);
-                            },
-                        )),
-                )
+                panel.child(haptics_row(ring.haptics, pal))
             })
     }
+}
+
+/// The ring on/off toggle row.
+fn enabled_row(enabled: bool, pal: Palette) -> impl IntoElement {
+    h_flex()
+        .items_center()
+        .justify_between()
+        .gap_3()
+        .child(
+            v_flex()
+                .child(div().text_body().child(tr!("action_ring.actions_ring")))
+                .child(
+                    div()
+                        .text_caption()
+                        .text_color(pal.text_muted)
+                        .child(tr!("action_ring.open_at_the_current_cursor_position")),
+                ),
+        )
+        .child(toggle_button("ring-enabled", enabled, |state, enabled| {
+            state.commit_action_ring_enabled(enabled);
+        }))
+}
+
+/// The haptic-feedback toggle row, shown only when the device supports it.
+fn haptics_row(haptics: bool, pal: Palette) -> impl IntoElement {
+    h_flex()
+        .items_center()
+        .justify_between()
+        .gap_3()
+        .child(
+            v_flex()
+                .child(div().text_body().child(tr!("action_ring.haptic_feedback")))
+                .child(
+                    div()
+                        .text_caption()
+                        .text_color(pal.text_muted)
+                        .child(tr!("action_ring.action_ring_haptic_description")),
+                ),
+        )
+        .child(toggle_button("ring-haptics", haptics, |state, enabled| {
+            state.commit_action_ring_haptics(enabled);
+        }))
 }
 
 fn action_ring_editor_state(cx: &Context<ActionRingPanel>) -> (ActionRingConfig, ActionRingLayout) {
