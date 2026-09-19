@@ -99,3 +99,18 @@ fn same_model_serial_less_cameras_keep_independent_names() {
         "Desk camera"
     );
 }
+
+#[test]
+fn renaming_a_device_reloads_the_agent_for_accessory_publication() {
+    let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::new(Sources::in_memory(
+        Config::ephemeral(),
+        &AssetResolver::new(),
+        commands,
+    ));
+    let _ = state.commit_device_custom_name(KNOWN_MOUSE_KEY, "Office mouse");
+    assert!(matches!(
+        receiver.try_recv().expect("reload after a name change"),
+        crate::services::ipc::Command::ReloadConfig(_)
+    ));
+}

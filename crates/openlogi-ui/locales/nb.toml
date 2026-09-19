@@ -77,6 +77,18 @@ show_in_the_notification_area = "Vis i varslingsområdet"
 notification_area_visibility_description = "Beholder OpenLogi-ikonet i varslingsområdet på oppgavelinjen. Trer i kraft neste gang bakgrunnsagenten starter."
 openlogi = "OpenLogi"
 
+[battery_widget]
+setting = "Show batteries in macOS widget"
+description = "Show battery levels for devices connected through Bolt or Unifying. macOS only."
+starting = "Starting"
+waiting = "Waiting for OpenLogi agent"
+active_singular = "Active · %{count} device"
+active_plural = "Active · %{count} devices"
+empty = "Connect a battery-powered device through Bolt or Unifying."
+unavailable = "Unavailable on this version of macOS"
+failed_singular = "Battery updates failed · %{count} device published"
+failed_plural = "Battery updates failed · %{count} devices published"
+
 [device]
 no_devices_connected = "Ingen enhet tilkoblet"
 devices = "Enheter"

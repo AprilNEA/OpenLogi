@@ -3,6 +3,8 @@ schema_version = 7
 selected_device = "receiver:aabbccdd:slot:1"
 
 [app_settings]
+# Experimental macOS Batteries widget integration for Bolt/Unifying accessories.
+macos_battery_widget = false
 launch_at_login = true
 check_for_updates = false
 auto_install_updates = false
