@@ -17,6 +17,7 @@
 //! at the cadence these fire at (≤ once per slider release / button press)
 //! and avoids holding a long-lived async runtime alongside GPUI's executor.
 
+use std::fmt;
 use std::future::Future;
 use std::time::Duration;
 
@@ -109,20 +110,46 @@ pub struct DeviceOp {
     route: DeviceRoute,
 }
 
+/// Why a device operation has no channel to write through right now.
+#[derive(Debug, Clone, Copy)]
+enum Unresolved {
+    /// The host gate refuses proactive device I/O (sleep, lock, shutdown).
+    IoSuspended,
+    /// Inventory publishes no channel for the route.
+    NoChannel,
+}
+
+impl fmt::Display for Unresolved {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::IoSuspended => "host device I/O suspended",
+            Self::NoChannel => "no inventory channel",
+        })
+    }
+}
+
+/// A requester sees both as "nothing to write to".
+impl From<Unresolved> for WriteError {
+    fn from(_: Unresolved) -> Self {
+        Self::DeviceNotFound
+    }
+}
+
 impl DeviceOp {
     /// Resolve the authoritative channel without acquiring the receiver
     /// lease. Callers that manage their own lease/thread lifecycle across
     /// more than one write (the volatile-settings reapply sequence) resolve
     /// once up front through this instead of [`Self::run`]/[`Self::detach`].
-    fn resolve(&self) -> Result<SharedChannel, WriteError> {
+    fn resolve(&self) -> Result<SharedChannel, Unresolved> {
         if !self.access.device_io.allows_io() {
-            return Err(WriteError::DeviceNotFound);
+            return Err(Unresolved::IoSuspended);
         }
         authoritative_channel(
             Some(&self.access.channel),
             &self.access.registry,
             &self.route,
         )
+        .map_err(|_| Unresolved::NoChannel)
     }
 
     /// Lease the receiver, resolve the authoritative channel, then run `f`
@@ -232,9 +259,12 @@ impl DeviceOp {
         F: FnOnce(SharedChannel) -> Fut + Send + 'static,
         Fut: Future<Output = Result<T, WriteError>>,
     {
-        let Ok(shared) = self.resolve() else {
-            debug!(route = %self.route, label, "no inventory channel — write skipped");
-            return;
+        let shared = match self.resolve() {
+            Ok(shared) => shared,
+            Err(reason) => {
+                debug!(route = %self.route, label, %reason, "background write skipped");
+                return;
+            }
         };
         let DeviceAccess {
             receiver_access,
@@ -368,9 +398,12 @@ pub fn reapply_mouse_volatile_in_background(op: &DeviceOp, settings: VolatileMou
         dpi,
         smartshift,
     } = settings;
-    let Ok(shared) = op.resolve() else {
-        debug!(route = %op.route, "no inventory channel — volatile reapply skipped");
-        return;
+    let shared = match op.resolve() {
+        Ok(shared) => shared,
+        Err(reason) => {
+            debug!(route = %op.route, %reason, "volatile reapply skipped");
+            return;
+        }
     };
     let receiver_access = op.access.receiver_access.clone();
     let device_io = op.access.device_io.clone();
