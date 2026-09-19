@@ -301,6 +301,11 @@ pub struct AppSettings {
     /// Logi Options+; off switches instantly. Only macOS reads it.
     #[serde(default = "default_true")]
     pub animate_desktop_switch: bool,
+    /// Publish receiver-device batteries to the macOS Batteries widget.
+    /// Experimental and off by default because it uses private IOKit APIs.
+    /// Ignored on other platforms.
+    #[serde(default)]
+    pub macos_battery_widget: bool,
 }
 
 const SENSITIVITY_MIN: u8 = 1;
@@ -506,6 +511,7 @@ impl Default for AppSettings {
             low_battery_notifications: true,
             lock_key_notifications: true,
             animate_desktop_switch: true,
+            macos_battery_widget: false,
         }
     }
 }
