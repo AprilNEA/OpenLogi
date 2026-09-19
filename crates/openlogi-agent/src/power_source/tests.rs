@@ -528,3 +528,96 @@ fn replacement_publication_does_not_hide_same_pass_cleanup_failure() {
     drop(publisher);
     assert_eq!(removals.get(), 2, "each occupant is released exactly once");
 }
+
+#[test]
+fn missing_metadata_keeps_reading_but_later_identity_conflict_retires_it() {
+    for physical_identity in [false, true] {
+        let config = enabled_config();
+        let now = Instant::now();
+        let mut inv = inventory();
+        if physical_identity {
+            inv.paired[0].model_info = Some(DeviceModelInfo {
+                entity_count: 1,
+                serial_number: None,
+                unit_id: [1, 2, 3, 4],
+                transports: DeviceTransports::default(),
+                model_ids: [0xb034, 0, 0],
+                extended_model_id: 0,
+            });
+        }
+        inv.paired[0].battery.as_mut().unwrap().status = BatteryStatus::Charging;
+        let mut publisher = PowerSourcePublisher::new(FakeBackend::default());
+        publisher.reconcile(&config, std::slice::from_ref(&inv), now);
+        publisher.reconcile(&config, &[], now + Duration::from_secs(1));
+        inv.paired[0].wpid = None;
+        inv.paired[0].battery = None;
+        for offset in [2, 3] {
+            publisher.reconcile(
+                &config,
+                std::slice::from_ref(&inv),
+                now + Duration::from_secs(offset),
+            );
+            let reading = publisher
+                .backend
+                .live
+                .values()
+                .next()
+                .expect("missing metadata must not remove the source");
+            assert_eq!(reading.percentage, 77);
+            assert_eq!(reading.status, BatteryStatus::Charging);
+            assert_eq!(publisher.backend.writes, 1);
+            assert_eq!(publisher.backend.removals.get(), 0);
+            assert_eq!(publisher.next_deadline(), None);
+        }
+        if physical_identity {
+            inv.paired[0].model_info.as_mut().unwrap().unit_id = [5, 6, 7, 8];
+        } else {
+            inv.paired[0].wpid = Some(0xb035);
+        }
+        publisher.reconcile(&config, &[inv], now + Duration::from_secs(4));
+        assert!(
+            publisher.backend.live.is_empty(),
+            "conflicting identity must still retire the previous occupant"
+        );
+        assert_eq!(publisher.backend.removals.get(), 1);
+    }
+}
+
+#[test]
+fn serial_enrichment_without_telemetry_preserves_source_and_remembers_identity() {
+    let config = enabled_config();
+    let now = Instant::now();
+    let mut inv = inventory();
+    inv.paired[0].model_info = Some(DeviceModelInfo {
+        entity_count: 1,
+        serial_number: None,
+        unit_id: [1, 2, 3, 4],
+        transports: DeviceTransports::default(),
+        model_ids: [0xb034, 0, 0],
+        extended_model_id: 0,
+    });
+    let mut publisher = PowerSourcePublisher::new(FakeBackend::default());
+    publisher.reconcile(&config, std::slice::from_ref(&inv), now);
+    inv.paired[0].battery = None;
+    inv.paired[0].wpid = None;
+    inv.paired[0].model_info.as_mut().unwrap().serial_number = Some("first-serial".into());
+    publisher.reconcile(&config, std::slice::from_ref(&inv), now);
+    let model = inv.paired[0].model_info.take().unwrap();
+    publisher.reconcile(&config, std::slice::from_ref(&inv), now);
+    assert_eq!(
+        publisher.backend.live.values().next().unwrap().percentage,
+        77
+    );
+    assert_eq!(publisher.backend.writes, 1);
+    assert_eq!(publisher.backend.removals.get(), 0);
+    // The serial learned without telemetry remains authoritative even after a
+    // sparse snapshot and when the next probe cannot supply a unit id.
+    inv.paired[0].model_info = Some(DeviceModelInfo {
+        serial_number: Some("replacement-serial".into()),
+        unit_id: [0; 4],
+        ..model
+    });
+    publisher.reconcile(&config, &[inv], now);
+    assert!(publisher.backend.live.is_empty());
+    assert_eq!(publisher.backend.removals.get(), 1);
+}
