@@ -23,7 +23,7 @@ use tracing::debug;
 use crate::backend::NodeId;
 
 /// How often [`lock_within`] re-tries a held lock.
-const POLL: Duration = Duration::from_millis(20);
+const POLL_PERIOD: Duration = Duration::from_millis(20);
 
 /// Directory of the lock files.
 ///
@@ -85,7 +85,7 @@ pub async fn lock_within(name: &str, budget: Duration) -> io::Result<Option<Host
     loop {
         match try_lock(name) {
             Ok(Some(lock)) => return Ok(Some(lock)),
-            Ok(None) if Instant::now() < deadline => tokio::time::sleep(POLL).await,
+            Ok(None) if Instant::now() < deadline => tokio::time::sleep(POLL_PERIOD).await,
             Ok(None) => {
                 debug!(name, ?budget, "host lock still held past the budget");
                 return Ok(None);
