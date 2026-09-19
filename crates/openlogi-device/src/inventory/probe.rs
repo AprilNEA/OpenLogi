@@ -157,9 +157,9 @@ const BOLT_SLOT_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 /// and one value for a test to shrink.
 ///
 /// The composition: a receiver probe waits for the node's register phase for
-/// up to `register_lock_timeout` *before* its `receiver_timeout` starts, and
-/// under that budget runs an `arrival_drain_timeout` and slot walks each bounded by
-/// their own slot probe. A direct device runs under `direct_timeout` alone.
+/// up to `register_lock` *before* its `receiver` timeout starts, and under that
+/// budget runs an `arrival_drain` and slot walks each bounded by their own slot
+/// probe timeout. A direct device runs under `direct` alone.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ProbeTimeouts {
     /// How long a receiver probe waits for another OpenLogi process to
@@ -167,31 +167,31 @@ pub(crate) struct ProbeTimeouts {
     /// ([`probe::ProbeVerdict::Deferred`]). Outside the I/O budget.
     ///
     /// [`probe::ProbeVerdict::Deferred`]: ProbeVerdict::Deferred
-    pub(crate) register_lock_timeout: Duration,
+    pub(crate) register_lock: Duration,
     /// [`RECEIVER_PROBE_TIMEOUT`].
-    pub(crate) receiver_timeout: Duration,
+    pub(crate) receiver: Duration,
     /// [`PROBE_TIMEOUT`].
-    pub(crate) direct_timeout: Duration,
+    pub(crate) direct: Duration,
     /// [`ARRIVAL_DRAIN_TIMEOUT`].
-    pub(crate) arrival_drain_timeout: Duration,
+    pub(crate) arrival_drain: Duration,
     /// [`BOLT_SLOT_PROBE_TIMEOUT`].
-    pub(crate) bolt_slot_probe_timeout: Duration,
+    pub(crate) bolt_slot_probe: Duration,
     /// [`UNIFYING_SLOT_PROBE_TIMEOUT`].
-    pub(crate) unifying_slot_probe_timeout: Duration,
+    pub(crate) unifying_slot_probe: Duration,
     /// [`UNIFYING_CACHED_SLOT_PROBE_TIMEOUT`].
-    pub(crate) unifying_cached_slot_probe_timeout: Duration,
+    pub(crate) unifying_cached_slot_probe: Duration,
 }
 
 impl ProbeTimeouts {
     /// The production timeouts.
     pub(crate) const DEFAULT: Self = Self {
-        register_lock_timeout: host_lock::RECEIVER_REGISTER_TIMEOUT,
-        receiver_timeout: RECEIVER_PROBE_TIMEOUT,
-        direct_timeout: PROBE_TIMEOUT,
-        arrival_drain_timeout: ARRIVAL_DRAIN_TIMEOUT,
-        bolt_slot_probe_timeout: BOLT_SLOT_PROBE_TIMEOUT,
-        unifying_slot_probe_timeout: UNIFYING_SLOT_PROBE_TIMEOUT,
-        unifying_cached_slot_probe_timeout: UNIFYING_CACHED_SLOT_PROBE_TIMEOUT,
+        register_lock: host_lock::RECEIVER_REGISTER_TIMEOUT,
+        receiver: RECEIVER_PROBE_TIMEOUT,
+        direct: PROBE_TIMEOUT,
+        arrival_drain: ARRIVAL_DRAIN_TIMEOUT,
+        bolt_slot_probe: BOLT_SLOT_PROBE_TIMEOUT,
+        unifying_slot_probe: UNIFYING_SLOT_PROBE_TIMEOUT,
+        unifying_cached_slot_probe: UNIFYING_CACHED_SLOT_PROBE_TIMEOUT,
     };
 }
 
@@ -310,7 +310,7 @@ impl NodeProbe {
 /// A receiver's probe first takes the node's register phase
 /// ([`host_lock::lock_receiver_registers`]) — or settles as
 /// [`ProbeVerdict::Deferred`] when another OpenLogi process still holds it
-/// after [`ProbeTimeouts::register_lock_timeout`] — and only then starts its
+/// after [`ProbeTimeouts::register_lock`] — and only then starts its
 /// I/O budget. The wait is time spent not talking to the receiver, so it
 /// must not count against the budget the receiver's real worst case was
 /// sized for: taken together, a four-second wait plus a legitimate deep
@@ -328,9 +328,9 @@ pub(super) async fn probe_one(
     // with concurrent opens of one node).
     let receiver = is_receiver_pid(info.product_id);
     let budget = if receiver {
-        pass.timeouts.receiver_timeout
+        pass.timeouts.receiver
     } else {
-        pass.timeouts.direct_timeout
+        pass.timeouts.direct
     };
     match receiver::detect(Arc::clone(&channel)) {
         Some(Receiver::Bolt(bolt)) => {
@@ -370,7 +370,7 @@ async fn lock_receiver_registers(
     info: &NodeInfo,
     timeouts: &ProbeTimeouts,
 ) -> Option<ReceiverRegisterPhase> {
-    host_lock::lock_receiver_registers(&info.id, timeouts.register_lock_timeout).await
+    host_lock::lock_receiver_registers(&info.id, timeouts.register_lock).await
 }
 
 /// Bound a probe's device I/O by `budget`. Burning the whole budget — an

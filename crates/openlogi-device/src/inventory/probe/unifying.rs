@@ -91,7 +91,7 @@ pub(super) async fn probe_unifying_receiver(
         &unifying,
         pairing_count,
         pass.subscriptions,
-        pass.timeouts.arrival_drain_timeout,
+        pass.timeouts.arrival_drain,
     )
     .await
     else {
@@ -389,9 +389,9 @@ pub(in crate::inventory) fn unifying_probe_budget(
     timeouts: &ProbeTimeouts,
 ) -> Duration {
     if cached.is_some_and(|entry| !is_stale(entry, now)) {
-        timeouts.unifying_cached_slot_probe_timeout
+        timeouts.unifying_cached_slot_probe
     } else {
-        timeouts.unifying_slot_probe_timeout
+        timeouts.unifying_slot_probe
     }
 }
 

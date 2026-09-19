@@ -38,12 +38,8 @@ pub(super) async fn probe_bolt_receiver(
     let pairing_count = bolt.count_pairings().await.ok();
     debug!(?pairing_count, "receiver reports pairing count");
 
-    let connections = drain_device_arrival(
-        &bolt,
-        pass.subscriptions,
-        pass.timeouts.arrival_drain_timeout,
-    )
-    .await;
+    let connections =
+        drain_device_arrival(&bolt, pass.subscriptions, pass.timeouts.arrival_drain).await;
     debug!(events = connections.len(), "drained device-arrival events");
     let by_slot: HashMap<u8, BoltDeviceConnection> =
         connections.into_iter().map(|c| (c.index, c)).collect();
@@ -68,7 +64,7 @@ pub(super) async fn probe_bolt_receiver(
     // addresses its own device index, so responses route by index (no
     // cross-talk), and this per-device walk is the slow part a laggy device
     // would otherwise serialize the rest of the receiver behind. Each is bounded
-    // independently by `bolt_slot_probe_timeout`; the ordered identity list keeps the
+    // independently by `bolt_slot_probe`; the ordered identity list keeps the
     // device list stable across ticks without an explicit sort.
     let slot_results = identities
         .iter()
@@ -210,7 +206,7 @@ async fn walk_bolt_slot(
     // drop *every* device on the receiver. A timed-out slot falls back to its
     // cached probe (its pairing-register identity read fine in phase 1),
     // mirroring the Unifying path (#218).
-    let slot_budget = pass.timeouts.bolt_slot_probe_timeout;
+    let slot_budget = pass.timeouts.bolt_slot_probe;
     let probe_result = timeout(
         slot_budget,
         probe_or_reuse(
