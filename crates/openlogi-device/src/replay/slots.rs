@@ -96,7 +96,7 @@ impl ReceiverSlots {
             } else if (0x61..=0x66).contains(&sub) {
                 self.require(sub & 0x0f, None, report)?;
             } else if (0x40..=0x45).contains(&sub) {
-                // inventory::probe::unifying::read_codename_unifying uses base 0x40 + n-1.
+                // inventory::probe::unifying::read_codename uses base 0x40 + n-1.
                 self.require(sub - 0x40 + 1, None, report)?;
             }
         } else if report[2] == u8::from(MessageType::GetRegister)

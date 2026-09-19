@@ -17,7 +17,7 @@ use super::events::EventFeatureIndices;
 use super::features::ProbedFeatures;
 use super::probe::{
     NodeProbe, PassContext, ProbeVerdict, assemble_bolt_probe, assemble_unifying_device,
-    parse_codename_unifying, preferred_direct_codename, probe_one, probe_unifying_slot,
+    parse_codename, preferred_direct_codename, probe_one, probe_unifying_slot,
     retry_arrival_trigger, unifying_probe_budget,
 };
 use super::{
@@ -1071,22 +1071,19 @@ fn codename_reads_len_prefixed_name() {
     let mut buf = vec![0x40, 0x0c];
     buf.extend_from_slice(b"MX Master 2S");
     buf.extend_from_slice(&[0u8; 2]); // trailing bytes of the 16-byte register
-    assert_eq!(
-        parse_codename_unifying(&buf).as_deref(),
-        Some("MX Master 2S")
-    );
+    assert_eq!(parse_codename(&buf).as_deref(), Some("MX Master 2S"));
 }
 
 #[test]
 fn codename_clamps_overlong_len() {
     // a bogus length byte must not over-read past the buffer.
     let buf = [0x40, 0xff, b'h', b'i'];
-    assert_eq!(parse_codename_unifying(&buf).as_deref(), Some("hi"));
+    assert_eq!(parse_codename(&buf).as_deref(), Some("hi"));
 }
 
 #[test]
 fn codename_rejects_short_response() {
-    assert_eq!(parse_codename_unifying(&[0x40]), None);
+    assert_eq!(parse_codename(&[0x40]), None);
 }
 
 #[test]

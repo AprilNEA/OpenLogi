@@ -33,7 +33,7 @@ use direct::probe_direct;
 use unifying::probe_unifying_receiver;
 #[cfg(test)]
 pub(super) use unifying::{
-    assemble_unifying_device, parse_codename_unifying, probe_unifying_slot, retry_arrival_trigger,
+    assemble_unifying_device, parse_codename, probe_unifying_slot, retry_arrival_trigger,
     unifying_probe_budget,
 };
 

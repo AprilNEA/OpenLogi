@@ -87,7 +87,7 @@ pub(super) async fn probe_unifying_receiver(
     // trigger leaves that list unchanged, but the successful pairing-count
     // read above proves the receiver channel is still live; don't tear down a
     // working capture session for this narrower transient.
-    let Some(connections) = drain_device_arrival_unifying(
+    let Some(connections) = drain_device_arrival(
         &unifying,
         pairing_count,
         pass.subscriptions,
@@ -182,7 +182,7 @@ pub(super) async fn probe_unifying_receiver(
 /// list comes from the slot registers), the drain is the only Unifying device
 /// source, so the caller must treat that as a failed probe rather than an
 /// empty receiver.
-async fn drain_device_arrival_unifying(
+async fn drain_device_arrival(
     unifying: &UnifyingReceiver,
     pairing_count: u8,
     subscriptions: Option<&EventSubscriptionHandle>,
@@ -357,7 +357,7 @@ pub(in crate::inventory) async fn probe_unifying_slot(
     let codename = if let Some(name) = probe.marketing_name.clone() {
         Some(name)
     } else if probe.capabilities.is_some() {
-        read_codename_unifying(channel, slot).await
+        read_codename(channel, slot).await
     } else {
         None
     };
@@ -420,18 +420,18 @@ pub(in crate::inventory) fn assemble_unifying_device(
 /// from Bolt's `0x60`: the long-register response is `[sub, len, data..]` with
 /// no chunk byte — wire-verified `40 0c "MX Master 2S"`. The name lives on the
 /// receiver, so it reads even while the device is offline (e.g. moved to BT).
-async fn read_codename_unifying(channel: &HidppChannel, slot: u8) -> Option<String> {
+async fn read_codename(channel: &HidppChannel, slot: u8) -> Option<String> {
     let response = channel
         .read_long_sub_register(0xFF, 0xB5, 0x40 + slot - 1, [0x00, 0x00])
         .await
         .ok()?;
-    parse_codename_unifying(&response)
+    parse_codename(&response)
 }
 
 /// Parse a Unifying name-register response `[sub, len, data..]` into a string.
 /// The device-reported `len` is clamped to the bytes actually present so a
 /// bogus length can't over-read the fixed long-register buffer.
-pub(in crate::inventory) fn parse_codename_unifying(response: &[u8]) -> Option<String> {
+pub(in crate::inventory) fn parse_codename(response: &[u8]) -> Option<String> {
     let len = usize::from(*response.get(1)?).min(response.len().saturating_sub(2));
     core::str::from_utf8(response.get(2..2 + len)?)
         .ok()
