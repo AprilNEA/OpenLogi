@@ -4,6 +4,7 @@
     reason = "the event tap uses Core Graphics / Core Foundation C APIs, and workspace observation uses typed Objective-C notification APIs"
 )]
 
+mod senderless_button;
 mod watchdog;
 
 use std::cell::RefCell;
@@ -43,6 +44,7 @@ use crate::{
     HookBackend, HookError, HookEvent, KeyEvent, KeyModifiers, MouseEvent, ScrollDelta,
     TapLocation,
 };
+use senderless_button::SenderlessButtonResolver;
 use watchdog::{
     CallbackActivity, LifecycleDecision, LifecycleExitReason, LifecycleObservation,
     LifecycleWatchdog, RearmBudget, TapPhase, WatchdogSignals, stuck_callback,
@@ -362,9 +364,17 @@ fn button_number_to_id(n: i64) -> Option<ButtonId> {
     }
 }
 
-/// Best-effort device identity for a button event's HID sender.
-fn button_source(event: &CGEvent) -> Option<crate::EventDevice> {
-    event_sender_id(event).map(|id| sender_device_info(id).event_device)
+/// Best-effort device identity, including macOS 27 events with sender id zero.
+fn button_source(
+    event: &CGEvent,
+    button_number: i64,
+    pressed: bool,
+    resolver: &mut SenderlessButtonResolver,
+) -> Option<crate::EventDevice> {
+    let sender_source = event_sender_id(event)
+        .filter(|sender_id| *sender_id != 0)
+        .map(|sender_id| sender_device_info(sender_id).event_device);
+    resolver.resolve(button_number, pressed, sender_source)
 }
 
 /// Map the macOS modifier flags on a `CGEvent` to our [`KeyModifiers`].
@@ -401,7 +411,11 @@ fn translate_key(etype: CGEventType, event: &CGEvent) -> Option<KeyEvent> {
 
 /// Convert a `CGEvent` to our [`MouseEvent`] vocabulary. Returns `None`
 /// for event types we don't translate (e.g. move events, unknown buttons).
-fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEvent> {
+fn translate(
+    etype: CGEventType,
+    event: &CGEvent,
+    resolver: &mut SenderlessButtonResolver,
+) -> Option<MouseEvent> {
     // Skip events OpenLogi itself synthesised, so a remapped click or inverted
     // scroll we posted doesn't re-enter the hook as real input. Gate the field
     // read to events we synthesize — keeping the FFI call off the high-rate
@@ -426,29 +440,29 @@ fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEvent> {
         CGEventType::LeftMouseDown => Some(MouseEvent::Button {
             id: ButtonId::LeftClick,
             pressed: true,
-            device: button_source(event),
+            device: button_source(event, 0, true, resolver),
         }),
         CGEventType::LeftMouseUp => Some(MouseEvent::Button {
             id: ButtonId::LeftClick,
             pressed: false,
-            device: button_source(event),
+            device: button_source(event, 0, false, resolver),
         }),
         CGEventType::RightMouseDown => Some(MouseEvent::Button {
             id: ButtonId::RightClick,
             pressed: true,
-            device: button_source(event),
+            device: button_source(event, 1, true, resolver),
         }),
         CGEventType::RightMouseUp => Some(MouseEvent::Button {
             id: ButtonId::RightClick,
             pressed: false,
-            device: button_source(event),
+            device: button_source(event, 1, false, resolver),
         }),
         CGEventType::OtherMouseDown => {
             let n = event.get_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER);
             button_number_to_id(n).map(|id| MouseEvent::Button {
                 id,
                 pressed: true,
-                device: button_source(event),
+                device: button_source(event, n, true, resolver),
             })
         }
         CGEventType::OtherMouseUp => {
@@ -456,7 +470,7 @@ fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEvent> {
             button_number_to_id(n).map(|id| MouseEvent::Button {
                 id,
                 pressed: false,
-                device: button_source(event),
+                device: button_source(event, n, false, resolver),
             })
         }
         CGEventType::ScrollWheel => {
@@ -831,10 +845,11 @@ fn run_tap_callback(
     cb: &dyn Fn(HookEvent) -> EventDisposition,
     etype: CGEventType,
     event: &CGEvent,
+    resolver: &mut SenderlessButtonResolver,
 ) -> CallbackResult {
     let result = catch_unwind(AssertUnwindSafe(|| {
         // Mouse first, then keyboard; a given event type is one or the other.
-        let hook_event = if let Some(mouse_event) = translate(etype, event) {
+        let hook_event = if let Some(mouse_event) = translate(etype, event, resolver) {
             HookEvent::Mouse(mouse_event)
         } else if let Some(key_event) = translate_key(etype, event) {
             HookEvent::Key(key_event)
@@ -1058,6 +1073,7 @@ fn thread_main(
     // Latched by the callback when the OS disables the tap, consumed by the
     // run-loop slice that decides whether to re-arm it.
     let tap_disabled = Arc::new(AtomicBool::new(false));
+    let senderless_button_resolver = RefCell::new(SenderlessButtonResolver::new());
 
     let tap_result = {
         let callback_signals = Arc::clone(&signals);
@@ -1074,9 +1090,18 @@ fn thread_main(
                     CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput
                 ) {
                     tap_disabled.store(true, Ordering::Release);
+                    // The gap while the tap is disabled can drop button-up
+                    // events this resolver never sees, so a cached
+                    // attribution from before the gap must not survive it.
+                    senderless_button_resolver.borrow_mut().cancel_all();
                 }
                 callback_activity.enter(callback_signals.now_millis());
-                let disposition = run_tap_callback(cb.as_ref(), etype, event);
+                let disposition = run_tap_callback(
+                    cb.as_ref(),
+                    etype,
+                    event,
+                    &mut senderless_button_resolver.borrow_mut(),
+                );
                 callback_activity.exit();
                 disposition
             },
@@ -1233,12 +1258,14 @@ mod tests {
         let source = CGEventSource::new(CGEventSourceStateID::Private)
             .expect("CGEventSourceCreate must succeed");
         let event = CGEvent::new(source).expect("CGEventCreate must succeed");
+        let mut resolver = SenderlessButtonResolver::unavailable();
 
         assert!(matches!(
             run_tap_callback(
                 &|_| EventDisposition::Suppress,
                 CGEventType::MouseMoved,
-                &event
+                &event,
+                &mut resolver,
             ),
             CallbackResult::Drop
         ));
@@ -1246,7 +1273,8 @@ mod tests {
             run_tap_callback(
                 &|_| panic!("test callback panic"),
                 CGEventType::MouseMoved,
-                &event
+                &event,
+                &mut resolver,
             ),
             CallbackResult::Keep
         ));

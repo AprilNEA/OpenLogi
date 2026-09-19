@@ -85,6 +85,16 @@ fn source_is_remappable_policy() {
         product_name: Some("Logitech USB Receiver".into()),
     };
     assert!(source_is_remappable(Some(&logi_by_name)));
+
+    // A Logitech touchpad exposing a mouse HID interface must stay excluded
+    // by name even though its vendor id alone would make `is_logitech` true —
+    // trackpad exclusion has to be checked before, not instead of, brand.
+    let logi_trackpad = EventDevice {
+        vendor_id: Some(LOGITECH_VENDOR_ID),
+        product_id: Some(0xb00c),
+        product_name: Some("Logitech Trackpad".into()),
+    };
+    assert!(!source_is_remappable(Some(&logi_trackpad)));
 }
 
 /// On unsupported targets (not macOS, Linux, or Windows), `Hook::start`
