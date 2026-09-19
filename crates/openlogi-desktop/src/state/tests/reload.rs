@@ -97,6 +97,41 @@ fn smooth_scroll_change_reloads_the_agent_once() {
     assert!(receiver.try_recv().is_err());
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn battery_widget_toggle_reloads_once_per_change() {
+    let resolver = AssetResolver::new();
+    let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::new(Sources::in_memory(Config::ephemeral(), &resolver, commands));
+
+    for enabled in [true, false] {
+        let _ = state.commit_macos_battery_widget(enabled);
+        assert_eq!(state.app_settings().macos_battery_widget, enabled);
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(crate::services::ipc::Command::ReloadConfig(_))
+        ));
+        let _ = state.commit_macos_battery_widget(enabled);
+        assert!(receiver.try_recv().is_err());
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn battery_widget_toggle_rolls_back_when_config_cannot_be_saved() {
+    let resolver = AssetResolver::new();
+    let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::new(Sources {
+        persistence: ConfigPersistence::ReadOnly("invalid config".into()),
+        ..Sources::in_memory(Config::ephemeral(), &resolver, commands)
+    });
+
+    let _ = state.commit_macos_battery_widget(true);
+    assert!(!state.app_settings().macos_battery_widget);
+    assert_eq!(state.config_issue(), Some("invalid config"));
+    assert!(receiver.try_recv().is_err());
+}
+
 /// A live language switch runs inside `AppState::update`, and the menu rebuild
 /// it schedules reads the same entity (the Device menu lists devices). Rebuilt
 /// synchronously that read is re-entrant and panics ("cannot read … while it is

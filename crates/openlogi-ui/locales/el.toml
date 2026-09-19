@@ -77,6 +77,18 @@ show_in_the_notification_area = "Εμφάνιση στην περιοχή ειδ
 notification_area_visibility_description = "Διατηρεί το εικονίδιο του OpenLogi στην περιοχή ειδοποιήσεων της γραμμής εργασιών. Ισχύει από την επόμενη εκκίνηση της υπηρεσίας παρασκηνίου."
 openlogi = "OpenLogi"
 
+[battery_widget]
+setting = "Show batteries in macOS widget"
+description = "Show battery levels for devices connected through Bolt or Unifying. macOS only."
+starting = "Starting"
+waiting = "Waiting for OpenLogi agent"
+active_singular = "Active · %{count} device"
+active_plural = "Active · %{count} devices"
+empty = "Connect a battery-powered device through Bolt or Unifying."
+unavailable = "Unavailable on this version of macOS"
+failed_singular = "Battery updates failed · %{count} device published"
+failed_plural = "Battery updates failed · %{count} devices published"
+
 [device]
 no_devices_connected = "Καμία συσκευή δεν είναι συνδεδεμένη"
 devices = "Συσκευές"

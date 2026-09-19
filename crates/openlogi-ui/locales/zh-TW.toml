@@ -77,6 +77,18 @@ show_in_the_notification_area = "在通知區域顯示"
 notification_area_visibility_description = "在工作列通知區域保留 OpenLogi 圖示。將於背景代理程式下次啟動時生效。"
 openlogi = "OpenLogi"
 
+[battery_widget]
+setting = "Show batteries in macOS widget"
+description = "Show battery levels for devices connected through Bolt or Unifying. macOS only."
+starting = "Starting"
+waiting = "Waiting for OpenLogi agent"
+active_singular = "Active · %{count} device"
+active_plural = "Active · %{count} devices"
+empty = "Connect a battery-powered device through Bolt or Unifying."
+unavailable = "Unavailable on this version of macOS"
+failed_singular = "Battery updates failed · %{count} device published"
+failed_plural = "Battery updates failed · %{count} devices published"
+
 [device]
 no_devices_connected = "沒有已連線的裝置"
 devices = "裝置"
