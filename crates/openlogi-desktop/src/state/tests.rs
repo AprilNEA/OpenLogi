@@ -630,7 +630,7 @@ fn thumbwheel_pair_updates_both_memory_and_config_entries() {
         bindings.get(&ButtonId::ThumbwheelScrollUp),
         Some(&Action::VolumeUp)
     );
-    let persisted = config.bindings_for(key);
+    let persisted = config.stored_bindings(key);
     assert_eq!(
         persisted.get(&ButtonId::ThumbwheelScrollDown),
         Some(&Binding::Single(Action::VolumeDown))
@@ -654,7 +654,7 @@ fn transient_thumbwheel_pair_stays_in_memory_without_persistence() {
         ThumbwheelPreset::CycleDpi.pair(),
     ));
     assert_eq!(bindings.len(), 2);
-    assert!(config.bindings_for("missing").is_empty());
+    assert!(config.stored_bindings("missing").is_empty());
 }
 
 /// What a light-write result that belonged to a live request announces.
@@ -802,7 +802,7 @@ fn a_binding_committed_in_a_per_app_profile_leaves_the_global_one_alone() {
         Some(&BTreeMap::from([(ButtonId::Back, Action::Undo)]))
     );
     assert!(
-        state.config.bindings_for(KNOWN_MOUSE_KEY).is_empty(),
+        state.config.stored_bindings(KNOWN_MOUSE_KEY).is_empty(),
         "the device's global bindings must be untouched"
     );
 }

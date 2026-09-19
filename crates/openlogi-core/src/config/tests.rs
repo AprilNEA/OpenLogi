@@ -18,7 +18,7 @@ fn canonical_configuration_example_parses() {
     let body = include_str!("../../../../docs/config.example.toml");
     let config: Config = toml::from_str(body).expect("documented config must parse");
     assert_eq!(config.schema_version, SCHEMA_VERSION);
-    let bindings = config.bindings_for("receiver:aabbccdd:slot:1");
+    let bindings = config.stored_bindings("receiver:aabbccdd:slot:1");
     let Some(Binding::LongPress(long_press)) = bindings.get(&ButtonId::DpiToggle) else {
         panic!("documented long-press binding should keep its shape");
     };
@@ -489,7 +489,7 @@ fn bindings_roundtrip_per_device() {
     let parsed = write_and_read(&cfg);
 
     // Per-device isolation.
-    let a = parsed.bindings_for("2b042");
+    let a = parsed.stored_bindings("2b042");
     assert_eq!(a.get(&ButtonId::Back), Some(&Binding::Single(Action::Copy)));
     assert_eq!(
         a.get(&ButtonId::DpiToggle),
@@ -498,7 +498,7 @@ fn bindings_roundtrip_per_device() {
         )))
     );
 
-    let b = parsed.bindings_for("4082d");
+    let b = parsed.stored_bindings("4082d");
     assert_eq!(
         b.get(&ButtonId::Back),
         Some(&Binding::Single(Action::Paste))
@@ -506,7 +506,7 @@ fn bindings_roundtrip_per_device() {
     assert_eq!(b.len(), 1, "device b should only see its own bindings");
 
     // Unknown device returns empty map without panic.
-    assert!(parsed.bindings_for("deadbeef").is_empty());
+    assert!(parsed.stored_bindings("deadbeef").is_empty());
 }
 
 #[test]
@@ -603,7 +603,7 @@ fn device_identity_roundtrips_and_is_iterable() {
     assert_eq!(parsed.device_identity("2b034"), Some(&mouse));
     assert_eq!(parsed.device_identity("absent"), None);
     assert_eq!(
-        parsed.bindings_for("2b034").get(&ButtonId::Back),
+        parsed.stored_bindings("2b034").get(&ButtonId::Back),
         Some(&Binding::Single(Action::BrowserBack)),
         "identity must coexist with bindings on the same device block"
     );
@@ -1022,7 +1022,7 @@ Click = \"Paste\"
 
     // v1 still loads (version <= current) and folds into the merged map.
     let cfg = Config::load_from_path(&path).expect("load v1");
-    let bindings = cfg.bindings_for("2b042");
+    let bindings = cfg.stored_bindings("2b042");
     assert_eq!(
         bindings.get(&ButtonId::Back),
         Some(&Binding::Single(Action::BrowserBack))
@@ -1061,7 +1061,7 @@ ThumbwheelScrollDown = \"HorizontalScrollLeft\"
     fs::write(&path, v6).expect("write");
 
     let cfg = Config::load_from_path(&path).expect("load v6");
-    let bindings = cfg.bindings_for("unit:6be9d300");
+    let bindings = cfg.stored_bindings("unit:6be9d300");
     assert_eq!(
         bindings.get(&ButtonId::ThumbwheelScrollUp),
         Some(&Binding::Single(Action::HorizontalScrollLeft))
@@ -1102,7 +1102,7 @@ ThumbwheelScrollUp = \"HorizontalScrollRight\"
         Some(&Binding::Single(Action::HorizontalScrollRight))
     );
     assert_eq!(
-        cfg.bindings_for("unit:6be9d300")
+        cfg.stored_bindings("unit:6be9d300")
             .get(&ButtonId::ThumbwheelScrollUp),
         Some(&Binding::Single(Action::NextTab)),
         "the custom global pair must stay literal"
@@ -1123,7 +1123,7 @@ ThumbwheelScrollDown = \"NextTab\"
     fs::write(&path, v6).expect("write");
 
     let cfg = Config::load_from_path(&path).expect("load v6");
-    let bindings = cfg.bindings_for("unit:6be9d300");
+    let bindings = cfg.stored_bindings("unit:6be9d300");
     assert_eq!(
         bindings.get(&ButtonId::ThumbwheelScrollUp),
         Some(&Binding::Single(Action::HorizontalScrollRight))
@@ -1148,7 +1148,7 @@ ThumbwheelScrollDown = \"HorizontalScrollLeft\"
     fs::write(&path, v6).expect("write");
 
     let cfg = Config::load_from_path(&path).expect("load v6");
-    let bindings = cfg.bindings_for("unit:6be9d300");
+    let bindings = cfg.stored_bindings("unit:6be9d300");
     let Some(Binding::LongPress(up)) = bindings.get(&ButtonId::ThumbwheelScrollUp) else {
         panic!("custom long-press binding must keep its shape");
     };
@@ -1174,7 +1174,7 @@ ThumbwheelScrollDown = \"HorizontalScrollLeft\"
     fs::write(&path, v7).expect("write");
 
     let cfg = Config::load_from_path(&path).expect("load v7");
-    let bindings = cfg.bindings_for("unit:6be9d300");
+    let bindings = cfg.stored_bindings("unit:6be9d300");
     assert_eq!(
         bindings.get(&ButtonId::ThumbwheelScrollUp),
         Some(&Binding::Single(Action::HorizontalScrollRight))
@@ -1210,7 +1210,7 @@ Down = \"Paste\"
     gesture.insert(GestureDirection::Up, Action::Copy);
     gesture.insert(GestureDirection::Down, Action::Paste);
     assert_eq!(
-        cfg.bindings_for("2b042").get(&ButtonId::GestureButton),
+        cfg.stored_bindings("2b042").get(&ButtonId::GestureButton),
         Some(&Binding::Gesture(gesture)),
         "gesture map must win over the legacy single GestureButton entry"
     );
@@ -1237,7 +1237,7 @@ Back = \"BrowserBack\"
 
     let bindings = Config::load_from_path(&path)
         .expect("load v1")
-        .bindings_for("2b042");
+        .stored_bindings("2b042");
     // An ordinary button still migrates to a `Single`...
     assert_eq!(
         bindings.get(&ButtonId::Back),
@@ -1386,7 +1386,7 @@ fn set_gesture_direction_upgrades_single_to_gesture() {
     );
     cfg.set_gesture_direction("2b042", ButtonId::Back, GestureDirection::Up, Action::Copy);
 
-    match cfg.bindings_for("2b042").get(&ButtonId::Back) {
+    match cfg.stored_bindings("2b042").get(&ButtonId::Back) {
         Some(Binding::Gesture(map)) => {
             // The prior single action is preserved as the Click entry.
             assert_eq!(
@@ -1412,7 +1412,7 @@ fn set_gesture_direction_on_fresh_gesture_button_seeds_click() {
         Action::Copy,
     );
 
-    match cfg.bindings_for("2b042").get(&ButtonId::GestureButton) {
+    match cfg.stored_bindings("2b042").get(&ButtonId::GestureButton) {
         Some(Binding::Gesture(map)) => {
             assert_eq!(map.get(&GestureDirection::Up), Some(&Action::Copy));
             assert_eq!(
@@ -1432,7 +1432,7 @@ fn set_gesture_mode_seeds_a_fresh_button_with_full_directions() {
     let mut cfg = Config::default();
     // The dedicated HID++ gesture button gets the full default direction map.
     cfg.set_gesture_mode("2b042", ButtonId::GestureButton, true);
-    match cfg.bindings_for("2b042").get(&ButtonId::GestureButton) {
+    match cfg.stored_bindings("2b042").get(&ButtonId::GestureButton) {
         Some(Binding::Gesture(map)) => {
             for dir in GestureDirection::ALL {
                 assert_eq!(map.get(&dir), Some(&default_gesture_binding(dir)));
@@ -1445,7 +1445,7 @@ fn set_gesture_mode_seeds_a_fresh_button_with_full_directions() {
     // its native action stays as Click, and the swipe arms are defaults — so
     // the GUI's shown defaults are exactly what the runtime dispatches.
     cfg.set_gesture_mode("2b042", ButtonId::Forward, true);
-    match cfg.bindings_for("2b042").get(&ButtonId::Forward) {
+    match cfg.stored_bindings("2b042").get(&ButtonId::Forward) {
         Some(Binding::Gesture(map)) => {
             assert_eq!(
                 map.get(&GestureDirection::Click),
@@ -1510,7 +1510,7 @@ Back = \"Copy\"
         Config::load_from_path(&path).expect("an invalid gesture_owner must not fail the load");
     // The rest of the device config survived...
     assert_eq!(
-        cfg.bindings_for("2b042").get(&ButtonId::Back),
+        cfg.stored_bindings("2b042").get(&ButtonId::Back),
         Some(&Binding::Single(Action::Copy))
     );
     // ...and the bad owner degraded to inference (HID++ button default here),
@@ -1545,7 +1545,7 @@ fn set_gesture_mode_on_keeps_click_and_seeds_directions() {
     cfg.set_binding("2b042", ButtonId::Back, Binding::Single(Action::Copy));
     cfg.set_gesture_mode("2b042", ButtonId::Back, true);
 
-    let bindings = cfg.bindings_for("2b042");
+    let bindings = cfg.stored_bindings("2b042");
     let Some(Binding::Gesture(map)) = bindings.get(&ButtonId::Back) else {
         panic!(
             "expected a gesture binding, got {:?}",
@@ -1580,7 +1580,7 @@ fn set_gesture_mode_off_demotes_to_the_click_action() {
 
     assert!(!cfg.is_gesture_mode("2b042", ButtonId::GestureButton));
     assert_eq!(
-        cfg.bindings_for("2b042").get(&ButtonId::GestureButton),
+        cfg.stored_bindings("2b042").get(&ButtonId::GestureButton),
         Some(&Binding::Single(Action::Paste))
     );
 }
@@ -1596,7 +1596,7 @@ fn set_gesture_mode_off_without_click_falls_back_to_the_default() {
     cfg.set_gesture_mode("2b042", ButtonId::Back, false);
 
     assert_eq!(
-        cfg.bindings_for("2b042").get(&ButtonId::Back),
+        cfg.stored_bindings("2b042").get(&ButtonId::Back),
         Some(&Binding::Single(Action::MouseBack))
     );
 }
@@ -1625,7 +1625,7 @@ MiddleClick = { Up = \"MissionControl\", Click = \"MiddleClick\" }
     assert!(cfg.is_gesture_mode("2b042", ButtonId::MiddleClick));
     assert!(!cfg.is_gesture_mode("2b042", ButtonId::GestureButton));
     assert_eq!(
-        cfg.bindings_for("2b042").get(&ButtonId::GestureButton),
+        cfg.stored_bindings("2b042").get(&ButtonId::GestureButton),
         Some(&Binding::Single(Action::Paste)),
         "the dormant map demotes to its Click choice"
     );
@@ -1654,7 +1654,7 @@ gesture_owner = \"Off\"
     assert!(!cfg.is_gesture_mode("2b042", ButtonId::GestureButton));
     assert!(cfg.gesture_mode_buttons("2b042").is_empty());
     assert_eq!(
-        cfg.bindings_for("2b042").get(&ButtonId::GestureButton),
+        cfg.stored_bindings("2b042").get(&ButtonId::GestureButton),
         Some(&Binding::Single(default_binding(ButtonId::GestureButton)))
     );
 }
@@ -1677,7 +1677,7 @@ gesture_owner = \"HapticPanel\"
 
     let cfg = Config::load_from_path(&path).expect("load");
     assert!(cfg.is_gesture_mode("2b042", ButtonId::HapticPanel));
-    match cfg.bindings_for("2b042").get(&ButtonId::HapticPanel) {
+    match cfg.stored_bindings("2b042").get(&ButtonId::HapticPanel) {
         Some(Binding::Gesture(map)) => {
             for dir in GestureDirection::ALL {
                 assert_eq!(map.get(&dir), Some(&default_gesture_binding(dir)));
@@ -1710,7 +1710,7 @@ GestureButton = \"CycleDpiPresets\"
 
     let cfg = Config::load_from_path(&path).expect("load");
     assert!(cfg.is_gesture_mode("2b042", ButtonId::GestureButton));
-    match cfg.bindings_for("2b042").get(&ButtonId::GestureButton) {
+    match cfg.stored_bindings("2b042").get(&ButtonId::GestureButton) {
         Some(Binding::Gesture(map)) => {
             assert_eq!(
                 map.get(&GestureDirection::Click),
@@ -1739,7 +1739,7 @@ fn off_then_on_restores_customized_swipe_arms() {
     assert!(!cfg.is_gesture_mode("2b042", ButtonId::GestureButton));
 
     cfg.set_gesture_mode("2b042", ButtonId::GestureButton, true);
-    match cfg.bindings_for("2b042").get(&ButtonId::GestureButton) {
+    match cfg.stored_bindings("2b042").get(&ButtonId::GestureButton) {
         Some(Binding::Gesture(map)) => {
             assert_eq!(
                 map.get(&GestureDirection::Up),
@@ -1764,7 +1764,7 @@ fn re_promoting_a_genuine_single_keeps_it_as_click() {
         Binding::Single(default_binding(ButtonId::GestureButton)),
     );
     cfg.set_gesture_mode("2b042", ButtonId::GestureButton, true);
-    match cfg.bindings_for("2b042").get(&ButtonId::GestureButton) {
+    match cfg.stored_bindings("2b042").get(&ButtonId::GestureButton) {
         Some(Binding::Gesture(map)) => {
             assert_eq!(
                 map.get(&GestureDirection::Click),
@@ -1789,7 +1789,10 @@ fn disabled_gesture_maps_survive_a_save_load_cycle() {
 
     let mut restored = write_and_read(&cfg);
     restored.set_gesture_mode("2b042", ButtonId::GestureButton, true);
-    match restored.bindings_for("2b042").get(&ButtonId::GestureButton) {
+    match restored
+        .stored_bindings("2b042")
+        .get(&ButtonId::GestureButton)
+    {
         Some(Binding::Gesture(map)) => {
             assert_eq!(map.get(&GestureDirection::Down), Some(&Action::Paste));
         }
@@ -1820,7 +1823,7 @@ MiddleClick = { Up = \"MissionControl\", Click = \"MiddleClick\" }
     assert!(!cfg.is_gesture_mode("2b042", ButtonId::GestureButton));
 
     cfg.set_gesture_mode("2b042", ButtonId::GestureButton, true);
-    match cfg.bindings_for("2b042").get(&ButtonId::GestureButton) {
+    match cfg.stored_bindings("2b042").get(&ButtonId::GestureButton) {
         Some(Binding::Gesture(map)) => {
             assert_eq!(
                 map.get(&GestureDirection::Up),
@@ -1850,7 +1853,7 @@ Back = { Up = \"Copy\" }
     assert!(cfg.is_gesture_mode("2b042", ButtonId::Back));
     assert!(!cfg.is_gesture_mode("2b042", ButtonId::GestureButton));
     assert_eq!(
-        cfg.bindings_for("2b042").get(&ButtonId::GestureButton),
+        cfg.stored_bindings("2b042").get(&ButtonId::GestureButton),
         Some(&Binding::Single(default_binding(ButtonId::GestureButton)))
     );
 }

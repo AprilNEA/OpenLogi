@@ -18,10 +18,12 @@ use crate::binding::{
 use crate::hid::Dpi;
 
 impl Config {
-    /// Returns the bindings stored for `device_key`, or an empty map if the
-    /// device has no committed bindings yet.
+    /// The bindings stored for `device_key` as they were committed, or an
+    /// empty map when the device has none yet. The effective per-button map,
+    /// with defaults and the per-app overlay applied, is
+    /// [`crate::bindings::bindings_for`].
     #[must_use]
-    pub fn bindings_for(&self, device_key: &str) -> BTreeMap<ButtonId, Binding> {
+    pub fn stored_bindings(&self, device_key: &str) -> BTreeMap<ButtonId, Binding> {
         self.devices
             .get(device_key)
             .map(|d| d.bindings.clone())
