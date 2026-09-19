@@ -19,6 +19,7 @@ ignores:
   - crates/openlogi-device/src/session/host_switch.rs
   - crates/openlogi-device/src/session/host_switch/**
   - "**/tests.rs"
+  - "**/tests/**"
 rule:
   any:
     - pattern: $CHAN.add_msg_listener_guarded($$$ARGS)

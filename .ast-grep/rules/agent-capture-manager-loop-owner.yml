@@ -16,6 +16,7 @@ files:
   - crates/openlogi-agent-core/src/watchers/keyboard/**/*.rs
 ignores:
   - "**/tests.rs"
+  - "**/tests/**"
 rule:
   any:
     - all:
