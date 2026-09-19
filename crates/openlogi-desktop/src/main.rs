@@ -141,6 +141,7 @@ fn main() -> Result<()> {
         // check on launch. Done before `initial_config` is handed to the
         // event loop below.
         platform::updater::install(cx, &initial_config.app_settings);
+        platform::installation::install(cx);
 
         // Wear the icon the user picked. An update replaces the bundle and
         // takes the icon with it, so this is a repair as much as a restore.

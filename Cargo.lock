@@ -5717,6 +5717,7 @@ dependencies = [
  "tracing",
  "url",
  "walkdir",
+ "winreg",
 ]
 
 [[package]]

@@ -205,6 +205,12 @@
                        Type="integer"
                        Value="1"
                        KeyPath="yes" />
+        <!-- Bind the receipt to this copy, not an unrelated portable GUI. -->
+        <RegistryValue Root="HKCU"
+                       Key="Software\OpenLogi"
+                       Name="InstallLocation"
+                       Type="string"
+                       Value="[INSTALLFOLDER]" />
       </Component>
     </StandardDirectory>
 

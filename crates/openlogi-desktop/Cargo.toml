@@ -32,7 +32,7 @@ gpui-base = { workspace = true }
 gpui-kit-assets = { workspace = true }
 swr-core = { workspace = true }
 swr-gpui = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "process"] }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }
@@ -65,6 +65,9 @@ objc2 = { workspace = true }
 objc2-app-kit = { workspace = true, features = ["NSApplication", "NSAppearance"] }
 objc2-foundation = { workspace = true, features = ["NSProcessInfo", "NSString", "NSError"] }
 objc2-service-management = { workspace = true, features = ["std", "SMAppService", "SMErrors", "objc2", "objc2-foundation"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+winreg = "0.55"
 
 [lints]
 workspace = true
