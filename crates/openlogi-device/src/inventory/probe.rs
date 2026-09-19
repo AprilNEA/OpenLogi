@@ -79,8 +79,8 @@ const MAX_BOLT_SLOTS: u8 = 6;
 /// deadline, and the first probe usually wakes the device so the retry succeeds
 /// fast.
 /// Slots are probed concurrently on both receiver paths, so a receiver's worst
-/// case is the 1.5 s arrival drain plus a single slot's [`BOLT_SLOT_PROBE`] /
-/// [`UNIFYING_SLOT_PROBE`] — not their sum — plus, on Bolt only, the
+/// case is the 1.5 s arrival drain plus a single slot's [`BOLT_SLOT_PROBE_TIMEOUT`] /
+/// [`UNIFYING_SLOT_PROBE_TIMEOUT`] — not their sum — plus, on Bolt only, the
 /// sequential pairing-register pass that precedes the slot walk. This stays
 /// comfortably above that, so awake devices never trip it.
 ///
@@ -104,7 +104,7 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(25);
 /// It must still fit a receiver probe's real worst case, which is NOT the
 /// millisecond register reads but a paired device's full HID++ 2.0 feature
 /// walk: 1.5 s arrival drain + the sequential pairing-register pass + one
-/// slot's [`BOLT_SLOT_PROBE`] (10 s). 6 s proved too tight — a legitimate
+/// slot's [`BOLT_SLOT_PROBE_TIMEOUT`] (10 s). 6 s proved too tight — a legitimate
 /// deep walk tripped the dead-delivery eviction, the surfaced-empty inventory
 /// tore down capture plans, and a pinned stale channel Arc then deadlocked
 /// recovery (dead buttons until restart). 13 s clears the honest worst case
@@ -124,7 +124,7 @@ const RECEIVER_PROBE_TIMEOUT: Duration = Duration::from_secs(13);
 /// how many other slots are being probed at the same time.  A timed-out slot
 /// still surfaces in the inventory (kind + wpid from the arrival event) — it
 /// just lacks capabilities / battery until the next reconciliation.
-pub(super) const UNIFYING_SLOT_PROBE: Duration = Duration::from_millis(3500);
+pub(super) const UNIFYING_SLOT_PROBE_TIMEOUT: Duration = Duration::from_millis(3500);
 
 /// Per-slot budget when a Unifying device already has a fresh immutable probe.
 ///
@@ -133,7 +133,7 @@ pub(super) const UNIFYING_SLOT_PROBE: Duration = Duration::from_millis(3500);
 /// live device-arrival event. Do not let that optional refresh consume the
 /// full first-sight feature-walk budget or delay publication of a known-online
 /// mouse on every reconciliation.
-pub(super) const UNIFYING_CACHED_SLOT_PROBE: Duration = Duration::from_millis(750);
+pub(super) const UNIFYING_CACHED_SLOT_PROBE_TIMEOUT: Duration = Duration::from_millis(750);
 
 /// Per-slot budget for the HID++ 2.0 feature walk on a Bolt paired device.
 ///
@@ -150,7 +150,7 @@ pub(super) const UNIFYING_CACHED_SLOT_PROBE: Duration = Duration::from_millis(75
 /// newly paired device could never acquire model info at all. 10 s is generous
 /// headroom for degraded-but-alive paths while still fitting [`PROBE_TIMEOUT`]
 /// after the 1.5 s arrival drain and Bolt's sequential pairing-register pass.
-const BOLT_SLOT_PROBE: Duration = Duration::from_secs(10);
+const BOLT_SLOT_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The timeouts one probe pass runs under, kept together so their
 /// composition — which waits sit inside which budget — is one place to read,
@@ -174,12 +174,12 @@ pub(crate) struct ProbeTimeouts {
     pub(crate) direct_timeout: Duration,
     /// [`ARRIVAL_DRAIN`].
     pub(crate) arrival_drain: Duration,
-    /// [`BOLT_SLOT_PROBE`].
-    pub(crate) bolt_slot_probe: Duration,
-    /// [`UNIFYING_SLOT_PROBE`].
-    pub(crate) unifying_slot_probe: Duration,
-    /// [`UNIFYING_CACHED_SLOT_PROBE`].
-    pub(crate) unifying_cached_slot_probe: Duration,
+    /// [`BOLT_SLOT_PROBE_TIMEOUT`].
+    pub(crate) bolt_slot_probe_timeout: Duration,
+    /// [`UNIFYING_SLOT_PROBE_TIMEOUT`].
+    pub(crate) unifying_slot_probe_timeout: Duration,
+    /// [`UNIFYING_CACHED_SLOT_PROBE_TIMEOUT`].
+    pub(crate) unifying_cached_slot_probe_timeout: Duration,
 }
 
 impl ProbeTimeouts {
@@ -189,9 +189,9 @@ impl ProbeTimeouts {
         receiver_timeout: RECEIVER_PROBE_TIMEOUT,
         direct_timeout: PROBE_TIMEOUT,
         arrival_drain: ARRIVAL_DRAIN,
-        bolt_slot_probe: BOLT_SLOT_PROBE,
-        unifying_slot_probe: UNIFYING_SLOT_PROBE,
-        unifying_cached_slot_probe: UNIFYING_CACHED_SLOT_PROBE,
+        bolt_slot_probe_timeout: BOLT_SLOT_PROBE_TIMEOUT,
+        unifying_slot_probe_timeout: UNIFYING_SLOT_PROBE_TIMEOUT,
+        unifying_cached_slot_probe_timeout: UNIFYING_CACHED_SLOT_PROBE_TIMEOUT,
     };
 }
 

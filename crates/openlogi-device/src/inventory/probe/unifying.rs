@@ -389,9 +389,9 @@ pub(in crate::inventory) fn unifying_probe_budget(
     timeouts: &ProbeTimeouts,
 ) -> Duration {
     if cached.is_some_and(|entry| !is_stale(entry, now)) {
-        timeouts.unifying_cached_slot_probe
+        timeouts.unifying_cached_slot_probe_timeout
     } else {
-        timeouts.unifying_slot_probe
+        timeouts.unifying_slot_probe_timeout
     }
 }
 

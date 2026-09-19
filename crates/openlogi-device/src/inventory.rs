@@ -35,7 +35,7 @@ use events::{ChannelEventSubscriptions, EventNotifier, EventSubscriptionHandle};
 use persist::{ProbeCacheSnapshot, ProbeCacheStore};
 use probe::{NodeProbe, PassContext, ProbeTimeouts, ProbeVerdict, probe_one};
 #[cfg(test)]
-use probe::{UNIFYING_CACHED_SLOT_PROBE, UNIFYING_SLOT_PROBE};
+use probe::{UNIFYING_CACHED_SLOT_PROBE_TIMEOUT, UNIFYING_SLOT_PROBE_TIMEOUT};
 
 /// Errors raised while enumerating HID++ devices.
 #[derive(Debug, Error)]
