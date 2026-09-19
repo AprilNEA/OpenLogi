@@ -110,6 +110,8 @@ pub struct SettingsView {
     /// Refreshes host-owned snapshots when Settings becomes active again.
     _activation_obs: Subscription,
     _state_obs: Subscription,
+    /// Refreshes installation metadata when the startup probe completes.
+    _installation_obs: Subscription,
     /// Which themes the Appearance grid shows (All / Light / Dark).
     theme_filter: ThemeFilter,
     /// Free-text filter for the Appearance theme grid (search 50+ themes by name).
@@ -162,6 +164,8 @@ impl SettingsView {
         let updater = crate::platform::updater::shared(cx)
             .unwrap_or_else(|| crate::platform::updater::new_entity(cx));
         let updater_obs = cx.observe(&updater, |_, _, cx| cx.notify());
+        let installation_obs =
+            cx.observe_global::<crate::platform::installation::Installation>(|_, cx| cx.notify());
         let state_obs = cx.subscribe(&AppState::global(cx), |this, _, event: &StateEvent, cx| {
             if matches!(event, StateEvent::LanguageChanged) {
                 // The cache-size line is localized text cached in view state
@@ -250,6 +254,7 @@ impl SettingsView {
             appearance_obs: None,
             _activation_obs: activation_obs,
             _state_obs: state_obs,
+            _installation_obs: installation_obs,
             theme_filter: ThemeFilter::All,
             theme_search,
             initial_page,

@@ -349,6 +349,33 @@ The Nix package uses the same shared resources and is declared in
 `packaging/linux/package.nix`; see the Nix package section above for its build
 commands.
 
+## Installation-source detection
+
+The desktop app probes once in the background and publishes the typed
+`platform::installation::Installation` global: `Detecting`, then
+`Detected(InstallationSource)`. It also logs `detected installation source`.
+Settings → Updates displays the result as **Installation source**, separately
+from the update download source. An open window refreshes when detection
+completes or the interface language changes.
+This is an ownership snapshot, not download provenance or an update policy;
+the updater does not yet change behavior based on it.
+
+- **Homebrew:** matches the installed receipt and Caskroom app back-link to
+  the running bundle, distinguishing `openlogi` from `openlogi@latest`. It
+  checks both standard prefixes, `HOMEBREW_PREFIX`, and prefixes discoverable
+  from `PATH`, without executing brew. An undiscoverable custom prefix cannot
+  be recognized. Other macOS bundles report `MacAppBundle`, not "DMG".
+- **Linux:** recognizes a resolved `/nix/store/` executable, or queries dpkg,
+  rpm, and pacman for ownership of the exact executable by `openlogi`.
+  Package queries are read-only, with a two-second timeout per command.
+- **Windows:** the MSI writes its `InstallLocation` under
+  `HKCU\Software\OpenLogi`; only a matching executable is `WindowsMsi`.
+  The ZIP carries `openlogi-installation.json` next to `OpenLogi.exe` and is
+  `WindowsPortable`. A matching MSI registration takes precedence.
+- **Unknown:** unmarked Windows releases predating these markers, bare
+  source/manual installs, or otherwise inconclusive ownership. Missing
+  metadata never implies a portable ZIP or a DMG.
+
 ## Release updater publishing
 
 Tagged releases still attach DMGs and `SHA256SUMS` to GitHub Releases for manual
