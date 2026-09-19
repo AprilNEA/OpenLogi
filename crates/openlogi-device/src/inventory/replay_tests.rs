@@ -59,7 +59,7 @@ async fn receiver_slots_interleave_on_one_channel_and_lifecycle_events_coalesce(
         .expect("known channel");
     let (notifier, mut events, observed) = observed_event_channel();
     let mut enumerator = Enumerator::with_backend(backend.clone()).with_event_notifier(notifier);
-    enumerator.timeouts.arrival_drain = Duration::ZERO;
+    enumerator.timeouts.arrival_drain_timeout = Duration::ZERO;
 
     let (inventory, ()) = tokio::join!(enumerator.enumerate(), async {
         tokio::join!(slot_one.request_written(), slot_two.request_written());
@@ -187,7 +187,7 @@ async fn disconnected_stale_channel_replays_last_good_then_opens_a_replacement()
     );
     let registry = ChannelRegistry::default();
     let mut enumerator = Enumerator::with_backend(backend.clone()).with_registry(registry.clone());
-    enumerator.timeouts.arrival_drain = Duration::ZERO;
+    enumerator.timeouts.arrival_drain_timeout = Duration::ZERO;
     let initial = enumerator
         .enumerate()
         .await
@@ -281,7 +281,7 @@ async fn vanished_direct_node_ages_out_independently_of_a_sleeping_receiver_slot
         .expect("valid mixed replay"),
     );
     let mut enumerator = Enumerator::with_backend(backend.clone());
-    enumerator.timeouts.arrival_drain = Duration::ZERO;
+    enumerator.timeouts.arrival_drain_timeout = Duration::ZERO;
     let initial = enumerator.enumerate().await.expect("mixed probe succeeds");
     assert!(initial.contains(&direct_inventory));
     assert!(

@@ -91,7 +91,7 @@ pub(super) async fn probe_unifying_receiver(
         &unifying,
         pairing_count,
         pass.subscriptions,
-        pass.timeouts.arrival_drain,
+        pass.timeouts.arrival_drain_timeout,
     )
     .await
     else {
@@ -186,7 +186,7 @@ async fn drain_device_arrival(
     unifying: &UnifyingReceiver,
     pairing_count: u8,
     subscriptions: Option<&EventSubscriptionHandle>,
-    drain: Duration,
+    idle_timeout: Duration,
 ) -> Option<Vec<UnifyingDeviceConnection>> {
     let rx = unifying.listen();
     let _receiver_snapshot = subscriptions.map(EventSubscriptionHandle::begin_receiver_snapshot);
@@ -203,7 +203,7 @@ async fn drain_device_arrival(
     .await?;
     let mut out = Vec::new();
     loop {
-        match timeout(drain, rx.recv()).await {
+        match timeout(idle_timeout, rx.recv()).await {
             Ok(Ok(UnifyingEvent::DeviceConnection(connection))) => out.push(connection),
             Ok(Ok(_)) => {}
             Ok(Err(_)) | Err(_) => break,
@@ -247,7 +247,7 @@ async fn drain_device_arrival(
     .await?;
     out.clear();
     loop {
-        match timeout(drain, rx.recv()).await {
+        match timeout(idle_timeout, rx.recv()).await {
             Ok(Ok(UnifyingEvent::DeviceConnection(connection))) => out.push(connection),
             Ok(Ok(_)) => {}
             Ok(Err(_)) | Err(_) => return Some(out),

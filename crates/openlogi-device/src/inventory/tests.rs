@@ -1237,7 +1237,7 @@ fn quick_timeouts() -> ProbeTimeouts {
         register_lock_timeout: Duration::from_secs(2),
         receiver_timeout: Duration::from_millis(900),
         direct_timeout: Duration::from_millis(900),
-        arrival_drain: Duration::from_millis(100),
+        arrival_drain_timeout: Duration::from_millis(100),
         bolt_slot_probe_timeout: Duration::from_millis(400),
         unifying_slot_probe_timeout: Duration::from_millis(400),
         unifying_cached_slot_probe_timeout: Duration::from_millis(100),
@@ -1295,7 +1295,7 @@ async fn a_receiver_probe_that_waited_for_its_register_phase_keeps_its_whole_io_
     let probe = probe_one(info, channel, pass).await;
     release.await.unwrap();
 
-    let io_floor = timeouts.arrival_drain + timeouts.bolt_slot_probe_timeout;
+    let io_floor = timeouts.arrival_drain_timeout + timeouts.bolt_slot_probe_timeout;
     assert!(
         lock_held_for + io_floor > timeouts.receiver_timeout,
         "the test must compose a wait and an I/O floor that together outrun the budget"

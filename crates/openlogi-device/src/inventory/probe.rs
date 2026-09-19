@@ -37,11 +37,11 @@ pub(super) use unifying::{
     unifying_probe_budget,
 };
 
-/// How long to wait for device-arrival event bursts before assuming the
-/// receiver has finished reporting. MX Master 4 (and other devices that may
+/// How long a device-arrival stream may stay quiet before the receiver is
+/// taken to have finished reporting. MX Master 4 (and other devices that may
 /// be asleep) need a generous window to wake and respond to the arrival
 /// ping; we err on the side of waiting.
-const ARRIVAL_DRAIN: Duration = Duration::from_millis(1500);
+const ARRIVAL_DRAIN_TIMEOUT: Duration = Duration::from_millis(1500);
 
 /// A Unifying receiver can transiently stall the first arrival-trigger write
 /// while its previous scan settles. Retry once inside the same probe instead
@@ -158,7 +158,7 @@ const BOLT_SLOT_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 ///
 /// The composition: a receiver probe waits for the node's register phase for
 /// up to `register_lock_timeout` *before* its `receiver_timeout` starts, and
-/// under that budget runs an `arrival_drain` and slot walks each bounded by
+/// under that budget runs an `arrival_drain_timeout` and slot walks each bounded by
 /// their own slot probe. A direct device runs under `direct_timeout` alone.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ProbeTimeouts {
@@ -172,8 +172,8 @@ pub(crate) struct ProbeTimeouts {
     pub(crate) receiver_timeout: Duration,
     /// [`PROBE_TIMEOUT`].
     pub(crate) direct_timeout: Duration,
-    /// [`ARRIVAL_DRAIN`].
-    pub(crate) arrival_drain: Duration,
+    /// [`ARRIVAL_DRAIN_TIMEOUT`].
+    pub(crate) arrival_drain_timeout: Duration,
     /// [`BOLT_SLOT_PROBE_TIMEOUT`].
     pub(crate) bolt_slot_probe_timeout: Duration,
     /// [`UNIFYING_SLOT_PROBE_TIMEOUT`].
@@ -188,7 +188,7 @@ impl ProbeTimeouts {
         register_lock_timeout: host_lock::RECEIVER_REGISTER_TIMEOUT,
         receiver_timeout: RECEIVER_PROBE_TIMEOUT,
         direct_timeout: PROBE_TIMEOUT,
-        arrival_drain: ARRIVAL_DRAIN,
+        arrival_drain_timeout: ARRIVAL_DRAIN_TIMEOUT,
         bolt_slot_probe_timeout: BOLT_SLOT_PROBE_TIMEOUT,
         unifying_slot_probe_timeout: UNIFYING_SLOT_PROBE_TIMEOUT,
         unifying_cached_slot_probe_timeout: UNIFYING_CACHED_SLOT_PROBE_TIMEOUT,

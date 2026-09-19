@@ -38,8 +38,12 @@ pub(super) async fn probe_bolt_receiver(
     let pairing_count = bolt.count_pairings().await.ok();
     debug!(?pairing_count, "receiver reports pairing count");
 
-    let connections =
-        drain_device_arrival(&bolt, pass.subscriptions, pass.timeouts.arrival_drain).await;
+    let connections = drain_device_arrival(
+        &bolt,
+        pass.subscriptions,
+        pass.timeouts.arrival_drain_timeout,
+    )
+    .await;
     debug!(events = connections.len(), "drained device-arrival events");
     let by_slot: HashMap<u8, BoltDeviceConnection> =
         connections.into_iter().map(|c| (c.index, c)).collect();
@@ -260,7 +264,7 @@ async fn walk_bolt_slot(
 async fn drain_device_arrival(
     bolt: &BoltReceiver,
     subscriptions: Option<&EventSubscriptionHandle>,
-    drain: Duration,
+    idle_timeout: Duration,
 ) -> Vec<BoltDeviceConnection> {
     let rx = bolt.listen();
     // Triggering a snapshot fabricates the same connection messages as a real
@@ -286,7 +290,7 @@ async fn drain_device_arrival(
 
     let mut out = Vec::new();
     loop {
-        match timeout(drain, rx.recv()).await {
+        match timeout(idle_timeout, rx.recv()).await {
             Ok(Ok(BoltEvent::DeviceConnection(c))) => out.push(c),
             Ok(Ok(_)) => {} // BoltEvent is non_exhaustive; ignore future variants
             Ok(Err(_)) | Err(_) => break,
