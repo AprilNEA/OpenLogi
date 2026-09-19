@@ -314,9 +314,11 @@ impl AppState {
     }
     /// Records (or, with `action = None`, clears) the F-key `trigger` binding
     /// in the global `[keyboard]` map. Mirrors [`Self::commit_binding`] minus
-    /// the device key — keyboard bindings are device-agnostic, so there's no
-    /// `current_record()` dependency. The agent's `rebuild()` republishes its
-    /// shared keyboard map on `reload_config`, so this lands live.
+    /// the device key — keyboard bindings are device-agnostic, so the write
+    /// happens with or without a selected device; only the event it reports is
+    /// addressed to the selected device, as every binding change's is. The
+    /// agent's `rebuild()` republishes its shared keyboard map on
+    /// `reload_config`, so this lands live.
     pub fn commit_keyboard_binding(
         &mut self,
         trigger: KeyTrigger,

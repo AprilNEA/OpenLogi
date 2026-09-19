@@ -41,7 +41,8 @@ impl AppState {
     /// installs the status item only when enabled — so the change takes effect
     /// the next time the agent launches (a no-restart live toggle would need a
     /// main-thread hop from the agent's IPC reload). `ReloadConfig` keeps the
-    /// agent's other config in sync meanwhile. No-op when unchanged.
+    /// agent's other config in sync meanwhile. An already-set value writes
+    /// nothing and is still reported.
     ///
     /// The callers are the menu-bar / notification-area toggle in Settings,
     /// shown only where there's a tray (macOS + Windows), so the setter is
@@ -56,9 +57,9 @@ impl AppState {
         self.persist_and_reload("show-in-menu-bar setting");
         StateEvent::SettingsChanged.into()
     }
-    /// Toggle the opt-in update check and persist it. No immediate side
-    /// effect beyond the next launch reading the new value. No-op when
-    /// unchanged.
+    /// Toggle the opt-in update check and persist it. No immediate side effect
+    /// beyond the next launch reading the new value. An already-set value
+    /// writes nothing and is still reported.
     pub fn set_check_for_updates(&mut self, enabled: bool) -> StateEvents {
         if self.config.app_settings.check_for_updates == enabled {
             return StateEvent::SettingsChanged.into();
@@ -70,8 +71,8 @@ impl AppState {
     }
     /// Toggle opt-in automatic install and persist it. The launch-time updater
     /// observer reads this live, so a newer version found after this is enabled
-    /// downloads and stages on its own; no immediate side effect here. No-op
-    /// when unchanged.
+    /// downloads and stages on its own; no immediate side effect here. An
+    /// already-set value writes nothing and is still reported.
     pub fn set_auto_install_updates(&mut self, enabled: bool) -> StateEvents {
         if self.config.app_settings.auto_install_updates == enabled {
             return StateEvent::SettingsChanged.into();
@@ -82,8 +83,9 @@ impl AppState {
         StateEvent::SettingsChanged.into()
     }
     /// Persist the light/dark appearance preference. The caller re-applies the
-    /// live theme via [`crate::ui::theme::apply_from_settings`]; this only writes the
-    /// choice. No-op when unchanged.
+    /// live theme via [`crate::ui::theme::apply_from_settings`]; this only
+    /// writes the choice. An already-set value writes nothing and is still
+    /// reported.
     pub fn set_appearance(&mut self, appearance: Appearance) -> StateEvents {
         if self.config.app_settings.appearance == appearance {
             return StateEvent::SettingsChanged.into();
@@ -94,7 +96,8 @@ impl AppState {
         StateEvent::SettingsChanged.into()
     }
     /// Persist the text and interface scale. Open window roots apply the new
-    /// rem size when the caller refreshes them. No-op when unchanged.
+    /// rem size when the caller refreshes them. An already-set value writes
+    /// nothing and is still reported.
     pub fn set_ui_scale(&mut self, scale: UiScale) -> StateEvents {
         if self.config.app_settings.ui_scale == scale {
             return StateEvent::SettingsChanged.into();
@@ -105,7 +108,7 @@ impl AppState {
         StateEvent::SettingsChanged.into()
     }
     /// Persist the chosen theme name for one mode (`None` = the OpenLogi brand
-    /// theme). No-op when unchanged.
+    /// theme). An already-set value writes nothing and is still reported.
     pub fn set_theme(&mut self, dark: bool, name: Option<String>) -> StateEvents {
         let current = if dark {
             &self.config.app_settings.theme_dark
@@ -128,9 +131,9 @@ impl AppState {
     }
     /// Persist the chosen app icon and wear it now. Unlike the theme settings
     /// this one leaves the process twice over: the icon is written onto the app
-    /// bundle so it survives a quit, and the agent is told so it can restyle the
-    /// menu-bar item — the one surface showing an icon that the GUI cannot
-    /// reach. No-op when unchanged.
+    /// bundle so it survives a quit, and the agent is told so it can restyle
+    /// the menu-bar item — the one surface showing an icon that the GUI cannot
+    /// reach. An already-set value writes nothing and is still reported.
     pub fn set_app_icon(&mut self, icon: AppIcon) -> StateEvents {
         if self.config.app_settings.app_icon == icon {
             return StateEvent::SettingsChanged.into();
@@ -145,8 +148,8 @@ impl AppState {
         }
         StateEvent::SettingsChanged.into()
     }
-    /// Persist the UI corner-radius override (`None` = each theme's own radius).
-    /// No-op when unchanged.
+    /// Persist the UI corner-radius override (`None` = each theme's own
+    /// radius). An already-set value writes nothing and is still reported.
     pub fn set_ui_radius(&mut self, radius: Option<u8>) -> StateEvents {
         if self.config.app_settings.ui_radius == radius {
             return StateEvent::SettingsChanged.into();
@@ -156,7 +159,8 @@ impl AppState {
         self.persist_config("UI radius setting");
         StateEvent::SettingsChanged.into()
     }
-    /// Persist the Home device-gallery layout. No-op when unchanged.
+    /// Persist the Home device-gallery layout. An already-set value writes
+    /// nothing and is still reported.
     pub fn set_device_view_mode(&mut self, mode: DeviceViewMode) -> StateEvents {
         if self.config.app_settings.device_view_mode == mode {
             return StateEvent::SettingsChanged.into();
@@ -225,12 +229,12 @@ impl AppState {
     }
 
     /// Set `key`'s per-device thumb-wheel sensitivity override and persist it.
-    /// Committing the app-wide default *clears*
-    /// the override — the slider is the device's only sensitivity control, so
-    /// landing on the default is the "no override" gesture, and the device
-    /// goes back to following Settings → General instead of pinning today's
-    /// default forever. The agent picks the change up through the reloaded
-    /// capture plans. No-op when the stored override would not change.
+    /// Committing the app-wide default *clears* the override — the slider is
+    /// the device's only sensitivity control, so landing on the default is the
+    /// "no override" gesture, and the device goes back to following Settings →
+    /// General instead of pinning today's default forever. The agent picks the
+    /// change up through the reloaded capture plans. A stored override that
+    /// would not change writes nothing and is still reported.
     pub fn set_device_thumbwheel_sensitivity(
         &mut self,
         key: &DeviceKey,
@@ -256,9 +260,10 @@ impl AppState {
     }
 
     /// Set the app-wide default thumb-wheel sensitivity and persist it —
-    /// devices without a per-device override follow it
-    /// through the reloaded capture plans. No-op when unchanged. Disk failures
-    /// restore the persisted value and surface a configuration error.
+    /// devices without a per-device override follow it through the reloaded
+    /// capture plans. An already-set value writes nothing and is still
+    /// reported. Disk failures restore the persisted value and surface a
+    /// configuration error.
     pub fn set_thumbwheel_sensitivity(
         &mut self,
         sensitivity: ThumbwheelSensitivity,
@@ -273,7 +278,8 @@ impl AppState {
     }
     /// Toggle finite animation for traditional mouse-wheel input and persist
     /// it. The agent publishes the change to the scroll worker on config
-    /// reload. No-op when unchanged; disk failures restore the persisted value.
+    /// reload. An already-set value writes nothing and is still reported; disk
+    /// failures restore the persisted value.
     pub fn set_smooth_scroll(&mut self, enabled: bool) -> StateEvents {
         if self.config.app_settings.smooth_scroll == enabled {
             return StateEvent::SettingsChanged.into();
@@ -284,8 +290,9 @@ impl AppState {
         StateEvent::SettingsChanged.into()
     }
     /// Set traditional vertical mouse-wheel sensitivity and persist it. The
-    /// agent publishes the value to its scroll worker on config reload. No-op
-    /// when unchanged; disk failures restore the persisted value.
+    /// agent publishes the value to its scroll worker on config reload. An
+    /// already-set value writes nothing and is still reported; disk failures
+    /// restore the persisted value.
     pub fn set_vertical_scroll_sensitivity(
         &mut self,
         sensitivity: VerticalScrollSensitivity,
@@ -341,7 +348,7 @@ impl AppState {
     /// Set the UI language (`None` = follow system), persist it, and switch the
     /// process-global locale via [`openlogi_core::locale`]. Emitting the
     /// [`StateEvent::LanguageChanged`] this reports is what repaints open UI.
-    /// No-op when unchanged.
+    /// An already-set value writes nothing and is still reported.
     pub fn set_language(&mut self, language: Option<String>) -> StateEvents {
         if self.config.app_settings.language == language {
             return StateEvent::SettingsChanged.into();
