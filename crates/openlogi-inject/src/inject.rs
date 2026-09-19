@@ -185,11 +185,11 @@ fn held_keys(combo: &KeyCombo) -> Vec<HeldKey> {
 /// handled at the hook/HID layer, logging a trace here.
 ///
 /// On Linux, key and scroll events are injected via a lazily-created `uinput`
-/// virtual device. Mouse clicks inject `BTN_*` events. macOS-only window
-/// manager actions (`MissionControl`, `AppExpose`, `ShowDesktop`,
-/// `LaunchpadShow`) have no universal Linux equivalent and are silently
-/// skipped (debug-logged). `CustomShortcut` maps macOS `kVK_*` codes to
-/// Linux key codes; macOS Cmd maps to Ctrl.
+/// virtual device. Mouse clicks inject `BTN_*` events. GNOME window-manager
+/// actions use a bounded Shell D-Bus operation, with standard shortcuts as
+/// fallbacks; desktops without a stable equivalent skip those actions
+/// (debug-logged). `CustomShortcut` maps macOS `kVK_*` codes to Linux key codes;
+/// macOS Cmd maps to Ctrl.
 ///
 /// On Windows, key and mouse events are synthesised via `SendInput`. The
 /// macOS window-manager actions map to their Windows equivalents (e.g.
