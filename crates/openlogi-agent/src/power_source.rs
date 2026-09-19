@@ -97,8 +97,20 @@ pub trait PowerSourceBackend {
     fn remove(&mut self, identifier: &str) -> Result<(), PowerSourceError>;
 }
 
-#[derive(Default)]
+#[derive(Clone, PartialEq, Eq)]
+struct AccessoryIdentity {
+    wpid: Option<u16>,
+    physical: Option<DeviceIdentity>,
+    category: AccessoryCategory,
+}
+
+struct OnlineAccessory {
+    identity: AccessoryIdentity,
+    reading: Option<AccessoryPower>,
+}
+
 struct Tracked {
+    identity: AccessoryIdentity,
     offline_since: Option<Instant>,
     /// Only successful publications count as active or suppress later writes.
     published: Option<AccessoryPower>,
@@ -109,6 +121,9 @@ pub struct PowerSourcePublisher<B: PowerSourceBackend> {
     backend: B,
     tracked: BTreeMap<String, Tracked>,
     status: BatteryWidgetStatus,
+    // A consumed handle cannot be retried. Keep its failure visible until a new
+    // publication succeeds, rather than treating an empty pass as recovery.
+    cleanup_error: Option<PowerSourceError>,
 }
 
 impl<B: PowerSourceBackend> PowerSourcePublisher<B> {
@@ -118,6 +133,7 @@ impl<B: PowerSourceBackend> PowerSourcePublisher<B> {
             backend,
             tracked: BTreeMap::new(),
             status: BatteryWidgetStatus::Disabled,
+            cleanup_error: None,
         }
     }
 
@@ -136,18 +152,18 @@ impl<B: PowerSourceBackend> PowerSourcePublisher<B> {
 
     /// Release all native entries immediately, also used at shutdown.
     pub fn clear_all(&mut self) {
-        let mut error = None;
         for (identifier, _) in std::mem::take(&mut self.tracked) {
             if let Err(failure) = self.backend.remove(&identifier) {
-                error.get_or_insert(failure);
+                self.cleanup_error.get_or_insert(failure);
             }
         }
-        self.update_status(error.map_or(BatteryWidgetStatus::Disabled, |error| {
-            BatteryWidgetStatus::Failed {
+        self.update_status(self.cleanup_error.as_ref().map_or(
+            BatteryWidgetStatus::Disabled,
+            |error| BatteryWidgetStatus::Failed {
                 published_devices: 0,
                 reason: error.to_string(),
-            }
-        }));
+            },
+        ));
     }
 
     /// Apply a snapshot and configuration at a caller-supplied monotonic time.
@@ -166,18 +182,42 @@ impl<B: PowerSourceBackend> PowerSourcePublisher<B> {
 
         let online = online_accessories(config, inventories, &self.tracked);
         let mut error = None;
-        for (identifier, accessory) in &online {
+        let mut cleanup_error = None;
+        let mut recovered = false;
+        for (identifier, online_accessory) in &online {
+            if self
+                .tracked
+                .get(identifier)
+                .is_some_and(|tracked| tracked.identity != online_accessory.identity)
+            {
+                // Receiver slots can be reassigned. Retire the old occupant even
+                // when the replacement has not supplied battery telemetry yet.
+                self.tracked.remove(identifier);
+                if let Err(failure) = self.backend.remove(identifier) {
+                    cleanup_error.get_or_insert(failure);
+                }
+            }
             // Presence is independent of telemetry and cancels any offline deadline.
             if let Some(tracked) = self.tracked.get_mut(identifier) {
                 tracked.offline_since = None;
             }
-            let Some(accessory) = accessory else {
+            let Some(accessory) = &online_accessory.reading else {
                 continue;
             };
-            let tracked = self.tracked.entry(identifier.clone()).or_default();
+            let tracked = self
+                .tracked
+                .entry(identifier.clone())
+                .or_insert_with(|| Tracked {
+                    identity: online_accessory.identity.clone(),
+                    offline_since: None,
+                    published: None,
+                });
             if tracked.published.as_ref() != Some(accessory) {
                 match self.backend.upsert(accessory) {
-                    Ok(()) => tracked.published = Some(accessory.clone()),
+                    Ok(()) => {
+                        tracked.published = Some(accessory.clone());
+                        recovered = true;
+                    }
                     Err(failure) => {
                         error.get_or_insert(failure);
                     }
@@ -194,10 +234,17 @@ impl<B: PowerSourceBackend> PowerSourcePublisher<B> {
                 return true;
             }
             if let Err(failure) = self.backend.remove(identifier) {
-                error.get_or_insert(failure);
+                cleanup_error.get_or_insert(failure);
             }
             false
         });
+        if recovered {
+            self.cleanup_error = None;
+        }
+        if let Some(failure) = cleanup_error {
+            self.cleanup_error = Some(failure);
+        }
+        let error = error.or_else(|| self.cleanup_error.clone());
 
         let published_devices = self
             .tracked
@@ -238,7 +285,7 @@ fn online_accessories(
     config: &Config,
     inventories: &[DeviceInventory],
     tracked: &BTreeMap<String, Tracked>,
-) -> BTreeMap<String, Option<AccessoryPower>> {
+) -> BTreeMap<String, OnlineAccessory> {
     let mut online = BTreeMap::new();
     for inventory in inventories {
         let Some(receiver) =
@@ -272,6 +319,11 @@ fn online_accessories(
                 DeviceIdentity::from_parts(model.serial_number.as_deref(), model.unit_id)
             });
             let config_key = config.resolve_device_key(&stable_id, identity.as_ref());
+            let identity = AccessoryIdentity {
+                wpid: paired.wpid,
+                physical: identity,
+                category,
+            };
             // Metadata can change while telemetry is missing. Reuse only an
             // accepted reading, never invent a battery level for a new device.
             let battery = paired
@@ -281,6 +333,7 @@ fn online_accessories(
                 .or_else(|| {
                     tracked
                         .get(&identifier)
+                        .filter(|tracked| tracked.identity == identity)
                         .and_then(|tracked| tracked.published.as_ref())
                         .map(|published| (published.percentage, published.status))
                 });
@@ -296,7 +349,7 @@ fn online_accessories(
                 percentage,
                 status,
             });
-            online.insert(identifier, reading);
+            online.insert(identifier, OnlineAccessory { identity, reading });
         }
     }
     online
