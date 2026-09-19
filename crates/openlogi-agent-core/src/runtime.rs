@@ -116,8 +116,8 @@ impl ActionExecutor {
                     .read()
                     .ok()
                     .and_then(|cycles| cycles.target_for(device_key));
-                info!("SmartShift toggle → flipping wheel mode");
                 if let Some(target) = target {
+                    info!("SmartShift toggle → flipping wheel mode");
                     toggle_smartshift_in_background(self.access.op(&target));
                 } else {
                     debug!("no target device — SmartShift toggle skipped");
@@ -151,9 +151,9 @@ impl ActionExecutor {
             }
         };
         if let Some((dpi, target)) = next {
-            info!(%dpi, "DPI action → writing to device");
             // No target: a dev environment without a real device.
             if let Some(target) = target {
+                info!(%dpi, "DPI action → writing to device");
                 write_dpi_in_background(self.access.op(&target), dpi);
             } else {
                 debug!(%dpi, "no target device — DPI write skipped");
