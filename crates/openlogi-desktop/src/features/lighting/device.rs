@@ -124,7 +124,7 @@ impl Render for LightingPanel {
                         div()
                             .text_caption()
                             .text_color(pal.text_primary)
-                            .child(format!("{}%", lighting.brightness)),
+                            .child(format!("{}%", self.brightness.shown(lighting.brightness))),
                     ),
             )
             .child(Slider::new(self.brightness.slider()).horizontal())

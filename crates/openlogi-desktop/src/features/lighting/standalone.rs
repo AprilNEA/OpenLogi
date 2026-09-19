@@ -186,7 +186,10 @@ impl Render for LightPanel {
             .when_some(brightness, |panel, LightSlider { range, slider }| {
                 panel.child(control_well(
                     tr!("camera.brightness"),
-                    format_light_value(brightness_native(*range, settings), range.unit()),
+                    format_light_value(
+                        slider.shown(brightness_native(*range, settings)),
+                        range.unit(),
+                    ),
                     format_range_endpoints(*range),
                     Slider::new(slider.slider()).horizontal(),
                     pal,
@@ -195,7 +198,10 @@ impl Render for LightPanel {
             .when_some(temperature, |panel, LightSlider { range, slider }| {
                 panel.child(control_well(
                     tr!("lighting.colour_temperature"),
-                    format_light_value(temperature_native(*range, settings), range.unit()),
+                    format_light_value(
+                        slider.shown(temperature_native(*range, settings)),
+                        range.unit(),
+                    ),
                     format_range_endpoints(*range),
                     Slider::new(slider.slider()).horizontal(),
                     pal,
