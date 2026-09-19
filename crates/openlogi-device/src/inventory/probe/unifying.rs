@@ -113,7 +113,7 @@ pub(super) async fn probe_unifying_receiver(
     connections.sort_by_key(|c| c.index);
 
     // Probe all online slots concurrently so a slow HID++ 2.0 feature walk on
-    // one device doesn't push the next slot past the PROBE_BUDGET deadline.
+    // one device doesn't push the next slot past the PROBE_TIMEOUT deadline.
     // Pass the receiver UID so each slot's cache key is scoped to this specific
     // receiver — two Unifying receivers sharing a slot number must not share a
     // cache entry (different devices, different capabilities).

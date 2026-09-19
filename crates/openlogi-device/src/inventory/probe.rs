@@ -88,11 +88,11 @@ const MAX_BOLT_SLOTS: u8 = 6;
 /// table over a link that drops individual reports, which `hidpp::device`
 /// re-asks for per entry. At 6 s one lost report consumed the whole budget and
 /// the walk was abandoned mid-table, surfacing as a mouse that never appeared.
-const PROBE_BUDGET: Duration = Duration::from_secs(25);
+const PROBE_TIMEOUT: Duration = Duration::from_secs(25);
 
 /// Probe budget for receiver nodes (Bolt/Unifying/Lightspeed dongles).
 ///
-/// The 25 s [`PROBE_BUDGET`] is sized for Bluetooth-direct feature walks that
+/// The 25 s [`PROBE_TIMEOUT`] is sized for Bluetooth-direct feature walks that
 /// receivers never perform. Keeping the receiver budget tighter matters
 /// because a full-budget timeout is also the detection path for a channel
 /// whose input-report delivery died (observed on macOS with concurrent opens
@@ -112,13 +112,13 @@ const PROBE_BUDGET: Duration = Duration::from_secs(25);
 /// [`host_lock::RECEIVER_REGISTER_WAIT`] on its own, is taken before this
 /// budget starts (see [`ProbeTimeouts`]), or the two together would trip
 /// it on a working receiver.
-const RECEIVER_PROBE_BUDGET: Duration = Duration::from_secs(13);
+const RECEIVER_PROBE_TIMEOUT: Duration = Duration::from_secs(13);
 
 /// Per-slot budget for the HID++ 2.0 feature walk on a Unifying paired device.
 ///
 /// Unifying wireless round-trips are slower than Bolt BTLE: some devices (e.g.
 /// K540) take ~3 s for the version ping to return. Running multiple slow slots
-/// concurrently can still consume the full PROBE_BUDGET and get cancelled
+/// concurrently can still consume the full PROBE_TIMEOUT and get cancelled
 /// mid-walk — the probe returns nothing rather than partial features.  A
 /// per-slot cap ensures each slot's feature walk is bounded independently of
 /// how many other slots are being probed at the same time.  A timed-out slot
@@ -141,14 +141,14 @@ pub(super) const UNIFYING_CACHED_SLOT_PROBE: Duration = Duration::from_millis(75
 /// a recent macOS IOHID stack with a new MX Master 4) so it falls back to its
 /// cached / identity-only data instead of pinning its slot future forever
 /// (#218). Slots walk *concurrently* (mirroring the Unifying path), so this
-/// budget covers the slowest single slot rather than dividing [`PROBE_BUDGET`]
+/// budget covers the slowest single slot rather than dividing [`PROBE_TIMEOUT`]
 /// across the slot count. A healthy walk is not always fast either: a
 /// feature-rich device enumerates a large table one round-trip per feature
 /// (the MX Master 4's 45 features take ~1–1.6 s over Bolt even awake), and on
 /// high-latency USB paths (a Bolt receiver behind a KVM's USB emulation) it
 /// takes several seconds — the previous 3 s cap starved every slot there, so a
 /// newly paired device could never acquire model info at all. 10 s is generous
-/// headroom for degraded-but-alive paths while still fitting [`PROBE_BUDGET`]
+/// headroom for degraded-but-alive paths while still fitting [`PROBE_TIMEOUT`]
 /// after the 1.5 s arrival drain and Bolt's sequential pairing-register pass.
 const BOLT_SLOT_PROBE: Duration = Duration::from_secs(10);
 
@@ -157,9 +157,9 @@ const BOLT_SLOT_PROBE: Duration = Duration::from_secs(10);
 /// and one value for a test to shrink.
 ///
 /// The composition: a receiver probe waits for the node's register phase for
-/// up to `register_lock_wait` *before* its `receiver_budget` starts, and
+/// up to `register_lock_wait` *before* its `receiver_timeout` starts, and
 /// under that budget runs an `arrival_drain` and slot walks each bounded by
-/// their own slot probe. A direct device runs under `direct_budget` alone.
+/// their own slot probe. A direct device runs under `direct_timeout` alone.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ProbeTimeouts {
     /// How long a receiver probe waits for another OpenLogi process to
@@ -168,10 +168,10 @@ pub(crate) struct ProbeTimeouts {
     ///
     /// [`probe::ProbeVerdict::Deferred`]: ProbeVerdict::Deferred
     pub(crate) register_lock_wait: Duration,
-    /// [`RECEIVER_PROBE_BUDGET`].
-    pub(crate) receiver_budget: Duration,
-    /// [`PROBE_BUDGET`].
-    pub(crate) direct_budget: Duration,
+    /// [`RECEIVER_PROBE_TIMEOUT`].
+    pub(crate) receiver_timeout: Duration,
+    /// [`PROBE_TIMEOUT`].
+    pub(crate) direct_timeout: Duration,
     /// [`ARRIVAL_DRAIN`].
     pub(crate) arrival_drain: Duration,
     /// [`BOLT_SLOT_PROBE`].
@@ -186,8 +186,8 @@ impl ProbeTimeouts {
     /// The production timeouts.
     pub(crate) const DEFAULT: Self = Self {
         register_lock_wait: host_lock::RECEIVER_REGISTER_WAIT,
-        receiver_budget: RECEIVER_PROBE_BUDGET,
-        direct_budget: PROBE_BUDGET,
+        receiver_timeout: RECEIVER_PROBE_TIMEOUT,
+        direct_timeout: PROBE_TIMEOUT,
         arrival_drain: ARRIVAL_DRAIN,
         bolt_slot_probe: BOLT_SLOT_PROBE,
         unifying_slot_probe: UNIFYING_SLOT_PROBE,
@@ -328,9 +328,9 @@ pub(super) async fn probe_one(
     // with concurrent opens of one node).
     let receiver = is_receiver_pid(info.product_id);
     let budget = if receiver {
-        pass.timeouts.receiver_budget
+        pass.timeouts.receiver_timeout
     } else {
-        pass.timeouts.direct_budget
+        pass.timeouts.direct_timeout
     };
     match receiver::detect(Arc::clone(&channel)) {
         Some(Receiver::Bolt(bolt)) => {

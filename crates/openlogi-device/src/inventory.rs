@@ -491,7 +491,7 @@ impl Enumerator {
 
     /// One enumeration pass, reusing the cache from prior passes. Probes every
     /// HID candidate concurrently (so one asleep node that burns the whole
-    /// `PROBE_BUDGET` can't stall the others), reusing each device's cached
+    /// `PROBE_TIMEOUT` can't stall the others), reusing each device's cached
     /// immutable data when it's present and fresh.
     ///
     /// A node the OS still lists but whose probe fails (receiver registers
@@ -571,7 +571,7 @@ impl Enumerator {
             let settled = settle_probe(&mut self.ledger, &node, probe.verdict, probe.inventory);
             // Every node waits for the ledger's consecutive-failure threshold,
             // receivers included. One full-budget timeout is not evidence of
-            // dead delivery: [`RECEIVER_PROBE_BUDGET`] leaves barely a second
+            // dead delivery: [`RECEIVER_PROBE_TIMEOUT`] leaves barely a second
             // over its own documented worst case, so a legitimate deep walk
             // plus a single lost reply (5 s `SEND_RESPONSE_TIMEOUT`) already
             // exceeds it. Evicting on that unpublishes *every* device behind

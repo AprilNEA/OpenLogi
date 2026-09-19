@@ -1238,8 +1238,8 @@ fn bolt_receiver_node(tag: &str) -> NodeInfo {
 fn quick_timeouts() -> ProbeTimeouts {
     ProbeTimeouts {
         register_lock_wait: Duration::from_secs(2),
-        receiver_budget: Duration::from_millis(900),
-        direct_budget: Duration::from_millis(900),
+        receiver_timeout: Duration::from_millis(900),
+        direct_timeout: Duration::from_millis(900),
         arrival_drain: Duration::from_millis(100),
         bolt_slot_probe: Duration::from_millis(400),
         unifying_slot_probe: Duration::from_millis(400),
@@ -1300,7 +1300,7 @@ async fn a_receiver_probe_that_waited_for_its_register_phase_keeps_its_whole_io_
 
     let io_floor = timeouts.arrival_drain + timeouts.bolt_slot_probe;
     assert!(
-        lock_held_for + io_floor > timeouts.receiver_budget,
+        lock_held_for + io_floor > timeouts.receiver_timeout,
         "the test must compose a wait and an I/O floor that together outrun the budget"
     );
     assert!(
@@ -1374,7 +1374,7 @@ async fn a_receiver_probe_defers_when_the_register_phase_is_held_past_the_wait()
 async fn a_receiver_probe_whose_io_outruns_the_budget_is_failed() {
     let info = bolt_receiver_node("io-outruns-budget");
     let timeouts = ProbeTimeouts {
-        receiver_budget: Duration::from_millis(150),
+        receiver_timeout: Duration::from_millis(150),
         ..quick_timeouts()
     };
     let (raw, _handle) = ScriptedRawHidChannel::with_responder(bolt_receiver_with_a_silent_slot);
