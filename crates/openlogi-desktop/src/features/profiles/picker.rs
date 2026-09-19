@@ -184,6 +184,7 @@ fn catalog_list(
 ) -> gpui::Div {
     let count = rows.len();
     div()
+        .relative()
         .h(px(application_list_height(count)))
         .w_full()
         .child(
