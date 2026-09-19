@@ -26,9 +26,9 @@ files; **keep this table in sync when you add or move one**:
 | `openlogi-agent/src/status_item.rs` | safe `objc2` wrappers over `NSStatusItem` / `NSMenu` / `NSMenuItem` |
 | `openlogi-agent/src/tray.rs` | the menu-bar semantics, `MenuTarget` + `ResumeTarget` (`define_class!`), the Accessory `NSApplication` loop, `NSWorkspace` resume notifications |
 | `openlogi-agent-core/src/watchers/camera.rs` | the CoreMediaIO "camera is running" property read |
-| `openlogi-camera/src/capture.rs` | `AVCaptureSession` capture + the `define_class!` frame delegate, and the Camera TCC prompt |
+| `openlogi-camera/src/capture_macos.rs` | `AVCaptureSession` capture + the `define_class!` frame delegate, and the Camera TCC prompt |
 | `openlogi-camera/src/macos.rs` | `AVCaptureDevice` enumeration (`class!` + `msg_send!`) |
-| `openlogi-camera/src/uvc.rs`, `.../uvc/iokit.rs` | IOKit USB / UVC control transfers; every `unsafe` in the macOS UVC backend lives in `iokit.rs` |
+| `openlogi-camera/src/uvc_macos.rs`, `.../uvc_macos/iokit.rs` | IOKit USB / UVC control transfers; every `unsafe` in the macOS UVC backend lives in `iokit.rs` |
 | `openlogi-desktop/src/platform/registration/macos.rs` | `SMAppService` registration of the agent's launchd service (the login-item side of the agent lifecycle; the GUI must own it — the API resolves the plist against the calling app's bundle) |
 | `openlogi-desktop/src/platform/os.rs` | `NSProcessInfo` OS version + the `NSAppearance` titlebar sync |
 | `openlogi-hid/src/permissions.rs` | `IOHIDCheckAccess` / `IOHIDRequestAccess` (the prompting half of Input Monitoring) |
@@ -69,7 +69,7 @@ every 2 s tray refresh under the old `cocoa`/`objc` 0.x path).
   reintroduce either.
 - `alloc`/`init`/`new`/`copy` and the framework getters return `Retained<T>` /
   `Option<Retained<T>>`; you keep what you need and let `Drop` free it.
-- IOKit handles get the same treatment by hand in `camera/src/uvc/iokit.rs`:
+- IOKit handles get the same treatment by hand in `camera/src/uvc_macos/iokit.rs`:
   `IoObject`, `UsbInterface` and `SeizedDevice` release on drop, and
   CoreFoundation values arrive as `CFRetained`. Never hand-balance a release.
 - **Never** call manual `retain`/`release`/`autorelease`, add raw `cocoa`/`objc`
@@ -115,7 +115,7 @@ is its own framework call, so "the TCC layer" is just this table:
 | Accessibility | `objc2-application-services` (`HIServices` + `AXUIElement`) | `AXIsProcessTrusted` / `AXIsProcessTrustedWithOptions` | both in `openlogi-hook` |
 | Input Monitoring / Post Event | `objc2-io-kit` (`hidsystem`) | `IOHIDCheckAccess` / `IOHIDRequestAccess` | read in `openlogi-permissions`, prompt in `openlogi-hid` |
 | Bluetooth | `objc2` class lookup (see below) | `+[CBManager authorization]` | `openlogi-permissions` |
-| Camera / microphone | `openlogi-camera` (`capture.rs`) | `+[AVCaptureDevice authorizationStatusForMediaType:]` / `requestAccessForMediaType:` | `openlogi-camera` |
+| Camera / microphone | `openlogi-camera` (`capture_macos.rs`) | `+[AVCaptureDevice authorizationStatusForMediaType:]` / `requestAccessForMediaType:` | `openlogi-camera` |
 | Screen Recording (unused) | `objc2-core-graphics` | `CGPreflightScreenCaptureAccess` | — |
 | Full Disk Access (unused) | — | no API; only a probe of a protected path | — |
 
@@ -242,8 +242,8 @@ under a `SAFETY` comment. Where it currently lives on macOS:
 - `desktop/platform/registration/macos.rs` — the `SMAppService` calls (all generated
   bindings are `unsafe fn`s). Together with `os.rs`, the GUI's entire `unsafe`
   surface.
-- `camera/{capture,uvc/iokit}.rs` — the AVFoundation capture FFI and the IOKit
-  USB plug-in; `uvc/iokit.rs` deliberately concentrates every `unsafe` of the
+- `camera/{capture_macos,uvc_macos/iokit}.rs` — the AVFoundation capture FFI and the IOKit
+  USB plug-in; `uvc_macos/iokit.rs` deliberately concentrates every `unsafe` of the
   macOS UVC backend so the descriptor parser above it is ordinary safe code.
 
 ## CGEventTap stays on `core-graphics` — on purpose
