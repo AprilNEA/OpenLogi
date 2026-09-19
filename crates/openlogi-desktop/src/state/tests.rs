@@ -254,6 +254,39 @@ fn profile_device(state: &AppState, unit_id: [u8; 4]) -> &super::DeviceRecord {
         .expect("canonical profile device is projected")
 }
 
+/// The canonical gaming mouse carries the gaming control tables without
+/// ReprogControls; its measured restriction must survive the projection so the
+/// Buttons panel narrows to what the OS hook can remap.
+#[test]
+fn canonical_profile_projects_gaming_mouse_without_diversion() {
+    let profile = canonical_device_profile();
+    let snapshot = snapshot_candidate(&profile);
+    let cache = AssetResolver::new();
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = canonical_profile_state(commands);
+
+    state.apply_agent_snapshot(&snapshot, &cache, &[]);
+
+    let gaming_mouse = profile_device(&state, [79, 76, 68, 5]);
+    assert_eq!(gaming_mouse.config_key, "unit:4f4c4405");
+    assert_eq!(
+        gaming_mouse.route,
+        Some(DeviceRoute::Bolt {
+            receiver_uid: "OL-BOLT-UID-0001".to_string(),
+            slot: 5,
+        })
+    );
+    let capabilities = gaming_mouse
+        .capabilities
+        .expect("gaming mouse capabilities are projected");
+    assert_eq!(
+        Some(capabilities),
+        profile.inventories[0].paired[3].capabilities
+    );
+    assert!(capabilities.buttons);
+    assert!(!capabilities.can_divert_buttons());
+}
+
 #[test]
 fn canonical_profile_projects_identity_routes_capabilities_and_battery() {
     let profile = canonical_device_profile();
@@ -276,7 +309,7 @@ fn canonical_profile_projects_identity_routes_capabilities_and_battery() {
     );
     assert_eq!(state.last_inventory(), snapshot.inventory);
     assert_eq!(state.agent_status(), Some(&snapshot.status));
-    assert_eq!(state.devices().len(), 5);
+    assert_eq!(state.devices().len(), 6);
 
     let receiver_mouse = profile_device(&state, [79, 76, 68, 1]);
     assert_eq!(receiver_mouse.config_key, "unit:4f4c4401");

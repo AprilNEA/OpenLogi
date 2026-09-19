@@ -306,12 +306,15 @@ fn test_client(agent: TestAgent) -> AgentClient {
 fn fixture_agent() -> TestAgent {
     let mut profile: DeviceProfile =
         serde_json::from_str(CANONICAL_DEVICE_PROFILE_JSON).expect("canonical profile parses");
+    // Keep the receiver to the performance mouse and the keyboard: the offline
+    // mouse has nothing to read, and the gaming mouse would only repeat the
+    // performance mouse's read families.
     profile.inventories[0]
         .paired
-        .retain(|device| device.slot != 2);
+        .retain(|device| !matches!(device.slot, 2 | 5));
     profile
         .settings
-        .retain(|settings| !matches!(settings.route, DeviceRoute::Bolt { slot: 2, .. }));
+        .retain(|settings| !matches!(settings.route, DeviceRoute::Bolt { slot: 2 | 5, .. }));
     profile.inventories[0].receiver.unique_id = Some(RAW_RECEIVER_UID.to_string());
     for device in &mut profile.inventories[0].paired {
         if let Some(model) = &mut device.model_info {
