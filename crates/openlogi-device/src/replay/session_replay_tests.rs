@@ -1,5 +1,7 @@
+use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
+use openlogi_core::binding::ButtonId;
 use openlogi_core::hid::PairingError;
 use openlogi_fixture::{
     CassetteExchange, FIXTURE_SCHEMA_VERSION, HidCassette, ReportSupport, RequestMatch,
@@ -8,149 +10,260 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::{
     ChannelConnection, NodePresence, OpenOutcome, RawWriterAvailability, ReplayBackend,
-    ReplayChannel, ReplayNode, ReplayTopology,
+    ReplayChannel, ReplayNode, ReplayResponseBarrier, ReplayTopology,
 };
 use crate::session::gesture::CaptureSpec;
 use crate::{
-    CaptureChannelSlot, CaptureHost, CaptureSessionOutcome, ChannelRegistry, DeviceRoute,
-    Enumerator, NodeId, NodeInfo, PairingCommand, PairingEvent, ReceiverSelector,
-    device_io_channel, reprog_controls, run_capture_session, run_pairing,
+    CaptureChannelSlot, CaptureHost, CaptureSessionFailure, CaptureSessionOutcome, CapturedInput,
+    ChannelRegistry, DeviceIoGate, DeviceIoSignal, DeviceRoute, Enumerator, NodeId, NodeInfo,
+    PairingCommand, PairingEvent, ReceiverSelector, SharedChannel, device_io_channel,
+    reprog_controls, run_capture_session, run_keyboard_capture_session, run_pairing,
 };
 
-const GESTURE_CHANNEL: &str = "gesture-capture-session";
+const CAPTURE_CHANNEL: &str = "capture-session";
 const PAIRING_CHANNEL: &str = "bolt-pairing-session";
 const DIRECT_PRODUCT_ID: u16 = 0xb35b;
 const BOLT_PRODUCT_ID: u16 = 0xc548;
 const REPROG_FEATURE_INDEX: u8 = 0x02;
 const GESTURE_CID: u16 = reprog_controls::GESTURE_BUTTON_CID;
+/// The Mute key, one of [`crate::KEYBOARD_KEY_CIDS`].
+const KEYBOARD_CID: u16 = 0x00e7;
 const ORIGINAL_REMAP_CID: u16 = 0x0053;
+/// A `getCidInfo` capability pair (bytes 4 and 8): a mouse control that is
+/// reprogrammable and divertable, with raw XY.
+const GESTURE_CONTROL_FLAGS: (u8, u8) = (0x31, 0x01);
+/// A function-row control that is reprogrammable and divertable, no raw XY.
+const KEYBOARD_CONTROL_FLAGS: (u8, u8) = (0x32, 0x00);
+/// `setCidReporting` flags that arm gesture capture: divert and raw XY, both
+/// marked valid.
+const GESTURE_ARMED_FLAGS: u8 = 0x33;
+/// `setCidReporting` flags that arm keyboard capture: divert marked valid, raw
+/// XY marked valid but off.
+const KEYBOARD_ARMED_FLAGS: u8 = 0x23;
+/// `setCidReporting` flags that hand a control back: divert and raw XY both
+/// marked valid and off.
+const RESTORED_FLAGS: u8 = 0x22;
 
 #[tokio::test]
 async fn gesture_capture_replay_restores_original_reporting_on_normal_shutdown() {
-    let node_id = NodeId::from("gesture-capture-node".to_string());
-    let route = DeviceRoute::Direct {
-        vendor_id: crate::LOGITECH_VENDOR_ID,
-        product_id: DIRECT_PRODUCT_ID,
-    };
-    let backend = Arc::new(
-        ReplayBackend::new(
-            replay_topology(direct_gesture_node(node_id.clone()), GESTURE_CHANNEL),
-            vec![gesture_capture_cassette()],
-        )
-        .expect("gesture replay topology is valid"),
-    );
-    let registry = ChannelRegistry::default();
-    let mut enumerator = Enumerator::with_backend(backend.clone()).with_registry(registry.clone());
-
-    let inventory = enumerator
-        .enumerate()
-        .await
-        .expect("production feature probe succeeds");
-    assert_eq!(inventory.len(), 1);
-    let original_publication = registry
-        .lookup(&route)
-        .expect("the enumerator publishes the direct route");
-    assert!(registry.is_current(&original_publication));
-    assert_eq!(
-        backend
-            .channel_lifetime_count(GESTURE_CHANNEL)
-            .expect("known gesture channel"),
-        1
-    );
-
-    let armed = backend
-        .hold_next_response(
-            GESTURE_CHANNEL,
-            RequestMatch::Hidpp20,
-            &root_feature_lookup_request(0x1d4b),
-        )
-        .expect("wireless feature lookup can be held");
+    let replay = ArmedReplay::enumerate(capture_cassette(
+        "gesture capture normal shutdown",
+        GESTURE_CID,
+        GESTURE_CONTROL_FLAGS,
+        GESTURE_ARMED_FLAGS,
+    ))
+    .await;
     let (sink, _captured) = mpsc::unbounded_channel();
-    let (shutdown, shutdown_rx) = oneshot::channel();
-    let channel_slot: CaptureChannelSlot = Arc::new(RwLock::new(None));
-    let (_io_signal, io_gate) = device_io_channel();
+    let (shutdown, host) = replay.host(sink);
     let capture = run_capture_session(
-        route.clone(),
+        replay.route.clone(),
         CaptureSpec {
             divert_gesture_sources: vec![GESTURE_CID],
             ..CaptureSpec::default()
         },
-        CaptureHost {
+        host,
+    );
+
+    let (outcome, ()) = tokio::join!(capture, replay.stop_after_arm(shutdown));
+
+    replay.assert_restored(outcome, GESTURE_CID, GESTURE_ARMED_FLAGS);
+}
+
+/// Keyboard capture arms its own way — `0x1b04` diversion on the wanted
+/// controls only, without raw XY — and then runs the skeleton the gesture
+/// session runs, so it has to publish its channel before it monitors and hand
+/// the control back before it completes, exactly as that session does.
+#[tokio::test]
+async fn keyboard_capture_replay_restores_original_reporting_on_normal_shutdown() {
+    let replay = ArmedReplay::enumerate(capture_cassette(
+        "keyboard capture normal shutdown",
+        KEYBOARD_CID,
+        KEYBOARD_CONTROL_FLAGS,
+        KEYBOARD_ARMED_FLAGS,
+    ))
+    .await;
+    let (sink, _captured) = mpsc::unbounded_channel();
+    let (shutdown, host) = replay.host(sink);
+    let capture = run_keyboard_capture_session(
+        replay.route.clone(),
+        BTreeMap::from([(KEYBOARD_CID, ButtonId::KeyMute)]),
+        host,
+    );
+
+    let (outcome, ()) = tokio::join!(capture, replay.stop_after_arm(shutdown));
+
+    replay.assert_restored(outcome, KEYBOARD_CID, KEYBOARD_ARMED_FLAGS);
+}
+
+/// One replayed direct device, enumerated the production way, whose `0x1d4b`
+/// lookup is held so a capture session can be observed between arming and
+/// monitoring.
+struct ArmedReplay {
+    backend: Arc<ReplayBackend>,
+    registry: ChannelRegistry,
+    node_id: NodeId,
+    route: DeviceRoute,
+    original_publication: SharedChannel,
+    channel_slot: CaptureChannelSlot,
+    wireless_lookup: ReplayResponseBarrier,
+    /// Held so the gate stays open for the session's lifetime.
+    _io_signal: DeviceIoSignal,
+    io_gate: DeviceIoGate,
+}
+
+impl ArmedReplay {
+    async fn enumerate(cassette: HidCassette) -> Self {
+        let node_id = NodeId::from("capture-node".to_string());
+        let route = DeviceRoute::Direct {
+            vendor_id: crate::LOGITECH_VENDOR_ID,
+            product_id: DIRECT_PRODUCT_ID,
+        };
+        let backend = Arc::new(
+            ReplayBackend::new(
+                replay_topology(direct_capture_node(node_id.clone()), CAPTURE_CHANNEL),
+                vec![cassette],
+            )
+            .expect("capture replay topology is valid"),
+        );
+        let registry = ChannelRegistry::default();
+        let mut enumerator =
+            Enumerator::with_backend(backend.clone()).with_registry(registry.clone());
+
+        let inventory = enumerator
+            .enumerate()
+            .await
+            .expect("production feature probe succeeds");
+        assert_eq!(inventory.len(), 1);
+        let original_publication = registry
+            .lookup(&route)
+            .expect("the enumerator publishes the direct route");
+        assert!(registry.is_current(&original_publication));
+        assert_eq!(
+            backend
+                .channel_lifetime_count(CAPTURE_CHANNEL)
+                .expect("known capture channel"),
+            1
+        );
+
+        let wireless_lookup = backend
+            .hold_next_response(
+                CAPTURE_CHANNEL,
+                RequestMatch::Hidpp20,
+                &root_feature_lookup_request(0x1d4b),
+            )
+            .expect("wireless feature lookup can be held");
+        let (io_signal, io_gate) = device_io_channel();
+        Self {
+            backend,
+            registry,
+            node_id,
+            route,
+            original_publication,
+            channel_slot: Arc::new(RwLock::new(None)),
+            wireless_lookup,
+            _io_signal: io_signal,
+            io_gate,
+        }
+    }
+
+    /// The host handles one session runs against, and the sender that shuts
+    /// it down.
+    fn host(
+        &self,
+        sink: mpsc::UnboundedSender<CapturedInput>,
+    ) -> (oneshot::Sender<()>, CaptureHost<'_>) {
+        let (shutdown, shutdown_rx) = oneshot::channel();
+        let host = CaptureHost {
             sink,
             shutdown: shutdown_rx,
-            channel_slot: Arc::clone(&channel_slot),
-            registry: &registry,
-            device_io: io_gate,
-        },
-    );
-    let stop_after_arm = async {
-        armed.request_written().await;
-        let published = channel_slot
+            channel_slot: Arc::clone(&self.channel_slot),
+            registry: &self.registry,
+            device_io: self.io_gate.clone(),
+        };
+        (shutdown, host)
+    }
+
+    /// Once the session has armed and asked for `0x1d4b`, check that it has
+    /// published its channel, then shut it down and let the lookup answer.
+    async fn stop_after_arm(&self, shutdown: oneshot::Sender<()>) {
+        self.wireless_lookup.request_written().await;
+        let published = self
+            .channel_slot
             .read()
             .expect("capture channel slot is readable")
             .clone()
-            .expect("capture channel is published after arming");
-        assert!(registry.is_current(&published));
+            .expect("capture channel is published before the wireless lookup");
+        assert!(self.registry.is_current(&published));
         shutdown
             .send(())
             .expect("capture session still owns its shutdown receiver");
-        armed.release();
-    };
+        self.wireless_lookup.release();
+    }
 
-    let (outcome, ()) = tokio::join!(capture, stop_after_arm);
-    assert!(matches!(
-        outcome.expect("capture session shuts down cleanly"),
-        CaptureSessionOutcome::Restored
-    ));
-    assert!(
-        channel_slot
-            .read()
-            .expect("capture channel slot is readable")
-            .is_none(),
-        "normal shutdown must clear the captured channel slot"
-    );
-    assert!(
-        registry.is_current(&original_publication),
-        "normal shutdown must restore through and retain the original publication"
-    );
-    assert_eq!(backend.open_count(&node_id).expect("known gesture node"), 1);
-    assert_eq!(
-        backend
-            .channel_lifetime_count(GESTURE_CHANNEL)
-            .expect("known gesture channel"),
-        1,
-        "capture must reuse the enumerator-owned channel"
-    );
+    /// A normal shutdown restored `cid`'s reporting through the channel the
+    /// enumerator owns, cleared the slot, and consumed the whole cassette.
+    fn assert_restored(
+        &self,
+        outcome: Result<CaptureSessionOutcome, CaptureSessionFailure>,
+        cid: u16,
+        armed_flags: u8,
+    ) {
+        assert!(matches!(
+            outcome.expect("capture session shuts down cleanly"),
+            CaptureSessionOutcome::Restored
+        ));
+        assert!(
+            self.channel_slot
+                .read()
+                .expect("capture channel slot is readable")
+                .is_none(),
+            "normal shutdown must clear the captured channel slot"
+        );
+        assert!(
+            self.registry.is_current(&self.original_publication),
+            "normal shutdown must restore through and retain the original publication"
+        );
+        assert_eq!(
+            self.backend
+                .open_count(&self.node_id)
+                .expect("known capture node"),
+            1
+        );
+        assert_eq!(
+            self.backend
+                .channel_lifetime_count(CAPTURE_CHANNEL)
+                .expect("known capture channel"),
+            1,
+            "capture must reuse the enumerator-owned channel"
+        );
 
-    assert_gesture_reporting_completion(&backend);
-}
-
-fn assert_gesture_reporting_completion(backend: &ReplayBackend) {
-    let completion = backend
-        .channel_completion(GESTURE_CHANNEL)
-        .expect("known gesture channel");
-    let reporting_writes: Vec<_> = completion
-        .written_reports
-        .iter()
-        .filter(|report| {
-            report[0] == 0x11 && report[2] == REPROG_FEATURE_INDEX && report[3] >> 4 == 3
-        })
-        .collect();
-    assert_eq!(reporting_writes.len(), 2);
-    assert_eq!(
-        &reporting_writes[0][4..],
-        &reprog_reporting_change_payload(0x33),
-        "arming sets diversion and raw-XY while preserving the original remap"
-    );
-    assert_eq!(
-        &reporting_writes[1][4..],
-        &reprog_reporting_change_payload(0x22),
-        "shutdown clears only diversion and raw-XY while preserving the original remap"
-    );
-    assert_eq!(completion.channel_open_count, 1);
-    backend
-        .require_complete()
-        .expect("gesture cassette is strictly consumed");
+        let completion = self
+            .backend
+            .channel_completion(CAPTURE_CHANNEL)
+            .expect("known capture channel");
+        let reporting_writes: Vec<_> = completion
+            .written_reports
+            .iter()
+            .filter(|report| {
+                report[0] == 0x11 && report[2] == REPROG_FEATURE_INDEX && report[3] >> 4 == 3
+            })
+            .collect();
+        assert_eq!(reporting_writes.len(), 2);
+        assert_eq!(
+            &reporting_writes[0][4..],
+            &reprog_reporting_change_payload(cid, armed_flags),
+            "arming sets only the diversion this capture needs while preserving the original remap"
+        );
+        assert_eq!(
+            &reporting_writes[1][4..],
+            &reprog_reporting_change_payload(cid, RESTORED_FLAGS),
+            "shutdown clears only diversion and raw-XY while preserving the original remap"
+        );
+        assert_eq!(completion.channel_open_count, 1);
+        self.backend
+            .require_complete()
+            .expect("capture cassette is strictly consumed");
+    }
 }
 
 #[tokio::test]
@@ -216,8 +329,8 @@ async fn bolt_pairing_replay_cancels_discovery_and_restores_notifications() {
         .expect("pairing cassette is strictly consumed");
 }
 
-fn direct_gesture_node(id: NodeId) -> ReplayNode {
-    replay_node(id, DIRECT_PRODUCT_ID, "Gesture Capture Mouse")
+fn direct_capture_node(id: NodeId) -> ReplayNode {
+    replay_node(id, DIRECT_PRODUCT_ID, "Capture Device")
 }
 
 fn bolt_pairing_node(id: NodeId) -> ReplayNode {
@@ -241,7 +354,7 @@ fn replay_node(id: NodeId, product_id: u16, name: &str) -> ReplayNode {
         channel: Some(if product_id == BOLT_PRODUCT_ID {
             PAIRING_CHANNEL.to_string()
         } else {
-            GESTURE_CHANNEL.to_string()
+            CAPTURE_CHANNEL.to_string()
         }),
         raw_writer: RawWriterAvailability::Unavailable,
         receiver_slots: Vec::new(),
@@ -259,10 +372,12 @@ fn replay_topology(node: ReplayNode, channel: &str) -> ReplayTopology {
     }
 }
 
-fn gesture_capture_cassette() -> HidCassette {
+/// The exchanges one capture session over `cid` costs, from the production
+/// probe through arming, the held `0x1d4b` lookup, and the restore on shutdown.
+fn capture_cassette(name: &str, cid: u16, control_flags: (u8, u8), armed_flags: u8) -> HidCassette {
     cassette(
-        "gesture capture normal shutdown",
-        GESTURE_CHANNEL,
+        name,
+        CAPTURE_CHANNEL,
         vec![
             root_ping_exchange(),
             root_feature_lookup_exchange(0x0001, 0x01, 0),
@@ -270,15 +385,15 @@ fn gesture_capture_cassette() -> HidCassette {
             feature_set_entry_exchange(1, 0x0001),
             feature_set_entry_exchange(2, reprog_controls::FEATURE_ID),
             reprog_control_count_exchange(1),
-            reprog_gesture_control_info_exchange(),
+            reprog_control_info_exchange(cid, control_flags),
             root_ping_exchange(),
             root_feature_lookup_exchange(reprog_controls::FEATURE_ID, REPROG_FEATURE_INDEX, 4),
             reprog_control_count_exchange(1),
-            reprog_gesture_control_info_exchange(),
-            reprog_reporting_state_exchange(),
-            reprog_reporting_change_exchange(0x33),
+            reprog_control_info_exchange(cid, control_flags),
+            reprog_reporting_state_exchange(cid),
+            reprog_reporting_change_exchange(cid, armed_flags),
             root_feature_lookup_exchange(0x1d4b, 0, 0),
-            reprog_reporting_change_exchange(0x22),
+            reprog_reporting_change_exchange(cid, RESTORED_FLAGS),
         ],
     )
 }
@@ -354,22 +469,22 @@ fn reprog_control_count_exchange(count: u8) -> CassetteExchange {
     )
 }
 
-fn reprog_gesture_control_info_exchange() -> CassetteExchange {
+fn reprog_control_info_exchange(cid: u16, (flags, flags_high): (u8, u8)) -> CassetteExchange {
     let mut response = [0u8; 16];
-    response[0..2].copy_from_slice(&GESTURE_CID.to_be_bytes());
+    response[0..2].copy_from_slice(&cid.to_be_bytes());
     response[2..4].copy_from_slice(&0x009cu16.to_be_bytes());
-    response[4] = 0x31;
-    response[8] = 0x01;
+    response[4] = flags;
+    response[8] = flags_high;
     hidpp20_exchange(
         hidpp20_long(0xff, REPROG_FEATURE_INDEX, 1, [0; 16]),
         hidpp20_long(0xff, REPROG_FEATURE_INDEX, 1, response),
     )
 }
 
-fn reprog_reporting_state_exchange() -> CassetteExchange {
-    let [cid_high, cid_low] = GESTURE_CID.to_be_bytes();
+fn reprog_reporting_state_exchange(cid: u16) -> CassetteExchange {
+    let [cid_high, cid_low] = cid.to_be_bytes();
     let mut response = [0u8; 16];
-    response[0..2].copy_from_slice(&GESTURE_CID.to_be_bytes());
+    response[0..2].copy_from_slice(&cid.to_be_bytes());
     response[2] = 0x44;
     response[3..5].copy_from_slice(&ORIGINAL_REMAP_CID.to_be_bytes());
     response[5] = 0x05;
@@ -379,15 +494,15 @@ fn reprog_reporting_state_exchange() -> CassetteExchange {
     )
 }
 
-fn reprog_reporting_change_exchange(flags: u8) -> CassetteExchange {
-    let payload = reprog_reporting_change_payload(flags);
+fn reprog_reporting_change_exchange(cid: u16, flags: u8) -> CassetteExchange {
+    let payload = reprog_reporting_change_payload(cid, flags);
     let report = hidpp20_long(0xff, REPROG_FEATURE_INDEX, 3, payload);
     hidpp20_exchange(report.clone(), report)
 }
 
-fn reprog_reporting_change_payload(flags: u8) -> [u8; 16] {
+fn reprog_reporting_change_payload(cid: u16, flags: u8) -> [u8; 16] {
     let mut payload = [0u8; 16];
-    payload[0..2].copy_from_slice(&GESTURE_CID.to_be_bytes());
+    payload[0..2].copy_from_slice(&cid.to_be_bytes());
     payload[2] = flags;
     payload[3..5].copy_from_slice(&ORIGINAL_REMAP_CID.to_be_bytes());
     payload
