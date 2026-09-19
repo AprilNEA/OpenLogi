@@ -309,7 +309,10 @@ impl Orchestrator {
             for button in hidpp_side_gesture_maps_for(&self.config, key, app).keys() {
                 // HID++ owns both edges for these controls. Keeping their
                 // projected click or gesture map in the global hook would
-                // reintroduce a second, unattributed dispatch path.
+                // reintroduce a second, unattributed dispatch path. A
+                // preserved Middle Click map is not in this set: its HID++
+                // capture is device-conditional (the control must declare the
+                // gesture task), so the hook stays its fail-open owner.
                 bindings.remove(button);
                 gestures.remove(button);
             }

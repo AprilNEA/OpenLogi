@@ -1,7 +1,8 @@
 //! Live control capture for one device: divert the device's gesture sources
-//! (DPI/ModeShift, the MX dedicated gesture button and/or the MX Master 4
-//! haptic panel), and the thumb wheel over HID++ and turn their events
-//! into [`CapturedInput`] the GUI can dispatch.
+//! (DPI/ModeShift, the MX dedicated gesture button, the MX Master 4 haptic
+//! panel, and a middle button whose control table declares it the gesture
+//! button) plus the thumb wheel over HID++, and turn their events into
+//! [`CapturedInput`] the GUI can dispatch.
 //!
 //! [`run_capture_session`] holds a single HID++ channel open for one device,
 //! enables diversion on whichever of those controls it exposes, registers one
@@ -208,6 +209,15 @@ pub struct CaptureSpec {
     /// Standard-button CIDs requested as raw-XY gesture sources. A control is
     /// armed only when its HID++ capability flags advertise raw-XY support.
     pub divert_gesture_buttons: Vec<(u16, ButtonId)>,
+    /// Standard-button CIDs requested as raw-XY gesture sources only when the
+    /// device's own control table identifies them as its gesture button (see
+    /// [`CtrlIdInfo::is_gesture_button`](crate::reprog_controls::CtrlIdInfo::is_gesture_button)
+    /// and [`reprog_controls::GESTURE_BUTTON_TASK_IDS`]). The `0x0052` middle
+    /// button is an ordinary click on most mice — the MX Anywhere 2S is the
+    /// exception, where it is the gesture button — so a raw-XY-capable
+    /// middle button must not be captured for gestures without that
+    /// confirmation.
+    pub divert_gesture_navigation: Vec<(u16, ButtonId)>,
     /// Buttons to divert as plain presses (no raw-XY): the
     /// [`DIVERTABLE_STANDARD_BUTTONS`] and non-gesturing
     /// [`GESTURE_SOURCE_BUTTONS`] whose binding leaves the default.
@@ -472,7 +482,8 @@ struct ArmedControls {
     /// `spec.divert_gesture_sources` members the device exposes.
     gesture_cids: Vec<u16>,
     /// Raw-XY-capable additional CIDs diverted as gesture sources (macOS side
-    /// buttons and a gesture-mode DPI/ModeShift button).
+    /// buttons, a gesture-mode DPI/ModeShift button, and a middle button the
+    /// device itself declares as its gesture button).
     gesture_button_cids: Vec<(u16, ButtonId)>,
     /// DPI/ModeShift CIDs diverted as plain buttons when gesture mode is off.
     dpi_cids: Vec<u16>,
@@ -773,6 +784,7 @@ async fn arm_controls_into(
                 armed.gesture_button_cids.push((cid, button));
             }
         }
+        arm_gesture_navigation_controls(&rc, &controls, spec, armed).await?;
         for &cid in &reprog_controls::DPI_MODE_SHIFT_CIDS {
             let gesture_requested = spec
                 .divert_gesture_buttons
@@ -844,6 +856,38 @@ async fn arm_controls_into(
             && let Err(error) = thumb.wheel.divert(thumb.direction()).await
         {
             return Err(GestureError::Hidpp(format!("{error:?}")));
+        }
+    }
+    Ok(())
+}
+
+async fn arm_gesture_navigation_controls(
+    rc: &ReprogControlsV4,
+    controls: &[reprog_controls::CtrlIdInfo],
+    spec: &CaptureSpec,
+    armed: &mut ArmedControls,
+) -> Result<(), GestureError> {
+    // A shared standard CID (the middle button) is a gesture source only when
+    // the device itself says so; capability flags alone would turn every
+    // raw-XY-capable middle click into a gesture button. The row is logged
+    // because the device's answer is what decides arming — a mis-classified
+    // model must be diagnosable from the agent log.
+    for &(cid, button) in &spec.divert_gesture_navigation {
+        let control = controls.iter().find(|c| c.cid == cid);
+        let confirmed = control.is_some_and(|control| {
+            control.is_divertable() && control.supports_raw_xy() && control.is_gesture_button()
+        });
+        debug!(
+            cid = format_args!("{cid:#06x}"),
+            task = format_args!("{:#06x}", control.map_or(0, |c| c.task_id)),
+            flags = format_args!("{:#06x}", control.map_or(0, |c| c.flags)),
+            %button,
+            confirmed,
+            "gesture-navigation capture request"
+        );
+        if confirmed {
+            arm_reprog_control(rc, cid, true, &mut armed.reporting).await?;
+            armed.gesture_button_cids.push((cid, button));
         }
     }
     Ok(())

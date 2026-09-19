@@ -63,6 +63,21 @@ pub const HAPTIC_PANEL_CID: u16 = control_ids::HAPTIC_PANEL.0;
 /// cross-checked against Solaar `special_keys.py`.
 pub const DPI_MODE_SHIFT_CIDS: [u16; 3] = [0x00c4, 0x00ed, 0x00fd];
 
+/// Task IDs that mark a `0x1b04` control as the device's own gesture button —
+/// the control whose press starts a hold-and-swipe gesture. Task names come
+/// from Solaar's task table (`special_keys.py`):
+///
+/// - `0x00a9` `Gesture Button Navigation` — the MX Master gesture buttons and
+///   the MX Anywhere 2S Middle Button (on that model the wheel click *is* the
+///   gesture button).
+/// - `0x00ad` `Multi Platform Gesture Button` — the M720 Triathlon's physical
+///   thumb gesture button.
+///
+/// The CID alone cannot decide this: `0x0052` is an ordinary middle button on
+/// most mice, and only the device's own task says whether it is the gesture
+/// button.
+pub const GESTURE_BUTTON_TASK_IDS: [u16; 2] = [0x00a9, 0x00ad];
+
 /// Control IDs of the Back button family. MX Vertical and similar devices
 /// report Back via HID++ `0x1b04` rather than a standard OS mouse button,
 /// so macOS never translates them into `OtherMouseDown` events. Whichever a
@@ -115,6 +130,15 @@ impl CtrlIdInfo {
     #[must_use]
     pub fn supports_raw_xy(self) -> bool {
         self.typed_flags().supports_raw_xy()
+    }
+
+    /// Whether the control's default task marks it as the device's gesture
+    /// button — what [`GESTURE_BUTTON_TASK_IDS`] names. A control that shares
+    /// its CID with an ordinary button (the `0x0052` middle button) must pass
+    /// this check before it may be captured as a gesture source.
+    #[must_use]
+    pub fn is_gesture_button(self) -> bool {
+        GESTURE_BUTTON_TASK_IDS.contains(&self.task_id)
     }
 
     /// Whether the control can report force raw-XY data while held.
