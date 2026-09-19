@@ -142,6 +142,18 @@ impl<T: SliderUnit> SliderRange<T> {
     fn value_at(self, raw: f32) -> T {
         T::from_slider(raw.clamp(self.min.to_slider(), self.max.to_slider()))
     }
+
+    /// `value`, pulled inside the range.
+    pub(crate) fn clamp(self, value: T) -> T {
+        let raw = value.to_slider();
+        if raw < self.min.to_slider() {
+            self.min
+        } else if raw > self.max.to_slider() {
+            self.max
+        } else {
+            value
+        }
+    }
 }
 
 /// Where the thumb rests and whether it is being dragged.
@@ -333,6 +345,17 @@ mod tests {
         assert_eq!(range.value_at(3.), 10);
         assert_eq!(range.value_at(14.6), 15);
         assert_eq!(range.value_at(250.), 20);
+    }
+
+    /// A UVC control can report its bounds the wrong way round; a value is
+    /// clamped between them, not to the first one.
+    #[test]
+    fn a_clamp_uses_the_ordered_bounds() {
+        let reversed = SliderRange::new(-2_i32, -11);
+
+        assert_eq!(reversed.clamp(-20), -11);
+        assert_eq!(reversed.clamp(-5), -5);
+        assert_eq!(reversed.clamp(3), -2);
     }
 
     #[test]

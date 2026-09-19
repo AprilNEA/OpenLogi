@@ -88,6 +88,12 @@ impl ControlSlider {
         self.slider.value(cx)
     }
 
+    /// The control's bounds in the order a clamp needs them; a UVC driver may
+    /// report them reversed.
+    fn bounds(&self) -> SliderRange<i32> {
+        SliderRange::new(self.range.min, self.range.max)
+    }
+
     /// Put the thumb on a value the hardware has just taken.
     fn seat(&self, value: i32, window: &mut Window, cx: &mut App) {
         self.slider.seat(value, window, cx);
@@ -233,7 +239,8 @@ impl CameraControlsPanel {
         let mut apply_values = Vec::new();
         for (control, range) in &snap.controls {
             let saved = AppState::try_read(cx).and_then(|s| s.camera_control(key, *control));
-            let initial = saved.unwrap_or(range.current).clamp(range.min, range.max);
+            let initial =
+                SliderRange::new(range.min, range.max).clamp(saved.unwrap_or(range.current));
             if saved.is_some()
                 && saved != Some(range.current)
                 && !auto_desired(*control).is_some_and(|on| on)
@@ -535,10 +542,7 @@ impl CameraControlsPanel {
                         let span = to_slider(slider.range.max - slider.range.min);
                         slider.range.min + from_slider(span * pct)
                     });
-                values.push((
-                    slider.control,
-                    target.clamp(slider.range.min, slider.range.max),
-                ));
+                values.push((slider.control, slider.bounds().clamp(target)));
             }
         } else if let Some(snap) = custom.get(id) {
             for row in &self.autos {
@@ -547,10 +551,7 @@ impl CameraControlsPanel {
             }
             for slider in &self.sliders {
                 if let Some(v) = snap.0.get(slider.control.name()) {
-                    values.push((
-                        slider.control,
-                        (*v).clamp(slider.range.min, slider.range.max),
-                    ));
+                    values.push((slider.control, slider.bounds().clamp(*v)));
                 }
             }
         } else {
