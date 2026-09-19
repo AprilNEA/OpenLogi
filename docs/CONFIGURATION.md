@@ -117,6 +117,17 @@ in TOML. The GUI presents their `short` action; changing that button in the GUI
 replaces the whole pair with the selected single action. `per_app_bindings` and
 `keyboard.bindings` remain single-action maps.
 
+`CustomShortcut` modifiers are `Cmd`, `Ctrl`, `Alt`, `Shift`, and `Fn`; `Fn`
+is a macOS-specific modifier that other injection backends ignore. macOS
+reproduces the native navigation events for `Fn+Left`, `Fn+Right`, `Fn+Up`, and
+`Fn+Down`, including the SecondaryFn event flag. Direct `PageUp` and `PageDown`
+shortcuts also preserve that flag:
+
+```toml
+Back = { CustomShortcut = "Fn+Down" }
+Forward = { CustomShortcut = "Fn+Up" }
+```
+
 An Actions Ring entry wraps the action and may add an icon or literal label:
 
 ```toml
