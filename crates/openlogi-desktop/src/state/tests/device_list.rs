@@ -55,6 +55,7 @@ pub(crate) fn snapshot_candidate(profile: &DeviceProfile) -> AgentSnapshot {
             agent_version: "synthetic-profile-test".to_string(),
             input_monitoring_granted: true,
             hid_open_failures: false,
+            battery_widget: openlogi_core::device::BatteryWidgetStatus::Disabled,
         },
         inventory: profile.inventories.clone(),
         standalone: profile.standalone.clone(),
