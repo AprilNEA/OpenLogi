@@ -2,7 +2,8 @@
 
 use gpui::{
     App, AppContext as _, Bounds, Context, InteractiveElement, IntoElement, ParentElement, Render,
-    Role, SharedString, Size, Styled, Window, WindowBounds, WindowOptions, div, px, rems,
+    Role, SharedString, Size, StatefulInteractiveElement as _, Styled, Window, WindowBounds,
+    WindowOptions, div, px, rems,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
@@ -266,6 +267,7 @@ impl ComponentGallery {
                 .child(
                     MenuRow::new("gallery-menu-primary")
                         .role(Role::MenuItem)
+                        .aria_label("Primary action")
                         .selected(self.menu_selected == 0)
                         .child("Primary action")
                         .child(Icon::new(IconName::ChevronRight).size_3())
@@ -277,6 +279,7 @@ impl ComponentGallery {
                 .child(
                     MenuRow::new("gallery-menu-secondary")
                         .role(Role::MenuItem)
+                        .aria_label("Secondary action")
                         .selected(self.menu_selected == 1)
                         .child("Secondary action")
                         .child(Icon::new(IconName::ChevronRight).size_3())

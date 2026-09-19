@@ -373,9 +373,15 @@ fn gesture_directions(
                     let selected = direction == active;
                     let action = gesture_action(gesture_map, button, direction);
                     let view = view.clone();
+                    let aria_label = format!(
+                        "{}: {}",
+                        tr!(direction.translation_key()),
+                        localized_action_label(&action)
+                    );
                     MenuRow::new(("inspector-direction", index))
                         .selected(selected)
                         .role(Role::Button)
+                        .aria_label(aria_label)
                         .child(
                             h_flex()
                                 .min_w_0()
@@ -489,6 +495,7 @@ fn thumbwheel_inspector(
                             MenuRow::new(("inspector-thumbwheel", index))
                                 .selected(selected)
                                 .role(Role::Button)
+                                .aria_label(tr!(preset.translation_key()))
                                 .child(
                                     h_flex()
                                         .items_center()
