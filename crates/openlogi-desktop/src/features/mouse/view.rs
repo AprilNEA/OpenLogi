@@ -5,31 +5,28 @@ use gpui::{
     AnyElement, App, AppContext as _, Context, ElementId, Entity, FocusHandle, Focusable, Hsla,
     InteractiveElement, IntoElement, ParentElement, Render, RenderOnce,
     StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, hsla, img,
-    prelude::FluentBuilder as _, px, rgb, svg,
+    prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
-    Icon, IconName, h_flex,
+    h_flex,
     input::{InputEvent, InputState},
     v_flex,
 };
-use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
+use openlogi_core::binding::{Action, ButtonId, GestureDirection};
 
 use super::geometry::{
-    LABEL_H, LabelDistribution, asset_dimensions_for_png, asset_has_button_labels,
-    asset_hotspots_for_png, default_labels, labels_from_hotspots,
+    LabelDistribution, asset_dimensions_for_png, asset_has_button_labels, asset_hotspots_for_png,
+    default_labels, labels_from_hotspots,
 };
 use super::hotspots::{Hotspot, MOUSE_MODEL_SIZE, MouseControlId, default_hotspots};
 use super::inspector::{BindingInspectorData, binding_inspector};
-use super::leader_lines::{Geometry as LeaderGeometry, Label, Side, paint as paint_leader_lines};
-use super::thumbwheel::ThumbwheelPreset;
+use super::leader_lines::{Geometry as LeaderGeometry, Label, paint as paint_leader_lines};
 use crate::app::{glow_canvas, keyboard_glow};
-use crate::features::binding_editor::{GESTURE_BUTTON_ICON, action_icon_path};
 use crate::features::profiles::{friendly_app_name, profile_canvas_status};
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
 use crate::state::{AppState, DeviceKey, DeviceRecord, StateEvent};
-use crate::ui::action::localized_action_label;
-use crate::ui::theme::{self, ACCENT_BLUE, Typography as _};
+use crate::ui::theme::{self, ACCENT_BLUE};
 
 const SIDE_GAP: f32 = 24.;
 const LABEL_W: f32 = 156.;
@@ -42,6 +39,9 @@ const HOTSPOT_DOT: f32 = 12.;
 /// Vertical space occupied by the device bar, profile context, and canvas
 /// padding. Normal operation no longer reserves a footer.
 const MODEL_VERTICAL_RESERVE: f32 = 154.;
+
+mod labels;
+use labels::{binding_label_for_control, label_control};
 /// Floor for the scaled model height. Below this the evenly-slotted side labels
 /// (≈[`LABEL_H`] each) start to overlap; the window's minimum height is sized to
 /// keep the viewport above [`MODEL_VERTICAL_RESERVE`] + this.
@@ -553,229 +553,6 @@ fn hotspots_layer(
         }))
 }
 
-/// Position a selectable control card at the label's slot in the side gutter.
-/// Selection updates the fixed inspector; labels never own editor overlays.
-fn label_control(
-    idx: usize,
-    label: Label,
-    binding: BindingLabel,
-    highlighted: bool,
-    model: ModelRect,
-    selected: bool,
-    view: &Entity<MouseModelView>,
-) -> gpui::Div {
-    let x = match label.side {
-        Side::Left => model.left - SIDE_GAP - LABEL_W,
-        Side::Right => model.left + model.width + SIDE_GAP,
-    };
-    let view = view.clone();
-    let control = label.id;
-    let trigger = LabelTrigger {
-        id: ("label-trigger", idx).into(),
-        label,
-        binding,
-        highlighted,
-        selected,
-        view,
-    };
-    div()
-        .absolute()
-        .left(px(x))
-        .top(px(label.y - LABEL_H / 2.))
-        .w(px(LABEL_W))
-        .h(px(LABEL_H))
-        .debug_selector(move || format!("label-card-{control:?}"))
-        .child(trigger)
-}
-
-struct BindingLabel {
-    text: gpui::SharedString,
-    /// Vendored action-icon asset path (see [`action_icon_path`]) for the
-    /// card's leading glyph. Every constructor currently supplies one; the
-    /// `Option` is the seam for icon-less bindings.
-    icon: Option<&'static str>,
-}
-
-impl BindingLabel {
-    /// The card's value row: the leading action icon, the binding text, and
-    /// the trailing chevron, all tinted with `color`.
-    fn row(self, color: Hsla, pal: theme::Palette) -> gpui::Div {
-        h_flex()
-            .items_center()
-            .gap_2()
-            // Leading action icon (same glyph as the picker rows), tinted with
-            // the value so it tracks the default / set / highlighted state.
-            .when_some(self.icon, |row, path| {
-                row.child(svg().path(path).size_4().flex_none().text_color(color))
-            })
-            .child(
-                // Shrink + ellipsis so a long action name (e.g. "Mission
-                // Control") doesn't push the chevron out of the fixed card.
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .whitespace_nowrap()
-                    .text_body()
-                    .text_color(color)
-                    .child(self.text),
-            )
-            .child(
-                Icon::new(IconName::ChevronRight)
-                    .size_3()
-                    .text_color(pal.text_muted),
-            )
-    }
-}
-
-#[derive(IntoElement)]
-struct LabelTrigger {
-    id: ElementId,
-    label: Label,
-    binding: BindingLabel,
-    highlighted: bool,
-    selected: bool,
-    view: Entity<MouseModelView>,
-}
-
-impl RenderOnce for LabelTrigger {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let highlighted = self.highlighted || self.selected;
-        let selected = self.selected;
-        let btn = self.label.id;
-        let view = self.view;
-        let click_view = view.clone();
-        let pal = theme::palette(cx);
-        let binding_color = if highlighted {
-            rgb(ACCENT_BLUE).into()
-        } else {
-            pal.text_primary
-        };
-        // Always show the action the button actually performs. Default and
-        // customised bindings use the same neutral value colour; only the
-        // actively highlighted control takes the accent.
-        let binding_description = self.binding.text.clone();
-        let button_name = tr!(self.label.id.translation_key());
-        BaseButton::new(self.id)
-            .selected(selected)
-            .accessibility_label(tr!("actions.bind_control", name => button_name.clone()))
-            .aria_description(binding_description)
-            .aria_selected(selected)
-            .flex()
-            .flex_col()
-            .items_stretch()
-            .w(px(LABEL_W))
-            .h(px(LABEL_H))
-            .px_3()
-            .justify_center()
-            .gap_0p5()
-            .rounded(pal.control_radius)
-            .border_1()
-            .border_color(if highlighted {
-                rgb(ACCENT_BLUE).into()
-            } else {
-                pal.border
-            })
-            .bg(if highlighted {
-                theme::accent_tint()
-            } else {
-                pal.control
-            })
-            .cursor_pointer()
-            .hover(move |s| {
-                s.bg(if highlighted {
-                    theme::accent_tint_hover()
-                } else {
-                    pal.control_hover
-                })
-            })
-            .focus_visible(move |s| {
-                s.bg(if highlighted {
-                    theme::accent_tint_hover()
-                } else {
-                    pal.control_hover
-                })
-                .border_color(rgb(ACCENT_BLUE))
-            })
-            // Button name — the caption (xs / muted), the same size as the
-            // inspector title and category headers it shares the binding flow with.
-            .child(
-                div()
-                    .text_caption()
-                    .text_color(pal.text_muted)
-                    .child(button_name),
-            )
-            // Current binding — the value (sm), the same size as the action rows
-            // it edits.
-            .child(
-                self.binding
-                    .row(binding_color, pal)
-                    .debug_selector(move || format!("label-value-row-{btn:?}")),
-            )
-            .on_click(move |_event, _window, cx| {
-                click_view.update(cx, |this, cx| {
-                    this.select(btn);
-                    cx.notify();
-                });
-            })
-            .on_hover(move |hovered, _window, cx| {
-                set_control_hovered(&view, btn, *hovered, cx);
-            })
-    }
-}
-
-/// The label card's text and icon for one control.
-fn binding_label_for_control(
-    control: MouseControlId,
-    bindings: &std::collections::BTreeMap<ButtonId, Action>,
-    gesture_buttons: &[ButtonId],
-) -> BindingLabel {
-    if control
-        .button()
-        .is_some_and(|button| gesture_buttons.contains(&button))
-    {
-        return BindingLabel {
-            text: tr!("actions.five_directions"),
-            icon: Some(GESTURE_BUTTON_ICON),
-        };
-    }
-
-    match control {
-        MouseControlId::Button(button) => {
-            let action = bindings
-                .get(&button)
-                .cloned()
-                .unwrap_or_else(|| default_binding(button));
-            BindingLabel {
-                text: localized_action_label(&action),
-                icon: Some(action_icon_path(&action)),
-            }
-        }
-        MouseControlId::ThumbwheelRotation => {
-            let backward = bindings
-                .get(&ButtonId::ThumbwheelScrollDown)
-                .cloned()
-                .unwrap_or_else(|| default_binding(ButtonId::ThumbwheelScrollDown));
-            let forward = bindings
-                .get(&ButtonId::ThumbwheelScrollUp)
-                .cloned()
-                .unwrap_or_else(|| default_binding(ButtonId::ThumbwheelScrollUp));
-            if let Some(preset) = ThumbwheelPreset::recognize(&backward, &forward) {
-                BindingLabel {
-                    text: tr!(preset.translation_key()),
-                    icon: Some(preset.icon()),
-                }
-            } else {
-                BindingLabel {
-                    text: tr!("common.custom"),
-                    icon: Some("action-icons/chevrons-right.svg"),
-                }
-            }
-        }
-    }
-}
-
 /// Shape-based silhouette used when no asset is cached for the device.
 ///
 /// Its `rounded_*` values are illustration proportions — the body shell and the
@@ -923,162 +700,4 @@ impl RenderOnce for HotspotTrigger {
 }
 
 #[cfg(test)]
-mod tests {
-    use gpui::{TestAppContext, size};
-    use openlogi_core::config::Config;
-
-    use super::*;
-    use crate::services::assets::AssetResolver;
-    use crate::services::i18n::LOCALE_LOCK;
-    use crate::state::Sources;
-
-    fn install_app_state(cx: &mut TestAppContext) {
-        cx.update(|cx| {
-            let resolver = AssetResolver::new();
-            let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
-            let state = cx.new(|_| {
-                AppState::new(Sources::in_memory(Config::ephemeral(), &resolver, commands))
-            });
-            AppState::set_global(state, cx);
-        });
-    }
-
-    #[gpui::test]
-    fn long_bindings_stay_inside_their_label_card(cx: &mut TestAppContext) {
-        // #1401: the card's Button base centres its children on the cross axis,
-        // so without `items_stretch` the value row keeps its natural width and
-        // overflows both edges once the binding name is wider than the card. The
-        // English defaults are enough to trip it under the test text system
-        // ("Forward (Button 5)" measures a 206px row over a 156px card). Pinned
-        // to English under the lock: another test in this binary leaves the
-        // process locale at zh-CN, whose labels are short enough to fit and
-        // would have made this a false pass.
-        let _locale = LOCALE_LOCK.lock().unwrap();
-        rust_i18n::set_locale("en");
-        cx.update(gpui_component::init);
-        install_app_state(cx);
-        let (view, cx) = cx.add_window_view(MouseModelView::new);
-        // Wide enough for labels on both sides (`model_layout` hides them under 960).
-        cx.simulate_resize(size(px(1200.), px(800.)));
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-
-        // Selectors are `label-card-{MouseControlId:?}` / `label-value-row-{MouseControlId:?}`.
-        for (card_selector, row_selector) in [
-            (
-                "label-card-Button(Forward)",
-                "label-value-row-Button(Forward)",
-            ),
-            (
-                "label-card-Button(MiddleClick)",
-                "label-value-row-Button(MiddleClick)",
-            ),
-        ] {
-            let card = cx
-                .debug_bounds(card_selector)
-                .expect("the synthetic model renders a label card for this control");
-            let row = cx
-                .debug_bounds(row_selector)
-                .expect("the label card renders its value row");
-            assert!(
-                card.contains(&row.origin) && card.contains(&row.bottom_right()),
-                "{row_selector}: value row {row:?} must sit inside its card {card:?}"
-            );
-        }
-
-        drop(view);
-        cx.update(|window, _| window.remove_window());
-        cx.run_until_parked();
-    }
-
-    #[gpui::test]
-    fn a_selected_gesture_can_render_in_the_binding_inspector(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
-        install_app_state(cx);
-        let (view, cx) = cx.add_window_view(MouseModelView::new);
-        cx.run_until_parked();
-
-        view.update(cx, |view, cx| {
-            view.set_gesture_selected_dir(Some(GestureDirection::Up));
-            let gesture_maps = BTreeMap::from([(
-                ButtonId::MiddleClick,
-                BTreeMap::from([(
-                    GestureDirection::Click,
-                    default_binding(ButtonId::MiddleClick),
-                )]),
-            )]);
-            let bindings = BTreeMap::new();
-            let entity = cx.entity();
-
-            binding_inspector(
-                BindingInspectorData {
-                    selected: Some(MouseControlId::Button(ButtonId::MiddleClick)),
-                    gesture_direction: Some(GestureDirection::Up),
-                    action_picker_open: false,
-                    bindings: &bindings,
-                    gesture_maps: &gesture_maps,
-                    dpi_gestures: false,
-                    editing_app: None,
-                    overridden: None,
-                },
-                &view.action_search,
-                &entity,
-                cx,
-            );
-        });
-        cx.run_until_parked();
-        drop(view);
-        cx.update(|window, _| window.remove_window());
-        cx.run_until_parked();
-    }
-
-    #[gpui::test]
-    fn selecting_another_control_closes_the_action_picker(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
-        install_app_state(cx);
-        let (view, cx) = cx.add_window_view(MouseModelView::new);
-        cx.run_until_parked();
-
-        view.update(cx, |view, _| {
-            view.selected = Some(MouseControlId::Button(ButtonId::Back));
-            view.action_picker_open = true;
-
-            view.select(MouseControlId::Button(ButtonId::Forward));
-
-            assert!(!view.action_picker_open);
-        });
-        drop(view);
-        cx.update(|window, _| window.remove_window());
-        cx.run_until_parked();
-    }
-
-    #[test]
-    fn active_thumbwheel_directions_highlight_the_paired_control() {
-        assert_eq!(
-            MouseControlId::from_active_button(ButtonId::ThumbwheelScrollUp),
-            MouseControlId::ThumbwheelRotation
-        );
-        assert_eq!(
-            MouseControlId::from_active_button(ButtonId::ThumbwheelScrollDown),
-            MouseControlId::ThumbwheelRotation
-        );
-    }
-
-    #[test]
-    fn fallback_model_only_adds_thumbwheel_when_capability_is_measured() {
-        let (_, _, without, _) = scaled_model(None, 560., 420., false, LabelDistribution::LeftOnly);
-        let (_, _, with, _) = scaled_model(None, 560., 420., true, LabelDistribution::LeftOnly);
-        assert_eq!(
-            without
-                .iter()
-                .filter(|hotspot| hotspot.id == MouseControlId::ThumbwheelRotation)
-                .count(),
-            0
-        );
-        assert_eq!(
-            with.iter()
-                .filter(|hotspot| hotspot.id == MouseControlId::ThumbwheelRotation)
-                .count(),
-            1
-        );
-    }
-}
+mod tests;
