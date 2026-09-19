@@ -28,7 +28,7 @@ use gpui_component::{
 };
 use openlogi_core::config::{DeviceViewMode, LightSettings};
 use openlogi_core::device::{DeviceKind, DeviceTransports};
-use openlogi_core::hid::DeviceRoute;
+use openlogi_core::hid::{DeviceRoute, is_litra_bluetooth_product_id};
 
 use super::AppView;
 use super::status::{loading_body, notice_body};
@@ -583,6 +583,11 @@ fn device_image(
 /// keeps the Bluetooth mark: it *may* be on a cable right now, but the
 /// current link medium isn't reported, and Bluetooth is how such devices are
 /// normally attached.
+///
+/// A raw-HID device (a Litra light) speaks no HID++ and so has no transport
+/// table to consult; its own product ID is the only signal, and Logitech's
+/// `0xB0xx`-over-Bluetooth/`0xC0xx`-over-USB pairing is what
+/// [`is_litra_bluetooth_product_id`] reads.
 pub(super) fn connection_icon_path(
     route: Option<&DeviceRoute>,
     transports: Option<&DeviceTransports>,
@@ -602,7 +607,13 @@ pub(super) fn connection_icon_path(
             // keep the old default.
             _ => "action-icons/bluetooth.svg",
         },
-        Some(DeviceRoute::RawHid { .. }) => "action-icons/usb.svg",
+        Some(DeviceRoute::RawHid { product_id, .. }) => {
+            if is_litra_bluetooth_product_id(*product_id) {
+                "action-icons/bluetooth.svg"
+            } else {
+                "action-icons/usb.svg"
+            }
+        }
     }
 }
 
