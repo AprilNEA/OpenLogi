@@ -43,7 +43,7 @@ const MODEL_VERTICAL_RESERVE: f32 = 154.;
 mod labels;
 use labels::{binding_label_for_control, label_control};
 /// Floor for the scaled model height. Below this the evenly-slotted side labels
-/// (≈[`LABEL_H`] each) start to overlap; the window's minimum height is sized to
+/// (≈[`LABEL_H`](super::geometry::LABEL_H) each) start to overlap; the window's minimum height is sized to
 /// keep the viewport above [`MODEL_VERTICAL_RESERVE`] + this.
 const MODEL_MIN_H: f32 = 360.;
 

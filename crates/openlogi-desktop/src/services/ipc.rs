@@ -1,7 +1,8 @@
 //! Agent IPC client.
 //!
 //! The agent owns all device I/O, so the GUI never opens a device — it connects
-//! to the agent's local socket and (a) keeps one [`Agent::observe`] request open
+//! to the agent's local socket and (a) keeps one
+//! [`Agent::observe`](openlogi_ipc::Agent::observe) request open
 //! for the agent's state, and (b) forwards "apply now" / "read" device commands.
 //! Both run on one dedicated OS thread with a tokio runtime (the GPUI thread owns
 //! no async runtime): results cross back over `mpsc` to the GPUI loop.

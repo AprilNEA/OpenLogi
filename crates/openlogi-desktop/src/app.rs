@@ -44,7 +44,7 @@ pub(crate) use home::{glow_canvas, keyboard_glow};
 /// GPUI has no router, so navigation is a tiny view-local enum that selects
 /// which subtree [`AppView::render`] builds. It is deliberately *not* in
 /// [`AppState`]: the route is pure UI presentation, whereas
-/// [`AppState::current_device`] is functional (it drives the hook bindings,
+/// [`AppState::current_record`] is functional (it drives the hook bindings,
 /// DPI, and persisted selection). The detail route is keyed by the record's
 /// user-facing identity rather than an index so a hot-plug that reorders
 /// or drops the device list can't silently swap the user onto another device —

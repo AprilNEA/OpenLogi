@@ -60,7 +60,7 @@ use key_points::{EVEN_SPACING_END, EVEN_SPACING_START, key_x_fractions};
 /// The full programmable top row: Esc, then F1-F19 — each key carries its
 /// legend and the [`KeyTrigger`] keycode it binds. MX Keys-class boards expose
 /// all 20; boards with a shorter F-row (a G513 has F1-F12) surface a prefix of
-/// this list, sized by the asset's key markers — see [`key_points`].
+/// this list, sized by the asset's key markers — see [`key_points()`].
 const FUNCTION_KEYS: [FunctionKey; 20] = FunctionKey::ALL;
 
 /// Width of the config panel (CSS px) when a key is selected.

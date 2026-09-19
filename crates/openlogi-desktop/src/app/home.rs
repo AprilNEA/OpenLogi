@@ -615,7 +615,8 @@ pub(super) fn device_scanning_state(cx: &App) -> Div {
 }
 
 /// Home body when the agent reports enumeration as broken
-/// ([`InventoryHealth::Unavailable`]): scanning never completed and won't
+/// ([`InventoryHealth::Unavailable`](openlogi_ipc::InventoryHealth::Unavailable)): scanning
+/// never completed and won't
 /// just by waiting, so showing a spinner (or claiming "no devices") would
 /// both be wrong. The agent keeps retrying and a recovery flows back in as a
 /// regular snapshot.

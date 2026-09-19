@@ -532,7 +532,8 @@ fn lighting_tab(lighting_panel: &gpui::Entity<LightingPanel>) -> impl IntoElemen
 /// each in a titled card. Side by side at the default window width so every
 /// control is visible without scrolling; the cards wrap to a stacked column
 /// when the window is too narrow. The preview drives the capture session via
-/// [`CameraPreview::set_target`] (called from [`AppView::render`]); the controls
+/// [`CameraPreview::set_target`] (called from `AppView`'s [`Render::render`](gpui::Render::render));
+/// the controls
 /// panel reads/writes UVC settings directly on the device.
 fn camera_tab(
     camera_preview: &gpui::Entity<CameraPreview>,

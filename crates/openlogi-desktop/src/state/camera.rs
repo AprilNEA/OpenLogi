@@ -121,7 +121,8 @@ impl AppState {
     }
     /// Lift settings from the legacy port-bound `camera-<unique_id>` key onto
     /// the stable serial/model key when the latter has none. Inventory identity
-    /// for cameras is separate ([`DeviceRecord::inventory_key`]); settings never
+    /// for cameras is separate ([`DeviceRecord::inventory_key`](super::DeviceRecord::inventory_key));
+    /// settings never
     /// use capture-id suffixes, so two serial-less same-model units honestly
     /// share one settings bag rather than risk cross-assigning on port moves.
     pub fn migrate_legacy_camera_key(&mut self, config_key: &str, capture_id: &str) {
