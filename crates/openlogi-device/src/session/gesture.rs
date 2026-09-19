@@ -62,6 +62,18 @@ pub enum CapturedInput {
     /// tagged with the source control so dispatch resolves it against that
     /// button's own direction map.
     Gesture(ButtonId, GestureDirection),
+    /// Raw movement belonging to a swipe that has already committed a
+    /// direction. The first emitted frame carries all travel accumulated up
+    /// to the commit threshold; later frames carry one physical raw-XY delta.
+    /// Consumers that only need one-shot directional actions may ignore it.
+    GestureMotion {
+        /// The held gesture source that owns this raw movement.
+        button: ButtonId,
+        /// Horizontal raw-XY travel in the device's native units.
+        delta_x: i32,
+        /// Vertical raw-XY travel in the device's native units.
+        delta_y: i32,
+    },
     /// A diverted button's physical down edge.
     ButtonDown(ButtonId),
     /// Thumb-wheel rotation to re-synthesise on the configured scroll axis.
@@ -1068,6 +1080,19 @@ fn handle_raw_xy(
     if let Some(direction) = swipe.accumulate(i32::from(dx), i32::from(dy)) {
         debug!(?direction, %button, "gesture committed");
         let _ = sink.send(CapturedInput::Gesture(*button, direction));
+        if let Some((delta_x, delta_y)) = swipe.committed_travel() {
+            let _ = sink.send(CapturedInput::GestureMotion {
+                button: *button,
+                delta_x,
+                delta_y,
+            });
+        }
+    } else if swipe.committed_travel().is_some() {
+        let _ = sink.send(CapturedInput::GestureMotion {
+            button: *button,
+            delta_x: i32::from(dx),
+            delta_y: i32::from(dy),
+        });
     }
 }
 

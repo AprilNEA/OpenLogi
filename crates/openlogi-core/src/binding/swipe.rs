@@ -129,6 +129,16 @@ impl SwipeAccumulator {
         None
     }
 
+    /// Return the accumulated travel that committed the current swipe.
+    ///
+    /// This is available only after [`Self::accumulate`] has returned a
+    /// direction. Capture paths use it to seed an interactive consumer with
+    /// the movement that occurred before the direction threshold was crossed.
+    #[must_use]
+    pub fn committed_travel(&self) -> Option<(i32, i32)> {
+        self.fired.then_some((self.dx, self.dy))
+    }
+
     /// End the current hold. Returns `true` when an in-progress hold ended
     /// without committing a swipe — the caller should fire the plain `Click`
     /// action — and `false` when a swipe already fired mid-motion, or when there
@@ -224,6 +234,24 @@ mod tests {
         );
         // Further travel in the same hold must not re-fire.
         assert_eq!(acc.accumulate(50, 0), None);
+    }
+
+    #[test]
+    fn accumulator_exposes_the_travel_that_committed_a_swipe() {
+        let mut acc = SwipeAccumulator::default();
+        acc.begin();
+        acc.backdate_hold_for_test();
+        assert_eq!(acc.committed_travel(), None);
+        assert_eq!(acc.accumulate(20, 0), None);
+        assert_eq!(
+            acc.accumulate(GESTURE_SWIPE_THRESHOLD, 0),
+            Some(GestureDirection::Right)
+        );
+        assert_eq!(
+            acc.committed_travel(),
+            Some((GESTURE_SWIPE_THRESHOLD + 20, 0)),
+            "interactive consumers need the pre-threshold travel in their first frame"
+        );
     }
 
     #[test]
