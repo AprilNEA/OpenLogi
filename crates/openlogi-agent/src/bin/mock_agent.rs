@@ -520,7 +520,7 @@ impl State {
             .iter()
             .find_map(|inventory| {
                 inventory.paired.iter().find_map(|device| {
-                    (DeviceRoute::device_route_for(inventory, device.slot).as_ref() == Some(route))
+                    (DeviceRoute::for_slot(inventory, device.slot).as_ref() == Some(route))
                         .then_some(device.online)
                 })
             })

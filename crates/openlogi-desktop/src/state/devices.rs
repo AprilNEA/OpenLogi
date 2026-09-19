@@ -162,7 +162,7 @@ pub(super) fn build_device_list(
     let mut list = Vec::new();
     for inv in inventories {
         for paired in &inv.paired {
-            let route = DeviceRoute::device_route_for(inv, paired.slot);
+            let route = DeviceRoute::for_slot(inv, paired.slot);
             let (model_key, asset, model_info, codename, serial_number, unit_id) =
                 if let Some(model) = paired.model_info.as_ref() {
                     let asset = resolver.resolve(model, paired.codename.as_deref());

@@ -969,7 +969,7 @@ fn build_devices(
             let Some(model) = paired.model_info.as_ref() else {
                 continue;
             };
-            let route = DeviceRoute::device_route_for(inv, paired.slot);
+            let route = DeviceRoute::for_slot(inv, paired.slot);
             let stable_id = DeviceStableId::from_parts(
                 route.as_ref(),
                 paired.slot,

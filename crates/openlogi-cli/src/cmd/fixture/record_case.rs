@@ -333,7 +333,7 @@ fn online_targets(inventories: &[DeviceInventory]) -> Vec<TargetCandidate> {
                 .iter()
                 .filter(|device| device.online)
                 .filter_map(|device| {
-                    let route = DeviceRoute::device_route_for(inventory, device.slot)?;
+                    let route = DeviceRoute::for_slot(inventory, device.slot)?;
                     if matches!(route, DeviceRoute::RawHid { .. }) {
                         return None;
                     }

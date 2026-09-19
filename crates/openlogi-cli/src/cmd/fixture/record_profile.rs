@@ -205,7 +205,7 @@ async fn capture_inventory(
         .paired
         .iter()
         .map(|device| {
-            DeviceRoute::device_route_for(&retained, device.slot).ok_or_else(|| {
+            DeviceRoute::for_slot(&retained, device.slot).ok_or_else(|| {
                 anyhow!("a retained Agent inventory route is not safely addressable")
             })
         })
@@ -220,7 +220,7 @@ async fn capture_inventory(
         .paired
         .iter()
         .map(|device| {
-            DeviceRoute::device_route_for(&retained, device.slot)
+            DeviceRoute::for_slot(&retained, device.slot)
                 .ok_or_else(|| anyhow!("a sanitized profile route is not addressable"))
         })
         .collect::<Result<Vec<_>>>()?;

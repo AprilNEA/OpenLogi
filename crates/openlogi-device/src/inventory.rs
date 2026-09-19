@@ -119,7 +119,7 @@ fn routes_for_inventories(inventories: &[DeviceInventory]) -> Vec<DeviceRoute> {
             inventory
                 .paired
                 .iter()
-                .filter_map(|paired| DeviceRoute::device_route_for(inventory, paired.slot))
+                .filter_map(|paired| DeviceRoute::for_slot(inventory, paired.slot))
         })
         .collect()
 }

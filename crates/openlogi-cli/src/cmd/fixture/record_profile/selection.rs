@@ -42,7 +42,7 @@ pub(super) fn target_candidates(
                 .iter()
                 .enumerate()
                 .filter_map(move |(device_index, device)| {
-                    let route = DeviceRoute::device_route_for(inventory, device.slot)?;
+                    let route = DeviceRoute::for_slot(inventory, device.slot)?;
                     Some(TargetCandidate {
                         route,
                         name: device

@@ -234,7 +234,7 @@ impl ProfileValidation {
         self.validate_paired_devices(inventory)?;
         self.validate_inventory_identity(inventory)?;
         for device in &inventory.paired {
-            let Some(route) = DeviceRoute::device_route_for(inventory, device.slot) else {
+            let Some(route) = DeviceRoute::for_slot(inventory, device.slot) else {
                 return Err(FixtureError::invalid(
                     "device profile",
                     format!(

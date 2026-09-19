@@ -176,7 +176,7 @@ impl DeviceRoute {
     /// (slot == [`DIRECT_DEVICE_INDEX`] with no receiver UID). Returns `None`
     /// when the receiver UID is unknown (writes are skipped, not mis-routed).
     #[must_use]
-    pub fn device_route_for(inv: &DeviceInventory, slot: u8) -> Option<Self> {
+    pub fn for_slot(inv: &DeviceInventory, slot: u8) -> Option<Self> {
         match &inv.receiver.unique_id {
             Some(uid) if speaks_unifying_protocol(inv.receiver.product_id) => {
                 Some(Self::Unifying {
@@ -258,9 +258,9 @@ mod tests {
     }
 
     #[test]
-    fn device_route_for_known_receiver_follows_its_protocol() {
+    fn for_slot_follows_a_known_receivers_protocol() {
         for receiver in RECEIVERS {
-            let route = DeviceRoute::device_route_for(&inv(receiver.product_id, Some("A1B2")), 2);
+            let route = DeviceRoute::for_slot(&inv(receiver.product_id, Some("A1B2")), 2);
             match receiver.protocol {
                 ReceiverProtocol::Bolt => assert_matches!(
                     route,
@@ -289,8 +289,8 @@ mod tests {
     }
 
     #[test]
-    fn device_route_for_unknown_receiver_defaults_to_bolt() {
-        let route = DeviceRoute::device_route_for(&inv(0xc5ff, Some("UID")), 1);
+    fn for_slot_defaults_an_unknown_receiver_to_bolt() {
+        let route = DeviceRoute::for_slot(&inv(0xc5ff, Some("UID")), 1);
         assert_matches!(
             route,
             Some(DeviceRoute::Bolt { ref receiver_uid, slot: 1 }) if receiver_uid == "UID"
@@ -298,8 +298,8 @@ mod tests {
     }
 
     #[test]
-    fn device_route_for_direct_when_no_uid_and_direct_slot() {
-        let route = DeviceRoute::device_route_for(&inv(0xb025, None), DIRECT_DEVICE_INDEX);
+    fn for_slot_is_direct_without_a_uid_on_the_direct_slot() {
+        let route = DeviceRoute::for_slot(&inv(0xb025, None), DIRECT_DEVICE_INDEX);
         assert_matches!(
             route,
             Some(DeviceRoute::Direct {
@@ -310,8 +310,8 @@ mod tests {
     }
 
     #[test]
-    fn device_route_for_none_when_no_uid_and_non_direct_slot() {
-        let route = DeviceRoute::device_route_for(&inv(0xc52b, None), 1);
+    fn for_slot_is_none_without_a_uid_on_a_paired_slot() {
+        let route = DeviceRoute::for_slot(&inv(0xc52b, None), 1);
         assert!(route.is_none());
     }
 
