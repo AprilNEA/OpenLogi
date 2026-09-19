@@ -131,6 +131,10 @@ pub struct MouseModelView {
     /// The gesture direction whose action is open in the fixed inspector.
     gesture_active_dir: Option<GestureDirection>,
     action_picker_open: bool,
+    /// Independent open state for the thumb-wheel tap's action picker, which
+    /// shares the wheel's inspector body with the rotation preset picker
+    /// above (`action_picker_open`) rather than getting its own hotspot.
+    thumbwheel_tap_picker_open: bool,
     action_search: Entity<InputState>,
     _state_obs: Subscription,
 }
@@ -170,6 +174,7 @@ impl MouseModelView {
             selected: None,
             gesture_active_dir: None,
             action_picker_open: false,
+            thumbwheel_tap_picker_open: false,
             action_search,
             _state_obs: state_obs,
         }
@@ -190,6 +195,14 @@ impl MouseModelView {
         self.action_picker_open = false;
     }
 
+    pub(super) fn toggle_thumbwheel_tap_picker(&mut self) {
+        self.thumbwheel_tap_picker_open = !self.thumbwheel_tap_picker_open;
+    }
+
+    pub(super) fn close_thumbwheel_tap_picker(&mut self) {
+        self.thumbwheel_tap_picker_open = false;
+    }
+
     fn reset_for_device(&mut self, device_key: Option<&str>) {
         if self.current_device_key.as_deref() == device_key {
             return;
@@ -199,6 +212,7 @@ impl MouseModelView {
         self.selected = None;
         self.gesture_active_dir = None;
         self.action_picker_open = false;
+        self.thumbwheel_tap_picker_open = false;
     }
 
     fn select(&mut self, control: MouseControlId) {
@@ -206,6 +220,7 @@ impl MouseModelView {
             self.selected = Some(control);
             self.gesture_active_dir = None;
             self.action_picker_open = false;
+            self.thumbwheel_tap_picker_open = false;
         }
     }
 }
@@ -325,6 +340,7 @@ impl Render for MouseModelView {
                 selected: self.selected,
                 gesture_direction: self.gesture_active_dir,
                 action_picker_open: self.action_picker_open,
+                thumbwheel_tap_picker_open: self.thumbwheel_tap_picker_open,
                 bindings,
                 gesture_maps,
                 dpi_gestures,
@@ -1033,6 +1049,44 @@ mod tests {
                     selected: Some(MouseControlId::Button(ButtonId::MiddleClick)),
                     gesture_direction: Some(GestureDirection::Up),
                     action_picker_open: false,
+                    thumbwheel_tap_picker_open: false,
+                    bindings: &bindings,
+                    gesture_maps: &gesture_maps,
+                    dpi_gestures: false,
+                    editing_app: None,
+                    overridden: None,
+                },
+                &view.action_search,
+                &entity,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        drop(view);
+        cx.update(|window, _| window.remove_window());
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn thumbwheel_inspector_renders_a_tap_action_picker_alongside_the_preset_picker(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_component::init);
+        install_app_state(cx);
+        let (view, cx) = cx.add_window_view(MouseModelView::new);
+        cx.run_until_parked();
+
+        view.update(cx, |view, cx| {
+            let bindings = BTreeMap::from([(ButtonId::Thumbwheel, Action::AppExpose)]);
+            let gesture_maps = BTreeMap::new();
+            let entity = cx.entity();
+
+            binding_inspector(
+                BindingInspectorData {
+                    selected: Some(MouseControlId::ThumbwheelRotation),
+                    gesture_direction: None,
+                    action_picker_open: false,
+                    thumbwheel_tap_picker_open: true,
                     bindings: &bindings,
                     gesture_maps: &gesture_maps,
                     dpi_gestures: false,
@@ -1064,6 +1118,41 @@ mod tests {
             view.select(MouseControlId::Button(ButtonId::Forward));
 
             assert!(!view.action_picker_open);
+        });
+        drop(view);
+        cx.update(|window, _| window.remove_window());
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn thumbwheel_tap_picker_toggles_independently_of_the_rotation_picker(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        install_app_state(cx);
+        let (view, cx) = cx.add_window_view(MouseModelView::new);
+        cx.run_until_parked();
+
+        view.update(cx, |view, _| {
+            view.selected = Some(MouseControlId::ThumbwheelRotation);
+            view.toggle_action_picker();
+            assert!(view.action_picker_open);
+            assert!(!view.thumbwheel_tap_picker_open);
+
+            view.toggle_thumbwheel_tap_picker();
+            assert!(
+                view.action_picker_open,
+                "opening the tap picker must not close the rotation preset picker"
+            );
+            assert!(view.thumbwheel_tap_picker_open);
+
+            view.close_thumbwheel_tap_picker();
+            assert!(
+                view.action_picker_open,
+                "closing the tap picker must not close the rotation preset picker"
+            );
+            assert!(!view.thumbwheel_tap_picker_open);
+
+            view.select(MouseControlId::Button(ButtonId::Forward));
+            assert!(!view.thumbwheel_tap_picker_open);
         });
         drop(view);
         cx.update(|window, _| window.remove_window());

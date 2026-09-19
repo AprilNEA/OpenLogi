@@ -183,6 +183,7 @@ couldnt_read_smartshift_click_to_retry = "SmartShiftin luku epäonnistui. Yritä
 this_device_does_not_support_smartshift = "Tämä laite ei tue SmartShiftiä."
 dpi_preset = "DPI-esiasetus %{index}"
 thumb_wheel = "Peukalorulla"
+thumb_wheel_tap = "Peukalorullan napautus"
 back_forward = "Takaisin / Eteenpäin"
 undo_redo = "Kumoa / Tee uudelleen"
 browser_back_forward = "Selaimessa takaisin / eteenpäin"

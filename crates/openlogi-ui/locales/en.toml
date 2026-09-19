@@ -183,6 +183,7 @@ couldnt_read_smartshift_click_to_retry = "Couldn't read SmartShift settings. Cli
 this_device_does_not_support_smartshift = "This device does not support SmartShift."
 dpi_preset = "DPI Preset %{index}"
 thumb_wheel = "Thumb Wheel"
+thumb_wheel_tap = "Thumb Wheel Tap"
 back_forward = "Back / Forward"
 undo_redo = "Undo / Redo"
 browser_back_forward = "Browser Back / Forward"

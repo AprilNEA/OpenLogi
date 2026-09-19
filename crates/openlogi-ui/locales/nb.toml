@@ -183,6 +183,7 @@ couldnt_read_smartshift_click_to_retry = "Kunne ikke lese SmartShift-innstilling
 this_device_does_not_support_smartshift = "Denne enheten støtter ikke SmartShift."
 dpi_preset = "DPI-forhåndsinnstilling %{index}"
 thumb_wheel = "Tommelhjul"
+thumb_wheel_tap = "Trykk på tommelhjulet"
 back_forward = "Tilbake / Frem"
 undo_redo = "Angre / Gjør om"
 browser_back_forward = "Nettleser tilbake / frem"

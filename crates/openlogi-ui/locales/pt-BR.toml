@@ -183,6 +183,7 @@ couldnt_read_smartshift_click_to_retry = "Não foi possível ler o SmartShift. C
 this_device_does_not_support_smartshift = "Este dispositivo não é compatível com SmartShift."
 dpi_preset = "Predefinição de DPI %{index}"
 thumb_wheel = "Roda do Polegar"
+thumb_wheel_tap = "Toque na roda do polegar"
 back_forward = "Voltar / Avançar"
 undo_redo = "Desfazer / Refazer"
 browser_back_forward = "Voltar / avançar no navegador"

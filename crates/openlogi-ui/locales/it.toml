@@ -183,6 +183,7 @@ couldnt_read_smartshift_click_to_retry = "Impossibile leggere SmartShift. Clicca
 this_device_does_not_support_smartshift = "Questo dispositivo non supporta SmartShift."
 dpi_preset = "Preset DPI %{index}"
 thumb_wheel = "Rotella laterale"
+thumb_wheel_tap = "Tocco sulla rotella laterale"
 back_forward = "Indietro / Avanti"
 undo_redo = "Annulla / Ripristina"
 browser_back_forward = "Indietro / avanti nel browser"

@@ -183,6 +183,7 @@ couldnt_read_smartshift_click_to_retry = "Kan SmartShift niet lezen. Klik om het
 this_device_does_not_support_smartshift = "Dit apparaat ondersteunt SmartShift niet."
 dpi_preset = "DPI-voorinstelling %{index}"
 thumb_wheel = "Duimwiel"
+thumb_wheel_tap = "Tik op duimwiel"
 back_forward = "Vorige / Volgende"
 undo_redo = "Ongedaan maken / Opnieuw"
 browser_back_forward = "Browser vorige / volgende"

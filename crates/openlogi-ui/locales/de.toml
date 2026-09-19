@@ -183,6 +183,7 @@ couldnt_read_smartshift_click_to_retry = "SmartShift konnte nicht gelesen werden
 this_device_does_not_support_smartshift = "Dieses Gerät unterstützt SmartShift nicht."
 dpi_preset = "DPI-Voreinstellung %{index}"
 thumb_wheel = "Daumenrad"
+thumb_wheel_tap = "Daumenrad-Tipp"
 back_forward = "Zurück / Vor"
 undo_redo = "Widerrufen / Wiederholen"
 browser_back_forward = "Browser zurück / vor"

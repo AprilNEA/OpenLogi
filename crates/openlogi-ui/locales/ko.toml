@@ -183,6 +183,7 @@ couldnt_read_smartshift_click_to_retry = "SmartShift 설정을 읽지 못했습�
 this_device_does_not_support_smartshift = "이 기기는 SmartShift를 지원하지 않습니다."
 dpi_preset = "DPI 프리셋 %{index}"
 thumb_wheel = "썸휠"
+thumb_wheel_tap = "썸휠 탭"
 back_forward = "뒤로 / 앞으로"
 undo_redo = "실행 취소 / 다시 실행"
 browser_back_forward = "브라우저 뒤로 / 앞으로"

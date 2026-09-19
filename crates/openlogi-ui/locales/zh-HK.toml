@@ -183,6 +183,7 @@ couldnt_read_smartshift_click_to_retry = "無法讀取 SmartShift，請點擊重
 this_device_does_not_support_smartshift = "此裝置不支援 SmartShift。"
 dpi_preset = "靈敏度預設 %{index}"
 thumb_wheel = "拇指滾輪"
+thumb_wheel_tap = "拇指滾輪輕觸"
 back_forward = "後退／前進"
 undo_redo = "復原／重做"
 browser_back_forward = "瀏覽器後退／前進"

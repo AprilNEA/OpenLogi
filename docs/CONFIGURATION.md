@@ -65,9 +65,10 @@ Common device fields are:
   scroll inversion, and scroll resolution
 - `bindings`: a button maps to one action, an independent short/long action
   pair, or a gesture-direction map.
-  `Thumbwheel` is the thumb wheel's capacitive tap — it has no GUI control and
-  stays inert unless bound here, because the wheel reports taps from incidental
-  thumb contact as well as from deliberate ones
+  `Thumbwheel` is the thumb wheel's capacitive tap, bindable from the wheel's
+  entry in the Buttons panel alongside its rotation preset; it stays inert
+  (`None`) by default, because the wheel reports taps from incidental thumb
+  contact as well as from deliberate ones
 - `per_app_bindings`: sparse action overlays keyed by macOS bundle id, Linux
   application id, exact lower-cased Windows executable path, or
   `exe:<filename>.exe`. The Buttons panel edits these under its Profile

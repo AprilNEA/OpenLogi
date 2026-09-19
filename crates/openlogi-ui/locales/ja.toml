@@ -183,6 +183,7 @@ couldnt_read_smartshift_click_to_retry = "SmartShift 設定を読み取れませ
 this_device_does_not_support_smartshift = "このデバイスは SmartShift に対応していません。"
 dpi_preset = "DPI プリセット %{index}"
 thumb_wheel = "サムホイール"
+thumb_wheel_tap = "サムホイールのタップ"
 back_forward = "戻る／進む"
 undo_redo = "取り消す／やり直す"
 browser_back_forward = "ブラウザで戻る／進む"

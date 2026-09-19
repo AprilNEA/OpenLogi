@@ -183,6 +183,7 @@ couldnt_read_smartshift_click_to_retry = "No se pudieron leer los ajustes de Sma
 this_device_does_not_support_smartshift = "Este dispositivo no es compatible con SmartShift."
 dpi_preset = "Preajuste de DPI %{index}"
 thumb_wheel = "Rueda lateral"
+thumb_wheel_tap = "Toque en la rueda lateral"
 back_forward = "Atrás / Adelante"
 undo_redo = "Deshacer / Rehacer"
 browser_back_forward = "Atrás / adelante en el navegador"

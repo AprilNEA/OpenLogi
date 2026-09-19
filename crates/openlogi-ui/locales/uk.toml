@@ -183,6 +183,7 @@ couldnt_read_smartshift_click_to_retry = "Не вдалося прочитати
 this_device_does_not_support_smartshift = "Цей пристрій не підтримує SmartShift."
 dpi_preset = "Пресет DPI %{index}"
 thumb_wheel = "Бічне коліщатко"
+thumb_wheel_tap = "Натискання на бічне коліщатко"
 back_forward = "Назад / Вперед"
 undo_redo = "Скасувати / Повторити"
 browser_back_forward = "Браузер: назад / вперед"

@@ -183,6 +183,7 @@ couldnt_read_smartshift_click_to_retry = "Nie udało się odczytać SmartShift. 
 this_device_does_not_support_smartshift = "To urządzenie nie obsługuje SmartShift."
 dpi_preset = "Ustawienie wstępne DPI %{index}"
 thumb_wheel = "Rolka kciukowa"
+thumb_wheel_tap = "Stuknięcie rolki kciukowej"
 back_forward = "Wstecz / Do przodu"
 undo_redo = "Cofnij / Ponów"
 browser_back_forward = "Wstecz / do przodu w przeglądarce"

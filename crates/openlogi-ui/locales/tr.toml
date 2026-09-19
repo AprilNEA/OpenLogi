@@ -183,6 +183,7 @@ couldnt_read_smartshift_click_to_retry = "SmartShift okunamadı. Yeniden denemek
 this_device_does_not_support_smartshift = "Bu cihaz SmartShift'i desteklemiyor."
 dpi_preset = "DPI Ön Ayarı %{index}"
 thumb_wheel = "Başparmak Tekerleği"
+thumb_wheel_tap = "Başparmak Tekerleğine Dokunma"
 back_forward = "Geri / İleri"
 undo_redo = "Geri Al / Yinele"
 browser_back_forward = "Tarayıcıda Geri / İleri"

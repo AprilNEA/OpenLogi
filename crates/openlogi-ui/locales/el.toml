@@ -183,6 +183,7 @@ couldnt_read_smartshift_click_to_retry = "Δεν ήταν δυνατή η ανά
 this_device_does_not_support_smartshift = "Αυτή η συσκευή δεν υποστηρίζει το SmartShift."
 dpi_preset = "Προεπιλογή DPI %{index}"
 thumb_wheel = "Πλαϊνός τροχός"
+thumb_wheel_tap = "Πάτημα πλαϊνού τροχού"
 back_forward = "Πίσω / Εμπρός"
 undo_redo = "Αναίρεση / Επανάληψη"
 browser_back_forward = "Πρόγραμμα περιήγησης πίσω / εμπρός"
