@@ -989,7 +989,7 @@ fn build_devices(
             };
             devices.push(AgentDevice {
                 config_key: config_key.into_string(),
-                model_key: model.config_key(),
+                model_key: model.model_key(),
                 route,
                 slot: paired.slot,
                 serial: model.serial_number.clone(),

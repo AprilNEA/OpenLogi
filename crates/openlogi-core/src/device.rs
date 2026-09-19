@@ -287,20 +287,19 @@ pub struct DeviceModelInfo {
     /// `[BTLE PID, eQuad PID, 0]`.
     pub model_ids: [u16; 3],
     /// Extra model byte prefixed to a PID to form the asset registry's
-    /// `modelId` — see [`Self::config_key`].
+    /// `modelId` — see [`Self::model_key`].
     pub extended_model_id: u8,
 }
 
 impl DeviceModelInfo {
-    /// Stable identifier used to key per-device configuration (button
-    /// bindings, etc.) and to look up assets in the OpenLogi asset registry.
-    ///
-    /// Format: `{extended_model_id:x}{model_ids[0]:04x}` — the same string
-    /// the depot `manifest.json` uses for its `modelId` field. Example: an
-    /// MX Master 4 with `extended_model_id = 0x02` and `model_ids[0] = 0xb042`
-    /// resolves to `"2b042"`.
+    /// The model's key in the OpenLogi asset registry: the string the depot
+    /// `manifest.json` uses for its `modelId` field, formatted
+    /// `{extended_model_id:x}{model_ids[0]:04x}`. An MX Master 4 with
+    /// `extended_model_id = 0x02` and `model_ids[0] = 0xb042` resolves to
+    /// `"2b042"`. Per-device configuration is keyed by
+    /// [`crate::device_order::DeviceIdentity::config_key`], not by this.
     #[must_use]
-    pub fn config_key(&self) -> String {
+    pub fn model_key(&self) -> String {
         format!("{:x}{:04x}", self.extended_model_id, self.model_ids[0])
     }
 }

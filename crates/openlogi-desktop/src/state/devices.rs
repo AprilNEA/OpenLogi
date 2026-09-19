@@ -167,7 +167,7 @@ pub(super) fn build_device_list(
                 if let Some(model) = paired.model_info.as_ref() {
                     let asset = resolver.resolve(model, paired.codename.as_deref());
                     (
-                        model.config_key(),
+                        model.model_key(),
                         asset,
                         Some(model.clone()),
                         paired.codename.clone(),
@@ -452,7 +452,7 @@ fn append_offline_known<'a>(
         let model_key = identity
             .model_info
             .as_ref()
-            .map_or_else(|| key.to_string(), DeviceModelInfo::config_key);
+            .map_or_else(|| key.to_string(), DeviceModelInfo::model_key);
         if is_legacy_model_key && blocked_legacy_models.contains(&model_key) {
             continue;
         }
@@ -565,7 +565,7 @@ fn offline_record(
     // only selects artwork and must not alter configuration or deduplication.
     let model_key = model_info
         .as_ref()
-        .map_or_else(|| config_key.to_string(), DeviceModelInfo::config_key);
+        .map_or_else(|| config_key.to_string(), DeviceModelInfo::model_key);
     let display_name = asset
         .as_ref()
         .filter(|asset| !asset.display_name.trim().is_empty())

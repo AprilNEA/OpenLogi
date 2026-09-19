@@ -150,7 +150,7 @@ fn find_paired<'a>(
     inventories.iter().flat_map(|inv| &inv.paired).find(|p| {
         p.model_info
             .as_ref()
-            .is_some_and(|m| m.config_key() == model_key)
+            .is_some_and(|m| m.model_key() == model_key)
     })
 }
 
