@@ -5,6 +5,7 @@ paths:
   - "crates/openlogi-permissions/**"
   - "crates/openlogi-camera/**"
   - "crates/openlogi-agent/src/tray.rs"
+  - "crates/openlogi-agent/src/power_source/**"
   - "crates/openlogi-agent/src/status_item.rs"
   - "crates/openlogi-agent-core/src/watchers/camera.rs"
   - "crates/openlogi-hook/src/macos.rs"
@@ -24,6 +25,7 @@ files; **keep this table in sync when you add or move one**:
 
 | File | What it carries |
 |---|---|
+| `openlogi-agent/src/power_source/iokit.rs` | opt-in Batteries-widget publisher: `dlopen`/`dlsym` of private `IOPSCreatePowerSource` / `IOPSSetPowerSourceDetails` / `IOPSReleasePowerSource` |
 | `openlogi-agent/src/status_item.rs` | safe `objc2` wrappers over `NSStatusItem` / `NSMenu` / `NSMenuItem` |
 | `openlogi-agent/src/tray.rs` | the menu-bar semantics, `MenuTarget` + `ResumeTarget` (`define_class!`), the Accessory `NSApplication` loop, `NSWorkspace` resume notifications |
 | `openlogi-agent-core/src/watchers/camera.rs` | the CoreMediaIO "camera is running" property read |
@@ -207,6 +209,8 @@ its single user. The current set, all deliberate:
   same reason.
 - `openlogi-inject`: the `dlopen`/`dlsym`-resolved private SPIs
   (`CoreDockSendNotification`, the CGS symbolic-hotkey trio).
+- `openlogi-agent/src/power_source/iokit.rs`: private `IOPS*` power-source SPI
+  (experimental Batteries-widget integration).
 - the `disclaim` crate: `responsibility_spawnattrs_setdisclaim` (private SPI).
 
 `openlogi-camera`'s `AVAuthorizationStatus` integers remain on the
