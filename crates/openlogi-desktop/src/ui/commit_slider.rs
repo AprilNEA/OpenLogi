@@ -280,7 +280,7 @@ impl<T: SliderUnit> CommitSlider<T> {
     /// [`Self::sync`] for a slider whose stops are coarser than its step: the
     /// thumb only moves when it resolves, through `snap`, to a value other
     /// than `committed`, so a thumb dropped between two stops is not yanked
-    /// back every frame.
+    /// back every frame — and, like [`Self::sync`], never mid-drag.
     pub(crate) fn sync_snapped(
         &self,
         committed: T,
@@ -288,7 +288,7 @@ impl<T: SliderUnit> CommitSlider<T> {
         window: &mut Window,
         cx: &mut App,
     ) {
-        if snap(self.value(cx)) != committed {
+        if self.thumb.get().dragged.is_none() && snap(self.value(cx)) != committed {
             self.seat(committed, window, cx);
         }
     }
@@ -483,5 +483,19 @@ mod tests {
 
         assert_eq!(sync(40, cx), 44, "44 already resolves to 40");
         assert_eq!(sync(70, cx), 70);
+
+        // A committed value that changes under a drag — a device refresh
+        // landing mid-gesture — waits for the release like it does in `sync`.
+        let slider = owner.read_with(cx, |owner, _| owner.slider.slider().clone());
+        slider.update(cx, |_, cx| cx.emit(SliderEvent::Change(55.0.into())));
+        cx.run_until_parked();
+        assert_eq!(sync(40, cx), 70, "the dragged thumb stays where it is");
+        slider.update(cx, |_, cx| cx.emit(SliderEvent::Release(55.0.into())));
+        cx.run_until_parked();
+        assert_eq!(
+            sync(40, cx),
+            40,
+            "released, it follows the committed stop again"
+        );
     }
 }
