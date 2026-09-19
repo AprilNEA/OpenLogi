@@ -375,6 +375,7 @@ input_monitoring_permission_description = "Bluetooth 直結マウスを含む HI
 input_monitoring_granted_but_unavailable = "許可されていますが、OpenLogi はデバイスを開けません。別のアプリが占有しているか、macOS への再ログインが必要な可能性があります。"
 bluetooth_permission_description = "OpenLogi が CoreBluetooth を使用できるようにします（HID アクセスには不要）。"
 camera_permission_description = "Logitech のウェブカメラはメインページに表示されます。アクセスを許可するとライブプレビューを確認できます。映像が Mac の外に出ることはありません。"
+camera_usage_description = "OpenLogi previews your Logitech webcam locally. Video never leaves your Mac."
 linux_input_access_denied_description = "ボタンの再割り当てには /dev/uinput への書き込み権限、HID++ 通信には /dev/hidraw* への読み書き権限が必要です。OpenLogi の udev ルールをインストールしてください。詳しくは Linux のインストールガイドを参照してください。"
 linux_input_access_unknown_description = "Logitech デバイスが検出されませんでした。デバイスを接続するか、hidraw の udev ルールがインストールされていることを確認してください。"
 

@@ -375,6 +375,7 @@ input_monitoring_permission_description = "Erforderlich zum Lesen von HID++-Date
 input_monitoring_granted_but_unavailable = "Erteilt, aber Geräte lassen sich weiterhin nicht öffnen. Möglicherweise hält eine andere App sie exklusiv, oder macOS erfordert ein Ab- und erneutes Anmelden."
 bluetooth_permission_description = "Erlaubt OpenLogi die Nutzung von CoreBluetooth (für HID-Zugriff nicht erforderlich)."
 camera_permission_description = "Deine Logitech-Webcam erscheint auf der Hauptseite. Erlaube den Zugriff, um die Live-Vorschau zu sehen. Das Video verlässt deinen Mac nie."
+camera_usage_description = "OpenLogi previews your Logitech webcam locally. Video never leaves your Mac."
 linux_input_access_denied_description = "OpenLogi benötigt Schreibzugriff auf /dev/uinput für Tastenneubelegungen sowie Lese- und Schreibzugriff auf /dev/hidraw* für die HID++-Kommunikation. Installiere die OpenLogi-udev-Regeln. Weitere Informationen findest du in der Linux-Installationsanleitung."
 linux_input_access_unknown_description = "Kein Logitech-Gerät erkannt. Schließe ein Gerät an oder prüfe, ob die hidraw-udev-Regeln installiert sind."
 
