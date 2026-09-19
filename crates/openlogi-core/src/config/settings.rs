@@ -280,6 +280,11 @@ pub struct AppSettings {
     /// the application under the pointer; unsupported platforms use focus.
     #[serde(default)]
     pub mouse_profile_target: MouseProfileTarget,
+    /// Publish receiver-device batteries to the macOS Batteries widget.
+    /// Experimental and off by default because it uses private IOKit APIs.
+    /// Ignored on other platforms.
+    #[serde(default)]
+    pub macos_battery_widget: bool,
 }
 
 const SENSITIVITY_MIN: u8 = 1;
@@ -482,6 +487,7 @@ impl Default for AppSettings {
             theme_dark: None,
             ui_radius: None,
             mouse_profile_target: MouseProfileTarget::Pointer,
+            macos_battery_widget: false,
         }
     }
 }
