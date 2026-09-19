@@ -367,12 +367,22 @@ fn remove_profile_question(profile: &ProfileChoice) -> gpui::SharedString {
 /// reported that application in this session. The identifier remains the
 /// matching key; only its last human-shaped component is presented.
 pub(crate) fn friendly_app_name(identifier: &str) -> String {
-    if let Some(path) = identifier.strip_prefix("exe:") {
+    let path = identifier.strip_prefix("exe:").unwrap_or(identifier);
+    // The Windows identifier is the full executable path with no `exe:`
+    // prefix (see `openlogi-hook`'s `ForegroundApp::id`), so a path
+    // separator or a `.exe` suffix marks a path even without that prefix —
+    // otherwise the dot rule below returns "exe" for every Windows app.
+    if path.contains(['/', '\\']) || path.to_ascii_lowercase().ends_with(".exe") {
         let name = path
             .rsplit(['/', '\\'])
             .find(|part| !part.is_empty())
             .unwrap_or(path);
-        return name.trim_end_matches(".exe").to_string();
+        let stem = name
+            .len()
+            .checked_sub(4)
+            .filter(|&i| name[i..].eq_ignore_ascii_case(".exe"))
+            .map_or(name, |i| &name[..i]);
+        return stem.to_string();
     }
     identifier
         .rsplit('.')
@@ -389,5 +399,16 @@ mod tests {
     fn profile_identifiers_have_a_readable_fallback() {
         assert_eq!(friendly_app_name("com.google.Chrome"), "Chrome");
         assert_eq!(friendly_app_name("exe:C:\\Tools\\Zed.exe"), "Zed");
+    }
+
+    #[test]
+    fn a_raw_windows_path_with_no_exe_prefix_still_resolves_to_the_stem() {
+        // `ForegroundApp::id` on Windows is the lower-cased full path with no
+        // `exe:` prefix — see `openlogi-hook`'s `windows/hook.rs`.
+        assert_eq!(
+            friendly_app_name(r"c:\program files\sharex\sharex.exe"),
+            "sharex"
+        );
+        assert_eq!(friendly_app_name(r"c:\windows\notepad.exe"), "notepad");
     }
 }
