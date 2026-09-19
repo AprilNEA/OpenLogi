@@ -284,3 +284,58 @@ fn unprobed_unknown_device_shows_only_device_tab() {
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Unknown, None));
     assert_eq!(tabs, vec![DetailTab::Device]);
 }
+
+#[gpui::test]
+fn main_window_renders_opened_dialogs(cx: &mut gpui::TestAppContext) {
+    use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
+    use crate::state::{AgentLink, AppState, ConfigPersistence};
+    use gpui::{AppContext as _, px, size};
+    use gpui_component::{Root, WindowExt as _};
+    use openlogi_core::config::Config;
+    use openlogi_ipc::{AgentStatus, InventoryHealth, PROTOCOL_VERSION};
+
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    cx.update(|cx| {
+        gpui_component::init(cx);
+        let (commands, _) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = AppState::with_runtime(
+            Config::ephemeral(),
+            &[],
+            &[],
+            &AssetResolver::new(),
+            &[],
+            ConfigPersistence::MemoryOnly,
+            commands,
+        );
+        state.set_agent_link(AgentLink::Ready(AgentStatus {
+            accessibility_granted: true,
+            hook_installed: true,
+            launch_at_login: false,
+            inventory: InventoryHealth::Ready,
+            protocol_version: PROTOCOL_VERSION,
+            agent_version: "dialog-test".into(),
+            input_monitoring_granted: true,
+            hid_open_failures: false,
+        }));
+        let state = cx.new(|_| state);
+        AppState::set_global(state, cx);
+    });
+    let (root, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| super::AppView::new(&[], window, cx));
+        Root::new(view, window, cx)
+    });
+    visual.simulate_resize(size(px(1000.), px(800.)));
+    visual.update(|window, cx| {
+        window.open_dialog(cx, |dialog, _, _| dialog.title("Keyboard keys"));
+        window.draw(cx).clear(cx);
+    });
+    assert!(visual.debug_bounds("dialog-layer").is_some());
+    visual.update(|window, cx| {
+        window.close_all_dialogs(cx);
+        window.draw(cx).clear(cx);
+    });
+    assert!(visual.debug_bounds("dialog-layer").is_none());
+    drop(root);
+    visual.update(|window, _| window.remove_window());
+    visual.run_until_parked();
+}

@@ -63,7 +63,9 @@ pub use succession::Identity;
 ///      the macOS dormancy gate.
 /// v30: `Agent::read_wheel` and `Agent::read_backlight` appended.
 /// v31: `Capabilities::dpi_gestures` appended.
-pub const PROTOCOL_VERSION: u32 = 31;
+/// v32: `Action::HoldGlobeKey` appended for physical Globe/Fn holds.
+/// v33: Double-click shortcuts; `KeyCombo` adds Fn and modifier-only chords.
+pub const PROTOCOL_VERSION: u32 = 34;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to

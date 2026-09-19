@@ -2,6 +2,7 @@
 _version = 1
 
 [common]
+confirm = "Confirm"
 grid = "Сетка"
 list = "Список"
 carousel = "Карусель"
@@ -235,6 +236,23 @@ wheel_resolution_other_connection = "Устройство поддерживае
 smartshift = "SmartShift"
 
 [actions]
+single_click = "Single click"
+long_press = "Long press"
+double_click = "Double click"
+hold_delay = "%{ms} ms"
+hold_immediate = "On press"
+double_click_delay = "Within 200 ms"
+keyboard_shortcut = "Keyboard shortcut…"
+keyboard_shortcut_title = "Keyboard shortcut"
+shortcut_preview = "Preview"
+multiple_actions = "Multiple actions"
+choose_keyboard_keys = "Choose at least one modifier or key."
+ordinary_key = "Ordinary key"
+modifiers_only = "No ordinary key"
+press_keyboard_keys = "Press keyboard keys…"
+hold_keyboard_keys = "Hold keyboard keys…"
+keyboard_keys_help = "Choose modifiers and a key. Fn can be used on its own."
+hold_globe_key = "Удерживать Globe / Fn (macOS)"
 bind_control = "Назначить %{name}"
 bind_control_in_app = "Назначить %{name} в %{app}"
 unbound = "Не назначено"

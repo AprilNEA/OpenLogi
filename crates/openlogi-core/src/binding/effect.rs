@@ -1,6 +1,6 @@
 //! A platform-neutral synthesis IR.
 //!
-//! [`Action`] has one variant per user-facing behaviour (52 of them), but the
+//! [`Action`] has one variant per user-facing behaviour, but the
 //! three `openlogi-inject` backends don't care about most of that
 //! granularity — they care about *mechanism*: "press this chord", "click
 //! this mouse button", "fire this media key", "there is no portable way to
@@ -38,9 +38,8 @@ pub enum Effect<'a> {
     /// Press an already-resolved keyboard chord: a user-recorded
     /// [`Action::CustomShortcut`], or a workflow's `PressKey` step.
     Key(&'a KeyCombo),
-    /// A user-recorded chord whose output is held by a lifecycle-aware
-    /// runtime. A one-shot executor treats this as [`Effect::Key`] so direct
-    /// dispatch remains balanced when no matching release can arrive.
+    /// Keyboard output owned by a physical press lifecycle. Shortcuts retain
+    /// their balanced-tap fallback; Globe requires a matching physical release.
     HeldKey(&'a KeyCombo),
     /// Synthesise one scroll tick. `dx`/`dy` are unit direction (-1/0/1);
     /// each backend applies its own tick magnitude.
@@ -275,6 +274,7 @@ impl Action {
 
             Action::CustomShortcut(combo) => Effect::Key(combo),
             Action::HoldShortcut(combo) => Effect::HeldKey(combo),
+            Action::HoldGlobeKey => Effect::HeldKey(&KeyCombo::FN),
 
             Action::TypeText(text) => Effect::Text(text),
             Action::RunAppleScript(src) => Effect::Script(Script::AppleScript(src)),

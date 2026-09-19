@@ -2,6 +2,7 @@
 _version = 1
 
 [common]
+confirm = "确定"
 grid = "网格"
 list = "列表"
 carousel = "轮播"
@@ -235,6 +236,23 @@ wheel_resolution_other_connection = "此设备通过其他连接时支持滚轮�
 smartshift = "SmartShift"
 
 [actions]
+single_click = "单击"
+long_press = "长按"
+double_click = "双击"
+hold_delay = "%{ms} 毫秒"
+hold_immediate = "按下即触发"
+double_click_delay = "间隔 ≤200 毫秒"
+keyboard_shortcut = "快捷键…"
+keyboard_shortcut_title = "快捷键"
+shortcut_preview = "快捷键预览"
+multiple_actions = "多个动作"
+choose_keyboard_keys = "请至少勾选一个修饰键或选择一个普通按键。"
+ordinary_key = "普通按键"
+modifiers_only = "不使用普通按键"
+press_keyboard_keys = "按键盘按键…"
+hold_keyboard_keys = "按住键盘按键…"
+keyboard_keys_help = "勾选修饰键，再选择按键。Fn 可单独使用。"
+hold_globe_key = "地球键 / Fn（按住，macOS）"
 bind_control = "绑定 %{name}"
 bind_control_in_app = "在 %{app} 中绑定 %{name}"
 unbound = "未绑定"

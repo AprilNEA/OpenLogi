@@ -58,7 +58,14 @@ pub(super) fn execute(action: &Action) {
         Effect::None => {}
         Effect::Click(button) => post_click(button),
         Effect::Shortcut(shortcut) => press_shortcut(shortcut),
-        Effect::Key(combo) | Effect::HeldKey(combo) => post_custom_shortcut(combo),
+        Effect::Key(combo) => super::tap_keys(combo),
+        Effect::HeldKey(combo) => {
+            if action.requires_physical_release() {
+                tracing::warn!(chord = %combo.rendered_label(), "held keyboard input requires a physical release");
+            } else {
+                super::tap_keys(combo);
+            }
+        }
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
         Effect::Media(key) => dispatch_media(key),
         Effect::Native(native) => dispatch_native(native),
@@ -187,7 +194,7 @@ fn run_workflow(steps: &[WorkflowStep]) {
                     "workflow TypeText injection is not implemented on Windows yet"
                 );
             }
-            WorkflowStep::PressKey(combo) => post_custom_shortcut(combo),
+            WorkflowStep::PressKey(combo) => super::tap_keys(combo),
             WorkflowStep::Delay { millis } => {
                 std::thread::sleep(std::time::Duration::from_millis(*millis));
             }
@@ -269,16 +276,16 @@ pub(super) fn post_scroll(delta: ScrollDelta) {
 }
 
 fn post_custom_shortcut(combo: &KeyCombo) {
-    let Some(vk) = super::hid_usage_to_windows(combo.key().code()) else {
-        tracing::warn!(
-            usage = combo.key().code(),
-            chord = %combo.rendered_label(),
-            "CustomShortcut key has no Windows mapping yet; press ignored"
-        );
+    if combo.has_fn() || combo.key().is_none() {
+        super::tap_keys(combo);
         return;
-    };
-
-    post_key(vk, &combo_modifiers(combo));
+    }
+    if let Some(vk) = combo
+        .key()
+        .and_then(|key| super::hid_usage_to_windows(key.code()))
+    {
+        post_key(vk, &combo_modifiers(combo));
+    }
 }
 
 fn combo_modifiers(combo: &KeyCombo) -> Vec<u16> {
@@ -435,7 +442,7 @@ mod tests {
             let Ok(chord) = combo(shortcut) else {
                 continue;
             };
-            let key = chord.key().code();
+            let key = chord.key().unwrap().code();
             assert!(
                 super::super::hid_usage_to_windows(key).is_some(),
                 "{shortcut:?} table entry has no Windows virtual-key mapping"

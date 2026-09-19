@@ -109,13 +109,16 @@ pub enum RingActionError {
     /// A ring cannot recursively open itself.
     #[error("Show Actions Ring cannot be assigned inside an Actions Ring")]
     RecursiveTrigger,
+    /// A ring activation cannot own a matching physical release.
+    #[error("this action requires a physical press and release, not an Actions Ring activation")]
+    RequiresPhysicalRelease,
 }
 
 /// An action that is valid inside an Actions Ring.
 ///
 /// Construction and deserialization reject actions that would make the ring's
 /// state ambiguous (`None`) or recursively invoke another ring
-/// (`ShowActionsRing`).
+/// (`ShowActionsRing`), or require a physical release (`HoldGlobeKey`).
 #[nutype(
     validate(with = validate_ring_action, error = RingActionError),
     derive(Clone, Debug, PartialEq, Eq, Hash, AsRef, TryFrom, Into, Serialize, Deserialize),
@@ -145,6 +148,9 @@ fn validate_ring_action(action: &Action) -> Result<(), RingActionError> {
     match action {
         Action::None => Err(RingActionError::EmptyAction),
         Action::ShowActionsRing => Err(RingActionError::RecursiveTrigger),
+        action if action.requires_physical_release() => {
+            Err(RingActionError::RequiresPhysicalRelease)
+        }
         _ => Ok(()),
     }
 }

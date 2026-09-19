@@ -50,7 +50,14 @@ pub(super) fn execute(action: &Action) {
         // this — the hook passes it straight through to the OS.
         Effect::Click(button) => dispatch_click(button),
         Effect::Shortcut(shortcut) => post_keycombo(&combo(shortcut)),
-        Effect::Key(combo) | Effect::HeldKey(combo) => post_keycombo(combo),
+        Effect::Key(combo) => super::tap_keys(combo),
+        Effect::HeldKey(combo) => {
+            if action.requires_physical_release() {
+                tracing::warn!(chord = %combo.rendered_label(), "held keyboard input requires a physical release");
+            } else {
+                super::tap_keys(combo);
+            }
+        }
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
         // Media/volume controls are NX system-defined keys, not ordinary
         // keyboard virtual-key events. Posting kVK_Volume* through
@@ -244,18 +251,20 @@ fn tag_synthetic(ev: &CGEvent) {
 }
 
 /// Post one keyboard edge for `vk` with `flags` set.
-fn post_key_phase(vk: u16, flags: CGEventFlags, phase: KeyPhase) {
+fn post_key_phase(vk: u16, flags: CGEventFlags, phase: KeyPhase) -> bool {
     let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
         tracing::warn!("CGEventSource::new failed");
-        return;
+        return false;
     };
     let down = phase == KeyPhase::Down;
     let Ok(event) = CGEvent::new_keyboard_event(src, vk, down) else {
         tracing::warn!(?phase, "CGEvent::new_keyboard_event failed");
-        return;
+        return false;
     };
     event.set_flags(flags);
+    tag_synthetic(&event);
     event.post(CGEventTapLocation::HID);
+    true
 }
 
 /// Post a key-down + key-up pair for `vk` with `flags` set.
@@ -285,15 +294,14 @@ fn post_unicode(text: &str) {
 }
 
 /// Press a key chord described by a `KeyCombo` modifier bitmask + virtual
-/// keycode. Used by the workflow sequencer's `PressKey` step.
+/// keycode. Used by the built-in shortcut table.
 fn post_keycombo(combo: &KeyCombo) {
-    if let Some(vk) = hid_usage_to_macos(combo.key().code()) {
+    if combo.has_fn() || combo.key().is_none() {
+        super::tap_keys(combo);
+        return;
+    }
+    if let Some(vk) = combo.key().and_then(|key| hid_usage_to_macos(key.code())) {
         post_key(vk, combo_flags(combo));
-    } else {
-        tracing::warn!(
-            usage = combo.key().code(),
-            "shortcut usage has no macOS mapping"
-        );
     }
 }
 
@@ -329,7 +337,15 @@ fn post_held_key(key: HeldKey, phase: KeyPhase, modifiers: &mut HeldModifiers) {
         }
         return;
     };
-    post_key_phase(vk, flags, phase);
+    let submitted = post_key_phase(vk, flags, phase);
+    if key == HeldKey::Globe {
+        tracing::info!(
+            action = "HoldGlobeKey",
+            ?phase,
+            submitted,
+            "Globe edge submission; target acceptance unknown"
+        );
+    }
 }
 
 fn held_key_event(
@@ -343,6 +359,7 @@ fn held_key_event(
         HeldKey::Shift => Some(0x38),
         HeldKey::Alt => Some(0x3a),
         HeldKey::Control => Some(0x3b),
+        HeldKey::Globe => Some(0x3f), // kVK_Function; macOS emits flagsChanged.
         HeldKey::Key(usage) => hid_usage_to_macos(usage.code()),
     }?;
     Some((vk, held_modifier_flags(*modifiers)))
@@ -361,6 +378,9 @@ fn held_modifier_flags(modifiers: HeldModifiers) -> CGEventFlags {
     }
     if modifiers.contains(HeldKey::Alt) {
         flags |= CGEventFlags::CGEventFlagAlternate;
+    }
+    if modifiers.contains(HeldKey::Globe) {
+        flags |= CGEventFlags::CGEventFlagSecondaryFn;
     }
     flags
 }
@@ -458,16 +478,136 @@ mod tests {
         assert_eq!(combo(Shortcut::NextTab).rendered_label(), "Ctrl+Tab");
         // hid_usage_to_macos must actually resolve every table entry, or a
         // `Shortcut` silently no-ops instead of pressing anything (see
-        // `post_keycombo`'s warn-and-drop path). Iterates `Shortcut::ALL`
+        // `post_keycombo`'s unmapped-key path). Iterates `Shortcut::ALL`
         // rather than a hand-copied list, so a newly added `Shortcut`
         // variant is checked here automatically instead of depending on
         // someone remembering to extend a second, independent list.
         for &shortcut in Shortcut::ALL {
-            let key = combo(shortcut).key().code();
+            let key = combo(shortcut).key().unwrap().code();
             assert!(
                 hid_usage_to_macos(key).is_some(),
                 "{shortcut:?} table entry has no macOS virtual-key mapping"
             );
+        }
+    }
+
+    /// Opt-in: observes only OpenLogi-tagged Fn events, never user keystrokes.
+    /// Needs Accessibility/Input Monitoring and can trigger configured voice tools.
+    #[test]
+    #[ignore = "posts real Fn events; requires a trusted macOS session"]
+    #[expect(
+        unsafe_code,
+        reason = "reading the system's immutable default run-loop mode"
+    )]
+    fn globe_live_event_tap_observes_balanced_guard_lifetimes() {
+        use crate::inject::{SYNTHETIC_EVENT_USER_DATA, press_hold};
+        use core_foundation::runloop::{CFRunLoop, kCFRunLoopDefaultMode};
+        use core_graphics::event::{
+            CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType,
+            CallbackResult, EventField,
+        };
+        use openlogi_core::binding::KeyCombo;
+        use std::cell::RefCell;
+        use std::time::Duration;
+
+        let observed = RefCell::new(Vec::new());
+        // SAFETY: CoreFoundation provides this immutable mode for the process lifetime.
+        let mode = unsafe { kCFRunLoopDefaultMode };
+        let pump = || {
+            CFRunLoop::run_in_mode(mode, Duration::from_millis(80), false);
+        };
+        CGEventTap::with_enabled(
+            CGEventTapLocation::Session,
+            CGEventTapPlacement::HeadInsertEventTap,
+            CGEventTapOptions::ListenOnly,
+            vec![CGEventType::FlagsChanged],
+            |_, _, event| {
+                if event.get_integer_value_field(EventField::EVENT_SOURCE_USER_DATA)
+                    == SYNTHETIC_EVENT_USER_DATA
+                    && event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) == 63
+                {
+                    observed.borrow_mut().push(
+                        event
+                            .get_flags()
+                            .contains(CGEventFlags::CGEventFlagSecondaryFn),
+                    );
+                }
+                CallbackResult::Keep
+            },
+            || {
+                for _ in 0..3 {
+                    let first = press_hold(&KeyCombo::FN);
+                    pump();
+                    let mut second = press_hold(&KeyCombo::FN);
+                    second.replace(&KeyCombo::FN);
+                    pump();
+                    drop(first);
+                    pump();
+                    drop(second);
+                    pump();
+                }
+            },
+        )
+        .expect("session event tap requires permission");
+        assert_eq!(
+            *observed.borrow(),
+            vec![true, false, true, false, true, false]
+        );
+    }
+
+    #[test]
+    fn globe_edges_clear_only_fn_and_preserve_other_held_modifiers() {
+        let mut modifiers = HeldModifiers::default();
+        held_key_event(HeldKey::Command, KeyPhase::Down, &mut modifiers).unwrap();
+        let (vk, down) = held_key_event(HeldKey::Globe, KeyPhase::Down, &mut modifiers).unwrap();
+        assert_eq!(vk, 63);
+        assert!(down.contains(CGEventFlags::CGEventFlagSecondaryFn));
+        assert!(down.contains(CGEventFlags::CGEventFlagCommand));
+
+        let (_, command_up) =
+            held_key_event(HeldKey::Command, KeyPhase::Up, &mut modifiers).unwrap();
+        assert!(command_up.contains(CGEventFlags::CGEventFlagSecondaryFn));
+        assert!(!command_up.contains(CGEventFlags::CGEventFlagCommand));
+        held_key_event(HeldKey::Shift, KeyPhase::Down, &mut modifiers).unwrap();
+        let (vk, up) = held_key_event(HeldKey::Globe, KeyPhase::Up, &mut modifiers).unwrap();
+        assert_eq!(vk, 63);
+        assert!(!up.contains(CGEventFlags::CGEventFlagSecondaryFn));
+        assert!(up.contains(CGEventFlags::CGEventFlagShift));
+    }
+
+    #[test]
+    fn generic_keys_generate_balanced_macos_edges() {
+        for (text, keycodes, final_flags) in [
+            ("Fn", vec![63], CGEventFlags::CGEventFlagSecondaryFn),
+            ("T", vec![17], CGEventFlags::CGEventFlagNull),
+            (
+                "⌃⌥⇧T",
+                vec![59, 56, 58, 17],
+                CGEventFlags::CGEventFlagControl
+                    | CGEventFlags::CGEventFlagAlternate
+                    | CGEventFlags::CGEventFlagShift,
+            ),
+            ("Fn+T", vec![63, 17], CGEventFlags::CGEventFlagSecondaryFn),
+        ] {
+            let chord: openlogi_core::binding::KeyCombo = text.parse().unwrap();
+            let keys = super::super::held_keys(&chord);
+            let mut modifiers = HeldModifiers::default();
+            let down: Vec<_> = keys
+                .iter()
+                .map(|key| held_key_event(*key, KeyPhase::Down, &mut modifiers).unwrap())
+                .collect();
+            assert_eq!(down.iter().map(|edge| edge.0).collect::<Vec<_>>(), keycodes);
+            assert_eq!(down.last().unwrap().1, final_flags);
+            let up: Vec<_> = keys
+                .iter()
+                .rev()
+                .map(|key| held_key_event(*key, KeyPhase::Up, &mut modifiers).unwrap())
+                .collect();
+            assert_eq!(
+                up.iter().map(|edge| edge.0).collect::<Vec<_>>(),
+                keycodes.into_iter().rev().collect::<Vec<_>>()
+            );
+            assert_eq!(up.last().unwrap().1, CGEventFlags::CGEventFlagNull);
         }
     }
 
@@ -483,7 +623,7 @@ mod tests {
         assert!(flags.contains(CGEventFlags::CGEventFlagCommand));
         assert!(flags.contains(CGEventFlags::CGEventFlagControl));
 
-        let key = combo(Shortcut::Copy).key();
+        let key = combo(Shortcut::Copy).key().unwrap();
         let (_, flags) = held_key_event(HeldKey::Key(key), KeyPhase::Up, &mut modifiers)
             .expect("Copy's key has a macOS virtual-key mapping");
         assert!(flags.contains(CGEventFlags::CGEventFlagCommand));
@@ -513,7 +653,7 @@ fn run_workflow(steps: &[WorkflowStep]) {
     for step in steps {
         match step {
             WorkflowStep::TypeText(text) => post_unicode(text),
-            WorkflowStep::PressKey(combo) => post_keycombo(combo),
+            WorkflowStep::PressKey(combo) => super::tap_keys(combo),
             WorkflowStep::Delay { millis } => {
                 std::thread::sleep(std::time::Duration::from_millis(*millis));
             }

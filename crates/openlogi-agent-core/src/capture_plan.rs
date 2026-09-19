@@ -151,7 +151,7 @@ pub fn plan_for_device(
         .filter(|(_, button)| !oshook.contains_key(button))
         .filter(|(_, button)| {
             bindings.get(button).is_some_and(|binding| {
-                if matches!(binding, Binding::LongPress(_)) {
+                if binding.is_timed() {
                     return true;
                 }
                 let action = binding.click_action();

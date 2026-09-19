@@ -40,4 +40,7 @@ pub use swipe::{
     GESTURE_HOLD_FOR_SWIPE, GESTURE_SWIPE_DEADZONE, GESTURE_SWIPE_THRESHOLD, SwipeAccumulator,
     detect_swipe,
 };
-pub use value::{Binding, LONG_PRESS_THRESHOLD, LongPressBinding};
+pub use value::{
+    Binding, ButtonActions, ButtonPress, DOUBLE_CLICK_HOLD_THRESHOLD, DOUBLE_CLICK_INTERVAL,
+    LONG_PRESS_THRESHOLD, LongPressBinding,
+};

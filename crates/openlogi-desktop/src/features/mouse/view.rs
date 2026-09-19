@@ -13,7 +13,7 @@ use gpui_component::{
     input::{InputEvent, InputState},
     v_flex,
 };
-use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
+use openlogi_core::binding::{Action, Binding, ButtonId, GestureDirection, default_binding};
 
 use super::geometry::{
     LABEL_H, LabelDistribution, asset_dimensions_for_png, asset_has_button_labels,
@@ -307,7 +307,7 @@ impl Render for MouseModelView {
             .child(breathing_art)
             .child(leader_canvas)
             .children(labels_outer.iter().enumerate().map(|(idx, label)| {
-                let binding = binding_label_for_control(label.id, bindings, &gesture_buttons);
+                let binding = binding_label_for_control(label.id, bindings, &gesture_buttons, cx);
                 label_control(
                     idx,
                     *label,
@@ -741,7 +741,22 @@ fn binding_label_for_control(
     control: MouseControlId,
     bindings: &std::collections::BTreeMap<ButtonId, Action>,
     gesture_buttons: &[ButtonId],
+    cx: &App,
 ) -> BindingLabel {
+    if let Some(button) = control.button()
+        && let Some(state) = AppState::try_read(cx)
+        && !state
+            .editing_app_overrides()
+            .is_some_and(|overrides| overrides.contains_key(&button))
+        && state
+            .default_button_binding(button)
+            .is_some_and(Binding::is_timed)
+    {
+        return BindingLabel {
+            text: tr!("actions.multiple_actions"),
+            icon: Some("action-icons/keyboard.svg"),
+        };
+    }
     if control
         .button()
         .is_some_and(|button| gesture_buttons.contains(&button))
@@ -1007,6 +1022,39 @@ mod tests {
         drop(view);
         cx.update(|window, _| window.remove_window());
         cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn button_activation_cards_share_alignment_and_spacing(cx: &mut TestAppContext) {
+        let _locale = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("zh-CN");
+        cx.update(gpui_component::init);
+        install_app_state(cx);
+        let (view, visual) = cx.add_window_view(MouseModelView::new);
+        visual.simulate_resize(size(px(1000.), px(800.)));
+        for button in [
+            ButtonId::MiddleClick,
+            ButtonId::Back,
+            ButtonId::Forward,
+            ButtonId::DpiToggle,
+        ] {
+            view.update(visual, |view, cx| {
+                view.select(MouseControlId::Button(button));
+                cx.notify();
+            });
+            visual.update(|window, cx| window.draw(cx).clear(cx));
+            let click = visual.debug_bounds("button-action-click").unwrap();
+            let hold = visual.debug_bounds("button-action-hold").unwrap();
+            let double = visual.debug_bounds("button-action-double").unwrap();
+            assert_eq!(click.left(), hold.left());
+            assert_eq!(hold.left(), double.left());
+            assert_eq!(click.size, hold.size);
+            assert_eq!(hold.size, double.size);
+            assert_eq!(hold.top() - click.bottom(), double.top() - hold.bottom());
+        }
+        drop(view);
+        visual.update(|window, _| window.remove_window());
+        visual.run_until_parked();
     }
 
     #[gpui::test]
