@@ -109,7 +109,7 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(25);
 /// tore down capture plans, and a pinned stale channel Arc then deadlocked
 /// recovery (dead buttons until restart). 13 s clears the honest worst case
 /// — and only that: the wait for the receiver's register phase, up to
-/// [`host_lock::RECEIVER_REGISTER_WAIT`] on its own, is taken before this
+/// [`host_lock::RECEIVER_REGISTER_TIMEOUT`] on its own, is taken before this
 /// budget starts (see [`ProbeTimeouts`]), or the two together would trip
 /// it on a working receiver.
 const RECEIVER_PROBE_TIMEOUT: Duration = Duration::from_secs(13);
@@ -157,7 +157,7 @@ const BOLT_SLOT_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 /// and one value for a test to shrink.
 ///
 /// The composition: a receiver probe waits for the node's register phase for
-/// up to `register_lock_wait` *before* its `receiver_timeout` starts, and
+/// up to `register_lock_timeout` *before* its `receiver_timeout` starts, and
 /// under that budget runs an `arrival_drain` and slot walks each bounded by
 /// their own slot probe. A direct device runs under `direct_timeout` alone.
 #[derive(Clone, Copy, Debug)]
@@ -167,7 +167,7 @@ pub(crate) struct ProbeTimeouts {
     /// ([`probe::ProbeVerdict::Deferred`]). Outside the I/O budget.
     ///
     /// [`probe::ProbeVerdict::Deferred`]: ProbeVerdict::Deferred
-    pub(crate) register_lock_wait: Duration,
+    pub(crate) register_lock_timeout: Duration,
     /// [`RECEIVER_PROBE_TIMEOUT`].
     pub(crate) receiver_timeout: Duration,
     /// [`PROBE_TIMEOUT`].
@@ -185,7 +185,7 @@ pub(crate) struct ProbeTimeouts {
 impl ProbeTimeouts {
     /// The production timeouts.
     pub(crate) const DEFAULT: Self = Self {
-        register_lock_wait: host_lock::RECEIVER_REGISTER_WAIT,
+        register_lock_timeout: host_lock::RECEIVER_REGISTER_TIMEOUT,
         receiver_timeout: RECEIVER_PROBE_TIMEOUT,
         direct_timeout: PROBE_TIMEOUT,
         arrival_drain: ARRIVAL_DRAIN,
@@ -310,7 +310,7 @@ impl NodeProbe {
 /// A receiver's probe first takes the node's register phase
 /// ([`host_lock::lock_receiver_registers`]) — or settles as
 /// [`ProbeVerdict::Deferred`] when another OpenLogi process still holds it
-/// after [`ProbeTimeouts::register_lock_wait`] — and only then starts its
+/// after [`ProbeTimeouts::register_lock_timeout`] — and only then starts its
 /// I/O budget. The wait is time spent not talking to the receiver, so it
 /// must not count against the budget the receiver's real worst case was
 /// sized for: taken together, a four-second wait plus a legitimate deep
@@ -370,7 +370,7 @@ async fn lock_receiver_registers(
     info: &NodeInfo,
     timeouts: &ProbeTimeouts,
 ) -> Option<ReceiverRegisterPhase> {
-    host_lock::lock_receiver_registers(&info.id, timeouts.register_lock_wait).await
+    host_lock::lock_receiver_registers(&info.id, timeouts.register_lock_timeout).await
 }
 
 /// Bound a probe's device I/O by `budget`. Burning the whole budget — an

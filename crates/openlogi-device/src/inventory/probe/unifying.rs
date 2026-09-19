@@ -39,9 +39,9 @@ use crate::inventory::mappings::{map_unifying_kind, resolve_device_kind};
 /// one `0xB5` sub-register is indistinguishable from another's, so the
 /// phase cannot be released before the last register read the probe may
 /// make. Unlike Bolt, then, the slot walks run under it — a few seconds at
-/// most, which [`host_lock::RECEIVER_REGISTER_WAIT`] allows for.
+/// most, which [`host_lock::RECEIVER_REGISTER_TIMEOUT`] allows for.
 ///
-/// [`host_lock::RECEIVER_REGISTER_WAIT`]: crate::host_lock::RECEIVER_REGISTER_WAIT
+/// [`host_lock::RECEIVER_REGISTER_TIMEOUT`]: crate::host_lock::RECEIVER_REGISTER_TIMEOUT
 pub(super) async fn probe_unifying_receiver(
     channel: Arc<HidppChannel>,
     info: NodeInfo,

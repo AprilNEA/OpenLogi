@@ -108,7 +108,7 @@ pub async fn lock_within(name: &str, budget: Duration) -> io::Result<Option<Host
 /// either a pairing session, which holds the phase for its whole run, or a
 /// probe failing one request timeout at a time; a waiter defers to it rather
 /// than joining it unlocked either way.
-pub const RECEIVER_REGISTER_WAIT: Duration = Duration::from_secs(8);
+pub const RECEIVER_REGISTER_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// Holds a receiver's register phase for this process — or nothing, when the
 /// host cannot arbitrate the phase at all. Dropping it releases the phase.
@@ -130,7 +130,7 @@ pub struct ReceiverRegisterPhase {
 /// each device by index under this process's own software id — and run
 /// outside it.
 ///
-/// `None` when another process still holds the phase after `wait`: the
+/// `None` when another process still holds the phase after `timeout`: the
 /// caller must not proceed unlocked, which would restore the very race the
 /// phase exists for. What it does instead is its own — a probe settles as
 /// deferred, a route open passes the node by this time. The lock directory
@@ -138,9 +138,9 @@ pub struct ReceiverRegisterPhase {
 /// it did before locks existed.
 pub async fn lock_receiver_registers(
     node: &NodeId,
-    wait: Duration,
+    timeout: Duration,
 ) -> Option<ReceiverRegisterPhase> {
-    match lock_within(&node_lock_name(node), wait).await {
+    match lock_within(&node_lock_name(node), timeout).await {
         Ok(Some(lock)) => Some(ReceiverRegisterPhase { _lock: Some(lock) }),
         Ok(None) => {
             debug!(

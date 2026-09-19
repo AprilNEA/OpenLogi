@@ -1237,7 +1237,7 @@ fn bolt_receiver_node(tag: &str) -> NodeInfo {
 /// lock wait is long enough for a holder to release inside it.
 fn quick_timeouts() -> ProbeTimeouts {
     ProbeTimeouts {
-        register_lock_wait: Duration::from_secs(2),
+        register_lock_timeout: Duration::from_secs(2),
         receiver_timeout: Duration::from_millis(900),
         direct_timeout: Duration::from_millis(900),
         arrival_drain: Duration::from_millis(100),
@@ -1341,7 +1341,7 @@ async fn a_receiver_probe_that_waited_for_its_register_phase_keeps_its_whole_io_
 async fn a_receiver_probe_defers_when_the_register_phase_is_held_past_the_wait() {
     let info = bolt_receiver_node("register-phase-held");
     let timeouts = ProbeTimeouts {
-        register_lock_wait: Duration::from_millis(100),
+        register_lock_timeout: Duration::from_millis(100),
         ..quick_timeouts()
     };
     let _held = host_lock::try_lock(&host_lock::node_lock_name(&info.id))

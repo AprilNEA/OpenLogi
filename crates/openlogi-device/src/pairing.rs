@@ -39,7 +39,7 @@ pub use hidpp::receiver::bolt::DeviceKind as BoltDeviceKind;
 pub use openlogi_core::hid::pairing::{Click, PairingError, PasskeyMethod, ReceiverSelector};
 
 use crate::backend::{HidBackend, NodeId};
-use crate::host_lock::{RECEIVER_REGISTER_WAIT, ReceiverRegisterPhase, lock_receiver_registers};
+use crate::host_lock::{RECEIVER_REGISTER_TIMEOUT, ReceiverRegisterPhase, lock_receiver_registers};
 
 mod notification;
 mod registers;
@@ -234,7 +234,7 @@ async fn read_bolt_uid(channel: &Arc<HidppChannel>, node: &NodeId) -> Option<Str
     let Some(Receiver::Bolt(bolt)) = receiver::detect(Arc::clone(channel)) else {
         return None;
     };
-    let _registers = lock_receiver_registers(node, RECEIVER_REGISTER_WAIT).await?;
+    let _registers = lock_receiver_registers(node, RECEIVER_REGISTER_TIMEOUT).await?;
     bolt.get_unique_id().await.ok()
 }
 
@@ -276,7 +276,7 @@ async fn open_receiver(
         if !matched {
             continue;
         }
-        let Some(registers) = lock_receiver_registers(&node.id, RECEIVER_REGISTER_WAIT).await
+        let Some(registers) = lock_receiver_registers(&node.id, RECEIVER_REGISTER_TIMEOUT).await
         else {
             return Err(PairingError::Register(
                 "the receiver's registers are held by another OpenLogi process".to_string(),
