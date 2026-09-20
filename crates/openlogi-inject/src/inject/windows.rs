@@ -1,6 +1,7 @@
 //! Windows helpers for synthesising OS-level input events via `SendInput`.
 #![expect(unsafe_code, reason = "SendInput is the Win32 API for synthetic input")]
 
+use std::collections::HashMap;
 use std::mem::size_of;
 use std::sync::{LazyLock, Mutex};
 
@@ -23,6 +24,11 @@ const WHEEL_DELTA_F64: f64 = 120.0;
 
 static SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
     LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
+
+// The shared tracker counts logical Command and Control separately, but both
+// map to VK_CONTROL here. Keep that physical key down until both are released.
+static PHYSICAL_HOLD_COUNTS: LazyLock<Mutex<HashMap<u16, usize>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 const VK_D: u16 = 0x44;
 const VK_L: u16 = 0x4C;
@@ -264,23 +270,45 @@ fn combo_modifiers(combo: &KeyCombo) -> Vec<u16> {
 
 /// Emit one edge for the physical keys whose ownership changed.
 pub(super) fn hold_keys(keys: &[HeldKey], phase: KeyPhase) {
-    let keys: Vec<_> = keys
-        .iter()
-        .filter_map(|key| held_virtual_key(*key))
-        .collect();
+    let Ok(mut counts) = PHYSICAL_HOLD_COUNTS.lock() else {
+        tracing::warn!("Windows physical hold counts mutex poisoned");
+        return;
+    };
+    let inputs = hold_inputs(&mut counts, keys, phase);
+    send_inputs(&inputs);
+}
+
+fn hold_inputs(counts: &mut HashMap<u16, usize>, keys: &[HeldKey], phase: KeyPhase) -> Vec<INPUT> {
     let key_up = phase == KeyPhase::Up;
-    let mut inputs: Vec<_> = keys.iter().map(|key| key_input(*key, key_up)).collect();
+    let mut inputs = Vec::new();
+    for vk in keys.iter().filter_map(|key| held_virtual_key(*key)) {
+        if key_up {
+            match counts.get_mut(&vk) {
+                Some(count) if *count > 1 => *count -= 1,
+                Some(_) => {
+                    counts.remove(&vk);
+                    inputs.push(key_input(vk, true));
+                }
+                None => {}
+            }
+        } else {
+            let count = counts.entry(vk).or_default();
+            if *count == 0 {
+                inputs.push(key_input(vk, false));
+            }
+            *count += 1;
+        }
+    }
     if key_up {
         inputs.reverse();
     }
-    send_inputs(&inputs);
+    inputs
 }
 
 /// Keep held Cmd → Ctrl consistent with [`combo_modifiers`], not the Windows key.
 fn held_virtual_key(key: HeldKey) -> Option<u16> {
     match key {
-        HeldKey::Command => Some(VK_CONTROL),
-        HeldKey::Control => Some(VK_CONTROL),
+        HeldKey::Command | HeldKey::Control => Some(VK_CONTROL),
         HeldKey::Shift => Some(VK_SHIFT),
         HeldKey::Alt => Some(VK_MENU),
         HeldKey::Key(usage) => {
@@ -400,6 +428,94 @@ mod tests {
             super::held_virtual_key(super::HeldKey::Control),
             Some(super::VK_CONTROL)
         );
+    }
+
+    fn held_edges(
+        counts: &mut std::collections::HashMap<u16, usize>,
+        keys: &[super::HeldKey],
+        phase: super::KeyPhase,
+    ) -> Vec<(u16, u32)> {
+        super::hold_inputs(counts, keys, phase)
+            .iter()
+            .map(|input| {
+                assert_eq!(input.r#type, super::INPUT_KEYBOARD);
+                // SAFETY: hold_inputs only constructs INPUT_KEYBOARD events with ki initialized.
+                let key = unsafe { input.Anonymous.ki };
+                (key.wVk, key.dwFlags)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn overlapping_held_command_and_control_release_only_the_last_owner() {
+        use super::{HeldKey, KEYEVENTF_KEYUP, KeyPhase};
+
+        for (first, second) in [
+            (HeldKey::Command, HeldKey::Control),
+            (HeldKey::Control, HeldKey::Command),
+        ] {
+            let mut counts = std::collections::HashMap::new();
+            assert_eq!(
+                held_edges(&mut counts, &[first], KeyPhase::Down),
+                vec![(VK_CONTROL, 0)]
+            );
+            assert!(held_edges(&mut counts, &[second], KeyPhase::Down).is_empty());
+            assert!(held_edges(&mut counts, &[first], KeyPhase::Up).is_empty());
+            assert_eq!(
+                held_edges(&mut counts, &[second], KeyPhase::Up),
+                vec![(VK_CONTROL, KEYEVENTF_KEYUP)]
+            );
+            assert!(counts.is_empty());
+        }
+    }
+
+    #[test]
+    fn non_overlapping_held_modifiers_preserve_edges_and_release_order() {
+        use super::{HeldKey, KEYEVENTF_KEYUP, KeyPhase};
+
+        for modifier in [HeldKey::Command, HeldKey::Control] {
+            let mut counts = std::collections::HashMap::new();
+            assert_eq!(
+                held_edges(&mut counts, &[modifier], KeyPhase::Down),
+                vec![(VK_CONTROL, 0)]
+            );
+            assert_eq!(
+                held_edges(&mut counts, &[modifier], KeyPhase::Up),
+                vec![(VK_CONTROL, KEYEVENTF_KEYUP)]
+            );
+            let keys = [modifier, HeldKey::Shift, HeldKey::Alt];
+            assert_eq!(
+                held_edges(&mut counts, &keys, KeyPhase::Down),
+                vec![(VK_CONTROL, 0), (VK_SHIFT, 0), (VK_MENU, 0)]
+            );
+            assert_eq!(
+                held_edges(&mut counts, &keys, KeyPhase::Up),
+                vec![
+                    (VK_MENU, KEYEVENTF_KEYUP),
+                    (VK_SHIFT, KEYEVENTF_KEYUP),
+                    (VK_CONTROL, KEYEVENTF_KEYUP),
+                ]
+            );
+            assert!(counts.is_empty());
+            assert!(held_edges(&mut counts, &keys, KeyPhase::Up).is_empty());
+        }
+    }
+
+    #[test]
+    fn held_command_and_control_in_one_chord_emit_one_physical_edge() {
+        use super::{HeldKey, KEYEVENTF_KEYUP, KeyPhase};
+
+        let mut counts = std::collections::HashMap::new();
+        let keys = [HeldKey::Command, HeldKey::Control];
+        assert_eq!(
+            held_edges(&mut counts, &keys, KeyPhase::Down),
+            vec![(VK_CONTROL, 0)]
+        );
+        assert_eq!(
+            held_edges(&mut counts, &keys, KeyPhase::Up),
+            vec![(VK_CONTROL, KEYEVENTF_KEYUP)]
+        );
+        assert!(counts.is_empty());
     }
 
     /// Pin a handful of representative `Shortcut -> KeyCombo` rows so an
