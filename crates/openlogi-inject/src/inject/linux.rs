@@ -412,12 +412,14 @@ pub(super) fn device_node() -> Option<std::path::PathBuf> {
 /// Convert a [`KeyCombo`] modifier bitmask
 /// to the evdev keys to hold.
 ///
-/// macOS Cmd (`MOD_CMD`) and Ctrl (`MOD_CTRL`) both map to `KEY_LEFTCTRL`;
-/// the bitwise-OR check deduplicates them so at most one Ctrl is pushed.
-/// Order is canonical: Ctrl → Shift → Alt.
+/// Cmd maps to Meta (Super), independently of Ctrl.
+/// Order is canonical: Meta → Ctrl → Shift → Alt.
 fn modifiers_to_keycodes(combo: &openlogi_core::binding::KeyCombo) -> Vec<KeyCode> {
     let mut modifiers = Vec::new();
-    if combo.has_command() || combo.has_control() {
+    if combo.has_command() {
+        modifiers.push(KeyCode::KEY_LEFTMETA);
+    }
+    if combo.has_control() {
         modifiers.push(KeyCode::KEY_LEFTCTRL);
     }
     if combo.has_shift() {
@@ -696,13 +698,24 @@ mod tests {
     }
 
     #[test]
-    fn modifiers_map_to_linux_without_duplicate_control() {
+    fn command_and_control_map_to_distinct_linux_modifiers() {
+        let command = "Cmd+W"
+            .parse::<KeyCombo>()
+            .expect("a valid shortcut must parse");
+        assert_eq!(modifiers_to_keycodes(&command), vec![KeyCode::KEY_LEFTMETA]);
+
+        let control = "Ctrl+W"
+            .parse::<KeyCombo>()
+            .expect("a valid shortcut must parse");
+        assert_eq!(modifiers_to_keycodes(&control), vec![KeyCode::KEY_LEFTCTRL]);
+
         let combo = "Cmd+Ctrl+Shift+Alt+A"
             .parse::<KeyCombo>()
             .expect("a valid shortcut must parse");
         assert_eq!(
             modifiers_to_keycodes(&combo),
             vec![
+                KeyCode::KEY_LEFTMETA,
                 KeyCode::KEY_LEFTCTRL,
                 KeyCode::KEY_LEFTSHIFT,
                 KeyCode::KEY_LEFTALT
