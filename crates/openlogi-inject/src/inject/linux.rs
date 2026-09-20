@@ -41,6 +41,7 @@ pub(super) fn execute(action: &Action) {
         Effect::Shortcut(shortcut) => press_combo(&combo(shortcut)),
         Effect::Key(combo) | Effect::HeldKey(combo) => press_combo(combo),
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
+        Effect::Zoom { dy } => dispatch_zoom(dy),
         Effect::Media(key) => dispatch_media(key),
         Effect::Native(native) => dispatch_native(action, native),
         Effect::Script(script) => super::dispatch_script(script),
@@ -169,6 +170,15 @@ fn dispatch_scroll(dx: i8, dy: i8) {
     if dx != 0 {
         scroll(RelativeAxisCode::REL_HWHEEL, i32::from(dx) * 3);
     }
+}
+
+fn dispatch_zoom(dy: i8) {
+    if dy == 0 {
+        return;
+    }
+    emit(&[key_ev(KeyCode::KEY_LEFTCTRL, 1), syn()]);
+    dispatch_scroll(0, dy);
+    emit(&[key_ev(KeyCode::KEY_LEFTCTRL, 0), syn()]);
 }
 
 /// Not implemented yet: unicode text has no uinput encoding without a keymap.
@@ -342,13 +352,37 @@ fn scroll(axis: RelativeAxisCode, value: i32) {
 }
 
 pub(super) fn post_scroll(delta: ScrollDelta) {
+    let mut events = quantized_scroll_events(delta);
+    if events.is_empty() {
+        return;
+    }
+    events.push(syn());
+    emit(&events);
+}
+
+pub(super) fn post_zoom_scroll(delta: ScrollDelta) {
+    let scroll = quantized_scroll_events(delta);
+    if scroll.is_empty() {
+        return;
+    }
+    let mut events = Vec::with_capacity(scroll.len() + 4);
+    events.push(key_ev(KeyCode::KEY_LEFTCTRL, 1));
+    events.push(syn());
+    events.extend(scroll);
+    events.push(syn());
+    events.push(key_ev(KeyCode::KEY_LEFTCTRL, 0));
+    events.push(syn());
+    emit(&events);
+}
+
+fn quantized_scroll_events(delta: ScrollDelta) -> Vec<InputEvent> {
     let ScrollDelta::WheelTicks { .. } = delta else {
         tracing::debug!("pixel scroll output is unsupported on Linux");
-        return;
+        return Vec::new();
     };
     let Ok(mut output) = SCROLL_OUTPUT.lock() else {
         tracing::warn!("Linux scroll quantizer mutex poisoned");
-        return;
+        return Vec::new();
     };
     let high_resolution = output
         .high_resolution
@@ -356,7 +390,7 @@ pub(super) fn post_scroll(delta: ScrollDelta) {
     let legacy = output.legacy.quantize(delta, 1.0);
     drop(output);
 
-    let mut events = Vec::with_capacity(5);
+    let mut events = Vec::with_capacity(4);
     push_scroll_axes(
         &mut events,
         high_resolution,
@@ -369,10 +403,7 @@ pub(super) fn post_scroll(delta: ScrollDelta) {
         RelativeAxisCode::REL_HWHEEL,
         RelativeAxisCode::REL_WHEEL,
     );
-    if !events.is_empty() {
-        events.push(syn());
-        emit(&events);
-    }
+    events
 }
 
 fn push_scroll_axes(

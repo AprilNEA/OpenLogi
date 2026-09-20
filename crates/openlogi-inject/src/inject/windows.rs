@@ -16,7 +16,7 @@ use openlogi_core::binding::{
 };
 use openlogi_core::scroll::ScrollDelta;
 
-use super::{HeldKey, KeyPhase, ScrollQuantizer};
+use super::{HeldKey, KeyPhase, QuantizedScroll, ScrollQuantizer};
 
 const WHEEL_DELTA: i32 = 120;
 const WHEEL_DELTA_F64: f64 = 120.0;
@@ -60,6 +60,7 @@ pub(super) fn execute(action: &Action) {
         Effect::Shortcut(shortcut) => press_shortcut(shortcut),
         Effect::Key(combo) | Effect::HeldKey(combo) => press_combo(combo),
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
+        Effect::Zoom { dy } => dispatch_zoom(dy),
         Effect::Media(key) => dispatch_media(key),
         Effect::Native(native) => dispatch_native(native),
         Effect::Script(script) => super::dispatch_script(script),
@@ -207,18 +208,21 @@ fn dispatch_scroll(dx: i8, dy: i8) {
     }
 }
 
-pub(super) fn post_scroll(delta: ScrollDelta) {
-    let ScrollDelta::WheelTicks { .. } = delta else {
-        tracing::debug!("pixel scroll output is unsupported on Windows");
+fn dispatch_zoom(dy: i8) {
+    if dy == 0 {
         return;
-    };
-    let Ok(mut quantizer) = SCROLL_QUANTIZER.lock() else {
-        tracing::warn!("Windows scroll quantizer mutex poisoned");
-        return;
-    };
-    let delta = quantizer.quantize(delta, WHEEL_DELTA_F64);
-    drop(quantizer);
+    }
+    send_inputs(&[
+        key_input(VK_CONTROL, false),
+        mouse_input(MOUSEEVENTF_WHEEL, i32::from(dy) * WHEEL_DELTA),
+        key_input(VK_CONTROL, true),
+    ]);
+}
 
+pub(super) fn post_scroll(delta: ScrollDelta) {
+    let Some(delta) = quantized_wheel(delta) else {
+        return;
+    };
     let mut inputs = Vec::with_capacity(2);
     if delta.y != 0 {
         inputs.push(mouse_input(MOUSEEVENTF_WHEEL, delta.y));
@@ -229,6 +233,36 @@ pub(super) fn post_scroll(delta: ScrollDelta) {
     if !inputs.is_empty() {
         send_inputs(&inputs);
     }
+}
+
+pub(super) fn post_zoom_scroll(delta: ScrollDelta) {
+    let Some(delta) = quantized_wheel(delta) else {
+        return;
+    };
+    let mut inputs = Vec::with_capacity(4);
+    inputs.push(key_input(VK_CONTROL, false));
+    if delta.y != 0 {
+        inputs.push(mouse_input(MOUSEEVENTF_WHEEL, delta.y));
+    }
+    if delta.x != 0 {
+        inputs.push(mouse_input(MOUSEEVENTF_HWHEEL, delta.x));
+    }
+    inputs.push(key_input(VK_CONTROL, true));
+    send_inputs(&inputs);
+}
+
+fn quantized_wheel(delta: ScrollDelta) -> Option<QuantizedScroll> {
+    let ScrollDelta::WheelTicks { .. } = delta else {
+        tracing::debug!("pixel scroll output is unsupported on Windows");
+        return None;
+    };
+    let Ok(mut quantizer) = SCROLL_QUANTIZER.lock() else {
+        tracing::warn!("Windows scroll quantizer mutex poisoned");
+        return None;
+    };
+    let delta = quantizer.quantize(delta, WHEEL_DELTA_F64);
+    drop(quantizer);
+    (delta != QuantizedScroll::default()).then_some(delta)
 }
 
 pub(super) fn press_combo(combo: &KeyCombo) {

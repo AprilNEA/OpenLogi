@@ -219,6 +219,8 @@ enum ScrollBinding {
     Down,
     Right,
     Left,
+    ZoomIn,
+    ZoomOut,
 }
 
 impl ScrollBinding {
@@ -228,19 +230,22 @@ impl ScrollBinding {
             Action::ScrollDown => Some(Self::Down),
             Action::HorizontalScrollRight => Some(Self::Right),
             Action::HorizontalScrollLeft => Some(Self::Left),
+            Action::ZoomIn => Some(Self::ZoomIn),
+            Action::ZoomOut => Some(Self::ZoomOut),
             _ => None,
         }
     }
 
     /// Convert positive distance into the configured axis and sign.
     fn output(self, distance: f64) -> WheelOutput {
-        let delta = match self {
-            Self::Up => ScrollDelta::wheel_ticks(0.0, distance),
-            Self::Down => ScrollDelta::wheel_ticks(0.0, -distance),
-            Self::Right => ScrollDelta::wheel_ticks(distance, 0.0),
-            Self::Left => ScrollDelta::wheel_ticks(-distance, 0.0),
-        };
-        WheelOutput::Scroll(delta)
+        match self {
+            Self::Up => WheelOutput::Scroll(ScrollDelta::wheel_ticks(0.0, distance)),
+            Self::Down => WheelOutput::Scroll(ScrollDelta::wheel_ticks(0.0, -distance)),
+            Self::Right => WheelOutput::Scroll(ScrollDelta::wheel_ticks(distance, 0.0)),
+            Self::Left => WheelOutput::Scroll(ScrollDelta::wheel_ticks(-distance, 0.0)),
+            Self::ZoomIn => WheelOutput::Zoom(ScrollDelta::wheel_ticks(0.0, distance)),
+            Self::ZoomOut => WheelOutput::Zoom(ScrollDelta::wheel_ticks(0.0, -distance)),
+        }
     }
 }
 
@@ -251,6 +256,9 @@ pub(super) enum WheelOutput {
     Idle,
     /// Typed fractional distance for the smooth-scroll runtime or injector.
     Scroll(ScrollDelta),
+    /// Typed fractional distance posted as platform zoom-scroll (modifier +
+    /// vertical wheel), bypassing the smooth-scroll interpolator.
+    Zoom(ScrollDelta),
     /// Fire the direction's bound discrete action.
     FireAction,
 }

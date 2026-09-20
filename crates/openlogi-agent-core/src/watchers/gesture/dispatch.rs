@@ -228,6 +228,11 @@ impl InputDispatcher {
                 ) {
                     WheelOutput::Idle => {}
                     WheelOutput::Scroll(delta) => self.outputs.post_scroll(session, delta),
+                    // Zoom is modifier+scroll. The smooth-scroll interpolator
+                    // would turn that into Command/Control + pixel-phase
+                    // frames, which many apps treat as ordinary scroll rather
+                    // than zoom.
+                    WheelOutput::Zoom(delta) => openlogi_inject::post_zoom_scroll(delta),
                     WheelOutput::FireAction => {
                         debug!(key, ?button, action = %action.label(), "thumb wheel → action");
                         self.outputs.actions.dispatch(action, Some(key));

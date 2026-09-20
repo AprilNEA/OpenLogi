@@ -448,6 +448,32 @@ pub fn post_scroll(delta: ScrollDelta) {
     }
 }
 
+/// Synthesise a typed scroll distance with the platform zoom modifier held
+/// (Command on macOS, Control on Windows and Linux).
+///
+/// Fractional wheel ticks are retained the same way as [`post_scroll`]. This
+/// path does not go through smooth-scroll phases: apps treat Command/Control
+/// plus a pixel-phase wheel as ordinary scroll more often than as zoom.
+pub fn post_zoom_scroll(delta: ScrollDelta) {
+    if !delta.is_finite() || (delta.x() == 0.0 && delta.y() == 0.0) {
+        return;
+    }
+    cfg_select! {
+        target_os = "macos" => {
+            macos::post_zoom_scroll(delta);
+        }
+        target_os = "linux" => {
+            linux::post_zoom_scroll(delta);
+        }
+        target_os = "windows" => {
+            windows::post_zoom_scroll(delta);
+        }
+        _ => {
+            let _ = delta;
+        }
+    }
+}
+
 /// Lifecycle phase of one synthetic smooth-scroll frame.
 ///
 /// macOS forwards this state to the scroll-wheel event so applications see a

@@ -1,6 +1,6 @@
 //! A platform-neutral synthesis IR.
 //!
-//! [`Action`] has one variant per user-facing behaviour (52 of them), but the
+//! [`Action`] has one variant per user-facing behaviour, but the
 //! three `openlogi-inject` backends don't care about most of that
 //! granularity — they care about *mechanism*: "press this chord", "click
 //! this mouse button", "fire this media key", "there is no portable way to
@@ -48,6 +48,13 @@ pub enum Effect<'a> {
         /// Horizontal direction: -1 left, 1 right, 0 none.
         dx: i8,
         /// Vertical direction: -1 down, 1 up, 0 none.
+        dy: i8,
+    },
+    /// Synthesise one zoom tick as vertical scroll with the platform zoom
+    /// modifier (Command on macOS, Control on Windows and Linux). `dy` is
+    /// unit direction: 1 zoom in, -1 zoom out.
+    Zoom {
+        /// Vertical direction: 1 zoom in, -1 zoom out.
         dy: i8,
     },
     /// Fire a media/volume key. Every backend reaches these through a
@@ -272,6 +279,8 @@ impl Action {
             Action::ScrollDown => Effect::Scroll { dx: 0, dy: -1 },
             Action::HorizontalScrollLeft => Effect::Scroll { dx: -1, dy: 0 },
             Action::HorizontalScrollRight => Effect::Scroll { dx: 1, dy: 0 },
+            Action::ZoomIn => Effect::Zoom { dy: 1 },
+            Action::ZoomOut => Effect::Zoom { dy: -1 },
 
             Action::CustomShortcut(combo) => Effect::Key(combo),
             Action::HoldShortcut(combo) => Effect::HeldKey(combo),
