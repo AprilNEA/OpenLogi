@@ -18,16 +18,20 @@ use super::{Host, Step};
 #[derive(Clone, Copy, PartialEq, Eq, Debug, EnumIter)]
 pub(crate) enum Job {
     Rustfmt,
+    Typos,
+    AstGrep,
+    PublishClosure,
     Shell,
     Clippy,
     Msrv,
     Rustdoc,
     TestsLinux,
     TestsMacos,
+    TestsWindows,
     CargoDeny,
     ClippyWindows,
-    /// Locale parity. Part of `tests (macos)`, and the suite Linux CI cannot
-    /// run because it excludes `openlogi-desktop`.
+    Wasm,
+    /// Portable locale parity plus the desktop end-to-end key-resolution tests.
     I18n,
     /// The bincode/tarpc golden wire format. Part of the test jobs.
     Wire,
@@ -60,37 +64,75 @@ struct Spec {
 
 /// The names that select more than one job, because `ci.yml` has more than one.
 const GROUPS: [(&str, &[Job]); 2] = [
-    ("tests", &[Job::TestsLinux, Job::TestsMacos]),
-    ("test", &[Job::TestsLinux, Job::TestsMacos]),
+    (
+        "tests",
+        &[Job::TestsLinux, Job::TestsMacos, Job::TestsWindows],
+    ),
+    (
+        "test",
+        &[Job::TestsLinux, Job::TestsMacos, Job::TestsWindows],
+    ),
 ];
+
+fn default_spec(
+    name: &'static str,
+    aliases: &'static [&'static str],
+    caveat: &'static str,
+) -> Spec {
+    Spec {
+        name,
+        aliases,
+        prefix: None,
+        hosts: Host::ANY,
+        in_default_run: true,
+        caveat,
+    }
+}
+
+fn focused_spec(
+    name: &'static str,
+    aliases: &'static [&'static str],
+    caveat: &'static str,
+) -> Spec {
+    Spec {
+        name,
+        aliases,
+        prefix: None,
+        hosts: Host::ANY,
+        in_default_run: false,
+        caveat,
+    }
+}
 
 impl Job {
     fn spec(self) -> Spec {
         match self {
-            Self::Rustfmt => Spec {
-                name: "rustfmt",
-                aliases: &["fmt"],
-                prefix: None,
-                hosts: Host::ANY,
-                in_default_run: true,
-                caveat: "",
-            },
-            Self::Shell => Spec {
-                name: "shell",
-                aliases: &[],
-                prefix: None,
-                hosts: Host::ANY,
-                in_default_run: true,
-                caveat: "shellcheck and shfmt over every tracked shell script. shfmt decides what counts as one — by extension, and by shebang for the extensionless ones — and takes its formatting options from .editorconfig, which any printer flag would discard.",
-            },
-            Self::Clippy => Spec {
-                name: "clippy",
-                aliases: &[],
-                prefix: None,
-                hosts: Host::ANY,
-                in_default_run: true,
-                caveat: "CI runs it on ubuntu-latest, so it compiles linux cfg. Host clippy on macOS or Windows is a different compilation, not this job.",
-            },
+            Self::Rustfmt => default_spec("rustfmt", &["fmt"], ""),
+            Self::Typos => default_spec(
+                "typos",
+                &["spelling"],
+                "Low-noise source spelling check. Needs typos-cli, which the devenv shell provides.",
+            ),
+            Self::AstGrep => default_spec(
+                "ast-grep",
+                &["sg", "ssot"],
+                "The single-source-of-truth guards in .ast-grep/rules: each names the module that owns a decision and fails on its ingredients anywhere else. Needs ast-grep, which the devenv shell provides.",
+            ),
+            Self::PublishClosure => default_spec(
+                "publish closure",
+                &["publish-closure", "publish"],
+                "Every normal/build path dependency of a crates.io package must name a registry version and target another publishable workspace package.",
+            ),
+            Self::Shell => default_spec(
+                "shell",
+                &[],
+                "shellcheck and shfmt over every tracked shell script. shfmt decides what counts as one — by extension, and by shebang for the extensionless ones — and takes its formatting options from .editorconfig, which any printer flag would discard.",
+            ),
+            Self::Clippy => default_spec(
+                "clippy",
+                &[],
+                "CI runs it on ubuntu-latest, so it compiles linux cfg. Host clippy on macOS or Windows is a different compilation, not this job.",
+            ),
             Self::Msrv => Spec {
                 name: "MSRV (cargo check)",
                 aliases: &["msrv"],
@@ -99,21 +141,18 @@ impl Job {
                 in_default_run: true,
                 caveat: "rust-toolchain.toml pins the channel to stable and rustup honours that over an installed toolchain, so CI and this runner both set RUSTUP_TOOLCHAIN to the rust-version floor — without it the check silently runs stable.",
             },
-            Self::Rustdoc => Spec {
-                name: "rustdoc (non-GUI crates)",
-                aliases: &["rustdoc", "docs"],
-                prefix: None,
-                hosts: Host::ANY,
-                in_default_run: true,
-                caveat: "Everything but the GPUI crates, which would drag the whole graphics toolchain into the job. A broken intra-doc link is neither a compile error nor a clippy lint, so nothing else catches one.",
-            },
+            Self::Rustdoc => default_spec(
+                "rustdoc (non-GUI crates)",
+                &["rustdoc", "docs"],
+                "Everything but the GPUI crates, which would drag the whole graphics toolchain into the job. A broken intra-doc link is neither a compile error nor a clippy lint, so nothing else catches one.",
+            ),
             Self::TestsLinux => Spec {
                 name: "tests (linux)",
                 aliases: &["test-linux"],
                 prefix: None,
                 hosts: &[Host::Linux],
                 in_default_run: true,
-                caveat: "Excludes openlogi-desktop, so the i18n locale-parity tests never run on Linux CI.",
+                caveat: "Excludes openlogi-desktop, but still runs openlogi-ui's portable locale-parity test. Only the desktop end-to-end key-resolution tests are absent.",
             },
             Self::TestsMacos => Spec {
                 name: "tests (macos)",
@@ -123,14 +162,19 @@ impl Job {
                 in_default_run: true,
                 caveat: "CI's matrix is arm64 (macos-latest) and x86_64 (macos-15-intel); a host only ever covers its own arch.",
             },
-            Self::CargoDeny => Spec {
-                name: "cargo-deny",
-                aliases: &["deny"],
+            Self::TestsWindows => Spec {
+                name: "tests (windows)",
+                aliases: &["test-windows"],
                 prefix: None,
-                hosts: Host::ANY,
+                hosts: &[Host::Windows],
                 in_default_run: true,
-                caveat: "Rooted at crates/openlogi — exactly the crates published to crates.io. Falls back to `nix run nixpkgs#cargo-deny` when the binary is not installed.",
+                caveat: "Excludes openlogi-desktop like the Linux job. Executes the `cfg(windows)` tests, which `clippy (windows)` only compiles and no other host can run.",
             },
+            Self::CargoDeny => default_spec(
+                "cargo-deny",
+                &["deny"],
+                "Rooted at crates/openlogi — exactly the crates published to crates.io. Falls back to `nix run nixpkgs#cargo-deny` when the binary is not installed.",
+            ),
             Self::ClippyWindows => Spec {
                 name: "clippy (windows)",
                 aliases: &["clippy-windows"],
@@ -141,27 +185,26 @@ impl Job {
                 in_default_run: true,
                 caveat: "CI lints the whole workspace natively on windows-latest. Anywhere else this is the ring-free cross lint over the crates that carry Windows code — a proxy, not that job.",
             },
-            Self::I18n => Spec {
-                name: "i18n",
-                aliases: &[],
-                prefix: None,
-                hosts: Host::ANY,
-                in_default_run: false,
-                caveat: "Locale parity. Part of tests (macos), and the suite Linux CI cannot run because it excludes openlogi-desktop.",
-            },
-            Self::Wire => Spec {
-                name: "wire_format",
-                aliases: &["wire"],
-                prefix: None,
-                hosts: Host::ANY,
-                in_default_run: false,
-                caveat: "The bincode/tarpc golden wire format. Part of the test jobs.",
-            },
+            Self::Wasm => default_spec(
+                "wasm (portable crates)",
+                &["wasm"],
+                "Proves the portable crates depend on nothing host-bound. A check, so it catches what cannot build for wasm — not what builds and then fails at runtime, which `std::thread::spawn` in the hidpp read loop and `tokio::time` both would.",
+            ),
+            Self::I18n => focused_spec(
+                "i18n",
+                &[],
+                "Portable catalog parity plus desktop end-to-end key resolution. Linux CI runs the first through openlogi-ui; macOS CI runs both.",
+            ),
+            Self::Wire => focused_spec(
+                "wire_format",
+                &["wire"],
+                "The bincode/tarpc golden wire format. Part of the test jobs.",
+            ),
         }
     }
 
     /// The jobs a bare `cargo xtask ci` runs — every job in `ci.yml`, in
-    /// workflow order. Both test jobs are in it: on a host that cannot run one
+    /// workflow order. Every test job is in it: on a host that cannot run one
     /// of them, a named skip is the honest report, and silence is not.
     pub(crate) fn default_run() -> impl Iterator<Item = Self> {
         Self::iter().filter(|job| job.spec().in_default_run)

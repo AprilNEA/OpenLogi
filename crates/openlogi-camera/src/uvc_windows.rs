@@ -45,7 +45,10 @@ const VPA_CONTRAST: i32 = 1;
 const VPA_HUE: i32 = 2;
 const VPA_SATURATION: i32 = 3;
 const VPA_SHARPNESS: i32 = 4;
-const VPA_WHITE_BALANCE: i32 = 6;
+// 5 and 6 are Gamma and ColorEnable — no control maps to them, but the enum is
+// contiguous, so WhiteBalance is 7 and not the next id after Sharpness. Counting
+// on from the last mapped value is how this read ColorEnable instead.
+const VPA_WHITE_BALANCE: i32 = 7;
 const CC_ZOOM: i32 = 3;
 const CC_EXPOSURE: i32 = 4;
 const CC_FOCUS: i32 = 6;
@@ -58,6 +61,7 @@ const FLAG_MANUAL: i32 = 0x2;
 enum Prop {
     VideoProcAmp(i32),
     CameraControl(i32),
+    Unsupported,
 }
 
 impl CameraControl {
@@ -66,6 +70,7 @@ impl CameraControl {
             Self::Zoom => Prop::CameraControl(CC_ZOOM),
             Self::Focus => Prop::CameraControl(CC_FOCUS),
             Self::Exposure => Prop::CameraControl(CC_EXPOSURE),
+            Self::PowerLineFrequency | Self::LowLightCompensation => Prop::Unsupported,
             Self::Brightness => Prop::VideoProcAmp(VPA_BRIGHTNESS),
             Self::Contrast => Prop::VideoProcAmp(VPA_CONTRAST),
             Self::Saturation => Prop::VideoProcAmp(VPA_SATURATION),
@@ -251,6 +256,7 @@ impl<'a> Device<'a> {
         // SAFETY: documented COM calls writing the five out-params.
         unsafe {
             match prop {
+                Prop::Unsupported => return Err(ControlError::Unsupported),
                 Prop::VideoProcAmp(id) => self
                     .proc_amp
                     .as_ref()
@@ -285,6 +291,7 @@ impl<'a> Device<'a> {
                 max,
                 default,
                 current,
+                value_mask: None,
             },
             caps,
         ))
@@ -296,6 +303,7 @@ impl<'a> Device<'a> {
         // SAFETY: documented COM calls writing the two out-params.
         unsafe {
             match prop {
+                Prop::Unsupported => return Err(ControlError::Unsupported),
                 Prop::VideoProcAmp(id) => self
                     .proc_amp
                     .as_ref()
@@ -322,6 +330,7 @@ impl<'a> Device<'a> {
         // SAFETY: documented COM calls; the device validates the value.
         unsafe {
             match prop {
+                Prop::Unsupported => return Err(ControlError::Unsupported),
                 Prop::VideoProcAmp(id) => self
                     .proc_amp
                     .as_ref()

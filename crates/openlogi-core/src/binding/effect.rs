@@ -38,6 +38,10 @@ pub enum Effect<'a> {
     /// Press an already-resolved keyboard chord: a user-recorded
     /// [`Action::CustomShortcut`], or a workflow's `PressKey` step.
     Key(&'a KeyCombo),
+    /// A user-recorded chord whose output is held by a lifecycle-aware
+    /// runtime. A one-shot executor treats this as [`Effect::Key`] so direct
+    /// dispatch remains balanced when no matching release can arrive.
+    HeldKey(&'a KeyCombo),
     /// Synthesise one scroll tick. `dx`/`dy` are unit direction (-1/0/1);
     /// each backend applies its own tick magnitude.
     Scroll {
@@ -270,6 +274,7 @@ impl Action {
             Action::HorizontalScrollRight => Effect::Scroll { dx: 1, dy: 0 },
 
             Action::CustomShortcut(combo) => Effect::Key(combo),
+            Action::HoldShortcut(combo) => Effect::HeldKey(combo),
 
             Action::TypeText(text) => Effect::Text(text),
             Action::RunAppleScript(src) => Effect::Script(Script::AppleScript(src)),

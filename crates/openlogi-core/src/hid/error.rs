@@ -16,12 +16,13 @@ use thiserror::Error;
 /// that genuinely lacks a feature would be re-probed forever. Variant order is
 /// therefore wire format: changes require a `PROTOCOL_VERSION` bump (guarded
 /// by `openlogi-ipc/tests/wire_format.rs`).
-#[derive(Debug, Clone, Error, Serialize, Deserialize)]
+#[derive(Debug, Clone, Error, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WriteError {
     /// HID transport error serialized as text.
     ///
-    /// `async_hid::HidError` isn't `Serialize`, so carry its message as text;
-    /// the typed error is never matched on (only constructed + displayed).
+    /// `openlogi_hid::BackendError` isn't `Serialize`, so carry its message as
+    /// text; the typed error is never matched on (only constructed +
+    /// displayed).
     #[error("HID transport error: {0}")]
     Hid(String),
     /// No currently connected device matched the requested route.

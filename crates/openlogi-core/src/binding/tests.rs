@@ -33,10 +33,28 @@ fn catalog_excludes_custom_shortcut() {
     let catalog = Action::catalog();
     for action in &catalog {
         assert!(
-            !matches!(action, Action::CustomShortcut(_)),
-            "catalog must not contain CustomShortcut"
+            !matches!(action, Action::CustomShortcut(_) | Action::HoldShortcut(_)),
+            "catalog must not contain recorded shortcut actions"
         );
     }
+}
+
+#[test]
+fn hold_shortcut_has_distinct_lifecycle_semantics() {
+    let combo: KeyCombo = "Alt+Space".parse().expect("valid shortcut failed");
+    let held = Action::HoldShortcut(combo.clone());
+
+    assert_eq!(held.label(), "Hold Alt+Space");
+    assert_eq!(held.category(), Category::Editing);
+    assert_eq!(held.held_combo(), Some(&combo));
+    assert_matches!(held.effect(), Effect::HeldKey(actual) if actual == &combo);
+    assert_eq!(Action::CustomShortcut(combo).held_combo(), None);
+}
+
+#[test]
+fn hold_shortcut_roundtrips_toml() {
+    let action = Action::HoldShortcut("Alt+Space".parse().expect("valid shortcut failed"));
+    assert_eq!(roundtrip(&action), action);
 }
 
 #[test]
@@ -116,6 +134,17 @@ fn workflow_roundtrips_toml() {
     assert_eq!(wf, back);
 }
 
+#[test]
+fn actions_ring_is_available_to_normal_and_gesture_pickers() {
+    assert_eq!(Action::ShowActionsRing.label(), "Actions Ring");
+    assert_eq!(Action::ShowActionsRing.category(), Category::System);
+    assert!(Action::catalog().contains(&Action::ShowActionsRing));
+    assert_eq!(
+        RingAction::new(Action::ShowActionsRing),
+        Err(RingActionError::RecursiveTrigger)
+    );
+}
+
 // ── Binding (merged model) serde routing ──────────────────────────────────
 
 /// On-disk shape: a `ButtonId` → [`Binding`] map, as `DeviceConfig.bindings`
@@ -167,6 +196,27 @@ fn binding_gesture_roundtrips() {
     bindings.insert(ButtonId::GestureButton, Binding::Gesture(map.clone()));
     let back = binding_roundtrip(bindings);
     assert_eq!(back[&ButtonId::GestureButton], Binding::Gesture(map));
+}
+
+#[test]
+fn binding_long_press_roundtrips_without_overlapping_other_table_shapes() {
+    let binding = Binding::LongPress(LongPressBinding::new(Action::Copy, Action::MissionControl));
+    let back = binding_roundtrip(BTreeMap::from([(ButtonId::Back, binding.clone())]));
+    assert_eq!(back[&ButtonId::Back], binding);
+
+    let toml = toml::to_string_pretty(&BindingWrapper { bindings: back }).expect("serialize");
+    assert!(toml.contains("short = \"Copy\""));
+    assert!(toml.contains("long = \"MissionControl\""));
+    assert!(!toml.contains("LongPress"));
+}
+
+#[test]
+fn binding_long_press_requires_exact_short_and_long_fields() {
+    let missing_long = "[bindings.Back]\nshort = \"Copy\"";
+    assert!(toml::from_str::<BindingWrapper>(missing_long).is_err());
+
+    let unknown = "[bindings.Back]\nshort = \"Copy\"\nlong = \"Paste\"\nthreshold_ms = 900";
+    assert!(toml::from_str::<BindingWrapper>(unknown).is_err());
 }
 
 /// The untagged-routing safety guard. A TOML table keyed by ANY
@@ -259,10 +309,13 @@ fn persisted_action_variant_names_are_stable() {
         Action::RunAppleScript(String::new()),
         Action::RunShellCommand(String::new()),
         Action::Workflow(Vec::new()),
-        Action::ShowActionsRing,
         Action::OpenApplication(
             ApplicationTarget::new("/Applications/OpenLogi.app", "OpenLogi")
                 .unwrap_or_else(|error| panic!("valid target failed: {error}")),
+        ),
+        Action::HoldShortcut(
+            "F2".parse()
+                .unwrap_or_else(|error| panic!("valid shortcut failed: {error}")),
         ),
     ]);
     let mut actual: Vec<String> = actions
@@ -293,6 +346,7 @@ fn persisted_action_variant_names_are_stable() {
         "Find",
         "HorizontalScrollLeft",
         "HorizontalScrollRight",
+        "HoldShortcut",
         "LaunchpadShow",
         "LeftClick",
         "LockScreen",
@@ -467,6 +521,62 @@ fn haptic_panel_defaults_to_opening_the_actions_ring() {
     assert!(ButtonId::ALL.contains(&ButtonId::HapticPanel));
 }
 
+#[test]
+fn gesture_mode_excludes_primary_clicks_and_every_wheel_control() {
+    let supported: Vec<_> = ButtonId::ALL
+        .into_iter()
+        .filter(|button| button.supports_gesture_mode())
+        .collect();
+
+    assert_eq!(
+        supported,
+        vec![
+            ButtonId::Back,
+            ButtonId::Forward,
+            ButtonId::DpiToggle,
+            ButtonId::GestureButton,
+            ButtonId::HapticPanel,
+        ]
+    );
+}
+
+#[test]
+fn wheel_tilt_defaults_to_the_scroll_its_firmware_already_does() {
+    // The seed has to match the native behavior on both sides: the capture
+    // plan diverts a control only when its binding leaves the default, so any
+    // other seed would divert an untouched tilt and kill horizontal scroll.
+    assert_eq!(
+        default_binding(ButtonId::WheelTiltLeft),
+        Action::HorizontalScrollLeft
+    );
+    assert_eq!(
+        default_binding(ButtonId::WheelTiltRight),
+        Action::HorizontalScrollRight
+    );
+    for tilt in [ButtonId::WheelTiltLeft, ButtonId::WheelTiltRight] {
+        assert!(ButtonId::ALL.contains(&tilt));
+        // A tilt reaches the host over HID++ diversion only: the OS hook sees
+        // a horizontal scroll, not a button, and it swipes nothing.
+        assert!(!tilt.is_os_hook_button());
+        assert!(!tilt.is_hidpp_gesture_source());
+    }
+}
+
+#[test]
+fn thumbwheel_defaults_match_normalised_native_direction() {
+    // HID++ capture normalises the per-model firmware polarity to physical
+    // forward/up. The defaults must then reproduce native horizontal scroll,
+    // including when sensitivity alone causes the wheel to be diverted.
+    assert_eq!(
+        default_binding(ButtonId::ThumbwheelScrollUp),
+        Action::HorizontalScrollLeft
+    );
+    assert_eq!(
+        default_binding(ButtonId::ThumbwheelScrollDown),
+        Action::HorizontalScrollRight
+    );
+}
+
 // ── Effect classification ─────────────────────────────────────────────────
 //
 // `Action::effect()` is the platform-neutral IR `openlogi-inject`'s three
@@ -494,6 +604,13 @@ fn power_user_and_device_side_actions_lower_to_the_expected_bucket() {
         .unwrap_or_else(|error| panic!("valid shortcut failed: {error}"));
     let custom_shortcut = Action::CustomShortcut(combo);
     assert_matches!(custom_shortcut.effect(), Effect::Key(_));
+
+    let hold_shortcut = Action::HoldShortcut(
+        "Ctrl+Space"
+            .parse()
+            .unwrap_or_else(|error| panic!("valid shortcut failed: {error}")),
+    );
+    assert_matches!(hold_shortcut.effect(), Effect::HeldKey(_));
 
     let type_text = Action::TypeText("hi".into());
     assert_matches!(type_text.effect(), Effect::Text("hi"));

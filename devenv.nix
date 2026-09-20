@@ -47,6 +47,9 @@ in
       cmake
       sccache
       prek
+      typos
+      # The `ast-grep` CI job and the prek hook of the same name.
+      ast-grep
       # The `shell` CI job and the prek hooks of the same name.
       shellcheck
       shfmt
@@ -85,7 +88,15 @@ in
     # plus prebuilt import libs (no `cc`-compiled C), so it lints cleanly. It is
     # a fast proxy for CI's authoritative `clippy (windows)` (msvc); building a
     # runnable .exe would additionally need pkgsCross.mingwW64 and is out of scope.
-    targets = [ "x86_64-pc-windows-gnu" ];
+    # `wasm32-unknown-unknown` is not a shipping target: nothing here is built
+    # for the browser. It exists so `cargo check` can *prove* the portable
+    # layer stays portable — a crate that has no business touching the host
+    # (protocol codec, device model) fails to compile here the moment it picks
+    # up a dependency that does. Discipline drifts; a compiler does not.
+    targets = [
+      "x86_64-pc-windows-gnu"
+      "wasm32-unknown-unknown"
+    ];
   };
 
   enterShell = ''
@@ -133,11 +144,11 @@ in
       '';
     };
     "openlogi:i18n-upload" = {
-      description = "Upload en.yml sources and per-language translations to Crowdin.";
+      description = "Upload en.toml sources and per-language translations to Crowdin.";
       exec = ''
         set -e
-        ${pkgs.crowdin-cli}/bin/crowdin upload sources
-        ${pkgs.crowdin-cli}/bin/crowdin upload translations
+        ${pkgs.crowdin-cli}/bin/crowdin upload sources --config .config/crowdin.yml
+        ${pkgs.crowdin-cli}/bin/crowdin upload translations --config .config/crowdin.yml
       '';
     };
     "openlogi:i18n-download" = {
@@ -148,12 +159,13 @@ in
         ${pkgs.python3}/bin/python3 .github/scripts/i18n/merge_crowdin_download.py --self-test
         before="$(mktemp -d)"
         trap 'rm -rf "$before"' EXIT
-        cp crates/openlogi-ui/locales/*.yml "$before/"
-        ${pkgs.crowdin-cli}/bin/crowdin download --skip-untranslated-strings
+        cp crates/openlogi-ui/locales/*.toml "$before/"
+        ${pkgs.crowdin-cli}/bin/crowdin download --config .config/crowdin.yml \
+          --skip-untranslated-strings
         ${pkgs.python3}/bin/python3 .github/scripts/i18n/merge_crowdin_download.py \
           --before "$before" \
           --locales crates/openlogi-ui/locales \
-          --en crates/openlogi-ui/locales/en.yml
+          --en crates/openlogi-ui/locales/en.toml
         cargo test -p openlogi-desktop i18n
       '';
     };

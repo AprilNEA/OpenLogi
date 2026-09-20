@@ -18,6 +18,10 @@ env:
   CARGO_INCREMENTAL: 0
   MACOSX_DEPLOYMENT_TARGET: "13.0"
   DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+  RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: "true"
+  # Tag-scoped cache entries cannot warm the next release.
+  SCCACHE_GHA_RW_MODE: READ_ONLY
 
 jobs:
   # Build (and sign/notarize) every platform's installers. The build matrix
@@ -45,15 +49,15 @@ jobs:
       contents: read
       pull-requests: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 10.11.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: pnpm
@@ -62,7 +66,7 @@ jobs:
       - name: Load Codex release-notes credentials from 1Password
         id: release_notes_config
         continue-on-error: true
-        uses: 1password/load-secrets-action@v4
+        uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
         with:
           export-env: false
         env:
@@ -121,19 +125,24 @@ jobs:
       contents: write
     steps:
       # Needed to build & run the xtask manifest generator below.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
-      # Match CI's RUSTFLAGS so the rust-cache env hash hits linux-stable-debug.
-      - name: Align rust-cache env with CI
+      # Match CI so Cargo inputs and sccache compiler objects are reusable.
+      - name: Align compiler inputs with CI
         run: echo "RUSTFLAGS=-D warnings" >> "$GITHUB_ENV"
+
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.16.0"
 
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1-rust
+          prefix-key: v2-cargo
           shared-key: linux-stable-debug
-          # Tag publish is not a useful cache writer; restore CI deps only.
+          cache-targets: false
+          # Tag publish is not a useful cache writer; restore Cargo inputs only.
           save-if: false
 
       - uses: actions/download-artifact@v8
@@ -202,7 +211,7 @@ jobs:
 
       - name: Load static updater publishing config from 1Password
         id: r2_config
-        uses: 1password/load-secrets-action@v4
+        uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
         with:
           export-env: false
         env:
@@ -341,7 +350,7 @@ jobs:
     steps:
       # The token-minting action below is a local action, so the repo must be
       # on disk before it can run.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Mint homebrew-tap token (GitHub App)
         id: tap_token

@@ -78,6 +78,24 @@ pub fn aux_title_bar(title: impl Into<SharedString>, cx: &App) -> impl IntoEleme
     )
 }
 
+/// Restamp the native titles of the open auxiliary windows after a live
+/// language switch. The Linux client-side titlebar re-renders with the window
+/// refresh, but the macOS / Windows native titlebar keeps the string stamped
+/// at open. The main and update-consent windows are titled with the product
+/// name, which never changes.
+pub fn retitle_open(cx: &mut App) {
+    let registry = cx.default_global::<WindowRegistry>();
+    let retitles = [
+        (registry.settings, settings::window_title()),
+        (registry.add_device, add_device::window_title()),
+    ];
+    for (handle, title) in retitles {
+        if let Some(handle) = handle {
+            let _ = handle.update(cx, |_, window, _| window.set_window_title(&title));
+        }
+    }
+}
+
 /// Implemented by every auxiliary root view so [`open_or_focus`] can hand it
 /// the appearance observer to hold onto — dropping the [`Subscription`] would
 /// detach the OS light/dark tracking and leave the window stuck on one theme.

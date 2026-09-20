@@ -3,8 +3,8 @@
 //! Owns the CGEventTap hook and the HID++ device path (gesture capture, DPI,
 //! SmartShift), serves the GUI over a Unix-socket tarpc IPC, reconciles its own
 //! launchd autostart, and (macOS) hosts the menu-bar status item. The async
-//! core runs on a tokio runtime; on macOS the process main thread hosts the
-//! AppKit run loop the menu bar requires.
+//! core walks the state machine in `lifecycle` on a tokio runtime; on macOS
+//! the process main thread hosts the AppKit run loop the menu bar requires.
 
 // Without this Windows runs the exe as a console app and pops a terminal
 // window whenever the GUI's sibling spawn or the Run-key autostart starts the
@@ -15,13 +15,24 @@
     windows_subsystem = "windows"
 )]
 
-mod launch_agent;
+mod autostart;
+mod binary_watch;
+mod lifecycle;
+mod logging;
 mod overlay;
 mod pairing;
+#[cfg(target_os = "linux")]
+mod resume_linux;
 #[cfg(target_os = "windows")]
 mod resume_windows;
-mod self_restart;
+// The shared locale catalogs live in `openlogi-ui`; the negotiation that picks
+// one is `openlogi_core::locale`. `t!` resolves against a backend each binary
+// generates itself, hence the relative path — see
+// `tests::the_shared_catalog_is_wired_up` for why a wrong path is silent.
+rust_i18n::i18n!("../openlogi-ui/locales", fallback = "en");
 mod server;
+mod shutdown;
+mod startup;
 #[cfg(target_os = "macos")]
 mod status_item;
 mod takeover;
@@ -30,36 +41,20 @@ mod tray;
 #[cfg(target_os = "windows")]
 mod tray_windows;
 
-use std::sync::Arc;
-// Only the resume-notification flag is atomic now, and that exists on the two
-// platforms that have a native suspend/resume signal.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
-
-use openlogi_agent_core::action_ring::ActionRingManager;
-use openlogi_agent_core::event_monitor::EventMonitor;
-use openlogi_agent_core::hook_runtime::ActionDispatcher;
-use openlogi_agent_core::observable::ObservableState;
-use openlogi_agent_core::orchestrator::{Orchestrator, SharedRuntime};
-use openlogi_agent_core::{hook_runtime, watchers};
 use openlogi_core::config::Config;
-use openlogi_hook::Hook;
-use tokio::sync::Mutex;
 use tracing::{info, warn};
-use tracing_subscriber::EnvFilter;
-
-use crate::server::AgentServer;
 
 fn main() {
-    init_tracing();
+    logging::init();
 
     // Single-instance guard: the agent owns all device I/O, the CGEventTap, and
     // the IPC socket, so a second agent must never start — launchd's KeepAlive
     // racing the GUI's one-shot auto-spawn could otherwise bring up two, and the
     // loser would steal the socket and install a duplicate event tap. Held for
     // the whole process; the OS releases it on exit (crash-recovery is free).
-    let _guard = match openlogi_core::single_instance::acquire("agent.lock") {
+    let _guard = match openlogi_core::single_instance::acquire(
+        openlogi_core::single_instance::Role::Agent,
+    ) {
         Ok(g) => g,
         Err(openlogi_core::single_instance::InstanceError::AlreadyRunning { path }) => {
             // The holder may be a leftover from before this binary's update —
@@ -80,16 +75,23 @@ fn main() {
         }
     };
 
-    // Watch our own executable and restart as the new image when an app update
-    // replaces it — see `self_restart`. Only the lock-holding (real) agent
-    // watches, so a losing duplicate can't restart anything.
-    self_restart::spawn();
-    overlay::spawn();
+    // Every non-signal process transition reports to the lifecycle owner. In
+    // particular, the binary watcher must not exec or exit from its own thread:
+    // an armed lifecycle first releases firmware diversion.
+    let (shutdown_tx, shutdown_requests) = shutdown::request_channel();
+    // Only the lock-holding (real) agent watches, so a losing duplicate cannot
+    // restart anything. The overlay spawns only after the lifecycle decides the
+    // agent is wanted; a dormant agent must not bring a helper up.
+    binary_watch::spawn(shutdown_tx.clone());
 
     let config = Config::load_or_default().unwrap_or_else(|e| {
         warn!(error = %e, "could not load config.toml; using defaults");
         Config::default()
     });
+    // The tray renders localized strings; resolve the stored preference (or
+    // the system locale) before any menu is built. A live language switch
+    // reaches the running agent through `reload_config`.
+    openlogi_core::locale::activate(config.app_settings.language.as_deref());
 
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -106,21 +108,36 @@ fn main() {
     // the process main thread — so the async core (orchestrator, IPC, watchers,
     // hook) runs on the tokio runtime on a dedicated thread, and the main thread
     // runs AppKit. Elsewhere there is no tray, so just block on the core.
+    let device_io_signal = openlogi_hid::host::device_io_signal();
     #[cfg(target_os = "macos")]
     {
+        // Fail closed before the core thread can enumerate or open HID devices.
+        // AppKit releases this startup hold only after its workspace observers
+        // have received the initial session state and Core Graphics has
+        // reported whether the display is already asleep.
+        let _ = device_io_signal.suspend();
         // Read the menu-bar preference before `config` moves into the core
         // thread; the main thread hosts the tray.
         let show_in_menu_bar = config.app_settings.show_in_menu_bar;
-        let resume_pending = Arc::new(AtomicBool::new(false));
-        let core_resume_pending = Arc::clone(&resume_pending);
+        let app_icon = config.app_settings.app_icon;
+        // The tray waits for the core to declare the agent *armed*: a dormant
+        // agent (launch_at_login off, started at login, no client yet) must
+        // not put an icon in the menu bar only to vanish seconds later. A
+        // dropped sender means the core exited without arming — fall through
+        // and let the process end.
+        let (armed_tx, armed_rx) = std::sync::mpsc::channel::<()>();
         if let Err(e) = std::thread::Builder::new()
             .name("openlogi-agent-core".into())
-            .spawn(move || runtime.block_on(run(config, core_resume_pending)))
+            .spawn(move || {
+                runtime.block_on(lifecycle::run(config, shutdown_requests, armed_tx));
+            })
         {
             warn!(error = %e, "could not spawn the agent core thread; exiting");
             return;
         }
-        tray::run_app_loop(show_in_menu_bar, resume_pending);
+        if armed_rx.recv().is_ok() {
+            tray::run_app_loop(show_in_menu_bar, app_icon, device_io_signal, shutdown_tx);
+        }
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -128,294 +145,19 @@ fn main() {
         // (message pump included); the async core keeps the main thread.
         #[cfg(target_os = "windows")]
         {
-            tray_windows::spawn(config.app_settings.show_in_menu_bar);
-            // Native resume notifications feed the same seam the macOS
-            // workspace observer does: the core replays volatile settings
-            // when the flag is set.
-            let resume_pending = Arc::new(AtomicBool::new(false));
-            resume_windows::register(Arc::clone(&resume_pending));
-            runtime.block_on(run(config, resume_pending));
+            tray_windows::spawn(config.app_settings.show_in_menu_bar, shutdown_tx.clone());
+            // Native resume notifications feed the same event seam as macOS
+            // and Linux: inventory wakes immediately and replays volatile
+            // settings on its settled authoritative snapshot.
+            resume_windows::register(device_io_signal.clone());
         }
-        #[cfg(not(target_os = "windows"))]
-        runtime.block_on(run(config));
+        #[cfg(target_os = "linux")]
+        resume_linux::register(device_io_signal.clone());
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+        drop(device_io_signal);
+        runtime.block_on(lifecycle::run(config, shutdown_requests));
     }
 }
 
-/// Start the HID++ background sessions that do not need Accessibility.
-fn spawn_hidpp_watchers(shared: &SharedRuntime, dispatcher: ActionDispatcher) {
-    watchers::gesture::spawn(
-        shared.capture_plans.clone(),
-        shared.capture_channel.clone(),
-        shared.receiver_access.clone(),
-        dispatcher.clone(),
-    );
-    watchers::host_switch::spawn(
-        shared.host_switch_links.clone(),
-        shared.channel_pool.clone(),
-        shared.receiver_access.clone(),
-    );
-    watchers::keyboard::spawn(
-        shared.keyboard_spec.clone(),
-        shared.keyboard_channel.clone(),
-        shared.receiver_access.clone(),
-        shared.channel_registry.clone(),
-        dispatcher,
-    );
-}
-
-fn action_ring_runtime(
-    shared: &SharedRuntime,
-) -> (
-    Arc<ActionRingManager>,
-    tokio::sync::mpsc::UnboundedReceiver<Option<String>>,
-    ActionDispatcher,
-) {
-    let manager = Arc::new(ActionRingManager::default());
-    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
-    let dispatcher = ActionDispatcher::new(
-        shared.dpi_cycle.clone(),
-        shared.capture_channel.clone(),
-        shared.channel_registry.clone(),
-        shared.receiver_access.clone(),
-        sender,
-    );
-    (manager, receiver, dispatcher)
-}
-
-/// Install the OS mouse hook now that Accessibility is granted, or say why it
-/// stays off. `None` means no hook is running, which is what the observable
-/// state reports either way.
-fn start_hook(
-    capture_mouse_events: bool,
-    shared: &SharedRuntime,
-    dispatcher: &ActionDispatcher,
-    event_monitor: &Arc<EventMonitor>,
-) -> Option<Hook> {
-    if !capture_mouse_events {
-        info!(
-            "OS mouse hook disabled by app_settings.capture_mouse_events — \
-             button remapping is off"
-        );
-        return None;
-    }
-    info!("accessibility granted — installing OS mouse hook");
-    hook_runtime::start(
-        shared.hook_maps.clone(),
-        shared.keyboard_bindings.clone(),
-        dispatcher.clone(),
-        Arc::clone(event_monitor),
-    )
-}
-
-async fn begin_action_ring(
-    orchestrator: &Mutex<Orchestrator>,
-    action_ring: &ActionRingManager,
-    ring_haptics: &server::RingHapticPlayer,
-    device_key: Option<&str>,
-) {
-    // A second trigger press while the ring is showing closes it.
-    if action_ring.dismiss_active() {
-        return;
-    }
-    if let Some(session) = orchestrator.lock().await.action_ring_session(device_key) {
-        // Arm the firmware haptic engine before the first buzz: some power
-        // transitions clear its enabled state, after which plays are accepted
-        // without any physical feedback. Sequenced through the haptic worker
-        // so the first hover cannot race a still-disarmed engine.
-        ring_haptics.arm(session.haptic_route.clone());
-        action_ring.begin(session);
-    }
-}
-
-/// Prompt for Accessibility when the enabled mouse hook needs it.
-fn prompt_missing_accessibility(capture_mouse_events: bool) {
-    // With the hook disabled the agent needs no Accessibility at all, so the
-    // opt-out also silences that prompt.
-    if capture_mouse_events && !Hook::has_accessibility() {
-        Hook::prompt_accessibility();
-    }
-}
-
-/// Request Input Monitoring before starting the HID inventory on macOS.
-///
-/// The agent (not the GUI) owns every HID++ device open, so it must be the
-/// binary the user authorizes. A newly granted permission requires a process
-/// relaunch before macOS lets the agent open HID devices.
-#[cfg(target_os = "macos")]
-async fn request_input_monitoring() {
-    // Without this, macOS never registers a decision at all:
-    // `IOHIDDeviceOpen` is silently denied, the permission never appears in
-    // System Settings for the user to grant, and no HID++ device is ever
-    // discovered. Wait for the blocking consent dialog before starting the
-    // inventory so it cannot cache the pre-grant access state.
-    if !openlogi_hid::permissions::has_access() {
-        let access_after_prompt = tokio::task::spawn_blocking(|| {
-            openlogi_hid::permissions::request_access();
-            openlogi_hid::permissions::has_access()
-        })
-        .await;
-        match access_after_prompt {
-            Ok(true) => self_restart::relaunch_after_input_monitoring_grant(),
-            Ok(false) => {}
-            Err(e) => {
-                warn!(error = %e, "Input Monitoring permission request task failed");
-            }
-        }
-    }
-}
-
-async fn run(
-    config: Config,
-    #[cfg(any(target_os = "macos", target_os = "windows"))] resume_pending: Arc<AtomicBool>,
-) {
-    // Reconcile the agent's launch-at-login autostart and clear the legacy GUI
-    // LaunchAgent, before `config` moves into the orchestrator.
-    launch_agent::reconcile(config.app_settings.launch_at_login);
-
-    // Read the hook kill-switch before `config` moves into the orchestrator.
-    // Startup-only on purpose (like `show_in_menu_bar`): flipping it requires
-    // an agent restart, which the config docs state.
-    let capture_mouse_events = config.app_settings.capture_mouse_events;
-
-    prompt_missing_accessibility(capture_mouse_events);
-    #[cfg(target_os = "macos")]
-    request_input_monitoring().await;
-
-    // The orchestrator is shared with the IPC server (which serves inventory /
-    // reload / status) and mutated by the watcher select loop, so it lives
-    // behind an async mutex. Locks are brief (a map rebuild or a clone).
-    // One cell holds everything the GUI can observe. The orchestrator
-    // republishes the device and config facts from its own mutators; the hook
-    // facts are published by the select loop below, which owns the hook.
-    let observable = Arc::new(ObservableState::new(env!("CARGO_PKG_VERSION").to_string()));
-    let orchestrator = Arc::new(Mutex::new(Orchestrator::new(
-        config,
-        Arc::clone(&observable),
-    )));
-    let shared = orchestrator.lock().await.shared();
-    let (action_ring, mut action_ring_rx, dispatcher) = action_ring_runtime(&shared);
-
-    // Live event monitor: shared between the hook callback (which mirrors events
-    // into it) and the IPC server (which the GUI polls). The janitor turns it
-    // back off once the GUI stops polling.
-    let event_monitor = Arc::new(EventMonitor::default());
-    tokio::spawn(Arc::clone(&event_monitor).run_idle_janitor());
-
-    // Pairing runs in the agent (it owns device I/O); the GUI drives it over IPC.
-    let pairing = Arc::new(pairing::PairingManager::new(
-        shared.clone(),
-        Arc::clone(&observable),
-    ));
-
-    // HID++ watchers need no Accessibility permission — start them up front.
-    spawn_hidpp_watchers(&shared, dispatcher.clone());
-
-    let mut inventory_rx = watchers::inventory::spawn_with_registry(
-        Duration::from_secs(2),
-        shared.channel_registry.clone(),
-    );
-    let mut camera_rx = watchers::camera::spawn(Duration::from_secs(1));
-    let mut app_rx = watchers::foreground_app::spawn(Duration::from_secs(1));
-    let mut accessibility_rx = watchers::accessibility::spawn(Duration::from_millis(1200));
-
-    // IPC server: the GUI connects here for device state + "apply now" commands.
-    // The endpoint (Unix socket / Windows named pipe) is resolved inside
-    // `transport::bind`, called by `server::run`.
-    let server = AgentServer::new(
-        Arc::clone(&orchestrator),
-        shared.clone(),
-        Arc::clone(&observable),
-        Arc::clone(&pairing),
-        Arc::clone(&event_monitor),
-        Arc::clone(&action_ring),
-        dispatcher.clone(),
-    );
-    let ring_haptics = server.ring_haptics.clone();
-    tokio::spawn(server::run(server));
-
-    // The CGEventTap hook is installed once Accessibility is granted and dropped
-    // if it's revoked (the tap self-disables on revoke regardless; dropping the
-    // handle stops its thread).
-    let mut hook: Option<Hook> = None;
-
-    info!("openlogi-agent started");
-    // Set once the inventory channel closes (the watcher thread died), so the
-    // select stops polling a permanently-ready closed receiver.
-    let mut inventory_open = true;
-    let mut camera_open = true;
-    loop {
-        tokio::select! {
-            event = inventory_rx.recv(), if inventory_open => match event {
-                Some(watchers::inventory::InventoryEvent::Snapshot { inventories, standalone }) => {
-                    let mut orchestrator = orchestrator.lock().await;
-                    // The portable watcher catches long sleeps from a polling
-                    // gap. Native notifications (macOS workspace wakes,
-                    // Windows suspend/resume) also cover the sleeps that gap
-                    // misses; consume the coalesced signal at the exact point
-                    // that can replay it.
-                    #[cfg(any(target_os = "macos", target_os = "windows"))]
-                    if resume_pending.swap(false, Ordering::Relaxed) {
-                        info!("native resume notification — replaying volatile settings");
-                        orchestrator.reapply_volatile_on_next_refresh();
-                    }
-                    orchestrator.refresh_inventory(&inventories, &standalone);
-                }
-                Some(watchers::inventory::InventoryEvent::Unavailable) => {
-                    orchestrator.lock().await.mark_inventory_unavailable();
-                }
-                Some(watchers::inventory::InventoryEvent::SystemWake) => {
-                    // Devices likely power-cycled during the sleep; the next
-                    // snapshot re-applies their volatile settings (#189).
-                    orchestrator.lock().await.reapply_volatile_on_next_refresh();
-                }
-                // Watcher thread death (e.g. a panic inside the HID backend's
-                // enumerate) — without a snapshot the GUI would scan forever.
-                None => {
-                    warn!("inventory watcher channel closed — marking enumeration unavailable");
-                    orchestrator.lock().await.mark_inventory_unavailable();
-                    inventory_open = false;
-                }
-            },
-            event = camera_rx.recv(), if camera_open => if let Some(active) = event {
-                orchestrator.lock().await.set_camera_active(active);
-            } else {
-                #[cfg(target_os = "macos")]
-                warn!("camera watcher channel closed — disabling camera automation updates");
-                camera_open = false;
-            },
-            Some(bundle) = app_rx.recv() => {
-                orchestrator.lock().await.set_current_app(bundle);
-            }
-            Some(device_key) = action_ring_rx.recv() => {
-                begin_action_ring(&orchestrator, &action_ring, &ring_haptics, device_key.as_deref()).await;
-            }
-            Some(granted) = accessibility_rx.recv() => {
-                observable.set_accessibility_granted(granted);
-                if !granted {
-                    hook = None;
-                }
-                if granted && hook.is_none() {
-                    hook = start_hook(
-                        capture_mouse_events,
-                        &shared,
-                        &dispatcher,
-                        &event_monitor,
-                    );
-                }
-                // One publish for every path above: revoked, installed, kept,
-                // or never installed because capture is off.
-                observable.set_hook_installed(hook.is_some());
-            }
-            else => break,
-        }
-    }
-}
-
-fn init_tracing() {
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(
-            EnvFilter::try_from_env("OPENLOGI_LOG").unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
-}
+#[cfg(test)]
+mod tests;

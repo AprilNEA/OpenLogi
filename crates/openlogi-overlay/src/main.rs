@@ -14,7 +14,7 @@
 // crate this one already depends on for locale negotiation.
 rust_i18n::i18n!("../openlogi-ui/locales", fallback = "en");
 
-mod agent;
+mod ipc;
 mod platform;
 mod ring;
 mod session;
@@ -24,29 +24,24 @@ use std::sync::Arc;
 use anyhow::Result;
 use gpui::AppContext as _;
 use tracing::warn;
-use tracing_subscriber::EnvFilter;
 
 use openlogi_core::action_ring::DISPLAY_LIFETIME;
 
-use crate::agent::{Ipc, OverlayCommand, spawn_ipc};
-use crate::ring::{RingView, ring_window_options};
+use crate::ipc::OverlayCommand;
+use crate::platform::RingPlacement;
+use crate::ring::RingView;
 use crate::session::{ClickAwaySession, claim_the_role, spawn_click_away_dismissal};
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(
-            EnvFilter::try_from_env("OPENLOGI_LOG").unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
+    openlogi_core::logging::init_stderr();
 
-    openlogi_ui::locale::activate(None);
+    openlogi_core::locale::activate(None);
     // Held for the whole run: dropping it hands the role to the replacement.
     let _tenancy = claim_the_role()?;
-    let Ipc {
+    let ipc::Handle {
         mut invocations,
         commands,
-    } = spawn_ipc();
+    } = ipc::spawn();
 
     let mut app = gpui_platform::application().with_assets(openlogi_ui::action_icons::ActionIcons);
     app = app.with_quit_mode(gpui::QuitMode::Explicit);
@@ -67,22 +62,38 @@ fn main() -> Result<()> {
                     });
                     continue;
                 };
-                openlogi_ui::locale::activate(invocation.language.as_deref());
+                openlogi_core::locale::activate(invocation.language.as_deref());
                 cx.update(|cx| {
-                    live_session.clear();
                     for handle in cx.windows() {
                         let _ = handle.update(cx, |_, window, _| window.remove_window());
                     }
-                    let options = ring_window_options(cx);
+                    let placement = match RingPlacement::capture(cx) {
+                        Ok(placement) => placement,
+                        Err(error) => {
+                            warn!(%error, "could not locate Actions Ring display");
+                            let _ = commands.send(OverlayCommand::Cancel {
+                                session_id: invocation.session_id,
+                            });
+                            return;
+                        }
+                    };
                     let commands = commands.clone();
                     let timeout_commands = commands.clone();
                     let session_id = invocation.session_id;
-                    match cx.open_window(options, |_, cx| {
-                        cx.new(|_| RingView::new(invocation, commands))
+                    match cx.open_window(placement.window_options(), |_, cx| {
+                        cx.new(|_| RingView::new(invocation, commands, &live_session))
                     }) {
                         Ok(handle) => {
-                            live_session.set(session_id);
-                            platform::configure_windows();
+                            if let Err(error) = handle
+                                .update(cx, |_, window, _| placement.show(window))
+                                .and_then(std::convert::identity)
+                            {
+                                warn!(%error, "could not position Actions Ring window");
+                                let _ = handle.update(cx, |_, window, _| window.remove_window());
+                                let _ =
+                                    timeout_commands.send(OverlayCommand::Cancel { session_id });
+                                return;
+                            }
                             cx.spawn(async move |cx| {
                                 cx.background_executor().timer(DISPLAY_LIFETIME).await;
                                 if handle
@@ -106,18 +117,4 @@ fn main() -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-
-    /// The catalog this binary translates against lives in `openlogi-ui` and is
-    /// reached by the relative path in the `i18n!` at the top. A wrong path
-    /// there does **not** fail the build — `rust_i18n` compiles it to an empty
-    /// catalog, and every ring label silently renders as its English key in all
-    /// 20 locales. Pin one action label in a non-English locale so that
-    /// breakage is loud.
-    #[test]
-    fn the_shared_catalog_is_wired_up() {
-        rust_i18n::set_locale("zh-CN");
-        assert_eq!(rust_i18n::t!("Left Click"), "左键单击");
-        rust_i18n::set_locale("en");
-    }
-}
+mod tests;

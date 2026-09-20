@@ -6,30 +6,37 @@
 //! exposes exact device-supported values once the list is known.
 
 use gpui::{
-    AnyElement, AppContext as _, BorrowAppContext as _, Context, Entity, InteractiveElement,
-    IntoElement, ParentElement, Render, SharedString, Styled, Subscription, Window, div, px,
+    AnyElement, Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, Window,
+    div, px,
 };
 use gpui_component::{
-    IconName, Selectable as _, Sizable as _,
+    Icon, IconName, Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    slider::{Slider, SliderEvent, SliderState},
+    slider::{Slider, SliderState},
     v_flex,
 };
-use openlogi_core::hid::{DeviceRoute, Dpi, DpiCapabilities};
+use openlogi_core::hid::{Dpi, DpiCapabilities};
 use tracing::debug;
 
-use crate::state::{AppState, DeviceKey, DpiStatus};
-use crate::ui::device_read::issue_device_read;
+use crate::state::{AppState, DeviceKey, DpiLoad, StateEvent};
+use crate::ui::commit_slider::{CommitSlider, SliderRange};
+use crate::ui::components::PresetChip;
 use crate::ui::status::{retry_line, status_line};
-use crate::ui::theme::{self, Palette, SelectableStyle, Typography as _};
+use crate::ui::theme::{self, Palette, Typography as _};
 
 pub struct DpiPanel {
-    slider_state: Option<Entity<SliderState>>,
-    slider_sub: Option<Subscription>,
-    slider_key: Option<String>,
-    slider_shape: Option<SliderShape>,
+    /// Rebuilt whenever the selected device or its reported range changes,
+    /// because a slider's range is fixed when it is built.
+    slider: Option<DpiSlider>,
     _state_obs: Subscription,
+}
+
+/// The slider together with what it was built for.
+struct DpiSlider {
+    key: DeviceKey,
+    shape: SliderShape,
+    slider: CommitSlider<Dpi>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,10 +47,11 @@ struct SliderShape {
 }
 
 struct DpiPanelSnapshot {
-    device_key: DeviceKey,
+    /// The active device, or `None` when nothing is selected.
+    device_key: Option<DeviceKey>,
     dpi: Dpi,
     presets: Vec<Dpi>,
-    status: DpiStatus,
+    status: DpiLoad,
     /// Whether the active device currently has a usable route. An offline
     /// device sits in `Unknown` forever (discovery can't start without a
     /// route), so the UI must say "offline" rather than "reading…".
@@ -52,54 +60,22 @@ struct DpiPanelSnapshot {
 
 impl DpiPanel {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        // Repaint when the carousel switches devices or DPI discovery
+        // Repaint when the active device changes or DPI discovery
         // completes. The slider entity is rebuilt in `render` whenever the
         // selected device or reported range changes, because SliderState's
         // range is builder-only.
-        let state_obs = cx.observe_global::<AppState>(|_panel, cx| cx.notify());
+        let state_obs =
+            AppState::repaint_on(cx, |event| matches!(event, StateEvent::DpiChanged(_)));
 
         Self {
-            slider_state: None,
-            slider_sub: None,
-            slider_key: None,
-            slider_shape: None,
+            slider: None,
             _state_obs: state_obs,
         }
     }
 
-    /// Kick off a one-shot DPI capability read for the active device when it
-    /// hasn't been queried yet.
-    ///
-    /// This is the *only* place discovery is triggered, and it runs from
-    /// `render`, so a device's capabilities — and therefore the normalization
-    /// applied to the hook's DPI-cycle presets — only populate once this panel
-    /// has been rendered for that device. A user who only ever cycles DPI via
-    /// the hook (window never opened) keeps the raw, un-normalized presets,
-    /// which are still valid DPI values. This lazy coupling is intentional:
-    /// `AppState` is a global without its own GPUI context to spawn from.
-    fn ensure_dpi_load(cx: &mut Context<Self>) {
-        let Some((key, route)) = dpi_load_target(cx) else {
-            return;
-        };
-
-        cx.update_global::<AppState, _>(|state, _| state.reads.dpi.mark_loading(&key));
-        // The agent owns device I/O: request the DPI read over IPC and store the
-        // typed reply off the render thread. The typed `WriteError` reaches
-        // `store_dpi_info` intact, so a permanent `FeatureUnsupported` /
-        // `EmptyDpiList` stops the panel re-probing on every reselect.
-        issue_device_read(
-            cx,
-            key,
-            route,
-            crate::services::ipc::Command::ReadDpi,
-            AppState::store_dpi_info,
-            |state, key| state.reads.dpi.clear_loading(key),
-        );
-    }
-
     fn ensure_slider(
         &mut self,
-        key: &str,
+        key: &DeviceKey,
         capabilities: &DpiCapabilities,
         dpi: Dpi,
         window: &mut Window,
@@ -110,118 +86,88 @@ impl DpiPanel {
             max: capabilities.max(),
             step: capabilities.step_hint(),
         };
-        if self.slider_key.as_deref() == Some(key) && self.slider_shape == Some(shape) {
-            if let Some(slider_state) = &self.slider_state {
-                let target = capabilities.nearest(dpi);
-                slider_state.update(cx, |state, cx| {
-                    // Only re-seat the thumb when `dpi` resolves to a *different
-                    // supported value* than the thumb currently rests on.
-                    // Comparing in the device's supported space (not raw slider
-                    // units) keeps a drag that lands between supported stops —
-                    // possible because the slider step is uniform but the
-                    // supported set may not be — from yanking the thumb back
-                    // every frame.
-                    let thumb = capabilities.nearest(Dpi::from_rounded(state.value().start()));
-                    if thumb != target {
-                        state.set_value(f32::from(target), window, cx);
-                    }
-                });
-            }
+        if let Some(current) = self
+            .slider
+            .as_ref()
+            .filter(|current| current.key == *key && current.shape == shape)
+        {
+            // Only re-seat the thumb when `dpi` resolves to a *different
+            // supported value* than the thumb currently rests on. Comparing in
+            // the device's supported space (not raw slider units) keeps a drag
+            // that lands between supported stops — possible because the slider
+            // step is uniform but the supported set may not be — from yanking
+            // the thumb back every frame.
+            current.slider.sync_snapped(
+                capabilities.nearest(dpi),
+                |thumb| capabilities.nearest(thumb),
+                window,
+                cx,
+            );
             return;
         }
 
-        let snapped = capabilities.nearest(dpi);
-        // Order matters: `SliderState` defaults to max=100, and `.min(N)`
-        // clamps the value against the current max. Setting max first keeps
-        // the intermediate state coherent for high-DPI devices.
-        let slider_state = cx.new(|_| {
-            SliderState::new()
-                .max(shape.max.into())
-                .min(shape.min.into())
-                .step(shape.step.into())
-                .default_value(f32::from(snapped))
+        let slider = CommitSlider::previewing(
+            SliderRange::new(shape.min, shape.max).step(shape.step.into()),
+            capabilities.nearest(dpi),
+            cx,
+            // Dragging drives the in-process state so the numeric label tracks
+            // the thumb. The HID write happens once on release to keep us from
+            // spamming the device with intermediate values.
+            |_, dpi, cx| {
+                let dpi =
+                    AppState::try_read(cx).map_or(dpi, |state| state.normalize_active_dpi(dpi));
+                debug!(%dpi, "slider change → AppState.dpi");
+                AppState::apply(cx, |state| state.set_dpi_preview(dpi));
+            },
+            |_, dpi, cx| {
+                let dpi =
+                    AppState::try_read(cx).map_or(dpi, |state| state.normalize_active_dpi(dpi));
+                // `commit_dpi` resolves the target at fire-time, so
+                // gallery-driven device switches route the write to the
+                // now-current device, not whichever was active when this
+                // slider was built.
+                AppState::apply(cx, |state| state.commit_dpi(dpi));
+            },
+        );
+        self.slider = Some(DpiSlider {
+            key: key.clone(),
+            shape,
+            slider,
         });
-
-        let slider_sub =
-            cx.subscribe(
-                &slider_state,
-                |_panel, _slider, event: &SliderEvent, cx| match event {
-                    // Continuous Change drives the in-process state so the numeric
-                    // label tracks the drag. The HID write happens once on Release
-                    // to keep us from spamming the device with intermediate values.
-                    SliderEvent::Change(value) => {
-                        let dpi = Dpi::from_rounded(value.start());
-                        let dpi = cx
-                            .try_global::<AppState>()
-                            .map_or(dpi, |state| state.normalize_active_dpi(dpi));
-                        debug!(%dpi, "slider change → AppState.dpi");
-                        cx.update_global::<AppState, _>(|state, _| state.dpi = dpi);
-                        cx.notify();
-                    }
-                    SliderEvent::Release(value) => {
-                        let dpi = Dpi::from_rounded(value.start());
-                        let dpi = cx
-                            .try_global::<AppState>()
-                            .map_or(dpi, |state| state.normalize_active_dpi(dpi));
-                        // `commit_dpi` resolves the target at fire-time, so
-                        // carousel-driven device switches route the write to the
-                        // now-current device, not whichever was active when this
-                        // slider entity was constructed.
-                        cx.update_global::<AppState, _>(|state, _| state.commit_dpi(dpi));
-                    }
-                },
-            );
-
-        self.slider_state = Some(slider_state);
-        self.slider_sub = Some(slider_sub);
-        self.slider_key = Some(key.to_string());
-        self.slider_shape = Some(shape);
     }
 }
 
 impl Render for DpiPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        Self::ensure_dpi_load(cx);
-
         let snapshot = dpi_panel_snapshot(cx);
         let pal = theme::palette(cx);
 
-        if let DpiStatus::Ready(info) = &snapshot.status {
-            self.ensure_slider(
-                snapshot.device_key.as_str(),
-                &info.capabilities,
-                snapshot.dpi,
-                window,
-                cx,
-            );
+        if let (DpiLoad::Ready(info), Some(key)) = (&snapshot.status, &snapshot.device_key) {
+            self.ensure_slider(key, &info.capabilities, snapshot.dpi, window, cx);
         } else {
-            self.slider_state = None;
-            self.slider_sub = None;
-            self.slider_key = None;
-            self.slider_shape = None;
+            self.slider = None;
         }
 
         // Highlight at most one chip: when several presets snap to the same
         // supported value as the current DPI, only the first is "active".
         let mut already_highlighted = false;
-        let preset_chips: Vec<AnyElement> = snapshot
+        let preset_chips: Vec<_> = snapshot
             .presets
             .iter()
             .enumerate()
             .map(|(idx, value)| {
-                let normalized = cx
-                    .try_global::<AppState>()
+                let normalized = AppState::try_read(cx)
                     .map_or(*value, |state| state.normalize_active_dpi(*value));
                 let active = !already_highlighted && normalized == snapshot.dpi;
                 already_highlighted |= active;
-                preset_chip(idx, *value, active, &snapshot.presets, pal)
+                preset_chip(idx, *value, active, &snapshot.presets)
             })
             .collect();
 
         let range_label = dpi_range_label(&snapshot.status, snapshot.reachable);
         let slider = slider_element(
             &snapshot.status,
-            self.slider_state.as_ref(),
+            self.slider.as_ref().map(|current| current.slider.slider()),
             snapshot.reachable,
             snapshot.device_key.clone(),
             pal,
@@ -238,7 +184,7 @@ impl Render for DpiPanel {
                         div()
                             .text_body()
                             .text_color(pal.text_muted)
-                            .child(tr!("DPI")),
+                            .child(tr!("pointer.dpi")),
                     )
                     .child(
                         div()
@@ -261,7 +207,7 @@ impl Render for DpiPanel {
                         div()
                             .text_caption()
                             .text_color(pal.text_muted)
-                            .child(tr!("Presets")),
+                            .child(tr!("common.presets")),
                     )
                     .child(
                         h_flex()
@@ -275,88 +221,98 @@ impl Render for DpiPanel {
 }
 
 fn dpi_panel_snapshot(cx: &mut Context<DpiPanel>) -> DpiPanelSnapshot {
-    cx.try_global::<AppState>()
+    AppState::try_read(cx)
         .and_then(|s| {
             let record = s.current_record()?;
             let device_key = record.device_key();
             Some(DpiPanelSnapshot {
-                status: s.reads.dpi.status(&device_key),
-                device_key,
-                dpi: s.dpi,
+                status: s.dpi_load_for(&device_key),
+                device_key: Some(device_key),
+                dpi: s.dpi(),
                 presets: s.dpi_presets(),
                 reachable: record.route.is_some(),
             })
         })
         .unwrap_or_else(|| DpiPanelSnapshot {
-            device_key: DeviceKey::default(),
+            device_key: None,
             dpi: crate::state::DEFAULT_DPI,
             presets: Vec::new(),
-            status: DpiStatus::Unsupported(tr!("No active device").to_string()),
+            status: DpiLoad::Unsupported(tr!("device.no_active_device").to_string()),
             reachable: false,
         })
 }
 
-fn dpi_range_label(status: &DpiStatus, reachable: bool) -> SharedString {
+fn dpi_range_label(status: &DpiLoad, reachable: bool) -> AnyElement {
     match status {
-        // The numeric range is digits and symbols only — nothing to translate.
-        DpiStatus::Ready(info) => format!(
-            "{}–{} · step {}",
-            info.capabilities.min(),
-            info.capabilities.max(),
-            info.capabilities.step_hint()
-        )
-        .into(),
-        DpiStatus::Unknown | DpiStatus::Loading if !reachable => {
-            tr!("Device offline — reconnect to read DPI range")
+        DpiLoad::Ready(info) => h_flex()
+            .gap_1()
+            .child(format!(
+                "{}–{}",
+                info.capabilities.min(),
+                info.capabilities.max()
+            ))
+            .child(Icon::empty().path("action-icons/dot.svg").size_3())
+            .child(tr!("pointer.dpi_step", step => info.capabilities.step_hint()))
+            .into_any_element(),
+        DpiLoad::Unknown | DpiLoad::Loading if !reachable => {
+            tr!("pointer.dpi_range_device_offline").into_any_element()
         }
-        DpiStatus::Unknown | DpiStatus::Loading => tr!("Loading device DPI range…"),
-        DpiStatus::Failed(message) => tr!("DPI read failed: %{message}", message => message),
-        DpiStatus::Unsupported(message) => {
-            tr!("DPI range unavailable: %{message}", message => message)
+        DpiLoad::Unknown | DpiLoad::Loading => {
+            tr!("pointer.loading_device_dpi_range").into_any_element()
+        }
+        DpiLoad::Failed(message) => {
+            tr!("pointer.dpi_read_failed", message => message).into_any_element()
+        }
+        DpiLoad::Unsupported(message) => {
+            tr!("pointer.dpi_range_unavailable", message => message).into_any_element()
         }
     }
 }
 
 fn slider_element(
-    status: &DpiStatus,
+    status: &DpiLoad,
     slider_state: Option<&Entity<SliderState>>,
     reachable: bool,
-    key: DeviceKey,
+    key: Option<DeviceKey>,
     pal: Palette,
 ) -> AnyElement {
     match (status, slider_state) {
         // A device with one supported DPI has nothing to drag — show the value.
-        (DpiStatus::Ready(info), _) if info.capabilities.min() == info.capabilities.max() => {
+        (DpiLoad::Ready(info), _) if info.capabilities.min() == info.capabilities.max() => {
             status_line(
-                tr!("Fixed DPI: %{dpi}", dpi => info.capabilities.min()),
+                tr!("pointer.fixed_dpi_value", dpi => info.capabilities.min()),
                 pal,
             )
+            .into_any_element()
         }
-        (DpiStatus::Ready(_), Some(slider_state)) => {
+        (DpiLoad::Ready(_), Some(slider_state)) => {
             Slider::new(slider_state).horizontal().into_any_element()
         }
-        (DpiStatus::Ready(_), None) => status_line(tr!("Preparing DPI slider…"), pal),
-        (DpiStatus::Unknown | DpiStatus::Loading, _) if !reachable => {
-            status_line(tr!("Device offline — DPI unavailable."), pal)
+        (DpiLoad::Ready(_), None) => {
+            status_line(tr!("pointer.preparing_dpi_slider"), pal).into_any_element()
         }
-        (DpiStatus::Unknown | DpiStatus::Loading, _) => {
-            status_line(tr!("Reading supported DPI values…"), pal)
+        (DpiLoad::Unknown | DpiLoad::Loading, _) if !reachable => {
+            status_line(tr!("pointer.device_offline_dpi_is_unavailable"), pal).into_any_element()
         }
-        // Clickable: reselecting is a no-op for a single-device carousel, so the
+        (DpiLoad::Unknown | DpiLoad::Loading, _) => {
+            status_line(tr!("pointer.reading_supported_dpi_values"), pal).into_any_element()
+        }
+        // Clickable: reselecting is a no-op for a single-device gallery, so the
         // retry must work in place.
-        (DpiStatus::Failed(_), _) => retry_line(
+        (DpiLoad::Failed(_), _) => retry_line(
             "dpi-retry",
-            tr!("Couldn't read DPI — click to retry."),
+            tr!("pointer.couldnt_read_dpi_click_to_retry"),
             pal,
             move |cx| {
-                cx.update_global::<AppState, _>(|state, _| state.reads.dpi.retry(&key));
-                cx.refresh_windows();
+                if let Some(key) = &key {
+                    AppState::apply(cx, |state| state.retry_dpi_read(key));
+                }
             },
-        ),
-        (DpiStatus::Unsupported(_), _) => status_line(
-            tr!("This device did not report Adjustable DPI support."),
-            pal,
-        ),
+        )
+        .into_any_element(),
+        (DpiLoad::Unsupported(_), _) => {
+            status_line(tr!("pointer.adjustable_dpi_unsupported"), pal).into_any_element()
+        }
     }
 }
 
@@ -364,19 +320,10 @@ const CHIP_H: f32 = 28.;
 
 /// One DPI preset rendered as a chip. Clicking the chip writes that DPI to
 /// the device and updates `AppState.dpi`; the small × removes the preset.
-fn preset_chip(idx: usize, value: Dpi, active: bool, presets: &[Dpi], pal: Palette) -> AnyElement {
+fn preset_chip(idx: usize, value: Dpi, active: bool, presets: &[Dpi]) -> impl IntoElement {
     let presets_for_remove: Vec<Dpi> = presets.to_vec();
-    h_flex()
-        .id(("dpi-preset-chip", idx))
-        .h(px(CHIP_H))
-        .px_2()
-        .gap_2()
-        .items_center()
-        .rounded(pal.control_radius)
-        .selected_border(active, pal)
-        .bg(pal.surface)
-        .selected_fill(active)
-        .hover(|s| s.bg(pal.surface_hover))
+    PresetChip::new(("dpi-preset-chip", idx))
+        .selected(active)
         .child(
             Button::new(("dpi-preset-apply", idx))
                 .compact()
@@ -390,14 +337,12 @@ fn preset_chip(idx: usize, value: Dpi, active: bool, presets: &[Dpi], pal: Palet
                     // Only apply once the supported DPI list is known, so the
                     // click writes a snapped, device-valid value — and can't be
                     // clobbered by a discovery result that lands afterwards.
-                    let Some(dpi) = cx
-                        .try_global::<AppState>()
+                    let Some(dpi) = AppState::try_read(cx)
                         .and_then(|s| Some(s.active_dpi_capabilities()?.nearest(value)))
                     else {
                         return;
                     };
-                    cx.update_global::<AppState, _>(|state, _| state.commit_dpi(dpi));
-                    cx.refresh_windows();
+                    AppState::apply(cx, |state| state.commit_dpi(dpi));
                 }),
         )
         .child(
@@ -410,42 +355,27 @@ fn preset_chip(idx: usize, value: Dpi, active: bool, presets: &[Dpi], pal: Palet
                     if idx < next.len() {
                         next.remove(idx);
                     }
-                    cx.update_global::<AppState, _>(|state, _| state.commit_dpi_presets(next));
-                    cx.refresh_windows();
+                    AppState::apply(cx, |state| state.commit_dpi_presets(next));
                 }),
         )
-        .into_any_element()
 }
 
 /// "+" chip that snapshots `AppState.dpi` as a new preset.
-fn add_preset_chip() -> AnyElement {
+fn add_preset_chip() -> impl IntoElement {
     Button::new("dpi-preset-add")
         .compact()
         .outline()
         .h(px(CHIP_H))
         .icon(IconName::Plus)
-        .label(tr!("Add"))
+        .label(tr!("common.add"))
         .on_click(|_event, _window, cx| {
             // Append the current DPI to the active device's preset list.
             // Duplicates are allowed — the user might want the same value
             // appearing at multiple cycle positions for muscle-memory reasons.
-            cx.update_global::<AppState, _>(|state, _| {
+            AppState::apply(cx, |state| {
                 let mut presets = state.dpi_presets();
-                presets.push(state.dpi);
-                state.commit_dpi_presets(presets);
+                presets.push(state.dpi());
+                state.commit_dpi_presets(presets)
             });
-            cx.refresh_windows();
         })
-        .into_any_element()
-}
-
-fn dpi_load_target(cx: &mut Context<DpiPanel>) -> Option<(DeviceKey, DeviceRoute)> {
-    cx.try_global::<AppState>().and_then(|state| {
-        let record = state.current_record()?;
-        let key = record.device_key();
-        if !state.reads.dpi.unqueried(&key) {
-            return None;
-        }
-        Some((key, record.route.clone()?))
-    })
 }

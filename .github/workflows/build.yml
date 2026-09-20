@@ -60,6 +60,11 @@ env:
   CARGO_INCREMENTAL: 0
   MACOSX_DEPLOYMENT_TARGET: "13.0"
   DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+  RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: "true"
+  # PR merge refs and release tags cannot warm another ref. Only dispatches
+  # and other branch-scoped runs write reusable compiler objects.
+  SCCACHE_GHA_RW_MODE: ${{ (github.event_name != 'pull_request' && github.ref_type != 'tag') && 'READ_WRITE' || 'READ_ONLY' }}
 
 jobs:
   # Opt-in gate for PR builds. Non-PR triggers (workflow_call / dispatch)
@@ -102,7 +107,10 @@ jobs:
     name: macOS DMG (${{ matrix.arch }})
     needs: should-build
     if: ${{ needs.should-build.outputs.run == 'true' }}
-    runs-on: ${{ matrix.runner }}
+    # Apple Silicon compiles both slices. Building the Intel slice on the arm64
+    # runner is supported by Rust and Xcode and avoids the much slower hosted
+    # Intel runner; every bundled Mach-O is checked below before it can ship.
+    runs-on: macos-latest
     # Bound a stuck brew/linker/notarize hang so it can't hold a PR build slot
     # for the 6-hour runner default (the signed path also notarizes).
     timeout-minutes: 60
@@ -111,34 +119,56 @@ jobs:
       matrix:
         include:
           - arch: arm64
-            runner: macos-latest
+            target: aarch64-apple-darwin
           - arch: x86_64
-            runner: macos-15-intel
+            target: x86_64-apple-darwin
     permissions:
       contents: read
     env:
       OPENLOGI_BUNDLE_ASSETS: ${{ vars.OPENLOGI_BUNDLE_ASSETS }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.16.0"
 
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1-rust
+          prefix-key: v2-cargo
           # Release profile (fat LTO) — never share with CI debug keys.
           shared-key: macos-stable-release
-          # Packaging never runs on master push; allow same-repo PRs/dispatch/release
-          # to refresh the shared release cache (few keys, not per-job thrash).
-          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+          cache-targets: false
+          # PR and tag caches are isolated to that ref. Restore there, but only
+          # save Cargo inputs from branch-scoped dispatches/callers.
+          save-if: ${{ github.event_name != 'pull_request' && github.ref_type != 'tag' }}
 
       - name: Verify runner architecture
-        run: test "$(uname -m)" = "${{ matrix.arch }}"
+        run: test "$(uname -m)" = arm64
+
+      # Pin both target builds to an Icon Composer-capable Xcode instead of
+      # relying on whatever `/Applications/Xcode.app` points at today.
+      - name: Select the Xcode both legs build with
+        run: |
+          # An unmatched glob stays literal, which `-d` then rejects — where
+          # `ls` would have failed the step under the shell's `-e -o pipefail`
+          # before this check could say what is actually wrong.
+          xcode=$(printf '%s\n' /Applications/Xcode_26*.app | sort -V | tail -1)
+          if [ ! -d "$xcode" ]; then
+            echo "No Xcode 26 on this runner; the app icon cannot be compiled." >&2
+            exit 1
+          fi
+          echo "OPENLOGI_DEVELOPER_DIR=$xcode/Contents/Developer" >> "$GITHUB_ENV"
+          echo "Building with $xcode"
 
       - name: Load release secrets from 1Password
         id: load_secrets
         if: ${{ inputs.sign }}
-        uses: 1password/load-secrets-action@v4
+        uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
         with:
           export-env: false
         env:
@@ -155,18 +185,21 @@ jobs:
           OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY: ${{ secrets.OP_R2_SECRET_ITEM }}/OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY
 
       - name: Cache Homebrew downloads
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/Library/Caches/Homebrew
             ~/Library/Caches/Homebrew/downloads
-          key: brew-macos-${{ runner.arch }}-librsvg-create-dmg-v1
+          key: brew-macos-${{ runner.arch }}-librsvg-create-dmg-cargo-bundle-v2
           restore-keys: |
             brew-macos-${{ runner.arch }}-
 
       - name: Install packaging tools
         run: |
-          brew install librsvg create-dmg
+          # cargo-bundle has bottles for both hosted macOS architectures.
+          # Installing the bottle avoids compiling the tool from source in
+          # every release leg before OpenLogi itself can start building.
+          brew install librsvg create-dmg cargo-bundle
 
       - name: Validate release secrets
         if: ${{ inputs.sign }}
@@ -210,10 +243,28 @@ jobs:
           set -euo pipefail
           export OPENLOGI_UPDATE_MANIFEST_URL="${OPENLOGI_UPDATE_BASE_URL%/}/channels/stable/latest.json"
           if [ "${{ inputs.sign }}" = "true" ]; then
-            cargo run -p xtask -- macos package --sign-identity "$APPLE_SIGNING_IDENTITY"
+            cargo run -p xtask -- macos package --target ${{ matrix.target }} --sign-identity "$APPLE_SIGNING_IDENTITY"
           else
-            cargo run -p xtask -- macos package
+            cargo run -p xtask -- macos package --target ${{ matrix.target }}
           fi
+
+      - name: Verify bundled architectures
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          app="target/release/bundle/osx/OpenLogi.app"
+          binaries=(
+            "$app/Contents/MacOS/openlogi-desktop"
+            "$app/Contents/MacOS/openlogi"
+            "$app/Contents/Library/LoginItems/OpenLogi Agent.app/Contents/MacOS/openlogi-agent"
+            "$app/Contents/Library/LoginItems/OpenLogi Overlay.app/Contents/MacOS/openlogi-overlay"
+          )
+          for binary in "${binaries[@]}"; do
+            archs=$(lipo -archs "$binary")
+            echo "$binary: $archs"
+            test "$archs" = "$EXPECTED_ARCH"
+          done
 
       # xtask stamps and verifies this itself; re-checking the artifact here is
       # deliberate redundancy, because a bundle that ships with the `.dev`
@@ -231,16 +282,16 @@ jobs:
             [ -f "$1/Contents/Resources/AppIcon.icns" ]
           }
           check "$app" "org.openlogi.openlogi" "OpenLogi"
-          check "$app/Contents/Library/LoginItems/OpenLogiAgent.app" "org.openlogi.agent" "OpenLogi Agent"
-          check "$app/Contents/Library/LoginItems/OpenLogiOverlay.app" "org.openlogi.overlay" "OpenLogi Overlay"
+          check "$app/Contents/Library/LoginItems/OpenLogi Agent.app" "org.openlogi.agent" "OpenLogi Agent"
+          check "$app/Contents/Library/LoginItems/OpenLogi Overlay.app" "org.openlogi.overlay" "OpenLogi Overlay"
 
       - name: Verify signed app bundle
         if: ${{ inputs.sign }}
         run: |
           set -euo pipefail
           app="target/release/bundle/osx/OpenLogi.app"
-          helper="$app/Contents/Library/LoginItems/OpenLogiAgent.app"
-          overlay="$app/Contents/Library/LoginItems/OpenLogiOverlay.app"
+          helper="$app/Contents/Library/LoginItems/OpenLogi Agent.app"
+          overlay="$app/Contents/Library/LoginItems/OpenLogi Overlay.app"
           cli="$app/Contents/MacOS/openlogi"
           codesign --verify --strict --verbose=2 "$app"
           [ -d "$helper" ] && codesign --verify --strict --verbose=2 "$helper"
@@ -328,21 +379,24 @@ jobs:
     # can't access a protected environment at all, then build fine).
     environment: ${{ inputs.sign && 'release' || '' }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      # Release builds need their own cache (crt-static RUSTFLAGS + --release).
-      # Shared per matrix.arch so labeled PR packaging and dispatch runs warm
-      # each other; tag-only saves were pure quota churn under the old per-ref
-      # keys, but a shared-key entry is restorable across PR/dispatch/release.
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.16.0"
+
+      # Both targets consume the same Cargo registry/git inputs. Compiler
+      # outputs stay isolated by sccache's command and target-triple hashes.
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1-rust
-          shared-key: windows-stable-release-${{ matrix.arch }}
-          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+          prefix-key: v2-cargo
+          shared-key: windows-stable-release
+          cache-targets: false
+          save-if: ${{ github.event_name != 'pull_request' && github.ref_type != 'tag' }}
 
       # Azure signing config lives in 1Password, matching the macOS job's secret flow.
       # load-secrets-action is a node action, so it runs on Windows runners too. The
@@ -351,7 +405,7 @@ jobs:
       - name: Load Azure signing config from 1Password
         id: azure_config
         if: ${{ inputs.sign }}
-        uses: 1password/load-secrets-action@v4
+        uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
         with:
           export-env: false
         env:
@@ -394,10 +448,10 @@ jobs:
       - name: Load static updater config from 1Password
         id: update_config
         if: ${{ inputs.sign }}
-        # Pinned to an immutable commit (matching crowdin.yml): this step runs
+        # Pinned to an immutable commit (matching the Crowdin workflow): this step runs
         # with the 1Password service-account token during signed release
         # builds, so a repointed mutable tag must not be able to swap the code.
-        uses: 1password/load-secrets-action@eb2efd0703da22a93c467f2d1ffbb6826c11e19c # v4.1.1
+        uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
         with:
           export-env: false
         env:
@@ -536,6 +590,9 @@ jobs:
             Write-Error "expected 4 staged files, found $staged — a name collision dropped one"
             exit 1
           }
+          # The MSI extracts this ZIP but only installs its explicitly listed
+          # executables, so the portable marker never enters an MSI install.
+          Copy-Item packaging\windows\openlogi-installation.json stage\openlogi-installation.json
           # Zipping after signing is safe: Authenticode lives in the PE files.
           $ref = $env:GITHUB_REF_NAME -replace '/', '-'
           Compress-Archive -Path stage\* -DestinationPath "dist\OpenLogi-$ref-windows-${{ matrix.arch }}.zip"
@@ -576,7 +633,7 @@ jobs:
     environment: ${{ inputs.sign && 'release' || '' }}
     steps:
       # Needed for packaging/windows/OpenLogi.wxs.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       # The portable zip from this arch's windows leg, containing the
       # already-signed OpenLogi.exe, openlogi-agent.exe, openlogi-overlay.exe,
@@ -600,7 +657,7 @@ jobs:
       - name: Load Azure signing config from 1Password
         id: azure_config
         if: ${{ inputs.sign }}
-        uses: 1password/load-secrets-action@v4
+        uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
         with:
           export-env: false
         env:
@@ -635,10 +692,12 @@ jobs:
         # Pinned exactly: a WiX point release can silently change the produced
         # MSI (validation, cab layout), and nothing in CI installs the MSI, so
         # drift would only surface on end-user machines. Bump deliberately.
-        # The Util extension (util:CloseApplication in OpenLogi.wxs) is pinned
-        # to the same version — WiX extensions release in lockstep with wix.
+        # The UI extension (the progress-only dialog flow) and Util extension
+        # (util:CloseApplication in OpenLogi.wxs) are pinned to the same version
+        # — WiX extensions release in lockstep with wix.
         run: |
           dotnet tool install --global wix --version 6.0.2
+          wix extension add --global WixToolset.UI.wixext/6.0.2
           wix extension add --global WixToolset.Util.wixext/6.0.2
 
       - name: Build the MSI
@@ -667,6 +726,7 @@ jobs:
           }
           New-Item -ItemType Directory -Force -Path out | Out-Null
           wix build packaging\windows\OpenLogi.wxs `
+            -ext WixToolset.UI.wixext `
             -ext WixToolset.Util.wixext `
             -arch ${{ matrix.msi_platform }} `
             -d Version=$version `
@@ -745,24 +805,34 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # The native build host defines the oldest GLIBC these binaries can
+          # load against. Keep both architectures on the documented 2.35 floor.
           - arch: amd64
-            runner: ubuntu-latest
+            runner: ubuntu-22.04
             nfpm_sha256: "d6417f99d5fa32bba7a4e007084615d3897651498c2e443118c26b9ec3b698a8"
           - arch: arm64
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-22.04-arm
             nfpm_sha256: "dc63aa7228ec70490bae67ad3146883055a055639dcf0dffc82fa965bac75a31"
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.16.0"
+
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1-rust
-          shared-key: linux-stable-release
-          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+          prefix-key: v2-cargo
+          # Cargo does not include the host GLIBC in its freshness checks. Do
+          # not share Cargo inputs under the Ubuntu 24.04 CI key; sccache hashes
+          # the compiler command and target environment independently.
+          shared-key: linux-jammy-stable-release
+          cache-targets: false
+          save-if: ${{ github.event_name != 'pull_request' && github.ref_type != 'tag' }}
 
       # The nfpm `arch` and the runner's native arch must agree — the packages
       # are built natively, not cross-compiled, so a mismatched runner would
@@ -803,6 +873,29 @@ jobs:
 
       - name: Build and package
         run: cargo run -p xtask -- linux package
+
+      - name: Verify GLIBC baseline
+        env:
+          MAX_GLIBC_VERSION: "2.35"
+        run: |
+          for binary in openlogi openlogi-desktop openlogi-overlay openlogi-agent; do
+            required=$(
+              readelf --version-info "target/release/$binary" \
+                | sed -n 's/.*Name: GLIBC_\([0-9][0-9.]*\).*/\1/p' \
+                | sort -Vu \
+                | tail -n 1
+            )
+            if [ -z "$required" ]; then
+              echo "could not determine the GLIBC requirement for $binary" >&2
+              exit 1
+            fi
+            echo "$binary requires GLIBC $required"
+            newest=$(printf '%s\n%s\n' "$MAX_GLIBC_VERSION" "$required" | sort -V | tail -n 1)
+            if [ "$newest" != "$MAX_GLIBC_VERSION" ]; then
+              echo "$binary exceeds the GLIBC $MAX_GLIBC_VERSION release baseline" >&2
+              exit 1
+            fi
+          done
 
       - name: Collect packages
         env:

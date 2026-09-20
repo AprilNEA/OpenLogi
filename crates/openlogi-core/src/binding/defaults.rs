@@ -7,34 +7,68 @@ use super::value::Binding;
 
 /// Sensible defaults for a fresh device so the panel isn't empty on first run.
 ///
-/// Thumbwheel / GestureButton defaults match what Logi Options+ ships for
-/// MX-line devices: thumb wheel click → App Exposé, gesture button →
-/// Mission Control. The thumb wheel isn't captured yet; the dedicated gesture button is
-/// (per-direction, see [`default_gesture_binding`]). The bindings persist
-/// regardless so the user only configures once.
+/// `GestureButton` matches what Logi Options+ ships for MX-line devices:
+/// gesture button → Mission Control, captured per-direction (see
+/// [`default_gesture_binding`]).
 ///
 /// `GestureButton`'s entry here is vestigial: in the merged [`Binding`] model
 /// the gesture button defaults to [`Binding::Gesture`] (see
 /// [`default_binding_for`]), so this single-action value is never the source of
 /// truth for it. It is retained only so the per-button-`Action` callers (the
 /// hook map, scroll defaults, labels) stay total.
+///
+/// [`ButtonId::Thumbwheel`] — the wheel's capacitive tap — is deliberately
+/// inert. The mouse model surfaces the wheel as one paired rotation control,
+/// so the tap has no GUI hotspot to discover or clear it, while the firmware
+/// reports a tap from incidental thumb contact (including mid-roll, from the
+/// ridges alone). Seeding it with a real action therefore fired that action
+/// for users who only changed the rotation bindings or the sensitivity — the
+/// two settings that divert the wheel over `0x2150` in the first place. A tap
+/// bound explicitly in the config still dispatches; only the seed is inert.
 #[must_use]
 pub fn default_binding(button: ButtonId) -> Action {
     match button {
         ButtonId::LeftClick => Action::LeftClick,
         ButtonId::RightClick => Action::RightClick,
         ButtonId::MiddleClick => Action::MiddleClick,
-        ButtonId::Back => Action::BrowserBack,
-        ButtonId::Forward => Action::BrowserForward,
+        // The main wheel's tilt scrolls horizontally in firmware. Seeding each
+        // side with the matching scroll action is what keeps a tilt the user
+        // never touched native: the capture plan diverts a control only when
+        // its binding leaves this default (see `capture_plan`), so an untouched
+        // tilt is never diverted and its firmware scroll is untouched.
+        #[expect(
+            clippy::match_same_arms,
+            reason = "the tilt and the thumb wheel are separate physical controls that happen to \
+                      scroll the same way; merging their arms would tie two independent defaults \
+                      together"
+        )]
+        ButtonId::WheelTiltLeft => Action::HorizontalScrollLeft,
+        #[expect(
+            clippy::match_same_arms,
+            reason = "see the left tilt above — same control pair, mirrored direction"
+        )]
+        ButtonId::WheelTiltRight => Action::HorizontalScrollRight,
+        // Preserve native side-button events unless explicitly rebound.
+        // BrowserBack/BrowserForward are dispatched navigation actions: using
+        // them as seeds would make the capture plan skip their HID++ diversion.
+        ButtonId::Back => Action::MouseBack,
+        ButtonId::Forward => Action::MouseForward,
         ButtonId::DpiToggle => Action::CycleDpiPresets,
-        ButtonId::Thumbwheel => Action::AppExpose,
-        // The thumb wheel scrolls horizontally by default: rotating it produces
-        // continuous horizontal scroll, with "up" → right and "down" → left.
-        // The wheel watcher renders these two actions as smooth, sensitivity-
-        // scaled scrolling rather than the discrete per-press burst a button
-        // would get (see `watchers::gesture`).
-        ButtonId::ThumbwheelScrollUp => Action::HorizontalScrollRight,
-        ButtonId::ThumbwheelScrollDown => Action::HorizontalScrollLeft,
+        #[expect(
+            clippy::match_same_arms,
+            reason = "the tap is inert because its captured events are noise (see above), \
+                      not because the control stays native like the keyboard arm below"
+        )]
+        ButtonId::Thumbwheel => Action::None,
+        // The thumb wheel scrolls horizontally in firmware: "up" (forward)
+        // scrolls left and "down" scrolls right. The device capture boundary
+        // normalises model-specific `0x2150 default_dir` polarity before these
+        // bindings are resolved, so the same physical direction reaches the
+        // same default on every model. The wheel watcher renders these actions
+        // as smooth, sensitivity-scaled scrolling rather than the discrete
+        // per-press burst a button would get (see `watchers::gesture`).
+        ButtonId::ThumbwheelScrollUp => Action::HorizontalScrollLeft,
+        ButtonId::ThumbwheelScrollDown => Action::HorizontalScrollRight,
         ButtonId::GestureButton => Action::MissionControl,
         ButtonId::HapticPanel => Action::ShowActionsRing,
         // Keyboard keys stay on their native firmware function until the user

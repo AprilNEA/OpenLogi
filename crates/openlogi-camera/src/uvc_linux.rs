@@ -27,12 +27,14 @@ const CID_BRIGHTNESS: u32 = 0x0098_0900;
 const CID_CONTRAST: u32 = 0x0098_0901;
 const CID_SATURATION: u32 = 0x0098_0902;
 const CID_AUTO_WHITE_BALANCE: u32 = 0x0098_090c;
+const CID_POWER_LINE_FREQUENCY: u32 = 0x0098_0918;
 const CID_WHITE_BALANCE_TEMPERATURE: u32 = 0x0098_091a;
 const CID_SHARPNESS: u32 = 0x0098_091b;
 
 /// `V4L2_CID_EXPOSURE_AUTO` — the Camera control class base.
 const CID_EXPOSURE_AUTO: u32 = 0x009a_0901;
 const CID_EXPOSURE_ABSOLUTE: u32 = 0x009a_0902;
+const CID_EXPOSURE_AUTO_PRIORITY: u32 = 0x009a_0903;
 const CID_FOCUS_ABSOLUTE: u32 = 0x009a_090a;
 const CID_FOCUS_AUTO: u32 = 0x009a_090c;
 const CID_ZOOM_ABSOLUTE: u32 = 0x009a_090d;
@@ -54,6 +56,8 @@ fn control_id(control: CameraControl) -> Option<u32> {
         CameraControl::Zoom => CID_ZOOM_ABSOLUTE,
         CameraControl::Focus => CID_FOCUS_ABSOLUTE,
         CameraControl::Exposure => CID_EXPOSURE_ABSOLUTE,
+        CameraControl::PowerLineFrequency => CID_POWER_LINE_FREQUENCY,
+        CameraControl::LowLightCompensation => CID_EXPOSURE_AUTO_PRIORITY,
         CameraControl::Brightness => CID_BRIGHTNESS,
         CameraControl::Contrast => CID_CONTRAST,
         CameraControl::Saturation => CID_SATURATION,
@@ -288,6 +292,11 @@ fn range_of(device: &Device, description: &Description) -> Option<ControlRange> 
         max: clamp_i32(description.maximum),
         default: clamp_i32(description.default),
         current: clamp_i32(current),
+        value_mask: description.items.as_ref().and_then(|items| {
+            items.iter().try_fold(0u32, |mask, (value, _)| {
+                (*value < u32::BITS).then_some(mask | (1u32 << *value))
+            })
+        }),
     })
 }
 

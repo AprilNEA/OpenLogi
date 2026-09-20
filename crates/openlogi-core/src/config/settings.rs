@@ -1,6 +1,6 @@
 //! App-wide and per-device *value* settings: [`AppSettings`], [`Appearance`],
-//! [`Lighting`], [`ScrollResolution`], [`WheelMode`] / [`SmartShift`], and
-//! the legacy [`GestureOwner`], plus their serde helpers.
+//! [`UiScale`], [`AppIcon`], [`Lighting`], [`ScrollResolution`], [`WheelMode`] /
+//! [`SmartShift`], and the legacy [`GestureOwner`], plus their serde helpers.
 
 use std::collections::BTreeMap;
 
@@ -26,6 +26,92 @@ pub enum Appearance {
     Light,
     /// Always use the dark variant of the selected theme.
     Dark,
+}
+
+/// User-selected scale for text and rem-based interface spacing.
+///
+/// The core stores a semantic choice rather than GPUI pixels; the desktop maps
+/// each variant's percentage onto the window's rem size. Keeping the supported
+/// range finite lets every layout be verified at every scale.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UiScale {
+    /// 90% of the standard interface size.
+    Small,
+    /// The standard interface size.
+    #[default]
+    Normal,
+    /// 110% of the standard interface size.
+    Large,
+    /// 125% of the standard interface size.
+    ExtraLarge,
+}
+
+impl UiScale {
+    /// Every supported scale, in the order Settings offers them.
+    pub const ALL: [Self; 4] = [Self::Small, Self::Normal, Self::Large, Self::ExtraLarge];
+
+    /// The displayed percentage for this scale.
+    #[must_use]
+    pub const fn percent(self) -> u16 {
+        match self {
+            Self::Small => 90,
+            Self::Normal => 100,
+            Self::Large => 110,
+            Self::ExtraLarge => 125,
+        }
+    }
+}
+
+/// Layout used for the Home device gallery.
+///
+/// This is a presentation preference: the GUI owns how each mode renders, while
+/// core keeps the persisted vocabulary platform-free alongside [`Appearance`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceViewMode {
+    /// Responsive cards that wrap to keep the finite device set visible.
+    #[default]
+    Grid,
+    /// Compact full-width rows for scanning identity and status.
+    List,
+    /// A horizontally scrolling row navigated with previous/next controls.
+    Carousel,
+}
+
+/// Which icon the app wears.
+///
+/// Variant names are one string doing three jobs, and all three are part of a
+/// contract: the value persisted in `config.toml`, the file each alternate
+/// ships as inside the macOS bundle, and the name the build compiles its source
+/// document under. Renaming one renames all three.
+///
+/// Platform-free, like [`Appearance`]: honouring it is the frontend's business,
+/// and today only macOS can — Windows embeds its icon in the executable at
+/// compile time and Linux installs a fixed one from the package.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, strum::Display)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum AppIcon {
+    /// The icon the app is signed with, and the one it wears until a user picks
+    /// another.
+    #[default]
+    Openlogi,
+    /// The geometric mark on a faceted, light-refracting fill.
+    Prism,
+}
+
+impl AppIcon {
+    /// Every icon, in the order Settings offers them.
+    pub const ALL: [Self; 2] = [Self::Openlogi, Self::Prism];
+
+    /// Whether this is the icon the installed bundle already wears — the one
+    /// case a frontend applies by clearing its override rather than by handing
+    /// the system a file.
+    #[must_use]
+    pub fn is_default(self) -> bool {
+        matches!(self, Self::Openlogi)
+    }
 }
 
 /// Preferred source for on-demand device assets.
@@ -59,12 +145,17 @@ pub enum AssetSourcePreference {
     reason = "independent on/off user preferences, not a state machine"
 )]
 pub struct AppSettings {
-    /// When true, a macOS `LaunchAgent` plist at
-    /// `~/Library/LaunchAgents/org.openlogi.openlogi.plist` is installed
-    /// so the app starts on login (P2.2). The plist is reconciled with
-    /// this field on every startup; flipping the flag and relaunching is
-    /// enough to install / remove it.
-    #[serde(default)]
+    /// Start the background agent at login. **On by default**: the agent is
+    /// what keeps remaps working, so a fresh install that silently died on
+    /// reboot would be broken-by-default. On macOS this is a *sunk* switch:
+    /// the `SMAppService` login item stays registered either way (visible and
+    /// revocable under System Settings › Login Items — that consent surface
+    /// is what makes the default defensible), and the agent itself reads this
+    /// value when launchd starts it — off, and with no client connecting, it
+    /// idles out instead of arming. On Linux/Windows the agent reconciles its
+    /// autostart unit / Run-key with it. A config written before the flip
+    /// keeps the value it saved.
+    #[serde(default = "default_true")]
     pub launch_at_login: bool,
     /// Opt-in update check (P2.8). **Off by default** to honour the
     /// README's "no telemetry, no auto-update poller" promise. When true,
@@ -104,11 +195,28 @@ pub struct AppSettings {
     /// Takes effect on agent restart.
     #[serde(default = "default_true")]
     pub capture_mouse_events: bool,
-    /// Whether the GUI automatically downloads device images from
-    /// `assets.openlogi.org` when a device appears. `true` (default) keeps
-    /// the current behavior; `false` makes no asset network requests at all
-    /// (the app falls back to bundled art and the synthetic silhouette). A
-    /// manual "Refresh assets" in Settings still fetches on demand regardless.
+    /// Whether ordinary mouse-wheel input is replaced with a finite smooth
+    /// scroll animation. **Off by default**: while enabled the OS hook
+    /// suppresses eligible physical wheel events only after its non-blocking
+    /// scroll worker accepts them. Trackpad and other continuous pixel input
+    /// remains native. Windows' low-level hook cannot attribute wheel messages
+    /// to a device, so the preference applies to every traditional mouse-wheel
+    /// message there.
+    #[serde(default)]
+    pub smooth_scroll: bool,
+    /// Distance multiplier for traditional vertical mouse-wheel input.
+    /// [`VerticalScrollSensitivity::DEFAULT`] means 1×; trackpad and other
+    /// continuous pixel input is never scaled.
+    #[serde(default)]
+    pub vertical_scroll_sensitivity: VerticalScrollSensitivity,
+    /// Which app icon the user picked. Applied at launch, and whenever it
+    /// changes, by whichever process owns a surface showing one — on macOS the
+    /// GUI hands the choice to the Dock and writes it onto the bundle (so the
+    /// icon survives a quit), and the agent restyles the menu-bar item, which
+    /// is its own glyph and no one else's to set. Elsewhere it is inert.
+    /// Defaults to the icon the app is signed with.
+    #[serde(default)]
+    pub app_icon: AppIcon,
     /// Whether the GUI automatically downloads device images from the selected
     /// source when a device appears. `true` (default) keeps the current behavior;
     /// `false` makes no asset network requests at all (the app falls back to
@@ -129,15 +237,21 @@ pub struct AppSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
     /// Thumb-wheel responsiveness. It scales both the speed of the wheel's
-    /// continuous horizontal scroll and how few rotation increments a custom
-    /// wheel action needs to fire. [`ThumbwheelSensitivity::DEFAULT`] means 1×
-    /// scroll speed; the wheel is only diverted from native scrolling once
-    /// this leaves the default.
+    /// continuous horizontal or remapped vertical scroll and how few rotation
+    /// increments a custom wheel action needs to fire.
+    /// [`ThumbwheelSensitivity::DEFAULT`] means 1× scroll speed; the wheel is
+    /// only diverted from native scrolling once this leaves the default.
     #[serde(default)]
     pub thumbwheel_sensitivity: ThumbwheelSensitivity,
     /// Light/dark appearance preference. Defaults to following the OS.
     #[serde(default)]
     pub appearance: Appearance,
+    /// Text and rem-based interface scale. Defaults to 100%.
+    #[serde(default)]
+    pub ui_scale: UiScale,
+    /// Layout used for the Home device gallery. Defaults to the responsive grid.
+    #[serde(default)]
+    pub device_view_mode: DeviceViewMode,
     /// Name of the theme used in light mode (a [`crate`]-agnostic string
     /// matching a gpui-component theme, e.g. `"OpenLogi Light"`). `None` uses
     /// the OpenLogi brand light theme.
@@ -153,10 +267,86 @@ pub struct AppSettings {
     pub ui_radius: Option<u8>,
 }
 
+const SENSITIVITY_MIN: u8 = 1;
+const SENSITIVITY_MAX: u8 = 100;
+const SENSITIVITY_DEFAULT: u8 = 14;
+
+/// Traditional vertical mouse-wheel responsiveness on OpenLogi's `1..=100`
+/// scale.
+///
+/// This is deliberately distinct from [`ThumbwheelSensitivity`]: vertical
+/// sensitivity changes only scroll distance and never changes a custom action
+/// threshold.
+#[nutype(
+    const_fn,
+    validate(greater_or_equal = SENSITIVITY_MIN, less_or_equal = SENSITIVITY_MAX),
+    derive(
+        Debug,
+        Clone,
+        Copy,
+        PartialEq,
+        Eq,
+        PartialOrd,
+        Ord,
+        TryFrom,
+        Into,
+        Display,
+        Serialize,
+        Deserialize
+    )
+)]
+pub struct VerticalScrollSensitivity(u8);
+
+impl VerticalScrollSensitivity {
+    /// Lowest selectable sensitivity.
+    pub const MIN: Self = match Self::try_new(SENSITIVITY_MIN) {
+        Ok(value) => value,
+        Err(_) => panic!("valid minimum vertical scroll sensitivity"),
+    };
+    /// Highest selectable sensitivity.
+    pub const MAX: Self = match Self::try_new(SENSITIVITY_MAX) {
+        Ok(value) => value,
+        Err(_) => panic!("valid maximum vertical scroll sensitivity"),
+    };
+    /// Out-of-the-box sensitivity. At this value scrolling runs at 1×.
+    pub const DEFAULT: Self = match Self::try_new(SENSITIVITY_DEFAULT) {
+        Ok(value) => value,
+        Err(_) => panic!("valid default vertical scroll sensitivity"),
+    };
+
+    /// Round and clamp a floating-point slider value into the valid range.
+    #[must_use]
+    pub fn from_rounded(value: f32) -> Self {
+        let raw = rounded_sensitivity(value);
+        let Ok(value) = Self::try_new(raw) else {
+            unreachable!("clamped vertical scroll sensitivity is always valid");
+        };
+        value
+    }
+
+    /// Vertical scroll-distance multiplier relative to [`Self::DEFAULT`].
+    #[must_use]
+    pub fn scroll_multiplier(self) -> f64 {
+        f64::from(self.into_inner()) / f64::from(Self::DEFAULT.into_inner())
+    }
+}
+
+impl Default for VerticalScrollSensitivity {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl From<VerticalScrollSensitivity> for f32 {
+    fn from(sensitivity: VerticalScrollSensitivity) -> Self {
+        Self::from(sensitivity.into_inner())
+    }
+}
+
 /// Thumb-wheel responsiveness on OpenLogi's `1..=100` scale.
 #[nutype(
     const_fn,
-    validate(greater_or_equal = 1, less_or_equal = 100),
+    validate(greater_or_equal = SENSITIVITY_MIN, less_or_equal = SENSITIVITY_MAX),
     derive(
         Debug,
         Clone,
@@ -176,18 +366,18 @@ pub struct ThumbwheelSensitivity(u8);
 
 impl ThumbwheelSensitivity {
     /// Lowest selectable sensitivity.
-    pub const MIN: Self = match Self::try_new(1) {
+    pub const MIN: Self = match Self::try_new(SENSITIVITY_MIN) {
         Ok(value) => value,
         Err(_) => panic!("valid minimum thumb-wheel sensitivity"),
     };
     /// Highest selectable sensitivity.
-    pub const MAX: Self = match Self::try_new(100) {
+    pub const MAX: Self = match Self::try_new(SENSITIVITY_MAX) {
         Ok(value) => value,
         Err(_) => panic!("valid maximum thumb-wheel sensitivity"),
     };
-    /// Out-of-the-box sensitivity. At this value horizontal scrolling runs at
-    /// 1× and remains native unless a thumb-wheel binding is customized.
-    pub const DEFAULT: Self = match Self::try_new(14) {
+    /// Out-of-the-box sensitivity. At this value scrolling runs at 1× and
+    /// remains native unless a thumb-wheel binding is customized.
+    pub const DEFAULT: Self = match Self::try_new(SENSITIVITY_DEFAULT) {
         Ok(value) => value,
         Err(_) => panic!("valid default thumb-wheel sensitivity"),
     };
@@ -195,15 +385,7 @@ impl ThumbwheelSensitivity {
     /// Round and clamp a floating-point slider value into the valid range.
     #[must_use]
     pub fn from_rounded(value: f32) -> Self {
-        let value = if value.is_nan() {
-            f32::from(Self::MIN)
-        } else {
-            value
-        };
-        let raw = value
-            .clamp(f32::from(Self::MIN), f32::from(Self::MAX))
-            .round()
-            .saturating_as::<u8>();
+        let raw = rounded_sensitivity(value);
         let Ok(value) = Self::try_new(raw) else {
             unreachable!("clamped thumb-wheel sensitivity is always valid");
         };
@@ -212,8 +394,8 @@ impl ThumbwheelSensitivity {
 
     /// Continuous-scroll speed multiplier relative to [`Self::DEFAULT`].
     #[must_use]
-    pub fn scroll_multiplier(self) -> f32 {
-        f32::from(self) / f32::from(Self::DEFAULT)
+    pub fn scroll_multiplier(self) -> f64 {
+        f64::from(self.into_inner()) / f64::from(Self::DEFAULT.into_inner())
     }
 
     /// Rotation increments required to fire a discrete thumb-wheel action.
@@ -241,6 +423,18 @@ impl From<ThumbwheelSensitivity> for i32 {
     }
 }
 
+fn rounded_sensitivity(value: f32) -> u8 {
+    let value = if value.is_nan() {
+        f32::from(SENSITIVITY_MIN)
+    } else {
+        value
+    };
+    value
+        .clamp(f32::from(SENSITIVITY_MIN), f32::from(SENSITIVITY_MAX))
+        .round()
+        .saturating_as::<u8>()
+}
+
 impl AppSettings {
     /// `skip_serializing_if` helper: true when nothing diverges from the
     /// default, so empty settings don't clutter `config.toml`.
@@ -253,17 +447,22 @@ impl AppSettings {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
-            launch_at_login: false,
+            launch_at_login: true,
             check_for_updates: false,
             auto_install_updates: false,
             update_prompt_seen: false,
             show_in_menu_bar: true,
             capture_mouse_events: true,
+            smooth_scroll: false,
+            vertical_scroll_sensitivity: VerticalScrollSensitivity::DEFAULT,
             auto_download_assets: true,
             asset_source: AssetSourcePreference::Automatic,
             language: None,
             thumbwheel_sensitivity: ThumbwheelSensitivity::DEFAULT,
             appearance: Appearance::System,
+            ui_scale: UiScale::Normal,
+            device_view_mode: DeviceViewMode::Grid,
+            app_icon: AppIcon::Openlogi,
             theme_light: None,
             theme_dark: None,
             ui_radius: None,
@@ -595,6 +794,23 @@ mod tests {
         assert_eq!(
             ThumbwheelSensitivity::from_rounded(f32::INFINITY),
             ThumbwheelSensitivity::MAX
+        );
+    }
+
+    #[test]
+    fn floating_vertical_scroll_sensitivity_rounds_and_saturates_into_the_domain() {
+        assert_eq!(u8::from(VerticalScrollSensitivity::from_rounded(49.6)), 50);
+        assert_eq!(
+            VerticalScrollSensitivity::from_rounded(f32::NAN),
+            VerticalScrollSensitivity::MIN
+        );
+        assert_eq!(
+            VerticalScrollSensitivity::from_rounded(f32::NEG_INFINITY),
+            VerticalScrollSensitivity::MIN
+        );
+        assert_eq!(
+            VerticalScrollSensitivity::from_rounded(f32::INFINITY),
+            VerticalScrollSensitivity::MAX
         );
     }
 }

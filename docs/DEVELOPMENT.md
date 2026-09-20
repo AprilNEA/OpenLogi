@@ -6,8 +6,11 @@ build instructions, see the [README](../README.md).
 ## Toolchain
 
 - Stable Rust (Edition 2024, MSRV 1.98 — the floor tracks current stable)
-- macOS: Xcode 16+ with the optional **Metal Toolchain** component (required by
-  GPUI's `gpui_macos` build script to compile shaders)
+- macOS: Xcode 26+ with the optional **Metal Toolchain** component. The Metal
+  Toolchain is what GPUI's `gpui_macos` build script compiles shaders with; the
+  version floor is `actool`, which packaging uses to compile the app icon from
+  its Icon Composer document. `OPENLOGI_DEVELOPER_DIR` overrides which Xcode is
+  used when several are installed.
 - Linux: system libraries — on Debian/Ubuntu:
   `sudo apt-get install libudev-dev gcc g++ clang libfontconfig-dev libwayland-dev libxkbcommon-x11-dev libx11-xcb-dev libssl-dev libzstd-dev pkg-config`
 - `create-dmg` for packaging (`brew install create-dmg`); `cargo-bundle` is
@@ -22,7 +25,7 @@ Nix/devenv is optional. A normal Rust toolchain is enough.
 ```sh
 # rustup installs the stable toolchain pinned in rust-toolchain.toml
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-# macOS: full Xcode 16+ with the Metal Toolchain (not only Command Line Tools)
+# macOS: full Xcode 26+ with the Metal Toolchain (not only Command Line Tools)
 # Linux: see system libraries under Toolchain above
 # optional helpers: brew install cmake create-dmg sccache
 git clone https://github.com/AprilNEA/OpenLogi
@@ -89,13 +92,16 @@ icon is generated on demand. The runner is a transparent passthrough for
 everything else (the CLI, tests); set `OPENLOGI_DEV_BUNDLE=0` to launch the raw
 `openlogi-desktop` binary instead.
 
-Each run also stops the dev agent and overlay left behind by the previous one.
-They are launched through LaunchServices so they get their own TCC identity,
-which also means they are not children of the GUI: closing its window or
-pressing Ctrl-C ends only the GUI, and a surviving dev agent relaunches itself
-~20 s later once its watcher notices the rewritten binary. Set
-`OPENLOGI_DEV_AGENT=0` to run against an
-agent you started yourself — nothing is stopped, built, or embedded then.
+Each run also stops the dev agent and overlay left behind by the previous one,
+then starts the freshly built agent and waits for its IPC socket before the
+GUI launches — so the window connects immediately instead of sitting on its
+connecting frame while the GUI's production fallback re-spawns the agent.
+The helpers are launched through LaunchServices so they get their own TCC
+identity, which also means they are not children of the GUI: closing its
+window or pressing Ctrl-C ends only the GUI, and a surviving dev agent
+relaunches itself ~20 s later once its watcher notices the rewritten binary.
+Set `OPENLOGI_DEV_AGENT=0` to run against an agent you started yourself —
+nothing is stopped, built, embedded, or started then.
 
 Packaged local dev bundles (`cargo run` and
 `cargo run -p xtask -- macos bundle`) use `-dev` bundle identifiers and the
@@ -150,6 +156,23 @@ flow (discovery → passkey → paired). Its agent version carries a `-mock` suf
 so a mock session is identifiable in the UI. It is a dev tool only and is never
 bundled.
 
+The proposed architecture for recorded device profiles, raw HID++ replay, and
+deterministic hardware scenarios is documented in
+[Mock device and hardware record/replay architecture](MOCK_DEVICE_TESTING.md).
+
+### Component gallery
+
+Use the debug-only component gallery to review shared controls across light and
+dark themes and every supported interface scale without config, IPC, or hardware:
+
+```sh
+OPENLOGI_COMPONENT_GALLERY=1 cargo run -p openlogi-desktop
+```
+
+Gallery mode opens one isolated window and bypasses the normal single-instance,
+config, agent, asset-sync, and updater startup paths. The environment variable is
+ignored by release builds.
+
 ## Project layout
 
 ```
@@ -170,11 +193,60 @@ crates/
   openlogi-overlay/ the `openlogi-overlay` binary — the cursor-centred Actions Ring
 ```
 
+## Agent guidance
+
+Shared rules have one tracked source: [`.agents/rules/`](../.agents/rules/).
+Edit and link those `.md` files, not a client-specific copy. The tracked
+`.claude/rules` symlink points to `../.agents/rules` inside the checkout.
+Existing references to `.claude/rules/<name>.md` still resolve through that alias.
+Crate-specific contracts stay in each crate's `AGENTS.md`; task workflows stay
+in `.agents/skills/`. No rule generator or install step is required.
+
+The root [AGENTS.md](../AGENTS.md) holds global instructions and the rule index.
+`CLAUDE.md` imports only that entrypoint. Claude Code discovers `.md` rules
+through `.claude/rules` and uses their `paths` metadata for conditional loading.
+Other clients must follow the index; `.agents/rules/` is not a universal
+automatic discovery path. Keep the index as ordinary Markdown links: importing
+every rule from the root would load unrelated guidance into Claude's context.
+
+### Check the checkout and client loading
+
+From the repository root, in a POSIX shell or Git Bash:
+
+```sh
+git ls-files --stage -- .claude/rules .agents/rules
+test -L .claude/rules && test -f .claude/rules/rust.md
+readlink .claude/rules
+```
+
+Expect regular rule files under `.agents/rules/` and one `120000` entry
+for `.claude/rules`, whose link target is `../.agents/rules`. The file checks
+must succeed too: the index mode alone does not prove a working symlink.
+
+On Windows, enable Developer Mode or obtain symlink creation permission before
+cloning with `git clone -c core.symlinks=true <repository-url> <new-directory>`.
+With `core.symlinks=false`, Git writes a text file containing the target instead
+of a directory link; Claude cannot discover the rules through it. Changing the
+config alone does not repair an existing checkout. Preserve local changes and
+use a fresh symlink-enabled checkout. Until then, read the canonical rules via
+the root index; do not replace the alias with independently maintained copies.
+
+Verify loading in the client, not only the filesystem. In a fresh Claude Code
+session, use `/context` or an `InstructionsLoaded` hook to inspect loaded files:
+
+- Read `README.md`: Rust and GUI path rules should not load solely from that read.
+- Read `crates/openlogi-core/src/lib.rs`: the Rust rule should load, but not GUI.
+- Read `crates/openlogi-desktop/src/app.rs`: the GUI rule should now load too.
+
+Follow [Claude's loading diagnostics](https://code.claude.com/docs/en/memory#troubleshoot-memory-issues)
+if those results differ. Filesystem checks and unchanged `paths` metadata are
+not evidence that a particular client version loaded the rules correctly.
+
 ## Local CI
 
 The PR test pipeline is `.github/workflows/ci.yml`. To run every job this
-machine can reproduce — including MSRV, cargo-deny, and the Windows cross-lint
-the host-OS gate does not run:
+machine can reproduce — including typos, the ast-grep guards, MSRV, cargo-deny,
+and the Windows cross-lint the host-OS gate does not run:
 
 ```sh
 cargo xtask ci
@@ -184,31 +256,66 @@ devenv tasks run openlogi:ci                 # same, from devenv
 
 The runner sets `RUSTFLAGS=-D warnings` the way CI does. Jobs that need another
 OS are reported as skipped; a skip is not a pass. The full job map (and which
-diff requires which job) is [`.claude/rules/ci.md`](../.claude/rules/ci.md).
+diff requires which job) is [`.agents/rules/ci.md`](../.agents/rules/ci.md).
 
 ### Pre-push gate
 
-Before pushing, the host-OS subset must pass:
+Before pushing, read [the local gate and push checklist](../.agents/rules/ci.md#local-gate-hard-stop-before-push--scale-it-to-the-affected-graph).
+That file owns tier selection, exact commands, and additional checks required by
+the diff. `devenv tasks run openlogi:check` runs the full host-OS tier, not the
+whole CI pipeline. A Rust-bearing rebase or conflict resolution requires the
+full tier. Non-Rust changes use the applicable non-Rust checks.
 
-```sh
-export RUSTFLAGS="-D warnings"
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps \
-  --document-private-items --exclude openlogi-ui --exclude openlogi-desktop \
-  --exclude openlogi-overlay --exclude openlogi-agent
-```
+## GitHub workflow
 
-Equivalent to `devenv tasks run openlogi:check`. That is **not** the full
-pipeline: Linux clippy, Windows clippy, MSRV, cargo-deny, and the shell lint
-(shellcheck + shfmt) are separate CI jobs. Reproduce those with `cargo xtask ci` or the commands in
-`.claude/rules/ci.md`.
+Read this section before preparing, adopting, reviewing, or merging a PR.
+These procedures do not authorize remote writes: obtain approval before pushing,
+opening or merging PRs, publishing, or approving/rerunning workflows.
+
+### Preparing and merging PRs
+
+- **Always `git fetch upstream master` (or origin) immediately before a rebase.** Rebase
+  onto the refreshed tip, not a stale local `master`.
+- Merging PRs: **squash by default** with a hand-written subject
+  `type(scope): description (#N)` (release-plz parses it; merge commits are disabled).
+  Rebase-merge only when every commit on the branch is already release-quality
+  conventional. Wait for the Greptile review check and CI before merging — findings get
+  fixed, replied to, and resolved, not ignored.
+- PR bodies: `## Summary`, `## Changes` (per-crate bullets), `## Testing` listing the
+  exact commands run plus hardware-verification status (say "not runtime-tested on
+  hardware" when true — real-hardware verification is the maintainer's job, so every
+  fix PR states how to test it), and a closing `Fixes #N` line. Screenshots for UI
+  changes.
+- Issues use the bug/feature/device forms and the `type:`/`area:`/`platform:`/`needs:`/
+  `status:` label families. Deferred or out-of-scope work becomes a linked issue, not a
+  TODO comment.
+
+### Adopting contributor PRs
+
+Contributor PRs are adopted, not rejected: check `maintainerCanModify`, rebase onto
+**fresh** master in a worktree, fix review findings, run the applicable local gate
+on the rebased tip (a Rust-bearing rebase takes the full tier), **then** push to the
+fork branch; preserve authorship (`Co-authored-by` when re-homing work).
+Squash-then-rebase is fine when the PR is far behind and commit-by-commit conflicts
+thrash.
+
+### CI / Actions when adopting PRs
+
+- CI concurrency is **per branch** (`ci-${{ workflow }}-${{ ref }}` with
+  `cancel-in-progress: true`). Approving or re-running an **old SHA** on the same
+  branch cancels the current-head run. Only approve / re-run workflows whose
+  `head_sha` equals the PR's current head.
+- After a force-push, wait for the new runs; do not re-approve stale
+  `action_required` jobs from earlier commits on that branch.
+- First-time-fork PRs may sit in `action_required` until a maintainer approves the
+  workflow run — that is fine; still do not push until the local gate is green.
 
 ## Packaging the macOS DMG
 
 ```sh
 cargo run -p xtask -- macos package    # → target/release/OpenLogi.dmg
+# Cross-compile a distribution DMG (aarch64 or x86_64):
+cargo run -p xtask -- macos package --target x86_64-apple-darwin
 ```
 
 Environment overrides:
@@ -232,7 +339,7 @@ derived from the host (override with `PKG_ARCH`):
 
 ```sh
 cargo run -p xtask -- linux package
-# → target/release/openlogi_*.deb / .rpm / .pkg.tar.zst
+# → target/release/*.deb / *.rpm / *.pkg.tar.zst
 ```
 
 The package contents (binaries, udev rules, systemd user unit, desktop entry,
@@ -241,6 +348,33 @@ icon) are declared in `packaging/linux/nfpm.yaml`.
 The Nix package uses the same shared resources and is declared in
 `packaging/linux/package.nix`; see the Nix package section above for its build
 commands.
+
+## Installation-source detection
+
+The desktop app probes once in the background and publishes the typed
+`platform::installation::Installation` global: `Detecting`, then
+`Detected(InstallationSource)`. It also logs `detected installation source`.
+Settings → Updates displays the result as **Installation source**, separately
+from the update download source. An open window refreshes when detection
+completes or the interface language changes.
+This is an ownership snapshot, not download provenance or an update policy;
+the updater does not yet change behavior based on it.
+
+- **Homebrew:** matches the installed receipt and Caskroom app back-link to
+  the running bundle, distinguishing `openlogi` from `openlogi@latest`. It
+  checks both standard prefixes, `HOMEBREW_PREFIX`, and prefixes discoverable
+  from `PATH`, without executing brew. An undiscoverable custom prefix cannot
+  be recognized. Other macOS bundles report `MacAppBundle`, not "DMG".
+- **Linux:** recognizes a resolved `/nix/store/` executable, or queries dpkg,
+  rpm, and pacman for ownership of the exact executable by `openlogi`.
+  Package queries are read-only, with a two-second timeout per command.
+- **Windows:** the MSI writes its `InstallLocation` under
+  `HKCU\Software\OpenLogi`; only a matching executable is `WindowsMsi`.
+  The ZIP carries `openlogi-installation.json` next to `OpenLogi.exe` and is
+  `WindowsPortable`. A matching MSI registration takes precedence.
+- **Unknown:** unmarked Windows releases predating these markers, bare
+  source/manual installs, or otherwise inconclusive ownership. Missing
+  metadata never implies a portable ZIP or a DMG.
 
 ## Release updater publishing
 
@@ -295,22 +429,25 @@ cargo run -p xtask -- release latest-json \
 `.github/workflows/crowdin.yml` syncs GUI locales with
 [Crowdin](https://crowdin.com/project/openlogi) and opens a `crowdin/i18n` PR
 when a **real** translation value improved — nightly, and on master pushes that
-touch English sources (`en.yml`), `crowdin.yml`, the Crowdin workflow, the merge
-script under `.github/scripts/i18n/`, or the shared GitHub App token action.
+touch English sources (`en.toml`), `.config/crowdin.yml`, the Crowdin workflow,
+the merge script under `.github/scripts/i18n/`, or the shared GitHub App token
+action.
 
 **How it helps translation**
 
 | | Role |
 |--|--|
-| `en.yml` (git) | English source of truth — English text is the key |
-| All `locales/*.yml` in git | Same keys as `en.yml` (parity test); seed Crowdin per language |
+| `en.toml` (git) | English source of truth; stable semantic keys grouped by product-domain tables |
+| All `locales/*.toml` in git | Same keys as `en.toml` (parity test); seed Crowdin per language |
 | Crowdin project | Where people improve non-English **values** |
 | Merge script | Applies only values ≠ English; restores keys sparse exports omit |
 | Bot PR (`crowdin/i18n`) | Only when a non-English value actually changed |
 
-Feature PRs add new keys to **every** locale file in the same change. Crowdin
-does not invent translations; it only stores and syncs them. A raw Crowdin
-download is unsafe: untranslated strings come back as English (#549), and
+Call sites use stable keys such as `device.connected`. Feature PRs add
+new keys to **every** locale file in the same change. English wording can change
+without renaming the key or updating call sites. Crowdin does not invent
+translations; it only stores and syncs them. A raw Crowdin download is unsafe:
+untranslated strings come back as English (#549), and
 `skip_untranslated_strings` overwrites catalogs with sparse files that delete
 keys (#552). The workflow always **snapshots → download → merge** via
 `.github/scripts/i18n/merge_crowdin_download.py` so catalogs stay complete and only real
@@ -318,8 +455,8 @@ translations land in git.
 
 Each run:
 
-1. Snapshots every `locales/*.yml`.
-2. Uploads `en.yml` **sources**.
+1. Snapshots every `locales/*.toml`.
+2. Uploads `en.toml` **sources**.
 3. Uploads **per-language translations** already in git (`import_eq_suggestions`
    off so `value == English` is not stored as a finished translation).
 4. Downloads Crowdin’s export (`skip_untranslated_strings`; sparse is fine).
@@ -344,7 +481,7 @@ OpenLogi project:
 
 Missing or invalid credentials fail the workflow. Translation PRs run the
 normal CI checks, including the locale key parity test (every catalog must match
-`en.yml` key-for-key). The workflow uses the existing `OP_GITHUB_APP_ITEM` to
+`en.toml` key-for-key). The workflow uses the existing `OP_GITHUB_APP_ITEM` to
 mint a short-lived token for pushing its translation branch and opening the PR;
 the default `GITHUB_TOKEN` remains read-only. Checkout runs with
 `persist-credentials: false` and the origin remote is rewritten to the app token
@@ -353,7 +490,7 @@ so git push does not inherit the read-only Actions credential.
 Local helpers (with Crowdin credentials configured):
 
 ```sh
-devenv tasks run openlogi:i18n-upload    # en.yml sources + per-language translations
+devenv tasks run openlogi:i18n-upload    # en.toml sources + per-language translations
 devenv tasks run openlogi:i18n-download  # download + merge + i18n tests
 python3 .github/scripts/i18n/merge_crowdin_download.py --self-test
 ```

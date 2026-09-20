@@ -1,4 +1,5 @@
 mod commands;
+mod icon;
 mod support;
 
 use anyhow::Result;

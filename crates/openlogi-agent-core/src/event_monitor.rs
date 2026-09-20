@@ -11,7 +11,7 @@
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
 use openlogi_hook::MouseEvent;
@@ -27,23 +27,47 @@ pub type SharedEventMonitor = std::sync::Arc<EventMonitor>;
 const CAPACITY: usize = 256;
 
 /// How often the janitor checks for an idle (no-longer-polled) monitor.
-const IDLE_TICK: Duration = Duration::from_secs(3);
+const IDLE_CHECK_PERIOD: Duration = Duration::from_secs(3);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum MonitorState {
+    Disabled = 0,
+    Polled = 1,
+    Idle = 2,
+}
+
+impl MonitorState {
+    fn from_raw(raw: u8) -> Self {
+        match raw {
+            0 => Self::Disabled,
+            1 => Self::Polled,
+            2 => Self::Idle,
+            _ => unreachable!("EventMonitor stores only MonitorState discriminants"),
+        }
+    }
+}
 
 /// Buffers the hook's observed events for the GUI's live monitor when enabled.
-#[derive(Default)]
 pub struct EventMonitor {
-    enabled: AtomicBool,
-    /// Set on every [`Self::poll`]; the janitor clears it each tick and treats a
-    /// tick with no intervening poll as "the GUI stopped watching".
-    polled: AtomicBool,
+    state: AtomicU8,
     buf: Mutex<VecDeque<MonitorEvent>>,
+}
+
+impl Default for EventMonitor {
+    fn default() -> Self {
+        Self {
+            state: AtomicU8::new(MonitorState::Disabled as u8),
+            buf: Mutex::default(),
+        }
+    }
 }
 
 impl EventMonitor {
     /// Whether monitoring is currently on — the one check the hot hook path runs.
     #[must_use]
     pub fn enabled(&self) -> bool {
-        self.enabled.load(Ordering::Relaxed)
+        MonitorState::from_raw(self.state.load(Ordering::Relaxed)) != MonitorState::Disabled
     }
 
     /// Record a hook event, if monitoring is on. Pointer moves are dropped: they
@@ -58,12 +82,17 @@ impl EventMonitor {
                 button: id.to_string(),
                 pressed: *pressed,
             },
-            MouseEvent::Scroll {
-                delta_x, delta_y, ..
-            } => MonitorEvent::Scroll {
-                delta_x: *delta_x,
-                delta_y: *delta_y,
-            },
+            MouseEvent::Scroll { delta, .. } =>
+            {
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "the monitor wire format is diagnostic f32 data; runtime scroll keeps f64"
+                )]
+                MonitorEvent::Scroll {
+                    delta_x: delta.x() as f32,
+                    delta_y: delta.y() as f32,
+                }
+            }
             MouseEvent::CaptureInterrupted => MonitorEvent::CaptureInterrupted,
             MouseEvent::Moved { .. } => return,
         };
@@ -80,23 +109,41 @@ impl EventMonitor {
     /// Enable monitoring (idempotent) and drain everything buffered since the
     /// last poll. Called from the IPC `poll_event_monitor` handler.
     pub fn poll(&self) -> Vec<MonitorEvent> {
-        // Mark the poll *before* enabling, and publish `enabled` with `Release`.
-        // The janitor loads `enabled` with `Acquire`, so a tick that observes
-        // `enabled == true` is guaranteed to also see this `polled = true` and
-        // won't disable a monitor that was just enabled by this very poll.
-        self.polled.store(true, Ordering::Relaxed);
-        self.enabled.store(true, Ordering::Release);
+        self.state
+            .store(MonitorState::Polled as u8, Ordering::Release);
         self.buf
             .lock()
             .map(|mut buf| buf.drain(..).collect())
             .unwrap_or_default()
     }
 
-    /// Turn monitoring off and discard any buffered events.
-    fn disable(&self) {
-        self.enabled.store(false, Ordering::Relaxed);
-        if let Ok(mut buf) = self.buf.lock() {
-            buf.clear();
+    fn idle_tick(&self) {
+        let mut raw = self.state.load(Ordering::Acquire);
+        loop {
+            let current = MonitorState::from_raw(raw);
+            let next = match current {
+                MonitorState::Disabled => return,
+                MonitorState::Polled => MonitorState::Idle,
+                MonitorState::Idle => MonitorState::Disabled,
+            };
+            match self.state.compare_exchange_weak(
+                raw,
+                next as u8,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    if next == MonitorState::Disabled
+                        && let Ok(mut buf) = self.buf.lock()
+                        && MonitorState::from_raw(self.state.load(Ordering::Acquire))
+                            == MonitorState::Disabled
+                    {
+                        buf.clear();
+                    }
+                    return;
+                }
+                Err(actual) => raw = actual,
+            }
         }
     }
 
@@ -105,23 +152,18 @@ impl EventMonitor {
     /// previous tick, the GUI is gone — disable and free the buffer.
     pub async fn run_idle_janitor(self: SharedEventMonitor) {
         // `interval` fires its first tick immediately; `interval_at` delays the
-        // first check by a full `IDLE_TICK`. That matters on an agent restart
-        // while monitoring was enabled: an immediate first tick would see
-        // `enabled == true` with no poll yet this window and disable before the
-        // reconnecting GUI repolls. Waiting one full window lets it poll first.
-        let mut ticker =
-            tokio::time::interval_at(tokio::time::Instant::now() + IDLE_TICK, IDLE_TICK);
+        // first check by a full `IDLE_CHECK_PERIOD`. That matters on an agent
+        // restart while monitoring was enabled: an immediate first tick would
+        // see `enabled == true` with no poll yet this window and disable before
+        // the reconnecting GUI repolls. Waiting one full window lets it poll
+        // first.
+        let mut ticker = tokio::time::interval_at(
+            tokio::time::Instant::now() + IDLE_CHECK_PERIOD,
+            IDLE_CHECK_PERIOD,
+        );
         loop {
             ticker.tick().await;
-            // Acquire-load `enabled` to pair with `poll`'s Release store: seeing
-            // `enabled == true` here guarantees the matching `polled = true` is
-            // visible, so a monitor enabled by a poll just before this tick is
-            // never torn down for a stale `polled == false`. `swap` then consumes
-            // the flag — a poll since the last tick keeps monitoring alive; an
-            // untouched flag means no poll happened this interval.
-            if self.enabled.load(Ordering::Acquire) && !self.polled.swap(false, Ordering::Relaxed) {
-                self.disable();
-            }
+            self.idle_tick();
         }
     }
 }
@@ -173,12 +215,32 @@ mod tests {
         m.poll(); // enable
         for _ in 0..(CAPACITY + 10) {
             m.record(&MouseEvent::Scroll {
-                delta_x: 0.0,
-                delta_y: 1.0,
+                delta: openlogi_hook::ScrollDelta::wheel_ticks(0.0, 1.0),
                 from_trackpad: false,
                 device: None,
             });
         }
         assert_eq!(m.poll().len(), CAPACITY, "never grows past the cap");
+    }
+
+    #[test]
+    fn idle_lifecycle_requires_a_full_tick_without_a_poll_to_disable() {
+        let m = EventMonitor::default();
+        m.idle_tick();
+        assert!(!m.enabled());
+
+        m.poll();
+        m.idle_tick();
+        assert!(m.enabled(), "the first tick consumes the enabling poll");
+
+        m.poll();
+        m.idle_tick();
+        assert!(m.enabled(), "a poll refreshes an idle monitor");
+
+        m.idle_tick();
+        assert!(
+            !m.enabled(),
+            "one whole interval without a poll disables it"
+        );
     }
 }

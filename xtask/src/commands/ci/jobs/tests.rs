@@ -25,23 +25,43 @@ fn workflow() -> Option<String> {
 
 /// The workflow with its line continuations joined back up and every run of
 /// whitespace collapsed, so a command it wraps for readability is one line
-/// again.
+/// again — under either line ending, since a Windows checkout hands this test
+/// the file with CRLF.
 fn workflow_commands(workflow: &str) -> String {
     workflow
-        .replace("\\\n", " ")
-        .split_whitespace()
+        .lines()
+        .map(|line| {
+            let line = line.trim_end();
+            line.strip_suffix('\\').unwrap_or(line)
+        })
+        .flat_map(str::split_whitespace)
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+#[test]
+fn wrapped_commands_join_under_either_line_ending() {
+    let joined = "cargo doc --workspace --exclude openlogi-ui";
+    for wrapped in [
+        "cargo doc --workspace \\\n    --exclude openlogi-ui\n",
+        "cargo doc --workspace \\\r\n    --exclude openlogi-ui\r\n",
+    ] {
+        assert_eq!(workflow_commands(wrapped), joined);
+    }
 }
 
 /// `ci.yml` is the pipeline's source of truth and this runner is a copy of it.
 /// A copy nothing checks is a copy that drifts.
 ///
-/// Only the jobs whose command does not depend on the host are compared. The
-/// other four pick their invocation from what the machine has — `shell` needs
-/// shellcheck and shfmt, `msrv` a toolchain, `cargo-deny` either the binary or
-/// nix, `clippy (windows)` a cross std — and are documented as proxies for
-/// their CI job rather than copies of it.
+/// Only the jobs whose plan does not depend on the host are compared. The
+/// other seven pick their invocation — or whether they can run at all — from
+/// what the machine has: `typos` needs typos-cli and `ast-grep` its binary (CI
+/// runs both through actions), `shell` needs shellcheck and shfmt, `msrv` a
+/// toolchain, `cargo-deny` either the binary or nix, `clippy (windows)` a cross
+/// std, `wasm` the wasm32 std. Each is documented as a proxy
+/// for its CI job rather than a copy of it, and `wasm` gets
+/// [`wasm_checks_the_crates_ci_checks`] instead, which compares the crate list
+/// rather than a plan.
 #[test]
 fn ci_yml_runs_what_this_runner_runs() {
     let Some(workflow) = workflow() else {
@@ -53,10 +73,12 @@ fn ci_yml_runs_what_this_runner_runs() {
 
     for job in [
         Job::Rustfmt,
+        Job::PublishClosure,
         Job::Clippy,
         Job::Rustdoc,
         Job::TestsLinux,
         Job::TestsMacos,
+        Job::TestsWindows,
     ] {
         let host = *job.spec().hosts.first().expect("every job names a host");
         let plan = job.plan(&sh, host).expect("a plan");
@@ -70,6 +92,24 @@ fn ci_yml_runs_what_this_runner_runs() {
                 "ci.yml does not run `{argv}` for {job:?}"
             );
         }
+    }
+}
+
+/// The wasm job skips itself on a machine without the wasm32 std, so its plan
+/// cannot be compared against `ci.yml` the way the others are. What must not
+/// drift is the crate list: a crate declared portable here but absent from the
+/// workflow is a crate CI never checks.
+#[test]
+fn wasm_checks_the_crates_ci_checks() {
+    let Some(workflow) = workflow() else {
+        return;
+    };
+    let commands = workflow_commands(&workflow);
+    for crate_name in super::steps::wasm_portable_crates() {
+        assert!(
+            commands.contains(&format!("-p {crate_name}")),
+            "ci.yml's wasm job does not check {crate_name}"
+        );
     }
 }
 
@@ -141,10 +181,10 @@ fn matrix_leg_names_resolve() {
 }
 
 #[test]
-fn tests_names_both_test_jobs() {
+fn tests_names_every_test_job() {
     assert_eq!(
         Job::resolve("tests").as_deref(),
-        Some(&[Job::TestsLinux, Job::TestsMacos][..])
+        Some(&[Job::TestsLinux, Job::TestsMacos, Job::TestsWindows][..])
     );
 }
 
@@ -167,6 +207,25 @@ fn the_default_run_is_the_ci_jobs_only() {
     }
 }
 
+#[test]
+fn i18n_runs_portable_parity_before_desktop_resolution() {
+    let sh = Shell::new().expect("a shell");
+    let plan = Job::I18n
+        .plan(&sh, Host::Linux)
+        .expect("the focused i18n plan");
+    let Action::Run(steps) = plan.action else {
+        panic!("i18n planned no steps");
+    };
+    let commands: Vec<String> = steps.iter().map(super::super::Step::argv_line).collect();
+    assert_eq!(
+        commands,
+        [
+            "cargo test -p openlogi-ui locale",
+            "cargo test -p openlogi-desktop i18n",
+        ]
+    );
+}
+
 /// The host lists are what decides a skip, so they are worth stating: on a
 /// `cfg!` these were only ever evaluated on the host that made them true.
 #[test]
@@ -174,6 +233,7 @@ fn jobs_name_the_hosts_ci_gives_them() {
     let hosts = |job: Job| job.spec().hosts.to_vec();
     assert_eq!(hosts(Job::TestsLinux), vec![Host::Linux]);
     assert_eq!(hosts(Job::TestsMacos), vec![Host::Macos]);
+    assert_eq!(hosts(Job::TestsWindows), vec![Host::Windows]);
     // CI's msrv matrix is macos-latest + ubuntu-latest — there is no
     // Windows leg to reproduce.
     assert_eq!(hosts(Job::Msrv), vec![Host::Linux, Host::Macos]);

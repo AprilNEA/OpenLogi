@@ -164,6 +164,27 @@ impl DeviceStableId {
         }
     }
 
+    /// Key naming the *path* a device was reached by, with the device's own
+    /// identity removed.
+    ///
+    /// Used as the key of a config entry's `links` table, so one device
+    /// reached two ways indexes one entry. Only [`Self::Direct`] carries a
+    /// device identity that moves to the entry key; the others keep
+    /// [`Self::runtime_key`] unchanged — a receiver key already names the
+    /// receiver rather than the paired device, and raw/routeless identities
+    /// are OS node ids that cannot become an entry key.
+    #[must_use]
+    pub fn route_key(&self) -> String {
+        match self {
+            Self::Direct {
+                vendor_id,
+                product_id,
+                ..
+            } => format!("direct:{vendor_id:04x}:{product_id:04x}"),
+            Self::Bolt { .. } | Self::RawHid { .. } | Self::Unknown { .. } => self.runtime_key(),
+        }
+    }
+
     /// Stable key for persisted per-physical-device configuration.
     ///
     /// Receiver-connected devices are identified by receiver UID + pairing
@@ -186,14 +207,23 @@ impl DeviceStableId {
 }
 
 impl DeviceIdentity {
-    fn is_physical(&self) -> bool {
+    /// Whether this identity is non-trivial: a non-empty serial, or a unit id
+    /// that is not all-zero.
+    ///
+    /// A device that reports neither has no identity worth keying on, either
+    /// for [`DeviceStableId::physical_key`] or for a route-independent
+    /// [`Self::key`].
+    pub(crate) fn is_physical(&self) -> bool {
         match self {
             Self::Serial(serial) => !serial.is_empty(),
             Self::Unit(unit) => *unit != [0; 4],
         }
     }
 
-    fn key(&self) -> String {
+    /// This identity formatted as a bare `serial:`/`unit:` fragment, with no
+    /// route information. Callers that only want a key for a physical
+    /// identity should gate this behind [`Self::is_physical`] first.
+    pub(crate) fn key(&self) -> String {
         match self {
             Self::Serial(serial) => format!("serial:{serial}"),
             Self::Unit(unit) => format!("unit:{}", hex_unit(*unit)),
@@ -213,6 +243,7 @@ impl PhysicalDeviceKey {
             || direct_identity_fragment(value).is_some_and(identity_fragment_is_physical)
             || raw_identity_fragment(value).is_some_and(raw_identity_is_physical)
             || unknown_identity_fragment(value).is_some_and(identity_fragment_is_physical)
+            || identity_fragment_is_physical(value)
         {
             Some(Self(value.to_string()))
         } else {
@@ -314,7 +345,7 @@ fn hex_unit(unit: [u8; 4]) -> String {
 mod tests {
     use crate::hid::DeviceRoute;
 
-    use super::{DeviceStableId, PhysicalDeviceKey};
+    use super::{DeviceIdentity, DeviceStableId, PhysicalDeviceKey};
 
     #[test]
     fn unifying_route_maps_to_bolt_stable_id() {
@@ -446,5 +477,37 @@ mod tests {
             .physical_key()
             .map(PhysicalDeviceKey::into_string);
         assert_eq!(key, Some("raw:046d:c900:ff43:0202:serial:glow-1".into()));
+    }
+
+    #[test]
+    fn a_direct_route_key_drops_the_device_identity() {
+        // The identity moves to the entry key; the route names only the path, so
+        // the same mouse cabled and on its receiver can index the same entry.
+        let id = DeviceStableId::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc08d,
+            identity: DeviceIdentity::Unit([0x6b, 0xe9, 0xd3, 0x00]),
+        };
+        assert_eq!(id.runtime_key(), "direct:046d:c08d:unit:6be9d300");
+        assert_eq!(id.route_key(), "direct:046d:c08d");
+    }
+
+    #[test]
+    fn other_routes_keep_their_runtime_key() {
+        // A receiver key names the receiver and slot, never the paired device, so
+        // there is no identity to strip. Raw and routeless keys keep their
+        // identity because it is an OS node id, not a device identity that can
+        // move to the entry key.
+        let bolt = DeviceStableId::Bolt {
+            receiver_uid: "82839805".to_string(),
+            slot: 1,
+        };
+        assert_eq!(bolt.route_key(), bolt.runtime_key());
+
+        let unknown = DeviceStableId::Unknown {
+            slot: 255,
+            identity: DeviceIdentity::Unit([1, 2, 3, 4]),
+        };
+        assert_eq!(unknown.route_key(), unknown.runtime_key());
     }
 }

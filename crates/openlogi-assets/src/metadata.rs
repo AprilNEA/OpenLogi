@@ -45,12 +45,12 @@ use serde::Deserialize;
 use crate::error::AssetError;
 use crate::http;
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct Metadata {
     pub images: Vec<ImageEntry>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct ImageEntry {
     pub key: String,
     pub origin: Origin,
@@ -58,13 +58,13 @@ pub struct ImageEntry {
     pub assignments: Vec<Assignment>,
 }
 
-#[derive(Debug, Deserialize, Clone, Copy)]
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
 pub struct Origin {
     pub width: u32,
     pub height: u32,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Assignment {
     /// Empty on older keyboard depots whose assignments carry only `slotId`;
     /// `map_slot_name`-style consumers treat unknown names as "no hotspot".
@@ -79,13 +79,13 @@ pub struct Assignment {
     pub label: Direction,
 }
 
-#[derive(Debug, Deserialize, Clone, Copy, Default)]
+#[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq)]
 pub struct Point {
     pub x: f32,
     pub y: f32,
 }
 
-#[derive(Debug, Deserialize, Clone, Copy, Default)]
+#[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Direction {
     pub x: i32,
     pub y: i32,

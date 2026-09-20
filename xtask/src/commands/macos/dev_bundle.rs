@@ -7,7 +7,7 @@
 //! grant to. Wrapping the build in a real bundle fixes all four — and doing it
 //! here rather than in the cargo runner means the dev and shipped bundles are
 //! assembled by the same code: one identity table ([`identity::Channel`]), one
-//! helper table ([`bundle::HELPERS`]), one set of `Info.plist` templates. The
+//! helper table ([`HELPERS`]), one set of `Info.plist` templates. The
 //! two used to be separate implementations, which is how the dev overlay ended
 //! up with no icon and the dev identity had to be renamed twice.
 //!
@@ -26,7 +26,9 @@ use strum::VariantArray as _;
 use xshell::{Shell, cmd};
 
 use super::bundle::identity::{self, Channel, Component};
-use super::bundle::{self, HELPERS, Helper};
+use super::bundle::{EmbeddedHelper, HELPERS, write_agent_launch_plist};
+use crate::icon::IconPipeline as _;
+use crate::icon::macos::AppBundle;
 use crate::support::fs::{ensure_file, repo_root};
 
 /// The dev bundle is the dev bundle; there is no channel to choose.
@@ -38,7 +40,9 @@ const CHANNEL: Channel = Channel::Dev;
 /// it.
 const APP_PLIST: &str = "crates/openlogi-desktop/bundle/desktop-dev/Info.plist";
 
-/// The shared app icon, generated on demand by `macos icns`.
+/// The shared app icon, compiled by [`AppBundle`] alongside the catalog and
+/// the alternates. Only this one is checked in; the rest a fresh clone
+/// compiles on its first bundle.
 const ICON: &str = "crates/openlogi-desktop/icon/AppIcon.icns";
 
 /// What the identity pass covers when the helpers were not embedded.
@@ -56,14 +60,12 @@ pub(crate) struct Args {
 pub(crate) fn run(args: &Args) -> Result<()> {
     let root = repo_root()?;
     let app = root.join("target/dev/OpenLogi.app");
-    let profile = Profile::of(&args.binary)?;
+    let profile = BuildProfile::of(&args.binary)?;
 
     processes::reap_leftovers(&app, &root.join("target"))?;
 
+    AppBundle.compile()?;
     let icon = root.join(ICON);
-    if !icon.is_file() {
-        bundle::generate_icns()?;
-    }
     ensure_file(&icon)?;
 
     let signing = signing::resolve(&app)?;
@@ -77,16 +79,20 @@ pub(crate) fn run(args: &Args) -> Result<()> {
     fs_err::copy(root.join(APP_PLIST), app.join("Contents/Info.plist"))
         .context("could not write the dev app Info.plist")?;
     fs_err::copy(&icon, app.join("Contents/Resources/AppIcon.icns"))?;
+    AppBundle.install(&app)?;
 
     // Clear the whole login-items directory rather than the bundles about to be
     // written: helper directory names have changed more than once, and a
     // leftover from an older checkout is a second row in every macOS list that
-    // names these processes.
-    remove_bundle(&app.join("Contents/Library/LoginItems"))?;
+    // names these processes. Same for the launchd service plists: one from an
+    // earlier build could name a helper this build does not embed.
+    remove_bundle(&app.join(openlogi_core::brand::LOGIN_ITEMS_DIR))?;
+    remove_bundle(&app.join(openlogi_core::brand::LAUNCH_AGENTS_DIR))?;
     let components = if helpers_wanted() {
         for helper in &HELPERS {
             embed_helper(&root, &app, &profile, helper, &icon, &signing)?;
         }
+        write_agent_launch_plist(&app, CHANNEL)?;
         Component::VARIANTS
     } else {
         println!("==> helpers: skipped (OPENLOGI_DEV_AGENT=0)");
@@ -98,10 +104,61 @@ pub(crate) fn run(args: &Args) -> Result<()> {
     identity::stamp(&app, CHANNEL, components)?;
     identity::verify(&app, CHANNEL, components)?;
     identity::verify_icons(&app, CHANNEL, components)?;
+    AppBundle.verify(&app)?;
     signing.run(&sign_order(&app, components))?;
     register_with_launch_services(&app)?;
 
+    // Start the freshly built agent before the GUI launches, so its first
+    // IPC connect succeeds instead of riding the production
+    // spawn-on-unreachable fallback through every dev run.
+    #[cfg(unix)]
+    if helpers_wanted() {
+        start_agent(&app)?;
+    }
+
     println!("Dev bundle ready: {}", app.display());
+    Ok(())
+}
+
+/// How long to wait for the started agent's IPC socket to accept a
+/// connection. Generous: a cold agent start enumerates HID before serving,
+/// but the socket itself comes up in well under a second — the budget only
+/// matters when the agent is broken, and then the GUI's own retry loop is the
+/// backstop.
+#[cfg(unix)]
+const AGENT_SOCKET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+#[cfg(unix)]
+const AGENT_SOCKET_POLL_PERIOD: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Launch the dev agent helper and wait for its IPC socket.
+///
+/// `open -g -n`, exactly like the GUI's own fallback: LaunchServices parents
+/// the agent under launchd, so it is its own TCC responsible process and the
+/// dev identity's Accessibility / Input Monitoring grants stick. A timeout is
+/// a warning, not an error — the GUI retries on its own.
+#[cfg(unix)]
+fn start_agent(app: &Path) -> Result<()> {
+    let agent_bundle = Component::Agent.root(app, CHANNEL);
+    let sh = Shell::new()?;
+    println!("==> agent (start)");
+    cmd!(sh, "open -g -n {agent_bundle}").run()?;
+
+    // The dev agent serves the sibling dev profile's socket; xtask itself is
+    // not a dev-profile process, so it asks for that profile's path by name.
+    let socket = openlogi_core::paths::agent_socket_path_for(CHANNEL.into())
+        .map_err(|error| anyhow::anyhow!("could not resolve the dev socket: {error}"))?;
+    let started = std::time::Instant::now();
+    while started.elapsed() < AGENT_SOCKET_TIMEOUT {
+        if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
+            println!("    agent ready ({:.1}s)", started.elapsed().as_secs_f32());
+            return Ok(());
+        }
+        std::thread::sleep(AGENT_SOCKET_POLL_PERIOD);
+    }
+    println!(
+        "    warning: agent socket not reachable after {}s — the GUI will keep retrying",
+        AGENT_SOCKET_TIMEOUT.as_secs()
+    );
     Ok(())
 }
 
@@ -109,12 +166,12 @@ pub(crate) fn run(args: &Args) -> Result<()> {
 fn embed_helper(
     root: &Path,
     app: &Path,
-    profile: &Profile,
-    helper: &Helper,
+    profile: &BuildProfile,
+    helper: &EmbeddedHelper,
     icon: &Path,
     signing: &signing::Signing,
 ) -> Result<()> {
-    let Helper {
+    let EmbeddedHelper {
         component,
         package,
         binary,
@@ -180,7 +237,7 @@ fn remove_bundle(path: &Path) -> Result<()> {
 fn sign_order(app: &Path, components: &[Component]) -> Vec<PathBuf> {
     let mut targets: Vec<PathBuf> = components
         .iter()
-        .filter(|component| component.nested_bundle(CHANNEL).is_some())
+        .filter(|component| component.nested_bundle_dir(CHANNEL).is_some())
         .map(|component| component.root(app, CHANNEL))
         .collect();
     targets.push(app.to_path_buf());
@@ -220,7 +277,7 @@ fn helpers_wanted() -> bool {
 /// `<root>/target`, which `CARGO_TARGET_DIR`, a shared target directory or a
 /// git worktree all move somewhere else.
 #[derive(Clone, PartialEq, Eq, Debug)]
-struct Profile {
+struct BuildProfile {
     /// The directory the helpers will be built into as well.
     dir: PathBuf,
     /// Whether to pass `--release` when building them. Helpers match the GUI:
@@ -228,7 +285,7 @@ struct Profile {
     release: bool,
 }
 
-impl Profile {
+impl BuildProfile {
     fn of(binary: &Path) -> Result<Self> {
         let dir = binary
             .parent()

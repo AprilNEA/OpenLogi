@@ -4,6 +4,91 @@ Durable "why we did it this way" records that are not obvious from the code.
 Add a dated entry when a non-obvious architectural or dependency decision is
 made or revisited.
 
+## 2026-08: The agent stays one process; a crossing edge gets a wire, not an event layer
+
+The 2026-06 daemon split (#165) put the resident input machinery in
+`openlogi-agent` and left the GUI an on-demand IPC client. Its two
+cross-process abstractions have been production infrastructure since:
+`openlogi-ipc` is the versioned, append-only wire, and `succession` owns the
+one-process-per-role lifetime pattern (the agent negotiates as a peer, the
+overlay serves one run as a subordinate, the GUI only reports mismatches).
+This entry records the deliberate end of that road: the agent itself does not
+split further, and no transport-agnostic event abstraction is built inside it.
+
+Two facts decide it:
+
+- **Every candidate cut crosses the hot path.** The agent's two
+  permission-bearing roles — the CGEventTap hook (Accessibility) and HID++
+  device I/O (Input Monitoring) — are not adjacent subsystems but two ends of
+  one input loop: the hook feeds the action dispatcher, which performs HID++
+  writes (DPI cycle) and OS injection, and HID++ gesture capture feeds the
+  same dispatcher in the other direction. A hook/device process boundary puts
+  IPC latency and a new failure mode inside button-press handling — the path
+  the product exists to keep fast. The GUI/agent split worked precisely
+  because its crossing edges are cold (config saves, snapshots, long-polls);
+  no cold cut of the agent exists.
+- **The isolation benefits already arrived by other means.** Crash recovery is
+  launchd supervision (`KeepAlive = {SuccessfulExit: false}`); prompt
+  containment is the dormancy gate (nothing user-visible before arming);
+  orphan lifetime is `succession`. What a split would still add — the event
+  tap surviving the seconds of a device-stack respawn — does not pay for a
+  second TCC identity: bundle identity is the TCC primary key, so a new
+  helper process is a new identity with zero existing grants, a mass
+  re-grant event of the 0.6.24 class.
+
+The standing doctrine for any edge that does someday cross a process boundary:
+give it the treatment the overlay got — a versioned method on the
+`openlogi-ipc` contract (append-only, golden-tested, `PROTOCOL_VERSION`
+bumped) plus a `succession` role for the new process's lifetime — and cut
+along the named seams (`startup::StateWatchers` is the message list of a
+watcher-side wire, `lifecycle::Armed` is the consumer-side state list). What
+is deliberately not built is an in-process event bus or transport-agnostic
+event-source layer: it would tax every in-process edge with serialization
+bounds, fallibility, and reconnection semantics that shared memory does not
+have, in preparation for a boundary this analysis says should not exist.
+
+Revisit if a platform forces a privilege split (a packaging world where
+uinput access requires a system service), if sandboxing the device stack
+becomes a requirement, or if a genuinely cold cut appears. The first move is
+still a wire, not an abstraction.
+
+## 2026-08: Device settings are keyed by identity, not by transport
+
+A device's config key was derived from how it was reached, so the same mouse
+on a receiver and on a cable became two devices: two entries, two carousel
+cards, settings left behind on whichever link set them. The correlating value
+was already read on both paths and thrown away — `DeviceStableId::from_parts`
+took `serial` and `unit_id` and discarded both for receiver routes.
+
+- Keys are now `unit:<hex>` or `serial:<s>`, with a persisted `links` table
+  naming the routes the device has been seen on. That table is also the index
+  that identifies a sleeping device when only its route is known, which is why
+  it is stored rather than recomputed. It fixes a second bug in passing:
+  unpairing mouse A from a slot and pairing B into it no longer hands B all of
+  A's bindings, because the key is no longer the slot. Not retroactively,
+  though — a pre-upgrade config records nothing about which device wrote a slot
+  entry, so the first sighting after the upgrade still folds it into whatever
+  now occupies the slot. Only from that point on is the entry keyed by unit and
+  the slot empty.
+- A device whose unit id reads all-zero keeps its route key and never
+  correlates — degradation, not an assumption about hardware we cannot sample.
+- Capabilities are measured per link, because they genuinely differ per link:
+  a G502 LIGHTSPEED publishes `0x2121 HiResWheel` over its receiver and
+  `0x00c2 DfuControlSigned` over USB, same firmware image either way (#660).
+  The probe was never wrong; one device simply could not own both readings.
+  Each link's capabilities are rewritten from the sighting that reached it, so
+  the table describes the hardware rather than whatever a migration happened to
+  leave behind. Settings that disagree between links become per-link overrides
+  rather than one link overwriting the other.
+- Migration is two-phase because a v4 direct key carries the unit id in the key
+  string while a receiver key says nothing about the device: schema 4 → 5
+  renames direct keys mechanically at load, and receiver entries fold into
+  their canonical entry on the next online sighting. Until that sighting the
+  legacy entry stays orphaned. Closing that window at load time by matching
+  entries on identical `model_ids` was rejected — model ids are model-scoped,
+  so two identical mice, one on a receiver and one cabled, would merge into one
+  device. That is the property slot-keying protected, and it must not regress.
+
 ## 2026-08: Suppressions are `expect`, and tests are exempt by config
 
 A sweep of every lint suppression in the tree (207 attributes, 247 lints) found
@@ -118,7 +203,10 @@ mature crates (`tempfile`, `which`, `plist`, `walkdir`, `xshell`, `sysinfo`,
   guarantee process spawn.
 - GUI helper launch keeps `/usr/bin/open -g -n` intentionally: it needs
   LaunchServices-specific flags to start the packaged agent under its own TCC
-  identity, which generic opener crates do not expose.
+  identity, which generic opener crates do not expose. (Since 2026-08 it is
+  the *fallback*: a registered login item is kickstarted through `launchctl`
+  instead, which supervises the agent as well — `open` remains for
+  unregistered installs and stays custom for the same reason.)
 - Agent autostart install keeps direct `systemctl` calls because it is managing
   systemd user units, not merely opening or spawning an arbitrary program.
 - Self-restart and `disclaim` launches stay custom because they are process

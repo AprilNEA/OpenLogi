@@ -19,11 +19,8 @@ use clap::ValueEnum;
 use openlogi_core::brand;
 use strum::{Display, VariantArray};
 
-use super::info_plist::{read_plist_string, stamp_plist_strings};
-
-/// The icon every component shares, as `CFBundleIconFile` spells it (the `.icns`
-/// extension is optional there, so it is trimmed before comparing).
-const ICON_STEM: &str = "AppIcon";
+use crate::icon::macos::ICON_NAME;
+use crate::support::info_plist::{read_plist_string, stamp_plist_strings};
 
 /// Which identity family a bundle carries.
 ///
@@ -38,6 +35,18 @@ pub(crate) enum Channel {
     /// bundle can never claim a shipped grant and System Settings shows which
     /// of the two installed copies a row belongs to.
     Dev,
+}
+
+/// The profile a bundle of this channel runs under: packaging stamps the
+/// identifiers, and the running process derives its config directory, socket
+/// and service label from them.
+impl From<Channel> for openlogi_core::paths::Profile {
+    fn from(channel: Channel) -> Self {
+        match channel {
+            Channel::Production => Self::Production,
+            Channel::Dev => Self::Dev,
+        }
+    }
 }
 
 /// A bundle whose identity xtask owns: the app plus each nested login-item
@@ -60,36 +69,29 @@ pub(crate) enum Component {
 }
 
 impl Component {
-    /// Where this component lives inside the app bundle; `None` is the app itself.
-    ///
-    /// The dev family spells "Dev" in the *directory* name as well as in
-    /// `CFBundleDisplayName`, because macOS privacy panes fall back to a
-    /// bundle's filename whenever its metadata is stale — a dev helper in a
-    /// directory named like the shipped one renders as a second row nobody can
-    /// tell from the real thing. The shipped spellings are frozen: the GUI's
-    /// `agent_binary_path` and the agent's `overlay_binary_path` look for both
-    /// families by name at runtime.
-    pub(crate) fn nested_bundle(self, channel: Channel) -> Option<&'static str> {
-        match (self, channel) {
-            (Self::App, _) => None,
-            (Self::Agent, Channel::Production) => {
-                Some("Contents/Library/LoginItems/OpenLogiAgent.app")
-            }
-            (Self::Agent, Channel::Dev) => {
-                Some("Contents/Library/LoginItems/OpenLogi Agent Dev.app")
-            }
-            (Self::Overlay, Channel::Production) => {
-                Some("Contents/Library/LoginItems/OpenLogiOverlay.app")
-            }
-            (Self::Overlay, Channel::Dev) => {
-                Some("Contents/Library/LoginItems/OpenLogi Overlay Dev.app")
-            }
+    /// The `brand` helper this component embeds; `None` is the app itself.
+    fn helper(self) -> Option<brand::Helper> {
+        match self {
+            Self::App => None,
+            Self::Agent => Some(brand::Helper::Agent),
+            Self::Overlay => Some(brand::Helper::Overlay),
         }
+    }
+
+    /// Where this component lives inside the app bundle; `None` is the app
+    /// itself. The spellings are [`brand::Helper`]'s: the GUI and the agent
+    /// look the helpers up by the same names at runtime.
+    pub(crate) fn nested_bundle_dir(self, channel: Channel) -> Option<String> {
+        let helper = self.helper()?;
+        Some(match channel {
+            Channel::Production => helper.bundle_dir(),
+            Channel::Dev => helper.dev_bundle_dir(),
+        })
     }
 
     /// This component's bundle root inside `app`.
     pub(crate) fn root(self, app: &Path, channel: Channel) -> PathBuf {
-        self.nested_bundle(channel)
+        self.nested_bundle_dir(channel)
             .map_or_else(|| app.to_path_buf(), |nested| app.join(nested))
     }
 
@@ -101,15 +103,14 @@ impl Component {
     /// This component's copy of the shared app icon.
     pub(crate) fn icon(self, app: &Path, channel: Channel) -> PathBuf {
         self.root(app, channel)
-            .join(format!("Contents/Resources/{ICON_STEM}.icns"))
+            .join(format!("Contents/Resources/{ICON_NAME}.icns"))
     }
 
     /// The shipped identity — the one macOS ties existing grants to.
     fn production(self) -> Identity {
-        let (bundle_id, name) = match self {
-            Self::App => (brand::APP_ID, "OpenLogi"),
-            Self::Agent => (brand::AGENT_ID, "OpenLogi Agent"),
-            Self::Overlay => (brand::OVERLAY_ID, "OpenLogi Overlay"),
+        let (bundle_id, name) = match self.helper() {
+            None => (brand::APP_ID, brand::APP_NAME),
+            Some(helper) => (helper.bundle_id(), helper.display_name()),
         };
         Identity {
             bundle_id: bundle_id.to_owned(),
@@ -135,7 +136,7 @@ impl Channel {
             Self::Production => production,
             Self::Dev => Identity {
                 bundle_id: brand::dev_id(&production.bundle_id),
-                name: format!("{} Dev", production.name),
+                name: brand::dev_name(&production.name),
             },
         }
     }
@@ -196,6 +197,10 @@ pub(crate) fn verify(app: &Path, channel: Channel, components: &[Component]) -> 
 /// Fail unless every component ships the shared app icon *and* declares it, so
 /// no surface that lists OpenLogi's processes — System Settings' privacy panes,
 /// Login Items — shows a blank icon for one of them.
+///
+/// What the app carries beyond that `.icns` — the asset catalog, the alternates
+/// — belongs to the icon pipeline, and
+/// [`IconPipeline::verify`](crate::icon::IconPipeline::verify) checks it.
 pub(crate) fn verify_icons(app: &Path, channel: Channel, components: &[Component]) -> Result<()> {
     for &component in components {
         let icon = component.icon(app, channel);
@@ -210,10 +215,10 @@ pub(crate) fn verify_icons(app: &Path, channel: Channel, components: &[Component
         if declared
             .as_deref()
             .map(|file| file.trim_end_matches(".icns"))
-            != Some(ICON_STEM)
+            != Some(ICON_NAME)
         {
             bail!(
-                "{component}: CFBundleIconFile is {declared:?}, expected {ICON_STEM:?} ({})",
+                "{component}: CFBundleIconFile is {declared:?}, expected {ICON_NAME:?} ({})",
                 plist.display()
             );
         }

@@ -15,40 +15,55 @@ use crate::config::Config;
 /// `app_bundle`'s per-app overlay applied. Unset buttons fall back to
 /// [`default_binding`].
 ///
-/// This is the map the OS hook and the HID++ button-press path consume, so a
-/// `Binding::Gesture` is projected to its `click_action()` — a gesture-mode
-/// button's per-direction swipes are dispatched via the separate
-/// [`hidpp_gesture_maps_for`] / [`oshook_gestures_for`] maps, not here.
+/// This projection is for one-shot consumers such as thumb-wheel rotation and
+/// the GUI. Lifecycle-aware button paths use [`button_bindings_for`] so a long
+/// press keeps both actions. `Binding::Gesture` is projected to its
+/// `click_action()`; per-direction swipes are dispatched via the separate
+/// [`hidpp_gesture_maps_for`] / [`oshook_gestures_for`] maps.
 #[must_use]
 pub fn bindings_for(
     config: &Config,
     config_key: Option<&str>,
     app_bundle: Option<&str>,
 ) -> BTreeMap<ButtonId, Action> {
+    button_bindings_for(config, config_key, app_bundle)
+        .into_iter()
+        .map(|(button, binding)| (button, binding.click_action()))
+        .collect()
+}
+
+/// Effective binding shapes for lifecycle-aware button consumers.
+///
+/// Unlike [`bindings_for`], this preserves threshold-based long presses. A
+/// sparse gesture map receives only its missing `Click` default so it keeps its
+/// gesture identity while retaining the same plain-click fallback.
+#[must_use]
+pub fn button_bindings_for(
+    config: &Config,
+    config_key: Option<&str>,
+    app_bundle: Option<&str>,
+) -> BTreeMap<ButtonId, Binding> {
     let stored = config_key
         .map(|key| config.effective_bindings(key, app_bundle))
         .unwrap_or_default();
-    let mut bindings: BTreeMap<ButtonId, Action> = ButtonId::ALL
+    let mut bindings: BTreeMap<ButtonId, Binding> = ButtonId::ALL
         .iter()
         .copied()
-        .map(|b| (b, default_binding(b)))
+        .map(|button| (button, Binding::Single(default_binding(button))))
         .collect();
-    for (k, binding) in stored {
-        // A gesture binding with no explicit `Click` has no opinion on the
-        // plain-press action, so leave the button's default seed in place rather
-        // than clobbering it with the `Action::None` that `click_action()` would
-        // project. (An explicit `Single(Action::None)` — a user-disabled button —
-        // still overrides, as it should.)
-        if binding.is_gesture() && binding.direction_action(GestureDirection::Click).is_none() {
-            continue;
+    for (button, mut binding) in stored {
+        if let Binding::Gesture(map) = &mut binding {
+            map.entry(GestureDirection::Click)
+                .or_insert_with(|| default_binding(button));
         }
-        bindings.insert(k, binding.click_action());
+        bindings.insert(button, binding);
     }
     bindings
 }
 
-/// Per-direction maps for every HID++ gesture source (the dedicated gesture
-/// button, the MX Master 4 haptic panel) in gesture mode on `config_key`,
+/// Per-direction maps for every HID++ gesture source (DPI/ModeShift, the
+/// dedicated gesture button, and the MX Master 4 haptic panel) in gesture mode
+/// on `config_key`, with `app_bundle`'s single-action overrides applied,
 /// keyed by the button its captured swipes dispatch as. Each map is seeded
 /// via [`Binding::fill_gesture_defaults`] — the one canonical seeding rule —
 /// so the watcher always dispatches the full five-direction set the GUI
@@ -57,11 +72,12 @@ pub fn bindings_for(
 pub fn hidpp_gesture_maps_for(
     config: &Config,
     config_key: Option<&str>,
+    app_bundle: Option<&str>,
 ) -> BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>> {
     let Some(key) = config_key else {
         return BTreeMap::new();
     };
-    let stored = config.bindings_for(key);
+    let stored = config.effective_bindings(key, app_bundle);
     ButtonId::ALL
         .iter()
         .copied()
@@ -76,18 +92,20 @@ pub fn hidpp_gesture_maps_for(
             binding.fill_gesture_defaults();
             match binding {
                 Binding::Gesture(map) => Some((button, map)),
-                Binding::Single(_) => None,
+                Binding::Single(_) | Binding::LongPress(_) => None,
             }
         })
         .collect()
 }
 
-/// Per-direction maps for every OS-hook button (Middle/Back/Forward) in
-/// gesture mode on `config_key`, with `app_bundle`'s per-app overlay applied,
-/// for the OS hook to resolve a hold+swipe. Gesture mode is per-button (see
-/// [`Config::is_gesture_mode`]), so any number of entries may be live at once —
-/// concurrency between them is the hook's first-hold-wins policy, not a config
-/// concern.
+/// Per-direction maps for every OS-hook button with a stored gesture binding on
+/// `config_key`, with `app_bundle`'s per-app overlay applied, for the OS hook to
+/// resolve a hold+swipe. New gesture mode is offered only for Back/Forward, but
+/// v0.8.0 also persisted Middle Click gesture maps; accepting all OS-hook
+/// buttons here preserves those maps until the user turns that mode off.
+/// Gesture mode is per-button (see [`Config::is_gesture_mode`]), so any number
+/// of entries may be live at once — concurrency between them is the hook's
+/// first-hold-wins policy, not a config concern.
 ///
 /// Unlike [`hidpp_gesture_maps_for`] (whose maps seed every direction at
 /// projection time), this returns each button's raw stored map. In practice
@@ -120,14 +138,14 @@ pub fn oshook_gestures_for(
         .filter(|(id, _)| id.is_os_hook_button())
         .filter_map(|(id, binding)| match binding {
             Binding::Gesture(map) => Some((id, map)),
-            Binding::Single(_) => None,
+            Binding::Single(_) | Binding::LongPress(_) => None,
         })
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::binding::default_gesture_binding;
+    use crate::binding::{LongPressBinding, default_gesture_binding};
 
     use super::*;
 
@@ -146,6 +164,47 @@ mod tests {
             projected.get(&ButtonId::GestureButton),
             Some(&default_binding(ButtonId::GestureButton)),
             "a Click-less gesture must keep the default click, not None"
+        );
+    }
+
+    #[test]
+    fn lifecycle_projection_preserves_long_press_while_action_projection_uses_short() {
+        let mut cfg = Config::default();
+        let binding = Binding::LongPress(LongPressBinding::new(Action::Copy, Action::Paste));
+        cfg.set_binding("2b042", ButtonId::Back, binding.clone());
+
+        let lifecycle = button_bindings_for(&cfg, Some("2b042"), None);
+        assert_eq!(lifecycle.get(&ButtonId::Back), Some(&binding));
+        let actions = bindings_for(&cfg, Some("2b042"), None);
+        assert_eq!(actions.get(&ButtonId::Back), Some(&Action::Copy));
+    }
+
+    #[test]
+    fn a_rotation_rebind_leaves_the_wheels_tap_inert() {
+        // Rebinding rotation (or moving the sensitivity slider) diverts the
+        // wheel over 0x2150, which is what starts delivering its capacitive
+        // taps. Those taps must stay inert until the user binds the tap
+        // itself — a seeded action here fires from incidental thumb contact.
+        let mut cfg = Config::default();
+        cfg.set_binding(
+            "2b034",
+            ButtonId::ThumbwheelScrollUp,
+            Action::VolumeUp.into(),
+        );
+
+        let projected = bindings_for(&cfg, Some("2b034"), None);
+        assert_eq!(projected.get(&ButtonId::Thumbwheel), Some(&Action::None));
+    }
+
+    #[test]
+    fn an_explicitly_bound_tap_survives_the_inert_default() {
+        let mut cfg = Config::default();
+        cfg.set_binding("2b034", ButtonId::Thumbwheel, Action::AppExpose.into());
+
+        let projected = bindings_for(&cfg, Some("2b034"), None);
+        assert_eq!(
+            projected.get(&ButtonId::Thumbwheel),
+            Some(&Action::AppExpose)
         );
     }
 
@@ -197,29 +256,39 @@ mod tests {
     }
 
     #[test]
-    fn oshook_gestures_includes_every_gesture_mode_button() {
-        // The owner lock is gone: every OS-hook button in gesture mode
-        // dispatches, each through its own direction map.
+    fn oshook_gestures_preserves_a_stored_middle_click_gesture() {
         let mut cfg = Config::default();
         cfg.set_gesture_mode("2b042", ButtonId::Back, true);
-        cfg.set_gesture_mode("2b042", ButtonId::MiddleClick, true);
+        cfg.set_gesture_mode("2b042", ButtonId::Forward, true);
+        let middle = BTreeMap::from([
+            (GestureDirection::Click, Action::MiddleClick),
+            (GestureDirection::Up, Action::Copy),
+        ]);
+        cfg.set_binding(
+            "2b042",
+            ButtonId::MiddleClick,
+            Binding::Gesture(middle.clone()),
+        );
 
         let oshook = oshook_gestures_for(&cfg, Some("2b042"), None);
         assert!(oshook.contains_key(&ButtonId::Back), "got: {oshook:?}");
-        assert!(
-            oshook.contains_key(&ButtonId::MiddleClick),
-            "got: {oshook:?}"
+        assert!(oshook.contains_key(&ButtonId::Forward), "got: {oshook:?}");
+        assert_eq!(
+            oshook.get(&ButtonId::MiddleClick),
+            Some(&middle),
+            "an existing Middle Click gesture from v0.8.0 must keep dispatching"
         );
     }
 
     #[test]
     fn hidpp_gesture_maps_includes_every_gesture_mode_source() {
-        // Both HID++ sources in gesture mode dispatch simultaneously, each
+        // All HID++ sources in gesture mode dispatch simultaneously, each
         // through its own seeded direction map.
         let mut cfg = Config::default();
+        cfg.set_gesture_mode("2b042", ButtonId::DpiToggle, true);
         cfg.set_gesture_mode("2b042", ButtonId::HapticPanel, true);
 
-        let maps = hidpp_gesture_maps_for(&cfg, Some("2b042"));
+        let maps = hidpp_gesture_maps_for(&cfg, Some("2b042"), None);
         // The dedicated button gestures by default...
         let dedicated = maps
             .get(&ButtonId::GestureButton)
@@ -234,6 +303,12 @@ mod tests {
             .expect("a gesture-mode panel must dispatch");
         for dir in GestureDirection::ALL {
             assert!(panel.contains_key(&dir), "unseeded panel arm {dir:?}");
+        }
+        let dpi = maps
+            .get(&ButtonId::DpiToggle)
+            .expect("a gesture-mode DPI button must dispatch through HID++");
+        for dir in GestureDirection::ALL {
+            assert!(dpi.contains_key(&dir), "unseeded DPI arm {dir:?}");
         }
     }
 
@@ -268,11 +343,54 @@ mod tests {
     }
 
     #[test]
+    fn per_app_overrides_replace_hidpp_gestures_and_clearing_restores_them() {
+        for button in [
+            ButtonId::DpiToggle,
+            ButtonId::GestureButton,
+            ButtonId::HapticPanel,
+        ] {
+            let mut cfg = Config::default();
+            cfg.set_gesture_mode("2b042", button, true);
+            let global = hidpp_gesture_maps_for(&cfg, Some("2b042"), None);
+            assert!(global.contains_key(&button));
+
+            for action in [Action::Paste, Action::None] {
+                cfg.set_per_app_binding(
+                    "2b042",
+                    "com.example.Editor",
+                    button,
+                    Some(action.clone()),
+                );
+                let mut expected = global.clone();
+                expected.remove(&button);
+                assert_eq!(
+                    hidpp_gesture_maps_for(&cfg, Some("2b042"), Some("com.example.Editor")),
+                    expected
+                );
+                assert_eq!(
+                    bindings_for(&cfg, Some("2b042"), Some("com.example.Editor")).get(&button),
+                    Some(&action)
+                );
+                assert_eq!(hidpp_gesture_maps_for(&cfg, Some("2b042"), None), global);
+                assert_eq!(
+                    hidpp_gesture_maps_for(&cfg, Some("2b042"), Some("com.example.Other")),
+                    global
+                );
+            }
+            cfg.set_per_app_binding("2b042", "com.example.Editor", button, None);
+            assert_eq!(
+                hidpp_gesture_maps_for(&cfg, Some("2b042"), Some("com.example.Editor")),
+                global
+            );
+        }
+    }
+
+    #[test]
     fn hidpp_maps_silent_for_a_demoted_dedicated_button() {
         // Default device: the dedicated HID++ gesture button gestures, with its
         // defaults seeded.
         let mut cfg = Config::default();
-        let maps = hidpp_gesture_maps_for(&cfg, Some("2b042"));
+        let maps = hidpp_gesture_maps_for(&cfg, Some("2b042"), None);
         assert_eq!(
             maps.get(&ButtonId::GestureButton)
                 .and_then(|m| m.get(&GestureDirection::Up)),
@@ -285,7 +403,7 @@ mod tests {
         cfg.set_gesture_mode("2b042", ButtonId::GestureButton, false);
         cfg.set_gesture_mode("2b042", ButtonId::Back, true);
         assert!(
-            hidpp_gesture_maps_for(&cfg, Some("2b042")).is_empty(),
+            hidpp_gesture_maps_for(&cfg, Some("2b042"), None).is_empty(),
             "a demoted dedicated button must dispatch nothing over HID++"
         );
     }

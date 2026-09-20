@@ -4,43 +4,47 @@
 //! the protocol-neutral generated visual and never borrow another model's
 //! image or diffuser geometry.
 
-use gpui::{AnyElement, BoxShadow, IntoElement, ParentElement, Styled, div, hsla, img, point, px};
+use gpui::{
+    BoxShadow, ParentElement, Styled, div, hsla, img, point, prelude::FluentBuilder as _, px,
+};
 use gpui_component::{Icon, IconName};
 use openlogi_core::config::LightSettings;
 
 use crate::services::assets::ResolvedAsset;
 use crate::ui::theme::Palette;
 
+/// What a light's visual reflects about the device — connection and power
+/// are independent facts (an enabled light can be offline), so this is a
+/// named pair rather than two adjacent `bool`s.
+#[derive(Clone, Copy)]
+pub(crate) struct LightView {
+    pub(crate) online: bool,
+    pub(crate) enabled: bool,
+}
+
 /// Render a standalone light inside a home-gallery image slot.
 pub(crate) fn gallery(
     asset: Option<&ResolvedAsset>,
-    online: bool,
-    enabled: bool,
+    view: LightView,
     settings: LightSettings,
     pal: Palette,
-) -> AnyElement {
-    if let Some(asset) = asset {
-        visual_container()
-            .child(product_image(asset, 210., 180., online))
-            .into_any_element()
-    } else {
-        generated_visual(210., 180., online, enabled, settings, pal).into_any_element()
-    }
+) -> gpui::Div {
+    visual_container()
+        .when_some(asset, |container, asset| {
+            container.child(product_image(asset, 210., 180., view.online))
+        })
+        .when(asset.is_none(), |container| {
+            container.child(generated_visual(210., 180., view, settings, pal))
+        })
 }
 
 /// Render a standalone light as the large hero in its detail view.
 pub(crate) fn detail(
     asset: Option<&ResolvedAsset>,
-    online: bool,
-    enabled: bool,
+    view: LightView,
     settings: LightSettings,
     pal: Palette,
 ) -> gpui::Div {
-    let content = if let Some(asset) = asset {
-        product_image(asset, 536., 460., online)
-    } else {
-        generated_visual(536., 460., online, enabled, settings, pal)
-    };
     visual_container()
         .flex_1()
         .min_w(px(440.))
@@ -48,9 +52,14 @@ pub(crate) fn detail(
         .rounded(pal.card_radius)
         .border_1()
         .border_color(pal.border)
-        .bg(pal.surface)
+        .bg(pal.panel)
         .overflow_hidden()
-        .child(content)
+        .when_some(asset, |container, asset| {
+            container.child(product_image(asset, 536., 460., view.online))
+        })
+        .when(asset.is_none(), |container| {
+            container.child(generated_visual(536., 460., view, settings, pal))
+        })
 }
 
 fn product_image(asset: &ResolvedAsset, width: f32, height: f32, online: bool) -> gpui::Div {
@@ -82,11 +91,11 @@ fn visual_container() -> gpui::Div {
 fn generated_visual(
     width: f32,
     height: f32,
-    online: bool,
-    enabled: bool,
+    view: LightView,
     settings: LightSettings,
     pal: Palette,
 ) -> gpui::Div {
+    let LightView { online, enabled } = view;
     let powered = online && enabled;
     let glow = light_color(settings.temperature_kelvin.unwrap_or(4600));
     let brightness = f32::from(settings.brightness_percent.min(100)) / 100.;
@@ -102,7 +111,7 @@ fn generated_visual(
         .bg(if powered {
             glow.opacity(0.08 + brightness * 0.18)
         } else {
-            pal.surface_hover
+            pal.muted
         });
     let halo = if powered {
         halo.shadow(vec![BoxShadow {
@@ -140,7 +149,7 @@ fn generated_visual(
                     .bg(if powered {
                         glow.opacity(0.2)
                     } else {
-                        pal.surface
+                        pal.panel
                     })
                     .child(Icon::new(IconName::Sun).size_12().text_color(if powered {
                         glow

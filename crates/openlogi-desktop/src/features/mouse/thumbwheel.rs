@@ -26,11 +26,13 @@ pub(crate) enum ThumbwheelPreset {
     VolumeReversed,
     CycleDpi,
     VerticalScroll,
+    VerticalScrollReversed,
     HorizontalScroll,
+    HorizontalScrollReversed,
 }
 
 impl ThumbwheelPreset {
-    pub(crate) const ALL: [Self; 11] = [
+    pub(crate) const ALL: [Self; 13] = [
         Self::BackForward,
         Self::UndoRedo,
         Self::BrowserHistory,
@@ -41,7 +43,9 @@ impl ThumbwheelPreset {
         Self::VolumeReversed,
         Self::CycleDpi,
         Self::VerticalScroll,
+        Self::VerticalScrollReversed,
         Self::HorizontalScroll,
+        Self::HorizontalScrollReversed,
     ];
 
     #[must_use]
@@ -57,7 +61,14 @@ impl ThumbwheelPreset {
             Self::VolumeReversed => (Action::VolumeUp, Action::VolumeDown),
             Self::CycleDpi => (Action::CycleDpiPresets, Action::CycleDpiPresets),
             Self::VerticalScroll => (Action::ScrollDown, Action::ScrollUp),
-            Self::HorizontalScroll => (Action::HorizontalScrollLeft, Action::HorizontalScrollRight),
+            Self::VerticalScrollReversed => (Action::ScrollUp, Action::ScrollDown),
+            // The plain pair must equal the native-direction defaults so
+            // picking it never diverts the wheel; the reversed pair is the
+            // swap, which diverts and injects the opposite direction.
+            Self::HorizontalScroll => (Action::HorizontalScrollRight, Action::HorizontalScrollLeft),
+            Self::HorizontalScrollReversed => {
+                (Action::HorizontalScrollLeft, Action::HorizontalScrollRight)
+            }
         };
         ThumbwheelPair { backward, forward }
     }
@@ -73,19 +84,21 @@ impl ThumbwheelPreset {
     }
 
     #[must_use]
-    pub(crate) const fn label(self) -> &'static str {
+    pub(crate) const fn translation_key(self) -> &'static str {
         match self {
-            Self::BackForward => "Back / Forward",
-            Self::UndoRedo => "Undo / Redo",
-            Self::BrowserHistory => "Browser Back / Forward",
-            Self::Tabs => "Previous / Next Tab",
-            Self::Desktops => "Previous / Next Desktop",
-            Self::Tracks => "Previous / Next Track",
-            Self::Volume => "Volume Down / Up",
-            Self::VolumeReversed => "Volume Up / Down",
-            Self::CycleDpi => "Cycle DPI Presets",
-            Self::VerticalScroll => "Vertical Scroll",
-            Self::HorizontalScroll => "Horizontal Scroll",
+            Self::BackForward => "pointer.back_forward",
+            Self::UndoRedo => "pointer.undo_redo",
+            Self::BrowserHistory => "pointer.browser_back_forward",
+            Self::Tabs => "pointer.previous_next_tab",
+            Self::Desktops => "pointer.previous_next_desktop",
+            Self::Tracks => "pointer.previous_next_track",
+            Self::Volume => "pointer.volume_down_up",
+            Self::VolumeReversed => "pointer.volume_up_down",
+            Self::CycleDpi => "pointer.cycle_dpi_presets",
+            Self::VerticalScroll => "pointer.vertical_scroll",
+            Self::VerticalScrollReversed => "pointer.vertical_scroll_reversed",
+            Self::HorizontalScroll => "pointer.horizontal_scroll",
+            Self::HorizontalScrollReversed => "pointer.horizontal_scroll_reversed",
         }
     }
 
@@ -100,8 +113,10 @@ impl ThumbwheelPreset {
             Self::Tracks => "action-icons/skip-forward.svg",
             Self::Volume | Self::VolumeReversed => "action-icons/volume-2.svg",
             Self::CycleDpi => "action-icons/gauge.svg",
-            Self::VerticalScroll => "action-icons/chevrons-up.svg",
-            Self::HorizontalScroll => "action-icons/chevrons-right.svg",
+            Self::VerticalScroll | Self::VerticalScrollReversed => "action-icons/chevrons-up.svg",
+            Self::HorizontalScroll | Self::HorizontalScrollReversed => {
+                "action-icons/chevrons-right.svg"
+            }
         }
     }
 }
@@ -123,6 +138,8 @@ mod tests {
             (Action::VolumeUp, Action::VolumeDown),
             (Action::CycleDpiPresets, Action::CycleDpiPresets),
             (Action::ScrollDown, Action::ScrollUp),
+            (Action::ScrollUp, Action::ScrollDown),
+            (Action::HorizontalScrollRight, Action::HorizontalScrollLeft),
             (Action::HorizontalScrollLeft, Action::HorizontalScrollRight),
         ];
 

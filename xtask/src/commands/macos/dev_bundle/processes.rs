@@ -16,11 +16,14 @@ use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, Signal, System};
 
 /// How long to wait for a signalled process to actually go, so the agent the
 /// GUI is about to spawn does not lose the singleton lock to a corpse.
-const EXIT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(3);
-const EXIT_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+const EXIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+const EXIT_POLL_PERIOD: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// The processes this checkout owns.
-const OURS: [&str; 2] = ["openlogi-agent", "openlogi-overlay"];
+const OURS: [&str; 2] = [
+    openlogi_core::brand::Helper::Agent.executable(),
+    openlogi_core::brand::Helper::Overlay.executable(),
+];
 
 /// Stop this checkout's leftovers, and refuse to share the machine with an
 /// agent from anywhere else.
@@ -51,7 +54,7 @@ pub(super) fn reap_leftovers(app: &Path, target: &Path) -> Result<()> {
         };
         if exe.starts_with(app) || exe.starts_with(target) {
             ours.push(*pid);
-        } else if name == "openlogi-agent" {
+        } else if name == openlogi_core::brand::Helper::Agent.executable() {
             external.push((*pid, exe.to_path_buf()));
         }
     }
@@ -63,12 +66,17 @@ pub(super) fn reap_leftovers(app: &Path, target: &Path) -> Result<()> {
             .map(|(pid, exe)| format!("  pid {pid}: {}", exe.display()))
             .collect::<Vec<_>>()
             .join("\n");
+        let service = crate::commands::macos::bundle::agent_service_label(
+            crate::commands::macos::bundle::identity::Channel::Production,
+        );
         bail!(
             "an external openlogi-agent is already running.\n\n\
              The dev GUI would connect to that agent instead of the freshly built dev\n\
-             agent, which makes GUI+agent testing misleading. Stop it first, e.g.:\n\n  \
-             launchctl bootout \"gui/$(id -u)/org.openlogi.agent\"\n  \
+             agent, which makes GUI+agent testing misleading. Stop it first: Quit from\n\
+             its menu-bar icon, or\n\n  \
              pkill -x openlogi-agent\n\n\
+             (for an install registered as a login item, also:\n  \
+             launchctl bootout \"gui/$(id -u)/{service}\")\n\n\
              Running external agent(s):\n{listed}\n\n\
              If this is intentional, rerun with OPENLOGI_ALLOW_EXTERNAL_AGENT=1."
         );
@@ -97,12 +105,12 @@ pub(super) fn reap_leftovers(app: &Path, target: &Path) -> Result<()> {
 fn wait_for_exit(pids: &[sysinfo::Pid]) {
     let mut system = System::new();
     let started = std::time::Instant::now();
-    while started.elapsed() < EXIT_DEADLINE {
+    while started.elapsed() < EXIT_TIMEOUT {
         system.refresh_processes(ProcessesToUpdate::Some(pids), true);
         if pids.iter().all(|pid| system.process(*pid).is_none()) {
             return;
         }
-        std::thread::sleep(EXIT_POLL);
+        std::thread::sleep(EXIT_POLL_PERIOD);
     }
     println!(
         "    warning: a leftover dev process is still running; the new agent may lose the lock"

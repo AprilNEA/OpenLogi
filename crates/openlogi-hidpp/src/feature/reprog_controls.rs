@@ -331,16 +331,6 @@ pub struct CidReportingChange {
 }
 
 impl CidReportingChange {
-    /// Change only the temporary diverted/raw-XY bits.
-    #[must_use]
-    pub fn temporary_diversion(diverted: bool, raw_xy: bool) -> Self {
-        Self {
-            diverted: Some(diverted),
-            raw_xy: Some(raw_xy),
-            ..Self::default()
-        }
-    }
-
     fn to_payload(self, cid: ControlId) -> [u8; 16] {
         let mut payload = [0u8; 16];
         let [cid_hi, cid_lo] = cid.0.to_be_bytes();

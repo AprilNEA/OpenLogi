@@ -10,16 +10,39 @@ description = "Core types, config, and paths for OpenLogi. No I/O specifics."
 keywords = ["logitech", "hidpp", "config", "mouse", "hid"]
 categories = ["hardware-support", "config"]
 
+[features]
+default = ["fs", "locale"]
+# The line between the host-touching config I/O and everything else here, which
+# is pure data and stays checkable against `wasm32-unknown-unknown` (see xtask's
+# `WASM_PORTABLE_CRATES`). On by default, so no consumer here is affected.
+fs = ["dep:atomic-write-file", "dep:etcetera", "dep:toml_edit"]
+# Locale negotiation over the shared catalogs in `openlogi-ui/locales/`. Gated
+# for the same wasm reason as `fs`: `sys-locale` reads the host's language
+# preference and `rust-i18n` owns the process-global locale.
+locale = ["dep:fluent-langneg", "dep:rust-i18n", "dep:sys-locale"]
+# The dedicated tokio worker thread the host crates run async work on
+# (`worker` module). Off by default: the portable core stays free of tokio.
+worker = ["dep:tokio"]
+# The `tracing` filter and stderr subscriber every process installs (`logging`
+# module). Off by default for the same reason as `worker`.
+logging = ["dep:tracing-subscriber"]
+
 [dependencies]
+openlogi-device-registry = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-etcetera = "0.11.0"
-atomic-write-file = { workspace = true }
+etcetera = { version = "0.11.0", optional = true }
+atomic-write-file = { workspace = true, optional = true }
+fluent-langneg = { version = "0.14.2", optional = true }
+rust-i18n = { version = "4", optional = true }
+sys-locale = { version = "0.3.2", optional = true }
+tokio = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
 num_enum = { workspace = true }
 strum = { version = "0.27", features = ["derive"] }
-toml_edit = "0.22"
+toml_edit = { version = "0.22", optional = true }
 nutype = { version = "0.7.0", features = ["serde"] }
 az = "1.3.0"
 

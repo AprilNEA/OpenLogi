@@ -1,0 +1,59 @@
+project_id_env: CROWDIN_PROJECT_ID
+api_token_env: CROWDIN_PERSONAL_TOKEN
+base_path: ".."
+
+preserve_hierarchy: true
+
+export_languages:
+  - be
+  - da
+  - de
+  - es-ES
+  - fr
+  - it
+  - nl
+  - "no"
+  - pl
+  - pt-PT
+  - pt-BR
+  - fi
+  - sv-SE
+  - tr
+  - el
+  - ru
+  - uk
+  - ja
+  - zh-CN
+  - zh-HK
+  - zh-TW
+  - ko
+
+files:
+  - source: "/crates/openlogi-ui/locales/en.toml"
+    translation: "/crates/openlogi-ui/locales/%locale%.toml"
+    type: "toml"
+    update_option: "update_as_unapproved"
+    languages_mapping:
+      locale:
+        be: "be"
+        da: "da"
+        de: "de"
+        es-ES: "es"
+        fr: "fr"
+        it: "it"
+        nl: "nl"
+        "no": "nb"
+        pl: "pl"
+        pt-PT: "pt-PT"
+        pt-BR: "pt-BR"
+        fi: "fi"
+        sv-SE: "sv"
+        tr: "tr"
+        el: "el"
+        ja: "ja"
+        ru: "ru"
+        uk: "uk"
+        zh-CN: "zh-CN"
+        zh-HK: "zh-HK"
+        zh-TW: "zh-TW"
+        ko: "ko"

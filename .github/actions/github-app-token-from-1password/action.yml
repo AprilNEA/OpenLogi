@@ -30,7 +30,7 @@ runs:
   steps:
     - name: Load GitHub App credentials from 1Password
       id: load-secrets
-      uses: 1password/load-secrets-action@v4
+      uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
       with:
         export-env: false
       env:

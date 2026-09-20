@@ -201,7 +201,7 @@ fn insert_feature<F: Feature>(
 /// report used to consume the caller's entire probe budget and abort
 /// enumeration. A HID++ round trip that is going to answer answers in tens of
 /// milliseconds; past this the report is lost, and re-asking beats waiting.
-const FEATURE_READ_ATTEMPT: Duration = Duration::from_millis(700);
+const FEATURE_READ_TIMEOUT: Duration = Duration::from_millis(700);
 
 /// Attempts per feature-table entry before enumeration gives up on it.
 ///
@@ -229,7 +229,7 @@ async fn read_feature_entry(
         let mut read = std::pin::pin!(feature_set.get_feature(index).fuse());
         let outcome = select! {
             result = read => Some(result),
-            () = futures_timer::Delay::new(FEATURE_READ_ATTEMPT).fuse() => None,
+            () = futures_timer::Delay::new(FEATURE_READ_TIMEOUT).fuse() => None,
         };
         match outcome {
             Some(Ok(info)) => return Ok(info),
@@ -256,7 +256,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::{
-        channel::{HidppChannel, tests::MockRawHidChannel},
+        channel::mock::{MockRawHidChannel, channel_with_reader},
         feature::{CreatableFeature as _, feature_set::FeatureSetFeature},
         protocol::v20::Hidpp20Error,
     };
@@ -270,7 +270,7 @@ mod tests {
     fn lost_feature_entry_is_retried_before_giving_up() {
         futures::executor::block_on(async {
             let (raw, handle) = MockRawHidChannel::new();
-            let channel = Arc::new(HidppChannel::from_raw_channel(raw).await.unwrap());
+            let channel = Arc::new(channel_with_reader(raw).await);
             // The mock answers nothing, so every attempt runs to its deadline.
             let feature_set = FeatureSetFeature::new(Arc::clone(&channel), 0xff, 0x01);
 

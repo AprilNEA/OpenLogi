@@ -1,27 +1,30 @@
 //! The GUI's event loop: everything the app does that isn't a render.
 //!
 //! One task, spawned onto GPUI's executor, owning the state that outlives any
-//! single event — the merged device set, the asset resolver, the background
-//! sync's bookkeeping — and one `select!` arm per source that can change it:
-//! the agent's IPC updates, the camera scan, the Settings → Assets commands,
-//! finished sync runs, and `openlogi://` deeplinks.
+//! single event — the merged device set, the asset resolver, the asset cache —
+//! and one `select!` arm per source that can change it: the agent's IPC
+//! updates, the camera scan, the Settings → Assets commands, finished
+//! downloads, and `openlogi://` deeplinks.
 
-use std::time::{Duration, Instant};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::time::Duration;
 
-use gpui::{AsyncApp, BorrowAppContext as _};
+use gpui::{AppContext as _, AsyncApp, Task};
 use openlogi_camera::Camera;
 use openlogi_core::brand::DeeplinkCommand;
 use openlogi_core::config::{AssetSourcePreference, Config};
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_ipc::AgentSnapshot;
+use swr_core::SwrClient;
+use swr_gpui::GpuiRuntime;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tracing::warn;
 
-use crate::services::assets::scheduler::{AssetSync, ManualStep};
-use crate::services::assets::sync::{AssetCommand, AssetTarget, run_asset_sync};
+use crate::services::assets::sync::{AssetCommand, AssetTarget};
 use crate::services::assets::{self, sync};
 use crate::services::ipc;
-use crate::state::{self, AppState, ConfigPersistence};
+use crate::state::{self, AppState, ConfigPersistence, Sources};
 use crate::{app, windows};
 
 /// How often the UI re-enumerates USB cameras. They are UVC devices the agent
@@ -39,9 +42,6 @@ pub(crate) struct Startup {
     pub(crate) updates: UnboundedReceiver<ipc::GuiUpdate>,
     /// Manual asset actions from Settings → Assets.
     pub(crate) asset_commands: UnboundedReceiver<AssetCommand>,
-    /// The loop's own handle on that channel, to re-issue a command it had to
-    /// defer while a sync was in flight.
-    pub(crate) asset_self_tx: UnboundedSender<AssetCommand>,
     /// `openlogi://` URLs, from the tray or another app.
     pub(crate) deeplinks: UnboundedReceiver<DeeplinkCommand>,
 }
@@ -56,7 +56,6 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
             ipc_commands,
             mut updates,
             mut asset_commands,
-            asset_self_tx,
             mut deeplinks,
         } = startup;
 
@@ -68,34 +67,50 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
             .spawn(async { openlogi_camera::enumerate_cameras() })
             .await;
 
-        // Install the hook-shared AppState up front, then open the window at
+        // Install the shared AppState entity up front, then open the window at
         // launch; closing it leaves the app live in the menu bar. Start with no
         // devices and never block startup on HID enumeration — a sleeping or
         // unresponsive device must not be able to wedge the main thread before
         // the window opens. The agent's first snapshot wires up devices,
         // bindings and the hook live.
-        cx.update(|cx| {
-            if !cx.has_global::<AppState>() {
-                let cache = assets::AssetResolver::new();
-                cx.set_global(AppState::with_runtime(
-                    config,
-                    &[],
-                    &[],
-                    &cache,
-                    &cams,
-                    persistence,
-                    ipc_commands,
-                ));
+        // Built once: the initial device list resolves against it here, and the
+        // event loop below keeps resolving against the same one.
+        let resolver = assets::AssetResolver::new();
+        let swr = cx.update(|cx| {
+            let swr_runtime: Arc<dyn swr_core::Runtime> = Arc::new(GpuiRuntime::new(cx));
+            let swr = SwrClient::builder()
+                .default_options(assets::queries::default_options())
+                .build(swr_runtime.clone());
+            if AppState::try_global(cx).is_none() {
+                let state = cx.new(|_| {
+                    let mut state = AppState::new(Sources {
+                        config,
+                        inventories: &[],
+                        standalone: &[],
+                        resolver: &resolver,
+                        cameras: &cams,
+                        persistence,
+                        ipc_commands,
+                    });
+                    state.connect_device_reads(swr.clone(), swr_runtime.clone());
+                    state
+                });
+                AppState::set_global(state, cx);
+                AppState::load_current_device_reads(cx);
+            } else {
+                AppState::update(cx, |state, _| {
+                    state.connect_device_reads(swr.clone(), swr_runtime);
+                });
             }
-            windows::main_window::open(&[], cx);
+            windows::main_window::open(cx);
+            swr
         });
 
         // First launch only: offer to opt in to the update check, since it
         // defaults to off. Marked seen either way so it shows just once.
         cx.update(|cx| {
-            let show = cx
-                .try_global::<AppState>()
-                .is_some_and(|s| !s.app_settings().update_prompt_seen);
+            let show = AppState::try_global(cx)
+                .is_some_and(|state| !state.read(cx).app_settings().update_prompt_seen);
             if show {
                 windows::update_consent::open(cx);
             }
@@ -106,8 +121,11 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
         // dead bytes. Off-thread so it never delays the first paint.
         std::thread::spawn(assets::cleanup_legacy_glow_pngs);
 
-        let (sync_tx, mut sync_done) = tokio::sync::mpsc::unbounded_channel::<bool>();
-        let mut rt = Runtime::new(cams, sync_tx);
+        #[cfg(target_os = "macos")]
+        ensure_registration_at_startup(cx);
+
+        let (sync_tx, mut sync_done) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let mut rt = Runtime::new(cams, sync_tx, swr, resolver);
         let mut camera_scan = Box::pin(cx.background_executor().timer(CAMERA_SCAN_PERIOD));
         // Cleared when the IPC update channel closes (the client thread died),
         // so the select stops polling a closed receiver.
@@ -140,19 +158,12 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
                     rt.rescan_cameras(cx).await;
                 }
                 Some(cmd) = asset_commands.recv() => rt.on_asset_command(cmd, cx),
-                // Guarded so this branch is *disabled* while no sync is in
-                // flight — we hold a live `sync_tx`, so an unguarded recv would
-                // pend forever and keep the `else => break` exit from ever
-                // firing once the other channels close.
-                Some(ok) = sync_done.recv(), if rt.sync.is_running() => {
-                    // A manual Refresh / Clear that landed mid-sync waited for
-                    // this moment: re-issue it now that the cache is no longer
-                    // being written. The command arm runs it (the sync is idle
-                    // again) — or re-defers if a new sync already started.
-                    if let Some(cmd) = rt.on_sync_finished(ok) {
-                        let _ = asset_self_tx.send(cmd);
-                    }
-                }
+                // Unguarded: we hold a live `sync_tx`, so this arm simply pends
+                // between downloads. The old guard existed to let `else => break`
+                // fire, which the always-armed camera timer above already makes
+                // unreachable. Manual commands no longer queue behind a sync —
+                // per-key in-flight state makes the exclusion the cache's job.
+                Some(()) = sync_done.recv() => rt.on_sync_finished(cx),
                 Some(cmd) = deeplinks.recv() => {
                     cx.update(|cx| app::deeplink::dispatch(cmd, cx));
                 }
@@ -161,6 +172,29 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
         }
     })
     .detach();
+}
+
+/// Ensure the agent's launchd service is registered, at startup: a fresh
+/// install registers on first GUI launch, an app update triggers the
+/// re-registration Apple requires for a changed executable. The spawn
+/// cascade in `services::ipc` also registers on demand — whichever runs
+/// first wins; this one still covers the update re-register while the agent
+/// is alive. Preference-independent (see `platform::registration`), so there
+/// is no stale input to stage around. On the background executor (XPC must
+/// not delay first paint); skipped for dev profiles, whose registration
+/// stays an explicit toggle.
+#[cfg(target_os = "macos")]
+fn ensure_registration_at_startup(cx: &mut gpui::AsyncApp) {
+    if openlogi_core::paths::is_dev_profile() {
+        return;
+    }
+    cx.background_executor()
+        .spawn(async {
+            if let Err(error) = crate::platform::registration::ensure_registered() {
+                tracing::warn!(error, "startup service registration failed");
+            }
+        })
+        .detach();
 }
 
 /// State the event loop carries between events.
@@ -174,13 +208,26 @@ struct Runtime {
     /// merge without waiting for the agent to change something of its own.
     snapshot: Option<AgentSnapshot>,
     /// The asset resolver stats the cache roots and parses the (possibly
-    /// hundreds-of-KB) index.json, so it is built once and reused across
-    /// snapshots — rebuilt only when a sync lands new assets. Rebuilding per
-    /// snapshot was pure waste: the unchanged-list early-return discarded the
-    /// fresh records anyway.
-    cache: assets::AssetResolver,
-    sync: AssetSync,
-    sync_tx: UnboundedSender<bool>,
+    /// hundreds-of-KB) index.json, and remembers every asset it has read from
+    /// disk, so it is built once and reused across snapshots: each one
+    /// rebuilds the device list, and a keyboard render alone costs
+    /// milliseconds to read. Replacing it is the only way its answers change,
+    /// so every path that changes the files on disk does — a settled download
+    /// ([`Self::on_sync_finished`]) and a cleared cache
+    /// ([`Self::on_asset_command`]).
+    resolver: assets::AssetResolver,
+    /// The process-wide swr cache, shared with `AppState`'s device reads. This
+    /// runtime owns the asset mirror probe and depot-download subscriptions —
+    /// see [`assets::queries`].
+    swr: SwrClient,
+    /// Whether the *automatic* download path runs in this build at all: a
+    /// release bundle already ships the art. Manual actions ignore it.
+    auto_sync: bool,
+    /// One live cache subscription per [`AssetWatch`], keyed by [`watch_key`].
+    /// Holding the task is what holds the subscription; dropping it
+    /// unsubscribes.
+    asset_subs: Subscriptions<Task<()>>,
+    sync_tx: UnboundedSender<()>,
     /// Most recent completed enumeration, kept so a manual Refresh / Clear can
     /// sync the current devices without waiting for the next snapshot.
     inventories: Vec<DeviceInventory>,
@@ -188,15 +235,21 @@ struct Runtime {
 }
 
 impl Runtime {
-    fn new(cams: Vec<Camera>, sync_tx: UnboundedSender<bool>) -> Self {
-        let cache = assets::AssetResolver::new();
-        let sync = AssetSync::new(sync::should_run(cache.has_bundle_root()));
+    fn new(
+        cams: Vec<Camera>,
+        sync_tx: UnboundedSender<()>,
+        swr: SwrClient,
+        resolver: assets::AssetResolver,
+    ) -> Self {
+        let auto_sync = sync::should_run(resolver.has_bundle_root());
         Self {
             cams,
             camera_misses: 0,
             snapshot: None,
-            cache,
-            sync,
+            resolver,
+            swr,
+            auto_sync,
+            asset_subs: Subscriptions::new(),
             sync_tx,
             inventories: Vec::new(),
             standalone: Vec::new(),
@@ -222,24 +275,19 @@ impl Runtime {
                 command,
                 result,
             } => {
-                let changed = cx.update_global::<AppState, _>(|state, _| {
-                    state.apply_light_command_result(key, request_id, command, result)
+                cx.update(|cx| {
+                    AppState::apply(cx, |state| {
+                        state.apply_light_command_result(key, request_id, command, result)
+                    });
                 });
-                if changed {
-                    cx.update(gpui::App::refresh_windows);
-                }
             }
             ipc::GuiUpdate::PairingUndeliverable(failure) => {
                 cx.update(|cx| windows::add_device::apply_undeliverable(cx, failure));
-                cx.update(gpui::App::refresh_windows);
             }
             ipc::GuiUpdate::ConfigReloadResult(result) => {
-                let changed = cx.update_global::<AppState, _>(|state, _| {
-                    state.apply_config_reload_result(result)
+                cx.update(|cx| {
+                    AppState::apply(cx, |state| state.apply_config_reload_result(result));
                 });
-                if changed {
-                    cx.update(gpui::App::refresh_windows);
-                }
             }
         }
     }
@@ -261,68 +309,44 @@ impl Runtime {
             self.inventories.clone_from(&snapshot.inventory);
             self.standalone.clone_from(&snapshot.standalone);
         }
-        // A completed sync may have put real photos where silhouettes were
-        // resolved: the resolver was rebuilt when its outcome landed; force
-        // this merge through the unchanged-list early-return so the fresh
-        // records become visible. Only consume the flag on a `Ready` snapshot
-        // that will actually run the merge below — `refresh_inventories` is
-        // skipped while the agent is still `Scanning`, so taking it there would
-        // drop the repaint and strand the device on its silhouette until the
-        // next inventory change or a restart (seen after an update relaunches
-        // GUI and agent together: the agent's Scanning window overlaps the
-        // first sync's completion).
-        let force_refresh = inventory_ready && self.sync.take_dirty();
-        let pairing_changed =
-            cx.update(|cx| windows::add_device::apply_state(cx, snapshot.pairing.clone()));
+        cx.update(|cx| {
+            windows::add_device::apply_state(cx, snapshot.pairing.clone());
+        });
         let (auto_download, asset_source, models) = cx.update(|cx| {
-            let (changed, merged, auto_download, asset_source, models) = cx
-                .update_global::<AppState, _>(|state, _| {
-                    // Merge only completed enumerations. A scanning agent serves
-                    // an empty pre-enumeration list, which must not burn the GUI's
-                    // miss grace or replace the last known device set.
-                    let merged = inventory_ready
-                        && state.refresh_inventories(
-                            &snapshot.inventory,
-                            &snapshot.standalone,
-                            &self.cache,
-                            force_refresh,
-                            &self.cams,
-                        );
-                    if inventory_ready {
-                        state.store_inventory_snapshot(&snapshot.inventory);
-                    }
-                    // Bitwise `|`: the link must be set even when the
-                    // merge already reported a change.
-                    let changed = merged
-                        | state.set_agent_link(state::AgentLink::Ready(snapshot.status.clone()))
-                        | state.set_camera_active(snapshot.camera_active);
+            let (changes, auto_download, asset_source, models) =
+                AppState::update(cx, |state, cx| {
+                    let changes = state.apply_agent_snapshot(snapshot, &self.resolver, &self.cams);
+                    changes.events.clone().emit(cx);
                     let settings = state.app_settings();
                     (
-                        changed,
-                        merged,
+                        changes,
                         settings.auto_download_assets,
                         settings.asset_source,
                         state.asset_models(),
                     )
                 });
-            if changed || pairing_changed {
-                cx.refresh_windows();
+            // A reconnect can drop an in-flight reply without changing the
+            // inventory. Retry any cache entry that the reply lifecycle reset
+            // to Unknown on every completed snapshot; resolved entries no-op.
+            if changes.inventory_ready {
+                AppState::load_current_device_reads(cx);
             }
-            if merged {
+            if changes.inventory_changed() {
                 app::menu::rebuild(cx);
             }
             (auto_download, asset_source, models)
         });
-        // Offer the merged set to the automatic sync: the index prefetch needs
-        // no devices, and depot fetches fire only for models not already synced
-        // this session. Use the UI's merged device set so persisted identities
-        // are covered when a live probe temporarily lacks model info.
-        let targets = models
-            .into_iter()
-            .chain(camera_targets(&self.cams))
-            .collect();
-        if let Some(pending) = self.sync.poll_auto(targets, auto_download, Instant::now()) {
-            self.start_fetch(asset_source, pending);
+        // Offer the merged set to the cache on every snapshot and let it decide:
+        // a model synced this session is fresh and answers instantly, and two
+        // snapshots racing the same model join one request. Use the UI's merged
+        // device set so persisted identities are covered when a live probe
+        // temporarily lacks model info.
+        if auto_download && self.auto_sync {
+            let targets: Vec<_> = models
+                .into_iter()
+                .chain(camera_targets(&self.cams))
+                .collect();
+            self.ensure_assets(asset_source, targets.into_iter(), cx);
         }
     }
 
@@ -363,73 +387,160 @@ impl Runtime {
         }
     }
 
-    /// A manual Refresh / Clear from Settings → Assets. Both force a fresh
-    /// fetch for the current devices — bypassing the auto-download setting and
-    /// the release-bundle sync gate — and Clear wipes the per-user cache first.
+    /// A manual Refresh / Clear from Settings → Assets. Both bypass the
+    /// auto-download setting and the release-bundle gate, and both mark the
+    /// tier stale so the refetch is real rather than a cache hit. Clear wipes
+    /// the per-user cache first.
+    ///
+    /// Clear does not wait for in-flight downloads to finish. A racing write
+    /// lands a registry-hashed file through the same atomic replace it always
+    /// used, and Clear's own semantics are "wipe, then fetch again" — so the
+    /// worst case is the wipe missing a file that was about to be re-fetched
+    /// anyway.
     fn on_asset_command(&mut self, cmd: AssetCommand, cx: &AsyncApp) {
         let (models, asset_source) = cx.update(|cx| {
-            let state = cx.global::<AppState>();
+            let state = AppState::global(cx);
+            let state = state.read(cx);
             (state.asset_models(), state.app_settings().asset_source)
         });
-        let targets = models
-            .into_iter()
-            .chain(camera_targets(&self.cams))
-            .collect();
-        let ManualStep::Run {
-            clear_cache,
-            targets,
-        } = self.sync.command(cmd, targets)
-        else {
-            return;
-        };
-        if clear_cache {
+        if cmd == AssetCommand::ClearCache {
             if let Err(e) = assets::clear_cache() {
                 warn!(error = %e, "could not clear asset cache");
             }
-            // The on-disk cache is gone: rebuild the resolver and repaint so
-            // cleared art falls back to the silhouette (or bundled art)
-            // immediately.
-            self.cache = assets::AssetResolver::new();
+            // The on-disk cache is gone: replace the resolver, which would go
+            // on answering from memory, and repaint so cleared art falls back
+            // to the silhouette (or bundled art) immediately.
+            self.resolver = assets::AssetResolver::new();
             self.refresh_devices(cx);
         }
-        self.start_fetch(asset_source, targets);
+        assets::queries::invalidate_all(&self.swr);
+        let targets: Vec<_> = models
+            .into_iter()
+            .chain(camera_targets(&self.cams))
+            .collect();
+        self.ensure_assets(asset_source, targets.into_iter(), cx);
     }
 
-    /// A background fetch finished. Returns the manual command that was waiting
-    /// on it, if any.
-    fn on_sync_finished(&mut self, ok: bool) -> Option<AssetCommand> {
-        let deferred = self.sync.finish(ok);
-        if ok {
-            self.cache = assets::AssetResolver::new();
-        }
-        deferred
+    /// A sync settled, successfully or not. Replace the resolver either way: a
+    /// depot syncs file by file, so a failed sync may still have written some
+    /// of them, and the one that was here keeps answering with what it found
+    /// before the download. Re-resolve against the changed cache and repaint;
+    /// the whole-record comparison in `refresh_inventories` decides whether
+    /// anything actually changed.
+    fn on_sync_finished(&mut self, cx: &AsyncApp) {
+        self.resolver = assets::AssetResolver::new();
+        self.refresh_devices(cx);
     }
 
     /// Rebuild the UI's device records against the current resolver.
     fn refresh_devices(&self, cx: &AsyncApp) {
         cx.update(|cx| {
-            let changed = cx.update_global::<AppState, _>(|state, _| {
-                state.refresh_inventories(
+            let changed = AppState::update(cx, |state, cx| {
+                let events = state.refresh_inventories(
                     &self.inventories,
                     &self.standalone,
-                    &self.cache,
-                    true,
+                    &self.resolver,
                     &self.cams,
-                )
+                );
+                let changed = !events.is_empty();
+                events.emit(cx);
+                changed
             });
             if changed {
-                cx.refresh_windows();
+                AppState::load_current_device_reads(cx);
+                app::menu::rebuild(cx);
             }
         });
     }
 
-    /// Hand a fetch to a dedicated background thread — the HTTP layer's
-    /// blocking retries are fine there, and must never run on the UI thread.
-    fn start_fetch(&self, source: AssetSourcePreference, targets: Vec<AssetTarget>) {
-        let tx = self.sync_tx.clone();
-        std::thread::spawn(move || {
-            let _ = tx.send(run_asset_sync(source, &targets));
+    /// Keep exactly one cache subscription per thing we want fetched: the
+    /// shared registry, plus every device model we want art for.
+    ///
+    /// One subscription per model rather than one batch: each key carries its
+    /// own in-flight state, so a slow depot no longer holds up the rest and a
+    /// failure retries on its own schedule instead of stalling every model
+    /// behind one shared backoff. The fetchers run on the background executor —
+    /// the HTTP layer blocks, and must never do so on the UI thread.
+    ///
+    /// The registry rides the same reconciliation rather than being held apart:
+    /// keeping it separate meant it also had to grow its own answer to the
+    /// source changing, and it has none of its own.
+    fn ensure_assets(
+        &mut self,
+        source: AssetSourcePreference,
+        targets: impl Iterator<Item = AssetTarget>,
+        cx: &AsyncApp,
+    ) {
+        let (swr, tx) = (&self.swr, &self.sync_tx);
+        // Nothing has a device behind the registry, so it is named here.
+        let wanted = std::iter::once(AssetWatch::Index)
+            .chain(targets.map(AssetWatch::Model))
+            .map(|watch| (watch_key(source, &watch), watch));
+        self.asset_subs.reconcile(wanted, |watch| match watch {
+            AssetWatch::Index => assets::queries::watch_index(swr, source, tx.clone(), cx),
+            AssetWatch::Model(target) => {
+                assets::queries::watch_model(swr, source, target, tx.clone(), cx)
+            }
         });
+    }
+}
+
+/// What one asset subscription covers.
+enum AssetWatch {
+    /// The shared registry every model fetch reads.
+    Index,
+    /// One device model's download.
+    Model(AssetTarget),
+}
+
+/// Identity of one subscription, and the reason the source is part of it: a
+/// fetcher captures the source it was built with, so a subscription kept across
+/// a source change would keep fetching from the old mirror — the Settings
+/// dropdown would appear to do nothing until the process restarted. Naming the
+/// source here makes a change re-key every entry, which reconciliation already
+/// knows how to act on.
+fn watch_key(source: AssetSourcePreference, watch: &AssetWatch) -> String {
+    let source = sync::source_segment(source);
+    match watch {
+        AssetWatch::Index => format!("{source}/index"),
+        AssetWatch::Model(target) => format!("{source}/model/{}", sync::model_key(target)),
+    }
+}
+
+/// Live cache subscriptions, one per key, opened on demand and dropped once
+/// their key stops being wanted.
+///
+/// Generic over the handle so the reconciliation can be tested without a GPUI
+/// context or a real fetch: what matters is that a repeated key keeps its one
+/// subscription and a vanished key has its handle *dropped*, since dropping is
+/// what unsubscribes.
+struct Subscriptions<H> {
+    live: HashMap<String, H>,
+}
+
+impl<H> Subscriptions<H> {
+    fn new() -> Self {
+        Self {
+            live: HashMap::new(),
+        }
+    }
+
+    /// Make the live set match `wanted`: open what is missing, keep what is
+    /// already there, and drop the rest.
+    fn reconcile<T>(
+        &mut self,
+        wanted: impl Iterator<Item = (String, T)>,
+        mut open: impl FnMut(T) -> H,
+    ) {
+        let mut keep = HashSet::new();
+        for (key, item) in wanted {
+            if !self.live.contains_key(&key) {
+                let handle = open(item);
+                self.live.insert(key.clone(), handle);
+            }
+            keep.insert(key);
+        }
+        self.live.retain(|key, _| keep.contains(key));
     }
 }
 
@@ -448,8 +559,135 @@ fn camera_targets(cams: &[Camera]) -> impl Iterator<Item = AssetTarget> + '_ {
 /// actually changed (the IPC client may repeat a notice across reconnect
 /// episodes).
 fn set_agent_link(link: state::AgentLink, cx: &mut gpui::App) {
-    let changed = cx.update_global::<AppState, _>(|state, _| state.set_agent_link(link));
-    if changed {
-        cx.refresh_windows();
+    AppState::apply(cx, |state| state.set_agent_link(link));
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use openlogi_camera::Camera;
+
+    use openlogi_core::config::AssetSourcePreference;
+
+    use super::{AssetWatch, Subscriptions, camera_targets, watch_key};
+    use crate::services::assets::sync::model_key;
+
+    /// Stands in for a live subscription. Dropping a real one unsubscribes, so
+    /// the tests below assert on drops rather than on any handle contents.
+    struct DropSpy {
+        key: String,
+        dropped: Rc<RefCell<Vec<String>>>,
+    }
+
+    impl Drop for DropSpy {
+        fn drop(&mut self) {
+            self.dropped.borrow_mut().push(self.key.clone());
+        }
+    }
+
+    /// Reconcile `keys`, recording every key a subscription was opened for.
+    fn reconcile(
+        subs: &mut Subscriptions<DropSpy>,
+        keys: &[&str],
+        opened: &Rc<RefCell<Vec<String>>>,
+        dropped: &Rc<RefCell<Vec<String>>>,
+    ) {
+        let wanted = keys.iter().map(|k| ((*k).to_string(), (*k).to_string()));
+        subs.reconcile(wanted, |key: String| {
+            opened.borrow_mut().push(key.clone());
+            DropSpy {
+                key,
+                dropped: Rc::clone(dropped),
+            }
+        });
+    }
+
+    #[test]
+    fn a_repeated_target_keeps_its_one_subscription() {
+        // The event loop offers the whole known set on every snapshot, so
+        // re-subscribing per snapshot would refetch every model forever.
+        let (opened, dropped) = (Rc::default(), Rc::default());
+        let mut subs = Subscriptions::new();
+
+        reconcile(&mut subs, &["a", "b"], &opened, &dropped);
+        reconcile(&mut subs, &["a", "b"], &opened, &dropped);
+
+        assert_eq!(opened.borrow().len(), 2, "each model subscribes once");
+        assert!(dropped.borrow().is_empty(), "nothing was given up");
+    }
+
+    #[test]
+    fn a_target_that_disappears_drops_its_subscription() {
+        // Dropping the handle is what unsubscribes and lets the entry age out;
+        // leaking it would pin every device ever seen for the session.
+        let (opened, dropped) = (Rc::default(), Rc::default());
+        let mut subs = Subscriptions::new();
+
+        reconcile(&mut subs, &["a", "b"], &opened, &dropped);
+        reconcile(&mut subs, &["b"], &opened, &dropped);
+
+        assert_eq!(*dropped.borrow(), ["a"]);
+        assert_eq!(opened.borrow().len(), 2, "`b` was not reopened");
+    }
+
+    #[test]
+    fn a_returning_target_subscribes_again() {
+        let (opened, dropped) = (Rc::default(), Rc::default());
+        let mut subs = Subscriptions::new();
+
+        reconcile(&mut subs, &["a"], &opened, &dropped);
+        reconcile(&mut subs, &[], &opened, &dropped);
+        reconcile(&mut subs, &["a"], &opened, &dropped);
+
+        assert_eq!(*opened.borrow(), ["a", "a"]);
+        assert_eq!(*dropped.borrow(), ["a"]);
+    }
+
+    fn camera(product_id: u16, unique_id: &str) -> Camera {
+        Camera {
+            name: "MX Brio".into(),
+            unique_id: unique_id.into(),
+            serial_number: None,
+            vendor_id: 0x046d,
+            product_id,
+            max_resolution: None,
+            max_fps: None,
+        }
+    }
+
+    #[test]
+    fn a_source_change_rekeys_every_subscription() {
+        // A fetcher captures the source it was built with, and reconciliation
+        // leaves an already-live key alone — so a subscription kept across a
+        // source change would go on fetching from the old mirror, and the
+        // Settings dropdown would appear to do nothing until a restart.
+        // Re-keying is what turns a source change into drop-and-reopen.
+        let target = camera_targets(&[camera(0x0944, "0x2031")])
+            .next()
+            .expect("one camera yields one target");
+        let watches = [AssetWatch::Index, AssetWatch::Model(target)];
+
+        for watch in &watches {
+            assert_ne!(
+                watch_key(AssetSourcePreference::OpenLogi, watch),
+                watch_key(AssetSourcePreference::Cloudflare, watch),
+            );
+        }
+    }
+
+    #[test]
+    fn a_camera_keeps_one_subscription_across_snapshots() {
+        // A camera's asset key must depend only on model-level identity. Fold
+        // anything per-connection into it — the OS capture id changes across a
+        // port change — and every snapshot would drop and reopen the
+        // subscription, refetching art the cache already holds.
+        let moved_ports = [camera(0x0944, "0x2031"), camera(0x0944, "0x2042")];
+        let keys: Vec<_> = camera_targets(&moved_ports)
+            .map(|t| model_key(&t))
+            .collect();
+
+        assert_eq!(keys[0], keys[1]);
     }
 }

@@ -3,10 +3,13 @@ resolver = "3"
 members = [
     "crates/openlogi",
     "crates/openlogi-core",
+    "crates/openlogi-device-registry",
+    "crates/openlogi-fixture",
     "crates/openlogi-inject",
     "crates/openlogi-hidpp",
     "crates/openlogi-hidpp-derive",
     "crates/openlogi-hid",
+    "crates/openlogi-device",
     "crates/openlogi-camera",
     "crates/openlogi-permissions",
     "crates/openlogi-assets",
@@ -26,7 +29,7 @@ members = [
 default-members = ["crates/openlogi"]
 
 [workspace.package]
-version = "0.7.4"
+version = "0.8.6"
 edition = "2024"
 # Tracks current stable rather than trailing it. OpenLogi ships as an app —
 # prebuilt installers, and no crate here has an external reverse dependency —
@@ -40,19 +43,16 @@ authors = ["AprilNEA <dev@aprilnea.me>"]
 description = "Lightweight, local-first alternative to Logitech Options+ for HID++ devices"
 
 [workspace.dependencies]
-hidpp = { package = "openlogi-hidpp", path = "crates/openlogi-hidpp", version = "0.7.4" }
-async-hid = "0.5.2"
-# Cross-platform local IPC for the agent <-> GUI tarpc transport: a Unix-domain
-# socket on Unix, a named pipe on Windows. The `tokio` feature gives the async
-# Stream/Listener used by serde_transport.
+hidpp = { package = "openlogi-hidpp", path = "crates/openlogi-hidpp", version = "0.8.6" }
+openlogi-device-registry = { path = "crates/openlogi-device-registry", version = "0.8.6" }
+openlogi-fixture = { path = "crates/openlogi-fixture", version = "0.8.6" }
+async-hid = { package = "openlogi-async-hid", version = "=0.5.3-openlogi.1" }
 interprocess = { version = "2", features = ["tokio"] }
 # The agent <-> GUI RPC layer itself, over the `interprocess` transport above.
 # 0.38 is a hard floor: earlier releases hard-depend on opentelemetry 0.30 (not
 # feature-gated — google/tarpc#564), which drags the vulnerable
 # opentelemetry_sdk 0.30 into the graph (GHSA-w9wp-h8wv-79jx).
 tarpc = { version = "0.38", features = ["serde1", "serde-transport", "serde-transport-bincode", "tokio1"] }
-# Windows FFI for the leaf input/HID paths (WH_MOUSE_LL hook, SendInput action
-# synthesis, native HID writes). Features are selected per crate.
 windows-sys = "0.61"
 tokio = { version = "1", default-features = false, features = ["rt", "macros", "sync", "time"] }
 futures-lite = "2"
@@ -74,12 +74,8 @@ core-foundation = { version = "0.10", default-features = false, features = ["lin
 opener = "0.8.5"
 shellexpand = "3.1.2"
 evdev = "0.13"
-# macOS ObjC / C FFI (see platform/CLAUDE.md): objc2 gives leak-proof Retained<T>
-# bindings, and the framework crates give typed bindings for the C APIs (privacy
-# permissions included) instead of hand-written `#[link] extern "C"` blocks.
-# Feature lists are selected per crate — these crates are huge, so every entry is
-# `default-features = false`. The version stays unified so a resolve can't move
-# gpui's Cargo.lock pin out from under the GUI.
+# Kept on one version across the workspace (block2 included) so a resolve can't
+# move gpui's Cargo.lock pin out from under the GUI.
 objc2 = "0.6.4"
 objc2-app-kit = "0.3.2"
 objc2-foundation = "0.3.2"
@@ -87,20 +83,34 @@ objc2-core-foundation = { version = "0.3.2", default-features = false }
 objc2-application-services = { version = "0.3.2", default-features = false }
 objc2-core-graphics = { version = "0.3.2", default-features = false }
 objc2-io-kit = { version = "0.3.2", default-features = false }
-# The block ABI crate objc2's generated bindings use for handler arguments;
-# same unified-version rationale as the objc2 crates above.
+objc2-service-management = { version = "0.3.2", default-features = false }
 block2 = "0.6.2"
 
-# gpui / gpui_platform track zed's default branch, matching how gpui-component
-# declares them (an explicit rev here would fork the git source and conflict).
-# The exact, compatible zed commit is pinned in Cargo.lock instead — bump it
-# deliberately with `cargo update`, in lockstep with the gpui-component rev.
-gpui = { git = "https://github.com/zed-industries/zed" }
-gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit", "x11", "wayland"] }
-gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "031555662e99a1b5a549990b47f246d475b8288a" }
-# Pinned to the same rev as gpui-component: this crate embeds the lucide SVGs
-# that the `IconName` enum is macro-generated from, so the two must agree.
-gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "031555662e99a1b5a549990b47f246d475b8288a" }
+# Version-aligned GPUI snapshots. Keep the core and platform on one release so
+# the desktop, overlay, and their integrations share the same GPUI types.
+gpui = { package = "gpui-pre", version = "=0.3.4" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.4", features = ["font-kit", "x11", "wayland"] }
+# Keep the Kit crates on one release checkout: build.rs embeds the upstream
+# themes, which are not included in the published component/assets packages.
+gpui-component = { git = "https://github.com/longbridge/gpui-kit", tag = "v0.6.1" }
+# The unstyled interaction primitives behind gpui-component. Desktop uses its
+# semantic Button for custom-painted controls that must retain native keyboard
+# and accessibility behavior without inheriting widget chrome.
+gpui-base = { git = "https://github.com/longbridge/gpui-kit", tag = "v0.6.1" }
+# The icon names and embedded SVGs must agree with the component release.
+gpui-kit-assets = { git = "https://github.com/longbridge/gpui-kit", tag = "v0.6.1" }
+
+swr-core = "0.1"
+swr-gpui = { package = "swr-gpui-pre", version = "0.1" }
+
+# Backport GroupBox/SettingGroup::footer to v0.6.1 without upgrading GPUI.
+# Remove when adopting an upstream release with the footer API. Keep all Kit
+# crates on this revision, including the theme source in packaging/linux/package.nix.
+[patch."https://github.com/longbridge/gpui-kit"]
+gpui-component = { git = "https://github.com/AprilNEA/gpui-kit", rev = "1ac69bd51f744f3664361d9abd609bfc16de489f" }
+gpui-base = { git = "https://github.com/AprilNEA/gpui-kit", rev = "1ac69bd51f744f3664361d9abd609bfc16de489f" }
+gpui-kit-assets = { git = "https://github.com/AprilNEA/gpui-kit", rev = "1ac69bd51f744f3664361d9abd609bfc16de489f" }
+gpui-component-macros = { git = "https://github.com/AprilNEA/gpui-kit", rev = "1ac69bd51f744f3664361d9abd609bfc16de489f" }
 
 [workspace.lints.rust]
 # Denied workspace-wide, but `deny` (not `forbid`) so a crate that genuinely

@@ -12,12 +12,13 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
 use openlogi_core::config::Lighting;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::hid::{
-    DeviceRoute, Dpi, DpiInfo, LightCommand, PairingError, PasskeyMethod, ReceiverSelector,
-    SmartShiftStatus, WriteError,
+    BacklightState, DeviceRoute, Dpi, DpiInfo, LightCommand, PairingError, PasskeyMethod,
+    ReceiverSelector, ScrollWheelMode, SmartShiftStatus, WriteError,
 };
 use serde::{Deserialize, Serialize};
 pub use succession::Identity;
@@ -52,7 +53,17 @@ pub use succession::Identity;
 ///      [`RingObservation`]).
 /// v22: DPI scalar values use the validated [`Dpi`] type end to end.
 /// v23: SmartShift writes carry one typed [`SmartShiftStatus`] value.
-pub const PROTOCOL_VERSION: u32 = 23;
+/// v24: `StandaloneDevice::registry_model_id` is always encoded (bincode fix).
+/// v25: `AgentStatus::input_monitoring_granted` appended.
+/// v26: `AgentStatus::hid_open_failures` appended.
+/// v27: `AgentSnapshot::foreground` appended — the frontmost application the
+///      agent matches per-app profiles against, plus the ones it saw recently.
+/// v28: `Action::HoldShortcut` appended for lifecycle-held keyboard output.
+/// v29: `Agent::declare_client` + [`ClientKind`] appended — typed demand for
+///      the macOS dormancy gate.
+/// v30: `Agent::read_wheel` and `Agent::read_backlight` appended.
+/// v31: `Capabilities::dpi_gestures` appended.
+pub const PROTOCOL_VERSION: u32 = 31;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -91,6 +102,10 @@ pub enum InventoryHealth {
 /// Agent health the GUI surfaces: the Accessibility gate, whether the hook is
 /// live, the autostart toggle state, and enumeration progress.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "AgentStatus is a serialized health DTO; bools keep the IPC shape explicit"
+)]
 pub struct AgentStatus {
     pub accessibility_granted: bool,
     pub hook_installed: bool,
@@ -99,6 +114,12 @@ pub struct AgentStatus {
     pub inventory: InventoryHealth,
     pub protocol_version: u32,
     pub agent_version: String,
+    /// Whether the agent process holds Input Monitoring (HID) access.
+    pub input_monitoring_granted: bool,
+    /// Whether the last enumeration tick failed to open at least one HID++
+    /// node. Paired with [`Self::input_monitoring_granted`] it distinguishes
+    /// a missing grant from an exclusive open or a stale permission session.
+    pub hid_open_failures: bool,
 }
 
 /// Status and inventory as one poll result. Kept together so the GUI never
@@ -116,7 +137,43 @@ pub struct AgentSnapshot {
     pub camera_active: bool,
     /// The pairing session the agent has open, if any. See [`PairingPhase`].
     pub pairing: Option<PairingPhase>,
+    /// Which application per-app profiles are resolving against. See
+    /// [`ForegroundApps`].
+    pub foreground: ForegroundApps,
 }
+
+/// The application the agent currently resolves per-app profiles against, and
+/// the ones it recently saw in front.
+///
+/// `recent` is here because a client cannot produce these identifiers itself.
+/// They come from four incompatible namespaces — macOS bundle ids, X11
+/// `WM_CLASS`, Wayland `app_id`, Windows executable paths — and only the agent
+/// holds the one that its matcher will actually compare. Enumerating installed
+/// applications in the GUI would produce plausible strings that miss. A client
+/// offering "make a profile for…" therefore picks from this list rather than
+/// from the host.
+///
+/// It also answers the case [`Self::current`] cannot: while a client's own
+/// window is in front, *it* is the foreground application, so the app the user
+/// means is the previous entry, not the current one.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForegroundApps {
+    /// The application whose profile is live right now, or `None` when nothing
+    /// is frontmost or the platform cannot say (a pure-Wayland session with no
+    /// usable backend). OpenLogi's own processes are reported here like any
+    /// other application — this is the matcher's view, not a filtered one.
+    pub current: Option<ForegroundApp>,
+    /// The most recently frontmost applications, newest first, deduplicated by
+    /// identifier and capped at [`RECENT_APPS`]. Excludes OpenLogi's own
+    /// processes, which are never a sensible profile target. Includes
+    /// [`Self::current`] when it is not one of them.
+    pub recent: Vec<ForegroundApp>,
+}
+
+/// How many applications [`ForegroundApps::recent`] remembers: enough to fill a
+/// picker with what the user was just doing, few enough that the list stays a
+/// rounding error in every observation.
+pub const RECENT_APPS: usize = 12;
 
 /// Where a pairing session stands.
 ///
@@ -264,6 +321,11 @@ impl From<PairingError> for PairingFailure {
             PairingError::Timeout => Self::Timeout,
             PairingError::Device(code) => Self::Device { code },
             PairingError::Cancelled => Self::Cancelled,
+            // The public agent API prevents this library-boundary rejection;
+            // retain the existing wire enum if an in-process caller violates it.
+            PairingError::UnsupportedCommand => Self::Hid {
+                message: "pairing command is not supported by the active receiver".into(),
+            },
             // Carried as the generic transport-failure message so the wire
             // format stays unchanged (PairingFailure variants are append-only).
             PairingError::MalformedNotification(what) => Self::Hid {
@@ -357,6 +419,21 @@ pub enum ActionRingCommandError {
     SessionNotFound,
     /// The selected position has no action.
     SlotEmpty,
+}
+
+/// What kind of client a connection is, declared through
+/// [`Agent::declare_client`] right after the version handshake.
+///
+/// Variants are append-only because this enum crosses bincode IPC.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClientKind {
+    /// The desktop app. The only kind whose declaration arms a dormant agent.
+    Gui,
+    /// The `openlogi` CLI reading a snapshot; served without arming.
+    Cli,
+    /// The Actions Ring overlay helper; served without arming — one that
+    /// connects on its own is an orphan of a previous run.
+    Overlay,
 }
 
 #[tarpc::service]
@@ -480,4 +557,13 @@ pub trait Agent {
     /// then return it. Same contract as [`Agent::observe`] — whole state, hold
     /// window, `0` for "seen nothing" — over the ring's own cell.
     async fn observe_action_ring(since: Generation) -> RingObservation;
+    /// Declare what kind of client this connection is. Informational for an
+    /// armed agent, load-bearing for a dormant one: the macOS dormancy gate
+    /// arms only on [`ClientKind::Gui`]. The takeover probe never declares —
+    /// it speaks only [`Agent::protocol_version`] — and so never arms.
+    async fn declare_client(kind: ClientKind);
+    /// Read the current HiResWheel reporting mode from `route`.
+    async fn read_wheel(route: DeviceRoute) -> Result<ScrollWheelMode, WriteError>;
+    /// Read the current keyboard-backlight state from `route`.
+    async fn read_backlight(route: DeviceRoute) -> Result<BacklightState, WriteError>;
 }

@@ -10,7 +10,7 @@ use crate::support::manifest::workspace_package;
 #[derive(Parser)]
 pub(crate) struct Args {
     /// git-cliff configuration.
-    #[arg(long, default_value = "cliff.toml")]
+    #[arg(long, default_value = ".config/cliff.toml")]
     config: PathBuf,
     /// Changelog the new section is prepended to.
     #[arg(long, default_value = "CHANGELOG.md")]
@@ -19,7 +19,7 @@ pub(crate) struct Args {
 
 /// Write the next workspace version's section into the changelog with
 /// git-cliff: every conventional commit in the whole repo since the previous
-/// `v*` tag, formatted by `cliff.toml`.
+/// `v*` tag, formatted by `.config/cliff.toml`.
 ///
 /// release-plz itself is package-path-scoped and skips the `release = false`
 /// app crates, so it cannot produce this. The release-plz workflow runs this
@@ -94,7 +94,7 @@ fn release_version(tag: &str) -> Option<[u64; 3]> {
 /// The changelog without its `## [version]` section, or `None` when it has no
 /// such section.
 ///
-/// The section runs to the next `## [` heading — the shape `cliff.toml`
+/// The section runs to the next `## [` heading — the shape `.config/cliff.toml`
 /// generates — or to the end of the file for the newest entry.
 fn strip_version_section(changelog: &str, version: &str) -> Option<String> {
     let heading = format!("## [{version}]");

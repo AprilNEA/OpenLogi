@@ -12,10 +12,10 @@
 pub(super) use std::rc::Rc;
 
 pub(super) use gpui::{
-    AnyElement, App, AppContext, Axis, BorrowAppContext, ClipboardItem, Context, Entity,
-    FocusHandle, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement, Render,
-    SharedString, Size, StatefulInteractiveElement, Styled, Subscription, Window, div, img,
-    prelude::FluentBuilder, px, rgb,
+    App, AppContext, Axis, ClipboardItem, Context, Entity, FocusHandle, FontWeight, Hsla,
+    InteractiveElement, IntoElement, ParentElement, Render, SharedString, Size,
+    StatefulInteractiveElement, Styled, Subscription, Window, div, img, prelude::FluentBuilder, px,
+    rgb,
 };
 pub(super) use gpui_component::{
     ActiveTheme, Disableable, Icon, IconName, IndexPath, Selectable, Sizable, TITLE_BAR_HEIGHT,
@@ -23,21 +23,24 @@ pub(super) use gpui_component::{
     button::{Button, ButtonGroup, ButtonVariants},
     group_box::GroupBoxVariant,
     h_flex,
-    input::{Input, InputEvent, InputState},
-    select::{Select, SelectEvent, SelectItem, SelectState},
+    input::{InputEvent, InputState},
+    select::{SelectEvent, SelectItem, SelectState},
     setting::{SelectIndex, SettingField, SettingGroup, SettingItem, SettingPage, Settings},
-    slider::{Slider, SliderEvent, SliderState},
+    slider::{Slider, SliderState},
     tag::Tag,
     theme::ThemeConfig,
     v_flex,
 };
 pub(super) use gpui_updater::{UpdateStatus, Updater};
 pub(super) use openlogi_core::brand::{HELP_URL, RELEASES_URL, REPO_URL};
-pub(super) use openlogi_core::config::{Appearance, AssetSourcePreference, ThumbwheelSensitivity};
+pub(super) use openlogi_core::config::{
+    Appearance, AssetSourcePreference, ThumbwheelSensitivity, UiScale, VerticalScrollSensitivity,
+};
 
 pub(super) use crate::app::menu::{CloseWindow, Minimize, Zoom};
 pub(super) use crate::services::assets::sync::{AssetCommand, AssetControl};
-pub(super) use crate::state::AppState;
+pub(super) use crate::state::{AppState, StateEvent};
+use crate::ui::commit_slider::{CommitSlider, SliderRange};
 pub(super) use crate::ui::theme::{self, Palette};
 #[cfg(target_os = "macos")]
 pub(super) use openlogi_permissions::Permission;
@@ -104,6 +107,11 @@ pub(super) enum ThemeFilter {
 pub struct SettingsView {
     focus_handle: FocusHandle,
     appearance_obs: Option<Subscription>,
+    /// Refreshes host-owned snapshots when Settings becomes active again.
+    _activation_obs: Subscription,
+    _state_obs: Subscription,
+    /// Refreshes installation metadata when the startup probe completes.
+    _installation_obs: Subscription,
     /// Which themes the Appearance grid shows (All / Light / Dark).
     theme_filter: ThemeFilter,
     /// Free-text filter for the Appearance theme grid (search 50+ themes by name).
@@ -114,7 +122,8 @@ pub struct SettingsView {
     initial_page: SettingsPage,
     language_select: Entity<SelectState<Vec<language::LanguageOption>>>,
     asset_source_select: Entity<SelectState<Vec<assets::AssetSourceOption>>>,
-    sensitivity_slider: Entity<SliderState>,
+    thumbwheel_sensitivity: CommitSlider<ThumbwheelSensitivity>,
+    vertical_scroll_sensitivity: CommitSlider<VerticalScrollSensitivity>,
     /// Shared app-wide updater, surfaced on the Updates page. A launch-time
     /// check result is already visible when the window opens.
     updater: Entity<Updater>,
@@ -132,6 +141,12 @@ pub struct SettingsView {
     /// re-walking the cache on every render. A snapshot — reopen to refresh
     /// after a Clear.
     asset_cache_desc: SharedString,
+    /// Snapshot of the agent service's registration status, taken when the
+    /// window opens, regains focus, and after every settings change (the status
+    /// read is an XPC round-trip, so it must not run per frame). Drives the
+    /// General page's "switched off in System Settings" notice while keeping
+    /// the render path on this intentional cache.
+    registration_status: crate::platform::registration::ServiceStatus,
     /// Drives the debug live event monitor: polls the agent on a timer while the
     /// Settings window is open. Dropping it with the view stops polling, which
     /// lets the agent's idle janitor turn monitoring back off.
@@ -149,29 +164,52 @@ impl SettingsView {
         let updater = crate::platform::updater::shared(cx)
             .unwrap_or_else(|| crate::platform::updater::new_entity(cx));
         let updater_obs = cx.observe(&updater, |_, _, cx| cx.notify());
+        let installation_obs =
+            cx.observe_global::<crate::platform::installation::Installation>(|_, cx| cx.notify());
+        let state_obs = cx.subscribe(&AppState::global(cx), |this, _, event: &StateEvent, cx| {
+            if matches!(event, StateEvent::LanguageChanged) {
+                // The cache-size line is localized text cached in view state
+                // (it interpolates an IO-derived size); rebuild it in the new
+                // locale.
+                this.asset_cache_desc = assets::cache_size_description();
+            }
+            if matches!(
+                event,
+                StateEvent::AgentChanged
+                    | StateEvent::DiagnosticsChanged
+                    | StateEvent::InventoryChanged
+                    | StateEvent::CameraPermissionChanged
+                    | StateEvent::SettingsChanged
+                    | StateEvent::LanguageChanged
+            ) {
+                // A settings change may have run the opportunistic
+                // registration ensure, so re-read the status snapshot.
+                if matches!(event, StateEvent::SettingsChanged) {
+                    this.refresh_registration_status(cx);
+                }
+                cx.notify();
+            }
+        });
+        let activation_obs = Self::observe_registration_status(window, cx);
 
         let theme_search =
-            cx.new(|cx| InputState::new(window, cx).placeholder(tr!("Filter themes…")));
+            cx.new(|cx| InputState::new(window, cx).placeholder(tr!("appearance.filter_themes")));
         cx.subscribe(&theme_search, |_, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 cx.notify();
             }
         })
         .detach();
-        let current = cx
-            .try_global::<AppState>()
-            .and_then(|s| s.app_settings().language.clone());
+        let current = AppState::try_read(cx).and_then(|s| s.app_settings().language.clone());
         let options = language::language_options();
         let selected = language::selected_language_index(current.as_deref(), &options);
         let language_select = cx.new(|cx| SelectState::new(options, Some(selected), window, cx));
         cx.subscribe_in(&language_select, window, Self::on_language_select)
             .detach();
 
-        let current_source = cx
-            .try_global::<AppState>()
-            .map_or(AssetSourcePreference::Automatic, |s| {
-                s.app_settings().asset_source
-            });
+        let current_source = AppState::try_read(cx).map_or(AssetSourcePreference::Automatic, |s| {
+            s.app_settings().asset_source
+        });
         let source_options = assets::asset_source_options();
         let selected_source = assets::selected_source_index(current_source, &source_options);
         let asset_source_select =
@@ -179,19 +217,8 @@ impl SettingsView {
         cx.subscribe_in(&asset_source_select, window, Self::on_asset_source_select)
             .detach();
 
-        let sensitivity = cx
-            .try_global::<AppState>()
-            .map_or(ThumbwheelSensitivity::DEFAULT, |s| {
-                s.app_settings().thumbwheel_sensitivity
-            });
-        let sensitivity_slider = cx.new(|_| {
-            SliderState::new()
-                .min(f32::from(ThumbwheelSensitivity::MIN))
-                .max(f32::from(ThumbwheelSensitivity::MAX))
-                .default_value(f32::from(sensitivity))
-        });
-        cx.subscribe_in(&sensitivity_slider, window, Self::on_sensitivity_slider)
-            .detach();
+        let thumbwheel_sensitivity = Self::thumbwheel_sensitivity_slider(cx);
+        let vertical_scroll_sensitivity = Self::vertical_scroll_sensitivity_slider(cx);
 
         // Poll the agent's live event monitor while this window is open. The task
         // is held in the view, so closing Settings drops it, polling stops, and
@@ -203,22 +230,18 @@ impl SettingsView {
                 // its per-frame render works off this cache instead of issuing
                 // CGGetEventTapList syscalls on every repaint.
                 let taps = openlogi_hook::Hook::list_event_taps();
-                let sender = cx.update_global::<AppState, _>(|s, _| s.ipc_sender());
+                let sender = cx.update(|cx| AppState::global(cx).read(cx).ipc_sender());
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 let events = if sender
-                    .send(crate::services::ipc::Command::PollEventMonitor(tx))
+                    .send(crate::services::ipc::PollEventMonitor { reply: tx }.into())
                     .is_ok()
                 {
                     rx.await.unwrap_or_default()
                 } else {
                     Vec::new()
                 };
-                cx.update_global::<AppState, _>(|state, cx| {
-                    state.set_event_taps(taps);
-                    if !events.is_empty() {
-                        state.push_monitor_events(events);
-                    }
-                    cx.refresh_windows();
+                cx.update(|cx| {
+                    AppState::apply(cx, |state| state.record_monitor_poll(taps, events));
                 });
                 cx.background_executor()
                     .timer(std::time::Duration::from_millis(300))
@@ -229,41 +252,81 @@ impl SettingsView {
         Self {
             focus_handle,
             appearance_obs: None,
+            _activation_obs: activation_obs,
+            _state_obs: state_obs,
+            _installation_obs: installation_obs,
             theme_filter: ThemeFilter::All,
             theme_search,
             initial_page,
             language_select,
             asset_source_select,
-            sensitivity_slider,
+            thumbwheel_sensitivity,
+            vertical_scroll_sensitivity,
             updater,
             updater_obs,
             copied: false,
             copied_gen: 0,
             asset_cache_desc: assets::cache_size_description(),
+            registration_status: crate::platform::registration::status(),
             #[cfg(all(target_os = "macos", debug_assertions))]
             _monitor_task: monitor_task,
         }
     }
 
-    /// Commit the thumb-wheel sensitivity slider. The label tracks the live
-    /// slider value on every `Change`; persistence (and the one shared-atomic
-    /// write the watcher reads) happens once on `Release`.
-    #[expect(
-        clippy::unused_self,
-        reason = "gpui subscription handlers must take &mut self"
-    )]
-    fn on_sensitivity_slider(
-        &mut self,
-        _: &Entity<SliderState>,
-        event: &SliderEvent,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let SliderEvent::Release(value) = event {
-            let sensitivity = ThumbwheelSensitivity::from_rounded(value.start());
-            cx.update_global::<AppState, _>(|s, _| s.set_thumbwheel_sensitivity(sensitivity));
+    fn refresh_registration_status(&mut self, cx: &mut Context<Self>) {
+        let status = crate::platform::registration::status();
+        if self.registration_status != status {
+            self.registration_status = status;
+            cx.notify();
         }
-        cx.notify();
+    }
+
+    fn observe_registration_status(window: &mut Window, cx: &mut Context<Self>) -> Subscription {
+        cx.observe_window_activation(window, |this, window, cx| {
+            if window.is_window_active() {
+                this.refresh_registration_status(cx);
+            }
+        })
+    }
+
+    /// The thumb-wheel sensitivity slider. The label tracks the live slider
+    /// value while it is dragged; persistence happens once on release.
+    fn thumbwheel_sensitivity_slider(
+        cx: &mut Context<Self>,
+    ) -> CommitSlider<ThumbwheelSensitivity> {
+        let current = AppState::try_read(cx).map_or(ThumbwheelSensitivity::DEFAULT, |state| {
+            state.app_settings().thumbwheel_sensitivity
+        });
+        CommitSlider::new(
+            SliderRange::new(ThumbwheelSensitivity::MIN, ThumbwheelSensitivity::MAX),
+            current,
+            cx,
+            |_, sensitivity, cx| {
+                AppState::apply(cx, |state| state.commit_thumbwheel_sensitivity(sensitivity));
+            },
+        )
+    }
+
+    /// The vertical scroll sensitivity slider, committed once it is released.
+    fn vertical_scroll_sensitivity_slider(
+        cx: &mut Context<Self>,
+    ) -> CommitSlider<VerticalScrollSensitivity> {
+        let current = AppState::try_read(cx).map_or(VerticalScrollSensitivity::DEFAULT, |state| {
+            state.app_settings().vertical_scroll_sensitivity
+        });
+        CommitSlider::new(
+            SliderRange::new(
+                VerticalScrollSensitivity::MIN,
+                VerticalScrollSensitivity::MAX,
+            ),
+            current,
+            cx,
+            |_, sensitivity, cx| {
+                AppState::apply(cx, |state| {
+                    state.commit_vertical_scroll_sensitivity(sensitivity)
+                });
+            },
+        )
     }
 
     fn on_language_select(
@@ -282,7 +345,7 @@ impl SettingsView {
             .filter(|code| !code.is_empty())
             .map(ToOwned::to_owned);
 
-        cx.update_global::<AppState, _>(|s, cx| s.set_language(language, cx));
+        AppState::apply(cx, |state| state.commit_language(language));
     }
 
     fn on_asset_source_select(
@@ -299,11 +362,11 @@ impl SettingsView {
             .selected_value()
             .copied()
             .unwrap_or_default();
-        let refresh = cx.try_global::<AppState>().is_some_and(|state| {
+        let refresh = AppState::try_read(cx).is_some_and(|state| {
             state.app_settings().asset_source != source && state.app_settings().auto_download_assets
         });
 
-        cx.update_global::<AppState, _>(|state, _| state.set_asset_source(source));
+        AppState::apply(cx, |state| state.commit_asset_source(source));
         if refresh {
             assets::send_asset_command(cx, AssetCommand::Refresh);
         }
@@ -325,10 +388,16 @@ pub fn open(cx: &mut App) {
 /// Open the Settings window on a specific page, or focus it if it's already
 /// open. The page only steers a *fresh* open — an already-open window is just
 /// focused on whatever page it last showed (the Settings widget owns selection).
+/// The window's native title — one definition for open and the live-language
+/// retitle ([`windows::retitle_open`]), so the two cannot drift.
+pub(crate) fn window_title() -> SharedString {
+    tr!("app.settings")
+}
+
 pub fn open_at(page: SettingsPage, cx: &mut App) {
     windows::open_or_focus(
         |reg| &mut reg.settings,
-        tr!("Settings"),
+        window_title(),
         // Wide enough that the pages' custom rows keep slack under fonts wider
         // than the macOS system font (Segoe UI tipped the old 840 into
         // clipping the hero rows' trailing buttons on Windows).
@@ -339,7 +408,26 @@ pub fn open_at(page: SettingsPage, cx: &mut App) {
 }
 
 impl Render for SettingsView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        theme::apply_ui_scale(window, cx);
+        crate::ui::components::localize_placeholder(
+            &self.theme_search,
+            tr!("appearance.filter_themes"),
+            window,
+            cx,
+        );
+        // A failed write restores AppState's persisted configuration. Re-seat
+        // these independently owned sliders so neither can keep presenting the
+        // rejected value after that rollback.
+        if let Some(settings) = AppState::try_read(cx).map(AppState::app_settings) {
+            let (vertical_scroll, thumbwheel) = (
+                settings.vertical_scroll_sensitivity,
+                settings.thumbwheel_sensitivity,
+            );
+            self.vertical_scroll_sensitivity
+                .sync(vertical_scroll, window, cx);
+            self.thumbwheel_sensitivity.sync(thumbwheel, window, cx);
+        }
         let pal = theme::palette(cx);
         let view = cx.entity();
         // Only surface the Camera permission when a webcam is actually present,
@@ -347,9 +435,7 @@ impl Render for SettingsView {
         // Gated to the platforms that register the permission page below (macOS
         // consent is the AVFoundation gate; Windows has no such page).
         #[cfg(any(target_os = "macos", target_os = "linux"))]
-        let has_camera = cx
-            .try_global::<AppState>()
-            .is_some_and(AppState::has_camera);
+        let has_camera = AppState::try_read(cx).is_some_and(AppState::has_camera);
 
         // Filled group boxes use the theme's content-surface token, keeping
         // settings groups distinct from the page without borrowing a control
@@ -361,37 +447,41 @@ impl Render for SettingsView {
                 page_ix: self.initial_page.index(),
                 group_ix: None,
             })
-            .page(general::general_page(self.sensitivity_slider.clone()))
-            .page(updates::updates_page(self.updater.clone(), pal));
+            .page(general::general_page(
+                general::SensitivitySliders {
+                    vertical_scroll: self.vertical_scroll_sensitivity.slider().clone(),
+                    thumbwheel: self.thumbwheel_sensitivity.slider().clone(),
+                },
+                self.registration_status,
+            ))
+            .page(updates::updates_page(self.updater.clone()));
         // Registered only where grants exist to manage — see the `mod
         // permissions` cfg for why Windows skips it.
         #[cfg(any(target_os = "macos", target_os = "linux"))]
-        let settings = settings.page(permissions::permissions_page(pal, has_camera));
+        let settings = settings.page(permissions::permissions_page(has_camera));
         let settings = settings
             .page(appearance::appearance_page(
                 view.clone(),
                 self.theme_filter,
                 self.theme_search.clone(),
                 self.language_select.clone(),
-                pal,
             ))
             .page(assets::assets_page(
                 view.clone(),
                 self.asset_source_select.clone(),
-                pal,
                 self.asset_cache_desc.clone(),
             ))
-            .page(about::about_page(view, self.copied, pal));
+            .page(about::about_page(view, self.copied));
         // Surfaces competing macOS event taps (a pointer-lag cause) and, in debug
         // builds, the full tap list and a live event monitor. Appended after
         // About so [`SettingsPage::index`] stays platform-independent.
         #[cfg(target_os = "macos")]
-        let settings = settings.page(diagnostics::diagnostics_page(pal));
+        let settings = settings.page(diagnostics::diagnostics_page());
 
         div()
             .size_full()
             .relative()
-            .bg(pal.bg)
+            .bg(pal.page)
             .text_color(pal.text_primary)
             .track_focus(&self.focus_handle)
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
@@ -408,7 +498,7 @@ impl Render for SettingsView {
                         .top_0()
                         .left_0()
                         .right_0()
-                        .child(windows::aux_title_bar(tr!("Settings"), cx)),
+                        .child(windows::aux_title_bar(tr!("app.settings"), cx)),
                 )
             })
             .child(settings)

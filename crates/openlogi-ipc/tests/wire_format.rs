@@ -30,23 +30,25 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 
 use bincode::Options;
+use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
-use openlogi_core::config::Lighting;
+use openlogi_core::config::{Lighting, ScrollResolution};
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
     DeviceModelInfo, DeviceTransports, LightCapabilities, LightValueRange, LightValueUnit,
     PairedDevice, RawDeviceAddress, ReceiverInfo, StandaloneDevice,
 };
 use openlogi_core::hid::{
-    Click, DeviceRoute, Dpi, DpiCapabilities, DpiInfo, HidppFeatureErrorKind, HidppOperation,
-    LightCommand, PasskeyMethod, ReceiverSelector, SmartShiftAutoDisengage, SmartShiftMode,
+    BacklightMode, BacklightState, BacklightStatus, Click, DeviceRoute, Dpi, DpiCapabilities,
+    DpiInfo, HidppFeatureErrorKind, HidppOperation, LightCommand, PasskeyMethod, ReceiverSelector,
+    ScrollReportingTarget, ScrollWheelMode, SmartShiftAutoDisengage, SmartShiftMode,
     SmartShiftStatus, SmartShiftThreshold, TunableTorque, WriteError,
 };
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
-    AgentSnapshot, AgentStatus, ConfigReloadError, FoundDevice, Identity, InventoryHealth,
-    MonitorEvent, Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase,
-    PairingUpdate, RingObservation,
+    AgentSnapshot, AgentStatus, ClientKind, ConfigReloadError, ForegroundApps, FoundDevice,
+    Identity, InventoryHealth, MonitorEvent, Observation, PROTOCOL_VERSION, PairingCommandError,
+    PairingFailure, PairingPhase, PairingUpdate, RingObservation,
 };
 use succession::{Compat, Run};
 
@@ -63,11 +65,26 @@ fn wire_bytes<T: serde::Serialize>(value: &T) -> String {
 }
 
 #[track_caller]
-fn assert_wire<T: serde::Serialize>(value: &T, golden: &str) {
+fn assert_wire<T>(value: &T, golden: &str)
+where
+    T: serde::Serialize + serde::de::DeserializeOwned + std::fmt::Debug,
+{
+    let hex = wire_bytes(value);
     assert_eq!(
-        wire_bytes(value),
-        golden,
+        hex, golden,
         "wire encoding changed — if intentional, bump PROTOCOL_VERSION and regenerate this golden"
+    );
+    let bytes = (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("valid hex"))
+        .collect::<Vec<u8>>();
+    let decoded: T = bincode::DefaultOptions::new()
+        .deserialize(&bytes)
+        .expect("wire types deserialize");
+    let re_hex = wire_bytes(&decoded);
+    assert_eq!(
+        hex, re_hex,
+        "wire round-trip failed — re-encoded bytes differ"
     );
 }
 
@@ -85,7 +102,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 23);
+    assert_eq!(PROTOCOL_VERSION, 31);
 }
 
 #[test]
@@ -172,6 +189,46 @@ fn request_variant_order() {
     assert_wire(&AgentRequest::Identity {}, "16");
     assert_wire(&AgentRequest::Observe { since: 7 }, "1707");
     assert_wire(&AgentRequest::ObserveActionRing { since: 7 }, "1807");
+    assert_wire(
+        &AgentRequest::DeclareClient {
+            kind: ClientKind::Gui,
+        },
+        "1900",
+    );
+    assert_wire(
+        &AgentRequest::DeclareClient {
+            kind: ClientKind::Cli,
+        },
+        "1901",
+    );
+    assert_wire(
+        &AgentRequest::DeclareClient {
+            kind: ClientKind::Overlay,
+        },
+        "1902",
+    );
+}
+
+#[test]
+fn semantic_read_requests() {
+    assert_wire(
+        &AgentRequest::ReadWheel {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+        },
+        "1a0008463030444341464501",
+    );
+    assert_wire(
+        &AgentRequest::ReadBacklight {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+        },
+        "1b0008463030444341464501",
+    );
 }
 
 /// The agent identity is frozen: a helper from any build has to be able to
@@ -255,8 +312,10 @@ fn agent_status() {
         // the version must not churn this golden.
         protocol_version: 7,
         agent_version: "0.6.6".into(),
+        input_monitoring_granted: true,
+        hid_open_failures: false,
     };
-    assert_wire(&status, "010001010705302e362e36");
+    assert_wire(&status, "010001010705302e362e360100");
 
     assert_wire(&InventoryHealth::Scanning, "00");
     assert_wire(&InventoryHealth::Ready, "01");
@@ -273,20 +332,46 @@ fn agent_snapshot() {
             inventory: InventoryHealth::Ready,
             protocol_version: 7,
             agent_version: "0.6.6".into(),
+            input_monitoring_granted: true,
+            hid_open_failures: false,
         },
         inventory: Vec::new(),
         standalone: Vec::new(),
         camera_active: false,
         pairing: None,
+        // Pinned on its own in `foreground_apps` below, like the inventory and
+        // pairing fields.
+        foreground: ForegroundApps::default(),
     };
-    assert_wire(&snapshot, "010001010705302e362e3600000000");
+    assert_wire(&snapshot, "010001010705302e362e360100000000000000");
 
     // The observation is the snapshot with its generation in front.
     let observed = Observation {
         generation: 3,
         snapshot,
     };
-    assert_wire(&observed, "03010001010705302e362e3600000000");
+    assert_wire(&observed, "03010001010705302e362e360100000000000000");
+}
+
+/// The foreground application rides the snapshot, so both halves are pinned:
+/// the `None`/empty resting shape and a populated one.
+#[test]
+fn foreground_apps() {
+    assert_wire(&ForegroundApps::default(), "0000");
+
+    let safari = ForegroundApp {
+        id: "com.apple.Safari".into(),
+        display_name: "Safari".into(),
+    };
+    assert_wire(&safari, "10636f6d2e6170706c652e53616661726906536166617269");
+
+    assert_wire(
+        &ForegroundApps {
+            current: Some(safari.clone()),
+            recent: vec![safari],
+        },
+        "0110636f6d2e6170706c652e536166617269065361666172690110636f6d2e6170706c652e53616661726906536166617269",
+    );
 }
 
 /// The pairing session is state, so its phases are wire format like any enum.
@@ -353,12 +438,13 @@ fn device_inventory() {
                 thumbwheel: true,
                 haptic_feedback: true,
                 haptic_panel: true,
+                dpi_gestures: true,
             }),
         }],
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b000010150020001030106323134304c5a0102030400010100fb34b0fb8240000b010101000001010101",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b000010150020001030106323134304c5a0102030400010100fb34b0fb8240000b01010100000101010101",
     );
 }
 
@@ -471,6 +557,29 @@ fn device_settings_payloads() {
 }
 
 #[test]
+fn semantic_read_payloads() {
+    assert_wire(&ScrollReportingTarget::Native, "00");
+    assert_wire(&ScrollReportingTarget::Diverted, "01");
+    let wheel: Result<ScrollWheelMode, WriteError> = Ok(ScrollWheelMode {
+        resolution: ScrollResolution::High,
+        inverted: false,
+        target: ScrollReportingTarget::Native,
+    });
+    assert_wire(&wheel, "00010000");
+
+    assert_wire(&BacklightMode::PermanentManual, "03");
+    assert_wire(&BacklightStatus::PermanentManual, "05");
+    let backlight: Result<BacklightState, WriteError> = Ok(BacklightState {
+        enabled: true,
+        mode: BacklightMode::Automatic,
+        status: BacklightStatus::AlsAutomatic,
+        current_level: 4,
+        nb_levels: 8,
+    });
+    assert_wire(&backlight, "000101020408");
+}
+
+#[test]
 fn standalone_light_dtos_commands_and_errors() {
     let brightness =
         LightValueRange::new(20, 250, 1, LightValueUnit::Lumens).expect("valid brightness range");
@@ -511,7 +620,7 @@ fn standalone_light_dtos_commands_and_errors() {
     legacy.registry_model_id = None;
     assert_wire(
         &legacy,
-        "fb6d04fb00c9fb43fffb02020d73657269616c3a676c6f772d310a4c6974726120476c6f7701044c6f67690106676c6f772d31000000000d010001010114fa010101fb8c0afb641964020000056c69747261",
+        "fb6d04fb00c9fb43fffb02020d73657269616c3a676c6f772d310a4c6974726120476c6f7701044c6f67690106676c6f772d31000000000d010001010114fa010101fb8c0afb641964020000056c6974726100",
     );
     assert_wire(&capabilities, "010114fa010101fb8c0afb641964020000");
     assert_wire(&brightness, "14fa0101");

@@ -13,52 +13,109 @@
 //! ([`crate::features::camera::request_camera_access`]) — the prompt must
 //! originate in-app because macOS only lists an app under Privacy → Camera
 //! after it has requested access at least once. Once the grant lands, the
-//! helper's window refresh re-runs [`Self::set_target`], which starts the
-//! deferred stream.
+//! helper's typed permission event starts the deferred stream.
 //!
 //! While streaming it captures at 720p (Retina-sharp for the 480pt box),
 //! rebuilds the GPU texture only when a new frame arrives, and repaints at the
 //! camera's ~30 fps delivery rate.
+//!
+//! When the camera cannot be opened at all the placeholder says why rather than
+//! waiting on a first frame that is never coming. Resource contention can clear
+//! without an event, so the preview retries on a timer while its tab is on screen.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, Context, InteractiveElement, IntoElement, ParentElement, Render, RenderImage,
-    SharedString, StatefulInteractiveElement, Styled, Task, Window, div, img, px,
+    Context, InteractiveElement, IntoElement, ParentElement, Render, RenderImage, SharedString,
+    Styled, Subscription, Task, Window, div, img, prelude::FluentBuilder as _, px,
 };
+use gpui_base::Button as BaseButton;
 use gpui_component::v_flex;
 use image::{Frame as ImageFrame, RgbaImage};
-use openlogi_camera::{CameraAuthorization, CameraStream, Frame};
+use openlogi_camera::{CameraAuthorization, CaptureError, Frame};
 
+use crate::state::{AppState, StateEvent};
 use crate::ui::theme::{self, Palette, Typography as _};
+
+mod capture;
+use capture::{Capture, PreviewStream, SystemCapture};
+
+#[cfg(test)]
+mod tests;
 
 const PREVIEW_W: f32 = 480.;
 const PREVIEW_H: f32 = 270.; // 16:9
+/// How long to wait before opening a camera again after a failed start. A
+/// camera another application holds becomes free when that application lets go
+/// of it, which raises no event to wait on — so poll, slowly enough that a
+/// camera left busy costs one activation attempt every couple of seconds.
+const RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Live preview view. Holds the capture stream + its texture only while the
 /// parent points it at a camera via [`Self::set_target`].
 pub struct CameraPreview {
-    stream: Option<CameraStream>,
-    streaming_uid: Option<String>,
+    capture: Box<dyn Capture>,
+    lifecycle: PreviewLifecycle,
     current_image: Option<Arc<RenderImage>>,
-    last_generation: u64,
-    /// Frame-rate repaint pump; exists only while streaming (dropping it cancels it).
-    repaint_task: Option<Task<()>>,
-    /// Target is set but the stream isn't running because Camera permission
-    /// wasn't granted yet; retried once access appears.
-    awaiting_access: bool,
+    _permission_obs: Subscription,
+}
+
+enum PreviewLifecycle {
+    Stopped,
+    /// A target remains selected after opening its stream failed. Same-target
+    /// renders stay idempotent rather than retrying the open in a hot loop.
+    StartFailed {
+        target: String,
+        error: CaptureError,
+        /// Leaving this state cancels its pending retry.
+        _retry_task: Task<()>,
+    },
+    /// A target is selected but waits for Camera permission before opening.
+    AwaitingAccess(String),
+    Streaming {
+        target: String,
+        stream: Box<dyn PreviewStream>,
+        last_generation: u64,
+        /// Dropping the streaming state cancels its frame-rate repaint pump.
+        _repaint_task: Task<()>,
+    },
+}
+
+impl PreviewLifecycle {
+    fn target(&self) -> Option<&str> {
+        match self {
+            Self::Stopped => None,
+            Self::StartFailed { target, .. }
+            | Self::AwaitingAccess(target)
+            | Self::Streaming { target, .. } => Some(target),
+        }
+    }
 }
 
 impl CameraPreview {
-    pub fn new(_cx: &mut Context<Self>) -> Self {
+    pub fn new(cx: &mut Context<Self>) -> Self {
+        Self::with_capture(Box::new(SystemCapture), cx)
+    }
+
+    fn with_capture(capture: Box<dyn Capture>, cx: &mut Context<Self>) -> Self {
+        let permission_obs = cx.subscribe(
+            &AppState::global(cx),
+            |preview, _, event: &StateEvent, cx| {
+                if !matches!(event, StateEvent::CameraPermissionChanged) {
+                    return;
+                }
+                if preview.capture.access_granted() {
+                    preview.start_deferred_stream(cx);
+                }
+                cx.notify();
+            },
+        );
         Self {
-            stream: None,
-            streaming_uid: None,
+            capture,
+            lifecycle: PreviewLifecycle::Stopped,
             current_image: None,
-            last_generation: 0,
-            repaint_task: None,
-            awaiting_access: false,
+            _permission_obs: permission_obs,
         }
     }
 
@@ -68,10 +125,8 @@ impl CameraPreview {
     /// target is unchanged, except that a stream deferred on missing Camera
     /// permission starts as soon as access is granted.
     pub fn set_target(&mut self, target: Option<String>, cx: &mut Context<Self>) {
-        if target == self.streaming_uid {
-            if self.awaiting_access && openlogi_camera::camera_access_granted() {
-                self.awaiting_access = false;
-                self.start_stream(cx);
+        if target.as_deref() == self.lifecycle.target() {
+            if self.capture.access_granted() && self.start_deferred_stream(cx) {
                 cx.notify();
             }
             return;
@@ -79,69 +134,116 @@ impl CameraPreview {
         // Stop the old stream first: drop the session (LED off), cancel the
         // repaint pump, and free the GPU texture immediately — not in `render`,
         // which stops running the moment the preview leaves the screen.
-        self.stream = None;
-        self.repaint_task = None;
-        self.last_generation = 0;
-        self.awaiting_access = false;
+        self.lifecycle = PreviewLifecycle::Stopped;
         if let Some(old) = self.current_image.take() {
             cx.drop_image(old, None);
         }
-        self.streaming_uid = target;
 
-        if self.streaming_uid.is_none() {
+        let Some(target) = target else {
             cx.notify();
             return;
-        }
+        };
         // Only open the camera when access is already granted, so selecting it
         // never blocks the UI thread on the permission dialog.
-        if openlogi_camera::camera_access_granted() {
-            self.start_stream(cx);
+        if self.capture.access_granted() {
+            self.start_stream(target, cx);
         } else {
-            self.awaiting_access = true;
+            self.lifecycle = PreviewLifecycle::AwaitingAccess(target);
         }
         cx.notify();
     }
 
-    fn start_stream(&mut self, cx: &mut Context<Self>) {
-        let Some(uid) = self.streaming_uid.as_deref() else {
-            return;
+    fn start_deferred_stream(&mut self, cx: &mut Context<Self>) -> bool {
+        let lifecycle = std::mem::replace(&mut self.lifecycle, PreviewLifecycle::Stopped);
+        let PreviewLifecycle::AwaitingAccess(target) = lifecycle else {
+            self.lifecycle = lifecycle;
+            return false;
         };
-        self.stream = openlogi_camera::start_stream(uid).ok();
-        if self.stream.is_some() {
-            self.repaint_task = Some(cx.spawn(async move |this, cx| {
-                loop {
-                    cx.background_executor()
-                        .timer(Duration::from_millis(16))
-                        .await;
-                    // Repaint only when a *new* frame has arrived, so gpui isn't
-                    // re-rendering the window on idle ticks.
-                    let result = this.update(cx, |view, cx| {
-                        let has_new = view
-                            .stream
-                            .as_ref()
-                            .is_some_and(|s| s.frame_generation() != view.last_generation);
-                        if has_new {
-                            cx.notify();
+        self.start_stream(target, cx);
+        true
+    }
+
+    fn start_stream(&mut self, target: String, cx: &mut Context<Self>) {
+        let stream = match self.capture.start_stream(&target) {
+            Ok(stream) => stream,
+            Err(error) => {
+                tracing::warn!(%error, "camera preview failed to start");
+                let retry_target = target.clone();
+                let retry_task = cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(RETRY_INTERVAL).await;
+                    let _ = this.update(cx, |view, cx| {
+                        if !matches!(
+                            &view.lifecycle,
+                            PreviewLifecycle::StartFailed { target, .. } if *target == retry_target
+                        ) {
+                            return;
                         }
+                        if view.capture.access_granted() {
+                            view.start_stream(retry_target, cx);
+                        } else {
+                            view.lifecycle = PreviewLifecycle::AwaitingAccess(retry_target);
+                        }
+                        cx.notify();
                     });
-                    if result.is_err() {
-                        break;
+                });
+                self.lifecycle = PreviewLifecycle::StartFailed {
+                    target,
+                    error,
+                    _retry_task: retry_task,
+                };
+                return;
+            }
+        };
+        let repaint_task = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(16))
+                    .await;
+                // Repaint only when a *new* frame has arrived, so gpui isn't
+                // re-rendering the window on idle ticks.
+                let result = this.update(cx, |view, cx| {
+                    let has_new = match &view.lifecycle {
+                        PreviewLifecycle::Streaming {
+                            stream,
+                            last_generation,
+                            ..
+                        } => stream.frame_generation() != *last_generation,
+                        PreviewLifecycle::Stopped
+                        | PreviewLifecycle::StartFailed { .. }
+                        | PreviewLifecycle::AwaitingAccess(_) => false,
+                    };
+                    if has_new {
+                        cx.notify();
                     }
+                });
+                if result.is_err() {
+                    break;
                 }
-            }));
-        }
+            }
+        });
+        self.lifecycle = PreviewLifecycle::Streaming {
+            target,
+            stream,
+            last_generation: 0,
+            _repaint_task: repaint_task,
+        };
     }
 }
 
 impl Render for CameraPreview {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = theme::palette(cx);
-        let granted = openlogi_camera::camera_access_granted();
+        let granted = self.capture.access_granted();
 
         // Rebuild the texture only when a new frame arrived; free the old one.
-        if let Some(stream) = self.stream.as_ref() {
+        if let PreviewLifecycle::Streaming {
+            stream,
+            last_generation,
+            ..
+        } = &mut self.lifecycle
+        {
             let generation = stream.frame_generation();
-            if generation != self.last_generation
+            if generation != *last_generation
                 && let Some(image) = stream
                     .take_frame()
                     .and_then(|f| build_image(Arc::unwrap_or_clone(f)))
@@ -150,39 +252,20 @@ impl Render for CameraPreview {
                     let _ = window.drop_image(old);
                 }
                 self.current_image = Some(image);
-                self.last_generation = generation;
+                *last_generation = generation;
             }
         }
 
-        let surface: AnyElement = if let Some(image) = self.current_image.as_ref() {
-            img(image.clone())
-                .w(px(PREVIEW_W))
-                .h(px(PREVIEW_H))
-                .rounded_md()
-                .into_any_element()
-        } else if !openlogi_camera::capture_supported() {
-            note(
-                tr!("Live preview isn't available on this platform yet."),
-                pal,
-            )
-        } else if granted {
-            note(tr!("Starting preview…"), pal)
-        } else if matches!(
-            openlogi_camera::camera_authorization(),
-            CameraAuthorization::Undetermined
-        ) {
-            div()
-                .id("camera-request-access")
-                .text_body()
-                .text_color(pal.text_muted)
-                .cursor_pointer()
-                .hover(|s| s.text_color(pal.text_primary))
-                .child(tr!("Click to enable camera access."))
-                .on_click(|_, _, cx| crate::features::camera::request_camera_access(cx))
-                .into_any_element()
-        } else {
-            note(tr!("Enable Camera access in Settings to preview."), pal)
-        };
+        let image = self.current_image.clone();
+        let show_placeholder = image.is_none();
+        let capture_supported = !show_placeholder || openlogi_camera::capture_supported();
+        let authorization_undetermined = show_placeholder
+            && capture_supported
+            && !granted
+            && matches!(
+                openlogi_camera::camera_authorization(),
+                CameraAuthorization::Undetermined
+            );
 
         v_flex()
             .w(px(PREVIEW_W))
@@ -192,8 +275,59 @@ impl Render for CameraPreview {
             .rounded_md()
             .border_1()
             .border_color(pal.border)
-            .bg(pal.surface)
-            .child(surface)
+            .bg(pal.panel)
+            .when_some(image, |surface, image| {
+                surface.child(img(image).w(px(PREVIEW_W)).h(px(PREVIEW_H)).rounded_md())
+            })
+            .when(show_placeholder && !capture_supported, |surface| {
+                surface.child(note(tr!("camera.camera_preview_platform_unavailable"), pal))
+            })
+            .when(
+                show_placeholder && capture_supported && granted,
+                |surface| {
+                    surface.child(note(
+                        match &self.lifecycle {
+                            PreviewLifecycle::StartFailed {
+                                error: CaptureError::ResourcesUnavailable,
+                                ..
+                            } => tr!("camera.camera_resources_unavailable"),
+                            PreviewLifecycle::StartFailed {
+                                error: CaptureError::AccessDenied,
+                                ..
+                            } => tr!("camera.camera_preview_permission_required"),
+                            PreviewLifecycle::StartFailed { .. } => {
+                                tr!("camera.camera_preview_start_failed")
+                            }
+                            _ => tr!("camera.starting_preview"),
+                        },
+                        pal,
+                    ))
+                },
+            )
+            .when(
+                show_placeholder && capture_supported && !granted && authorization_undetermined,
+                |surface| {
+                    surface.child(
+                        BaseButton::new("camera-request-access")
+                            .accessibility_label(tr!("camera.click_to_enable_camera_access"))
+                            .text_body()
+                            .text_color(pal.text_muted)
+                            .cursor_pointer()
+                            .hover(|s| s.text_color(pal.text_primary))
+                            .focus_visible(|s| s.text_color(pal.text_primary))
+                            .child(tr!("camera.click_to_enable_camera_access"))
+                            .on_click(|_, _, cx| {
+                                crate::features::camera::request_camera_access(cx);
+                            }),
+                    )
+                },
+            )
+            .when(
+                show_placeholder && capture_supported && !granted && !authorization_undetermined,
+                |surface| {
+                    surface.child(note(tr!("camera.camera_preview_permission_required"), pal))
+                },
+            )
     }
 }
 
@@ -204,10 +338,12 @@ fn build_image(frame: Frame) -> Option<Arc<RenderImage>> {
     Some(Arc::new(RenderImage::new(vec![ImageFrame::new(buffer)])))
 }
 
-fn note(text: impl Into<SharedString>, pal: Palette) -> AnyElement {
+fn note(text: impl Into<SharedString>, pal: Palette) -> gpui::Div {
     div()
+        .max_w_full()
+        .px_4()
+        .text_center()
         .text_body()
         .text_color(pal.text_muted)
         .child(text.into())
-        .into_any_element()
 }

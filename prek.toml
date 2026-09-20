@@ -11,7 +11,17 @@ hooks = [
     { id = "check-yaml" },
     { id = "check-toml" },
     { id = "check-merge-conflict" },
-    { id = "check-added-large-files" },
+    # Design masters are hand-authored sources, not build output: a 1024² icon
+    # layer is legitimately over the 500 KB default. The guard still covers
+    # everything else, which is where an accidental blob would land.
+    { id = "check-added-large-files", exclude = "^design/" },
+]
+
+[[repos]]
+repo = "https://github.com/crate-ci/typos"
+rev = "v1.49.0"
+hooks = [
+    { id = "typos", args = ["--config", ".config/typos.toml", "--write-changes", "--force-exclude"] },
 ]
 
 [[repos]]
@@ -24,6 +34,17 @@ entry = "cargo fmt --all --"
 language = "system"
 types = ["rust"]
 pass_filenames = false
+
+# The single-source-of-truth guards (.ast-grep/rules): each names the module
+# that owns a decision and fails on its ingredients anywhere else. The same
+# rules as CI's `ast-grep` job, here over the staged Rust files; ast-grep is in
+# the devenv shell.
+[[repos.hooks]]
+id = "ast-grep"
+name = "ast-grep"
+entry = "ast-grep scan"
+language = "system"
+types = ["rust"]
 
 # Clippy compiles the workspace, so keep it on pre-push rather than every commit.
 [[repos.hooks]]

@@ -1,0 +1,25 @@
+# Owner: openlogi_agent_core::hardware::log_outcome — how a bounded background
+# write's three outcomes are logged: the success line (the caller's, because
+# it carries the value written), a failure, and a timeout.
+id: agent-write-outcome-log-owner
+language: rust
+severity: error
+message: A background write logs its outcome through hardware::log_outcome; pass it the success line instead of matching the result and wording a timeout here.
+note: |
+  Seven sites matched the same Result<Result<T, WriteError>, Elapsed> and had
+  drifted: no failure arm logged the device index, and two timeout arms logged
+  the value but not the index. See "Single source of truth" in AGENTS.md.
+files:
+  - crates/openlogi-agent-core/**/*.rs
+  - crates/openlogi-agent/**/*.rs
+rule:
+  all:
+    - kind: string_literal
+    - regex: 'timed out \(device asleep/unresponsive\)'
+    - not:
+        inside:
+          kind: function_item
+          stopBy: end
+          has:
+            field: name
+            regex: '^log_outcome$'

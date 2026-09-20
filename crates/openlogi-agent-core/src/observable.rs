@@ -14,11 +14,13 @@
 //! for the device and config facts, the agent binary for the hook ones — so it
 //! is shared as an `Arc` and every setter takes `&self`.
 
+use openlogi_core::app::ForegroundApp;
+use openlogi_core::brand::is_openlogi_foreground_id;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_hook::Hook;
 use openlogi_ipc::{
-    AgentSnapshot, AgentStatus, FoundDevice, Generation, InventoryHealth, OBSERVE_HOLD,
-    Observation, PROTOCOL_VERSION, PairingPhase,
+    AgentSnapshot, AgentStatus, ForegroundApps, FoundDevice, Generation, InventoryHealth,
+    OBSERVE_HOLD, Observation, PROTOCOL_VERSION, PairingPhase, RECENT_APPS,
 };
 use tokio::sync::watch;
 
@@ -50,11 +52,14 @@ impl ObservableState {
                     inventory: InventoryHealth::Scanning,
                     protocol_version: PROTOCOL_VERSION,
                     agent_version,
+                    input_monitoring_granted: openlogi_hid::permissions::has_access(),
+                    hid_open_failures: false,
                 },
                 inventory: Vec::new(),
                 standalone: Vec::new(),
                 camera_active: false,
                 pairing: None,
+                foreground: ForegroundApps::default(),
             },
         });
         Self { tx }
@@ -110,26 +115,30 @@ impl ObservableState {
     }
 
     /// Publish where enumeration stands together with the device set it
-    /// produced, so the two can never be read from different generations.
+    /// produced — and whether that pass failed to open HID++ nodes — so none
+    /// of the three can be read from different generations.
     ///
-    /// The inventory watcher re-enumerates on a timer, so most calls carry the
-    /// same devices as the last one; those notify nobody.
+    /// Reconciliations often carry the same devices as the last one; those
+    /// notify nobody.
     pub fn set_inventory(
         &self,
         health: InventoryHealth,
         inventories: &[DeviceInventory],
         standalone: &[StandaloneDevice],
+        hid_open_failures: bool,
     ) {
         self.update(|snapshot| {
             if snapshot.status.inventory == health
                 && snapshot.inventory == inventories
                 && snapshot.standalone == standalone
+                && snapshot.status.hid_open_failures == hid_open_failures
             {
                 return false;
             }
             snapshot.status.inventory = health;
             snapshot.inventory = inventories.to_vec();
             snapshot.standalone = standalone.to_vec();
+            snapshot.status.hid_open_failures = hid_open_failures;
             true
         });
     }
@@ -156,14 +165,32 @@ impl ObservableState {
         });
     }
 
-    /// Publish an Accessibility trust change, as observed by
-    /// [`watchers::accessibility`](crate::watchers::accessibility).
-    pub fn set_accessibility_granted(&self, granted: bool) {
+    /// Publish an Accessibility trust change (as observed by
+    /// [`watchers::accessibility`](crate::watchers::accessibility)) together
+    /// with the hook state it produced. One generation on purpose: published
+    /// separately, a revoke would briefly serve a state claiming the hook is
+    /// installed without the permission it requires.
+    pub fn set_accessibility_and_hook(&self, granted: bool, hook_installed: bool) {
         self.update(|snapshot| {
-            if snapshot.status.accessibility_granted == granted {
+            if snapshot.status.accessibility_granted == granted
+                && snapshot.status.hook_installed == hook_installed
+            {
                 return false;
             }
             snapshot.status.accessibility_granted = granted;
+            snapshot.status.hook_installed = hook_installed;
+            true
+        });
+    }
+
+    /// Publish an Input Monitoring trust change, as observed by
+    /// [`watchers::input_monitoring`](crate::watchers::input_monitoring).
+    pub fn set_input_monitoring_granted(&self, granted: bool) {
+        self.update(|snapshot| {
+            if snapshot.status.input_monitoring_granted == granted {
+                return false;
+            }
+            snapshot.status.input_monitoring_granted = granted;
             true
         });
     }
@@ -201,13 +228,28 @@ impl ObservableState {
         });
     }
 
-    /// Publish whether the OS input hook is currently installed.
-    pub fn set_hook_installed(&self, installed: bool) {
+    /// Publish which application is frontmost, as observed by
+    /// [`watchers::foreground_app`](crate::watchers::foreground_app).
+    ///
+    /// `current` mirrors the matcher exactly, OpenLogi's own processes
+    /// included; the recent list filters them out, because a per-app profile
+    /// for OpenLogi is never what a user means. The list grows only here, so a
+    /// client that reconnects mid-session inherits whatever the agent has seen
+    /// since it started rather than an empty picker.
+    pub fn set_foreground(&self, app: Option<ForegroundApp>) {
         self.update(|snapshot| {
-            if snapshot.status.hook_installed == installed {
+            if snapshot.foreground.current == app {
                 return false;
             }
-            snapshot.status.hook_installed = installed;
+            if let Some(app) = &app
+                && !is_openlogi_foreground_id(&app.id)
+            {
+                let recent = &mut snapshot.foreground.recent;
+                recent.retain(|seen| seen.id != app.id);
+                recent.insert(0, app.clone());
+                recent.truncate(RECENT_APPS);
+            }
+            snapshot.foreground.current = app;
             true
         });
     }
@@ -216,9 +258,11 @@ impl ObservableState {
 #[cfg(test)]
 mod tests {
     use super::ObservableState;
+    use openlogi_core::app::ForegroundApp;
+    use openlogi_core::brand::APP_ID;
     use openlogi_core::device::{DeviceInventory, DeviceKind, PairedDevice, ReceiverInfo};
     use openlogi_hid::DIRECT_DEVICE_INDEX;
-    use openlogi_ipc::InventoryHealth;
+    use openlogi_ipc::{InventoryHealth, RECENT_APPS};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -248,17 +292,93 @@ mod tests {
         }
     }
 
+    /// Drive the watcher's edge for one application id.
+    fn front(state: &ObservableState, id: &str) {
+        state.set_foreground(Some(ForegroundApp::unnamed(id.to_string())));
+    }
+
+    /// Identifiers of the recent list, newest first.
+    fn recent(state: &ObservableState) -> Vec<String> {
+        state
+            .snapshot()
+            .foreground
+            .recent
+            .into_iter()
+            .map(|app| app.id)
+            .collect()
+    }
+
+    #[test]
+    fn revisiting_an_app_moves_it_to_the_front_instead_of_repeating_it() {
+        let state = state();
+        front(&state, "com.apple.Safari");
+        front(&state, "com.microsoft.VSCode");
+        front(&state, "com.apple.Safari");
+
+        assert_eq!(recent(&state), ["com.apple.Safari", "com.microsoft.VSCode"]);
+    }
+
+    #[test]
+    fn our_own_windows_never_become_a_profile_target() {
+        let state = state();
+        front(&state, "com.apple.Safari");
+        // The user clicked over to OpenLogi to edit Safari's profile: the
+        // matcher must see the switch, but the picker must still offer Safari.
+        front(&state, APP_ID);
+
+        assert_eq!(
+            state.snapshot().foreground.current.map(|app| app.id),
+            Some(APP_ID.to_string()),
+            "current mirrors the matcher, unfiltered"
+        );
+        assert_eq!(recent(&state), ["com.apple.Safari"]);
+    }
+
+    #[test]
+    fn the_recent_list_is_capped() {
+        let state = state();
+        for n in 0..RECENT_APPS + 5 {
+            front(&state, &format!("app.{n}"));
+        }
+        let recent = recent(&state);
+        assert_eq!(recent.len(), RECENT_APPS);
+        assert_eq!(
+            recent[0],
+            format!("app.{}", RECENT_APPS + 4),
+            "newest first"
+        );
+    }
+
+    #[test]
+    fn a_renamed_app_is_still_news_but_does_not_duplicate_the_entry() {
+        let state = state();
+        front(&state, "com.example.App");
+        let mut rx = state.subscribe();
+        rx.mark_unchanged();
+
+        state.set_foreground(Some(ForegroundApp {
+            id: "com.example.App".to_string(),
+            display_name: "Renamed".to_string(),
+        }));
+
+        assert!(
+            rx.has_changed().unwrap(),
+            "the name a client renders changed"
+        );
+        assert_eq!(recent(&state), ["com.example.App"]);
+    }
+
     #[test]
     fn a_repeated_enumeration_notifies_nobody() {
         let state = state();
         let mut rx = state.subscribe();
 
-        state.set_inventory(InventoryHealth::Ready, &[inventory(true)], &[]);
+        state.set_inventory(InventoryHealth::Ready, &[inventory(true)], &[], false);
         assert!(rx.has_changed().unwrap(), "the first enumeration is news");
         rx.mark_unchanged();
 
         // What the inventory watcher does every couple of seconds on a steady desk.
-        state.set_inventory(InventoryHealth::Ready, &[inventory(true)], &[]);
+        state.set_inventory(InventoryHealth::Ready, &[inventory(true)], &[], false);
         assert!(
             !rx.has_changed().unwrap(),
             "an identical enumeration must not wake a reader"
@@ -269,10 +389,10 @@ mod tests {
     fn a_device_waking_inside_an_otherwise_identical_set_is_news() {
         let state = state();
         let mut rx = state.subscribe();
-        state.set_inventory(InventoryHealth::Ready, &[inventory(false)], &[]);
+        state.set_inventory(InventoryHealth::Ready, &[inventory(false)], &[], false);
         rx.mark_unchanged();
 
-        state.set_inventory(InventoryHealth::Ready, &[inventory(true)], &[]);
+        state.set_inventory(InventoryHealth::Ready, &[inventory(true)], &[], false);
         assert!(rx.has_changed().unwrap());
     }
 
@@ -283,7 +403,7 @@ mod tests {
 
         // "Checked, no devices" differs from "not checked yet" only in health —
         // the distinction the GUI's empty state reads.
-        state.set_inventory(InventoryHealth::Ready, &[], &[]);
+        state.set_inventory(InventoryHealth::Ready, &[], &[], false);
         assert!(rx.has_changed().unwrap());
         let snapshot = state.snapshot();
         assert_eq!(snapshot.status.inventory, InventoryHealth::Ready);
@@ -293,16 +413,31 @@ mod tests {
     #[test]
     fn a_hook_write_leaves_the_device_facts_alone() {
         let state = state();
-        state.set_inventory(InventoryHealth::Ready, &[inventory(true)], &[]);
+        state.set_inventory(InventoryHealth::Ready, &[inventory(true)], &[], false);
 
-        state.set_hook_installed(true);
-        state.set_accessibility_granted(true);
+        state.set_accessibility_and_hook(true, true);
 
         let snapshot = state.snapshot();
         assert!(snapshot.status.hook_installed);
         assert!(snapshot.status.accessibility_granted);
         assert_eq!(snapshot.inventory.len(), 1);
         assert_eq!(snapshot.status.inventory, InventoryHealth::Ready);
+    }
+
+    #[test]
+    fn a_revoke_retires_the_hook_in_the_same_generation() {
+        let state = state();
+        state.set_accessibility_and_hook(true, true);
+        let before = state.subscribe().borrow().generation;
+
+        state.set_accessibility_and_hook(false, false);
+
+        let after = state.subscribe().borrow().generation;
+        assert_eq!(
+            after,
+            before + 1,
+            "no intermediate generation may claim the hook without its permission"
+        );
     }
 
     #[tokio::test]
@@ -319,7 +454,7 @@ mod tests {
     #[tokio::test]
     async fn a_stale_generation_gets_the_current_state_at_once() {
         let state = state();
-        state.set_inventory(InventoryHealth::Ready, &[inventory(true)], &[]);
+        state.set_inventory(InventoryHealth::Ready, &[inventory(true)], &[], false);
 
         let observed = state.observe(1).await;
         assert_eq!(observed.generation, 2);
@@ -332,7 +467,7 @@ mod tests {
         let writer = Arc::clone(&state);
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(1)).await;
-            writer.set_hook_installed(true);
+            writer.set_accessibility_and_hook(true, true);
         });
 
         let observed = state.observe(1).await;
@@ -352,12 +487,12 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_silent_write_does_not_end_the_hold() {
         let state = Arc::new(state());
-        state.set_hook_installed(true);
+        state.set_accessibility_and_hook(true, true);
         let writer = Arc::clone(&state);
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(1)).await;
-            // Same value: this must not be mistaken for news.
-            writer.set_hook_installed(true);
+            // Same values: this must not be mistaken for news.
+            writer.set_accessibility_and_hook(true, true);
         });
 
         let observed = state.observe(2).await;
@@ -367,13 +502,13 @@ mod tests {
     #[test]
     fn an_unchanged_flag_notifies_nobody() {
         let state = state();
-        state.set_hook_installed(true);
+        state.set_accessibility_and_hook(true, true);
         let rx = state.subscribe();
 
-        state.set_hook_installed(true);
+        state.set_accessibility_and_hook(true, true);
         assert!(!rx.has_changed().unwrap());
 
-        state.set_hook_installed(false);
+        state.set_accessibility_and_hook(true, false);
         assert!(rx.has_changed().unwrap());
     }
 }

@@ -1,0 +1,214 @@
+//! HID++ `ReprogControlsV4` (feature `0x1b04`) — temporary control diversion
+//! and raw-XY reporting, the mechanism behind MX-line reprogrammable controls.
+//!
+//! The full protocol wrapper lives in `openlogi-hidpp`; this module keeps the
+//! raw-CID accessor the capture and host-switch sessions drive: `getCount` /
+//! `getCtrlIdInfo` (walk the control table and confirm a control can divert or
+//! report raw XY), `getCidReporting` (snapshot a control before arming it) and
+//! `setCidReporting` (turn diversion on or off, and hand the control back).
+//! While a control is diverted with raw-XY reporting, the device emits two
+//! unsolicited events, decoded by [`decode_event`]:
+//!
+//! - function `0` `divertedButtonsEvent` — up to four currently-pressed CIDs.
+//! - function `1` `rawXYEvent` — signed `dx`/`dy` while a raw-XY control is held.
+//!
+//! Wire formats cross-checked against Solaar's `hidpp20.py` and
+//! `notifications.py`.
+
+use std::sync::Arc;
+
+use hidpp::{
+    channel::HidppChannel,
+    feature::{CreatableFeature, reprog_controls as hidpp_reprog},
+    protocol::v20::Hidpp20Error,
+};
+
+mod event;
+
+pub use event::{RawControlEvent, decode_event};
+pub use hidpp_reprog::{
+    AnalyticsKeyEvent, CidFlags, CidInfo, CidReporting, CidReportingChange, CidReportingChangeEcho,
+    ControlId, GroupMask, RawWheelResolution, ReprogControlsCapabilities, ReprogControlsEvent,
+    TaskId, decode_event as decode_full_event,
+};
+pub use hidpp_reprog::{control_ids, task_ids};
+
+/// `ReprogControlsV4` HID++ feature ID.
+pub const FEATURE_ID: u16 = 0x1b04;
+
+/// Control ID of the MX-line dedicated gesture button (`Mouse_Gesture_Button`,
+/// Logitech "App_Switch_Gesture").
+///
+/// MX Master 4 also has a separate Haptic Sense Panel in the thumb area; that
+/// panel is [`HAPTIC_PANEL_CID`], not this CID.
+pub const GESTURE_BUTTON_CID: u16 = 0x00c3;
+
+/// Control ID of the MX Master 4 Haptic Sense Panel — the touch-sensitive
+/// thumb rest that replaces the dedicated gesture button on that model.
+///
+/// Reverse-engineered on real hardware (MX Master 4, Bolt receiver); not in
+/// the published `0x1b04` control-ID lists. Press/release arrive as
+/// `divertedButtonsEvent` with this CID, and while touched the panel streams
+/// relative raw-XY at ~125 Hz exactly like the dedicated gesture button —
+/// except that the first raw-XY sample after contact is a large position jump
+/// that must be discarded before feeding a swipe accumulator.
+///
+/// The typed source of truth is [`control_ids::HAPTIC_PANEL`].
+pub const HAPTIC_PANEL_CID: u16 = control_ids::HAPTIC_PANEL.0;
+
+/// Control IDs of the "DPI / ModeShift" button family. Whichever a device
+/// exposes (and can divert) is captured and mapped to
+/// [`ButtonId::DpiToggle`](openlogi_core::binding::ButtonId::DpiToggle): the MX
+/// wheel-mode "Smart Shift" button, plus the dedicated "DPI Change" / "DPI
+/// Switch" buttons on other models. Values from the `0x1b04` control-ID list,
+/// cross-checked against Solaar `special_keys.py`.
+pub const DPI_MODE_SHIFT_CIDS: [u16; 3] = [0x00c4, 0x00ed, 0x00fd];
+
+/// Control IDs of the Back button family. MX Vertical and similar devices
+/// report Back via HID++ `0x1b04` rather than a standard OS mouse button,
+/// so macOS never translates them into `OtherMouseDown` events. Whichever a
+/// device exposes (and can divert) is captured and mapped to
+/// [`ButtonId::Back`](openlogi_core::binding::ButtonId::Back).
+///
+/// Known CIDs (from the `0x1b04` control-ID list / Solaar `special_keys.py`):
+/// - `0x0053` — Back (classic mouse CID, used by MX Vertical)
+/// - `0x00BD` — MultiPlatform Back
+/// - `0x00CE` — Multiplatform Back (alternate)
+/// - `0x00DB` — Back (generic)
+pub const BACK_CIDS: [u16; 4] = [0x0053, 0x00BD, 0x00CE, 0x00DB];
+
+/// Control IDs of the Forward button family. Counterpart to [`BACK_CIDS`]:
+/// captured and mapped to
+/// [`ButtonId::Forward`](openlogi_core::binding::ButtonId::Forward).
+///
+/// Known CIDs:
+/// - `0x0056` — Forward (classic mouse CID, used by MX Vertical)
+/// - `0x00CF` — Multiplatform Forward
+pub const FORWARD_CIDS: [u16; 2] = [0x0056, 0x00CF];
+
+/// Identity and capabilities of one reprogrammable control, as returned by
+/// `getCtrlIdInfo`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CtrlIdInfo {
+    /// Control ID — stable across firmware (e.g. [`GESTURE_BUTTON_CID`]).
+    pub cid: u16,
+    /// Task ID — the control's default on-device action.
+    pub task_id: u16,
+    /// `KeyFlag` capability bitfield (response bytes 4 and 8 combined).
+    pub flags: u16,
+}
+
+impl CtrlIdInfo {
+    /// Typed view of the legacy raw [`Self::flags`] field.
+    #[must_use]
+    pub fn typed_flags(self) -> CidFlags {
+        CidFlags::from_bits_retain(self.flags)
+    }
+
+    /// Whether the control can be temporarily diverted to HID++ events.
+    #[must_use]
+    pub fn is_divertable(self) -> bool {
+        self.typed_flags().is_divertable()
+    }
+
+    /// Whether the control can report raw XY movement while held — required to
+    /// decode a swipe into a direction.
+    #[must_use]
+    pub fn supports_raw_xy(self) -> bool {
+        self.typed_flags().supports_raw_xy()
+    }
+
+    /// Whether the control can report analytics key events.
+    #[must_use]
+    pub fn supports_analytics_events(self) -> bool {
+        self.typed_flags().supports_analytics_key_events()
+    }
+}
+
+impl From<CidInfo> for CtrlIdInfo {
+    fn from(info: CidInfo) -> Self {
+        Self {
+            cid: info.cid.into(),
+            task_id: info.task_id.0,
+            flags: info.flags.raw(),
+        }
+    }
+}
+
+/// `ReprogControlsV4` accessor bound to one device + resolved feature index.
+///
+/// Construct with the feature index obtained from the device's root feature
+/// (`get_feature(`[`FEATURE_ID`]`)`), then call the functions below. Cheap to
+/// clone (an `Arc` plus the feature index).
+#[derive(Clone)]
+pub struct ReprogControlsV4 {
+    inner: Arc<hidpp_reprog::ReprogControlsFeature>,
+    feature_index: u8,
+}
+
+impl ReprogControlsV4 {
+    /// Bind the feature to `(device_index, feature_index)` on `chan`.
+    #[must_use]
+    pub fn new(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
+        Self {
+            inner: Arc::new(hidpp_reprog::ReprogControlsFeature::new(
+                chan,
+                device_index,
+                feature_index,
+            )),
+            feature_index,
+        }
+    }
+
+    /// The feature index this accessor talks to — used to match unsolicited
+    /// events in [`decode_event`].
+    #[must_use]
+    pub fn feature_index(&self) -> u8 {
+        self.feature_index
+    }
+
+    /// Number of reprogrammable controls the device exposes.
+    pub async fn get_count(&self) -> Result<u8, Hidpp20Error> {
+        self.inner.get_count().await
+    }
+
+    /// Identity + capabilities of the control at `index` (`0..get_count`).
+    pub async fn get_cid_info(&self, index: u8) -> Result<CidInfo, Hidpp20Error> {
+        self.inner.get_cid_info(index).await
+    }
+
+    /// Compatibility projection of [`Self::get_cid_info`].
+    pub async fn get_ctrl_id_info(&self, index: u8) -> Result<CtrlIdInfo, Hidpp20Error> {
+        Ok(self.get_cid_info(index).await?.into())
+    }
+
+    /// Current reporting/remapping state for `cid`.
+    pub async fn get_cid_reporting(&self, cid: u16) -> Result<CidReporting, Hidpp20Error> {
+        self.inner.get_cid_reporting(ControlId(cid)).await
+    }
+
+    /// Apply the full `setCidReporting` packet.
+    pub async fn set_cid_reporting_full(
+        &self,
+        cid: u16,
+        change: CidReportingChange,
+    ) -> Result<CidReportingChangeEcho, Hidpp20Error> {
+        self.inner.set_cid_reporting(ControlId(cid), change).await
+    }
+
+    /// Divert `cid`'s reports to software. Raw XY stays off and remapping is
+    /// left untouched; the device then emits [`RawControlEvent`]s on this
+    /// feature index.
+    pub async fn divert_cid(&self, cid: u16) -> Result<(), Hidpp20Error> {
+        self.set_cid_reporting_full(
+            cid,
+            hidpp_reprog::CidReportingChange {
+                diverted: Some(true),
+                raw_xy: Some(false),
+                ..Default::default()
+            },
+        )
+        .await?;
+        Ok(())
+    }
+}
