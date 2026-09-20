@@ -43,12 +43,11 @@ enum KeyPhase {
 
 /// One physical keyboard output shared by held chords.
 ///
-/// Logical Cmd and Ctrl are distinct on macOS. Cmd aliases Ctrl on Linux and
-/// Windows, so ownership is counted after that platform mapping is resolved.
+/// Logical Cmd and Ctrl remain distinct: Cmd maps to Command on macOS,
+/// Meta on Linux, and the Windows key on Windows.
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum HeldKey {
-    #[cfg(target_os = "macos")]
     Command,
     Control,
     Shift,
@@ -160,15 +159,9 @@ static HELD_OUTPUT: LazyLock<Mutex<HeldOutput>> =
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn held_keys(combo: &KeyCombo) -> Vec<HeldKey> {
     let mut keys = Vec::with_capacity(4);
-    #[cfg(target_os = "macos")]
     if combo.has_command() {
         keys.push(HeldKey::Command);
     }
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
-    if combo.has_command() || combo.has_control() {
-        keys.push(HeldKey::Control);
-    }
-    #[cfg(target_os = "macos")]
     if combo.has_control() {
         keys.push(HeldKey::Control);
     }
@@ -630,31 +623,31 @@ mod tests {
         );
     }
 
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     #[test]
-    fn command_and_control_share_one_physical_output() {
-        let command_a = combo("Cmd+A");
-        let control_b = combo("Ctrl+B");
+    fn held_command_control_chord_preserves_both_modifiers() {
+        let chord = combo("Cmd+Ctrl+W");
         let mut output = HeldOutput::default();
-
-        output.transition(None, Some(&command_a));
+        let pressed = output.transition(None, Some(&chord));
         assert_eq!(
-            output.transition(None, Some(&control_b)),
-            HoldTransition {
-                up: vec![],
-                down: vec![HeldKey::Key(control_b.key())],
-            }
+            pressed.down,
+            vec![
+                HeldKey::Command,
+                HeldKey::Control,
+                HeldKey::Key(chord.key())
+            ]
         );
+        assert!(pressed.up.is_empty());
         assert_eq!(
-            output.transition(Some(&command_a), None),
+            output.transition(Some(&chord), None),
             HoldTransition {
-                up: vec![HeldKey::Key(command_a.key())],
+                up: pressed.down,
                 down: vec![],
             }
         );
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     #[test]
     fn command_and_control_are_distinct_physical_outputs() {
         let command_a = combo("Cmd+A");
@@ -678,7 +671,7 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     #[test]
     fn shared_command_stays_down_until_its_last_chord_ends() {
         let command_a = combo("Cmd+A");

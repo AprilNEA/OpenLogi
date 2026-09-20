@@ -433,6 +433,7 @@ fn modifiers_to_keycodes(combo: &openlogi_core::binding::KeyCombo) -> Vec<KeyCod
 
 fn held_keycode(key: HeldKey) -> Option<KeyCode> {
     match key {
+        HeldKey::Command => Some(KeyCode::KEY_LEFTMETA),
         HeldKey::Control => Some(KeyCode::KEY_LEFTCTRL),
         HeldKey::Shift => Some(KeyCode::KEY_LEFTSHIFT),
         HeldKey::Alt => Some(KeyCode::KEY_LEFTALT),
@@ -673,6 +674,18 @@ mod tests {
 
     use super::{combo, hid_usage_to_linux, key_ev, key_phase_events, modifiers_to_keycodes, syn};
     use crate::inject::KeyPhase;
+
+    #[test]
+    fn held_command_and_control_map_to_distinct_linux_modifiers() {
+        assert_eq!(
+            super::held_keycode(super::HeldKey::Command),
+            Some(KeyCode::KEY_LEFTMETA)
+        );
+        assert_eq!(
+            super::held_keycode(super::HeldKey::Control),
+            Some(KeyCode::KEY_LEFTCTRL)
+        );
+    }
 
     #[test]
     fn held_chord_edges_use_inverse_key_order() {

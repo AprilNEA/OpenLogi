@@ -277,6 +277,7 @@ pub(super) fn hold_keys(keys: &[HeldKey], phase: KeyPhase) {
 
 fn held_virtual_key(key: HeldKey) -> Option<u16> {
     match key {
+        HeldKey::Command => Some(VK_LWIN),
         HeldKey::Control => Some(VK_CONTROL),
         HeldKey::Shift => Some(VK_SHIFT),
         HeldKey::Alt => Some(VK_MENU),
@@ -356,6 +357,18 @@ mod tests {
     use openlogi_core::binding::Shortcut;
 
     use super::{VK_BROWSER_BACK, VK_BROWSER_FORWARD, combo};
+
+    #[test]
+    fn held_command_and_control_map_to_distinct_windows_modifiers() {
+        assert_eq!(
+            super::held_virtual_key(super::HeldKey::Command),
+            Some(super::VK_LWIN)
+        );
+        assert_eq!(
+            super::held_virtual_key(super::HeldKey::Control),
+            Some(super::VK_CONTROL)
+        );
+    }
 
     /// Pin a handful of representative `Shortcut -> KeyCombo` rows so an
     /// edit to the table can't silently change what Ctrl+C sends.
