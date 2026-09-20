@@ -1,7 +1,7 @@
 //! Regression tests for OS-hook state and dispatch policy.
 
 use super::*;
-use openlogi_core::binding::{GESTURE_SWIPE_THRESHOLD, LongPressBinding};
+use openlogi_core::binding::{GESTURE_SWIPE_THRESHOLD_H, LongPressBinding};
 
 fn token(id: u64, button: ButtonId) -> PressToken {
     PressToken::hook_for_test(id, button)
@@ -39,7 +39,7 @@ fn accumulate_tags_a_committed_swipe_with_the_held_press() {
     hold.swipe.backdate_hold_for_test();
 
     assert_eq!(
-        hold.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+        hold.accumulate(GESTURE_SWIPE_THRESHOLD_H + 10, 0),
         Some((press.clone(), ButtonId::Back, GestureDirection::Right))
     );
     assert_eq!(
@@ -68,7 +68,7 @@ fn a_same_button_repress_restarts_the_stale_hold() {
     hold.begin(ButtonId::Back, replacement.clone());
     hold.swipe.backdate_hold_for_test();
     assert_eq!(
-        hold.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+        hold.accumulate(GESTURE_SWIPE_THRESHOLD_H + 10, 0),
         Some((replacement, ButtonId::Back, GestureDirection::Right))
     );
 }
@@ -87,7 +87,7 @@ fn an_aged_hold_yields_to_a_new_buttons_press() {
     hold.begin(ButtonId::Forward, replacement.clone());
     hold.swipe.backdate_hold_for_test();
     assert_eq!(
-        hold.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+        hold.accumulate(GESTURE_SWIPE_THRESHOLD_H + 10, 0),
         Some((replacement, ButtonId::Forward, GestureDirection::Right))
     );
 }
@@ -104,7 +104,7 @@ fn begin_is_first_wins_while_a_hold_is_active() {
     );
 
     assert_eq!(
-        hold.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+        hold.accumulate(GESTURE_SWIPE_THRESHOLD_H + 10, 0),
         Some((first.clone(), ButtonId::Back, GestureDirection::Right))
     );
     assert_eq!(hold.end(ButtonId::Forward), None);
