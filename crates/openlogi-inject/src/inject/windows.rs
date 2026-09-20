@@ -17,7 +17,7 @@ use openlogi_core::binding::{
 };
 use openlogi_core::scroll::ScrollDelta;
 
-use super::{HeldKey, KeyPhase, ScrollQuantizer};
+use super::{HeldKey, ScrollQuantizer};
 
 const WHEEL_DELTA: i32 = 120;
 const WHEEL_DELTA_F64: f64 = 120.0;
@@ -268,40 +268,72 @@ fn combo_modifiers(combo: &KeyCombo) -> Vec<u16> {
     modifiers
 }
 
-/// Emit one edge for the physical keys whose ownership changed.
-pub(super) fn hold_keys(keys: &[HeldKey], phase: KeyPhase) {
+/// Emit only the *net* physical edges for one hold transition.
+///
+/// `up`/`down` are the logical keys [`HoldTransition`] released and pressed
+/// in a single [`HeldChord`] update. Both lists are resolved to physical
+/// virtual keys and applied to [`PHYSICAL_HOLD_COUNTS`] under one lock, so a
+/// VK that both lists touch — e.g. a chord replace that swaps `HeldKey::Control`
+/// for `HeldKey::Command`, which share `VK_CONTROL` — is settled before
+/// anything is sent to the OS: if its count would return to the same
+/// nonzero state it started at, no physical event is emitted for it at all.
+/// This is what preserves [`HeldChord::replace`]'s guarantee on Windows;
+/// calling `hold_keys`-style up-then-down as two independent `SendInput`
+/// batches would emit a real key-up followed by a real key-down for the
+/// shared key, interrupting it.
+///
+/// [`HoldTransition`]: super::HoldTransition
+/// [`HeldChord`]: super::HeldChord
+/// [`HeldChord::replace`]: super::HeldChord::replace
+pub(super) fn hold_transition(up: &[HeldKey], down: &[HeldKey]) {
     let Ok(mut counts) = PHYSICAL_HOLD_COUNTS.lock() else {
         tracing::warn!("Windows physical hold counts mutex poisoned");
         return;
     };
-    let inputs = hold_inputs(&mut counts, keys, phase);
+    let inputs = hold_transition_inputs(&mut counts, up, down);
     send_inputs(&inputs);
 }
 
-fn hold_inputs(counts: &mut HashMap<u16, usize>, keys: &[HeldKey], phase: KeyPhase) -> Vec<INPUT> {
-    let key_up = phase == KeyPhase::Up;
-    let mut inputs = Vec::new();
-    for vk in keys.iter().filter_map(|key| held_virtual_key(*key)) {
-        if key_up {
-            match counts.get_mut(&vk) {
-                Some(count) if *count > 1 => *count -= 1,
-                Some(_) => {
-                    counts.remove(&vk);
-                    inputs.push(key_input(vk, true));
-                }
-                None => {}
+fn hold_transition_inputs(
+    counts: &mut HashMap<u16, usize>,
+    up: &[HeldKey],
+    down: &[HeldKey],
+) -> Vec<INPUT> {
+    // Candidate releases: VKs whose count reached 0 while processing `up`.
+    // Not emitted yet — `down` may reclaim one before anything is sent.
+    let mut up_edges: Vec<u16> = Vec::new();
+    for vk in up.iter().filter_map(|key| held_virtual_key(*key)) {
+        match counts.get_mut(&vk) {
+            Some(count) if *count > 1 => *count -= 1,
+            Some(_) => {
+                counts.remove(&vk);
+                up_edges.push(vk);
             }
+            None => {}
+        }
+    }
+
+    let mut down_edges: Vec<u16> = Vec::new();
+    for vk in down.iter().filter_map(|key| held_virtual_key(*key)) {
+        if let Some(reclaimed) = up_edges.iter().position(|&candidate| candidate == vk) {
+            // Released and immediately reclaimed within the same
+            // transition: net zero change, so cancel the release instead of
+            // emitting an up/down pair for a key that never should have
+            // moved.
+            up_edges.remove(reclaimed);
+            counts.insert(vk, 1);
         } else {
             let count = counts.entry(vk).or_default();
             if *count == 0 {
-                inputs.push(key_input(vk, false));
+                down_edges.push(vk);
             }
             *count += 1;
         }
     }
-    if key_up {
-        inputs.reverse();
-    }
+
+    let mut inputs = Vec::with_capacity(up_edges.len() + down_edges.len());
+    inputs.extend(up_edges.into_iter().rev().map(|vk| key_input(vk, true)));
+    inputs.extend(down_edges.into_iter().map(|vk| key_input(vk, false)));
     inputs
 }
 
@@ -430,16 +462,20 @@ mod tests {
         );
     }
 
-    fn held_edges(
+    /// Run one `hold_transition` step and decode its `INPUT`s back to
+    /// `(vk, flags)` pairs. `up`/`down` mirror `hold_transition`'s own
+    /// parameters; pass an empty slice for whichever side isn't exercised by
+    /// a given step.
+    fn transition_edges(
         counts: &mut std::collections::HashMap<u16, usize>,
-        keys: &[super::HeldKey],
-        phase: super::KeyPhase,
+        up: &[super::HeldKey],
+        down: &[super::HeldKey],
     ) -> Vec<(u16, u32)> {
-        super::hold_inputs(counts, keys, phase)
+        super::hold_transition_inputs(counts, up, down)
             .iter()
             .map(|input| {
                 assert_eq!(input.r#type, super::INPUT_KEYBOARD);
-                // SAFETY: hold_inputs only constructs INPUT_KEYBOARD events with ki initialized.
+                // SAFETY: hold_transition_inputs only constructs INPUT_KEYBOARD events with ki initialized.
                 let key = unsafe { input.Anonymous.ki };
                 (key.wVk, key.dwFlags)
             })
@@ -448,7 +484,7 @@ mod tests {
 
     #[test]
     fn overlapping_held_command_and_control_release_only_the_last_owner() {
-        use super::{HeldKey, KEYEVENTF_KEYUP, KeyPhase};
+        use super::{HeldKey, KEYEVENTF_KEYUP};
 
         for (first, second) in [
             (HeldKey::Command, HeldKey::Control),
@@ -456,13 +492,13 @@ mod tests {
         ] {
             let mut counts = std::collections::HashMap::new();
             assert_eq!(
-                held_edges(&mut counts, &[first], KeyPhase::Down),
+                transition_edges(&mut counts, &[], &[first]),
                 vec![(VK_CONTROL, 0)]
             );
-            assert!(held_edges(&mut counts, &[second], KeyPhase::Down).is_empty());
-            assert!(held_edges(&mut counts, &[first], KeyPhase::Up).is_empty());
+            assert!(transition_edges(&mut counts, &[], &[second]).is_empty());
+            assert!(transition_edges(&mut counts, &[first], &[]).is_empty());
             assert_eq!(
-                held_edges(&mut counts, &[second], KeyPhase::Up),
+                transition_edges(&mut counts, &[second], &[]),
                 vec![(VK_CONTROL, KEYEVENTF_KEYUP)]
             );
             assert!(counts.is_empty());
@@ -471,25 +507,25 @@ mod tests {
 
     #[test]
     fn non_overlapping_held_modifiers_preserve_edges_and_release_order() {
-        use super::{HeldKey, KEYEVENTF_KEYUP, KeyPhase};
+        use super::{HeldKey, KEYEVENTF_KEYUP};
 
         for modifier in [HeldKey::Command, HeldKey::Control] {
             let mut counts = std::collections::HashMap::new();
             assert_eq!(
-                held_edges(&mut counts, &[modifier], KeyPhase::Down),
+                transition_edges(&mut counts, &[], &[modifier]),
                 vec![(VK_CONTROL, 0)]
             );
             assert_eq!(
-                held_edges(&mut counts, &[modifier], KeyPhase::Up),
+                transition_edges(&mut counts, &[modifier], &[]),
                 vec![(VK_CONTROL, KEYEVENTF_KEYUP)]
             );
             let keys = [modifier, HeldKey::Shift, HeldKey::Alt];
             assert_eq!(
-                held_edges(&mut counts, &keys, KeyPhase::Down),
+                transition_edges(&mut counts, &[], &keys),
                 vec![(VK_CONTROL, 0), (VK_SHIFT, 0), (VK_MENU, 0)]
             );
             assert_eq!(
-                held_edges(&mut counts, &keys, KeyPhase::Up),
+                transition_edges(&mut counts, &keys, &[]),
                 vec![
                     (VK_MENU, KEYEVENTF_KEYUP),
                     (VK_SHIFT, KEYEVENTF_KEYUP),
@@ -497,25 +533,63 @@ mod tests {
                 ]
             );
             assert!(counts.is_empty());
-            assert!(held_edges(&mut counts, &keys, KeyPhase::Up).is_empty());
+            assert!(transition_edges(&mut counts, &keys, &[]).is_empty());
         }
     }
 
     #[test]
     fn held_command_and_control_in_one_chord_emit_one_physical_edge() {
-        use super::{HeldKey, KEYEVENTF_KEYUP, KeyPhase};
+        use super::{HeldKey, KEYEVENTF_KEYUP};
 
         let mut counts = std::collections::HashMap::new();
         let keys = [HeldKey::Command, HeldKey::Control];
         assert_eq!(
-            held_edges(&mut counts, &keys, KeyPhase::Down),
+            transition_edges(&mut counts, &[], &keys),
             vec![(VK_CONTROL, 0)]
         );
         assert_eq!(
-            held_edges(&mut counts, &keys, KeyPhase::Up),
+            transition_edges(&mut counts, &keys, &[]),
             vec![(VK_CONTROL, KEYEVENTF_KEYUP)]
         );
         assert!(counts.is_empty());
+    }
+
+    /// Regression test for the "Held Modifier Is Interrupted" review comment:
+    /// replacing a held chord's modifier from Control to Command (or vice
+    /// versa) must never emit a physical up/down pair for `VK_CONTROL`, since
+    /// both logical modifiers share that one physical key and the chord
+    /// guarantees it stays continuously held across the swap.
+    #[test]
+    fn chord_replace_preserves_shared_physical_modifier() {
+        use super::{HeldKey, KEYEVENTF_KEYUP};
+
+        for (from, to) in [
+            (HeldKey::Control, HeldKey::Command),
+            (HeldKey::Command, HeldKey::Control),
+        ] {
+            let mut counts = std::collections::HashMap::new();
+            assert_eq!(
+                transition_edges(&mut counts, &[], &[from]),
+                vec![(VK_CONTROL, 0)]
+            );
+
+            // A chord replace surfaces as one combined transition: `from` in
+            // `up`, `to` in `down`, in a single `hold_transition` call. The
+            // shared VK_CONTROL must see no edge at all here.
+            assert!(
+                transition_edges(&mut counts, &[from], &[to]).is_empty(),
+                "replacing {from:?} with {to:?} must not touch the shared physical key"
+            );
+            assert_eq!(counts.get(&VK_CONTROL), Some(&1));
+
+            // The new logical owner (`to`) is now the sole owner, so
+            // releasing it emits the real, final release.
+            assert_eq!(
+                transition_edges(&mut counts, &[to], &[]),
+                vec![(VK_CONTROL, KEYEVENTF_KEYUP)]
+            );
+            assert!(counts.is_empty());
+        }
     }
 
     /// Pin a handful of representative `Shortcut -> KeyCombo` rows so an

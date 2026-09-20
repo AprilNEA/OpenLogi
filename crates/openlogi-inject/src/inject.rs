@@ -35,6 +35,11 @@ use macos as platform;
 use windows as platform;
 
 /// Which isolated edge of a held keyboard chord to synthesize.
+///
+/// Windows settles a whole up/down transition atomically (see
+/// `windows::hold_transition`) instead of taking one edge at a time, so it
+/// no longer needs this type — only macOS and Linux do.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum KeyPhase {
     Down,
@@ -347,8 +352,12 @@ fn hold_transition(released: Option<&KeyCombo>, pressed: Option<&KeyCombo>) {
         target_os = "windows" => {
             let mut output = HELD_OUTPUT.lock().unwrap_or_else(PoisonError::into_inner);
             let transition = output.transition(released, pressed);
-            windows::hold_keys(&transition.up, KeyPhase::Up);
-            windows::hold_keys(&transition.down, KeyPhase::Down);
+            // A single atomic call: Windows collapses logical Command and
+            // Control onto one physical VK_CONTROL, so a chord replace that
+            // releases one and presses the other in the same transition must
+            // never see a physical up/down pair for it (see
+            // `windows::hold_transition`).
+            windows::hold_transition(&transition.up, &transition.down);
         }
         _ => {
             tracing::warn!(
