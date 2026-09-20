@@ -52,7 +52,7 @@ const XBUTTON2: i32 = 2;
 /// Windows implementation: classify `action` into an [`Effect`] and
 /// synthesise events via `SendInput`. macOS window-manager actions map to
 /// their Windows equivalents; `CustomShortcut` maps macOS `kVK_*` codes to
-/// Windows virtual-key codes (Cmd → Windows key).
+/// Windows virtual-key codes (Cmd → Ctrl).
 pub(super) fn execute(action: &Action) {
     match action.effect() {
         Effect::None => {}
@@ -244,16 +244,17 @@ pub(super) fn press_combo(combo: &KeyCombo) {
     post_key(vk, &combo_modifiers(combo));
 }
 
+/// Preserve Windows' Cmd → Ctrl shortcut alias; only Linux maps Cmd to Meta/Super.
 fn combo_modifiers(combo: &KeyCombo) -> Vec<u16> {
     let mut modifiers = Vec::new();
     if combo.has_command() {
-        modifiers.push(VK_LWIN);
-    }
-    if combo.has_control() {
         modifiers.push(VK_CONTROL);
     }
     if combo.has_shift() {
         modifiers.push(VK_SHIFT);
+    }
+    if combo.has_control() && !modifiers.contains(&VK_CONTROL) {
+        modifiers.push(VK_CONTROL);
     }
     if combo.has_option() {
         modifiers.push(VK_MENU);
@@ -275,9 +276,10 @@ pub(super) fn hold_keys(keys: &[HeldKey], phase: KeyPhase) {
     send_inputs(&inputs);
 }
 
+/// Keep held Cmd → Ctrl consistent with [`combo_modifiers`], not the Windows key.
 fn held_virtual_key(key: HeldKey) -> Option<u16> {
     match key {
-        HeldKey::Command => Some(VK_LWIN),
+        HeldKey::Command => Some(VK_CONTROL),
         HeldKey::Control => Some(VK_CONTROL),
         HeldKey::Shift => Some(VK_SHIFT),
         HeldKey::Alt => Some(VK_MENU),
@@ -357,16 +359,15 @@ mod tests {
     use openlogi_core::binding::{KeyCombo, Shortcut};
 
     use super::{
-        VK_BROWSER_BACK, VK_BROWSER_FORWARD, VK_CONTROL, VK_LWIN, VK_MENU, VK_SHIFT, combo,
-        combo_modifiers,
+        VK_BROWSER_BACK, VK_BROWSER_FORWARD, VK_CONTROL, VK_MENU, VK_SHIFT, combo, combo_modifiers,
     };
 
     #[test]
-    fn command_and_control_map_to_distinct_windows_modifiers() {
+    fn command_and_control_share_one_windows_modifier() {
         let command = "Cmd+W"
             .parse::<KeyCombo>()
             .expect("a valid shortcut must parse");
-        assert_eq!(combo_modifiers(&command), vec![VK_LWIN]);
+        assert_eq!(combo_modifiers(&command), vec![VK_CONTROL]);
 
         let control = "Ctrl+W"
             .parse::<KeyCombo>()
@@ -376,22 +377,24 @@ mod tests {
         let both = "Cmd+Ctrl+W"
             .parse::<KeyCombo>()
             .expect("a valid shortcut must parse");
-        assert_eq!(combo_modifiers(&both), vec![VK_LWIN, VK_CONTROL]);
+        assert_eq!(combo_modifiers(&both), vec![VK_CONTROL]);
 
         let combo = "Cmd+Ctrl+Shift+Alt+A"
             .parse::<KeyCombo>()
             .expect("a valid shortcut must parse");
-        assert_eq!(
-            combo_modifiers(&combo),
-            vec![VK_LWIN, VK_CONTROL, VK_SHIFT, VK_MENU]
-        );
+        assert_eq!(combo_modifiers(&combo), vec![VK_CONTROL, VK_SHIFT, VK_MENU]);
+
+        let control_shift = "Ctrl+Shift+W"
+            .parse::<KeyCombo>()
+            .expect("a valid shortcut must parse");
+        assert_eq!(combo_modifiers(&control_shift), vec![VK_SHIFT, VK_CONTROL]);
     }
 
     #[test]
-    fn held_command_and_control_map_to_distinct_windows_modifiers() {
+    fn held_command_and_control_map_to_control() {
         assert_eq!(
             super::held_virtual_key(super::HeldKey::Command),
-            Some(super::VK_LWIN)
+            Some(super::VK_CONTROL)
         );
         assert_eq!(
             super::held_virtual_key(super::HeldKey::Control),

@@ -43,8 +43,8 @@ enum KeyPhase {
 
 /// One physical keyboard output shared by held chords.
 ///
-/// Logical Cmd and Ctrl remain distinct: Cmd maps to Command on macOS,
-/// Meta on Linux, and the Windows key on Windows.
+/// Logical Cmd and Ctrl remain distinct here: Cmd maps to Command on macOS,
+/// Meta on Linux, and Ctrl on Windows to preserve its shortcut alias.
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum HeldKey {
