@@ -23,6 +23,8 @@ const WHEEL_DELTA_F64: f64 = 120.0;
 
 static SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
     LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
+static ZOOM_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
+    LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
 
 const VK_D: u16 = 0x44;
 const VK_L: u16 = 0x4C;
@@ -212,17 +214,23 @@ fn dispatch_zoom(dy: i8) {
     if dy == 0 {
         return;
     }
-    send_inputs(&[
-        key_input(VK_CONTROL, false),
-        mouse_input(MOUSEEVENTF_WHEEL, i32::from(dy) * WHEEL_DELTA),
-        key_input(VK_CONTROL, true),
-    ]);
+    super::with_held_key(HeldKey::Control, || dispatch_scroll(0, dy));
 }
 
 pub(super) fn post_scroll(delta: ScrollDelta) {
-    let Some(delta) = quantized_wheel(delta) else {
+    if let Some(delta) = quantized_wheel(&SCROLL_QUANTIZER, delta) {
+        emit_quantized_wheel(delta);
+    }
+}
+
+pub(super) fn post_zoom_scroll(delta: ScrollDelta) {
+    let Some(delta) = quantized_wheel(&ZOOM_QUANTIZER, delta) else {
         return;
     };
+    super::with_held_key(HeldKey::Control, || emit_quantized_wheel(delta));
+}
+
+fn emit_quantized_wheel(delta: QuantizedScroll) {
     let mut inputs = Vec::with_capacity(2);
     if delta.y != 0 {
         inputs.push(mouse_input(MOUSEEVENTF_WHEEL, delta.y));
@@ -235,28 +243,15 @@ pub(super) fn post_scroll(delta: ScrollDelta) {
     }
 }
 
-pub(super) fn post_zoom_scroll(delta: ScrollDelta) {
-    let Some(delta) = quantized_wheel(delta) else {
-        return;
-    };
-    let mut inputs = Vec::with_capacity(4);
-    inputs.push(key_input(VK_CONTROL, false));
-    if delta.y != 0 {
-        inputs.push(mouse_input(MOUSEEVENTF_WHEEL, delta.y));
-    }
-    if delta.x != 0 {
-        inputs.push(mouse_input(MOUSEEVENTF_HWHEEL, delta.x));
-    }
-    inputs.push(key_input(VK_CONTROL, true));
-    send_inputs(&inputs);
-}
-
-fn quantized_wheel(delta: ScrollDelta) -> Option<QuantizedScroll> {
+fn quantized_wheel(
+    quantizer: &Mutex<ScrollQuantizer>,
+    delta: ScrollDelta,
+) -> Option<QuantizedScroll> {
     let ScrollDelta::WheelTicks { .. } = delta else {
         tracing::debug!("pixel scroll output is unsupported on Windows");
         return None;
     };
-    let Ok(mut quantizer) = SCROLL_QUANTIZER.lock() else {
+    let Ok(mut quantizer) = quantizer.lock() else {
         tracing::warn!("Windows scroll quantizer mutex poisoned");
         return None;
     };

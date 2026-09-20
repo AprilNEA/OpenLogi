@@ -14,6 +14,10 @@ static LINE_SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
     LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
 static PIXEL_SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
     LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
+static ZOOM_LINE_SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
+    LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
+static ZOOM_PIXEL_SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
+    LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
 static SMOOTH_SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
     LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
 
@@ -59,9 +63,15 @@ pub(in crate::inject) fn post_zoom_scroll(delta: ScrollDelta) {
 }
 
 fn post_quantized_scroll(delta: ScrollDelta, zoom: bool) {
-    let (quantizer, unit) = match delta {
-        ScrollDelta::Pixels { .. } => (&PIXEL_SCROLL_QUANTIZER, ScrollEventUnit::PIXEL),
-        ScrollDelta::WheelTicks { .. } => (&LINE_SCROLL_QUANTIZER, ScrollEventUnit::LINE),
+    let (quantizer, unit) = match (zoom, delta) {
+        (false, ScrollDelta::Pixels { .. }) => (&PIXEL_SCROLL_QUANTIZER, ScrollEventUnit::PIXEL),
+        (false, ScrollDelta::WheelTicks { .. }) => (&LINE_SCROLL_QUANTIZER, ScrollEventUnit::LINE),
+        (true, ScrollDelta::Pixels { .. }) => {
+            (&ZOOM_PIXEL_SCROLL_QUANTIZER, ScrollEventUnit::PIXEL)
+        }
+        (true, ScrollDelta::WheelTicks { .. }) => {
+            (&ZOOM_LINE_SCROLL_QUANTIZER, ScrollEventUnit::LINE)
+        }
     };
     let Ok(mut quantizer) = quantizer.lock() else {
         tracing::warn!("macOS scroll quantizer mutex poisoned");

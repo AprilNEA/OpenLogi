@@ -29,6 +29,8 @@ struct ScrollOutput {
 
 static SCROLL_OUTPUT: LazyLock<Mutex<ScrollOutput>> =
     LazyLock::new(|| Mutex::new(ScrollOutput::default()));
+static ZOOM_OUTPUT: LazyLock<Mutex<ScrollOutput>> =
+    LazyLock::new(|| Mutex::new(ScrollOutput::default()));
 
 /// Linux implementation: classify `action` into an [`Effect`] and inject the
 /// resulting events via a shared `uinput` virtual device.
@@ -176,9 +178,7 @@ fn dispatch_zoom(dy: i8) {
     if dy == 0 {
         return;
     }
-    emit(&[key_ev(KeyCode::KEY_LEFTCTRL, 1), syn()]);
-    dispatch_scroll(0, dy);
-    emit(&[key_ev(KeyCode::KEY_LEFTCTRL, 0), syn()]);
+    super::with_held_key(HeldKey::Control, || dispatch_scroll(0, dy));
 }
 
 /// Not implemented yet: unicode text has no uinput encoding without a keymap.
@@ -352,7 +352,18 @@ fn scroll(axis: RelativeAxisCode, value: i32) {
 }
 
 pub(super) fn post_scroll(delta: ScrollDelta) {
-    let mut events = quantized_scroll_events(delta);
+    emit_quantized_scroll(quantized_scroll_events(&SCROLL_OUTPUT, delta));
+}
+
+pub(super) fn post_zoom_scroll(delta: ScrollDelta) {
+    let scroll = quantized_scroll_events(&ZOOM_OUTPUT, delta);
+    if scroll.is_empty() {
+        return;
+    }
+    super::with_held_key(HeldKey::Control, || emit_quantized_scroll(scroll));
+}
+
+fn emit_quantized_scroll(mut events: Vec<InputEvent>) {
     if events.is_empty() {
         return;
     }
@@ -360,27 +371,12 @@ pub(super) fn post_scroll(delta: ScrollDelta) {
     emit(&events);
 }
 
-pub(super) fn post_zoom_scroll(delta: ScrollDelta) {
-    let scroll = quantized_scroll_events(delta);
-    if scroll.is_empty() {
-        return;
-    }
-    let mut events = Vec::with_capacity(scroll.len() + 4);
-    events.push(key_ev(KeyCode::KEY_LEFTCTRL, 1));
-    events.push(syn());
-    events.extend(scroll);
-    events.push(syn());
-    events.push(key_ev(KeyCode::KEY_LEFTCTRL, 0));
-    events.push(syn());
-    emit(&events);
-}
-
-fn quantized_scroll_events(delta: ScrollDelta) -> Vec<InputEvent> {
+fn quantized_scroll_events(output: &Mutex<ScrollOutput>, delta: ScrollDelta) -> Vec<InputEvent> {
     let ScrollDelta::WheelTicks { .. } = delta else {
         tracing::debug!("pixel scroll output is unsupported on Linux");
         return Vec::new();
     };
-    let Ok(mut output) = SCROLL_OUTPUT.lock() else {
+    let Ok(mut output) = output.lock() else {
         tracing::warn!("Linux scroll quantizer mutex poisoned");
         return Vec::new();
     };
