@@ -362,16 +362,10 @@ pub fn press_hold(combo: &KeyCombo) -> HeldChord {
 /// do not emit a Ctrl-up that would tear down a still-held shortcut.
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 fn with_held_key(key: HeldKey, body: impl FnOnce()) {
-    let need_down = {
-        let mut output = HELD_OUTPUT.lock().unwrap_or_else(PoisonError::into_inner);
-        output.acquire(key)
-    };
     // Construct the owner before posting the edge so unwinding from the
     // platform backend still balances any ownership it completed.
     let _guard = TransientHeldKey { key };
-    if need_down {
-        emit_held_key(key, KeyPhase::Down);
-    }
+    apply_held_key(key, KeyPhase::Down, HeldOutput::acquire);
     body();
 }
 
@@ -383,13 +377,18 @@ struct TransientHeldKey {
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 impl Drop for TransientHeldKey {
     fn drop(&mut self) {
-        let need_up = {
-            let mut output = HELD_OUTPUT.lock().unwrap_or_else(PoisonError::into_inner);
-            output.release(self.key)
-        };
-        if need_up {
-            emit_held_key(self.key, KeyPhase::Up);
-        }
+        apply_held_key(self.key, KeyPhase::Up, HeldOutput::release);
+    }
+}
+
+/// Apply an ownership change and its matching key edge under the same
+/// `HELD_OUTPUT` lock that [`hold_transition`] uses, so a button-worker
+/// chord cannot observe the map without the physical modifier.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn apply_held_key(key: HeldKey, phase: KeyPhase, change: fn(&mut HeldOutput, HeldKey) -> bool) {
+    let mut output = HELD_OUTPUT.lock().unwrap_or_else(PoisonError::into_inner);
+    if change(&mut output, key) {
+        emit_held_key(key, phase);
     }
 }
 
