@@ -52,7 +52,7 @@ const XBUTTON2: i32 = 2;
 /// Windows implementation: classify `action` into an [`Effect`] and
 /// synthesise events via `SendInput`. macOS window-manager actions map to
 /// their Windows equivalents; `CustomShortcut` maps macOS `kVK_*` codes to
-/// Windows virtual-key codes (Cmd → Ctrl).
+/// Windows virtual-key codes (Cmd → Windows key).
 pub(super) fn execute(action: &Action) {
     match action.effect() {
         Effect::None => {}
@@ -247,13 +247,13 @@ pub(super) fn press_combo(combo: &KeyCombo) {
 fn combo_modifiers(combo: &KeyCombo) -> Vec<u16> {
     let mut modifiers = Vec::new();
     if combo.has_command() {
+        modifiers.push(VK_LWIN);
+    }
+    if combo.has_control() {
         modifiers.push(VK_CONTROL);
     }
     if combo.has_shift() {
         modifiers.push(VK_SHIFT);
-    }
-    if combo.has_control() && !modifiers.contains(&VK_CONTROL) {
-        modifiers.push(VK_CONTROL);
     }
     if combo.has_option() {
         modifiers.push(VK_MENU);
@@ -354,9 +354,38 @@ fn mouse_input(flags: u32, data: i32) -> INPUT {
 
 #[cfg(test)]
 mod tests {
-    use openlogi_core::binding::Shortcut;
+    use openlogi_core::binding::{KeyCombo, Shortcut};
 
-    use super::{VK_BROWSER_BACK, VK_BROWSER_FORWARD, combo};
+    use super::{
+        VK_BROWSER_BACK, VK_BROWSER_FORWARD, VK_CONTROL, VK_LWIN, VK_MENU, VK_SHIFT, combo,
+        combo_modifiers,
+    };
+
+    #[test]
+    fn command_and_control_map_to_distinct_windows_modifiers() {
+        let command = "Cmd+W"
+            .parse::<KeyCombo>()
+            .expect("a valid shortcut must parse");
+        assert_eq!(combo_modifiers(&command), vec![VK_LWIN]);
+
+        let control = "Ctrl+W"
+            .parse::<KeyCombo>()
+            .expect("a valid shortcut must parse");
+        assert_eq!(combo_modifiers(&control), vec![VK_CONTROL]);
+
+        let both = "Cmd+Ctrl+W"
+            .parse::<KeyCombo>()
+            .expect("a valid shortcut must parse");
+        assert_eq!(combo_modifiers(&both), vec![VK_LWIN, VK_CONTROL]);
+
+        let combo = "Cmd+Ctrl+Shift+Alt+A"
+            .parse::<KeyCombo>()
+            .expect("a valid shortcut must parse");
+        assert_eq!(
+            combo_modifiers(&combo),
+            vec![VK_LWIN, VK_CONTROL, VK_SHIFT, VK_MENU]
+        );
+    }
 
     #[test]
     fn held_command_and_control_map_to_distinct_windows_modifiers() {
