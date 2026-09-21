@@ -100,9 +100,7 @@ pub(crate) fn button_profile_scope_bar(
     let model = profile_scope_model(editing_app, profiles, &recent_apps, catalog, cx);
     let actions = ProfileScopeActions::new(
         |app, cx| {
-            AppState::update_bindings(cx, |state| {
-                state.set_editing_app(app);
-            });
+            AppState::apply(cx, |state| state.set_editing_app(app));
         },
         |profile, window, cx| open_button_remove_confirmation(window, cx, &profile),
     );
@@ -147,15 +145,7 @@ pub(crate) fn action_ring_profile_scope_bar(
     let model = profile_scope_model(editing_app, profiles, &recent_apps, catalog, cx);
     let actions = ProfileScopeActions::new(
         |app, cx| {
-            AppState::update(cx, |state, cx| {
-                let key = state
-                    .current_record()
-                    .map(crate::state::DeviceRecord::device_key);
-                state.set_editing_action_ring_app(app);
-                if let Some(key) = key {
-                    cx.emit(crate::state::StateEvent::BindingsChanged(key));
-                }
-            });
+            AppState::apply(cx, |state| state.set_editing_action_ring_app(app));
         },
         |profile, window, cx| open_action_ring_remove_confirmation(window, cx, &profile),
     );
@@ -310,9 +300,7 @@ fn open_button_remove_confirmation(window: &mut Window, cx: &mut App, profile: &
                     .show_cancel(true),
             )
             .on_ok(move |_event, _window, cx| {
-                AppState::update_bindings(cx, |state| {
-                    state.remove_editing_app_profile();
-                });
+                AppState::apply(cx, AppState::remove_editing_app_profile);
                 true
             })
     });
@@ -335,15 +323,7 @@ fn open_action_ring_remove_confirmation(
                     .show_cancel(true),
             )
             .on_ok(move |_event, _window, cx| {
-                AppState::update(cx, |state, cx| {
-                    let key = state
-                        .current_record()
-                        .map(crate::state::DeviceRecord::device_key);
-                    state.remove_editing_action_ring_profile();
-                    if let Some(key) = key {
-                        cx.emit(crate::state::StateEvent::BindingsChanged(key));
-                    }
-                });
+                AppState::apply(cx, AppState::remove_editing_action_ring_profile);
                 true
             })
     });

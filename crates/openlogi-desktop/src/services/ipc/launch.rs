@@ -27,7 +27,7 @@ pub fn mark_suite_quitting() {
 /// Launch the agent once when the socket is unreachable. Detached so it
 /// outlives the GUI (the agent is the always-on process); logs and moves on if
 /// the binary can't be found / started — the user may start it via launchd or by
-/// hand, and the poll loop keeps retrying the connection regardless.
+/// hand, and the observe loop keeps retrying the connection regardless.
 pub(super) fn spawn_agent() {
     if SUITE_QUITTING.load(std::sync::atomic::Ordering::Relaxed) {
         info!("suite is quitting — leaving the agent down");

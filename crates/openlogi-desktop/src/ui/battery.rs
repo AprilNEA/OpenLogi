@@ -56,7 +56,7 @@ impl BatteryIndicator {
     }
 
     /// The tersest readout — glyph and value only — for a card corner whose
-    /// context rides a hover tip (see [`battery_context`]).
+    /// context rides a hover tip (see [`Self::status`]).
     pub(crate) fn glance(battery: &BatteryInfo) -> Self {
         Self {
             battery: battery.clone(),

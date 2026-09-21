@@ -13,7 +13,7 @@ use evdev::{AttributeSet, EventType, InputEvent, KeyCode, RelativeAxisCode};
 use zbus::blocking::Connection as DbusConn;
 
 use openlogi_core::binding::{
-    Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Script, Shortcut, WorkflowStep,
+    Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Shortcut,
 };
 use openlogi_core::scroll::ScrollDelta;
 
@@ -43,13 +43,8 @@ pub(super) fn execute(action: &Action) {
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
         Effect::Media(key) => dispatch_media(key),
         Effect::Native(native) => dispatch_native(action, native),
-        Effect::Script(script) => dispatch_script(script),
-        Effect::Text(text) => {
-            tracing::warn!(
-                chars = text.chars().count(),
-                "TypeText injection is not implemented on Linux yet"
-            );
-        }
+        Effect::Script(script) => super::dispatch_script(script),
+        Effect::Text(text) => type_text(text),
         Effect::AgentSide => {
             tracing::debug!(
                 action = action.label(),
@@ -96,17 +91,12 @@ fn combo(shortcut: Shortcut) -> KeyCombo {
         Shortcut::PrevTab => "Ctrl+Shift+Tab",
         Shortcut::ReloadPage => "Ctrl+R",
     };
-    parse_shortcut(text)
-}
-
-fn parse_shortcut(text: &str) -> KeyCombo {
-    text.parse()
-        .unwrap_or_else(|error| unreachable!("hardcoded shortcut table entry {text:?}: {error}"))
+    super::parse_shortcut(text)
 }
 
 /// Press an already-resolved chord: a table lookup from [`combo`] or a
 /// user-recorded [`Action::CustomShortcut`]/`WorkflowStep::PressKey`.
-fn press_combo(combo: &KeyCombo) {
+pub(super) fn press_combo(combo: &KeyCombo) {
     let Some(key) = hid_usage_to_linux(combo.key().code()) else {
         tracing::warn!(
             usage = combo.key().code(),
@@ -169,16 +159,6 @@ fn dispatch_native(action: &Action, native: NativeAction) {
     }
 }
 
-fn dispatch_script(script: Script<'_>) {
-    match script {
-        Script::AppleScript(_) => {
-            tracing::warn!("RunAppleScript is only supported on macOS");
-        }
-        Script::ShellCommand(cmd) => run_shell_command_async(cmd.to_string()),
-        Script::Workflow(steps) => run_workflow_async(steps.to_vec()),
-    }
-}
-
 /// Synthesise one scroll tick in direction `(dx, dy)`. Unit direction
 /// (-1/0/1) scaled by the fixed relative-axis magnitude the four
 /// `Scroll*`/`HorizontalScroll*` actions have always used.
@@ -191,45 +171,19 @@ fn dispatch_scroll(dx: i8, dy: i8) {
     }
 }
 
-fn run_shell_command_async(cmd: String) {
-    std::thread::spawn(move || run_shell_command(&cmd));
+/// Not implemented yet: unicode text has no uinput encoding without a keymap.
+pub(super) fn type_text(text: &str) {
+    tracing::warn!(
+        chars = text.chars().count(),
+        "TypeText injection is not implemented on Linux yet"
+    );
 }
 
-fn run_workflow_async(steps: Vec<WorkflowStep>) {
-    std::thread::spawn(move || run_workflow(&steps));
+pub(super) fn run_apple_script(_src: &str) {
+    tracing::warn!("RunAppleScript is only supported on macOS");
 }
 
-fn run_workflow(steps: &[WorkflowStep]) {
-    for step in steps {
-        match step {
-            WorkflowStep::TypeText(text) => {
-                tracing::warn!(
-                    chars = text.chars().count(),
-                    "workflow TypeText injection is not implemented on Linux yet"
-                );
-            }
-            WorkflowStep::PressKey(combo) => {
-                let Some(key) = hid_usage_to_linux(combo.key().code()) else {
-                    tracing::warn!(
-                        usage = combo.key().code(),
-                        "workflow PressKey usage has no Linux mapping; step ignored"
-                    );
-                    continue;
-                };
-                press_key(&modifiers_to_keycodes(combo), key);
-            }
-            WorkflowStep::Delay { millis } => {
-                std::thread::sleep(std::time::Duration::from_millis(*millis));
-            }
-            WorkflowStep::RunAppleScript(_) => {
-                tracing::warn!("workflow RunAppleScript is only supported on macOS");
-            }
-            WorkflowStep::RunShellCommand(cmd) => run_shell_command(cmd),
-        }
-    }
-}
-
-fn run_shell_command(cmd: &str) {
+pub(super) fn run_shell_command(cmd: &str) {
     let _ = std::process::Command::new("/bin/sh")
         .args(["-c", cmd])
         .output();

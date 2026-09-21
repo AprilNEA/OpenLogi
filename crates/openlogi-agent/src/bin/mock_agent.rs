@@ -70,7 +70,6 @@ use tarpc::server::{BaseChannel, Channel as _};
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tracing::{info, warn};
-use tracing_subscriber::EnvFilter;
 
 #[path = "mock_agent/profile.rs"]
 mod profile;
@@ -113,22 +112,16 @@ const PAIRING_HOLD: Duration = Duration::from_secs(2);
 /// How often that hold checks for an event. Short enough that a scripted step
 /// reaches the GUI promptly; see [`MockAgent::next_pairing`] for why the hold
 /// polls instead of awaiting the receiver.
-const PAIRING_POLL_TICK: Duration = Duration::from_millis(100);
+const PAIRING_POLL_PERIOD: Duration = Duration::from_millis(100);
 
 /// How often a held `observe` re-renders the scripted state looking for a
 /// change. The real agent is told by its watchers and needs no tick at all; a
 /// mock has nothing to be told by, so it compares instead.
-const OBSERVE_TICK: Duration = Duration::from_millis(250);
+const OBSERVE_POLL_PERIOD: Duration = Duration::from_millis(250);
 
 fn main() -> ExitCode {
     default_to_dev_profile();
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(
-            EnvFilter::try_from_env(openlogi_core::env::LOG)
-                .unwrap_or_else(|_| EnvFilter::new(openlogi_core::env::LOG_DEFAULT)),
-        )
-        .init();
+    openlogi_core::logging::init_stderr();
 
     let state = match state_from_args(std::env::args_os().skip(1)) {
         Ok(state) => state,
@@ -527,7 +520,7 @@ impl State {
             .iter()
             .find_map(|inventory| {
                 inventory.paired.iter().find_map(|device| {
-                    (DeviceRoute::device_route_for(inventory, device.slot).as_ref() == Some(route))
+                    (DeviceRoute::for_slot(inventory, device.slot).as_ref() == Some(route))
                         .then_some(device.online)
                 })
             })
@@ -542,9 +535,10 @@ impl State {
                 })
             })
             .or_else(|| {
-                self.profile.standalone.iter().find_map(|device| {
-                    (standalone_route(device) == *route).then_some(device.online)
-                })
+                self.profile
+                    .standalone
+                    .iter()
+                    .find_map(|device| (device.route() == *route).then_some(device.online))
             })
     }
 
@@ -607,16 +601,6 @@ fn profile_value_mut<'a, T>(
         ProfileSetting::Unavailable => Err(WriteError::DeviceUnreachable {
             index: route.device_index(),
         }),
-    }
-}
-
-fn standalone_route(device: &StandaloneDevice) -> DeviceRoute {
-    DeviceRoute::RawHid {
-        vendor_id: device.address.vendor_id,
-        product_id: device.address.product_id,
-        usage_page: device.address.usage_page,
-        usage_id: device.address.usage_id,
-        identity: device.address.identity.clone(),
     }
 }
 
@@ -935,7 +919,7 @@ impl Agent for MockAgent {
             if let Some(update) = self.state.lock().await.next_pairing_update() {
                 return Some(update);
             }
-            tokio::time::sleep(PAIRING_POLL_TICK).await;
+            tokio::time::sleep(PAIRING_POLL_PERIOD).await;
         }
         None
     }
@@ -951,7 +935,7 @@ impl Agent for MockAgent {
             if current.generation != since || Instant::now() >= deadline {
                 return current;
             }
-            tokio::time::sleep(OBSERVE_TICK).await;
+            tokio::time::sleep(OBSERVE_POLL_PERIOD).await;
         }
     }
 

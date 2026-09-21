@@ -23,8 +23,8 @@ pub(crate) struct Args {
 /// package, so `openlogi-overlay` only ever reached a `.deb` when a cached
 /// `target/release` happened to still hold one from an earlier run.
 const PACKAGED_BINS: [&str; 4] = [
-    "openlogi",
-    "openlogi-desktop",
+    openlogi_core::brand::CLI_EXECUTABLE,
+    openlogi_core::brand::GUI_EXECUTABLE,
     openlogi_core::brand::Helper::Overlay.executable(),
     openlogi_core::brand::Helper::Agent.executable(),
 ];

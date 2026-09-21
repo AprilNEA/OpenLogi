@@ -4,7 +4,8 @@ use openlogi_core::config::Lighting;
 use openlogi_core::device_order::PhysicalDeviceKey;
 use tracing::debug;
 
-use super::AppState;
+use super::events::StateEvents;
+use super::{AppState, StateEvent};
 
 impl AppState {
     /// The lighting config for the active device, or the default when none is
@@ -39,10 +40,11 @@ impl AppState {
     }
     /// Persist a new lighting config for the active device and push it to the
     /// hardware (best-effort). No-op when no device is selected.
-    pub fn commit_lighting(&mut self, lighting: Lighting) {
+    pub fn commit_lighting(&mut self, lighting: Lighting) -> StateEvents {
+        let events = self.for_current_device(StateEvent::LightingChanged);
         let Some(record) = self.current_record() else {
             debug!("no active device — lighting change ignored");
-            return;
+            return events;
         };
         let key = record.persistent_config_key().map(str::to_string);
         let target = record.route.clone();
@@ -53,7 +55,7 @@ impl AppState {
             // when the keyboard reconnects, and without the reload it would
             // replay whatever was saved the last time something *else* reloaded.
             if !self.persist_and_reload("lighting") {
-                return;
+                return events;
             }
         } else {
             debug!("transient device lighting applied without persistence");
@@ -61,5 +63,6 @@ impl AppState {
         if let Some(route) = target {
             self.send_ipc(crate::services::ipc::SetLighting { route, lighting });
         }
+        events
     }
 }

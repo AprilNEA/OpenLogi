@@ -4,7 +4,7 @@
 //! at this crate's root; [`transport`] is the cross-platform local-socket
 //! transport that carries them, and [`client`] is how every client reaches an
 //! agent over it — the connect handshake, the protocol-version policy, and the
-//! generation ledger live there once rather than in each consumer. This is a
+//! observe loop's connection state live there once rather than in each consumer. This is a
 //! leaf crate — it depends on `openlogi-core` and nothing else internal to the
 //! workspace — so the GUI (a pure IPC client) can pull in the wire contract
 //! without linking `openlogi-hid`/`hidpp`/`async-hid`. The agent-side runtime

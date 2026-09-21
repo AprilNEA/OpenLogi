@@ -58,11 +58,43 @@ impl Profile {
     /// answer cannot change within a process lifetime.
     #[must_use]
     pub fn current() -> Self {
-        if is_dev_profile() {
-            Self::Dev
-        } else {
-            Self::Production
+        static CURRENT: OnceLock<Profile> = OnceLock::new();
+        *CURRENT.get_or_init(Self::detect)
+    }
+
+    /// The launchd service label this profile's bundle declares — what its
+    /// embedded LaunchAgent plist carries, `SMAppService` registers, and
+    /// `launchctl` addresses. The dev variant is suffixed, so a dev
+    /// registration can never collide with the shipped one. Frozen once
+    /// shipped; see [`crate::brand::AGENT_SERVICE_LABEL`].
+    #[must_use]
+    pub fn agent_service_label(self) -> String {
+        match self {
+            Self::Production => crate::brand::AGENT_SERVICE_LABEL.to_owned(),
+            Self::Dev => crate::brand::dev_id(crate::brand::AGENT_SERVICE_LABEL),
         }
+    }
+
+    fn detect() -> Self {
+        match std::env::var(crate::env::PROFILE) {
+            Ok(value) if value == Self::Dev.env_value() => return Self::Dev,
+            // `production` is the long-hand spelling older docs used.
+            Ok(value) if value == Self::Production.env_value() || value == "production" => {
+                return Self::Production;
+            }
+            _ => {}
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(identifier) = current_bundle_identifier()
+                && crate::brand::is_dev_id(&identifier)
+            {
+                return Self::Dev;
+            }
+        }
+
+        Self::Production
     }
 
     /// The value of [`crate::env::PROFILE`] that forces this profile.
@@ -100,35 +132,10 @@ fn app_dir() -> &'static str {
     Profile::current().app_dir()
 }
 
-/// Whether this process runs under the dev profile: forced by
-/// [`crate::env::PROFILE`], or (macOS) detected from the bundle the executable
-/// lives in carrying a dev identifier. Decides which profile directory every
-/// path below lives under, and which launchd service label the GUI manages.
-/// Memoized — the answer cannot change within a process lifetime.
+/// Whether this process runs under the dev profile; see [`Profile::current`].
 #[must_use]
 pub fn is_dev_profile() -> bool {
-    static IS_DEV_PROFILE: OnceLock<bool> = OnceLock::new();
-    *IS_DEV_PROFILE.get_or_init(detect_dev_profile)
-}
-
-fn detect_dev_profile() -> bool {
-    match std::env::var(crate::env::PROFILE) {
-        Ok(value) if value == Profile::Dev.env_value() => return true,
-        // `production` is the long-hand spelling older docs used.
-        Ok(value) if value == Profile::Production.env_value() || value == "production" => {
-            return false;
-        }
-        _ => {}
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        if let Some(identifier) = current_bundle_identifier() {
-            return crate::brand::is_dev_id(&identifier);
-        }
-    }
-
-    false
+    Profile::current() == Profile::Dev
 }
 
 #[cfg(target_os = "macos")]

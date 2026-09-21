@@ -234,7 +234,7 @@ impl ProfileValidation {
         self.validate_paired_devices(inventory)?;
         self.validate_inventory_identity(inventory)?;
         for device in &inventory.paired {
-            let Some(route) = DeviceRoute::device_route_for(inventory, device.slot) else {
+            let Some(route) = DeviceRoute::for_slot(inventory, device.slot) else {
                 return Err(FixtureError::invalid(
                     "device profile",
                     format!(
@@ -358,13 +358,7 @@ impl ProfileValidation {
         let owner = format!("standalone device {}", device.display_name);
         validate_unit_id(&mut self.unit_ids, device.unit_id, &owner)?;
         self.push_route(ProfileRouteFacts {
-            route: DeviceRoute::RawHid {
-                vendor_id: device.address.vendor_id,
-                product_id: device.address.product_id,
-                usage_page: device.address.usage_page,
-                usage_id: device.address.usage_id,
-                identity: device.address.identity.clone(),
-            },
+            route: device.route(),
             capabilities: device.capabilities,
             standalone: true,
             light_capabilities: device.light_capabilities,
@@ -850,7 +844,11 @@ fn normalize_hidpp20(request: &[u8]) -> Vec<u8> {
     normalized
 }
 
-fn format_hex(report: &[u8]) -> String {
+/// A report as a cassette spells it: lowercase hex, two digits per byte, no
+/// separators. Replay diagnostics quote reports the same way, so a mismatch
+/// message can be pasted back against the cassette.
+#[must_use]
+pub fn format_hex(report: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut formatted = String::with_capacity(report.len() * 2);
     for &byte in report {

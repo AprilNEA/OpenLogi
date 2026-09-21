@@ -4,7 +4,7 @@ use openlogi_fixture::{
     ProfileSupport,
 };
 
-use super::{State, standalone_route};
+use super::State;
 
 pub(super) fn built_in_profile() -> Result<DeviceProfile, String> {
     parse_profile(
@@ -47,7 +47,7 @@ pub(super) fn validate_light_command(
         .profile
         .standalone
         .iter()
-        .find(|device| standalone_route(device) == *route)
+        .find(|device| device.route() == *route)
         .and_then(|device| device.light_capabilities)
         .ok_or(WriteError::DeviceNotFound)?;
     match command {

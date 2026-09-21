@@ -22,6 +22,7 @@ use openlogi_ipc::{
     Observation, PROTOCOL_VERSION, PairingCommandError, PairingPhase, PairingUpdate,
     RingObservation,
 };
+use tarpc::client::RpcError;
 use tarpc::context::Context as TarpcContext;
 use tarpc::server::{BaseChannel, Channel as _};
 

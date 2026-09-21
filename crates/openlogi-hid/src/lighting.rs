@@ -14,7 +14,7 @@ use tracing::{debug, warn};
 
 use crate::{DeviceRoute, HidppOperation, LightingMethod, SharedChannel, WriteError};
 
-const WAIT_BUDGET: Duration = Duration::from_secs(5);
+const WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 type RouteLock = Arc<tokio::sync::Mutex<()>>;
 static LIGHTING_LOCKS: LazyLock<Mutex<HashMap<String, RouteLock>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -67,7 +67,7 @@ impl LightingJob {
             .spawn(move || {
                 let result = match openlogi_core::worker::runtime() {
                     Ok(runtime) => runtime.block_on(async {
-                        let _guard = tokio::time::timeout(WAIT_BUDGET, lock.lock_owned())
+                        let _guard = tokio::time::timeout(WAIT_TIMEOUT, lock.lock_owned())
                             .await
                             .map_err(|_| timed_out())?;
                         if cancellation.is_cancelled() {
@@ -101,7 +101,7 @@ impl LightingJob {
     /// For long-lived hosts such as the agent; standalone commands must use
     /// [`Self::finish`] so process exit cannot cut off recovery.
     pub async fn wait(mut self) -> Result<(), WriteError> {
-        tokio::time::timeout(WAIT_BUDGET, &mut self.result)
+        tokio::time::timeout(WAIT_TIMEOUT, &mut self.result)
             .await
             .map_err(|_| timed_out())?
             .map_err(|_| WriteError::AgentUnavailable)?

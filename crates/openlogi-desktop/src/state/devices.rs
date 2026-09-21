@@ -92,7 +92,7 @@ impl DeviceRecord {
     /// state, standalone-light overrides, inventory-miss counters). Wraps
     /// [`Self::config_key`] — see [`DeviceKey`].
     pub(crate) fn device_key(&self) -> DeviceKey {
-        DeviceKey::from(self.config_key.as_str())
+        DeviceKey::of_record(&self.config_key)
     }
 
     /// Return the configuration key only when it is safe to persist settings.
@@ -155,19 +155,19 @@ impl DeviceRecord {
 pub(super) fn build_device_list(
     inventories: &[DeviceInventory],
     standalone: &[StandaloneDevice],
-    cache: &AssetResolver,
+    resolver: &AssetResolver,
     config: &Config,
     cameras: &[Camera],
 ) -> Vec<DeviceRecord> {
     let mut list = Vec::new();
     for inv in inventories {
         for paired in &inv.paired {
-            let route = DeviceRoute::device_route_for(inv, paired.slot);
+            let route = DeviceRoute::for_slot(inv, paired.slot);
             let (model_key, asset, model_info, codename, serial_number, unit_id) =
                 if let Some(model) = paired.model_info.as_ref() {
-                    let asset = cache.resolve(model, paired.codename.as_deref());
+                    let asset = resolver.resolve(model, paired.codename.as_deref());
                     (
-                        model.config_key(),
+                        model.model_key(),
                         asset,
                         Some(model.clone()),
                         paired.codename.clone(),
@@ -238,7 +238,7 @@ pub(super) fn build_device_list(
             });
         }
     }
-    append_standalone(&mut list, standalone, cache, config);
+    append_standalone(&mut list, standalone, resolver, config);
     #[cfg(debug_assertions)]
     if std::env::var_os("OPENLOGI_DEMO_KEYBOARD").is_some() {
         list.push(demo_keyboard());
@@ -251,7 +251,7 @@ pub(super) fn build_device_list(
     append_offline_known(
         &mut list,
         config.known_identities(),
-        cache,
+        resolver,
         &present_receivers,
         config,
     );
@@ -261,7 +261,7 @@ pub(super) fn build_device_list(
     // path — so this assembly stays pure; the merge in
     // `super::AppState::refresh_inventories` reconciles them by inventory key.
     for camera in cameras {
-        list.push(camera_record(camera, cache));
+        list.push(camera_record(camera, resolver));
     }
     apply_custom_names(&mut list, config);
     sort_device_list(&mut list);
@@ -291,13 +291,13 @@ fn apply_custom_names(list: &mut [DeviceRecord], config: &Config) {
 /// StreamCam's `0893`), so a webcam's product render resolves through the same
 /// [`AssetResolver`] as HID++ devices once we synthesize a minimal
 /// [`DeviceModelInfo`] from the USB pid.
-fn camera_record(camera: &Camera, cache: &AssetResolver) -> DeviceRecord {
+fn camera_record(camera: &Camera, resolver: &AssetResolver) -> DeviceRecord {
     let config_key = camera.config_key();
     // Cameras are UVC, not HID++, so they carry no `DeviceStableId` route of
     // their own — the config key doubles as the route key.
     let route_key = config_key.clone();
     let model_info = camera_model_info(camera);
-    let asset = cache.resolve(&model_info, Some(&camera.name));
+    let asset = resolver.resolve(&model_info, Some(&camera.name));
     DeviceRecord {
         model_key: format!("{:04x}", camera.product_id),
         config_key,
@@ -344,17 +344,11 @@ pub(crate) fn camera_model_info(camera: &Camera) -> DeviceModelInfo {
 fn append_standalone(
     list: &mut Vec<DeviceRecord>,
     devices: &[StandaloneDevice],
-    cache: &AssetResolver,
+    resolver: &AssetResolver,
     config: &Config,
 ) {
     for device in devices {
-        let route = Some(DeviceRoute::RawHid {
-            vendor_id: device.address.vendor_id,
-            product_id: device.address.product_id,
-            usage_page: device.address.usage_page,
-            usage_id: device.address.usage_id,
-            identity: device.address.identity.clone(),
-        });
+        let route = Some(device.route());
         let stable_id = DeviceStableId::from_parts(
             route.as_ref(),
             openlogi_core::hid::DIRECT_DEVICE_INDEX,
@@ -374,7 +368,7 @@ fn append_standalone(
         let asset = device
             .registry_model_id
             .as_deref()
-            .and_then(|model_id| cache.resolve_registry_model(model_id));
+            .and_then(|model_id| resolver.resolve_registry_model(model_id));
         let display_name = asset
             .as_ref()
             .filter(|asset| !asset.display_name.trim().is_empty())
@@ -429,7 +423,7 @@ fn append_standalone(
 fn append_offline_known<'a>(
     list: &mut Vec<DeviceRecord>,
     known: impl Iterator<Item = (&'a str, &'a DeviceIdentity)>,
-    cache: &AssetResolver,
+    resolver: &AssetResolver,
     present_receivers: &HashSet<String>,
     config: &Config,
 ) {
@@ -458,11 +452,11 @@ fn append_offline_known<'a>(
         let model_key = identity
             .model_info
             .as_ref()
-            .map_or_else(|| key.to_string(), DeviceModelInfo::config_key);
+            .map_or_else(|| key.to_string(), DeviceModelInfo::model_key);
         if is_legacy_model_key && blocked_legacy_models.contains(&model_key) {
             continue;
         }
-        let record = offline_record(key, identity, cache);
+        let record = offline_record(key, identity, resolver);
         let wire_pid = record_wire_pid(&record);
         if is_legacy_model_key
             && wire_pid
@@ -552,7 +546,7 @@ pub(super) fn record_wire_pid(record: &DeviceRecord) -> Option<String> {
 fn offline_record(
     config_key: &str,
     identity: &DeviceIdentity,
-    cache: &AssetResolver,
+    resolver: &AssetResolver,
 ) -> DeviceRecord {
     let model_info = identity
         .model_info
@@ -561,17 +555,17 @@ fn offline_record(
     let asset = identity
         .registry_model_id
         .as_deref()
-        .and_then(|model_id| cache.resolve_registry_model(model_id))
+        .and_then(|model_id| resolver.resolve_registry_model(model_id))
         .or_else(|| {
             model_info
                 .as_ref()
-                .and_then(|model| cache.resolve(model, identity.codename.as_deref()))
+                .and_then(|model| resolver.resolve(model, identity.codename.as_deref()))
         });
     // Keep offline standalone records keyed exactly as before. The registry id
     // only selects artwork and must not alter configuration or deduplication.
     let model_key = model_info
         .as_ref()
-        .map_or_else(|| config_key.to_string(), DeviceModelInfo::config_key);
+        .map_or_else(|| config_key.to_string(), DeviceModelInfo::model_key);
     let display_name = asset
         .as_ref()
         .filter(|asset| !asset.display_name.trim().is_empty())

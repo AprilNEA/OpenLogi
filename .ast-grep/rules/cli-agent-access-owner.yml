@@ -1,18 +1,29 @@
 # Owner: openlogi_cli::agent — how the CLI connects to the agent and how long
-# it gives a snapshot.
+# it gives any one call.
 id: cli-agent-access-owner
 language: rust
 severity: error
-message: CLI subcommands reach the agent through crate::agent (connect, snapshot); do not connect or fetch a snapshot directly here.
+message: CLI subcommands reach the agent through crate::agent (connect, snapshot, call); do not connect here, and wrap every RPC in agent::call so it shares the one budget.
 note: |
-  Two subcommands once carried their own client kind and snapshot budget.
+  Two subcommands once carried their own client kind and snapshot budget, and
+  the fixture recorder a second copy of the same five seconds for its reads.
   See "Single source of truth" in AGENTS.md.
 files:
   - crates/openlogi-cli/**/*.rs
 ignores:
   - crates/openlogi-cli/src/agent.rs
+  - "**/tests.rs"
+  - "**/tests/**"
 rule:
   any:
     - pattern: $P::connect_as($$$)
-    - pattern: $C.snapshot(context::current())
-    - pattern: $C.snapshot(tarpc::context::current())
+    - all:
+        - any:
+            - pattern: $C.$METHOD(context::current())
+            - pattern: $C.$METHOD(context::current(), $$$ARGS)
+            - pattern: $C.$METHOD(tarpc::context::current())
+            - pattern: $C.$METHOD(tarpc::context::current(), $$$ARGS)
+        - not:
+            inside:
+              pattern: agent::call($$$)
+              stopBy: end

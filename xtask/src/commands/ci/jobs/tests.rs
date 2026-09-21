@@ -25,13 +25,29 @@ fn workflow() -> Option<String> {
 
 /// The workflow with its line continuations joined back up and every run of
 /// whitespace collapsed, so a command it wraps for readability is one line
-/// again.
+/// again — under either line ending, since a Windows checkout hands this test
+/// the file with CRLF.
 fn workflow_commands(workflow: &str) -> String {
     workflow
-        .replace("\\\n", " ")
-        .split_whitespace()
+        .lines()
+        .map(|line| {
+            let line = line.trim_end();
+            line.strip_suffix('\\').unwrap_or(line)
+        })
+        .flat_map(str::split_whitespace)
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+#[test]
+fn wrapped_commands_join_under_either_line_ending() {
+    let joined = "cargo doc --workspace --exclude openlogi-ui";
+    for wrapped in [
+        "cargo doc --workspace \\\n    --exclude openlogi-ui\n",
+        "cargo doc --workspace \\\r\n    --exclude openlogi-ui\r\n",
+    ] {
+        assert_eq!(workflow_commands(wrapped), joined);
+    }
 }
 
 /// `ci.yml` is the pipeline's source of truth and this runner is a copy of it.
@@ -62,6 +78,7 @@ fn ci_yml_runs_what_this_runner_runs() {
         Job::Rustdoc,
         Job::TestsLinux,
         Job::TestsMacos,
+        Job::TestsWindows,
     ] {
         let host = *job.spec().hosts.first().expect("every job names a host");
         let plan = job.plan(&sh, host).expect("a plan");
@@ -164,10 +181,10 @@ fn matrix_leg_names_resolve() {
 }
 
 #[test]
-fn tests_names_both_test_jobs() {
+fn tests_names_every_test_job() {
     assert_eq!(
         Job::resolve("tests").as_deref(),
-        Some(&[Job::TestsLinux, Job::TestsMacos][..])
+        Some(&[Job::TestsLinux, Job::TestsMacos, Job::TestsWindows][..])
     );
 }
 
@@ -216,6 +233,7 @@ fn jobs_name_the_hosts_ci_gives_them() {
     let hosts = |job: Job| job.spec().hosts.to_vec();
     assert_eq!(hosts(Job::TestsLinux), vec![Host::Linux]);
     assert_eq!(hosts(Job::TestsMacos), vec![Host::Macos]);
+    assert_eq!(hosts(Job::TestsWindows), vec![Host::Windows]);
     // CI's msrv matrix is macos-latest + ubuntu-latest — there is no
     // Windows leg to reproduce.
     assert_eq!(hosts(Job::Msrv), vec![Host::Linux, Host::Macos]);

@@ -5,7 +5,6 @@ use std::process::ExitCode;
 
 use anyhow::Result;
 use clap::Parser;
-use tracing_subscriber::{EnvFilter, fmt};
 
 mod agent;
 mod cmd;
@@ -28,13 +27,7 @@ struct Cli {
 /// Returns the exit status the process should terminate with — `list` uses a
 /// distinct one to report that no hardware is connected.
 pub async fn run() -> Result<ExitCode> {
-    fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(
-            EnvFilter::try_from_env(openlogi_core::env::LOG)
-                .unwrap_or_else(|_| EnvFilter::new(openlogi_core::env::LOG_DEFAULT)),
-        )
-        .init();
+    openlogi_core::logging::init_stderr();
 
     let cli = Cli::parse();
     let command = cli

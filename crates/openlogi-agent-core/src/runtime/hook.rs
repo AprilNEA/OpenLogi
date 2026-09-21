@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use openlogi_core::binding::{
     Action, Binding, ButtonId, GestureDirection, SwipeAccumulator, default_binding,
 };
-use openlogi_core::config::{KeyModifiers, KeyTrigger};
+use openlogi_core::config::KeyTrigger;
 use openlogi_hook::{
     EventDevice, EventDisposition, Hook, HookEvent, KeyEvent, MouseEvent, source_is_remappable,
 };
@@ -58,18 +58,6 @@ pub type SharedHookMaps = Arc<RwLock<HookMaps>>;
 /// (keycode + modifiers).
 pub type SharedKeyboardBindings = Arc<RwLock<BTreeMap<KeyTrigger, Action>>>;
 
-/// Convert the hook-layer modifier state into the config-layer type (the two
-/// live in different crates — core is leaf-level and duplicates the four
-/// bools). Drop-in identity once the field names align.
-fn convert_modifiers(m: openlogi_hook::KeyModifiers) -> KeyModifiers {
-    KeyModifiers {
-        shift: m.shift,
-        control: m.control,
-        option: m.option,
-        command: m.command,
-    }
-}
-
 /// Tracks which OS-hook gesture button (Back/Forward) is mid-hold and defers the
 /// swipe detection itself to a shared [`SwipeAccumulator`], which commits a swipe
 /// *mid-motion* like the HID++ gesture-button path in `openlogi-hid`. This wrapper
@@ -78,7 +66,7 @@ fn convert_modifiers(m: openlogi_hook::KeyModifiers) -> KeyModifiers {
 /// A gesture hold this old is presumed stale — real hold+swipe interactions
 /// finish in well under a second, and only a lost button-up (with no OS
 /// interrupt to trigger [`HoldState::cancel`]) leaves one lingering.
-const STALE_HOLD: Duration = Duration::from_secs(10);
+const HOLD_STALE_AFTER: Duration = Duration::from_secs(10);
 
 #[derive(Default)]
 struct HoldState {
@@ -107,13 +95,13 @@ impl HoldState {
     /// clears it when the OS drops a release without an interrupt): a re-press
     /// of the held button itself — a button cannot be pressed while down, so
     /// this is proof the release was lost — and any press once the hold has
-    /// aged past [`STALE_HOLD`], without which every other gesture button
+    /// aged past [`HOLD_STALE_AFTER`], without which every other gesture button
     /// would stay refused indefinitely.
     fn prepare_begin(&mut self, button: ButtonId) -> HoldAdmission {
         let Some(held) = self.current.take() else {
             return HoldAdmission::Begin;
         };
-        if held.button != button && held.started_at.elapsed() < STALE_HOLD {
+        if held.button != button && held.started_at.elapsed() < HOLD_STALE_AFTER {
             self.current = Some(held);
             return HoldAdmission::Refuse;
         }
@@ -167,7 +155,7 @@ impl HoldState {
     #[cfg(test)]
     fn backdate_for_test(&mut self) {
         if let Some(held) = &mut self.current
-            && let Some(aged) = Instant::now().checked_sub(STALE_HOLD)
+            && let Some(aged) = Instant::now().checked_sub(HOLD_STALE_AFTER)
         {
             held.started_at = aged;
         }
@@ -415,10 +403,7 @@ fn handle_key(
     if HELD_KEYS.with_borrow(|keys| keys.contains(&keycode)) {
         return EventDisposition::Suppress;
     }
-    let trigger = KeyTrigger {
-        keycode,
-        modifiers: convert_modifiers(modifiers),
-    };
+    let trigger = KeyTrigger { keycode, modifiers };
     let Some(action) = bindings
         .try_read()
         .ok()

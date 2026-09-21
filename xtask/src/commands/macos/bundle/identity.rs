@@ -37,6 +37,18 @@ pub(crate) enum Channel {
     Dev,
 }
 
+/// The profile a bundle of this channel runs under: packaging stamps the
+/// identifiers, and the running process derives its config directory, socket
+/// and service label from them.
+impl From<Channel> for openlogi_core::paths::Profile {
+    fn from(channel: Channel) -> Self {
+        match channel {
+            Channel::Production => Self::Production,
+            Channel::Dev => Self::Dev,
+        }
+    }
+}
+
 /// A bundle whose identity xtask owns: the app plus each nested login-item
 /// helper it embeds.
 ///

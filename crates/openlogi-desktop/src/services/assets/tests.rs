@@ -3,6 +3,18 @@ use openlogi_assets::DeviceEntry;
 use openlogi_core::device::DeviceTransports;
 use std::collections::HashMap;
 
+/// A resolver over `roots` — the bundle first when there are two, as in
+/// production — with `index` already in memory instead of read from them.
+fn resolver_over(roots: &[&Path], index: Option<Index>) -> AssetResolver {
+    AssetResolver {
+        read_roots: roots.iter().map(|root| root.to_path_buf()).collect(),
+        write_root: roots[roots.len() - 1].to_path_buf(),
+        has_bundle: roots.len() > 1,
+        index,
+        resolved: RefCell::default(),
+    }
+}
+
 fn mx_master_3s_entry(model_ids: Vec<String>) -> DeviceEntry {
     DeviceEntry {
         model_id: "2b043".to_string(),
@@ -125,12 +137,7 @@ fn resolves_old_schema_depot_on_disk() {
     .expect("write metadata.json");
     std::fs::write(dir.join("front.png"), png_header(100, 200)).expect("write front.png");
 
-    let resolver = AssetResolver {
-        read_roots: vec![root.path().to_path_buf()],
-        write_root: root.path().to_path_buf(),
-        has_bundle: false,
-        index: None,
-    };
+    let resolver = resolver_over(&[root.path()], None);
     let entry = DeviceEntry {
         model_id: "eb020".to_string(),
         model_ids: Vec::new(),
@@ -141,7 +148,7 @@ fn resolves_old_schema_depot_on_disk() {
     };
 
     let asset = resolver
-        .load_files(depot, &entry, &bare_model())
+        .load_files(depot, &entry, bare_model().extended_model_id)
         .expect("old-schema depot should resolve");
     assert_eq!(
         asset.image_path.file_name().expect("image has a file name"),
@@ -182,12 +189,7 @@ fn resolves_depot_whose_metadata_is_only_named_by_the_manifest() {
     std::fs::write(dir.join("front_ext_2.png"), png_header(860, 1256))
         .expect("write variant render");
 
-    let resolver = AssetResolver {
-        read_roots: vec![root.path().to_path_buf()],
-        write_root: root.path().to_path_buf(),
-        has_bundle: false,
-        index: None,
-    };
+    let resolver = resolver_over(&[root.path()], None);
     let entry = DeviceEntry {
         model_id: "b031".to_string(),
         model_ids: Vec::new(),
@@ -202,7 +204,7 @@ fn resolves_depot_whose_metadata_is_only_named_by_the_manifest() {
     };
 
     let asset = resolver
-        .load_files(depot, &entry, &model)
+        .load_files(depot, &entry, model.extended_model_id)
         .expect("manifest-named metadata should resolve the depot");
     assert_eq!(
         asset.image_path.file_name().expect("image has a file name"),
@@ -261,12 +263,7 @@ fn resolves_left_handed_lift_for_business_b033_ext6() {
         asset_path: format!("v1/devices/{depot}/"),
         files: Vec::new(),
     };
-    let resolver = AssetResolver {
-        read_roots: vec![root.path().to_path_buf()],
-        write_root: root.path().to_path_buf(),
-        has_bundle: false,
-        index: Some(index_of(depot, entry)),
-    };
+    let resolver = resolver_over(&[root.path()], Some(index_of(depot, entry)));
     let model = DeviceModelInfo {
         transports: DeviceTransports {
             btle: true,
@@ -317,12 +314,7 @@ fn resolves_standalone_registry_model_without_synthetic_hidpp_info() {
             files: vec![],
         },
     );
-    let resolver = AssetResolver {
-        read_roots: vec![root.path().to_path_buf()],
-        write_root: root.path().to_path_buf(),
-        has_bundle: false,
-        index: Some(index),
-    };
+    let resolver = resolver_over(&[root.path()], Some(index));
 
     let asset = resolver
         .resolve_registry_model("8c900")
@@ -371,12 +363,7 @@ fn standalone_registry_lookup_does_not_cross_model_depots() {
             ),
         ]),
     };
-    let resolver = AssetResolver {
-        read_roots: vec![root.path().to_path_buf()],
-        write_root: root.path().to_path_buf(),
-        has_bundle: false,
-        index: Some(index),
-    };
+    let resolver = resolver_over(&[root.path()], Some(index));
 
     assert!(resolver.resolve_registry_model("8c900").is_none());
     assert_eq!(
@@ -399,11 +386,9 @@ fn unsafe_standalone_manifest_filename_is_rejected() {
     )
     .expect("write manifest");
     std::fs::write(root.path().join("front.png"), png_header(1, 1)).expect("write escape");
-    let resolver = AssetResolver {
-        read_roots: vec![root.path().to_path_buf()],
-        write_root: root.path().to_path_buf(),
-        has_bundle: false,
-        index: Some(index_of(
+    let resolver = resolver_over(
+        &[root.path()],
+        Some(index_of(
             "litra_glow",
             DeviceEntry {
                 model_id: "8c900".into(),
@@ -418,7 +403,7 @@ fn unsafe_standalone_manifest_filename_is_rejected() {
                 }],
             },
         )),
-    };
+    );
     assert!(resolver.resolve_registry_model("8c900").is_none());
 }
 
@@ -437,11 +422,9 @@ fn standalone_resolution_prefers_the_first_read_root() {
         )
         .expect("write front");
     }
-    let resolver = AssetResolver {
-        read_roots: roots.iter().map(|root| root.path().to_path_buf()).collect(),
-        write_root: roots[1].path().to_path_buf(),
-        has_bundle: true,
-        index: Some(index_of(
+    let resolver = resolver_over(
+        &[roots[0].path(), roots[1].path()],
+        Some(index_of(
             "litra_glow",
             DeviceEntry {
                 model_id: "8c900".into(),
@@ -456,7 +439,7 @@ fn standalone_resolution_prefers_the_first_read_root() {
                 }],
             },
         )),
-    };
+    );
 
     let asset = resolver
         .resolve_registry_model("8c900")
@@ -488,4 +471,132 @@ fn cleanup_removes_only_legacy_glow_pngs() {
         depot.join("front.png").exists() && depot.join("metadata.json").exists(),
         "real assets must be left untouched"
     );
+}
+
+/// The depot [`mx_master_3s_index`] maps the MX Master 3S to, with one render
+/// of its own width per colour variant. Returns the depot directory.
+fn write_variant_depot(root: &Path, variants: &[(u8, u32)]) -> PathBuf {
+    let depot = "mx_master_3s";
+    let dir = root.join(depot);
+    std::fs::create_dir_all(&dir).expect("create depot dir");
+    let devices: Vec<String> = variants
+        .iter()
+        .map(|(ext, _)| {
+            format!(
+                r#"{{"modelId":"2b034_ext{ext}","resources":[
+                    {{"key":"device_buttons_image","src":"side_ext_{ext}.png"}}]}}"#
+            )
+        })
+        .collect();
+    std::fs::write(
+        dir.join("manifest.json"),
+        format!(r#"{{"devices":[{}]}}"#, devices.join(",")),
+    )
+    .expect("write manifest");
+    std::fs::write(dir.join("core_metadata.json"), r#"{"images":[]}"#).expect("write metadata");
+    for (ext, width) in variants {
+        std::fs::write(
+            dir.join(format!("side_ext_{ext}.png")),
+            png_header(*width, 10),
+        )
+        .expect("write render");
+    }
+    dir
+}
+
+fn mx_master_3s(extended_model_id: u8) -> DeviceModelInfo {
+    DeviceModelInfo {
+        model_ids: [0xb034, 0, 0],
+        extended_model_id,
+        ..bare_model()
+    }
+}
+
+/// The device list is rebuilt on every agent snapshot, so a resolver must not
+/// go back to disk for an asset it has already found. Deleting the depot
+/// between two resolves is the proof: the second answer can only come from
+/// memory. A new resolver is the one way to see the change, which is what the
+/// runtime builds when a download lands or the cache is cleared.
+#[test]
+fn a_found_asset_is_answered_from_memory_until_the_resolver_is_replaced() {
+    let root = tempfile::tempdir().expect("create temp dir");
+    let dir = write_variant_depot(root.path(), &[(2, 100)]);
+    let resolver = resolver_over(&[root.path()], Some(mx_master_3s_index()));
+
+    let found = resolver
+        .resolve(&mx_master_3s(2), None)
+        .expect("the depot is on disk");
+    std::fs::remove_dir_all(&dir).expect("remove the depot");
+
+    assert_eq!(resolver.resolve(&mx_master_3s(2), None), Some(found));
+    assert_eq!(
+        resolver_over(&[root.path()], Some(mx_master_3s_index())).resolve(&mx_master_3s(2), None),
+        None,
+        "a replacement resolver reads the disk again"
+    );
+}
+
+#[test]
+fn a_found_standalone_asset_is_answered_from_memory_too() {
+    let root = tempfile::tempdir().expect("create temp dir");
+    let depot = root.path().join("litra_glow");
+    std::fs::create_dir_all(&depot).expect("create depot dir");
+    std::fs::write(depot.join("front.png"), png_header(396, 396)).expect("write front");
+    let index = index_of(
+        "litra_glow",
+        DeviceEntry {
+            model_id: "8c900".into(),
+            model_ids: vec![],
+            display_name: "Litra Glow".into(),
+            kind: "ILLUMINATION_LIGHT".into(),
+            asset_path: "v1/devices/litra_glow/".into(),
+            files: vec![openlogi_assets::FileEntry {
+                name: "front.png".into(),
+                sha256: String::new(),
+                bytes: 0,
+            }],
+        },
+    );
+    let resolver = resolver_over(&[root.path()], Some(index));
+
+    let found = resolver
+        .resolve_registry_model("8c900")
+        .expect("the depot is on disk");
+    std::fs::remove_dir_all(&depot).expect("remove the depot");
+
+    assert_eq!(resolver.resolve_registry_model("8c900"), Some(found));
+}
+
+/// Only finds are remembered. A depot that is not on disk yet is downloaded in
+/// the background, and partial writes can land before the download that
+/// replaces the resolver settles; the next resolve has to see them.
+#[test]
+fn a_depot_that_lands_after_a_miss_is_found_by_the_same_resolver() {
+    let root = tempfile::tempdir().expect("create temp dir");
+    let resolver = resolver_over(&[root.path()], Some(mx_master_3s_index()));
+    assert_eq!(resolver.resolve(&mx_master_3s(2), None), None);
+
+    write_variant_depot(root.path(), &[(2, 100)]);
+
+    assert!(resolver.resolve(&mx_master_3s(2), None).is_some());
+}
+
+/// Two colours of one model share a depot and nothing else: the second must
+/// not be handed the render remembered for the first.
+#[test]
+fn colour_variants_of_one_depot_are_remembered_apart() {
+    let root = tempfile::tempdir().expect("create temp dir");
+    let dir = write_variant_depot(root.path(), &[(2, 100), (12, 200)]);
+    let resolver = resolver_over(&[root.path()], Some(mx_master_3s_index()));
+
+    let graphite = resolver
+        .resolve(&mx_master_3s(2), None)
+        .expect("graphite resolves");
+    let pale_grey = resolver
+        .resolve(&mx_master_3s(12), None)
+        .expect("pale grey resolves");
+
+    assert_eq!(graphite.image_path, dir.join("side_ext_2.png"));
+    assert_eq!(pale_grey.image_path, dir.join("side_ext_12.png"));
+    assert_eq!((graphite.png_width, pale_grey.png_width), (100, 200));
 }

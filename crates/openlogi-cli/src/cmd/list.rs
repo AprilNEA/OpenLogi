@@ -111,10 +111,6 @@ fn print_empty_notes(status: Option<&AgentStatus>) {
                 "  - A Bluetooth-direct mouse (e.g. Lift, Signature) needs Input Monitoring \
                  permission: System Settings → Privacy & Security → Input Monitoring."
             );
-            println!(
-                "  - hidpp 0.2 only recognises Logi Bolt receivers (PID 0xC548); other \
-                 receivers (Unifying) aren't surfaced yet."
-            );
         }
     }
 }

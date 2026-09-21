@@ -23,7 +23,7 @@ pub use openlogi_core::hid::route::{
 use tracing::{debug, warn};
 
 use crate::backend::{BackendError, HidBackend, NodeInfo, RawWriter};
-use crate::host_lock::{RECEIVER_REGISTER_WAIT, lock_receiver_registers};
+use crate::host_lock::{RECEIVER_REGISTER_TIMEOUT, lock_receiver_registers};
 use crate::write::WriteError;
 
 /// Enumerate HID++ candidates and open the channel that reaches `route`.
@@ -37,7 +37,7 @@ use crate::write::WriteError;
 /// register read, so it takes the receiver's register phase
 /// ([`lock_receiver_registers`]) like every other register caller. A
 /// receiver whose phase another OpenLogi process still holds after
-/// [`RECEIVER_REGISTER_WAIT`] is passed over this time — the caller sees the
+/// [`RECEIVER_REGISTER_TIMEOUT`] is passed over this time — the caller sees the
 /// same `None` as for a receiver that is not there — rather than read
 /// unlocked into the holder's replies.
 pub(crate) async fn open_route_channel(
@@ -70,7 +70,7 @@ pub(crate) async fn open_route_channel(
                     continue;
                 };
                 let Some(_registers) =
-                    lock_receiver_registers(&node.id, RECEIVER_REGISTER_WAIT).await
+                    lock_receiver_registers(&node.id, RECEIVER_REGISTER_TIMEOUT).await
                 else {
                     debug!(node = %node.id, "receiver register phase held elsewhere — passing the node over");
                     continue;
@@ -87,7 +87,7 @@ pub(crate) async fn open_route_channel(
                     continue;
                 };
                 let Some(_registers) =
-                    lock_receiver_registers(&node.id, RECEIVER_REGISTER_WAIT).await
+                    lock_receiver_registers(&node.id, RECEIVER_REGISTER_TIMEOUT).await
                 else {
                     debug!(node = %node.id, "receiver register phase held elsewhere — passing the node over");
                     continue;

@@ -29,7 +29,7 @@ members = [
 default-members = ["crates/openlogi"]
 
 [workspace.package]
-version = "0.8.5"
+version = "0.8.6"
 edition = "2024"
 # Tracks current stable rather than trailing it. OpenLogi ships as an app —
 # prebuilt installers, and no crate here has an external reverse dependency —
@@ -43,9 +43,9 @@ authors = ["AprilNEA <dev@aprilnea.me>"]
 description = "Lightweight, local-first alternative to Logitech Options+ for HID++ devices"
 
 [workspace.dependencies]
-hidpp = { package = "openlogi-hidpp", path = "crates/openlogi-hidpp", version = "0.8.5" }
-openlogi-device-registry = { path = "crates/openlogi-device-registry", version = "0.8.5" }
-openlogi-fixture = { path = "crates/openlogi-fixture", version = "0.8.5" }
+hidpp = { package = "openlogi-hidpp", path = "crates/openlogi-hidpp", version = "0.8.6" }
+openlogi-device-registry = { path = "crates/openlogi-device-registry", version = "0.8.6" }
+openlogi-fixture = { path = "crates/openlogi-fixture", version = "0.8.6" }
 async-hid = { package = "openlogi-async-hid", version = "=0.5.3-openlogi.1" }
 interprocess = { version = "2", features = ["tokio"] }
 # The agent <-> GUI RPC layer itself, over the `interprocess` transport above.
@@ -102,6 +102,15 @@ gpui-kit-assets = { git = "https://github.com/longbridge/gpui-kit", tag = "v0.6.
 
 swr-core = "0.1"
 swr-gpui = { package = "swr-gpui-pre", version = "0.1" }
+
+# Backport GroupBox/SettingGroup::footer to v0.6.1 without upgrading GPUI.
+# Remove when adopting an upstream release with the footer API. Keep all Kit
+# crates on this revision, including the theme source in packaging/linux/package.nix.
+[patch."https://github.com/longbridge/gpui-kit"]
+gpui-component = { git = "https://github.com/AprilNEA/gpui-kit", rev = "1ac69bd51f744f3664361d9abd609bfc16de489f" }
+gpui-base = { git = "https://github.com/AprilNEA/gpui-kit", rev = "1ac69bd51f744f3664361d9abd609bfc16de489f" }
+gpui-kit-assets = { git = "https://github.com/AprilNEA/gpui-kit", rev = "1ac69bd51f744f3664361d9abd609bfc16de489f" }
+gpui-component-macros = { git = "https://github.com/AprilNEA/gpui-kit", rev = "1ac69bd51f744f3664361d9abd609bfc16de489f" }
 
 [workspace.lints.rust]
 # Denied workspace-wide, but `deny` (not `forbid`) so a crate that genuinely

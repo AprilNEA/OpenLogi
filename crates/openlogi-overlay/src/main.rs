@@ -14,7 +14,7 @@
 // crate this one already depends on for locale negotiation.
 rust_i18n::i18n!("../openlogi-ui/locales", fallback = "en");
 
-mod agent;
+mod ipc;
 mod platform;
 mod ring;
 mod session;
@@ -24,31 +24,24 @@ use std::sync::Arc;
 use anyhow::Result;
 use gpui::AppContext as _;
 use tracing::warn;
-use tracing_subscriber::EnvFilter;
 
 use openlogi_core::action_ring::DISPLAY_LIFETIME;
 
-use crate::agent::{Ipc, OverlayCommand, spawn_ipc};
+use crate::ipc::OverlayCommand;
 use crate::platform::RingPlacement;
 use crate::ring::RingView;
 use crate::session::{ClickAwaySession, claim_the_role, spawn_click_away_dismissal};
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(
-            EnvFilter::try_from_env(openlogi_core::env::LOG)
-                .unwrap_or_else(|_| EnvFilter::new(openlogi_core::env::LOG_DEFAULT)),
-        )
-        .init();
+    openlogi_core::logging::init_stderr();
 
     openlogi_core::locale::activate(None);
     // Held for the whole run: dropping it hands the role to the replacement.
     let _tenancy = claim_the_role()?;
-    let Ipc {
+    let ipc::Handle {
         mut invocations,
         commands,
-    } = spawn_ipc();
+    } = ipc::spawn();
 
     let mut app = gpui_platform::application().with_assets(openlogi_ui::action_icons::ActionIcons);
     app = app.with_quit_mode(gpui::QuitMode::Explicit);

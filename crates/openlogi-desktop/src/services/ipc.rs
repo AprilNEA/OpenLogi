@@ -1,7 +1,8 @@
 //! Agent IPC client.
 //!
 //! The agent owns all device I/O, so the GUI never opens a device — it connects
-//! to the agent's local socket and (a) keeps one [`Agent::observe`] request open
+//! to the agent's local socket and (a) keeps one
+//! [`Agent::observe`](openlogi_ipc::Agent::observe) request open
 //! for the agent's state, and (b) forwards "apply now" / "read" device commands.
 //! Both run on one dedicated OS thread with a tokio runtime (the GPUI thread owns
 //! no async runtime): results cross back over `mpsc` to the GPUI loop.
@@ -13,9 +14,9 @@
 //! ask again with generation 0 and the next answer is the whole truth.
 //!
 //! The connection is one [`link::Link`]: while up it owns the client, the
-//! generation ledger and the poll in flight; while down it owns the outage
-//! clock and what the window has been told about it. What is left to time is
-//! failure. `launch::spawn_agent` brings the agent up when the socket stays
+//! generation ledger and the observe call in flight; while down it owns the
+//! outage clock and what the window has been told about it. What is left to
+//! time is failure. `launch::spawn_agent` brings the agent up when the socket stays
 //! down — gated by [`reflex::SpawnReflex`], which fires immediately for an
 //! agent that was never reachable but gives a lost connection
 //! [`reflex::SPAWN_AFTER_LOSS`] first (the deliberate quits and the supervised
@@ -40,12 +41,12 @@ use std::time::{Duration, Instant};
 
 use openlogi_core::hid::{LightCommand, WriteError};
 use openlogi_ipc::client::{self, ConnectError};
-use openlogi_ipc::{
-    AgentClient, AgentSnapshot, ClientKind, ConfigReloadError, Observation, PairingFailure,
-};
+use openlogi_ipc::{AgentClient, AgentSnapshot, ClientKind, ConfigReloadError, PairingFailure};
 use tarpc::client::RpcError;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
+
+use crate::state::DeviceKey;
 
 mod launch;
 mod link;
@@ -86,8 +87,8 @@ pub enum GuiUpdate {
     /// Result of an agent-owned standalone-light command. The typed failure
     /// reaches the GPUI state model instead of being reduced to a log line.
     LightCommandResult {
-        /// Runtime/config key of the light that issued the command.
-        key: String,
+        /// The light that issued the command.
+        key: DeviceKey,
         /// Monotonic request id used to ignore stale results.
         request_id: u64,
         /// The control whose write produced this result.
@@ -106,7 +107,7 @@ pub enum GuiUpdate {
 /// Handle the GUI holds to talk to the agent: a stream of state updates and a
 /// sender for device commands. Pairing progress arrives through the same state
 /// updates as everything else.
-pub struct IpcClient {
+pub struct Handle {
     pub updates: mpsc::UnboundedReceiver<GuiUpdate>,
     pub commands: mpsc::UnboundedSender<Command>,
 }
@@ -114,7 +115,7 @@ pub struct IpcClient {
 /// Spawn the IPC client thread. Returns immediately; the thread connects (and
 /// reconnects) on its own.
 #[must_use]
-pub fn spawn() -> IpcClient {
+pub fn spawn() -> Handle {
     let (update_tx, updates) = mpsc::unbounded_channel();
     let (commands, mut cmd_rx) = mpsc::unbounded_channel::<Command>();
 
@@ -125,7 +126,7 @@ pub fn spawn() -> IpcClient {
         warn!(%error, "could not start the IPC client thread — agent state unavailable");
     }
 
-    IpcClient { updates, commands }
+    Handle { updates, commands }
 }
 
 /// Where the agent is reached and how it is brought up — the loop's only two
@@ -156,8 +157,8 @@ impl Effects for System {
 /// carrying the last generation this client saw; the agent answers when its
 /// state differs from that, or after its hold window with the same state as a
 /// heartbeat. Commands share the connection — tarpc multiplexes requests, and
-/// the poll stays in flight across command handling, so a device write never
-/// cancels it.
+/// the observe call stays in flight across command handling, so a device write
+/// never cancels it.
 async fn observe_loop(
     effects: &mut impl Effects,
     update_tx: &mpsc::UnboundedSender<GuiUpdate>,
@@ -177,11 +178,11 @@ async fn observe_loop(
             _ = retry.tick(), if link.is_down() => Woken::Reconnect,
         };
         match woken {
-            Woken::Observed(Ok(observation)) => {
-                if let Some(snapshot) = link.answered(observation) {
-                    let _ = update_tx.send(GuiUpdate::Snapshot(snapshot));
-                }
+            Woken::Observed(Ok(Some(snapshot))) => {
+                let _ = update_tx.send(GuiUpdate::Snapshot(snapshot));
             }
+            // The agent's heartbeat, or a stale reply: the window is current.
+            Woken::Observed(Ok(None)) => {}
             // The connection dropped (agent self-exec on update, or a crash).
             // Reconnecting re-reads the whole state, so nothing is lost.
             Woken::Observed(Err(error)) => {
@@ -227,8 +228,8 @@ async fn observe_loop(
 
 /// Why [`observe_loop`] woke up.
 enum Woken {
-    /// The long-poll answered, or its connection dropped.
-    Observed(Result<Observation, RpcError>),
+    /// The observe call answered, or its connection dropped.
+    Observed(Result<Option<AgentSnapshot>, RpcError>),
     /// A device command, or `None` once the GUI drops the sender.
     Command(Option<Command>),
     /// Time to try connecting again.
@@ -250,9 +251,14 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use std::sync::Mutex;
+
     use openlogi_core::hid::DeviceRoute;
     use openlogi_ipc::testing::in_memory_agent;
-    use openlogi_ipc::{AgentRequest, AgentResponse};
+    use openlogi_ipc::{
+        AgentRequest, AgentResponse, AgentStatus, ForegroundApps, InventoryHealth, Observation,
+        PROTOCOL_VERSION,
+    };
     use tokio::sync::oneshot;
 
     use super::*;
@@ -477,5 +483,77 @@ mod tests {
 
         assert!(matches!(answer, Err(WriteError::AmbiguousRawDevice)));
         assert_eq!(effects.launches, 0, "a reachable agent is never spawned at");
+    }
+
+    /// A snapshot the tests can tell apart by its camera flag.
+    fn snapshot(camera_active: bool) -> AgentSnapshot {
+        AgentSnapshot {
+            status: AgentStatus {
+                accessibility_granted: true,
+                hook_installed: true,
+                launch_at_login: false,
+                inventory: InventoryHealth::Ready,
+                protocol_version: PROTOCOL_VERSION,
+                agent_version: "observe-loop-test".to_owned(),
+                input_monitoring_granted: true,
+                hid_open_failures: false,
+            },
+            inventory: Vec::new(),
+            standalone: Vec::new(),
+            camera_active,
+            pairing: None,
+            foreground: ForegroundApps::default(),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_newer_snapshot_reaches_the_window_and_a_heartbeat_does_not() {
+        // The agent answers the hold elapsing with the generation the client
+        // already has. That keeps the link alive and must not repaint a
+        // window that is already current.
+        let answers = Arc::new(Mutex::new(VecDeque::from([
+            (1, snapshot(false)),
+            (1, snapshot(false)),
+            (2, snapshot(true)),
+        ])));
+        let agent = in_memory_agent(
+            move |request| {
+                let answers = answers.clone();
+                Box::pin(async move {
+                    let AgentRequest::Observe { .. } = request else {
+                        panic!("the client loop sent an unexpected request: {request:?}");
+                    };
+                    let next = answers.lock().unwrap().pop_front();
+                    match next {
+                        Some((generation, snapshot)) => Ok(AgentResponse::Observe(Observation {
+                            generation,
+                            snapshot,
+                        })),
+                        None => std::future::pending().await,
+                    }
+                })
+            },
+            std::future::pending(),
+        );
+        let mut effects = ScriptedEffects::answering([Ok(agent)]);
+        let (update_tx, mut updates) = mpsc::unbounded_channel();
+        let (_commands, mut cmd_rx) = mpsc::unbounded_channel();
+
+        let seen = tokio::select! {
+            () = observe_loop(&mut effects, &update_tx, &mut cmd_rx) => {
+                panic!("the loop ends only once the GUI hangs up")
+            }
+            seen = async {
+                let mut seen = Vec::new();
+                while seen.len() < 2 {
+                    if let Some(GuiUpdate::Snapshot(snapshot)) = updates.recv().await {
+                        seen.push(snapshot);
+                    }
+                }
+                seen
+            } => seen,
+        };
+
+        assert_eq!(seen, [snapshot(false), snapshot(true)]);
     }
 }

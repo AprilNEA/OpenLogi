@@ -365,9 +365,10 @@ fn selected_model<'a>(
         .inventories
         .iter()
         .find(|inventory| {
-            inventory.paired.iter().any(|device| {
-                DeviceRoute::device_route_for(inventory, device.slot).as_ref() == Some(route)
-            })
+            inventory
+                .paired
+                .iter()
+                .any(|device| DeviceRoute::for_slot(inventory, device.slot).as_ref() == Some(route))
         })
         .and_then(|inventory| inventory.paired.iter().find(|device| device.slot == slot))
         .and_then(|device| device.model_info.as_ref())

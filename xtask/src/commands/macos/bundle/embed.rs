@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, anyhow};
 use openlogi_core::brand;
+use openlogi_core::paths::Profile;
 use xshell::{Shell, cmd};
 
 use super::identity::{Channel, Component};
@@ -132,14 +133,10 @@ fn embed_helper(
     Ok(())
 }
 
-/// The launchd service label `channel`'s bundle carries — what its embedded
-/// LaunchAgent plist declares, `SMAppService` registers, and `launchctl`
-/// addresses. Frozen once shipped; see [`brand::AGENT_SERVICE_LABEL`].
+/// The launchd service label `channel`'s bundle carries: the one the profile
+/// it runs under will look for.
 pub(crate) fn agent_service_label(channel: Channel) -> String {
-    match channel {
-        Channel::Production => brand::AGENT_SERVICE_LABEL.to_owned(),
-        Channel::Dev => brand::dev_id(brand::AGENT_SERVICE_LABEL),
-    }
+    Profile::from(channel).agent_service_label()
 }
 
 /// The launchd property list `SMAppService` registers the agent from.
@@ -209,21 +206,25 @@ pub(crate) fn write_agent_launch_plist(app: &Path, channel: Channel) -> Result<(
 
 pub(super) fn embed_cli(release_dir: &Path, app: &Path) -> Result<()> {
     println!("==> cli (embed)");
-    let cli_bin = release_dir.join("openlogi");
+    let cli_bin = release_dir.join(brand::CLI_EXECUTABLE);
     ensure_file(&cli_bin)?;
 
     let macos = app.join("Contents/MacOS");
-    fs_err::copy(&cli_bin, macos.join("openlogi"))
+    let embedded = macos.join(brand::CLI_EXECUTABLE);
+    fs_err::copy(&cli_bin, &embedded)
         .with_context(|| "could not copy the CLI binary into the app bundle".to_string())?;
 
-    println!("    embedded {}", macos.join("openlogi").display());
+    println!("    embedded {}", embedded.display());
     Ok(())
 }
 
 /// Every Mach-O the finished bundle must ship, for `channel`'s helper layout.
 fn required_bundle_binaries(app: &Path, channel: Channel) -> Vec<PathBuf> {
     let macos = app.join("Contents/MacOS");
-    let mut required = vec![macos.join("openlogi"), macos.join("openlogi-desktop")];
+    let mut required = vec![
+        macos.join(brand::CLI_EXECUTABLE),
+        macos.join(brand::GUI_EXECUTABLE),
+    ];
     required.extend(HELPERS.iter().map(|helper| {
         helper
             .component

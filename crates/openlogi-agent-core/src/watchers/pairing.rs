@@ -1,14 +1,15 @@
 //! On-demand device-pairing watcher.
 //!
 //! Unlike the polling watchers, this one is event-driven: it idles until the
-//! "Add device" window sends [`Control::Start`], then runs a single
+//! "Add device" window sends [`PairingControl::Start`], then runs a single
 //! [`openlogi_hid::run_pairing`] session — forwarding the user's device pick
-//! and cancel into it — and streams [`SessionEvent`]s back to the agent.
+//! and cancel into it — and streams [`PairingSessionEvent`]s back to the agent.
 //! When the session ends it returns to idle, ready for the next open.
 //!
 //! Keeping the thread long-lived means the consumer's select loop can own one
-//! fixed [`SessionEvent`] receiver and one [`Control`] sender (published as a
-//! global), instead of wiring a fresh channel on every window open.
+//! fixed [`PairingSessionEvent`] receiver and one [`PairingControl`] sender
+//! (published as a global), instead of wiring a fresh channel on every window
+//! open.
 
 use std::future::Future;
 
@@ -25,33 +26,33 @@ mod replay_tests;
 
 /// Commands the UI sends to the pairing watcher.
 #[derive(Debug)]
-pub enum Control {
+pub enum PairingControl {
     /// Begin a pairing session against the chosen receiver.
     Start {
         /// Identity assigned by the agent when it admits the session.
-        session: SessionId,
+        session: PairingSessionId,
         /// Receiver the session should open.
         selector: ReceiverSelector,
     },
     /// Bolt: pair with a discovered device.
     Pair {
         /// Session that discovered the device.
-        session: SessionId,
+        session: PairingSessionId,
         /// Full device data retained inside the agent.
         device: DiscoveredDevice,
     },
     /// Abort the in-progress session.
     Cancel {
         /// Session to cancel.
-        session: SessionId,
+        session: PairingSessionId,
     },
 }
 
 /// Process-local identity for one admitted pairing session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SessionId(u64);
+pub struct PairingSessionId(u64);
 
-impl SessionId {
+impl PairingSessionId {
     /// Construct an identity from the agent's monotonic session counter.
     #[must_use]
     pub const fn new(value: u64) -> Self {
@@ -61,20 +62,20 @@ impl SessionId {
 
 /// Pairing event tagged with the session that produced it.
 #[derive(Debug)]
-pub struct SessionEvent {
+pub struct PairingSessionEvent {
     /// Session that produced `event`.
-    pub session: SessionId,
+    pub session: PairingSessionId,
     /// Progress or terminal result from the HID pairing flow.
     pub event: PairingEvent,
 }
 
-/// Spawn the watcher. Returns a sender for [`Control`] messages and a receiver
-/// of [`SessionEvent`]s. Dropping the control sender stops the watcher after
-/// the current session.
+/// Spawn the watcher. Returns a sender for [`PairingControl`] messages and a
+/// receiver of [`PairingSessionEvent`]s. Dropping the control sender stops the
+/// watcher after the current session.
 #[must_use]
 pub fn spawn() -> (
-    mpsc::UnboundedSender<Control>,
-    mpsc::UnboundedReceiver<SessionEvent>,
+    mpsc::UnboundedSender<PairingControl>,
+    mpsc::UnboundedReceiver<PairingSessionEvent>,
 ) {
     spawn_with_hardware(HardwareContext::production())
 }
@@ -86,8 +87,8 @@ pub fn spawn() -> (
 pub fn spawn_with_hardware(
     hardware: HardwareContext,
 ) -> (
-    mpsc::UnboundedSender<Control>,
-    mpsc::UnboundedReceiver<SessionEvent>,
+    mpsc::UnboundedSender<PairingControl>,
+    mpsc::UnboundedReceiver<PairingSessionEvent>,
 ) {
     let (ctrl_tx, ctrl_rx) = mpsc::unbounded_channel();
     let (evt_tx, evt_rx) = mpsc::unbounded_channel();
@@ -101,10 +102,11 @@ pub fn spawn_with_hardware(
     (ctrl_tx, evt_rx)
 }
 
-/// Idle ↔ session driver. Returns when every [`Control`] sender is dropped.
+/// Idle ↔ session driver. Returns when every [`PairingControl`] sender is
+/// dropped.
 async fn run(
-    ctrl_rx: mpsc::UnboundedReceiver<Control>,
-    evt_tx: mpsc::UnboundedSender<SessionEvent>,
+    ctrl_rx: mpsc::UnboundedReceiver<PairingControl>,
+    evt_tx: mpsc::UnboundedSender<PairingSessionEvent>,
     hardware: HardwareContext,
 ) {
     run_with(
@@ -121,12 +123,12 @@ async fn run(
 /// The session driver is parameterized so teardown ordering can be tested
 /// without opening a host HID device.
 async fn run_with<F, Fut>(
-    mut ctrl_rx: mpsc::UnboundedReceiver<Control>,
-    evt_tx: mpsc::UnboundedSender<SessionEvent>,
+    mut ctrl_rx: mpsc::UnboundedReceiver<PairingControl>,
+    evt_tx: mpsc::UnboundedSender<PairingSessionEvent>,
     mut start_session: F,
 ) where
     F: FnMut(
-        SessionId,
+        PairingSessionId,
         ReceiverSelector,
         mpsc::UnboundedReceiver<PairingCommand>,
         mpsc::UnboundedSender<PairingEvent>,
@@ -141,7 +143,7 @@ async fn run_with<F, Fut>(
         } else {
             loop {
                 match ctrl_rx.recv().await {
-                    Some(Control::Start { session, selector }) => break (session, selector),
+                    Some(PairingControl::Start { session, selector }) => break (session, selector),
                     // Stray Pair/Cancel while idle: ignore and keep waiting.
                     Some(_) => {}
                     None => return,
@@ -167,22 +169,22 @@ async fn run_with<F, Fut>(
                     None => events_open = false,
                 },
                 ctrl = ctrl_rx.recv() => match ctrl {
-                    Some(Control::Pair { session, device }) if session == session_id => {
+                    Some(PairingControl::Pair { session, device }) if session == session_id => {
                         let _ = cmd_tx.send(PairingCommand::Pair(device));
                     }
-                    Some(Control::Cancel { session }) if session == session_id => {
+                    Some(PairingControl::Cancel { session }) if session == session_id => {
                         let _ = cmd_tx.send(PairingCommand::Cancel);
                     }
                     // Carry a start received during the old session's wind-down
                     // into the next idle iteration instead of consuming it.
-                    Some(Control::Start { session, selector }) => {
+                    Some(PairingControl::Start { session, selector }) => {
                         if queued_start.is_none() {
                             queued_start = Some((session, selector));
                         } else {
                             warn!(?session, "pairing start received while another start is queued");
                         }
                     }
-                    Some(Control::Pair { .. } | Control::Cancel { .. }) => {}
+                    Some(PairingControl::Pair { .. } | PairingControl::Cancel { .. }) => {}
                     // App shutting down: dropping `session` cancels it.
                     None => return,
                 },
@@ -206,7 +208,7 @@ async fn run_with<F, Fut>(
                 Err(error) => error,
             })
         });
-        let _ = evt_tx.send(SessionEvent {
+        let _ = evt_tx.send(PairingSessionEvent {
             session: session_id,
             event: terminal,
         });
@@ -214,9 +216,9 @@ async fn run_with<F, Fut>(
 }
 
 fn relay_event(
-    session: SessionId,
+    session: PairingSessionId,
     event: PairingEvent,
-    events: &mpsc::UnboundedSender<SessionEvent>,
+    events: &mpsc::UnboundedSender<PairingSessionEvent>,
     terminal: &mut Option<PairingEvent>,
 ) {
     if matches!(event, PairingEvent::Paired { .. } | PairingEvent::Failed(_)) {
@@ -229,7 +231,7 @@ fn relay_event(
             );
         }
     } else {
-        let _ = events.send(SessionEvent { session, event });
+        let _ = events.send(PairingSessionEvent { session, event });
     }
 }
 
@@ -280,10 +282,10 @@ mod tests {
             }
         }));
 
-        let first = SessionId::new(1);
-        let second = SessionId::new(2);
+        let first = PairingSessionId::new(1);
+        let second = PairingSessionId::new(2);
         ctrl_tx
-            .send(Control::Start {
+            .send(PairingControl::Start {
                 session: first,
                 selector: ReceiverSelector::First,
             })
@@ -291,7 +293,7 @@ mod tests {
         assert_eq!(started_rx.recv().await, Some(first));
 
         ctrl_tx
-            .send(Control::Start {
+            .send(PairingControl::Start {
                 session: second,
                 selector: ReceiverSelector::First,
             })

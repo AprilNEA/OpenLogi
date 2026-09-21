@@ -15,7 +15,7 @@ name = "openlogi-overlay"
 path = "src/main.rs"
 
 [dependencies]
-openlogi-core = { path = "../openlogi-core", features = ["worker"] }
+openlogi-core = { path = "../openlogi-core", features = ["logging", "worker"] }
 openlogi-hook = { path = "../openlogi-hook" }
 openlogi-ipc = { path = "../openlogi-ipc" }
 openlogi-ui = { path = "../openlogi-ui" }
@@ -27,7 +27,6 @@ succession = "0.2"
 tarpc = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
 
 [build-dependencies]
 embed-resource = "3.0.9"

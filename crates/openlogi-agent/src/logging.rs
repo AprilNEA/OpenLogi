@@ -7,7 +7,6 @@ use std::path::Path;
 
 use tracing::warn;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
-use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::SubscriberInitExt as _;
 
@@ -22,8 +21,7 @@ const MAX_LOG_FILES: usize = 7;
 /// launchd-run agent cannot be diagnosed at all (#336). If the file cannot be
 /// opened the agent falls back to stderr only and says so.
 pub(crate) fn init() {
-    let filter = EnvFilter::try_from_env(openlogi_core::env::LOG)
-        .unwrap_or_else(|_| EnvFilter::new(openlogi_core::env::LOG_DEFAULT));
+    let filter = openlogi_core::logging::env_filter();
     let (file_layer, file_error) = match file_appender() {
         Ok(appender) => (
             Some(

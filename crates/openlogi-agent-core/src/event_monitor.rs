@@ -27,7 +27,7 @@ pub type SharedEventMonitor = std::sync::Arc<EventMonitor>;
 const CAPACITY: usize = 256;
 
 /// How often the janitor checks for an idle (no-longer-polled) monitor.
-const IDLE_TICK: Duration = Duration::from_secs(3);
+const IDLE_CHECK_PERIOD: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -152,12 +152,15 @@ impl EventMonitor {
     /// previous tick, the GUI is gone — disable and free the buffer.
     pub async fn run_idle_janitor(self: SharedEventMonitor) {
         // `interval` fires its first tick immediately; `interval_at` delays the
-        // first check by a full `IDLE_TICK`. That matters on an agent restart
-        // while monitoring was enabled: an immediate first tick would see
-        // `enabled == true` with no poll yet this window and disable before the
-        // reconnecting GUI repolls. Waiting one full window lets it poll first.
-        let mut ticker =
-            tokio::time::interval_at(tokio::time::Instant::now() + IDLE_TICK, IDLE_TICK);
+        // first check by a full `IDLE_CHECK_PERIOD`. That matters on an agent
+        // restart while monitoring was enabled: an immediate first tick would
+        // see `enabled == true` with no poll yet this window and disable before
+        // the reconnecting GUI repolls. Waiting one full window lets it poll
+        // first.
+        let mut ticker = tokio::time::interval_at(
+            tokio::time::Instant::now() + IDLE_CHECK_PERIOD,
+            IDLE_CHECK_PERIOD,
+        );
         loop {
             ticker.tick().await;
             self.idle_tick();

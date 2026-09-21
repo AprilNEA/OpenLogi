@@ -7,7 +7,7 @@ use openlogi_core::config::Config;
 
 use super::*;
 use crate::services::assets::AssetResolver;
-use crate::state::ConfigPersistence;
+use crate::state::Sources;
 
 #[derive(Default)]
 struct FakeCapture {
@@ -85,19 +85,10 @@ impl Drop for FakeStream {
 fn preview(cx: &mut TestAppContext) -> (Entity<CameraPreview>, Rc<FakeCapture>) {
     cx.update(gpui_component::init);
     cx.update(|cx| {
-        let cache = AssetResolver::new();
+        let resolver = AssetResolver::new();
         let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
-        let state = cx.new(|_| {
-            AppState::with_runtime(
-                Config::ephemeral(),
-                &[],
-                &[],
-                &cache,
-                &[],
-                ConfigPersistence::MemoryOnly,
-                commands,
-            )
-        });
+        let state =
+            cx.new(|_| AppState::new(Sources::in_memory(Config::ephemeral(), &resolver, commands)));
         AppState::set_global(state, cx);
     });
     let capture = Rc::new(FakeCapture::default());
