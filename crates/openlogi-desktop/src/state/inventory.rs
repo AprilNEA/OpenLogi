@@ -11,8 +11,9 @@ use crate::services::assets::AssetResolver;
 use crate::services::assets::sync::{AssetTarget, model_key};
 use crate::state::devices::{
     DeviceRecord, adopt_transient_record, build_device_list, direct_key_prefix,
-    fold_by_inventory_key, record_wire_pid, sort_device_list,
+    fold_by_inventory_key, receiver_uid_of, record_wire_pid, sort_device_list,
 };
+use openlogi_core::hid::DeviceRoute;
 
 use super::device_key::DeviceKey;
 use super::device_session::DeviceSession;
@@ -215,6 +216,15 @@ impl AppState {
             // Cameras reappear under a new capture id after a port change —
             // do not grace-keep a stale cam-live entry beside the new one.
             if previous.kind == openlogi_core::device::DeviceKind::Camera {
+                clear_inventory_misses(&mut self.devices.sessions, &key);
+                continue;
+            }
+
+            // Easy-Switch / KVM: sibling Bolt slots often flip from
+            // `receiver:…:slot:N` (identity not yet readable) to a folded
+            // `serial:`/`unit:` card. Miss-grace would keep the route-keyed
+            // ghosts beside the real mouse for several polls (#1560).
+            if live_supersedes_previous(previous, &by_key) {
                 clear_inventory_misses(&mut self.devices.sessions, &key);
                 continue;
             }
@@ -522,6 +532,67 @@ pub(super) fn adopt_routes(config: &mut Config, list: &[DeviceRecord]) -> bool {
         adopted |= config.adopt_route(&key, &record.route_key, record.capabilities);
     }
     adopted
+}
+
+/// Whether a live folded snapshot already accounts for `previous` under a
+/// different inventory key — so miss-grace must not keep it as a second card.
+fn live_supersedes_previous(
+    previous: &DeviceRecord,
+    live: &BTreeMap<String, DeviceRecord>,
+) -> bool {
+    live.values()
+        .any(|record| same_physical_gallery_device(previous, record))
+}
+
+/// Two gallery records name the same physical mouse/keyboard.
+///
+/// Matching serial or non-zero unit id is definitive. Easy-Switch also leaves
+/// route-keyed Bolt siblings (`receiver:…:slot:N`) beside an identity-keyed
+/// card (`serial:` / `unit:`) that already occupies that receiver + model —
+/// those siblings are the same device mid-probe, not a second mouse.
+fn same_physical_gallery_device(left: &DeviceRecord, right: &DeviceRecord) -> bool {
+    if left.inventory_key() == right.inventory_key() {
+        return true;
+    }
+    if serials_match(left, right) || units_match(left, right) {
+        return true;
+    }
+    bolt_route_sibling_of_identity_card(left, right)
+        || bolt_route_sibling_of_identity_card(right, left)
+}
+
+fn serials_match(left: &DeviceRecord, right: &DeviceRecord) -> bool {
+    match (&left.serial_number, &right.serial_number) {
+        (Some(a), Some(b)) if !a.is_empty() && !b.is_empty() => a.eq_ignore_ascii_case(b),
+        _ => false,
+    }
+}
+
+fn units_match(left: &DeviceRecord, right: &DeviceRecord) -> bool {
+    left.unit_id != [0; 4] && left.unit_id == right.unit_id
+}
+
+fn bolt_route_sibling_of_identity_card(
+    route_keyed: &DeviceRecord,
+    identity: &DeviceRecord,
+) -> bool {
+    let id_key = identity.config_key.as_str();
+    if !(id_key.starts_with("serial:") || id_key.starts_with("unit:")) {
+        return false;
+    }
+    let Some(uid) = receiver_uid_of(&route_keyed.route_key)
+        .or_else(|| receiver_uid_of(&route_keyed.config_key))
+    else {
+        return false;
+    };
+    if route_keyed.model_key != identity.model_key {
+        return false;
+    }
+    match &identity.route {
+        Some(DeviceRoute::Bolt { receiver_uid, .. }) => receiver_uid.eq_ignore_ascii_case(&uid),
+        _ => receiver_uid_of(&identity.route_key)
+            .is_some_and(|live_uid| live_uid.eq_ignore_ascii_case(&uid)),
+    }
 }
 
 /// Reset `key`'s consecutive-miss counter — the device was just confirmed

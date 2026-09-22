@@ -457,6 +457,12 @@ fn append_offline_known<'a>(
         if is_legacy_model_key && blocked_legacy_models.contains(&model_key) {
             continue;
         }
+        // Easy-Switch / KVM: a live folded `serial:`/`unit:` card already
+        // represents this receiver slot — do not resurrect the pre-identity
+        // route key as a second (chip) gallery card.
+        if known_route_covered_by_live(list, key, &model_key) {
+            continue;
+        }
         let record = offline_record(key, identity, resolver);
         let wire_pid = record_wire_pid(&record);
         if is_legacy_model_key
@@ -476,7 +482,7 @@ fn append_offline_known<'a>(
 }
 
 /// The receiver UID embedded in a `receiver:<uid>:slot:<n>` config key.
-fn receiver_uid_of(key: &str) -> Option<String> {
+pub(super) fn receiver_uid_of(key: &str) -> Option<String> {
     key.strip_prefix("receiver:")
         .and_then(|rest| rest.split(':').next())
         .map(str::to_ascii_lowercase)
@@ -519,6 +525,35 @@ fn entry_is_unreachable(key: &str, config: &Config, present_receivers: &HashSet<
         .filter_map(receiver_uid_of)
         .peekable();
     receiver_uids.peek().is_some() && receiver_uids.all(|uid| !present_receivers.contains(&uid))
+}
+
+/// A live identity-keyed Bolt card already covers this persisted `receiver:`
+/// known entry (same receiver + model) — used so append_offline_known does not
+/// resurrect Easy-Switch route ghosts beside a folded serial/unit card.
+fn known_route_covered_by_live(
+    list: &[DeviceRecord],
+    known_key: &str,
+    known_model_key: &str,
+) -> bool {
+    let Some(uid) = receiver_uid_of(known_key) else {
+        return false;
+    };
+    list.iter().any(|live| {
+        let id_key = live.config_key.as_str();
+        if !(id_key.starts_with("serial:") || id_key.starts_with("unit:")) {
+            return false;
+        }
+        if live.model_key != known_model_key {
+            return false;
+        }
+        match &live.route {
+            Some(DeviceRoute::Bolt { receiver_uid, .. }) => {
+                receiver_uid.eq_ignore_ascii_case(&uid)
+            }
+            _ => receiver_uid_of(&live.route_key)
+                .is_some_and(|live_uid| live_uid.eq_ignore_ascii_case(&uid)),
+        }
+    })
 }
 
 /// The record's wire product id, used to suppress legacy same-model duplicate

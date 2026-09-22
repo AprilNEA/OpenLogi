@@ -165,6 +165,87 @@ fn ambiguous_transient_probe_is_not_adopted() {
     );
 }
 
+/// Three Easy-Switch channels; optional serial/unit so a KVM-style probe can
+/// first emit route-keyed cards, then a folded identity card.
+fn easyswitch_bolt_inventory(
+    serial: Option<&str>,
+    unit_id: [u8; 4],
+    online_slot: Option<u8>,
+) -> DeviceInventory {
+    DeviceInventory {
+        receiver: ReceiverInfo {
+            name: "Bolt Receiver".into(),
+            vendor_id: 0x046d,
+            product_id: 0xc548,
+            unique_id: Some("ca984f9c081e268d".into()),
+        },
+        paired: (1..=3)
+            .map(|slot| PairedDevice {
+                slot,
+                codename: Some("MX Master 3S".into()),
+                wpid: Some(0xb034),
+                kind: DeviceKind::Mouse,
+                online: online_slot == Some(slot),
+                battery: None,
+                model_info: Some(DeviceModelInfo {
+                    entity_count: 1,
+                    serial_number: serial.map(str::to_string),
+                    unit_id,
+                    transports: DeviceTransports::default(),
+                    model_ids: [0xb034, 0, 0],
+                    extended_model_id: 0,
+                }),
+                capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn easyswitch_route_keyed_ghosts_drop_when_serial_card_appears() {
+    // KVM / host-switch: offline slots often arrive without a readable
+    // identity (`receiver:…:slot:N`), then the next probe reports the serial
+    // and fold collapses to one card. Miss-grace must not keep the route
+    // ghosts beside that card.
+    let resolver = AssetResolver::new();
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::new(Sources {
+        inventories: &[easyswitch_bolt_inventory(None, [0; 4], Some(2))],
+        ..Sources::in_memory(Config::ephemeral(), &resolver, commands)
+    });
+    assert_eq!(
+        state.devices().len(),
+        3,
+        "unread Easy-Switch slots stay route-keyed: {:?}",
+        state
+            .devices()
+            .iter()
+            .map(|r| r.config_key.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    let folded = build_device_list(
+        &[easyswitch_bolt_inventory(
+            Some("2412LZ51UZH8"),
+            [0x8f, 0xeb, 0x7b, 0x3a],
+            Some(2),
+        )],
+        &[],
+        &resolver,
+        &state.config,
+        &[],
+    );
+    let merged = state.merge_inventory_snapshot(folded);
+
+    assert_eq!(
+        merged.len(),
+        1,
+        "route-keyed siblings must not survive beside the serial card: {merged:#?}"
+    );
+    assert_eq!(merged[0].config_key, "serial:2412lz51uzh8");
+    assert!(merged[0].online);
+}
+
 #[test]
 fn a_route_shared_by_two_online_twins_is_never_adopted() {
     // #482 corollary: `route_key` for a Direct route strips the device's own
