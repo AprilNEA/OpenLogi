@@ -7,7 +7,6 @@ pub(crate) mod contribute;
 mod output;
 pub(crate) mod record_case;
 pub(crate) mod record_profile;
-mod target_selection;
 pub(crate) mod verify;
 
 /// Commands that create or inspect mock-device fixtures.

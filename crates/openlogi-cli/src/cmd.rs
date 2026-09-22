@@ -6,14 +6,19 @@ use clap::Subcommand;
 pub mod assets;
 pub mod backlight;
 pub mod camera;
+pub mod control;
 pub mod diag;
 pub mod fixture;
 pub mod light;
 pub mod list;
 pub mod snapshot;
+mod target_selection;
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Query or change mouse settings through the running agent; JSON output.
+    #[command(subcommand)]
+    Control(control::ControlCmd),
     /// List connected Logitech HID++ devices.
     List(list::ListArgs),
     /// Read or persistently set the keyboard backlight (HID++ 0x1982).
@@ -43,6 +48,7 @@ impl Command {
     /// other subcommand either succeeds or fails outright.
     pub async fn run(self) -> Result<ExitCode> {
         match self {
+            Self::Control(cmd) => control::run(cmd).await?,
             Self::List(args) => return list::run(args).await,
             Self::Backlight(args) => backlight::run(args).await?,
             // Camera capture is blocking AVFoundation — no need for the async runtime.
