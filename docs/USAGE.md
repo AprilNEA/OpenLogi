@@ -22,6 +22,9 @@ Running `openlogi` with no subcommand defaults to `list`. Set
 to direct HID access, launches an agent, or edits saved profiles. The agent owns
 device access and the platform permissions it needs.
 
+These commands require protocol 32. Update the agent and CLI together; the
+official 0.8.6 agent uses protocol 31 and is rejected by the compatibility check.
+
 ```sh
 openlogi control devices
 openlogi control dpi --device "MX Master 3S"
@@ -49,14 +52,21 @@ Without a write option, `dpi` and `smartshift` only read and return
 capabilities. SmartShift reports wheel mode, automatic disengage threshold, and
 tunable torque when supported. `--mode` accepts `free` or `ratchet`;
 `--threshold` accepts 1–255, where 255 means permanent ratchet. Omitted
-SmartShift fields, including torque, retain their existing values.
+SmartShift fields, including torque, use the firmware's leave-unchanged values.
+The agent receives a partial edit, so the command cannot resend stale values for
+fields another client changed after the initial read. Verification compares only
+the explicitly requested fields. The `before` value is an earlier observation,
+not a locked snapshot; other clients and saved profiles can still change settings.
 
 Writes validate supported DPI, issue one request, then read back the setting.
 Only a matching read-back returns `written: true`, `before`, `current`, and
 `persistence: "temporary"`. Saved profiles or a reconnect can replace these
-temporary settings. A timeout, disconnect, or mismatched read-back fails without
-an automatic retry; a write may already have taken effect. Query the setting
-before deciding whether to retry.
+temporary settings. An initial-read transport failure reports that this command
+did not attempt a write. A timeout or disconnect during a write or its verification
+reports an uncertain outcome; a write may already have taken effect. A mismatched
+read-back also fails. The CLI does not retry writes automatically, and the partial
+SmartShift device operation sends at most one write. Query the setting before
+deciding whether to retry.
 
 ## Device assets
 

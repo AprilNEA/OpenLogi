@@ -6,7 +6,9 @@ use std::num::NonZeroU16;
 use anyhow::{Result, anyhow, bail};
 use clap::{Args, Subcommand, ValueEnum};
 use openlogi_core::device::{BatteryInfo, Capabilities, DeviceInventory};
-use openlogi_core::hid::{DeviceRoute, Dpi, SmartShiftAutoDisengage, SmartShiftMode};
+use openlogi_core::hid::{
+    DeviceRoute, Dpi, SmartShiftAutoDisengage, SmartShiftChange, SmartShiftMode,
+};
 use openlogi_ipc::{AgentClient, InventoryHealth};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -116,7 +118,11 @@ fn selected(inventory: &[DeviceInventory], query: &str) -> Result<Device> {
     Ok(device)
 }
 
-fn rpc_failure(failure: agent::CallFailure) -> anyhow::Error {
+fn read_failure(failure: agent::CallFailure) -> anyhow::Error {
+    anyhow!("agent read failed ({failure:?}); this command did not attempt a write")
+}
+
+fn write_failure(failure: agent::CallFailure) -> anyhow::Error {
     anyhow!(
         "agent request failed ({failure:?}); no retry was attempted; a started write may have taken effect"
     )
@@ -151,7 +157,7 @@ async fn execute(client: &AgentClient, command: ControlCmd) -> Result<Value> {
             let device = selected(&snapshot.inventory, &args.target.device)?;
             let before = agent::call(client.read_dpi(context::current(), device.route.clone()))
                 .await
-                .map_err(rpc_failure)??;
+                .map_err(read_failure)??;
             let Some(value) = args.set else {
                 return Ok(
                     json!({"schema_version":1,"device":device.id,"written":false,"current":before}),
@@ -163,10 +169,10 @@ async fn execute(client: &AgentClient, command: ControlCmd) -> Result<Value> {
             }
             agent::call(client.set_dpi(context::current(), device.route.clone(), requested))
                 .await
-                .map_err(rpc_failure)??;
+                .map_err(write_failure)??;
             let after = agent::call(client.read_dpi(context::current(), device.route))
                 .await
-                .map_err(rpc_failure)??;
+                .map_err(write_failure)??;
             if after.current != requested {
                 bail!("DPI write was acknowledged but read-back differs; no retry was attempted");
             }
@@ -179,29 +185,27 @@ async fn execute(client: &AgentClient, command: ControlCmd) -> Result<Value> {
             let before =
                 agent::call(client.read_smartshift(context::current(), device.route.clone()))
                     .await
-                    .map_err(rpc_failure)??;
-            let mut requested = before;
-            if let Some(mode) = args.mode {
-                requested.mode = match mode {
+                    .map_err(read_failure)??;
+            let requested = SmartShiftChange {
+                mode: args.mode.map(|mode| match mode {
                     Mode::Free => SmartShiftMode::Free,
                     Mode::Ratchet => SmartShiftMode::Ratchet,
-                };
-            }
-            if let Some(threshold) = args.threshold {
-                requested.auto_disengage = SmartShiftAutoDisengage::try_from(threshold)?;
-            }
+                }),
+                auto_disengage: args
+                    .threshold
+                    .map(SmartShiftAutoDisengage::try_from)
+                    .transpose()?,
+            };
             if args.mode.is_none() && args.threshold.is_none() {
                 return Ok(
                     json!({"schema_version":1,"device":device.id,"written":false,"current":before}),
                 );
             }
-            agent::call(client.set_smartshift(context::current(), device.route.clone(), requested))
-                .await
-                .map_err(rpc_failure)??;
-            let after = agent::call(client.read_smartshift(context::current(), device.route))
-                .await
-                .map_err(rpc_failure)??;
-            if after != requested {
+            let after =
+                agent::call(client.update_smartshift(context::current(), device.route, requested))
+                    .await
+                    .map_err(write_failure)??;
+            if !requested.matches(after) {
                 bail!(
                     "SmartShift write was acknowledged but read-back differs; no retry was attempted"
                 );

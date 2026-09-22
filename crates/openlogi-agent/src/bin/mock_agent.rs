@@ -797,6 +797,19 @@ impl Agent for MockAgent {
         Ok(())
     }
 
+    async fn update_smartshift(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        change: openlogi_core::hid::SmartShiftChange,
+    ) -> Result<SmartShiftStatus, WriteError> {
+        let mut state = self.state.lock().await;
+        let settings = state.settings_for_mut(&route)?;
+        let status = profile_value_mut(&mut settings.smartshift, &route, 0x2110)?;
+        change.apply_to(status);
+        Ok(*status)
+    }
+
     async fn read_dpi(self, _: Context, route: DeviceRoute) -> Result<DpiInfo, WriteError> {
         let state = self.state.lock().await;
         profile_value(&state.settings_for(&route)?.dpi, &route, 0x2201).cloned()

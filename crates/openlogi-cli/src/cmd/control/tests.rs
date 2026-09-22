@@ -32,18 +32,24 @@ fn inventory() -> Vec<DeviceInventory> {
     }]
 }
 
+#[derive(Clone, Copy)]
+enum TransportFailure {
+    None,
+    Read,
+    Write,
+}
+
 struct DeviceState {
     dpi: DpiInfo,
     smartshift: SmartShiftStatus,
     writes: usize,
     apply: bool,
     reject: bool,
+    change_after_read: bool,
+    transport_failure: TransportFailure,
 }
-fn test_agent(
-    inventory: Vec<DeviceInventory>,
-    health: InventoryHealth,
-) -> (AgentClient, Arc<Mutex<DeviceState>>) {
-    let snapshot = AgentSnapshot {
+fn snapshot(inventory: Vec<DeviceInventory>, health: InventoryHealth) -> AgentSnapshot {
+    AgentSnapshot {
         status: AgentStatus {
             accessibility_granted: false,
             hook_installed: false,
@@ -59,7 +65,14 @@ fn test_agent(
         camera_active: false,
         pairing: None,
         foreground: ForegroundApps::default(),
-    };
+    }
+}
+
+fn test_agent(
+    inventory: Vec<DeviceInventory>,
+    health: InventoryHealth,
+) -> (AgentClient, Arc<Mutex<DeviceState>>) {
+    let snapshot = snapshot(inventory, health);
     let state = Arc::new(Mutex::new(DeviceState {
         dpi: DpiInfo {
             current: Dpi::new(800),
@@ -73,17 +86,45 @@ fn test_agent(
         writes: 0,
         apply: true,
         reject: false,
+        change_after_read: false,
+        transport_failure: TransportFailure::None,
     }));
     let shared = state.clone();
     let (client, server) = tarpc::transport::channel::unbounded();
     let serve = tarpc::server::serve(move |_: tarpc::context::Context, request: AgentRequest| {
+        {
+            let state = shared.lock().unwrap();
+            let fails = (matches!(state.transport_failure, TransportFailure::Read)
+                && matches!(
+                    request,
+                    AgentRequest::ReadDpi { .. } | AgentRequest::ReadSmartshift { .. }
+                ))
+                || (matches!(state.transport_failure, TransportFailure::Write)
+                    && matches!(
+                        request,
+                        AgentRequest::SetDpi { .. } | AgentRequest::UpdateSmartshift { .. }
+                    ));
+            if fails {
+                return std::future::ready(Err(tarpc::ServerError::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "scripted RPC failure".into(),
+                )));
+            }
+        }
         let response = match request {
             AgentRequest::Snapshot {} => AgentResponse::Snapshot(snapshot.clone()),
             AgentRequest::ReadDpi { .. } => {
                 AgentResponse::ReadDpi(Ok(shared.lock().unwrap().dpi.clone()))
             }
             AgentRequest::ReadSmartshift { .. } => {
-                AgentResponse::ReadSmartshift(Ok(shared.lock().unwrap().smartshift))
+                let mut s = shared.lock().unwrap();
+                let before = s.smartshift;
+                if s.change_after_read {
+                    s.smartshift.auto_disengage = SmartShiftAutoDisengage::try_from(60).unwrap();
+                    s.smartshift.tunable_torque = Some(TunableTorque::try_from(80).unwrap());
+                    s.change_after_read = false;
+                }
+                AgentResponse::ReadSmartshift(Ok(before))
             }
             AgentRequest::SetDpi { dpi, .. } => {
                 let mut s = shared.lock().unwrap();
@@ -99,13 +140,13 @@ fn test_agent(
                     AgentResponse::SetDpi(Ok(()))
                 }
             }
-            AgentRequest::SetSmartshift { status, .. } => {
+            AgentRequest::UpdateSmartshift { change, .. } => {
                 let mut s = shared.lock().unwrap();
                 s.writes += 1;
                 if s.apply {
-                    s.smartshift = status;
+                    change.apply_to(&mut s.smartshift);
                 }
-                AgentResponse::SetSmartshift(Ok(()))
+                AgentResponse::UpdateSmartshift(Ok(s.smartshift))
             }
             _ => panic!("unexpected RPC: {request:?}"),
         };
@@ -274,4 +315,77 @@ async fn smartshift_preserves_torque_and_unspecified_threshold() {
     assert_eq!(after.auto_disengage, before.auto_disengage);
     assert_eq!(after.tunable_torque, before.tunable_torque);
     assert_eq!(state.lock().unwrap().writes, 1);
+}
+
+#[tokio::test]
+async fn smartshift_does_not_overwrite_a_concurrent_change_to_omitted_fields() {
+    let (client, state) = test_agent(inventory(), InventoryHealth::Ready);
+    state.lock().unwrap().change_after_read = true;
+    execute(
+        &client,
+        ControlCmd::Smartshift(SmartshiftArgs {
+            target: TargetArgs {
+                device: "Test Mouse".into(),
+            },
+            mode: Some(Mode::Free),
+            threshold: None,
+        }),
+    )
+    .await
+    .unwrap();
+    let s = state.lock().unwrap();
+    assert_eq!(s.smartshift.mode, SmartShiftMode::Free);
+    assert_eq!(
+        s.smartshift.auto_disengage,
+        SmartShiftAutoDisengage::try_from(60).unwrap()
+    );
+    assert_eq!(
+        s.smartshift.tunable_torque,
+        Some(TunableTorque::try_from(80).unwrap())
+    );
+    assert_eq!(s.writes, 1);
+}
+
+#[test]
+fn transport_errors_distinguish_unattempted_from_uncertain_writes() {
+    for failure in [
+        agent::CallFailure::TimedOut,
+        agent::CallFailure::Disconnected,
+    ] {
+        let read = read_failure(failure).to_string();
+        assert!(read.contains("did not attempt a write"));
+        assert!(!read.contains("may have taken effect"));
+        assert!(
+            write_failure(failure)
+                .to_string()
+                .contains("may have taken effect")
+        );
+    }
+}
+
+#[tokio::test]
+async fn failed_initial_reads_never_claim_an_attempted_write() {
+    for command in [
+        dpi(Some(1600)),
+        ControlCmd::Smartshift(SmartshiftArgs {
+            target: TargetArgs {
+                device: "Test Mouse".into(),
+            },
+            mode: Some(Mode::Free),
+            threshold: None,
+        }),
+    ] {
+        let (client, state) = test_agent(inventory(), InventoryHealth::Ready);
+        state.lock().unwrap().transport_failure = TransportFailure::Read;
+        let error = execute(&client, command).await.unwrap_err().to_string();
+        assert!(error.contains("did not attempt a write"), "{error}");
+        assert_eq!(state.lock().unwrap().writes, 0);
+    }
+    let (client, state) = test_agent(inventory(), InventoryHealth::Ready);
+    state.lock().unwrap().transport_failure = TransportFailure::Write;
+    let error = execute(&client, dpi(Some(1600)))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("may have taken effect"), "{error}");
 }
