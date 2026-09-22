@@ -43,6 +43,14 @@ pub const FEATURE_ID: u16 = 0x1b04;
 /// panel is [`HAPTIC_PANEL_CID`], not this CID.
 pub const GESTURE_BUTTON_CID: u16 = 0x00c3;
 
+/// Control ID of the dedicated gesture button on multi-host mice (confirmed
+/// on the M720 Triathlon: `openlogi diag controls` reports this CID —
+/// `divertable, raw-xy` — instead of [`GESTURE_BUTTON_CID`], which the device
+/// does not expose at all). [`control_ids::MULTIPLATFORM_GESTURE_BUTTON`] is
+/// the typed source of truth; this button is otherwise identical to
+/// [`GESTURE_BUTTON_CID`]'s.
+pub const GESTURE_BUTTON_MULTIPLATFORM_CID: u16 = control_ids::MULTIPLATFORM_GESTURE_BUTTON.0;
+
 /// Control ID of the MX Master 4 Haptic Sense Panel — the touch-sensitive
 /// thumb rest that replaces the dedicated gesture button on that model.
 ///
