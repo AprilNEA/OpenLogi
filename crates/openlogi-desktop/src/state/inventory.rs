@@ -185,7 +185,7 @@ impl AppState {
         &mut self,
         new_list: Vec<DeviceRecord>,
     ) -> Vec<DeviceRecord> {
-        let mut by_key = fold_by_inventory_key(new_list);
+        let mut by_key = fold_by_inventory_key(&self.config, new_list);
         let mut adopted = self.adopt_transient_records(&mut by_key);
         let mut merged = Vec::with_capacity(by_key.len().max(self.devices.records.len()));
 

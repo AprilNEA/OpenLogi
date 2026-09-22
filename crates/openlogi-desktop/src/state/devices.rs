@@ -192,15 +192,15 @@ pub(super) fn build_device_list(
                 unit_id,
             );
             let identity = RouteIdentity::from_parts(serial_number.as_deref(), unit_id);
+            let identity_hint = identity.resolve_hint();
             let (config_key, persistent) = config
-                .resolve_device_key(&stable_id, paired.online.then_some(&identity))
+                .resolve_device_key(&stable_id, identity_hint)
                 .map_or_else(
                     || (stable_id.runtime_key(), false),
                     |key| (key.into_string(), true),
                 );
             let canonical_key =
-                canonical_device_key(&stable_id, paired.online.then_some(&identity))
-                    .map(PhysicalDeviceKey::into_string);
+                canonical_device_key(&stable_id, identity_hint).map(PhysicalDeviceKey::into_string);
             let route_key = stable_id.route_key();
 
             let display_name = asset
@@ -356,14 +356,15 @@ fn append_standalone(
             device.unit_id,
         );
         let identity = RouteIdentity::from_parts(device.serial_number.as_deref(), device.unit_id);
+        let identity_hint = identity.resolve_hint();
         let (config_key, persistent) = config
-            .resolve_device_key(&stable_id, device.online.then_some(&identity))
+            .resolve_device_key(&stable_id, identity_hint)
             .map_or_else(
                 || (stable_id.runtime_key(), false),
                 |key| (key.into_string(), true),
             );
-        let canonical_key = canonical_device_key(&stable_id, device.online.then_some(&identity))
-            .map(PhysicalDeviceKey::into_string);
+        let canonical_key =
+            canonical_device_key(&stable_id, identity_hint).map(PhysicalDeviceKey::into_string);
         let route_key = stable_id.route_key();
         let asset = device
             .registry_model_id
@@ -677,9 +678,12 @@ pub(super) fn adopt_transient_record(known: &DeviceRecord, live: DeviceRecord) -
 /// headline case (cable live, receiver asleep), wrong for an already-adopted
 /// but disconnected Bluetooth-direct node beside a live receiver link.
 ///
-/// Between two records of equal liveness the later one in sort order wins, as
-/// it always has.
+/// Between two online records the later one in iteration order wins. Between
+/// two offline records (Easy-Switch sibling slots sharing a serial, #1560),
+/// prefer a route already present in that device's `config.links`, else the
+/// lowest slot number — matching the agent's fold.
 pub(super) fn fold_by_inventory_key(
+    config: &Config,
     list: impl IntoIterator<Item = DeviceRecord>,
 ) -> BTreeMap<String, DeviceRecord> {
     let mut by_key: BTreeMap<String, DeviceRecord> = BTreeMap::new();
@@ -689,13 +693,47 @@ pub(super) fn fold_by_inventory_key(
                 slot.insert(record);
             }
             Entry::Occupied(mut slot) => {
-                if record.online || !slot.get().online {
+                if prefer_folded_record(config, &record, slot.get()) {
                     slot.insert(record);
                 }
             }
         }
     }
     by_key
+}
+
+fn prefer_folded_record(
+    config: &Config,
+    candidate: &DeviceRecord,
+    incumbent: &DeviceRecord,
+) -> bool {
+    match (candidate.online, incumbent.online) {
+        (false, true) => false,
+        // Online candidate wins; both online keeps insertion order ("later wins").
+        (true, _) => true,
+        (false, false) => prefer_offline_record(config, candidate, incumbent),
+    }
+}
+
+fn prefer_offline_record(
+    config: &Config,
+    candidate: &DeviceRecord,
+    incumbent: &DeviceRecord,
+) -> bool {
+    let candidate_linked = route_in_device_links(config, candidate);
+    let incumbent_linked = route_in_device_links(config, incumbent);
+    match (candidate_linked, incumbent_linked) {
+        (true, false) => true,
+        (false, true) => false,
+        _ => candidate.slot < incumbent.slot,
+    }
+}
+
+fn route_in_device_links(config: &Config, record: &DeviceRecord) -> bool {
+    let Some(entry) = config.devices.get(record.config_key.as_str()) else {
+        return false;
+    };
+    entry.links.contains_key(record.route_key.as_str())
 }
 
 /// Order the gallery by physical route. HID enumeration order can change as
