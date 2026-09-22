@@ -179,7 +179,10 @@ pub(super) async fn arm_controls_into(
         // Divert each gesture-mode source; a source not listed stays native
         // (an idle HID++ control must not be captured-and-dropped).
         for &cid in &spec.divert_gesture_sources {
-            if controls.iter().any(|c| c.cid == cid && c.supports_raw_xy()) {
+            if controls
+                .iter()
+                .any(|c| c.cid == cid && c.is_divertable() && c.supports_raw_xy())
+            {
                 arm_reprog_control(&rc, cid, true, &mut armed.reporting).await?;
                 armed.gesture_cids.push(cid);
             }
