@@ -26,7 +26,7 @@
                 "asset": "profile",
                 "field": "receiver_route"
               },
-              "count": 3
+              "count": 4
             }
           ]
         }
@@ -151,6 +151,32 @@
               "location": {
                 "asset": "profile",
                 "field": "raw_hid_route_identity"
+              },
+              "count": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "principal": {
+        "kind": "device",
+        "id": "receiver-gaming-mouse",
+        "route": {
+          "kind": "bolt",
+          "receiver": "bolt-receiver",
+          "slot": 5
+        }
+      },
+      "representations": [
+        {
+          "kind": "device_unit_id",
+          "value": [79, 76, 68, 5],
+          "occurrences": [
+            {
+              "location": {
+                "asset": "profile",
+                "field": "device_unit_id"
               },
               "count": 1
             }

@@ -164,7 +164,7 @@ async fn inventory_projects_mixed_devices_without_unrelated_private_state() {
     )));
     let result = run_script(snapshot, ApiCommand::Devices, vec![]).await;
     let devices = result["data"]["devices"].as_array().unwrap();
-    assert_eq!(devices.len(), 5);
+    assert_eq!(devices.len(), 6);
     assert_eq!(
         devices[0]["battery"],
         json!({
@@ -174,12 +174,16 @@ async fn inventory_projects_mixed_devices_without_unrelated_private_state() {
     assert_eq!(devices[0]["capabilities"]["pointer"], true);
     assert_eq!(devices[1]["online"], false);
     assert_eq!(devices[1]["battery"], Value::Null);
-    assert_eq!(devices[3]["id"], "direct 046d:b020");
-    assert_eq!(devices[3]["battery"]["percentage"], 55);
-    assert_eq!(devices[4]["kind"], "light");
-    assert_eq!(devices[4]["battery"], Value::Null);
+    // The canonical fixture's gaming mouse is appended to the Bolt receiver's
+    // paired list, so it projects ahead of the standalone devices and shifts
+    // each of them one place.
+    assert_eq!(devices[3]["id"], "slot 5 on receiver OL-BOLT-UID-0001");
+    assert_eq!(devices[4]["id"], "direct 046d:b020");
+    assert_eq!(devices[4]["battery"]["percentage"], 55);
+    assert_eq!(devices[5]["kind"], "light");
+    assert_eq!(devices[5]["battery"], Value::Null);
     assert_eq!(
-        devices[4]["light_capabilities"]["temperature"],
+        devices[5]["light_capabilities"]["temperature"],
         json!({
             "min": 2700, "max": 6500, "step": 100, "unit": "kelvin",
         })

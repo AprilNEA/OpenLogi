@@ -64,6 +64,10 @@ pub(super) fn buttons_image_for(
 ) -> Option<String> {
     manifest
         .resource_for_variant(base_model_id, ext, "device_buttons_image")
+        // Gaming depots ship the same side view under `device_side` and no
+        // `device_buttons_image` at all; without this a G-series mouse falls
+        // back to the hero render, whose markers live in a different entry.
+        .or_else(|| manifest.resource_for_variant(base_model_id, ext, "device_side"))
         .map(str::to_string)
 }
 
