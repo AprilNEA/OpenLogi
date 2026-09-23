@@ -68,7 +68,7 @@ pub const GESTURE_CONTACT_SETTLE: std::time::Duration = std::time::Duration::fro
 /// Minimum time a gesture button must be held before its travel can commit to a
 /// swipe. Distinguishes a deliberate hold-and-swipe from a quick click whose
 /// cursor happened to be moving. Shared by both gesture paths (the HID++ thumb
-/// pad and the OS-hook Middle/Back/Forward).
+/// pad and the OS-hook Back/Forward buttons).
 pub const GESTURE_HOLD_FOR_SWIPE: std::time::Duration = std::time::Duration::from_millis(160);
 
 /// Classify the *running* raw-XY travel of a held gesture button into a
@@ -146,8 +146,8 @@ pub fn detect_swipe_with_thresholds(
 }
 
 /// The mid-swipe state machine shared by both gesture-capture paths: the HID++
-/// dedicated gesture button (`openlogi-hid`'s `0x1b04` raw-XY divert) and the OS-hook
-/// Middle/Back/Forward buttons (`openlogi-agent-core`'s CGEventTap). A gesture
+/// HID++ gesture sources (`openlogi-hid`'s `0x1b04` raw-XY divert) and the
+/// OS-hook Back/Forward buttons (`openlogi-agent-core`'s CGEventTap). A gesture
 /// button's hold accumulates travel; the instant the dominant axis commits a
 /// direction — after the button has been held [`GestureSensitivity::hold_duration`]
 /// (or immediately if travel exceeds the high-velocity flick threshold) —

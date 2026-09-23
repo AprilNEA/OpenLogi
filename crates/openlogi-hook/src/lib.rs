@@ -32,6 +32,10 @@ use thiserror::Error;
 
 pub use openlogi_core::app::ForegroundApp;
 pub use openlogi_core::binding::ButtonId;
+/// Which modifier keys were held when a key event fired — the same type a
+/// [`KeyTrigger`](openlogi_core::config::KeyTrigger) is written with, so an
+/// event's modifiers compare against a binding's without a conversion.
+pub use openlogi_core::config::KeyModifiers;
 pub use openlogi_core::scroll::ScrollDelta;
 
 /// Logitech's USB/Bluetooth vendor id (`0x046D`), widened from
@@ -102,22 +106,6 @@ pub fn source_is_remappable(device: Option<&EventDevice>) -> bool {
         Some(d) => d.is_logitech(),
         None => false,
     }
-}
-
-/// Which modifier keys were held when a key event fired. Mirrors the
-/// detectable macOS modifier flags. Note `Fn` is deliberately absent — it is
-/// firmware-internal and never reported on non-function-row keys (see the
-/// function-key-remapper spec, Appendix A).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "four independent modifier flags from OS event bits"
-)]
-pub struct KeyModifiers {
-    pub shift: bool,
-    pub control: bool,
-    pub option: bool,
-    pub command: bool,
 }
 
 /// A keyboard event observed by the hook.
@@ -536,6 +524,23 @@ impl Hook {
 #[must_use]
 pub fn frontmost_application() -> Option<ForegroundApp> {
     Backend::frontmost_app()
+}
+
+/// Return the Safari process captured by the latest macOS foreground-app
+/// observation without querying AppKit on the caller's thread.
+///
+/// This is a nonblocking atomic snapshot for input callbacks. It returns
+/// `None` when Safari is not frontmost and on non-macOS platforms.
+#[must_use]
+pub fn frontmost_safari_pid() -> Option<i32> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::frontmost_safari_pid()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
 }
 
 /// Failure to install or operate a native foreground-application observer.

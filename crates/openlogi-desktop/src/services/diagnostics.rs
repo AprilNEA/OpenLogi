@@ -12,7 +12,7 @@ use openlogi_core::hid::DeviceRoute;
 use openlogi_ipc::{InventoryHealth, PROTOCOL_VERSION};
 
 use crate::services::assets::AssetResolver;
-use crate::state::{AppState, DpiStatus};
+use crate::state::{AppState, DpiLoad};
 
 /// Build the report from the current app state, defaulting to an empty report before the entity is installed.
 #[must_use]
@@ -127,7 +127,7 @@ fn collect_devices(state: &AppState) -> Vec<DeviceDiag> {
                 online: record.online,
                 battery: record.battery.clone(),
                 capabilities: record.capabilities,
-                dpi: dpi_summary(state.dpi_load_for(&record.device_key()).cloned()),
+                dpi: dpi_summary(state.dpi_load_for(&record.device_key())),
                 // Diagnostics are model-level by contract. The runtime config
                 // key may contain a receiver UID or raw-device serial.
                 config_key: record.model_key.clone(),
@@ -152,7 +152,7 @@ fn find_paired<'a>(
     inventories.iter().flat_map(|inv| &inv.paired).find(|p| {
         p.model_info
             .as_ref()
-            .is_some_and(|m| m.config_key() == model_key)
+            .is_some_and(|m| m.model_key() == model_key)
     })
 }
 
@@ -174,19 +174,19 @@ fn connection_for(
     }
 }
 
-fn dpi_summary(status: Option<DpiStatus>) -> Option<String> {
-    match status? {
-        DpiStatus::Unknown => None,
-        DpiStatus::Loading => Some("querying…".to_string()),
-        DpiStatus::Ready(info) => Some(format!(
+fn dpi_summary(load: DpiLoad) -> Option<String> {
+    match load {
+        DpiLoad::Unknown => None,
+        DpiLoad::Loading => Some("querying…".to_string()),
+        DpiLoad::Ready(info) => Some(format!(
             "{} dpi (range {}–{}, {} steps)",
             info.current,
             info.capabilities.min(),
             info.capabilities.max(),
             info.capabilities.values().len(),
         )),
-        DpiStatus::Unsupported(_) => Some("unsupported".to_string()),
-        DpiStatus::Failed(_) => Some("read failed".to_string()),
+        DpiLoad::Unsupported(_) => Some("unsupported".to_string()),
+        DpiLoad::Failed(_) => Some("read failed".to_string()),
     }
 }
 

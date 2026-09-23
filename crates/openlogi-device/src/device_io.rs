@@ -4,7 +4,24 @@
 //! may open a HID node or send a request. It contains no host integration of
 //! its own, so the device layer remains portable and testable.
 
+use thiserror::Error;
 use tokio::sync::watch;
+
+use crate::backend::BackendError;
+
+/// The gate's refusal while host device I/O is suspended.
+///
+/// Only [`DeviceIoGate::ensure_allowed`] constructs one, so the check and its
+/// wording live there; callers convert it into their own error with `?`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("host device I/O is suspended")]
+pub struct IoSuspended(());
+
+impl From<IoSuspended> for BackendError {
+    fn from(error: IoSuspended) -> Self {
+        Self::Backend(error.to_string())
+    }
+}
 
 /// Non-blocking producer owned by the host lifecycle observer.
 #[derive(Clone)]
@@ -68,6 +85,19 @@ impl DeviceIoGate {
         *self.receiver.borrow() == DeviceIoState::Allowed
     }
 
+    /// Refuse an open or a request while host device I/O is suspended.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IoSuspended`] while the gate is closed.
+    pub fn ensure_allowed(&self) -> Result<(), IoSuspended> {
+        if self.allows_io() {
+            Ok(())
+        } else {
+            Err(IoSuspended(()))
+        }
+    }
+
     /// Wait for the next distinct gate transition.
     ///
     /// Returns the new allow-state, or `None` if the lifecycle producer was
@@ -93,7 +123,7 @@ impl DeviceIoGate {
 mod tests {
     use std::time::Duration;
 
-    use super::device_io_channel;
+    use super::{BackendError, device_io_channel};
 
     #[tokio::test]
     async fn latest_transition_is_retained_and_duplicates_coalesce() {
@@ -113,5 +143,25 @@ mod tests {
         assert!(signal.resume());
         assert!(gate.wait_until_allowed().await);
         assert!(gate.allows_io());
+    }
+
+    #[test]
+    fn a_closed_gate_refuses_until_it_reopens() {
+        let (signal, gate) = device_io_channel();
+        gate.ensure_allowed()
+            .expect("an open gate allows device I/O");
+
+        assert!(signal.suspend());
+        let refusal = gate
+            .ensure_allowed()
+            .expect_err("a suspended gate must refuse device I/O");
+        assert!(matches!(
+            BackendError::from(refusal),
+            BackendError::Backend(message) if message == refusal.to_string()
+        ));
+
+        assert!(signal.resume());
+        gate.ensure_allowed()
+            .expect("a resumed gate allows device I/O again");
     }
 }

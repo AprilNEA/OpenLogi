@@ -1,0 +1,18 @@
+# Owner: openlogi_agent_core::watchers::shutdown::WatcherHandle::spawn — the
+# thread shell of a HID++ watcher manager: a named worker thread that owns its
+# runtime, drops it before acknowledging, and reports a worker that never
+# started as unclean.
+id: agent-watcher-shell-owner
+language: rust
+severity: error
+message: A watcher manager starts through WatcherHandle::spawn (or openlogi_core::worker::spawn for a watcher with no stop handshake); do not build a runtime and drive it by hand here.
+note: |
+  The gesture, keyboard and host-switch watchers each hand-rolled the same
+  thread::spawn + worker::runtime() shell, unnamed, and disagreed on what a
+  runtime-build failure reports. See "Single source of truth" in AGENTS.md.
+files:
+  - crates/openlogi-agent-core/src/watchers/**/*.rs
+rule:
+  any:
+    - pattern: openlogi_core::worker::runtime()
+    - pattern: worker::runtime()

@@ -1,0 +1,27 @@
+# Owner: openlogi_agent_core::watchers::retry — how long a HID++ session
+# manager waits before trying again (RETRY_DELAY) and the deadline wait its
+# select loop parks on (wait_for_deadline).
+id: agent-watcher-retry-owner
+language: rust
+severity: error
+message: Retry pacing for the HID++ session managers is watchers::retry's (RETRY_DELAY, wait_for_deadline); import it instead of defining another here.
+note: |
+  The gesture, keyboard and host-switch managers each defined the same
+  one-second RETRY_DELAY and the same wait_for_deadline. See "Single source of
+  truth" in AGENTS.md.
+files:
+  - crates/openlogi-agent-core/src/watchers/**/*.rs
+ignores:
+  - crates/openlogi-agent-core/src/watchers/retry.rs
+rule:
+  any:
+    - all:
+        - kind: const_item
+        - has:
+            field: name
+            regex: '^RETRY_DELAY$'
+    - all:
+        - kind: function_item
+        - has:
+            field: name
+            regex: '^wait_for_deadline$'

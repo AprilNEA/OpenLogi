@@ -20,7 +20,7 @@ fn hover_or_selection_highlights_a_key() {
 
 #[test]
 fn function_row_covers_esc_through_f19() {
-    let labels: Vec<&str> = FUNCTION_KEYS.iter().map(|(label, _)| *label).collect();
+    let labels: Vec<&str> = FUNCTION_KEYS.iter().map(|key| key.label()).collect();
 
     assert_eq!(FUNCTION_KEYS.len(), 20);
     assert_eq!(labels.first(), Some(&"Esc"));

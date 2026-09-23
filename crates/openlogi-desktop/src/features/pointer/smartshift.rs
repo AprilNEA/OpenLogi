@@ -14,26 +14,24 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Entity, InteractiveElement, IntoElement,
-    MouseButton, MouseDownEvent, ParentElement, Render, SharedString, Styled, Subscription, Window,
-    div, px, rgb,
+    AnyElement, App, Context, IntoElement, ParentElement, Render, SharedString, Styled,
+    Subscription, Window, div, px, rgb,
 };
 use gpui_component::{
-    Disableable as _, Selectable as _,
-    button::Button,
-    h_flex,
-    slider::{Slider, SliderEvent, SliderState},
-    v_flex,
+    Disableable as _, Selectable as _, button::Button, h_flex, slider::Slider, v_flex,
 };
-use openlogi_core::config::{
-    GestureAxisBias, GestureSensitivity, SMARTSHIFT_AUTO_DISENGAGE_DEFAULT,
-    SMARTSHIFT_MIN_AUTO_DISENGAGE, ThumbwheelSensitivity,
+use openlogi_core::config::{GestureAxisBias, GestureSensitivity, 
+    SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SMARTSHIFT_MIN_AUTO_DISENGAGE, ThumbwheelSensitivity,
 };
 use openlogi_core::hid::{
     SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold,
 };
 
-use crate::state::{AppState, DeviceKey, SmartShiftLoad, SmartShiftWriteStatus, StateEvent};
+use crate::state::{
+    AppState, DeviceKey, DeviceRecord, SmartShiftLoad, SmartShiftWriteStatus, StateEvent,
+    StateEvents,
+};
+use crate::ui::commit_slider::{CommitSlider, SliderRange};
 use crate::ui::components::Toggle;
 use crate::ui::section::section_label;
 use crate::ui::status::{retry_line, status_line};
@@ -55,211 +53,95 @@ const DEFAULT_THRESHOLD: SmartShiftThreshold = SMARTSHIFT_AUTO_DISENGAGE_DEFAULT
 
 pub struct SmartShiftPanel {
     /// The auto-disengage threshold slider. Always constructed (range is
-    /// builder-only); only *rendered* in ratchet, non-permanent mode.
-    threshold: Entity<SliderState>,
-    /// Last threshold pushed into the slider from the device, so toggling
-    /// "permanent" off restores it and an external change re-seats the thumb —
-    /// but an in-progress drag (tracked by `pending_threshold`) doesn't.
-    last_threshold: SmartShiftThreshold,
-    /// The live drag value, shown in the numeric label until release commits.
-    pending_threshold: Option<SmartShiftThreshold>,
-    _threshold_sub: Subscription,
+    /// builder-only); only *rendered* in ratchet, non-permanent mode. The
+    /// value it was last seated on is what toggling "permanent" off restores.
+    threshold: CommitSlider<SmartShiftThreshold>,
     /// The per-device thumb-wheel sensitivity slider (device override; devices
     /// without one follow the app-wide default from Settings → General).
-    wheel_sensitivity: Entity<SliderState>,
-    /// Last committed sensitivity, to re-seat the thumb on a device switch.
-    last_wheel_sensitivity: ThumbwheelSensitivity,
-    /// Live drag value shown in the numeric label until release commits.
-    pending_wheel_sensitivity: Option<ThumbwheelSensitivity>,
-    _wheel_sensitivity_sub: Subscription,
-    /// The per-device gesture sensitivity slider (device override; devices
-    /// without one follow the app-wide default from Settings → General).
-    gesture_sensitivity: Entity<SliderState>,
-    /// Last committed gesture sensitivity, to re-seat the thumb on a device switch.
-    last_gesture_sensitivity: GestureSensitivity,
-    /// Live drag value shown in the numeric label until release commits.
-    pending_gesture_sensitivity: Option<GestureSensitivity>,
-    _gesture_sensitivity_sub: Subscription,
-    /// The per-device gesture axis bias slider (device override; devices
-    /// without one follow the app-wide default from Settings → General).
-    gesture_bias: Entity<SliderState>,
-    /// Last committed gesture axis bias, to re-seat the thumb on a device switch.
-    last_gesture_bias: GestureAxisBias,
-    /// Live drag value shown in the numeric label until release commits.
-    pending_gesture_bias: Option<GestureAxisBias>,
-    _gesture_bias_sub: Subscription,
+    wheel_sensitivity: CommitSlider<ThumbwheelSensitivity>,
+    gesture_sensitivity: CommitSlider<GestureSensitivity>,
+    gesture_axis_bias: CommitSlider<GestureAxisBias>,
     _state_obs: Subscription,
 }
 
 impl SmartShiftPanel {
-    #[expect(
-        clippy::too_many_lines,
-        reason = "wires threshold, wheel sensitivity, gesture sensitivity, and gesture axis bias slider state subscriptions"
-    )]
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let threshold = cx.new(|_| {
-            SliderState::new()
-                .max(f32::from(THRESHOLD_MAX))
-                .min(f32::from(THRESHOLD_MIN))
-                .step(1.)
-                .default_value(f32::from(DEFAULT_THRESHOLD))
-        });
         // Drive the device only on release (a drag would stream a write burst);
-        // Change just updates the numeric label.
-        let threshold_sub =
-            cx.subscribe(
-                &threshold,
-                |panel, _slider, event: &SliderEvent, cx| match event {
-                    SliderEvent::Change(value) => {
-                        panel.pending_threshold = Some(threshold_from_slider(value.start()));
-                        cx.notify();
-                    }
-                    SliderEvent::Release(value) => {
-                        let threshold = threshold_from_slider(value.start());
-                        panel.pending_threshold = None;
-                        panel.last_threshold = threshold;
-                        let status =
-                            AppState::try_read(cx).and_then(AppState::current_smartshift_ready);
-                        if let Some(status) = status {
-                            AppState::update_smartshift(
-                                cx,
-                                SmartShiftStatus {
-                                    mode: SmartShiftMode::Ratchet,
-                                    auto_disengage: SmartShiftAutoDisengage::Threshold(threshold),
-                                    ..status
-                                },
-                            );
-                        }
-                        cx.notify();
-                    }
-                },
-            );
-        let wheel_sensitivity = cx.new(|_| {
-            SliderState::new()
-                .min(f32::from(ThumbwheelSensitivity::MIN))
-                .max(f32::from(ThumbwheelSensitivity::MAX))
-                .step(1.)
-                .default_value(f32::from(ThumbwheelSensitivity::DEFAULT))
-        });
-        let wheel_sensitivity_sub = cx.subscribe(
-            &wheel_sensitivity,
-            |panel, _slider, event: &SliderEvent, cx| match event {
-                SliderEvent::Change(value) => {
-                    panel.pending_wheel_sensitivity =
-                        Some(ThumbwheelSensitivity::from_rounded(value.start()));
-                    cx.notify();
-                }
-                SliderEvent::Release(value) => {
-                    let sensitivity = ThumbwheelSensitivity::from_rounded(value.start());
-                    panel.pending_wheel_sensitivity = None;
-                    panel.last_wheel_sensitivity = sensitivity;
-                    AppState::update(cx, |state, cx| {
-                        let record = state
-                            .current_record()
-                            .map(|record| (record.config_key.clone(), record.device_key()));
-                        if let Some((config_key, event_key)) = record {
-                            state.set_device_thumbwheel_sensitivity(&config_key, sensitivity);
-                            cx.emit(StateEvent::DeviceConfigChanged(event_key));
-                        }
-                    });
-                    cx.notify();
+        // dragging just updates the numeric label.
+        let threshold = CommitSlider::new(
+            SliderRange::new(THRESHOLD_MIN, THRESHOLD_MAX),
+            DEFAULT_THRESHOLD,
+            cx,
+            |_, threshold, cx| {
+                let status = AppState::try_read(cx).and_then(AppState::current_smartshift_ready);
+                if let Some(status) = status {
+                    AppState::update_smartshift(
+                        cx,
+                        SmartShiftStatus {
+                            mode: SmartShiftMode::Ratchet,
+                            auto_disengage: SmartShiftAutoDisengage::Threshold(threshold),
+                            ..status
+                        },
+                    );
                 }
             },
         );
-        let gesture_sensitivity = cx.new(|_| {
-            SliderState::new()
-                .min(f32::from(GestureSensitivity::MIN))
-                .max(f32::from(GestureSensitivity::MAX))
-                .step(1.)
-                .default_value(f32::from(GestureSensitivity::DEFAULT))
-        });
-        let gesture_sensitivity_sub = cx.subscribe(
-            &gesture_sensitivity,
-            |panel, _slider, event: &SliderEvent, cx| match event {
-                SliderEvent::Change(value) => {
-                    panel.pending_gesture_sensitivity =
-                        Some(GestureSensitivity::from_rounded(value.start()));
-                    cx.notify();
-                }
-                SliderEvent::Release(value) => {
-                    let sensitivity = GestureSensitivity::from_rounded(value.start());
-                    panel.pending_gesture_sensitivity = None;
-                    panel.last_gesture_sensitivity = sensitivity;
-                    AppState::update(cx, |state, cx| {
-                        let record = state
-                            .current_record()
-                            .map(|record| (record.config_key.clone(), record.device_key()));
-                        if let Some((config_key, event_key)) = record {
-                            state.set_device_gesture_sensitivity(&config_key, sensitivity);
-                            cx.emit(StateEvent::DeviceConfigChanged(event_key));
-                        }
-                    });
-                    cx.notify();
-                }
+        let wheel_sensitivity = CommitSlider::new(
+            SliderRange::new(ThumbwheelSensitivity::MIN, ThumbwheelSensitivity::MAX),
+            ThumbwheelSensitivity::DEFAULT,
+            cx,
+            |_, sensitivity, cx| {
+                AppState::apply(cx, |state| {
+                    state
+                        .current_record()
+                        .map(DeviceRecord::device_key)
+                        .map_or_else(StateEvents::none, |key| {
+                            state.commit_device_thumbwheel_sensitivity(&key, sensitivity)
+                        })
+                });
             },
         );
-        let gesture_bias = cx.new(|_| {
-            SliderState::new()
-                .min(f32::from(GestureAxisBias::MIN))
-                .max(f32::from(GestureAxisBias::MAX))
-                .step(1.)
-                .default_value(f32::from(GestureAxisBias::DEFAULT))
-        });
-        let gesture_bias_sub = cx.subscribe(
-            &gesture_bias,
-            |panel, _slider, event: &SliderEvent, cx| match event {
-                SliderEvent::Change(value) => {
-                    panel.pending_gesture_bias = Some(GestureAxisBias::from_rounded(value.start()));
-                    cx.notify();
-                }
-                SliderEvent::Release(value) => {
-                    let bias = GestureAxisBias::from_rounded(value.start());
-                    panel.pending_gesture_bias = None;
-                    panel.last_gesture_bias = bias;
-                    AppState::update(cx, |state, cx| {
-                        let record = state
-                            .current_record()
-                            .map(|record| (record.config_key.clone(), record.device_key()));
-                        if let Some((config_key, event_key)) = record {
-                            state.set_device_gesture_axis_bias(&config_key, bias);
-                            cx.emit(StateEvent::DeviceConfigChanged(event_key));
-                        }
-                    });
-                    cx.notify();
-                }
+        let gesture_sensitivity = CommitSlider::new(
+            SliderRange::new(GestureSensitivity::MIN, GestureSensitivity::MAX),
+            GestureSensitivity::DEFAULT,
+            cx,
+            |_, sensitivity, cx| {
+                AppState::apply(cx, |state| {
+                    state
+                        .current_record()
+                        .map(DeviceRecord::device_key)
+                        .map_or_else(StateEvents::none, |key| {
+                            state.commit_device_gesture_sensitivity(&key, sensitivity)
+                        })
+                });
             },
         );
-        let state_obs = cx.subscribe(&AppState::global(cx), |_, _, event: &StateEvent, cx| {
-            let relevant = match event {
-                StateEvent::InventoryChanged | StateEvent::DeviceSelected(_) => true,
-                StateEvent::SmartShiftChanged(key) | StateEvent::DeviceConfigChanged(key) => {
-                    AppState::try_read(cx)
-                        .and_then(AppState::current_record)
-                        .is_some_and(|record| record.device_key() == *key)
-                }
-                _ => false,
-            };
-            if relevant {
-                cx.notify();
-            }
+        let gesture_axis_bias = CommitSlider::new(
+            SliderRange::new(GestureAxisBias::MIN, GestureAxisBias::MAX),
+            GestureAxisBias::DEFAULT,
+            cx,
+            |_, bias, cx| {
+                AppState::apply(cx, |state| {
+                    state
+                        .current_record()
+                        .map(DeviceRecord::device_key)
+                        .map_or_else(StateEvents::none, |key| {
+                            state.commit_device_gesture_axis_bias(&key, bias)
+                        })
+                });
+            },
+        );
+        let state_obs = AppState::repaint_on(cx, |event| {
+            matches!(
+                event,
+                StateEvent::SmartShiftChanged(_) | StateEvent::DeviceConfigChanged(_)
+            )
         });
         Self {
             threshold,
-            last_threshold: DEFAULT_THRESHOLD,
-            pending_threshold: None,
-            _threshold_sub: threshold_sub,
             wheel_sensitivity,
-            last_wheel_sensitivity: ThumbwheelSensitivity::DEFAULT,
-            pending_wheel_sensitivity: None,
-            _wheel_sensitivity_sub: wheel_sensitivity_sub,
             gesture_sensitivity,
-            last_gesture_sensitivity: GestureSensitivity::DEFAULT,
-            pending_gesture_sensitivity: None,
-            _gesture_sensitivity_sub: gesture_sensitivity_sub,
-            gesture_bias,
-            last_gesture_bias: GestureAxisBias::DEFAULT,
-            pending_gesture_bias: None,
-            _gesture_bias_sub: gesture_bias_sub,
+            gesture_axis_bias,
             _state_obs: state_obs,
         }
     }
@@ -280,18 +162,16 @@ impl SmartShiftPanel {
         let committed = status
             .auto_disengage
             .threshold()
-            .map_or(self.last_threshold, clamp_threshold);
+            .map_or_else(|| self.threshold.seated(), clamp_threshold);
         // Re-seat the thumb on an external change (device re-read / mode switch),
-        // never mid-drag, and keep `last_threshold` tracking the real value so a
-        // permanent→off toggle can restore it.
-        if !permanent && self.pending_threshold.is_none() && committed != self.last_threshold {
-            self.last_threshold = committed;
-            self.threshold
-                .update(cx, |s, cx| s.set_value(f32::from(committed), window, cx));
+        // never mid-drag, so what it is seated on keeps tracking the real value
+        // and a permanent→off toggle can restore it.
+        if !permanent {
+            self.threshold.sync(committed, window, cx);
         }
-        let display = self.pending_threshold.unwrap_or(committed);
+        let display = self.threshold.shown(committed);
         let restore_threshold = if permanent {
-            self.last_threshold
+            self.threshold.seated()
         } else {
             committed
         };
@@ -325,8 +205,35 @@ impl SmartShiftPanel {
                     )),
             );
 
-        let sensitivity_row =
-            self.smartshift_sensitivity_row(sensitivity_enabled, display, pal, cx);
+        let value_color = if sensitivity_enabled {
+            rgb(ACCENT_BLUE).into()
+        } else {
+            pal.text_muted
+        };
+        let sensitivity_row = v_flex()
+            .gap_2()
+            .child(
+                h_flex()
+                    .justify_between()
+                    .items_baseline()
+                    .child(section_label(tr!("pointer.sensitivity"), pal))
+                    .child(
+                        div()
+                            .text_body()
+                            .text_color(value_color)
+                            .child(format!("{display}")),
+                    ),
+            )
+            .when(sensitivity_enabled, |row| {
+                row.child(Slider::new(self.threshold.slider()).horizontal())
+            })
+            .when(!sensitivity_enabled, |row| row.child(disabled_track(pal)))
+            .child(
+                div()
+                    .text_caption()
+                    .text_color(pal.text_muted)
+                    .child(tr!("pointer.smartshift_sensitivity_description")),
+            );
 
         let wheel_row = self.wheel_sensitivity_row(window, cx);
         let gesture_row = self.gesture_sensitivity_row(window, cx);
@@ -344,227 +251,9 @@ impl SmartShiftPanel {
             .child(gesture_row)
             .child(gesture_bias_row)
     }
-
-    /// The auto-disengage sensitivity row: label, live threshold, slider with
-    /// double-click reset to default.
-    fn smartshift_sensitivity_row(
-        &self,
-        sensitivity_enabled: bool,
-        display: SmartShiftThreshold,
-        pal: Palette,
-        cx: &mut Context<Self>,
-    ) -> gpui::Div {
-        let value_color = if sensitivity_enabled {
-            rgb(ACCENT_BLUE).into()
-        } else {
-            pal.text_muted
-        };
-        let handle = self.threshold.clone();
-        v_flex()
-            .gap_2()
-            .child(
-                h_flex()
-                    .justify_between()
-                    .items_baseline()
-                    .child(section_label(tr!("pointer.sensitivity"), pal))
-                    .child(
-                        div()
-                            .text_body()
-                            .text_color(value_color)
-                            .child(format!("{display}")),
-                    ),
-            )
-            .when(sensitivity_enabled, |row| {
-                row.child(
-                    div()
-                        .capture_any_mouse_down(cx.listener(
-                            move |_this, event: &MouseDownEvent, window, cx| {
-                                if event.button == MouseButton::Left && event.click_count == 2 {
-                                    cx.stop_propagation();
-                                    handle.update(cx, |s, cx| {
-                                        s.set_value(f32::from(DEFAULT_THRESHOLD), window, cx);
-                                    });
-                                    let status = AppState::try_read(cx)
-                                        .and_then(AppState::current_smartshift_ready);
-                                    if let Some(status) = status {
-                                        AppState::update_smartshift(
-                                            cx,
-                                            SmartShiftStatus {
-                                                mode: SmartShiftMode::Ratchet,
-                                                auto_disengage: SmartShiftAutoDisengage::Threshold(
-                                                    DEFAULT_THRESHOLD,
-                                                ),
-                                                ..status
-                                            },
-                                        );
-                                    }
-                                }
-                            },
-                        ))
-                        .child(Slider::new(&self.threshold).horizontal()),
-                )
-            })
-            .when(!sensitivity_enabled, |row| row.child(disabled_track(pal)))
-            .child(
-                div()
-                    .text_caption()
-                    .text_color(pal.text_muted)
-                    .child(tr!("pointer.smartshift_sensitivity_description")),
-            )
-    }
 }
 
 impl SmartShiftPanel {
-    /// The per-device gesture sensitivity row: label, live value, slider.
-    /// Reads the selected device's effective value and re-seats the thumb on a
-    /// device switch / external config change, never mid-drag.
-    fn gesture_sensitivity_row(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> gpui::Div {
-        let pal = theme::palette(cx);
-        let committed = AppState::try_read(cx)
-            .and_then(|state| {
-                state
-                    .current_record()
-                    .map(|r| state.device_gesture_sensitivity(&r.config_key))
-            })
-            .unwrap_or(GestureSensitivity::DEFAULT);
-        if self.pending_gesture_sensitivity.is_none() && committed != self.last_gesture_sensitivity
-        {
-            self.last_gesture_sensitivity = committed;
-            self.gesture_sensitivity.update(cx, |s, cx| {
-                s.set_value(f32::from(committed), window, cx);
-            });
-        }
-        let display = self.pending_gesture_sensitivity.unwrap_or(committed);
-        let handle = self.gesture_sensitivity.clone();
-        v_flex()
-            .gap_2()
-            .child(
-                h_flex()
-                    .justify_between()
-                    .items_baseline()
-                    .child(section_label(tr!("pointer.gesture_sensitivity"), pal))
-                    .child(
-                        div()
-                            .text_body()
-                            .text_color(rgb(ACCENT_BLUE))
-                            .child(format!("{display}")),
-                    ),
-            )
-            .child(
-                div()
-                    .capture_any_mouse_down(cx.listener(
-                        move |_this, event: &MouseDownEvent, window, cx| {
-                            if event.button == MouseButton::Left && event.click_count == 2 {
-                                cx.stop_propagation();
-                                handle.update(cx, |s, cx| {
-                                    s.set_value(f32::from(GestureSensitivity::DEFAULT), window, cx);
-                                });
-                                if let Some((config_key, event_key)) = AppState::try_read(cx)
-                                    .and_then(|s| {
-                                        s.current_record().map(|r| {
-                                            (r.config_key.clone(), r.device_key())
-                                        })
-                                    })
-                                {
-                                    AppState::update(cx, |state, cx| {
-                                        state.set_device_gesture_sensitivity(
-                                            &config_key,
-                                            GestureSensitivity::DEFAULT,
-                                        );
-                                        cx.emit(StateEvent::DeviceConfigChanged(event_key));
-                                    });
-                                }
-                            }
-                        },
-                    ))
-                    .child(Slider::new(&self.gesture_sensitivity).horizontal()),
-            )
-            .child(
-                div()
-                    .text_caption()
-                    .text_color(pal.text_muted)
-                    .child(tr!("pointer.gesture_sensitivity_description")),
-            )
-    }
-
-    /// The per-device gesture axis bias row: label, live value, slider.
-    /// Reads the selected device's effective value and re-seats the thumb on a
-    /// device switch / external config change, never mid-drag.
-    fn gesture_axis_bias_row(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
-        let pal = theme::palette(cx);
-        let committed = AppState::try_read(cx)
-            .and_then(|state| {
-                state
-                    .current_record()
-                    .map(|r| state.device_gesture_axis_bias(&r.config_key))
-            })
-            .unwrap_or(GestureAxisBias::DEFAULT);
-        if self.pending_gesture_bias.is_none() && committed != self.last_gesture_bias {
-            self.last_gesture_bias = committed;
-            self.gesture_bias.update(cx, |s, cx| {
-                s.set_value(f32::from(committed), window, cx);
-            });
-        }
-        let display = self.pending_gesture_bias.unwrap_or(committed);
-        let raw = i8::from(display);
-        let label = match raw.cmp(&0) {
-            std::cmp::Ordering::Less => {
-                format!("{} ({})", tr!("common.horizontal"), raw.abs())
-            }
-            std::cmp::Ordering::Greater => format!("{} ({})", tr!("common.vertical"), raw),
-            std::cmp::Ordering::Equal => tr!("common.neutral").to_string(),
-        };
-        let handle = self.gesture_bias.clone();
-        v_flex()
-            .gap_2()
-            .child(
-                h_flex()
-                    .justify_between()
-                    .items_baseline()
-                    .child(section_label(tr!("pointer.gesture_axis_bias"), pal))
-                    .child(div().text_body().text_color(rgb(ACCENT_BLUE)).child(label)),
-            )
-            .child(
-                div()
-                    .capture_any_mouse_down(cx.listener(
-                        move |_this, event: &MouseDownEvent, window, cx| {
-                            if event.button == MouseButton::Left && event.click_count == 2 {
-                                cx.stop_propagation();
-                                handle.update(cx, |s, cx| {
-                                    s.set_value(f32::from(GestureAxisBias::DEFAULT), window, cx);
-                                });
-                                if let Some((config_key, event_key)) = AppState::try_read(cx)
-                                    .and_then(|s| {
-                                        s.current_record().map(|r| {
-                                            (r.config_key.clone(), r.device_key())
-                                        })
-                                    })
-                                {
-                                    AppState::update(cx, |state, cx| {
-                                        state.set_device_gesture_axis_bias(
-                                            &config_key,
-                                            GestureAxisBias::DEFAULT,
-                                        );
-                                        cx.emit(StateEvent::DeviceConfigChanged(event_key));
-                                    });
-                                }
-                            }
-                        },
-                    ))
-                    .child(Slider::new(&self.gesture_bias).horizontal()),
-            )
-            .child(
-                div()
-                    .text_caption()
-                    .text_color(pal.text_muted)
-                    .child(tr!("pointer.gesture_axis_bias_description")),
-            )
-    }
-
     /// The per-device thumb-wheel sensitivity row: label, live value, slider.
     /// Reads the selected device's effective value and re-seats the thumb on a
     /// device switch / external config change, never mid-drag.
@@ -577,14 +266,8 @@ impl SmartShiftPanel {
                     .map(|r| state.device_thumbwheel_sensitivity(&r.config_key))
             })
             .unwrap_or(ThumbwheelSensitivity::DEFAULT);
-        if self.pending_wheel_sensitivity.is_none() && committed != self.last_wheel_sensitivity {
-            self.last_wheel_sensitivity = committed;
-            self.wheel_sensitivity.update(cx, |s, cx| {
-                s.set_value(f32::from(committed), window, cx);
-            });
-        }
-        let display = self.pending_wheel_sensitivity.unwrap_or(committed);
-        let handle = self.wheel_sensitivity.clone();
+        self.wheel_sensitivity.sync(committed, window, cx);
+        let display = self.wheel_sensitivity.shown(committed);
         v_flex()
             .gap_2()
             .child(
@@ -599,41 +282,76 @@ impl SmartShiftPanel {
                             .child(format!("{display}")),
                     ),
             )
+            .child(Slider::new(self.wheel_sensitivity.slider()).horizontal())
+    }
+
+    fn gesture_sensitivity_row(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
+        let pal = theme::palette(cx);
+        let committed = AppState::try_read(cx)
+            .and_then(|state| {
+                state
+                    .current_record()
+                    .map(|r| state.device_gesture_sensitivity(&r.config_key))
+            })
+            .unwrap_or(GestureSensitivity::DEFAULT);
+        self.gesture_sensitivity.sync(committed, window, cx);
+        let display = self.gesture_sensitivity.shown(committed);
+        v_flex()
+            .gap_2()
+            .child(
+                h_flex()
+                    .justify_between()
+                    .items_baseline()
+                    .child(section_label(tr!("pointer.gesture_sensitivity"), pal))
+                    .child(
+                        div()
+                            .text_body()
+                            .text_color(rgb(ACCENT_BLUE))
+                            .child(format!("{display}")),
+                    ),
+            )
+            .child(Slider::new(self.gesture_sensitivity.slider()).horizontal())
             .child(
                 div()
-                    .capture_any_mouse_down(cx.listener(
-                        move |_this, event: &MouseDownEvent, window, cx| {
-                            if event.button == MouseButton::Left && event.click_count == 2 {
-                                cx.stop_propagation();
-                                handle.update(cx, |s, cx| {
-                                    s.set_value(
-                                        f32::from(ThumbwheelSensitivity::DEFAULT),
-                                        window,
-                                        cx,
-                                    );
-                                });
-                                if let Some((config_key, event_key)) = AppState::try_read(cx)
-                                    .and_then(|s| {
-                                        s.current_record().map(|r| {
-                                            (r.config_key.clone(), r.device_key())
-                                        })
-                                    })
-                                {
-                                    AppState::update(cx, |state, cx| {
-                                        state.set_device_thumbwheel_sensitivity(
-                                            &config_key,
-                                            ThumbwheelSensitivity::DEFAULT,
-                                        );
-                                        cx.emit(StateEvent::DeviceConfigChanged(event_key));
-                                    });
-                                }
-                            }
-                        },
-                    ))
-                    .child(Slider::new(&self.wheel_sensitivity).horizontal()),
+                    .text_caption()
+                    .text_color(pal.text_muted)
+                    .child(tr!("pointer.gesture_sensitivity_description")),
             )
     }
-}
+
+    fn gesture_axis_bias_row(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
+        let pal = theme::palette(cx);
+        let committed = AppState::try_read(cx)
+            .and_then(|state| {
+                state
+                    .current_record()
+                    .map(|r| state.device_gesture_axis_bias(&r.config_key))
+            })
+            .unwrap_or(GestureAxisBias::DEFAULT);
+        self.gesture_axis_bias.sync(committed, window, cx);
+        let display = self.gesture_axis_bias.shown(committed);
+        v_flex()
+            .gap_2()
+            .child(
+                h_flex()
+                    .justify_between()
+                    .items_baseline()
+                    .child(section_label(tr!("pointer.gesture_axis_bias"), pal))
+                    .child(
+                        div()
+                            .text_body()
+                            .text_color(rgb(ACCENT_BLUE))
+                            .child(format!("{display}")),
+                    ),
+            )
+            .child(Slider::new(self.gesture_axis_bias.slider()).horizontal())
+            .child(
+                div()
+                    .text_caption()
+                    .text_color(pal.text_muted)
+                    .child(tr!("pointer.gesture_axis_bias_description")),
+            )
+    }
 
 impl Render for SmartShiftPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -642,7 +360,7 @@ impl Render for SmartShiftPanel {
         let (key, status) = AppState::try_read(cx)
             .and_then(|state| {
                 let key = state.current_record()?.device_key();
-                Some((Some(key.clone()), state.smartshift_status_for(&key)))
+                Some((Some(key.clone()), state.smartshift_load_for(&key)))
             })
             .unwrap_or((None, SmartShiftLoad::Unknown));
         let write_status =
@@ -685,7 +403,7 @@ impl Render for SmartShiftPanel {
 fn retry_smartshift_closure(key: Option<DeviceKey>) -> impl Fn(&mut App) + 'static {
     move |cx| {
         if let Some(key) = &key {
-            AppState::retry_smartshift_read(cx, key.clone());
+            AppState::apply(cx, |state| state.retry_smartshift_read(key));
         }
     }
 }
@@ -777,11 +495,6 @@ fn mode_pill(label: SharedString, selected: bool, status: SmartShiftStatus) -> i
 /// A greyed bar standing in for the slider when sensitivity isn't adjustable.
 fn disabled_track(pal: Palette) -> gpui::Div {
     div().w_full().h(px(6.)).rounded_full().bg(pal.border)
-}
-
-/// Round + clamp a raw slider read into the friendly threshold range.
-fn threshold_from_slider(raw: f32) -> SmartShiftThreshold {
-    SmartShiftThreshold::from_rounded(raw).clamp(THRESHOLD_MIN, THRESHOLD_MAX)
 }
 
 /// Map a device-reported threshold into the slider's friendly band for display.

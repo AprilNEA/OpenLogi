@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use hidpp::channel::RawHidChannel;
-use openlogi_fixture::{HidCassette, ReportSupport, RequestMatch};
+use openlogi_fixture::{HidCassette, ReportSupport, RequestMatch, format_hex};
 use tokio::sync::mpsc;
 
 use crate::backend::{BackendError, RawWriter};
@@ -418,6 +418,13 @@ impl ReplayRawHidChannel {
         Self::build_scripted(responder, Some(fails))
     }
 
+    /// Present a scripted receiver's product id to HID++ receiver detection.
+    #[cfg(test)]
+    pub(crate) fn presenting_as(mut self, product_id: u16) -> Self {
+        self.product_id = product_id;
+        self
+    }
+
     #[cfg(test)]
     fn build_scripted(
         responder: impl Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync + 'static,
@@ -520,16 +527,6 @@ fn disconnected_error() -> Box<dyn Error + Send + Sync> {
         io::ErrorKind::BrokenPipe,
         "replay HID channel is disconnected",
     ))
-}
-
-fn format_hex(report: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut formatted = String::with_capacity(report.len() * 2);
-    for &byte in report {
-        formatted.push(char::from(HEX[usize::from(byte >> 4)]));
-        formatted.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    formatted
 }
 
 /// A raw output-report sink that records every successful write.

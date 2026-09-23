@@ -21,6 +21,7 @@ mod device_io;
 
 pub mod backend;
 pub mod backlight;
+pub mod host_lock;
 pub mod inventory;
 pub mod pairing;
 pub mod replay;
@@ -39,7 +40,7 @@ pub use channel::route::{
     speaks_unifying_protocol,
 };
 pub use channel::{ChannelPool, ChannelRegistry, SharedChannel};
-pub use device_io::{DeviceIoGate, DeviceIoSignal, device_io_channel};
+pub use device_io::{DeviceIoGate, DeviceIoSignal, IoSuspended, device_io_channel};
 pub use inventory::hotplug::watch_hotplug;
 pub use inventory::standalone::enumerate_standalone;
 pub use inventory::{Enumerator, InventoryError, enumerate};
@@ -52,16 +53,14 @@ pub use pairing::{
     PasskeyMethod, ReceiverFamily, ReceiverSelector, list_pairing_receivers, run_pairing, unpair,
 };
 pub use session::gesture::{
-    CaptureChannel, CaptureSessionFailure, CaptureSessionOutcome, CapturedInput, GestureError,
-    PendingCaptureRestore, run_capture_session, run_capture_session_with_registry_spec,
+    CaptureChannelSlot, CaptureError, CaptureHost, CaptureSessionFailure, CaptureSessionOutcome,
+    CapturedInput, PendingCaptureRestore, run_capture_session,
 };
 pub use session::host_switch::{
     HostSwitchError, HostSwitchRestoreOutcome, HostSwitchSessionFailure, HostSwitchSessionOutcome,
     HostSwitchStopReason, PendingHostSwitchRestore, run_host_switch_session, switch_linked_hosts,
 };
-pub use session::keyboard::{
-    KEYBOARD_KEY_CIDS, run_keyboard_capture_session, run_keyboard_capture_session_with_registry,
-};
+pub use session::keyboard::{KEYBOARD_KEY_CIDS, run_keyboard_capture_session};
 pub use write::{
     Dpi, DpiCapabilities, DpiInfo, FeatureEntry, FirmwareEntity, FirmwareEntityInfo,
     HapticWaveform, HidppFeatureErrorKind, HidppOperation, LITRA_BEAM_PRODUCT_ID,

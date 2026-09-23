@@ -73,7 +73,7 @@ async fn registry(
         .await
 }
 
-/// Watch one device model's download, reporting each settled outcome on `tx`.
+/// Watch one device model's download, reporting on `tx` each time it settles.
 ///
 /// A subscription rather than a one-shot read, because the caller offers every
 /// known device on every snapshot and only wants to hear about real changes: an
@@ -88,7 +88,7 @@ pub(crate) fn watch_model(
     client: &SwrClient,
     preference: AssetSourcePreference,
     target: AssetTarget,
-    tx: UnboundedSender<bool>,
+    tx: UnboundedSender<()>,
     cx: &AsyncApp,
 ) -> Task<()> {
     let weak = client.downgrade();
@@ -121,7 +121,7 @@ pub(crate) fn watch_model(
 pub(crate) fn watch_index(
     client: &SwrClient,
     preference: AssetSourcePreference,
-    tx: UnboundedSender<bool>,
+    tx: UnboundedSender<()>,
     cx: &AsyncApp,
 ) -> Task<()> {
     let handle = client.subscribe(
@@ -132,13 +132,14 @@ pub(crate) fn watch_index(
     settled_outcomes(handle, tx, "asset index", cx)
 }
 
-/// Forward every *settled* state of `handle` to `tx` as "did it succeed".
+/// Tell `tx` each time `handle` settles, successfully or not — a depot syncs
+/// file by file, so files may have landed either way.
 ///
 /// `changed` also fires when a request starts; those carry no new bytes, so
 /// reporting them would rebuild the resolver for nothing.
 fn settled_outcomes<T>(
     mut handle: QueryHandle<T, SyncError>,
-    tx: UnboundedSender<bool>,
+    tx: UnboundedSender<()>,
     what: &'static str,
     cx: &AsyncApp,
 ) -> Task<()>
@@ -154,7 +155,7 @@ where
             if let Some(error) = state.error.as_ref() {
                 warn!(%error, "{what} failed — swr will retry");
             }
-            if tx.send(state.error.is_none()).is_err() {
+            if tx.send(()).is_err() {
                 break; // the event loop is gone
             }
         }

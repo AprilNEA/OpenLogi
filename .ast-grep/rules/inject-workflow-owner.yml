@@ -1,0 +1,20 @@
+# Owner: openlogi_inject::inject — the script and workflow runners: how a
+# script is taken off the hook thread, and what each workflow step means. A
+# platform module supplies the four hooks they call (type_text, press_combo,
+# run_apple_script, run_shell_command) and nothing above them.
+id: inject-workflow-owner
+language: rust
+severity: error
+message: The script and workflow runners live in inject.rs over the platform hooks; add or fix a hook in this platform module instead of a runner beside it.
+note: |
+  Each of the three backends carried its own copy of run_workflow,
+  dispatch_script, the *_async thread wrappers and parse_shortcut — five
+  functions, three times, drifting apart in what a TypeText step did. See
+  "Single source of truth" in AGENTS.md.
+files:
+  - crates/openlogi-inject/src/inject/*.rs
+rule:
+  kind: function_item
+  has:
+    field: name
+    regex: '^(run_workflow|run_workflow_async|run_shell_command_async|run_apple_script_async|dispatch_script|parse_shortcut)$'

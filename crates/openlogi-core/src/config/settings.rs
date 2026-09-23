@@ -217,11 +217,6 @@ pub struct AppSettings {
     /// Defaults to the icon the app is signed with.
     #[serde(default)]
     pub app_icon: AppIcon,
-    /// Whether the GUI automatically downloads device images from
-    /// `assets.openlogi.org` when a device appears. `true` (default) keeps
-    /// the current behavior; `false` makes no asset network requests at all
-    /// (the app falls back to bundled art and the synthetic silhouette). A
-    /// manual "Refresh assets" in Settings still fetches on demand regardless.
     /// Whether the GUI automatically downloads device images from the selected
     /// source when a device appears. `true` (default) keeps the current behavior;
     /// `false` makes no asset network requests at all (the app falls back to

@@ -15,10 +15,10 @@ use gpui_component::{
     v_flex,
 };
 
-use super::catalog::{AppCatalogPicker, AppIconState, ProfileIconCache};
+use super::catalog::{AppCatalogPicker, ApplicationIconState, ProfileIconCache};
 use super::shell::application_mark;
 use super::{AddAppChoices, CatalogPresentation, ProfileChoice, ProfileScopeActions};
-use crate::features::mouse::picker::{compact_panel, divider, title};
+use crate::features::binding_editor::{compact_panel, divider, title};
 use crate::ui::components::{MenuRow, control_button, control_input};
 use crate::ui::theme::{self, Palette, SelectableStyle as _, Typography as _};
 
@@ -227,6 +227,7 @@ fn applications_toggle(
         .w_full()
         .flex()
         .items_center()
+        .justify_start()
         .gap_2()
         .px_2()
         .py_1p5()
@@ -285,7 +286,7 @@ fn profile_matches_query(choice: &ProfileChoice, query: &str) -> bool {
 fn application_row(
     id_base: &'static str,
     choice: ProfileChoice,
-    icon: AppIconState,
+    icon: ApplicationIconState,
     actions: ProfileScopeActions,
     pal: Palette,
     popover: WeakEntity<PopoverState>,
@@ -357,7 +358,7 @@ mod tests {
     use gpui_component::popover::Popover;
 
     use super::APP_ROW_H;
-    use crate::features::mouse::picker::compact_panel;
+    use crate::features::binding_editor::compact_panel;
     use crate::ui::components::MenuRow;
     use crate::ui::theme;
 

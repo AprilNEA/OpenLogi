@@ -3,16 +3,10 @@
 
 use super::ServiceStatus;
 
-/// The launchd service label this process manages: the dev variant inside a
-/// dev-profile bundle, so a dev registration can never collide with the
-/// shipped one.
+/// The launchd service label this process manages: its own profile's.
 #[must_use]
 pub fn agent_service_label() -> String {
-    if openlogi_core::paths::is_dev_profile() {
-        openlogi_core::brand::dev_id(openlogi_core::brand::AGENT_SERVICE_LABEL)
-    } else {
-        openlogi_core::brand::AGENT_SERVICE_LABEL.to_owned()
-    }
+    openlogi_core::paths::Profile::current().agent_service_label()
 }
 
 pub(super) fn status() -> ServiceStatus {
