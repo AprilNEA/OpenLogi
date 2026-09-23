@@ -25,6 +25,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt as _;
+use openlogi_agent_core::battery_alert::BatteryAlerts;
 use openlogi_agent_core::event_monitor::EventMonitor;
 use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedHandles};
@@ -32,6 +33,7 @@ use openlogi_agent_core::runtime::hook;
 use openlogi_agent_core::watchers::foreground_app::ForegroundUpdate;
 use openlogi_agent_core::watchers::inventory::{InventoryEvent, InventoryRefresh};
 use openlogi_core::config::Config;
+use openlogi_core::device::{BatteryLevel, DeviceInventory};
 use openlogi_hook::Hook;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
@@ -42,7 +44,7 @@ use openlogi_ipc::ClientKind;
 use self::transition::{Replacement, WatcherFleet};
 use crate::shutdown::{self, ShutdownRequest, ShutdownRequests, ShutdownSignals};
 use crate::startup::{self, Core, InputServices};
-use crate::{autostart, overlay, server};
+use crate::{autostart, notify, overlay, server, tray_battery, tray_glyph};
 
 /// How long a dormant agent waits before leaving — generous next to the
 /// seconds a kickstarting GUI needs, and the window costs only an idle
@@ -236,6 +238,7 @@ impl Wanted {
                 hidpp_watchers: WatcherFleet::Inactive,
                 hook: None,
                 capture_mouse_events,
+                battery_alerts: BatteryAlerts::default(),
             },
         }
     }
@@ -263,6 +266,9 @@ struct Running {
     /// revoke (dropping the handle stops its thread).
     hook: Option<Hook>,
     capture_mouse_events: bool,
+    /// Which devices have already raised a low-battery alert. Lives with the
+    /// loop that drives it; nothing else in the agent needs to see it.
+    battery_alerts: BatteryAlerts,
 }
 
 impl Armed {
@@ -370,7 +376,7 @@ impl Running {
     }
 
     /// Fold one inventory-watcher event into the orchestrator.
-    async fn apply_inventory(&self, event: InventoryEvent, refresh: &InventoryRefresh) {
+    async fn apply_inventory(&mut self, event: InventoryEvent, refresh: &InventoryRefresh) {
         match event {
             InventoryEvent::Snapshot {
                 inventories,
@@ -379,6 +385,7 @@ impl Running {
             } => {
                 let mut orchestrator = self.orchestrator.lock().await;
                 orchestrator.refresh_inventory(&inventories, &standalone, hid_open_failures);
+                update_tray_battery(&orchestrator, &inventories, &mut self.battery_alerts);
                 let confirm_settings = orchestrator.needs_reapply_confirmation();
                 drop(orchestrator);
                 if confirm_settings {
@@ -545,6 +552,63 @@ impl Running {
     #[cfg(any(target_os = "macos", not(unix)))]
     fn exit_after_replacement_teardown(&mut self, reason: &str) -> ! {
         shutdown::release_hook_and_exit(self.hook.take(), &mut self.inputs, reason, None)
+    }
+}
+/// Feed the tray's battery surfaces from a fresh inventory snapshot.
+///
+/// Split out of the inventory fold so it stays readable, and because the three
+/// surfaces have genuinely different cadences: the rows are a cheap
+/// unconditional write the tray reads only when its menu opens, the glyph
+/// wakes the tray thread but only when its rendered state changed, and the
+/// alerts are a pure fold that fires at most once per level crossing.
+///
+/// Both settings are read from the live config rather than latched at startup,
+/// so an IPC `reload_config` takes effect on the next tick with no restart.
+fn update_tray_battery(
+    orchestrator: &Orchestrator,
+    inventories: &[DeviceInventory],
+    battery_alerts: &mut BatteryAlerts,
+) {
+    if let Some(tooltip) = tray_battery::publish(inventories) {
+        #[cfg(target_os = "windows")]
+        crate::tray_windows::request_tooltip(tooltip);
+        #[cfg(not(target_os = "windows"))]
+        let _ = tooltip;
+    }
+
+    // Published unconditionally, style included: the shell keeps whatever icon
+    // it was last handed, so simply not sending updates while the battery
+    // style is off would strand a stale glyph on screen. `publish` filters
+    // repeats, so this stays a no-op on the overwhelming majority of ticks.
+    if let Some(icon) = tray_glyph::publish(orchestrator.tray_icon_style(), inventories) {
+        #[cfg(target_os = "windows")]
+        crate::tray_windows::request_icon(icon);
+        #[cfg(not(target_os = "windows"))]
+        let _ = icon;
+    }
+
+    // Folded in on every tick, even while the setting is off, for the same
+    // reason the glyph above is published unconditionally: the bookkeeping has
+    // to describe the world as it is now, not as it was when the user last had
+    // alerts on. Skipping the fold instead would leave `fired` frozen: a device
+    // that drained while muted would alert the moment the setting came back,
+    // and one that recovered while muted would stay marked as alerted and go
+    // quiet on its next real crossing.
+    let alerts = battery_alerts.evaluate(inventories);
+    if !orchestrator.battery_alerts() {
+        return;
+    }
+    for alert in alerts {
+        let key = match alert.level {
+            BatteryLevel::Critical => "app.battery_alert_critical",
+            _ => "app.battery_alert_low",
+        };
+        let body = rust_i18n::t!(
+            key,
+            name = alert.name.as_str(),
+            percentage = alert.percentage
+        );
+        notify::notify("OpenLogi", &body);
     }
 }
 

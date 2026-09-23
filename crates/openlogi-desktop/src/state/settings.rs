@@ -5,6 +5,8 @@ use super::events::StateEvents;
 use super::{AppState, StateEvent};
 use crate::platform::app_icon::AppIconExt as _;
 use gpui_component::ThemeMode;
+#[cfg(target_os = "windows")]
+use openlogi_core::config::TrayIconStyle;
 use openlogi_core::config::{
     AppIcon, AppSettings, Appearance, AssetSourcePreference, DeviceViewMode, ThumbwheelSensitivity,
     UiScale, VerticalScrollSensitivity,
@@ -56,6 +58,40 @@ impl AppState {
         self.config
             .edit(|config| config.app_settings.show_in_menu_bar = enabled);
         self.persist_and_reload("show-in-menu-bar setting");
+        StateEvent::SettingsChanged.into()
+    }
+    /// Toggle low-battery notifications and persist them. The agent reads the
+    /// value live on its next inventory tick, so the reload this triggers is
+    /// enough, with no restart, unlike [`Self::commit_show_in_menu_bar`]. An
+    /// already-set value writes nothing and is still reported.
+    ///
+    /// Gated to Windows, matching the switch that drives it: the notification
+    /// is a balloon on the tray icon, so without a tray there is nothing to
+    /// attach it to. M2 widens this and its switch together, when the macOS
+    /// menu-bar item can render the same surfaces.
+    #[cfg(target_os = "windows")]
+    pub fn commit_battery_alerts(&mut self, enabled: bool) -> StateEvents {
+        if self.config.app_settings.battery_alerts == enabled {
+            return StateEvent::SettingsChanged.into();
+        }
+        self.config
+            .edit(|config| config.app_settings.battery_alerts = enabled);
+        self.persist_and_reload("battery-alerts setting");
+        StateEvent::SettingsChanged.into()
+    }
+    /// Switch the tray icon between the brand mark and a battery indicator and
+    /// persist it. Read live by the agent. An already-set value writes nothing
+    /// and is still reported.
+    ///
+    /// Windows-only for the same reason as [`Self::commit_battery_alerts`].
+    #[cfg(target_os = "windows")]
+    pub fn commit_tray_icon_style(&mut self, style: TrayIconStyle) -> StateEvents {
+        if self.config.app_settings.tray_icon_style == style {
+            return StateEvent::SettingsChanged.into();
+        }
+        self.config
+            .edit(|config| config.app_settings.tray_icon_style = style);
+        self.persist_and_reload("tray-icon-style setting");
         StateEvent::SettingsChanged.into()
     }
     /// Toggle the opt-in update check and persist it. No immediate side effect

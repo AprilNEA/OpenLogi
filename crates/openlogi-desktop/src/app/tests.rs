@@ -1,6 +1,6 @@
 use super::home::{connection_icon_path, ordered_device_indices};
 use super::{Capabilities, DetailTab, DeviceKind, DeviceRecord};
-use crate::ui::battery::{battery_charging_no_reading, battery_needs_attention};
+use crate::ui::battery::battery_charging_no_reading;
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, DeviceTransports, LightCapabilities, LightValueRange,
     LightValueUnit,
@@ -29,28 +29,6 @@ fn charging_without_reading_suppresses_percentage() {
     assert!(!battery_charging_no_reading(&b(
         0,
         BatteryStatus::Discharging
-    )));
-}
-
-#[test]
-fn low_discharging_battery_needs_attention() {
-    let battery = |percentage, status| BatteryInfo {
-        percentage,
-        level: BatteryLevel::Low,
-        status,
-    };
-
-    assert!(battery_needs_attention(&battery(
-        20,
-        BatteryStatus::Discharging
-    )));
-    assert!(!battery_needs_attention(&battery(
-        21,
-        BatteryStatus::Discharging
-    )));
-    assert!(!battery_needs_attention(&battery(
-        20,
-        BatteryStatus::Charging
     )));
 }
 

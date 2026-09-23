@@ -5542,6 +5542,7 @@ dependencies = [
  "openlogi-hid",
  "openlogi-hook",
  "openlogi-ipc",
+ "resvg 0.46.0",
  "rust-i18n",
  "serde_json",
  "succession",
