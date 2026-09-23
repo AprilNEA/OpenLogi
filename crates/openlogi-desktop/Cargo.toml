@@ -17,7 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 appcatalog = "0.1.1"
-openlogi-core = { path = "../openlogi-core" }
+openlogi-core = { path = "../openlogi-core", features = ["logging", "worker"] }
 openlogi-ui = { path = "../openlogi-ui" }
 openlogi-camera = { path = "../openlogi-camera" }
 openlogi-hook = { path = "../openlogi-hook" }
@@ -32,10 +32,9 @@ gpui-base = { workspace = true }
 gpui-kit-assets = { workspace = true }
 swr-core = { workspace = true }
 swr-gpui = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "process"] }
 anyhow = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 image = { version = "0.25", default-features = false, features = ["png"] }
@@ -48,7 +47,6 @@ gpui-updater = { package = "gpui-updater-pre", version = "0.1" }
 disclaim = "0.1"
 url = "2.5.8"
 walkdir = "2.5.0"
-backon.workspace = true
 opener = { workspace = true }
 derive_more = { version = "2.1.1", default-features = false, features = ["display", "from"] }
 # The user-picked app icon (Settings -> Appearance). Cross-platform: every
@@ -68,14 +66,19 @@ objc2-app-kit = { workspace = true, features = ["NSApplication", "NSAppearance"]
 objc2-foundation = { workspace = true, features = ["NSProcessInfo", "NSString", "NSError"] }
 objc2-service-management = { workspace = true, features = ["std", "SMAppService", "SMErrors", "objc2", "objc2-foundation"] }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+winreg = "0.55"
+
 [lints]
 workspace = true
 
 [dev-dependencies]
+openlogi-ipc = { path = "../openlogi-ipc", features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
 openlogi-device = { path = "../openlogi-device" }
 openlogi-fixture = { workspace = true }
 tempfile = "3.27.0"
+tokio = { workspace = true, features = ["test-util"] }
 
 [package.metadata.bundle]
 name = "OpenLogi"

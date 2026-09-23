@@ -15,7 +15,7 @@ use gpui_component::{button::ButtonVariants as _, h_flex, scroll::ScrollableElem
 use gpui_updater::Updater;
 
 use crate::app::menu::{CloseWindow, Minimize, Zoom};
-use crate::state::{AppState, StateEvent};
+use crate::state::AppState;
 use crate::ui::components::control_button;
 use crate::ui::theme;
 use crate::windows::{self, AuxWindow};
@@ -56,10 +56,7 @@ pub fn open(cx: &mut App) {
 
 /// Persist the user's answer, run one check if they opted in, and close.
 fn answer(enabled: bool, window: &mut Window, cx: &mut App) {
-    AppState::update(cx, |state, cx| {
-        state.record_update_consent(enabled);
-        cx.emit(StateEvent::SettingsChanged);
-    });
+    AppState::apply(cx, |state| state.record_update_consent(enabled));
     if enabled && let Some(updater) = crate::platform::updater::shared(cx) {
         updater.update(cx, Updater::check);
     }
@@ -154,7 +151,7 @@ mod tests {
 
     use super::*;
     use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
-    use crate::state::ConfigPersistence;
+    use crate::state::Sources;
 
     #[gpui::test]
     fn consent_actions_stay_visible_while_long_copy_scrolls(cx: &mut TestAppContext) {
@@ -175,15 +172,7 @@ mod tests {
                 config.app_settings.ui_scale = scale;
                 let (commands, _) = tokio::sync::mpsc::unbounded_channel();
                 let state = cx.new(|_| {
-                    AppState::with_runtime(
-                        config,
-                        &[],
-                        &[],
-                        &AssetResolver::new(),
-                        &[],
-                        ConfigPersistence::MemoryOnly,
-                        commands,
-                    )
+                    AppState::new(Sources::in_memory(config, &AssetResolver::new(), commands))
                 });
                 AppState::set_global(state, cx);
                 open(cx);

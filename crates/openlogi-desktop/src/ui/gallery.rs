@@ -11,6 +11,7 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     scroll::ScrollableElement as _,
+    slider::Slider,
     v_flex,
 };
 use openlogi_core::brand::APP_ID;
@@ -20,6 +21,7 @@ use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus};
 use super::battery::BatteryIndicator;
 use super::carousel::Carousel;
 use super::choice_card::ChoiceCard;
+use super::commit_slider::{CommitSlider, SliderRange};
 use super::components::{MenuRow, PanelCard, PresetChip, ProfileTab, Toggle};
 use super::theme::{self, ContentWidth, OPENLOGI_DARK, OPENLOGI_LIGHT, Palette, Typography as _};
 
@@ -94,10 +96,19 @@ struct ComponentGallery {
     profile_selected: usize,
     preset_selected: bool,
     carousel_selected: usize,
+    slider: CommitSlider<u8>,
+    slider_committed: u8,
 }
 
 impl ComponentGallery {
-    fn new(_: &mut Context<Self>) -> Self {
+    fn new(cx: &mut Context<Self>) -> Self {
+        let slider_committed = 40;
+        let slider = CommitSlider::new(
+            SliderRange::new(0, 100),
+            slider_committed,
+            cx,
+            |this: &mut Self, value, _| this.slider_committed = value,
+        );
         Self {
             mode: ThemeMode::Light,
             scale: UiScale::Normal,
@@ -107,6 +118,8 @@ impl ComponentGallery {
             profile_selected: 1,
             preset_selected: true,
             carousel_selected: 1,
+            slider,
+            slider_committed,
         }
     }
 
@@ -186,6 +199,7 @@ impl ComponentGallery {
             .child(self.menu_panel(pal, cx))
             .child(self.profile_panel(pal, cx))
             .child(self.preset_panel(pal, cx))
+            .child(self.slider_panel(pal))
             .child(Self::battery_panel(pal))
     }
 
@@ -339,6 +353,27 @@ impl ComponentGallery {
                         .px_1()
                         .text_color(pal.text_muted)
                         .child(Icon::new(IconName::Close).size_3()),
+                ),
+            pal,
+        )
+    }
+
+    fn slider_panel(&self, pal: Palette) -> gpui::Div {
+        gallery_panel(
+            "CommitSlider",
+            IconName::Sun,
+            v_flex()
+                .gap_2()
+                .child(Slider::new(self.slider.slider()).horizontal())
+                .child(
+                    div()
+                        .text_caption()
+                        .text_color(pal.text_muted)
+                        .child(format!(
+                            "Showing {} · committed {}",
+                            self.slider.shown(self.slider_committed),
+                            self.slider_committed
+                        )),
                 ),
             pal,
         )

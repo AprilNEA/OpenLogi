@@ -52,6 +52,17 @@ jobs:
         with:
           config: .config/typos.toml
 
+  # The single-source-of-truth guards in .ast-grep/rules: each names the module
+  # that owns a decision and fails on its ingredients anywhere else.
+  ast-grep:
+    name: ast-grep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ast-grep/action@370e627637505696e4365db4a149af9f2311afe8 # v1.4
+        with:
+          version: 0.45.1
+
   publish-closure:
     name: publish closure
     runs-on: ubuntu-latest
@@ -255,6 +266,26 @@ jobs:
       - name: Verify runner architecture
         run: test "$(uname -m)" = "${{ matrix.arch }}"
       - run: cargo test --workspace --all-targets
+
+  # Runs the workspace's tests on Windows — including the `cfg(windows)` ones,
+  # which `clippy (windows)` only compiles and no other host can execute. The
+  # same shape as the Linux job: everything but the desktop crate.
+  test-windows:
+    name: tests (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.16.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v2-cargo
+          shared-key: windows-stable-debug
+          cache-targets: false
+          save-if: ${{ github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main' }}
+      - run: cargo test --workspace --exclude openlogi-desktop
 
   cargo-deny:
     name: cargo-deny

@@ -9,6 +9,7 @@
 //! `hidpp` channel up-converts outgoing short messages to long for them.
 
 use std::collections::BTreeSet;
+#[cfg(not(target_os = "windows"))]
 use std::error::Error;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex as StdMutex, PoisonError};
@@ -46,18 +47,6 @@ fn backend_error(error: async_hid::HidError) -> BackendError {
         }
         other => BackendError::Backend(other.to_string()),
     }
-}
-
-fn device_io_suspended() -> BackendError {
-    BackendError::Backend("host device I/O is suspended".into())
-}
-
-fn device_io_error() -> Box<dyn Error + Send + Sync> {
-    std::io::Error::new(
-        std::io::ErrorKind::WouldBlock,
-        "host device I/O is suspended",
-    )
-    .into()
 }
 
 /// Classify a failed device open. On macOS `IOHIDDeviceOpen` denies silently —
@@ -481,9 +470,7 @@ async fn open_hidpp_channel_inner(
     device_io: DeviceIoGate,
     observer: Option<Arc<dyn ChannelObserver>>,
 ) -> Result<Option<Arc<HidppChannel>>, BackendError> {
-    if !device_io.allows_io() {
-        return Err(device_io_suspended());
-    }
+    device_io.ensure_allowed()?;
     // `Device: Deref<Target = DeviceInfo>` — clone the deref'd value because
     // the channel keeps it for the lifetime of the open.
     let info: DeviceInfo = (**dev).clone();
@@ -512,9 +499,7 @@ async fn open_hidpp_channel_inner(
     #[cfg(not(target_os = "windows"))]
     {
         let (reader, writer) = dev.open().await.map_err(open_error)?;
-        if !device_io.allows_io() {
-            return Err(device_io_suspended());
-        }
+        device_io.ensure_allowed()?;
         // BLE-direct devices expose only the long HID++ report; flag the channel so
         // it advertises short-unsupported and the `hidpp` channel up-converts shorts.
         let long_only = is_long_only_collection(info.usage_page, info.usage_id);
@@ -693,13 +678,9 @@ impl RawHidChannel for AsyncHidChannel {
     }
 
     async fn write_report(&self, src: &[u8]) -> Result<usize, Box<dyn Error + Send + Sync>> {
-        if !self.device_io.allows_io() {
-            return Err(device_io_error());
-        }
+        self.device_io.ensure_allowed()?;
         let mut w = self.writer.lock().await;
-        if !self.device_io.allows_io() {
-            return Err(device_io_error());
-        }
+        self.device_io.ensure_allowed()?;
         match w.write_output_report(src).await {
             Ok(()) => Ok(src.len()),
             Err(e) => {

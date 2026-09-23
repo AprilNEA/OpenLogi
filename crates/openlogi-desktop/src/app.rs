@@ -9,7 +9,7 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     v_flex,
 };
-use openlogi_core::device::{Capabilities, DeviceInventory, DeviceKind};
+use openlogi_core::device::{Capabilities, DeviceKind};
 use openlogi_ipc::InventoryHealth;
 use tracing::info;
 
@@ -18,14 +18,14 @@ use crate::features::action_ring::ActionRingPanel;
 use crate::features::camera::controls::CameraControlsPanel;
 use crate::features::camera::preview::CameraPreview;
 use crate::features::keyboard::function_row::FunctionRowView;
-use crate::features::lighting::device::LightingPanel;
+use crate::features::lighting::keyboard_rgb::LightingPanel;
 use crate::features::lighting::standalone::LightPanel;
 use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
 use crate::features::pointer::smartshift::SmartShiftPanel;
 use crate::features::profiles::{AppCatalogPicker, ProfileIconCache};
-use crate::services::assets::AssetResolver;
-use crate::state::{AgentLink, AppState, DeviceRecord, StateEvent};
+use crate::services::assets::user_cache_root;
+use crate::state::{AgentLink, AppState, DeviceRecord, StateEvent, StateEvents};
 use crate::ui::theme::{self, ContentWidth, Typography as _};
 
 pub(crate) mod deeplink;
@@ -44,7 +44,7 @@ pub(crate) use home::{glow_canvas, keyboard_glow};
 /// GPUI has no router, so navigation is a tiny view-local enum that selects
 /// which subtree [`AppView::render`] builds. It is deliberately *not* in
 /// [`AppState`]: the route is pure UI presentation, whereas
-/// [`AppState::current_device`] is functional (it drives the hook bindings,
+/// [`AppState::current_record`] is functional (it drives the hook bindings,
 /// DPI, and persisted selection). The detail route is keyed by the record's
 /// user-facing identity rather than an index so a hot-plug that reorders
 /// or drops the device list can't silently swap the user onto another device —
@@ -196,12 +196,7 @@ impl Focusable for AppView {
 
 impl AppView {
     /// Construct the root view and its child entities.
-    pub fn new(
-        _inventories: &[DeviceInventory],
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let cache = AssetResolver::new();
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
         // `AppState` is installed as an entity by `main` (with the IPC command
@@ -218,7 +213,7 @@ impl AppView {
                 );
             } else {
                 info!(
-                    root = ?cache.cache_root(),
+                    root = ?user_cache_root(),
                     "no devices with HID++ model info — using synthetic silhouette"
                 );
             }
@@ -237,9 +232,8 @@ impl AppView {
         let app_catalog = cx.new(|cx| AppCatalogPicker::new(profile_icons.clone(), window, cx));
         let app_catalog_obs = cx.observe(&app_catalog, |_, _, cx| cx.notify());
         let state_obs = cx.subscribe(&state, |view, _, event: &StateEvent, cx| {
-            let active_key = AppState::try_read(cx)
-                .and_then(AppState::current_record)
-                .map(DeviceRecord::device_key);
+            let is_current =
+                |key| AppState::try_read(cx).is_some_and(|state| state.is_current_device(key));
             let on_home = matches!(view.route, Route::Home);
             let relevant = match event {
                 StateEvent::AgentChanged
@@ -252,21 +246,18 @@ impl AppView {
                             view.active_tab,
                             DetailTab::Buttons | DetailTab::ActionsRing | DetailTab::Device
                         )
-                        && active_key.as_ref() == Some(key)
+                        && is_current(key)
                 }
                 StateEvent::DpiChanged(key) => {
-                    !on_home
-                        && view.active_tab == DetailTab::Device
-                        && active_key.as_ref() == Some(key)
+                    !on_home && view.active_tab == DetailTab::Device && is_current(key)
                 }
                 StateEvent::LightingChanged(key) => {
-                    on_home
-                        || (view.active_tab == DetailTab::Light && active_key.as_ref() == Some(key))
+                    on_home || (view.active_tab == DetailTab::Light && is_current(key))
                 }
                 StateEvent::DeviceConfigChanged(key) => {
                     on_home
                         || (matches!(view.active_tab, DetailTab::Pointer | DetailTab::Device)
-                            && active_key.as_ref() == Some(key))
+                            && is_current(key))
                 }
                 StateEvent::CameraChanged => on_home || view.active_tab == DetailTab::Light,
                 // Child entities own these surfaces and subscribe directly. A
@@ -319,18 +310,15 @@ impl AppView {
 
     /// Drill into a device's settings from the gallery. Makes it the
     /// functionally active device too (hook bindings, DPI, and the persisted
-    /// selection follow [`AppState::set_current_device`]) and switches the
+    /// selection follow [`AppState::select_device`]) and switches the
     /// route to its detail screen.
     fn open_device(&mut self, record_key: String, cx: &mut Context<Self>) {
-        AppState::global(cx).update(cx, |state, cx| {
-            if let Some(idx) = state
+        AppState::apply(cx, |state| {
+            state
                 .devices()
                 .iter()
                 .position(|record| record.record_key() == record_key)
-                && let Some(key) = state.set_current_device(idx)
-            {
-                cx.emit(StateEvent::DeviceSelected(key));
-            }
+                .map_or_else(StateEvents::none, |idx| state.select_device(idx))
         });
         AppState::load_current_device_reads(cx);
         self.route = Route::Device { record_key };

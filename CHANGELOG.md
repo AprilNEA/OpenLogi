@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.6] - 2026-09-19
+
+### Added
+
+- *(gui)* show installation source in update settings
+- *(gui)* detect installation ownership across platforms
+- *(xtask)* model the Windows test job in the local CI runner
+- *(core)* own the function-row vocabulary in one FunctionKey
+
+### Changed
+
+- *(gui)* resolve each device's assets once per asset generation
+- *(gui)* build the asset resolver once at startup
+
+### Fixed
+
+- *(agent)* log a DPI or SmartShift write only once one is scheduled
+- *(agent)* say why a background write was skipped
+- *(agent)* start the HID++ watchers through one named worker shell
+- *(xtask)* read ci.yml's wrapped commands under either line ending
+- *(gui)* replace the asset resolver after a failed sync too
+- *(gui)* keep a snapped sync off a slider mid-drag
+- *(gui)* show the dragged value beside a lighting slider
+- *(gui)* clamp camera control values through the ordered range
+- *(gui)* re-seat the thumb-wheel sensitivity slider after a rolled-back save
+- *(cli)* stop telling users Unifying receivers are not surfaced
+- *(cli)* tell a timed-out profile capture what to do next
+- *(ipc)* start the handshake deadline before the socket is reached
+- *(cli)* stop naming the agent lock file outside its owner
+- *(gui)* keep the relaunch notice ahead of the unreachable one
+- *(gui)* hold a config reload until the agent connects
+
 ## [0.8.5] - 2026-09-16
 
 ### Added

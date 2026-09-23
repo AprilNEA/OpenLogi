@@ -1,25 +1,28 @@
-//! Firmware ownership and channel-lifecycle primitives shared by mouse and
-//! keyboard capture without coupling their manager loops or input semantics.
+//! What capture owes the firmware and when it stops: the restore plan, the
+//! stop reasons and the reporting writes shared by mouse and keyboard capture
+//! without coupling their manager loops or input semantics. The token that
+//! carries an unfinished restore is `session::restore`'s.
 
 use std::fmt;
 use std::future::Future;
-use std::sync::{Arc, RwLock, Weak};
+use std::sync::{Arc, RwLock};
 
-use hidpp::channel::HidppChannel;
+use hidpp::protocol::v20::Hidpp20Error;
 use thiserror::Error;
 
+use super::restore::{PendingRestore, RestoreOutcome, RestorePlan, SessionFailure};
 use crate::backend::BackendError;
 use crate::reprog_controls::{self, ReprogControlsV4};
 use crate::thumbwheel::Thumbwheel;
-use crate::{ChannelRegistry, DeviceRoute, SharedChannel};
+use crate::{ChannelRegistry, IoSuspended, SharedChannel};
 
 /// Shared slot holding the active capture session's open channel, so bounded
 /// hardware writes can reuse it instead of opening a second connection.
-pub type CaptureChannel = Arc<RwLock<Option<SharedChannel>>>;
+pub type CaptureChannelSlot = Arc<RwLock<Option<SharedChannel>>>;
 
 /// Why a capture session could not start (or had to stop).
 #[derive(Debug, Error)]
-pub enum GestureError {
+pub enum CaptureError {
     /// HID transport-level failure while enumerating or opening the device.
     #[error("HID transport error")]
     Hid(#[from] BackendError),
@@ -32,6 +35,18 @@ pub enum GestureError {
     /// A HID++ feature call returned an error; inner string carries context.
     #[error("HID++ protocol error: {0}")]
     Hidpp(String),
+}
+
+impl From<Hidpp20Error> for CaptureError {
+    fn from(error: Hidpp20Error) -> Self {
+        Self::Hidpp(format!("{error:?}"))
+    }
+}
+
+impl From<IoSuspended> for CaptureError {
+    fn from(error: IoSuspended) -> Self {
+        Self::Hid(error.into())
+    }
 }
 
 /// One `0x1b04` control whose original reporting state can restore a failed
@@ -65,82 +80,18 @@ pub(crate) enum CaptureStop {
     ChannelChanged,
 }
 
-/// Whether a retry may use the transport on which capture originally ran.
-#[derive(Clone, Copy)]
-enum RetiredChannelPolicy {
-    /// Inventory declared the transport obsolete; wait for another current
-    /// publication instead of writing underneath its replacement.
-    ReplacementOnly,
-    /// Capture stopped normally but a restore write failed, so retrying the
-    /// still-current original transport is safe.
-    CurrentAllowed,
-}
-
-/// How a capture session completed its firmware teardown.
-#[must_use = "a pending restore must be retained until firmware ownership is released"]
-pub enum CaptureSessionOutcome {
-    /// Every diverted control was restored before the session returned.
-    Restored,
-    /// Firmware restoration is incomplete. The caller must retain this token
-    /// and retry it before arming a successor for the same physical device.
-    RestorePending(PendingCaptureRestore),
-}
-
-/// A capture setup failure plus any firmware ownership its rollback could not
-/// release.
-#[derive(Debug, Error)]
-#[error("{error}")]
-pub struct CaptureSessionFailure {
-    #[source]
-    error: GestureError,
-    pending_restore: Option<PendingCaptureRestore>,
-}
-
-impl CaptureSessionFailure {
-    pub(crate) fn clean(error: GestureError) -> Self {
-        Self {
-            error,
-            pending_restore: None,
-        }
-    }
-
-    pub(crate) fn with_pending(error: GestureError, pending: PendingCaptureRestore) -> Self {
-        Self {
-            error,
-            pending_restore: Some(pending),
-        }
-    }
-
-    /// Split the setup error from firmware ownership the caller must retain.
-    #[must_use]
-    pub fn into_parts(self) -> (GestureError, Option<PendingCaptureRestore>) {
-        (self.error, self.pending_restore)
-    }
-}
-
-impl From<GestureError> for CaptureSessionFailure {
-    fn from(error: GestureError) -> Self {
-        Self::clean(error)
-    }
-}
-
-/// Opaque firmware ownership that survives the transport which armed it.
+/// What a capture session writes to hand its controls back: every diverted
+/// `0x1b04` control's reporting, and the thumb wheel's.
 ///
-/// The token owns its original route and is consumed by every retry. A failed
-/// retry returns the token through [`CaptureSessionOutcome::RestorePending`],
-/// so callers cannot accidentally treat a borrowed `false` as completion.
-pub struct PendingCaptureRestore {
-    route: DeviceRoute,
-    retired_channel: Weak<HidppChannel>,
-    retired_policy: RetiredChannelPolicy,
+/// One untimed attempt per control; a failed one leaves the whole plan owed.
+pub struct CaptureRestorePlan {
     reprog: Option<ReprogRestore>,
     thumb_index: Option<u8>,
 }
 
-impl fmt::Debug for PendingCaptureRestore {
+impl fmt::Debug for CaptureRestorePlan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PendingCaptureRestore")
-            .field("route", &self.route)
+        f.debug_struct("CaptureRestorePlan")
             .field(
                 "reporting_count",
                 &self
@@ -149,70 +100,11 @@ impl fmt::Debug for PendingCaptureRestore {
                     .map_or(0, |reprog| reprog.controls.len()),
             )
             .field("has_thumbwheel", &self.thumb_index.is_some())
-            .finish_non_exhaustive()
+            .finish()
     }
 }
 
-impl PendingCaptureRestore {
-    pub(crate) fn new(
-        retired: &SharedChannel,
-        reprog: Option<ReprogRestore>,
-        thumb_index: Option<u8>,
-    ) -> Option<Self> {
-        if reprog.is_none() && thumb_index.is_none() {
-            return None;
-        }
-        Some(Self {
-            route: retired.route().clone(),
-            retired_channel: Arc::downgrade(retired.channel()),
-            retired_policy: RetiredChannelPolicy::ReplacementOnly,
-            reprog,
-            thumb_index,
-        })
-    }
-
-    /// Retry through the exact-route channel currently published by inventory.
-    ///
-    /// Success is accepted only if the same publication remains current after
-    /// every awaited restore write. A concurrent replacement returns this
-    /// token as pending so the new winner is restored on the next attempt.
-    pub async fn retry(self, registry: &ChannelRegistry) -> CaptureSessionOutcome {
-        let Some(current) = registry.lookup(&self.route) else {
-            return CaptureSessionOutcome::RestorePending(self);
-        };
-        if matches!(self.retired_policy, RetiredChannelPolicy::ReplacementOnly)
-            && self
-                .retired_channel
-                .upgrade()
-                .is_some_and(|retired| Arc::ptr_eq(current.channel(), &retired))
-        {
-            return CaptureSessionOutcome::RestorePending(self);
-        }
-        let restored = self.restore_on(&current).await;
-        if restored && registry.is_current(&current) {
-            CaptureSessionOutcome::Restored
-        } else {
-            CaptureSessionOutcome::RestorePending(self)
-        }
-    }
-
-    /// Restore on the original standalone channel, where no registry
-    /// publication can supersede the session.
-    pub(crate) async fn restore_standalone(self, retired: &SharedChannel) -> CaptureSessionOutcome {
-        if self.restore_on(retired).await {
-            CaptureSessionOutcome::Restored
-        } else {
-            CaptureSessionOutcome::RestorePending(self)
-        }
-    }
-
-    /// Permit a retry on the original channel after a normal teardown write
-    /// failed while that publication was still current.
-    pub(crate) fn allow_current_channel(mut self) -> Self {
-        self.retired_policy = RetiredChannelPolicy::CurrentAllowed;
-        self
-    }
-
+impl RestorePlan for CaptureRestorePlan {
     async fn restore_on(&self, current: &SharedChannel) -> bool {
         let channel = Arc::clone(current.channel());
         let device_index = current.device_index();
@@ -232,27 +124,35 @@ impl PendingCaptureRestore {
     }
 }
 
-/// Roll back a partially armed session without losing firmware ownership when
-/// any compensating write fails.
-pub(crate) async fn rollback_capture_start(
-    error: GestureError,
-    pending: Option<PendingCaptureRestore>,
-    retired: &SharedChannel,
-    registry: Option<&ChannelRegistry>,
-) -> CaptureSessionFailure {
-    let Some(pending) = pending else {
-        return CaptureSessionFailure::clean(error);
-    };
-    let pending = pending.allow_current_channel();
-    let outcome = match registry {
-        Some(registry) => pending.retry(registry).await,
-        None => pending.restore_standalone(retired).await,
-    };
-    match outcome {
-        CaptureSessionOutcome::Restored => CaptureSessionFailure::clean(error),
-        CaptureSessionOutcome::RestorePending(pending) => {
-            CaptureSessionFailure::with_pending(error, pending)
+/// Firmware ownership a capture session could not release, to retry on the
+/// channel inventory publishes next.
+pub type PendingCaptureRestore = PendingRestore<CaptureRestorePlan>;
+
+/// How a capture session completed its firmware teardown.
+pub type CaptureSessionOutcome = RestoreOutcome<CaptureRestorePlan>;
+
+/// A capture setup failure plus any firmware ownership its rollback could not
+/// release.
+pub type CaptureSessionFailure = SessionFailure<CaptureError, CaptureRestorePlan>;
+
+impl PendingCaptureRestore {
+    /// The restore owed for `reprog` and the thumb wheel, or `None` when the
+    /// session diverted nothing.
+    pub(crate) fn new(
+        retired: &SharedChannel,
+        reprog: Option<ReprogRestore>,
+        thumb_index: Option<u8>,
+    ) -> Option<Self> {
+        if reprog.is_none() && thumb_index.is_none() {
+            return None;
         }
+        Some(Self::owing(
+            retired,
+            CaptureRestorePlan {
+                reprog,
+                thumb_index,
+            },
+        ))
     }
 }
 
@@ -260,38 +160,27 @@ pub(crate) async fn rollback_capture_start(
 pub(crate) async fn restore_after_stop(
     stop: CaptureStop,
     pending: Option<PendingCaptureRestore>,
-    retired: &SharedChannel,
-    registry: Option<&ChannelRegistry>,
+    registry: &ChannelRegistry,
 ) -> CaptureSessionOutcome {
     let Some(pending) = pending else {
         return CaptureSessionOutcome::Restored;
     };
     match stop {
-        CaptureStop::Shutdown => {
-            let pending = pending.allow_current_channel();
-            match registry {
-                Some(registry) => pending.retry(registry).await,
-                None => pending.restore_standalone(retired).await,
-            }
-        }
-        CaptureStop::ChannelChanged => match registry {
-            Some(registry) => pending.retry(registry).await,
-            None => CaptureSessionOutcome::RestorePending(pending),
-        },
+        CaptureStop::Shutdown => pending.allow_current_channel().retry(registry).await,
+        CaptureStop::ChannelChanged => pending.retry(registry).await,
     }
 }
 
 /// Re-check inventory at shutdown so a simultaneously ready stop request does
 /// not win over publication replacement and write through a retired channel.
 pub(crate) fn stop_for_current_publication(
-    registry: Option<&ChannelRegistry>,
+    registry: &ChannelRegistry,
     retired: &SharedChannel,
 ) -> CaptureStop {
-    if registry.is_some_and(|registry| !registry.is_current(retired)) {
-        CaptureStop::ChannelChanged
-    } else {
-        // A standalone session has no publication that can supersede it.
+    if registry.is_current(retired) {
         CaptureStop::Shutdown
+    } else {
+        CaptureStop::ChannelChanged
     }
 }
 
@@ -299,12 +188,9 @@ pub(crate) fn stop_for_current_publication(
 /// armed. The returned reason never carries a cached replacement across an
 /// await; restoration performs a fresh registry lookup instead.
 pub(crate) async fn wait_for_channel_change(
-    registry: Option<&ChannelRegistry>,
+    registry: &ChannelRegistry,
     retired: &SharedChannel,
 ) -> CaptureStop {
-    let Some(registry) = registry else {
-        return std::future::pending().await;
-    };
     let mut changes = registry.subscribe();
     loop {
         if !registry.is_current(retired) {
@@ -312,8 +198,8 @@ pub(crate) async fn wait_for_channel_change(
         }
         if changes.changed().await.is_err() {
             // The borrowed registry owns the sender, so this is unreachable;
-            // preserve standalone-like pending semantics if that invariant is
-            // ever changed rather than inventing a channel transition.
+            // stay pending if that invariant ever changes rather than
+            // inventing a channel transition.
             return std::future::pending().await;
         }
     }

@@ -6,9 +6,10 @@ use openlogi_core::config::LightSettings;
 use openlogi_core::hid::{DeviceRoute, LightCommand, WriteError};
 use tracing::debug;
 
-use super::AppState;
 use super::device_key::DeviceKey;
-use super::device_runtime::DeviceRuntimeState;
+use super::device_session::DeviceSession;
+use super::events::StateEvents;
+use super::{AppState, StateEvent};
 
 const fn camera_policy_applies(light: LightSettings) -> bool {
     cfg!(target_os = "macos") && light.auto_camera
@@ -27,7 +28,7 @@ pub enum LightCommandStatus {
 
 /// Process-session state shared by standalone-light devices.
 #[derive(Debug, Default)]
-pub(super) struct LightingState {
+pub(super) struct LightSession {
     camera_active: bool,
     next_request_id: u64,
 }
@@ -105,26 +106,27 @@ impl AppState {
         let light = self.light_for(key);
         if camera_policy_applies(light) {
             self.devices
-                .runtime
+                .sessions
                 .get(key)
                 .and_then(|entry| entry.light.manual_override)
-                .unwrap_or(self.lighting.camera_active)
+                .unwrap_or(self.lights.camera_active)
         } else {
             light.enabled
         }
     }
 
     /// Update the runtime camera state used by camera-linked light rendering.
-    /// A real transition clears every transient manual override.
-    pub fn set_camera_active(&mut self, active: bool) -> bool {
-        let changed = self.lighting.camera_active != active;
+    /// A real transition clears every transient manual override, and is the
+    /// only case reported.
+    pub fn set_camera_active(&mut self, active: bool) -> StateEvents {
+        let changed = self.lights.camera_active != active;
         if changed {
-            for entry in self.devices.runtime.values_mut() {
+            for entry in self.devices.sessions.values_mut() {
                 entry.light.manual_override = None;
             }
         }
-        self.lighting.camera_active = active;
-        changed
+        self.lights.camera_active = active;
+        changed.then_some(StateEvent::CameraChanged).into()
     }
 
     /// Whether the selected light is currently governed by a supported camera
@@ -140,7 +142,7 @@ impl AppState {
     pub fn light_command_status(&self) -> Option<LightCommandStatus> {
         let key = self.current_record()?.device_key();
         self.devices
-            .runtime
+            .sessions
             .get(&key)
             .and_then(|entry| entry.light.status.as_ref())
             .map(|(_, status)| status.clone())
@@ -150,9 +152,9 @@ impl AppState {
     /// [`PendingLightSetup`] becomes the pending entry in one step, while
     /// `None` (device offline / no route) records only the Offline status.
     fn begin_light_command(&mut self, key: &DeviceKey, setup: Option<PendingLightSetup>) -> u64 {
-        self.lighting.next_request_id = self.lighting.next_request_id.wrapping_add(1);
-        let request_id = self.lighting.next_request_id;
-        let entry = self.devices.runtime.entry(key.clone()).or_default();
+        self.lights.next_request_id = self.lights.next_request_id.wrapping_add(1);
+        let request_id = self.lights.next_request_id;
+        let entry = self.devices.sessions.entry(key.clone()).or_default();
         match setup {
             Some(setup) => {
                 entry.light.pending = Some(PendingLightCommand {
@@ -185,21 +187,21 @@ impl AppState {
     ) {
         if let Some(pending) = self
             .devices
-            .runtime
+            .sessions
             .get_mut(key)
             .and_then(|entry| entry.light.pending.as_mut())
             && pending.request_id == request_id
         {
             pending.pending = pending.pending.saturating_add(1);
         }
-        if !self.send_ipc(crate::services::ipc::Command::SetLight(
+        if !self.send_ipc(crate::services::ipc::SetLight {
             route,
             command,
-            key.to_string(),
+            key: key.clone(),
             request_id,
-        )) {
-            self.apply_light_command_result(
-                key.to_string(),
+        }) {
+            self.settle_light_command(
+                key.clone(),
                 request_id,
                 command,
                 Err(WriteError::AgentUnavailable),
@@ -210,7 +212,7 @@ impl AppState {
     fn supersede_light_command(&mut self, key: &DeviceKey) -> Vec<SupersededLightCommand> {
         let Some(pending) = self
             .devices
-            .runtime
+            .sessions
             .get_mut(key)
             .and_then(|entry| entry.light.pending.take())
         else {
@@ -231,15 +233,30 @@ impl AppState {
     /// overwrite the status of a newer slider release.
     pub fn apply_light_command_result(
         &mut self,
-        key: String,
+        key: DeviceKey,
+        request_id: u64,
+        command: LightCommand,
+        result: Result<(), WriteError>,
+    ) -> StateEvents {
+        if self.settle_light_command(key.clone(), request_id, command, result) {
+            StateEvent::LightingChanged(key).into()
+        } else {
+            StateEvents::none()
+        }
+    }
+
+    /// Record one write result against the request it belongs to, reporting
+    /// whether it belonged to a live one.
+    fn settle_light_command(
+        &mut self,
+        key: DeviceKey,
         request_id: u64,
         command: LightCommand,
         result: Result<(), WriteError>,
     ) -> bool {
-        let key = DeviceKey::from(key);
         let Some(pending) = self
             .devices
-            .runtime
+            .sessions
             .get_mut(&key)
             .and_then(|entry| entry.light.pending.as_mut())
         else {
@@ -277,7 +294,7 @@ impl AppState {
 
         let Some(pending) = self
             .devices
-            .runtime
+            .sessions
             .get_mut(&key)
             .and_then(|entry| entry.light.pending.take())
         else {
@@ -310,19 +327,19 @@ impl AppState {
         if let Some(error) = failure {
             if successful_commands.is_empty() {
                 self.devices
-                    .runtime
+                    .sessions
                     .entry(key.clone())
                     .or_default()
                     .light
                     .volatile_settings = pending.previous_volatile;
-                restore_manual_override(&mut self.devices.runtime, &key, manual_override_rollback);
+                restore_manual_override(&mut self.devices.sessions, &key, manual_override_rollback);
             } else {
                 let mut accepted = pending.rollback_settings;
                 for &command in &successful_commands {
                     apply_light_command(&mut accepted, command);
                 }
                 if let Some(persistent_key) = pending.persistent_key {
-                    if let Some(entry) = self.devices.runtime.get_mut(&key) {
+                    if let Some(entry) = self.devices.sessions.get_mut(&key) {
                         entry.light.volatile_settings = None;
                     }
                     self.config
@@ -330,7 +347,7 @@ impl AppState {
                     self.persist_and_reload("partial light");
                 } else {
                     self.devices
-                        .runtime
+                        .sessions
                         .entry(key.clone())
                         .or_default()
                         .light
@@ -341,13 +358,13 @@ impl AppState {
                     .any(|command| matches!(command, LightCommand::Power(_)))
                 {
                     restore_manual_override(
-                        &mut self.devices.runtime,
+                        &mut self.devices.sessions,
                         &key,
                         manual_override_rollback,
                     );
                 }
             }
-            self.devices.runtime.entry(key).or_default().light.status =
+            self.devices.sessions.entry(key).or_default().light.status =
                 Some((request_id, LightCommandStatus::Failed(error)));
         } else {
             if let (Some(settings), Some(persistent_key)) =
@@ -355,14 +372,14 @@ impl AppState {
             {
                 self.config
                     .edit(|config| config.set_light(&persistent_key, settings));
-                if let Some(entry) = self.devices.runtime.get_mut(&key) {
+                if let Some(entry) = self.devices.sessions.get_mut(&key) {
                     entry.light.volatile_settings = None;
                 }
                 self.persist_and_reload("light");
             }
             // Successful writes are reflected by the controls themselves; do
             // not leave a persistent success banner in the panel.
-            if let Some(entry) = self.devices.runtime.get_mut(&key) {
+            if let Some(entry) = self.devices.sessions.get_mut(&key) {
                 entry.light.status = None;
             }
         }
@@ -382,7 +399,7 @@ impl AppState {
     #[must_use]
     pub fn light_for(&self, key: &DeviceKey) -> LightSettings {
         self.devices
-            .runtime
+            .sessions
             .get(key)
             .and_then(|entry| entry.light.volatile_settings)
             .or_else(|| self.config.light(key.as_str()))
@@ -399,7 +416,7 @@ impl AppState {
         fallback: LightSettings,
     ) -> (LightSettings, Option<LightSettings>) {
         self.devices
-            .runtime
+            .sessions
             .get(key)
             .and_then(|entry| entry.light.pending.as_ref())
             .map_or_else(
@@ -407,7 +424,7 @@ impl AppState {
                     (
                         fallback,
                         self.devices
-                            .runtime
+                            .sessions
                             .get(key)
                             .and_then(|entry| entry.light.volatile_settings),
                     )
@@ -426,7 +443,7 @@ impl AppState {
         camera_mode_changed: bool,
     ) -> Option<ManualOverrideRollback> {
         self.devices
-            .runtime
+            .sessions
             .get(key)
             .and_then(|entry| entry.light.pending.as_ref())
             .and_then(|pending| pending.manual_override_rollback)
@@ -434,7 +451,7 @@ impl AppState {
                 camera_mode_changed.then(|| ManualOverrideRollback {
                     previous: self
                         .devices
-                        .runtime
+                        .sessions
                         .get(key)
                         .and_then(|entry| entry.light.manual_override),
                 })
@@ -444,7 +461,8 @@ impl AppState {
     /// Persist and apply standalone-light settings through the agent-owned
     /// raw-HID path. Online persistent changes are committed only after every
     /// advertised device command succeeds; failures roll optimistic state back.
-    pub fn commit_light(&mut self, light: LightSettings) {
+    pub fn commit_light(&mut self, light: LightSettings) -> StateEvents {
+        let events = self.for_current_device(StateEvent::LightingChanged);
         let Some((runtime_key, key, route, online, capabilities)) =
             self.current_record().map(|record| {
                 (
@@ -457,14 +475,14 @@ impl AppState {
             })
         else {
             debug!("no active device — light change ignored");
-            return;
+            return events;
         };
         let previous = self.light_for(&runtime_key);
         let camera_mode_changed =
             cfg!(target_os = "macos") && previous.auto_camera != light.auto_camera;
         let effective_enabled = if camera_policy_applies(light) {
             if camera_mode_changed {
-                self.lighting.camera_active
+                self.lights.camera_active
             } else {
                 self.light_enabled_for(&runtime_key)
             }
@@ -473,7 +491,7 @@ impl AppState {
         };
         let manual_override_rollback =
             self.light_mode_override_rollback(&runtime_key, camera_mode_changed);
-        if camera_mode_changed && let Some(entry) = self.devices.runtime.get_mut(&runtime_key) {
+        if camera_mode_changed && let Some(entry) = self.devices.sessions.get_mut(&runtime_key) {
             entry.light.manual_override = None;
         }
         let mut effective = light;
@@ -486,7 +504,7 @@ impl AppState {
         let (rollback_settings, previous_volatile) =
             self.light_write_rollback(&runtime_key, previous);
         self.devices
-            .runtime
+            .sessions
             .entry(runtime_key.clone())
             .or_default()
             .light
@@ -509,30 +527,32 @@ impl AppState {
                 for command in commands {
                     self.queue_light_command(&runtime_key, request_id, route.clone(), command);
                 }
-                return;
+                return events;
             }
             self.begin_light_command(&runtime_key, None);
         }
         if let Some(key) = key {
-            if let Some(entry) = self.devices.runtime.get_mut(&runtime_key) {
+            if let Some(entry) = self.devices.sessions.get_mut(&runtime_key) {
                 entry.light.volatile_settings = None;
             }
             self.config.edit(|config| config.set_light(&key, light));
             self.persist_and_reload("light");
         } else {
             self.devices
-                .runtime
+                .sessions
                 .entry(runtime_key)
                 .or_default()
                 .light
                 .volatile_settings = Some(light);
         }
+        events
     }
 
     /// Apply a transient manual power choice while camera automation remains
     /// enabled. The persisted `enabled` field is updated as the manual fallback,
     /// but the runtime override lasts only until the next camera transition.
-    pub fn commit_manual_light_power(&mut self, enabled: bool) {
+    pub fn commit_manual_light_power(&mut self, enabled: bool) -> StateEvents {
+        let events = self.for_current_device(StateEvent::LightingChanged);
         let Some((runtime_key, key, route, online)) = self.current_record().map(|record| {
             (
                 record.device_key(),
@@ -542,13 +562,12 @@ impl AppState {
             )
         }) else {
             debug!("no active device — manual light power ignored");
-            return;
+            return events;
         };
         let mut light = self.light_for(&runtime_key);
         if !camera_policy_applies(light) {
             light.enabled = enabled;
-            self.commit_light(light);
-            return;
+            return self.commit_light(light);
         }
 
         let (rollback_settings, previous_volatile) = self.light_write_rollback(&runtime_key, light);
@@ -558,7 +577,11 @@ impl AppState {
         let manual_override_rollback = self.light_mode_override_rollback(&runtime_key, true);
         light.enabled = enabled;
         {
-            let entry = self.devices.runtime.entry(runtime_key.clone()).or_default();
+            let entry = self
+                .devices
+                .sessions
+                .entry(runtime_key.clone())
+                .or_default();
             entry.light.manual_override = Some(enabled);
             entry.light.volatile_settings = Some(light);
         }
@@ -577,30 +600,31 @@ impl AppState {
                     superseded,
                 }),
             );
-            if !self.send_ipc(crate::services::ipc::Command::SetLightManualPower(
+            if !self.send_ipc(crate::services::ipc::SetLightManualPower {
                 route,
                 enabled,
-                runtime_key.to_string(),
+                key: runtime_key.clone(),
                 request_id,
-            )) {
-                self.apply_light_command_result(
-                    runtime_key.to_string(),
+            }) {
+                self.settle_light_command(
+                    runtime_key,
                     request_id,
                     LightCommand::Power(enabled),
                     Err(WriteError::AgentUnavailable),
                 );
             }
-            return;
+            return events;
         }
         self.begin_light_command(&runtime_key, None);
 
         if let Some(key) = key {
-            if let Some(entry) = self.devices.runtime.get_mut(&runtime_key) {
+            if let Some(entry) = self.devices.sessions.get_mut(&runtime_key) {
                 entry.light.volatile_settings = None;
             }
             self.config.edit(|config| config.set_light(&key, light));
             self.persist_and_reload("manual light power");
         }
+        events
     }
 }
 
@@ -618,12 +642,12 @@ fn apply_light_command(settings: &mut LightSettings, command: LightCommand) {
 }
 
 fn restore_manual_override(
-    runtime: &mut BTreeMap<DeviceKey, DeviceRuntimeState>,
+    sessions: &mut BTreeMap<DeviceKey, DeviceSession>,
     key: &DeviceKey,
     rollback: Option<ManualOverrideRollback>,
 ) {
     if let Some(rollback) = rollback {
-        runtime
+        sessions
             .entry(key.clone())
             .or_default()
             .light

@@ -44,7 +44,6 @@ use anyhow::Result;
 use openlogi_core::brand::DeeplinkCommand;
 use openlogi_core::config::{Config, ConfigFile};
 use tracing::{info, warn};
-use tracing_subscriber::EnvFilter;
 
 use crate::platform::app_icon::AppIconExt as _;
 use crate::services::assets::sync::{AssetCommand, AssetControl};
@@ -61,17 +60,18 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let _guard = match openlogi_core::single_instance::acquire("openlogi.lock") {
-        Ok(g) => g,
-        Err(openlogi_core::single_instance::InstanceError::AlreadyRunning { path }) => {
-            info!(
-                path = %path.display(),
-                "another OpenLogi instance is already running — exiting"
-            );
-            return Ok(());
-        }
-        Err(e) => return Err(anyhow::Error::from(e).context("single-instance check")),
-    };
+    let _guard =
+        match openlogi_core::single_instance::acquire(openlogi_core::single_instance::Role::Gui) {
+            Ok(g) => g,
+            Err(openlogi_core::single_instance::InstanceError::AlreadyRunning { path }) => {
+                info!(
+                    path = %path.display(),
+                    "another OpenLogi instance is already running — exiting"
+                );
+                return Ok(());
+            }
+            Err(e) => return Err(anyhow::Error::from(e).context("single-instance check")),
+        };
 
     let (initial_config, config_persistence) = match ConfigFile::load_or_default() {
         Ok((config, file)) => (config, ConfigPersistence::UserFile(file)),
@@ -91,7 +91,7 @@ fn main() -> Result<()> {
     // The always-on agent owns the hook, the HID++ capture, and all device I/O.
     // The GUI is a client: it observes inventory + status and forwards device
     // commands over IPC. Started here so the first state is already on its way.
-    let ipc::IpcClient {
+    let ipc::Handle {
         updates,
         commands: ipc_commands,
     } = ipc::spawn();
@@ -121,7 +121,7 @@ fn main() -> Result<()> {
     });
 
     // Reopen the window when the app is relaunched with none open (dock click).
-    app.on_reopen(|cx| windows::main_window::open(&[], cx));
+    app.on_reopen(windows::main_window::open);
 
     app.run(move |cx| {
         gpui_component::init(cx);
@@ -141,6 +141,7 @@ fn main() -> Result<()> {
         // check on launch. Done before `initial_config` is handed to the
         // event loop below.
         platform::updater::install(cx, &initial_config.app_settings);
+        platform::installation::install(cx);
 
         // Wear the icon the user picked. An update replaces the bundle and
         // takes the icon with it, so this is a repair as much as a restore.
@@ -173,10 +174,5 @@ fn main() -> Result<()> {
 }
 
 fn init_tracing() {
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(
-            EnvFilter::try_from_env("OPENLOGI_LOG").unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
+    openlogi_core::logging::init_stderr();
 }

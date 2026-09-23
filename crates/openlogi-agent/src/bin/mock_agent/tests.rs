@@ -360,7 +360,7 @@ async fn profile_backed_support_and_route_errors_remain_typed() {
 
     let light_route = {
         let state = agent.state.lock().await;
-        standalone_route(&state.profile.standalone[0])
+        state.profile.standalone[0].route()
     };
     agent
         .clone()

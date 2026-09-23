@@ -72,7 +72,7 @@ async fn online_devices() -> Result<Vec<Candidate>> {
 fn online_candidates(inventory: &DeviceInventory) -> Vec<Candidate> {
     let mut candidates = Vec::new();
     for paired in inventory.paired.iter().filter(|paired| paired.online) {
-        if let Some(route) = DeviceRoute::device_route_for(inventory, paired.slot) {
+        if let Some(route) = DeviceRoute::for_slot(inventory, paired.slot) {
             let name = paired
                 .codename
                 .clone()

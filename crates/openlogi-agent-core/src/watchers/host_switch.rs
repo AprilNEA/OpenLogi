@@ -1,6 +1,5 @@
 //! Keep configured keyboard → pointing-device host-switch links armed.
 
-use std::thread;
 use std::time::Duration;
 
 use openlogi_hid::{
@@ -11,11 +10,11 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 use tracing::{debug, warn};
 
+use super::retry::{RETRY_DELAY, wait_for_deadline};
 use super::shutdown::{ManagerCompletion, WatcherHandle};
 use crate::receiver_access::{ExclusiveAccessReason, ReceiverAccess, ReceiverRequestState};
 
 const DEPARTURE_TIMEOUT: Duration = Duration::from_secs(10);
-const RETRY_DELAY: Duration = Duration::from_secs(1);
 
 /// One resolved link. Config keys are converted to live routes by the
 /// orchestrator so the transport watcher never needs to understand inventory.
@@ -51,35 +50,28 @@ pub fn spawn(
 ) -> WatcherHandle {
     let links = links.clone();
     let receiver_requests = receiver_access.subscribe_requests();
-    let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let (shutdown_done_tx, shutdown_done_rx) = oneshot::channel();
-    thread::spawn(move || {
-        let runtime = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(runtime) => runtime,
-            Err(error) => {
-                warn!(%error, "host switch watcher: could not build tokio runtime");
-                let _ = shutdown_done_tx.send(ManagerCompletion::Unexpected);
-                return;
-            }
-        };
-        let completion = runtime.block_on(manage(HostSwitchManagerContext {
+    WatcherHandle::spawn("openlogi-host-switch-watcher", move |shutdown| {
+        manage(HostSwitchManagerContext {
             links,
             channel_pool,
             registry,
             receiver_access,
             receiver_requests,
             device_io,
-            shutdown: shutdown_rx,
-        }));
-        // A manager return can strand detached task supervisors. Destroy their
-        // runtime before reporting that no old firmware writer remains.
-        drop(runtime);
-        let _ = shutdown_done_tx.send(completion);
-    });
-    WatcherHandle::new(shutdown_tx, shutdown_done_rx)
+            shutdown,
+        })
+    })
+}
+
+/// Identity of one spawned host-switch session. A completion settles only the
+/// slot carrying its epoch, so a stale task cannot settle its successor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SessionEpoch(u64);
+
+impl SessionEpoch {
+    fn next(self) -> Self {
+        Self(self.0.wrapping_add(1))
+    }
 }
 
 enum SessionPhase {
@@ -89,7 +81,7 @@ enum SessionPhase {
 
 struct RunningSession {
     link: HostSwitchLink,
-    generation: u64,
+    epoch: SessionEpoch,
     phase: SessionPhase,
 }
 
@@ -113,7 +105,7 @@ enum RestorePhase {
 
 struct Recovery {
     link: HostSwitchLink,
-    generation: u64,
+    epoch: SessionEpoch,
     requested_host: Option<u8>,
     restore: RestorePhase,
 }
@@ -149,7 +141,7 @@ enum TransitionPhase {
 }
 
 struct SessionCompletion {
-    generation: u64,
+    epoch: SessionEpoch,
     result: Result<SessionResult, tokio::task::JoinError>,
 }
 
@@ -160,7 +152,7 @@ struct SessionResult {
 }
 
 struct RestoreCompletion {
-    generation: u64,
+    epoch: SessionEpoch,
     result: Result<HostSwitchRestoreOutcome, tokio::task::JoinError>,
 }
 
@@ -180,7 +172,7 @@ struct SessionServices {
 
 struct HostSwitchManagerState {
     slots: Vec<HostSwitchSlot>,
-    next_generation: u64,
+    last_epoch: SessionEpoch,
     transition: Option<TransitionPhase>,
     task_failed: bool,
 }
@@ -189,7 +181,7 @@ impl HostSwitchManagerState {
     fn new() -> Self {
         Self {
             slots: Vec::new(),
-            next_generation: 0,
+            last_epoch: SessionEpoch(0),
             transition: None,
             task_failed: false,
         }
@@ -304,7 +296,7 @@ impl HostSwitchManagerState {
             let Some(lease) = services.receiver_access.try_acquire_for_session() else {
                 break;
             };
-            let generation = recovery.generation;
+            let epoch = recovery.epoch;
             let RestorePhase::Ready { token, .. } =
                 std::mem::replace(&mut recovery.restore, RestorePhase::Restoring)
             else {
@@ -323,7 +315,7 @@ impl HostSwitchManagerState {
                     }
                 });
                 let _ = events.send(ManagerEvent::Restore(RestoreCompletion {
-                    generation,
+                    epoch,
                     result: task.await,
                 }));
             });
@@ -338,10 +330,10 @@ impl HostSwitchManagerState {
             let Some(lease) = services.receiver_access.try_acquire_for_session() else {
                 break;
             };
-            self.next_generation = self.next_generation.wrapping_add(1);
+            self.last_epoch = self.last_epoch.next();
             self.slots.push(HostSwitchSlot::Running(spawn_session(
                 link.clone(),
-                self.next_generation,
+                self.last_epoch,
                 lease,
                 services,
             )));
@@ -355,7 +347,7 @@ impl HostSwitchManagerState {
         terminal: bool,
     ) {
         let Some(index) = self.slots.iter().position(|slot| {
-            matches!(slot, HostSwitchSlot::Running(session) if session.generation == completion.generation)
+            matches!(slot, HostSwitchSlot::Running(session) if session.epoch == completion.epoch)
         }) else {
             return;
         };
@@ -377,7 +369,7 @@ impl HostSwitchManagerState {
         if let Some(token) = result.pending_restore {
             self.slots.push(HostSwitchSlot::Recovering(Recovery {
                 link: session.link,
-                generation: session.generation,
+                epoch: session.epoch,
                 requested_host: result.requested_host.filter(|_| request_is_current),
                 restore: RestorePhase::Ready {
                     token,
@@ -404,7 +396,7 @@ impl HostSwitchManagerState {
         terminal: bool,
     ) {
         let Some(index) = self.slots.iter().position(|slot| {
-            matches!(slot, HostSwitchSlot::Recovering(recovery) if recovery.generation == completion.generation)
+            matches!(slot, HostSwitchSlot::Recovering(recovery) if recovery.epoch == completion.epoch)
         }) else {
             return;
         };
@@ -547,7 +539,7 @@ fn handle_manager_event(
 
 fn spawn_session(
     link: HostSwitchLink,
-    generation: u64,
+    epoch: SessionEpoch,
     receiver_lease: crate::receiver_access::SessionReceiverLease,
     services: &SessionServices,
 ) -> RunningSession {
@@ -587,13 +579,13 @@ fn spawn_session(
             }
         });
         let _ = events.send(ManagerEvent::Session(SessionCompletion {
-            generation,
+            epoch,
             result: task.await,
         }));
     });
     RunningSession {
         link,
-        generation,
+        epoch,
         phase: SessionPhase::Active(stop),
     }
 }
@@ -666,14 +658,6 @@ fn expedite_pending_restores(state: &mut HostSwitchManagerState) {
     }
 }
 
-async fn wait_for_deadline(deadline: Option<Instant>) {
-    if let Some(deadline) = deadline {
-        tokio::time::sleep_until(deadline).await;
-    } else {
-        std::future::pending::<()>().await;
-    }
-}
-
 async fn wait_for_departure(links: &mut HostSwitchLinks, keyboard: &DeviceRoute) {
     let deadline = tokio::time::sleep(DEPARTURE_TIMEOUT);
     tokio::pin!(deadline);
@@ -723,7 +707,7 @@ mod tests {
         let mut state = HostSwitchManagerState::new();
         state.slots.push(HostSwitchSlot::Running(RunningSession {
             link: link(2),
-            generation: 1,
+            epoch: SessionEpoch(1),
             phase: SessionPhase::Active(stop),
         }));
 
@@ -756,7 +740,7 @@ mod tests {
         let mut state = HostSwitchManagerState::new();
         state.slots.push(HostSwitchSlot::Recovering(Recovery {
             link: link(2),
-            generation: 1,
+            epoch: SessionEpoch(1),
             requested_host: None,
             restore: RestorePhase::Restoring,
         }));
@@ -772,7 +756,7 @@ mod tests {
         let mut state = HostSwitchManagerState::new();
         state.slots.push(HostSwitchSlot::Recovering(Recovery {
             link: link(2),
-            generation: 1,
+            epoch: SessionEpoch(1),
             requested_host: None,
             restore: RestorePhase::Restoring,
         }));
@@ -780,7 +764,7 @@ mod tests {
         assert!(state.terminal_completion(true).is_none());
         state.handle_restore_completion(
             RestoreCompletion {
-                generation: 0,
+                epoch: SessionEpoch(0),
                 result: Ok(HostSwitchRestoreOutcome::Restored),
             },
             &[],
@@ -792,7 +776,7 @@ mod tests {
         );
         state.handle_restore_completion(
             RestoreCompletion {
-                generation: 1,
+                epoch: SessionEpoch(1),
                 result: Ok(HostSwitchRestoreOutcome::Restored),
             },
             &[],
@@ -809,7 +793,7 @@ mod tests {
         let mut state = HostSwitchManagerState::new();
         state.slots.push(HostSwitchSlot::Recovering(Recovery {
             link: link(2),
-            generation: 1,
+            epoch: SessionEpoch(1),
             requested_host: None,
             restore: RestorePhase::Restoring,
         }));
@@ -825,7 +809,7 @@ mod tests {
 
         state.handle_restore_completion(
             RestoreCompletion {
-                generation: 1,
+                epoch: SessionEpoch(1),
                 result: Ok(HostSwitchRestoreOutcome::Restored),
             },
             &[link(2)],
@@ -857,7 +841,7 @@ mod tests {
         };
         let _session = spawn_session(
             link(2),
-            1,
+            SessionEpoch(1),
             access.try_acquire_for_session().unwrap(),
             &services,
         );

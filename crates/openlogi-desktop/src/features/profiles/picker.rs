@@ -18,7 +18,7 @@ use gpui_component::{
 use super::catalog::{AppCatalogPicker, ApplicationIconState, ProfileIconCache};
 use super::shell::application_mark;
 use super::{AddAppChoices, CatalogPresentation, ProfileChoice, ProfileScopeActions};
-use crate::features::mouse::picker::{compact_panel, divider, title};
+use crate::features::binding_editor::{compact_panel, divider, title};
 use crate::ui::components::{MenuRow, control_button, control_input};
 use crate::ui::theme::{self, Palette, SelectableStyle as _, Typography as _};
 
@@ -358,7 +358,7 @@ mod tests {
     use gpui_component::popover::Popover;
 
     use super::APP_ROW_H;
-    use crate::features::mouse::picker::compact_panel;
+    use crate::features::binding_editor::compact_panel;
     use crate::ui::components::MenuRow;
     use crate::ui::theme;
 

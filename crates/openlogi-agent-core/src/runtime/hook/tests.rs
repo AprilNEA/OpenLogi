@@ -2,6 +2,7 @@
 
 use super::*;
 use openlogi_core::binding::{GESTURE_SWIPE_THRESHOLD, LongPressBinding};
+use openlogi_core::config::KeyModifiers;
 
 fn token(id: u64, button: ButtonId) -> PressToken {
     PressToken::hook_for_test(id, button)
@@ -43,10 +44,12 @@ fn test_dispatcher() -> (
     let dispatcher = ActionDispatcher {
         executor: super::super::ActionExecutor {
             dpi_cycle: Arc::new(RwLock::new(crate::DpiCycles::default())),
-            capture: Arc::new(RwLock::new(None)),
-            registry: openlogi_hid::ChannelRegistry::default(),
-            receiver_access: crate::receiver_access::ReceiverAccess::default(),
-            device_io: openlogi_hid::device_io_channel().1,
+            access: crate::hardware::DeviceAccess {
+                channel: Arc::new(RwLock::new(None)),
+                registry: openlogi_hid::ChannelRegistry::default(),
+                receiver_access: crate::receiver_access::ReceiverAccess::default(),
+                device_io: openlogi_hid::device_io_channel().1,
+            },
             action_ring,
         },
         buttons: owner.input(),
@@ -216,7 +219,7 @@ fn queued_key_action_retains_its_press_time_target() {
             KeyEvent {
                 keycode,
                 pressed: true,
-                modifiers: openlogi_hook::KeyModifiers::default(),
+                modifiers: KeyModifiers::default(),
             },
             &bindings,
             &actions,

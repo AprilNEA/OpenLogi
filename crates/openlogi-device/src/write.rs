@@ -59,8 +59,8 @@ pub use smartshift::{
 };
 
 // commands_for_light_settings operates purely on openlogi_core config/device
-// types with no HID++ I/O, so it lives in `openlogi_core::hid::light`;
-// re-exported here unchanged so this module's own API surface doesn't churn.
+// types with no HID++ I/O, so it lives in `openlogi_core::hid::light`; this
+// module's callers name it through here, next to the writes it feeds.
 pub use openlogi_core::hid::light::commands_for_light_settings;
 
 pub(crate) use error::classify_hidpp_error;

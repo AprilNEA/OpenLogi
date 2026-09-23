@@ -147,7 +147,11 @@ fn about_config(cx: &App) -> gpui::Div {
                 .gap_1()
                 .flex_1()
                 .min_w_0()
-                .child(div().font_weight(FontWeight::MEDIUM).child("config.toml"))
+                .child(
+                    div()
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(openlogi_core::paths::CONFIG_FILE),
+                )
                 .child(
                     div()
                         .text_caption()

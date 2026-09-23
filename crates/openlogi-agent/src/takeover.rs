@@ -30,16 +30,10 @@ use std::time::Duration;
 
 use openlogi_core::single_instance::InstanceGuard;
 #[cfg(unix)]
-use openlogi_core::single_instance::{self, InstanceError};
+use openlogi_core::single_instance::{self, InstanceError, Role};
 use tracing::info;
 #[cfg(unix)]
 use tracing::warn;
-
-/// How long to wait for the protocol handshake against the lock holder. The
-/// agent answers from memory; a holder that can't answer in this window is
-/// wedged in a way we can't reason about, so leave it alone.
-#[cfg(unix)]
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// How long to wait for the singleton lock after terminating the stale
 /// holder (20 × 200 ms). SIGTERM delivery and process teardown are fast; the
@@ -63,45 +57,30 @@ pub fn try_replace_stale() -> Option<InstanceGuard> {
 
 #[cfg(unix)]
 fn replace_stale() -> Option<InstanceGuard> {
-    use openlogi_ipc::{AgentClient, PROTOCOL_VERSION};
+    use openlogi_ipc::client::{self, ProtocolSkew};
     use std::ffi::OsStr;
     use sysinfo::{Pid, ProcessesToUpdate, Signal, System};
-    use tarpc::{client, context};
 
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .ok()?;
-    let holder_version = rt.block_on(async {
-        let handshake = async {
-            let stream = openlogi_ipc::transport::connect().await.ok()?;
-            let transport = openlogi_ipc::transport::wrap(stream);
-            let client = AgentClient::new(client::Config::default(), transport).spawn();
-            client.protocol_version(context::current()).await.ok()
-        };
-        tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake)
-            .await
-            .ok()
-            .flatten()
-    })?;
+    let rt = openlogi_core::worker::runtime().ok()?;
+    // The probe carries the shared handshake deadline: a holder that cannot
+    // answer within it is wedged in a way we cannot reason about, so it is
+    // left alone like an unreachable one.
+    let holder_version = rt.block_on(client::probe_version()).ok()?;
     drop(rt);
 
-    if holder_version >= PROTOCOL_VERSION {
-        // We are the duplicate (or the stale one — the GUI handles that
-        // direction by telling the user to relaunch).
+    // Only an older holder is ours to replace. The same version makes us the
+    // duplicate; a newer one makes us the stale side, which the GUI handles by
+    // telling the user to relaunch.
+    let Err(skew @ ProtocolSkew::AgentOlder { .. }) = ProtocolSkew::check(holder_version) else {
         return None;
-    }
-    info!(
-        holder = holder_version,
-        ours = PROTOCOL_VERSION,
-        "lock holder speaks an older protocol — taking over"
-    );
+    };
+    info!(%skew, "lock holder speaks an older protocol — taking over");
 
     let mut system = System::new();
     system.refresh_processes(ProcessesToUpdate::All, true);
     let own_pid = Pid::from_u32(std::process::id());
     let stale_agents = system
-        .processes_by_exact_name(OsStr::new("openlogi-agent"))
+        .processes_by_exact_name(OsStr::new(openlogi_core::brand::Helper::Agent.executable()))
         .filter(|process| process.pid() != own_pid);
 
     let mut found = false;
@@ -129,7 +108,7 @@ fn replace_stale() -> Option<InstanceGuard> {
 
     let (attempts, delay) = LOCK_RETRY;
     for _ in 0..attempts {
-        match single_instance::acquire("agent.lock") {
+        match single_instance::acquire(Role::Agent) {
             Ok(guard) => return Some(guard),
             Err(InstanceError::AlreadyRunning { .. }) => std::thread::sleep(delay),
             Err(e) => {

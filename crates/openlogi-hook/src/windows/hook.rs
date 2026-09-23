@@ -29,6 +29,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_XBUTTONDOWN, WM_XBUTTONUP, XBUTTON1, XBUTTON2,
 };
 
+use openlogi_core::config::FunctionKey;
+
 use super::cursor::{MonitorDpi, PhysicalCursorPosition};
 use super::worker::{WorkerEvent, WorkerPhase, WorkerStatus};
 use crate::{
@@ -597,24 +599,17 @@ fn translate_key(
     })
 }
 
-/// macOS `kVK_*` keycodes for F1–F19 in order — [`KeyEvent`] carries macOS
-/// virtual keycodes on every platform, matching the `KeyTrigger` config
-/// vocabulary.
-const FKEY_MAC_KEYCODES: [u16; 19] = [
-    0x7A, 0x78, 0x63, 0x76, 0x60, 0x61, 0x62, 0x64, 0x65, 0x6D, 0x67, 0x6F, 0x69, 0x6B, 0x71, 0x6A,
-    0x40, 0x4F, 0x50,
-];
-
-/// Map a Windows virtual-key code to the macOS keycode [`KeyEvent`] carries,
-/// or `None` for keys outside the Esc/F1–F19 set.
+/// Map a Windows virtual-key code to the macOS keycode [`KeyEvent`] carries
+/// on every platform — [`FunctionKey`]'s — or `None` for keys outside the
+/// Esc/F1–F19 set. Windows numbers `VK_F1`.. consecutively.
 fn mac_keycode(vk: u32) -> Option<u16> {
     let vk = u16::try_from(vk).ok()?;
-    if vk == VK_ESCAPE {
-        return Some(0x35);
-    }
-    FKEY_MAC_KEYCODES
-        .get(usize::from(vk.checked_sub(VK_F1)?))
-        .copied()
+    let key = if vk == VK_ESCAPE {
+        FunctionKey::Esc
+    } else {
+        FunctionKey::nth_f(vk.checked_sub(VK_F1)?.checked_add(1)?)?
+    };
+    Some(key.keycode())
 }
 
 /// Snapshot the modifier state via `GetAsyncKeyState` — `WH_KEYBOARD_LL`
@@ -696,22 +691,28 @@ mod tests {
         }
     }
 
-    /// The hook emits macOS `kVK_*` keycodes; a drift from the `KeyTrigger`
-    /// parse table in openlogi-core would make every saved binding miss.
+    /// The keycodes themselves are `FunctionKey`'s; what this module owns is
+    /// which Windows virtual key is which function key.
     #[test]
-    fn emitted_keycodes_match_the_key_trigger_vocabulary() {
-        use openlogi_core::config::KeyTrigger;
-
-        let esc: KeyTrigger = "esc".parse().expect("parse key trigger");
-        assert_eq!(mac_keycode(u32::from(VK_ESCAPE)), Some(esc.keycode));
-        for n in 1..=19u16 {
-            let trigger: KeyTrigger = format!("f{n}").parse().expect("parse key trigger");
-            assert_eq!(
-                mac_keycode(u32::from(VK_F1 + n - 1)),
-                Some(trigger.keycode),
-                "f{n}"
-            );
-        }
+    fn virtual_keys_map_onto_the_function_row() {
+        assert_eq!(
+            mac_keycode(u32::from(VK_ESCAPE)),
+            Some(FunctionKey::Esc.keycode())
+        );
+        assert_eq!(
+            mac_keycode(u32::from(VK_F1)),
+            Some(FunctionKey::F1.keycode())
+        );
+        assert_eq!(
+            mac_keycode(u32::from(VK_F1 + 18)),
+            Some(FunctionKey::F19.keycode())
+        );
+        assert_eq!(
+            mac_keycode(u32::from(VK_F1 + 19)),
+            None,
+            "F20 is off the row"
+        );
+        assert_eq!(mac_keycode(u32::from(VK_F1 - 1)), None);
     }
 
     #[test]

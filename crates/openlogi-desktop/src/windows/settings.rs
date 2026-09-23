@@ -26,7 +26,7 @@ pub(super) use gpui_component::{
     input::{InputEvent, InputState},
     select::{SelectEvent, SelectItem, SelectState},
     setting::{SelectIndex, SettingField, SettingGroup, SettingItem, SettingPage, Settings},
-    slider::{Slider, SliderEvent, SliderState},
+    slider::{Slider, SliderState},
     tag::Tag,
     theme::ThemeConfig,
     v_flex,
@@ -40,6 +40,7 @@ pub(super) use openlogi_core::config::{
 pub(super) use crate::app::menu::{CloseWindow, Minimize, Zoom};
 pub(super) use crate::services::assets::sync::{AssetCommand, AssetControl};
 pub(super) use crate::state::{AppState, StateEvent};
+use crate::ui::commit_slider::{CommitSlider, SliderRange};
 pub(super) use crate::ui::theme::{self, Palette};
 #[cfg(target_os = "macos")]
 pub(super) use openlogi_permissions::Permission;
@@ -109,6 +110,8 @@ pub struct SettingsView {
     /// Refreshes host-owned snapshots when Settings becomes active again.
     _activation_obs: Subscription,
     _state_obs: Subscription,
+    /// Refreshes installation metadata when the startup probe completes.
+    _installation_obs: Subscription,
     /// Which themes the Appearance grid shows (All / Light / Dark).
     theme_filter: ThemeFilter,
     /// Free-text filter for the Appearance theme grid (search 50+ themes by name).
@@ -119,8 +122,8 @@ pub struct SettingsView {
     initial_page: SettingsPage,
     language_select: Entity<SelectState<Vec<language::LanguageOption>>>,
     asset_source_select: Entity<SelectState<Vec<assets::AssetSourceOption>>>,
-    thumbwheel_sensitivity_slider: Entity<SliderState>,
-    vertical_scroll_sensitivity_slider: Entity<SliderState>,
+    thumbwheel_sensitivity: CommitSlider<ThumbwheelSensitivity>,
+    vertical_scroll_sensitivity: CommitSlider<VerticalScrollSensitivity>,
     /// Shared app-wide updater, surfaced on the Updates page. A launch-time
     /// check result is already visible when the window opens.
     updater: Entity<Updater>,
@@ -161,6 +164,8 @@ impl SettingsView {
         let updater = crate::platform::updater::shared(cx)
             .unwrap_or_else(|| crate::platform::updater::new_entity(cx));
         let updater_obs = cx.observe(&updater, |_, _, cx| cx.notify());
+        let installation_obs =
+            cx.observe_global::<crate::platform::installation::Installation>(|_, cx| cx.notify());
         let state_obs = cx.subscribe(&AppState::global(cx), |this, _, event: &StateEvent, cx| {
             if matches!(event, StateEvent::LanguageChanged) {
                 // The cache-size line is localized text cached in view state
@@ -212,9 +217,8 @@ impl SettingsView {
         cx.subscribe_in(&asset_source_select, window, Self::on_asset_source_select)
             .detach();
 
-        let thumbwheel_sensitivity_slider = Self::thumbwheel_sensitivity_slider(window, cx);
-        let vertical_scroll_sensitivity_slider =
-            Self::vertical_scroll_sensitivity_slider(window, cx);
+        let thumbwheel_sensitivity = Self::thumbwheel_sensitivity_slider(cx);
+        let vertical_scroll_sensitivity = Self::vertical_scroll_sensitivity_slider(cx);
 
         // Poll the agent's live event monitor while this window is open. The task
         // is held in the view, so closing Settings drops it, polling stops, and
@@ -229,7 +233,7 @@ impl SettingsView {
                 let sender = cx.update(|cx| AppState::global(cx).read(cx).ipc_sender());
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 let events = if sender
-                    .send(crate::services::ipc::Command::PollEventMonitor(tx))
+                    .send(crate::services::ipc::PollEventMonitor { reply: tx }.into())
                     .is_ok()
                 {
                     rx.await.unwrap_or_default()
@@ -237,13 +241,7 @@ impl SettingsView {
                     Vec::new()
                 };
                 cx.update(|cx| {
-                    AppState::update(cx, |state, cx| {
-                        state.set_event_taps(taps);
-                        if !events.is_empty() {
-                            state.push_monitor_events(events);
-                        }
-                        cx.emit(StateEvent::DiagnosticsChanged);
-                    });
+                    AppState::apply(cx, |state| state.record_monitor_poll(taps, events));
                 });
                 cx.background_executor()
                     .timer(std::time::Duration::from_millis(300))
@@ -256,13 +254,14 @@ impl SettingsView {
             appearance_obs: None,
             _activation_obs: activation_obs,
             _state_obs: state_obs,
+            _installation_obs: installation_obs,
             theme_filter: ThemeFilter::All,
             theme_search,
             initial_page,
             language_select,
             asset_source_select,
-            thumbwheel_sensitivity_slider,
-            vertical_scroll_sensitivity_slider,
+            thumbwheel_sensitivity,
+            vertical_scroll_sensitivity,
             updater,
             updater_obs,
             copied: false,
@@ -290,92 +289,44 @@ impl SettingsView {
         })
     }
 
+    /// The thumb-wheel sensitivity slider. The label tracks the live slider
+    /// value while it is dragged; persistence happens once on release.
     fn thumbwheel_sensitivity_slider(
-        window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Entity<SliderState> {
+    ) -> CommitSlider<ThumbwheelSensitivity> {
         let current = AppState::try_read(cx).map_or(ThumbwheelSensitivity::DEFAULT, |state| {
             state.app_settings().thumbwheel_sensitivity
         });
-        let slider = cx.new(|_| {
-            SliderState::new()
-                .min(f32::from(ThumbwheelSensitivity::MIN))
-                .max(f32::from(ThumbwheelSensitivity::MAX))
-                .default_value(f32::from(current))
-        });
-        cx.subscribe_in(&slider, window, Self::on_thumbwheel_sensitivity_slider)
-            .detach();
-        slider
+        CommitSlider::new(
+            SliderRange::new(ThumbwheelSensitivity::MIN, ThumbwheelSensitivity::MAX),
+            current,
+            cx,
+            |_, sensitivity, cx| {
+                AppState::apply(cx, |state| state.commit_thumbwheel_sensitivity(sensitivity));
+            },
+        )
     }
 
+    /// The vertical scroll sensitivity slider, committed once it is released.
     fn vertical_scroll_sensitivity_slider(
-        window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Entity<SliderState> {
+    ) -> CommitSlider<VerticalScrollSensitivity> {
         let current = AppState::try_read(cx).map_or(VerticalScrollSensitivity::DEFAULT, |state| {
             state.app_settings().vertical_scroll_sensitivity
         });
-        let slider = cx.new(|_| {
-            SliderState::new()
-                .min(f32::from(VerticalScrollSensitivity::MIN))
-                .max(f32::from(VerticalScrollSensitivity::MAX))
-                .default_value(f32::from(current))
-        });
-        cx.subscribe_in(&slider, window, Self::on_vertical_scroll_sensitivity_slider)
-            .detach();
-        slider
-    }
-
-    /// Commit the thumb-wheel sensitivity slider. The label tracks the live
-    /// slider value on every `Change`; persistence happens once on `Release`.
-    #[expect(
-        clippy::unused_self,
-        reason = "gpui subscription handlers must take &mut self"
-    )]
-    fn on_thumbwheel_sensitivity_slider(
-        &mut self,
-        _: &Entity<SliderState>,
-        event: &SliderEvent,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let SliderEvent::Release(value) = event {
-            let sensitivity = ThumbwheelSensitivity::from_rounded(value.start());
-            AppState::update(cx, |state, cx| {
-                state.set_thumbwheel_sensitivity(sensitivity);
-                cx.emit(StateEvent::SettingsChanged);
-            });
-        }
-        cx.notify();
-    }
-
-    /// Commit the vertical scroll sensitivity once the slider is released.
-    #[expect(
-        clippy::unused_self,
-        reason = "gpui subscription handlers must take &mut self"
-    )]
-    fn on_vertical_scroll_sensitivity_slider(
-        &mut self,
-        slider: &Entity<SliderState>,
-        event: &SliderEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let SliderEvent::Release(value) = event {
-            let sensitivity = VerticalScrollSensitivity::from_rounded(value.start());
-            let committed = AppState::update(cx, |state, cx| {
-                state.set_vertical_scroll_sensitivity(sensitivity);
-                cx.emit(StateEvent::SettingsChanged);
-                state.app_settings().vertical_scroll_sensitivity
-            });
-            // A failed write restores AppState's persisted configuration. Re-seat
-            // this independently owned slider so it cannot keep presenting the
-            // rejected value after that rollback.
-            slider.update(cx, |slider, cx| {
-                slider.set_value(f32::from(committed), window, cx);
-            });
-        }
-        cx.notify();
+        CommitSlider::new(
+            SliderRange::new(
+                VerticalScrollSensitivity::MIN,
+                VerticalScrollSensitivity::MAX,
+            ),
+            current,
+            cx,
+            |_, sensitivity, cx| {
+                AppState::apply(cx, |state| {
+                    state.commit_vertical_scroll_sensitivity(sensitivity)
+                });
+            },
+        )
     }
 
     fn on_language_select(
@@ -394,10 +345,7 @@ impl SettingsView {
             .filter(|code| !code.is_empty())
             .map(ToOwned::to_owned);
 
-        AppState::update(cx, |state, cx| {
-            state.set_language(language, cx);
-            cx.emit(StateEvent::SettingsChanged);
-        });
+        AppState::apply(cx, |state| state.commit_language(language));
     }
 
     fn on_asset_source_select(
@@ -418,10 +366,7 @@ impl SettingsView {
             state.app_settings().asset_source != source && state.app_settings().auto_download_assets
         });
 
-        AppState::update(cx, |state, cx| {
-            state.set_asset_source(source);
-            cx.emit(StateEvent::SettingsChanged);
-        });
+        AppState::apply(cx, |state| state.commit_asset_source(source));
         if refresh {
             assets::send_asset_command(cx, AssetCommand::Refresh);
         }
@@ -471,6 +416,18 @@ impl Render for SettingsView {
             window,
             cx,
         );
+        // A failed write restores AppState's persisted configuration. Re-seat
+        // these independently owned sliders so neither can keep presenting the
+        // rejected value after that rollback.
+        if let Some(settings) = AppState::try_read(cx).map(AppState::app_settings) {
+            let (vertical_scroll, thumbwheel) = (
+                settings.vertical_scroll_sensitivity,
+                settings.thumbwheel_sensitivity,
+            );
+            self.vertical_scroll_sensitivity
+                .sync(vertical_scroll, window, cx);
+            self.thumbwheel_sensitivity.sync(thumbwheel, window, cx);
+        }
         let pal = theme::palette(cx);
         let view = cx.entity();
         // Only surface the Camera permission when a webcam is actually present,
@@ -492,8 +449,8 @@ impl Render for SettingsView {
             })
             .page(general::general_page(
                 general::SensitivitySliders {
-                    vertical_scroll: self.vertical_scroll_sensitivity_slider.clone(),
-                    thumbwheel: self.thumbwheel_sensitivity_slider.clone(),
+                    vertical_scroll: self.vertical_scroll_sensitivity.slider().clone(),
+                    thumbwheel: self.thumbwheel_sensitivity.slider().clone(),
                 },
                 self.registration_status,
             ))
