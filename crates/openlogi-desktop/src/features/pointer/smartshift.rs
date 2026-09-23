@@ -352,6 +352,7 @@ impl SmartShiftPanel {
                     .child(tr!("pointer.gesture_axis_bias_description")),
             )
     }
+}
 
 impl Render for SmartShiftPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

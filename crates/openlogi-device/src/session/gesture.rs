@@ -28,7 +28,6 @@ use std::sync::{Arc, Mutex, PoisonError};
 use hidpp::protocol::v20;
 use openlogi_core::binding::{ButtonId, GestureDirection, GestureTrace};
 use openlogi_core::config::{GestureAxisBias, GestureSensitivity};
-use openlogi_core::config::{GestureAxisBias, GestureSensitivity};
 use tokio::sync::mpsc;
 use tracing::info;
 
@@ -270,13 +269,7 @@ impl ArmedCapture for GestureCapture {
 
     fn reset_input_state(&self) {
         let mut accum = self.accum.lock().unwrap_or_else(PoisonError::into_inner);
-        let sensitivity = accum.sensitivity;
-        let axis_bias = accum.axis_bias;
-        *accum = CaptureAccum {
-            sensitivity,
-            axis_bias,
-            ..CaptureAccum::default()
-        };
+        accum.reset_preserving_config();
     }
 
     async fn rearm(&self) {

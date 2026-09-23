@@ -374,7 +374,13 @@ impl SwipeAccumulator {
         let fast_flick = dominant >= self.sensitivity.velocity_bypass_threshold();
         let held_long_enough = elapsed >= self.sensitivity.hold_duration();
         // Two+ post-kick samples confirm direction without waiting the full hold gate.
-        let direction_confirmed = self.kept_samples >= 2 || held_long_enough || fast_flick;
+        // A single post-settle sample that already meets the travel threshold also
+        // confirms — OS hooks often coalesce a whole swipe into one move event.
+        let enough_travel = dominant >= self.sensitivity.travel_threshold();
+        let direction_confirmed = self.kept_samples >= 2
+            || held_long_enough
+            || fast_flick
+            || (self.kept_samples >= 1 && enough_travel);
 
         if direction_confirmed
             && let Some(dir) = detect_swipe_with_thresholds(
@@ -539,6 +545,24 @@ mod tests {
 
     // ── SwipeAccumulator (the shared mid-swipe state machine) ─────────────────
 
+
+    #[test]
+    fn single_post_settle_move_above_travel_commits() {
+        let mut acc = SwipeAccumulator::default();
+        acc.begin_with_config(GestureSensitivity::DEFAULT, GestureAxisBias::DEFAULT);
+        // OS-hook path clears contact-kick suppression so the first move counts.
+        acc.clear_contact_kick_pending();
+        acc.backdate_settle_for_test();
+        let travel = GestureSensitivity::DEFAULT.travel_threshold();
+        let bypass = GestureSensitivity::DEFAULT.velocity_bypass_threshold();
+        assert!(travel < bypass);
+        assert_eq!(
+            acc.accumulate(travel, 0),
+            Some(GestureDirection::Right),
+            "one post-settle sample at travel threshold must commit a swipe"
+        );
+    }
+
     /// Discard the contact-kick sample, then feed real motion.
     fn after_kick(acc: &mut SwipeAccumulator, dx: i32, dy: i32) -> Option<GestureDirection> {
         assert_eq!(
@@ -559,13 +583,8 @@ mod tests {
         assert_eq!(acc.total_dx(), 0);
         assert_eq!(
             acc.accumulate(-(GESTURE_SWIPE_THRESHOLD + 10), 0),
-            None,
-            "one kept sample alone waits for confirmation"
-        );
-        assert_eq!(
-            acc.accumulate(-20, 0),
             Some(GestureDirection::Left),
-            "post-kick samples commit the real direction"
+            "one post-kick sample at travel threshold commits after settle"
         );
     }
 

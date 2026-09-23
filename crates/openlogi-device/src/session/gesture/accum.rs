@@ -3,11 +3,10 @@
 
 use openlogi_core::binding::{ButtonId, GestureDirection, SwipeAccumulator};
 use openlogi_core::config::{GestureAxisBias, GestureSensitivity};
-use openlogi_core::config::{GestureAxisBias, GestureSensitivity};
 use tokio::sync::mpsc;
 use tracing::debug;
 
-use super::{CaptureSpec, CapturedInput, GESTURE_SOURCE_BUTTONS};
+use super::{CapturedInput, GESTURE_SOURCE_BUTTONS};
 use crate::reprog_controls::{self, RawControlEvent};
 
 /// The hold that owns raw-XY motion, or the absence of one. Raw-XY reports
@@ -94,6 +93,19 @@ pub(super) fn capture_accum_for(spec: &super::CaptureSpec) -> CaptureAccum {
     }
 }
 
+impl CaptureAccum {
+    /// Drop hold/button state but keep the configured sensitivity/axis bias.
+    pub(super) fn reset_preserving_config(&mut self) {
+        let sensitivity = self.sensitivity;
+        let axis_bias = self.axis_bias;
+        *self = CaptureAccum {
+            sensitivity,
+            axis_bias,
+            ..CaptureAccum::default()
+        };
+    }
+}
+
 #[cfg(test)]
 impl CaptureAccum {
     /// Test-only seam mirroring [`SwipeAccumulator::backdate_hold_for_test`]
@@ -105,13 +117,6 @@ impl CaptureAccum {
     }
 }
 
-pub(super) fn capture_accum_for(spec: &CaptureSpec) -> CaptureAccum {
-    CaptureAccum {
-        sensitivity: spec.gesture_sensitivity,
-        axis_bias: spec.gesture_axis_bias,
-        ..CaptureAccum::default()
-    }
-}
 
 /// The [`ButtonId`] a gesture-source CID dispatches as, per
 /// [`GESTURE_SOURCE_BUTTONS`]; `None` for a CID that is not a gesture source.
