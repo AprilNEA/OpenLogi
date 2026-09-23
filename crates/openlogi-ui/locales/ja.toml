@@ -169,6 +169,10 @@ select_device_button_description = "動作を変更するボタンをデバイ�
 remove_profile_description = "このプロファイルのカスタムボタン割り当てを削除します。デフォルトの割り当てには影響しません。"
 
 [pointer]
+mouse_button_profiles = "マウスボタンのプロファイル"
+mouse_profile_pointer = "マウスポインター"
+mouse_profile_focused = "フォーカス中のアプリ"
+mouse_profile_target_description = "マウスボタンのプロファイルの対象アプリを選びます。キーボードのプロファイルは引き続きフォーカスに従います。デスクトップでは全体の割り当てを使います。フォーカスのないウィンドウのキーボードショートカットは実行せず、別のアプリには送りません。Wayland ではマウスのプロファイルもフォーカスに従います。"
 dpi_presets = "DPI プリセット"
 wheel_mode = "ホイールモード"
 free_spin = "フリースピン"

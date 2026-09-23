@@ -169,6 +169,10 @@ select_device_button_description = "Selecciona un botón del dispositivo para ca
 remove_profile_description = "Se eliminarán las asignaciones personalizadas de este perfil. Las predeterminadas no cambiarán."
 
 [pointer]
+mouse_button_profiles = "Perfiles de botones del ratón"
+mouse_profile_pointer = "Puntero del ratón"
+mouse_profile_focused = "Aplicación con el foco"
+mouse_profile_target_description = "Elige la app para los perfiles del ratón. Los perfiles del teclado siguen el foco. El escritorio usa las asignaciones globales. Se omiten los atajos de teclado de ventanas sin foco; nunca se envían a otra app. En Wayland, los perfiles del ratón siguen el foco."
 dpi_presets = "Preajustes de DPI"
 wheel_mode = "Modo de la rueda"
 free_spin = "Giro libre"

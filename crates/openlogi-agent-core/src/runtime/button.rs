@@ -325,6 +325,7 @@ enum ButtonCommand {
     CancelStalePress(PressToken),
     CancelSource(ButtonSource),
     CancelHooks,
+    CancelPointerExcept(openlogi_hook::PointerTarget),
     Wake,
 }
 
@@ -368,6 +369,12 @@ impl ButtonState {
 
     fn cancel_all(&mut self) -> Vec<ActivePress> {
         self.active.drain().map(|(_, press)| press).collect()
+    }
+
+    fn cancel_pointer_except(&mut self, current: openlogi_hook::PointerTarget) -> Vec<ActivePress> {
+        self.active.extract_if(|_, press| matches!(press.target, ActionDispatchTarget::Pointer(target) if target != current))
+            .map(|(_, press)| press)
+            .collect()
     }
 
     fn fire_selected_long_presses(
@@ -487,6 +494,10 @@ impl ButtonInputHandle {
 
     pub(crate) fn cancel_hooks(&self) {
         self.try_command(ButtonCommand::CancelHooks);
+    }
+
+    pub(crate) fn cancel_pointer_except(&self, current: openlogi_hook::PointerTarget) {
+        self.try_command(ButtonCommand::CancelPointerExcept(current));
     }
 
     pub(crate) fn try_hidpp_down(

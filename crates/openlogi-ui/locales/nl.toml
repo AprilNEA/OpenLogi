@@ -169,6 +169,10 @@ select_device_button_description = "Selecteer een knop op het apparaat om de fun
 remove_profile_description = "Hiermee verwijder je de eigen knoptoewijzingen in dit profiel. Standaardtoewijzingen blijven behouden."
 
 [pointer]
+mouse_button_profiles = "Muisknopprofielen"
+mouse_profile_pointer = "Muisaanwijzer"
+mouse_profile_focused = "App met focus"
+mouse_profile_target_description = "Kies de app voor muisknopprofielen. Toetsenbordprofielen blijven de focus volgen. Het bureaublad gebruikt globale toewijzingen. Sneltoetsen voor vensters zonder focus worden overgeslagen, nooit naar een andere app gestuurd. Onder Wayland volgen muisprofielen de focus."
 dpi_presets = "DPI-voorinstellingen"
 wheel_mode = "Wielmodus"
 free_spin = "Vrij draaien"

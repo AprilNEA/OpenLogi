@@ -169,6 +169,10 @@ select_device_button_description = "Velg en knapp på enheten for å endre funks
 remove_profile_description = "Dette sletter profilens egendefinerte knappetilordninger. Standardtilordninger påvirkes ikke."
 
 [pointer]
+mouse_button_profiles = "Profiler for museknapper"
+mouse_profile_pointer = "Musepeker"
+mouse_profile_focused = "App med fokus"
+mouse_profile_target_description = "Velg appen for museknapprofiler. Tastaturprofiler følger fortsatt fokus. Skrivebordet bruker globale tilordninger. Tastatursnarveier for vinduer uten fokus hoppes over og sendes aldri til en annen app. På Wayland følger museprofiler fokus."
 dpi_presets = "DPI-forhåndsinnstillinger"
 wheel_mode = "Hjulmodus"
 free_spin = "Fri rotasjon"

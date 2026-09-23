@@ -169,6 +169,10 @@ select_device_button_description = "Valitse laitteesta painike, jonka toimintoa 
 remove_profile_description = "Tämä poistaa profiilin mukautetut painikesidonnat. Oletussidontoihin ei tehdä muutoksia."
 
 [pointer]
+mouse_button_profiles = "Hiiren painikeprofiilit"
+mouse_profile_pointer = "Hiiren osoitin"
+mouse_profile_focused = "Kohdistettu sovellus"
+mouse_profile_target_description = "Valitse hiiren painikeprofiilien sovellus. Näppäimistöprofiilit seuraavat edelleen kohdistusta. Työpöytä käyttää yleisiä sidontoja. Kohdistamattomien ikkunoiden pikanäppäimet ohitetaan eikä niitä lähetetä toiseen sovellukseen. Waylandissa hiiriprofiilit seuraavat kohdistusta."
 dpi_presets = "DPI-esiasetukset"
 wheel_mode = "Rullatila"
 free_spin = "Vapaa pyöriminen"

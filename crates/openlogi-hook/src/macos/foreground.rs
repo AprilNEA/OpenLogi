@@ -114,7 +114,7 @@ pub(crate) fn watch_frontmost_application_activations(
     })
 }
 
-fn foreground_app_from_running_application(
+pub(super) fn foreground_app_from_running_application(
     app: &NSRunningApplication,
     pool: objc2::rc::AutoreleasePool<'_>,
 ) -> Option<ForegroundApp> {

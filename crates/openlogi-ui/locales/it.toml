@@ -169,6 +169,10 @@ select_device_button_description = "Seleziona un pulsante sul dispositivo per ca
 remove_profile_description = "Elimina le associazioni personalizzate di questo profilo. Quelle predefinite non verranno modificate."
 
 [pointer]
+mouse_button_profiles = "Profili dei pulsanti del mouse"
+mouse_profile_pointer = "Puntatore del mouse"
+mouse_profile_focused = "Applicazione con il focus"
+mouse_profile_target_description = "Scegli l’app per i profili del mouse. I profili della tastiera seguono sempre il focus. Il desktop usa le associazioni globali. Le scorciatoie da tastiera delle finestre senza focus vengono ignorate, mai inviate a un’altra app. Su Wayland, i profili del mouse seguono il focus."
 dpi_presets = "Preset DPI"
 wheel_mode = "Modalità rotella"
 free_spin = "Scorrimento libero"

@@ -64,6 +64,9 @@ pub struct DispatchPlan {
     /// This device's effective thumb-wheel sensitivity (device override or the
     /// app-wide default).
     pub thumbwheel_sensitivity: ThumbwheelSensitivity,
+    /// Pointer identity used to select these mouse bindings; absent for the
+    /// explicitly focused policy and keyboard input.
+    pub pointer_target: Option<openlogi_hook::PointerTarget>,
 }
 
 /// One device's independently versioned hardware target and dispatch plan.
@@ -201,6 +204,7 @@ pub fn plan_for_device(
             gesture_bindings,
             side_gesture_bindings,
             thumbwheel_sensitivity,
+            pointer_target: None,
         },
     }
 }

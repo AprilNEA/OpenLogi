@@ -169,6 +169,10 @@ select_device_button_description = "Wähle eine Taste am Gerät aus, um ihre Fun
 remove_profile_description = "Dadurch werden die eigenen Tastenzuweisungen dieses Profils gelöscht. Standardzuweisungen bleiben erhalten."
 
 [pointer]
+mouse_button_profiles = "Maustastenprofile"
+mouse_profile_pointer = "Mauszeiger"
+mouse_profile_focused = "Fokussierte Anwendung"
+mouse_profile_target_description = "Wähle die App für Maustastenprofile. Tastaturprofile folgen weiterhin dem Fokus. Auf dem Desktop gelten globale Zuweisungen. Tastenkürzel für nicht fokussierte Fenster werden übersprungen, nie an eine andere App gesendet. Unter Wayland folgen Mausprofile dem Fokus."
 dpi_presets = "DPI-Voreinstellungen"
 wheel_mode = "Radmodus"
 free_spin = "Freilauf"
