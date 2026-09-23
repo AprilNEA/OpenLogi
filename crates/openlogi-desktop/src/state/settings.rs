@@ -7,7 +7,8 @@ use crate::platform::app_icon::AppIconExt as _;
 use gpui_component::ThemeMode;
 use openlogi_core::config::{
     AppIcon, AppSettings, Appearance, AssetSourcePreference, DeviceViewMode, GestureAxisBias,
-    GestureSensitivity, ThumbwheelSensitivity, UiScale, VerticalScrollSensitivity,
+    GestureSensitivity, MouseProfileTarget, ThumbwheelSensitivity, UiScale,
+    VerticalScrollSensitivity,
 };
 
 impl AppState {
@@ -367,6 +368,19 @@ impl AppState {
         self.config
             .edit(|config| config.app_settings.gesture_axis_bias = bias);
         self.persist_and_reload("gesture axis bias");
+        StateEvent::SettingsChanged.into()
+    }
+
+    /// Persist the application target for mouse button profiles and reload the
+    /// agent. An unchanged value writes nothing; failed saves restore the
+    /// previous selection through the shared configuration rollback boundary.
+    pub fn commit_mouse_profile_target(&mut self, target: MouseProfileTarget) -> StateEvents {
+        if self.config.app_settings.mouse_profile_target == target {
+            return StateEvent::SettingsChanged.into();
+        }
+        self.config
+            .edit(|config| config.app_settings.mouse_profile_target = target);
+        self.persist_and_reload("mouse profile target");
         StateEvent::SettingsChanged.into()
     }
     /// Toggle finite animation for traditional mouse-wheel input and persist

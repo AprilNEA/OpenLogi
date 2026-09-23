@@ -40,9 +40,9 @@ pub use key_trigger::{KeyModifiers, KeyTrigger, KeyboardConfig, ParseTriggerErro
 pub use settings::LightSettings;
 pub use settings::{
     AppIcon, AppSettings, Appearance, AssetSourcePreference, CameraControls, DeviceViewMode,
-    GestureAxisBias, GestureSensitivity, Lighting, SMARTSHIFT_AUTO_DISENGAGE_DEFAULT,
-    SMARTSHIFT_MIN_AUTO_DISENGAGE, ScrollResolution, SmartShift, ThumbwheelSensitivity, UiScale,
-    VerticalScrollSensitivity, WheelMode,
+    GestureAxisBias, GestureSensitivity, Lighting, MouseProfileTarget,
+    SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SMARTSHIFT_MIN_AUTO_DISENGAGE, ScrollResolution, SmartShift,
+    ThumbwheelSensitivity, UiScale, VerticalScrollSensitivity, WheelMode,
 };
 
 use crate::binding::Action;

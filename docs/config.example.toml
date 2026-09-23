@@ -8,6 +8,8 @@ check_for_updates = false
 auto_install_updates = false
 show_in_menu_bar = true
 capture_mouse_events = true
+# Mouse button profiles: "pointer" (default) or "focused".
+mouse_profile_target = "pointer"
 smooth_scroll = false
 vertical_scroll_sensitivity = 14
 auto_download_assets = true
