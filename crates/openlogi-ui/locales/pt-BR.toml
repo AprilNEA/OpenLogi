@@ -169,6 +169,10 @@ select_device_button_description = "Selecione um botão no dispositivo para alte
 remove_profile_description = "Isso exclui as atribuições personalizadas deste perfil. As atribuições padrão não serão afetadas."
 
 [pointer]
+mouse_button_profiles = "Perfis dos botões do mouse"
+mouse_profile_pointer = "Ponteiro do mouse"
+mouse_profile_focused = "Aplicativo em foco"
+mouse_profile_target_description = "Escolha o app para os perfis do mouse. Os perfis do teclado continuam seguindo o foco. A área de trabalho usa as atribuições globais. Atalhos de teclado de janelas sem foco são ignorados, nunca enviados a outro app. No Wayland, os perfis do mouse seguem o foco."
 dpi_presets = "Predefinições de DPI"
 wheel_mode = "Modo da roda"
 free_spin = "Giro livre"

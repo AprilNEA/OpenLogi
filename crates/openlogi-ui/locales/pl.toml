@@ -169,6 +169,10 @@ select_device_button_description = "Wybierz przycisk na urządzeniu, aby zmieni�
 remove_profile_description = "Spowoduje to usunięcie własnych przypisań przycisków w tym profilu. Domyślne przypisania pozostaną bez zmian."
 
 [pointer]
+mouse_button_profiles = "Profile przycisków myszy"
+mouse_profile_pointer = "Wskaźnik myszy"
+mouse_profile_focused = "Aktywna aplikacja"
+mouse_profile_target_description = "Wybierz aplikację dla profili myszy. Profile klawiatury nadal śledzą aktywną aplikację. Pulpit używa globalnych przypisań. Skróty klawiaturowe nieaktywnych okien są pomijane, nigdy nie są wysyłane do innej aplikacji. W Wayland profile myszy śledzą aktywną aplikację."
 dpi_presets = "Ustawienia wstępne DPI"
 wheel_mode = "Tryb rolki"
 free_spin = "Swobodny obrót"

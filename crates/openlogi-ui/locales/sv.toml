@@ -169,6 +169,10 @@ select_device_button_description = "Välj en knapp på enheten för att ändra d
 remove_profile_description = "Detta tar bort profilens anpassade knappbindningar. Standardbindningar påverkas inte."
 
 [pointer]
+mouse_button_profiles = "Profiler för musknappar"
+mouse_profile_pointer = "Muspekare"
+mouse_profile_focused = "App med fokus"
+mouse_profile_target_description = "Välj appen för musknappsprofiler. Tangentbordsprofiler följer fortfarande fokus. Skrivbordet använder globala bindningar. Kortkommandon för fönster utan fokus hoppas över och skickas aldrig till en annan app. På Wayland följer musprofiler fokus."
 dpi_presets = "DPI-förinställningar"
 wheel_mode = "Hjulläge"
 free_spin = "Frihjul"

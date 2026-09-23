@@ -169,6 +169,10 @@ select_device_button_description = "Ne yapacağını değiştirmek için cihaz �
 remove_profile_description = "Bu, profildeki özel düğme atamalarını siler. Varsayılan atamalar etkilenmez."
 
 [pointer]
+mouse_button_profiles = "Fare düğmesi profilleri"
+mouse_profile_pointer = "Fare işaretçisi"
+mouse_profile_focused = "Odaklanmış uygulama"
+mouse_profile_target_description = "Fare düğmesi profilleri için uygulamayı seçin. Klavye profilleri odağı izlemeye devam eder. Masaüstü genel atamaları kullanır. Odaklanmamış pencerelerin klavye kısayolları atlanır, başka bir uygulamaya gönderilmez. Wayland'de fare profilleri odağı izler."
 dpi_presets = "DPI ön ayarları"
 wheel_mode = "Tekerlek modu"
 free_spin = "Serbest dönüş"

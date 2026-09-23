@@ -169,6 +169,10 @@ select_device_button_description = "Select a button on the device to change what
 remove_profile_description = "This deletes the custom button bindings in this profile. Default bindings are not affected."
 
 [pointer]
+mouse_button_profiles = "Mouse button profiles"
+mouse_profile_pointer = "Mouse pointer"
+mouse_profile_focused = "Focused application"
+mouse_profile_target_description = "Choose the app for mouse button profiles. Keyboard profiles still follow focus. The desktop uses global bindings. Keyboard shortcuts for unfocused windows are skipped, never sent to another app. On Wayland, mouse profiles follow focus."
 dpi_presets = "DPI presets"
 wheel_mode = "Wheel mode"
 free_spin = "Free spin"

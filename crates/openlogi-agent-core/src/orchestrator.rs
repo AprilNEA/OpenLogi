@@ -17,7 +17,7 @@ use std::sync::{Arc, RwLock};
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{Action, Binding};
 use openlogi_core::bindings::{button_bindings_for, oshook_gestures_for};
-use openlogi_core::config::{Config, LightSettings, canonical_device_key};
+use openlogi_core::config::{Config, LightSettings, MouseProfileTarget, canonical_device_key};
 use openlogi_core::device::{
     Capabilities, DeviceInventory, DeviceKind, LightCapabilities, StandaloneDevice,
 };
@@ -172,6 +172,7 @@ pub struct Orchestrator {
     devices: Vec<AgentDevice>,
     current: usize,
     current_app: Option<String>,
+    pointer_context: openlogi_hook::PointerContext,
     /// The latest inventory snapshot, kept so the IPC server can answer the
     /// GUI's `inventory()` polls without re-enumerating (the agent owns all
     /// device I/O). The enum keeps "nothing checked yet" and "enumeration
@@ -277,6 +278,10 @@ impl Orchestrator {
             devices: Vec::new(),
             current: 0,
             current_app: None,
+            pointer_context: openlogi_hook::PointerContext {
+                app: None,
+                target: openlogi_hook::PointerTarget::Unavailable,
+            },
             inventory: InventoryState::Pending,
             reapply_all_next_refresh: false,
             hid_open_failures: false,
@@ -309,17 +314,31 @@ impl Orchestrator {
             .map(|d| d.config_key.as_str())
     }
 
-    /// Build the OS-hook callback's maps for `key` + foreground `app`. Both hook
+    fn mouse_context(&self) -> (Option<&str>, Option<openlogi_hook::PointerTarget>) {
+        if self.config.app_settings.mouse_profile_target == MouseProfileTarget::Focused
+            || self.pointer_context.target == openlogi_hook::PointerTarget::Unsupported
+        {
+            (self.current_app.as_deref(), None)
+        } else {
+            (
+                self.pointer_context.app.as_ref().map(|app| app.id.as_str()),
+                Some(self.pointer_context.target),
+            )
+        }
+    }
+
+    /// Build the OS-hook callback's maps for `key` and its mouse context. Both hook
     /// sub-maps are app-scoped (a per-app override can demote the gesture owner),
     /// so they're built together here and published under one lock — keeping
     /// `rebuild` and `set_current_app` from drifting into a half-populated write.
-    fn hook_maps_for(&self, key: Option<&str>, app: Option<&str>) -> HookMaps {
+    fn hook_maps_for(&self, key: Option<&str>) -> HookMaps {
         // A disabled selected device gets empty maps: the OS hook then passes
         // its events through untouched instead of applying remaps to a device
         // the user asked OpenLogi to leave alone.
         if key.is_some_and(|k| !self.config.device_enabled(k)) {
             return HookMaps::default();
         }
+        let (app, pointer_target) = self.mouse_context();
         let mut bindings = button_bindings_for(&self.config, key, app);
         let mut gestures = oshook_gestures_for(&self.config, key, app);
         if let Some(key) = key {
@@ -334,6 +353,7 @@ impl Orchestrator {
         HookMaps {
             bindings,
             gestures,
+            pointer_target,
             selected_device: key.map(str::to_owned),
             ..HookMaps::default()
         }
@@ -401,7 +421,7 @@ impl Orchestrator {
     /// Rewrite every shared map from the current config + selected device.
     fn rebuild(&self) {
         let key = self.current_key();
-        self.publish_hook_maps(self.hook_maps_for(key, self.current_app.as_deref()));
+        self.publish_hook_maps(self.hook_maps_for(key));
         self.publish_device_runtime();
     }
 
@@ -481,15 +501,22 @@ impl Orchestrator {
                 let identity = DeviceIdentity::from_parts(dev.serial.as_deref(), dev.unit_id);
                 let physical_key = canonical_device_key(&stable_id(dev), Some(&identity))
                     .or_else(|| PhysicalDeviceKey::parse(&dev.config_key))?;
-                Some(plan_for_device(
+                let (app, pointer_target) = if dev.kind == DeviceKind::Keyboard {
+                    (self.current_app.as_deref(), None)
+                } else {
+                    self.mouse_context()
+                };
+                let mut plan = plan_for_device(
                     &self.config,
                     physical_key,
                     &dev.config_key,
                     route,
-                    self.current_app.as_deref(),
+                    app,
                     rearm_generation,
                     self.os_mouse_hook_available,
-                ))
+                );
+                plan.dispatch.pointer_target = pointer_target;
+                Some(plan)
             })
             .collect()
     }
@@ -860,11 +887,28 @@ impl Orchestrator {
             return false;
         }
         self.current_app = id;
-        self.publish_hook_maps(self.hook_maps_for(self.current_key(), self.current_app.as_deref()));
+        self.publish_hook_maps(self.hook_maps_for(self.current_key()));
         // Capture plans are app-scoped (per-app binding overlays); republish
         // them with the keyboard's effective bindings.
         self.publish_device_runtime();
         true
+    }
+
+    /// Publish a pointer-window change separately from keyboard focus. The
+    /// target travels in the same snapshot as its effective mouse bindings.
+    /// Returns whether pointer-scoped presses must be canceled.
+    pub fn set_pointer_context(&mut self, context: openlogi_hook::PointerContext) -> bool {
+        if self.pointer_context == context {
+            return false;
+        }
+        let previous = self.mouse_context().1;
+        self.pointer_context = context;
+        if self.config.app_settings.mouse_profile_target == MouseProfileTarget::Focused {
+            return false;
+        }
+        self.publish_hook_maps(self.hook_maps_for(self.current_key()));
+        self.publish_capture_plans();
+        previous != self.mouse_context().1
     }
 
     /// Replace the config (after `config.toml` changed) and rebuild everything.

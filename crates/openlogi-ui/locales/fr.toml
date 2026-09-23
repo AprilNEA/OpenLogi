@@ -169,6 +169,10 @@ select_device_button_description = "Sélectionnez un bouton de l’appareil pour
 remove_profile_description = "Les affectations personnalisées de ce profil seront supprimées. Celles par défaut ne seront pas modifiées."
 
 [pointer]
+mouse_button_profiles = "Profils des boutons de souris"
+mouse_profile_pointer = "Pointeur de la souris"
+mouse_profile_focused = "Application au premier plan"
+mouse_profile_target_description = "Choisissez l’app pour les profils de souris. Les profils du clavier suivent toujours le focus. Le bureau utilise les affectations globales. Les raccourcis clavier des fenêtres sans focus sont ignorés, jamais envoyés à une autre app. Sous Wayland, les profils de souris suivent le focus."
 dpi_presets = "Préréglages DPI"
 wheel_mode = "Mode de molette"
 free_spin = "Roue libre"

@@ -169,6 +169,10 @@ select_device_button_description = "동작을 변경할 버튼을 기기에서 �
 remove_profile_description = "이 프로필의 사용자 지정 버튼 할당을 삭제합니다. 기본 할당에는 영향을 주지 않습니다."
 
 [pointer]
+mouse_button_profiles = "마우스 버튼 프로필"
+mouse_profile_pointer = "마우스 포인터"
+mouse_profile_focused = "포커스된 앱"
+mouse_profile_target_description = "마우스 버튼 프로필의 대상 앱을 선택합니다. 키보드 프로필은 계속 포커스를 따릅니다. 바탕 화면에서는 전역 할당을 사용합니다. 포커스가 없는 창의 키보드 단축키는 건너뛰며 다른 앱에 보내지 않습니다. Wayland에서는 마우스 프로필이 포커스를 따릅니다."
 dpi_presets = "DPI 프리셋"
 wheel_mode = "휠 모드"
 free_spin = "자유 회전"

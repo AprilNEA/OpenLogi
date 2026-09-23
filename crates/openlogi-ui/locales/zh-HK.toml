@@ -169,6 +169,10 @@ select_device_button_description = "選擇裝置上的按鍵以更改其功能�
 remove_profile_description = "這會刪除此設定檔的自訂按鍵指派，不會影響預設指派。"
 
 [pointer]
+mouse_button_profiles = "滑鼠按鍵設定檔"
+mouse_profile_pointer = "滑鼠指標"
+mouse_profile_focused = "焦點應用程式"
+mouse_profile_target_description = "選擇滑鼠按鍵設定檔的目標應用程式。鍵盤設定檔仍跟隨焦點。桌面使用全域按鍵指派。未取得焦點視窗的鍵盤快捷鍵會略過，不會傳送至其他應用程式。Wayland 下的滑鼠設定檔會跟隨焦點。"
 dpi_presets = "DPI 預設"
 wheel_mode = "滾輪模式"
 free_spin = "自由滾動"
