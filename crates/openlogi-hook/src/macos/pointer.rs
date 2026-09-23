@@ -40,34 +40,36 @@ fn number(info: &Dictionary, key: &CFString) -> Option<CFRetained<CFNumber>> {
 /// Dock and WindowManager draw Mission Control, App Exposé and Stage Manager.
 const SYSTEM_OVERLAY_OWNERS: [&str; 2] = ["com.apple.dock", "com.apple.WindowManager"];
 
-fn overlay_target(owner: Option<&ForegroundApp>) -> PointerTarget {
-    if owner.is_some_and(|app| SYSTEM_OVERLAY_OWNERS.contains(&app.id.as_str())) {
-        PointerTarget::Desktop
-    } else {
-        PointerTarget::Unavailable
-    }
-}
-
 fn target(info: &Dictionary, owner: Option<&ForegroundApp>) -> Option<PointerTarget> {
     // SAFETY: immutable Core Graphics string constant.
     let layer = number(info, unsafe { kCGWindowLayer })?.as_i32()?;
+    // SAFETY: immutable Core Graphics string constant.
+    let window_id = number(info, unsafe { kCGWindowNumber }).and_then(|n| n.as_i64());
+    classify(layer, owner, owner_pid(info), window_id)
+}
+
+fn classify(
+    layer: i32,
+    owner: Option<&ForegroundApp>,
+    process_id: Option<i32>,
+    window_id: Option<i64>,
+) -> Option<PointerTarget> {
     if layer == CGWindowLevelForKey(CGWindowLevelKey::DesktopWindowLevelKey)
         || layer == CGWindowLevelForKey(CGWindowLevelKey::DesktopIconWindowLevelKey)
     {
         return Some(PointerTarget::Desktop);
     }
     if layer != CGWindowLevelForKey(CGWindowLevelKey::NormalWindowLevelKey) {
-        return Some(overlay_target(owner));
-    }
-    let process_id = owner_pid(info)?;
-    // SAFETY: immutable Core Graphics string constant.
-    let window_id = number(info, unsafe { kCGWindowNumber })?.as_i64()?;
-    if window_id <= 0 {
-        return None;
+        let system = owner.is_some_and(|app| SYSTEM_OVERLAY_OWNERS.contains(&app.id.as_str()));
+        return Some(if system {
+            PointerTarget::Desktop
+        } else {
+            PointerTarget::Unavailable
+        });
     }
     Some(PointerTarget::Window {
-        process_id,
-        window_id: u64::try_from(window_id).ok()?,
+        process_id: process_id?,
+        window_id: u64::try_from(window_id?).ok().filter(|id| *id > 0)?,
     })
 }
 
@@ -199,19 +201,78 @@ mod tests {
         }
     }
 
+    fn level(key: CGWindowLevelKey) -> i32 {
+        CGWindowLevelForKey(key)
+    }
+
+    #[test]
+    fn desktop_layers_are_desktop() {
+        for key in [
+            CGWindowLevelKey::DesktopWindowLevelKey,
+            CGWindowLevelKey::DesktopIconWindowLevelKey,
+        ] {
+            assert_eq!(
+                classify(level(key), None, None, None),
+                Some(PointerTarget::Desktop)
+            );
+        }
+    }
+
+    #[test]
+    fn normal_layer_is_the_owning_window() {
+        assert_eq!(
+            classify(
+                level(CGWindowLevelKey::NormalWindowLevelKey),
+                None,
+                Some(41),
+                Some(7)
+            ),
+            Some(PointerTarget::Window {
+                process_id: 41,
+                window_id: 7
+            })
+        );
+    }
+
+    #[test]
+    fn normal_layer_with_missing_or_invalid_ids_fails_closed() {
+        let normal = level(CGWindowLevelKey::NormalWindowLevelKey);
+        for (pid, window) in [
+            (None, Some(7)),
+            (Some(41), None),
+            (Some(41), Some(0)),
+            (Some(41), Some(-3)),
+        ] {
+            assert_eq!(classify(normal, None, pid, window), None);
+        }
+    }
+
     #[test]
     fn mission_control_overlays_count_as_desktop() {
+        let dock = level(CGWindowLevelKey::DockWindowLevelKey);
         for owner in SYSTEM_OVERLAY_OWNERS {
-            assert_eq!(overlay_target(Some(&app(owner))), PointerTarget::Desktop);
+            assert_eq!(
+                classify(dock, Some(&app(owner)), Some(41), Some(7)),
+                Some(PointerTarget::Desktop)
+            );
         }
     }
 
     #[test]
     fn other_overlays_stay_unavailable() {
+        let floating = level(CGWindowLevelKey::FloatingWindowLevelKey);
         assert_eq!(
-            overlay_target(Some(&app("com.apple.notificationcenterui"))),
-            PointerTarget::Unavailable
+            classify(
+                floating,
+                Some(&app("com.apple.notificationcenterui")),
+                Some(41),
+                Some(7)
+            ),
+            Some(PointerTarget::Unavailable)
         );
-        assert_eq!(overlay_target(None), PointerTarget::Unavailable);
+        assert_eq!(
+            classify(floating, None, None, None),
+            Some(PointerTarget::Unavailable)
+        );
     }
 }

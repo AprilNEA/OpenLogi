@@ -41,7 +41,9 @@ pub struct PointerContext {
 ///
 /// Blocking window-server / accessibility I/O: call only on a background worker,
 /// never an input hook or event-tap callback. This does not update foreground
-/// caches (including the foreground Safari PID).
+/// caches (including the foreground Safari PID). On macOS the lookup runs on the
+/// main queue, so the process must be running its AppKit loop; otherwise every
+/// call returns [`PointerTarget::Unavailable`] after a short timeout.
 #[must_use]
 pub fn pointer_context() -> PointerContext {
     if !pointer_context_supported() {
