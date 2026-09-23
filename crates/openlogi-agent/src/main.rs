@@ -19,6 +19,7 @@ mod autostart;
 mod binary_watch;
 mod lifecycle;
 mod logging;
+mod notify;
 mod overlay;
 mod pairing;
 #[cfg(target_os = "linux")]
@@ -38,6 +39,8 @@ mod status_item;
 mod takeover;
 #[cfg(target_os = "macos")]
 mod tray;
+mod tray_battery;
+mod tray_glyph;
 #[cfg(target_os = "windows")]
 mod tray_windows;
 

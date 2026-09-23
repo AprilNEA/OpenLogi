@@ -5,6 +5,9 @@ use super::{
     SettingField, SettingGroup, SettingItem, SettingPage, Slider, SliderState, Styled,
     ThumbwheelSensitivity, VerticalScrollSensitivity, div, h_flex, px, theme, v_flex,
 };
+#[cfg(target_os = "windows")]
+use openlogi_core::config::TrayIconStyle;
+
 use crate::ui::theme::Typography as _;
 use gpui_base::Button as BaseButton;
 
@@ -79,6 +82,11 @@ pub(super) fn general_page(
         }),
     );
 
+    // Battery surfaces on the tray icon. Windows-only for now; the macOS
+    // menu-bar item gains the same controls when it learns to render them.
+    #[cfg(target_os = "windows")]
+    let group = with_battery_items(group);
+
     SettingPage::new(tr!("app.general"))
         .icon(IconName::Settings)
         .resettable(false)
@@ -151,6 +159,50 @@ fn sensitivity_field(
                     .child(format!("({})", rust_i18n::t!("common.default"))),
             )
         })
+}
+
+/// The tray-battery switches, split out of [`general_page`] to keep that
+/// function inside the workspace's line budget.
+///
+/// Windows-only in this milestone: these controls drive surfaces only the
+/// Windows tray renders today, and shipping a switch that does nothing on
+/// macOS would be worse than shipping no switch.
+#[cfg(target_os = "windows")]
+fn with_battery_items(group: SettingGroup) -> SettingGroup {
+    group
+        .item(
+            SettingItem::new(
+                tr!("app.low_battery_alerts"),
+                SettingField::switch(
+                    |cx| AppState::try_read(cx).is_some_and(|s| s.app_settings().battery_alerts),
+                    |enabled, cx| {
+                        AppState::apply(cx, |state| state.commit_battery_alerts(enabled));
+                    },
+                ),
+            )
+            .description(tr!("app.low_battery_alerts_description")),
+        )
+        .item(
+            SettingItem::new(
+                tr!("app.show_battery_on_tray_icon"),
+                SettingField::switch(
+                    |cx| {
+                        AppState::try_read(cx).is_some_and(|s| {
+                            s.app_settings().tray_icon_style == TrayIconStyle::Battery
+                        })
+                    },
+                    |enabled, cx| {
+                        let style = if enabled {
+                            TrayIconStyle::Battery
+                        } else {
+                            TrayIconStyle::Brand
+                        };
+                        AppState::apply(cx, |state| state.commit_tray_icon_style(style));
+                    },
+                ),
+            )
+            .description(tr!("app.show_battery_on_tray_icon_description")),
+        )
 }
 
 /// The launch-at-login switch — a persisted config value the agent reads
