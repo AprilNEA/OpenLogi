@@ -16,7 +16,7 @@ use objc2_core_graphics::{
 };
 
 use super::foreground::foreground_app_from_running_application;
-use crate::{PointerContext, PointerTarget};
+use crate::{ForegroundApp, PointerContext, PointerTarget};
 
 type Dictionary = CFDictionary<CFString, CFType>;
 
@@ -37,7 +37,18 @@ fn number(info: &Dictionary, key: &CFString) -> Option<CFRetained<CFNumber>> {
     info.get(key)?.downcast::<CFNumber>().ok()
 }
 
-fn target(info: &Dictionary) -> Option<PointerTarget> {
+/// Dock and WindowManager draw Mission Control, App Exposé and Stage Manager.
+const SYSTEM_OVERLAY_OWNERS: [&str; 2] = ["com.apple.dock", "com.apple.WindowManager"];
+
+fn overlay_target(owner: Option<&ForegroundApp>) -> PointerTarget {
+    if owner.is_some_and(|app| SYSTEM_OVERLAY_OWNERS.contains(&app.id.as_str())) {
+        PointerTarget::Desktop
+    } else {
+        PointerTarget::Unavailable
+    }
+}
+
+fn target(info: &Dictionary, owner: Option<&ForegroundApp>) -> Option<PointerTarget> {
     // SAFETY: immutable Core Graphics string constant.
     let layer = number(info, unsafe { kCGWindowLayer })?.as_i32()?;
     if layer == CGWindowLevelForKey(CGWindowLevelKey::DesktopWindowLevelKey)
@@ -46,18 +57,32 @@ fn target(info: &Dictionary) -> Option<PointerTarget> {
         return Some(PointerTarget::Desktop);
     }
     if layer != CGWindowLevelForKey(CGWindowLevelKey::NormalWindowLevelKey) {
-        return Some(PointerTarget::Unavailable);
+        return Some(overlay_target(owner));
     }
-    // SAFETY: immutable Core Graphics string constant.
-    let process_id = number(info, unsafe { kCGWindowOwnerPID })?.as_i32()?;
+    let process_id = owner_pid(info)?;
     // SAFETY: immutable Core Graphics string constant.
     let window_id = number(info, unsafe { kCGWindowNumber })?.as_i64()?;
-    if process_id <= 0 || window_id <= 0 {
+    if window_id <= 0 {
         return None;
     }
     Some(PointerTarget::Window {
         process_id,
         window_id: u64::try_from(window_id).ok()?,
+    })
+}
+
+fn owner_pid(info: &Dictionary) -> Option<i32> {
+    // SAFETY: immutable Core Graphics string constant.
+    let pid = number(info, unsafe { kCGWindowOwnerPID })?.as_i32()?;
+    (pid > 0).then_some(pid)
+}
+
+fn owner_app(process_id: i32) -> Option<ForegroundApp> {
+    // This background worker has no AppKit run loop to drain temporaries.
+    // Reuse only the pure conversion; never publish a foreground Safari PID.
+    objc2::rc::autoreleasepool(|pool| {
+        let app = NSRunningApplication::runningApplicationWithProcessIdentifier(process_id)?;
+        foreground_app_from_running_application(&app, pool)
     })
 }
 
@@ -86,16 +111,11 @@ pub(crate) fn pointer_context() -> Option<PointerContext> {
     // SAFETY: CGWindowListCopyWindowInfo returns an array of CF dictionaries.
     let windows = unsafe { CFRetained::cast_unchecked::<CFArray<CFType>>(windows) };
     let info = dictionary(windows.into_iter().next()?)?;
-    let target = target(&info)?;
-    let app = if let PointerTarget::Window { process_id, .. } = target {
-        // This background worker has no AppKit run loop to drain temporaries.
-        // Reuse only the pure conversion; never publish a foreground Safari PID.
-        Some(objc2::rc::autoreleasepool(|pool| {
-            let app = NSRunningApplication::runningApplicationWithProcessIdentifier(process_id)?;
-            foreground_app_from_running_application(&app, pool)
-        })?)
-    } else {
-        None
+    let owner = owner_pid(&info).and_then(owner_app);
+    let target = target(&info, owner.as_ref())?;
+    let app = match target {
+        PointerTarget::Window { .. } => Some(owner?),
+        _ => None,
     };
     Some(PointerContext { app, target })
 }
@@ -166,4 +186,32 @@ fn focused_window_id(pid: i32) -> Option<u64> {
         }
         Some(u64::from(id))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn app(id: &str) -> ForegroundApp {
+        ForegroundApp {
+            id: id.into(),
+            display_name: id.into(),
+        }
+    }
+
+    #[test]
+    fn mission_control_overlays_count_as_desktop() {
+        for owner in SYSTEM_OVERLAY_OWNERS {
+            assert_eq!(overlay_target(Some(&app(owner))), PointerTarget::Desktop);
+        }
+    }
+
+    #[test]
+    fn other_overlays_stay_unavailable() {
+        assert_eq!(
+            overlay_target(Some(&app("com.apple.notificationcenterui"))),
+            PointerTarget::Unavailable
+        );
+        assert_eq!(overlay_target(None), PointerTarget::Unavailable);
+    }
 }
