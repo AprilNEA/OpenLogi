@@ -30,7 +30,6 @@ mod resume_windows;
 // generates itself, hence the relative path — see
 // `tests::the_shared_catalog_is_wired_up` for why a wrong path is silent.
 rust_i18n::i18n!("../openlogi-ui/locales", fallback = "en");
-#[cfg(target_os = "macos")]
 mod power_source;
 mod server;
 mod shutdown;

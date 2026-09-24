@@ -9,15 +9,115 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::time::{Duration, Instant};
 
+use openlogi_agent_core::observable::ObservableState;
+use openlogi_agent_core::orchestrator::Orchestrator;
 use openlogi_core::config::Config;
 use openlogi_core::device::{BatteryStatus, BatteryWidgetStatus, DeviceInventory, DeviceKind};
 use openlogi_core::device_order::{DeviceIdentity, DeviceStableId};
 use openlogi_core::hid::{DeviceRoute, ReceiverBrand, find_receiver};
+use tokio::sync::{Mutex, watch};
+use tokio::time::{Interval, MissedTickBehavior};
 use tracing::warn;
 
-pub use iokit::IoKitPowerSourceBackend;
+use iokit::IoKitPowerSourceBackend;
 
 const OFFLINE_GRACE: Duration = Duration::from_mins(5);
+/// Retry cadence for failed publications while the integration is enabled.
+const RETRY_INTERVAL: Duration = Duration::from_secs(30);
+
+/// The lifecycle's handle: when to reconcile, and the publisher it drives.
+pub(crate) struct PowerSources {
+    publisher: PowerSourcePublisher<IoKitPowerSourceBackend>,
+    config_changes: Option<watch::Receiver<()>>,
+    retry: Interval,
+    enabled: bool,
+}
+
+impl PowerSources {
+    pub(crate) fn new() -> Self {
+        let mut retry = tokio::time::interval(RETRY_INTERVAL);
+        retry.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        Self {
+            publisher: PowerSourcePublisher::new(IoKitPowerSourceBackend::new()),
+            config_changes: None,
+            retry,
+            enabled: false,
+        }
+    }
+
+    /// Reconcile after every adopted configuration change.
+    pub(crate) fn watch_config(&mut self, changes: watch::Receiver<()>) {
+        self.config_changes = Some(changes);
+    }
+
+    /// Resolve when a reconcile is due: a configuration change, an offline
+    /// expiry, or the retry tick. The tick only runs while enabled.
+    pub(crate) async fn wake(&mut self) {
+        let Self {
+            publisher,
+            config_changes,
+            retry,
+            enabled,
+        } = self;
+        let deadline = publisher.next_deadline();
+        let config_changed = async {
+            let changed = match config_changes {
+                Some(changes) => changes.changed().await.is_ok(),
+                None => false,
+            };
+            // A closed channel means no further changes can arrive.
+            if !changed {
+                std::future::pending::<()>().await;
+            }
+        };
+        let retry = async {
+            if *enabled {
+                retry.tick().await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        };
+        let expiry = async {
+            match deadline {
+                Some(at) => tokio::time::sleep_until(at.into()).await,
+                None => std::future::pending().await,
+            }
+        };
+        tokio::select! {
+            () = config_changed => {}
+            () = retry => {}
+            () = expiry => {}
+        }
+    }
+
+    /// Publish the orchestrator's current config and inventory, then report
+    /// the resulting status. Copies nothing while the integration is off.
+    pub(crate) async fn reconcile(
+        &mut self,
+        orchestrator: &Mutex<Orchestrator>,
+        observable: &ObservableState,
+    ) {
+        let snapshot = {
+            let orchestrator = orchestrator.lock().await;
+            self.enabled = orchestrator.config().app_settings.macos_battery_widget;
+            self.enabled
+                .then(|| (orchestrator.config().clone(), orchestrator.inventory()))
+        };
+        match snapshot {
+            Some((config, inventories)) => {
+                self.publisher
+                    .reconcile(&config, &inventories, Instant::now());
+            }
+            None => self.publisher.clear_all(),
+        }
+        observable.set_battery_widget(self.publisher.status());
+    }
+
+    /// Release every published entry, for shutdown and replacement.
+    pub(crate) fn clear_all(&mut self) {
+        self.publisher.clear_all();
+    }
+}
 
 /// One accessory reading accepted for publication.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,19 +279,17 @@ impl<B: PowerSourceBackend> PowerSourcePublisher<B> {
     }
 
     /// Release all native entries immediately, also used at shutdown.
+    ///
+    /// A failed release has already consumed its handle, so nothing is left to
+    /// retry. The failure is logged and the next enable starts clean.
     pub fn clear_all(&mut self) {
         for (identifier, _) in std::mem::take(&mut self.tracked) {
-            if let Err(failure) = self.backend.remove(&identifier) {
-                self.cleanup_error.get_or_insert(failure);
+            if let Err(error) = self.backend.remove(&identifier) {
+                warn!(%error, "failed to remove macOS accessory power source");
             }
         }
-        self.update_status(self.cleanup_error.as_ref().map_or(
-            BatteryWidgetStatus::Disabled,
-            |error| BatteryWidgetStatus::Failed {
-                published_devices: 0,
-                reason: error.to_string(),
-            },
-        ));
+        self.cleanup_error = None;
+        self.update_status(BatteryWidgetStatus::Disabled);
     }
 
     /// Apply a snapshot and configuration at a caller-supplied monotonic time.
@@ -267,11 +365,12 @@ impl<B: PowerSourceBackend> PowerSourcePublisher<B> {
             }
             false
         });
-        if recovered {
-            self.cleanup_error = None;
-        }
+        // A failure from this pass stays visible; otherwise a successful
+        // publication proves recovery from an earlier one.
         if let Some(failure) = cleanup_error {
             self.cleanup_error = Some(failure);
+        } else if recovered {
+            self.cleanup_error = None;
         }
         let error = error.or_else(|| self.cleanup_error.clone());
 
@@ -363,6 +462,8 @@ fn online_accessories(
             };
             // Metadata can change while telemetry is missing. Reuse only an
             // accepted reading, never invent a battery level for a new device.
+            // Unified and legacy readings pass firmware bytes through
+            // unvalidated; bound them so macOS never renders more than 100%.
             let battery = paired
                 .battery
                 .as_ref()
