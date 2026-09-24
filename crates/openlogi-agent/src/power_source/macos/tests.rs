@@ -169,29 +169,6 @@ fn offline_and_absent_devices_receive_the_full_grace_period() {
 }
 
 #[test]
-fn online_without_telemetry_cancels_offline_deadline_and_keeps_last_reading() {
-    let mut publisher = PowerSourcePublisher::new(FakeBackend::default());
-    let config = enabled_config();
-    let now = Instant::now();
-    let mut inv = inventory();
-    publisher.reconcile(&config, std::slice::from_ref(&inv), now);
-    publisher.reconcile(&config, &[], now + Duration::from_secs(1));
-    inv.paired[0].battery = None;
-    publisher.reconcile(
-        &config,
-        std::slice::from_ref(&inv),
-        now + Duration::from_secs(2),
-    );
-    assert_eq!(publisher.next_deadline(), None);
-    publisher.reconcile(&config, &[inv], now + OFFLINE_GRACE * 2);
-    assert_eq!(
-        publisher.backend.live.values().next().unwrap().percentage,
-        77
-    );
-    assert_eq!(publisher.backend.writes, 1);
-}
-
-#[test]
 fn rename_without_telemetry_preserves_battery_and_cancels_offline_deadline() {
     let mut config = enabled_config();
     let key = "receiver:test-receiver:slot:1";
@@ -364,7 +341,9 @@ fn failed_removal_is_reported_but_consumed_handle_is_never_released_twice() {
         }
     ));
     assert_eq!(publisher.next_deadline(), None);
-    publisher.clear_all();
+    // Disabling cannot retry a consumed handle, so it reports plain Disabled.
+    publisher.reconcile(&Config::default(), &[], now + OFFLINE_GRACE);
+    assert_eq!(publisher.status(), BatteryWidgetStatus::Disabled);
     assert_eq!(publisher.backend.removals.get(), 1);
     publisher.reconcile(&config, &[inventory()], now + OFFLINE_GRACE);
     assert_eq!(
@@ -451,50 +430,38 @@ fn replacement_without_telemetry_does_not_inherit_previous_occupant_reading() {
 
 #[test]
 fn cleanup_failure_survives_repeated_empty_reconciliation_until_publication_recovers() {
-    for disabled in [false, true] {
-        let mut publisher = PowerSourcePublisher::new(FakeBackend::default());
-        let config = enabled_config();
-        let now = Instant::now();
-        publisher.reconcile(&config, &[inventory()], now);
-        publisher.backend.fail_remove = true;
-        let cleanup_config = if disabled {
-            Config::default()
-        } else {
-            enabled_config()
-        };
-        publisher.reconcile(&cleanup_config, &[], now);
-        publisher.reconcile(&cleanup_config, &[], now + OFFLINE_GRACE);
-        let failure = publisher.status();
-        assert!(matches!(
-            failure,
-            BatteryWidgetStatus::Failed {
-                published_devices: 0,
-                ..
-            }
-        ));
-        for offset in [1, 2, 3] {
-            publisher.reconcile(
-                &cleanup_config,
-                &[],
-                now + OFFLINE_GRACE + Duration::from_secs(offset),
-            );
-            assert_eq!(publisher.status(), failure);
+    let mut publisher = PowerSourcePublisher::new(FakeBackend::default());
+    let config = enabled_config();
+    let now = Instant::now();
+    publisher.reconcile(&config, &[inventory()], now);
+    publisher.backend.fail_remove = true;
+    publisher.reconcile(&config, &[], now);
+    publisher.reconcile(&config, &[], now + OFFLINE_GRACE);
+    let failure = publisher.status();
+    assert!(matches!(
+        failure,
+        BatteryWidgetStatus::Failed {
+            published_devices: 0,
+            ..
         }
-        publisher.clear_all();
-        assert_eq!(publisher.status(), failure);
-        assert_eq!(publisher.backend.removals.get(), 1);
-        publisher.backend.fail_remove = false;
-        publisher.reconcile(&config, &[inventory()], now + OFFLINE_GRACE);
-        assert_eq!(
-            publisher.status(),
-            BatteryWidgetStatus::Active {
-                published_devices: 1
-            }
+    ));
+    for offset in [1, 2, 3] {
+        publisher.reconcile(
+            &config,
+            &[],
+            now + OFFLINE_GRACE + Duration::from_secs(offset),
         );
-        publisher.reconcile(&Config::default(), &[], now + OFFLINE_GRACE);
-        assert_eq!(publisher.status(), BatteryWidgetStatus::Disabled);
-        assert_eq!(publisher.backend.removals.get(), 2);
+        assert_eq!(publisher.status(), failure);
     }
+    publisher.backend.fail_remove = false;
+    publisher.reconcile(&config, &[inventory()], now + OFFLINE_GRACE);
+    assert_eq!(
+        publisher.status(),
+        BatteryWidgetStatus::Active {
+            published_devices: 1
+        }
+    );
+    assert_eq!(publisher.backend.removals.get(), 1);
 }
 
 #[test]

@@ -24,7 +24,7 @@ mod transition;
 
 use std::sync::Arc;
 #[cfg(target_os = "macos")]
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use futures::StreamExt as _;
 use openlogi_agent_core::backlight_overlay::BacklightOverlayManager;
@@ -45,8 +45,7 @@ use tracing::{debug, info, warn};
 use openlogi_ipc::ClientKind;
 
 use self::transition::{Replacement, WatcherFleet};
-#[cfg(target_os = "macos")]
-use crate::power_source::{IoKitPowerSourceBackend, PowerSourcePublisher};
+use crate::power_source::PowerSources;
 use crate::shutdown::{self, ShutdownRequest, ShutdownRequests, ShutdownSignals};
 use crate::startup::{self, Core, InputServices};
 use crate::{autostart, overlay, server};
@@ -262,8 +261,7 @@ impl Wanted {
                 held_pointer: None,
                 #[cfg(target_os = "macos")]
                 virtual_keyboard,
-                #[cfg(target_os = "macos")]
-                power_sources: PowerSourcePublisher::new(IoKitPowerSourceBackend::new()),
+                power_sources: PowerSources::new(),
             },
         }
     }
@@ -302,8 +300,7 @@ struct Running {
     #[cfg(target_os = "macos")]
     virtual_keyboard: Option<openlogi_inject::VirtualKeyboard>,
     /// Opt-in Batteries-widget publisher for Bolt/Unifying accessories.
-    #[cfg(target_os = "macos")]
-    power_sources: PowerSourcePublisher<IoKitPowerSourceBackend>,
+    power_sources: PowerSources,
 }
 
 impl Armed {
@@ -323,34 +320,11 @@ impl Armed {
         let (mut watchers, inventory_refresh) = startup::spawn_state_watchers(&running.shared);
         let mut ring = running.inputs.ring.subscribe();
 
-        let mut config_changes = running.orchestrator.lock().await.subscribe_config_changes();
-        #[cfg(target_os = "macos")]
-        let mut power_source_retry = tokio::time::interval(Duration::from_secs(30));
-        #[cfg(target_os = "macos")]
-        power_source_retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let config_changes = running.orchestrator.lock().await.subscribe_config_changes();
+        running.power_sources.watch_config(config_changes);
 
         info!("openlogi-agent started");
         loop {
-            #[cfg(target_os = "macos")]
-            let deadline = running.power_sources.next_deadline();
-            // The disabled integration has no timer work on other platforms.
-            let power_source_refresh = async {
-                #[cfg(target_os = "macos")]
-                {
-                    let expiry = async {
-                        match deadline {
-                            Some(at) => tokio::time::sleep_until(at.into()).await,
-                            None => std::future::pending::<()>().await,
-                        }
-                    };
-                    tokio::select! {
-                        _ = power_source_retry.tick() => {},
-                        () = expiry => {},
-                    }
-                }
-                #[cfg(not(target_os = "macos"))]
-                std::future::pending::<()>().await;
-            };
             tokio::select! {
                 biased;
 
@@ -367,12 +341,7 @@ impl Armed {
                 (request, stopped) = running.hidpp_watchers.replacement_ready() => {
                     running.complete_replacement(request, stopped);
                 }
-                Ok(()) = config_changes.changed() => {
-                    #[cfg(target_os = "macos")]
-                    running.reconcile_power_sources().await;
-                }
-                () = power_source_refresh => {
-                    #[cfg(target_os = "macos")]
+                () = running.power_sources.wake() => {
                     running.reconcile_power_sources().await;
                 }
                 Some(event) = watchers.next() => {
@@ -392,16 +361,10 @@ impl Armed {
 
 impl Running {
     /// Reconcile config, inventory and expiry through the publisher's single owner.
-    #[cfg(target_os = "macos")]
     async fn reconcile_power_sources(&mut self) {
-        let (config, inventories) = {
-            let orchestrator = self.orchestrator.lock().await;
-            (orchestrator.config().clone(), orchestrator.inventory())
-        };
         self.power_sources
-            .reconcile(&config, &inventories, Instant::now());
-        self.observable
-            .set_battery_widget(self.power_sources.status());
+            .reconcile(&self.orchestrator, &self.observable)
+            .await;
     }
 
     /// Retire a terminal hook worker and publish that input capture is no
@@ -530,7 +493,6 @@ impl Running {
                 orchestrator.refresh_inventory(&inventories, &standalone, hid_open_failures);
                 let confirm_settings = orchestrator.needs_reapply_confirmation();
                 drop(orchestrator);
-                #[cfg(target_os = "macos")]
                 self.reconcile_power_sources().await;
                 if confirm_settings {
                     refresh.request_settings_confirmation();
@@ -827,7 +789,6 @@ impl Running {
         reason: &str,
         tray_guard: Option<tokio::sync::oneshot::Sender<()>>,
     ) -> ! {
-        #[cfg(target_os = "macos")]
         self.power_sources.clear_all();
         shutdown::release_hook_and_exit(
             self.hook.take(),
