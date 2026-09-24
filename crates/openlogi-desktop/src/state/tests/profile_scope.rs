@@ -204,6 +204,44 @@ fn resetting_profiles_restores_inheritance_without_closing_the_editors() {
 }
 
 #[test]
+fn removing_all_app_profiles_only_closes_editors_showing_that_app() {
+    for (buttons_app, ring_app) in [("Safari", "Chrome"), ("Chrome", "Safari")] {
+        let mut state = state_with_a_known_mouse();
+        for app in ["Safari", "Chrome"] {
+            let _ = state.set_editing_app(Some(app.into()));
+            let _ = state.commit_binding(ButtonId::Back, Action::Undo);
+            let _ = state.set_editing_action_ring_app(Some(app.into()));
+            let _ = state.commit_action_ring_slot(
+                ActionRingSlot::Top,
+                Some(RingAction::new(Action::Redo).unwrap()),
+            );
+        }
+        let _ = state.set_editing_app(Some(buttons_app.into()));
+        let _ = state.set_editing_action_ring_app(Some(ring_app.into()));
+
+        let _ = state.remove_all_app_profiles(&DeviceKey::from(KNOWN_MOUSE_KEY), "Safari");
+
+        assert_eq!(
+            state.editing_app(),
+            (buttons_app == "Chrome").then_some("Chrome")
+        );
+        assert_eq!(
+            state.editing_action_ring_app(),
+            (ring_app == "Chrome").then_some("Chrome")
+        );
+        assert_eq!(state.app_profiles().collect::<Vec<_>>(), [("Chrome", 1)]);
+        let ring = state.current_action_ring();
+        assert!(!ring.per_app.contains_key("Safari"));
+        assert_eq!(
+            ring.per_app["Chrome"].slots[&ActionRingSlot::Top].action(),
+            &Action::Redo
+        );
+        let _ = state.set_editing_app(Some("Chrome".into()));
+        assert_eq!(state.button_bindings()[&ButtonId::Back], Action::Undo);
+    }
+}
+
+#[test]
 fn profile_commands_keep_the_named_target_after_selection_changes() {
     let resolver = AssetResolver::new();
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
