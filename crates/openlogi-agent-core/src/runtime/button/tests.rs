@@ -230,6 +230,56 @@ fn hidpp_edges_and_pulses_retain_their_press_time_targets() {
 }
 
 #[test]
+fn pointer_change_cancels_old_target_but_preserves_keyboard_and_new_target() {
+    use openlogi_hook::PointerTarget;
+    let (sent, received) = mpsc::channel();
+    let mut owner = ButtonRuntimeOwner::spawn(move |event| sent.send(event).expect("receiver"))
+        .expect("worker");
+    let input = owner.input();
+    let old = PointerTarget::Window {
+        process_id: 41,
+        window_id: 7,
+    };
+    let current = PointerTarget::Desktop;
+    let old_press = input
+        .try_hook_down_with_target(ButtonId::Back, None, ActionDispatchTarget::Pointer(old))
+        .expect("old down");
+    let new_press = input
+        .try_hook_down_with_target(
+            ButtonId::Forward,
+            None,
+            ActionDispatchTarget::Pointer(current),
+        )
+        .expect("new down");
+    let keyboard = input
+        .try_hook_key_down(42, &Action::Copy, ActionDispatchTarget::Keyboard)
+        .expect("key down");
+    for _ in 0..3 {
+        assert!(matches!(
+            recv_event(&received),
+            ButtonRuntimeEvent::Started(_)
+        ));
+    }
+    input.cancel_pointer_except(current);
+    let ButtonRuntimeEvent::Ended { press, reason } = recv_event(&received) else {
+        panic!("old target must end");
+    };
+    assert_eq!(press.token(), &old_press);
+    assert_eq!(reason, EndReason::Canceled(CancelReason::Invalidated));
+    assert!(input.try_hook_up(ButtonId::Forward));
+    let ButtonRuntimeEvent::Ended { press, .. } = recv_event(&received) else {
+        panic!("new target must survive");
+    };
+    assert_eq!(press.token(), &new_press);
+    assert!(input.try_hook_key_up(42));
+    let ButtonRuntimeEvent::Ended { press, .. } = recv_event(&received) else {
+        panic!("keyboard must survive");
+    };
+    assert_eq!(press.token(), &keyboard);
+    assert!(owner.shutdown());
+}
+
+#[test]
 fn source_cancellation_invalidates_queued_gesture_work() {
     let (sent, received) = mpsc::channel();
     let mut owner = ButtonRuntimeOwner::spawn(move |event| {

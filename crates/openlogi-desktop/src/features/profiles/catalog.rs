@@ -201,7 +201,6 @@ impl AppCatalogPicker {
                 Some(ProfileChoice {
                     app,
                     name: application.name.clone(),
-                    override_count: 0,
                     persisted: false,
                 })
             })

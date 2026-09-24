@@ -9,18 +9,16 @@ use std::rc::Rc;
 
 use gpui::{App, Entity, ParentElement, Styled, Window, div};
 use gpui_component::{WindowExt as _, button::ButtonVariant, dialog::DialogButtonProps, h_flex};
-use openlogi_core::binding::{ActionRingConfig, ActionRingLayout, ActionRingSlot};
 
 pub(crate) use self::catalog::{AppCatalogPicker, ProfileIconCache};
 use self::shell::ProfileScopeShell;
-use crate::state::AppState;
+use crate::state::{AppState, DeviceKey};
 use crate::ui::theme::{self, Typography as _};
 
 #[derive(Clone)]
 pub(super) struct ProfileChoice {
     pub(super) app: String,
     pub(super) name: String,
-    pub(super) override_count: usize,
     pub(super) persisted: bool,
 }
 
@@ -42,23 +40,29 @@ pub(super) struct ProfileScopeModel {
 }
 
 type SelectProfile = dyn Fn(Option<String>, &mut App);
-type RemoveProfile = dyn Fn(ProfileChoice, &mut Window, &mut App);
+type ChangeProfile = dyn Fn(ProfileChoice, &mut Window, &mut App);
 
 /// Feature-owned behavior invoked by the profile selector shell.
 #[derive(Clone)]
 pub(super) struct ProfileScopeActions {
     select: Rc<SelectProfile>,
-    remove: Rc<RemoveProfile>,
+    reset: Rc<ChangeProfile>,
+    remove: Rc<ChangeProfile>,
+    remove_all: Rc<ChangeProfile>,
 }
 
 impl ProfileScopeActions {
     fn new(
         select: impl Fn(Option<String>, &mut App) + 'static,
+        reset: impl Fn(ProfileChoice, &mut Window, &mut App) + 'static,
         remove: impl Fn(ProfileChoice, &mut Window, &mut App) + 'static,
+        remove_all: impl Fn(ProfileChoice, &mut Window, &mut App) + 'static,
     ) -> Self {
         Self {
             select: Rc::new(select),
+            reset: Rc::new(reset),
             remove: Rc::new(remove),
+            remove_all: Rc::new(remove_all),
         }
     }
 
@@ -66,8 +70,16 @@ impl ProfileScopeActions {
         (self.select)(app, cx);
     }
 
+    pub(super) fn reset(&self, profile: ProfileChoice, window: &mut Window, cx: &mut App) {
+        (self.reset)(profile, window, cx);
+    }
+
     pub(super) fn remove(&self, profile: ProfileChoice, window: &mut Window, cx: &mut App) {
         (self.remove)(profile, window, cx);
+    }
+
+    pub(super) fn remove_all(&self, profile: ProfileChoice, window: &mut Window, cx: &mut App) {
+        (self.remove_all)(profile, window, cx);
     }
 }
 
@@ -81,15 +93,17 @@ pub(crate) fn button_profile_scope_bar(
     if !state.current_device_is_persistent() {
         return None;
     }
+    let key = state.current_record()?.device_key();
+    let reset_key = key.clone();
+    let remove_all_key = key.clone();
     let editing_app = state.editing_app().map(str::to_string);
     let profiles: Vec<ProfileChoice> = state
         .app_profiles()
-        .map(|(app, override_count)| ProfileChoice {
+        .map(|(app, _)| ProfileChoice {
             app: app.to_string(),
             name: state
                 .recent_app_name(app)
                 .map_or_else(|| friendly_app_name(app), str::to_string),
-            override_count,
             persisted: true,
         })
         .collect();
@@ -102,7 +116,15 @@ pub(crate) fn button_profile_scope_bar(
         |app, cx| {
             AppState::apply(cx, |state| state.set_editing_app(app));
         },
-        |profile, window, cx| open_button_remove_confirmation(window, cx, &profile),
+        move |profile, window, cx| {
+            ProfileCommand::ResetButtons.confirm(&reset_key, &profile, window, cx);
+        },
+        move |profile, window, cx| {
+            ProfileCommand::RemoveButtons.confirm(&key, &profile, window, cx);
+        },
+        move |profile, window, cx| {
+            ProfileCommand::RemoveAll.confirm(&remove_all_key, &profile, window, cx);
+        },
     );
 
     Some(ProfileScopeShell::new(
@@ -124,17 +146,19 @@ pub(crate) fn action_ring_profile_scope_bar(
     if !state.current_device_is_persistent() {
         return None;
     }
+    let key = state.current_record()?.device_key();
+    let reset_key = key.clone();
+    let remove_all_key = key.clone();
     let editing_app = state.editing_action_ring_app().map(str::to_string);
     let ring = state.current_action_ring();
     let profiles: Vec<ProfileChoice> = ring
         .per_app
-        .iter()
-        .map(|(app, layout)| ProfileChoice {
+        .keys()
+        .map(|app| ProfileChoice {
             app: app.clone(),
             name: state
                 .recent_app_name(app)
                 .map_or_else(|| friendly_app_name(app), str::to_string),
-            override_count: action_ring_override_count(&ring, layout),
             persisted: true,
         })
         .collect();
@@ -147,7 +171,15 @@ pub(crate) fn action_ring_profile_scope_bar(
         |app, cx| {
             AppState::apply(cx, |state| state.set_editing_action_ring_app(app));
         },
-        |profile, window, cx| open_action_ring_remove_confirmation(window, cx, &profile),
+        move |profile, window, cx| {
+            ProfileCommand::ResetRing.confirm(&reset_key, &profile, window, cx);
+        },
+        move |profile, window, cx| {
+            ProfileCommand::RemoveRing.confirm(&key, &profile, window, cx);
+        },
+        move |profile, window, cx| {
+            ProfileCommand::RemoveAll.confirm(&remove_all_key, &profile, window, cx);
+        },
     );
 
     Some(ProfileScopeShell::new(
@@ -175,7 +207,6 @@ fn profile_scope_model(
                 .iter()
                 .find(|(identifier, _)| identifier == app)
                 .map_or_else(|| friendly_app_name(app), |(_, name)| name.clone()),
-            override_count: 0,
             persisted: false,
         });
     }
@@ -195,7 +226,6 @@ fn profile_scope_model(
         .map(|(app, name)| ProfileChoice {
             app: app.clone(),
             name: name.clone(),
-            override_count: 0,
             persisted: false,
         })
         .collect();
@@ -219,13 +249,6 @@ fn profile_scope_model(
         profiles,
         choices,
     }
-}
-
-fn action_ring_override_count(ring: &ActionRingConfig, layout: &ActionRingLayout) -> usize {
-    ActionRingSlot::ALL
-        .into_iter()
-        .filter(|slot| layout.slots.get(slot) != ring.default.slots.get(slot))
-        .count()
 }
 
 /// Profile inheritance and active-app context shown above the device canvas.
@@ -286,60 +309,74 @@ fn profile_summary(editing_app: Option<&str>, override_count: usize) -> gpui::Sh
     }
 }
 
-fn open_button_remove_confirmation(window: &mut Window, cx: &mut App, profile: &ProfileChoice) {
-    let question = remove_profile_question(profile);
-    window.open_alert_dialog(cx, move |alert, _, _| {
-        alert
-            .title(question.clone())
-            .description(tr!("profiles.remove_profile_description"))
-            .button_props(
-                DialogButtonProps::default()
-                    .ok_text(tr!("profiles.remove_profile"))
-                    .ok_variant(ButtonVariant::Danger)
-                    .cancel_text(tr!("common.cancel"))
-                    .show_cancel(true),
-            )
-            .on_ok(move |_event, _window, cx| {
-                AppState::apply(cx, AppState::remove_editing_app_profile);
-                true
-            })
-    });
+#[derive(Clone, Copy)]
+enum ProfileCommand {
+    ResetButtons,
+    RemoveButtons,
+    ResetRing,
+    RemoveRing,
+    RemoveAll,
 }
 
-fn open_action_ring_remove_confirmation(
-    window: &mut Window,
-    cx: &mut App,
-    profile: &ProfileChoice,
-) {
-    let question = remove_profile_question(profile);
-    window.open_alert_dialog(cx, move |alert, _, _| {
-        alert
-            .title(question.clone())
-            .button_props(
-                DialogButtonProps::default()
-                    .ok_text(tr!("profiles.remove_profile"))
-                    .ok_variant(ButtonVariant::Danger)
-                    .cancel_text(tr!("common.cancel"))
-                    .show_cancel(true),
-            )
-            .on_ok(move |_event, _window, cx| {
-                AppState::apply(cx, AppState::remove_editing_action_ring_profile);
-                true
-            })
-    });
-}
+impl ProfileCommand {
+    fn apply(self, key: &DeviceKey, app: &str, cx: &mut App) {
+        AppState::apply(cx, |state| match self {
+            Self::ResetButtons => state.reset_app_profile(key, app),
+            Self::RemoveButtons => state.remove_app_profile(key, app),
+            Self::ResetRing => state.reset_action_ring_profile(key, app),
+            Self::RemoveRing => state.remove_action_ring_profile(key, app),
+            Self::RemoveAll => state.remove_all_app_profiles(key, app),
+        });
+    }
 
-fn remove_profile_question(profile: &ProfileChoice) -> gpui::SharedString {
-    match profile.override_count {
-        1 => tr!(
-            "profiles.remove_app_profile_single_override",
-            app => profile.name.clone()
-        ),
-        count => tr!(
-            "profiles.remove_app_profile_multiple_overrides",
-            app => profile.name.clone(),
-            count => count
-        ),
+    fn confirm(self, key: &DeviceKey, profile: &ProfileChoice, window: &mut Window, cx: &mut App) {
+        // A draft in this editor may still have saved settings in the other.
+        if !profile.persisted && !matches!(self, Self::RemoveAll) {
+            self.apply(key, &profile.app, cx);
+            return;
+        }
+        let key = key.clone();
+        let app = profile.app.clone();
+        let name = profile.name.clone();
+        let reset = matches!(self, Self::ResetButtons | Self::ResetRing);
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let key = key.clone();
+            let app = app.clone();
+            let question = if matches!(self, Self::RemoveAll) {
+                tr!("profiles.remove_all_profiles_question", app => name.clone())
+            } else if reset {
+                tr!("profiles.reset_profile_question", app => name.clone())
+            } else {
+                tr!("profiles.remove_profile_question", app => name.clone())
+            };
+            let description = match self {
+                Self::ResetButtons => tr!("profiles.reset_buttons_description"),
+                Self::RemoveButtons => tr!("profiles.remove_buttons_description"),
+                Self::ResetRing => tr!("profiles.reset_ring_description"),
+                Self::RemoveRing => tr!("profiles.remove_ring_description"),
+                Self::RemoveAll => tr!("profiles.remove_all_profiles_description"),
+            };
+            alert
+                .title(question)
+                .description(description)
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text(if matches!(self, Self::RemoveAll) {
+                            tr!("profiles.remove_all_profiles")
+                        } else if reset {
+                            tr!("profiles.reset_profile")
+                        } else {
+                            tr!("profiles.remove_profile")
+                        })
+                        .ok_variant(ButtonVariant::Danger)
+                        .cancel_text(tr!("common.cancel"))
+                        .show_cancel(true),
+                )
+                .on_ok(move |_event, _window, cx| {
+                    self.apply(&key, &app, cx);
+                    true
+                })
+        });
     }
 }
 

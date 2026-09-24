@@ -229,6 +229,7 @@ pub(crate) enum WatcherEvent {
     /// Camera activity flipped.
     Camera(bool),
     App(watchers::foreground_app::ForegroundUpdate),
+    Pointer(openlogi_hook::PointerContext),
     /// The Accessibility grant flipped.
     Accessibility(bool),
     /// The Input Monitoring grant flipped.
@@ -245,6 +246,7 @@ pub(crate) enum Watcher {
     Inventory,
     Camera,
     App,
+    Pointer,
     Accessibility,
     InputMonitoring,
 }
@@ -273,6 +275,10 @@ pub(crate) fn spawn_state_watchers(
         shared.hardware(),
         shared.channel_registry.clone(),
     );
+    let mut pointer = watchers::pointer::spawn();
+    // Publish capability even when an unsupported source has no worker and
+    // closes immediately. The orchestrator starts unknown, never guessing.
+    pointer.mark_changed();
     let streams = stream::select_all([
         tagged(
             inventory.events,
@@ -289,6 +295,13 @@ pub(crate) fn spawn_state_watchers(
             Watcher::App,
             WatcherEvent::App,
         ),
+        stream::unfold(pointer, |mut rx| async move {
+            rx.changed().await.ok()?;
+            let context = rx.borrow_and_update().clone();
+            Some((WatcherEvent::Pointer(context), rx))
+        })
+        .chain(stream::iter([WatcherEvent::Lost(Watcher::Pointer)]))
+        .boxed(),
         tagged(
             watchers::accessibility::spawn(Duration::from_millis(1200)),
             Watcher::Accessibility,

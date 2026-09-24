@@ -457,11 +457,24 @@ fn app_title_bar(cx: &App) -> impl IntoElement {
 }
 
 impl Render for AppView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let content = self.render_content(window, cx);
+        // Root owns dialog state but the application must mount its layer.
+        // Keep it present across connecting, permission, and error screens too.
+        div()
+            .relative()
+            .size_full()
+            .child(content)
+            .children(gpui_component::Root::render_dialog_layer(window, cx))
+    }
+}
+
+impl AppView {
     #[expect(
         clippy::too_many_lines,
         reason = "root view assembles every screen branch inline"
     )]
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         theme::apply_ui_scale(window, cx);
         let pal = theme::palette(cx);
 
