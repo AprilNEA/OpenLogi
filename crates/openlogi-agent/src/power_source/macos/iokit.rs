@@ -6,9 +6,12 @@
 )]
 
 use std::collections::BTreeMap;
-use std::ffi::{CStr, c_char, c_int, c_void};
+use std::ffi::{CStr, c_void};
+use std::mem::ManuallyDrop;
 use std::ptr::{self, NonNull};
 use std::sync::OnceLock;
+
+use libc::{RTLD_LAZY, dlopen, dlsym};
 
 use objc2_core_foundation::{CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType};
 use tracing::warn;
@@ -16,7 +19,6 @@ use tracing::warn;
 use super::{AccessoryPower, BatteryStatus, PowerSourceBackend, PowerSourceError};
 
 const IOKIT: &CStr = c"/System/Library/Frameworks/IOKit.framework/IOKit";
-const RTLD_LAZY: c_int = 0x1;
 
 type CreateFn = unsafe extern "C" fn(*mut *mut c_void) -> i32;
 type SetDetailsFn = unsafe extern "C" fn(*mut c_void, &CFDictionary<CFString, CFType>) -> i32;
@@ -73,9 +75,10 @@ fn check(operation: &'static str, code: i32) -> Result<(), PowerSourceError> {
     }
 }
 
-/// Owns one opaque, non-CF handle. Native release consumes it even on failure.
+/// Owns one opaque, non-CF handle. Native release consumes it even on failure,
+/// so [`Source::release`] takes `self` and a released handle cannot be reused.
 struct Source {
-    handle: Option<NonNull<c_void>>,
+    handle: NonNull<c_void>,
     spi: &'static Spi,
 }
 
@@ -91,36 +94,38 @@ impl Source {
             (spi.create)(&raw mut handle)
         })?;
         Ok(Self {
-            handle: Some(NonNull::new(handle).ok_or(PowerSourceError::MissingHandle)?),
+            handle: NonNull::new(handle).ok_or(PowerSourceError::MissingHandle)?,
             spi,
         })
     }
 
     fn set(&self, accessory: &AccessoryPower) -> Result<(), PowerSourceError> {
-        let handle = self.handle.ok_or(PowerSourceError::MissingHandle)?;
         let details = details_dictionary(accessory);
         // SAFETY: The live handle is uniquely owned; the dictionary remains valid
         // during the call and IOPS copies its contents for later resynchronization.
         check("IOPSSetPowerSourceDetails", unsafe {
-            (self.spi.set_details)(handle.as_ptr(), &details)
+            (self.spi.set_details)(self.handle.as_ptr(), &details)
         })
     }
 
-    fn release(&mut self) -> Result<(), PowerSourceError> {
-        let Some(handle) = self.handle.take() else {
-            return Ok(());
-        };
-        // SAFETY: Take ownership before calling: Apple's implementation frees the
-        // handle unconditionally, so neither retries nor Drop may release it again.
+    /// Release the handle and report the result. `Drop` does not run afterwards.
+    fn release(self) -> Result<(), PowerSourceError> {
+        ManuallyDrop::new(self).release_handle()
+    }
+
+    /// Called exactly once per handle: by `release` or by `Drop`.
+    fn release_handle(&self) -> Result<(), PowerSourceError> {
+        // SAFETY: Apple's implementation frees the handle unconditionally. Both
+        // callers consume the owner, so the handle is never released twice.
         check("IOPSReleasePowerSource", unsafe {
-            (self.spi.release)(handle.as_ptr())
+            (self.spi.release)(self.handle.as_ptr())
         })
     }
 }
 
 impl Drop for Source {
     fn drop(&mut self) {
-        if let Err(error) = self.release() {
+        if let Err(error) = self.release_handle() {
             warn!(%error, "failed to release macOS accessory power source");
         }
     }
@@ -159,7 +164,7 @@ impl PowerSourceBackend for IoKitPowerSourceBackend {
     fn remove(&mut self, identifier: &str) -> Result<(), PowerSourceError> {
         self.sources
             .remove(identifier)
-            .map_or(Ok(()), |mut source| source.release())
+            .map_or(Ok(()), Source::release)
     }
 }
 
@@ -215,11 +220,6 @@ fn details_dictionary(accessory: &AccessoryPower) -> CFRetained<CFDictionary<CFS
     CFDictionary::from_slices(&keys.each_ref().map(|key| &**key), &values)
 }
 
-unsafe extern "C" {
-    fn dlopen(filename: *const c_char, flag: c_int) -> *mut c_void;
-    fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,29 +273,27 @@ mod tests {
     }
 
     #[test]
-    fn source_drop_does_not_retry_a_failed_consuming_release() {
+    fn a_failed_release_or_set_releases_each_handle_exactly_once() {
         static TEST_SPI: Spi = Spi {
             create: unused_create,
             set_details: unused_set,
             release: failed_release,
         };
-        let mut source = Source {
-            handle: Some(NonNull::dangling()),
+        let source = Source {
+            handle: NonNull::dangling(),
             spi: &TEST_SPI,
         };
-        let error = source.release().unwrap_err();
         assert_eq!(
-            error,
+            source.release().unwrap_err(),
             PowerSourceError::Operation {
                 operation: "IOPSReleasePowerSource",
                 code: -1
             }
         );
-        drop(source);
         assert_eq!(RELEASES.load(Ordering::SeqCst), 1);
         // An owned handle that has not been released still gets RAII cleanup.
         let pending = Source {
-            handle: Some(NonNull::dangling()),
+            handle: NonNull::dangling(),
             spi: &TEST_SPI,
         };
         let error = pending
