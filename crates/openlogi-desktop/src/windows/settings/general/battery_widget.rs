@@ -63,6 +63,11 @@ impl StatusText {
 }
 
 fn status_text(enabled: bool, status: Option<&BatteryWidgetStatus>) -> StatusText {
+    // The switch is the user's intent. A status the agent has not caught up
+    // with yet must not contradict it.
+    if !enabled {
+        return StatusText::plain(tr!("common.off"));
+    }
     match status {
         Some(BatteryWidgetStatus::Failed {
             published_devices,
@@ -85,27 +90,13 @@ fn status_text(enabled: bool, status: Option<&BatteryWidgetStatus>) -> StatusTex
             detail: (*published_devices == 0).then(|| tr!("battery_widget.empty")),
             failed: false,
         },
-        Some(BatteryWidgetStatus::Unavailable { reason }) => {
-            if enabled {
-                StatusText {
-                    summary: tr!("battery_widget.unavailable"),
-                    detail: Some(reason.clone().into()),
-                    failed: true,
-                }
-            } else {
-                StatusText::plain(tr!("common.off"))
-            }
-        }
-        Some(BatteryWidgetStatus::Disabled) => StatusText::plain(if enabled {
-            tr!("battery_widget.starting")
-        } else {
-            tr!("common.off")
-        }),
-        None => StatusText::plain(if enabled {
-            tr!("battery_widget.waiting")
-        } else {
-            tr!("common.off")
-        }),
+        Some(BatteryWidgetStatus::Unavailable { reason }) => StatusText {
+            summary: tr!("battery_widget.unavailable"),
+            detail: Some(reason.clone().into()),
+            failed: true,
+        },
+        Some(BatteryWidgetStatus::Disabled) => StatusText::plain(tr!("battery_widget.starting")),
+        None => StatusText::plain(tr!("battery_widget.waiting")),
     }
 }
 
@@ -147,26 +138,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_cleanup_failure_stays_visible_after_the_preference_is_disabled() {
-        let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
-        let status = BatteryWidgetStatus::Failed {
-            published_devices: 1,
-            reason: "macOS could not remove the accessory.".into(),
-        };
-        let text = status_text(false, Some(&status));
-        assert!(text.failed);
-        assert_eq!(
-            text.detail.as_deref(),
-            Some("macOS could not remove the accessory.")
-        );
-        assert_eq!(
-            text.summary,
-            tr!("battery_widget.failed_singular", count = 1)
-        );
-    }
-
-    #[test]
-    fn starting_and_disconnected_states_do_not_claim_the_publisher_is_active() {
+    fn off_and_pending_states_do_not_claim_the_publisher_is_active() {
         let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
         assert_eq!(
             status_text(true, Some(&BatteryWidgetStatus::Disabled)).summary,
@@ -176,8 +148,17 @@ mod tests {
             status_text(true, None).summary,
             tr!("battery_widget.waiting")
         );
-        assert_eq!(status_text(false, None).summary, tr!("common.off"));
+        let failed = BatteryWidgetStatus::Failed {
+            published_devices: 0,
+            reason: "IOPSReleasePowerSource failed (0xffffffff)".into(),
+        };
+        for status in [None, Some(&failed)] {
+            let text = status_text(false, status);
+            assert_eq!(text.summary, tr!("common.off"));
+            assert!(!text.failed && text.detail.is_none());
+        }
     }
+
     #[gpui::test]
     fn the_widget_switch_updates_the_preference_by_pointer_and_keyboard(
         cx: &mut gpui::TestAppContext,
