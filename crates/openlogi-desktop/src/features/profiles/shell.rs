@@ -6,18 +6,17 @@ use gpui::{
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
-    Icon, IconName, Sizable as _,
-    button::{Button, ButtonVariants as _},
+    IconName, Sizable as _,
+    button::ButtonVariants as _,
     h_flex,
-    popover::Popover,
+    menu::{DropdownMenu as _, PopupMenuItem},
     spinner::Spinner,
 };
 
 use super::catalog::{AppCatalogPicker, ApplicationIconState, ProfileIconCache};
 use super::picker::add_app_popover;
 use super::{ProfileChoice, ProfileScopeActions, ProfileScopeModel};
-use crate::features::binding_editor::{compact_panel, divider, title};
-use crate::ui::components::MenuRow;
+use crate::ui::components::control_button;
 use crate::ui::theme::{self, Palette, SelectableStyle as _, Typography as _};
 
 /// Icon edge inside single-line profile tabs.
@@ -147,17 +146,9 @@ fn profile_scope_content(shell: ProfileScopeShell, pal: Palette) -> impl IntoEle
             shell.actions.clone(),
             pal,
         ))
-        .when_some(
-            selected_profile.filter(|profile| profile.persisted),
-            |row, profile| {
-                row.child(profile_options_popover(
-                    shell.id_base,
-                    profile,
-                    shell.actions,
-                    pal,
-                ))
-            },
-        )
+        .when_some(selected_profile, |row, profile| {
+            row.child(profile_options_menu(shell.id_base, profile, shell.actions))
+        })
 }
 
 fn profile_tab(
@@ -240,47 +231,57 @@ pub(super) fn application_mark(
     }
 }
 
-fn profile_options_popover(
+fn profile_options_menu(
     id_base: &'static str,
     profile: ProfileChoice,
     actions: ProfileScopeActions,
-    pal: Palette,
 ) -> impl IntoElement {
-    Popover::new(format!("{id_base}:profile-options-popover"))
-        .anchor(gpui::Anchor::TopRight)
-        // `compact_panel` is the surface; the popover chrome would wrap it in
-        // a second padded, differently-rounded box.
-        .appearance(false)
-        .trigger(
-            Button::new(format!("{id_base}:profile-options"))
-                .ghost()
-                .xsmall()
-                .icon(IconName::Ellipsis),
-        )
-        .content(move |_state, _window, cx| {
-            let popover = cx.entity().downgrade();
+    control_button(format!("{id_base}:profile-options"))
+        .ghost()
+        .label(tr!("profiles.profile_options"))
+        .icon(IconName::ChevronDown)
+        .dropdown_menu_with_anchor(gpui::Anchor::TopRight, move |menu, _, _| {
+            let reset_profile = profile.clone();
+            let reset_actions = actions.clone();
+            let all_profile = profile.clone();
+            let all_actions = actions.clone();
             let profile = profile.clone();
             let actions = actions.clone();
-            compact_panel(pal)
-                .w(px(224.))
-                .child(title(tr!("profiles.profile_options"), pal))
-                .child(divider(pal))
-                .child(
-                    MenuRow::new(format!("{id_base}:remove-profile"))
-                        .role(Role::MenuItem)
-                        .child(
-                            h_flex()
-                                .items_center()
-                                .gap_2()
-                                .child(Icon::new(IconName::Close).size_4())
-                                .child(tr!("profiles.remove_profile_dialog")),
-                        )
-                        .on_click(move |_event, window, cx| {
-                            if let Some(popover) = popover.upgrade() {
-                                popover.update(cx, |state, cx| state.dismiss(window, cx));
-                            }
-                            actions.remove(profile.clone(), window, cx);
+            menu.label(profile.name.clone())
+                .item(
+                    PopupMenuItem::new(tr!("profiles.reset_profile_dialog"))
+                        .disabled(!profile.persisted)
+                        .on_click(move |_, window, cx| {
+                            let profile = reset_profile.clone();
+                            let actions = reset_actions.clone();
+                            // Open after the menu restores focus to its trigger.
+                            window.defer(cx, move |window, cx| actions.reset(profile, window, cx));
                         }),
+                )
+                .separator()
+                .item(
+                    PopupMenuItem::new(if profile.persisted {
+                        tr!("profiles.remove_profile_dialog")
+                    } else {
+                        tr!("profiles.remove_profile")
+                    })
+                    .on_click(move |_event, window, cx| {
+                        let profile = profile.clone();
+                        let actions = actions.clone();
+                        window.defer(cx, move |window, cx| actions.remove(profile, window, cx));
+                    }),
+                )
+                .separator()
+                .item(
+                    PopupMenuItem::new(tr!("profiles.remove_all_profiles_dialog")).on_click(
+                        move |_, window, cx| {
+                            let profile = all_profile.clone();
+                            let actions = all_actions.clone();
+                            window.defer(cx, move |window, cx| {
+                                actions.remove_all(profile, window, cx);
+                            });
+                        },
+                    ),
                 )
         })
 }
