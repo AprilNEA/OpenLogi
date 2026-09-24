@@ -292,9 +292,11 @@ fn application_row(
     popover: WeakEntity<PopoverState>,
 ) -> gpui::Div {
     let app = choice.app.clone();
+    let aria_label = format!("{}: {}", choice.name, choice.app);
     div().h(px(APP_ROW_H)).child(
         MenuRow::new(format!("{id_base}:catalog-app:{}", choice.app))
             .role(Role::MenuItem)
+            .aria_label(aria_label)
             .child(
                 h_flex()
                     .min_w_0()

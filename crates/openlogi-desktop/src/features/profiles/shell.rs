@@ -268,6 +268,7 @@ fn profile_options_popover(
                 .child(
                     MenuRow::new(format!("{id_base}:remove-profile"))
                         .role(Role::MenuItem)
+                        .aria_label(tr!("profiles.remove_profile_dialog"))
                         .child(
                             h_flex()
                                 .items_center()

@@ -15,7 +15,8 @@
 )]
 
 use gpui::{
-    App, Entity, FontWeight, IntoElement, ParentElement, RenderOnce, Styled, Window, div, px, svg,
+    App, Entity, FontWeight, IntoElement, ParentElement, RenderOnce,
+    StatefulInteractiveElement as _, Styled, Window, div, px, svg,
 };
 use gpui_component::{
     Icon, IconName, Sizable as _,
@@ -258,8 +259,10 @@ impl RenderOnce for WorkflowStepRow {
         };
         let pal = theme::palette(cx);
         let view_remove = self.view;
+        let aria_label = format!("{type_label}: {}", step_preview_text(&self.step));
 
         MenuRow::new(("wf-step", self.idx))
+            .aria_label(aria_label)
             .child(
                 h_flex()
                     .w_full()
@@ -292,8 +295,12 @@ impl RenderOnce for WorkflowStepRow {
     }
 }
 
-fn step_preview(step: &WorkflowStep, pal: Palette) -> impl IntoElement {
-    let text: String = match step {
+/// The step's visible/announced payload preview — a text step's content, a
+/// key combo's rendered label, or a delay's duration. Shared by
+/// [`step_preview`] (sighted) and [`WorkflowStepRow`]'s accessible name
+/// (screen readers), so both stay in sync.
+fn step_preview_text(step: &WorkflowStep) -> String {
+    match step {
         WorkflowStep::TypeText(s) => {
             if s.is_empty() {
                 "…".to_string()
@@ -310,11 +317,14 @@ fn step_preview(step: &WorkflowStep, pal: Palette) -> impl IntoElement {
                 s.clone()
             }
         }
-    };
+    }
+}
+
+fn step_preview(step: &WorkflowStep, pal: Palette) -> impl IntoElement {
     div()
         .text_caption()
         .text_color(pal.text_primary)
-        .child(text)
+        .child(step_preview_text(step))
 }
 
 fn key_combo_preview(combo: &KeyCombo) -> String {
