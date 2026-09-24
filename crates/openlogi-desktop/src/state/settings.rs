@@ -205,7 +205,15 @@ impl AppState {
         self.config.edit(|config| {
             config.set_device_custom_name(record_key, custom_name.clone());
         });
-        if !self.persist_and_reload("device name") {
+        // Only the macOS Batteries widget reads custom names in the agent. A
+        // reload re-applies device settings, so skip it when nothing needs it.
+        let persisted =
+            if cfg!(target_os = "macos") && self.config.app_settings.macos_battery_widget {
+                self.persist_and_reload("device name")
+            } else {
+                self.persist_config("device name")
+            };
+        if !persisted {
             return StateEvent::InventoryChanged.into();
         }
         for record in self
