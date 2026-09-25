@@ -87,12 +87,28 @@ echo "Installing udev rules …"
 sudo install -Dm644 "${SCRIPT_DIR}/udev/70-openlogi.rules" \
   /etc/udev/rules.d/70-openlogi.rules
 
+# The rule grants /dev/uinput with TAG+="uaccess", which logind applies in
+# response to a device event. A host that has never loaded the uinput module has
+# no such device, so the trigger below matches nothing and the node stays
+# root-owned — the hook then cannot create its virtual device and button
+# remapping silently does nothing. Load it now, and register it for every boot.
+echo "Loading the uinput module …"
+sudo install -Dm644 "${SCRIPT_DIR}/modules-load/openlogi.conf" \
+  /etc/modules-load.d/openlogi.conf
+if command -v modprobe >/dev/null 2>&1; then
+  sudo modprobe uinput || true
+fi
+
 if command -v udevadm >/dev/null 2>&1; then
   echo "Reloading udev rules …"
   sudo udevadm control --reload-rules
   sudo udevadm trigger --subsystem-match=hidraw
   sudo udevadm trigger --subsystem-match=input
   sudo udevadm trigger --subsystem-match=misc --attr-match=name=uinput 2>/dev/null || true
+  # trigger only queues the events. Without settle the script can return before
+  # udev has applied the uaccess ACLs, so the next thing the user does — start
+  # the agent — still hits EACCES on a correctly configured system.
+  sudo udevadm settle 2>/dev/null || true
 fi
 
 # ── systemd user unit ─────────────────────────────────────────────────────────
