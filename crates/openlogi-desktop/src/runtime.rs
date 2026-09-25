@@ -199,6 +199,8 @@ fn ensure_registration_at_startup(cx: &mut gpui::AsyncApp) {
 
 /// State the event loop carries between events.
 struct Runtime {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    displayed_selection: Option<openlogi_ipc::DeviceSelection>,
     /// The camera set last merged into the UI.
     cams: Vec<Camera>,
     /// Consecutive empty camera scans while cameras were showing — see the
@@ -243,6 +245,8 @@ impl Runtime {
     ) -> Self {
         let auto_sync = sync::should_run(resolver.has_bundle_root());
         Self {
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            displayed_selection: None,
             cams,
             camera_misses: 0,
             snapshot: None,
@@ -333,6 +337,20 @@ impl Runtime {
             }
             if changes.inventory_changed() {
                 app::menu::rebuild(cx);
+            }
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            if let Some(request) = &snapshot.device_selection
+                && (self.displayed_selection.as_ref() == Some(request)
+                    || windows::main_window::open_device_settings(&request.device_key, cx))
+            {
+                self.displayed_selection = Some(request.clone());
+                let sender = AppState::global(cx).read(cx).ipc_sender();
+                if sender
+                    .send(ipc::AcknowledgeDeviceSelection(request.clone()).into())
+                    .is_err()
+                {
+                    warn!("could not acknowledge tray device selection");
+                }
             }
             (auto_download, asset_source, models)
         });

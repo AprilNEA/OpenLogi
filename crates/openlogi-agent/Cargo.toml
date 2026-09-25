@@ -30,6 +30,8 @@ openlogi-hid = { path = "../openlogi-hid" }
 openlogi-hook = { path = "../openlogi-hook" }
 openlogi-ipc = { path = "../openlogi-ipc" }
 serde_json.workspace = true
+serde.workspace = true
+atomic-write-file.workspace = true
 tarpc = { workspace = true }
 interprocess = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util", "signal"] }
@@ -53,6 +55,8 @@ objc2 = { workspace = true }
 objc2-app-kit = { workspace = true, features = ["NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSResponder", "NSView", "NSMenu", "NSMenuItem", "NSImage", "NSApplication", "NSRunningApplication", "NSWorkspace"] }
 objc2-core-graphics = { workspace = true, features = ["CGDirectDisplay", "CGDisplayConfiguration", "libc"] }
 objc2-foundation = { workspace = true, features = ["NSString", "NSData", "NSArray", "NSNotification"] }
+block2.workspace = true
+objc2-user-notifications = { workspace = true, features = ["UNUserNotificationCenter", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationSettings", "UNNotificationTrigger", "block2"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = "5"
@@ -65,6 +69,9 @@ windows-sys = { workspace = true, features = [
     "Win32_System_LibraryLoader",
     "Win32_System_Power",
     "Win32_UI_Shell",
+    "Win32_UI_Accessibility",
+    "Win32_UI_Controls",
+    "Win32_UI_HiDpi",
     "Win32_UI_WindowsAndMessaging",
 ] }
 

@@ -83,3 +83,31 @@ pub fn ensure(cx: &mut App) {
         open(cx);
     }
 }
+
+/// Focus or create the main window, then show exactly the requested device.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub(crate) fn open_device_settings(device_key: &str, cx: &mut App) -> bool {
+    let record_key = crate::state::AppState::try_read(cx).and_then(|state| {
+        state
+            .devices()
+            .iter()
+            .find(|record| record.config_key == device_key)
+            .map(crate::state::DeviceRecord::record_key)
+    });
+    let Some(record_key) = record_key else {
+        return false;
+    };
+    open(cx);
+    let Some(handle) = cx.default_global::<WindowRegistry>().main else {
+        return false;
+    };
+    handle
+        .update(cx, |root, _, cx| {
+            let Ok(view) = root.view().clone().downcast::<AppView>() else {
+                return false;
+            };
+            view.update(cx, |view, cx| view.open_device_settings(record_key, cx));
+            true
+        })
+        .unwrap_or(false)
+}

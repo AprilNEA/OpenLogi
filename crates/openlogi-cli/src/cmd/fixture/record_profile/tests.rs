@@ -193,6 +193,9 @@ impl Agent for TestAgent {
         unreachable!("profile capture must not inspect pairing")
     }
 
+    async fn acknowledge_device_selection(self, _: TarpcContext, _: openlogi_ipc::DeviceSelection) {
+    }
+
     async fn snapshot(self, _: TarpcContext) -> AgentSnapshot {
         *self.snapshots.lock().expect("snapshot lock") += 1;
         self.snapshot
@@ -355,6 +358,7 @@ fn fixture_agent() -> TestAgent {
         pairing: Some(PairingPhase::Passkey(PasskeyMethod::Keyboard(
             "SECRET-PASSKEY".to_string(),
         ))),
+        device_selection: None,
         foreground: ForegroundApps {
             current: Some(ForegroundApp {
                 id: RUNTIME_APP_ID.to_string(),

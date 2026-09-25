@@ -624,14 +624,62 @@ fn light_tab(
 /// Device tab: device details and configuration cards stacked.
 fn device_tab(cx: &mut Context<AppView>) -> impl IntoElement {
     let pal = theme::palette(cx);
-    tab_body(
-        ContentWidth::Small,
+    let content = v_flex()
+        .w_full()
+        .gap_3()
+        .child(device_details_card(pal, cx))
+        .child(configuration_card(pal, cx));
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    let content = content.children(battery_preferences_card(pal, cx));
+    tab_body(ContentWidth::Small, content)
+}
+
+/// Battery preferences remain independent of device management and each other.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn battery_preferences_card(pal: Palette, cx: &mut Context<AppView>) -> Option<impl IntoElement> {
+    let state = AppState::try_read(cx)?;
+    let record = state.current_record()?;
+    if !state.battery_preferences_available(record) {
+        return None;
+    }
+    let key = record.device_key();
+    let preferences = state.battery_preferences(key.as_str());
+    let menu_key = key.clone();
+    let menu = Toggle::new("battery-show-in-menu")
+        .label(Some(tr!("device.battery_show_in_menu")))
+        .selected(preferences.show_in_menu)
+        .on_change(move |checked, _, cx| {
+            AppState::apply(cx, |state| {
+                let mut next = state.battery_preferences(menu_key.as_str());
+                next.show_in_menu = *checked;
+                state.commit_battery_preferences(&menu_key, next)
+            });
+        });
+    let warning = Toggle::new("battery-warn-low")
+        .label(Some(tr!("device.battery_warn_low")))
+        .selected(preferences.warn_low)
+        .on_change(move |checked, _, cx| {
+            AppState::apply(cx, |state| {
+                let mut next = state.battery_preferences(key.as_str());
+                next.warn_low = *checked;
+                state.commit_battery_preferences(&key, next)
+            });
+        });
+    Some(PanelCard::new(
+        tr!("device.battery_preferences"),
+        Icon::new(IconName::Battery),
         v_flex()
-            .w_full()
             .gap_3()
-            .child(device_details_card(pal, cx))
-            .child(configuration_card(pal, cx)),
-    )
+            .child(menu)
+            .child(warning)
+            .child(
+                div()
+                    .text_caption()
+                    .text_color(pal.text_muted)
+                    .child(tr!("device.battery_warn_description")),
+            )
+            .into_any_element(),
+    ))
 }
 
 fn device_details_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {

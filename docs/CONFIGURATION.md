@@ -95,6 +95,37 @@ Common device fields are:
 `shift+command+f5`. Supported trigger modifiers are `shift`, `control`,
 `option`, and `command`; aliases such as `ctrl`, `alt`, and `cmd` are accepted.
 
+
+### Battery menu and warnings
+
+On macOS and Windows, each online battery-reporting device appears in the tray
+menu. The battery badge contains its percentage and a lightning bolt while
+charging. A missing or cached reading appears as `?`. Clicking a device opens its
+settings. Linux has no tray integration and is unchanged by these options.
+
+Each device has two independent options, both enabled by default:
+
+```toml
+[devices."<physical-key>".battery]
+show_in_menu = true
+warn_low = true
+```
+
+`warn_low` controls both OS notifications and the OpenLogi tray icon's warning
+color, including for a device hidden from the menu. The icon turns orange at 20%
+and red at 10%, using the lowest current battery among warning-enabled devices.
+Charging or fully charged devices and stale readings do not contribute.
+
+A notification is sent once per low-battery episode, including when the app first
+observes an already-low device. The episode only resets after a current reading
+above 25%; reconnecting, restarting, or briefly charging does not reset it.
+Notification delivery respects the operating system's notification permissions.
+Warning history is stored in `battery-warnings.json` in the profile's state
+directory. Devices without their own serial or unit ID use session-only history.
+That history is discarded when the pairing disappears or its reported model changes;
+an offline device that remains paired keeps its history.
+
+
 ## Actions
 
 Action names are the serialized Rust variant names, including `Copy`,

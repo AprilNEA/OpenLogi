@@ -23,11 +23,10 @@ use std::sync::{Mutex, PoisonError};
 
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, NSObject};
+use objc2::runtime::{AnyObject, NSObject, ProtocolObject};
 use objc2::{
     AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel,
 };
-use objc2_app_kit::NSStatusItem;
 #[cfg(test)]
 use objc2_app_kit::NSWorkspaceDidWakeNotification;
 use objc2_app_kit::{
@@ -36,8 +35,9 @@ use objc2_app_kit::{
     NSWorkspaceSessionDidBecomeActiveNotification, NSWorkspaceSessionDidResignActiveNotification,
     NSWorkspaceWillSleepNotification,
 };
+use objc2_app_kit::{NSMenuDelegate, NSStatusItem};
 use objc2_core_graphics::{CGDisplayIsAsleep, CGMainDisplayID};
-use objc2_foundation::{NSNotification, NSString};
+use objc2_foundation::{NSNotification, NSObjectProtocol, NSString};
 use openlogi_core::brand::{self, DeeplinkCommand};
 use openlogi_core::config::AppIcon;
 use openlogi_hid::DeviceIoSignal;
@@ -51,7 +51,8 @@ use crate::status_item;
 /// rebuild the menu in a new language.
 struct TrayState {
     item: Retained<NSStatusItem>,
-    target: Retained<MenuTarget>,
+    _target: Retained<MenuTarget>,
+    icon: AppIcon,
 }
 
 thread_local! {
@@ -87,32 +88,49 @@ pub fn set_icon(icon: AppIcon) {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
-        TRAY.with_borrow(|state| {
-            if let Some(state) = state.as_ref() {
-                status_item::set_png_icon(&state.item, mtm, glyph(icon), "OpenLogi");
+        TRAY.with_borrow_mut(|state| {
+            if let Some(state) = state.as_mut() {
+                state.icon = icon;
+                status_item::set_warning_tint(
+                    &state.item,
+                    mtm,
+                    glyph(state.icon),
+                    crate::battery::snapshot().severity,
+                );
             }
         });
     });
 }
 
-/// Rebuild the menu-bar menu with the current locale's titles, after a config
-/// reload switched the interface language. Same shape as [`set_icon`]: the
-/// work hops to the main queue, and a hidden item is a no-op.
+/// Refresh derived tray state after a locale change. Menu titles read the
+/// current locale on their next opening, never during menu tracking.
 pub fn relocalize() {
+    battery_changed();
+}
+
+/// Refresh the status icon on the AppKit thread. Menu contents are snapshotted
+/// just before opening, so background updates never invalidate a tracked row.
+pub fn battery_changed() {
     DispatchQueue::main().exec_async(|| {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
         TRAY.with_borrow(|state| {
             if let Some(state) = state.as_ref() {
-                // The status item retains the menu; the fresh one replaces the
-                // old wholesale so titles, order, and key equivalents cannot
-                // drift from `build_menu`.
-                let menu = build_menu(mtm, &state.target);
-                state.item.setMenu(Some(&menu));
+                status_item::set_warning_tint(
+                    &state.item,
+                    mtm,
+                    glyph(state.icon),
+                    crate::battery::snapshot().severity,
+                );
             }
         });
     });
+}
+
+/// Deliver a battery alert using the agent's notification identity.
+pub fn notify_battery(alert: &crate::battery::Alert) {
+    status_item::notify_battery(alert);
 }
 
 struct ActivityTargetIvars {
@@ -223,7 +241,35 @@ define_class!(
     #[name = "OpenLogiAgentMenuTarget"]
     struct MenuTarget;
 
+    // SAFETY: NSObject's default protocol implementation applies to this subclass.
+    unsafe impl NSObjectProtocol for MenuTarget {}
+
+    // SAFETY: callbacks execute on AppKit's main thread and retain no borrowed arguments.
+    unsafe impl NSMenuDelegate for MenuTarget {
+        #[unsafe(method(menuNeedsUpdate:))]
+        fn menu_needs_update(&self, menu: &objc2_app_kit::NSMenu) {
+            menu.removeAllItems();
+            populate_menu(self.mtm(), self, menu);
+        }
+
+        #[unsafe(method(menu:willHighlightItem:))]
+        fn menu_will_highlight(&self, menu: &objc2_app_kit::NSMenu, _item: Option<&objc2_app_kit::NSMenuItem>) {
+            for item in &menu.itemArray() {
+                if let Some(view) = item.view() {
+                    view.setNeedsDisplay(true);
+                }
+            }
+        }
+    }
+
     impl MenuTarget {
+        #[unsafe(method(openDevice:))]
+        fn open_device(&self, sender: &objc2_app_kit::NSMenuItem) {
+            if let Some(key) = sender.representedObject().and_then(|value| value.downcast::<NSString>().ok()) {
+                crate::device_selection::request(key.to_string());
+                open_command(DeeplinkCommand::Show);
+            }
+        }
         #[unsafe(method(openOpenLogi:))]
         fn open_openlogi(&self, _sender: Option<&AnyObject>) {
             open_command(DeeplinkCommand::Show);
@@ -424,11 +470,17 @@ fn install_status_item(
 ) {
     let target = MenuTarget::new(mtm);
     let status_item = status_item::create_status_item();
-    status_item::set_png_icon(&status_item, mtm, glyph(app_icon), "OpenLogi");
+    status_item::set_warning_tint(
+        &status_item,
+        mtm,
+        glyph(app_icon),
+        crate::battery::snapshot().severity,
+    );
     TRAY.with_borrow_mut(|slot| {
         *slot = Some(TrayState {
             item: status_item.clone(),
-            target: target.clone(),
+            _target: target.clone(),
+            icon: app_icon,
         });
     });
     let menu = build_menu(mtm, &target);
@@ -442,7 +494,12 @@ fn install_status_item(
 /// for both the install and a [`relocalize`] rebuild, so the two cannot drift.
 fn build_menu(mtm: MainThreadMarker, target: &MenuTarget) -> Retained<objc2_app_kit::NSMenu> {
     let menu = status_item::new_menu(mtm);
+    menu.setDelegate(Some(ProtocolObject::from_ref(target)));
+    populate_menu(mtm, target, &menu);
+    menu
+}
 
+fn populate_menu(mtm: MainThreadMarker, target: &MenuTarget, menu: &objc2_app_kit::NSMenu) {
     let show = status_item::new_action_item(
         mtm,
         &rust_i18n::t!("app.show_main_window"),
@@ -451,7 +508,19 @@ fn build_menu(mtm: MainThreadMarker, target: &MenuTarget) -> Retained<objc2_app_
         "m",
     );
     menu.addItem(&show);
-    status_item::add_separator(&menu, mtm);
+    status_item::add_separator(menu, mtm);
+    let devices = crate::battery::snapshot().devices;
+    let has_devices = !devices.is_empty();
+    for device in devices {
+        let item = status_item::new_action_item(mtm, &device.name, sel!(openDevice:), target, "");
+        // SAFETY: NSString is retained by the item and openDevice: validates its type.
+        unsafe { item.setRepresentedObject(Some(&NSString::from_str(&device.key))) };
+        status_item::set_battery_row(&item, mtm, device);
+        menu.addItem(&item);
+    }
+    if has_devices {
+        status_item::add_separator(menu, mtm);
+    }
 
     let settings = status_item::new_action_item(
         mtm,
@@ -477,7 +546,7 @@ fn build_menu(mtm: MainThreadMarker, target: &MenuTarget) -> Retained<objc2_app_
         "u",
     );
     menu.addItem(&updates);
-    status_item::add_separator(&menu, mtm);
+    status_item::add_separator(menu, mtm);
 
     let quit = status_item::new_action_item(
         mtm,
@@ -494,7 +563,6 @@ fn build_menu(mtm: MainThreadMarker, target: &MenuTarget) -> Retained<objc2_app_
         quit.setImage(Some(&image));
     }
     menu.addItem(&quit);
-    menu
 }
 
 #[cfg(test)]

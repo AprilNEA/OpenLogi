@@ -59,6 +59,7 @@ fn snapshot_candidate(profile: &DeviceProfile) -> AgentSnapshot {
         standalone: profile.standalone.clone(),
         camera_active: true,
         pairing: None,
+        device_selection: None,
         foreground: ForegroundApps {
             current: Some(editor.clone()),
             recent: vec![editor],
@@ -452,6 +453,7 @@ fn an_identical_snapshot_is_still_a_no_op() {
 fn inventory_with_battery(unit_id: [u8; 4], percentage: u8) -> DeviceInventory {
     let mut inventory = direct_inventory(unit_id);
     inventory.paired[0].battery = Some(BatteryInfo {
+        freshness: openlogi_core::device::BatteryFreshness::Current,
         percentage,
         level: BatteryLevel::Good,
         status: BatteryStatus::Discharging,
@@ -540,4 +542,153 @@ fn a_failed_save_keeps_the_forgotten_device() {
             .edit(|config| config.device_identity("2b034").is_some()),
         "the persisted entry must survive the failed save"
     );
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[test]
+fn battery_preferences_remain_independent_across_snapshot_refreshes() {
+    let profile = canonical_device_profile();
+    let snapshot = snapshot_candidate(&profile);
+    let resolver = AssetResolver::new();
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = canonical_profile_state(commands);
+    let _ = state.apply_agent_snapshot(&snapshot, &resolver, &[]);
+    let key = state.devices()[0].device_key();
+    let mut preferences = state.battery_preferences(key.as_str());
+    assert!(preferences.show_in_menu && preferences.warn_low);
+    preferences.show_in_menu = false;
+    let _ = state.commit_battery_preferences(&key, preferences);
+    let _ = state.apply_agent_snapshot(&snapshot, &resolver, &[]);
+    assert_eq!(state.battery_preferences(key.as_str()), preferences);
+    preferences.warn_low = false;
+    let _ = state.commit_battery_preferences(&key, preferences);
+    assert_eq!(state.battery_preferences(key.as_str()), preferences);
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[test]
+fn battery_preferences_require_evidence_and_survive_missing_readings() {
+    let resolver = AssetResolver::new();
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = canonical_profile_state(commands);
+    let mut inventory = direct_inventory([1, 2, 3, 4]);
+    inventory.paired[0].codename = Some("Synthetic peripheral".into());
+    let model = inventory.paired[0].model_info.as_mut().unwrap();
+    model.model_ids = [0; 3];
+    model.extended_model_id = 0;
+    for kind in [DeviceKind::Mouse, DeviceKind::Keyboard] {
+        inventory.paired[0].kind = kind;
+        let _ = state.refresh_inventories(&[inventory.clone()], &[], &resolver, &[]);
+        assert_eq!(state.devices()[0].kind, kind);
+        assert!(
+            !state.battery_preferences_available(&state.devices()[0]),
+            "a mouse or keyboard without battery evidence must not offer battery switches"
+        );
+    }
+    inventory.paired[0].battery = Some(BatteryInfo {
+        freshness: openlogi_core::device::BatteryFreshness::Cached,
+        percentage: 50,
+        level: BatteryLevel::Good,
+        status: BatteryStatus::Discharging,
+    });
+    let _ = state.refresh_inventories(&[inventory.clone()], &[], &resolver, &[]);
+    assert!(state.battery_preferences_available(&state.devices()[0]));
+    let key = state.devices()[0].device_key();
+    let preferences = openlogi_core::config::BatteryPreferences {
+        show_in_menu: false,
+        warn_low: false,
+    };
+    let _ = state.commit_battery_preferences(&key, preferences);
+    inventory.paired[0].battery = None;
+    for online in [true, false] {
+        inventory.paired[0].online = online;
+        let _ = state.refresh_inventories(&[inventory.clone()], &[], &resolver, &[]);
+        assert!(
+            state.battery_preferences_available(&state.devices()[0]),
+            "a temporary missing reading must retain known battery controls"
+        );
+        assert_eq!(state.battery_preferences(key.as_str()), preferences);
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[test]
+fn battery_preferences_do_not_follow_a_reused_receiver_slot() {
+    let resolver = AssetResolver::new();
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = canonical_profile_state(commands);
+    let mut inventory = receiver_inventory();
+    inventory.paired[0].model_info = None;
+    inventory.paired[0].wpid = Some(0x4082);
+    inventory.paired[0].battery = Some(BatteryInfo {
+        freshness: openlogi_core::device::BatteryFreshness::Current,
+        percentage: 50,
+        level: BatteryLevel::Good,
+        status: BatteryStatus::Discharging,
+    });
+    let _ = state.refresh_inventories(&[inventory.clone()], &[], &resolver, &[]);
+    let key = state.devices()[0].device_key();
+    assert!(state.battery_preferences_available(&state.devices()[0]));
+
+    inventory.paired[0].battery = None;
+    inventory.paired[0].wpid = Some(0x4090);
+    let _ = state.refresh_inventories(&[inventory.clone()], &[], &resolver, &[]);
+    assert_eq!(state.devices()[0].device_key(), key);
+    assert!(!state.battery_preferences_available(&state.devices()[0]));
+
+    // Switching back must not resurrect evidence left behind by the first occupant.
+    inventory.paired[0].wpid = Some(0x4082);
+    let _ = state.refresh_inventories(&[inventory], &[], &resolver, &[]);
+    assert!(!state.battery_preferences_available(&state.devices()[0]));
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[test]
+fn battery_preferences_survive_a_model_less_offline_placeholder() {
+    for wpid in [Some(0x4082), None] {
+        let resolver = AssetResolver::new();
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = canonical_profile_state(commands);
+        let mut inventory = receiver_inventory();
+        inventory.paired[0].model_info = None;
+        inventory.paired[0].wpid = wpid;
+        inventory.paired[0].battery = Some(BatteryInfo {
+            freshness: openlogi_core::device::BatteryFreshness::Current,
+            percentage: 50,
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Discharging,
+        });
+        let _ = state.refresh_inventories(&[inventory.clone()], &[], &resolver, &[]);
+        let key = state.devices()[0].device_key();
+        let live_model = state.devices()[0].model_key.clone();
+        let preferences = openlogi_core::config::BatteryPreferences {
+            show_in_menu: false,
+            warn_low: false,
+        };
+        let _ = state.commit_battery_preferences(&key, preferences);
+        let mut missing = inventory.clone();
+        missing.paired.clear();
+        let _ = state.refresh_inventories(&[missing.clone()], &[], &resolver, &[]);
+        let placeholder = &state.devices()[0];
+        assert_eq!(placeholder.device_key(), key);
+        assert!(!placeholder.online && placeholder.route.is_none());
+        assert_ne!(placeholder.model_key, live_model);
+        assert!(
+            state.battery_preferences_available(placeholder),
+            "a synthetic offline model key is not evidence of a replacement device"
+        );
+        assert_eq!(state.battery_preferences(key.as_str()), preferences);
+
+        inventory.paired[0].battery = None;
+        let _ = state.refresh_inventories(&[inventory.clone()], &[], &resolver, &[]);
+        assert!(state.battery_preferences_available(&state.devices()[0]));
+        let _ = state.refresh_inventories(&[missing], &[], &resolver, &[]);
+        assert!(state.battery_preferences_available(&state.devices()[0]));
+        inventory.paired[0].wpid = Some(0x4090);
+        let _ = state.refresh_inventories(&[inventory], &[], &resolver, &[]);
+        assert!(
+            !state.battery_preferences_available(&state.devices()[0]),
+            "a live replacement model must still discard prior battery evidence"
+        );
+    }
 }

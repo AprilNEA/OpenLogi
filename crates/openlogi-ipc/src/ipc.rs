@@ -63,7 +63,8 @@ pub use succession::Identity;
 ///      the macOS dormancy gate.
 /// v30: `Agent::read_wheel` and `Agent::read_backlight` appended.
 /// v31: `Capabilities::dpi_gestures` appended.
-pub const PROTOCOL_VERSION: u32 = 31;
+/// v32: battery freshness and preferences; acknowledged device selection for tray clicks.
+pub const PROTOCOL_VERSION: u32 = 32;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -140,6 +141,19 @@ pub struct AgentSnapshot {
     /// Which application per-app profiles are resolving against. See
     /// [`ForegroundApps`].
     pub foreground: ForegroundApps,
+    /// Most recent unacknowledged tray request, retained across GUI launches.
+    pub device_selection: Option<DeviceSelection>,
+}
+
+/// A tray click addressed to one physical device and one agent publication.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceSelection {
+    /// Agent run, preventing a delayed acknowledgement from clearing a new run's request.
+    pub agent: Identity,
+    /// Publication generation, also distinguishing repeated clicks on the same device.
+    pub request_id: u64,
+    /// Config key shared by the device's transports.
+    pub device_key: String,
 }
 
 /// The application the agent currently resolves per-app profiles against, and
@@ -566,4 +580,6 @@ pub trait Agent {
     async fn read_wheel(route: DeviceRoute) -> Result<ScrollWheelMode, WriteError>;
     /// Read the current keyboard-backlight state from `route`.
     async fn read_backlight(route: DeviceRoute) -> Result<BacklightState, WriteError>;
+    /// Acknowledge only the exact device selection the GUI has displayed.
+    async fn acknowledge_device_selection(request: DeviceSelection);
 }
