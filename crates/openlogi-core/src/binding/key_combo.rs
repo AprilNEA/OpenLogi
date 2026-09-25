@@ -10,7 +10,8 @@ const MOD_COMMAND: u8 = 1 << 0;
 const MOD_SHIFT: u8 = 1 << 1;
 const MOD_CONTROL: u8 = 1 << 2;
 const MOD_OPTION: u8 = 1 << 3;
-const ALL_MODIFIERS: u8 = MOD_COMMAND | MOD_SHIFT | MOD_CONTROL | MOD_OPTION;
+const MOD_SUPER: u8 = 1 << 4;
+const ALL_MODIFIERS: u8 = MOD_COMMAND | MOD_SHIFT | MOD_CONTROL | MOD_OPTION | MOD_SUPER;
 
 /// USB HID keyboard usage supported by custom shortcuts.
 ///
@@ -191,12 +192,24 @@ impl KeyCombo {
         self.modifiers & MOD_OPTION != 0
     }
 
+    /// Whether the chord includes the Super key (Linux `KEY_LEFTMETA`, the
+    /// Windows key, macOS Command). Unlike [`Self::has_command`], which the
+    /// Linux and Windows backends fold into Control for macOS-authored
+    /// chords, Super always presses the platform's logo key.
+    #[must_use]
+    pub const fn has_super(&self) -> bool {
+        self.modifiers & MOD_SUPER != 0
+    }
+
     /// Canonical user-facing chord label.
     #[must_use]
     pub fn rendered_label(&self) -> String {
         let mut parts = Vec::new();
         if self.has_command() {
             parts.push("Cmd".to_string());
+        }
+        if self.has_super() {
+            parts.push("Super".to_string());
         }
         if self.has_control() {
             parts.push("Ctrl".to_string());
@@ -267,6 +280,7 @@ impl FromStr for KeyCombo {
 fn parse_modifier(token: &str) -> Option<u8> {
     match token.to_ascii_lowercase().as_str() {
         "cmd" | "command" | "meta" | "win" => Some(MOD_COMMAND),
+        "super" => Some(MOD_SUPER),
         "shift" => Some(MOD_SHIFT),
         "ctrl" | "control" => Some(MOD_CONTROL),
         "alt" | "option" => Some(MOD_OPTION),
@@ -329,6 +343,27 @@ fn parse_key(token: &str) -> Result<KeyboardUsage, KeyComboParseError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_super_as_its_own_modifier() {
+        let combo = "Super+End"
+            .parse::<KeyCombo>()
+            .expect("valid shortcut failed");
+        assert!(combo.has_super());
+        assert!(!combo.has_command());
+        assert_eq!(combo.key().code(), 0x4d);
+        assert_eq!(combo.rendered_label(), "Super+End");
+
+        // `meta` / `win` keep their historical Command meaning.
+        let combo = "Meta+A".parse::<KeyCombo>().expect("valid shortcut failed");
+        assert!(combo.has_command());
+        assert!(!combo.has_super());
+
+        let combo = "Super+Shift+Right"
+            .parse::<KeyCombo>()
+            .expect("valid shortcut failed");
+        assert_eq!(combo.rendered_label(), "Super+Shift+Right");
+    }
 
     #[test]
     fn parses_modifiers_letters_and_navigation_keys() {

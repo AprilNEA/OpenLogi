@@ -378,7 +378,7 @@ fn held_modifier_flags(modifiers: HeldModifiers) -> CGEventFlags {
 
 fn combo_flags(combo: &KeyCombo) -> CGEventFlags {
     let mut flags = CGEventFlags::CGEventFlagNull;
-    if combo.has_command() {
+    if combo.has_command() || combo.has_super() {
         flags |= CGEventFlags::CGEventFlagCommand;
     }
     if combo.has_shift() {
