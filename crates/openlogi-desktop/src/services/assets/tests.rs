@@ -514,81 +514,56 @@ fn cached_m650_assets_keep_each_devices_firmware_name() {
     assert_eq!(resolver.resolved.borrow().len(), 1, "artwork stays shared");
 }
 
-/// #1332: a plain Signature M650 shares the M650 *L* depot's `modelId`
-/// (`2b02a`), so `resolve_in_index` matches it by pid regardless of
-/// variant. Without the firmware's own name, the GUI would show "Signature
-/// M650 L" for a mouse that isn't the L variant.
 #[test]
-fn m650_plain_display_name_drops_catalogs_l_suffix() {
-    let index = m650_index();
-    let (depot, entry) =
-        resolve_in_index(&index, &m650_plain_model(), Some("Signature M650 Mouse"))
-            .expect("2b02a pid should resolve to the shared depot");
-    assert_eq!(
-        variant_display_name(&entry.display_name, Some("Signature M650 Mouse")),
-        "Signature M650"
-    );
-    assert_eq!(depot, "signature_m650");
-}
-
-/// A real Signature M650 *L* whose own reported name already carries the
-/// "L" must keep showing it — the catalog name isn't overridden when it
-/// isn't a superset of the codename.
-#[test]
-fn m650_l_display_name_keeps_catalogs_l_suffix() {
-    let entry = m650_l_depot_entry();
-    assert_eq!(
-        variant_display_name(&entry.display_name, Some("Signature M650 L")),
-        "Signature M650 L"
-    );
-}
-
-/// No codename at all (offline placeholder, older firmware): keep trusting
-/// the catalog, same as before this fix.
-#[test]
-fn variant_display_name_falls_back_to_catalog_without_codename() {
-    assert_eq!(
-        variant_display_name("Signature M650 L", None),
-        "Signature M650 L"
-    );
-}
-
-/// A catalog name that isn't a superset of the codename (a genuinely
-/// different or more complete name, not a bare variant suffix) is left
-/// alone — the catalog stays authoritative outside the variant-suffix case.
-#[test]
-fn variant_display_name_keeps_catalog_when_not_a_superset() {
-    assert_eq!(
-        variant_display_name("MX Master 3S", Some("M3S")),
-        "MX Master 3S"
-    );
-}
-
-/// #1366: a terser codename must not truncate a real model-generation word
-/// off a more specific catalog name. "MX Master" is a prefix of "MX Master
-/// 3S" in the word-count sense the #1332 fix checks, but "3S" is not a
-/// recognized variant qualifier (unlike "L"), so it must be kept.
-#[test]
-fn variant_display_name_keeps_a_real_generation_suffix() {
-    assert_eq!(
-        variant_display_name("MX Master 3S", Some("MX Master")),
-        "MX Master 3S"
-    );
-    // "X" is just as much a real model word as "3S" and must survive too.
-    assert_eq!(
-        variant_display_name("MX Master X", Some("MX Master")),
-        "MX Master X"
-    );
-}
-
-/// The original #1332 bug must still be fixed: "L" is a recognized variant
-/// qualifier, so it is still stripped when the codename doesn't carry it.
-#[test]
-fn variant_display_name_still_drops_a_recognized_qualifier() {
-    assert_eq!(
-        variant_display_name("Signature M650 L", Some("Signature M650 Mouse")),
-        "Signature M650"
-    );
+fn variant_display_name_preserves_matching_and_whitespace_rules() {
+    // None means leave the catalog name untouched, including its whitespace.
+    for (catalog, codename, correction) in [
+        (
+            "Signature M650 L",
+            Some("Signature M650 Mouse"),
+            Some("Signature M650"),
+        ),
+        ("Signature M650 L", Some("Signature M650 L"), None),
+        ("Signature M650 L", None, None),
+        ("MX Master 3S", Some("M3S"), None),
+        ("MX Master 3S", Some("MX Master"), None),
+        ("MX Master X", Some("MX Master"), None),
+        (
+            "Signature M650 L LEFT",
+            Some("signature m650"),
+            Some("Signature M650"),
+        ),
+        ("Signature M650 L Pro", Some("Signature M650"), None),
+        ("Signature M650", Some("Signature M650 L"), None),
+        ("Other M650 L", Some("Signature M650"), None),
+        ("Signature M650 L", Some(" \t"), None),
+        ("Signature M650 L", Some("Mouse Keyboard Trackball"), None),
+        ("", Some("Signature M650"), None),
+        (
+            " \tSignature\u{2003}M650  l \n",
+            Some("signature\tM650 mouse"),
+            Some("Signature M650"),
+        ),
+        (" MX\tMaster 3S ", Some("MX Master"), None),
+        ("Élan L", Some("Élan Mouse"), Some("Élan")),
+        // Characterize existing behavior, not a new tail-only removal policy.
+        (
+            "Signature M650 L",
+            Some("Signature Mouse M650"),
+            Some("Signature M650"),
+        ),
+        (
+            "Signature M650 L",
+            Some("Signature M650 \u{212a}eyboard"),
+            Some("Signature M650"),
+        ),
+    ] {
+        assert_eq!(
+            variant_display_name_override(catalog, codename).as_deref(),
+            correction,
+            "catalog={catalog:?}, codename={codename:?}"
+        );
+    }
 }
 
 #[test]
