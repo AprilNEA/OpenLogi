@@ -133,28 +133,28 @@ pub fn spawn(
 /// Route one accepted keyboard edge through the shared HID++ lifecycle.
 fn dispatch_input(
     session: &HidppSessionId,
-    input: CapturedInput,
+    input: &CapturedInput,
     bindings: &KeyboardDispatchPlan,
     dispatcher: &ActionDispatcher,
 ) {
     match input {
         CapturedInput::ButtonDown(button) => {
-            let binding = bindings.bindings.get(&button);
+            let binding = bindings.bindings.get(button);
             if let Some(binding) = binding {
                 info!(button = %button, action = %binding.click_action().label(), "keyboard key → handling binding");
             } else {
                 debug!(?button, "keyboard key with no binding — ignored");
             }
-            dispatcher.try_hidpp_button_down(session, button, binding, None);
+            dispatcher.try_hidpp_button_down(session, *button, binding, None);
         }
         CapturedInput::ButtonUp(button) => {
-            dispatcher.try_hidpp_button_up(session, button);
+            dispatcher.try_hidpp_button_up(session, *button);
         }
         CapturedInput::ButtonPulse(button) => {
             dispatcher.dispatch_hidpp_button_pulse(
                 session,
-                button,
-                bindings.bindings.get(&button),
+                *button,
+                bindings.bindings.get(button),
                 None,
             );
         }
@@ -357,7 +357,7 @@ impl KeyboardManagerState {
                 };
                 dispatch_input(
                     running.id(),
-                    input.input,
+                    &input.input,
                     running.dispatch(),
                     &self.dispatcher,
                 );

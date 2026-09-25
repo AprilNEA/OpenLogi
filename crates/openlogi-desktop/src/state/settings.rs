@@ -6,8 +6,9 @@ use super::{AppState, StateEvent};
 use crate::platform::app_icon::AppIconExt as _;
 use gpui_component::ThemeMode;
 use openlogi_core::config::{
-    AppIcon, AppSettings, Appearance, AssetSourcePreference, DeviceViewMode, MouseProfileTarget,
-    ThumbwheelSensitivity, UiScale, VerticalScrollSensitivity,
+    AppIcon, AppSettings, Appearance, AssetSourcePreference, DeviceViewMode, GestureAxisBias,
+    GestureSensitivity, MouseProfileTarget, ThumbwheelSensitivity, UiScale,
+    VerticalScrollSensitivity,
 };
 
 impl AppState {
@@ -279,6 +280,97 @@ impl AppState {
         self.persist_and_reload("thumbwheel sensitivity");
         StateEvent::SettingsChanged.into()
     }
+
+    /// The effective gesture sensitivity for `key` (its per-device
+    /// override, else the app-wide default).
+    #[must_use]
+    pub fn device_gesture_sensitivity(&self, key: &str) -> GestureSensitivity {
+        self.config.gesture_sensitivity(key)
+    }
+
+    /// Set `key`'s per-device gesture sensitivity override and persist it.
+    /// Committing the app-wide default clears the override.
+    pub fn commit_device_gesture_sensitivity(
+        &mut self,
+        key: &DeviceKey,
+        sensitivity: GestureSensitivity,
+    ) -> StateEvents {
+        let events = StateEvent::DeviceConfigChanged(key.clone()).into();
+        let key = key.as_str();
+        let override_value =
+            (sensitivity != self.config.app_settings.gesture_sensitivity).then_some(sensitivity);
+        let stored = self
+            .config
+            .devices
+            .get(key)
+            .and_then(|d| d.gesture_sensitivity);
+        if stored == override_value {
+            return events;
+        }
+        self.config.edit(|config| {
+            config.set_device_gesture_sensitivity(key, override_value);
+        });
+        self.persist_and_reload("device gesture sensitivity");
+        events
+    }
+
+    /// Set the app-wide default gesture sensitivity and persist it.
+    pub fn commit_gesture_sensitivity(
+        &mut self,
+        sensitivity: GestureSensitivity,
+    ) -> StateEvents {
+        if self.config.app_settings.gesture_sensitivity == sensitivity {
+            return StateEvent::SettingsChanged.into();
+        }
+        self.config
+            .edit(|config| config.app_settings.gesture_sensitivity = sensitivity);
+        self.persist_and_reload("gesture sensitivity");
+        StateEvent::SettingsChanged.into()
+    }
+
+    /// The effective gesture axis bias for `key` (its per-device
+    /// override, else the app-wide default).
+    #[must_use]
+    pub fn device_gesture_axis_bias(&self, key: &str) -> GestureAxisBias {
+        self.config.gesture_axis_bias(key)
+    }
+
+    /// Set `key`'s per-device gesture axis bias override and persist it.
+    /// Committing the app-wide default clears the override.
+    pub fn commit_device_gesture_axis_bias(
+        &mut self,
+        key: &DeviceKey,
+        bias: GestureAxisBias,
+    ) -> StateEvents {
+        let events = StateEvent::DeviceConfigChanged(key.clone()).into();
+        let key = key.as_str();
+        let override_value = (bias != self.config.app_settings.gesture_axis_bias).then_some(bias);
+        let stored = self
+            .config
+            .devices
+            .get(key)
+            .and_then(|d| d.gesture_axis_bias);
+        if stored == override_value {
+            return events;
+        }
+        self.config.edit(|config| {
+            config.set_device_gesture_axis_bias(key, override_value);
+        });
+        self.persist_and_reload("device gesture axis bias");
+        events
+    }
+
+    /// Set the app-wide default gesture axis bias and persist it.
+    pub fn commit_gesture_axis_bias(&mut self, bias: GestureAxisBias) -> StateEvents {
+        if self.config.app_settings.gesture_axis_bias == bias {
+            return StateEvent::SettingsChanged.into();
+        }
+        self.config
+            .edit(|config| config.app_settings.gesture_axis_bias = bias);
+        self.persist_and_reload("gesture axis bias");
+        StateEvent::SettingsChanged.into()
+    }
+
     /// Persist the application target for mouse button profiles and reload the
     /// agent. An unchanged value writes nothing; failed saves restore the
     /// previous selection through the shared configuration rollback boundary.

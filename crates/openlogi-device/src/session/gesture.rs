@@ -26,7 +26,8 @@ mod arm;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use hidpp::protocol::v20;
-use openlogi_core::binding::{ButtonId, GestureDirection};
+use openlogi_core::binding::{ButtonId, GestureDirection, GestureTrace};
+use openlogi_core::config::{GestureAxisBias, GestureSensitivity};
 use tokio::sync::mpsc;
 use tracing::info;
 
@@ -35,7 +36,7 @@ use crate::channel::route::DeviceRoute;
 
 pub use super::capture::CaptureHost;
 use super::capture::{ArmedCapture, Liveness, run_capture};
-use accum::CaptureAccum;
+use accum::{CaptureAccum, capture_accum_for};
 pub(crate) use arm::enumerate_controls;
 use arm::{ArmedControls, ArmedThumbwheel, arm_controls};
 
@@ -47,12 +48,12 @@ use crate::reprog_controls::{self, ReprogControlsV4};
 use crate::thumbwheel::{self, WheelResolution};
 
 /// One input captured from the active device.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CapturedInput {
     /// A completed swipe (or tap click) from a diverted gesture source,
     /// tagged with the source control so dispatch resolves it against that
-    /// button's own direction map.
-    Gesture(ButtonId, GestureDirection),
+    /// button's own direction map, along with the raw motion trace if available.
+    Gesture(ButtonId, GestureDirection, Option<GestureTrace>),
     /// A diverted button's physical down edge.
     ButtonDown(ButtonId),
     /// Thumb-wheel rotation to re-synthesise on the configured scroll axis.
@@ -145,6 +146,10 @@ pub struct CaptureSpec {
     /// [`DIVERTABLE_STANDARD_BUTTONS`] and non-gesturing
     /// [`GESTURE_SOURCE_BUTTONS`] whose binding leaves the default.
     pub divert_buttons: Vec<(u16, ButtonId)>,
+    /// Configured gesture sensitivity for hold duration and swipe distance.
+    pub gesture_sensitivity: GestureSensitivity,
+    /// Configured gesture axis bias for horizontal vs vertical balance.
+    pub gesture_axis_bias: GestureAxisBias,
 }
 
 /// Capture the controls selected by `spec` on `route` until `host.shutdown`
@@ -177,7 +182,7 @@ pub async fn run_capture_session(
     if let Some(direction) = armed.thumbwheel_direction() {
         let _ = host.sink.send(direction);
     }
-    Ok(run_capture(shared, GestureCapture::new(armed), host).await)
+    Ok(run_capture(shared, GestureCapture::new(armed, &spec), host).await)
 }
 
 /// Gesture capture as [`run_capture`] drives it: the armed controls, and the
@@ -190,10 +195,10 @@ struct GestureCapture {
 }
 
 impl GestureCapture {
-    fn new(armed: ArmedControls) -> Self {
+    fn new(armed: ArmedControls, spec: &CaptureSpec) -> Self {
         Self {
             armed,
-            accum: Arc::default(),
+            accum: Arc::new(Mutex::new(capture_accum_for(spec))),
         }
     }
 }
@@ -263,7 +268,8 @@ impl ArmedCapture for GestureCapture {
     }
 
     fn reset_input_state(&self) {
-        *self.accum.lock().unwrap_or_else(PoisonError::into_inner) = CaptureAccum::default();
+        let mut accum = self.accum.lock().unwrap_or_else(PoisonError::into_inner);
+        accum.reset_preserving_config();
     }
 
     async fn rearm(&self) {
