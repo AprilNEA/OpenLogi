@@ -58,6 +58,7 @@ fn main_window_renders_profile_confirmation_dialogs(cx: &mut gpui::TestAppContex
 #[test]
 fn charging_without_reading_suppresses_percentage() {
     let b = |percentage, status| BatteryInfo {
+        freshness: openlogi_core::device::BatteryFreshness::Current,
         percentage,
         level: BatteryLevel::Good,
         status,
@@ -80,6 +81,7 @@ fn charging_without_reading_suppresses_percentage() {
 #[test]
 fn low_discharging_battery_needs_attention() {
     let battery = |percentage, status| BatteryInfo {
+        freshness: openlogi_core::device::BatteryFreshness::Current,
         percentage,
         level: BatteryLevel::Low,
         status,
@@ -328,4 +330,70 @@ fn unprobed_mouse_falls_back_to_presumed_capabilities() {
 fn unprobed_unknown_device_shows_only_device_tab() {
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Unknown, None));
     assert_eq!(tabs, vec![DetailTab::Device]);
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[gpui::test]
+fn tray_navigation_opens_exact_device_settings_cold_and_warm(cx: &mut gpui::TestAppContext) {
+    use crate::services::assets::AssetResolver;
+    use crate::state::{AppState, Sources};
+    use crate::windows::{WindowRegistry, main_window};
+    use gpui::AppContext as _;
+    use openlogi_fixture::{CANONICAL_DEVICE_PROFILE_JSON, DeviceProfile};
+
+    cx.update(gpui_component::init);
+    cx.update(|cx| {
+        let profile: DeviceProfile = serde_json::from_str(CANONICAL_DEVICE_PROFILE_JSON).unwrap();
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let resolver = AssetResolver::new();
+        let state = cx.new(|_| {
+            let mut state = AppState::new(Sources::in_memory(
+                openlogi_core::config::Config::ephemeral(),
+                &resolver,
+                commands,
+            ));
+            let _ = state.refresh_inventories(
+                &profile.inventories,
+                &profile.standalone,
+                &resolver,
+                &[],
+            );
+            state
+        });
+        let keys: Vec<_> = state
+            .read(cx)
+            .devices()
+            .iter()
+            .map(|record| record.config_key.clone())
+            .collect();
+        assert!(keys.len() >= 2);
+        AppState::set_global(state, cx);
+        assert!(!main_window::open_device_settings("unit:missing", cx));
+        assert!(cx.default_global::<WindowRegistry>().main.is_none());
+
+        for key in [&keys[0], &keys[1], &keys[0]] {
+            assert!(main_window::open_device_settings(key, cx));
+            let handle = cx.default_global::<WindowRegistry>().main.unwrap();
+            handle
+                .update(cx, |root, _, cx| {
+                    let view = root.view().clone().downcast::<super::AppView>().unwrap();
+                    assert_eq!(view.read(cx).active_tab, DetailTab::Device);
+                    assert_eq!(
+                        AppState::try_read(cx)
+                            .unwrap()
+                            .current_record()
+                            .unwrap()
+                            .config_key,
+                        *key
+                    );
+                    assert!(matches!(view.read(cx).route, super::Route::Device { .. }));
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            cx.windows().len(),
+            1,
+            "warm selection reuses the main window"
+        );
+    });
 }

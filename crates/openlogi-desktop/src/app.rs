@@ -331,6 +331,14 @@ impl AppView {
         cx.notify();
     }
 
+    /// Open the selected device's general settings from the native tray.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    pub(crate) fn open_device_settings(&mut self, record_key: String, cx: &mut Context<Self>) {
+        self.open_device(record_key, cx);
+        self.active_tab = DetailTab::Device;
+        cx.notify();
+    }
+
     /// Return to the device gallery. Leaves the active-device selection
     /// untouched — the route is purely presentational.
     fn go_home(&mut self, cx: &mut Context<Self>) {
