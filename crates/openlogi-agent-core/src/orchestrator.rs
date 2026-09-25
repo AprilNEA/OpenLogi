@@ -327,10 +327,10 @@ impl Orchestrator {
         }
     }
 
-    /// Build the OS-hook callback's maps for `key` and its mouse context. Both hook
-    /// sub-maps are app-scoped (a per-app override can demote the gesture owner),
-    /// so they're built together here and published under one lock — keeping
-    /// `rebuild` and `set_current_app` from drifting into a half-populated write.
+    /// Build the OS-hook callback's maps for `key` and its mouse context.
+    /// Bindings, gestures, and responses share the selected-device boundary;
+    /// a native receiver event cannot identify its pairing slot. HID++ capture
+    /// plans retain physical-device responses. All maps publish under one lock.
     fn hook_maps_for(&self, key: Option<&str>) -> HookMaps {
         // A disabled selected device gets empty maps: the OS hook then passes
         // its events through untouched instead of applying remaps to a device
@@ -350,9 +350,16 @@ impl Orchestrator {
                 gestures.remove(button);
             }
         }
+        let gesture_responses = key.map_or_else(BTreeMap::new, |key| {
+            gestures
+                .keys()
+                .map(|&button| (button, self.config.gesture_response(key, button)))
+                .collect()
+        });
         HookMaps {
             bindings,
             gestures,
+            gesture_responses,
             pointer_target,
             selected_device: key.map(str::to_owned),
             ..HookMaps::default()
