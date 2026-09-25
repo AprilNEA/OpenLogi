@@ -20,9 +20,7 @@ impl AppState {
                 .devices
                 .sessions
                 .get(record.config_key.as_str())
-                .is_some_and(|session| {
-                    session.battery_model.as_deref() == Some(record.model_key.as_str())
-                })
+                .is_some_and(|session| session.battery_model.is_some())
     }
 
     /// Preferences shared by every route of this physical device.

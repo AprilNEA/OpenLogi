@@ -641,3 +641,54 @@ fn battery_preferences_do_not_follow_a_reused_receiver_slot() {
     let _ = state.refresh_inventories(&[inventory], &[], &resolver, &[]);
     assert!(!state.battery_preferences_available(&state.devices()[0]));
 }
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[test]
+fn battery_preferences_survive_a_model_less_offline_placeholder() {
+    for wpid in [Some(0x4082), None] {
+        let resolver = AssetResolver::new();
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = canonical_profile_state(commands);
+        let mut inventory = receiver_inventory();
+        inventory.paired[0].model_info = None;
+        inventory.paired[0].wpid = wpid;
+        inventory.paired[0].battery = Some(BatteryInfo {
+            freshness: openlogi_core::device::BatteryFreshness::Current,
+            percentage: 50,
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Discharging,
+        });
+        let _ = state.refresh_inventories(&[inventory.clone()], &[], &resolver, &[]);
+        let key = state.devices()[0].device_key();
+        let live_model = state.devices()[0].model_key.clone();
+        let preferences = openlogi_core::config::BatteryPreferences {
+            show_in_menu: false,
+            warn_low: false,
+        };
+        let _ = state.commit_battery_preferences(&key, preferences);
+        let mut missing = inventory.clone();
+        missing.paired.clear();
+        let _ = state.refresh_inventories(&[missing.clone()], &[], &resolver, &[]);
+        let placeholder = &state.devices()[0];
+        assert_eq!(placeholder.device_key(), key);
+        assert!(!placeholder.online && placeholder.route.is_none());
+        assert_ne!(placeholder.model_key, live_model);
+        assert!(
+            state.battery_preferences_available(placeholder),
+            "a synthetic offline model key is not evidence of a replacement device"
+        );
+        assert_eq!(state.battery_preferences(key.as_str()), preferences);
+
+        inventory.paired[0].battery = None;
+        let _ = state.refresh_inventories(&[inventory.clone()], &[], &resolver, &[]);
+        assert!(state.battery_preferences_available(&state.devices()[0]));
+        let _ = state.refresh_inventories(&[missing], &[], &resolver, &[]);
+        assert!(state.battery_preferences_available(&state.devices()[0]));
+        inventory.paired[0].wpid = Some(0x4090);
+        let _ = state.refresh_inventories(&[inventory], &[], &resolver, &[]);
+        assert!(
+            !state.battery_preferences_available(&state.devices()[0]),
+            "a live replacement model must still discard prior battery evidence"
+        );
+    }
+}

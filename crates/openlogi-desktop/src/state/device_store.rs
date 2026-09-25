@@ -50,9 +50,12 @@ impl DeviceStore {
                     .entry(record.device_key())
                     .or_default()
                     .battery_model = Some(record.model_key.clone());
-            } else if let Some(session) = self.sessions.get_mut(record.config_key.as_str())
+            } else if (record.online || record.route.is_some())
+                && let Some(session) = self.sessions.get_mut(record.config_key.as_str())
                 && session.battery_model.as_deref() != Some(record.model_key.as_str())
             {
+                // Synthetic offline placeholders may substitute the config key
+                // for the model; they cannot establish replacement evidence.
                 session.battery_model = None;
             }
         }
