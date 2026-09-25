@@ -18,7 +18,11 @@
 #[cfg(target_os = "macos")]
 mod activity_macos;
 mod autostart;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod battery;
 mod binary_watch;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod device_selection;
 mod lifecycle;
 mod logging;
 mod overlay;
