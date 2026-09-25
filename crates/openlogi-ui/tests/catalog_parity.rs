@@ -45,6 +45,7 @@ fn locale_files_have_the_same_keys() {
         ("es", include_str!("../locales/es.toml")),
         ("fi", include_str!("../locales/fi.toml")),
         ("fr", include_str!("../locales/fr.toml")),
+        ("gl", include_str!("../locales/gl.toml")),
         ("ko", include_str!("../locales/ko.toml")),
         ("nb", include_str!("../locales/nb.toml")),
         ("nl", include_str!("../locales/nl.toml")),
