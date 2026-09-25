@@ -247,13 +247,13 @@ pub(super) fn press_combo(combo: &KeyCombo) {
 fn combo_modifiers(combo: &KeyCombo) -> Vec<u16> {
     let mut modifiers = Vec::new();
     if combo.has_command() {
+        modifiers.push(VK_LWIN);
+    }
+    if combo.has_control() {
         modifiers.push(VK_CONTROL);
     }
     if combo.has_shift() {
         modifiers.push(VK_SHIFT);
-    }
-    if combo.has_control() && !modifiers.contains(&VK_CONTROL) {
-        modifiers.push(VK_CONTROL);
     }
     if combo.has_option() {
         modifiers.push(VK_MENU);
@@ -277,6 +277,7 @@ pub(super) fn hold_keys(keys: &[HeldKey], phase: KeyPhase) {
 
 fn held_virtual_key(key: HeldKey) -> Option<u16> {
     match key {
+        HeldKey::Command => Some(VK_LWIN),
         HeldKey::Control => Some(VK_CONTROL),
         HeldKey::Shift => Some(VK_SHIFT),
         HeldKey::Alt => Some(VK_MENU),
@@ -353,9 +354,31 @@ fn mouse_input(flags: u32, data: i32) -> INPUT {
 
 #[cfg(test)]
 mod tests {
-    use openlogi_core::binding::Shortcut;
+    use openlogi_core::binding::{KeyCombo, Shortcut};
 
-    use super::{VK_BROWSER_BACK, VK_BROWSER_FORWARD, combo};
+    use super::{VK_BROWSER_BACK, VK_BROWSER_FORWARD, VK_CONTROL, VK_LWIN, combo, combo_modifiers};
+
+    #[test]
+    fn cmd_maps_to_the_windows_key_distinct_from_ctrl() {
+        let chord = "Cmd+Ctrl+A"
+            .parse::<KeyCombo>()
+            .expect("a valid shortcut must parse");
+        assert_eq!(combo_modifiers(&chord), vec![VK_LWIN, VK_CONTROL]);
+    }
+
+    #[test]
+    fn win_and_meta_and_super_are_accepted_aliases_for_cmd() {
+        for alias in ["Cmd+A", "Command+A", "Win+A", "Meta+A", "Super+A"] {
+            let chord = alias
+                .parse::<KeyCombo>()
+                .unwrap_or_else(|e| panic!("{alias} must parse: {e:?}"));
+            assert_eq!(
+                combo_modifiers(&chord),
+                vec![VK_LWIN],
+                "{alias} must map to the Windows key"
+            );
+        }
+    }
 
     /// Pin a handful of representative `Shortcut -> KeyCombo` rows so an
     /// edit to the table can't silently change what Ctrl+C sends.

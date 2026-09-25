@@ -412,12 +412,16 @@ pub(super) fn device_node() -> Option<std::path::PathBuf> {
 /// Convert a [`KeyCombo`] modifier bitmask
 /// to the evdev keys to hold.
 ///
-/// macOS Cmd (`MOD_CMD`) and Ctrl (`MOD_CTRL`) both map to `KEY_LEFTCTRL`;
-/// the bitwise-OR check deduplicates them so at most one Ctrl is pushed.
-/// Order is canonical: Ctrl → Shift → Alt.
+/// Cmd (`MOD_COMMAND`, the config parser's cross-platform Cmd/Win/Super/Meta
+/// alias) maps to `KEY_LEFTMETA` — the Super key most Linux compositors bind
+/// to — distinct from Ctrl's `KEY_LEFTCTRL`. Order is canonical:
+/// Meta → Ctrl → Shift → Alt.
 fn modifiers_to_keycodes(combo: &openlogi_core::binding::KeyCombo) -> Vec<KeyCode> {
     let mut modifiers = Vec::new();
-    if combo.has_command() || combo.has_control() {
+    if combo.has_command() {
+        modifiers.push(KeyCode::KEY_LEFTMETA);
+    }
+    if combo.has_control() {
         modifiers.push(KeyCode::KEY_LEFTCTRL);
     }
     if combo.has_shift() {
@@ -431,6 +435,7 @@ fn modifiers_to_keycodes(combo: &openlogi_core::binding::KeyCombo) -> Vec<KeyCod
 
 fn held_keycode(key: HeldKey) -> Option<KeyCode> {
     match key {
+        HeldKey::Command => Some(KeyCode::KEY_LEFTMETA),
         HeldKey::Control => Some(KeyCode::KEY_LEFTCTRL),
         HeldKey::Shift => Some(KeyCode::KEY_LEFTSHIFT),
         HeldKey::Alt => Some(KeyCode::KEY_LEFTALT),
@@ -696,18 +701,33 @@ mod tests {
     }
 
     #[test]
-    fn modifiers_map_to_linux_without_duplicate_control() {
+    fn cmd_maps_to_super_distinct_from_ctrl() {
         let combo = "Cmd+Ctrl+Shift+Alt+A"
             .parse::<KeyCombo>()
             .expect("a valid shortcut must parse");
         assert_eq!(
             modifiers_to_keycodes(&combo),
             vec![
+                KeyCode::KEY_LEFTMETA,
                 KeyCode::KEY_LEFTCTRL,
                 KeyCode::KEY_LEFTSHIFT,
                 KeyCode::KEY_LEFTALT
             ]
         );
+    }
+
+    #[test]
+    fn super_and_meta_are_accepted_aliases_for_cmd() {
+        for alias in ["Cmd+A", "Command+A", "Win+A", "Meta+A", "Super+A"] {
+            let combo = alias
+                .parse::<KeyCombo>()
+                .unwrap_or_else(|e| panic!("{alias} must parse: {e:?}"));
+            assert_eq!(
+                modifiers_to_keycodes(&combo),
+                vec![KeyCode::KEY_LEFTMETA],
+                "{alias} must map to the Super/Meta key"
+            );
+        }
     }
 
     #[test]

@@ -43,12 +43,13 @@ enum KeyPhase {
 
 /// One physical keyboard output shared by held chords.
 ///
-/// Logical Cmd and Ctrl are distinct on macOS. Cmd aliases Ctrl on Linux and
-/// Windows, so ownership is counted after that platform mapping is resolved.
+/// `Command` is the platform-neutral Cmd/Win/Super/Meta modifier the config
+/// parser accepts under all four aliases — a distinct physical key from
+/// `Control` on every platform (the Windows key on Windows, Super/Meta on
+/// Linux, Cmd on macOS), never folded into it.
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum HeldKey {
-    #[cfg(target_os = "macos")]
     Command,
     Control,
     Shift,
@@ -160,15 +161,9 @@ static HELD_OUTPUT: LazyLock<Mutex<HeldOutput>> =
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn held_keys(combo: &KeyCombo) -> Vec<HeldKey> {
     let mut keys = Vec::with_capacity(4);
-    #[cfg(target_os = "macos")]
     if combo.has_command() {
         keys.push(HeldKey::Command);
     }
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
-    if combo.has_command() || combo.has_control() {
-        keys.push(HeldKey::Control);
-    }
-    #[cfg(target_os = "macos")]
     if combo.has_control() {
         keys.push(HeldKey::Control);
     }
@@ -630,31 +625,7 @@ mod tests {
         );
     }
 
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
-    #[test]
-    fn command_and_control_share_one_physical_output() {
-        let command_a = combo("Cmd+A");
-        let control_b = combo("Ctrl+B");
-        let mut output = HeldOutput::default();
-
-        output.transition(None, Some(&command_a));
-        assert_eq!(
-            output.transition(None, Some(&control_b)),
-            HoldTransition {
-                up: vec![],
-                down: vec![HeldKey::Key(control_b.key())],
-            }
-        );
-        assert_eq!(
-            output.transition(Some(&command_a), None),
-            HoldTransition {
-                up: vec![HeldKey::Key(command_a.key())],
-                down: vec![],
-            }
-        );
-    }
-
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     #[test]
     fn command_and_control_are_distinct_physical_outputs() {
         let command_a = combo("Cmd+A");
@@ -678,7 +649,7 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     #[test]
     fn shared_command_stays_down_until_its_last_chord_ends() {
         let command_a = combo("Cmd+A");
