@@ -1,0 +1,11 @@
+id: core-battery-policy-owner
+language: rust
+severity: error
+message: Use BatteryInfo::severity, needs_attention or rearms_warning; core owns battery thresholds.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-core/src/battery.rs
+rule:
+  kind: binary_expression
+  regex: '(percentage|battery\.percentage)\s*(<=|<|>)\s*(10|20|25)\b'

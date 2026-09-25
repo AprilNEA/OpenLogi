@@ -102,7 +102,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 34);
+    assert_eq!(PROTOCOL_VERSION, 35);
 }
 
 #[test]
@@ -380,15 +380,16 @@ fn agent_snapshot() {
         // Pinned on its own in `foreground_apps` below, like the inventory and
         // pairing fields.
         foreground: ForegroundApps::default(),
+        device_selection: None,
     };
-    assert_wire(&snapshot, "010001010705302e362e360100000000000000");
+    assert_wire(&snapshot, "010001010705302e362e36010000000000000000");
 
     // The observation is the snapshot with its generation in front.
     let observed = Observation {
         generation: 3,
         snapshot,
     };
-    assert_wire(&observed, "03010001010705302e362e360100000000000000");
+    assert_wire(&observed, "03010001010705302e362e36010000000000000000");
 }
 
 /// The foreground application rides the snapshot, so both halves are pinned:
@@ -450,6 +451,7 @@ fn device_inventory() {
             kind: DeviceKind::Mouse,
             online: true,
             battery: Some(BatteryInfo {
+                freshness: openlogi_core::device::BatteryFreshness::Current,
                 percentage: 80,
                 level: BatteryLevel::Good,
                 status: BatteryStatus::Discharging,
@@ -688,4 +690,28 @@ fn standalone_light_dtos_commands_and_errors() {
         "0c05636f6c6f72",
     );
     assert_wire(&WriteError::AmbiguousRawDevice, "0d");
+}
+
+#[test]
+fn battery_preferences_and_device_selection() {
+    use openlogi_core::config::BatteryPreferences;
+    use openlogi_ipc::DeviceSelection;
+    assert_wire(&BatteryPreferences::default(), "0101");
+    assert_wire(
+        &BatteryPreferences {
+            show_in_menu: false,
+            warn_low: true,
+        },
+        "0001",
+    );
+    let request = DeviceSelection {
+        agent: Identity::new(Run::from_raw(7), Compat::from_raw(32)),
+        request_id: 2,
+        device_key: "unit:aa".into(),
+    };
+    assert_wire(&request, "07200207756e69743a6161");
+    assert_wire(
+        &AgentRequest::AcknowledgeDeviceSelection { request },
+        "1c07200207756e69743a6161",
+    );
 }

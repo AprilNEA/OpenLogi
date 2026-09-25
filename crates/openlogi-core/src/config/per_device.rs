@@ -9,8 +9,8 @@
 use std::collections::BTreeMap;
 
 use super::{
-    CameraControls, Config, DeviceIdentity, LightSettings, Lighting, ScrollResolution, SmartShift,
-    ThumbwheelSensitivity,
+    BatteryPreferences, CameraControls, Config, DeviceIdentity, LightSettings, Lighting,
+    ScrollResolution, SmartShift, ThumbwheelSensitivity,
 };
 use crate::binding::{
     ActionRingConfig, ActionRingIcon, ActionRingSlot, Binding, ButtonId, RingAction,
@@ -18,6 +18,23 @@ use crate::binding::{
 use crate::hid::Dpi;
 
 impl Config {
+    /// Battery preferences for a physical device, including the initial defaults.
+    #[must_use]
+    pub fn battery_preferences(&self, device_key: &str) -> BatteryPreferences {
+        self.devices
+            .get(device_key)
+            .map(|device| device.battery)
+            .unwrap_or_default()
+    }
+
+    /// Persist both independent battery preferences for a physical device.
+    pub fn set_battery_preferences(&mut self, device_key: &str, preferences: BatteryPreferences) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .battery = preferences;
+    }
+
     /// The bindings stored for `device_key` as they were committed, or an
     /// empty map when the device has none yet. The effective per-button map,
     /// with defaults and the per-app overlay applied, is
