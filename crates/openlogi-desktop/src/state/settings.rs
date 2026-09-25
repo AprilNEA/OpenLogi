@@ -11,6 +11,28 @@ use openlogi_core::config::{
 };
 
 impl AppState {
+    /// Preferences shared by every route of this physical device.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    pub fn battery_preferences(&self, key: &str) -> openlogi_core::config::BatteryPreferences {
+        self.config.battery_preferences(key)
+    }
+
+    /// Persist the independent menu and warning choices through the usual config owner.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    pub fn commit_battery_preferences(
+        &mut self,
+        key: &DeviceKey,
+        preferences: openlogi_core::config::BatteryPreferences,
+    ) -> StateEvents {
+        let events = StateEvent::DeviceConfigChanged(key.clone()).into();
+        if self.config.battery_preferences(key.as_str()) != preferences {
+            self.config
+                .edit(|config| config.set_battery_preferences(key.as_str(), preferences));
+            self.persist_and_reload("battery preferences");
+        }
+        events
+    }
+
     /// App-wide settings backing the Settings window (launch-at-login,
     /// update check). Read-only view; mutate via the `commit_*` methods below
     /// so the change is persisted.

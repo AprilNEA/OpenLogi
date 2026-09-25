@@ -59,6 +59,7 @@ fn snapshot_candidate(profile: &DeviceProfile) -> AgentSnapshot {
         standalone: profile.standalone.clone(),
         camera_active: true,
         pairing: None,
+        device_selection: None,
         foreground: ForegroundApps {
             current: Some(editor.clone()),
             recent: vec![editor],
@@ -452,6 +453,7 @@ fn an_identical_snapshot_is_still_a_no_op() {
 fn inventory_with_battery(unit_id: [u8; 4], percentage: u8) -> DeviceInventory {
     let mut inventory = direct_inventory(unit_id);
     inventory.paired[0].battery = Some(BatteryInfo {
+        freshness: openlogi_core::device::BatteryFreshness::Current,
         percentage,
         level: BatteryLevel::Good,
         status: BatteryStatus::Discharging,
@@ -690,4 +692,25 @@ fn a_device_seen_on_the_unpaired_slot_still_goes() {
     );
     assert!(state.devices().is_empty());
     assert!(!state.config.devices.contains_key(&config_key));
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[test]
+fn battery_preferences_remain_independent_across_snapshot_refreshes() {
+    let profile = canonical_device_profile();
+    let snapshot = snapshot_candidate(&profile);
+    let resolver = AssetResolver::new();
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = canonical_profile_state(commands);
+    let _ = state.apply_agent_snapshot(&snapshot, &resolver, &[]);
+    let key = state.devices()[0].device_key();
+    let mut preferences = state.battery_preferences(key.as_str());
+    assert!(preferences.show_in_menu && preferences.warn_low);
+    preferences.show_in_menu = false;
+    let _ = state.commit_battery_preferences(&key, preferences);
+    let _ = state.apply_agent_snapshot(&snapshot, &resolver, &[]);
+    assert_eq!(state.battery_preferences(key.as_str()), preferences);
+    preferences.warn_low = false;
+    let _ = state.commit_battery_preferences(&key, preferences);
+    assert_eq!(state.battery_preferences(key.as_str()), preferences);
 }

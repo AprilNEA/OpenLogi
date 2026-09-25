@@ -78,6 +78,16 @@ notification_area_visibility_description = "OpenLogi-Symbol im Infobereich der T
 openlogi = "OpenLogi"
 
 [device]
+battery_preferences = "Batterie"
+battery_show_in_menu = "Batteriestand im Menü anzeigen"
+battery_warn_low = "Bei niedrigem Batteriestand warnen"
+battery_warn_description = "Bei höchstens 20 % benachrichtigen und das OpenLogi-Icon einfärben."
+battery_unknown = "Batteriestand unbekannt"
+battery_tray_charging = "Lädt"
+battery_tray_low = "Niedrig"
+battery_tray_critical = "Kritisch"
+battery_alert_title = "%{name}: Batterie niedrig"
+battery_alert_body = "Noch %{percentage} %. Lade das Gerät oder wechsle die Batterie."
 no_devices_connected = "Kein Gerät verbunden"
 devices = "Geräte"
 device_count_plural = "%{count} Geräte"
