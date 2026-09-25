@@ -32,12 +32,13 @@ ctrlc = "3"
 block2 = { workspace = true }
 core-graphics = { workspace = true }
 core-foundation = { workspace = true }
+dispatch2 = { workspace = true }
 # For `ForeignType::as_ptr` on `CGEvent` (to reach the raw `CGEventRef` for the
 # device-of-origin lookup). Matches the version core-graphics already resolves.
 foreign-types-shared = "0.3"
 libc = "0.2"
 objc2 = { workspace = true }
-objc2-app-kit = { workspace = true, features = ["NSWorkspace", "NSRunningApplication"] }
+objc2-app-kit = { workspace = true, features = ["NSApplication", "NSEvent", "NSResponder", "NSRunningApplication", "NSWindow", "NSWorkspace"] }
 objc2-application-services = { workspace = true, features = ["std", "HIServices", "AXUIElement", "AXError"] }
 objc2-core-foundation = { workspace = true, features = ["std", "CFArray", "CFDictionary", "CFNumber", "CFString"] }
 objc2-core-graphics = { workspace = true, features = ["std", "CGWindow", "CGWindowLevel"] }
