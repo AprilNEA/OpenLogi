@@ -292,6 +292,20 @@ pub enum BatteryStatus {
     Unknown,
 }
 
+/// Whether the current inventory pass read the battery or replayed cached data.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BatteryFreshness {
+    /// The battery was read during the current probe.
+    #[default]
+    Current,
+    /// The last successful reading, retained after a failed read or offline probe.
+    Cached,
+    /// Charging was read now, but firmware supplied no percentage; the stored
+    /// percentage is a pre-charge value retained for the existing device UI.
+    HeldPercentage,
+}
+
 /// Battery snapshot for one paired device, as last polled over HID++.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BatteryInfo {
@@ -307,6 +321,9 @@ pub struct BatteryInfo {
     pub level: BatteryLevel,
     /// Charging state at poll time.
     pub status: BatteryStatus,
+    /// Distinguishes a fresh reading from the last-good replay used by the GUI.
+    #[serde(default)]
+    pub freshness: BatteryFreshness,
 }
 
 /// The charge at or below which a discharging battery needs attention.
@@ -713,6 +730,7 @@ mod tests {
                 kind: DeviceKind::Mouse,
                 online: true,
                 battery: Some(BatteryInfo {
+                    freshness: crate::device::BatteryFreshness::Current,
                     percentage: Some(battery_percentage),
                     level: BatteryLevel::Good,
                     status: BatteryStatus::Discharging,

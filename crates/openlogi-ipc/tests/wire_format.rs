@@ -553,6 +553,7 @@ fn agent_snapshot() {
         foreground: ForegroundApps::default(),
         // Pinned populated in `observed_light` below.
         lights: Vec::new(),
+        device_selection: None,
     };
     assert_wire(&snapshot, "010001010705302e362e3601000000000000000000");
 
@@ -632,6 +633,7 @@ fn device_inventory() {
             kind: DeviceKind::Mouse,
             online: true,
             battery: Some(BatteryInfo {
+                freshness: openlogi_core::device::BatteryFreshness::Current,
                 percentage: Some(80),
                 level: BatteryLevel::Good,
                 status: BatteryStatus::Discharging,
@@ -1067,4 +1069,28 @@ fn pointer_speed_and_precision_mode() {
     );
     // Appended at the end of `Action`, so every earlier index is unchanged.
     assert_wire(&Action::TogglePrecisionMode, "36");
+}
+
+#[test]
+fn battery_preferences_and_device_selection() {
+    use openlogi_core::config::BatteryPreferences;
+    use openlogi_ipc::DeviceSelection;
+    assert_wire(&BatteryPreferences::default(), "0101");
+    assert_wire(
+        &BatteryPreferences {
+            show_in_menu: false,
+            warn_low: true,
+        },
+        "0001",
+    );
+    let request = DeviceSelection {
+        agent: Identity::new(Run::from_raw(7), Compat::from_raw(32)),
+        request_id: 2,
+        device_key: "unit:aa".into(),
+    };
+    assert_wire(&request, "07200207756e69743a6161");
+    assert_wire(
+        &AgentRequest::AcknowledgeDeviceSelection { request },
+        "1c07200207756e69743a6161",
+    );
 }

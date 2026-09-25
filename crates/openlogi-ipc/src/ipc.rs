@@ -233,6 +233,8 @@ pub struct AgentSnapshot {
     /// light reached only through its raw report reads nothing back and is
     /// not listed.
     pub lights: Vec<ObservedLight>,
+    /// Most recent unacknowledged tray request, retained across GUI launches.
+    pub device_selection: Option<DeviceSelection>,
 }
 
 /// A standalone light as it reported itself to the agent.
@@ -273,6 +275,17 @@ pub struct SavedConfig {
     pub revision: ConfigRevision,
     /// The controls of lights the user set in the save without a write.
     pub chosen: Vec<ChosenLight>,
+}
+
+/// A tray click addressed to one physical device and one agent publication.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceSelection {
+    /// Agent run, preventing a delayed acknowledgement from clearing a new run's request.
+    pub agent: Identity,
+    /// Publication generation, also distinguishing repeated clicks on the same device.
+    pub request_id: u64,
+    /// Config key shared by the device's transports.
+    pub device_key: String,
 }
 
 /// The application the agent currently resolves per-app profiles against, and
@@ -870,4 +883,7 @@ pub trait Agent {
         route: DeviceRoute,
         speed: PointerSpeed,
     ) -> Result<PointerSpeed, WriteError>;
+
+    /// Acknowledge only the exact device selection the GUI has displayed.
+    async fn acknowledge_device_selection(request: DeviceSelection);
 }
