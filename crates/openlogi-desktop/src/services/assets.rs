@@ -235,13 +235,19 @@ impl AssetResolver {
         let index = self.index.as_ref()?;
         let (depot, entry) = resolve_in_index(index, model, codename)?;
         let extended_model_id = model.extended_model_id;
-        self.remembered(
+        let mut asset = self.remembered(
             AssetKey::Variant {
                 depot: depot.to_owned(),
                 extended_model_id,
             },
             || self.load_files(depot, entry, extended_model_id),
-        )
+        )?;
+        // Assets are shared by model variant; the firmware name belongs to
+        // this device and must never overwrite another device's cached name.
+        if let Some(name) = variant_display_name_override(&asset.display_name, codename) {
+            asset.display_name = name;
+        }
+        Some(asset)
     }
 
     /// Resolve a standalone device directly by its registry model id.
@@ -552,6 +558,57 @@ pub(crate) fn resolve_in_index<'a>(
         "asset matched via codename↔displayName fallback"
     );
     Some(hit)
+}
+
+/// Firmware type words ignored when matching model names, wherever they occur.
+const GENERIC_CODENAME_WORDS: [&str; 3] = ["mouse", "keyboard", "trackball"];
+
+/// Size/hand qualifiers, not model-generation words such as `3S` or `X`.
+const VARIANT_QUALIFIER_SUFFIXES: [&str; 2] = ["l", "left"];
+
+/// Correct a shared depot's variant name (M650 vs. M650 L, #1332).
+///
+/// Return an override only when the firmware name matches a nonempty catalog
+/// prefix and every remaining word is a recognized qualifier. Keep catalog
+/// spelling, joining matched words with single spaces. `None` leaves the
+/// caller's existing name untouched; only a correction allocates a string.
+fn variant_display_name_override(catalog_name: &str, codename: Option<&str>) -> Option<String> {
+    let codename_words = codename?.split_whitespace().filter(|word| {
+        !GENERIC_CODENAME_WORDS.iter().any(|generic| {
+            word.chars()
+                .flat_map(char::to_lowercase)
+                .eq(generic.chars())
+        })
+    });
+    let mut catalog_words = catalog_name.split_whitespace();
+    let mut matched_words = 0;
+    for word in codename_words {
+        if !catalog_words.next()?.eq_ignore_ascii_case(word) {
+            return None;
+        }
+        matched_words += 1;
+    }
+
+    let mut qualifiers = catalog_words.peekable();
+    if matched_words == 0
+        || qualifiers.peek().is_none()
+        || !qualifiers.all(|word| {
+            VARIANT_QUALIFIER_SUFFIXES
+                .iter()
+                .any(|qualifier| word.eq_ignore_ascii_case(qualifier))
+        })
+    {
+        return None;
+    }
+
+    let mut name = String::with_capacity(catalog_name.len());
+    for word in catalog_name.split_whitespace().take(matched_words) {
+        if !name.is_empty() {
+            name.push(' ');
+        }
+        name.push_str(word);
+    }
+    Some(name)
 }
 
 fn strict_candidates(model: &DeviceModelInfo) -> Vec<String> {

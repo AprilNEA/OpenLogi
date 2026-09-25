@@ -158,10 +158,9 @@ pub fn plan_for_device(
                     return true;
                 }
                 let action = binding.click_action();
-                // The panel's default is ShowActionsRing, which must be
-                // diverted to open the ring. Action::None means "leave native
-                // firmware haptics alone", so treat None as the only non-divert.
-                if *button == ButtonId::HapticPanel {
+                // Gesture sources have no host-visible firmware action, so any
+                // single binding needs the divert. `None` leaves them native.
+                if GESTURE_SOURCE_BUTTONS.iter().any(|(_, source)| source == button) {
                     action != Action::None
                 } else {
                     action != default_binding(*button)
@@ -574,11 +573,30 @@ mod tests {
     }
 
     #[test]
-    fn gestures_off_default_gesture_button_stays_native() {
-        // With gestures off and no explicit binding, the gesture button keeps
-        // its native HID behavior — same contract as the standard buttons.
+    fn gestures_off_gesture_button_is_diverted_for_its_single_action() {
+        // Turning gestures off leaves `Single(MissionControl)`. The firmware
+        // gives the gesture button no host action, so that must be diverted.
         let mut cfg = Config::default();
         cfg.set_gesture_mode("2b042", ButtonId::GestureButton, false);
+
+        let plan = plan_for_device(&cfg, "2b042", route(), None, 0, true);
+        assert!(
+            plan.target
+                .spec
+                .divert_buttons
+                .contains(&(GESTURE_BUTTON_CID, ButtonId::GestureButton)),
+            "a gestures-off Mission Control binding must reach the agent"
+        );
+    }
+
+    #[test]
+    fn gesture_button_bound_to_none_stays_native() {
+        let mut cfg = Config::default();
+        cfg.set_binding(
+            "2b042",
+            ButtonId::GestureButton,
+            Binding::Single(Action::None),
+        );
 
         let plan = plan_for_device(&cfg, "2b042", route(), None, 0, true);
         assert!(
@@ -588,7 +606,7 @@ mod tests {
                 .divert_buttons
                 .iter()
                 .any(|&(cid, _)| cid == GESTURE_BUTTON_CID),
-            "an unbound gesture button must not be captured"
+            "an explicitly unbound gesture button must not be captured"
         );
     }
 
