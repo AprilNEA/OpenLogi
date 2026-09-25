@@ -11,6 +11,20 @@ use openlogi_core::config::{
 };
 
 impl AppState {
+    /// Battery evidence, including cached readings, enables the controls. A missing
+    /// reading later in this session does not hide a known device's preferences.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    pub fn battery_preferences_available(&self, record: &super::devices::DeviceRecord) -> bool {
+        record.battery.is_some()
+            || self
+                .devices
+                .sessions
+                .get(record.config_key.as_str())
+                .is_some_and(|session| {
+                    session.battery_model.as_deref() == Some(record.model_key.as_str())
+                })
+    }
+
     /// Preferences shared by every route of this physical device.
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub fn battery_preferences(&self, key: &str) -> openlogi_core::config::BatteryPreferences {
