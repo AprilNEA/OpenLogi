@@ -1,12 +1,16 @@
 use super::*;
+use std::sync::{Arc, Mutex};
+
 use hidpp::feature::extended_dpi::{DpiRange, Lod};
+use hidpp::feature::onboard_profiles::OnboardMode;
 use hidpp::feature::per_key_lighting::FramePersistence;
 use hidpp::feature::smartshift::WheelMode;
+use hidpp::protocol::v20::{ErrorType, Hidpp20Error};
 
 use crate::SharedChannel;
 use crate::channel::scripted::{ScriptedRawHidChannel, feature_error, scripted_channel};
 use crate::write::diagnostics::dump_firmware_entities_on_channel;
-use crate::write::dpi::expand_dpi_ranges;
+use crate::write::dpi::{expand_dpi_ranges, is_onboard_refusal};
 use crate::write::lighting::{collect_present_zones, per_key_reports};
 use crate::write::smartshift::{
     is_missing_enhanced, is_transient_smartshift_error, smartshift_to_wheel,
@@ -321,6 +325,124 @@ fn a_single_value_range_yields_just_that_value() {
     );
 }
 
+#[test]
+fn only_the_onboard_refusal_triggers_the_host_mode_retry() {
+    // LogitechInternal is what a device running an onboard profile answers a
+    // host DPI write with. Every other feature error is a real failure and must
+    // reach the caller unchanged instead of provoking a mode change.
+    assert!(is_onboard_refusal(&Hidpp20Error::Feature(
+        ErrorType::LogitechInternal
+    )));
+    for error in [
+        ErrorType::Unsupported,
+        ErrorType::InvalidArgument,
+        ErrorType::OutOfRange,
+        ErrorType::Busy,
+        ErrorType::HwError,
+    ] {
+        assert!(
+            !is_onboard_refusal(&Hidpp20Error::Feature(error)),
+            "{error:?} must not be read as an onboard-profile refusal"
+        );
+    }
+    assert!(!is_onboard_refusal(&Hidpp20Error::UnsupportedResponse));
+}
+
+#[tokio::test]
+async fn a_dpi_write_refused_by_an_onboard_profile_lands_after_switching_to_host_mode()
+-> Result<(), WriteError> {
+    // A mouse whose firmware is running a profile out of its own memory owns
+    // the sensor and refuses every host DPI write with LogitechInternal, so DPI
+    // never changed. 0x8100 host mode is what hands the sensor back.
+    let device = Arc::new(Mutex::new(OnboardDevice {
+        mode: u8::from(OnboardMode::Onboard),
+        dpi: 800,
+    }));
+    let scripted = Arc::clone(&device);
+    let (raw, handle) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+        onboard_profile_scripted_response(request, &scripted)
+    });
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(
+        channel,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xb35b,
+        },
+    );
+
+    set_dpi_on(&shared, Dpi::new(1200)).await?;
+
+    // The device really was taken out of onboard mode, and the DPI the retry
+    // wrote is the one it now reports.
+    let state = *device.lock().unwrap();
+    assert_eq!(state.mode, u8::from(OnboardMode::Host));
+    assert_eq!(state.dpi, 1200);
+    // setOnboardMode is function 1 of feature index 0x09, carrying the mode.
+    let mode_write = handle
+        .written_reports()
+        .into_iter()
+        .find(|report| report[2] == 0x09 && report[3] >> 4 == 0x01)
+        .expect("the retry must ask the device for host mode");
+    assert_eq!(mode_write[4], u8::from(OnboardMode::Host));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_dpi_write_refused_by_a_host_mode_device_is_reported_not_retried()
+-> Result<(), WriteError> {
+    // Same refusal, but the device is already host-driven: onboard mode was not
+    // the cause, so the error belongs to the caller rather than being masked by
+    // a pointless mode write.
+    let device = Arc::new(Mutex::new(OnboardDevice {
+        mode: u8::from(OnboardMode::Host),
+        dpi: 800,
+    }));
+    let scripted = Arc::clone(&device);
+    let (raw, handle) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+        // Refuse regardless of the mode, which is the shape of a firmware
+        // rejecting the write for some other internal reason.
+        if request[2] == 0x05 && request[3] >> 4 == 0x06 {
+            return Some(feature_error(
+                request,
+                u8::from(ErrorType::LogitechInternal),
+            ));
+        }
+        onboard_profile_scripted_response(request, &scripted)
+    });
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(
+        channel,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xb35b,
+        },
+    );
+
+    let error = set_dpi_on(&shared, Dpi::new(1200))
+        .await
+        .expect_err("a refusal that onboard mode does not explain must surface");
+    assert!(
+        matches!(
+            error,
+            WriteError::HidppFeature {
+                operation: HidppOperation::WriteDpi,
+                feature_hex: 0x2202,
+                kind: HidppFeatureErrorKind::LogitechInternal,
+            }
+        ),
+        "unexpected error: {error:?}"
+    );
+    assert!(
+        !handle
+            .written_reports()
+            .iter()
+            .any(|report| report[2] == 0x09 && report[3] >> 4 == 0x01),
+        "a host-mode device must not be written to 0x8100"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn dpi_reads_and_writes_work_on_a_device_with_only_extended_dpi() -> Result<(), WriteError> {
     // `Capabilities::from_feature_ids` turns the DPI panel on for 0x2201 *or*
@@ -573,6 +695,90 @@ fn extended_dpi_scripted_response(request: &[u8]) -> Option<Vec<u8>> {
         (0x05, 0x06) => {
             payload[..6].copy_from_slice(&request[4..10]);
             true
+        }
+        _ => return None,
+    };
+
+    let mut response = vec![0u8; if long { 20 } else { 7 }];
+    response[0] = if long { 0x11 } else { 0x10 };
+    response[1..4].copy_from_slice(&request[1..4]);
+    let payload_len = response.len() - 4;
+    response[4..].copy_from_slice(&payload[..payload_len]);
+    Some(response)
+}
+
+/// The state a scripted onboard-profile device answers from.
+#[derive(Clone, Copy)]
+struct OnboardDevice {
+    /// The `0x8100` mode the device is currently in.
+    mode: u8,
+    /// The DPI its sensor reports.
+    dpi: u16,
+}
+
+/// A mouse that exposes `0x2202 ExtendedAdjustableDpi` and `0x8100
+/// OnboardProfiles`, and refuses host DPI writes with `LogitechInternal` for as
+/// long as an onboard profile is driving it — the shape a DPI write could not
+/// get past.
+fn onboard_profile_scripted_response(
+    request: &[u8],
+    device: &Mutex<OnboardDevice>,
+) -> Option<Vec<u8>> {
+    if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
+        return None;
+    }
+    let feature_index = request[2];
+    let function = request[3] >> 4;
+    let mut payload = [0u8; 16];
+    let long = match (feature_index, function) {
+        // Root ping used by Device::new.
+        (0x00, 0x01) => {
+            payload[0] = 4;
+            false
+        }
+        // Root feature lookup: 0x2202 at index 0x05, 0x8100 at index 0x09.
+        (0x00, 0x00) => {
+            payload[0] = match u16::from_be_bytes([request[4], request[5]]) {
+                0x2202 => 0x05,
+                0x8100 => 0x09,
+                _ => 0x00,
+            };
+            false
+        }
+        // getSensorCount.
+        (0x05, 0x00) => {
+            payload[0] = 1;
+            false
+        }
+        // getSensorDpiParameters: the DPI in effect, no independent Y axis.
+        (0x05, 0x05) => {
+            payload[1..3].copy_from_slice(&device.lock().unwrap().dpi.to_be_bytes());
+            payload[3..5].copy_from_slice(&800u16.to_be_bytes());
+            payload[9] = u8::from(Lod::Medium);
+            true
+        }
+        // setSensorDpiParameters: refused while an onboard profile owns the
+        // sensor, accepted once the host has been given it.
+        (0x05, 0x06) => {
+            let mut state = device.lock().unwrap();
+            if state.mode == u8::from(OnboardMode::Onboard) {
+                return Some(feature_error(
+                    request,
+                    u8::from(ErrorType::LogitechInternal),
+                ));
+            }
+            state.dpi = u16::from_be_bytes([request[5], request[6]]);
+            payload[..6].copy_from_slice(&request[4..10]);
+            true
+        }
+        // setOnboardMode / getOnboardMode.
+        (0x09, 0x01) => {
+            device.lock().unwrap().mode = request[4];
+            false
+        }
+        (0x09, 0x02) => {
+            payload[0] = device.lock().unwrap().mode;
+            false
         }
         _ => return None,
     };

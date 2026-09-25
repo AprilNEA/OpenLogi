@@ -6,6 +6,7 @@ use hidpp::{
         CreatableFeature,
         adjustable_dpi::AdjustableDpiFeature,
         extended_dpi::{DpiDirection, DpiRange, ExtendedDpiFeature, SetDpiParameters},
+        onboard_profiles::{OnboardMode, OnboardProfilesFeature},
     },
     protocol::v20::{ErrorType, Hidpp20Error},
 };
@@ -293,10 +294,21 @@ pub(super) async fn set_dpi_on_channel(
         .await
         .map_err(|_| WriteError::DeviceUnreachable { index })?;
     let feature = DpiFeature::open(&mut device).await?;
-    feature
-        .set_dpi(dpi)
-        .await
-        .map_err(|e| classify_hidpp_error(e, HidppOperation::WriteDpi, feature.id()))?;
+    if let Err(error) = feature.set_dpi(dpi).await {
+        // A device running an onboard profile owns the sensor and refuses the
+        // write; retry once from host mode, which is what makes it land.
+        if !is_onboard_refusal(&error) || !leave_onboard_mode(&mut device, index).await {
+            return Err(classify_hidpp_error(
+                error,
+                HidppOperation::WriteDpi,
+                feature.id(),
+            ));
+        }
+        feature
+            .set_dpi(dpi)
+            .await
+            .map_err(|e| classify_hidpp_error(e, HidppOperation::WriteDpi, feature.id()))?;
+    }
     // Read back to confirm the firmware accepted the value. A mismatch is a
     // silent failure mode that's otherwise invisible — devices in low-power
     // states or with unsupported DPI ranges can ACK the write yet keep the old
@@ -318,6 +330,64 @@ pub(super) async fn set_dpi_on_channel(
         debug!(index, %dpi, "wrote DPI (read-back skipped)");
     }
     Ok(())
+}
+
+/// Whether `error` is how a device that is running an onboard profile refuses a
+/// host DPI write.
+///
+/// The firmware owns the sensor while a profile out of its own memory drives
+/// it, and rejects the write before it reaches the sensor. `0x2202` reports
+/// that as the catch-all `LogitechInternal` (observed on a PRO X 2 behind a
+/// Lightspeed receiver) — a code that is not specific to onboard mode, so this
+/// only makes the retry worth *asking* about. [`leave_onboard_mode`] confirms
+/// it by reading `0x8100` before changing anything.
+pub(super) const fn is_onboard_refusal(error: &Hidpp20Error) -> bool {
+    matches!(error, Hidpp20Error::Feature(ErrorType::LogitechInternal))
+}
+
+/// Takes a device that is running an onboard profile back under host control so
+/// a DPI write can land, and reports whether that actually happened.
+///
+/// `false` means the refused write must be reported as-is: the device has no
+/// `0x8100` at all, is already host-driven — in both cases onboard mode was not
+/// what refused it — or `0x8100` itself failed, which is logged here and must
+/// not replace the DPI error the caller is holding.
+///
+/// The mode is volatile: the device returns to onboard mode whenever it
+/// reconnects, wakes, or is power-cycled. Asserting host mode from the write
+/// path rather than once at connect is what keeps DPI writable across those
+/// events, at the cost of one refused write per reversion.
+async fn leave_onboard_mode(device: &mut Device, index: u8) -> bool {
+    let profiles = match feature_index(device, OnboardProfilesFeature::ID).await {
+        Ok(Some(feature_index)) => device.add_feature::<OnboardProfilesFeature>(feature_index),
+        // No onboard profiles: whatever refused the write, it was not one.
+        Ok(None) => return false,
+        Err(error) => {
+            tracing::warn!(index, %error, "could not look up 0x8100 after a refused DPI write");
+            return false;
+        }
+    };
+    match profiles.get_onboard_mode().await {
+        Ok(OnboardMode::Host) => return false,
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(index, %error, "could not read the onboard mode after a refused DPI write");
+            return false;
+        }
+    }
+    match profiles.set_onboard_mode(OnboardMode::Host).await {
+        Ok(()) => {
+            debug!(
+                index,
+                "device was running an onboard profile; switched it to host mode"
+            );
+            true
+        }
+        Err(error) => {
+            tracing::warn!(index, %error, "could not switch the device to host mode");
+            false
+        }
+    }
 }
 
 /// Write DPI on an already-open [`SharedChannel`] — the fast path that skips
