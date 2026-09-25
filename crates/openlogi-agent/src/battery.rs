@@ -127,12 +127,27 @@ impl State {
     }
 
     fn reconcile(&mut self, now: Instant) -> (bool, Vec<Alert>) {
+        // An unpaired slot may next contain another device, even the same model.
+        // Sleeping paired devices remain in observations and keep their episode.
+        let present: BTreeSet<&str> = self
+            .observations
+            .iter()
+            .filter(|observation| observation.history_key.is_none())
+            .map(|observation| observation.session_key.as_str())
+            .collect();
+        self.session_warned
+            .retain(|key| present.contains(key.as_str()));
+        self.session_batteries
+            .retain(|key| present.contains(key.as_str()));
         let current = self
             .observed_at
             .is_some_and(|observed| now.saturating_duration_since(observed) <= MAX_READING_AGE);
         let mut next = Snapshot::default();
         let mut alerts = Vec::new();
         for observation in &self.observations {
+            if !observation.online {
+                continue;
+            }
             let (id, known, warned) = match &observation.history_key {
                 Some(key) => (
                     key,
@@ -140,7 +155,7 @@ impl State {
                     &mut self.history.warned,
                 ),
                 None => (
-                    &observation.key,
+                    &observation.session_key,
                     &mut self.session_batteries,
                     &mut self.session_warned,
                 ),
@@ -301,6 +316,8 @@ mod tests {
         Observation {
             key: "unit:01020304".into(),
             history_key: Some("unit:01020304".into()),
+            session_key: "receiver:receiver:slot:1:model:keyboard".into(),
+            online: true,
             name: "Keyboard".into(),
             battery: Some(BatteryInfo {
                 percentage,
@@ -394,6 +411,37 @@ mod tests {
         assert_eq!(read(&mut restarted, anonymous, Instant::now()).len(), 1);
         assert!(restarted.history.warned.is_empty());
     }
+    #[test]
+    fn removed_anonymous_pairing_does_not_suppress_its_replacement() {
+        let mut state = State::new(None);
+        let now = Instant::now();
+        let mut anonymous = observation(8);
+        anonymous.history_key = None;
+        assert_eq!(read(&mut state, anonymous.clone(), now).len(), 1);
+        assert!(read(&mut state, anonymous.clone(), now).is_empty());
+        let mut sleeping = anonymous.clone();
+        sleeping.online = false;
+        assert!(read(&mut state, sleeping, now).is_empty());
+        assert!(state.snapshot.devices.is_empty());
+        assert_eq!(state.snapshot.severity, Severity::Normal);
+        assert!(read(&mut state, anonymous.clone(), now).is_empty());
+        state.observations.clear();
+        state.reconcile(now);
+        assert_eq!(read(&mut state, anonymous, now).len(), 1);
+    }
+
+    #[test]
+    fn changed_anonymous_model_starts_a_new_warning_episode() {
+        let mut state = State::new(None);
+        let now = Instant::now();
+        let mut anonymous = observation(8);
+        anonymous.history_key = None;
+        assert_eq!(read(&mut state, anonymous.clone(), now).len(), 1);
+        anonymous.session_key = "receiver:receiver:slot:1:model:mouse".into();
+        assert_eq!(read(&mut state, anonymous, now).len(), 1);
+        assert_eq!(state.session_warned.len(), 1);
+    }
+
     #[test]
     fn temporary_save_failure_is_retried_without_another_battery_transition() {
         let dir = tempfile::tempdir().unwrap();
