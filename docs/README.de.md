@@ -1,6 +1,9 @@
 > [!WARNING]
 > **OpenLogi befindet sich in aktiver Entwicklung** und ist noch nicht stabil — Funktionen und Konfiguration können sich noch ändern. Gib dem Repo einen **Star** ⭐ und **beobachte** 👀 es, um benachrichtigt zu werden, wenn ein neues Release erscheint.
 
+> [!CAUTION]
+> **OpenLogi hat keinen Krypto-Token.** Wir haben niemals einen Token erstellt, autorisiert oder unterstützt — weder auf pump.fun noch anderswo — und werden es auch nie tun. Jeder Token, der den Namen oder das Logo von OpenLogi verwendet, ist Betrug und steht in keiner Verbindung zu diesem Projekt.
+
 <h4 align="right"><a href="../README.md">English</a> | <a href="README.zh-CN.md">简体中文</a> | <a href="README.ja.md">日本語</a> | <strong>Deutsch</strong> | <a href="README.fr.md">Français</a> | <a href="README.ko.md">한국어</a> | <a href="README.ru.md">Русский</a></h4>
 
 <p align="center">
