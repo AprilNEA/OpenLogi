@@ -46,6 +46,10 @@ pub use crate::controls::{
 enum Payload {
     /// 1-byte unsigned (menu/enum controls).
     U8,
+    /// One half of the 8-byte `CT_PANTILT_ABSOLUTE_CONTROL` pair. Unlike every
+    /// other control, pan and tilt share a single selector, so each is
+    /// addressed by which word of that payload it occupies.
+    PanTilt(Axis),
     /// 2-byte unsigned (most controls).
     U16,
     /// 2-byte signed (brightness, hue).
@@ -61,8 +65,45 @@ impl Payload {
             Self::U8 => 1,
             Self::U16 | Self::I16 => 2,
             Self::U32 => 4,
+            Self::PanTilt(_) => PAN_TILT_LEN,
         }
     }
+}
+
+/// Which half of the `CT_PANTILT_ABSOLUTE_CONTROL` payload a control addresses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Axis {
+    Pan,
+    Tilt,
+}
+
+impl Axis {
+    /// Byte offset of this axis' `dw` word within the pair.
+    const fn offset(self) -> usize {
+        match self {
+            Self::Pan => 0,
+            Self::Tilt => 4,
+        }
+    }
+}
+
+/// Wire size of `CT_PANTILT_ABSOLUTE_CONTROL`: `dwPanAbsolute` followed by
+/// `dwTiltAbsolute`, each a little-endian signed 32-bit value (UVC 1.5
+/// Â§4.2.2.1.14). It is the widest control payload, so it also sizes the buffer
+/// every read uses.
+const PAN_TILT_LEN: usize = 8;
+
+/// Read one axis out of a `CT_PANTILT_ABSOLUTE_CONTROL` payload.
+fn pan_tilt_half(buf: &[u8; PAN_TILT_LEN], axis: Axis) -> i32 {
+    let mut word = [0u8; 4];
+    word.copy_from_slice(&buf[axis.offset()..axis.offset() + 4]);
+    i32::from_le_bytes(word)
+}
+
+/// Replace one axis in a `CT_PANTILT_ABSOLUTE_CONTROL` payload, leaving the
+/// other untouched.
+fn patch_pan_tilt(buf: &mut [u8; PAN_TILT_LEN], axis: Axis, value: i32) {
+    buf[axis.offset()..axis.offset() + 4].copy_from_slice(&value.to_le_bytes());
 }
 
 /// A control's complete UVC wire description: the entity it addresses, its
@@ -77,20 +118,26 @@ impl CameraControl {
     /// UVC entity, control selector (Camera Terminal §A.9.4, Processing Unit
     /// §A.9.5), and wire payload type for this control.
     const fn spec(self) -> ControlSpec {
-        use Payload::{I16, U8, U16, U32};
+        use Payload::{I16, PanTilt, U8, U16, U32};
         use Unit::{CameraTerminal, Processing};
         let (unit, selector, payload) = match self {
             Self::Zoom => (CameraTerminal, 0x0B, U16), // CT_ZOOM_ABSOLUTE_CONTROL
+            // Both halves of CT_PANTILT_ABSOLUTE_CONTROL.
+            Self::Pan => (CameraTerminal, 0x0D, PanTilt(Axis::Pan)),
+            Self::Tilt => (CameraTerminal, 0x0D, PanTilt(Axis::Tilt)),
             Self::Focus => (CameraTerminal, 0x06, U16), // CT_FOCUS_ABSOLUTE_CONTROL
             Self::Exposure => (CameraTerminal, 0x04, U32), // CT_EXPOSURE_TIME_ABSOLUTE_CONTROL
             Self::PowerLineFrequency => (Processing, 0x05, U8), // PU_POWER_LINE_FREQUENCY_CONTROL
             Self::LowLightCompensation => (CameraTerminal, 0x03, U8), // CT_AE_PRIORITY_CONTROL
             Self::Brightness => (Processing, 0x02, I16), // PU_BRIGHTNESS_CONTROL
-            Self::Contrast => (Processing, 0x03, U16), // PU_CONTRAST_CONTROL
+            Self::Contrast => (Processing, 0x03, U16),  // PU_CONTRAST_CONTROL
             Self::Saturation => (Processing, 0x07, U16), // PU_SATURATION_CONTROL
             Self::Sharpness => (Processing, 0x08, U16), // PU_SHARPNESS_CONTROL
+            Self::Gain => (Processing, 0x04, U16),      // PU_GAIN_CONTROL
+            // PU_BACKLIGHT_COMPENSATION_CONTROL
+            Self::BacklightCompensation => (Processing, 0x01, U16),
             Self::WhiteBalance => (Processing, 0x0A, U16), // PU_WHITE_BALANCE_TEMPERATURE_CONTROL
-            Self::Tint => (Processing, 0x06, I16),     // PU_HUE_CONTROL
+            Self::Tint => (Processing, 0x06, I16),         // PU_HUE_CONTROL
         };
         ControlSpec {
             unit,
@@ -442,11 +489,13 @@ impl UsbDevice {
             payload,
         } = control.spec();
         let entity = self.entity(unit)?;
-        let mut buf = [0u8; 4];
+        let mut buf = [0u8; PAN_TILT_LEN];
         self.transfer(RT_GET, req, selector, entity, &mut buf[..payload.len()])?;
         Ok(match payload {
             Payload::U8 => i32::from(buf[0]),
-            Payload::U32 => i32::try_from(u32::from_le_bytes(buf)).unwrap_or(i32::MAX),
+            Payload::U32 => i32::try_from(u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]))
+                .unwrap_or(i32::MAX),
+            Payload::PanTilt(axis) => pan_tilt_half(&buf, axis),
             Payload::I16 => i32::from(i16::from_le_bytes([buf[0], buf[1]])),
             Payload::U16 => i32::from(u16::from_le_bytes([buf[0], buf[1]])),
         })
@@ -460,6 +509,16 @@ impl UsbDevice {
             payload,
         } = control.spec();
         let entity = self.entity(unit)?;
+        if let Payload::PanTilt(axis) = payload {
+            // The two axes share one control, so a write must carry both words:
+            // read the live pair, replace this axis, send it back. A failed read
+            // is surfaced rather than written over with a zeroed sibling axis,
+            // which would recentre the axis the caller never asked about.
+            let mut buf = [0u8; PAN_TILT_LEN];
+            self.transfer(RT_GET, UVC_GET_CUR, selector, entity, &mut buf)?;
+            patch_pan_tilt(&mut buf, axis, value);
+            return self.transfer(RT_SET, UVC_SET_CUR, selector, entity, &mut buf);
+        }
         let mut buf = value.cast_unsigned().to_le_bytes();
         self.transfer(
             RT_SET,
@@ -637,8 +696,12 @@ fn scan_descriptors(blob: &[u8]) -> Option<VcTopology> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CameraControl, ITT_CAMERA, Payload, Unit, VcTopology, location_hint, scan_descriptors,
+        Axis, CameraControl, ITT_CAMERA, PAN_TILT_LEN, Payload, Unit, VcTopology, location_hint,
+        pan_tilt_half, patch_pan_tilt, scan_descriptors,
     };
+
+    /// `dwPanAbsolute` = 1, `dwTiltAbsolute` = 2.
+    const PAN_TILT_SAMPLE: [u8; PAN_TILT_LEN] = [1, 0, 0, 0, 2, 0, 0, 0];
 
     #[test]
     fn flicker_and_low_light_use_standard_uvc_controls() {
@@ -651,6 +714,77 @@ mod tests {
         assert_eq!(low_light.unit, Unit::CameraTerminal);
         assert_eq!(low_light.selector, 0x03);
         assert_eq!(low_light.payload, Payload::U8);
+    }
+
+    /// Pan and tilt are two halves of one selector, not two controls.
+    #[test]
+    fn pan_and_tilt_share_the_pantilt_selector() {
+        let pan = CameraControl::Pan.spec();
+        let tilt = CameraControl::Tilt.spec();
+        assert_eq!(pan.unit, Unit::CameraTerminal);
+        assert_eq!(pan.selector, 0x0D);
+        assert_eq!(tilt.selector, pan.selector);
+        assert_eq!(pan.payload, Payload::PanTilt(Axis::Pan));
+        assert_eq!(tilt.payload, Payload::PanTilt(Axis::Tilt));
+        assert_eq!(pan.payload.len(), PAN_TILT_LEN);
+    }
+
+    #[test]
+    fn pan_reads_the_first_word() {
+        assert_eq!(pan_tilt_half(&PAN_TILT_SAMPLE, Axis::Pan), 1);
+    }
+
+    #[test]
+    fn tilt_reads_the_second_word() {
+        assert_eq!(pan_tilt_half(&PAN_TILT_SAMPLE, Axis::Tilt), 2);
+    }
+
+    /// Both axes are signed: a camera centred at 0 reports negative pan for
+    /// left, so a sign-extension slip would fold the whole left half of the
+    /// range onto huge positive values.
+    #[test]
+    fn negative_values_sign_extend() {
+        let mut buf = [0u8; PAN_TILT_LEN];
+        buf[..4].copy_from_slice(&(-36000i32).to_le_bytes());
+        buf[4..].copy_from_slice(&(-1i32).to_le_bytes());
+        assert_eq!(pan_tilt_half(&buf, Axis::Pan), -36000);
+        assert_eq!(pan_tilt_half(&buf, Axis::Tilt), -1);
+    }
+
+    /// The invariant behind the read-modify-write in `Device::set`.
+    #[test]
+    fn patching_pan_preserves_tilt() {
+        let mut buf = PAN_TILT_SAMPLE;
+        patch_pan_tilt(&mut buf, Axis::Pan, -7);
+        assert_eq!(pan_tilt_half(&buf, Axis::Pan), -7);
+        assert_eq!(
+            pan_tilt_half(&buf, Axis::Tilt),
+            2,
+            "tilt survives a pan write"
+        );
+    }
+
+    #[test]
+    fn patching_tilt_preserves_pan() {
+        let mut buf = PAN_TILT_SAMPLE;
+        patch_pan_tilt(&mut buf, Axis::Tilt, i32::MIN);
+        assert_eq!(pan_tilt_half(&buf, Axis::Tilt), i32::MIN);
+        assert_eq!(
+            pan_tilt_half(&buf, Axis::Pan),
+            1,
+            "pan survives a tilt write"
+        );
+    }
+
+    #[test]
+    fn patch_then_read_round_trips_each_axis() {
+        let mut buf = [0u8; PAN_TILT_LEN];
+        for value in [i32::MIN, -1, 0, 1, i32::MAX] {
+            patch_pan_tilt(&mut buf, Axis::Pan, value);
+            patch_pan_tilt(&mut buf, Axis::Tilt, value);
+            assert_eq!(pan_tilt_half(&buf, Axis::Pan), value);
+            assert_eq!(pan_tilt_half(&buf, Axis::Tilt), value);
+        }
     }
 
     /// AVFoundation prints the location id unpadded: a StreamCam on bus
