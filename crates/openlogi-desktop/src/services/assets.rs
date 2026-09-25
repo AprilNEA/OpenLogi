@@ -244,7 +244,9 @@ impl AssetResolver {
         )?;
         // Assets are shared by model variant; the firmware name belongs to
         // this device and must never overwrite another device's cached name.
-        asset.display_name = variant_display_name(&asset.display_name, codename);
+        if let Some(name) = variant_display_name_override(&asset.display_name, codename) {
+            asset.display_name = name;
+        }
         Some(asset)
     }
 
@@ -558,57 +560,55 @@ pub(crate) fn resolve_in_index<'a>(
     Some(hit)
 }
 
-/// Device-type words a firmware marketing name may append that carry no
-/// variant information (`"Signature M650 Mouse"`) — stripped before the
-/// prefix comparison in [`variant_display_name`] so they don't block it.
-const GENERIC_CODENAME_SUFFIXES: [&str; 3] = ["mouse", "keyboard", "trackball"];
+/// Firmware type words ignored when matching model names, wherever they occur.
+const GENERIC_CODENAME_WORDS: [&str; 3] = ["mouse", "keyboard", "trackball"];
 
-/// Trailing catalog words that are known hand/SKU *qualifiers* rather than
-/// part of the model's own generation name — issue #1332's "Signature M650
-/// **L**" (large). [`variant_display_name`] only strips a trailing
-/// catalog word when it is in this list: an unlisted trailing word (`"3S"`,
-/// `"X"`, `"2S"`, …) is a real part of the model name — e.g. codename "MX
-/// Master" vs. catalog "MX Master 3S" — and must be kept (issue #1366).
+/// Size/hand qualifiers, not model-generation words such as `3S` or `X`.
 const VARIANT_QUALIFIER_SUFFIXES: [&str; 2] = ["l", "left"];
 
-/// The catalog stores one static `displayName` per depot regardless of
-/// which `extended_model_id` colour/hand variant this physical unit is —
-/// issue #1332: a plain Signature M650 (BLE direct) shares the Signature
-/// M650 *L* depot's `modelId`, so the depot's only name, "Signature M650
-/// L", is wrong for it. The firmware's own reported name is the one
-/// per-device signal the catalog can't carry.
+/// Correct a shared depot's variant name (M650 vs. M650 L, #1332).
 ///
-/// Only override the catalog name when it is the device's own name plus
-/// extra trailing word(s) that are all recognized variant qualifiers (see
-/// [`VARIANT_QUALIFIER_SUFFIXES`]) — i.e. the catalog is the codename plus a
-/// bare hand/SKU suffix. A trailing word that isn't a recognized qualifier
-/// (a real model-generation word like "3S" or "X") is left alone, so a
-/// terser codename ("MX Master") never truncates a more specific catalog
-/// name ("MX Master 3S").
-fn variant_display_name(catalog_name: &str, codename: Option<&str>) -> String {
-    let Some(codename) = codename else {
-        return catalog_name.to_string();
-    };
-    let codename_words: Vec<&str> = codename
-        .split_whitespace()
-        .filter(|w| !GENERIC_CODENAME_SUFFIXES.contains(&w.to_lowercase().as_str()))
-        .collect();
-    let catalog_words: Vec<&str> = catalog_name.split_whitespace().collect();
-    if codename_words.is_empty() || catalog_words.len() <= codename_words.len() {
-        return catalog_name.to_string();
+/// Return an override only when the firmware name matches a nonempty catalog
+/// prefix and every remaining word is a recognized qualifier. Keep catalog
+/// spelling, joining matched words with single spaces. `None` leaves the
+/// caller's existing name untouched; only a correction allocates a string.
+fn variant_display_name_override(catalog_name: &str, codename: Option<&str>) -> Option<String> {
+    let codename_words = codename?.split_whitespace().filter(|word| {
+        !GENERIC_CODENAME_WORDS.iter().any(|generic| {
+            word.chars()
+                .flat_map(char::to_lowercase)
+                .eq(generic.chars())
+        })
+    });
+    let mut catalog_words = catalog_name.split_whitespace();
+    let mut matched_words = 0;
+    for word in codename_words {
+        if !catalog_words.next()?.eq_ignore_ascii_case(word) {
+            return None;
+        }
+        matched_words += 1;
     }
-    let is_prefix = codename_words
-        .iter()
-        .zip(catalog_words.iter())
-        .all(|(a, b)| a.eq_ignore_ascii_case(b));
-    let trailing_words_are_qualifiers = catalog_words[codename_words.len()..]
-        .iter()
-        .all(|w| VARIANT_QUALIFIER_SUFFIXES.contains(&w.to_lowercase().as_str()));
-    if is_prefix && trailing_words_are_qualifiers {
-        catalog_words[..codename_words.len()].join(" ")
-    } else {
-        catalog_name.to_string()
+
+    let mut qualifiers = catalog_words.peekable();
+    if matched_words == 0
+        || qualifiers.peek().is_none()
+        || !qualifiers.all(|word| {
+            VARIANT_QUALIFIER_SUFFIXES
+                .iter()
+                .any(|qualifier| word.eq_ignore_ascii_case(qualifier))
+        })
+    {
+        return None;
     }
+
+    let mut name = String::with_capacity(catalog_name.len());
+    for word in catalog_name.split_whitespace().take(matched_words) {
+        if !name.is_empty() {
+            name.push(' ');
+        }
+        name.push_str(word);
+    }
+    Some(name)
 }
 
 fn strict_candidates(model: &DeviceModelInfo) -> Vec<String> {
