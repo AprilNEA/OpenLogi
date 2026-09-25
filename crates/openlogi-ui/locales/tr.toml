@@ -391,6 +391,7 @@ input_monitoring_permission_description = "Doğrudan Bluetooth fareleri dahil HI
 input_monitoring_granted_but_unavailable = "İzin verildi ama cihazlar yine de açılamıyor. Başka bir uygulama onları özel olarak tutuyor olabilir veya macOS'ta oturumu kapatıp yeniden açmanız gerekebilir."
 bluetooth_permission_description = "OpenLogi'nin CoreBluetooth kullanmasına izin verir (HID erişimi için gerekli değildir)."
 camera_permission_description = "Logitech web kameranız ana sayfada görünür. Canlı önizlemesini görmek için erişim verin; video Mac'inizden asla çıkmaz."
+camera_usage_description = "OpenLogi previews your Logitech webcam locally. Video never leaves your Mac."
 linux_input_access_denied_description = "OpenLogi, düğmeleri yeniden eşlemek için /dev/uinput dosyasına yazma; HID++ iletişimi için /dev/hidraw* dosyalarına okuma ve yazma erişimi gerektirir. Erişim vermek için OpenLogi udev kurallarını yükleyin. Linux kurulum kılavuzuna bakın."
 linux_input_access_unknown_description = "Logitech cihazı algılanmadı. Bir cihaz bağlayın veya hidraw udev kurallarının yüklü olduğunu doğrulayın."
 
