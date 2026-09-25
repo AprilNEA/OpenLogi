@@ -103,6 +103,8 @@ fn combo(shortcut: Shortcut) -> Result<KeyCombo, u16> {
         Shortcut::NextTab => "Ctrl+Tab",
         Shortcut::PrevTab => "Ctrl+Shift+Tab",
         Shortcut::ReloadPage => "Ctrl+R",
+        Shortcut::ZoomIn => "Ctrl+=",
+        Shortcut::ZoomOut => "Ctrl+-",
     };
     Ok(super::parse_shortcut(text))
 }

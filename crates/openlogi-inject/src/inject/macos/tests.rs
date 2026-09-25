@@ -25,6 +25,18 @@ fn combo_table_pins_representative_shortcuts() {
     assert_eq!(combo(Shortcut::Redo).rendered_label(), "Cmd+Shift+Z");
     assert_eq!(combo(Shortcut::BrowserBack).rendered_label(), "Cmd+[");
     assert_eq!(combo(Shortcut::NextTab).rendered_label(), "Ctrl+Tab");
+    assert_eq!(combo(Shortcut::ZoomIn).rendered_label(), "Cmd+=");
+    assert_eq!(combo(Shortcut::ZoomOut).rendered_label(), "Cmd+-");
+    // kVK_ANSI_Equal / kVK_ANSI_Minus: the keys browsers, Preview, and
+    // Office bind to zoom.
+    assert_eq!(
+        hid_usage_to_macos(combo(Shortcut::ZoomIn).key().code()),
+        Some(0x18)
+    );
+    assert_eq!(
+        hid_usage_to_macos(combo(Shortcut::ZoomOut).key().code()),
+        Some(0x1b)
+    );
     // hid_usage_to_macos must actually resolve every table entry, or a
     // `Shortcut` silently no-ops instead of pressing anything (see
     // `press_combo`'s warn-and-drop path). Iterates `Shortcut::ALL`
