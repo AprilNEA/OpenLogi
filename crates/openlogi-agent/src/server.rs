@@ -112,9 +112,10 @@ impl AgentServer {
                 #[cfg(target_os = "macos")]
                 let app_icon = config.app_settings.app_icon;
                 let language = config.app_settings.language.clone();
+                let mut orchestrator = self.orchestrator.lock().await;
                 match saved {
-                    None => self.orchestrator.lock().await.reload_config(config),
-                    Some(saved) => self.orchestrator.lock().await.reload_saved_config(
+                    None => orchestrator.reload_config(config),
+                    Some(saved) => orchestrator.reload_saved_config(
                         config,
                         file.revision(),
                         &saved,
@@ -135,6 +136,8 @@ impl AgentServer {
                 openlogi_core::locale::activate(language.as_deref());
                 #[cfg(target_os = "macos")]
                 crate::tray::relocalize();
+                #[cfg(any(target_os = "macos", target_os = "windows"))]
+                crate::battery::refresh_preferences(orchestrator.battery_observations());
                 Ok(())
             }
             Err(error) => {
@@ -388,6 +391,14 @@ impl Agent for AgentServer {
 
     async fn next_pairing(self, _: Context) -> Option<PairingUpdate> {
         self.pairing.next_update().await
+    }
+
+    async fn acknowledge_device_selection(
+        self,
+        _: Context,
+        request: openlogi_ipc::DeviceSelection,
+    ) {
+        self.observable.acknowledge_device_selection(&request);
     }
 
     async fn snapshot(self, _: Context) -> AgentSnapshot {
