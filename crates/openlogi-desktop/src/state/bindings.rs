@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use openlogi_core::binding::{Action, Binding, ButtonId, GestureDirection};
+use openlogi_core::binding::{Action, Binding, ButtonId, GestureDirection, GestureResponse};
 use openlogi_core::bindings::{bindings_for, hidpp_gesture_maps_for, oshook_gestures_for};
 use openlogi_core::config::{Config, KeyTrigger};
 use tracing::debug;
@@ -407,6 +407,40 @@ impl AppState {
     #[must_use]
     pub fn device_gesture_binding_count(&self) -> usize {
         self.device_gesture_maps().values().map(BTreeMap::len).sum()
+    }
+
+    /// Gesture response for one control on the active physical device.
+    #[must_use]
+    pub fn gesture_response(&self, button: ButtonId) -> GestureResponse {
+        self.current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .map_or_else(GestureResponse::default, |key| {
+                self.config.gesture_response(key, button)
+            })
+    }
+
+    /// Persist one control's gesture response and reload the agent so its
+    /// HID++ session or OS-hook map adopts it immediately.
+    pub fn commit_gesture_response(
+        &mut self,
+        button: ButtonId,
+        response: GestureResponse,
+    ) -> StateEvents {
+        let Some(key) = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .map(str::to_string)
+        else {
+            return StateEvents::none();
+        };
+        if self.config.gesture_response(&key, button) == response {
+            return StateEvents::none();
+        }
+        self.config.edit(|config| {
+            config.set_gesture_response(&key, button, response);
+        });
+        self.persist_and_reload("gesture response");
+        self.for_current_device(StateEvent::BindingsChanged)
     }
 
     /// The gesture menus the panel offers: [`Self::device_gesture_maps`], or

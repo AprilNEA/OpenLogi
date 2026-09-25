@@ -3,6 +3,42 @@
 use super::*;
 
 #[test]
+fn gesture_response_is_saved_per_control_on_the_selected_device() {
+    let mut state = state_with_a_known_mouse();
+    assert_eq!(
+        state.gesture_response(ButtonId::HapticPanel),
+        GestureResponse::BALANCED
+    );
+    assert_eq!(
+        state.gesture_response(ButtonId::GestureButton),
+        GestureResponse::BALANCED
+    );
+
+    let events = state.commit_gesture_response(ButtonId::HapticPanel, GestureResponse::FAST);
+    assert_eq!(
+        events,
+        [StateEvent::BindingsChanged(DeviceKey::from(
+            KNOWN_MOUSE_KEY
+        ))]
+    );
+
+    assert_eq!(
+        state.gesture_response(ButtonId::HapticPanel),
+        GestureResponse::FAST
+    );
+    assert_eq!(
+        state.gesture_response(ButtonId::GestureButton),
+        GestureResponse::BALANCED
+    );
+    assert_eq!(
+        state
+            .config
+            .gesture_response(KNOWN_MOUSE_KEY, ButtonId::HapticPanel),
+        GestureResponse::FAST
+    );
+}
+
+#[test]
 fn thumbwheel_pair_updates_both_memory_and_config_entries() {
     let mut bindings = std::collections::BTreeMap::new();
     let mut config = Config::ephemeral();
