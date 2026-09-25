@@ -90,6 +90,8 @@ fn combo(shortcut: Shortcut) -> KeyCombo {
         Shortcut::NextTab => "Ctrl+Tab",
         Shortcut::PrevTab => "Ctrl+Shift+Tab",
         Shortcut::ReloadPage => "Ctrl+R",
+        Shortcut::ZoomIn => "Ctrl+=",
+        Shortcut::ZoomOut => "Ctrl+-",
     };
     super::parse_shortcut(text)
 }
@@ -729,6 +731,8 @@ mod tests {
         assert_eq!(combo(Shortcut::Redo).rendered_label(), "Ctrl+Shift+Z");
         assert_eq!(combo(Shortcut::BrowserBack).rendered_label(), "Alt+Left");
         assert_eq!(combo(Shortcut::NextTab).rendered_label(), "Ctrl+Tab");
+        assert_eq!(combo(Shortcut::ZoomIn).rendered_label(), "Ctrl+=");
+        assert_eq!(combo(Shortcut::ZoomOut).rendered_label(), "Ctrl+-");
         // hid_usage_to_linux must actually resolve every table entry, or a
         // `Shortcut` silently no-ops instead of pressing anything (see
         // `press_combo`'s warn-and-drop path). Iterates `Shortcut::ALL`
