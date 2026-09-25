@@ -577,6 +577,7 @@ mod tests {
         ];
         for (percentage, level, status, expected) in cases {
             let battery = BatteryInfo {
+                freshness: openlogi_core::device::BatteryFreshness::Current,
                 percentage: Some(percentage),
                 level,
                 status,
