@@ -19,12 +19,22 @@ linker = "/usr/bin/cc"
 # holding this config file — the repo root — so it works from any cwd.
 runner = ".cargo/run-macos.sh"
 
-# Belt-and-suspenders DEVELOPER_DIR for contributors who run cargo outside
-# the devenv shell and have xcode-select pointing at the Command Line Tools
-# only (no Metal toolchain). `force = false` means a real DEVELOPER_DIR
-# already exported in the shell (devenv users, CI runners) wins.
-[env]
-DEVELOPER_DIR = { value = "/Applications/Xcode.app/Contents/Developer", force = false }
+# No static `[env] DEVELOPER_DIR` override here (removed, #1079): Cargo's
+# `[env]` table is plain TOML with no way to check whether that path exists,
+# so it applied unconditionally to *every* cargo invocation, including the
+# non-GUI crates that need no Metal toolchain at all. A contributor with only
+# the Command Line Tools installed — or Xcode under a non-standard name such
+# as `Xcode-beta.app` — got every build script's linker step pointed at a
+# path that doesn't exist, breaking `cargo build`/`check`/`test` entirely,
+# not just the GUI's Metal shader compile this was meant to help. `force =
+# false` never prevented that: it only yields to a `DEVELOPER_DIR` already
+# exported in the shell, which a plain `xcode-select` misconfiguration never
+# sets. devenv (`devenv.nix`) and CI (`.github/workflows/*.yml`) already set
+# their own correct `DEVELOPER_DIR` independently of this file, so removing
+# it doesn't affect either. A contributor building the GUI outside devenv
+# with Xcode installed but `xcode-select` pointed at the Command Line Tools
+# still has a one-time system fix:
+# `sudo xcode-select -s /Applications/Xcode.app/Contents/Developer`.
 
 [alias]
 xtask = "run -p xtask --"
