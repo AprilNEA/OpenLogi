@@ -22,10 +22,15 @@ use tarpc::tokio_serde::formats::Bincode;
 ///
 /// On Unix this is the filesystem Unix-domain socket at
 /// [`agent_socket_path`](openlogi_core::paths::agent_socket_path). Production
-/// builds keep `~/.config/openlogi/agent.sock`; local macOS `-dev` bundles use
-/// the sibling `openlogi-dev` profile so development agents cannot occupy the
-/// installed app's endpoint. On Windows it is a named pipe in the OS namespace
-/// (`\\.\pipe\openlogi-agent.sock`).
+/// builds keep `~/.config/openlogi/agent.sock`; a dev build (macOS `-dev`
+/// bundle, or — since [`openlogi_core::paths::is_dev_profile`] covers every
+/// platform — an unpackaged Windows/Linux dev binary) uses the sibling
+/// `openlogi-dev` profile so a development agent cannot occupy the installed
+/// app's endpoint. On Windows it is a named pipe in the OS namespace
+/// (`\\.\pipe\openlogi-agent.sock`, or `\\.\pipe\openlogi-agent-dev.sock`
+/// under the dev profile) — the pipe namespace has no directory of its own to
+/// key off, so the profile has to be named directly rather than folded into
+/// a path the way the Unix branch does.
 ///
 /// # Errors
 ///
@@ -45,7 +50,12 @@ pub fn endpoint_name() -> io::Result<interprocess::local_socket::Name<'static>> 
         // A fixed per-machine pipe name. The default DACL grants the creating
         // user + administrators, which is acceptable for a single-user desktop;
         // per-user isolation on a shared machine is a future hardening point.
-        "openlogi-agent.sock".to_ns_name::<GenericNamespaced>()
+        let name = if openlogi_core::paths::is_dev_profile() {
+            "openlogi-agent-dev.sock"
+        } else {
+            "openlogi-agent.sock"
+        };
+        name.to_ns_name::<GenericNamespaced>()
     }
 }
 

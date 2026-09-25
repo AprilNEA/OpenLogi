@@ -19,8 +19,23 @@
 //! shipped in Windows artifacts, because moving it afterwards would strand
 //! every existing user's `config.toml` and the agent's first-run state.
 
-//! Local packaged macOS builds stamped with dev-channel identifiers use the
-//! same layout under an `openlogi-dev` app directory.
+//! An unpackaged dev build uses the same layout under an `openlogi-dev` app
+//! directory instead: a local packaged macOS build stamped with a dev-channel
+//! bundle identifier, or (on any platform, since only macOS has a packaged
+//! dev-bundle mechanism) an executable still sitting in Cargo's own
+//! `target/debug`/`target/release` output.
+//!
+//! **Windows only, production profile only:** a run from anywhere other than
+//! the MSI's fixed per-user install directory (`%LOCALAPPDATA%\Programs\OpenLogi`,
+//! see `packaging/windows/OpenLogi.wxs`'s `INSTALLFOLDER`) is a portable
+//! `.zip` release, extracted and run from wherever the user put it — a USB
+//! drive, another machine, anywhere. [`config_dir`]/[`data_dir`]/[`state_dir`]
+//! then resolve under a `data` folder next to the executable instead of the
+//! user profile, so moving that folder (executable included) carries the data
+//! with it. This does not revisit decision #347: an MSI install's exe path is
+//! fixed, so every existing installed user keeps resolving to the same
+//! `%USERPROFILE%\.config\openlogi` they always have — only a portable run,
+//! which had no stranded data to begin with, takes the new path.
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -54,7 +69,10 @@ pub enum Profile {
 
 impl Profile {
     /// The profile this process runs under: forced by [`crate::env::PROFILE`],
-    /// or detected from the bundle the executable lives in. Memoized — the
+    /// detected on macOS from the bundle the executable lives in, or —
+    /// on every platform, since only macOS has a packaged dev-bundle
+    /// mechanism — detected from the executable still sitting in a Cargo
+    /// `target/debug`/`target/release` output directory. Memoized — the
     /// answer cannot change within a process lifetime.
     #[must_use]
     pub fn current() -> Self {
@@ -92,6 +110,15 @@ impl Profile {
             {
                 return Self::Dev;
             }
+        }
+
+        // Only macOS has a packaged dev-bundle mechanism (`xtask macos
+        // dev-bundle`); without this fallback, an unpackaged dev build on
+        // Windows or Linux silently lands on the production profile and
+        // shares the installed app's config directory, IPC socket, and
+        // single-instance lock.
+        if running_from_cargo_target() {
+            return Self::Dev;
         }
 
         Self::Production
@@ -136,6 +163,75 @@ fn app_dir() -> &'static str {
 #[must_use]
 pub fn is_dev_profile() -> bool {
     Profile::current() == Profile::Dev
+}
+
+/// True when the running executable lives inside a Cargo build output
+/// directory (`target/debug/…`, `target/release/…`, or a `--target
+/// <triple>` cross-compile's `target/<triple>/debug/…` /
+/// `target/<triple>/release/…`) — the layout every `cargo build`/`cargo run`
+/// produces and no installer ever does. Only Windows and Linux have no
+/// packaged dev-bundle mechanism (that is macOS-only, see `xtask macos
+/// dev-bundle`), so without this fallback an unpackaged dev build on those
+/// platforms silently lands on the production profile and shares the
+/// installed app's config directory, IPC socket, and single-instance lock.
+fn running_from_cargo_target() -> bool {
+    std::env::current_exe().is_ok_and(|exe| is_cargo_target_path(&exe))
+}
+
+fn is_cargo_target_path(exe: &std::path::Path) -> bool {
+    let components: Vec<_> = exe
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect();
+    components
+        .windows(2)
+        .any(|pair| pair[0] == "target" && matches!(pair[1], "debug" | "release"))
+        || components
+            .windows(3)
+            .any(|triple| triple[0] == "target" && matches!(triple[2], "debug" | "release"))
+}
+
+/// The MSI's fixed per-user install directory — the layout only that
+/// installer produces (`packaging/windows/OpenLogi.wxs`'s `INSTALLFOLDER`).
+#[cfg(windows)]
+fn windows_msi_install_dir(local_app_data: &std::path::Path) -> PathBuf {
+    local_app_data.join("Programs").join("OpenLogi")
+}
+
+/// Whether `exe_dir` is a portable Windows run: the production profile,
+/// launched from somewhere other than [`windows_msi_install_dir`]. `false`
+/// for an MSI install (keeps decision #347's location), the dev profile
+/// (already isolated by [`DEV_APP_DIR`]), and when `local_app_data` can't be
+/// resolved — treating an unresolvable installed-location check as "not
+/// installed" would move a real install's data on nothing more than a
+/// missing environment variable. Windows paths are case-insensitive, so the
+/// comparison is too. A pure function of its inputs so it's testable without
+/// mutating the process environment or `current_exe()`.
+#[cfg(windows)]
+fn is_windows_portable(
+    profile: Profile,
+    exe_dir: &std::path::Path,
+    local_app_data: Option<&std::path::Path>,
+) -> bool {
+    if profile != Profile::Production {
+        return false;
+    }
+    let Some(local_app_data) = local_app_data else {
+        return false;
+    };
+    let installed = windows_msi_install_dir(local_app_data);
+    !installed
+        .as_os_str()
+        .eq_ignore_ascii_case(exe_dir.as_os_str())
+}
+
+/// The executable's own directory, when [`is_windows_portable`] holds for
+/// the current process.
+#[cfg(windows)]
+fn windows_portable_root() -> Option<PathBuf> {
+    let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    let local_app_data = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    is_windows_portable(Profile::current(), &exe_dir, local_app_data.as_deref()).then_some(exe_dir)
 }
 
 #[cfg(target_os = "macos")]
@@ -197,9 +293,14 @@ pub fn xdg_data_home() -> Result<PathBuf, PathsError> {
 
 /// Directory holding the user's `config.toml`.
 ///
-/// `$XDG_CONFIG_HOME/openlogi`, default `~/.config/openlogi`.
-/// Local macOS dev builds use `openlogi-dev` instead.
+/// `$XDG_CONFIG_HOME/openlogi`, default `~/.config/openlogi`. Local macOS dev
+/// builds use `openlogi-dev` instead; a portable Windows run uses `data` next
+/// to the executable instead — see `windows_portable_root` below.
 pub fn config_dir() -> Result<PathBuf, PathsError> {
+    #[cfg(windows)]
+    if let Some(root) = windows_portable_root() {
+        return Ok(root.join("data"));
+    }
     config_dir_for(Profile::current())
 }
 
@@ -216,18 +317,30 @@ pub fn config_path() -> Result<PathBuf, PathsError> {
 /// Directory for downloaded application data; the device-render asset cache
 /// lives under `data_dir()/assets`.
 ///
-/// `$XDG_DATA_HOME/openlogi`, default `~/.local/share/openlogi`.
-/// Local macOS dev builds use `openlogi-dev` instead.
+/// `$XDG_DATA_HOME/openlogi`, default `~/.local/share/openlogi`. Local macOS
+/// dev builds use `openlogi-dev` instead; a portable Windows run uses `data`
+/// next to the executable instead, the same folder [`config_dir`] uses — see
+/// `windows_portable_root` below.
 pub fn data_dir() -> Result<PathBuf, PathsError> {
+    #[cfg(windows)]
+    if let Some(root) = windows_portable_root() {
+        return Ok(root.join("data"));
+    }
     Ok(xdg()?.data_dir().join(app_dir()))
 }
 
 /// Directory for logs and other rebuildable process state — the agent's
 /// rotated log files live here.
 ///
-/// `$XDG_STATE_HOME/openlogi`, default `~/.local/state/openlogi`.
-/// Local macOS dev builds use `openlogi-dev` instead.
+/// `$XDG_STATE_HOME/openlogi`, default `~/.local/state/openlogi`. Local
+/// macOS dev builds use `openlogi-dev` instead; a portable Windows run uses
+/// `data\state` next to the executable instead — see
+/// `windows_portable_root` below.
 pub fn state_dir() -> Result<PathBuf, PathsError> {
+    #[cfg(windows)]
+    if let Some(root) = windows_portable_root() {
+        return Ok(root.join("data").join("state"));
+    }
     let xdg = xdg()?;
     Ok(xdg
         .state_dir()
@@ -265,19 +378,96 @@ pub fn agent_socket_path_for(profile: Profile) -> Result<PathBuf, PathsError> {
 mod tests {
     use super::*;
 
+    // The test binary itself runs from `target/debug/deps/…`, so
+    // `is_dev_profile()` correctly reports dev here (proven by
+    // `cargo_target_debug_and_release_binaries_are_dev` below) and `app_dir()`
+    // resolves to `DEV_APP_DIR`. Accept either app dir rather than asserting
+    // the production one.
+    fn ends_with_an_openlogi_app_dir(path: &std::path::Path) -> bool {
+        path.ends_with(APP_DIR) || path.ends_with(DEV_APP_DIR)
+    }
+
     #[test]
     fn config_dir_keeps_openlogi_under_xdg_config_home() {
-        assert!(config_dir().expect("config dir").ends_with("openlogi"));
+        assert!(ends_with_an_openlogi_app_dir(
+            &config_dir().expect("config dir")
+        ));
     }
 
     #[test]
     fn data_dir_keeps_openlogi_under_xdg_data_home() {
-        assert!(data_dir().expect("data dir").ends_with("openlogi"));
+        assert!(ends_with_an_openlogi_app_dir(
+            &data_dir().expect("data dir")
+        ));
     }
 
     #[test]
     fn runtime_dir_keeps_openlogi_suffix() {
-        assert!(runtime_dir().expect("runtime dir").ends_with("openlogi"));
+        assert!(ends_with_an_openlogi_app_dir(
+            &runtime_dir().expect("runtime dir")
+        ));
+    }
+}
+
+// `is_cargo_target_path` is pure path-string logic with no XDG/home
+// dependency, and it exists specifically to cover Windows (the platform with
+// no packaged dev-bundle mechanism) — unlike the `#[cfg(unix)]` module above,
+// it must compile and run there too.
+#[cfg(test)]
+mod cargo_target_path_tests {
+    use super::{Profile, agent_socket_path_for, config_dir_for, is_cargo_target_path};
+
+    // `/`-separated paths only: `std::path::Path` parses separators for the
+    // *compiling* target, so a literal `C:\...` string only splits into
+    // components when this test itself is compiled for Windows — on the
+    // Linux/macOS hosts that actually run `cargo test` (no CI test job
+    // targets Windows, only cross-compiled clippy) it would stay one opaque
+    // component and silently fail this test. `/` is accepted as a separator
+    // on every target Rust supports, Windows included, so it exercises the
+    // same `Path::components()` logic on all three hosts.
+    #[test]
+    fn cargo_target_debug_and_release_binaries_are_dev() {
+        assert!(is_cargo_target_path(std::path::Path::new(
+            "/home/dev/openlogi/target/debug/openlogi-desktop"
+        )));
+        assert!(is_cargo_target_path(std::path::Path::new(
+            "/home/dev/openlogi/target/release/openlogi-desktop"
+        )));
+        assert!(is_cargo_target_path(std::path::Path::new(
+            "C:/Users/dev/openlogi/target/debug/openlogi-desktop.exe"
+        )));
+    }
+
+    // `cargo build --target <triple>` (used for cross-compiled clippy checks
+    // in this repo, e.g. `x86_64-pc-windows-gnu`) nests an extra
+    // target-triple directory between `target/` and `debug`/`release`.
+    #[test]
+    fn cross_compiled_target_triple_binaries_are_dev() {
+        assert!(is_cargo_target_path(std::path::Path::new(
+            "/home/dev/openlogi/target/x86_64-pc-windows-gnu/debug/openlogi-desktop.exe"
+        )));
+        assert!(is_cargo_target_path(std::path::Path::new(
+            "/home/dev/openlogi/target/aarch64-unknown-linux-musl/release/openlogi-agent"
+        )));
+    }
+
+    #[test]
+    fn an_installed_binary_is_not_mistaken_for_a_cargo_target_build() {
+        assert!(!is_cargo_target_path(std::path::Path::new(
+            "/usr/bin/openlogi-desktop"
+        )));
+        assert!(!is_cargo_target_path(std::path::Path::new(
+            "/opt/openlogi/openlogi-desktop"
+        )));
+        assert!(!is_cargo_target_path(std::path::Path::new(
+            "C:/Program Files/OpenLogi/openlogi-desktop.exe"
+        )));
+        // A stray "target" *file/dir name* that isn't Cargo's own build
+        // output (e.g. a user directory literally named "target") must not
+        // be mistaken for one — only "target/debug" or "target/release".
+        assert!(!is_cargo_target_path(std::path::Path::new(
+            "/home/user/target/openlogi-desktop"
+        )));
     }
 
     #[test]
@@ -297,5 +487,75 @@ mod tests {
                 .expect("production socket")
                 .ends_with("openlogi/agent.sock")
         );
+    }
+}
+
+#[cfg(windows)]
+#[cfg(test)]
+mod windows_portable_tests {
+    use std::path::Path;
+
+    use super::{Profile, is_windows_portable, windows_msi_install_dir};
+
+    #[test]
+    fn msi_install_dir_sits_under_local_app_data_programs() {
+        assert_eq!(
+            windows_msi_install_dir(Path::new(r"C:\Users\dev\AppData\Local")),
+            Path::new(r"C:\Users\dev\AppData\Local\Programs\OpenLogi")
+        );
+    }
+
+    #[test]
+    fn an_msi_install_is_never_portable() {
+        let local_app_data = Path::new(r"C:\Users\dev\AppData\Local");
+        let installed = windows_msi_install_dir(local_app_data);
+        assert!(!is_windows_portable(
+            Profile::Production,
+            &installed,
+            Some(local_app_data)
+        ));
+    }
+
+    #[test]
+    fn an_msi_install_path_comparison_is_case_insensitive() {
+        let local_app_data = Path::new(r"C:\Users\dev\AppData\Local");
+        assert!(!is_windows_portable(
+            Profile::Production,
+            Path::new(r"c:\users\dev\appdata\local\programs\openlogi"),
+            Some(local_app_data)
+        ));
+    }
+
+    #[test]
+    fn a_run_from_anywhere_else_is_portable() {
+        let local_app_data = Path::new(r"C:\Users\dev\AppData\Local");
+        for exe_dir in [
+            Path::new(r"D:\OpenLogiPortable"),
+            Path::new(r"C:\Users\dev\Desktop\OpenLogi"),
+            Path::new(r"C:\Users\dev\AppData\Local\Programs\OpenLogiOld"),
+        ] {
+            assert!(
+                is_windows_portable(Profile::Production, exe_dir, Some(local_app_data)),
+                "{exe_dir:?} should be treated as portable"
+            );
+        }
+    }
+
+    #[test]
+    fn the_dev_profile_is_never_portable_even_when_relocated() {
+        assert!(!is_windows_portable(
+            Profile::Dev,
+            Path::new(r"D:\OpenLogiPortable"),
+            Some(Path::new(r"C:\Users\dev\AppData\Local"))
+        ));
+    }
+
+    #[test]
+    fn an_unresolvable_local_app_data_falls_back_to_not_portable() {
+        assert!(!is_windows_portable(
+            Profile::Production,
+            Path::new(r"D:\OpenLogiPortable"),
+            None
+        ));
     }
 }
