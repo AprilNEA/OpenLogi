@@ -130,6 +130,8 @@ pub struct MouseModelView {
     gesture_active_dir: Option<GestureDirection>,
     action_picker_open: bool,
     action_search: Entity<InputState>,
+    shortcut_input: Entity<InputState>,
+    shortcut_hold: bool,
     _state_obs: Subscription,
 }
 
@@ -139,6 +141,14 @@ impl MouseModelView {
         let action_search =
             cx.new(|cx| InputState::new(window, cx).placeholder(tr!("actions.search_actions")));
         cx.subscribe(&action_search, |_, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        })
+        .detach();
+        let shortcut_input = cx
+            .new(|cx| InputState::new(window, cx).placeholder(tr!("actions.shortcut_placeholder")));
+        cx.subscribe(&shortcut_input, |_, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 cx.notify();
             }
@@ -160,6 +170,8 @@ impl MouseModelView {
             gesture_active_dir: None,
             action_picker_open: false,
             action_search,
+            shortcut_input,
+            shortcut_hold: false,
             _state_obs: state_obs,
         }
     }
@@ -177,6 +189,27 @@ impl MouseModelView {
 
     pub(super) fn close_action_picker(&mut self) {
         self.action_picker_open = false;
+    }
+
+    pub(super) fn set_shortcut_hold(&mut self, hold: bool) {
+        self.shortcut_hold = hold;
+    }
+
+    /// Re-derive every input's placeholder from the current locale, so a live
+    /// language switch doesn't leave one stuck with the text it was built with.
+    fn localize_inputs(&self, window: &mut Window, cx: &mut Context<Self>) {
+        crate::ui::components::localize_placeholder(
+            &self.action_search,
+            tr!("actions.search_actions"),
+            window,
+            cx,
+        );
+        crate::ui::components::localize_placeholder(
+            &self.shortcut_input,
+            tr!("actions.shortcut_placeholder"),
+            window,
+            cx,
+        );
     }
 
     fn reset_for_device(&mut self, device_key: Option<DeviceKey>) {
@@ -223,12 +256,7 @@ fn set_control_hovered(
 
 impl Render for MouseModelView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        crate::ui::components::localize_placeholder(
-            &self.action_search,
-            tr!("actions.search_actions"),
-            window,
-            cx,
-        );
+        self.localize_inputs(window, cx);
         let (empty_bindings, empty_gesture_maps) = (BTreeMap::new(), BTreeMap::new());
         let MouseWorkspaceData {
             device_key,
@@ -321,6 +349,8 @@ impl Render for MouseModelView {
                 overridden,
             },
             &self.action_search,
+            &self.shortcut_input,
+            self.shortcut_hold,
             &view,
             cx,
         );
