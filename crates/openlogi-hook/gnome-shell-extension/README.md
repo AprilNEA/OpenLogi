@@ -19,12 +19,22 @@ contents, no input, no UI.
 
 ## Install
 
+The Linux packages (`.deb` / `.rpm` / `.pkg.tar.zst`), the Nix derivation and
+`packaging/linux/install.sh` already put the extension in
+`/usr/share/gnome-shell/extensions/openlogi-frontmost@openlogi.dev/`. If you
+installed OpenLogi any of those ways, skip to enabling it below.
+
+Copy it by hand only when running from a source build:
+
 ```sh
 UUID=openlogi-frontmost@openlogi.dev
 DEST="$HOME/.local/share/gnome-shell/extensions/$UUID"
 mkdir -p "$DEST"
 cp metadata.json extension.js "$DEST"/
 ```
+
+Packaging installs the files but does not enable them: GNOME loads only what
+the user opted into, so the two steps below are yours either way.
 
 On Wayland the shell cannot be reloaded in place, so **log out and back in** to
 let GNOME pick up the newly added extension, then enable it:
