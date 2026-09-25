@@ -395,6 +395,13 @@ fn gesture_response_control(
                     AppState::apply(cx, |state| state.commit_gesture_response(button, preset));
                 }),
         )
+        .when(!presets.contains(&current), |panel| {
+            panel.child(div().text_caption().text_color(pal.text_primary).child(tr!(
+                "actions.gesture_response_custom",
+                hold_ms => current.hold_duration().as_millis().to_string(),
+                travel => current.travel_threshold().to_string()
+            )))
+        })
         .child(
             div()
                 .text_caption()
