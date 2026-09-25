@@ -12,7 +12,7 @@
 //!   [`ThumbwheelScrollUp`](openlogi_core::binding::ButtonId::ThumbwheelScrollUp) /
 //!   [`ThumbwheelScrollDown`](openlogi_core::binding::ButtonId::ThumbwheelScrollDown)
 //!   bindings — either re-synthesised as continuous, sensitivity-scaled scroll
-//!   or accumulated into a custom action,
+//!   or zoom, or accumulated into a custom action,
 //!
 //! all via the common [`crate::runtime::ActionDispatcher`].
 //!

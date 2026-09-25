@@ -53,6 +53,7 @@ fn pointer_action_allowed(
         Effect::None
         | Effect::Click(_)
         | Effect::Scroll { .. }
+        | Effect::Zoom { .. }
         | Effect::Media(_)
         | Effect::Native(_)
         | Effect::AgentSide => false,
@@ -126,6 +127,12 @@ mod tests {
         }
         assert!(pointer_action_allowed(
             &Action::VolumeUp,
+            BROWSER,
+            BROWSER,
+            || false
+        ));
+        assert!(pointer_action_allowed(
+            &Action::ZoomIn,
             BROWSER,
             BROWSER,
             || false
