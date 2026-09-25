@@ -17,7 +17,7 @@ use crate::SharedChannel;
 use crate::backend::HidBackend;
 use crate::channel::route::DeviceRoute;
 use openlogi_core::hid::smartshift::{
-    SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, TunableTorque,
+    SmartShiftAutoDisengage, SmartShiftChange, SmartShiftMode, SmartShiftStatus, TunableTorque,
 };
 
 use super::{
@@ -176,17 +176,28 @@ impl SmartShift {
     /// A missing tunable-torque level is sent as HID++'s zero "preserve"
     /// sentinel, which lets legacy/unsupported devices accept mode changes.
     async fn set_status(&self, status: SmartShiftStatus) -> Result<(), WriteError> {
-        let SmartShiftStatus {
-            mode,
-            auto_disengage,
-            tunable_torque,
-        } = status;
-        let auto_disengage = NonZeroU8::from(auto_disengage);
+        self.write_fields(
+            Some(status.mode),
+            Some(status.auto_disengage),
+            status.tunable_torque,
+        )
+        .await
+    }
+
+    /// Encode omitted fields using the protocol's preserve sentinel, never
+    /// using values read earlier by another client.
+    async fn write_fields(
+        &self,
+        mode: Option<SmartShiftMode>,
+        auto_disengage: Option<SmartShiftAutoDisengage>,
+        tunable_torque: Option<TunableTorque>,
+    ) -> Result<(), WriteError> {
+        let auto_disengage = auto_disengage.map(NonZeroU8::from);
         match self {
             Self::Enhanced(feature) => feature
                 .set_ratchet_control_mode(SmartShiftEnhancedStatusChange {
-                    wheel_mode: Some(smartshift_to_wheel(mode)),
-                    auto_disengage: Some(auto_disengage),
+                    wheel_mode: mode.map(smartshift_to_wheel),
+                    auto_disengage,
                     tunable_torque: tunable_torque.map(NonZeroU8::from),
                 })
                 .await
@@ -199,11 +210,7 @@ impl SmartShift {
                     )
                 }),
             Self::Legacy(feature) => feature
-                .set_ratchet_control_mode(
-                    Some(smartshift_to_wheel(mode)),
-                    Some(auto_disengage),
-                    None,
-                )
+                .set_ratchet_control_mode(mode.map(smartshift_to_wheel), auto_disengage, None)
                 .await
                 .map_err(|e| {
                     classify_hidpp_error(e, HidppOperation::WriteSmartShift, SmartShiftFeature::ID)
@@ -211,36 +218,9 @@ impl SmartShift {
         }
     }
 
-    /// Write a new auto-disengage `sensitivity`, preserving the current mode
-    /// (and, on Enhanced, the tunable torque). Reads the current status first
-    /// so every preserved field is written back explicitly.
+    /// Change sensitivity without resending an earlier mode or torque.
     async fn set_sensitivity(&self, value: SmartShiftAutoDisengage) -> Result<(), WriteError> {
-        let current = self.status().await?;
-        let wire_value = NonZeroU8::from(value);
-        match self {
-            Self::Enhanced(feature) => feature
-                .set_ratchet_control_mode(SmartShiftEnhancedStatusChange {
-                    wheel_mode: Some(smartshift_to_wheel(current.mode)),
-                    auto_disengage: Some(wire_value),
-                    tunable_torque: current.tunable_torque.map(NonZeroU8::from),
-                })
-                .await
-                .map(|_| ())
-                .map_err(|e| {
-                    classify_hidpp_error(
-                        e,
-                        HidppOperation::WriteSmartShift,
-                        SmartShiftEnhancedFeature::ID,
-                    )
-                }),
-            Self::Legacy(_) => {
-                self.set_status(SmartShiftStatus {
-                    auto_disengage: value,
-                    ..current
-                })
-                .await
-            }
-        }
+        self.write_fields(None, Some(value), None).await
     }
 }
 
@@ -444,4 +424,25 @@ pub async fn set_smartshift_on(
     status: SmartShiftStatus,
 ) -> Result<(), WriteError> {
     set_smartshift_on_channel(shared.channel(), shared.device_index(), status).await
+}
+
+/// Apply only explicitly requested fields on the agent's existing channel, then
+/// return a fresh read-back. Preserved fields are encoded as firmware no-change
+/// values, so concurrent clients cannot have their values overwritten by an old
+/// snapshot. This operation never retries a write.
+pub async fn update_smartshift_on(
+    shared: &SharedChannel,
+    change: SmartShiftChange,
+) -> Result<SmartShiftStatus, WriteError> {
+    let index = shared.device_index();
+    let mut device = Device::new(Arc::clone(shared.channel()), index)
+        .await
+        .map_err(|_| WriteError::DeviceUnreachable { index })?;
+    let feature = SmartShift::open(&mut device).await?;
+    if change.mode.is_some() || change.auto_disengage.is_some() {
+        feature
+            .write_fields(change.mode, change.auto_disengage, None)
+            .await?;
+    }
+    feature.status().await
 }

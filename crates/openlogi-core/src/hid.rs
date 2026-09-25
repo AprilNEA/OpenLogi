@@ -29,5 +29,6 @@ pub use route::{
 };
 pub use scroll::{ScrollReportingTarget, ScrollWheelMode};
 pub use smartshift::{
-    SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque,
+    SmartShiftAutoDisengage, SmartShiftChange, SmartShiftMode, SmartShiftStatus,
+    SmartShiftThreshold, TunableTorque,
 };

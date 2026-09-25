@@ -790,3 +790,108 @@ async fn a_channel_failure_aborts_the_dump_instead_of_blaming_the_firmware() {
         "the dump stops at the failure rather than timing out per entity"
     );
 }
+
+#[tokio::test]
+async fn smartshift_partial_writes_preserve_concurrent_fields_on_both_protocols() {
+    use openlogi_core::hid::SmartShiftChange;
+    use std::sync::{Arc, Mutex};
+    for enhanced in [true, false] {
+        for change in [
+            SmartShiftChange {
+                mode: Some(SmartShiftMode::Free),
+                auto_disengage: None,
+            },
+            SmartShiftChange {
+                mode: None,
+                auto_disengage: Some(SmartShiftAutoDisengage::try_from(30).unwrap()),
+            },
+            SmartShiftChange {
+                mode: Some(SmartShiftMode::Free),
+                auto_disengage: Some(SmartShiftAutoDisengage::try_from(30).unwrap()),
+            },
+            SmartShiftChange::default(),
+        ] {
+            let state = Arc::new(Mutex::new([2_u8, 20, 37]));
+            let device_state = state.clone();
+            let (raw, handle) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+                let mut response = vec![0x10, request[1], request[2], request[3], 0, 0, 0];
+                match (request[2], request[3] >> 4) {
+                    (0, 1) => response[4] = 4,
+                    (0, 0) => {
+                        let id = u16::from_be_bytes([request[4], request[5]]);
+                        response[4] = if id == if enhanced { 0x2111 } else { 0x2110 } {
+                            6
+                        } else {
+                            0
+                        };
+                    }
+                    (6, function) if function == u8::from(enhanced) => {
+                        response[4..7].copy_from_slice(&*device_state.lock().unwrap());
+                    }
+                    (6, function) if function == if enhanced { 2 } else { 1 } => {
+                        let mut current = device_state.lock().unwrap();
+                        // Another writer changed threshold and torque after the
+                        // caller's initial read but before this request arrived.
+                        *current = [2, 60, 80];
+                        for (field, value) in current.iter_mut().zip(&request[4..7]) {
+                            if *value != 0 {
+                                *field = *value;
+                            }
+                        }
+                        response[4..7].copy_from_slice(&*current);
+                    }
+                    _ => return None,
+                }
+                Some(response)
+            });
+            let shared = SharedChannel::new(
+                scripted_channel(raw).await,
+                DeviceRoute::Direct {
+                    vendor_id: 0x046d,
+                    product_id: 0xb35b,
+                },
+            );
+            let before = get_smartshift_status_on(&shared).await.unwrap();
+            assert_eq!(
+                before.auto_disengage,
+                SmartShiftAutoDisengage::try_from(20).unwrap()
+            );
+            let after = update_smartshift_on(&shared, change).await.unwrap();
+            assert!(change.matches(after));
+            let reports = handle.written_reports();
+            let writes: Vec<_> = reports
+                .iter()
+                .filter(|r| r[2] == 6 && (r[3] >> 4) == if enhanced { 2 } else { 1 })
+                .collect();
+            if change == SmartShiftChange::default() {
+                assert!(writes.is_empty());
+                assert_eq!(after, before);
+            } else {
+                assert_eq!(writes.len(), 1);
+                let expected_mode = u8::from(change.mode.is_some());
+                let expected_threshold = if change.auto_disengage.is_some() {
+                    30
+                } else {
+                    0
+                };
+                assert_eq!(
+                    &writes[0][4..7],
+                    &[expected_mode, expected_threshold, 0],
+                    "only requested fields go onto the wire"
+                );
+                if change.auto_disengage.is_none() {
+                    assert_eq!(
+                        after.auto_disengage,
+                        SmartShiftAutoDisengage::try_from(60).unwrap()
+                    );
+                }
+                if enhanced {
+                    assert_eq!(
+                        after.tunable_torque,
+                        Some(TunableTorque::try_from(80).unwrap())
+                    );
+                }
+            }
+        }
+    }
+}

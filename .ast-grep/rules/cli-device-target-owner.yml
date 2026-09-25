@@ -1,0 +1,16 @@
+# Owner: openlogi_cli::cmd::target_selection. Fixture recording and settings
+# commands must agree on exact names/routes and duplicate-route rejection.
+id: cli-device-target-owner
+language: rust
+severity: error
+message: Select CLI devices through cmd::target_selection::select_target; do not reimplement exact name or rendered-route matching.
+files:
+  - crates/openlogi-cli/**/*.rs
+ignores:
+  - crates/openlogi-cli/src/cmd/target_selection.rs
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  any:
+    - pattern: $C.display_name().eq_ignore_ascii_case($Q)
+    - pattern: $C.route().to_string() == $Q
