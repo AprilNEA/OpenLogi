@@ -49,14 +49,8 @@ impl ActionRingPanel {
     pub fn new(app_icons: ProfileIconCache, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let app_catalog = cx.new(|cx| AppCatalogPicker::new(app_icons.clone(), window, cx));
         let app_catalog_obs = cx.observe(&app_catalog, |_, _, cx| cx.notify());
-        let state_obs = AppState::repaint_on(cx, |event| {
-            matches!(
-                event,
-                StateEvent::BindingsChanged(_)
-                    | StateEvent::InventoryChanged
-                    | StateEvent::DeviceSelected(_)
-            )
-        });
+        let state_obs =
+            AppState::repaint_on(cx, |event| matches!(event, StateEvent::BindingsChanged(_)));
         Self {
             focus_handle: cx.focus_handle(),
             selected_slot: ActionRingSlot::Top,
