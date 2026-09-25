@@ -9,6 +9,7 @@ use core_graphics::event::{CGEvent, CGEventField, CGEventFlags, CGEventType, Eve
 use tracing::debug;
 
 use super::sender::{event_sender_id, sender_device_info};
+use super::senderless_button::SenderlessButtonResolver;
 use crate::{ButtonId, KeyEvent, KeyModifiers, MouseEvent, ScrollDelta};
 
 /// Translate a raw OS button number to a [`ButtonId`].
@@ -26,9 +27,39 @@ fn button_number_to_id(n: i64) -> Option<ButtonId> {
     }
 }
 
-/// Best-effort device identity for a button event's HID sender.
-fn button_source(event: &CGEvent) -> Option<crate::EventDevice> {
-    event_sender_id(event).map(|id| sender_device_info(id).event_device)
+/// Best-effort device identity for a button event's HID sender, including
+/// macOS 27 events whose sender id is zero (the `SenderlessButtonResolver`'s
+/// `IOHIDManager` poll, see that module).
+struct ButtonSource {
+    device: Option<crate::EventDevice>,
+    attribution_invalidated: bool,
+}
+
+fn button_source(
+    event: &CGEvent,
+    button_number: i64,
+    pressed: bool,
+    resolver: &mut SenderlessButtonResolver,
+) -> ButtonSource {
+    let sender_source = event_sender_id(event)
+        .filter(|sender_id| *sender_id != 0)
+        .map(|sender_id| sender_device_info(sender_id).event_device);
+    let device = resolver.resolve(button_number, pressed, sender_source);
+    ButtonSource {
+        device,
+        attribution_invalidated: resolver.take_attribution_invalidated(),
+    }
+}
+
+/// Build a [`MouseEvent::Button`] from a resolved [`ButtonSource`] — shared by
+/// every `translate` match arm so the field list lives in one place.
+fn button_event(id: ButtonId, pressed: bool, source: ButtonSource) -> MouseEvent {
+    MouseEvent::Button {
+        id,
+        pressed,
+        device: source.device,
+        attribution_invalidated: source.attribution_invalidated,
+    }
 }
 
 /// Map the macOS modifier flags on a `CGEvent` to our [`KeyModifiers`].
@@ -65,7 +96,11 @@ pub(super) fn translate_key(etype: CGEventType, event: &CGEvent) -> Option<KeyEv
 
 /// Convert a `CGEvent` to our [`MouseEvent`] vocabulary. Returns `None`
 /// for event types we don't translate (e.g. move events, unknown buttons).
-pub(super) fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEvent> {
+pub(super) fn translate(
+    etype: CGEventType,
+    event: &CGEvent,
+    resolver: &mut SenderlessButtonResolver,
+) -> Option<MouseEvent> {
     // Skip events OpenLogi itself synthesised, so a remapped click or inverted
     // scroll we posted doesn't re-enter the hook as real input. Gate the field
     // read to events we synthesize — keeping the FFI call off the high-rate
@@ -87,41 +122,43 @@ pub(super) fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEven
         return None;
     }
     match etype {
-        CGEventType::LeftMouseDown => Some(MouseEvent::Button {
-            id: ButtonId::LeftClick,
-            pressed: true,
-            device: button_source(event),
-        }),
-        CGEventType::LeftMouseUp => Some(MouseEvent::Button {
-            id: ButtonId::LeftClick,
-            pressed: false,
-            device: button_source(event),
-        }),
-        CGEventType::RightMouseDown => Some(MouseEvent::Button {
-            id: ButtonId::RightClick,
-            pressed: true,
-            device: button_source(event),
-        }),
-        CGEventType::RightMouseUp => Some(MouseEvent::Button {
-            id: ButtonId::RightClick,
-            pressed: false,
-            device: button_source(event),
-        }),
+        CGEventType::LeftMouseDown => Some(button_event(
+            ButtonId::LeftClick,
+            true,
+            button_source(event, 0, true, resolver),
+        )),
+        CGEventType::LeftMouseUp => Some(button_event(
+            ButtonId::LeftClick,
+            false,
+            button_source(event, 0, false, resolver),
+        )),
+        CGEventType::RightMouseDown => Some(button_event(
+            ButtonId::RightClick,
+            true,
+            button_source(event, 1, true, resolver),
+        )),
+        CGEventType::RightMouseUp => Some(button_event(
+            ButtonId::RightClick,
+            false,
+            button_source(event, 1, false, resolver),
+        )),
         CGEventType::OtherMouseDown => {
             let n = event.get_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER);
-            button_number_to_id(n).map(|id| MouseEvent::Button {
+            let id = button_number_to_id(n)?;
+            Some(button_event(
                 id,
-                pressed: true,
-                device: button_source(event),
-            })
+                true,
+                button_source(event, n, true, resolver),
+            ))
         }
         CGEventType::OtherMouseUp => {
             let n = event.get_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER);
-            button_number_to_id(n).map(|id| MouseEvent::Button {
+            let id = button_number_to_id(n)?;
+            Some(button_event(
                 id,
-                pressed: false,
-                device: button_source(event),
-            })
+                false,
+                button_source(event, n, false, resolver),
+            ))
         }
         CGEventType::ScrollWheel => {
             // axis 1 = vertical scroll; axis 2 = horizontal scroll. Continuous

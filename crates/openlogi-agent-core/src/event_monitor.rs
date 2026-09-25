@@ -181,6 +181,7 @@ mod tests {
             id: ButtonId::Back,
             pressed: true,
             device: None,
+            attribution_invalidated: false,
         });
         assert!(!m.enabled());
 
@@ -197,6 +198,7 @@ mod tests {
             id: ButtonId::Forward,
             pressed: false,
             device: None,
+            attribution_invalidated: false,
         });
         assert_eq!(
             m.poll(),

@@ -152,6 +152,21 @@ impl HoldState {
         self.swipe.end();
     }
 
+    /// Cancel the hold for `button` specifically, without touching a hold on
+    /// any other button, returning its press token so the caller can release
+    /// the matching dispatcher-owned lifecycle. Used when a competing device
+    /// makes `button`'s attribution ambiguous: the release that would
+    /// otherwise end this hold now arrives unattributed on macOS and never
+    /// reaches [`Self::end`], which would otherwise leave a stale hold for
+    /// the next stray pointer move to turn into a phantom swipe — the same
+    /// hazard `cancel` guards against, scoped to one button instead of every
+    /// hold.
+    fn cancel_for(&mut self, button: ButtonId) -> Option<PressToken> {
+        let held = self.current.take_if(|held| held.button == button)?;
+        self.swipe.end();
+        Some(held.press)
+    }
+
     /// Age the current hold past the staleness horizon, so tests can exercise
     /// the lost-button-up recovery without sleeping.
     #[cfg(test)]
@@ -241,12 +256,27 @@ fn handle_button(
     id: ButtonId,
     pressed: bool,
     device: Option<&EventDevice>,
+    attribution_invalidated: bool,
     hooks: &SharedHookMaps,
     dispatcher: &ActionDispatcher,
     capture_target: impl FnOnce() -> ActionDispatchTarget,
 ) -> EventDisposition {
     // Primary L/R always pass through (suppressing them would brick the mouse).
-    if !id.is_os_hook_button() || !button_source_may_remap(device) {
+    if !id.is_os_hook_button() {
+        return EventDisposition::PassThrough;
+    }
+    if !button_source_may_remap(device) {
+        // On macOS, a competing device can make `id`'s attribution ambiguous
+        // mid-hold. The release that would otherwise end that hold arrives
+        // unattributed too and never reaches the `HOLD.end` branch below, so
+        // cancel it here instead of leaving a stale hold for the next stray
+        // pointer move to turn into a phantom swipe.
+        if pressed
+            && attribution_invalidated
+            && let Some(press) = HOLD.with_borrow_mut(|h| h.cancel_for(id))
+        {
+            dispatcher.cancel_stale_hook_press(&press);
+        }
         return EventDisposition::PassThrough;
     }
     // `try_read` only: a blocking read on the tap thread freezes every pointer
@@ -463,10 +493,12 @@ pub fn start(
                     id,
                     pressed,
                     device,
+                    attribution_invalidated,
                 } => handle_button(
                     id,
                     pressed,
                     device.as_ref(),
+                    attribution_invalidated,
                     &hooks,
                     &dispatcher,
                     ActionDispatchTarget::capture,
