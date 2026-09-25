@@ -13,7 +13,7 @@ description = "The tarpc contract and local-socket transport shared by the OpenL
 test-support = ["dep:futures-lite"]
 
 [dependencies]
-openlogi-core = { path = "../openlogi-core", version = "0.8.7" }
+openlogi-core = { path = "../openlogi-core", version = "0.8.8" }
 serde = { workspace = true }
 thiserror = { workspace = true }
 tarpc = { workspace = true }
