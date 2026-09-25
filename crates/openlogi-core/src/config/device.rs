@@ -124,6 +124,35 @@ impl LinkOverrides {
     }
 }
 
+/// Battery menu and alert preferences shared by every connection of a device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BatteryPreferences {
+    /// Include this device in the tray menu.
+    pub show_in_menu: bool,
+    /// Notify on low battery and include the device in the tray warning color.
+    pub warn_low: bool,
+}
+
+impl Default for BatteryPreferences {
+    fn default() -> Self {
+        Self {
+            show_in_menu: true,
+            warn_low: true,
+        }
+    }
+}
+
+impl BatteryPreferences {
+    #[expect(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "serde's skip_serializing_if requires a reference"
+    )]
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// Settings scoped to a single physical device.
 ///
 /// Deserialization goes through `RawDeviceConfig` (`#[serde(from)]`) so
@@ -270,6 +299,9 @@ pub struct DeviceConfig {
     /// [`Self::dpi`]. `None` means "never set — leave the keyboard alone".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fn_lock: Option<bool>,
+    /// Battery display and warnings, enabled by default for existing devices.
+    #[serde(default, skip_serializing_if = "BatteryPreferences::is_default")]
+    pub battery: BatteryPreferences,
 }
 
 impl DeviceConfig {
@@ -370,6 +402,7 @@ impl Default for DeviceConfig {
             scroll_resolution: None,
             host_switch_targets: Vec::new(),
             fn_lock: None,
+            battery: BatteryPreferences::default(),
         }
     }
 }
@@ -494,6 +527,8 @@ struct RawDeviceConfig {
     enabled: bool,
     #[serde(default)]
     custom_name: Option<String>,
+    #[serde(default)]
+    battery: BatteryPreferences,
 }
 
 impl From<RawDeviceConfig> for DeviceConfig {
@@ -550,6 +585,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             scroll_resolution: raw.scroll_resolution,
             host_switch_targets: raw.host_switch_targets,
             fn_lock: raw.fn_lock,
+            battery: raw.battery,
         }
     }
 }
@@ -557,6 +593,19 @@ impl From<RawDeviceConfig> for DeviceConfig {
 #[cfg(test)]
 mod tests {
     use super::DeviceConfig;
+
+    #[test]
+    fn battery_preferences_default_and_partial_opt_out_round_trip() {
+        let original: DeviceConfig = toml::from_str("dpi = 1200").unwrap();
+        assert!(original.battery.show_in_menu && original.battery.warn_low);
+        assert!(!toml::to_string(&original).unwrap().contains("battery"));
+        let configured: DeviceConfig = toml::from_str("[battery]\nshow_in_menu = false").unwrap();
+        assert!(!configured.battery.show_in_menu);
+        assert!(configured.battery.warn_low);
+        assert!(configured.holds_settings());
+        let saved = toml::to_string(&configured).unwrap();
+        assert_eq!(toml::from_str::<DeviceConfig>(&saved).unwrap(), configured);
+    }
 
     #[test]
     fn host_switch_targets_round_trip_as_physical_keys() -> Result<(), Box<dyn std::error::Error>> {

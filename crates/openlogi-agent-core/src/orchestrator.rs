@@ -770,6 +770,12 @@ impl Orchestrator {
         }
     }
 
+    /// Online battery devices projected using the same configuration identity as the GUI.
+    #[must_use]
+    pub fn battery_observations(&self) -> Vec<crate::battery::Observation> {
+        crate::battery::observations(&self.config, &self.inventory())
+    }
+
     /// The latest standalone raw-HID inventory snapshot.
     #[must_use]
     pub fn standalone(&self) -> Vec<StandaloneDevice> {

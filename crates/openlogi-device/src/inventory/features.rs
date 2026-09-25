@@ -92,6 +92,7 @@ pub(super) async fn read_battery(
                 .await
                 .ok()
                 .map(|info| BatteryInfo {
+                    freshness: openlogi_core::device::BatteryFreshness::Current,
                     percentage: info.charging_percentage,
                     level: map_battery_level(info.level),
                     status: map_battery_status(info.status),
@@ -104,6 +105,7 @@ pub(super) async fn read_battery(
                 .await
                 .ok()
                 .map(|info| BatteryInfo {
+                    freshness: openlogi_core::device::BatteryFreshness::Current,
                     percentage: info.discharge_level,
                     level: legacy_battery_level_from_percentage(info.discharge_level),
                     status: map_legacy_battery_status(info.status),
@@ -114,6 +116,7 @@ pub(super) async fn read_battery(
             feature.get_battery_info().await.ok().map(|info| {
                 let percentage = voltage_battery_percentage(info.voltage_mv);
                 BatteryInfo {
+                    freshness: openlogi_core::device::BatteryFreshness::Current,
                     percentage,
                     // The firmware's own critical marker outranks our
                     // estimated bucket.

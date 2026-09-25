@@ -290,3 +290,32 @@ fn partial_first_probe_does_not_abandon_unread_slots_during_deferral() {
     assert!(!e.cache.contains_key(&unread));
     assert!(e.cache_dirty);
 }
+
+#[test]
+fn deferred_and_failed_probes_do_not_publish_fresh_battery_readings() {
+    use openlogi_core::device::{BatteryFreshness, BatteryInfo, BatteryLevel, BatteryStatus};
+    let mut ledger = super::ledger::NodeLedger::default();
+    let mut known = inventory(&[1]).pop().unwrap();
+    known.paired[0].battery = Some(BatteryInfo {
+        percentage: 8,
+        level: BatteryLevel::Critical,
+        status: BatteryStatus::Discharging,
+        freshness: BatteryFreshness::Current,
+    });
+    ledger.settle(&1, true, Some(known.clone()));
+    for replay in [ledger.defer(&1), ledger.settle(&1, false, None)] {
+        let replay = replay.inventory.unwrap();
+        let battery = replay.paired[0].battery.as_ref().unwrap();
+        assert_eq!(battery.percentage, 8);
+        assert_eq!(battery.freshness, BatteryFreshness::Cached);
+        assert!(!battery.needs_attention());
+    }
+    let recovered = ledger.settle(&1, true, Some(known)).inventory.unwrap();
+    assert!(
+        recovered.paired[0]
+            .battery
+            .as_ref()
+            .unwrap()
+            .needs_attention()
+    );
+}

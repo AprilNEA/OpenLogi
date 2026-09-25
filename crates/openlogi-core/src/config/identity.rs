@@ -357,6 +357,10 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
         );
     }
 
+    // An opt-out on either legacy route survives physical-device adoption.
+    device.battery.show_in_menu &= legacy.battery.show_in_menu;
+    device.battery.warn_low &= legacy.battery.warn_low;
+
     // `enabled` defaults to `true` and is only ever persisted when `false`,
     // so a legacy `false` is a deliberate "leave this device alone" choice
     // that must not be lost under a canonical entry that never opted out.
@@ -414,6 +418,24 @@ mod tests {
             receiver_uid: "82839805".to_string(),
             slot: 1,
         }
+    }
+
+    #[test]
+    fn battery_opt_outs_survive_route_adoption_independently() {
+        let mut canonical = super::DeviceConfig::default();
+        canonical.battery.warn_low = false;
+        let mut legacy = super::DeviceConfig::default();
+        legacy.battery.show_in_menu = false;
+        super::fold(&mut canonical, legacy, "direct:046d:c08d");
+        assert!(!canonical.battery.show_in_menu);
+        assert!(!canonical.battery.warn_low);
+        super::fold(
+            &mut canonical,
+            super::DeviceConfig::default(),
+            "receiver:other:slot:1",
+        );
+        assert!(!canonical.battery.show_in_menu);
+        assert!(!canonical.battery.warn_low);
     }
 
     #[test]
