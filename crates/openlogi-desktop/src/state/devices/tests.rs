@@ -135,7 +135,7 @@ fn cabled_inventory() -> DeviceInventory {
 fn records_from(config: &Config, inventories: &[DeviceInventory]) -> Vec<DeviceRecord> {
     let resolver = AssetResolver::new();
     let list = build_device_list(inventories, &[], &resolver, config, &[]);
-    fold_by_inventory_key(list).into_values().collect()
+    fold_by_inventory_key(config, list).into_values().collect()
 }
 
 #[test]
@@ -192,7 +192,7 @@ fn folding_two_records_of_one_device_keeps_the_online_one() {
             vec![asleep, live]
         };
 
-        let folded = fold_by_inventory_key(list);
+        let folded = fold_by_inventory_key(&Config::default(), list);
         let record = &folded["unit:6be9d300"];
         assert!(record.online, "live_first = {live_first}");
         assert_eq!(
@@ -669,6 +669,139 @@ fn non_direct_keys_have_no_wire_prefix() {
     assert_eq!(direct_key_prefix("2b034"), None);
     assert_eq!(direct_key_prefix("direct:046d:c09d:"), None);
     assert_eq!(direct_key_prefix("direct:046d"), None);
+}
+
+/// Three Easy-Switch channels for one mouse on a Bolt receiver (#1560).
+fn easyswitch_bolt_inventory(
+    serial: Option<&str>,
+    unit_id: [u8; 4],
+    online_slot: Option<u8>,
+) -> DeviceInventory {
+    DeviceInventory {
+        receiver: ReceiverInfo {
+            name: "Bolt Receiver".into(),
+            vendor_id: 0x046d,
+            product_id: 0xc548,
+            unique_id: Some("82839805".into()),
+        },
+        paired: (1..=3)
+            .map(|slot| PairedDevice {
+                slot,
+                codename: Some("MX Master 3S".into()),
+                wpid: None,
+                kind: DeviceKind::Mouse,
+                online: online_slot == Some(slot),
+                battery: None,
+                model_info: Some(DeviceModelInfo {
+                    entity_count: 1,
+                    serial_number: serial.map(str::to_string),
+                    unit_id,
+                    transports: DeviceTransports::default(),
+                    model_ids: [0xb034, 0, 0],
+                    extended_model_id: 2,
+                }),
+                capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn easyswitch_slots_sharing_a_serial_fold_to_the_online_card() {
+    let config = Config::default();
+    let records = records_from(
+        &config,
+        &[easyswitch_bolt_inventory(
+            Some("2412LZ51UZH8"),
+            [0x6b, 0xe9, 0xd3, 0x00],
+            Some(2),
+        )],
+    );
+    assert_eq!(records.len(), 1, "got {records:#?}");
+    assert_eq!(records[0].config_key, "serial:2412lz51uzh8");
+    assert!(records[0].online);
+    assert_eq!(records[0].slot, 2);
+}
+
+#[test]
+fn easyswitch_all_offline_folds_to_one_card_preferring_lowest_slot() {
+    let config = Config::default();
+    let records = records_from(
+        &config,
+        &[easyswitch_bolt_inventory(
+            Some("2412LZ51UZH8"),
+            [0x6b, 0xe9, 0xd3, 0x00],
+            None,
+        )],
+    );
+    assert_eq!(records.len(), 1, "got {records:#?}");
+    assert!(!records[0].online);
+    assert_eq!(records[0].slot, 1);
+}
+
+#[test]
+fn easyswitch_all_offline_prefers_a_linked_route_over_lowest_slot() {
+    let mut config = Config::default();
+    let mut device = DeviceConfig::default();
+    device.links.insert(
+        "receiver:82839805:slot:3".to_string(),
+        LinkConfig::default(),
+    );
+    config
+        .devices
+        .insert("serial:2412lz51uzh8".to_string(), device);
+
+    let records = records_from(
+        &config,
+        &[easyswitch_bolt_inventory(
+            Some("2412LZ51UZH8"),
+            [0x6b, 0xe9, 0xd3, 0x00],
+            None,
+        )],
+    );
+    assert_eq!(records.len(), 1, "got {records:#?}");
+    assert_eq!(records[0].slot, 3);
+    assert_eq!(records[0].route_key, "receiver:82839805:slot:3");
+}
+
+#[test]
+fn easyswitch_slots_with_different_serials_stay_separate() {
+    let config = Config::default();
+    let mut inventory = easyswitch_bolt_inventory(Some("AAAA"), [1, 0, 0, 0], Some(1));
+    inventory.paired[1]
+        .model_info
+        .as_mut()
+        .unwrap()
+        .serial_number = Some("BBBB".into());
+    inventory.paired[1].model_info.as_mut().unwrap().unit_id = [2, 0, 0, 0];
+    inventory.paired[2]
+        .model_info
+        .as_mut()
+        .unwrap()
+        .serial_number = Some("CCCC".into());
+    inventory.paired[2].model_info.as_mut().unwrap().unit_id = [3, 0, 0, 0];
+
+    let records = records_from(&config, &[inventory]);
+    assert_eq!(records.len(), 3, "got {records:#?}");
+}
+
+#[test]
+fn zero_unit_offline_bolt_slots_stay_route_keyed() {
+    // No serial, all-zero unit: each offline slot keeps its receiver key and
+    // must not collapse into one phantom device.
+    let config = Config::default();
+    let records = records_from(&config, &[easyswitch_bolt_inventory(None, [0; 4], None)]);
+    assert_eq!(records.len(), 3, "got {records:#?}");
+    let mut keys: Vec<_> = records.iter().map(|r| r.config_key.as_str()).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "receiver:82839805:slot:1",
+            "receiver:82839805:slot:2",
+            "receiver:82839805:slot:3",
+        ]
+    );
 }
 
 #[test]
