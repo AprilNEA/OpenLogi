@@ -21,6 +21,9 @@ use openlogi_core::scroll::ScrollDelta;
 #[cfg(target_os = "macos")]
 mod macos;
 
+#[cfg(any(target_os = "macos", test))]
+mod space_switch;
+
 #[cfg(target_os = "linux")]
 mod linux;
 
@@ -239,6 +242,11 @@ fn run_workflow(steps: &[WorkflowStep]) {
 /// `SetDpiPreset`, `ToggleSmartShift`) have no CGEvent equivalent and are
 /// handled at the hook/HID layer, logging a trace here.
 ///
+/// macOS `PreviousDesktop` / `NextDesktop` run on a dedicated worker: they
+/// send a DockSwipe and confirm the pointer display's Space without modifying
+/// system shortcuts. Overlapping requests are skipped, not queued. The caller
+/// must keep the process alive for confirmation; this function does not wait.
+///
 /// On Linux, key and scroll events are injected via a lazily-created `uinput`
 /// virtual device. Mouse clicks inject `BTN_*` events. macOS-only window
 /// manager actions (`MissionControl`, `AppExpose`, `ShowDesktop`,
@@ -256,6 +264,11 @@ fn run_workflow(steps: &[WorkflowStep]) {
 /// immediately — the binary compiles clean on all targets.
 ///
 /// # Manual verification
+///
+/// For macOS Space switching, use the opt-in native test in a logged-in session
+/// with Accessibility granted to the test host and a right-hand adjacent Space:
+/// `cargo test -p openlogi-inject interactive_next_space -- --ignored --nocapture`.
+/// This actually switches the pointer's display one Space to the right.
 ///
 /// `execute` is intentionally excluded from the automated test suite because
 /// it would need to intercept the OS event queue. Smoke-test it manually:

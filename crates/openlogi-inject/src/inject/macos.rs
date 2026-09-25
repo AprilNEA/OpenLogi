@@ -13,8 +13,7 @@ use openlogi_core::config::FunctionKey;
 
 use super::{HeldKey, HeldModifiers, KeyPhase};
 
-/// Shared resolver for private ApplicationServices SPI used by the Dock and
-/// symbolic-hotkey helpers.
+/// Shared resolver for private ApplicationServices and SkyLight SPI.
 #[expect(
     unsafe_code,
     reason = "private ApplicationServices SPI symbols are resolved via dlopen/dlsym FFI"
@@ -39,17 +38,12 @@ mod browser;
 )]
 mod dock;
 mod scroll;
-/// macOS Space switching actions.
-///
-/// Use the system symbolic hotkey records for "Move left a space" (79) and
-/// "Move right a space" (81). That respects the user's configured shortcut
-/// instead of assuming Ctrl+Left/Right, and temporarily enables the symbolic
-/// hotkey when the user has disabled it.
+/// DockSwipe events with read-only, per-display Space confirmation.
 #[expect(
     unsafe_code,
-    reason = "CGS symbolic hotkey SPI is only reachable via dlopen/dlsym FFI"
+    reason = "read-only SkyLight SPI and AppKit notification registration require FFI"
 )]
-mod symbolic_hotkey;
+mod spaces;
 #[cfg(test)]
 mod tests;
 
@@ -58,7 +52,7 @@ pub(super) use browser::ax_browser_navigate;
 use dock::{app_expose, launchpad, mission_control, show_desktop};
 use scroll::dispatch_scroll;
 pub(super) use scroll::{post_scroll, post_smooth_scroll};
-use symbolic_hotkey::{next_desktop, previous_desktop};
+use spaces::{next_desktop, previous_desktop};
 
 // NX_KEYTYPE_* constants from <IOKit/hidsystem/ev_keymap.h>.
 const NX_KEYTYPE_SOUND_UP: i32 = 0;
