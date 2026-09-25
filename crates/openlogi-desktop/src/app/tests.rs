@@ -225,6 +225,7 @@ fn gallery_order_moves_connected_devices_first_stably() {
 fn tabs_follow_capabilities_not_kind() {
     let caps = Some(Capabilities {
         buttons: true,
+        no_button_diversion: false,
         pointer: true,
         lighting: false,
         scroll_inversion: false,
@@ -241,6 +242,69 @@ fn tabs_follow_capabilities_not_kind() {
     assert!(!tabs.contains(&DetailTab::Lighting));
 }
 
+/// A G-series *keyboard* reports `buttons` from the same gaming tables a
+/// G502 does, but the function-row remapper has no OS-hook fallback — it
+/// diverts every key over `0x1b04`. Offering Keys here would open a panel
+/// whose capture session bails on the missing feature and re-arms forever.
+///
+/// The feature list is a real G713 dump (#886). It carries `0x8100` without
+/// `0x8110`, so one gaming table is enough to set `buttons`, and the gate
+/// that withholds Keys is `can_divert_buttons`, not `buttons`.
+#[test]
+fn gaming_keyboard_gets_no_keys_tab() {
+    let g713 = Capabilities::from_feature_ids(&[
+        0x0000, 0x0001, 0x0003, 0x0005, 0x0020, 0x8071, 0x8081, 0x1bc0, 0x40a3, 0x4522, 0x4540,
+        0x8010, 0x8040, 0x8100, 0x8060, 0x00c2, 0x00d0,
+    ]);
+    assert!(g713.buttons, "the gaming tables must still set `buttons`");
+    let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, Some(g713)));
+    assert!(
+        !tabs.contains(&DetailTab::Keys),
+        "a keyboard that cannot divert its keys must not be offered the remapper"
+    );
+    assert!(tabs.contains(&DetailTab::Lighting));
+}
+
+/// A G-series mouse carries `0x8100` OnboardProfiles and no `0x1b04`, so it
+/// has `buttons` without `can_divert_buttons()`. The OS hook still remaps
+/// its middle/back/forward, and `ShowActionsRing` dispatches from those same
+/// buttons — so both panels appear. Requiring ReprogControls left every
+/// gaming mouse with no way to bind anything at all (#392, #730, #877).
+#[test]
+fn mouse_without_reprogcontrols_still_gets_buttons_and_ring() {
+    let caps = Some(Capabilities {
+        buttons: true,
+        no_button_diversion: true,
+        pointer: true,
+        lighting: false,
+        scroll_inversion: false,
+        hires_wheel: true,
+        thumbwheel: false,
+        haptic_feedback: false,
+        haptic_panel: false,
+        dpi_gestures: false,
+    });
+    let tabs = DetailTab::tabs_for(&record(DeviceKind::Mouse, caps));
+    assert!(tabs.contains(&DetailTab::Buttons));
+    assert!(tabs.contains(&DetailTab::ActionsRing));
+    assert!(tabs.contains(&DetailTab::Pointer));
+}
+
+/// The panels are for pointer devices only. A keyboard with no
+/// ReprogControls must not gain a mouse-model panel from the same change.
+#[test]
+fn keyboard_without_reprogcontrols_gains_no_mouse_panels() {
+    let caps = Some(Capabilities {
+        buttons: false,
+        lighting: true,
+        ..Capabilities::default()
+    });
+    let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
+    assert!(!tabs.contains(&DetailTab::Buttons));
+    assert!(!tabs.contains(&DetailTab::ActionsRing));
+    assert!(!tabs.contains(&DetailTab::Keys));
+}
+
 /// A keyboard that exposes ReprogControls (buttons=true) but has no resolved
 /// asset should not get the mouse-model Buttons panel — the generic mouse
 /// hotspot layout (Middle Click, DPI Toggle, …) is wrong for a keyboard.
@@ -248,6 +312,7 @@ fn tabs_follow_capabilities_not_kind() {
 fn keyboard_without_asset_hides_buttons_tab() {
     let caps = Some(Capabilities {
         buttons: true,
+        no_button_diversion: false,
         pointer: false,
         lighting: true,
         scroll_inversion: false,
@@ -269,6 +334,7 @@ fn keyboard_without_asset_hides_buttons_tab() {
 fn keyboard_with_buttons_shows_keys_tab() {
     let caps = Some(Capabilities {
         buttons: true,
+        no_button_diversion: false,
         pointer: false,
         lighting: true,
         scroll_inversion: false,

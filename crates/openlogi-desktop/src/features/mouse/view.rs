@@ -14,12 +14,16 @@ use gpui_component::{
     v_flex,
 };
 use openlogi_core::binding::{Action, ButtonId, GestureDirection};
+use openlogi_core::device::DeviceKind;
 
 use super::geometry::{
     LabelDistribution, asset_dimensions_for_png, asset_has_button_labels, asset_hotspots_for_png,
     default_labels, labels_from_hotspots,
 };
-use super::hotspots::{Hotspot, MOUSE_MODEL_SIZE, MouseControlId, default_hotspots};
+use super::hotspots::{
+    Hotspot, MOUSE_MODEL_SIZE, ModelControls, MouseControlId, default_hotspots,
+    retain_remappable_hotspots,
+};
 use super::inspector::{BindingInspectorData, binding_inspector};
 use super::leader_lines::{Geometry as LeaderGeometry, Label, paint as paint_leader_lines};
 use crate::app::{glow_canvas, keyboard_glow};
@@ -63,7 +67,7 @@ struct MouseWorkspaceData<'a> {
     bindings: &'a BTreeMap<ButtonId, Action>,
     gesture_maps: &'a BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
     glow: Option<(Arc<GlowGeometry>, Hsla)>,
-    thumbwheel: bool,
+    controls: ModelControls,
     dpi_gestures: bool,
     editing_app: Option<String>,
     overridden: Option<&'a BTreeMap<ButtonId, Action>>,
@@ -84,10 +88,10 @@ impl<'a> MouseWorkspaceData<'a> {
             glow: state
                 .current_record()
                 .and_then(|record| keyboard_glow(state, record)),
-            thumbwheel: state
-                .current_record()
-                .and_then(|record| record.capabilities)
-                .is_some_and(|capabilities| capabilities.thumbwheel),
+            controls: state.current_record().map_or_else(
+                || ModelControls::for_device(None, DeviceKind::Mouse),
+                |record| ModelControls::for_device(record.capabilities, record.kind),
+            ),
             dpi_gestures: state
                 .current_record()
                 .and_then(|record| record.capabilities)
@@ -112,7 +116,10 @@ impl<'a> MouseWorkspaceData<'a> {
             bindings,
             gesture_maps,
             glow: None,
-            thumbwheel: false,
+            // No device at all: presume the same full model the tab gate
+            // presumes for an unprobed mouse, rather than the empty `Default`,
+            // which would read as undivertable and silently filter the diagram.
+            controls: ModelControls::for_device(None, DeviceKind::Mouse),
             dpi_gestures: false,
             editing_app: None,
             overridden: None,
@@ -237,7 +244,7 @@ impl Render for MouseModelView {
             bindings,
             gesture_maps,
             glow,
-            thumbwheel,
+            controls,
             dpi_gestures,
             editing_app,
             overridden,
@@ -264,7 +271,7 @@ impl Render for MouseModelView {
             mouse_h,
             hotspots,
             labels,
-        } = model_layout(asset, viewport_w, viewport_h, thumbwheel);
+        } = model_layout(asset, viewport_w, viewport_h, controls);
         let canvas_h = mouse_h;
 
         let highlight = self.hovered.or(active).or(self.selected);
@@ -380,7 +387,7 @@ fn model_layout(
     asset: Option<&ResolvedAsset>,
     viewport_w: f32,
     viewport_h: f32,
-    thumbwheel: bool,
+    controls: ModelControls,
 ) -> ModelLayout {
     let target_h = (viewport_h - MODEL_VERTICAL_RESERVE).clamp(MODEL_MIN_H, MOUSE_MODEL_SIZE.1);
     let has_labels = asset.is_none_or(asset_has_button_labels) && viewport_w >= 960.;
@@ -399,7 +406,7 @@ fn model_layout(
     };
     let max_image_w = (content_w - left_gutter - right_gutter).max(MODEL_MIN_CONTENT_W / 2.);
     let (mouse_w, mouse_h, hotspots, mut labels) =
-        scaled_model(asset, target_h, max_image_w, thumbwheel, label_distribution);
+        scaled_model(asset, target_h, max_image_w, controls, label_distribution);
     if !has_labels {
         labels.clear();
     }
@@ -422,17 +429,20 @@ fn scaled_model(
     asset: Option<&ResolvedAsset>,
     target_h: f32,
     max_w: f32,
-    thumbwheel: bool,
+    controls: ModelControls,
     label_distribution: LabelDistribution,
 ) -> (f32, f32, Vec<Hotspot>, Vec<Label>) {
+    let thumbwheel = controls.thumbwheel;
     if let Some(a) = asset {
         let (w, h) = asset_dimensions_for_png(a, target_h, max_w);
-        let hotspots = asset_hotspots_for_png(a, w, h);
+        let mut hotspots = asset_hotspots_for_png(a, w, h);
+        retain_remappable_hotspots(&mut hotspots, controls.can_divert);
+        // Derived from the surviving hotspots, so the labels can't outlive them.
         let labels = labels_from_hotspots(&hotspots, h, label_distribution);
         (w, h, hotspots, labels)
     } else {
         let scale = (target_h / MOUSE_MODEL_SIZE.1).min(max_w / MOUSE_MODEL_SIZE.0);
-        let hotspots = default_hotspots(thumbwheel)
+        let mut hotspots: Vec<Hotspot> = default_hotspots(thumbwheel)
             .into_iter()
             .map(|hs| Hotspot {
                 x: hs.x * scale,
@@ -442,8 +452,13 @@ fn scaled_model(
                 ..hs
             })
             .collect();
+        retain_remappable_hotspots(&mut hotspots, controls.can_divert);
+        // The synthetic layout authors its labels independently of its
+        // hotspots, so a filtered model has to drop the orphans itself or the
+        // leader lines point at controls that are no longer drawn.
         let labels = default_labels(thumbwheel, label_distribution)
             .into_iter()
+            .filter(|label| hotspots.iter().any(|hotspot| hotspot.id == label.id))
             .map(|l| Label {
                 y: l.y * scale,
                 ..l
