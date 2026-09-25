@@ -347,6 +347,7 @@ mod format_tests {
     fn battery_info_is_embedded_when_present() {
         let mut d = base_device();
         d.battery = Some(BatteryInfo {
+            freshness: openlogi_core::device::BatteryFreshness::Current,
             percentage: Some(42),
             level: BatteryLevel::Low,
             status: BatteryStatus::Discharging,
@@ -370,6 +371,7 @@ mod format_tests {
         // `ChargingSlow`'s Debug form has no separator; lowercasing alone
         // yields "chargingslow", not "charging_slow" or "charging slow".
         let b = BatteryInfo {
+            freshness: openlogi_core::device::BatteryFreshness::Current,
             percentage: Some(10),
             level: BatteryLevel::Critical,
             status: BatteryStatus::ChargingSlow,

@@ -566,6 +566,7 @@ mod tests {
                     connection: ConnectionKind::BoltReceiver,
                     online: true,
                     battery: Some(BatteryInfo {
+                        freshness: crate::device::BatteryFreshness::Current,
                         percentage: Some(80),
                         level: BatteryLevel::Good,
                         status: BatteryStatus::Discharging,
