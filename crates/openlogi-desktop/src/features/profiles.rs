@@ -10,7 +10,8 @@ use std::rc::Rc;
 use gpui::{App, Entity, ParentElement, Styled, Window, div};
 use gpui_component::{WindowExt as _, button::ButtonVariant, dialog::DialogButtonProps, h_flex};
 
-pub(crate) use self::catalog::{AppCatalogPicker, ProfileIconCache};
+pub(crate) use self::catalog::{AppCatalogPicker, ApplicationIconState, ProfileIconCache};
+pub(crate) use self::picker::application_popover;
 use self::shell::ProfileScopeShell;
 use crate::state::{AppState, DeviceKey};
 use crate::ui::theme::{self, Typography as _};
@@ -18,6 +19,7 @@ use crate::ui::theme::{self, Typography as _};
 #[derive(Clone)]
 pub(super) struct ProfileChoice {
     pub(super) app: String,
+    pub(super) launch_target: Option<String>,
     pub(super) name: String,
     pub(super) persisted: bool,
 }
@@ -101,6 +103,7 @@ pub(crate) fn button_profile_scope_bar(
         .app_profiles()
         .map(|(app, _)| ProfileChoice {
             app: app.to_string(),
+            launch_target: None,
             name: state
                 .recent_app_name(app)
                 .map_or_else(|| friendly_app_name(app), str::to_string),
@@ -156,6 +159,7 @@ pub(crate) fn action_ring_profile_scope_bar(
         .keys()
         .map(|app| ProfileChoice {
             app: app.clone(),
+            launch_target: None,
             name: state
                 .recent_app_name(app)
                 .map_or_else(|| friendly_app_name(app), str::to_string),
@@ -203,6 +207,7 @@ fn profile_scope_model(
     {
         profiles.push(ProfileChoice {
             app: app.to_string(),
+            launch_target: None,
             name: recent_apps
                 .iter()
                 .find(|(identifier, _)| identifier == app)
@@ -225,6 +230,7 @@ fn profile_scope_model(
         })
         .map(|(app, name)| ProfileChoice {
             app: app.clone(),
+            launch_target: None,
             name: name.clone(),
             persisted: false,
         })

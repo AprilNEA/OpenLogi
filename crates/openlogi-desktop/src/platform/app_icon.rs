@@ -6,6 +6,7 @@
 //! cosmetic — the app keeps the icon it was signed with — never fatal.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use openlogi_core::config::AppIcon;
 use tracing::{debug, warn};
@@ -54,6 +55,73 @@ impl AppIconExt for AppIcon {
 
     fn preview(self) -> Option<PathBuf> {
         bundled_icon(self, "png")
+    }
+}
+
+/// Resolve the installed application's icon for a profile identifier or app path.
+///
+/// Exact app paths use the icon for that file. Profile identifiers resolve
+/// through the application registry. The lookup does blocking platform work —
+/// callers run it on the background executor, never on the render path.
+#[must_use]
+pub fn application_icon(identifier: &str) -> Option<Arc<gpui::RenderImage>> {
+    #[cfg(target_os = "macos")]
+    {
+        use appcatalog::{ApplicationIdentity, IdentityKind};
+
+        /// Pixel edge of the fetched rendition: comfortably above the 18 pt
+        /// display size at 2× scale, far below the 1024 px source renditions.
+        const ICON_EDGE: u32 = 64;
+
+        if let Some(icon) = openlogi_ui::application_icon::application_icon(identifier, ICON_EDGE) {
+            return Some(icon);
+        }
+        let identity =
+            ApplicationIdentity::new(IdentityKind::MacBundleIdentifier, identifier.to_string());
+        let icon = match appcatalog::application_icon(&identity, ICON_EDGE) {
+            Ok(icon) => icon?,
+            Err(error) => {
+                warn!(%identifier, %error, "could not render the application icon");
+                return None;
+            }
+        };
+        openlogi_ui::image::render_image_from_rgba(icon.width(), icon.height(), icon.into_rgba())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = identifier;
+        None
+    }
+}
+
+/// Resolve an observed application identifier to its launch path.
+///
+/// The lookup is blocking and must run on the background executor.
+#[must_use]
+pub fn application_path(identifier: &str) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::rc::autoreleasepool;
+        use objc2_app_kit::NSWorkspace;
+        use objc2_foundation::NSString;
+
+        autoreleasepool(|_| {
+            let identifier = NSString::from_str(identifier);
+            NSWorkspace::sharedWorkspace()
+                .URLForApplicationWithBundleIdentifier(&identifier)?
+                .path()
+                .map(|path| path.to_string())
+        })
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let path = std::path::Path::new(identifier);
+        (path.is_absolute() && path.is_file()).then(|| identifier.to_string())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = identifier;
+        None
     }
 }
 
