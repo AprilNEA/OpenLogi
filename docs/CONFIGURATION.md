@@ -121,7 +121,9 @@ observes an already-low device. The episode only resets after a current reading
 above 25%; reconnecting, restarting, or briefly charging does not reset it.
 Notification delivery respects the operating system's notification permissions.
 Warning history is stored in `battery-warnings.json` in the profile's state
-directory. Devices without a stable physical identity use session-only history.
+directory. Devices without their own serial or unit ID use session-only history.
+That history is discarded when the pairing disappears or its reported model changes;
+an offline device that remains paired keeps its history.
 
 
 ## Actions
