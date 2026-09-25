@@ -16,8 +16,7 @@ use openlogi_core::config::FunctionKey;
 
 use super::{HeldKey, HeldModifiers, KeyPhase};
 
-/// Shared resolver for private ApplicationServices SPI used by the Dock and
-/// symbolic-hotkey helpers.
+/// Shared resolver for private ApplicationServices and SkyLight SPI.
 #[expect(
     unsafe_code,
     reason = "private ApplicationServices SPI symbols are resolved via dlopen/dlsym FFI"
@@ -58,8 +57,13 @@ mod main_thread;
 )]
 mod menu_shortcut;
 mod scroll;
-/// Space switching and screenshots, posted through their system symbolic
-/// hotkey records ("Move left/right a space", the screenshot shortcuts).
+/// DockSwipe events with read-only, per-display Space confirmation.
+#[expect(
+    unsafe_code,
+    reason = "read-only SkyLight SPI and AppKit notification registration require FFI"
+)]
+mod spaces;
+/// Screenshots, posted through their system symbolic hotkey records.
 ///
 /// That respects the user's configured shortcut instead of assuming one, is
 /// independent of the keyboard layout because each record names a physical
@@ -79,7 +83,8 @@ use keyboard_layout::layout_key;
 use menu_shortcut::{MenuPress, MenuShortcut};
 use scroll::dispatch_scroll;
 pub(super) use scroll::{post_scroll, post_smooth_scroll};
-use symbolic_hotkey::{capture_region, next_desktop, previous_desktop, screenshot};
+use spaces::{next_desktop, previous_desktop};
+use symbolic_hotkey::{capture_region, screenshot};
 
 // NX_KEYTYPE_* constants from <IOKit/hidsystem/ev_keymap.h>.
 const NX_KEYTYPE_SOUND_UP: i32 = 0;
