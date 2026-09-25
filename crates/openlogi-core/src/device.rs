@@ -234,6 +234,32 @@ pub struct BatteryInfo {
     pub status: BatteryStatus,
 }
 
+/// Agent-owned status of the experimental macOS battery publisher.
+/// Variants are append-only because this type crosses the IPC boundary.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BatteryWidgetStatus {
+    /// The user has not enabled the integration.
+    #[default]
+    Disabled,
+    /// The platform cannot provide the required native functions.
+    Unavailable {
+        /// Explanation suitable for display beside the setting.
+        reason: String,
+    },
+    /// The publisher is available and has processed the current inventory.
+    Active {
+        /// Number of accessory power sources currently registered with macOS.
+        published_devices: usize,
+    },
+    /// At least one native operation failed; other devices may remain published.
+    Failed {
+        /// Number of accessory power sources still registered with macOS.
+        published_devices: usize,
+        /// Explanation suitable for display beside the setting.
+        reason: String,
+    },
+}
+
 /// Identity of an enumerated receiver — no paired-device state (that lives
 /// in [`DeviceInventory::paired`]). For a direct (Bluetooth/wired) device,
 /// a synthetic entry mirroring the device's own HID identity fills this role.

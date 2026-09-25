@@ -497,6 +497,7 @@ mod tests {
                 agent_version: "observe-loop-test".to_owned(),
                 input_monitoring_granted: true,
                 hid_open_failures: false,
+                battery_widget: openlogi_core::device::BatteryWidgetStatus::Disabled,
             },
             inventory: Vec::new(),
             standalone: Vec::new(),

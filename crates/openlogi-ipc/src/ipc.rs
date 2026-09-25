@@ -15,7 +15,7 @@ use std::time::Duration;
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
 use openlogi_core::config::Lighting;
-use openlogi_core::device::{DeviceInventory, StandaloneDevice};
+use openlogi_core::device::{BatteryWidgetStatus, DeviceInventory, StandaloneDevice};
 use openlogi_core::hid::{
     BacklightState, DeviceRoute, Dpi, DpiInfo, LightCommand, PairingError, PasskeyMethod,
     ReceiverSelector, ScrollWheelMode, SmartShiftStatus, WriteError,
@@ -63,7 +63,8 @@ pub use succession::Identity;
 ///      the macOS dormancy gate.
 /// v30: `Agent::read_wheel` and `Agent::read_backlight` appended.
 /// v31: `Capabilities::dpi_gestures` appended.
-pub const PROTOCOL_VERSION: u32 = 31;
+/// v32: `AgentStatus::battery_widget` appended.
+pub const PROTOCOL_VERSION: u32 = 32;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -120,6 +121,8 @@ pub struct AgentStatus {
     /// node. Paired with [`Self::input_monitoring_granted`] it distinguishes
     /// a missing grant from an exclusive open or a stale permission session.
     pub hid_open_failures: bool,
+    /// Experimental macOS battery publisher state, including partial failures.
+    pub battery_widget: BatteryWidgetStatus,
 }
 
 /// Status and inventory as one poll result. Kept together so the GUI never

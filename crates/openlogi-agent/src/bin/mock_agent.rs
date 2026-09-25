@@ -637,6 +637,7 @@ fn agent_status() -> AgentStatus {
         agent_version: concat!(env!("CARGO_PKG_VERSION"), "-mock").to_string(),
         input_monitoring_granted: true,
         hid_open_failures: false,
+        battery_widget: openlogi_core::device::BatteryWidgetStatus::Disabled,
     }
 }
 

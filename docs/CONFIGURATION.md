@@ -45,6 +45,8 @@ optional physical device key.
 - `asset_source`: `automatic`, `openlogi`, `cloudflare`, or `fastly`
 - `language`, `appearance`, `device_view_mode` (`grid`, `list`, or `carousel`),
   optional theme names, and optional UI radius
+- `macos_battery_widget`: experimental macOS Batteries widget integration for
+  Bolt/Unifying mice and keyboards, off by default; ignored on other platforms
 - `smooth_scroll` toggles finite animation for traditional mouse-wheel input
 - `vertical_scroll_sensitivity`, from `1` through `100` (`14` is 1×);
   continuous trackpad input remains native
@@ -94,6 +96,42 @@ Common device fields are:
 `[keyboard.bindings]` contains global key triggers such as `f1` or
 `shift+command+f5`. Supported trigger modifiers are `shift`, `control`,
 `option`, and `command`; aliases such as `ctrl`, `alt`, and `cmd` are accepted.
+
+## macOS Batteries widget
+
+In Settings > General, enable **Show batteries in macOS widget** to publish
+battery readings from mice and keyboards connected through Bolt or Unifying
+receivers. The card reports the agent's live publication status and device count.
+The option is off by default and is only shown on macOS.
+
+Alternatively, set `macos_battery_widget = true` in the existing `[app_settings]`
+section. After a hand edit, reopen the GUI to reload the file.
+Configuration reloads take effect without restarting the agent, including
+switching the feature off and changing a device's custom name.
+
+The integration uses private Apple IOKit functions. It is experimental and
+may stop working after a macOS update. The agent loads the functions only
+when enabled; unavailable functions and publication failures do not disable
+button remapping or other agent features. It targets OpenLogi's macOS 13+
+range, but symbol availability alone does not prove widget compatibility on
+an untested macOS version.
+
+Direct Bluetooth devices are left to macOS. Lightspeed receivers, wired
+devices, and other accessory categories are outside this integration's scope.
+Battery percentages use OpenLogi's existing readings, including estimates
+for devices that only report voltage. Apple's widget cannot label those
+values as estimates. A missing reading is never converted into a zero-percent
+battery. Apple's widget controls its icons, ordering, and visible device count.
+
+After OpenLogi marks an accessory offline or absent, its last reading remains
+visible for five minutes. An online device without a new battery reading does
+not start that timer. Reconnection cancels the pending removal. Turning the
+feature off or exiting the agent releases its power-source registrations.
+
+The agent exposes the actual integration status and published device count
+through IPC. An unavailable SPI and registration errors have separate states.
+`pmset -g accps` lists the registered accessory sources even when the selected
+widget size cannot display all of them.
 
 ## Actions
 
