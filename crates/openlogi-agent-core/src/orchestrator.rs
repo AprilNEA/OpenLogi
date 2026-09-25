@@ -45,8 +45,9 @@ use crate::{DpiCycleState, DpiCycles};
 mod devices;
 
 #[cfg(test)]
-use devices::{VOLATILE_REAPPLY_CONFIRM_RETRIES, reapply_targets};
+use devices::reapply_targets;
 use devices::{
+    RECONNECT_REAPPLY_CONFIRM_RETRIES, VOLATILE_REAPPLY_CONFIRM_RETRIES,
     any_device_needs_capture_rearm, build_devices, configured_wheel_mode, host_switch_links,
     is_hidpp_device, pick_current, plan_reapply, stable_id,
 };
@@ -180,10 +181,13 @@ pub struct Orchestrator {
     /// the distinction (as [`InventoryHealth`]) so the GUI can tell them
     /// apart.
     inventory: InventoryState,
-    /// Set after a system wake: devices may have power-cycled while their
-    /// set/route/online state looks identical across the sleep gap, so the
-    /// next refresh re-applies volatile settings to every online device.
-    reapply_all_next_refresh: bool,
+    /// Set after a system wake or a device's own reconnect broadcast: devices
+    /// may have power-cycled while their set/route/online state looks
+    /// identical across the gap, so the next refresh re-applies volatile
+    /// settings to every online device. The value is the confirming re-apply
+    /// budget the forced targets are queued with — a system wake keeps the
+    /// boot-race ladder, a device reconnect needs only a link-race confirm.
+    forced_reapply_budget: Option<u8>,
     /// Whether the last enumeration pass failed to open HID++ nodes; published
     /// atomically with the inventory so no observation pairs a fresh device
     /// set with a stale flag.
@@ -283,7 +287,7 @@ impl Orchestrator {
                 target: openlogi_hook::PointerTarget::Unavailable,
             },
             inventory: InventoryState::Pending,
-            reapply_all_next_refresh: false,
+            forced_reapply_budget: None,
             hid_open_failures: false,
             reapply_followup: HashMap::new(),
             camera_active: None,
@@ -562,14 +566,15 @@ impl Orchestrator {
         // wheel mode) live in device RAM and reset on a power cycle. Every
         // reconnect shape re-applies the persisted values (#189): a first
         // sighting, a replug (new route), a wake from device sleep
-        // (offline→online), or — via the
-        // flag — a system wake where none of those are observable.
-        let reapply_all = std::mem::take(&mut self.reapply_all_next_refresh);
+        // (offline→online), or — via the forced budget — a system wake or a
+        // device's own `0x1d4b` reconnect broadcast, where none of those
+        // transitions are observable.
+        let forced = self.forced_reapply_budget.take();
         let next_current = pick_current(&devices, self.config.selected_device());
-        let rearm_capture = any_device_needs_capture_rearm(&self.devices, &devices, reapply_all);
+        let rearm_capture =
+            any_device_needs_capture_rearm(&self.devices, &devices, forced.is_some());
         let followup = std::mem::take(&mut self.reapply_followup);
-        let (targets, next_followup) =
-            plan_reapply(&self.devices, &devices, &followup, reapply_all);
+        let (targets, next_followup) = plan_reapply(&self.devices, &devices, &followup, forced);
         self.reapply_followup = next_followup;
         for idx in targets {
             self.reapply_volatile_settings(&devices[idx]);
@@ -619,7 +624,28 @@ impl Orchestrator {
     /// can look identical to the last pre-sleep one (same set, same routes,
     /// already online), so the per-device transition triggers never fire.
     pub fn reapply_volatile_on_next_refresh(&mut self) {
-        self.reapply_all_next_refresh = true;
+        self.force_reapply(VOLATILE_REAPPLY_CONFIRM_RETRIES);
+    }
+
+    /// Force a volatile-settings re-apply on the next inventory refresh
+    /// because a device broadcast its own reconnection (`0x1d4b`). The
+    /// firmware is explicitly asking to be reconfigured, and — as after a
+    /// system wake — the snapshot that follows can look identical to the last
+    /// one (a nap short enough that no reconciliation ever observed the
+    /// device offline), so the offline→online trigger cannot be relied on.
+    /// The event channel is identity-free by design, so every online device
+    /// re-applies; the writes are idempotent and the confirm budget is the
+    /// short link-race one, not the boot ladder.
+    pub fn reapply_reconnected_on_next_refresh(&mut self) {
+        self.force_reapply(RECONNECT_REAPPLY_CONFIRM_RETRIES);
+    }
+
+    /// Coalesce forced re-apply requests, keeping the largest confirm budget:
+    /// a device reconnect arriving between a system wake and its snapshot must
+    /// not shrink the wake's boot-race ladder.
+    fn force_reapply(&mut self, confirm_retries: u8) {
+        self.forced_reapply_budget =
+            Some(self.forced_reapply_budget.unwrap_or(0).max(confirm_retries));
     }
 
     /// Push the persisted volatile settings (lighting, sensor DPI, SmartShift,
