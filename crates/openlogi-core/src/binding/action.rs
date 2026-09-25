@@ -187,6 +187,10 @@ pub enum Action {
     /// cancellation and shutdown. Dispatchers without a release context must
     /// degrade this action to a balanced tap rather than leave keys held.
     HoldShortcut(KeyCombo),
+    /// Trigger the native macOS Smart Zoom gesture at the pointer location.
+    /// This is the same semantic action as a two-finger double-tap on a
+    /// trackpad; supported applications decide how the content toggles.
+    SmartZoom,
 }
 
 /// One step in a [`Action::Workflow`]. A workflow is a `Vec<WorkflowStep>`
@@ -216,8 +220,9 @@ pub enum WorkflowStep {
 /// X-macro table of every payload-free [`Action`] variant.
 ///
 /// Each row is `Variant "Label" "i18n.key" Category Icon`, optionally followed
-/// by `not_pickable` for a row [`Action::catalog`] must omit. This is the single
-/// place a plain action is declared; payload-carrying variants (`SetDpiPreset`,
+/// by a catalog policy: `not_pickable` omits the row everywhere, while
+/// `macos_only` exposes it only in macOS builds. This is the single place a
+/// plain action is declared; payload-carrying variants (`SetDpiPreset`,
 /// `CustomShortcut`, …) build their label/category/icon from their payload and
 /// keep hand-written arms alongside the generated ones instead.
 ///
@@ -263,6 +268,7 @@ macro_rules! for_each_unit_action {
             NextDesktop "Next Desktop" "actions.next_desktop" Navigation NextDesktop,
             ShowDesktop "Show Desktop" "actions.show_desktop" Navigation Monitor,
             LaunchpadShow "Launchpad" "actions.launchpad" Navigation Applications,
+            SmartZoom "Smart Zoom" "actions.smart_zoom" Navigation Search macos_only,
             // System
             None "Do Nothing" "pointer.do_nothing" System Ban,
             LockScreen "Lock Screen" "actions.lock_screen" System Lock,
@@ -372,7 +378,11 @@ macro_rules! derive_action_core {
             ///
             /// [`Action::CustomShortcut`] is intentionally excluded — it is opened via
             /// "Record shortcut…" (P1.3), not selected from the catalog. Table rows
-            /// tagged `not_pickable` are excluded from the catalog the same way.
+            /// tagged `not_pickable` (currently only [`Action::ShowActionsRing`], the
+            /// fixed default for [`ButtonId::HapticPanel`](super::ButtonId::HapticPanel))
+            /// are excluded from the catalog the same way. Rows tagged `macos_only`
+            /// remain serializable on every platform for config portability, but are
+            /// offered by the picker only when compiled for macOS.
             #[must_use]
             pub fn catalog() -> Vec<Action> {
                 [ $( derive_action_core!(@item $variant $( $tag )?) ),* ]
@@ -387,6 +397,9 @@ macro_rules! derive_action_core {
     };
     (@item $variant:ident not_pickable) => {
         None
+    };
+    (@item $variant:ident macos_only) => {
+        cfg!(target_os = "macos").then_some(Action::$variant)
     };
 }
 
