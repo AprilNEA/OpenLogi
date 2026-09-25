@@ -639,9 +639,7 @@ fn device_tab(cx: &mut Context<AppView>) -> impl IntoElement {
 fn battery_preferences_card(pal: Palette, cx: &mut Context<AppView>) -> Option<impl IntoElement> {
     let state = AppState::try_read(cx)?;
     let record = state.current_record()?;
-    // Raw-HID lights and cameras do not report batteries. HID++ devices may
-    // have no current reading while asleep, but retain their preferences.
-    if matches!(record.kind, DeviceKind::Camera | DeviceKind::Light) {
+    if !state.battery_preferences_available(record) {
         return None;
     }
     let key = record.device_key();
