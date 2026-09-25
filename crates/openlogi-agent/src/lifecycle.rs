@@ -30,6 +30,7 @@ use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedHandles};
 use openlogi_agent_core::runtime::hook;
 use openlogi_agent_core::watchers::foreground_app::ForegroundUpdate;
+use openlogi_agent_core::watchers::input_monitoring::{Access, needs_successor};
 use openlogi_agent_core::watchers::inventory::{InventoryEvent, InventoryRefresh};
 use openlogi_core::config::Config;
 use openlogi_hook::Hook;
@@ -236,6 +237,7 @@ impl Wanted {
                 hidpp_watchers: WatcherFleet::Inactive,
                 hook: None,
                 capture_mouse_events,
+                input_monitoring: Access::Granted,
             },
         }
     }
@@ -263,6 +265,9 @@ struct Running {
     /// revoke (dropping the handle stops its thread).
     hook: Option<Hook>,
     capture_mouse_events: bool,
+    /// What this process can do with Input Monitoring, decided at arming. Off
+    /// macOS nothing gates HID access, so it is never anything else.
+    input_monitoring: Access,
 }
 
 impl Armed {
@@ -271,10 +276,19 @@ impl Armed {
     async fn run(self) {
         let Self { mut running } = self;
         #[cfg(target_os = "macos")]
-        if request_input_monitoring_and_schedule_relaunch().await {
-            running
-                .shut_down("Input Monitoring permission relaunch", None)
-                .await;
+        {
+            let arming = request_input_monitoring().await;
+            running.input_monitoring = arming.access();
+            // Only a grant the user actually gave is worth restarting into; a
+            // refusal has to be left alone, or the agent asks again on every
+            // launch.
+            if arming == AccessAtArming::GrantedToSuccessor
+                && schedule_input_monitoring_relaunch()
+            {
+                running
+                    .shut_down("Input Monitoring permission relaunch", None)
+                    .await;
+            }
         }
 
         // HID++ watchers need no Accessibility — start them up front.
@@ -354,7 +368,19 @@ impl Running {
             WatcherEvent::Pointer(context) => self.apply_pointer_context(context).await,
             WatcherEvent::Accessibility(granted) => self.apply_accessibility(granted).await,
             WatcherEvent::InputMonitoring(granted) => {
+                // Publish before considering the restart: a client must never be
+                // told the grant is missing while the agent is on its way out
+                // to pick it up.
                 self.observable.set_input_monitoring_granted(granted);
+                // A grant this process cannot use is worth nothing until a
+                // successor starts, so become one instead of retrying a
+                // permission that can never take effect here.
+                if needs_successor(self.input_monitoring, granted)
+                    && schedule_input_monitoring_relaunch()
+                {
+                    self.shut_down("Input Monitoring permission relaunch", None)
+                        .await;
+                }
             }
             // Watcher thread death — without a snapshot the GUI would scan
             // forever.
@@ -575,13 +601,55 @@ fn prompt_missing_accessibility(capture_mouse_events: bool) {
     }
 }
 
-/// Request Input Monitoring before starting the HID inventory on macOS.
+/// Arrange for a successor to start with a grant this process cannot use, and
+/// report whether one is on its way. The grant is only ever applied to the next
+/// launch of this identity, so leaving is the only way to use it.
+#[cfg(target_os = "macos")]
+fn schedule_input_monitoring_relaunch() -> bool {
+    crate::binary_watch::schedule_after_input_monitoring_grant()
+}
+
+/// Nothing to arrange: HID access is never gated off macOS, so no observation
+/// there can call for a relaunch.
+#[cfg(not(target_os = "macos"))]
+fn schedule_input_monitoring_relaunch() -> bool {
+    false
+}
+
+/// What arming found out about macOS Input Monitoring.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AccessAtArming {
+    /// The agent may open HID devices in this process already.
+    InEffect,
+    /// The consent dialog was answered with a grant. macOS applies it to the
+    /// next launch of this identity rather than to the process that asked, so
+    /// the agent has to leave and come back.
+    GrantedToSuccessor,
+    /// Not granted. The agent runs without HID access, and a grant made later
+    /// in System Settings reaches it only through a restart.
+    Denied,
+}
+
+#[cfg(target_os = "macos")]
+impl AccessAtArming {
+    /// What this process can do with the permission from here on.
+    fn access(self) -> Access {
+        match self {
+            Self::InEffect => Access::Granted,
+            Self::GrantedToSuccessor | Self::Denied => Access::NeedsSuccessor,
+        }
+    }
+}
+
+/// Request Input Monitoring before starting the HID inventory on macOS, and
+/// report what this process can do with the result.
 ///
 /// The agent (not the GUI) owns every HID++ device open, so it must be the
 /// binary the user authorizes. A newly granted permission requires a process
 /// relaunch before macOS lets the agent open HID devices.
 #[cfg(target_os = "macos")]
-async fn request_input_monitoring_and_schedule_relaunch() -> bool {
+async fn request_input_monitoring() -> AccessAtArming {
     // Without this, macOS never registers a decision at all:
     // `IOHIDDeviceOpen` is silently denied, the permission never appears in
     // System Settings for the user to grant, and no HID++ device is ever
@@ -594,12 +662,12 @@ async fn request_input_monitoring_and_schedule_relaunch() -> bool {
         })
         .await;
         match access_after_prompt {
-            Ok(true) => return crate::binary_watch::schedule_after_input_monitoring_grant(),
-            Ok(false) => {}
+            Ok(true) => AccessAtArming::GrantedToSuccessor,
+            Ok(false) => AccessAtArming::Denied,
             Err(e) => {
                 warn!(error = %e, "Input Monitoring permission request task failed");
+                AccessAtArming::Denied
             }
         }
     }
-    false
 }
