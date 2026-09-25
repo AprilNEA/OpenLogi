@@ -94,7 +94,7 @@ pub fn application_icon(identifier: &str) -> Option<Arc<gpui::RenderImage>> {
     }
 }
 
-/// Resolve a macOS bundle identifier to its launch path.
+/// Resolve an observed application identifier to its launch path.
 ///
 /// The lookup is blocking and must run on the background executor.
 #[must_use]
@@ -113,7 +113,12 @@ pub fn application_path(identifier: &str) -> Option<String> {
                 .map(|path| path.to_string())
         })
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        let path = std::path::Path::new(identifier);
+        (path.is_absolute() && path.is_file()).then(|| identifier.to_string())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = identifier;
         None
