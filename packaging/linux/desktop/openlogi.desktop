@@ -2,6 +2,7 @@
 Type=Application
 Name=OpenLogi
 Comment=Logitech HID++ device control — remap buttons, DPI, SmartShift
+Comment[es]=Control de dispositivos Logitech HID++: reasignación de botones, DPI y SmartShift
 Exec=openlogi-desktop
 Icon=openlogi
 Terminal=false
