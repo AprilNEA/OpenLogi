@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.8] - 2026-09-25
+
+### Added
+
+- *(gui)* add safe per-app profile reset and complete removal
+- *(hid)* recognise Nano receiver 046d:c534 (MK270, MK295) ([#1456](https://github.com/AprilNEA/OpenLogi/pull/1456))
+
+### Fixed
+
+- *(gui)* prefer firmware codename over catalog name for M650 variants ([#1366](https://github.com/AprilNEA/OpenLogi/pull/1366))
+- *(i18n)* clarify which app editors close after deletion
+- *(gui)* render profile confirmation dialogs in the main window
+- *(agent)* divert a single-bound gesture button ([#1569](https://github.com/AprilNEA/OpenLogi/pull/1569))
+
 ## [0.8.7] - 2026-09-23
 
 ### Added
