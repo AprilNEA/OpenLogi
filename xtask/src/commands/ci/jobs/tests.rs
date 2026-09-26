@@ -95,6 +95,35 @@ fn ci_yml_runs_what_this_runner_runs() {
     }
 }
 
+/// The native Windows job is planned apart from the loop above, because its
+/// first host is not Windows and elsewhere it plans the cross-lint proxy. It
+/// must still run what CI's `clippy (windows)` runs — the docs step included,
+/// or a Windows-only broken doc link passes locally and fails there.
+#[test]
+fn native_clippy_windows_runs_what_ci_runs() {
+    let Some(workflow) = workflow() else {
+        return;
+    };
+    let commands = workflow_commands(&workflow);
+    let sh = Shell::new().expect("a shell");
+
+    let plan = Job::ClippyWindows.plan(&sh, Host::Windows).expect("a plan");
+    let Action::Run(steps) = plan.action else {
+        panic!("clippy (windows) planned no steps on Windows");
+    };
+    let argvs: Vec<String> = steps.iter().map(super::super::Step::argv_line).collect();
+    assert!(
+        argvs.iter().any(|argv| argv.starts_with("cargo doc ")),
+        "the native plan must build the docs: {argvs:?}"
+    );
+    for argv in argvs {
+        assert!(
+            commands.contains(&argv),
+            "ci.yml does not run `{argv}` for ClippyWindows"
+        );
+    }
+}
+
 /// The wasm job skips itself on a machine without the wasm32 std, so its plan
 /// cannot be compared against `ci.yml` the way the others are. What must not
 /// drift is the crate list: a crate declared portable here but absent from the

@@ -283,21 +283,24 @@ fn msrv(job: Job, sh: &Shell, host: Host) -> Result<Plan> {
 }
 
 fn rustdoc(job: Job) -> Plan {
+    Plan::run(job, [rustdoc_step()])
+}
+
+/// The non-GUI `cargo doc` line, shared by the `rustdoc` job and the native
+/// `clippy (windows)` job that repeats it under Windows `cfg`.
+fn rustdoc_step() -> Step {
     let excludes = RUSTDOC_EXCLUDES
         .iter()
         .flat_map(|crate_name| ["--exclude", crate_name]);
-    Plan::run(
-        job,
-        [Step::new("cargo")
-            .args([
-                "doc",
-                "--workspace",
-                "--no-deps",
-                "--document-private-items",
-            ])
-            .args(excludes)
-            .env("RUSTDOCFLAGS", "-D warnings")],
-    )
+    Step::new("cargo")
+        .args([
+            "doc",
+            "--workspace",
+            "--no-deps",
+            "--document-private-items",
+        ])
+        .args(excludes)
+        .env("RUSTDOCFLAGS", "-D warnings")
 }
 
 fn tests_macos(job: Job) -> Plan {
@@ -389,7 +392,12 @@ fn wasm(job: Job, sh: &Shell) -> Result<Plan> {
 
 fn clippy_windows(job: Job, sh: &Shell, host: Host) -> Result<Plan> {
     if host == Host::Windows {
-        return Ok(Plan::run(job, [Step::new("cargo").args(CLIPPY_ARGS)]));
+        // CI's job builds the docs after linting: a `cfg`-gated doc target
+        // missing only on Windows resolves fine in the Linux `rustdoc` job.
+        return Ok(Plan::run(
+            job,
+            [Step::new("cargo").args(CLIPPY_ARGS), rustdoc_step()],
+        ));
     }
 
     let sysroot = cmd!(sh, "rustc --print sysroot").quiet().read()?;
