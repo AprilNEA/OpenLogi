@@ -378,7 +378,9 @@ impl<'a> CassetteBuilder<'a> {
 
     fn validate_unassociated(&mut self) {
         for evidence in &self.channel.unassociated {
-            self.reject(None, unassociated_rejection(&evidence.observation));
+            if let Some(reason) = unassociated_rejection(&evidence.observation) {
+                self.reject(None, reason);
+            }
         }
     }
 
