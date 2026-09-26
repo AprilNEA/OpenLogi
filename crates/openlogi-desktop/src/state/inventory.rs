@@ -15,9 +15,10 @@ use crate::state::devices::{
 };
 
 use super::device_key::DeviceKey;
-use super::device_runtime::DeviceRuntimeState;
+use super::device_session::DeviceSession;
+use super::events::StateEvents;
 use super::load::Load;
-use super::{AppState, INVENTORY_MISS_GRACE};
+use super::{AppState, INVENTORY_MISS_GRACE, StateEvent};
 
 impl AppState {
     /// Every known device model that can be resolved to an asset depot.
@@ -48,9 +49,10 @@ impl AppState {
     /// Replace the merged device catalog from a fresh inventory snapshot,
     /// preserving the active device by `config_key` when possible. If
     /// the previously-selected device disappeared, the selection falls back
-    /// to index 0. Returns whether anything actually changed.
+    /// to index 0. Reports [`StateEvent::InventoryChanged`] when anything
+    /// actually changed.
     ///
-    /// No-op (returning `false`) when the rebuilt list equals the current one,
+    /// No-op (reporting nothing) when the rebuilt list equals the current one,
     /// so the caller skips the window refresh. The comparison is whole-record,
     /// which is what lets every input tier — the agent snapshot, the camera
     /// scan, and the asset cache — share one rebuild path without any of them
@@ -59,10 +61,10 @@ impl AppState {
         &mut self,
         inventories: &[DeviceInventory],
         standalone: &[StandaloneDevice],
-        cache: &AssetResolver,
+        resolver: &AssetResolver,
         cameras: &[openlogi_camera::Camera],
-    ) -> bool {
-        let new_list = build_device_list(inventories, standalone, cache, &self.config, cameras);
+    ) -> StateEvents {
+        let new_list = build_device_list(inventories, standalone, resolver, &self.config, cameras);
         // Adoption runs before anything else touches the config. Only an
         // online record's identity was actually read this snapshot, so only an
         // online sighting can attribute its route to a device with confidence
@@ -88,7 +90,7 @@ impl AppState {
         // skips it — a grace-kept record is never online. That guard existing
         // for its own reason is what this rebuild silently depends on.
         let new_list = if adopted {
-            build_device_list(inventories, standalone, cache, &self.config, cameras)
+            build_device_list(inventories, standalone, resolver, &self.config, cameras)
         } else {
             new_list
         };
@@ -110,7 +112,7 @@ impl AppState {
             // struct is still showing (built from the pre-fold config) is the
             // truthful one, and the next tick will retry the fold.
             if !self.persist_and_reload("adopt device route") {
-                return false;
+                return StateEvents::none();
             }
         } else if identities_changed {
             self.persist_config("device identity");
@@ -123,7 +125,7 @@ impl AppState {
         // guard immune to new fields, which is what an allowlist can never
         // be.
         if merged_list == self.devices.records {
-            return false;
+            return StateEvents::none();
         }
 
         let previous_key = self.current_record().map(DeviceRecord::inventory_key);
@@ -157,9 +159,8 @@ impl AppState {
         self.devices.replace(merged_list, new_index);
         for key in &rerouted {
             self.pointer.reads.remove(key);
-            if let Some(entry) = self.devices.runtime.get_mut(key) {
-                entry.smartshift.pending_confirm = None;
-                entry.smartshift.write_status = None;
+            if let Some(entry) = self.devices.sessions.get_mut(key) {
+                entry.smartshift.reset();
             }
         }
         let present: HashSet<_> = self
@@ -178,7 +179,7 @@ impl AppState {
         self.refresh_binding_projections();
         // Display state only — the agent runs its own inventory watcher and
         // rebuilds the live binding/DPI maps itself.
-        true
+        StateEvent::InventoryChanged.into()
     }
     pub(crate) fn merge_inventory_snapshot(
         &mut self,
@@ -190,14 +191,15 @@ impl AppState {
 
         for previous in &self.devices.records {
             let inv = previous.inventory_key();
+            let key = previous.device_key();
             if let Some(record) = by_key.remove(&inv) {
-                clear_inventory_misses(&mut self.devices.runtime, &inv);
+                clear_inventory_misses(&mut self.devices.sessions, &key);
                 merged.push(record);
                 continue;
             }
 
             if let Some(record) = adopted.remove(&inv) {
-                clear_inventory_misses(&mut self.devices.runtime, &inv);
+                clear_inventory_misses(&mut self.devices.sessions, &key);
                 merged.push(record);
                 continue;
             }
@@ -206,22 +208,18 @@ impl AppState {
             // the next snapshot resolves a physical serial/unit key, retaining
             // this record through the normal miss grace would show both cards.
             if !previous.is_persistent() {
-                clear_inventory_misses(&mut self.devices.runtime, &inv);
+                clear_inventory_misses(&mut self.devices.sessions, &key);
                 continue;
             }
 
             // Cameras reappear under a new capture id after a port change —
             // do not grace-keep a stale cam-live entry beside the new one.
             if previous.kind == openlogi_core::device::DeviceKind::Camera {
-                clear_inventory_misses(&mut self.devices.runtime, &inv);
+                clear_inventory_misses(&mut self.devices.sessions, &key);
                 continue;
             }
 
-            let entry = self
-                .devices
-                .runtime
-                .entry(DeviceKey::from(inv.as_str()))
-                .or_default();
+            let entry = self.devices.sessions.entry(key).or_default();
             entry.inventory_misses = entry.inventory_misses.saturating_add(1);
             let misses = entry.inventory_misses;
             if misses <= INVENTORY_MISS_GRACE {
@@ -234,17 +232,15 @@ impl AppState {
             }
         }
 
-        for (key, record) in by_key {
-            clear_inventory_misses(&mut self.devices.runtime, &key);
+        for record in by_key.into_values() {
+            clear_inventory_misses(&mut self.devices.sessions, &record.device_key());
             merged.push(record);
         }
         // Adopted records whose known card was never in the previous list
         // (identity known only from config) still belong in the gallery.
         merged.extend(adopted.into_values());
-        let live: HashSet<String> = merged.iter().map(DeviceRecord::inventory_key).collect();
-        self.devices
-            .runtime
-            .retain(|key, _| live.contains(key.as_str()));
+        let live: HashSet<DeviceKey> = merged.iter().map(DeviceRecord::device_key).collect();
+        self.devices.sessions.retain(|key, _| live.contains(key));
         // `merged` is `previous-order + newly-appeared`, so re-apply the
         // canonical route order or a new device would be stuck at the end of
         // the gallery permanently.
@@ -357,13 +353,13 @@ impl AppState {
     /// ignored so callers can pass them straight through from UI events.
     /// Persists the new selection (by config key, not index — index isn't
     /// stable across restarts), reloads bindings for the new device, and
-    /// pushes the new map into the hook-shared `Arc`. Returns the selected
-    /// device key only when the selection changed.
-    pub fn set_current_device(&mut self, idx: usize) -> Option<DeviceKey> {
+    /// pushes the new map into the hook-shared `Arc`. Reports
+    /// [`StateEvent::DeviceSelected`] only when the selection changed.
+    pub fn select_device(&mut self, idx: usize) -> StateEvents {
         if !self.devices.select(idx) {
-            return None;
+            return StateEvents::none();
         }
-        let selected_key = self.current_record().map(DeviceRecord::device_key)?;
+        let selected = self.for_current_device(StateEvent::DeviceSelected);
         // A device left in `Failed` (transient read errors exhausted its retry
         // budget) gets one fresh attempt each time it is re-selected.
         if let Some(key) = self.current_record().map(DeviceRecord::device_key) {
@@ -388,13 +384,13 @@ impl AppState {
             .map(str::to_string)
         else {
             debug!("transient device selection not persisted");
-            return Some(selected_key);
+            return selected;
         };
         self.config
             .edit(|config| config.set_selected_device(Some(key)));
         // The agent owns the hook + device I/O; have it switch devices too.
         self.persist_and_reload("selected device");
-        Some(selected_key)
+        selected
     }
 }
 
@@ -402,19 +398,20 @@ impl super::AppState {
     /// Forget an offline device: drop its persisted identity, custom name,
     /// and per-device settings, and remove its placeholder card. Live devices
     /// are never offered this — the next inventory snapshot would simply
-    /// re-register them.
-    pub(crate) fn forget_device(&mut self, record_key: &str) -> bool {
+    /// re-register them. Reports [`StateEvent::InventoryChanged`] once the
+    /// card is gone.
+    pub(crate) fn forget_device(&mut self, record_key: &str) -> StateEvents {
         let Some(index) = self
             .devices
             .records
             .iter()
             .position(|record| record.record_key() == record_key)
         else {
-            return false;
+            return StateEvents::none();
         };
         let record = &self.devices.records[index];
         if record.online {
-            return false;
+            return StateEvents::none();
         }
         let device_key = record.device_key();
         let config_key = record.persistent_config_key().map(str::to_string);
@@ -427,7 +424,7 @@ impl super::AppState {
         if let Some(config_key) = config_key {
             self.config.edit(|config| config.remove_device(&config_key));
             if !self.persist_and_reload("device removed") {
-                return false;
+                return StateEvents::none();
             }
         }
 
@@ -440,9 +437,9 @@ impl super::AppState {
             None => 0,
         };
         self.devices.replace(records, selected);
-        self.devices.runtime.remove(&device_key);
+        self.devices.sessions.remove(&device_key);
         self.pointer.reads.remove(&device_key);
-        true
+        StateEvent::InventoryChanged.into()
     }
 }
 
@@ -529,11 +526,11 @@ pub(super) fn adopt_routes(config: &mut Config, list: &[DeviceRecord]) -> bool {
 
 /// Reset `key`'s consecutive-miss counter — the device was just confirmed
 /// present (live, adopted, or freshly appeared) or is a kind that never earns
-/// grace (transient, camera). Leaves the rest of the device's runtime row
+/// grace (transient, camera). Leaves the rest of the device's session row
 /// untouched. A free function, not an `AppState` method, so callers can hold
 /// it alongside a live borrow of the device catalog.
-fn clear_inventory_misses(runtime: &mut BTreeMap<DeviceKey, DeviceRuntimeState>, key: &str) {
-    if let Some(entry) = runtime.get_mut(key) {
+fn clear_inventory_misses(sessions: &mut BTreeMap<DeviceKey, DeviceSession>, key: &DeviceKey) {
+    if let Some(entry) = sessions.get_mut(key) {
         entry.inventory_misses = 0;
     }
 }

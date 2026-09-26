@@ -13,6 +13,10 @@ type ClickHandler = std::rc::Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 /// A controlled radio-card that keeps custom layout and styling while using
 /// the shared semantic button primitive for focus, keyboard activation, and
 /// accessibility state.
+///
+/// A card is a column: its children stack top to bottom and stretch to the
+/// card's width, so a preview sits above its label and a full-width row can
+/// space its ends apart. Callers refine that with their own `Styled` calls.
 #[derive(IntoElement)]
 pub(crate) struct ChoiceCard {
     base: BaseButton,
@@ -29,7 +33,13 @@ impl ChoiceCard {
         accessibility_label: impl Into<SharedString>,
     ) -> Self {
         Self {
-            base: BaseButton::new(id),
+            // The base button lays its root out as a centred flex row and only
+            // then layers the caller's refinements on top, so the column axis
+            // and neutral alignment must be pinned here rather than assumed.
+            base: BaseButton::new(id)
+                .flex_col()
+                .items_stretch()
+                .justify_start(),
             selected: false,
             disabled: false,
             label: accessibility_label.into(),
@@ -112,8 +122,8 @@ mod tests {
     use std::{cell::Cell, rc::Rc};
 
     use gpui::{
-        Context, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, Render, TestAppContext, div,
-        point, px,
+        Bounds, Context, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, Pixels, Render,
+        TestAppContext, canvas, div, point, px,
     };
 
     use super::*;
@@ -211,5 +221,52 @@ mod tests {
 
         assert_eq!(activations.get(), 0);
         assert_eq!(parent_clicks.get(), 0);
+    }
+
+    type PaintedBounds = Rc<Cell<Option<Bounds<Pixels>>>>;
+
+    /// A card holding two full-width probes that record where they are painted.
+    struct StackHarness {
+        first: PaintedBounds,
+        second: PaintedBounds,
+    }
+
+    impl Render for StackHarness {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            ChoiceCard::new("stack-choice", "Choice")
+                .w(px(100.))
+                .child(probe(&self.first))
+                .child(probe(&self.second))
+        }
+    }
+
+    fn probe(slot: &PaintedBounds) -> impl IntoElement {
+        let slot = slot.clone();
+        canvas(|_, _, _| (), move |bounds, (), _, _| slot.set(Some(bounds)))
+            .w_full()
+            .h(px(20.))
+    }
+
+    /// The base button lays its root out as a row; a card must still stack its
+    /// children top to bottom at the card's width, or a preview lands beside
+    /// its label instead of above it.
+    #[gpui::test]
+    fn choice_card_stacks_children_top_to_bottom_at_full_width(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let first: PaintedBounds = Rc::default();
+        let second: PaintedBounds = Rc::default();
+        let (_, cx) = cx.add_window_view({
+            let first = first.clone();
+            let second = second.clone();
+            move |_, _| StackHarness { first, second }
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        let first = first.get().expect("first probe painted");
+        let second = second.get().expect("second probe painted");
+        assert_eq!(first.size.width, px(100.));
+        assert_eq!(second.size.width, px(100.));
+        assert_eq!(second.origin.x, first.origin.x);
+        assert_eq!(second.origin.y, first.origin.y + first.size.height);
     }
 }

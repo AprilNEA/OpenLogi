@@ -24,7 +24,7 @@ use crate::runtime::HidppSessionId;
 const ANIMATION_DURATION: Duration = Duration::from_millis(100);
 /// Output cadence. Position is evaluated from absolute time, so delayed wakes
 /// do not slow or lengthen the animation.
-const FRAME_INTERVAL: Duration = Duration::from_millis(8);
+const FRAME_PERIOD: Duration = Duration::from_millis(8);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct WheelDelta {
@@ -166,7 +166,7 @@ impl ActiveMotion {
                 started_at: at,
             },
             emitted: WheelDelta::ZERO,
-            next_frame: at + FRAME_INTERVAL,
+            next_frame: at + FRAME_PERIOD,
         }
     }
 
@@ -185,7 +185,7 @@ impl ActiveMotion {
             target,
             started_at: at,
         };
-        self.next_frame = at + FRAME_INTERVAL;
+        self.next_frame = at + FRAME_PERIOD;
         MotionUpdate::Active(delta)
     }
 
@@ -199,7 +199,7 @@ impl ActiveMotion {
             MotionUpdate::Finished(delta)
         } else {
             while self.next_frame <= at {
-                self.next_frame += FRAME_INTERVAL;
+                self.next_frame += FRAME_PERIOD;
             }
             self.next_frame = self.next_frame.min(self.segment.ends_at());
             MotionUpdate::Active(delta)

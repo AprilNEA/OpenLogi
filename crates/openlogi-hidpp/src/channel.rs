@@ -1,15 +1,30 @@
 //! Implements basic messaging across HID and HID++ channels.
 //!
-//! This includes mapping incoming messages to previously sent requests.
+//! This includes mapping incoming messages to previously sent requests. A
+//! reply is matched to the oldest pending request whose predicate accepts it,
+//! and every predicate keys on the report's first three bytes — device,
+//! feature (or HID++1.0 sub id), function and software id (or register
+//! address). Two requests sharing those bytes therefore get replies nothing on
+//! the wire can tell apart, and a wireless receiver may answer them out of
+//! order (a retransmitted radio packet completes after a later one). The
+//! channel never lets that happen: a request whose key is already in flight
+//! waits until that request is answered — or, when it timed out or was
+//! cancelled unanswered, until its reply lands and is discarded or
+//! [`STALE_REPLY_GRACE`] passes without one. That holds even for a request
+//! that re-asks the abandoned one byte for byte — the same question does not
+//! promise the same answer once a write has gone between them — unless the
+//! caller says otherwise with [`AbandonedReply::AdoptIdentical`], which only
+//! a query of immutable state may.
 
 use std::{
-    collections::{HashMap, VecDeque},
+    any::Any,
+    collections::HashMap,
     sync::{
         Arc, Mutex, Weak,
         atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering},
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use futures::{FutureExt, channel::oneshot, select};
@@ -19,17 +34,27 @@ use crate::{nibble::U4, sync::lock};
 
 mod error;
 mod message;
+mod observation;
+mod pending;
 mod raw;
 
 #[cfg(test)]
-pub(crate) mod tests;
+pub(crate) mod mock;
+#[cfg(test)]
+mod tests;
 
 pub use error::ChannelError;
 pub use message::{
     HidppMessage, LONG_REPORT_ID, LONG_REPORT_LENGTH, SHORT_REPORT_ID, SHORT_REPORT_LENGTH,
 };
+pub use observation::{ChannelObservation, ChannelObserver, ObservedReport, RequestOutcome};
 pub use raw::RawHidChannel;
 
+use observation::{RequestObservation, emit_report};
+use pending::{
+    PendingMessage, PendingQueue, PendingRequest, PendingRequestCompletion, StaleKey,
+    finish_request,
+};
 use raw::supports_short_long_hidpp;
 
 /// This is the size of the buffer incoming reports are read into.
@@ -44,6 +69,47 @@ const MAX_RAW_REPORT_LENGTH: usize = 64;
 /// write plus the wait for a matching response. Callers that need a different
 /// budget can use [`HidppChannel::send_with_timeout`].
 pub const SEND_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long a request abandoned unanswered — timed out, or cancelled by an
+/// outer deadline — keeps its reply header reserved. A reply that lands inside
+/// this window is discarded; one that never comes frees the header when the
+/// window closes. Without the reservation a late reply would answer the next
+/// request with the same header, which nothing on the wire can distinguish.
+///
+/// One second covers the late replies seen in practice: a receiver answering a
+/// register read a few hundred milliseconds after a tight probe budget gave up
+/// on it. It is deliberately much shorter than [`SEND_RESPONSE_TIMEOUT`]: a
+/// device that never answers costs the next same-header request one grace
+/// window, not a whole timeout, and a reply later than the grace is as
+/// unattributable as it always was.
+///
+/// The quarantine makes no exception of its own for a request that re-asks
+/// the abandoned one byte for byte. The bytes say what was asked, not what
+/// the answer is: a DPI read abandoned before its reply, a DPI write
+/// acknowledged, and the read re-asked all fit inside one grace window, and
+/// the first read's late reply would hand the re-ask the value from before
+/// the write. A caller whose query cannot be changed by any write may opt in
+/// with [`AbandonedReply::AdoptIdentical`].
+pub const STALE_REPLY_GRACE: Duration = Duration::from_secs(1);
+
+/// What a request does about a reply still owed to an abandoned request with
+/// the same header — see [`STALE_REPLY_GRACE`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AbandonedReply {
+    /// Wait for it to land and be discarded, or for the grace to pass. The
+    /// default, and the only safe choice for a query whose answer a write
+    /// could have changed since the abandoned ask.
+    #[default]
+    Quarantine,
+    /// Take it as this request's own answer, provided the abandoned request
+    /// was byte-identical; the request goes out at once and is answered by
+    /// whichever reply comes first, the other being discarded on arrival.
+    /// The caller vouches that nothing can have changed the answer between
+    /// the two asks — a lookup in a device's feature table, which is fixed
+    /// for the life of the connection. A re-ask then costs no grace wait,
+    /// which is what keeps a feature walk over a lossy link moving.
+    AdoptIdentical,
+}
 
 type MessageListener = Arc<dyn Fn(HidppMessage, bool) + Send + Sync + 'static>;
 
@@ -98,15 +164,16 @@ pub enum SwIdPolicy {
     /// requests for a single exclusive user of a node. The counter is this
     /// policy's own; the id `0` slot is skipped in the wrap.
     Rotating(AtomicU8),
-    /// A fixed id owned process-wide: `free(id)` runs exactly once when this
-    /// policy is dropped, handing the lease back to the allocator — so
-    /// concurrent opens of one HID node never share a correlation id.
+    /// A fixed id held for the channel's lifetime, so concurrent opens of one
+    /// HID node never share a correlation id. The `lease` is whatever the
+    /// allocator hands out to back it — an entry in a table, an OS file lock —
+    /// and is dropped with the policy, which is when the id goes back.
     /// (OpenLogi local addition.)
     Leased {
         /// The leased id every request carries.
         id: RequestSwId,
-        /// Returns the id to the allocator on drop.
-        free: fn(u8),
+        /// Owns the lease; dropping it returns the id to the allocator.
+        lease: Box<dyn Any + Send + Sync>,
     },
 }
 
@@ -122,14 +189,6 @@ impl Default for SwIdPolicy {
     /// Fixed id `1`, matching the protocol's conventional default.
     fn default() -> Self {
         Self::Fixed(RequestSwId(U4::from_lo(0x01)))
-    }
-}
-
-impl Drop for SwIdPolicy {
-    fn drop(&mut self) {
-        if let Self::Leased { id, free } = self {
-            free(id.get().to_lo());
-        }
     }
 }
 
@@ -150,6 +209,9 @@ pub struct HidppChannel {
     /// The underlying raw HID channel.
     raw_channel: Arc<dyn RawHidChannel>,
 
+    /// Optional sink for reports and request lifecycle events.
+    observer: Option<Arc<dyn ChannelObserver>>,
+
     /// The software-id policy for outgoing requests (see [`SwIdPolicy`]).
     ///
     /// This must remain after `raw_channel`: fields drop in declaration order,
@@ -157,8 +219,9 @@ pub struct HidppChannel {
     /// the read thread and released the raw transport.
     sw_id_policy: SwIdPolicy,
 
-    /// All sent messages that are waiting for a response.
-    pending_messages: Arc<Mutex<VecDeque<PendingMessage>>>,
+    /// All sent messages that are waiting for a response, and the requests
+    /// parked behind one that shares their header.
+    pending_messages: Arc<Mutex<PendingQueue>>,
 
     /// The request ID assigned to the next pending message.
     pending_message_id: AtomicU64,
@@ -206,20 +269,6 @@ impl Drop for HidppChannel {
     }
 }
 
-/// Represents a message that was sent and is waiting for a response.
-struct PendingMessage {
-    /// Unique ID used to remove this request if it times out.
-    id: u64,
-
-    /// The predicate that has to match for an incoming message to be classified
-    /// as the response.
-    response_predicate: Box<dyn Fn(&HidppMessage) -> bool + Send>,
-
-    /// The oneshot sender used to provide the response message to the receiving
-    /// end.
-    sender: oneshot::Sender<HidppMessage>,
-}
-
 impl HidppChannel {
     /// Tries to construct a HID++ channel from a raw HID channel.
     ///
@@ -230,6 +279,26 @@ impl HidppChannel {
     /// If the given HID channel does not support HID++,
     /// [`ChannelError::HidppNotSupported`] will be returned.
     pub async fn from_raw_channel(raw: impl RawHidChannel) -> Result<Self, ChannelError> {
+        Self::from_raw_channel_inner(raw, None).await
+    }
+
+    /// Tries to construct a HID++ channel that reports wire and request facts
+    /// to `observer`.
+    ///
+    /// This has the same channel behavior and failure contract as
+    /// [`Self::from_raw_channel`]. Observation is best enabled at construction
+    /// so incoming reports cannot race observer installation.
+    pub async fn from_raw_channel_with_observer(
+        raw: impl RawHidChannel,
+        observer: Arc<dyn ChannelObserver>,
+    ) -> Result<Self, ChannelError> {
+        Self::from_raw_channel_inner(raw, Some(observer)).await
+    }
+
+    async fn from_raw_channel_inner(
+        raw: impl RawHidChannel,
+        observer: Option<Arc<dyn ChannelObserver>>,
+    ) -> Result<Self, ChannelError> {
         let (supports_short, supports_long) = supports_short_long_hidpp(&raw).await?;
 
         if !supports_short && !supports_long {
@@ -237,7 +306,7 @@ impl HidppChannel {
         }
 
         let raw_channel_rc = Arc::new(raw);
-        let pending_messages_rc = Arc::new(Mutex::new(VecDeque::<PendingMessage>::new()));
+        let pending_messages_rc = Arc::new(Mutex::new(PendingQueue::default()));
         let message_listeners_rc = Arc::new(Mutex::new(HashMap::<u32, MessageListener>::new()));
 
         let (close_sender, close_receiver) = oneshot::channel::<()>();
@@ -246,12 +315,14 @@ impl HidppChannel {
             let raw_channel = Arc::clone(&raw_channel_rc);
             let pending_messages = Arc::clone(&pending_messages_rc);
             let message_listeners = Arc::clone(&message_listeners_rc);
+            let observer = observer.clone();
 
             move || {
                 futures::executor::block_on(read_loop(
                     &*raw_channel,
                     &pending_messages,
                     &message_listeners,
+                    observer.as_deref(),
                     close_receiver,
                 ));
             }
@@ -263,6 +334,7 @@ impl HidppChannel {
             vendor_id: raw_channel_rc.vendor_id(),
             product_id: raw_channel_rc.product_id(),
             raw_channel: raw_channel_rc,
+            observer,
             sw_id_policy: SwIdPolicy::default(),
             pending_messages: pending_messages_rc,
             pending_message_id: AtomicU64::new(1),
@@ -365,6 +437,16 @@ impl HidppChannel {
     /// response that still arrives later reaches message listeners as an
     /// unmatched message.
     ///
+    /// A request whose header — device, feature, function and software id —
+    /// is already in flight goes out only once that request is answered:
+    /// their replies would be indistinguishable, and a receiver may deliver
+    /// them out of order. If that request timed out or was cancelled
+    /// unanswered, its reply is still expected: the header stays reserved
+    /// until the reply lands and is discarded, or for [`STALE_REPLY_GRACE`]
+    /// at most — a byte-identical re-ask included, since a write may have gone
+    /// between the two asks. The wait counts against `timeout`. A query of
+    /// immutable state can adopt that reply instead through [`Self::send_with`].
+    ///
     /// [`Self::send`] uses this with [`SEND_RESPONSE_TIMEOUT`], which suits
     /// requests to a device that may be asleep. Requests that should fail
     /// faster — e.g. probing a receiver that answers immediately or not at
@@ -374,6 +456,21 @@ impl HidppChannel {
         msg: HidppMessage,
         response_predicate: impl Fn(&HidppMessage) -> bool + Send + 'static,
         timeout: Duration,
+    ) -> Result<HidppMessage, ChannelError> {
+        self.send_with(msg, response_predicate, timeout, AbandonedReply::Quarantine)
+            .await
+    }
+
+    /// [`Self::send_with_timeout`], choosing what to do about a reply still
+    /// owed to an abandoned request with the same header. Only a query whose
+    /// answer no write can change should pass
+    /// [`AbandonedReply::AdoptIdentical`].
+    pub async fn send_with(
+        &self,
+        msg: HidppMessage,
+        response_predicate: impl Fn(&HidppMessage) -> bool + Send + 'static,
+        timeout: Duration,
+        abandoned: AbandonedReply,
     ) -> Result<HidppMessage, ChannelError> {
         let msg = self.normalize_outgoing(msg);
         if !self.supports_msg(&msg) {
@@ -386,63 +483,102 @@ impl HidppChannel {
         let (dev, feat, func) = msg.header();
         trace!(dev, feat, func, "hidpp request");
 
-        let (sender, receiver) = oneshot::channel::<HidppMessage>();
         let pending_id = self.pending_message_id.fetch_add(1, Ordering::SeqCst);
+        let observation = RequestObservation::new(self.observer.as_deref(), pending_id);
 
-        {
-            let mut pending = lock(&self.pending_messages);
-            // Drop abandoned requests before queuing this one. Timeouts and
-            // write failures remove their entry eagerly below, but a caller
-            // cancelled mid-flight (an outer `timeout(..)` dropping the whole
-            // future) still leaves its `PendingMessage` behind. On a channel
-            // reused across inventory ticks those would accumulate unboundedly
-            // — and a late response could be mis-delivered to a recycled
-            // software id. `is_canceled()` is true once the receiver is gone,
-            // so this prunes exactly the give-ups.
-            pending.retain(|m| !m.sender.is_canceled());
-            pending.push_back(PendingMessage {
-                id: pending_id,
-                response_predicate: Box::new(response_predicate),
-                sender,
-            });
-        }
+        // The deadline covers the wait for an identical in-flight header and
+        // the write as well: `write_report` has no bounded-time contract of its
+        // own, so a wedged device could otherwise park `send` forever before
+        // the response wait even starts.
+        let completion = {
+            let mut request = std::pin::pin!(
+                async move {
+                    let pending_request = PendingRequest::register_when_key_free(
+                        pending_id,
+                        Arc::clone(&self.pending_messages),
+                        msg,
+                        abandoned,
+                        response_predicate,
+                    )
+                    .await;
+                    if let Err(error) = self.write_hidpp_report(msg, Some(pending_id)).await {
+                        return PendingRequestCompletion::WriteFailed(error);
+                    }
+                    pending_request.receive().await.map_or(
+                        PendingRequestCompletion::NoResponse,
+                        PendingRequestCompletion::Response,
+                    )
+                }
+                .fuse()
+            );
 
-        // The deadline covers the write as well: `write_report` has no
-        // bounded-time contract of its own, so a wedged device could otherwise
-        // park `send` forever before the response wait even starts.
-        let mut request = std::pin::pin!(
-            async {
-                self.send_and_forget(msg).await?;
-                receiver.await.map_err(|_| ChannelError::NoResponse)
+            select! {
+                completion = request => completion,
+                () = futures_timer::Delay::new(timeout).fuse() => PendingRequestCompletion::TimedOut,
             }
-            .fuse()
-        );
-
-        let result = select! {
-            result = request => result,
-            () = futures_timer::Delay::new(timeout).fuse() => Err(ChannelError::Timeout),
         };
 
-        match &result {
-            Ok(_) => trace!(dev, feat, "hidpp response"),
-            Err(e) => trace!(dev, feat, error = ?e, "hidpp no response"),
-        }
-
-        if result.is_err() {
-            // A timeout or write failure leaves the entry queued — remove it
-            // eagerly. After a matched response the read thread has already
-            // taken it, so this is a no-op then.
-            self.remove_pending_message(pending_id);
-        }
-
-        result
+        finish_request(completion, observation, dev, feat)
     }
 
-    fn remove_pending_message(&self, id: u64) {
-        let mut pending = lock(&self.pending_messages);
-        if let Some(pos) = pending.iter().position(|msg| msg.id == id) {
-            pending.remove(pos);
+    /// Sends a HID++ message without timing out its transport write, then
+    /// waits at most `response_timeout` for a matching response.
+    ///
+    /// This ordering is for an owner that must know the native write has
+    /// completed before issuing a later request such as rollback. A native HID
+    /// implementation may keep a write alive after its Rust future is dropped,
+    /// so timing out and discarding that future cannot guarantee wire order.
+    ///
+    /// The caller **must drive this future to completion**, even after its own
+    /// requester has cancelled or exceeded a deadline. Requester deadlines
+    /// belong outside the task that owns this future and should only signal
+    /// that owner. A wedged native write cannot honestly be bounded without a
+    /// transport-level cancellation or completion guarantee.
+    ///
+    /// Pending-request cleanup, observations, and response matching otherwise
+    /// follow [`Self::send_with_timeout`].
+    pub async fn send_write_through(
+        &self,
+        msg: HidppMessage,
+        response_predicate: impl Fn(&HidppMessage) -> bool + Send + 'static,
+        response_timeout: Duration,
+    ) -> Result<HidppMessage, ChannelError> {
+        let msg = self.normalize_outgoing(msg);
+        if !self.supports_msg(&msg) {
+            return Err(ChannelError::MessageTypeNotSupported);
         }
+
+        let (dev, feat, func) = msg.header();
+        trace!(dev, feat, func, "hidpp request");
+
+        let pending_id = self.pending_message_id.fetch_add(1, Ordering::SeqCst);
+        let observation = RequestObservation::new(self.observer.as_deref(), pending_id);
+        let pending_request = PendingRequest::register_when_key_free(
+            pending_id,
+            Arc::clone(&self.pending_messages),
+            msg,
+            AbandonedReply::Quarantine,
+            response_predicate,
+        )
+        .await;
+
+        let completion = if let Err(error) = self.write_hidpp_report(msg, Some(pending_id)).await {
+            drop(pending_request);
+            PendingRequestCompletion::WriteFailed(error)
+        } else {
+            let mut response = std::pin::pin!(pending_request.receive().fuse());
+            select! {
+                response = response => response.map_or(
+                    PendingRequestCompletion::NoResponse,
+                    PendingRequestCompletion::Response,
+                ),
+                () = futures_timer::Delay::new(response_timeout).fuse() => {
+                    PendingRequestCompletion::TimedOut
+                },
+            }
+        };
+
+        finish_request(completion, observation, dev, feat)
     }
 
     /// Sends a HID++ message across the channel and does not wait for a
@@ -455,8 +591,19 @@ impl HidppChannel {
             return Err(ChannelError::MessageTypeNotSupported);
         }
 
+        self.write_hidpp_report(msg, None).await
+    }
+
+    async fn write_hidpp_report(
+        &self,
+        msg: HidppMessage,
+        request_id: Option<u64>,
+    ) -> Result<(), ChannelError> {
         let mut buf = [0u8; LONG_REPORT_LENGTH];
         let len = msg.write_raw(&mut buf);
+        emit_report(self.observer.as_deref(), &buf[..len], |report| {
+            ChannelObservation::OutgoingReport { request_id, report }
+        });
         self.raw_channel
             .write_report(&buf[..len])
             .await
@@ -485,6 +632,12 @@ impl HidppChannel {
             return Err(ChannelError::InvalidRawReportLength(report.len()));
         }
 
+        emit_report(self.observer.as_deref(), report, |report| {
+            ChannelObservation::OutgoingReport {
+                request_id: None,
+                report,
+            }
+        });
         let mut write = std::pin::pin!(self.raw_channel.write_report(report).fuse());
         select! {
             result = write => result.map_err(ChannelError::Implementation),
@@ -534,8 +687,9 @@ impl HidppChannel {
 /// lets the channel shut down — see [`RawHidChannel::read_report`].
 async fn read_loop(
     raw_channel: &dyn RawHidChannel,
-    pending_messages: &Mutex<VecDeque<PendingMessage>>,
+    pending_messages: &Mutex<PendingQueue>,
     message_listeners: &Mutex<HashMap<u32, MessageListener>>,
+    observer: Option<&dyn ChannelObserver>,
     mut close: oneshot::Receiver<()>,
 ) {
     let mut buf = [0u8; MAX_REPORT_LENGTH];
@@ -557,26 +711,66 @@ async fn read_loop(
         };
 
         let Some(msg) = HidppMessage::read_raw(&buf[..len]) else {
+            emit_report(observer, &buf[..len], |report| {
+                ChannelObservation::MalformedIncomingReport { report }
+            });
             trace!(len, "report not HID++ — dropped");
             continue;
         };
 
-        let mut matched = false;
+        let mut matched_id = None;
+        let mut stale = false;
         let pending_count;
         {
-            let mut msgs = lock(pending_messages);
-            pending_count = msgs.len();
-            if let Some(pos) = msgs.iter().position(|elem| (elem.response_predicate)(&msg))
-                && let Some(waiting) = msgs.remove(pos)
+            let mut queue = lock(pending_messages);
+            pending_count = queue.messages.len();
+            if let Some(answered) = queue
+                .messages
+                .iter()
+                .position(|elem| (elem.response_predicate)(&msg))
+                .and_then(|pos| queue.messages.remove(pos))
             {
-                let _ = waiting.sender.send(msg);
-                matched = true;
+                matched_id = Some(answered.id);
+                let PendingMessage {
+                    key,
+                    request,
+                    response_predicate,
+                    sender,
+                    extra_replies,
+                    ..
+                } = answered;
+                let _ = sender.send(msg);
+                if extra_replies > 0 {
+                    // Answered by one of several replies it was owed: the
+                    // others are still coming and must not answer the next
+                    // request with this header.
+                    queue.stale.push(StaleKey {
+                        key,
+                        request,
+                        response_predicate,
+                        outstanding: extra_replies,
+                        expires: Instant::now() + STALE_REPLY_GRACE,
+                    });
+                }
+                queue.wake_key_waiters();
+            } else {
+                // The reply of a request nobody waits for any more. Discarding
+                // it here is what frees its header for the next request.
+                stale = queue.discard_stale_reply(&msg);
             }
         }
 
+        emit_report(observer, &buf[..len], |report| {
+            ChannelObservation::IncomingReport {
+                request_id: matched_id,
+                report,
+            }
+        });
+
         trace!(
             len,
-            matched,
+            matched = matched_id.is_some(),
+            stale,
             pending_count,
             payload = format_args!("{:02x?}", &buf[..len.min(16)]),
             "raw report received"
@@ -586,7 +780,7 @@ async fn read_loop(
         // without deadlocking on the lock it is being called under.
         let listeners: Vec<_> = lock(message_listeners).values().cloned().collect();
         for listener in listeners {
-            listener(msg, matched);
+            listener(msg, matched_id.is_some());
         }
     }
 }

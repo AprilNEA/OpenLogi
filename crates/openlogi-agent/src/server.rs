@@ -11,16 +11,15 @@ use std::time::{Duration, Instant};
 use futures::StreamExt as _;
 use openlogi_agent_core::action_ring::ActionRingManager;
 use openlogi_agent_core::event_monitor::SharedEventMonitor;
-use openlogi_agent_core::hardware;
 use openlogi_agent_core::observable::ObservableState;
-use openlogi_agent_core::orchestrator::{Orchestrator, SharedRuntime};
+use openlogi_agent_core::orchestrator::{Orchestrator, SharedHandles};
 use openlogi_agent_core::runtime::ActionDispatcher;
 use openlogi_core::binding::ActionRingSlot;
 use openlogi_core::config::{Config, Lighting};
 use openlogi_core::device::DeviceInventory;
 use openlogi_hid::{
-    DeviceRoute, Dpi, DpiInfo, HapticWaveform, HidppOperation, LightCommand, ReceiverSelector,
-    SmartShiftStatus, WriteError,
+    BacklightState, DeviceRoute, Dpi, DpiInfo, HapticWaveform, HidppOperation, LightCommand,
+    ReceiverSelector, ScrollWheelMode, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
@@ -45,7 +44,7 @@ use tracing::{info, warn};
 #[derive(Clone)]
 pub struct AgentServer {
     pub orchestrator: Arc<Mutex<Orchestrator>>,
-    pub shared: SharedRuntime,
+    pub shared: SharedHandles,
     /// Everything the GUI observes, answered from here rather than recomposed
     /// per request: reads take no orchestrator lock and no permission syscall.
     pub observable: Arc<ObservableState>,
@@ -64,7 +63,7 @@ impl AgentServer {
     /// The second return is the demand channel the dormancy gate drains.
     pub fn new(
         orchestrator: Arc<Mutex<Orchestrator>>,
-        shared: SharedRuntime,
+        shared: SharedHandles,
         observable: Arc<ObservableState>,
         pairing: Arc<PairingManager>,
         event_monitor: SharedEventMonitor,
@@ -165,13 +164,7 @@ impl Agent for AgentServer {
         route: DeviceRoute,
         lighting: Lighting,
     ) -> Result<(), WriteError> {
-        let (r, g, b) = hardware::lighting_rgb(&lighting);
-        self.shared
-            .device(&route)
-            .run(HidppOperation::Lighting, |c| async move {
-                openlogi_hid::set_keyboard_color_on(&c, r, g, b).await
-            })
-            .await
+        self.shared.device(&route).lighting(&lighting)?.wait().await
     }
 
     async fn set_smartshift(
@@ -206,6 +199,32 @@ impl Agent for AgentServer {
             .device(&route)
             .run(HidppOperation::ReadSmartShift, |c| async move {
                 openlogi_hid::get_smartshift_status_on(&c).await
+            })
+            .await
+    }
+
+    async fn read_wheel(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<ScrollWheelMode, WriteError> {
+        self.shared
+            .device(&route)
+            .run(HidppOperation::ReadWheelMode, |c| async move {
+                openlogi_hid::get_scroll_wheel_mode_on(&c).await
+            })
+            .await
+    }
+
+    async fn read_backlight(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<BacklightState, WriteError> {
+        self.shared
+            .device(&route)
+            .run(HidppOperation::ReadBacklight, |c| async move {
+                openlogi_hid::get_backlight_on(&c).await
             })
             .await
     }
@@ -252,8 +271,7 @@ impl Agent for AgentServer {
         route: DeviceRoute,
         command: LightCommand,
     ) -> Result<(), WriteError> {
-        hardware::cancel_light_reapply(&route);
-        hardware::apply_light(&route, command).await
+        self.shared.hardware().apply_light(&route, command).await
     }
 
     async fn set_light_manual_power(
@@ -262,8 +280,10 @@ impl Agent for AgentServer {
         route: DeviceRoute,
         enabled: bool,
     ) -> Result<(), WriteError> {
-        hardware::cancel_light_reapply(&route);
-        hardware::apply_light(&route, LightCommand::Power(enabled)).await?;
+        self.shared
+            .hardware()
+            .apply_light(&route, LightCommand::Power(enabled))
+            .await?;
         if !self
             .orchestrator
             .lock()
@@ -387,7 +407,7 @@ const ARM_BUDGET: Duration = Duration::from_secs(1);
 /// Best-effort by design: a device that never lost the state plays fine
 /// without this, so a silent channel must cost the session a bounded delay
 /// rather than its whole haptic budget.
-async fn arm_firmware_haptics(shared: &SharedRuntime, route: &DeviceRoute) {
+async fn arm_firmware_haptics(shared: &SharedHandles, route: &DeviceRoute) {
     let budget = Budget::starting_at(Instant::now(), ARM_BUDGET);
     for attempt in 1..=2u8 {
         let Some(remaining) = budget.remaining(Instant::now()) else {
@@ -428,7 +448,7 @@ async fn arm_firmware_haptics(shared: &SharedRuntime, route: &DeviceRoute) {
 /// supersedes this one, since a stale buzz has no value and this worker is
 /// single-flight.
 async fn play_within_budget(
-    shared: &SharedRuntime,
+    shared: &SharedHandles,
     rx: &tokio::sync::watch::Receiver<Option<(DeviceRoute, HapticWaveform, &'static str)>>,
     route: &DeviceRoute,
     waveform: HapticWaveform,
@@ -499,7 +519,7 @@ impl Budget {
 
 impl RingHapticPlayer {
     /// Spawn the single-flight worker. Must be called from a tokio runtime.
-    pub fn spawn(shared: SharedRuntime) -> Self {
+    pub fn spawn(shared: SharedHandles) -> Self {
         let (tx, mut rx) = tokio::sync::watch::channel::<
             Option<(DeviceRoute, HapticWaveform, &'static str)>,
         >(None);

@@ -7,6 +7,7 @@
 
 mod button;
 pub mod hook;
+mod pointer;
 pub mod scroll;
 
 use std::collections::HashMap;
@@ -14,67 +15,85 @@ use std::io;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
-use openlogi_core::binding::{Action, Binding, ButtonId, KeyCombo};
-use openlogi_hid::{CaptureChannel, ChannelRegistry};
-use tracing::{info, warn};
+use openlogi_core::binding::{Action, Binding, ButtonId};
+use tracing::{debug, info, warn};
 
 use self::button::{
     ButtonInputHandle, ButtonRuntimeEvent, ButtonRuntimeOwner, EndReason, PressControl,
 };
 pub(crate) use self::button::{HidppSessionId, PressToken};
-use crate::hardware::{toggle_smartshift_in_background, write_dpi_in_background};
-use crate::receiver_access::ReceiverAccess;
+use crate::hardware::{DeviceAccess, toggle_smartshift_in_background, write_dpi_in_background};
 use crate::{DpiCycleState, DpiCycles};
 
-/// Output transition when an action starts within one physical press.
-#[derive(Debug, PartialEq, Eq)]
-enum HoldStart {
-    /// The action is instantaneous and belongs to ordinary dispatch.
-    NotHeld,
-    /// This press newly owns one held chord.
-    Started(KeyCombo),
-    /// The same press changed its held action.
-    Replaced { old: KeyCombo, new: KeyCombo },
+/// Application identity captured with a physical press and retained through
+/// asynchronous button dispatch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ActionDispatchTarget {
+    /// Safari's Accessibility target at the instant the physical press arrived.
+    SafariProcess(i32),
+    /// The ordinary browser-navigation shortcut target captured outside Safari.
+    Keyboard,
+    /// The pointer context that selected the binding. Validated off the tap
+    /// before output, never substituted with an unrelated foreground window.
+    Pointer(openlogi_hook::PointerTarget),
 }
 
+impl ActionDispatchTarget {
+    fn capture() -> Self {
+        openlogi_hook::frontmost_safari_pid().map_or(Self::Keyboard, Self::SafariProcess)
+    }
+
+    fn for_pointer(target: Option<openlogi_hook::PointerTarget>) -> Self {
+        target.map_or_else(Self::capture, Self::Pointer)
+    }
+}
 /// Held output owned by accepted press capabilities rather than by a capture
 /// backend. Because every [`PressToken`] has exactly one terminal event, this
-/// map gives release, cancellation, invalidation, and shutdown one path.
+/// map gives release, cancellation, invalidation, shutdown, and unwinding one
+/// RAII path.
 #[derive(Default)]
 struct HeldShortcuts {
-    by_press: HashMap<PressToken, KeyCombo>,
+    by_press: HashMap<PressToken, openlogi_inject::HeldChord>,
 }
 
 impl HeldShortcuts {
-    fn start(&mut self, press: &PressToken, action: &Action) -> HoldStart {
+    fn start(&mut self, press: &PressToken, action: &Action) -> bool {
         let Some(combo) = action.held_combo() else {
-            return HoldStart::NotHeld;
+            return false;
         };
-        match self.by_press.insert(press.clone(), combo.clone()) {
-            Some(old) => HoldStart::Replaced {
-                old,
-                new: combo.clone(),
-            },
-            None => HoldStart::Started(combo.clone()),
+        match self.by_press.entry(press.clone()) {
+            std::collections::hash_map::Entry::Occupied(mut held) => {
+                held.get_mut().replace(combo);
+            }
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(openlogi_inject::press_hold(combo));
+            }
         }
+        true
     }
 
-    fn end(&mut self, press: &PressToken) -> Option<KeyCombo> {
-        self.by_press.remove(press)
+    fn end(&mut self, press: &PressToken) {
+        self.by_press.remove(press);
     }
 }
 
 #[derive(Clone)]
 struct ActionExecutor {
     dpi_cycle: Arc<RwLock<DpiCycles>>,
-    capture: CaptureChannel,
-    registry: ChannelRegistry,
-    receiver_access: ReceiverAccess,
+    access: DeviceAccess,
     action_ring: tokio::sync::mpsc::UnboundedSender<Option<String>>,
 }
 
 impl ActionExecutor {
     fn dispatch(&self, action: &Action, device_key: Option<&str>) {
+        self.dispatch_to(action, device_key, ActionDispatchTarget::capture());
+    }
+
+    fn dispatch_to(&self, action: &Action, device_key: Option<&str>, target: ActionDispatchTarget) {
+        let Some(target) = target.resolve(action) else {
+            debug!(action = %action.label(), "mouse action target unavailable or no longer matches — skipped");
+            return;
+        };
         if matches!(action, Action::ShowActionsRing) {
             if self
                 .action_ring
@@ -109,24 +128,30 @@ impl ActionExecutor {
                     .read()
                     .ok()
                     .and_then(|cycles| cycles.target_for(device_key));
-                info!("SmartShift toggle → flipping wheel mode");
-                toggle_smartshift_in_background(
-                    &self.capture,
-                    &self.registry,
-                    &self.receiver_access,
-                    target,
-                );
+                if let Some(target) = target {
+                    info!("SmartShift toggle → flipping wheel mode");
+                    toggle_smartshift_in_background(self.access.op(&target));
+                } else {
+                    debug!("no target device — SmartShift toggle skipped");
+                }
                 return;
             }
-            // BrowserBack/BrowserForward fall through to the keyboard shortcut
-            // (Cmd+[ / Cmd+]) here — for Chrome and other apps that respond to
-            // it, and as the HID++ gesture watcher's own fallback when its
-            // AXPress attempt (Safari) fails. On devices where one physical
-            // press is visible through both capture paths, debounce the shared
-            // action so the browser navigates only once.
+            // Browser navigation uses Safari's captured Accessibility target
+            // or the platform shortcut, not a native mouse click. Preserve the
+            // press-time target through queued dispatch and debounce duplicate
+            // capture paths before either output.
             Action::BrowserBack | Action::BrowserForward => {
-                if browser_nav_debounce_ok(action) {
-                    openlogi_inject::execute(action);
+                if let Some(reservation) = browser_nav_debounce_begin(action) {
+                    if dispatch_browser_navigation(
+                        action,
+                        target,
+                        openlogi_inject::ax_navigate_browser,
+                        || openlogi_inject::execute(action),
+                    ) {
+                        browser_nav_debounce_commit(reservation);
+                    } else {
+                        browser_nav_debounce_cancel(reservation);
+                    }
                 } else {
                     info!(action = %action.label(), "browser nav debounced — duplicate dispatch path suppressed");
                 }
@@ -138,14 +163,13 @@ impl ActionExecutor {
             }
         };
         if let Some((dpi, target)) = next {
-            info!(%dpi, "DPI action → writing to device");
-            write_dpi_in_background(
-                &self.capture,
-                &self.registry,
-                &self.receiver_access,
-                target,
-                dpi,
-            );
+            // No target: a dev environment without a real device.
+            if let Some(target) = target {
+                info!(%dpi, "DPI action → writing to device");
+                write_dpi_in_background(self.access.op(&target), dpi);
+            } else {
+                debug!(%dpi, "no target device — DPI write skipped");
+            }
         } else if matches!(action, Action::CycleDpiPresets | Action::SetDpiPreset(_)) {
             info!(
                 action = %action.label(),
@@ -172,16 +196,14 @@ impl ButtonEventHandler {
         match event {
             ButtonRuntimeEvent::Started(press) => {
                 if let Some(action) = press.start_action() {
-                    self.start_action(press.token(), action, press.device_key());
+                    self.start_action(press.token(), action, press.device_key(), press.target());
                 }
             }
             ButtonRuntimeEvent::Triggered { press, action } => {
-                self.start_action(press.token(), &action, press.device_key());
+                self.start_action(press.token(), &action, press.device_key(), press.target());
             }
             ButtonRuntimeEvent::Ended { press, reason } => {
-                if let Some(combo) = self.held.end(press.token()) {
-                    openlogi_inject::release_hold(&combo);
-                }
+                self.held.end(press.token());
                 if let EndReason::Canceled(reason) = reason {
                     match press.control() {
                         PressControl::Button(button) => {
@@ -196,13 +218,18 @@ impl ButtonEventHandler {
         }
     }
 
-    fn start_action(&mut self, press: &PressToken, action: &Action, device_key: Option<&str>) {
-        match self.held.start(press, action) {
-            HoldStart::NotHeld => self.executor.dispatch(action, device_key),
-            HoldStart::Started(combo) => openlogi_inject::press_hold(&combo),
-            HoldStart::Replaced { old, new } => {
-                openlogi_inject::replace_hold(&old, &new);
-            }
+    fn start_action(
+        &mut self,
+        press: &PressToken,
+        action: &Action,
+        device_key: Option<&str>,
+        target: ActionDispatchTarget,
+    ) {
+        if action.held_combo().is_some() && target.resolve(action).is_none() {
+            return;
+        }
+        if !self.held.start(press, action) {
+            self.executor.dispatch_to(action, device_key, target);
         }
     }
 }
@@ -228,16 +255,12 @@ impl ActionRuntime {
     /// Build the action executor and its source-independent button worker.
     pub fn new(
         dpi_cycle: Arc<RwLock<DpiCycles>>,
-        capture: CaptureChannel,
-        registry: ChannelRegistry,
-        receiver_access: ReceiverAccess,
+        access: DeviceAccess,
         action_ring: tokio::sync::mpsc::UnboundedSender<Option<String>>,
     ) -> io::Result<Self> {
         let executor = ActionExecutor {
             dpi_cycle,
-            capture,
-            registry,
-            receiver_access,
+            access,
             action_ring,
         };
         let mut button_handler = ButtonEventHandler::new(executor.clone());
@@ -270,14 +293,29 @@ impl ActionDispatcher {
         self.executor.dispatch(action, device_key);
     }
 
+    pub(crate) fn dispatch_pointer_action(
+        &self,
+        action: &Action,
+        device_key: Option<&str>,
+        target: Option<openlogi_hook::PointerTarget>,
+    ) {
+        self.executor.dispatch_to(
+            action,
+            device_key,
+            ActionDispatchTarget::for_pointer(target),
+        );
+    }
+
     /// Queue one OS-hook down edge without blocking the callback. The returned
     /// token uniquely identifies this accepted press.
     pub(crate) fn try_hook_button_down(
         &self,
         button: ButtonId,
         binding: Option<&Binding>,
+        target: ActionDispatchTarget,
     ) -> Option<PressToken> {
-        self.buttons.try_hook_down(button, binding)
+        self.buttons
+            .try_hook_down_with_target(button, binding, target)
     }
 
     /// Queue one OS-hook up edge without blocking the callback.
@@ -286,8 +324,15 @@ impl ActionDispatcher {
     }
 
     /// Queue one function-key down edge without blocking the hook callback.
-    pub(crate) fn try_hook_key_down(&self, keycode: u16, action: &Action) -> bool {
-        self.buttons.try_hook_key_down(keycode, action).is_some()
+    pub(crate) fn try_hook_key_down(
+        &self,
+        keycode: u16,
+        action: &Action,
+        target: ActionDispatchTarget,
+    ) -> bool {
+        self.buttons
+            .try_hook_key_down(keycode, action, target)
+            .is_some()
     }
 
     /// Queue one function-key up edge without blocking the hook callback.
@@ -319,8 +364,14 @@ impl ActionDispatcher {
         session: &HidppSessionId,
         button: ButtonId,
         binding: Option<&Binding>,
+        pointer_target: Option<openlogi_hook::PointerTarget>,
     ) -> Option<PressToken> {
-        self.buttons.try_hidpp_down(session, button, binding)
+        self.buttons.try_hidpp_down(
+            session,
+            button,
+            binding,
+            ActionDispatchTarget::for_pointer(pointer_target),
+        )
     }
 
     /// Queue one HID++ up edge for a specific capture session.
@@ -335,8 +386,14 @@ impl ActionDispatcher {
         session: &HidppSessionId,
         button: ButtonId,
         binding: Option<&Binding>,
+        pointer_target: Option<openlogi_hook::PointerTarget>,
     ) {
-        self.buttons.try_hidpp_pulse(session, button, binding);
+        self.buttons.try_hidpp_pulse(
+            session,
+            button,
+            binding,
+            ActionDispatchTarget::for_pointer(pointer_target),
+        );
     }
 
     /// Cancel presses from a HID++ session that is stopping or has died.
@@ -351,6 +408,13 @@ impl ActionDispatcher {
         self.buttons.invalidate_all();
     }
 
+    /// End only pointer-scoped presses when the hovered window changes.
+    /// Keyboard and explicitly focus-scoped holds keep their own lifecycles.
+    /// Preserve presses already admitted against the newly published target.
+    pub fn cancel_pointer_buttons_except(&self, current: openlogi_hook::PointerTarget) {
+        self.buttons.cancel_pointer_except(current);
+    }
+
     /// Cancel only presses owned by an OS-hook callback. HID++ capture does not
     /// depend on Accessibility and remains active when the native hook stops.
     pub fn cancel_hook_buttons(&self) {
@@ -358,90 +422,237 @@ impl ActionDispatcher {
     }
 }
 
-/// Minimum time between two BrowserBack (or two BrowserForward) keyboard
+/// Minimum time between two BrowserBack (or two BrowserForward) navigation
 /// dispatches shared across OS-hook and HID++ capture paths.
 const BROWSER_NAV_DEBOUNCE: Duration = Duration::from_millis(150);
 
 /// Per-direction last-dispatch timestamps: `(last_back, last_forward)`.
 static BROWSER_NAV_LAST: Mutex<(Option<Instant>, Option<Instant>)> = Mutex::new((None, None));
 
-fn browser_nav_debounce_ok(action: &Action) -> bool {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BrowserNavDebounceReservation {
+    forward: bool,
+    timestamp: Instant,
+}
+
+fn browser_nav_debounce_begin(action: &Action) -> Option<BrowserNavDebounceReservation> {
     let mut last = BROWSER_NAV_LAST
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
-    let slot = if matches!(action, Action::BrowserForward) {
-        &mut last.1
-    } else {
-        &mut last.0
-    };
+    let forward = matches!(action, Action::BrowserForward);
+    let slot = if forward { &mut last.1 } else { &mut last.0 };
     let now = Instant::now();
     let fire = slot.is_none_or(|time| now.duration_since(time) >= BROWSER_NAV_DEBOUNCE);
     if fire {
         *slot = Some(now);
+        Some(BrowserNavDebounceReservation {
+            forward,
+            timestamp: now,
+        })
+    } else {
+        None
     }
-    fire
+}
+
+fn browser_nav_debounce_commit(reservation: BrowserNavDebounceReservation) {
+    let mut last = BROWSER_NAV_LAST
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let slot = if reservation.forward {
+        &mut last.1
+    } else {
+        &mut last.0
+    };
+    if *slot == Some(reservation.timestamp) {
+        // AX may take longer than the debounce interval. Start that interval
+        // at completion, before the button worker dequeues a duplicate path.
+        *slot = Some(Instant::now());
+    }
+}
+
+fn browser_nav_debounce_cancel(reservation: BrowserNavDebounceReservation) {
+    let mut last = BROWSER_NAV_LAST
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let slot = if reservation.forward {
+        &mut last.1
+    } else {
+        &mut last.0
+    };
+    if *slot == Some(reservation.timestamp) {
+        *slot = None;
+    }
+}
+
+fn dispatch_browser_navigation(
+    action: &Action,
+    target: ActionDispatchTarget,
+    ax_navigate: impl FnOnce(i32, bool) -> bool,
+    keyboard: impl FnOnce(),
+) -> bool {
+    match target {
+        ActionDispatchTarget::SafariProcess(pid) => {
+            let navigated = ax_navigate(pid, matches!(action, Action::BrowserForward));
+            if !navigated {
+                info!(pid, action = %action.label(), "captured Safari navigation unavailable — keyboard fallback suppressed");
+            }
+            navigated
+        }
+        ActionDispatchTarget::Keyboard => {
+            keyboard();
+            true
+        }
+        ActionDispatchTarget::Pointer(_) => {
+            unreachable!("pointer targets resolve before navigation")
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn hold(label: &str) -> Action {
-        Action::HoldShortcut(label.parse().expect("test shortcut must be valid"))
-    }
-
-    #[test]
-    fn held_output_is_owned_by_the_exact_press_until_its_terminal_event() {
-        let first = PressToken::hook_for_test(1, ButtonId::Back);
-        let second = PressToken::hook_for_test(2, ButtonId::Forward);
-        let mut held = HeldShortcuts::default();
-
-        assert_eq!(
-            held.start(&first, &hold("Ctrl+Space")),
-            HoldStart::Started("Ctrl+Space".parse().expect("valid shortcut"))
-        );
-        assert_eq!(
-            held.start(&second, &hold("Alt+F2")),
-            HoldStart::Started("Alt+F2".parse().expect("valid shortcut"))
-        );
-        assert_eq!(
-            held.end(&first),
-            Some("Ctrl+Space".parse().expect("valid shortcut"))
-        );
-        assert_eq!(held.end(&first), None, "a press releases at most once");
-        assert_eq!(
-            held.end(&second),
-            Some("Alt+F2".parse().expect("valid shortcut"))
-        );
-    }
-
-    #[test]
-    fn changing_a_hold_within_one_press_balances_the_previous_chord() {
-        let press = PressToken::hook_for_test(1, ButtonId::Back);
-        let mut held = HeldShortcuts::default();
-        let old: KeyCombo = "Ctrl+Space".parse().expect("valid shortcut");
-        let new: KeyCombo = "Alt+F2".parse().expect("valid shortcut");
-
-        assert_eq!(
-            held.start(&press, &Action::HoldShortcut(old.clone())),
-            HoldStart::Started(old.clone())
-        );
-        assert_eq!(
-            held.start(&press, &Action::HoldShortcut(new.clone())),
-            HoldStart::Replaced {
-                old,
-                new: new.clone(),
-            }
-        );
-        assert_eq!(held.end(&press), Some(new));
-    }
-
+    static BROWSER_NAV_TEST_LOCK: Mutex<()> = Mutex::new(());
     #[test]
     fn instantaneous_actions_do_not_enter_held_state() {
         let press = PressToken::hook_for_test(1, ButtonId::Back);
         let mut held = HeldShortcuts::default();
 
-        assert_eq!(held.start(&press, &Action::Copy), HoldStart::NotHeld);
-        assert_eq!(held.end(&press), None);
+        assert!(!held.start(&press, &Action::Copy));
+        held.end(&press);
+    }
+
+    #[test]
+    fn captured_safari_navigation_keeps_press_time_pid_and_never_falls_back() {
+        for (action, forward) in [(Action::BrowserBack, false), (Action::BrowserForward, true)] {
+            for navigated in [false, true] {
+                let mut pid_and_direction = None;
+                let mut keyboard = false;
+                assert_eq!(
+                    dispatch_browser_navigation(
+                        &action,
+                        ActionDispatchTarget::SafariProcess(417),
+                        |pid, direction| {
+                            pid_and_direction = Some((pid, direction));
+                            navigated
+                        },
+                        || keyboard = true,
+                    ),
+                    navigated
+                );
+                assert_eq!(pid_and_direction, Some((417, forward)));
+                assert!(!keyboard);
+            }
+        }
+    }
+
+    #[test]
+    fn keyboard_navigation_never_reinterprets_a_later_safari_focus() {
+        let mut ax_called = false;
+        let mut keyboard = false;
+
+        assert!(dispatch_browser_navigation(
+            &Action::BrowserForward,
+            ActionDispatchTarget::Keyboard,
+            |_, _| {
+                ax_called = true;
+                true
+            },
+            || keyboard = true,
+        ));
+
+        assert!(!ax_called);
+        assert!(keyboard);
+    }
+
+    #[test]
+    fn browser_navigation_debounce_is_per_direction_and_expires() {
+        let _guard = BROWSER_NAV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let now = Instant::now();
+        *BROWSER_NAV_LAST
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = (Some(now), None);
+
+        assert!(browser_nav_debounce_begin(&Action::BrowserBack).is_none());
+        assert!(browser_nav_debounce_begin(&Action::BrowserForward).is_some());
+
+        let expired = Instant::now()
+            .checked_sub(BROWSER_NAV_DEBOUNCE)
+            .expect("the debounce interval fits before the current instant");
+        BROWSER_NAV_LAST
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .0 = Some(expired);
+
+        assert!(browser_nav_debounce_begin(&Action::BrowserBack).is_some());
+    }
+
+    #[test]
+    fn slow_successful_navigation_still_debounces_the_queued_duplicate() {
+        let _guard = BROWSER_NAV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let started = Instant::now()
+            .checked_sub(BROWSER_NAV_DEBOUNCE * 2)
+            .expect("the simulated AX duration fits before the current instant");
+        *BROWSER_NAV_LAST
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = (None, Some(started));
+
+        browser_nav_debounce_commit(BrowserNavDebounceReservation {
+            forward: true,
+            timestamp: started,
+        });
+
+        assert!(browser_nav_debounce_begin(&Action::BrowserForward).is_none());
+        assert!(browser_nav_debounce_begin(&Action::BrowserBack).is_some());
+    }
+
+    #[test]
+    fn failed_captured_navigation_releases_its_debounce_reservation() {
+        let _guard = BROWSER_NAV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *BROWSER_NAV_LAST
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = (None, None);
+        let reservation = browser_nav_debounce_begin(&Action::BrowserBack)
+            .expect("the first attempt should reserve the direction");
+
+        assert!(!dispatch_browser_navigation(
+            &Action::BrowserBack,
+            ActionDispatchTarget::SafariProcess(417),
+            |_, _| false,
+            || panic!("stale Safari targets must not fall back"),
+        ));
+        browser_nav_debounce_cancel(reservation);
+
+        assert!(browser_nav_debounce_begin(&Action::BrowserBack).is_some());
+    }
+
+    #[test]
+    fn canceling_a_failed_attempt_never_clears_a_newer_reservation() {
+        let _guard = BROWSER_NAV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let original = Instant::now();
+        let newer = original + Duration::from_millis(1);
+        *BROWSER_NAV_LAST
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = (Some(newer), None);
+        browser_nav_debounce_cancel(BrowserNavDebounceReservation {
+            forward: false,
+            timestamp: original,
+        });
+
+        assert_eq!(
+            BROWSER_NAV_LAST
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .0,
+            Some(newer)
+        );
     }
 }

@@ -27,57 +27,41 @@ use std::sync::Arc;
 use gpui::{
     AnyElement, App, AppContext as _, Bounds, Context, Entity, FontWeight, Hsla,
     InteractiveElement, IntoElement, ParentElement, PathBuilder, Render, RenderOnce, Role,
-    StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, hsla, point,
-    prelude::FluentBuilder as _, px, rgb, svg,
+    SharedString, StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, hsla,
+    point, prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_component::{Selectable as _, h_flex, input::InputState, v_flex};
 use openlogi_core::binding::{Action, WorkflowStep};
-use openlogi_core::config::{KeyModifiers, KeyTrigger};
+use openlogi_core::config::{FunctionKey, KeyModifiers, KeyTrigger};
 
 use super::editors::{
     PowerUserKind, text_editor_placeholder, text_editor_seed, workflow_editor_seed,
 };
 use crate::app::{glow_canvas, keyboard_glow};
-use crate::features::mouse::geometry::asset_dimensions_for_png;
-use crate::features::mouse::picker::{
+use crate::features::binding_editor::{
     PickFn, action_icon_path, action_rows, compact_panel, divider, editor_scroll_list,
     editor_section,
 };
+use crate::features::mouse::geometry::asset_dimensions_for_png;
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
-use crate::state::{AppState, DeviceRecord, StateEvent};
+use crate::state::{AppState, StateEvent};
 use crate::ui::action::localized_action_label;
 use crate::ui::components::MenuRow;
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
 use gpui::ease_in_out;
 use gpui::{Animation, AnimationExt, img};
 
-/// The full programmable top row: Esc, then F1-F19. Each entry is the display
-/// label (on the key) + the [`KeyTrigger`] keycode it binds. MX Keys-class
-/// boards expose all 20; boards with a shorter F-row (a G513 has F1-F12)
-/// surface a prefix of this list, sized by the asset's key markers — see
-/// [`key_points`].
-const FUNCTION_KEYS: [(&str, u16); 20] = [
-    ("Esc", 0x35),
-    ("F1", 0x7A),
-    ("F2", 0x78),
-    ("F3", 0x63),
-    ("F4", 0x76),
-    ("F5", 0x60),
-    ("F6", 0x61),
-    ("F7", 0x62),
-    ("F8", 0x64),
-    ("F9", 0x65),
-    ("F10", 0x6D),
-    ("F11", 0x67),
-    ("F12", 0x6F),
-    ("F13", 0x69),
-    ("F14", 0x6B),
-    ("F15", 0x71),
-    ("F16", 0x6A),
-    ("F17", 0x40),
-    ("F18", 0x4F),
-    ("F19", 0x50),
-];
+mod key_points;
+
+use key_points::key_points;
+#[cfg(test)]
+use key_points::{EVEN_SPACING_END, EVEN_SPACING_START, key_x_fractions};
+
+/// The full programmable top row: Esc, then F1-F19 — each key carries its
+/// legend and the [`KeyTrigger`] keycode it binds. MX Keys-class boards expose
+/// all 20; boards with a shorter F-row (a G513 has F1-F12) surface a prefix of
+/// this list, sized by the asset's key markers — see [`key_points()`].
+const FUNCTION_KEYS: [FunctionKey; 20] = FunctionKey::ALL;
 
 /// Width of the config panel (CSS px) when a key is selected.
 const PANEL_W: f32 = 320.;
@@ -102,18 +86,6 @@ const KEY_CALLOUT_TOP_LOWER: f32 = 50.;
 const KEY_TARGET_W: f32 = 30.;
 const KEY_TARGET_H: f32 = 30.;
 const KEY_HOTSPOT_DOT: f32 = 12.;
-const FALLBACK_KEY_Y_FRAC: f32 = 0.153;
-/// Legacy pixel-marker depots (G513 family) mark F1-F12 but not Esc. Esc sits
-/// this many key pitches left of F1 on that chassis (measured on the render).
-const ESC_LEFT_OF_F1_PITCHES: f32 = 1.55;
-/// Logitech key markers are authored against a tighter internal keyboard
-/// image. The rendered `front.png` includes a little more top/left padding, so
-/// the raw marker lands high-left of the visible keycap center.
-const FRONT_MARKER_X_OFFSET_FRAC: f32 = 0.02;
-const FRONT_MARKER_Y_OFFSET_FRAC: f32 = 0.023;
-/// Even-spacing fallback band (fractions of image width) when no metadata.
-const EVEN_SPACING_START: f32 = 0.04;
-const EVEN_SPACING_END: f32 = 0.96;
 
 /// The function-row remapper view.
 pub struct FunctionRowView {
@@ -135,18 +107,8 @@ pub struct FunctionRowView {
 impl FunctionRowView {
     /// Create the view.
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let state_obs = cx.subscribe(&AppState::global(cx), |_view, _, event: &StateEvent, cx| {
-            let relevant = match event {
-                StateEvent::InventoryChanged | StateEvent::DeviceSelected(_) => true,
-                StateEvent::BindingsChanged(key) => AppState::try_read(cx)
-                    .and_then(AppState::current_record)
-                    .is_some_and(|record| record.device_key() == *key),
-                _ => false,
-            };
-            if relevant {
-                cx.notify();
-            }
-        });
+        let state_obs =
+            AppState::repaint_on(cx, |event| matches!(event, StateEvent::BindingsChanged(_)));
         Self {
             selected_key: None,
             hovered_key: None,
@@ -208,12 +170,12 @@ impl FunctionRowView {
     pub(crate) fn new_text_state(
         &mut self,
         seed: String,
-        placeholder: &str,
+        placeholder: SharedString,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<InputState> {
         let state = cx.new(|cx| {
-            let mut s = InputState::new(window, cx).placeholder(tr!(placeholder));
+            let mut s = InputState::new(window, cx).placeholder(placeholder);
             if !seed.is_empty() {
                 s.set_value(seed, window, cx);
             }
@@ -259,15 +221,15 @@ impl Render for FunctionRowView {
             .iter()
             .zip(points.iter())
             .enumerate()
-            .map(|(idx, ((label, keycode), point))| {
+            .map(|(idx, (key, point))| {
                 let trigger = KeyTrigger {
-                    keycode: *keycode,
+                    keycode: key.keycode(),
                     modifiers: KeyModifiers::default(),
                 };
                 let bound = bindings.and_then(|bindings| bindings.get(&trigger));
                 KeySlot {
                     idx,
-                    label,
+                    label: key.label(),
                     trigger,
                     x_frac: point.x_frac,
                     y_frac: point.y_frac,
@@ -302,7 +264,7 @@ impl Render for FunctionRowView {
                     if let Some(state) = self.text_state.clone() {
                         crate::ui::components::localize_placeholder(
                             &state,
-                            tr!(text_editor_placeholder(kind)),
+                            text_editor_placeholder(kind),
                             window,
                             cx,
                         );
@@ -677,7 +639,7 @@ fn key_click_target(
 fn binding_label(action: Option<&Action>) -> gpui::SharedString {
     match action {
         Some(action) => localized_action_label(action),
-        None => tr!("Off"),
+        None => tr!("common.off"),
     }
 }
 
@@ -817,12 +779,8 @@ impl FunctionRowView {
         let view_for_pick = view.clone();
         let trigger_for_pick = trigger.clone();
         let on_pick: PickFn = Rc::new(move |action, _window, cx| {
-            AppState::update(cx, |state, cx| {
-                let key = state.current_record().map(DeviceRecord::device_key);
-                state.commit_keyboard_binding(trigger_for_pick.clone(), Some(action));
-                if let Some(key) = key {
-                    cx.emit(StateEvent::BindingsChanged(key));
-                }
+            AppState::apply(cx, |state| {
+                state.commit_keyboard_binding(trigger_for_pick.clone(), Some(action))
             });
             view_for_pick.update(cx, |_, vcx| vcx.notify());
         });
@@ -850,7 +808,7 @@ fn title_header(key_name: &str, pal: &Palette) -> impl IntoElement {
                 .text_caption()
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(pal.text_muted)
-                .child(tr!("Bind %{name}", name => key_name)),
+                .child(tr!("actions.bind_control", name => key_name)),
         )
 }
 
@@ -889,7 +847,7 @@ fn panel_action_rows(
 
     children.push(
         v_flex()
-            .child(editor_section(tr!("Power User").to_string(), *pal))
+            .child(editor_section(tr!("actions.power_user").to_string(), *pal))
             .children(power_user_actions.iter().enumerate().map(
                 |(idx, (kind, label, icon_path))| {
                     let kind = *kind;
@@ -939,206 +897,6 @@ fn panel_action_rows(
     children
 }
 
-#[derive(Clone, Copy, Debug)]
-struct KeyPoint {
-    x_frac: f32,
-    y_frac: f32,
-}
-
-/// Resolve key marker points as fractions [0..1] of the rendered image, along
-/// with how many top-row keys the board exposes (`points.len()` — the visible
-/// prefix of [`FUNCTION_KEYS`]). Prefer asset metadata's top-row markers —
-/// percent-based on MX Keys-class depots, pixel-based on legacy keyboard
-/// depots (G513) — and fall back to even spacing on the same row.
-fn key_points(asset: Option<&ResolvedAsset>) -> Vec<KeyPoint> {
-    if let Some(a) = asset {
-        if let Some(points) = legacy_pixel_key_points(a) {
-            return points;
-        }
-        let key_markers = sorted_marker_points(a, &["device_keys_image", "device_buttons_image"]);
-        let easy_switch_markers = sorted_marker_points(a, &["device_easyswitch_image"]);
-
-        if key_markers.len() >= 16 && easy_switch_markers.len() >= 3 {
-            let mut out = Vec::with_capacity(FUNCTION_KEYS.len());
-            out.push(synthesized_esc_point(key_markers[0]));
-            out.extend(
-                key_markers[..12]
-                    .iter()
-                    .copied()
-                    .map(calibrated_marker_point),
-            );
-            out.extend(
-                easy_switch_markers[..3]
-                    .iter()
-                    .copied()
-                    .map(calibrated_marker_point),
-            );
-            out.extend(
-                key_markers[key_markers.len() - 4..]
-                    .iter()
-                    .copied()
-                    .map(calibrated_marker_point),
-            );
-            if out.len() == FUNCTION_KEYS.len() {
-                return out;
-            }
-        }
-
-        if key_markers.len() >= FUNCTION_KEYS.len() - 1 {
-            let f1_to_f19 = &key_markers[..FUNCTION_KEYS.len() - 1];
-            let mut out = Vec::with_capacity(FUNCTION_KEYS.len());
-            out.push(synthesized_esc_point(f1_to_f19[0]));
-            out.extend(f1_to_f19.iter().copied().map(calibrated_marker_point));
-            return out;
-        }
-    }
-    fallback_key_points()
-}
-
-#[cfg(test)]
-fn key_x_fractions(asset: Option<&ResolvedAsset>) -> Vec<f32> {
-    key_points(asset)
-        .into_iter()
-        .map(|point| point.x_frac)
-        .collect()
-}
-
-/// Key points from a legacy pixel-marker depot (the G513 family), or `None`
-/// when the asset isn't one.
-///
-/// Legacy `metadata*.json` files mark each F-key's cap-face centre in
-/// *absolute pixels* of the authored canvas (`origin`), not percentages. The
-/// markers only apply when that canvas is the render we actually cached —
-/// the same depot also ships marker sets authored against other variants'
-/// renders (the G513's `metadata.json` belongs to the G512 banner render) —
-/// so a depot whose `origin` doesn't match the PNG is rejected rather than
-/// misplacing every callout.
-fn legacy_pixel_key_points(asset: &ResolvedAsset) -> Option<Vec<KeyPoint>> {
-    let img = asset
-        .metadata
-        .images
-        .iter()
-        .find(|img| img.key == "device_image" && !img.assignments.is_empty())?;
-    if img.origin.width != asset.png_width || img.origin.height != asset.png_height {
-        return None;
-    }
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "depot image dimensions are a few thousand pixels at most"
-    )]
-    let (w, h) = (img.origin.width as f32, img.origin.height as f32);
-
-    let mut markers: Vec<KeyPoint> = img
-        .assignments
-        .iter()
-        .map(|asg| asg.marker)
-        // Percent-schema depots never exceed 100 on either axis; anything
-        // beyond is a pixel coordinate. Mixed files don't exist in the wild,
-        // but a percent marker slipping through would land off by 27x.
-        .filter(|m| m.x > 100. || m.y > 100.)
-        .map(|m| KeyPoint {
-            x_frac: (m.x / w).clamp(0.0, 1.0),
-            y_frac: (m.y / h).clamp(0.0, 1.0),
-        })
-        .collect();
-    if markers.len() < 2 || markers.len() > FUNCTION_KEYS.len() - 1 {
-        return None;
-    }
-    markers.sort_by(|a, b| {
-        a.x_frac
-            .partial_cmp(&b.x_frac)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    // The depots mark F1..Fn but never Esc; place it left of F1 by the F-row's
-    // own key pitch so it stays registered at any render size.
-    let pitch = median_pitch(&markers)?;
-    let first = markers[0];
-    let esc = KeyPoint {
-        x_frac: (first.x_frac - ESC_LEFT_OF_F1_PITCHES * pitch).max(0.0),
-        y_frac: first.y_frac,
-    };
-
-    let mut out = Vec::with_capacity(markers.len() + 1);
-    out.push(esc);
-    out.extend(markers);
-    Some(out)
-}
-
-/// Median gap between adjacent marker x positions — the F-row's key pitch.
-/// The median rides out the wider inter-cluster gaps (F4→F5, F8→F9).
-fn median_pitch(sorted_markers: &[KeyPoint]) -> Option<f32> {
-    let mut gaps: Vec<f32> = sorted_markers
-        .windows(2)
-        .map(|pair| pair[1].x_frac - pair[0].x_frac)
-        .filter(|gap| *gap > 0.)
-        .collect();
-    if gaps.is_empty() {
-        return None;
-    }
-    gaps.sort_by(f32::total_cmp);
-    Some(gaps[gaps.len() / 2])
-}
-
-fn sorted_marker_points(asset: &ResolvedAsset, image_keys: &[&str]) -> Vec<KeyPoint> {
-    let mut markers: Vec<KeyPoint> = asset
-        .metadata
-        .images
-        .iter()
-        .filter(|img| image_keys.contains(&img.key.as_str()))
-        .flat_map(|img| img.assignments.iter())
-        .map(|asg| KeyPoint {
-            x_frac: asg.marker.x / 100.0,
-            y_frac: asg.marker.y / 100.0,
-        })
-        .collect();
-    markers.sort_by(|a, b| {
-        a.x_frac
-            .partial_cmp(&b.x_frac)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    markers
-}
-
-fn synthesized_esc_point(first_function_key: KeyPoint) -> KeyPoint {
-    KeyPoint {
-        x_frac: synthesized_esc_x(first_function_key.x_frac),
-        y_frac: calibrated_marker_point(first_function_key).y_frac,
-    }
-}
-
-fn calibrated_marker_point(raw: KeyPoint) -> KeyPoint {
-    KeyPoint {
-        x_frac: (raw.x_frac + FRONT_MARKER_X_OFFSET_FRAC).clamp(0.0, 1.0),
-        y_frac: (raw.y_frac + FRONT_MARKER_Y_OFFSET_FRAC).clamp(0.0, 1.0),
-    }
-}
-
-fn synthesized_esc_x(first_function_key_x: f32) -> f32 {
-    (first_function_key_x - 0.045).max(0.02)
-}
-
-#[expect(
-    clippy::cast_precision_loss,
-    reason = "FUNCTION_KEYS is a fixed table of a dozen entries"
-)]
-fn fallback_key_x_fractions() -> Vec<f32> {
-    let step = (EVEN_SPACING_END - EVEN_SPACING_START) / (FUNCTION_KEYS.len() - 1) as f32;
-    (0..FUNCTION_KEYS.len())
-        .map(|i| EVEN_SPACING_START + (i as f32) * step)
-        .collect()
-}
-
-fn fallback_key_points() -> Vec<KeyPoint> {
-    fallback_key_x_fractions()
-        .into_iter()
-        .map(|x_frac| KeyPoint {
-            x_frac,
-            y_frac: FALLBACK_KEY_Y_FRAC,
-        })
-        .collect()
-}
-
 /// The keyboard image, or a labeled placeholder when no asset resolved. The
 /// element is sized to the PNG's own aspect (see [`keyboard_render_size`]), so
 /// the contain-fit paints edge to edge and the marker overlays stay registered.
@@ -1161,305 +919,10 @@ fn image_or_fallback(
             .items_center()
             .justify_center()
             .text_color(pal.text_muted)
-            .child(tr!("No keyboard image available"))
+            .child(tr!("keyboard.no_keyboard_image_available"))
             .into_any_element(),
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use openlogi_assets::{Assignment, Direction, ImageEntry, Metadata, Origin, Point};
-    use openlogi_core::device::DeviceKind;
-    use std::path::PathBuf;
-
-    #[test]
-    fn clicking_the_selected_key_closes_the_panel() {
-        assert_eq!(next_selection_after_click(None, 3), Some(3));
-        assert_eq!(next_selection_after_click(Some(3), 3), None);
-        assert_eq!(next_selection_after_click(Some(3), 4), Some(4));
-    }
-
-    #[test]
-    fn hover_or_selection_highlights_a_key() {
-        assert!(key_is_highlighted(2, Some(2), None));
-        assert!(key_is_highlighted(2, None, Some(2)));
-        assert!(key_is_highlighted(2, Some(2), Some(7)));
-        assert!(!key_is_highlighted(2, Some(1), Some(7)));
-    }
-
-    #[test]
-    fn function_row_covers_esc_through_f19() {
-        let labels: Vec<&str> = FUNCTION_KEYS.iter().map(|(label, _)| *label).collect();
-
-        assert_eq!(FUNCTION_KEYS.len(), 20);
-        assert_eq!(labels.first(), Some(&"Esc"));
-        assert_eq!(labels.last(), Some(&"F19"));
-        assert!(labels.contains(&"F13"));
-        assert!(labels.contains(&"F19"));
-    }
-
-    #[test]
-    fn fallback_key_positions_cover_the_full_top_row() {
-        let positions = key_x_fractions(None);
-
-        assert_eq!(positions.len(), 20);
-        assert_eq!(positions.first().copied(), Some(EVEN_SPACING_START));
-        assert_eq!(positions.last().copied(), Some(EVEN_SPACING_END));
-    }
-
-    #[test]
-    fn mx_keys_markers_merge_function_and_easy_switch_groups() {
-        let key_markers = vec![
-            9.0, 13.4, 17.8, 22.3, 26.7, 31.15, 35.55, 40.05, 44.55, 49.1, 53.5, 57.9, 62.35, 81.5,
-            85.9, 90.3, 94.7,
-        ];
-        let easy_switch_markers = vec![67.5, 71.92, 76.3];
-        let asset = asset_with_markers(&key_markers, &easy_switch_markers);
-
-        let positions = key_x_fractions(Some(&asset));
-
-        assert_eq!(positions.len(), 20);
-        assert_approx_eq(positions[0], 0.045);
-        assert_approx_eq(positions[1], 0.11);
-        assert_approx_eq(positions[12], 0.599);
-        assert_approx_eq(positions[13], 0.695);
-        assert_approx_eq(positions[15], 0.783);
-        assert_approx_eq(positions[16], 0.835);
-        assert_approx_eq(positions[19], 0.967);
-        assert!(
-            positions.windows(2).all(|pair| pair[0] < pair[1]),
-            "positions should stay in physical left-to-right order"
-        );
-    }
-
-    #[test]
-    fn mx_keys_markers_preserve_key_center_points() {
-        let key_markers = vec![
-            9.0, 13.4, 17.8, 22.3, 26.7, 31.15, 35.55, 40.05, 44.55, 49.1, 53.5, 57.9, 62.35, 81.5,
-            85.9, 90.3, 94.7,
-        ];
-        let easy_switch_markers = vec![67.5, 71.92, 76.3];
-        let asset = asset_with_markers(&key_markers, &easy_switch_markers);
-
-        let points = key_points(Some(&asset));
-
-        assert_eq!(points.len(), 20);
-        assert_approx_eq(points[19].x_frac, 0.967);
-        assert_approx_eq(points[19].y_frac, 0.153);
-        assert_approx_eq(key_target_top_px(points[19].y_frac, 220.0, 30.0), 18.66);
-    }
-
-    /// The G513 family's `metadata_full.json`: `device_image` markers in
-    /// absolute pixels of the authored canvas, which matches the cached
-    /// render. F1-F12 come from the markers; Esc is synthesized one chassis
-    /// offset left of F1.
-    #[test]
-    fn g513_pixel_markers_resolve_esc_plus_f1_to_f12() {
-        let marker_xs = [
-            285., 405., 525., 645., 840., 960., 1080., 1200., 1395., 1515., 1635., 1755.,
-        ];
-        let asset = legacy_asset(&marker_xs, 290., (2760, 1600), (2760, 1600));
-
-        let points = key_points(Some(&asset));
-
-        assert_eq!(points.len(), 13, "Esc + F1-F12, no phantom F13-F19");
-        assert_approx_eq(points[1].x_frac, 285. / 2760.);
-        assert_approx_eq(points[12].x_frac, 1755. / 2760.);
-        // Esc: 1.55 key pitches (median gap 120px) left of F1.
-        assert_approx_eq(points[0].x_frac, (285. - 1.55 * 120.) / 2760.);
-        for point in &points {
-            assert_approx_eq(point.y_frac, 290. / 1600.);
-        }
-        assert!(
-            points
-                .windows(2)
-                .all(|pair| pair[0].x_frac < pair[1].x_frac),
-            "points stay in physical left-to-right order"
-        );
-    }
-
-    /// The same depot's `metadata.json` is authored against a *different*
-    /// render (the G512 banner). Its origin doesn't match the cached PNG, so
-    /// the markers must be rejected in favour of the even-spacing fallback
-    /// rather than misplacing every callout.
-    #[test]
-    fn pixel_markers_for_a_different_render_fall_back_to_even_spacing() {
-        let marker_xs = [370., 525., 680., 835., 1090., 1250., 1400., 1555.];
-        let asset = legacy_asset(&marker_xs, 300., (3598, 1315), (2760, 1600));
-
-        let points = key_points(Some(&asset));
-
-        assert_eq!(points.len(), FUNCTION_KEYS.len());
-        assert_approx_eq(points[0].x_frac, EVEN_SPACING_START);
-        assert_approx_eq(points[19].x_frac, EVEN_SPACING_END);
-    }
-
-    #[test]
-    fn render_size_follows_the_png_aspect_up_to_the_width_cap() {
-        // MX Keys-class render (1872x728): width-bound at a roomy viewport.
-        let mx = legacy_asset(&[], 0., (1872, 728), (1872, 728));
-        let (w, h) = keyboard_render_size(Some(&mx), 900.);
-        assert_approx_eq(w, 700.);
-        assert!((h - 700. * 728. / 1872.).abs() < 0.01);
-
-        // G513 render (2760x1600) is far taller at the same width.
-        let g513 = legacy_asset(&[], 0., (2760, 1600), (2760, 1600));
-        let (w, h) = keyboard_render_size(Some(&g513), 900.);
-        assert_approx_eq(w, 700.);
-        assert!((h - 700. * 1600. / 2760.).abs() < 0.01);
-
-        // A short viewport shrinks the render instead of overflowing it.
-        let (w, h) = keyboard_render_size(Some(&g513), 500.);
-        assert_approx_eq(h, KEYBOARD_MIN_IMG_H);
-        assert!((w - KEYBOARD_MIN_IMG_H * 2760. / 1600.).abs() < 0.01);
-
-        assert_eq!(keyboard_render_size(None, 900.), FALLBACK_KEYBOARD_SIZE);
-    }
-
-    #[test]
-    fn callouts_spread_evenly_from_margin_to_margin() {
-        let margin = KEY_CALLOUT_W / 2.0 + 4.0;
-        assert_approx_eq(callout_center_x(0, 13, 700.0), margin);
-        assert_approx_eq(callout_center_x(12, 13, 700.0), 700.0 - margin);
-        assert_approx_eq(callout_center_x(0, 1, 700.0), 350.0);
-        assert!(callout_left_px(0, 13, 700.0, KEY_CALLOUT_W) >= 0.0);
-        assert!(callout_left_px(12, 13, 700.0, KEY_CALLOUT_W) <= 700.0 - KEY_CALLOUT_W);
-    }
-
-    /// Bubbles share a stagger lane with every second key; same-lane
-    /// neighbours must never overlap for any board size the row can show.
-    #[test]
-    fn same_lane_callouts_never_overlap() {
-        for count in [13usize, 20] {
-            for idx in 0..count.saturating_sub(2) {
-                let gap = callout_center_x(idx + 2, count, KEYBOARD_W)
-                    - callout_center_x(idx, count, KEYBOARD_W);
-                assert!(
-                    gap >= KEY_CALLOUT_W,
-                    "lane neighbours {idx}/{} overlap at count {count}: gap {gap}",
-                    idx + 2
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn function_key_callouts_stagger_even_lower_odd_upper() {
-        assert!(callout_top_px(0) > callout_top_px(1));
-        assert_eq!(callout_top_px(0), callout_top_px(2));
-        assert_eq!(callout_top_px(1), callout_top_px(3));
-    }
-
-    #[test]
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "lane counts are bounded by FUNCTION_KEYS"
-    )]
-    fn staggered_function_key_callout_rows_fit_the_keyboard_width() {
-        let lower_count = FUNCTION_KEYS
-            .iter()
-            .enumerate()
-            .filter(|(idx, _)| callout_lane_is_lower(*idx))
-            .count();
-        let upper_count = FUNCTION_KEYS.len() - lower_count;
-        assert!(
-            KEY_CALLOUT_W * lower_count as f32 <= KEYBOARD_W,
-            "lower callout lane overlaps before spacing is considered"
-        );
-        assert!(
-            KEY_CALLOUT_W * upper_count as f32 <= KEYBOARD_W,
-            "upper callout lane overlaps before spacing is considered"
-        );
-    }
-
-    /// A legacy pixel-marker asset: `device_image` assignments in absolute
-    /// pixels of an `origin` canvas, over a render of `png` dimensions.
-    fn legacy_asset(
-        marker_xs: &[f32],
-        marker_y: f32,
-        origin: (u32, u32),
-        png: (u32, u32),
-    ) -> ResolvedAsset {
-        let assignments = marker_xs
-            .iter()
-            .map(|x| Assignment {
-                slot_name: String::new(),
-                marker: Point { x: *x, y: marker_y },
-                label: Direction { x: -1, y: -1 },
-            })
-            .collect();
-        ResolvedAsset {
-            depot: "g513".to_string(),
-            display_name: "G513".to_string(),
-            kind: Some(DeviceKind::Keyboard),
-            image_path: PathBuf::from("/tmp/g513.png"),
-            hero_image_path: None,
-            glow: None,
-            metadata: Metadata {
-                images: vec![ImageEntry {
-                    key: "device_image".to_string(),
-                    origin: Origin {
-                        width: origin.0,
-                        height: origin.1,
-                    },
-                    assignments,
-                }],
-            },
-            png_width: png.0,
-            png_height: png.1,
-        }
-    }
-
-    fn asset_with_markers(key_markers: &[f32], easy_switch_markers: &[f32]) -> ResolvedAsset {
-        ResolvedAsset {
-            depot: "mx_keys_s_for_mac".to_string(),
-            display_name: "MX Keys S for Mac".to_string(),
-            kind: Some(DeviceKind::Keyboard),
-            image_path: PathBuf::from("/tmp/mx-keys.png"),
-            hero_image_path: None,
-            glow: None,
-            metadata: Metadata {
-                images: vec![
-                    ImageEntry {
-                        key: "device_keys_image".to_string(),
-                        origin: Origin {
-                            width: 1872,
-                            height: 728,
-                        },
-                        assignments: assignments_from_markers(key_markers),
-                    },
-                    ImageEntry {
-                        key: "device_easyswitch_image".to_string(),
-                        origin: Origin {
-                            width: 1872,
-                            height: 728,
-                        },
-                        assignments: assignments_from_markers(easy_switch_markers),
-                    },
-                ],
-            },
-            png_width: 1872,
-            png_height: 728,
-        }
-    }
-
-    fn assignments_from_markers(markers: &[f32]) -> Vec<Assignment> {
-        markers
-            .iter()
-            .enumerate()
-            .map(|(idx, x)| Assignment {
-                slot_name: format!("slot-{idx}"),
-                marker: Point { x: *x, y: 13.0 },
-                label: Direction { x: -1, y: -1 },
-            })
-            .collect()
-    }
-
-    fn assert_approx_eq(actual: f32, expected: f32) {
-        assert!(
-            (actual - expected).abs() < 0.0001,
-            "expected {expected}, got {actual}"
-        );
-    }
-}
+mod tests;

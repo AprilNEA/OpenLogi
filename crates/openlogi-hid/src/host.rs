@@ -18,7 +18,6 @@ use crate::probe_cache::FileProbeCacheStore;
 use crate::transport::native_backend;
 use openlogi_core::hid::smartshift::{SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus};
 use openlogi_device::ChannelPool;
-use openlogi_device::DeviceRoute;
 use openlogi_device::backend::{HidBackend, HotplugStream};
 use openlogi_device::backlight::BacklightState;
 use openlogi_device::inventory::{Enumerator, InventoryError};
@@ -27,6 +26,7 @@ use openlogi_device::write::{
     self as device, Dpi, DpiInfo, FeatureEntry, FirmwareEntity, HapticWaveform, LightingMethod,
     LitraModel, ReprogControlEntry, ScrollResolution, ScrollWheelMode,
 };
+use openlogi_device::{DeviceIoGate, DeviceIoSignal, DeviceRoute};
 
 /// This host's HID stack.
 ///
@@ -36,6 +36,19 @@ use openlogi_device::write::{
 #[must_use]
 pub fn backend() -> Arc<dyn HidBackend> {
     native_backend()
+}
+
+/// Control the process-wide native HID activity gate from the host lifecycle
+/// observer.
+#[must_use]
+pub fn device_io_signal() -> DeviceIoSignal {
+    crate::transport::device_io_signal()
+}
+
+/// Subscribe to the process-wide native HID activity gate.
+#[must_use]
+pub fn device_io_gate() -> DeviceIoGate {
+    crate::transport::device_io_gate()
 }
 
 /// Read the sensor DPI of the device `route` reaches.
@@ -131,7 +144,7 @@ pub async fn set_keyboard_color(
     g: u8,
     b: u8,
 ) -> Result<(), WriteError> {
-    device::set_keyboard_color(&*native_backend(), route, r, g, b).await
+    set_keyboard_color_with(route, LightingMethod::Auto, r, g, b).await
 }
 
 /// Set every key to one colour over a chosen lighting feature.
@@ -142,7 +155,23 @@ pub async fn set_keyboard_color_with(
     g: u8,
     b: u8,
 ) -> Result<(), WriteError> {
-    device::set_keyboard_color_with(&*native_backend(), route, method, r, g, b).await
+    let target = route.clone();
+    let gate = device_io_gate();
+    crate::lighting::LightingJob::spawn(route, move |cancel| async move {
+        device::LightingWrite {
+            method,
+            color: openlogi_core::color::Rgb::new(r, g, b),
+        }
+        .apply(
+            &*native_backend(),
+            &target,
+            || cancel.is_cancelled(),
+            || gate.allows_io(),
+        )
+        .await
+    })?
+    .finish()
+    .await
 }
 
 /// Play a haptic waveform on the device `route` reaches.

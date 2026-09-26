@@ -44,6 +44,18 @@ impl DecodeEvent for BatteryEvent {
     }
 }
 
+impl BatteryEvent {
+    /// Decodes one event payload for this feature, or returns `None` for an
+    /// unsupported function or wire value.
+    ///
+    /// Consumers that already own a channel-level listener can use this
+    /// without constructing a second [`UnifiedBatteryFeature`].
+    #[must_use]
+    pub fn decode(function_id: u8, payload: &[u8; 16]) -> Option<Self> {
+        <Self as DecodeEvent>::decode(function_id, payload)
+    }
+}
+
 impl UnifiedBatteryFeature {
     /// Retrieves the capabilities of this feature and the battery in general.
     pub async fn get_battery_capabilities(&self) -> Result<BatteryCapabilities, Hidpp20Error> {

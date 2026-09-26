@@ -13,29 +13,41 @@ use std::time::{Duration, Instant};
 use openlogi_core::binding::{
     Action, Binding, ButtonId, GestureDirection, SwipeAccumulator, default_binding,
 };
-use openlogi_core::config::{KeyModifiers, KeyTrigger};
+use openlogi_core::config::KeyTrigger;
 use openlogi_hook::{
     EventDevice, EventDisposition, Hook, HookEvent, KeyEvent, MouseEvent, source_is_remappable,
 };
 use tracing::{info, warn};
 
 use super::scroll::ScrollInputHandle;
-use super::{ActionDispatcher, PressToken};
+use super::{ActionDispatchTarget, ActionDispatcher, PressToken};
 use crate::event_monitor::SharedEventMonitor;
 
-/// The two button maps the OS-hook callback reads, kept behind ONE lock so a
-/// config rebuild publishes both atomically — a press during an owner switch can
-/// never see the new single-action bindings against the old gesture map (or vice
-/// versa), and the common case reads one lock instead of two.
+/// The button maps and selected-device thumb-wheel polarity the OS-hook callback
+/// reads, kept behind ONE lock so a config rebuild publishes one coherent
+/// snapshot. A callback during a device/app switch can never combine one
+/// device's bindings with another device's direction convention.
 #[derive(Default)]
 pub struct HookMaps {
     /// Per-button immediate or threshold binding — the non-gesture dispatch path.
     pub bindings: BTreeMap<ButtonId, Binding>,
-    /// Per-direction maps for the OS-hook gesture buttons (Middle/Back/Forward in
-    /// gesture mode), so a hold+swipe resolves to a bound action. The dedicated
-    /// HID++ gesture button (0x00c3) uses the gesture watcher's separate map
-    /// instead — it never reaches the OS hook.
+    /// Per-direction maps for the OS-hook gesture buttons (Back/Forward in
+    /// gesture mode), so a hold+swipe resolves to a bound action. HID++
+    /// gesture sources use the gesture watcher's separate map instead.
     pub gestures: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
+    /// The pointer identity that selected this snapshot, or focused policy.
+    pub(crate) pointer_target: Option<openlogi_hook::PointerTarget>,
+    /// Device whose binding maps this snapshot contains.
+    #[cfg_attr(
+        not(any(target_os = "windows", test)),
+        expect(dead_code, reason = "read only by the Windows native-wheel fallback")
+    )]
+    pub(crate) selected_device: Option<String>,
+    /// Per-device `0x2150 default_dir`, learned by HID++ capture sessions:
+    /// `true` means a positive native horizontal delta is physical forward/up.
+    /// Entries survive map rebuilds because they are hardware observations,
+    /// not configuration.
+    pub(crate) thumbwheel_positive_is_forward: BTreeMap<String, bool>,
 }
 
 /// Shared, atomically-published [`HookMaps`], threaded between the config owner
@@ -48,19 +60,7 @@ pub type SharedHookMaps = Arc<RwLock<HookMaps>>;
 /// (keycode + modifiers).
 pub type SharedKeyboardBindings = Arc<RwLock<BTreeMap<KeyTrigger, Action>>>;
 
-/// Convert the hook-layer modifier state into the config-layer type (the two
-/// live in different crates — core is leaf-level and duplicates the four
-/// bools). Drop-in identity once the field names align.
-fn convert_modifiers(m: openlogi_hook::KeyModifiers) -> KeyModifiers {
-    KeyModifiers {
-        shift: m.shift,
-        control: m.control,
-        option: m.option,
-        command: m.command,
-    }
-}
-
-/// Tracks which OS-hook button (Middle/Back/Forward) is mid-hold and defers the
+/// Tracks which OS-hook gesture button (Back/Forward) is mid-hold and defers the
 /// swipe detection itself to a shared [`SwipeAccumulator`], which commits a swipe
 /// *mid-motion* like the HID++ gesture-button path in `openlogi-hid`. This wrapper
 /// adds only the button identity the accumulator doesn't track; a press that
@@ -68,7 +68,7 @@ fn convert_modifiers(m: openlogi_hook::KeyModifiers) -> KeyModifiers {
 /// A gesture hold this old is presumed stale — real hold+swipe interactions
 /// finish in well under a second, and only a lost button-up (with no OS
 /// interrupt to trigger [`HoldState::cancel`]) leaves one lingering.
-const STALE_HOLD: Duration = Duration::from_secs(10);
+const HOLD_STALE_AFTER: Duration = Duration::from_secs(10);
 
 #[derive(Default)]
 struct HoldState {
@@ -97,13 +97,13 @@ impl HoldState {
     /// clears it when the OS drops a release without an interrupt): a re-press
     /// of the held button itself — a button cannot be pressed while down, so
     /// this is proof the release was lost — and any press once the hold has
-    /// aged past [`STALE_HOLD`], without which every other gesture button
+    /// aged past [`HOLD_STALE_AFTER`], without which every other gesture button
     /// would stay refused indefinitely.
     fn prepare_begin(&mut self, button: ButtonId) -> HoldAdmission {
         let Some(held) = self.current.take() else {
             return HoldAdmission::Begin;
         };
-        if held.button != button && held.started_at.elapsed() < STALE_HOLD {
+        if held.button != button && held.started_at.elapsed() < HOLD_STALE_AFTER {
             self.current = Some(held);
             return HoldAdmission::Refuse;
         }
@@ -157,7 +157,7 @@ impl HoldState {
     #[cfg(test)]
     fn backdate_for_test(&mut self) {
         if let Some(held) = &mut self.current
-            && let Some(aged) = Instant::now().checked_sub(STALE_HOLD)
+            && let Some(aged) = Instant::now().checked_sub(HOLD_STALE_AFTER)
         {
             held.started_at = aged;
         }
@@ -171,10 +171,9 @@ thread_local! {
     /// Thread-local rather than a shared `Mutex` keeps the hot path lock-free and
     /// free of cross-thread contention on the freeze-sensitive callback.
     static HOLD: RefCell<HoldState> = RefCell::new(HoldState::default());
-    /// Buttons whose physical press was delivered because the action queue
-    /// rejected the remap. Their matching release must also pass through so
-    /// apps never see a stuck auxiliary button (down without up).
-    static FAIL_OPEN_PRESSES: RefCell<HashSet<ButtonId>> = RefCell::new(HashSet::new());
+    /// Accepted non-gesture presses retain their edge disposition even when
+    /// moving the pointer changes the binding before physical release.
+    static SUPPRESSED_PRESSES: RefCell<HashSet<ButtonId>> = RefCell::new(HashSet::new());
     /// Function keys whose held action owns an accepted lifecycle. Repeated
     /// key-down events are auto-repeat, not replacement presses; their first
     /// matching key-up ends the lifecycle.
@@ -183,20 +182,17 @@ thread_local! {
 
 /// Whether a button event's physical source may be remapped/suppressed.
 ///
-/// macOS attributes every CGEvent to an IOKit sender and fails closed: only
-/// known Logitech non-trackpad devices are remappable, so the built-in
-/// trackpad can never be swallowed. Linux/Windows often lack attribution
-/// (`device: None`); those platforms already restrict which devices the hook
-/// attaches to, so unknown sources stay remappable.
+/// macOS fails closed because its hook is global: only a known Logitech,
+/// non-trackpad source may be suppressed. Bluetooth-direct Back/Forward
+/// gestures are captured through their device-specific HID++ session instead
+/// of weakening this policy. Linux/Windows restrict hook attachment upstream,
+/// so an unavailable source remains eligible there.
 fn button_source_may_remap(device: Option<&EventDevice>) -> bool {
     match device {
         Some(d) => source_is_remappable(Some(d)),
-        None => {
-            // Attribution missing: safe on Linux/Windows (device selection is
-            // upstream of the callback). On macOS fail closed — an unattributed
-            // event is more likely a trackpad/system source than a Logi mouse.
-            !cfg!(target_os = "macos")
-        }
+        // Linux/Windows restrict which devices the hook attaches to upstream.
+        // macOS uses one global tap, so an unattributed event must fail closed.
+        None => !cfg!(target_os = "macos"),
     }
 }
 
@@ -211,13 +207,15 @@ fn scroll_source_may_intercept(from_trackpad: bool, device: Option<&EventDevice>
 }
 
 /// Off-thread worker for bound actions so the tap callback never injects input.
-fn spawn_action_worker(dispatcher: ActionDispatcher) -> mpsc::SyncSender<Action> {
-    let (tx, rx) = mpsc::sync_channel::<Action>(64);
+type QueuedAction = (Action, ActionDispatchTarget);
+
+fn spawn_action_worker(dispatcher: ActionDispatcher) -> mpsc::SyncSender<QueuedAction> {
+    let (tx, rx) = mpsc::sync_channel::<QueuedAction>(64);
     let _ = thread::Builder::new()
         .name("openlogi-action".into())
         .spawn(move || {
-            while let Ok(action) = rx.recv() {
-                dispatcher.dispatch(&action, None);
+            while let Ok((action, target)) = rx.recv() {
+                dispatcher.executor.dispatch_to(&action, None, target);
             }
         });
     tx
@@ -225,8 +223,12 @@ fn spawn_action_worker(dispatcher: ActionDispatcher) -> mpsc::SyncSender<Action>
 
 /// Queue a bound action without blocking the tap callback. Returns `false` if
 /// the queue is full (caller should fail open and pass the physical event).
-fn try_queue_action(tx: &mpsc::SyncSender<Action>, action: Action) -> bool {
-    if tx.try_send(action).is_err() {
+fn try_queue_action(
+    tx: &mpsc::SyncSender<QueuedAction>,
+    action: Action,
+    target: ActionDispatchTarget,
+) -> bool {
+    if tx.try_send((action, target)).is_err() {
         warn!("action queue full — dropping bound action to keep the input hook live");
         false
     } else {
@@ -241,16 +243,28 @@ fn handle_button(
     device: Option<&EventDevice>,
     hooks: &SharedHookMaps,
     dispatcher: &ActionDispatcher,
+    capture_target: impl FnOnce() -> ActionDispatchTarget,
 ) -> EventDisposition {
     // Primary L/R always pass through (suppressing them would brick the mouse).
     if !id.is_os_hook_button() || !button_source_may_remap(device) {
         return EventDisposition::PassThrough;
     }
-
     // `try_read` only: a blocking read on the tap thread freezes every pointer
     // event while a config rebuild holds the write lock. Fail open if unavailable.
+    let (binding, is_gesture, pointer_target) =
+        hooks.try_read().map_or((None, false, None), |maps| {
+            (
+                maps.bindings.get(&id).cloned(),
+                maps.gestures.contains_key(&id),
+                maps.pointer_target,
+            )
+        });
+    let action_target = if pressed {
+        pointer_target.map_or_else(capture_target, ActionDispatchTarget::Pointer)
+    } else {
+        ActionDispatchTarget::Keyboard
+    };
     if pressed {
-        let is_gesture = hooks.try_read().is_ok_and(|m| m.gestures.contains_key(&id));
         // A refused begin — a second gesture button pressed mid-hold — falls
         // through to the single-action path: the first hold wins and this press
         // still means its plain click.
@@ -259,11 +273,12 @@ fn handle_button(
             if let Some(HoldAdmission::Replace(stale)) = &admission {
                 dispatcher.cancel_stale_hook_press(stale);
             }
-            if let Some(press) = dispatcher.try_hook_button_down(id, None) {
+            if let Some(press) = dispatcher.try_hook_button_down(id, None, action_target) {
                 HOLD.with_borrow_mut(|h| h.begin(id, press));
                 return EventDisposition::Suppress;
             }
-            return FAIL_OPEN_PRESSES.with_borrow_mut(|s| remapped_press_disposition(id, false, s));
+            return SUPPRESSED_PRESSES
+                .with_borrow_mut(|s| remapped_press_disposition(id, false, s));
         }
     } else {
         // Drop the HOLD borrow before any queueing (re-entrancy freeze hazard).
@@ -282,27 +297,25 @@ fn handle_button(
             dispatcher.try_hook_button_up(id);
             return EventDisposition::Suppress;
         }
+        let disposition =
+            SUPPRESSED_PRESSES.with_borrow_mut(|s| remapped_release_disposition(id, s));
+        if disposition == EventDisposition::Suppress {
+            dispatcher.try_hook_button_up(id);
+        }
+        return disposition;
     }
 
-    let binding = hooks
-        .try_read()
-        .ok()
-        .and_then(|m| m.bindings.get(&id).cloned());
     let Some(binding) = binding else {
-        return EventDisposition::PassThrough;
+        return SUPPRESSED_PRESSES.with_borrow_mut(|s| remapped_press_disposition(id, false, s));
     };
     if binding_is_native_click(id, &binding) {
-        return EventDisposition::PassThrough;
+        return SUPPRESSED_PRESSES.with_borrow_mut(|s| remapped_press_disposition(id, false, s));
     }
-    if pressed {
-        info!(button = %id, action = %binding.click_action().label(), "button → handling binding");
-        let queued = dispatcher
-            .try_hook_button_down(id, Some(&binding))
-            .is_some();
-        return FAIL_OPEN_PRESSES.with_borrow_mut(|s| remapped_press_disposition(id, queued, s));
-    }
-    dispatcher.try_hook_button_up(id);
-    FAIL_OPEN_PRESSES.with_borrow_mut(|s| remapped_release_disposition(id, s))
+    info!(button = %id, action = %binding.click_action().label(), "button → handling binding");
+    let queued = dispatcher
+        .try_hook_button_down(id, Some(&binding), action_target)
+        .is_some();
+    SUPPRESSED_PRESSES.with_borrow_mut(|s| remapped_press_disposition(id, queued, s))
 }
 
 fn binding_is_native_click(id: ButtonId, binding: &Binding) -> bool {
@@ -310,31 +323,30 @@ fn binding_is_native_click(id: ButtonId, binding: &Binding) -> bool {
 }
 
 /// Press of a remapped single-action button: suppress when the action was
-/// queued, otherwise pass through and mark `id` so the release pairs.
+/// queued, and remember that decision so release uses the same disposition.
 fn remapped_press_disposition(
     id: ButtonId,
     queued: bool,
-    fail_open: &mut HashSet<ButtonId>,
+    suppressed: &mut HashSet<ButtonId>,
 ) -> EventDisposition {
     if queued {
-        fail_open.remove(&id);
+        suppressed.insert(id);
         EventDisposition::Suppress
     } else {
-        fail_open.insert(id);
+        suppressed.remove(&id);
         EventDisposition::PassThrough
     }
 }
 
-/// Release of a remapped single-action button: pass through only when the
-/// matching press was fail-opened (queue rejection), else suppress.
+/// A release follows its matching press, not the pointer's current profile.
 fn remapped_release_disposition(
     id: ButtonId,
-    fail_open: &mut HashSet<ButtonId>,
+    suppressed: &mut HashSet<ButtonId>,
 ) -> EventDisposition {
-    if fail_open.remove(&id) {
-        EventDisposition::PassThrough
-    } else {
+    if suppressed.remove(&id) {
         EventDisposition::Suppress
+    } else {
+        EventDisposition::PassThrough
     }
 }
 
@@ -375,8 +387,9 @@ fn handle_moved(
 fn handle_key(
     event: KeyEvent,
     bindings: &SharedKeyboardBindings,
-    action_tx: &mpsc::SyncSender<Action>,
+    action_tx: &mpsc::SyncSender<QueuedAction>,
     dispatcher: &ActionDispatcher,
+    capture_target: impl FnOnce() -> ActionDispatchTarget,
 ) -> EventDisposition {
     let KeyEvent {
         keycode,
@@ -395,10 +408,7 @@ fn handle_key(
     if HELD_KEYS.with_borrow(|keys| keys.contains(&keycode)) {
         return EventDisposition::Suppress;
     }
-    let trigger = KeyTrigger {
-        keycode,
-        modifiers: convert_modifiers(modifiers),
-    };
+    let trigger = KeyTrigger { keycode, modifiers };
     let Some(action) = bindings
         .try_read()
         .ok()
@@ -408,8 +418,9 @@ fn handle_key(
     };
 
     info!(keycode, action = %action.label(), "key → executing bound action");
+    let action_target = capture_target();
     let queued = if action.held_combo().is_some() {
-        let queued = dispatcher.try_hook_key_down(keycode, &action);
+        let queued = dispatcher.try_hook_key_down(keycode, &action, action_target);
         if queued {
             HELD_KEYS.with_borrow_mut(|keys| {
                 keys.insert(keycode);
@@ -417,7 +428,7 @@ fn handle_key(
         }
         queued
     } else {
-        try_queue_action(action_tx, action)
+        try_queue_action(action_tx, action, action_target)
     };
     queued_event_disposition(queued)
 }
@@ -452,7 +463,14 @@ pub fn start(
                     id,
                     pressed,
                     device,
-                } => handle_button(id, pressed, device.as_ref(), &hooks, &dispatcher),
+                } => handle_button(
+                    id,
+                    pressed,
+                    device.as_ref(),
+                    &hooks,
+                    &dispatcher,
+                    ActionDispatchTarget::capture,
+                ),
                 MouseEvent::Moved { delta_x, delta_y } => {
                     handle_moved(delta_x, delta_y, &hooks, &dispatcher)
                 }
@@ -470,13 +488,18 @@ pub fn start(
                 } => {
                     #[cfg(target_os = "windows")]
                     if delta.y() == 0.0
-                        && let Some((button, action)) = hooks
-                            .try_read()
-                            .ok()
-                            .and_then(|maps| rebound_thumbwheel_action(&maps, delta.x()))
+                        && let Some((button, action, target)) =
+                            hooks.try_read().ok().and_then(|maps| {
+                                rebound_thumbwheel_action(&maps, delta.x())
+                                    .map(|(button, action)| (button, action, maps.pointer_target))
+                            })
                     {
                         info!(button = %button, action = %action.label(), "native thumb wheel → executing bound action");
-                        return queued_event_disposition(try_queue_action(&action_tx, action));
+                        return queued_event_disposition(try_queue_action(
+                            &action_tx,
+                            action,
+                            ActionDispatchTarget::for_pointer(target),
+                        ));
                     }
                     if scroll_source_may_intercept(from_trackpad, device.as_ref()) {
                         return queued_event_disposition(scroll.try_hook_scroll(delta));
@@ -489,7 +512,13 @@ pub fn start(
         // HoldShortcut enters the same down/up/cancel lifecycle as a mouse
         // button. The active set pairs key-up even if modifier state or config
         // changes while the key is down.
-        HookEvent::Key(event) => handle_key(event, &keyboard_bindings, &action_tx, &dispatcher),
+        HookEvent::Key(event) => handle_key(
+            event,
+            &keyboard_bindings,
+            &action_tx,
+            &dispatcher,
+            ActionDispatchTarget::capture,
+        ),
     });
 
     match result {
@@ -507,16 +536,28 @@ pub fn start(
 /// Resolve a native horizontal-wheel tick to a rebound thumb-wheel action.
 /// The built-in horizontal-scroll defaults intentionally return `None` so the
 /// physical wheel stays native unless the user changed that direction. On
-/// Windows/MX Master 2S, positive `WM_MOUSEHWHEEL` delta is the physical
-/// backward/down direction, so it maps to `ThumbwheelScrollDown`.
+/// devices exposing `0x2150`, the learned `default_dir` determines which
+/// physical direction the native delta represents. A selected device whose
+/// polarity has not arrived yet fails open instead of guessing the opposite
+/// action; only the legacy no-device-context path retains the MX Master 2S
+/// fallback (positive is physical backward/down).
 #[cfg(any(target_os = "windows", test))]
 fn rebound_thumbwheel_action(maps: &HookMaps, delta_x: f64) -> Option<(ButtonId, Action)> {
-    let button = if delta_x > 0.0 {
-        ButtonId::ThumbwheelScrollDown
+    let positive_is_forward = match maps.selected_device.as_deref() {
+        Some(key) => maps.thumbwheel_positive_is_forward.get(key).copied()?,
+        None => false,
+    };
+    let forward = if delta_x > 0.0 {
+        positive_is_forward
     } else if delta_x < 0.0 {
-        ButtonId::ThumbwheelScrollUp
+        !positive_is_forward
     } else {
         return None;
+    };
+    let button = if forward {
+        ButtonId::ThumbwheelScrollUp
+    } else {
+        ButtonId::ThumbwheelScrollDown
     };
     let action = maps.bindings.get(&button)?.click_action();
     (action != default_binding(button)).then_some((button, action))

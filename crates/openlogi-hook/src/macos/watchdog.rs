@@ -26,6 +26,51 @@ pub(super) enum TapPhase {
     ThreadExited,
 }
 
+impl TapPhase {
+    const fn decode(value: u8) -> Self {
+        if value > Self::ThreadExited as u8 {
+            // An unknown byte cannot prove that the HID tap was destroyed.
+            // Treat it as hazardous so both watchdogs remain armed and the
+            // lifecycle timeout can fail safe instead of panicking or disarming.
+            return Self::Armed;
+        }
+        match value {
+            0 => Self::Starting,
+            1 => Self::Arming,
+            2 => Self::Armed,
+            3 => Self::TapStopped,
+            _ => Self::ThreadExited,
+        }
+    }
+}
+
+/// Whether the tap callback is idle or the monotonic millisecond when it entered.
+///
+/// Zero is idle; [`WatchdogSignals::now_millis`] reserves nonzero values for
+/// entries. One Release store publishes each whole state, so an Acquire load
+/// cannot observe "entered" without its matching timestamp as it could with
+/// separate flag and timestamp atomics.
+#[derive(Debug, Default)]
+pub(super) struct CallbackActivity(AtomicU64);
+
+impl CallbackActivity {
+    pub fn enter(&self, entered_at_ms: u64) {
+        debug_assert_ne!(entered_at_ms, 0);
+        self.0.store(entered_at_ms, Ordering::Release);
+    }
+
+    pub fn exit(&self) {
+        self.0.store(0, Ordering::Release);
+    }
+
+    pub fn entered_at_ms(&self) -> Option<u64> {
+        match self.0.load(Ordering::Acquire) {
+            0 => None,
+            entered_at_ms => Some(entered_at_ms),
+        }
+    }
+}
+
 /// Atomics shared by the tap, stopper, and watchdog threads.
 ///
 /// A stop request is a separate latch from `phase`: it must never imply that
@@ -63,14 +108,7 @@ impl WatchdogSignals {
     }
 
     pub fn phase(&self) -> TapPhase {
-        match self.phase.load(Ordering::Acquire) {
-            0 => TapPhase::Starting,
-            1 => TapPhase::Arming,
-            2 => TapPhase::Armed,
-            3 => TapPhase::TapStopped,
-            4 => TapPhase::ThreadExited,
-            _ => unreachable!("invalid tap lifecycle phase"),
-        }
+        TapPhase::decode(self.phase.load(Ordering::Acquire))
     }
 
     pub fn set_phase(&self, phase: TapPhase) {
@@ -215,6 +253,36 @@ pub(super) fn stuck_callback(now_ms: u64, entered_at_ms: u64) -> Option<Duration
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tap_phase_decoder_is_total_and_fails_safe() {
+        assert_eq!(TapPhase::decode(0), TapPhase::Starting);
+        assert_eq!(TapPhase::decode(1), TapPhase::Arming);
+        assert_eq!(TapPhase::decode(2), TapPhase::Armed);
+        assert_eq!(TapPhase::decode(3), TapPhase::TapStopped);
+        assert_eq!(TapPhase::decode(4), TapPhase::ThreadExited);
+        assert_eq!(TapPhase::decode(5), TapPhase::Armed);
+        assert_eq!(TapPhase::decode(u8::MAX), TapPhase::Armed);
+
+        let signals = WatchdogSignals::default();
+        signals.phase.store(u8::MAX, Ordering::Relaxed);
+        assert_eq!(signals.phase(), TapPhase::Armed);
+    }
+
+    #[test]
+    fn callback_activity_publishes_one_complete_state() {
+        let activity = CallbackActivity::default();
+        assert_eq!(activity.entered_at_ms(), None);
+
+        activity.enter(42);
+        assert_eq!(activity.entered_at_ms(), Some(42));
+
+        activity.enter(43);
+        assert_eq!(activity.entered_at_ms(), Some(43));
+
+        activity.exit();
+        assert_eq!(activity.entered_at_ms(), None);
+    }
 
     fn observation(
         phase: TapPhase,

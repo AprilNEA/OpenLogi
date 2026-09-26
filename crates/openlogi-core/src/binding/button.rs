@@ -119,9 +119,10 @@ impl ButtonId {
     /// remaps: Middle, Back, or Forward. The primary L/R clicks always pass
     /// through (suppressing them would brick the mouse), and the DPI / thumb /
     /// dedicated gesture controls aren't visible to the OS hook at all (they're
-    /// captured over HID++). These are exactly the buttons that can become an
-    /// OS-hook gesture button, so the hook's remap gate and the gesture-owner
-    /// projection share this one definition.
+    /// captured over HID++). Stored gesture bindings also project through this
+    /// set so Middle Click configurations written by v0.8.0 keep working;
+    /// [`Self::supports_gesture_mode`] separately controls which buttons may be
+    /// newly promoted by the UI.
     #[must_use]
     pub fn is_os_hook_button(self) -> bool {
         matches!(
@@ -130,14 +131,35 @@ impl ButtonId {
         )
     }
 
+    /// Whether this button may use the OS hook's hold-and-swipe gesture path.
+    /// Back and Forward are the only eligible controls: Middle Click belongs
+    /// to the main wheel, whose controls intentionally remain single-action.
+    #[must_use]
+    pub fn is_os_hook_gesture_source(self) -> bool {
+        matches!(self, ButtonId::Back | ButtonId::Forward)
+    }
+
     /// Whether this button is a HID++ gesture source — a control that is
     /// captured over HID++ raw-XY diversion (never the OS hook) and can
-    /// therefore own the gesture role with swipe directions: the dedicated
-    /// gesture button, or the MX Master 4 haptic panel. The capture layer maps
-    /// each to its control ID.
+    /// therefore own the gesture role with swipe directions: DPI/ModeShift,
+    /// the dedicated gesture button, or the MX Master 4 haptic panel. The
+    /// capture layer maps each to its control ID and checks the device's
+    /// advertised raw-XY capability before arming it.
     #[must_use]
     pub fn is_hidpp_gesture_source(self) -> bool {
-        matches!(self, ButtonId::GestureButton | ButtonId::HapticPanel)
+        matches!(
+            self,
+            ButtonId::DpiToggle | ButtonId::GestureButton | ButtonId::HapticPanel
+        )
+    }
+
+    /// Whether OpenLogi offers gesture mode for this logical control. Wheel
+    /// controls and the primary clicks stay single-action by product policy;
+    /// device-specific HID++ capability checks may further narrow this set at
+    /// capture time.
+    #[must_use]
+    pub fn supports_gesture_mode(self) -> bool {
+        self.is_os_hook_gesture_source() || self.is_hidpp_gesture_source()
     }
 
     /// Human-readable label for popovers and tooltips.
@@ -166,6 +188,35 @@ impl ButtonId {
             ButtonId::KeyVolumeDown => "Volume Down Key",
             ButtonId::KeyVolumeUp => "Volume Up Key",
             ButtonId::HapticPanel => "Haptic Panel",
+        }
+    }
+
+    /// Stable catalog key for the localized button label.
+    #[must_use]
+    pub fn translation_key(self) -> &'static str {
+        match self {
+            ButtonId::LeftClick => "actions.left_click",
+            ButtonId::RightClick => "actions.right_click",
+            ButtonId::MiddleClick => "actions.middle_click",
+            ButtonId::WheelTiltLeft => "actions.tilt_left",
+            ButtonId::WheelTiltRight => "actions.tilt_right",
+            ButtonId::Back => "actions.back",
+            ButtonId::Forward => "actions.forward",
+            ButtonId::DpiToggle => "actions.dpi_toggle",
+            ButtonId::Thumbwheel => "pointer.thumb_wheel",
+            ButtonId::ThumbwheelScrollUp => "pointer.thumb_wheel_up",
+            ButtonId::ThumbwheelScrollDown => "pointer.thumb_wheel_down",
+            ButtonId::GestureButton => "actions.gesture_button",
+            ButtonId::KeySearch => "keyboard.search_key",
+            ButtonId::KeyDictation => "keyboard.dictation_key",
+            ButtonId::KeyEmoji => "keyboard.emoji_key",
+            ButtonId::KeyScreenCapture => "keyboard.screen_capture_key",
+            ButtonId::KeyMicMute => "keyboard.mic_mute_key",
+            ButtonId::KeyPlayPause => "keyboard.play_pause_key",
+            ButtonId::KeyMute => "keyboard.mute_key",
+            ButtonId::KeyVolumeDown => "keyboard.volume_down_key",
+            ButtonId::KeyVolumeUp => "keyboard.volume_up_key",
+            ButtonId::HapticPanel => "actions.haptic_panel",
         }
     }
 }

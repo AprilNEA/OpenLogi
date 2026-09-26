@@ -7,6 +7,4 @@
 //! reach the overlay through the back door.
 
 pub mod action_icons;
-#[cfg(test)]
-mod catalog_parity;
 pub mod color;

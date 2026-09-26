@@ -14,15 +14,21 @@ devenv.local.yaml
 # never copied or vendored. Cloned at the project root for convenience.
 /local-reference/
 
-# Claude Code skill plumbing — local per-developer, not part of the project.
-# `/*` instead of the bare directory so the committed Amp orb lifecycle
-# scripts can be re-included below: git cannot un-ignore a file whose parent
-# directory is excluded, and a tracked-but-ignored file makes release-plz
-# treat every checkout as dirty (`git ls-files -ci --exclude-standard`).
+# Track the orb lifecycle, shared rules, and curated project skills. Other agent state
+# and skills stay local. Keep parent directories visible for these exceptions.
 /.agents/*
 !/.agents/resume
 !/.agents/setup
-/skills-lock.json
+!/.agents/rules/
+!/.agents/skills/
+/.agents/skills/*
+!/.agents/skills/gpui-kit/
+!/.agents/skills/gpui-kit-design-guides/
+!/.agents/skills/testing-openlogi-ui/
+!/.agents/skills/diagnosing-openlogi-devices/
+!/.agents/skills/verifying-openlogi-changes/
+!/.agents/skills/contributing-device-fixtures/
+!/.agents/skills/LICENSE-APACHE
 
 # Local planning docs — kept on disk, never committed.
 /UI.md
@@ -32,24 +38,26 @@ devenv.local.yaml
 .worktrees/
 
 # Claude Code worktrees, transcripts, local settings — per-developer state.
-# The path-scoped agent rules in .claude/rules/ are project config and stay tracked.
+# Track only the rules symlink here; shared rule files live in .agents/rules/.
 /.claude/*
-!/.claude/rules/
+!/.claude/rules
 # Project skills are named explicitly and tracked; everything else under
 # .claude/skills/ is the per-developer symlink farm into .agents/skills/.
 !/.claude/skills/
 /.claude/skills/*
 !/.claude/skills/openlogi-macos-permissions/
+!/.claude/skills/gpui-kit
+!/.claude/skills/gpui-kit-design-guides
+!/.claude/skills/testing-openlogi-ui
+!/.claude/skills/diagnosing-openlogi-devices
+!/.claude/skills/verifying-openlogi-changes
+!/.claude/skills/contributing-device-fixtures
 
 # Node dependencies for the JS helper scripts under .github/scripts/.
 node_modules/
 
 # macOS finder metadata
 .DS_Store
-
-# Bundle-time asset payload — fetched fresh from OpenLogi's asset mirrors by
-# the macOS bundle task before `cargo bundle`, not checked in.
-/crates/openlogi-gui/assets/
 
 # Compiled icons — `cargo xtask macos icon` rebuilds them from the Icon
 # Composer documents in `design/icon` on every bundle build. `AppIcon.icns` is

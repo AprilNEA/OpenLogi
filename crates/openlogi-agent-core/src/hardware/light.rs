@@ -13,10 +13,13 @@ use openlogi_hid::{
 };
 use tracing::{debug, info, warn};
 
+use super::HardwareContext;
+
 struct LightApplyRequest {
     settings: LightSettings,
     capabilities: LightCapabilities,
     generation: u64,
+    hardware: HardwareContext,
 }
 
 #[derive(Clone)]
@@ -43,7 +46,8 @@ static LIGHT_WRITE_LOCKS: LazyLock<Mutex<HashMap<String, LightWriteLock>>> =
 /// Apply standalone-light settings during reconnect or config re-application.
 /// Failures are logged because this path is best-effort; an explicit IPC
 /// command returns the typed error to the caller instead.
-pub fn set_light_in_background(
+pub(super) fn set_light_in_background(
+    hardware: &HardwareContext,
     target: Option<DeviceRoute>,
     light: &LightSettings,
     capabilities: LightCapabilities,
@@ -63,6 +67,7 @@ pub fn set_light_in_background(
             settings: *light,
             capabilities,
             generation,
+            hardware: hardware.clone(),
         })
         .is_err()
     {
@@ -74,7 +79,7 @@ pub fn set_light_in_background(
 /// Invalidate pending best-effort writes before an explicit user command.
 /// Already-running writes are serialized by the HID driver's device lock; a
 /// newer explicit command therefore remains the final state.
-pub fn cancel_light_reapply(target: &DeviceRoute) {
+pub(super) fn cancel_light_reapply(target: &DeviceRoute) {
     let key = target.to_string();
     let Ok(workers) = LIGHT_WORKERS.lock() else {
         warn!(route = %key, "light worker registry poisoned — cannot cancel stale write");
@@ -134,10 +139,7 @@ fn light_worker_loop(
     receiver: mpsc::Receiver<LightApplyRequest>,
     generation: Arc<AtomicU64>,
 ) {
-    let rt = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
+    let rt = match openlogi_core::worker::runtime() {
         Ok(rt) => rt,
         Err(error) => {
             warn!(route = %target, error = %error, "light worker runtime init failed");
@@ -152,7 +154,12 @@ fn light_worker_loop(
             debug!(route = %target, "skipping superseded light re-apply");
             continue;
         }
+        if !request.hardware.device_io().allows_io() {
+            debug!(route = %target, "host device I/O suspended — light re-apply skipped");
+            continue;
+        }
         let result = rt.block_on(apply_light_settings(
+            &request.hardware,
             &target,
             &request.settings,
             request.capabilities,
@@ -174,6 +181,7 @@ fn light_worker_loop(
 }
 
 async fn apply_light_settings(
+    hardware: &HardwareContext,
     target: &DeviceRoute,
     light: &LightSettings,
     capabilities: LightCapabilities,
@@ -189,19 +197,33 @@ async fn apply_light_settings(
         return Ok(false);
     }
     for command in commands_for_light_settings(*light, capabilities) {
-        apply_light_unlocked(target, command).await?;
+        if !hardware.device_io().allows_io() {
+            return Ok(false);
+        }
+        apply_light_unlocked(hardware, target, command).await?;
     }
     Ok(true)
 }
 
 /// Apply a semantic command to a supported standalone light.
-pub async fn apply_light(route: &DeviceRoute, command: LightCommand) -> Result<(), WriteError> {
+pub(super) async fn apply_light(
+    hardware: &HardwareContext,
+    route: &DeviceRoute,
+    command: LightCommand,
+) -> Result<(), WriteError> {
+    if !hardware.device_io().allows_io() {
+        return Err(WriteError::DeviceNotFound);
+    }
     let lock = light_write_lock(route);
     let _guard = lock.lock().await;
-    apply_light_unlocked(route, command).await
+    if !hardware.device_io().allows_io() {
+        return Err(WriteError::DeviceNotFound);
+    }
+    apply_light_unlocked(hardware, route, command).await
 }
 
 async fn apply_light_unlocked(
+    hardware: &HardwareContext,
     route: &DeviceRoute,
     command: LightCommand,
 ) -> Result<(), WriteError> {
@@ -212,7 +234,7 @@ async fn apply_light_unlocked(
     };
     super::timed(
         HidppOperation::Light,
-        openlogi_hid::apply_litra(route, model, command),
+        hardware.apply_litra(route, model, command),
     )
     .await
 }
@@ -227,4 +249,103 @@ fn light_write_lock(route: &DeviceRoute) -> LightWriteLock {
         .entry(key)
         .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
         .clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use openlogi_hid::replay::{
+        ChannelConnection, NodePresence, OpenOutcome, RawWriterAvailability, ReplayBackend,
+        ReplayNode, ReplayTopology,
+    };
+    use openlogi_hid::{NodeId, NodeInfo, device_io_channel};
+
+    const PRODUCT_ID: u16 = 0xc900;
+    const USAGE_PAGE: u16 = 0xff43;
+    const USAGE_ID: u16 = 0x0202;
+
+    #[tokio::test]
+    async fn injected_light_uses_raw_writer_and_context_gate_without_opening_hidpp() {
+        let node_id = NodeId::from("agent-litra-node".to_string());
+        let route = DeviceRoute::RawHid {
+            vendor_id: 0x046d,
+            product_id: PRODUCT_ID,
+            usage_page: USAGE_PAGE,
+            usage_id: USAGE_ID,
+            identity: "serial:agent-litra".to_string(),
+        };
+        let backend = Arc::new(
+            ReplayBackend::new(litra_topology(node_id.clone()), Vec::new())
+                .expect("valid raw-light replay topology"),
+        );
+        let writer = backend
+            .raw_writer_handle(&node_id)
+            .expect("known raw-light node");
+        let (device_io_signal, device_io) = device_io_channel();
+        let hardware = HardwareContext::injected(backend.clone(), device_io);
+
+        hardware
+            .apply_light(&route, LightCommand::TemperatureKelvin(4600))
+            .await
+            .expect("semantic light command succeeds through replay raw writer");
+        let mut expected = vec![0; 20];
+        expected[..6].copy_from_slice(&[0x11, 0xff, 0x04, 0x9c, 0x11, 0xf8]);
+        assert_eq!(writer.written_reports(), vec![expected]);
+        assert_eq!(
+            backend.open_count(&node_id).expect("known raw-light node"),
+            0,
+            "a standalone light command must not open a HID++ channel"
+        );
+
+        writer.set_connection(ChannelConnection::Disconnected);
+        let disconnected = hardware
+            .apply_light(&route, LightCommand::Power(false))
+            .await
+            .expect_err("a disconnected raw writer must fail");
+        assert!(matches!(
+            disconnected,
+            WriteError::Hid(message) if message.contains("not connected")
+        ));
+        assert_eq!(writer.written_reports().len(), 1);
+
+        writer.set_connection(ChannelConnection::Connected);
+        assert!(device_io_signal.suspend());
+        let suspended = hardware
+            .apply_light(&route, LightCommand::Power(false))
+            .await
+            .expect_err("the context gate must stop raw-light I/O");
+        assert!(matches!(suspended, WriteError::DeviceNotFound));
+        assert_eq!(writer.written_reports().len(), 1);
+        assert_eq!(
+            backend.open_count(&node_id).expect("known raw-light node"),
+            0
+        );
+        backend
+            .require_complete()
+            .expect("raw-light replay has no HID++ cassette traffic");
+    }
+
+    fn litra_topology(node_id: NodeId) -> ReplayTopology {
+        ReplayTopology {
+            nodes: vec![ReplayNode {
+                info: NodeInfo {
+                    id: node_id,
+                    vendor_id: 0x046d,
+                    product_id: PRODUCT_ID,
+                    usage_page: USAGE_PAGE,
+                    usage_id: USAGE_ID,
+                    name: "Agent Replay Litra Glow".to_string(),
+                    manufacturer: Some("Logitech".to_string()),
+                    serial_number: Some("AGENT-LITRA".to_string()),
+                },
+                presence: NodePresence::Present,
+                open_outcome: OpenOutcome::NotHidpp,
+                channel: None,
+                raw_writer: RawWriterAvailability::Capture,
+                receiver_slots: Vec::new(),
+            }],
+            channels: Vec::new(),
+        }
+    }
 }

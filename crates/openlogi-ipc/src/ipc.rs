@@ -17,8 +17,8 @@ use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
 use openlogi_core::config::Lighting;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::hid::{
-    DeviceRoute, Dpi, DpiInfo, LightCommand, PairingError, PasskeyMethod, ReceiverSelector,
-    SmartShiftStatus, WriteError,
+    BacklightState, DeviceRoute, Dpi, DpiInfo, LightCommand, PairingError, PasskeyMethod,
+    ReceiverSelector, ScrollWheelMode, SmartShiftStatus, WriteError,
 };
 use serde::{Deserialize, Serialize};
 pub use succession::Identity;
@@ -61,8 +61,10 @@ pub use succession::Identity;
 /// v28: `Action::HoldShortcut` appended for lifecycle-held keyboard output.
 /// v29: `Agent::declare_client` + [`ClientKind`] appended — typed demand for
 ///      the macOS dormancy gate.
-/// v30: host primary mouse button state and setter appended.
-pub const PROTOCOL_VERSION: u32 = 30;
+/// v30: `Agent::read_wheel` and `Agent::read_backlight` appended.
+/// v31: `Capabilities::dpi_gestures` appended.
+/// v32: host primary mouse button state and setter appended.
+pub const PROTOCOL_VERSION: u32 = 32;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -345,6 +347,11 @@ impl From<PairingError> for PairingFailure {
             PairingError::Timeout => Self::Timeout,
             PairingError::Device(code) => Self::Device { code },
             PairingError::Cancelled => Self::Cancelled,
+            // The public agent API prevents this library-boundary rejection;
+            // retain the existing wire enum if an in-process caller violates it.
+            PairingError::UnsupportedCommand => Self::Hid {
+                message: "pairing command is not supported by the active receiver".into(),
+            },
             // Carried as the generic transport-failure message so the wire
             // format stays unchanged (PairingFailure variants are append-only).
             PairingError::MalformedNotification(what) => Self::Hid {
@@ -581,8 +588,12 @@ pub trait Agent {
     /// arms only on [`ClientKind::Gui`]. The takeover probe never declares —
     /// it speaks only [`Agent::protocol_version`] — and so never arms.
     async fn declare_client(kind: ClientKind);
+    /// Read the current HiResWheel reporting mode from `route`.
+    async fn read_wheel(route: DeviceRoute) -> Result<ScrollWheelMode, WriteError>;
+    /// Read the current keyboard-backlight state from `route`.
+    async fn read_backlight(route: DeviceRoute) -> Result<BacklightState, WriteError>;
     /// Make `button` the host-wide primary mouse button and return the value
-    /// read back from the platform. Appended for protocol v30.
+    /// read back from the platform. Appended for protocol v32.
     async fn set_primary_mouse_button(
         button: PrimaryMouseButton,
     ) -> Result<PrimaryMouseButton, SystemMouseSettingError>;

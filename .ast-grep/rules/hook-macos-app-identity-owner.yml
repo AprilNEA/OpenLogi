@@ -1,0 +1,11 @@
+# Owner: macos::foreground::foreground_app_from_running_application — the bundle profile ID.
+id: hook-macos-app-identity-owner
+language: rust
+severity: error
+message: Use macos::foreground::foreground_app_from_running_application so pointer and foreground profiles share the bundle identifier conversion without changing the foreground cache.
+files:
+  - crates/openlogi-hook/src/**/*.rs
+ignores:
+  - crates/openlogi-hook/src/macos/foreground.rs
+rule:
+  pattern: $APP.bundleIdentifier()

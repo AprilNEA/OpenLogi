@@ -6,9 +6,11 @@ use openlogi_core::hid::{DpiInfo, SmartShiftStatus};
 
 /// State projected from an swr-backed device query: unqueried, in flight,
 /// resolved, transiently failed, or permanently unsupported.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum Load<T> {
-    /// The selected device has not been queried yet.
+    /// The selected device has not been queried yet. Also what a device
+    /// nobody has asked about reads as.
+    #[default]
     Unknown,
     /// A background HID++ read is in flight.
     Loading,
@@ -23,7 +25,7 @@ pub enum Load<T> {
 }
 
 /// Per-device DPI capability load state. See [`Load`].
-pub type DpiStatus = Load<Arc<DpiInfo>>;
+pub type DpiLoad = Load<Arc<DpiInfo>>;
 
 /// Per-device SmartShift (`0x2111`) config load state. See [`Load`]. Unlike DPI
 /// presets, the resolved config is *not* persisted to `config.toml` — the device

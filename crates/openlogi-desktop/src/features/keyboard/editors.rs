@@ -6,7 +6,7 @@
 //! returns to the action list; the panel itself closes when the key is
 //! deselected.
 //!
-//! [`compact_panel`]: crate::features::mouse::picker::compact_panel
+//! [`compact_panel`]: crate::features::binding_editor::compact_panel
 
 #![expect(
     clippy::needless_pass_by_value,
@@ -28,8 +28,8 @@ use openlogi_core::binding::{Action, KeyCombo, WorkflowStep};
 use openlogi_core::config::KeyTrigger;
 
 use super::function_row::FunctionRowView;
-use crate::features::mouse::picker::{compact_panel, divider, editor_scroll_list, title};
-use crate::state::{AppState, DeviceRecord, StateEvent};
+use crate::features::binding_editor::{compact_panel, divider, editor_scroll_list, title};
+use crate::state::AppState;
 use crate::ui::components::{MenuRow, control_input};
 use crate::ui::theme::{self, Palette, Typography as _};
 
@@ -43,22 +43,22 @@ pub enum PowerUserKind {
 }
 
 impl PowerUserKind {
-    fn heading(self) -> &'static str {
+    fn heading_key(self) -> &'static str {
         match self {
-            Self::TypeText => "Type Text",
-            Self::RunAppleScript => "Run AppleScript",
-            Self::RunShellCommand => "Run Shell Command",
-            Self::Workflow => "Workflow",
+            Self::TypeText => "actions.type_text_heading",
+            Self::RunAppleScript => "actions.run_applescript_heading",
+            Self::RunShellCommand => "actions.run_shell_command_heading",
+            Self::Workflow => "actions.workflow_heading",
         }
     }
 }
 
-pub(crate) fn text_editor_placeholder(kind: PowerUserKind) -> &'static str {
+pub(crate) fn text_editor_placeholder(kind: PowerUserKind) -> gpui::SharedString {
     match kind {
-        PowerUserKind::TypeText => "Text to type…",
-        PowerUserKind::RunAppleScript => "display dialog \"Hello\"",
-        PowerUserKind::RunShellCommand => "echo hello",
-        PowerUserKind::Workflow => "",
+        PowerUserKind::TypeText => tr!("actions.type_text_placeholder"),
+        PowerUserKind::RunAppleScript => "display dialog \"Hello\"".into(),
+        PowerUserKind::RunShellCommand => "echo hello".into(),
+        PowerUserKind::Workflow => "".into(),
     }
 }
 
@@ -93,7 +93,7 @@ pub fn editor_card(
             Some(state) => text_editor_card(trigger, kind, state, view, pal),
             None => compact_panel(pal)
                 .w(px(300.))
-                .child(title(tr!("Editor unavailable"), pal)),
+                .child(title(tr!("keyboard.editor_unavailable"), pal)),
         },
     }
 }
@@ -107,13 +107,13 @@ fn text_editor_card(
     view: &Entity<FunctionRowView>,
     pal: Palette,
 ) -> gpui::Div {
-    let heading = kind.heading();
+    let heading = tr!(kind.heading_key());
     let key_name = trigger.to_string();
 
     compact_panel(pal)
         .w(px(300.))
         .child(title(
-            tr!("%{action} · %{key}", action => heading, key => key_name),
+            tr!("actions.action_key_summary", action => heading, key => key_name),
             pal,
         ))
         .child(divider(pal))
@@ -142,7 +142,7 @@ fn editor_action_row(
         .child(
             Button::new("editor-cancel")
                 .ghost()
-                .label(tr!("Cancel"))
+                .label(tr!("common.cancel"))
                 .on_click(move |_e, _window, cx| {
                     view_cancel.update(cx, |v, vcx| v.close_editor(vcx));
                 }),
@@ -150,7 +150,7 @@ fn editor_action_row(
         .child(
             Button::new("editor-save")
                 .primary()
-                .label(tr!("Save"))
+                .label(tr!("common.save"))
                 .on_click(move |_e, _window, cx| {
                     let text = view_save
                         .read(cx)
@@ -163,12 +163,8 @@ fn editor_action_row(
                         PowerUserKind::RunShellCommand => Action::RunShellCommand(text),
                         PowerUserKind::Workflow => return,
                     };
-                    AppState::update(cx, |state, cx| {
-                        let key = state.current_record().map(DeviceRecord::device_key);
-                        state.commit_keyboard_binding(trigger_save.clone(), Some(action));
-                        if let Some(key) = key {
-                            cx.emit(StateEvent::BindingsChanged(key));
-                        }
+                    AppState::apply(cx, |state| {
+                        state.commit_keyboard_binding(trigger_save.clone(), Some(action))
                     });
                     view_save.update(cx, |v, vcx| v.close_editor(vcx));
                 }),
@@ -195,7 +191,10 @@ fn workflow_editor_card(
 
     compact_panel(pal)
         .w(px(320.))
-        .child(title(tr!("Workflow · %{key}", key => key_name), pal))
+        .child(title(
+            tr!("actions.workflow_key_summary", key => key_name),
+            pal,
+        ))
         .child(divider(pal))
         .child(editor_scroll_list("workflow-steps", rows))
         .child(
@@ -207,7 +206,7 @@ fn workflow_editor_card(
                     Button::new("wf-add-step")
                         .ghost()
                         .small()
-                        .label(tr!("+ Add Step"))
+                        .label(tr!("actions.add_workflow_step"))
                         .on_click({
                             let v = view.clone();
                             move |_e, _w, cx| {
@@ -223,19 +222,15 @@ fn workflow_editor_card(
                 .child(
                     Button::new("wf-save")
                         .primary()
-                        .label(tr!("Save Workflow"))
+                        .label(tr!("actions.save_workflow"))
                         .on_click({
                             let v = view.clone();
                             let trigger = trigger.clone();
                             move |_e, _window, cx| {
                                 let steps = v.read(cx).workflow_draft().to_vec();
                                 let action = Action::Workflow(steps);
-                                AppState::update(cx, |state, cx| {
-                                    let key = state.current_record().map(DeviceRecord::device_key);
-                                    state.commit_keyboard_binding(trigger.clone(), Some(action));
-                                    if let Some(key) = key {
-                                        cx.emit(StateEvent::BindingsChanged(key));
-                                    }
+                                AppState::apply(cx, |state| {
+                                    state.commit_keyboard_binding(trigger.clone(), Some(action))
                                 });
                                 v.update(cx, |v, vcx| v.close_editor(vcx));
                             }

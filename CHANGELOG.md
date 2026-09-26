@@ -7,6 +7,163 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.8] - 2026-09-25
+
+### Added
+
+- *(gui)* add safe per-app profile reset and complete removal
+- *(hid)* recognise Nano receiver 046d:c534 (MK270, MK295) ([#1456](https://github.com/AprilNEA/OpenLogi/pull/1456))
+
+### Fixed
+
+- *(gui)* prefer firmware codename over catalog name for M650 variants ([#1366](https://github.com/AprilNEA/OpenLogi/pull/1366))
+- *(i18n)* clarify which app editors close after deletion
+- *(gui)* render profile confirmation dialogs in the main window
+- *(agent)* divert a single-bound gesture button ([#1569](https://github.com/AprilNEA/OpenLogi/pull/1569))
+
+## [0.8.7] - 2026-09-23
+
+### Added
+
+- *(agent)* default mouse profiles to pointer context
+- *(hook)* expose native pointer window context
+
+## [0.8.6] - 2026-09-19
+
+### Added
+
+- *(gui)* show installation source in update settings
+- *(gui)* detect installation ownership across platforms
+- *(xtask)* model the Windows test job in the local CI runner
+- *(core)* own the function-row vocabulary in one FunctionKey
+
+### Changed
+
+- *(gui)* resolve each device's assets once per asset generation
+- *(gui)* build the asset resolver once at startup
+
+### Fixed
+
+- *(agent)* log a DPI or SmartShift write only once one is scheduled
+- *(agent)* say why a background write was skipped
+- *(agent)* start the HID++ watchers through one named worker shell
+- *(xtask)* read ci.yml's wrapped commands under either line ending
+- *(gui)* replace the asset resolver after a failed sync too
+- *(gui)* keep a snapped sync off a slider mid-drag
+- *(gui)* show the dragged value beside a lighting slider
+- *(gui)* clamp camera control values through the ordered range
+- *(gui)* re-seat the thumb-wheel sensitivity slider after a rolled-back save
+- *(cli)* stop telling users Unifying receivers are not surfaced
+- *(cli)* tell a timed-out profile capture what to do next
+- *(ipc)* start the handshake deadline before the socket is reached
+- *(cli)* stop naming the agent lock file outside its owner
+- *(gui)* keep the relaunch notice ahead of the unreachable one
+- *(gui)* hold a config reload until the agent connects
+
+## [0.8.5] - 2026-09-16
+
+### Added
+
+- *(gui)* expose supported button gestures
+- *(agent)* support dpi button gestures
+
+### Fixed
+
+- *(gui)* declare the alignment bespoke buttons relied on
+- *(gui)* pin ChoiceCard to a column under gpui-kit 0.6
+- *(gui)* require measured raw-xy support for dpi gestures
+- *(agent)* honor per-app overrides for hidpp gestures
+- *(core)* preserve existing middle click gestures
+- *(hid)* preserve warm cache after a failed initial probe
+- *(inventory)* hold unattributed cache entries for a node deferred before its first probe
+- *(inventory)* hold a deferred node's cache entries out of miss aging
+- *(inventory)* take a receiver's register phase before its I/O budget starts
+- *(hid)* every receiver register caller takes the node's register phase
+- *(hidpp)* quarantine an abandoned request's reply even for a byte-identical re-ask
+- *(inventory)* settle a deferred receiver probe without counting a failure
+- *(hid)* defer a receiver probe that cannot take the register-phase lock
+- *(hidpp)* keep an abandoned request's header reserved until its reply lands
+- *(hid)* lease HID++ software ids per node, not per host
+- *(hidpp)* never keep two requests with one reply header in flight
+- *(hid)* serialise a receiver's register phase across OpenLogi processes
+- *(hid)* lease HID++ software ids across OpenLogi processes
+- *(hidpp)* match sub-register reads on the echoed sub-register byte
+- *(linux)* serialise autostart reconciles and claim the marker atomically
+- *(linux)* preserve systemd unit and enablement ownership
+- *(gui)* resolve depot metadata named only by the manifest
+
+## [0.8.4] - 2026-09-15
+
+### Added
+
+- *(hid)* support cancellation-safe rgb-effects lighting
+- *(cli)* add fixture contribution wizard
+- *(cli)* verify fixture corpus directories
+- *(cli)* capture semantic device profiles
+- *(device)* add fixture identity ledger
+- *(cli)* record privacy-safe fixture cases
+- *(agent)* add injectable hardware context
+- *(agent)* complete semantic profile reads
+- *(hid)* build sanitized cassettes from recordings
+- *(device)* add deterministic replay barriers
+- *(device)* add canonical synthetic profile
+- *(agent)* drive mock from device profiles
+- *(device)* complete semantic device profiles
+- *(hid)* add bounded native traffic recording
+- *(hid)* add strict device replay foundation
+- *(hidpp)* add channel observation API
+- *(gui)* add snapshot projection boundary
+- *(i18n)* migrate catalogs to semantic TOML keys ([#1169](https://github.com/AprilNEA/OpenLogi/pull/1169))
+
+### Changed
+
+- *(i18n)* avoid copying borrowed translations ([#1184](https://github.com/AprilNEA/OpenLogi/pull/1184))
+
+### Fixed
+
+- *(gui)* keep update consent buttons visible
+- *(cli)* select rgb devices through receiver routes
+- *(camera)* require a stored frame before reporting startup
+- *(gui)* retry a camera preview that failed to start
+- *(camera)* refuse a camera another application is streaming
+- *(deps)* update rustls to address RUSTSEC-2026-0285
+- *(macos)* preserve device isolation and harden Safari dispatch
+- *(macos)* bind Safari navigation to press-time process
+- *(cli)* enforce fixture corpus and capture safety checks
+- *(hid)* enforce receiver slot state during cassette replay
+- *(fixture)* enforce read-only protocol and case relationships
+- *(cli)* hold agent ownership throughout fixture capture
+- *(cli)* use shared fixture identity policy
+- *(hid)* retain suspended open evidence
+- *(hid)* reject unknown nested fixture fields
+- *(gui)* stop linking SMAppServiceErrorDomain so macOS 13 and 14 can launch
+- *(gui)* place Windows actions ring in physical monitor coordinates ([#1319](https://github.com/AprilNEA/OpenLogi/pull/1319))
+- *(agent)* avoid capture recovery deadline busy loops ([#1321](https://github.com/AprilNEA/OpenLogi/pull/1321))
+- *(agent)* fence queued pairing discovery after selection ([#1320](https://github.com/AprilNEA/OpenLogi/pull/1320))
+- *(core)* stop seeding Back/Forward with a divertable default ([#1225](https://github.com/AprilNEA/OpenLogi/pull/1225))
+- *(linux)* declare F13-F20 in uinput key capabilities ([#1224](https://github.com/AprilNEA/OpenLogi/pull/1224))
+- *(agent)* keep terminal exit responsive during replacement
+- *(agent)* recover host-switch controls across channel retirement
+- *(agent)* restore diverted controls before process exit
+- *(hook)* normalize Windows cursor position to DIP scale ([#1246](https://github.com/AprilNEA/OpenLogi/pull/1246))
+- add Debian runtime dependencies ([#1249](https://github.com/AprilNEA/OpenLogi/pull/1249))
+- *(i18n)* correct mistranslations in the Spanish catalog ([#1315](https://github.com/AprilNEA/OpenLogi/pull/1315))
+- *(docs)* fix typo in installation guide ([#1189](https://github.com/AprilNEA/OpenLogi/pull/1189))
+- *(hid)* keep pairing phase after device selection ([#1181](https://github.com/AprilNEA/OpenLogi/pull/1181))
+- *(i18n)* refine French asset and control descriptions ([#1278](https://github.com/AprilNEA/OpenLogi/pull/1278))
+- *(i18n)* polish Brazilian Portuguese profile and settings copy ([#1276](https://github.com/AprilNEA/OpenLogi/pull/1276))
+- *(i18n)* avoid repeating device headings in count captions
+- *(i18n)* localize DPI steps and correct count labels
+- *(i18n)* polish supported locale copy ([#1180](https://github.com/AprilNEA/OpenLogi/pull/1180))
+
+## [0.8.3] - 2026-08-30
+
+### Fixed
+
+- *(ci)* repair focused i18n gate and agent guidance ([#1138](https://github.com/AprilNEA/OpenLogi/pull/1138))
+- make Actions Ring selectable in action pickers ([#958](https://github.com/AprilNEA/OpenLogi/pull/958))
+- *(ci)* align agent guidance with current contracts ([#1139](https://github.com/AprilNEA/OpenLogi/pull/1139))
+
 ## [0.8.0] - 2026-08-25
 
 ### Added

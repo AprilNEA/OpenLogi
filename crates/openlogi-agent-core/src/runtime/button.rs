@@ -17,21 +17,31 @@ use std::time::{Duration, Instant};
 use openlogi_core::binding::{Action, Binding, ButtonId, LONG_PRESS_THRESHOLD};
 use tracing::warn;
 
+use super::ActionDispatchTarget;
+
 /// OS-hook callbacks must fail open rather than block.
 const EVENT_QUEUE_CAPACITY: usize = 128;
 /// Bounds how long graceful process exit waits for terminal handlers.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 /// Lets the worker observe the out-of-band shutdown channel even while idle.
-const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const SHUTDOWN_POLL_PERIOD: Duration = Duration::from_millis(10);
 
-/// Stable identity of one HID++ capture-session incarnation, unique across
-/// every manager that mints one: the shared button and scroll runtimes key
-/// cancellation on it, so two live sessions with equal identities would
-/// cancel each other's presses.
+/// Process-unique identity of one HID++ hardware capture incarnation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct CaptureEpoch(u64);
+
+mod worker;
+use worker::run_worker;
+#[cfg(test)]
+use worker::{emit_canceled, emit_selected_long_presses, process_input, settle_due_long_presses};
+
+/// A capture epoch bound to the config namespace its actions currently use.
+/// The namespace can hot-swap while the epoch remains the task's stable input
+/// identity.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct HidppSessionId {
     device_key: Arc<str>,
-    epoch: u64,
+    epoch: CaptureEpoch,
 }
 
 /// Feeds [`HidppSessionId::new`] — one counter for the whole process.
@@ -46,7 +56,7 @@ impl HidppSessionId {
     pub(crate) fn new(device_key: &str) -> Self {
         Self {
             device_key: Arc::from(device_key),
-            epoch: NEXT_SESSION_EPOCH.fetch_add(1, Ordering::Relaxed),
+            epoch: CaptureEpoch(NEXT_SESSION_EPOCH.fetch_add(1, Ordering::Relaxed)),
         }
     }
 
@@ -56,7 +66,7 @@ impl HidppSessionId {
     pub(crate) fn with_epoch(device_key: &str, epoch: u64) -> Self {
         Self {
             device_key: Arc::from(device_key),
-            epoch,
+            epoch: CaptureEpoch(epoch),
         }
     }
 
@@ -65,7 +75,19 @@ impl HidppSessionId {
     }
 
     pub(crate) fn epoch(&self) -> u64 {
-        self.epoch
+        self.epoch.0
+    }
+
+    /// Whether two IDs name the same hardware capture incarnation even when
+    /// its hot-swappable config namespace has changed.
+    pub(crate) fn same_epoch(&self, other: &Self) -> bool {
+        self.epoch == other.epoch
+    }
+
+    /// Move future dispatch from this hardware epoch to a different config
+    /// namespace. Managers cancel the old action lifecycle before calling it.
+    pub(crate) fn rekey(&mut self, device_key: &str) {
+        self.device_key = Arc::from(device_key);
     }
 }
 
@@ -153,6 +175,7 @@ impl PressToken {
 pub(crate) struct ActivePress {
     token: PressToken,
     behavior: PressBehavior,
+    target: ActionDispatchTarget,
 }
 
 /// Runtime-only state of the action semantics attached to one active press.
@@ -237,6 +260,10 @@ impl ActivePress {
         self.behavior.start_action()
     }
 
+    pub(crate) fn target(&self) -> ActionDispatchTarget {
+        self.target
+    }
+
     fn release_action(&self) -> Option<&Action> {
         self.behavior.release_action()
     }
@@ -298,6 +325,7 @@ enum ButtonCommand {
     CancelStalePress(PressToken),
     CancelSource(ButtonSource),
     CancelHooks,
+    CancelPointerExcept(openlogi_hook::PointerTarget),
     Wake,
 }
 
@@ -341,6 +369,12 @@ impl ButtonState {
 
     fn cancel_all(&mut self) -> Vec<ActivePress> {
         self.active.drain().map(|(_, press)| press).collect()
+    }
+
+    fn cancel_pointer_except(&mut self, current: openlogi_hook::PointerTarget) -> Vec<ActivePress> {
+        self.active.extract_if(|_, press| matches!(press.target, ActionDispatchTarget::Pointer(target) if target != current))
+            .map(|(_, press)| press)
+            .collect()
     }
 
     fn fire_selected_long_presses(
@@ -403,24 +437,40 @@ pub(crate) struct ButtonInputHandle {
 }
 
 impl ButtonInputHandle {
+    #[cfg(test)]
     pub(crate) fn try_hook_down(
         &self,
         button: ButtonId,
         binding: Option<&Binding>,
     ) -> Option<PressToken> {
-        self.try_down(ButtonSource::current_hook(), button, binding)
+        self.try_hook_down_with_target(button, binding, ActionDispatchTarget::capture())
+    }
+
+    pub(crate) fn try_hook_down_with_target(
+        &self,
+        button: ButtonId,
+        binding: Option<&Binding>,
+        target: ActionDispatchTarget,
+    ) -> Option<PressToken> {
+        self.try_down(ButtonSource::current_hook(), button, binding, target)
     }
 
     pub(crate) fn try_hook_up(&self, button: ButtonId) -> bool {
         self.try_up(ButtonSource::current_hook(), button)
     }
 
-    pub(crate) fn try_hook_key_down(&self, keycode: u16, action: &Action) -> Option<PressToken> {
+    pub(crate) fn try_hook_key_down(
+        &self,
+        keycode: u16,
+        action: &Action,
+        target: ActionDispatchTarget,
+    ) -> Option<PressToken> {
         let generation = self.generation.load(Ordering::Acquire);
         let press = self.new_press(
             PressKey::for_key(ButtonSource::current_hook(), keycode),
             PressBehavior::Immediate(action.clone()),
             generation,
+            target,
         );
         let token = press.token.clone();
         self.try_input(generation, ButtonInput::Down(press))
@@ -446,13 +496,23 @@ impl ButtonInputHandle {
         self.try_command(ButtonCommand::CancelHooks);
     }
 
+    pub(crate) fn cancel_pointer_except(&self, current: openlogi_hook::PointerTarget) {
+        self.try_command(ButtonCommand::CancelPointerExcept(current));
+    }
+
     pub(crate) fn try_hidpp_down(
         &self,
         session: &HidppSessionId,
         button: ButtonId,
         binding: Option<&Binding>,
+        target: ActionDispatchTarget,
     ) -> Option<PressToken> {
-        self.try_down(ButtonSource::Hidpp(session.clone()), button, binding)
+        self.try_down(
+            ButtonSource::Hidpp(session.clone()),
+            button,
+            binding,
+            target,
+        )
     }
 
     pub(crate) fn try_hidpp_up(&self, session: &HidppSessionId, button: ButtonId) -> bool {
@@ -464,12 +524,14 @@ impl ButtonInputHandle {
         session: &HidppSessionId,
         button: ButtonId,
         binding: Option<&Binding>,
+        target: ActionDispatchTarget,
     ) -> bool {
         let generation = self.generation.load(Ordering::Acquire);
         let press = self.new_press(
             PressKey::new(ButtonSource::Hidpp(session.clone()), button),
             PressBehavior::new(binding, Instant::now()),
             generation,
+            target,
         );
         self.try_input(generation, ButtonInput::Pulse(press))
     }
@@ -508,12 +570,14 @@ impl ButtonInputHandle {
         source: ButtonSource,
         button: ButtonId,
         binding: Option<&Binding>,
+        target: ActionDispatchTarget,
     ) -> Option<PressToken> {
         let generation = self.generation.load(Ordering::Acquire);
         let press = self.new_press(
             PressKey::new(source, button),
             PressBehavior::new(binding, Instant::now()),
             generation,
+            target,
         );
         let token = press.token.clone();
         self.try_input(generation, ButtonInput::Down(press))
@@ -531,7 +595,13 @@ impl ButtonInputHandle {
         )
     }
 
-    fn new_press(&self, key: PressKey, behavior: PressBehavior, generation: u64) -> ActivePress {
+    fn new_press(
+        &self,
+        key: PressKey,
+        behavior: PressBehavior,
+        generation: u64,
+        target: ActionDispatchTarget,
+    ) -> ActivePress {
         let id = PressId(self.next_press.fetch_add(1, Ordering::Relaxed));
         ActivePress {
             token: PressToken {
@@ -540,6 +610,7 @@ impl ButtonInputHandle {
                 generation,
             },
             behavior,
+            target,
         }
     }
 
@@ -635,331 +706,6 @@ impl ButtonRuntimeOwner {
 impl Drop for ButtonRuntimeOwner {
     fn drop(&mut self) {
         let _ = self.shutdown();
-    }
-}
-
-fn run_worker(
-    events: &mpsc::Receiver<ButtonCommand>,
-    shutdown: &mpsc::Receiver<ShutdownRequest>,
-    shared_generation: &AtomicU64,
-    emit: &mut impl FnMut(ButtonRuntimeEvent),
-) {
-    let mut state = ButtonState::default();
-    let mut generation = shared_generation.load(Ordering::Acquire);
-    loop {
-        if finish_shutdown_if_requested(shutdown, &mut state, emit) {
-            return;
-        }
-        let command = match events.recv_timeout(SHUTDOWN_POLL_INTERVAL) {
-            Ok(command) => command,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                if settle_due_long_presses(
-                    events,
-                    shutdown,
-                    shared_generation,
-                    &mut generation,
-                    &mut state,
-                    None,
-                    emit,
-                ) {
-                    return;
-                }
-                continue;
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                emit_canceled(state.cancel_all(), CancelReason::SourceEnded, emit);
-                return;
-            }
-        };
-        synchronize_generation(&mut state, shared_generation, &mut generation, emit);
-        if state.has_due_long_press(Instant::now()) {
-            if settle_due_long_presses(
-                events,
-                shutdown,
-                shared_generation,
-                &mut generation,
-                &mut state,
-                Some(command),
-                emit,
-            ) {
-                return;
-            }
-            continue;
-        }
-        process_command(&mut state, command, generation, emit);
-        if settle_due_long_presses(
-            events,
-            shutdown,
-            shared_generation,
-            &mut generation,
-            &mut state,
-            None,
-            emit,
-        ) {
-            return;
-        }
-    }
-}
-
-fn process_command(
-    state: &mut ButtonState,
-    command: ButtonCommand,
-    generation: u64,
-    emit: &mut impl FnMut(ButtonRuntimeEvent),
-) {
-    match command {
-        ButtonCommand::Input {
-            generation: input_generation,
-            input,
-        } if input_generation == generation => process_input(state, input, emit),
-        ButtonCommand::Input { .. } | ButtonCommand::Wake => {}
-        ButtonCommand::CancelStalePress(token) => {
-            if let Some(press) = state.cancel_press(&token) {
-                emit(ButtonRuntimeEvent::Ended {
-                    press,
-                    reason: EndReason::Canceled(CancelReason::StaleHold),
-                });
-            }
-        }
-        ButtonCommand::CancelSource(source) => {
-            emit_canceled(
-                state.cancel_source(&source),
-                CancelReason::SourceEnded,
-                emit,
-            );
-        }
-        ButtonCommand::CancelHooks => {
-            emit_canceled(state.cancel_hooks(), CancelReason::SourceEnded, emit);
-        }
-    }
-}
-
-fn settle_due_long_presses(
-    events: &mpsc::Receiver<ButtonCommand>,
-    shutdown: &mpsc::Receiver<ShutdownRequest>,
-    shared_generation: &AtomicU64,
-    generation: &mut u64,
-    state: &mut ButtonState,
-    first_command: Option<ButtonCommand>,
-    emit: &mut impl FnMut(ButtonRuntimeEvent),
-) -> bool {
-    if finish_shutdown_if_requested(shutdown, state, emit) {
-        return true;
-    }
-    // An event handler may have blocked while another thread invalidated
-    // this generation. Observe that transition before any overdue timer.
-    synchronize_generation(state, shared_generation, generation, emit);
-    let due_presses = state.due_long_presses(Instant::now());
-    if due_presses.is_empty() {
-        if let Some(command) = first_command {
-            process_command(state, command, *generation, emit);
-        }
-        return false;
-    }
-
-    // Before firing an overdue timer, settle one channel-capacity snapshot.
-    // FIFO ordering guarantees that this includes every command that was
-    // already queued at the checkpoint. State transitions are separated from
-    // synchronous handlers so unrelated actions cannot delay the deadline.
-    let mut deferred = Vec::new();
-    let queued_limit = if let Some(command) = first_command {
-        process_command(state, command, *generation, &mut |event| {
-            deferred.push(event);
-        });
-        if finish_deferred_shutdown_if_requested(shutdown, state, &due_presses, &mut deferred, emit)
-        {
-            return true;
-        }
-        synchronize_generation(state, shared_generation, generation, &mut |event| {
-            deferred.push(event);
-        });
-        EVENT_QUEUE_CAPACITY - 1
-    } else {
-        EVENT_QUEUE_CAPACITY
-    };
-    for _ in 0..queued_limit {
-        if finish_deferred_shutdown_if_requested(shutdown, state, &due_presses, &mut deferred, emit)
-        {
-            return true;
-        }
-        synchronize_generation(state, shared_generation, generation, &mut |event| {
-            deferred.push(event);
-        });
-        let command = match events.try_recv() {
-            Ok(command) => command,
-            Err(mpsc::TryRecvError::Empty) => break,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                emit_canceled(
-                    state.cancel_all(),
-                    CancelReason::SourceEnded,
-                    &mut |event| deferred.push(event),
-                );
-                emit_settled_events(deferred, &due_presses, emit);
-                return true;
-            }
-        };
-        process_command(state, command, *generation, &mut |event| {
-            deferred.push(event);
-        });
-        if finish_deferred_shutdown_if_requested(shutdown, state, &due_presses, &mut deferred, emit)
-        {
-            return true;
-        }
-        synchronize_generation(state, shared_generation, generation, &mut |event| {
-            deferred.push(event);
-        });
-    }
-
-    emit_selected_long_presses(state, &due_presses, Instant::now(), &mut |event| {
-        deferred.push(event);
-    });
-    emit_settled_events(deferred, &due_presses, emit);
-    false
-}
-
-fn finish_deferred_shutdown_if_requested(
-    shutdown: &mpsc::Receiver<ShutdownRequest>,
-    state: &mut ButtonState,
-    due_presses: &[PressToken],
-    deferred: &mut Vec<ButtonRuntimeEvent>,
-    emit: &mut impl FnMut(ButtonRuntimeEvent),
-) -> bool {
-    let Ok(request) = shutdown.try_recv() else {
-        return false;
-    };
-    emit_canceled(state.cancel_all(), CancelReason::Shutdown, &mut |event| {
-        deferred.push(event);
-    });
-    emit_settled_events(std::mem::take(deferred), due_presses, emit);
-    let _ = request.done.send(());
-    true
-}
-
-fn emit_settled_events(
-    events: Vec<ButtonRuntimeEvent>,
-    due_presses: &[PressToken],
-    emit: &mut impl FnMut(ButtonRuntimeEvent),
-) {
-    let (deadline_events, ordered_events): (Vec<_>, Vec<_>) =
-        events.into_iter().partition(|event| match event {
-            ButtonRuntimeEvent::Triggered { press, .. }
-            | ButtonRuntimeEvent::Ended { press, .. } => {
-                matches!(press.behavior, PressBehavior::LongPressFired)
-                    && due_presses.contains(press.token())
-            }
-            ButtonRuntimeEvent::Started(_) => false,
-        });
-    for event in deadline_events.into_iter().chain(ordered_events) {
-        emit(event);
-    }
-}
-
-fn finish_shutdown_if_requested(
-    shutdown: &mpsc::Receiver<ShutdownRequest>,
-    state: &mut ButtonState,
-    emit: &mut impl FnMut(ButtonRuntimeEvent),
-) -> bool {
-    let Ok(request) = shutdown.try_recv() else {
-        return false;
-    };
-    emit_canceled(state.cancel_all(), CancelReason::Shutdown, emit);
-    let _ = request.done.send(());
-    true
-}
-
-fn synchronize_generation(
-    state: &mut ButtonState,
-    shared_generation: &AtomicU64,
-    generation: &mut u64,
-    emit: &mut impl FnMut(ButtonRuntimeEvent),
-) {
-    let current = shared_generation.load(Ordering::Acquire);
-    if current != *generation {
-        emit_canceled(state.cancel_all(), CancelReason::Invalidated, emit);
-        *generation = current;
-    }
-}
-
-fn process_input(
-    state: &mut ButtonState,
-    input: ButtonInput,
-    emit: &mut impl FnMut(ButtonRuntimeEvent),
-) {
-    match input {
-        ButtonInput::Down(press) => {
-            if let Some(stale) = state.press(press.clone()) {
-                emit(ButtonRuntimeEvent::Ended {
-                    press: stale,
-                    reason: EndReason::Canceled(CancelReason::RepeatedDown),
-                });
-            }
-            emit(ButtonRuntimeEvent::Started(press));
-        }
-        ButtonInput::Up { key, released_at } => {
-            if let Some(mut press) = state.release(&key) {
-                if let Some(action) = press.fire_long(released_at) {
-                    emit(ButtonRuntimeEvent::Triggered {
-                        press: press.clone(),
-                        action,
-                    });
-                }
-                emit_released(press, emit);
-            }
-        }
-        ButtonInput::Pulse(press) => {
-            if let Some(stale) = state.press(press.clone()) {
-                emit(ButtonRuntimeEvent::Ended {
-                    press: stale,
-                    reason: EndReason::Canceled(CancelReason::RepeatedDown),
-                });
-            }
-            emit(ButtonRuntimeEvent::Started(press.clone()));
-            if let Some(press) = state.release(&press.token.key) {
-                emit_released(press, emit);
-            }
-        }
-        ButtonInput::TriggerWhilePressed { token, action } => {
-            if let Some(press) = state.active(&token).cloned() {
-                emit(ButtonRuntimeEvent::Triggered { press, action });
-            }
-        }
-    }
-}
-
-fn emit_selected_long_presses(
-    state: &mut ButtonState,
-    tokens: &[PressToken],
-    now: Instant,
-    emit: &mut impl FnMut(ButtonRuntimeEvent),
-) {
-    for (press, action) in state.fire_selected_long_presses(tokens, now) {
-        emit(ButtonRuntimeEvent::Triggered { press, action });
-    }
-}
-
-fn emit_released(press: ActivePress, emit: &mut impl FnMut(ButtonRuntimeEvent)) {
-    if let Some(action) = press.release_action().cloned() {
-        emit(ButtonRuntimeEvent::Triggered {
-            press: press.clone(),
-            action,
-        });
-    }
-    emit(ButtonRuntimeEvent::Ended {
-        press,
-        reason: EndReason::Released,
-    });
-}
-
-fn emit_canceled(
-    presses: Vec<ActivePress>,
-    reason: CancelReason,
-    emit: &mut impl FnMut(ButtonRuntimeEvent),
-) {
-    for press in presses {
-        emit(ButtonRuntimeEvent::Ended {
-            press,
-            reason: EndReason::Canceled(reason),
-        });
     }
 }
 

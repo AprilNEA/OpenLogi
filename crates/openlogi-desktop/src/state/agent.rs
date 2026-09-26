@@ -1,12 +1,29 @@
-//! Agent connection status and debug monitor state.
+//! Agent connection status, snapshot projection, and debug monitor state.
 
+use openlogi_camera::Camera;
 use openlogi_core::device::DeviceInventory;
-use openlogi_ipc::{ForegroundApps, PrimaryMouseButton};
+use openlogi_ipc::PrimaryMouseButton;
+use openlogi_ipc::{AgentSnapshot, ForegroundApps, InventoryHealth};
 
 #[cfg(target_os = "macos")]
 use crate::services::ipc::PrimaryMouseButtonCommandError;
 
-use super::{AgentLink, AppState};
+use super::events::StateEvents;
+use super::{AgentLink, AppState, StateEvent};
+use crate::services::assets::AssetResolver;
+
+/// State transitions produced by applying one complete agent snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SnapshotChanges {
+    pub(crate) inventory_ready: bool,
+    pub(crate) events: StateEvents,
+}
+
+impl SnapshotChanges {
+    pub(crate) fn inventory_changed(&self) -> bool {
+        self.events.contains(&StateEvent::InventoryChanged)
+    }
+}
 
 #[cfg(target_os = "macos")]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -74,10 +91,65 @@ impl Default for AgentSession {
 }
 
 impl AppState {
+    /// Apply one complete agent snapshot through the desktop's production
+    /// state projection, without requiring GPUI or an IPC connection.
+    ///
+    /// Pairing UI, emitted GPUI events, device-read scheduling, and asset sync
+    /// remain runtime effects owned by the caller. This method owns only the
+    /// durable snapshot-to-state merge shared by runtime delivery and tests.
+    pub(crate) fn apply_agent_snapshot(
+        &mut self,
+        snapshot: &AgentSnapshot,
+        resolver: &AssetResolver,
+        cameras: &[Camera],
+    ) -> SnapshotChanges {
+        let inventory_ready = snapshot.status.inventory == InventoryHealth::Ready;
+        // Merge only completed enumerations. A scanning agent serves an empty
+        // pre-enumeration list, which must not burn the GUI's miss grace or
+        // replace the last known device set.
+        let inventory = if inventory_ready {
+            self.refresh_inventories(&snapshot.inventory, &snapshot.standalone, resolver, cameras)
+        } else {
+            StateEvents::none()
+        };
+        if inventory_ready {
+            self.store_inventory_snapshot(&snapshot.inventory);
+        }
+
+        let agent = self.set_agent_link(AgentLink::Ready(snapshot.status.clone()));
+        let camera = self.set_camera_active(snapshot.camera_active);
+        let foreground = self.set_foreground(snapshot.foreground.clone());
+        let primary_mouse_button = self.set_primary_mouse_button(snapshot.primary_mouse_button);
+
+        SnapshotChanges {
+            inventory_ready,
+            events: inventory
+                .and(agent)
+                .and(camera)
+                .and(foreground)
+                .and(primary_mouse_button),
+        }
+    }
+
+    /// Fold one live-monitor poll into what the Diagnostics page renders: the
+    /// refreshed event-tap snapshot, and whatever events arrived since the
+    /// last poll.
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    pub fn record_monitor_poll(
+        &mut self,
+        taps: Vec<openlogi_hook::EventTapInfo>,
+        events: Vec<openlogi_ipc::MonitorEvent>,
+    ) -> StateEvents {
+        self.set_event_taps(taps);
+        if !events.is_empty() {
+            self.push_monitor_events(events);
+        }
+        StateEvent::DiagnosticsChanged.into()
+    }
     /// Append a batch of live-monitor events, capping the retained history so the
     /// buffer can't grow without bound while the monitor is open.
     #[cfg(all(target_os = "macos", debug_assertions))]
-    pub fn push_monitor_events(&mut self, events: Vec<openlogi_ipc::MonitorEvent>) {
+    fn push_monitor_events(&mut self, events: Vec<openlogi_ipc::MonitorEvent>) {
         const MAX: usize = 200;
         self.agent.monitor_events.extend(events);
         let overflow = self.agent.monitor_events.len().saturating_sub(MAX);
@@ -92,7 +164,7 @@ impl AppState {
     /// Replace the cached event-tap snapshot the Diagnostics page renders.
     /// Refreshed on the live-monitor poll tick; see [`Self::event_taps`].
     #[cfg(all(target_os = "macos", debug_assertions))]
-    pub fn set_event_taps(&mut self, taps: Vec<openlogi_hook::EventTapInfo>) {
+    fn set_event_taps(&mut self, taps: Vec<openlogi_hook::EventTapInfo>) {
         self.agent.event_taps = taps;
     }
     /// The cached event-tap snapshot for the Diagnostics page.
@@ -106,7 +178,7 @@ impl AppState {
     /// binary; prompting in the GUI process (as the pre-split build did) would
     /// grant the wrong binary and the hook would never install.
     pub fn request_accessibility_prompt(&self) {
-        self.send_ipc(crate::services::ipc::Command::RequestAccessibilityPrompt);
+        self.send_ipc(crate::services::ipc::RequestAccessibilityPrompt);
     }
     /// The agent connection state the render path branches on.
     #[must_use]
@@ -123,15 +195,15 @@ impl AppState {
             _ => None,
         }
     }
-    /// Replace the link, reporting whether it actually changed — the steady
-    /// IPC poll mostly delivers identical snapshots, and the caller skips the
-    /// window refresh for those.
-    pub fn set_agent_link(&mut self, link: AgentLink) -> bool {
+    /// Replace the link, reporting it only when it actually changed — most
+    /// observed snapshots leave the link as it was, and those must not refresh
+    /// the window.
+    pub fn set_agent_link(&mut self, link: AgentLink) -> StateEvents {
         if self.agent.link == link {
-            return false;
+            return StateEvents::none();
         }
         self.agent.link = link;
-        true
+        StateEvent::AgentChanged.into()
     }
 
     /// Cache a completed inventory snapshot for diagnostics.
@@ -146,12 +218,12 @@ impl AppState {
     }
 
     /// Adopt the agent's foreground application snapshot.
-    pub fn set_foreground(&mut self, foreground: ForegroundApps) -> bool {
+    pub fn set_foreground(&mut self, foreground: ForegroundApps) -> StateEvents {
         if self.agent.foreground == foreground {
-            return false;
+            return StateEvents::none();
         }
         self.agent.foreground = foreground;
-        true
+        StateEvent::ForegroundChanged.into()
     }
 
     pub(super) fn foreground(&self) -> &ForegroundApps {
@@ -185,7 +257,7 @@ impl AppState {
 
     /// Adopt a host-wide primary mouse button observation, using it to resolve
     /// a write whose RPC reply was lost after the agent may have applied it.
-    pub fn set_primary_mouse_button(&mut self, button: Option<PrimaryMouseButton>) -> bool {
+    pub fn set_primary_mouse_button(&mut self, button: Option<PrimaryMouseButton>) -> StateEvents {
         let button_changed = self.agent.primary_mouse_button != button;
         if button_changed {
             self.agent.primary_mouse_button = button;
@@ -196,28 +268,32 @@ impl AppState {
                 .agent
                 .primary_mouse_button_command
                 .reconcile_observation(button);
-            button_changed || command_changed
+            (button_changed || command_changed)
+                .then_some(StateEvent::SettingsChanged)
+                .into()
         }
         #[cfg(not(target_os = "macos"))]
         {
-            button_changed
+            button_changed.then_some(StateEvent::SettingsChanged).into()
         }
     }
 
     /// Ask the agent to change the macOS system setting. The observed snapshot,
     /// not this pending request, remains the GUI's source of truth. Returns
-    /// whether request/error presentation changed.
+    /// which event reports a changed request/error presentation.
     #[cfg(target_os = "macos")]
-    pub fn request_primary_mouse_button(&mut self, button: PrimaryMouseButton) -> bool {
+    pub fn request_primary_mouse_button(&mut self, button: PrimaryMouseButton) -> StateEvents {
         let previous = self.agent.primary_mouse_button_command.clone();
         self.agent.primary_mouse_button_command = if self
-            .send_ipc(crate::services::ipc::Command::SetPrimaryMouseButton(button))
+            .send_ipc(crate::services::ipc::SetPrimaryMouseButton { button })
         {
             PrimaryMouseButtonCommandState::Pending(button)
         } else {
             PrimaryMouseButtonCommandState::Failed(PrimaryMouseButtonCommandError::AgentUnavailable)
         };
-        previous != self.agent.primary_mouse_button_command
+        (previous != self.agent.primary_mouse_button_command)
+            .then_some(StateEvent::SettingsChanged)
+            .into()
     }
 
     /// Record whether the agent accepted the latest primary-button write. A
@@ -227,7 +303,7 @@ impl AppState {
     pub fn apply_primary_mouse_button_result(
         &mut self,
         result: Result<PrimaryMouseButton, PrimaryMouseButtonCommandError>,
-    ) -> bool {
+    ) -> StateEvents {
         let previous = self.agent.primary_mouse_button_command.clone();
         self.agent.primary_mouse_button_command = match result {
             Ok(_) => PrimaryMouseButtonCommandState::Idle,
@@ -246,6 +322,8 @@ impl AppState {
             },
             Err(error) => PrimaryMouseButtonCommandState::Failed(error),
         };
-        previous != self.agent.primary_mouse_button_command
+        (previous != self.agent.primary_mouse_button_command)
+            .then_some(StateEvent::SettingsChanged)
+            .into()
     }
 }

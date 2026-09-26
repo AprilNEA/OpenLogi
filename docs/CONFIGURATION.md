@@ -30,11 +30,13 @@ Schema versions newer than the running build are rejected before their fields
 are parsed. v1 binding maps and the v2–v3 gesture-owner layout migrate on load.
 The v3 physical-device-key transition cannot safely assign older model-scoped
 device settings when two identical devices exist, so v2 model-key entries must
-be copied manually to the generated physical keys.
+be copied manually to the generated physical keys. Pre-v7 thumb-wheel scroll
+pairs on the old defaults are migrated in both device and per-application
+profiles so they keep their native direction.
 
 ## Shape
 
-`schema_version` is required and currently `5`. `selected_device` is an
+`schema_version` is required and currently `7`. `selected_device` is an
 optional physical device key.
 
 `[app_settings]` contains application-wide preferences:
@@ -47,6 +49,16 @@ optional physical device key.
 - `vertical_scroll_sensitivity`, from `1` through `100` (`14` is 1×);
   continuous trackpad input remains native
 - `thumbwheel_sensitivity`, from `1` through `100` (`14` is 1×)
+- `mouse_profile_target`: `pointer` (default, including existing configs that
+  omit this preference) or `focused`. Mouse button profiles follow the window
+  under the pointer; the desktop uses the global bindings. Keyboard profiles
+  continue to follow the focused application. Pointer targeting is supported
+  on macOS, Windows, and X11; unsupported sessions such as Wayland use the
+  focused application. An unavailable pointer target is not treated as desktop.
+  OpenLogi never activates a background window to send a shortcut: mouse
+  bindings that produce keystrokes or run workflows are skipped unless the
+  hovered window is focused. Global actions such as desktop switching can run
+  without changing application focus.
 
 `[devices."<physical-key>"]` contains per-device state. Receiver keys look like
 `receiver:<receiver-id>:slot:<number>`; direct, raw-HID, and camera devices use

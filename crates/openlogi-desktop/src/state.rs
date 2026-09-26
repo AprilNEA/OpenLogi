@@ -5,13 +5,17 @@
 //! here. Per-component scratch state (hover index) stays
 //! in the owning entity.
 //!
-//! [`AppState::with_runtime`] resolves every paired device's asset + DPI
-//! target up front so views can switch instantly when the active device
-//! changes — no synchronous I/O during the device switch.
+//! [`AppState::new`] resolves every paired device's asset + DPI target up
+//! front so views can switch instantly when the active device changes — no
+//! synchronous I/O during the device switch.
+//!
+//! A mutator's prefix says where the change goes: `commit_*` persists it to
+//! `config.toml` (and tells the agent or the device when they care), `set_*`
+//! changes this process's memory and nothing else.
 
 use std::collections::BTreeMap;
 
-use gpui::{App, Context, Entity, EventEmitter, Global};
+use gpui::{App, Context, Entity, Global};
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::config::Config;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
@@ -22,9 +26,10 @@ use tracing::warn;
 pub use config::ConfigPersistence;
 pub(crate) use device_key::DeviceKey;
 pub use devices::DeviceRecord;
+pub(crate) use events::{StateEvent, StateEvents};
 pub use light::LightCommandStatus;
 pub(crate) use load::Load;
-pub use load::{DpiStatus, SmartShiftLoad};
+pub use load::{DpiLoad, SmartShiftLoad};
 
 /// Result of confirming a SmartShift write by reading the value back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,7 +51,7 @@ use agent::AgentSession;
 use bindings::BindingState;
 use device_store::DeviceStore;
 pub(crate) use devices::camera_model_info;
-use light::LightingState;
+use light::LightSession;
 use pointer::PointerState;
 
 use crate::services::assets::AssetResolver;
@@ -60,10 +65,11 @@ mod bindings;
 mod camera;
 mod config;
 mod device_key;
-mod device_runtime;
+mod device_session;
 mod device_store;
 mod devices;
 mod dpi;
+mod events;
 mod inventory;
 mod light;
 mod lighting;
@@ -80,47 +86,42 @@ mod tests;
 /// mid-range mouse and keeps the dot-preview visually obvious from frame one.
 pub const DEFAULT_DPI: Dpi = Dpi::new(1600);
 
-/// Semantic changes emitted by the shared application-state entity.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum StateEvent {
-    /// Agent connection or permission state changed.
-    AgentChanged,
-    /// The foreground application or recent-application list changed.
-    ForegroundChanged,
-    /// Cached diagnostics/event-monitor data changed.
-    #[cfg_attr(
-        not(all(target_os = "macos", debug_assertions)),
-        expect(dead_code, reason = "the live event monitor is macOS debug-only")
-    )]
-    DiagnosticsChanged,
-    /// The merged device inventory changed.
-    InventoryChanged,
-    /// The active device changed.
-    DeviceSelected(DeviceKey),
-    /// Mouse, keyboard, gesture, or Actions Ring bindings changed.
-    BindingsChanged(DeviceKey),
-    /// DPI data or the active DPI value changed.
-    DpiChanged(DeviceKey),
-    /// SmartShift data or write status changed.
-    SmartShiftChanged(DeviceKey),
-    /// Device or standalone-light settings changed.
-    LightingChanged(DeviceKey),
-    /// Camera settings or activity changed.
-    CameraChanged,
-    /// Host camera-permission status may have changed.
-    #[cfg_attr(
-        not(target_os = "macos"),
-        expect(dead_code, reason = "camera consent polling is macOS-only")
-    )]
-    CameraPermissionChanged,
-    /// Per-device preferences outside the feature-specific events changed.
-    DeviceConfigChanged(DeviceKey),
-    /// Application-wide preferences changed.
-    SettingsChanged,
-    /// The interface language switched live. Views re-render localized strings
-    /// on the accompanying refresh; this event is for localized text *cached
-    /// in state*, which must be recomputed in the new locale.
-    LanguageChanged,
+/// Everything a fresh [`AppState`] is built from.
+pub struct Sources<'a> {
+    /// The configuration as loaded.
+    pub config: Config,
+    /// The receivers and paired devices the agent has enumerated so far.
+    pub inventories: &'a [DeviceInventory],
+    /// The standalone raw-HID devices the agent has recognized so far.
+    pub standalone: &'a [StandaloneDevice],
+    /// Resolves each device's art.
+    pub resolver: &'a AssetResolver,
+    /// The webcams this process enumerated itself; they never come over IPC.
+    pub cameras: &'a [openlogi_camera::Camera],
+    /// Where changes to `config` may be written.
+    pub persistence: ConfigPersistence,
+    /// Sender to the IPC client thread.
+    pub ipc_commands: mpsc::UnboundedSender<crate::services::ipc::Command>,
+}
+
+#[cfg(test)]
+impl<'a> Sources<'a> {
+    /// No devices and nothing written to disk: where most state tests start.
+    pub(crate) fn in_memory(
+        config: Config,
+        resolver: &'a AssetResolver,
+        ipc_commands: mpsc::UnboundedSender<crate::services::ipc::Command>,
+    ) -> Self {
+        Self {
+            config,
+            inventories: &[],
+            standalone: &[],
+            resolver,
+            cameras: &[],
+            persistence: ConfigPersistence::MemoryOnly,
+            ipc_commands,
+        }
+    }
 }
 
 struct GlobalAppState(Entity<AppState>);
@@ -162,14 +163,16 @@ pub struct AppState {
     config: ConfigState,
     /// Agent-owned observations accepted by this GUI session.
     agent: AgentSession,
-    /// Merged device catalog, valid active selection, and per-device runtime.
+    /// Merged device catalog, valid active selection, and per-device sessions.
     devices: DeviceStore,
     /// Binding-editor scope and projections derived from config.
     bindings: BindingState,
+    /// Per-device Actions Ring profile open in this window's editor.
+    action_ring_editing_apps: BTreeMap<String, String>,
     /// DPI/SmartShift reads and the active pointer editor value.
     pointer: PointerState,
     /// Standalone-light sequencing and aggregate camera activity.
-    lighting: LightingState,
+    lights: LightSession,
     /// Sender to the IPC client thread. The agent owns the hook and device I/O.
     ipc_commands: mpsc::UnboundedSender<crate::services::ipc::Command>,
     /// Camera-consent poll started by an in-app macOS prompt. The app-state
@@ -226,17 +229,18 @@ impl AppState {
     /// The initial selection prefers [`Config::selected_device`] if it still
     /// matches one of the paired devices; otherwise it falls back to index 0.
     #[must_use]
-    pub fn with_runtime(
-        config: Config,
-        inventories: &[DeviceInventory],
-        standalone: &[StandaloneDevice],
-        cache: &AssetResolver,
-        cameras: &[openlogi_camera::Camera],
-        config_persistence: ConfigPersistence,
-        ipc_commands: mpsc::UnboundedSender<crate::services::ipc::Command>,
-    ) -> Self {
-        let mut config = ConfigState::new(config, config_persistence);
-        let device_list = build_device_list(inventories, standalone, cache, &config, cameras);
+    pub fn new(sources: Sources<'_>) -> Self {
+        let Sources {
+            config,
+            inventories,
+            standalone,
+            resolver,
+            cameras,
+            persistence,
+            ipc_commands,
+        } = sources;
+        let mut config = ConfigState::new(config, persistence);
+        let device_list = build_device_list(inventories, standalone, resolver, &config, cameras);
         // Fold each online device's route into its canonical entry before
         // anything writes to the config — the first frame after a schema-5
         // upgrade is the earliest moment this can happen, and the ordering
@@ -246,7 +250,7 @@ impl AppState {
         let adopted = config.edit(|config| inventory::adopt_routes(config, &device_list));
         // Adoption re-keyed entries, so rebuild before reading the list again.
         let device_list = if adopted {
-            build_device_list(inventories, standalone, cache, &config, cameras)
+            build_device_list(inventories, standalone, resolver, &config, cameras)
         } else {
             device_list
         };
@@ -265,8 +269,9 @@ impl AppState {
             agent: AgentSession::default(),
             devices: DeviceStore::new(device_list, current_device),
             bindings,
+            action_ring_editing_apps: BTreeMap::new(),
             pointer: PointerState::default(),
-            lighting: LightingState::default(),
+            lights: LightSession::default(),
             ipc_commands,
             #[cfg(target_os = "macos")]
             camera_permission_poll: None,
@@ -283,14 +288,14 @@ impl AppState {
             state.persist_config("device identity");
         }
         if state.config.should_reload_agent() {
-            state.send_ipc(crate::services::ipc::Command::ReloadConfig);
+            state.send_ipc(crate::services::ipc::ReloadConfig);
         }
         state
     }
     /// Send a device command to the agent over IPC, logging a dropped channel
     /// (the client thread is gone) rather than surfacing it.
-    fn send_ipc(&self, command: crate::services::ipc::Command) -> bool {
-        if self.ipc_commands.send(command).is_err() {
+    fn send_ipc(&self, command: impl Into<crate::services::ipc::Command>) -> bool {
+        if self.ipc_commands.send(command.into()).is_err() {
             warn!("IPC client thread is gone — device command dropped");
             return false;
         }
@@ -306,7 +311,7 @@ impl AppState {
     /// config and surfaces the persistence error in the GUI.
     fn persist_and_reload(&mut self, what: &str) -> bool {
         if self.persist_config(what) {
-            self.send_ipc(crate::services::ipc::Command::ReloadConfig);
+            self.send_ipc(crate::services::ipc::ReloadConfig);
             true
         } else {
             false
@@ -343,8 +348,12 @@ impl AppState {
     pub fn apply_config_reload_result(
         &mut self,
         result: Result<(), openlogi_ipc::ConfigReloadError>,
-    ) -> bool {
-        self.config.apply_reload_result(result)
+    ) -> StateEvents {
+        if self.config.apply_reload_result(result) {
+            StateEvent::SettingsChanged.into()
+        } else {
+            StateEvents::none()
+        }
     }
     /// A clone of the IPC command sender used by the state entity to issue
     /// device reads and writes through the agent.
@@ -454,5 +463,3 @@ impl AppState {
             .then_some(app.display_name.as_str())
     }
 }
-
-impl EventEmitter<StateEvent> for AppState {}

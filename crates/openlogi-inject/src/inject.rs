@@ -14,6 +14,8 @@ use std::sync::{LazyLock, Mutex, PoisonError};
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use openlogi_core::binding::KeyboardUsage;
 use openlogi_core::binding::{Action, KeyCombo};
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+use openlogi_core::binding::{Script, WorkflowStep};
 use openlogi_core::scroll::ScrollDelta;
 
 #[cfg(target_os = "macos")]
@@ -24,6 +26,13 @@ mod linux;
 
 #[cfg(target_os = "windows")]
 mod windows;
+
+#[cfg(target_os = "linux")]
+use linux as platform;
+#[cfg(target_os = "macos")]
+use macos as platform;
+#[cfg(target_os = "windows")]
+use windows as platform;
 
 /// Which isolated edge of a held keyboard chord to synthesize.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -173,6 +182,52 @@ fn held_keys(combo: &KeyCombo) -> Vec<HeldKey> {
     keys
 }
 
+/// A shortcut-table entry, parsed once into the chord it names. The tables are
+/// hand-written constants, so a parse failure is a programming error.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+fn parse_shortcut(text: &str) -> KeyCombo {
+    text.parse()
+        .unwrap_or_else(|error| unreachable!("hardcoded shortcut table entry {text:?}: {error}"))
+}
+
+/// Run a script off the caller's thread: a shell command, an AppleScript or a
+/// workflow can take seconds, and the caller is the input hook.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+fn dispatch_script(script: Script<'_>) {
+    match script {
+        Script::AppleScript(src) => {
+            let src = src.to_string();
+            std::thread::spawn(move || platform::run_apple_script(&src));
+        }
+        Script::ShellCommand(cmd) => {
+            let cmd = cmd.to_string();
+            std::thread::spawn(move || platform::run_shell_command(&cmd));
+        }
+        Script::Workflow(steps) => {
+            let steps = steps.to_vec();
+            std::thread::spawn(move || run_workflow(&steps));
+        }
+    }
+}
+
+/// Run workflow steps in order on the current (worker) thread, so a `Delay`
+/// never stalls the event tap. Each step is one call into the platform
+/// backend; a backend that cannot perform a step logs and moves on.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+fn run_workflow(steps: &[WorkflowStep]) {
+    for step in steps {
+        match step {
+            WorkflowStep::TypeText(text) => platform::type_text(text),
+            WorkflowStep::PressKey(combo) => platform::press_combo(combo),
+            WorkflowStep::Delay { millis } => {
+                std::thread::sleep(std::time::Duration::from_millis(*millis));
+            }
+            WorkflowStep::RunAppleScript(src) => platform::run_apple_script(src),
+            WorkflowStep::RunShellCommand(cmd) => platform::run_shell_command(cmd),
+        }
+    }
+}
+
 /// Synthesise the OS-level event for `action`.
 ///
 /// On macOS, key events are posted via `CGEventPost(kCGHIDEventTap, …)`
@@ -238,33 +293,52 @@ pub fn execute(action: &Action) {
     }
 }
 
-/// Synthesise the down edge of `combo`, leaving its output held.
+/// One synthetic held chord, released exactly once when dropped.
 ///
-/// Every successful lifecycle start must be paired with [`release_hold`],
-/// including cancellation and shutdown paths. Prefer [`execute`] when the
-/// caller does not own a matching terminal event.
-pub fn press_hold(combo: &KeyCombo) {
-    hold_transition(None, Some(combo));
+/// Keep this value with the physical press lifecycle. Replacing its chord
+/// preserves physical keys shared by the old and new chords; cancellation,
+/// shutdown, and unwinding all release the current chord through [`Drop`].
+#[must_use = "dropping the held chord immediately releases its synthetic output"]
+pub struct HeldChord {
+    combo: KeyCombo,
 }
 
-/// Synthesise the up edge matching a prior [`press_hold`].
-///
-/// Each successful [`press_hold`] must be released exactly once. The lifecycle
-/// owner provides that guarantee; duplicate releases would consume ownership
-/// retained for an overlapping chord.
-pub fn release_hold(combo: &KeyCombo) {
-    hold_transition(Some(combo), None);
+impl HeldChord {
+    /// Replace this held chord without releasing physical keys shared by both.
+    pub fn replace(&mut self, combo: &KeyCombo) {
+        let old = std::mem::replace(&mut self.combo, combo.clone());
+        hold_transition(Some(&old), Some(&self.combo));
+    }
 }
 
-/// Replace one held chord without releasing physical keys shared by both.
-pub fn replace_hold(old: &KeyCombo, new: &KeyCombo) {
-    hold_transition(Some(old), Some(new));
+impl Drop for HeldChord {
+    fn drop(&mut self) {
+        hold_transition(Some(&self.combo), None);
+    }
+}
+
+/// Synthesise the down edge of `combo` and return its release owner.
+///
+/// Keep the returned [`HeldChord`] until the physical press ends. Prefer
+/// [`execute`] when the caller does not own a matching terminal event.
+pub fn press_hold(combo: &KeyCombo) -> HeldChord {
+    // Construct the owner before posting the edge so unwinding from the
+    // platform backend still balances any ownership transition it completed.
+    let held = HeldChord {
+        combo: combo.clone(),
+    };
+    hold_transition(None, Some(&held.combo));
+    held
 }
 
 fn hold_transition(released: Option<&KeyCombo>, pressed: Option<&KeyCombo>) {
     cfg_select! {
         target_os = "macos" => {
             let mut output = HELD_OUTPUT.lock().unwrap_or_else(PoisonError::into_inner);
+            // `HeldOutput::owners` is the only persistent modifier state. This
+            // bitmask is an event-ordering cursor: derive it from the map while
+            // holding the same mutex, advance it through the exact transition
+            // edges, then prove it reached the map's post-transition state.
             let modifiers = output.modifiers();
             let transition = output.transition(released, pressed);
             let modifiers = macos::hold_keys(&transition.up, KeyPhase::Up, modifiers);
@@ -291,18 +365,18 @@ fn hold_transition(released: Option<&KeyCombo>, pressed: Option<&KeyCombo>) {
     }
 }
 
-/// Navigate the browser identified by `pid` backwards or forwards using the
-/// Accessibility API (`AXPress` on the "Go back" / "Go forward" toolbar button).
+/// Navigate Safari backwards or forwards using `AXPress` on its toolbar
+/// button's stable Accessibility identifier.
 ///
-/// Call this from the gesture watcher **at the moment the button press arrives**
-/// so `pid` reflects the correct frontmost app rather than whatever happens to
-/// be frontmost when the async dispatch completes. Returns `true` on success.
+/// Pass the Safari process captured when the button press arrived. The call
+/// returns `false` if that process is no longer frontmost or the frontmost app
+/// is not Safari.
 /// No-op (returns `false`) on non-macOS platforms.
 #[must_use]
 pub fn ax_navigate_browser(pid: i32, forward: bool) -> bool {
     #[cfg(target_os = "macos")]
     {
-        macos::ax_browser_navigate(forward, Some(pid))
+        macos::ax_browser_navigate(forward, pid)
     }
     #[cfg(not(target_os = "macos"))]
     {

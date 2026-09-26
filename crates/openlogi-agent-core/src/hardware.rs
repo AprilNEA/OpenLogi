@@ -2,9 +2,9 @@
 //! and the OS-event hook thread (bound button press).
 //!
 //! [`DeviceOp`] is the seam every device write and read goes through: it binds
-//! a [`DeviceRoute`] to this runtime's capture/inventory channels (built via
-//! [`crate::orchestrator::SharedRuntime::device`] or
-//! [`crate::orchestrator::SharedRuntime::keyboard_device`]), then either
+//! a [`DeviceRoute`] to the agent's capture/inventory channels (built via
+//! [`crate::orchestrator::SharedHandles::device`] or
+//! [`crate::orchestrator::SharedHandles::keyboard_device`]), then either
 //! awaits [`DeviceOp::run`] (the IPC server's reads/writes, which must report
 //! their result to the GUI) or fires [`DeviceOp::detach`] (the OS-hook and
 //! reconnect paths, which must never block their caller). Both resolve the
@@ -17,32 +17,34 @@
 //! at the cadence these fire at (≤ once per slider release / button press)
 //! and avoids holding a long-lived async runtime alongside GPUI's executor.
 
+use std::fmt;
 use std::future::Future;
 use std::time::Duration;
 
 use openlogi_core::config::Lighting;
 use openlogi_hid::{
-    CaptureChannel, ChannelRegistry, DeviceRoute, Dpi, HidppOperation, ScrollResolution,
-    SharedChannel, SmartShiftStatus, WriteError,
+    CaptureChannelSlot, ChannelRegistry, DeviceIoGate, DeviceRoute, Dpi, HidppOperation,
+    ScrollResolution, SharedChannel, SmartShiftStatus, WriteError,
 };
 use tokio::time::error::Elapsed;
 use tracing::{debug, warn};
 
 use crate::receiver_access::ReceiverAccess;
 
+mod context;
 mod light;
 
-pub use light::{apply_light, cancel_light_reapply, set_light_in_background};
+pub use context::HardwareContext;
 
 /// Upper bound on a single HID++ write. `hidpp` has no request timeout of its
 /// own, so without this an asleep / unresponsive device would hang (and leak)
 /// this background thread forever; a write to a live device completes in well
 /// under a second.
-const WRITE_BUDGET: Duration = Duration::from_secs(5);
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Select the only Agent-authoritative channel for `route`.
 fn authoritative_channel(
-    capture: Option<&CaptureChannel>,
+    capture: Option<&CaptureChannelSlot>,
     registry: &ChannelRegistry,
     route: &DeviceRoute,
 ) -> Result<SharedChannel, WriteError> {
@@ -69,44 +71,89 @@ fn choose_authoritative<T>(
     }
 }
 
-/// One device's HID++ write or read, bound to this runtime's capture and
-/// inventory channels for `route`. Built via
-/// [`crate::orchestrator::SharedRuntime::device`] or
-/// [`crate::orchestrator::SharedRuntime::keyboard_device`] — the receiver-side
-/// counterpart of `openlogi_hid::write::with_route`'s "boilerplate-eater"
-/// pattern, applied to an already-open channel instead of a fresh one.
-pub struct DeviceOp<'a> {
-    capture: &'a CaptureChannel,
-    registry: &'a ChannelRegistry,
-    receiver_access: &'a ReceiverAccess,
-    route: DeviceRoute,
+/// The four handles every device read and write goes through: the capture
+/// session's channel slot, inventory's channel registry, the receiver lease
+/// and the host device-I/O gate. Cheap to clone; bind it to a device with
+/// [`Self::op`].
+#[derive(Clone)]
+pub struct DeviceAccess {
+    /// The capture session's open channel, preferred for as long as inventory
+    /// still publishes it.
+    pub channel: CaptureChannelSlot,
+    /// Exact-route channels owned and published by the inventory enumerator.
+    pub registry: ChannelRegistry,
+    /// Receiver access shared with HID++ sessions and pairing.
+    pub receiver_access: ReceiverAccess,
+    /// Host-lifecycle gate shared by every producer of proactive device I/O.
+    pub device_io: DeviceIoGate,
 }
 
-impl<'a> DeviceOp<'a> {
-    pub(crate) fn new(
-        capture: &'a CaptureChannel,
-        registry: &'a ChannelRegistry,
-        receiver_access: &'a ReceiverAccess,
-        route: &DeviceRoute,
-    ) -> Self {
-        Self {
-            capture,
-            registry,
-            receiver_access,
+impl DeviceAccess {
+    /// Bind a device operation to `route`.
+    #[must_use]
+    pub fn op(&self, route: &DeviceRoute) -> DeviceOp {
+        DeviceOp {
+            access: self.clone(),
             route: route.clone(),
         }
     }
+}
 
+/// One device's HID++ write or read, bound to the agent's capture and
+/// inventory channels for `route`. Built via [`DeviceAccess::op`], usually
+/// through [`crate::orchestrator::SharedHandles::device`] or
+/// [`crate::orchestrator::SharedHandles::keyboard_device`] — the receiver-side
+/// counterpart of `openlogi_hid::write::with_route`'s "boilerplate-eater"
+/// pattern, applied to an already-open channel instead of a fresh one.
+pub struct DeviceOp {
+    access: DeviceAccess,
+    route: DeviceRoute,
+}
+
+/// Why a device operation has no channel to write through right now.
+#[derive(Debug, Clone, Copy)]
+enum Unresolved {
+    /// The host gate refuses proactive device I/O (sleep, lock, shutdown).
+    IoSuspended,
+    /// Inventory publishes no channel for the route.
+    NoChannel,
+}
+
+impl fmt::Display for Unresolved {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::IoSuspended => "host device I/O suspended",
+            Self::NoChannel => "no inventory channel",
+        })
+    }
+}
+
+/// A requester sees both as "nothing to write to".
+impl From<Unresolved> for WriteError {
+    fn from(_: Unresolved) -> Self {
+        Self::DeviceNotFound
+    }
+}
+
+impl DeviceOp {
     /// Resolve the authoritative channel without acquiring the receiver
     /// lease. Callers that manage their own lease/thread lifecycle across
     /// more than one write (the volatile-settings reapply sequence) resolve
     /// once up front through this instead of [`Self::run`]/[`Self::detach`].
-    fn resolve(&self) -> Result<SharedChannel, WriteError> {
-        authoritative_channel(Some(self.capture), self.registry, &self.route)
+    fn resolve(&self) -> Result<SharedChannel, Unresolved> {
+        if !self.access.device_io.allows_io() {
+            return Err(Unresolved::IoSuspended);
+        }
+        authoritative_channel(
+            Some(&self.access.channel),
+            &self.access.registry,
+            &self.route,
+        )
+        .map_err(|_| Unresolved::NoChannel)
     }
 
     /// Lease the receiver, resolve the authoritative channel, then run `f`
-    /// against it under `WRITE_BUDGET`, mapping a timeout to
+    /// against it under `WRITE_TIMEOUT`, mapping a timeout to
     /// [`WriteError::RequestTimedOut`].
     ///
     /// Lease-then-resolve, not the other way around: the lease wait is
@@ -115,23 +162,65 @@ impl<'a> DeviceOp<'a> {
     /// would likely still succeed on the stale handle, but anything that
     /// caches a feature off it (see the haptic feature cache's
     /// `EpochGuarded` note) would then pin a channel the enumerator can never
-    /// reopen. Used by every awaited device call: the IPC server's
-    /// DPI/SmartShift/lighting reads and writes, and the Actions Ring haptic
-    /// path.
+    /// reopen. Used by the IPC server's ordinary reads and writes and the
+    /// Actions Ring haptic path. Lighting uses [`Self::lighting`] so rollback
+    /// outlives the requester's deadline.
     pub async fn run<F, Fut, T>(self, op: HidppOperation, f: F) -> Result<T, WriteError>
     where
         F: FnOnce(SharedChannel) -> Fut,
         Fut: Future<Output = Result<T, WriteError>>,
     {
-        let _lease = self.receiver_access.acquire_for_io().await;
+        if !self.access.device_io.allows_io() {
+            return Err(WriteError::DeviceNotFound);
+        }
+        let _lease = self.access.receiver_access.acquire_for_io().await;
         let shared = self.resolve()?;
         timed(op, f(shared)).await
+    }
+
+    /// Own the whole lighting transaction outside the requester runtime. The
+    /// worker leases and resolves AFTER obtaining its lighting route lock and
+    /// retains that lease through any RGB rollback after requester cancellation.
+    pub fn lighting(
+        self,
+        lighting: &Lighting,
+    ) -> Result<openlogi_hid::lighting::LightingJob, WriteError> {
+        let DeviceAccess {
+            channel: capture,
+            registry,
+            receiver_access,
+            device_io,
+        } = self.access;
+        let route = self.route.clone();
+        let (r, g, b) = lighting_rgb(lighting);
+        let write = openlogi_hid::write::LightingWrite {
+            method: openlogi_hid::LightingMethod::Auto,
+            color: openlogi_core::color::Rgb::new(r, g, b),
+        };
+        openlogi_hid::lighting::LightingJob::spawn(&self.route, move |cancel| async move {
+            let _lease = tokio::time::timeout(WRITE_TIMEOUT, receiver_access.acquire_for_io())
+                .await
+                .map_err(|_| WriteError::RequestTimedOut {
+                    operation: HidppOperation::Lighting,
+                })?;
+            if !device_io.allows_io() {
+                return Err(WriteError::DeviceNotFound);
+            }
+            let channel = authoritative_channel(Some(&capture), &registry, &route)?;
+            write
+                .apply_on(
+                    &channel,
+                    || cancel.is_cancelled(),
+                    || device_io.allows_io() && registry.is_current(&channel),
+                )
+                .await
+        })
     }
 
     /// Fire-and-forget `f` on its own OS thread and one-shot runtime, with the
     /// standard three-arm outcome logging: a completed write and a failed
     /// write both log at their own level, keyed by `label`; a device that
-    /// never answers within `WRITE_BUDGET` warns instead of hanging the
+    /// never answers within `WRITE_TIMEOUT` warns instead of hanging the
     /// thread forever.
     ///
     /// Resolves the channel on the calling thread before spawning — every
@@ -145,13 +234,10 @@ impl<'a> DeviceOp<'a> {
         Fut: Future<Output = Result<T, WriteError>>,
     {
         let index = self.route.device_index();
-        self.spawn_write(label, f, move |result| match result {
-            Ok(Ok(_)) => debug!(index, label, "background write completed"),
-            Ok(Err(e)) => warn!(error = ?e, label, "background write failed"),
-            Err(_) => warn!(
-                index,
-                label, "background write timed out (device asleep/unresponsive)"
-            ),
+        self.spawn_write(label, f, move |result| {
+            log_outcome(index, label, result, |_| {
+                debug!(index, label, "background write completed");
+            });
         });
     }
 
@@ -173,21 +259,55 @@ impl<'a> DeviceOp<'a> {
         F: FnOnce(SharedChannel) -> Fut + Send + 'static,
         Fut: Future<Output = Result<T, WriteError>>,
     {
-        let Ok(shared) = self.resolve() else {
-            debug!(route = %self.route, label, "no inventory channel — write skipped");
-            return;
+        let shared = match self.resolve() {
+            Ok(shared) => shared,
+            Err(reason) => {
+                debug!(route = %self.route, label, %reason, "background write skipped");
+                return;
+            }
         };
-        let receiver_access = self.receiver_access.clone();
+        let DeviceAccess {
+            receiver_access,
+            device_io,
+            ..
+        } = self.access;
         std::thread::spawn(move || {
             let Some(rt) = one_shot_runtime(label) else {
                 return;
             };
             let result = rt.block_on(async {
                 let _lease = receiver_access.acquire_for_io().await;
-                tokio::time::timeout(WRITE_BUDGET, f(shared)).await
+                if !device_io.allows_io() {
+                    return None;
+                }
+                Some(tokio::time::timeout(WRITE_TIMEOUT, f(shared)).await)
             });
-            log(result);
+            if let Some(result) = result {
+                log(result);
+            } else {
+                debug!(
+                    label,
+                    "host device I/O suspended — background write skipped"
+                );
+            }
         });
+    }
+}
+
+/// Log how one bounded background write ended. Only the success line differs
+/// between writes, because it carries the value written, so `written` logs
+/// it. A failed write and one that timed out (an asleep or unresponsive
+/// device) both warn, naming `what` and the device.
+fn log_outcome<T>(
+    index: u8,
+    what: &str,
+    result: Result<Result<T, WriteError>, Elapsed>,
+    written: impl FnOnce(T),
+) {
+    match result {
+        Ok(Ok(value)) => written(value),
+        Ok(Err(error)) => warn!(index, ?error, "{what} failed"),
+        Err(_) => warn!(index, "{what} timed out (device asleep/unresponsive)"),
     }
 }
 
@@ -195,10 +315,7 @@ impl<'a> DeviceOp<'a> {
 /// its OS thread onto. Logs and returns `None` on the rare case that
 /// initialization itself fails (e.g. OS resource exhaustion).
 fn one_shot_runtime(label: &str) -> Option<tokio::runtime::Runtime> {
-    match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
+    match openlogi_core::worker::runtime() {
         Ok(rt) => Some(rt),
         Err(e) => {
             warn!(error = %e, label, "tokio runtime init failed; write skipped");
@@ -207,31 +324,19 @@ fn one_shot_runtime(label: &str) -> Option<tokio::runtime::Runtime> {
     }
 }
 
-/// Spawn an OS thread that toggles SmartShift (free ↔ ratchet) on the
-/// device at `target` via its current shared channel. Returns
-/// immediately; failures (incl. devices that expose neither `0x2111` nor
-/// the older `0x2110` SmartShift feature) are logged.
-pub fn toggle_smartshift_in_background(
-    capture: &CaptureChannel,
-    registry: &ChannelRegistry,
-    receiver_access: &ReceiverAccess,
-    target: Option<DeviceRoute>,
-) {
-    let Some(target) = target else {
-        debug!("no target device — SmartShift toggle skipped");
-        return;
-    };
-    let index = target.device_index();
-    DeviceOp::new(capture, registry, receiver_access, &target).spawn_write(
+/// Spawn an OS thread that toggles SmartShift (free ↔ ratchet) on `op`'s
+/// device via its current shared channel. Returns immediately; failures
+/// (incl. devices that expose neither `0x2111` nor the older `0x2110`
+/// SmartShift feature) are logged.
+pub fn toggle_smartshift_in_background(op: DeviceOp) {
+    let index = op.route.device_index();
+    op.spawn_write(
         "SmartShift toggle",
         |c| async move { openlogi_hid::toggle_smartshift_on(&c).await },
-        move |result| match result {
-            Ok(Ok(mode)) => debug!(index, ?mode, "SmartShift toggled"),
-            Ok(Err(e)) => warn!(error = ?e, "SmartShift toggle failed"),
-            Err(_) => warn!(
-                index,
-                "SmartShift toggle timed out (device asleep/unresponsive)"
-            ),
+        move |result| {
+            log_outcome(index, "SmartShift toggle", result, |mode| {
+                debug!(index, ?mode, "SmartShift toggled");
+            });
         },
     );
 }
@@ -240,20 +345,37 @@ pub fn toggle_smartshift_in_background(
 /// via [`openlogi_hid::set_fn_lock_on`]. Returns immediately; failures (incl.
 /// keyboards that expose neither `0x40a3` nor `0x40a2` fn inversion) are
 /// logged.
-pub fn write_fn_lock_in_background(op: DeviceOp<'_>, on: bool) {
+pub fn write_fn_lock_in_background(op: DeviceOp, on: bool) {
     let index = op.route.device_index();
     op.spawn_write(
         "Fn-lock write",
         move |c| async move { openlogi_hid::set_fn_lock_on(&c, on).await },
-        move |result| match result {
-            Ok(Ok(())) => debug!(index, on, "Fn-lock written"),
-            Ok(Err(e)) => warn!(error = ?e, "Fn-lock write failed"),
-            Err(_) => warn!(
-                index,
-                "Fn-lock write timed out (device asleep/unresponsive)"
-            ),
+        move |result| {
+            log_outcome(index, "Fn-lock write", result, |()| {
+                debug!(index, on, "Fn-lock written");
+            });
         },
     );
+}
+
+/// The settings a mouse forgets when it power-cycles, as one reapply pushes
+/// them. `None` leaves that setting alone.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VolatileMouseSettings {
+    /// Native HiResWheel resolution and inversion.
+    pub wheel: Option<WheelModeChange>,
+    /// Sensor DPI.
+    pub dpi: Option<Dpi>,
+    /// SmartShift mode and thresholds.
+    pub smartshift: Option<SmartShiftStatus>,
+}
+
+impl VolatileMouseSettings {
+    /// Whether there is nothing to push.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// Re-apply every volatile mouse setting for `op`'s device on a **single**
@@ -270,18 +392,21 @@ pub fn write_fn_lock_in_background(op: DeviceOp<'_>, on: bool) {
 /// on the one OS thread spawned here. Takes `op` by reference (unlike every
 /// other function here) because it only ever reads its fields — it never
 /// hands the operation itself to [`DeviceOp::run`] or [`DeviceOp::detach`].
-pub fn reapply_mouse_volatile_in_background(
-    op: &DeviceOp<'_>,
-    resolution: Option<ScrollResolution>,
-    inverted: Option<bool>,
-    dpi: Option<Dpi>,
-    smartshift: Option<SmartShiftStatus>,
-) {
-    let Ok(shared) = op.resolve() else {
-        debug!(route = %op.route, "no inventory channel — volatile reapply skipped");
-        return;
+pub fn reapply_mouse_volatile_in_background(op: &DeviceOp, settings: VolatileMouseSettings) {
+    let VolatileMouseSettings {
+        wheel,
+        dpi,
+        smartshift,
+    } = settings;
+    let shared = match op.resolve() {
+        Ok(shared) => shared,
+        Err(reason) => {
+            debug!(route = %op.route, %reason, "volatile reapply skipped");
+            return;
+        }
     };
-    let receiver_access = op.receiver_access.clone();
+    let receiver_access = op.access.receiver_access.clone();
+    let device_io = op.access.device_io.clone();
     let index = op.route.device_index();
     std::thread::spawn(move || {
         let Some(rt) = one_shot_runtime("volatile reapply") else {
@@ -289,181 +414,143 @@ pub fn reapply_mouse_volatile_in_background(
         };
         rt.block_on(async {
             let _lease = receiver_access.acquire_for_io().await;
-            if resolution.is_some() || inverted.is_some() {
-                let result = tokio::time::timeout(WRITE_BUDGET, async {
-                    apply_wheel_mode(&shared, resolution, inverted).await
-                })
-                .await;
-                log_wheel_result(index, resolution, inverted, result);
+            if !device_io.allows_io() {
+                debug!(
+                    index,
+                    "host device I/O suspended — volatile reapply skipped"
+                );
+                return;
+            }
+            if let Some(change) = wheel {
+                let result = tokio::time::timeout(WRITE_TIMEOUT, change.apply_on(&shared)).await;
+                log_wheel_result(index, change, result);
             }
             if let Some(dpi) = dpi {
-                let result = tokio::time::timeout(WRITE_BUDGET, async {
+                let result = tokio::time::timeout(WRITE_TIMEOUT, async {
                     openlogi_hid::set_dpi_on(&shared, dpi).await
                 })
                 .await;
-                match result {
-                    Ok(Ok(())) => {
-                        debug!(index, %dpi, "DPI written to device");
-                    }
-                    Ok(Err(e)) => warn!(error = ?e, "DPI write failed"),
-                    Err(_) => warn!(
-                        %dpi,
-                        "DPI write timed out (device asleep/unresponsive)"
-                    ),
-                }
+                log_outcome(index, "DPI write", result, |()| {
+                    debug!(index, %dpi, "DPI written to device");
+                });
             }
             if let Some(ss) = smartshift {
-                let result = tokio::time::timeout(WRITE_BUDGET, async {
+                let result = tokio::time::timeout(WRITE_TIMEOUT, async {
                     openlogi_hid::set_smartshift_on(&shared, ss).await
                 })
                 .await;
-                match result {
-                    Ok(Ok(())) => debug!(
-                        index,
-                        status = ?ss,
-                        "SmartShift config written"
-                    ),
-                    Ok(Err(e)) => warn!(error = ?e, "SmartShift write failed"),
-                    Err(_) => warn!(
-                        index,
-                        "SmartShift write timed out (device asleep/unresponsive)"
-                    ),
-                }
+                log_outcome(index, "SmartShift write", result, |()| {
+                    debug!(index, status = ?ss, "SmartShift config written");
+                });
             }
         });
     });
 }
 
-async fn apply_wheel_mode(
-    shared: &SharedChannel,
-    resolution: Option<ScrollResolution>,
-    inverted: Option<bool>,
-) -> Result<(), WriteError> {
-    match (resolution, inverted) {
-        (Some(resolution), Some(inverted)) => {
-            openlogi_hid::set_scroll_wheel_mode_on(shared, resolution, inverted)
-                .await
-                .map(|_| ())
+/// A change to a device's native HiResWheel mode. What a variant leaves out
+/// keeps the device's current value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WheelModeChange {
+    /// Set the resolution and preserve the inversion bit.
+    Resolution(ScrollResolution),
+    /// Set the inversion bit and preserve the resolution.
+    Inversion(bool),
+    /// Set both.
+    ResolutionAndInversion {
+        /// The resolution to set.
+        resolution: ScrollResolution,
+        /// The inversion bit to set.
+        inverted: bool,
+    },
+}
+
+impl WheelModeChange {
+    /// The change that sets whichever of the two is configured, or `None`
+    /// when neither is and the wheel stays unmanaged.
+    #[must_use]
+    pub fn new(resolution: Option<ScrollResolution>, inverted: Option<bool>) -> Option<Self> {
+        match (resolution, inverted) {
+            (Some(resolution), Some(inverted)) => Some(Self::ResolutionAndInversion {
+                resolution,
+                inverted,
+            }),
+            (Some(resolution), None) => Some(Self::Resolution(resolution)),
+            (None, Some(inverted)) => Some(Self::Inversion(inverted)),
+            (None, None) => None,
         }
-        (Some(resolution), None) => openlogi_hid::set_scroll_resolution_on(shared, resolution)
-            .await
-            .map(|_| ()),
-        (None, Some(inverted)) => openlogi_hid::set_scroll_inversion_on(shared, inverted).await,
-        (None, None) => Ok(()),
+    }
+
+    /// Write the change through `shared`.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the HiResWheel write reports, including
+    /// [`WriteError::FeatureUnsupported`] on a wheel without the feature.
+    pub async fn apply_on(self, shared: &SharedChannel) -> Result<(), WriteError> {
+        match self {
+            Self::ResolutionAndInversion {
+                resolution,
+                inverted,
+            } => openlogi_hid::set_scroll_wheel_mode_on(shared, resolution, inverted)
+                .await
+                .map(|_| ()),
+            Self::Resolution(resolution) => {
+                openlogi_hid::set_scroll_resolution_on(shared, resolution)
+                    .await
+                    .map(|_| ())
+            }
+            Self::Inversion(inverted) => {
+                openlogi_hid::set_scroll_inversion_on(shared, inverted).await
+            }
+        }
     }
 }
 
 fn log_wheel_result(
     index: u8,
-    resolution: Option<ScrollResolution>,
-    inverted: Option<bool>,
+    change: WheelModeChange,
     result: Result<Result<(), WriteError>, Elapsed>,
 ) {
-    match result {
-        Ok(Ok(())) => debug!(index, ?resolution, ?inverted, "native wheel mode written"),
-        Ok(Err(WriteError::FeatureUnsupported { feature_hex })) => debug!(
+    // Plenty of mice have no HiResWheel or no inversion bit, so that refusal
+    // is expected and stays out of the warnings every other write earns.
+    if let Ok(Err(WriteError::FeatureUnsupported { feature_hex })) = &result {
+        debug!(
             index,
-            ?resolution,
-            ?inverted,
+            ?change,
             feature = format_args!("{feature_hex:#06x}"),
             "native wheel mode unsupported"
-        ),
-        Ok(Err(e)) => warn!(error = ?e, "wheel mode write failed"),
-        Err(_) => warn!(
-            index,
-            ?resolution,
-            ?inverted,
-            "wheel mode write timed out (device asleep/unresponsive)"
-        ),
+        );
+        return;
     }
+    log_outcome(index, "wheel mode write", result, |()| {
+        debug!(index, ?change, "native wheel mode written");
+    });
 }
 
-/// Spawn an OS thread that writes `dpi` to the device at `target` via its
-/// current shared channel. Returns immediately; failures are logged.
-///
-/// `target == None` is a no-op (dev environment without a real device).
-pub fn write_dpi_in_background(
-    capture: &CaptureChannel,
-    registry: &ChannelRegistry,
-    receiver_access: &ReceiverAccess,
-    target: Option<DeviceRoute>,
-    dpi: Dpi,
-) {
-    let Some(target) = target else {
-        debug!(%dpi, "no target device — DPI write skipped");
-        return;
-    };
-    let index = target.device_index();
-    DeviceOp::new(capture, registry, receiver_access, &target).spawn_write(
+/// Spawn an OS thread that writes `dpi` to `op`'s device via its current
+/// shared channel. Returns immediately; failures are logged.
+pub fn write_dpi_in_background(op: DeviceOp, dpi: Dpi) {
+    let index = op.route.device_index();
+    op.spawn_write(
         "DPI write",
         move |c| async move { openlogi_hid::set_dpi_on(&c, dpi).await },
-        move |result| match result {
-            Ok(Ok(())) => debug!(index, %dpi, "DPI written to device"),
-            Ok(Err(e)) => warn!(error = ?e, "DPI write failed"),
-            Err(_) => warn!(
-                %dpi,
-                "DPI write timed out (device asleep/unresponsive)"
-            ),
+        move |result| {
+            log_outcome(index, "DPI write", result, |()| {
+                debug!(index, %dpi, "DPI written to device");
+            });
         },
     );
 }
 
-#[derive(Debug, Clone, Copy)]
-enum ScrollWheelModeChange {
-    Resolution(ScrollResolution),
-    Inversion(bool),
-    ResolutionAndInversion {
-        resolution: ScrollResolution,
-        inverted: bool,
-    },
-}
-
 /// Spawn an OS thread that reconciles the configured native HiResWheel mode
-/// for `op`'s device.
-///
-/// `resolution == None` preserves the current device resolution;
-/// `inverted == None` preserves the current inversion bit. At least one field
-/// must be set by the caller. Unsupported devices are expected and only logged
-/// at debug level.
-pub fn write_scroll_wheel_mode_in_background(
-    op: DeviceOp<'_>,
-    resolution: Option<ScrollResolution>,
-    inverted: Option<bool>,
-) {
-    let change = match (resolution, inverted) {
-        (Some(resolution), Some(inverted)) => ScrollWheelModeChange::ResolutionAndInversion {
-            resolution,
-            inverted,
-        },
-        (Some(resolution), None) => ScrollWheelModeChange::Resolution(resolution),
-        (None, Some(inverted)) => ScrollWheelModeChange::Inversion(inverted),
-        (None, None) => {
-            debug!("no configured wheel mode fields — write skipped");
-            return;
-        }
-    };
+/// for `op`'s device. Unsupported devices are expected and only logged at
+/// debug level.
+pub fn write_scroll_wheel_mode_in_background(op: DeviceOp, change: WheelModeChange) {
     let index = op.route.device_index();
     op.spawn_write(
         "wheel mode write",
-        move |shared| async move {
-            match change {
-                ScrollWheelModeChange::ResolutionAndInversion {
-                    resolution,
-                    inverted,
-                } => openlogi_hid::set_scroll_wheel_mode_on(&shared, resolution, inverted)
-                    .await
-                    .map(|_| ()),
-                ScrollWheelModeChange::Resolution(resolution) => {
-                    openlogi_hid::set_scroll_resolution_on(&shared, resolution)
-                        .await
-                        .map(|_| ())
-                }
-                ScrollWheelModeChange::Inversion(inverted) => {
-                    openlogi_hid::set_scroll_inversion_on(&shared, inverted).await
-                }
-            }
-        },
-        move |result| log_wheel_result(index, resolution, inverted, result),
+        move |shared| async move { change.apply_on(&shared).await },
+        move |result| log_wheel_result(index, change, result),
     );
 }
 
@@ -473,20 +560,11 @@ pub fn write_scroll_wheel_mode_in_background(
 /// lighting is off) and writes every key over HID++ via
 /// [`openlogi_hid::set_keyboard_color_on`]. A registry miss and write
 /// failures are logged, not surfaced.
-pub fn set_lighting_in_background(op: DeviceOp<'_>, lighting: &Lighting) {
-    let (r, g, b) = lighting_rgb(lighting);
-    op.spawn_write(
-        "lighting write",
-        move |c| async move { openlogi_hid::set_keyboard_color_on(&c, r, g, b).await },
-        move |result| match result {
-            Ok(Ok(())) => debug!(r, g, b, "lighting written to keyboard"),
-            Ok(Err(e)) => warn!(error = ?e, "lighting write failed"),
-            Err(_) => warn!(
-                r,
-                g, b, "lighting write timed out (device asleep/unresponsive)"
-            ),
-        },
-    );
+pub fn set_lighting_in_background(op: DeviceOp, lighting: &Lighting) {
+    match op.lighting(lighting) {
+        Ok(job) => job.detach(),
+        Err(error) => warn!(?error, "could not start background lighting"),
+    }
 }
 
 /// Resolve a [`Lighting`] config to an `(r, g, b)` triple: the configured
@@ -502,13 +580,13 @@ pub fn lighting_rgb(lighting: &Lighting) -> (u8, u8, u8) {
     (scale(r), scale(g), scale(b))
 }
 
-/// Bound any single HID++ call by [`WRITE_BUDGET`] so an asleep / unresponsive
+/// Bound any single HID++ call by [`WRITE_TIMEOUT`] so an asleep / unresponsive
 /// device can't hang the awaiting IPC handler indefinitely.
 async fn timed<T>(
     operation: HidppOperation,
     fut: impl Future<Output = Result<T, WriteError>>,
 ) -> Result<T, WriteError> {
-    tokio::time::timeout(WRITE_BUDGET, fut)
+    tokio::time::timeout(WRITE_TIMEOUT, fut)
         .await
         .map_err(|_| WriteError::RequestTimedOut { operation })?
 }
@@ -520,6 +598,23 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::*;
+    use openlogi_hid::device_io_channel;
+
+    fn device_op(
+        capture: &CaptureChannelSlot,
+        registry: &ChannelRegistry,
+        receiver_access: &ReceiverAccess,
+        device_io: &DeviceIoGate,
+        route: &DeviceRoute,
+    ) -> DeviceOp {
+        DeviceAccess {
+            channel: capture.clone(),
+            registry: registry.clone(),
+            receiver_access: receiver_access.clone(),
+            device_io: device_io.clone(),
+        }
+        .op(route)
+    }
 
     #[test]
     fn current_capture_wins_without_consulting_the_registry_again() {
@@ -566,14 +661,15 @@ mod tests {
     /// no-op.
     #[tokio::test]
     async fn run_on_a_registry_miss_returns_device_not_found_without_calling_f() {
-        let capture: CaptureChannel = std::sync::Arc::new(RwLock::new(None));
+        let capture: CaptureChannelSlot = std::sync::Arc::new(RwLock::new(None));
         let registry = ChannelRegistry::default();
         let receiver_access = ReceiverAccess::default();
+        let (_device_io_signal, device_io) = device_io_channel();
         let route = unresolvable_route();
         let called = std::sync::Arc::new(AtomicBool::new(false));
         let called_for_closure = std::sync::Arc::clone(&called);
 
-        let result = DeviceOp::new(&capture, &registry, &receiver_access, &route)
+        let result = device_op(&capture, &registry, &receiver_access, &device_io, &route)
             .run(HidppOperation::WriteDpi, move |_shared| {
                 called_for_closure.store(true, Ordering::SeqCst);
                 async move { Ok::<(), WriteError>(()) }
@@ -587,18 +683,77 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn run_while_device_io_is_suspended_does_not_wait_for_a_receiver_or_call_f() {
+        let capture: CaptureChannelSlot = std::sync::Arc::new(RwLock::new(None));
+        let registry = ChannelRegistry::default();
+        let receiver_access = ReceiverAccess::default();
+        let (device_io_signal, device_io) = device_io_channel();
+        let route = unresolvable_route();
+        let called = std::sync::Arc::new(AtomicBool::new(false));
+        let called_for_closure = std::sync::Arc::clone(&called);
+        let _exclusive = receiver_access
+            .acquire_exclusive(crate::receiver_access::ExclusiveAccessReason::Pairing)
+            .await;
+        assert!(device_io_signal.suspend());
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(10),
+            device_op(&capture, &registry, &receiver_access, &device_io, &route).run(
+                HidppOperation::WriteDpi,
+                move |_shared| {
+                    called_for_closure.store(true, Ordering::SeqCst);
+                    async move { Ok::<(), WriteError>(()) }
+                },
+            ),
+        )
+        .await
+        .expect("a suspended operation must fail before waiting for receiver access");
+
+        assert!(matches!(result, Err(WriteError::DeviceNotFound)));
+        assert!(
+            !called.load(Ordering::SeqCst),
+            "the write closure must not run while host device I/O is suspended",
+        );
+    }
+
+    /// Every combination of the two independently configured wheel settings.
+    /// `Some(false)` is a configured inversion, not an absent one.
+    #[test]
+    fn a_wheel_mode_change_sets_exactly_what_is_configured() {
+        let low = ScrollResolution::Low;
+
+        assert_eq!(WheelModeChange::new(None, None), None);
+        assert_eq!(
+            WheelModeChange::new(Some(low), None),
+            Some(WheelModeChange::Resolution(low))
+        );
+        assert_eq!(
+            WheelModeChange::new(None, Some(false)),
+            Some(WheelModeChange::Inversion(false))
+        );
+        assert_eq!(
+            WheelModeChange::new(Some(low), Some(true)),
+            Some(WheelModeChange::ResolutionAndInversion {
+                resolution: low,
+                inverted: true,
+            })
+        );
+    }
+
     /// `DeviceOp::detach` resolves before spawning, so a registry miss must
     /// return synchronously (no thread, no lease wait) and never call `f`.
     #[tokio::test]
     async fn detach_on_a_registry_miss_never_calls_f() {
-        let capture: CaptureChannel = std::sync::Arc::new(RwLock::new(None));
+        let capture: CaptureChannelSlot = std::sync::Arc::new(RwLock::new(None));
         let registry = ChannelRegistry::default();
         let receiver_access = ReceiverAccess::default();
+        let (_device_io_signal, device_io) = device_io_channel();
         let route = unresolvable_route();
         let called = std::sync::Arc::new(AtomicBool::new(false));
         let called_for_closure = std::sync::Arc::clone(&called);
 
-        DeviceOp::new(&capture, &registry, &receiver_access, &route).detach(
+        device_op(&capture, &registry, &receiver_access, &device_io, &route).detach(
             "test write",
             move |_shared| {
                 called_for_closure.store(true, Ordering::SeqCst);
@@ -613,9 +768,9 @@ mod tests {
     }
 
     /// The timeout every [`DeviceOp::run`] call relies on: a write that never
-    /// resolves within `WRITE_BUDGET` must map to
+    /// resolves within `WRITE_TIMEOUT` must map to
     /// [`WriteError::RequestTimedOut`] carrying the operation, not hang
-    /// forever. Uses a paused clock so the test doesn't spend `WRITE_BUDGET`
+    /// forever. Uses a paused clock so the test doesn't spend `WRITE_TIMEOUT`
     /// (5s) of real wall-clock time.
     #[tokio::test(start_paused = true)]
     async fn timed_maps_an_elapsed_deadline_to_request_timed_out() {
@@ -626,7 +781,7 @@ mod tests {
         // Let the spawned task run up to its first await point so the
         // underlying sleep is armed before we fast-forward the clock past it.
         tokio::task::yield_now().await;
-        tokio::time::advance(WRITE_BUDGET + Duration::from_millis(1)).await;
+        tokio::time::advance(WRITE_TIMEOUT + Duration::from_millis(1)).await;
 
         let result = handle.await.expect("timed task must not panic");
 

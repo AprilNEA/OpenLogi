@@ -32,15 +32,16 @@ use std::fmt::Write;
 use bincode::Options;
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
-use openlogi_core::config::Lighting;
+use openlogi_core::config::{Lighting, ScrollResolution};
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
     DeviceModelInfo, DeviceTransports, LightCapabilities, LightValueRange, LightValueUnit,
     PairedDevice, RawDeviceAddress, ReceiverInfo, StandaloneDevice,
 };
 use openlogi_core::hid::{
-    Click, DeviceRoute, Dpi, DpiCapabilities, DpiInfo, HidppFeatureErrorKind, HidppOperation,
-    LightCommand, PasskeyMethod, ReceiverSelector, SmartShiftAutoDisengage, SmartShiftMode,
+    BacklightMode, BacklightState, BacklightStatus, Click, DeviceRoute, Dpi, DpiCapabilities,
+    DpiInfo, HidppFeatureErrorKind, HidppOperation, LightCommand, PasskeyMethod, ReceiverSelector,
+    ScrollReportingTarget, ScrollWheelMode, SmartShiftAutoDisengage, SmartShiftMode,
     SmartShiftStatus, SmartShiftThreshold, TunableTorque, WriteError,
 };
 use openlogi_ipc::{
@@ -102,7 +103,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 30);
+    assert_eq!(PROTOCOL_VERSION, 32);
 }
 
 #[test]
@@ -211,7 +212,29 @@ fn request_variant_order() {
         &AgentRequest::SetPrimaryMouseButton {
             button: PrimaryMouseButton::Right,
         },
-        "1a01",
+        "1c01",
+    );
+}
+
+#[test]
+fn semantic_read_requests() {
+    assert_wire(
+        &AgentRequest::ReadWheel {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+        },
+        "1a0008463030444341464501",
+    );
+    assert_wire(
+        &AgentRequest::ReadBacklight {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+        },
+        "1b0008463030444341464501",
     );
 }
 
@@ -436,12 +459,13 @@ fn device_inventory() {
                 thumbwheel: true,
                 haptic_feedback: true,
                 haptic_panel: true,
+                dpi_gestures: true,
             }),
         }],
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b000010150020001030106323134304c5a0102030400010100fb34b0fb8240000b010101000001010101",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b000010150020001030106323134304c5a0102030400010100fb34b0fb8240000b01010100000101010101",
     );
 }
 
@@ -551,6 +575,29 @@ fn device_settings_payloads() {
         &ReceiverSelector::BoltUid("F00DCAFE".into()),
         "01084630304443414645",
     );
+}
+
+#[test]
+fn semantic_read_payloads() {
+    assert_wire(&ScrollReportingTarget::Native, "00");
+    assert_wire(&ScrollReportingTarget::Diverted, "01");
+    let wheel: Result<ScrollWheelMode, WriteError> = Ok(ScrollWheelMode {
+        resolution: ScrollResolution::High,
+        inverted: false,
+        target: ScrollReportingTarget::Native,
+    });
+    assert_wire(&wheel, "00010000");
+
+    assert_wire(&BacklightMode::PermanentManual, "03");
+    assert_wire(&BacklightStatus::PermanentManual, "05");
+    let backlight: Result<BacklightState, WriteError> = Ok(BacklightState {
+        enabled: true,
+        mode: BacklightMode::Automatic,
+        status: BacklightStatus::AlsAutomatic,
+        current_level: 4,
+        nb_levels: 8,
+    });
+    assert_wire(&backlight, "000101020408");
 }
 
 #[test]

@@ -21,6 +21,9 @@ use openlogi_core::device::{
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
+use crate::reprog_controls::DPI_MODE_SHIFT_CIDS;
+
+use super::events::{EventFeatureIndices, EventSubscriptionHandle};
 use super::mappings::{
     legacy_battery_level_from_percentage, map_battery_level, map_battery_status, map_device_type,
     map_legacy_battery_status, map_voltage_battery_status, normalize_serial_number,
@@ -39,13 +42,23 @@ pub(super) struct ProbedFeatures {
     /// such as Windows Bluetooth's plain `"Mouse"`.
     pub(super) marketing_name: Option<String>,
     /// Configuration capabilities derived from the device's feature table.
+    ///
+    /// Invariant: `capabilities_incomplete` implies this is `Some`. The sole
+    /// non-test writer, [`probe_features`], returns `Default` when the feature
+    /// table is unavailable and only sets the qualifier after constructing the
+    /// capability set. The cache only replaces that set with another `Some`,
+    /// and persistence only round-trips probes produced here. If another writer
+    /// is added, preserve this proof or replace the pair with a sum type.
     pub(super) capabilities: Option<Capabilities>,
     /// A `DeviceInformation` read *failed* (vs. the feature being absent), so
     /// the identity fields above may be missing data the device does have.
+    /// This is intentionally independent of `model_info`: `true` with `Some`
+    /// means only the serial-number read failed, while `true` with `None` means
+    /// the whole device-information read failed.
     pub(super) identity_incomplete: bool,
     /// A capability read *failed* (vs. the device not having the capability),
     /// so `capabilities` above understates what the device can do. Memoizing
-    /// that would hide a panel in the GUI for `REFRESH_TICKS`.
+    /// that would hide a panel in the GUI for `REFRESH_INTERVAL`.
     pub(super) capabilities_incomplete: bool,
 }
 
@@ -64,8 +77,8 @@ pub(super) enum BatteryProbe {
 /// Read just the battery by addressing its feature at the known runtime index —
 /// one round-trip, with no `Device::new` ping and no feature-table walk. This is
 /// both the full probe's battery read (the walk just produced the index) and the
-/// cheap per-tick refresh for cache hits. `None` when the device doesn't answer
-/// (asleep, switched hosts).
+/// cheap per-reconciliation refresh for cache hits. `None` when the device
+/// doesn't answer (asleep, switched hosts).
 pub(super) async fn read_battery(
     channel: &Arc<HidppChannel>,
     slot: u8,
@@ -186,29 +199,45 @@ async fn read_marketing_identity(
 pub(super) async fn probe_features(
     channel: &Arc<HidppChannel>,
     slot: u8,
-) -> (ProbedFeatures, Option<BatteryProbe>) {
+    subscriptions: Option<&EventSubscriptionHandle>,
+) -> (ProbedFeatures, Option<BatteryProbe>, EventFeatureIndices) {
     let mut device = match Device::new(Arc::clone(channel), slot).await {
         Ok(d) => d,
         Err(e) => {
             debug!(slot, error = ?e, "Device::new failed");
-            return (ProbedFeatures::default(), None);
+            return (
+                ProbedFeatures::default(),
+                None,
+                EventFeatureIndices::default(),
+            );
         }
     };
     // The enumeration response IS the device's feature-ID table — capture it
     // for capability derivation instead of discarding it.
     let mut battery_probe = None;
+    let mut event_features = EventFeatureIndices::default();
     let mut probe_haptic_controls = false;
     let mut capabilities = match device.enumerate_features().await {
         Ok(Some(features)) => {
             let ids: Vec<u16> = features.iter().map(|f| f.id).collect();
             battery_probe = battery_feature_index(ids.iter().copied());
+            event_features = EventFeatureIndices::from_feature_ids(&ids);
+            if let Some(subscriptions) = subscriptions {
+                // Register immediately after the table read, before the
+                // battery/identity snapshot that will be published.
+                subscriptions.register_device(slot, event_features);
+            }
             probe_haptic_controls = ids.contains(&0x19b0) || ids.contains(&0x19c0);
             Some(Capabilities::from_feature_ids(&ids))
         }
         Ok(None) => None,
         Err(e) => {
             debug!(slot, error = ?e, "enumerate_features failed");
-            return (ProbedFeatures::default(), None);
+            return (
+                ProbedFeatures::default(),
+                None,
+                EventFeatureIndices::default(),
+            );
         }
     };
     let mut capabilities_incomplete = false;
@@ -278,6 +307,7 @@ pub(super) async fn probe_features(
             capabilities_incomplete,
         },
         battery_probe,
+        event_features,
     )
 }
 
@@ -307,30 +337,25 @@ async fn probe_extra_capabilities(
     {
         caps.thumbwheel = feature.has_thumbwheel().await.unwrap_or(false);
     }
-    if probe_haptic_controls && let Some(feature) = device.get_feature::<ReprogControlsFeature>() {
-        match has_haptic_panel(&feature).await {
-            Some(found) => caps.haptic_panel = found,
-            None => return Err(()),
+    if let Some(feature) = device.get_feature::<ReprogControlsFeature>() {
+        let count = feature.get_count().await.map_err(|_| ())?;
+        let mut haptic_panel = false;
+        let mut dpi_gestures = false;
+        for index in 0..count {
+            let info = feature.get_cid_info(index).await.map_err(|_| ())?;
+            haptic_panel |= probe_haptic_controls
+                && info.cid == control_ids::HAPTIC_PANEL
+                && info.flags.is_divertable();
+            dpi_gestures |= DPI_MODE_SHIFT_CIDS.contains(&info.cid.0)
+                && info.flags.is_divertable()
+                && info.flags.supports_raw_xy();
         }
+        // Publish only a complete control walk. A lost reply must retain the
+        // cache's last-good capabilities and schedule repair, not hide support.
+        caps.haptic_panel = haptic_panel;
+        caps.dpi_gestures = dpi_gestures;
     }
     Ok(())
-}
-
-/// Whether the device exposes a divertable haptic panel, or `None` when a read
-/// failed part-way through the ~40-entry control walk.
-///
-/// The distinction matters because the answer is memoized for `REFRESH_TICKS`:
-/// reporting a lost reply as `false` hides the Actions Ring binding for half a
-/// minute on a device that has the panel.
-async fn has_haptic_panel(feature: &ReprogControlsFeature) -> Option<bool> {
-    let count = feature.get_count().await.ok()?;
-    for index in 0..count {
-        let info = feature.get_cid_info(index).await.ok()?;
-        if info.cid == control_ids::HAPTIC_PANEL {
-            return Some(info.flags.is_divertable());
-        }
-    }
-    Some(false)
 }
 
 #[cfg(test)]
@@ -340,7 +365,82 @@ mod tests {
         battery_voltage::BatteryVoltageFeature, unified_battery::UnifiedBatteryFeature,
     };
 
-    use super::{BatteryProbe, battery_feature_index};
+    use super::{BatteryProbe, ProbedFeatures, battery_feature_index, probe_features};
+    use crate::channel::scripted::{ScriptedRawHidChannel, feature_error, scripted_channel};
+
+    async fn control_probe(
+        features: Vec<u16>,
+        controls: Vec<(u16, u16)>,
+        fail_at: Option<u8>,
+    ) -> ProbedFeatures {
+        let (raw, _) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+            let mut response = vec![0; 20];
+            response[..4].copy_from_slice(&request[..4]);
+            response[0] = 0x11;
+            match (request[2], request[3] >> 4) {
+                (0, 1) => response[4] = 4,
+                (0, 0) => response[4] = 1,
+                (1, 0) => response[4] = u8::try_from(features.len()).unwrap(),
+                (1, 1) => response[4..6]
+                    .copy_from_slice(&features[usize::from(request[4]) - 1].to_be_bytes()),
+                (2, 0) => response[4] = u8::try_from(controls.len()).unwrap(),
+                (2, 1) => {
+                    if fail_at == Some(request[4]) {
+                        return Some(feature_error(request, 0x08));
+                    }
+                    let (cid, flags) = controls[usize::from(request[4])];
+                    response[4..6].copy_from_slice(&cid.to_be_bytes());
+                    let [low, high] = flags.to_le_bytes();
+                    response[8] = low;
+                    response[12] = high;
+                }
+                _ => panic!("unexpected capability request: {request:02x?}"),
+            }
+            Some(response)
+        });
+        let channel = scripted_channel(raw).await;
+        probe_features(&channel, 0xff, None).await.0
+    }
+
+    #[tokio::test]
+    async fn dpi_gestures_require_a_matching_divertable_raw_xy_control() {
+        // A raw-XY gesture button is a decoy: only DPI-family support counts.
+        for cid in [0x00c4, 0x00ed, 0x00fd, 0x0053] {
+            for (flags, supported) in [(0x0120, true), (0x0020, false), (0x0100, false), (0, false)]
+            {
+                let probe = control_probe(
+                    vec![0x0001, 0x1b04],
+                    vec![(0x00c3, 0x0120), (cid, flags)],
+                    None,
+                )
+                .await;
+                let caps = probe.capabilities.unwrap();
+                assert!(!probe.capabilities_incomplete);
+                assert_eq!(
+                    caps.dpi_gestures,
+                    supported && cid != 0x0053,
+                    "CID {cid:04x}, flags {flags:04x}"
+                );
+                assert!(!caps.haptic_panel);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn control_walk_publishes_both_capabilities_only_after_all_rows_succeed() {
+        for fail_at in [Some(0), Some(1), None] {
+            let probe = control_probe(
+                vec![0x0001, 0x1b04, 0x19b0],
+                vec![(0x01a0, 0x0020), (0x00ed, 0x0120)],
+                fail_at,
+            )
+            .await;
+            let caps = probe.capabilities.unwrap();
+            assert_eq!(probe.capabilities_incomplete, fail_at.is_some());
+            assert_eq!(caps.haptic_panel, fail_at.is_none());
+            assert_eq!(caps.dpi_gestures, fail_at.is_none());
+        }
+    }
 
     #[test]
     fn battery_index_is_one_based_in_the_enumerated_table() {
