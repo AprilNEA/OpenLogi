@@ -44,7 +44,7 @@ fn interactive_space_round_trip() {
         let display_id = cursor_display().expect("one unambiguous pointer display");
         let mut backend = Native::new(display_id).expect("Space SPI available");
         let before = backend.state().expect("read initial display state");
-        let result = space_switch::run(&mut backend, Direction::Next, || {})
+        let result = space_switch::run(&mut backend, Direction::Next, PostGate::for_test())
             .expect("Space switch confirmed");
         let Outcome::Reached(target) = result else {
             panic!("move to a Space with a right-hand neighbor before running this test");
@@ -58,7 +58,7 @@ fn interactive_space_round_trip() {
         // expectation is the original native ID, not the direction encoder.
         let mut reverse = Native::new(display_id).expect("Space SPI available");
         assert_eq!(
-            space_switch::run(&mut reverse, Direction::Previous, || {})
+            space_switch::run(&mut reverse, Direction::Previous, PostGate::for_test())
                 .expect("reverse Space switch confirmed"),
             Outcome::Reached(before.current)
         );

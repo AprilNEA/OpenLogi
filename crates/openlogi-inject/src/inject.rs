@@ -248,6 +248,10 @@ fn run_workflow(steps: &[WorkflowStep]) {
 /// A dedicated worker confirms the pointer display's Space; the process must
 /// remain alive to receive that diagnostic. Overlapping switches are skipped,
 /// not queued. Call from an action worker, never an input-tap callback.
+/// Worker preparation has a two-second cancellation deadline; a canceled
+/// worker cannot post later and retains its busy slot until it exits. Initial
+/// cursor capture and committed native post calls are not interruptible: this
+/// is not a hard wall-clock limit on `execute`.
 ///
 /// On Linux, key and scroll events are injected via a lazily-created `uinput`
 /// virtual device. Mouse clicks inject `BTN_*` events. macOS-only window

@@ -22,7 +22,7 @@ use objc2_core_graphics::{
 };
 use objc2_foundation::{NSNotification, NSNotificationCenter, NSObjectProtocol};
 
-use super::super::space_switch::{self, Backend, Direction, Failure, Lease, SpaceState};
+use super::super::space_switch::{self, Backend, Direction, Failure, Lease, PostGate, SpaceState};
 use super::{app_services, app_services_symbol};
 
 static BUSY: AtomicBool = AtomicBool::new(false);
@@ -45,14 +45,11 @@ fn start(direction: Direction) {
         tracing::warn!(?direction, "Space switch: cursor display unavailable");
         return;
     };
-    let result = space_switch::spawn_ordered(move |posted| {
+    let result = space_switch::spawn_ordered(move |gate| {
         let _lease = lease;
         autoreleasepool(|_| {
-            let result = Native::new(display_id).and_then(|mut native| {
-                space_switch::run(&mut native, direction, || {
-                    let _ = posted.send(());
-                })
-            });
+            let result = Native::new(display_id)
+                .and_then(|mut native| space_switch::run(&mut native, direction, gate));
             match result {
                 Ok(outcome) => {
                     tracing::debug!(display_id, ?direction, ?outcome, "Space switch result");
@@ -67,7 +64,7 @@ fn start(direction: Direction) {
         });
     });
     if let Err(error) = result {
-        tracing::warn!(%error, "Space switch worker unavailable");
+        tracing::warn!(?error, "Space switch preparation failed — no retry");
     }
 }
 
@@ -163,15 +160,16 @@ impl Backend for Native {
         Ok(state)
     }
 
-    fn post(&mut self, direction: Direction) -> Result<(), Failure> {
+    fn post(&mut self, direction: Direction, gate: PostGate) -> Result<(), Failure> {
         let events = swipe_events(direction).ok_or(Failure::PostFailed)?;
         if cursor_display() != Some(self.display) {
             return Err(Failure::ContextChanged);
         }
-        for event in events {
-            CGEvent::post(CGEventTapLocation::SessionEventTap, Some(&event));
-        }
-        Ok(())
+        gate.commit(|| {
+            for event in &events {
+                CGEvent::post(CGEventTapLocation::SessionEventTap, Some(event));
+            }
+        })
     }
 
     fn elapsed(&self) -> Duration {
