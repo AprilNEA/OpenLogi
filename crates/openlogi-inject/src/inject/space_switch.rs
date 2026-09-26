@@ -1,6 +1,7 @@
 //! Space-switch transaction policy, independent of macOS FFI for regression tests.
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::time::Duration;
 
 const CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(2);
@@ -78,7 +79,26 @@ pub(super) trait Backend {
     fn wait_for_change(&mut self, remaining: Duration);
 }
 
-pub(super) fn run(backend: &mut impl Backend, direction: Direction) -> Result<Outcome, Failure> {
+/// Return only after the worker acknowledges posting or drops the sender on an
+/// early exit. Confirmation remains on the worker, but later caller actions
+/// cannot overtake posting and short-lived callers cannot exit before it.
+pub(super) fn spawn_ordered(
+    work: impl FnOnce(mpsc::SyncSender<()>) + Send + 'static,
+) -> std::io::Result<()> {
+    let (posted, receive) = mpsc::sync_channel(0);
+    std::thread::Builder::new()
+        .name("openlogi-spaces".into())
+        .spawn(move || work(posted))?;
+    // Disconnection means preparation failed, so no late post remains pending.
+    let _ = receive.recv();
+    Ok(())
+}
+
+pub(super) fn run(
+    backend: &mut impl Backend,
+    direction: Direction,
+    posted: impl FnOnce(),
+) -> Result<Outcome, Failure> {
     let initial = backend.state()?;
     let Some(target) = initial.target(direction)? else {
         return Ok(Outcome::Boundary);
@@ -91,6 +111,7 @@ pub(super) fn run(backend: &mut impl Backend, direction: Direction) -> Result<Ou
         return Err(Failure::TimedOut);
     }
     backend.post(direction)?;
+    posted();
     loop {
         let state = backend.state()?;
         if state.display != initial.display || state.ordered != initial.ordered {

@@ -18,7 +18,7 @@ use objc2_core_foundation::{
     CFArray, CFDictionary, CFNumber, CFRetained, CFString, CFType, CFUUID,
 };
 use objc2_core_graphics::{
-    CGError, CGEvent, CGEventField, CGEventTapLocation, CGGetDisplaysWithPoint,
+    CGError, CGEvent, CGEventField, CGEventTapLocation, CGEventType, CGGetDisplaysWithPoint,
 };
 use objc2_foundation::{NSNotification, NSNotificationCenter, NSObjectProtocol};
 
@@ -45,26 +45,27 @@ fn start(direction: Direction) {
         tracing::warn!(?direction, "Space switch: cursor display unavailable");
         return;
     };
-    let result = std::thread::Builder::new()
-        .name("openlogi-spaces".into())
-        .spawn(move || {
-            let _lease = lease;
-            autoreleasepool(|_| {
-                let result = Native::new(display_id)
-                    .and_then(|mut native| space_switch::run(&mut native, direction));
-                match result {
-                    Ok(outcome) => {
-                        tracing::debug!(display_id, ?direction, ?outcome, "Space switch result");
-                    }
-                    Err(error) => tracing::warn!(
-                        display_id,
-                        ?direction,
-                        ?error,
-                        "Space switch unconfirmed — no retry"
-                    ),
-                }
+    let result = space_switch::spawn_ordered(move |posted| {
+        let _lease = lease;
+        autoreleasepool(|_| {
+            let result = Native::new(display_id).and_then(|mut native| {
+                space_switch::run(&mut native, direction, || {
+                    let _ = posted.send(());
+                })
             });
+            match result {
+                Ok(outcome) => {
+                    tracing::debug!(display_id, ?direction, ?outcome, "Space switch result");
+                }
+                Err(error) => tracing::warn!(
+                    display_id,
+                    ?direction,
+                    ?error,
+                    "Space switch unconfirmed — no retry"
+                ),
+            }
         });
+    });
     if let Err(error) = result {
         tracing::warn!(%error, "Space switch worker unavailable");
     }
@@ -186,9 +187,12 @@ impl Backend for Native {
 fn swipe_events(direction: Direction) -> Option<[CFRetained<CGEvent>; 2]> {
     let make = |phase| {
         let event = CGEvent::new(None)?;
-        // Private DockSwipe SPI fields: event kind, HID kind, horizontal motion,
-        // phase. Public CGEventType does not represent Dock control events.
-        for (field, value) in [(55, 30), (110, 23), (123, 1), (132, phase)] {
+        // Establish the private DockControl type before setting its fields,
+        // as required by CGEventSetIntegerValueField's API contract. This is
+        // type 30 (also private field 55), not the generic Gesture type 29.
+        CGEvent::set_type(Some(&event), CGEventType(30));
+        // DockSwipe HID kind, horizontal motion, and balanced gesture phases.
+        for (field, value) in [(110, 23), (123, 1), (132, phase)] {
             CGEvent::set_integer_value_field(Some(&event), CGEventField(field), value);
         }
         CGEvent::set_integer_value_field(

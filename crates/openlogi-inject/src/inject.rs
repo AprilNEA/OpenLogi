@@ -242,10 +242,12 @@ fn run_workflow(steps: &[WorkflowStep]) {
 /// `SetDpiPreset`, `ToggleSmartShift`) have no CGEvent equivalent and are
 /// handled at the hook/HID layer, logging a trace here.
 ///
-/// macOS `PreviousDesktop` / `NextDesktop` run on a dedicated worker: they
-/// send a DockSwipe and confirm the pointer display's Space without modifying
-/// system shortcuts. Overlapping requests are skipped, not queued. The caller
-/// must keep the process alive for confirmation; this function does not wait.
+/// macOS `PreviousDesktop` / `NextDesktop` send a DockSwipe without modifying
+/// system shortcuts. This call waits for posting (or cancellation), preserving
+/// event order for sequential callers, but not for the desktop animation to end.
+/// A dedicated worker confirms the pointer display's Space; the process must
+/// remain alive to receive that diagnostic. Overlapping switches are skipped,
+/// not queued. Call from an action worker, never an input-tap callback.
 ///
 /// On Linux, key and scroll events are injected via a lazily-created `uinput`
 /// virtual device. Mouse clicks inject `BTN_*` events. macOS-only window
@@ -267,8 +269,9 @@ fn run_workflow(steps: &[WorkflowStep]) {
 ///
 /// For macOS Space switching, use the opt-in native test in a logged-in session
 /// with Accessibility granted to the test host and a right-hand adjacent Space:
-/// `cargo test -p openlogi-inject interactive_next_space -- --ignored --nocapture`.
-/// This actually switches the pointer's display one Space to the right.
+/// `cargo test -p openlogi-inject interactive_space_round_trip -- --ignored --nocapture`.
+/// This actually switches the pointer's display right, then left back to the
+/// original Space; a failure can leave it on the next Space.
 ///
 /// `execute` is intentionally excluded from the automated test suite because
 /// it would need to intercept the OS event queue. Smoke-test it manually:
