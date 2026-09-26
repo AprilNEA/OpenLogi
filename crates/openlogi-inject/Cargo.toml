@@ -44,4 +44,11 @@ objc2-application-services = { workspace = true, features = ["std", "HIServices"
 objc2-core-foundation = { workspace = true, features = ["std", "CFArray", "CFString"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_UI_Input_KeyboardAndMouse"] }
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_Power",
+  "Win32_System_Shutdown",
+  "Win32_System_Threading",
+  "Win32_UI_Input_KeyboardAndMouse",
+] }
