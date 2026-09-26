@@ -20,7 +20,7 @@ use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentStatus, ClientKind,
     ConfigReloadError, ForegroundApps, Generation, Identity, InventoryHealth, MonitorEvent,
     Observation, PROTOCOL_VERSION, PairingCommandError, PairingPhase, PairingUpdate,
-    RingObservation,
+    PrimaryMouseButton, RingObservation, SystemMouseSettingError,
 };
 use tarpc::client::RpcError;
 use tarpc::context::Context as TarpcContext;
@@ -287,6 +287,14 @@ impl Agent for TestAgent {
             0x1982,
         )
     }
+
+    async fn set_primary_mouse_button(
+        self,
+        _: TarpcContext,
+        _button: PrimaryMouseButton,
+    ) -> Result<PrimaryMouseButton, SystemMouseSettingError> {
+        unreachable!("profile capture must never change a host setting")
+    }
 }
 
 /// The client end of an in-process agent, past the handshake `connect_as`
@@ -362,6 +370,7 @@ fn fixture_agent() -> TestAgent {
             }),
             recent: Vec::new(),
         },
+        primary_mouse_button: None,
     };
     TestAgent::from_profile(profile, snapshot)
 }

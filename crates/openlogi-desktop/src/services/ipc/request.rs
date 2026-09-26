@@ -21,12 +21,16 @@ use openlogi_core::hid::{
     DeviceRoute, Dpi, DpiInfo, LightCommand, ReceiverSelector, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::{AgentClient, ConfigReloadError, PairingCommandError, PairingFailure};
+#[cfg(target_os = "macos")]
+use openlogi_ipc::{PrimaryMouseButton, SystemMouseSettingError};
 use tarpc::client::RpcError;
 use tarpc::context;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
 use super::GuiUpdate;
+#[cfg(target_os = "macos")]
+use super::PrimaryMouseButtonCommandError;
 use crate::state::DeviceKey;
 
 /// The GPUI-bound update stream a request may deliver through.
@@ -158,6 +162,36 @@ impl Request for SetSmartShift {
 
     fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
         log_rejection("SmartShift", outcome);
+    }
+}
+
+/// Set the host-wide primary mouse button. The next snapshot remains the
+/// authoritative value; this request reports a rejected or lost write.
+#[cfg(target_os = "macos")]
+pub struct SetPrimaryMouseButton {
+    pub button: PrimaryMouseButton,
+}
+
+#[cfg(target_os = "macos")]
+impl Request for SetPrimaryMouseButton {
+    type Answer = Result<PrimaryMouseButton, SystemMouseSettingError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .set_primary_mouse_button(context::current(), self.button)
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        let result = match outcome {
+            Ok(Ok(button)) => Ok(button),
+            Ok(Err(error)) => {
+                warn!(?error, "agent could not change the primary mouse button");
+                Err(PrimaryMouseButtonCommandError::Rejected(error))
+            }
+            Err(Unavailable) => Err(PrimaryMouseButtonCommandError::AgentUnavailable),
+        };
+        let _ = updates.send(GuiUpdate::PrimaryMouseButtonResult(result));
     }
 }
 
@@ -447,6 +481,8 @@ commands! {
     SetLight,
     SetLightManualPower,
     SetSmartShift,
+    #[cfg(target_os = "macos")]
+    SetPrimaryMouseButton,
     ReadDpi,
     ReadSmartShift,
     ReloadConfig,

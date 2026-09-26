@@ -63,7 +63,8 @@ pub use succession::Identity;
 ///      the macOS dormancy gate.
 /// v30: `Agent::read_wheel` and `Agent::read_backlight` appended.
 /// v31: `Capabilities::dpi_gestures` appended.
-pub const PROTOCOL_VERSION: u32 = 31;
+/// v32: host primary mouse button state and setter appended.
+pub const PROTOCOL_VERSION: u32 = 32;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -140,6 +141,31 @@ pub struct AgentSnapshot {
     /// Which application per-app profiles are resolving against. See
     /// [`ForegroundApps`].
     pub foreground: ForegroundApps,
+    /// The host-wide primary mouse button, or `None` when the platform does
+    /// not expose this setting or this agent run has not read it successfully.
+    /// A later transient read failure retains the last observed value.
+    pub primary_mouse_button: Option<PrimaryMouseButton>,
+}
+
+/// Which physical mouse button the host treats as the primary click.
+///
+/// This is a host-wide accessibility/input preference, not a per-device HID++
+/// setting. Variants are append-only because the enum crosses bincode IPC.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PrimaryMouseButton {
+    Left,
+    Right,
+}
+
+/// Why the agent could not change the host's primary mouse button.
+///
+/// Variants are append-only because the enum crosses bincode IPC.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SystemMouseSettingError {
+    /// This host has no OpenLogi backend for the setting.
+    Unsupported,
+    /// The platform API failed or its result could not be verified.
+    Unavailable { message: String },
 }
 
 /// The application the agent currently resolves per-app profiles against, and
@@ -566,4 +592,9 @@ pub trait Agent {
     async fn read_wheel(route: DeviceRoute) -> Result<ScrollWheelMode, WriteError>;
     /// Read the current keyboard-backlight state from `route`.
     async fn read_backlight(route: DeviceRoute) -> Result<BacklightState, WriteError>;
+    /// Make `button` the host-wide primary mouse button and return the value
+    /// read back from the platform. Appended for protocol v32.
+    async fn set_primary_mouse_button(
+        button: PrimaryMouseButton,
+    ) -> Result<PrimaryMouseButton, SystemMouseSettingError>;
 }

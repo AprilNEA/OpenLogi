@@ -20,7 +20,7 @@ use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_hook::Hook;
 use openlogi_ipc::{
     AgentSnapshot, AgentStatus, ForegroundApps, FoundDevice, Generation, InventoryHealth,
-    OBSERVE_HOLD, Observation, PROTOCOL_VERSION, PairingPhase, RECENT_APPS,
+    OBSERVE_HOLD, Observation, PROTOCOL_VERSION, PairingPhase, PrimaryMouseButton, RECENT_APPS,
 };
 use tokio::sync::watch;
 
@@ -60,6 +60,7 @@ impl ObservableState {
                 camera_active: false,
                 pairing: None,
                 foreground: ForegroundApps::default(),
+                primary_mouse_button: None,
             },
         });
         Self { tx }
@@ -253,6 +254,17 @@ impl ObservableState {
             true
         });
     }
+
+    /// Publish the current host-wide primary mouse button.
+    pub fn set_primary_mouse_button(&self, button: PrimaryMouseButton) {
+        self.update(|snapshot| {
+            if snapshot.primary_mouse_button == Some(button) {
+                return false;
+            }
+            snapshot.primary_mouse_button = Some(button);
+            true
+        });
+    }
 }
 
 #[cfg(test)]
@@ -262,7 +274,7 @@ mod tests {
     use openlogi_core::brand::APP_ID;
     use openlogi_core::device::{DeviceInventory, DeviceKind, PairedDevice, ReceiverInfo};
     use openlogi_hid::DIRECT_DEVICE_INDEX;
-    use openlogi_ipc::{InventoryHealth, RECENT_APPS};
+    use openlogi_ipc::{InventoryHealth, PrimaryMouseButton, RECENT_APPS};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -509,6 +521,26 @@ mod tests {
         assert!(!rx.has_changed().unwrap());
 
         state.set_accessibility_and_hook(true, false);
+        assert!(rx.has_changed().unwrap());
+    }
+
+    #[test]
+    fn primary_mouse_button_edges_are_observable() {
+        let state = state();
+        let mut rx = state.subscribe();
+
+        state.set_primary_mouse_button(PrimaryMouseButton::Left);
+        assert!(rx.has_changed().unwrap());
+        assert_eq!(
+            state.snapshot().primary_mouse_button,
+            Some(PrimaryMouseButton::Left)
+        );
+        rx.mark_unchanged();
+
+        state.set_primary_mouse_button(PrimaryMouseButton::Left);
+        assert!(!rx.has_changed().unwrap(), "an identical sample is silent");
+
+        state.set_primary_mouse_button(PrimaryMouseButton::Right);
         assert!(rx.has_changed().unwrap());
     }
 }

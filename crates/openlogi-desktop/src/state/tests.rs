@@ -25,12 +25,16 @@ use gpui::AppContext as _;
 use openlogi_core::app::ForegroundApp;
 use openlogi_fixture::{CANONICAL_DEVICE_PROFILE_JSON, DeviceProfile, ProfileSupport};
 use openlogi_ipc::{AgentSnapshot, AgentStatus, ForegroundApps, InventoryHealth, PROTOCOL_VERSION};
+#[cfg(target_os = "macos")]
+use openlogi_ipc::{PrimaryMouseButton, SystemMouseSettingError};
 
 use crate::features::mouse::thumbwheel::ThumbwheelPreset;
 use crate::services::assets::AssetResolver;
 use crate::services::ipc::SetLight;
 #[cfg(target_os = "macos")]
 use crate::services::ipc::SetLightManualPower;
+#[cfg(target_os = "macos")]
+use crate::services::ipc::{Command, PrimaryMouseButtonCommandError, SetPrimaryMouseButton};
 
 use super::bindings::apply_thumbwheel_pair;
 use super::devices::build_device_list;
@@ -55,6 +59,125 @@ mod reload;
 mod smartshift;
 mod transient_identity;
 mod wheel_resolution;
+
+#[cfg(target_os = "macos")]
+#[test]
+fn primary_mouse_button_failure_stays_visible_without_overwriting_the_snapshot() {
+    let cache = AssetResolver::new();
+    let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::new(Sources::in_memory(Config::ephemeral(), &cache, commands));
+    let _ = state.set_primary_mouse_button(Some(PrimaryMouseButton::Left));
+
+    assert_eq!(
+        state.request_primary_mouse_button(PrimaryMouseButton::Right),
+        [StateEvent::SettingsChanged]
+    );
+    assert!(state.primary_mouse_button_pending());
+    assert!(state.primary_mouse_button_error().is_none());
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(Command::SetPrimaryMouseButton(SetPrimaryMouseButton {
+            button: PrimaryMouseButton::Right
+        }))
+    ));
+
+    let error = PrimaryMouseButtonCommandError::Rejected(SystemMouseSettingError::Unavailable {
+        message: "persistent write rejected".into(),
+    });
+    assert_eq!(
+        state.apply_primary_mouse_button_result(Err(error.clone())),
+        [StateEvent::SettingsChanged]
+    );
+    assert!(!state.primary_mouse_button_pending());
+    assert_eq!(state.primary_mouse_button_error(), Some(error.clone()));
+    assert_eq!(
+        state.primary_mouse_button(),
+        Some(PrimaryMouseButton::Left),
+        "a command result must not replace the agent's authoritative snapshot"
+    );
+    assert_eq!(
+        state.set_primary_mouse_button(Some(PrimaryMouseButton::Right)),
+        [StateEvent::SettingsChanged]
+    );
+    assert_eq!(
+        state.primary_mouse_button_error(),
+        Some(error),
+        "a matching snapshot must not hide a definitive platform rejection"
+    );
+    assert_eq!(
+        state.set_primary_mouse_button(Some(PrimaryMouseButton::Left)),
+        [StateEvent::SettingsChanged]
+    );
+
+    assert_eq!(
+        state.request_primary_mouse_button(PrimaryMouseButton::Right),
+        [StateEvent::SettingsChanged]
+    );
+    assert!(state.primary_mouse_button_error().is_none());
+    assert_eq!(
+        state.apply_primary_mouse_button_result(Ok(PrimaryMouseButton::Right)),
+        [StateEvent::SettingsChanged]
+    );
+    assert_eq!(
+        state.primary_mouse_button(),
+        Some(PrimaryMouseButton::Left),
+        "even success waits for the observed snapshot to move the switch"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn primary_mouse_button_snapshot_reconciles_an_ambiguous_transport_failure() {
+    let cache = AssetResolver::new();
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::new(Sources::in_memory(Config::ephemeral(), &cache, commands));
+    let _ = state.set_primary_mouse_button(Some(PrimaryMouseButton::Left));
+
+    assert_eq!(
+        state.request_primary_mouse_button(PrimaryMouseButton::Right),
+        [StateEvent::SettingsChanged]
+    );
+    assert_eq!(
+        state.apply_primary_mouse_button_result(Err(
+            PrimaryMouseButtonCommandError::AgentUnavailable,
+        )),
+        [StateEvent::SettingsChanged]
+    );
+    assert_eq!(
+        state.primary_mouse_button_error(),
+        Some(PrimaryMouseButtonCommandError::AgentUnavailable)
+    );
+    assert_eq!(
+        state.set_primary_mouse_button(Some(PrimaryMouseButton::Right)),
+        [StateEvent::SettingsChanged]
+    );
+    assert!(state.primary_mouse_button_error().is_none());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn primary_mouse_button_snapshot_before_lost_reply_also_confirms_the_write() {
+    let cache = AssetResolver::new();
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::new(Sources::in_memory(Config::ephemeral(), &cache, commands));
+    let _ = state.set_primary_mouse_button(Some(PrimaryMouseButton::Left));
+
+    assert_eq!(
+        state.request_primary_mouse_button(PrimaryMouseButton::Right),
+        [StateEvent::SettingsChanged]
+    );
+    assert_eq!(
+        state.set_primary_mouse_button(Some(PrimaryMouseButton::Right)),
+        [StateEvent::SettingsChanged]
+    );
+    assert_eq!(
+        state.apply_primary_mouse_button_result(Err(
+            PrimaryMouseButtonCommandError::AgentUnavailable,
+        )),
+        [StateEvent::SettingsChanged]
+    );
+    assert!(state.primary_mouse_button_error().is_none());
+}
 
 /// Config key of the mouse [`direct_inventory`] builds with a real unit id.
 ///

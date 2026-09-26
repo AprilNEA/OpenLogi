@@ -281,6 +281,12 @@ impl Runtime {
                     });
                 });
             }
+            #[cfg(target_os = "macos")]
+            ipc::GuiUpdate::PrimaryMouseButtonResult(result) => {
+                cx.update(|cx| {
+                    AppState::apply(cx, |state| state.apply_primary_mouse_button_result(result));
+                });
+            }
             ipc::GuiUpdate::PairingUndeliverable(failure) => {
                 cx.update(|cx| windows::add_device::apply_undeliverable(cx, failure));
             }

@@ -21,6 +21,7 @@ use openlogi_agent_core::watchers::{self, gesture::GestureOutputs};
 use openlogi_core::config::Config;
 #[cfg(target_os = "macos")]
 use openlogi_hook::Hook;
+use openlogi_ipc::PrimaryMouseButton;
 use tokio::sync::Mutex;
 use tracing::warn;
 
@@ -234,6 +235,8 @@ pub(crate) enum WatcherEvent {
     Accessibility(bool),
     /// The Input Monitoring grant flipped.
     InputMonitoring(bool),
+    /// The host-wide primary mouse button changed.
+    PrimaryMouseButton(PrimaryMouseButton),
     /// A watcher's channel closed (its thread died). Emitted once; the
     /// source then leaves the merge, so a dead watcher cannot busy-wake the
     /// loop.
@@ -249,6 +252,7 @@ pub(crate) enum Watcher {
     Pointer,
     Accessibility,
     InputMonitoring,
+    PrimaryMouseButton,
 }
 
 /// Spawn the per-source state watchers at arming, merged into one tagged
@@ -279,7 +283,7 @@ pub(crate) fn spawn_state_watchers(
     // Publish capability even when an unsupported source has no worker and
     // closes immediately. The orchestrator starts unknown, never guessing.
     pointer.mark_changed();
-    let streams = stream::select_all([
+    let mut sources = vec![
         tagged(
             inventory.events,
             Watcher::Inventory,
@@ -312,7 +316,15 @@ pub(crate) fn spawn_state_watchers(
             Watcher::InputMonitoring,
             WatcherEvent::InputMonitoring,
         ),
-    ]);
+    ];
+    if let Some(primary_mouse_button_rx) = crate::system_mouse::spawn(Duration::from_millis(1200)) {
+        sources.push(tagged(
+            primary_mouse_button_rx,
+            Watcher::PrimaryMouseButton,
+            WatcherEvent::PrimaryMouseButton,
+        ));
+    }
+    let streams = stream::select_all(sources);
     (streams, inventory.refresh)
 }
 

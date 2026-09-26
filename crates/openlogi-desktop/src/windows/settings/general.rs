@@ -9,6 +9,8 @@ use crate::ui::theme::Typography as _;
 use gpui_base::Button as BaseButton;
 use gpui_component::radio::{Radio, RadioGroup};
 use openlogi_core::config::MouseProfileTarget;
+#[cfg(target_os = "macos")]
+use openlogi_ipc::PrimaryMouseButton;
 
 use crate::platform::registration::ServiceStatus;
 
@@ -22,6 +24,7 @@ pub(super) struct SensitivitySliders {
 pub(super) fn general_page(
     sliders: SensitivitySliders,
     registration_status: ServiceStatus,
+    cx: &App,
 ) -> SettingPage {
     let SensitivitySliders {
         vertical_scroll,
@@ -56,6 +59,8 @@ pub(super) fn general_page(
     } else {
         group
     };
+
+    let group = with_primary_mouse_button(group, cx);
 
     // One `show_in_menu_bar` setting drives the macOS status item and the
     // Windows notification-area icon (honored at next agent launch); Linux
@@ -136,6 +141,52 @@ fn smooth_scrolling_item() -> SettingItem {
         ),
     )
     .description(tr!("pointer.smooth_scrolling_description"))
+}
+
+#[cfg(target_os = "macos")]
+fn with_primary_mouse_button(group: SettingGroup, cx: &App) -> SettingGroup {
+    group.item(primary_mouse_button_item(cx))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn with_primary_mouse_button(group: SettingGroup, _: &App) -> SettingGroup {
+    group
+}
+
+#[cfg(target_os = "macos")]
+fn primary_mouse_button_item(cx: &App) -> SettingItem {
+    let (available, pending, failed) =
+        AppState::try_read(cx).map_or((false, false, false), |state| {
+            (
+                state.primary_mouse_button().is_some(),
+                state.primary_mouse_button_pending(),
+                state.primary_mouse_button_error().is_some(),
+            )
+        });
+    SettingItem::new(
+        tr!("pointer.swap_left_right_buttons"),
+        SettingField::switch(
+            |cx| {
+                AppState::try_read(cx).is_some_and(|state| {
+                    state.primary_mouse_button() == Some(PrimaryMouseButton::Right)
+                })
+            },
+            |enabled, cx| {
+                let button = if enabled {
+                    PrimaryMouseButton::Right
+                } else {
+                    PrimaryMouseButton::Left
+                };
+                AppState::apply(cx, |state| state.request_primary_mouse_button(button));
+            },
+        ),
+    )
+    .description(if failed {
+        tr!("pointer.primary_mouse_button_failed")
+    } else {
+        tr!("pointer.swap_left_right_buttons_description")
+    })
+    .disabled(!available || pending)
 }
 
 fn thumbwheel_sensitivity_field(slider: &Entity<SliderState>, cx: &mut App) -> gpui::Div {

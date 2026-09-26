@@ -42,6 +42,8 @@ use std::time::{Duration, Instant};
 use openlogi_core::hid::{LightCommand, WriteError};
 use openlogi_ipc::client::{self, ConnectError};
 use openlogi_ipc::{AgentClient, AgentSnapshot, ClientKind, ConfigReloadError, PairingFailure};
+#[cfg(target_os = "macos")]
+use openlogi_ipc::{PrimaryMouseButton, SystemMouseSettingError};
 use tarpc::client::RpcError;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
@@ -60,6 +62,8 @@ use reflex::SpawnReflex;
 use request::LinkLost;
 #[cfg(all(target_os = "macos", debug_assertions))]
 pub use request::PollEventMonitor;
+#[cfg(target_os = "macos")]
+pub use request::SetPrimaryMouseButton;
 pub use request::{
     CancelPairing, Command, PairDevice, ReadDpi, ReadSmartShift, ReloadConfig,
     RequestAccessibilityPrompt, SetDpi, SetLight, SetLightManualPower, SetLighting, SetSmartShift,
@@ -96,12 +100,28 @@ pub enum GuiUpdate {
         /// Agent acceptance or typed device failure.
         result: Result<(), WriteError>,
     },
+    /// Result of changing the host-wide primary mouse button. Unlike the
+    /// authoritative value, which arrives through [`Self::Snapshot`], this
+    /// reports whether the user's write was accepted or rejected.
+    #[cfg(target_os = "macos")]
+    PrimaryMouseButtonResult(Result<PrimaryMouseButton, PrimaryMouseButtonCommandError>),
     /// Whether the agent adopted the config currently on disk.
     ConfigReloadResult(Result<(), ConfigReloadError>),
     /// A pairing command could not be delivered, so no session will ever appear
     /// in the observed state to explain the silence. Reported locally rather
     /// than faked as a session the agent never had.
     PairingUndeliverable(PairingFailure),
+}
+
+/// Why a primary-mouse-button command did not complete.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PrimaryMouseButtonCommandError {
+    /// The agent reached the platform backend, which rejected or could not
+    /// verify the requested change.
+    Rejected(SystemMouseSettingError),
+    /// The command could not reach a compatible running agent.
+    AgentUnavailable,
 }
 
 /// Handle the GUI holds to talk to the agent: a stream of state updates and a
@@ -261,6 +281,8 @@ mod tests {
     };
     use tokio::sync::oneshot;
 
+    #[cfg(target_os = "macos")]
+    use super::request::Request as _;
     use super::*;
 
     /// How a scripted agent answers a reload.
@@ -503,6 +525,7 @@ mod tests {
             camera_active,
             pairing: None,
             foreground: ForegroundApps::default(),
+            primary_mouse_button: None,
         }
     }
 
@@ -555,5 +578,45 @@ mod tests {
         };
 
         assert_eq!(seen, [snapshot(false), snapshot(true)]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_rejected_primary_button_write_reaches_the_gui() {
+        let (update_tx, mut update_rx) = mpsc::unbounded_channel();
+        let error = SystemMouseSettingError::Unavailable {
+            message: "persistent write rejected".to_string(),
+        };
+
+        SetPrimaryMouseButton {
+            button: PrimaryMouseButton::Right,
+        }
+        .deliver(Ok(Err(error.clone())), &update_tx);
+
+        let GuiUpdate::PrimaryMouseButtonResult(Err(PrimaryMouseButtonCommandError::Rejected(
+            actual,
+        ))) = update_rx.try_recv().unwrap()
+        else {
+            panic!("a typed platform refusal must be forwarded to the GUI");
+        };
+        assert_eq!(actual, error);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_undeliverable_primary_button_write_is_reported() {
+        let (update_tx, mut update_rx) = mpsc::unbounded_channel();
+
+        SetPrimaryMouseButton {
+            button: PrimaryMouseButton::Right,
+        }
+        .deliver(Err(request::Unavailable), &update_tx);
+
+        assert!(matches!(
+            update_rx.try_recv(),
+            Ok(GuiUpdate::PrimaryMouseButtonResult(Err(
+                PrimaryMouseButtonCommandError::AgentUnavailable
+            )))
+        ));
     }
 }
