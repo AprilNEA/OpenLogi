@@ -14,7 +14,7 @@
 //! Two permissions matter: **Accessibility** (the hook's event tap) and **Input
 //! Monitoring** (opening HID devices via `IOHIDManager`). **Bluetooth** is
 //! surfaced for completeness — OpenLogi reaches BLE mice through `IOHIDManager`,
-//! so it usually reads [`PermissionStatus::Unknown`].
+//! so it usually reads `PermissionStatus::Unknown`.
 //!
 //! Accessibility status is not read here: the agent owns the tap, so
 //! `openlogi_hook::has_accessibility` is the source of truth.
