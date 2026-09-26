@@ -21,6 +21,9 @@ use openlogi_core::scroll::ScrollDelta;
 #[cfg(target_os = "macos")]
 mod macos;
 
+#[cfg(any(target_os = "macos", test))]
+mod space_switch;
+
 #[cfg(target_os = "linux")]
 mod linux;
 
@@ -239,6 +242,17 @@ fn run_workflow(steps: &[WorkflowStep]) {
 /// `SetDpiPreset`, `ToggleSmartShift`) have no CGEvent equivalent and are
 /// handled at the hook/HID layer, logging a trace here.
 ///
+/// macOS `PreviousDesktop` / `NextDesktop` send a DockSwipe without modifying
+/// system shortcuts. This call waits for posting (or cancellation), preserving
+/// event order for sequential callers, but not for the desktop animation to end.
+/// A dedicated worker confirms the pointer display's Space; the process must
+/// remain alive to receive that diagnostic. Overlapping switches are skipped,
+/// not queued. Call from an action worker, never an input-tap callback.
+/// Worker preparation has a two-second cancellation deadline; a canceled
+/// worker cannot post later and retains its busy slot until it exits. Initial
+/// cursor capture and committed native post calls are not interruptible: this
+/// is not a hard wall-clock limit on `execute`.
+///
 /// On Linux, key and scroll events are injected via a lazily-created `uinput`
 /// virtual device. Mouse clicks inject `BTN_*` events. macOS-only window
 /// manager actions (`MissionControl`, `AppExpose`, `ShowDesktop`,
@@ -256,6 +270,12 @@ fn run_workflow(steps: &[WorkflowStep]) {
 /// immediately — the binary compiles clean on all targets.
 ///
 /// # Manual verification
+///
+/// For macOS Space switching, use the opt-in native test in a logged-in session
+/// with Accessibility granted to the test host and a right-hand adjacent Space:
+/// `cargo test -p openlogi-inject interactive_space_round_trip -- --ignored --nocapture`.
+/// This actually switches the pointer's display right, then left back to the
+/// original Space; a failure can leave it on the next Space.
 ///
 /// `execute` is intentionally excluded from the automated test suite because
 /// it would need to intercept the OS event queue. Smoke-test it manually:

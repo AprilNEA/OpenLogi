@@ -31,17 +31,12 @@ zbus = "5"
 core-graphics = { workspace = true, features = ["highsierra"] }
 core-foundation = { workspace = true }
 objc2 = { workspace = true }
-objc2-app-kit = { workspace = true, features = [
-  "NSEvent",
-  "NSGraphicsContext",
-  "objc2-core-graphics",
-  "NSWorkspace",
-  "NSRunningApplication",
-] }
-objc2-core-graphics = { workspace = true, features = ["CGEvent"] }
+objc2-app-kit = { workspace = true, features = ["NSEvent", "NSGraphicsContext", "objc2-core-graphics", "NSWorkspace", "NSRunningApplication"] }
+objc2-core-graphics = { workspace = true, features = ["CGDirectDisplay", "CGError", "CGEvent", "CGEventTypes"] }
 objc2-foundation = { workspace = true }
 objc2-application-services = { workspace = true, features = ["std", "HIServices", "AXUIElement", "AXError", "libc"] }
-objc2-core-foundation = { workspace = true, features = ["std", "CFArray", "CFString"] }
+objc2-core-foundation = { workspace = true, features = ["std", "CFArray", "CFString", "CFDictionary", "CFNumber", "CFUUID"] }
+block2.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_UI_Input_KeyboardAndMouse"] }
