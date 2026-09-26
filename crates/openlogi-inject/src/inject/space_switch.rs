@@ -1,9 +1,10 @@
 //! Space-switch transaction policy, independent of macOS FFI for regression tests.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::{Arc, mpsc};
+use std::time::{Duration, Instant};
 
+const PREPARATION_TIMEOUT: Duration = Duration::from_secs(2);
 const CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,33 +72,133 @@ pub(super) enum Outcome {
 /// One native transaction owns its observer and monotonic start time.
 pub(super) trait Backend {
     fn state(&mut self) -> Result<SpaceState, Failure>;
-    /// Recheck the cursor display immediately before posting. Never warp it.
-    fn post(&mut self, direction: Direction) -> Result<(), Failure>;
+    /// Finish allocation and cursor checks before committing the gate. Never
+    /// put native preparation inside the committed, non-cancellable output.
+    fn post(&mut self, direction: Direction, gate: PostGate) -> Result<(), Failure>;
     fn elapsed(&self) -> Duration;
     /// Wake on a notification or the deadline, without losing notifications
     /// between `state` and this call. A wakeup alone never proves success.
     fn wait_for_change(&mut self, remaining: Duration);
 }
 
-/// Return only after the worker acknowledges posting or drops the sender on an
-/// early exit. Confirmation remains on the worker, but later caller actions
-/// cannot overtake posting and short-lived callers cannot exit before it.
-pub(super) fn spawn_ordered(
-    work: impl FnOnce(mpsc::SyncSender<()>) + Send + 'static,
-) -> std::io::Result<()> {
-    let (posted, receive) = mpsc::sync_channel(0);
+#[repr(u8)]
+enum PostState {
+    Preparing,
+    Posting,
+    Canceled,
+}
+
+struct PostControl {
+    state: AtomicU8,
+    deadline: Instant,
+}
+
+impl PostControl {
+    /// False means posting already won; its native calls cannot be canceled.
+    fn cancel(&self) -> bool {
+        match self.state.compare_exchange(
+            PostState::Preparing as u8,
+            PostState::Canceled as u8,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            Ok(_) => true,
+            Err(state) => state == PostState::Canceled as u8,
+        }
+    }
+}
+
+/// Sole authority to emit both phases. Cancellation and commitment arbitrate
+/// atomically, so a timed-out native query cannot later produce stale output.
+pub(super) struct PostGate {
+    control: Arc<PostControl>,
+    posted: mpsc::Sender<()>,
+}
+
+struct PostWait {
+    control: Arc<PostControl>,
+    receive: mpsc::Receiver<()>,
+}
+
+impl PostGate {
+    #[cfg(test)]
+    pub(super) fn for_test() -> Self {
+        Self::new(Instant::now() + PREPARATION_TIMEOUT).0
+    }
+
+    fn new(deadline: Instant) -> (Self, PostWait) {
+        let control = Arc::new(PostControl {
+            state: AtomicU8::new(PostState::Preparing as u8),
+            deadline,
+        });
+        let (posted, receive) = mpsc::channel();
+        (
+            Self {
+                control: Arc::clone(&control),
+                posted,
+            },
+            PostWait { control, receive },
+        )
+    }
+
+    /// Only the two post calls belong in `emit`: no allocation, state queries,
+    /// retries, or cancellation checks between the balanced phases.
+    pub(super) fn commit(self, emit: impl FnOnce()) -> Result<(), Failure> {
+        if Instant::now() >= self.control.deadline {
+            self.control.cancel();
+            return Err(Failure::TimedOut);
+        }
+        self.control
+            .state
+            .compare_exchange(
+                PostState::Preparing as u8,
+                PostState::Posting as u8,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
+            .map_err(|_| Failure::TimedOut)?;
+        emit();
+        let _ = self.posted.send(());
+        Ok(())
+    }
+}
+
+impl PostWait {
+    fn wait(self, now: Instant) -> Result<(), Failure> {
+        let remaining = self.control.deadline.saturating_duration_since(now);
+        if self.receive.recv_timeout(remaining) == Err(mpsc::RecvTimeoutError::Timeout) {
+            if self.control.cancel() {
+                return Err(Failure::TimedOut);
+            }
+            // Posting won the race. Do not release later actions before both
+            // native calls return; a second timeout would allow a late swipe.
+            let _ = self.receive.recv();
+        }
+        // Disconnection is cancellation/worker exit, not evidence of success.
+        // After unwinding it can also mean partial output; never retry it.
+        Ok(())
+    }
+}
+
+/// Bound preparation, not native event posting. Return after irrevocable
+/// cancellation, posting acknowledgement, or worker exit. Confirmation stays
+/// detached; a canceled but stuck worker retains its single-flight lease.
+pub(super) fn spawn_ordered(work: impl FnOnce(PostGate) + Send + 'static) -> Result<(), Failure> {
+    let (gate, wait) = PostGate::new(Instant::now() + PREPARATION_TIMEOUT);
     std::thread::Builder::new()
         .name("openlogi-spaces".into())
-        .spawn(move || work(posted))?;
-    // Disconnection means preparation failed, so no late post remains pending.
-    let _ = receive.recv();
-    Ok(())
+        .spawn(move || work(gate))
+        .map_err(|error| {
+            tracing::warn!(%error, "Space switch worker unavailable");
+            Failure::Unavailable
+        })?;
+    wait.wait(Instant::now())
 }
 
 pub(super) fn run(
     backend: &mut impl Backend,
     direction: Direction,
-    posted: impl FnOnce(),
+    gate: PostGate,
 ) -> Result<Outcome, Failure> {
     let initial = backend.state()?;
     let Some(target) = initial.target(direction)? else {
@@ -107,11 +208,7 @@ pub(super) fn run(
     if backend.state()? != initial {
         return Err(Failure::ContextChanged);
     }
-    if backend.elapsed() >= CONFIRMATION_TIMEOUT {
-        return Err(Failure::TimedOut);
-    }
-    backend.post(direction)?;
-    posted();
+    backend.post(direction, gate)?;
     loop {
         let state = backend.state()?;
         if state.display != initial.display || state.ordered != initial.ordered {
