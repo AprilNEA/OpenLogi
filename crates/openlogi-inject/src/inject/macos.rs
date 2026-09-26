@@ -63,6 +63,8 @@ use symbolic_hotkey::{next_desktop, previous_desktop};
 // NX_KEYTYPE_* constants from <IOKit/hidsystem/ev_keymap.h>.
 const NX_KEYTYPE_SOUND_UP: i32 = 0;
 const NX_KEYTYPE_SOUND_DOWN: i32 = 1;
+const NX_KEYTYPE_BRIGHTNESS_UP: i32 = 2;
+const NX_KEYTYPE_BRIGHTNESS_DOWN: i32 = 3;
 const NX_KEYTYPE_MUTE: i32 = 7;
 const NX_KEYTYPE_PLAY: i32 = 16;
 const NX_KEYTYPE_NEXT: i32 = 17;
@@ -178,6 +180,8 @@ fn nx_key(key: MediaKey) -> i32 {
         MediaKey::VolumeUp => NX_KEYTYPE_SOUND_UP,
         MediaKey::VolumeDown => NX_KEYTYPE_SOUND_DOWN,
         MediaKey::Mute => NX_KEYTYPE_MUTE,
+        MediaKey::BrightnessUp => NX_KEYTYPE_BRIGHTNESS_UP,
+        MediaKey::BrightnessDown => NX_KEYTYPE_BRIGHTNESS_DOWN,
     }
 }
 
