@@ -67,8 +67,9 @@ struct Asset {
 }
 
 /// The per-OS constants of an updater-relevant artifact, derived from its file
-/// name. The Linux packages (`.deb`/`.rpm`) are deliberately absent: those
-/// installs update through the distro package manager, not the in-app updater.
+/// name. The Linux artifacts (`.deb`/`.rpm`/`.pkg.tar.zst`/`.AppImage`) are
+/// deliberately absent: the packages update through the distro package
+/// manager, and the AppImage has no in-app updater yet.
 struct Classified {
     os: &'static str,
     arch: String,

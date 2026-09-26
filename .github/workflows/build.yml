@@ -810,9 +810,17 @@ jobs:
           - arch: amd64
             runner: ubuntu-22.04
             nfpm_sha256: "d6417f99d5fa32bba7a4e007084615d3897651498c2e443118c26b9ec3b698a8"
+            # appimagetool and the type2 runtime name architectures the
+            # kernel's way, not Debian's.
+            appimage_arch: x86_64
+            appimagetool_sha256: "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0"
+            appimage_runtime_sha256: "2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d"
           - arch: arm64
             runner: ubuntu-22.04-arm
             nfpm_sha256: "dc63aa7228ec70490bae67ad3146883055a055639dcf0dffc82fa965bac75a31"
+            appimage_arch: aarch64
+            appimagetool_sha256: "f0837e7448a0c1e4e650a93bb3e85802546e60654ef287576f46c71c126a9158"
+            appimage_runtime_sha256: "00cbdfcf917cc6c0ff6d3347d59e0ca1f7f45a6df1a428a0d6d8a78664d87444"
     permissions:
       contents: read
     steps:
@@ -871,8 +879,38 @@ jobs:
           echo "${NFPM_SHA256}  /tmp/nfpm.deb" | sha256sum -c
           sudo dpkg -i /tmp/nfpm.deb
 
+      # appimagetool is itself an AppImage. The runtime it embeds into ours
+      # is pinned separately: left alone it downloads whatever type2-runtime's
+      # `continuous` tag holds at package time, which is not reproducible and
+      # not something a signed release should pick up unreviewed.
+      - name: Install appimagetool and the AppImage runtime
+        env:
+          APPIMAGETOOL_VERSION: "1.9.1"
+          APPIMAGE_RUNTIME_VERSION: "20251108"
+          APPIMAGE_ARCH: ${{ matrix.appimage_arch }}
+          APPIMAGETOOL_SHA256: ${{ matrix.appimagetool_sha256 }}
+          APPIMAGE_RUNTIME_SHA256: ${{ matrix.appimage_runtime_sha256 }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/appimage"
+          curl -fsSLo "$RUNNER_TEMP/appimage/appimagetool" \
+            "https://github.com/AppImage/appimagetool/releases/download/${APPIMAGETOOL_VERSION}/appimagetool-${APPIMAGE_ARCH}.AppImage"
+          echo "${APPIMAGETOOL_SHA256}  $RUNNER_TEMP/appimage/appimagetool" | sha256sum -c
+          chmod +x "$RUNNER_TEMP/appimage/appimagetool"
+          curl -fsSLo "$RUNNER_TEMP/appimage/runtime" \
+            "https://github.com/AppImage/type2-runtime/releases/download/${APPIMAGE_RUNTIME_VERSION}/runtime-${APPIMAGE_ARCH}"
+          echo "${APPIMAGE_RUNTIME_SHA256}  $RUNNER_TEMP/appimage/runtime" | sha256sum -c
+          echo "$RUNNER_TEMP/appimage" >> "$GITHUB_PATH"
+          echo "OPENLOGI_APPIMAGE_RUNTIME=$RUNNER_TEMP/appimage/runtime" >> "$GITHUB_ENV"
+
       - name: Build and package
         run: cargo run -p xtask -- linux package
+
+      # Reuses the binaries the package step built and verified. The runner
+      # has no FUSE for appimagetool's own image, so it self-extracts instead.
+      - name: Build AppImage
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: cargo run -p xtask -- linux appimage --no-build
 
       - name: Verify GLIBC baseline
         env:
@@ -904,7 +942,7 @@ jobs:
           mkdir -p dist
           ref_name="${GITHUB_REF_NAME:-dev}"
           ref_name="${ref_name//\//-}"
-          for pkg in target/release/*.deb target/release/*.rpm; do
+          for pkg in target/release/*.deb target/release/*.rpm target/release/*.AppImage; do
             [ -f "$pkg" ] || continue
             ext="${pkg##*.}"
             cp "$pkg" "dist/openlogi-${ref_name}-linux-${PKG_ARCH}.${ext}"

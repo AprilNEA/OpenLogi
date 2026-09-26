@@ -19,6 +19,58 @@ fn rendered_unit_is_valid_ini_with_all_three_sections() {
     assert!(body.contains("[Install]"));
 }
 
+/// Inside an AppImage the executable sits on a per-launch FUSE mount; the unit
+/// has to launch the image file with the agent selected as `AppRun`'s first
+/// argument, or autostart points at a path that is gone by the next login.
+#[test]
+fn an_appimage_agent_autostarts_through_the_image_file() {
+    let exe = Path::new("/tmp/.mount_OpenLoAbCdEf/usr/bin/openlogi-agent");
+    let launch = LaunchCommand::for_agent_in(
+        exe,
+        Some(PathBuf::from("/home/me/Apps/OpenLogi x86_64.AppImage")),
+        Some(PathBuf::from("/tmp/.mount_OpenLoAbCdEf")),
+    );
+    assert_eq!(
+        launch.program,
+        Path::new("/home/me/Apps/OpenLogi x86_64.AppImage")
+    );
+    assert_eq!(launch.args, ["openlogi-agent"]);
+
+    let unit = launch.render_unit();
+    assert!(
+        unit.contains("ExecStart=\"/home/me/Apps/OpenLogi x86_64.AppImage\" openlogi-agent\n"),
+        "{unit}"
+    );
+    assert!(is_generated_unit(&unit), "{unit}");
+    assert_eq!(
+        unescape_systemd_exec(exec_start_value(&unit).expect("one ExecStart")),
+        "/home/me/Apps/OpenLogi x86_64.AppImage"
+    );
+}
+
+/// A packaged agent started by an AppImage GUI inherits `APPIMAGE`, but its
+/// executable is not inside that image's mount: it must register itself.
+#[test]
+fn an_inherited_appimage_variable_does_not_hijack_a_packaged_agent() {
+    let exe = Path::new("/usr/bin/openlogi-agent");
+    let launch = LaunchCommand::for_agent_in(
+        exe,
+        Some(PathBuf::from("/home/me/OpenLogi.AppImage")),
+        Some(PathBuf::from("/tmp/.mount_OpenLoAbCdEf")),
+    );
+    assert_eq!(launch.program, exe);
+    assert!(launch.args.is_empty());
+    assert_eq!(launch.render_unit(), render_unit("/usr/bin/openlogi-agent"));
+}
+
+#[test]
+fn outside_an_appimage_the_unit_launches_the_executable_itself() {
+    let exe = Path::new("/home/dev/OpenLogi/target/debug/openlogi-agent");
+    let launch = LaunchCommand::for_agent_in(exe, None, None);
+    assert_eq!(launch.program, exe);
+    assert_eq!(launch.render_unit(), render_unit(&exe.to_string_lossy()));
+}
+
 #[test]
 fn escape_systemd_exec_doubles_percent() {
     assert_eq!(

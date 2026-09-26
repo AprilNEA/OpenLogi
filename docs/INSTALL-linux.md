@@ -57,9 +57,54 @@ For a build without installing the module:
 nix build github:AprilNEA/OpenLogi#openlogi
 ```
 
+## AppImage
+
+Every release also ships an `.AppImage` for `x86_64` and `aarch64`. It needs
+no installation and no root: mark it executable and run it. The image
+contains all four executables; the first argument selects one, and the GUI
+runs when there is none:
+
+```sh
+chmod +x openlogi-*.AppImage
+./openlogi-*.AppImage                    # GUI
+./openlogi-*.AppImage openlogi list      # CLI
+./openlogi-*.AppImage openlogi-agent     # agent in the foreground
+```
+
+The GUI starts the agent from the same image, and the agent's
+launch-at-login setting writes a systemd user unit that runs the AppImage
+file itself, so keep the file where it is (or update the setting after
+moving it).
+
+What an AppImage cannot do is install the udev rules from the next section.
+Copy them out of the image once:
+
+```sh
+./openlogi-*.AppImage --appimage-extract etc/udev/rules.d/70-openlogi.rules
+sudo install -Dm644 squashfs-root/etc/udev/rules.d/70-openlogi.rules \
+  /etc/udev/rules.d/70-openlogi.rules
+rm -r squashfs-root
+sudo udevadm control --reload-rules && sudo udevadm trigger
+```
+
+The AppImage bundles no system libraries, so the host has to provide what
+the packages declare as dependencies. The GLIBC 2.35 floor is the same as for
+the packages. Beyond that:
+
+| Executable | Host requirements |
+|---|---|
+| `openlogi`, `openlogi-agent` | glibc only |
+| `openlogi-desktop`, `openlogi-overlay` | `libxkbcommon`, `libxkbcommon-x11`, `libxcb` (linked at start), plus a Wayland or X11 session, `libwayland-client`, EGL, and the Vulkan loader with a working GPU driver (loaded at runtime) |
+
+The two `libxkbcommon` libraries are the only ones an AppImage could carry
+itself; the rest belong to the display server, GPU driver, or font setup and
+have to come from the host. Any desktop that runs a Wayland or X11 session
+has all of them. On a headless or minimal install, the CLI and agent still
+run; the GUI reports which library it could not load.
+
 ## Build from source
 
-Pre-built `.deb` and `.rpm` packages are available on the
+Pre-built `.deb`, `.rpm`, and `.AppImage` files are available on the
 [releases page](https://github.com/AprilNEA/OpenLogi/releases/latest) — see
 the main [README](../README.md#linux) for the package-based install. To build
 from source instead, use the stable Rust toolchain:

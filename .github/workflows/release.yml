@@ -185,18 +185,18 @@ jobs:
           # hashed alone. The Windows portable artifact is a zip of the GUI +
           # agent exes (#347); no bare .exe ships anymore.
           shopt -s nullglob
-          sha256sum -- *.dmg *.zip *.msi *.deb *.rpm *.pkg.tar.zst > SHA256SUMS
+          sha256sum -- *.dmg *.zip *.msi *.deb *.rpm *.pkg.tar.zst *.AppImage > SHA256SUMS
 
       # softprops' `files` can't list a glob that matches nothing without
       # tripping fail_on_unmatched_files. The Windows zip/msi (per arch leg)
-      # and the Linux deb/rpm are all best-effort — only the DMGs, SHA256SUMS
+      # and the Linux deb/rpm/AppImage are all best-effort — only the DMGs, SHA256SUMS
       # and the .minisig set are guaranteed by the publish gate — so record
       # what actually arrived. This is what lets a failing Windows or Linux
       # leg degrade to a smaller release instead of blocking the macOS one.
       - name: Detect best-effort artifacts
         id: artifacts
         run: |
-          for ext in zip msi deb rpm; do
+          for ext in zip msi deb rpm AppImage; do
             if compgen -G "dist/*.$ext" > /dev/null; then
               echo "$ext=true" >> "$GITHUB_OUTPUT"
             else
@@ -270,7 +270,7 @@ jobs:
           # the globs may match nothing; the DMGs are guaranteed by the publish
           # gate.
           shopt -s nullglob
-          for artifact in dist/*.dmg dist/*.zip dist/*.msi dist/*.deb dist/*.rpm dist/*.pkg.tar.zst; do
+          for artifact in dist/*.dmg dist/*.zip dist/*.msi dist/*.deb dist/*.rpm dist/*.pkg.tar.zst dist/*.AppImage; do
             minisign -S -m "$artifact" -s "$key_file" -x "$artifact.minisig" -W
             minisign -V -m "$artifact" -P "$OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY" -x "$artifact.minisig"
           done
@@ -339,6 +339,7 @@ jobs:
             ${{ steps.artifacts.outputs.deb == 'true' && 'dist/*.deb' || '' }}
             ${{ steps.artifacts.outputs.rpm == 'true' && 'dist/*.rpm' || '' }}
             ${{ steps.artifacts.outputs.pacman == 'true' && 'dist/*.pkg.tar.zst' || '' }}
+            ${{ steps.artifacts.outputs.AppImage == 'true' && 'dist/*.AppImage' || '' }}
           fail_on_unmatched_files: true
 
   homebrew-tap:
