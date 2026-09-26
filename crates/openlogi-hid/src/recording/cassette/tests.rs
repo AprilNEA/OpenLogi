@@ -608,6 +608,7 @@ async fn replay_with_different_lease(cassette: HidCassette) {
     let mut channel = HidppChannel::from_raw_channel(raw).await.unwrap();
     channel.set_sw_id_policy(SwIdPolicy::Leased {
         id: RequestSwId::new(U4::from_lo(REPLAY_SW_ID)).unwrap(),
+        secondary: None,
         lease: Box::new(()),
     });
 

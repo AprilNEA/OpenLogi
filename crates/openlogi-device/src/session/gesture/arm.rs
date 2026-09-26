@@ -170,7 +170,11 @@ pub(super) async fn arm_controls_into(
         .get_feature(reprog_controls::FEATURE_ID)
         .await?
     {
-        let rc = ReprogControlsV4::new(Arc::clone(chan), slot, info.index);
+        // `new_secondary`, matching `device`'s own construction: this
+        // control-table walk (`getCount`/`getCidInfo`) must not share a
+        // correlation key with a concurrent inventory probe on the same
+        // shared channel — see #1128.
+        let rc = ReprogControlsV4::new_secondary(Arc::clone(chan), slot, info.index);
         let controls = enumerate_controls(&rc).await?;
         // Register an accessor before the first divert, so a failure on any
         // divert (including the first) can become a restore capability.
@@ -232,7 +236,8 @@ pub(super) async fn arm_controls_into(
     if spec.capture_thumbwheel
         && let Some(info) = device.root().get_feature(thumbwheel::FEATURE_ID).await?
     {
-        let tw = Thumbwheel::new(Arc::clone(chan), slot, info.index);
+        // `new_secondary`, same reasoning as the reprog-controls walk above.
+        let tw = Thumbwheel::new_secondary(Arc::clone(chan), slot, info.index);
         let wheel_info = match tw.get_info().await {
             Ok(twinfo) => Some(twinfo),
             Err(e) => {

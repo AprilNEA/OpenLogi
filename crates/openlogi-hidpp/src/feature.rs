@@ -161,6 +161,13 @@ pub(crate) struct FeatureEndpoint {
 
     /// The index of the feature in the device's feature table.
     feature_index: u8,
+
+    /// Whether this endpoint stamps requests with the channel's secondary
+    /// software id (see [`HidppChannel::get_secondary_sw_id`]) rather than its
+    /// primary one — for a second, distinct in-process consumer of a shared
+    /// channel, so its requests correlate independently of the other
+    /// consumer's.
+    secondary: bool,
 }
 
 impl FeatureEndpoint {
@@ -170,6 +177,22 @@ impl FeatureEndpoint {
             chan,
             device_index,
             feature_index,
+            secondary: false,
+        }
+    }
+
+    /// [`Self::new`], stamping requests with the channel's secondary software
+    /// id instead of its primary one.
+    pub(crate) fn new_secondary(
+        chan: Arc<HidppChannel>,
+        device_index: u8,
+        feature_index: u8,
+    ) -> Self {
+        Self {
+            chan,
+            device_index,
+            feature_index,
+            secondary: true,
         }
     }
 
@@ -184,11 +207,16 @@ impl FeatureEndpoint {
             function < 16,
             "HID++2.0 function id {function} exceeds 4 bits"
         );
+        let software_id = if self.secondary {
+            self.chan.get_secondary_sw_id()
+        } else {
+            self.chan.get_sw_id()
+        };
         v20::MessageHeader {
             device_index: self.device_index,
             feature_index: self.feature_index,
             function_id: U4::from_lo(function),
-            software_id: self.chan.get_sw_id(),
+            software_id,
         }
     }
 

@@ -91,7 +91,11 @@ async fn arm_keyboard(
         .await
         .map_err(CaptureError::from)?
         .ok_or_else(|| CaptureError::Hidpp("keyboard exposes no 0x1b04 reprog controls".into()))?;
-    let rc = ReprogControlsV4::new(
+    // `new_secondary`, matching `open_device`'s own construction above: this
+    // control-table walk (`getCount`/`getCidInfo`) must not share a
+    // correlation key with a concurrent inventory probe on the same shared
+    // channel — see #1128.
+    let rc = ReprogControlsV4::new_secondary(
         Arc::clone(shared.channel()),
         shared.device_index(),
         info.index,

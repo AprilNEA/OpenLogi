@@ -160,6 +160,24 @@ impl ReprogControlsV4 {
         }
     }
 
+    /// [`Self::new`], stamping requests with the channel's secondary software
+    /// id (see [`HidppChannel::get_secondary_sw_id`]) instead of its primary
+    /// one — for a second, distinct in-process consumer of a channel another
+    /// consumer already holds open (e.g. input capture reusing an
+    /// inventory-owned channel), so its `getCount`/`getCidInfo` calls don't
+    /// share a correlation key with the other consumer's own.
+    #[must_use]
+    pub fn new_secondary(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
+        Self {
+            inner: Arc::new(hidpp_reprog::ReprogControlsFeature::new_secondary(
+                chan,
+                device_index,
+                feature_index,
+            )),
+            feature_index,
+        }
+    }
+
     /// The feature index this accessor talks to — used to match unsolicited
     /// events in [`decode_event`].
     #[must_use]
