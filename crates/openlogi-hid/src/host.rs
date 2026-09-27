@@ -222,6 +222,11 @@ pub async fn read_battery_raw(route: &DeviceRoute) -> Result<String, WriteError>
     device::read_battery_raw(&*native_backend(), route).await
 }
 
+/// Read the `0x4531` MultiPlatform state of the device `route` reaches.
+pub async fn read_platform_raw(route: &DeviceRoute) -> Result<String, WriteError> {
+    device::read_platform_raw(&*native_backend(), route).await
+}
+
 /// An enumerator over this host's HID stack, with a memory-only probe cache.
 ///
 /// One-shot callers (the CLI) want exactly this: nothing to warm-start from and
