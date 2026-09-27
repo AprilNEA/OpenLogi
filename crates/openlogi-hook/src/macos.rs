@@ -422,7 +422,10 @@ fn spawn_lifecycle_watchdog(
                         let phase = signals.phase();
                         let still_hazardous = match reason {
                             LifecycleExitReason::TapThreadStalled => {
-                                matches!(phase, TapPhase::Arming | TapPhase::Armed)
+                                matches!(
+                                    phase,
+                                    TapPhase::Arming | TapPhase::Armed | TapPhase::Probing
+                                )
                             }
                             LifecycleExitReason::StopTimedOut => phase != TapPhase::ThreadExited,
                         };
@@ -432,6 +435,9 @@ fn spawn_lifecycle_watchdog(
                         let reason = match reason {
                             LifecycleExitReason::TapThreadStalled if phase == TapPhase::Arming => {
                                 "HID tap creation or activation stopped making progress"
+                            }
+                            LifecycleExitReason::TapThreadStalled if phase == TapPhase::Probing => {
+                                "HID tap capability probe stopped making progress"
                             }
                             LifecycleExitReason::TapThreadStalled => {
                                 "HID tap thread stopped making progress while tap remained active"
@@ -493,11 +499,21 @@ fn service_tap(tap: &CGEventTap<'_>, signals: &WatchdogSignals, tap_disabled: &A
             CFRunLoopRunResult::TimedOut | CFRunLoopRunResult::HandledSource => {}
         }
         signals.mark_tap_progress();
+        // Everything below this point is a WindowServer or TCC round trip, not
+        // tap servicing. Publish that so the lifecycle watchdog judges it
+        // against `TAP_PROBE_BUDGET`: while the display is asleep these calls
+        // have been measured at ~1.6 s, and charging them to the 1.5 s stall
+        // budget force-exited a perfectly healthy agent once a minute for the
+        // whole of display sleep (#952).
+        signals.set_phase(TapPhase::Probing);
         if !Backend::has_accessibility() {
             warn!(
                 "Accessibility revoked while the event tap was live — \
                  disabling the tap to avoid wedging system input"
             );
+            // Teardown of a tap that outlived its permission is the freeze
+            // hazard itself: judge it on the short budget, not the probe's.
+            signals.resume_armed();
             break;
         }
         // Observe both disable signals: the callback catches the documented
@@ -510,11 +526,16 @@ fn service_tap(tap: &CGEventTap<'_>, signals: &WatchdogSignals, tap_disabled: &A
                 "the OS keeps disabling the HID tap — releasing it instead of \
                  re-arming a tap nothing is servicing"
             );
+            signals.resume_armed();
             break;
         }
         // Enabling is idempotent while the tap is already live. Only reached
         // while the live capability probe above still succeeds.
         tap.enable();
+        // Back to servicing the tap: the short stall budget applies again. The
+        // break paths above publish `Armed` the same way before their
+        // synchronous teardown, so teardown is judged on the short budget too.
+        signals.resume_armed();
     }
 }
 
