@@ -129,12 +129,17 @@ impl ActionRingManager {
         for (slot, entry) in spec.layout.slots {
             let (action, custom_icon, custom_label) = entry.into_parts();
             let literal = custom_label.is_some();
+            let application_icon = match (&action, custom_icon) {
+                (Action::OpenApplication(target), None) => Some(target.path().to_string()),
+                _ => None,
+            };
             slots.insert(
                 slot,
                 ActionRingPresentation {
                     label: custom_label.unwrap_or_else(|| action.label()),
                     literal,
                     icon: custom_icon.unwrap_or_else(|| ActionRingIcon::for_action(&action)),
+                    application_icon,
                 },
             );
             actions.insert(slot, action);
@@ -319,9 +324,43 @@ mod tests {
                 label: "Cut".to_string(),
                 literal: false,
                 icon: ActionRingIcon::Keyboard,
+                application_icon: None,
             }
         );
         assert_eq!(invocation.language.as_deref(), Some("fr"));
+    }
+
+    #[test]
+    fn application_icon_hint_respects_an_explicit_icon() {
+        let manager = ActionRingManager::default();
+        let target =
+            openlogi_core::binding::ApplicationTarget::new("/Applications/Safari.app", "Safari")
+                .expect("valid application target");
+        let action = openlogi_core::binding::RingAction::new(Action::OpenApplication(target))
+            .expect("valid ring action");
+
+        let mut automatic = spec();
+        automatic
+            .layout
+            .set_action(ActionRingSlot::Top, Some(action.clone()));
+        assert_eq!(
+            manager.begin(automatic).slots[&ActionRingSlot::Top]
+                .application_icon
+                .as_deref(),
+            Some("/Applications/Safari.app")
+        );
+
+        let mut customized = spec();
+        customized
+            .layout
+            .set_action(ActionRingSlot::Top, Some(action));
+        customized
+            .layout
+            .set_icon(ActionRingSlot::Top, Some(ActionRingIcon::Star));
+        assert_eq!(
+            manager.begin(customized).slots[&ActionRingSlot::Top].application_icon,
+            None
+        );
     }
 
     #[tokio::test]

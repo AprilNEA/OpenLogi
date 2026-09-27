@@ -1,6 +1,18 @@
 use super::*;
 
 #[test]
+fn mock_action_ring_is_opt_in_and_requests_a_native_icon() {
+    assert_eq!(scripted_action_ring(false), None);
+    let invocation = scripted_action_ring(true).expect("enabled ring should be scripted");
+    assert_eq!(
+        invocation.slots[&ActionRingSlot::Top]
+            .application_icon
+            .as_deref(),
+        Some("/Applications/Safari.app")
+    );
+}
+
+#[test]
 fn no_argument_mode_uses_the_canonical_profile_with_demo_time() {
     let state = state_from_args(std::iter::empty()).expect("no-argument mock state");
     let canonical: DeviceProfile =

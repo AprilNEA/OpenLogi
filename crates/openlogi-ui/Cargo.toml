@@ -16,6 +16,13 @@ openlogi-core = { path = "../openlogi-core" }
 # dependency added here lands in the overlay helper too, so the widget kit and
 # the artwork only the app draws both stay on the app's side.
 gpui = { workspace = true }
+image = { version = "0.25", default-features = false }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { workspace = true }
+objc2-app-kit = { workspace = true, features = ["NSBitmapImageRep", "NSGraphics", "NSGraphicsContext", "NSImage", "NSImageRep", "NSWorkspace"] }
+objc2-foundation = { workspace = true, features = ["NSGeometry", "NSString"] }
+shellexpand = { workspace = true }
 
 [lints]
 workspace = true
