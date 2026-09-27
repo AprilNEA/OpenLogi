@@ -102,7 +102,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 31);
+    assert_eq!(PROTOCOL_VERSION, 32);
 }
 
 #[test]
@@ -643,4 +643,21 @@ fn standalone_light_dtos_commands_and_errors() {
         "0c05636f6c6f72",
     );
     assert_wire(&WriteError::AmbiguousRawDevice, "0d");
+}
+
+#[test]
+fn partial_smartshift_request_is_appended() {
+    assert_wire(
+        &AgentRequest::UpdateSmartshift {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+            change: openlogi_core::hid::SmartShiftChange {
+                mode: Some(SmartShiftMode::Free),
+                auto_disengage: None,
+            },
+        },
+        "1c0008463030444341464501010000",
+    );
 }

@@ -18,7 +18,7 @@ use openlogi_hid::recording::{
 };
 use openlogi_ipc::client::{self, ConnectError};
 
-use super::target_selection::{self, FixtureTarget};
+use crate::cmd::target_selection::{self, DeviceTarget};
 
 mod audit;
 mod replay;
@@ -207,7 +207,7 @@ impl CaptureTarget {
     }
 }
 
-impl FixtureTarget for TargetCandidate {
+impl DeviceTarget for TargetCandidate {
     fn route(&self) -> &DeviceRoute {
         &self.route
     }

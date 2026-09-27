@@ -1,0 +1,9 @@
+# Owner: Agent::update_smartshift and the device layer's firmware preserve encoder.
+id: cli-smartshift-change-owner
+language: rust
+severity: error
+message: CLI partial SmartShift edits must use update_smartshift; set_smartshift resends unspecified fields from a stale snapshot.
+files:
+  - crates/openlogi-cli/src/cmd/control.rs
+rule:
+  pattern: $CLIENT.set_smartshift($$$)

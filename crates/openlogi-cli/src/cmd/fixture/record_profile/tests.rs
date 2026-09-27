@@ -148,6 +148,15 @@ impl Agent for TestAgent {
         unreachable!("profile capture must never write SmartShift")
     }
 
+    async fn update_smartshift(
+        self,
+        _: TarpcContext,
+        _: DeviceRoute,
+        _: openlogi_core::hid::SmartShiftChange,
+    ) -> Result<SmartShiftStatus, WriteError> {
+        unreachable!("profile capture must never write SmartShift")
+    }
+
     async fn read_dpi(self, _: TarpcContext, route: DeviceRoute) -> Result<DpiInfo, WriteError> {
         self.read(ReadFamily::Dpi, &route, |settings| &settings.dpi, 0x2201)
     }

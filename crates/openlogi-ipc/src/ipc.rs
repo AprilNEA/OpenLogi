@@ -18,7 +18,7 @@ use openlogi_core::config::Lighting;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::hid::{
     BacklightState, DeviceRoute, Dpi, DpiInfo, LightCommand, PairingError, PasskeyMethod,
-    ReceiverSelector, ScrollWheelMode, SmartShiftStatus, WriteError,
+    ReceiverSelector, ScrollWheelMode, SmartShiftChange, SmartShiftStatus, WriteError,
 };
 use serde::{Deserialize, Serialize};
 pub use succession::Identity;
@@ -63,7 +63,8 @@ pub use succession::Identity;
 ///      the macOS dormancy gate.
 /// v30: `Agent::read_wheel` and `Agent::read_backlight` appended.
 /// v31: `Capabilities::dpi_gestures` appended.
-pub const PROTOCOL_VERSION: u32 = 31;
+/// v32: `Agent::update_smartshift` appended for firmware-preserving partial edits.
+pub const PROTOCOL_VERSION: u32 = 32;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -566,4 +567,10 @@ pub trait Agent {
     async fn read_wheel(route: DeviceRoute) -> Result<ScrollWheelMode, WriteError>;
     /// Read the current keyboard-backlight state from `route`.
     async fn read_backlight(route: DeviceRoute) -> Result<BacklightState, WriteError>;
+    /// Apply a partial SmartShift edit using firmware preserve semantics, then
+    /// read back. Unspecified fields must not be reconstructed from old state.
+    async fn update_smartshift(
+        route: DeviceRoute,
+        change: SmartShiftChange,
+    ) -> Result<SmartShiftStatus, WriteError>;
 }

@@ -55,7 +55,7 @@ pub use litra::{
 };
 pub use smartshift::{
     get_smartshift_status, get_smartshift_status_on, set_smartshift, set_smartshift_on,
-    set_smartshift_sensitivity, toggle_smartshift, toggle_smartshift_on,
+    set_smartshift_sensitivity, toggle_smartshift, toggle_smartshift_on, update_smartshift_on,
 };
 
 // commands_for_light_settings operates purely on openlogi_core config/device

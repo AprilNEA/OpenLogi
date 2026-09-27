@@ -1,16 +1,16 @@
-//! Strict fixture target selection with privacy-safe diagnostics.
+//! Strict device target selection with privacy-safe diagnostics.
 
 use std::fmt::Write as _;
 
 use anyhow::{Result, anyhow, bail};
 use openlogi_core::hid::DeviceRoute;
 
-pub(super) trait FixtureTarget: Clone {
+pub(super) trait DeviceTarget: Clone {
     fn route(&self) -> &DeviceRoute;
     fn display_name(&self) -> &str;
 }
 
-pub(super) fn select_target<T: FixtureTarget>(candidates: &[T], query: Option<&str>) -> Result<T> {
+pub(super) fn select_target<T: DeviceTarget>(candidates: &[T], query: Option<&str>) -> Result<T> {
     if candidates.is_empty() {
         bail!("no addressable physical device candidate was found");
     }
@@ -51,7 +51,7 @@ pub(super) fn select_target<T: FixtureTarget>(candidates: &[T], query: Option<&s
     Ok(selected)
 }
 
-fn selection_error<T: FixtureTarget>(message: &str, candidates: &[T]) -> anyhow::Error {
+fn selection_error<T: DeviceTarget>(message: &str, candidates: &[T]) -> anyhow::Error {
     let mut list = String::new();
     for candidate in candidates {
         let _ = write!(

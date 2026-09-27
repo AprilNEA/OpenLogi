@@ -180,6 +180,20 @@ impl Agent for AgentServer {
             .await
     }
 
+    async fn update_smartshift(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        change: openlogi_core::hid::SmartShiftChange,
+    ) -> Result<SmartShiftStatus, WriteError> {
+        self.shared
+            .device(&route)
+            .run(HidppOperation::WriteSmartShift, |c| async move {
+                openlogi_hid::update_smartshift_on(&c, change).await
+            })
+            .await
+    }
+
     async fn read_dpi(self, _: Context, route: DeviceRoute) -> Result<DpiInfo, WriteError> {
         self.shared
             .device(&route)

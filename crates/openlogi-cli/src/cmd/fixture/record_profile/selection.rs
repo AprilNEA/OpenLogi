@@ -4,7 +4,7 @@ use anyhow::Result;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::hid::DeviceRoute;
 
-use super::super::target_selection::{self, FixtureTarget};
+use crate::cmd::target_selection::{self, DeviceTarget};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum TargetLocation {
@@ -19,7 +19,7 @@ pub(super) struct TargetCandidate {
     pub(super) location: TargetLocation,
 }
 
-impl FixtureTarget for TargetCandidate {
+impl DeviceTarget for TargetCandidate {
     fn route(&self) -> &DeviceRoute {
         &self.route
     }

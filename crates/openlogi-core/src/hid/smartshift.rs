@@ -321,6 +321,37 @@ impl From<SmartShiftStatus> for crate::config::SmartShift {
     }
 }
 
+/// Partial SmartShift edit. Omitted fields use the firmware's preserve sentinel;
+/// they must never be filled from an earlier status snapshot. Torque is untouched.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SmartShiftChange {
+    /// New wheel mode, or leave the current mode alone.
+    pub mode: Option<SmartShiftMode>,
+    /// New automatic disengage threshold, or leave it alone.
+    pub auto_disengage: Option<SmartShiftAutoDisengage>,
+}
+
+impl SmartShiftChange {
+    /// Whether the read-back satisfies every explicitly requested field.
+    #[must_use]
+    pub fn matches(self, status: SmartShiftStatus) -> bool {
+        self.mode.is_none_or(|mode| mode == status.mode)
+            && self
+                .auto_disengage
+                .is_none_or(|threshold| threshold == status.auto_disengage)
+    }
+
+    /// Apply to an authoritative in-memory device, used by the mock agent.
+    pub fn apply_to(self, status: &mut SmartShiftStatus) {
+        if let Some(mode) = self.mode {
+            status.mode = mode;
+        }
+        if let Some(threshold) = self.auto_disengage {
+            status.auto_disengage = threshold;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
