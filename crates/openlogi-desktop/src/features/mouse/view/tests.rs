@@ -137,10 +137,135 @@ fn active_thumbwheel_directions_highlight_the_paired_control() {
     );
 }
 
+/// A depot render whose authored markers cover both hook-visible and
+/// HID++-only controls. A G-series mouse resolves a real depot, so the
+/// asset path — not just the synthetic fallback — has to be filtered.
+fn asset_with_slots(slot_names: &[&str]) -> ResolvedAsset {
+    ResolvedAsset {
+        depot: "g502_wireless".to_string(),
+        display_name: "G502".to_string(),
+        kind: Some(openlogi_core::device::DeviceKind::Mouse),
+        image_path: std::path::PathBuf::from("/tmp/g502.png"),
+        hero_image_path: None,
+        glow: None,
+        metadata: openlogi_assets::metadata::Metadata {
+            images: vec![openlogi_assets::metadata::ImageEntry {
+                key: "device_buttons_image".to_string(),
+                origin: openlogi_assets::metadata::Origin {
+                    width: 420,
+                    height: 560,
+                },
+                assignments: slot_names
+                    .iter()
+                    .enumerate()
+                    .map(|(i, name)| openlogi_assets::metadata::Assignment {
+                        slot_name: (*name).to_string(),
+                        slot_id: format!("mx-master-6b012_c{i}"),
+                        #[expect(
+                            clippy::cast_precision_loss,
+                            reason = "fixture indices are single digits"
+                        )]
+                        marker: openlogi_assets::metadata::Point {
+                            x: 50.,
+                            y: 10. * i as f32,
+                        },
+                        label: openlogi_assets::metadata::Direction { x: -1, y: -1 },
+                    })
+                    .collect(),
+            }],
+        },
+        png_width: 420,
+        png_height: 560,
+    }
+}
+
+#[test]
+fn asset_model_without_diversion_drops_hidpp_controls() {
+    let asset = asset_with_slots(&[
+        "SLOT_NAME_MIDDLE_BUTTON",
+        "SLOT_NAME_BACK_BUTTON",
+        "SLOT_NAME_FORWARD_BUTTON",
+        "SLOT_NAME_MODESHIFT_BUTTON",
+        "SLOT_NAME_GESTURE_BUTTON",
+    ]);
+    let controls = ModelControls {
+        thumbwheel: false,
+        can_divert: false,
+    };
+    let (_, _, hotspots, _) = scaled_model(
+        Some(&asset),
+        560.,
+        420.,
+        controls,
+        LabelDistribution::LeftOnly,
+    );
+    assert_eq!(
+        hotspots
+            .iter()
+            .map(|hotspot| hotspot.id)
+            .collect::<Vec<_>>(),
+        vec![
+            MouseControlId::Button(ButtonId::MiddleClick),
+            MouseControlId::Button(ButtonId::Back),
+            MouseControlId::Button(ButtonId::Forward),
+        ],
+        "the depot's DPI and gesture markers can never fire without 0x1b04"
+    );
+}
+
+/// Every control the model draws must be one this device can actually be
+/// bound on, and every label must point at a control that is still drawn —
+/// the synthetic silhouette builds its labels independently of its
+/// hotspots, so a filtered model that forgets its labels leaves leader
+/// lines aimed at nothing.
+#[test]
+fn fallback_model_without_diversion_draws_only_os_hook_controls() {
+    let controls = ModelControls {
+        thumbwheel: true,
+        can_divert: false,
+    };
+    let (_, _, hotspots, labels) =
+        scaled_model(None, 560., 420., controls, LabelDistribution::LeftOnly);
+    assert_eq!(
+        hotspots
+            .iter()
+            .map(|hotspot| hotspot.id)
+            .collect::<Vec<_>>(),
+        vec![
+            MouseControlId::Button(ButtonId::MiddleClick),
+            MouseControlId::Button(ButtonId::Back),
+            MouseControlId::Button(ButtonId::Forward),
+        ]
+    );
+    for label in &labels {
+        assert!(
+            hotspots.iter().any(|hotspot| hotspot.id == label.id),
+            "label {:?} survived its hotspot",
+            label.id
+        );
+    }
+}
+
 #[test]
 fn fallback_model_only_adds_thumbwheel_when_capability_is_measured() {
-    let (_, _, without, _) = scaled_model(None, 560., 420., false, LabelDistribution::LeftOnly);
-    let (_, _, with, _) = scaled_model(None, 560., 420., true, LabelDistribution::LeftOnly);
+    let divertable = |thumbwheel| ModelControls {
+        thumbwheel,
+        can_divert: true,
+    };
+    let (_, _, without, _) = scaled_model(
+        None,
+        560.,
+        420.,
+        divertable(false),
+        LabelDistribution::LeftOnly,
+    );
+    let (_, _, with, _) = scaled_model(
+        None,
+        560.,
+        420.,
+        divertable(true),
+        LabelDistribution::LeftOnly,
+    );
     assert_eq!(
         without
             .iter()

@@ -43,9 +43,9 @@ fn canonical_device_profile_is_valid_synthetic_and_privacy_safe() {
 
     assert_eq!(profile.id, "openlogi-canonical-synthetic-profile");
     assert_eq!(profile.inventories.len(), 2);
-    assert_eq!(profile.inventories[0].paired.len(), 3);
+    assert_eq!(profile.inventories[0].paired.len(), 4);
     assert_eq!(profile.standalone.len(), 1);
-    assert_eq!(profile.settings.len(), 5);
+    assert_eq!(profile.settings.len(), 6);
     assert_eq!(
         profile.inventories[0].receiver.unique_id.as_deref(),
         Some("OL-BOLT-UID-0001")

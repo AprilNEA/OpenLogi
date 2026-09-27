@@ -101,6 +101,18 @@ impl DetailTab {
     /// The Buttons panel renders a mouse-model silhouette with hotspots. It is
     /// only useful for pointer-type devices; keyboards get the Keys panel
     /// instead, even when they expose ReprogControls over HID++.
+    ///
+    /// `buttons` answers whether the Buttons panel appears;
+    /// `Capabilities::can_divert_buttons` answers what goes in it. A G-series
+    /// mouse (`0x8100` OnboardProfiles, no `0x1b04`) has the first without the
+    /// second, so it gets the panel with only the OS-hook-remappable controls
+    /// drawn — see `ModelControls` (#392, #730, #877).
+    ///
+    /// The Keys panel is the exception that needs the *second* question: the
+    /// function-row remapper has no OS-hook path at all, it diverts every key
+    /// over `0x1b04`. A gaming keyboard reports `buttons` from the same gaming
+    /// tables a G502 does, so gating Keys on `buttons` would hand it a panel
+    /// whose capture session cannot start.
     fn tabs_for(record: &DeviceRecord) -> Vec<Self> {
         let caps = record
             .capabilities
@@ -120,8 +132,8 @@ impl DetailTab {
         if caps.haptic_panel || (caps.buttons && can_show_mouse_model) {
             tabs.push(Self::ActionsRing);
         }
-        // Function-row remapper when the keyboard reports remappable buttons.
-        if matches!(record.kind, DeviceKind::Keyboard) && caps.buttons {
+        // Function-row remapper when the keyboard can actually divert its keys.
+        if matches!(record.kind, DeviceKind::Keyboard) && caps.can_divert_buttons() {
             tabs.push(Self::Keys);
         }
         if caps.pointer {
