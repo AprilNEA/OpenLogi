@@ -25,6 +25,10 @@ pub(super) const EVEN_SPACING_END: f32 = 0.96;
 pub(super) struct KeyPoint {
     pub(super) x_frac: f32,
     pub(super) y_frac: f32,
+    /// The HID++ `0x1b04` control the marker names, when the depot says —
+    /// the key's hotkey, pressed without Fn. `None` for synthesized and
+    /// fallback points and for depots whose slots name no control.
+    pub(super) control: Option<u16>,
 }
 
 /// Resolve key marker points as fractions [0..1] of the rendered image, along
@@ -121,6 +125,7 @@ fn legacy_pixel_key_points(asset: &ResolvedAsset) -> Option<Vec<KeyPoint>> {
         .map(|m| KeyPoint {
             x_frac: (m.x / w).clamp(0.0, 1.0),
             y_frac: (m.y / h).clamp(0.0, 1.0),
+            control: None,
         })
         .collect();
     if markers.len() < 2 || markers.len() > FUNCTION_KEYS.len() - 1 {
@@ -139,6 +144,7 @@ fn legacy_pixel_key_points(asset: &ResolvedAsset) -> Option<Vec<KeyPoint>> {
     let esc = KeyPoint {
         x_frac: (first.x_frac - ESC_LEFT_OF_F1_PITCHES * pitch).max(0.0),
         y_frac: first.y_frac,
+        control: None,
     };
 
     let mut out = Vec::with_capacity(markers.len() + 1);
@@ -172,6 +178,7 @@ fn sorted_marker_points(asset: &ResolvedAsset, image_keys: &[&str]) -> Vec<KeyPo
         .map(|asg| KeyPoint {
             x_frac: asg.marker.x / 100.0,
             y_frac: asg.marker.y / 100.0,
+            control: asg.control_id(),
         })
         .collect();
     markers.sort_by(|a, b| {
@@ -186,6 +193,7 @@ fn synthesized_esc_point(first_function_key: KeyPoint) -> KeyPoint {
     KeyPoint {
         x_frac: synthesized_esc_x(first_function_key.x_frac),
         y_frac: calibrated_marker_point(first_function_key).y_frac,
+        control: None,
     }
 }
 
@@ -193,6 +201,7 @@ fn calibrated_marker_point(raw: KeyPoint) -> KeyPoint {
     KeyPoint {
         x_frac: (raw.x_frac + FRONT_MARKER_X_OFFSET_FRAC).clamp(0.0, 1.0),
         y_frac: (raw.y_frac + FRONT_MARKER_Y_OFFSET_FRAC).clamp(0.0, 1.0),
+        control: raw.control,
     }
 }
 
@@ -217,6 +226,7 @@ fn fallback_key_points() -> Vec<KeyPoint> {
         .map(|x_frac| KeyPoint {
             x_frac,
             y_frac: FALLBACK_KEY_Y_FRAC,
+            control: None,
         })
         .collect()
 }

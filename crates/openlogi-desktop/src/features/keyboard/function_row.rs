@@ -6,9 +6,13 @@
 //! right while the keyboard physically makes room. Only one key is selected at a
 //! time.
 //!
-//! F-key bindings are global (`AppState`'s keyboard map), committed via
-//! [`AppState::commit_keyboard_binding`]. The panel lists the same action
-//! catalog the mouse picker uses, plus a Power User section.
+//! Each key has up to two layers, switched above the keyboard: its F-key, bound
+//! globally (`AppState`'s keyboard map, committed via
+//! [`AppState::commit_keyboard_binding`]), and — when the keyboard's image
+//! names the key's HID++ control and the keyboard reports it divertable — its
+//! hotkey, the printed function it sends without Fn, bound per device like a
+//! mouse button. The panel lists the same action catalog the mouse picker
+//! uses, plus a Power User section.
 
 #![expect(
     clippy::needless_pass_by_value,
@@ -30,13 +34,15 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, hsla,
     point, prelude::FluentBuilder as _, px, rgb, svg,
 };
+use gpui_component::button::{Button, ButtonGroup, ButtonVariants as _};
 use gpui_component::{Selectable as _, h_flex, input::InputState, v_flex};
-use openlogi_core::binding::{Action, WorkflowStep};
+use openlogi_core::binding::{Action, ButtonId, WorkflowStep};
 use openlogi_core::config::{FunctionKey, KeyModifiers, KeyTrigger};
 
 use super::editors::{
     PowerUserKind, text_editor_placeholder, text_editor_seed, workflow_editor_seed,
 };
+use super::target::{KeyTarget, hotkey_binding};
 use crate::app::{glow_canvas, keyboard_glow};
 use crate::features::binding_editor::{
     PickFn, action_icon_path, action_rows, compact_panel, divider, editor_scroll_list,
@@ -46,7 +52,7 @@ use crate::features::mouse::geometry::asset_dimensions_for_png;
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
 use crate::state::{AppState, StateEvent};
 use crate::ui::action::localized_action_label;
-use crate::ui::components::MenuRow;
+use crate::ui::components::{MenuRow, PresetChip};
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
 use gpui::ease_in_out;
 use gpui::{Animation, AnimationExt, img};
@@ -89,12 +95,15 @@ const KEY_HOTSPOT_DOT: f32 = 12.;
 
 /// The function-row remapper view.
 pub struct FunctionRowView {
-    /// The single selected key index (0 = Esc), or `None` when nothing is
-    /// selected (no panel shown).
-    selected_key: Option<usize>,
+    /// The single selected key, or `None` when nothing is selected (no panel
+    /// shown).
+    selected: Option<KeySelection>,
     /// The hovered function-row key index, shared by callout bubbles, key hit
     /// zones, and leader lines.
     hovered_key: Option<usize>,
+    /// Which of the keys' layers the row shows and edits. `None` until the
+    /// user picks one: then hotkeys when the keyboard has any.
+    layer: Option<KeyLayer>,
     /// Which power-user editor is showing in the panel, if any.
     active_editor: Option<PowerUserKind>,
     /// Lazily-created [`InputState`] for the text editors.
@@ -110,8 +119,9 @@ impl FunctionRowView {
         let state_obs =
             AppState::repaint_on(cx, |event| matches!(event, StateEvent::BindingsChanged(_)));
         Self {
-            selected_key: None,
+            selected: None,
             hovered_key: None,
+            layer: None,
             active_editor: None,
             text_state: None,
             workflow_draft: Vec::new(),
@@ -120,26 +130,54 @@ impl FunctionRowView {
     }
 
     /// Select a key (or deselect with `None`), opening/closing the panel.
-    pub(crate) fn select_key(&mut self, idx: Option<usize>, cx: &mut Context<Self>) {
+    fn select(&mut self, selection: Option<KeySelection>, cx: &mut Context<Self>) {
         // Changing selection also drops any open editor + its drafts.
-        if self.selected_key != idx {
+        if self.selected != selection {
             self.active_editor = None;
             self.text_state = None;
             self.workflow_draft.clear();
         }
-        self.selected_key = idx;
+        self.selected = selection;
         cx.notify();
     }
 
-    /// Toggle a key selection from a click on either its callout or key hit
-    /// target.
-    pub(crate) fn click_key(&mut self, idx: usize, cx: &mut Context<Self>) {
-        self.select_key(next_selection_after_click(self.selected_key, idx), cx);
+    /// Toggle `clicked` from a click on a key's callout, its hit target on
+    /// the photo, or a hotkey chip: clicking the selected key closes the panel.
+    pub(crate) fn click(&mut self, clicked: KeySelection, cx: &mut Context<Self>) {
+        self.select(next_selection_after_click(self.selected, clicked), cx);
     }
 
-    #[expect(dead_code, reason = "public accessor for the selection state")]
-    pub(crate) fn selected_key(&self) -> Option<usize> {
-        self.selected_key
+    /// Show and edit `layer`, closing any open key: the same slot is a
+    /// different binding on the other layer.
+    pub(crate) fn set_layer(&mut self, layer: KeyLayer, cx: &mut Context<Self>) {
+        if self.layer != Some(layer) {
+            self.layer = Some(layer);
+            self.select(None, cx);
+        }
+    }
+
+    /// The binding the selection edits on the current device.
+    ///
+    /// A stale selection can outlive a device switch to a shorter F-row or a
+    /// keyboard without that hotkey; it is dropped instead of editing a key the
+    /// current device doesn't have.
+    fn resolve_target(&mut self, row: &KeyRow) -> Option<KeyTarget> {
+        let target = match self.selected? {
+            KeySelection::Function(idx) => row
+                .slots
+                .get(idx)
+                .map(|slot| KeyTarget::Function(slot.trigger.clone())),
+            KeySelection::Hotkey(button) => {
+                row.has_hotkey(button).then_some(KeyTarget::Hotkey(button))
+            }
+        };
+        if target.is_none() {
+            self.selected = None;
+            self.active_editor = None;
+            self.text_state = None;
+            self.workflow_draft.clear();
+        }
+        target
     }
 
     pub(crate) fn set_hovered_key(&mut self, idx: Option<usize>, cx: &mut Context<Self>) {
@@ -206,7 +244,6 @@ impl Render for FunctionRowView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = AppState::try_read(cx);
         let asset = state.and_then(|state| state.current_record()?.asset.as_ref());
-        let bindings = state.map(AppState::keyboard_bindings);
         let glow = state.and_then(|state| {
             state
                 .current_record()
@@ -215,45 +252,29 @@ impl Render for FunctionRowView {
 
         let viewport_h = f32::from(window.viewport_size().height);
         let render_size = keyboard_render_size(asset, viewport_h);
-        let points = key_points(asset);
         let image_path = asset.map(|asset| asset.image_path.clone());
-        let slots: Vec<KeySlot> = FUNCTION_KEYS
-            .iter()
-            .zip(points.iter())
-            .enumerate()
-            .map(|(idx, (key, point))| {
-                let trigger = KeyTrigger {
-                    keycode: key.keycode(),
-                    modifiers: KeyModifiers::default(),
-                };
-                let bound = bindings.and_then(|bindings| bindings.get(&trigger));
-                KeySlot {
-                    idx,
-                    label: key.label(),
-                    trigger,
-                    x_frac: point.x_frac,
-                    y_frac: point.y_frac,
-                    binding: binding_label(bound),
-                    binding_icon: bound.map(action_icon_path),
-                }
-            })
-            .collect();
+        let row = state.map_or_else(KeyRow::default, |state| {
+            KeyRow::new(state, &key_points(asset))
+        });
+        let layer = self.layer.unwrap_or_else(|| {
+            if row.has_hotkeys() {
+                KeyLayer::Hotkey
+            } else {
+                KeyLayer::Function
+            }
+        });
 
-        // A stale selection can outlive a device switch to a shorter F-row;
-        // drop it instead of indexing past the new slot list.
-        if self.selected_key.is_some_and(|idx| idx >= slots.len()) {
-            self.selected_key = None;
-            self.active_editor = None;
-            self.text_state = None;
-            self.workflow_draft.clear();
-        }
-        let selected = self.selected_key;
+        let target = self.resolve_target(&row);
+        let selected = self.selected.and_then(|selection| row.slot_of(selection));
+        let selected_strip_key = match self.selected {
+            Some(KeySelection::Hotkey(button)) if selected.is_none() => Some(button),
+            _ => None,
+        };
         let hovered = self.hovered_key;
         let active_editor = self.active_editor;
-        if let (Some(selected_idx), Some(kind)) = (selected, active_editor)
-            && let Some(slot) = slots.get(selected_idx)
-        {
-            let current_action = bindings.and_then(|bindings| bindings.get(&slot.trigger));
+        if let (Some(target), Some(kind)) = (&target, active_editor) {
+            let current_action = AppState::try_read(cx).and_then(|state| target.current(state));
+            let current_action = current_action.as_ref();
             match kind {
                 PowerUserKind::Workflow => {
                     if self.workflow_draft.is_empty() {
@@ -280,19 +301,60 @@ impl Render for FunctionRowView {
             }
         }
         let view = cx.entity();
-        let keyboard =
-            KeyboardPane::new(slots.clone(), image_path, glow, render_size, view.clone())
-                .selected(selected)
-                .hovered(hovered);
-        let panel = selected.map(|selected| self.config_panel(selected, &slots, &view, cx));
+        let show_layers = row.has_hotkeys();
+        let strip = (layer == KeyLayer::Hotkey && !row.unplaced.is_empty()).then(|| HotkeyStrip {
+            slots: row.unplaced.clone(),
+            selected: selected_strip_key,
+            width: render_size.0,
+            view: view.clone(),
+        });
+        let keyboard = KeyboardPane::new(row.slots, image_path, glow, render_size, view.clone())
+            .layer(layer)
+            .selected(selected)
+            .hovered(hovered);
+        let keyboard_column = v_flex()
+            .items_center()
+            .gap_3()
+            .when(show_layers, |column| {
+                column.child(layer_switch(layer, render_size.0, &view))
+            })
+            .child(keyboard)
+            .children(strip);
+        let panel = target.map(|target| self.config_panel(target, &view, cx));
 
         // The whole row animates as one: when a key is selected the right-side
         // panel grows in and the keyboard nudges left to make room.
         v_flex()
             .w_full()
             .items_center()
-            .child(InspectorRow::new(keyboard).panel(panel))
+            .child(InspectorRow::new(keyboard_column).panel(panel))
     }
+}
+
+/// The "Function keys | Hotkeys" switch above a keyboard that has both.
+fn layer_switch(layer: KeyLayer, width: f32, view: &Entity<FunctionRowView>) -> impl IntoElement {
+    let layers = [KeyLayer::Function, KeyLayer::Hotkey];
+    let view = view.clone();
+    h_flex().w(px(width)).child(
+        ButtonGroup::new("key-layer")
+            .outline()
+            .child(
+                Button::new("key-layer-function")
+                    .label(tr!("keyboard.function_keys"))
+                    .selected(layer == KeyLayer::Function),
+            )
+            .child(
+                Button::new("key-layer-hotkey")
+                    .label(tr!("keyboard.hotkeys"))
+                    .selected(layer == KeyLayer::Hotkey),
+            )
+            .on_click(move |indices, _window, cx| {
+                let Some(layer) = indices.first().and_then(|index| layers.get(*index)) else {
+                    return;
+                };
+                view.update(cx, |v, vcx| v.set_layer(*layer, vcx));
+            }),
+    )
 }
 
 /// The keyboard render size: the actual PNG aspect at up to [`KEYBOARD_W`]
@@ -308,7 +370,7 @@ fn keyboard_render_size(asset: Option<&ResolvedAsset>, viewport_h: f32) -> (f32,
     asset_dimensions_for_png(asset, target_h, KEYBOARD_W)
 }
 
-/// One function-row key with its resolved layout + binding.
+/// One function-row key with its resolved layout and both layers' bindings.
 #[derive(Clone)]
 struct KeySlot {
     idx: usize,
@@ -318,17 +380,224 @@ struct KeySlot {
     y_frac: f32,
     binding: gpui::SharedString,
     binding_icon: Option<&'static str>,
+    /// The key's hotkey layer, when it has one on this keyboard.
+    hotkey: Option<SlotHotkey>,
 }
 
-/// The two-pane row: keyboard photo + an optional side panel.
+/// A key's hotkey: the divertable control it sends without Fn, and what it is
+/// bound to on the selected keyboard.
+#[derive(Clone)]
+struct SlotHotkey {
+    button: ButtonId,
+    binding: SharedString,
+    binding_icon: Option<&'static str>,
+}
+
+impl KeySlot {
+    /// What clicking this key selects on `layer`, or `None` when the key has
+    /// nothing on that layer (Esc on the hotkey layer).
+    fn selection(&self, layer: KeyLayer) -> Option<KeySelection> {
+        match layer {
+            KeyLayer::Function => Some(KeySelection::Function(self.idx)),
+            KeyLayer::Hotkey => self
+                .hotkey
+                .as_ref()
+                .map(|hotkey| KeySelection::Hotkey(hotkey.button)),
+        }
+    }
+
+    /// The binding summary and icon shown in the key's callout on `layer`.
+    fn binding_on(&self, layer: KeyLayer) -> (SharedString, Option<&'static str>) {
+        match (layer, &self.hotkey) {
+            (KeyLayer::Function, _) => (self.binding.clone(), self.binding_icon),
+            (KeyLayer::Hotkey, Some(hotkey)) => (hotkey.binding.clone(), hotkey.binding_icon),
+            (KeyLayer::Hotkey, None) => ("—".into(), None),
+        }
+    }
+}
+
+/// Which of a key's two functions the row shows and edits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum KeyLayer {
+    /// The F-key, bound globally across keyboards.
+    Function,
+    /// The printed hotkey, bound per keyboard.
+    Hotkey,
+}
+
+/// What the Keys panel has selected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum KeySelection {
+    /// A function-row key's F-key, by index into the rendered slots (0 = Esc).
+    Function(usize),
+    /// One of the keyboard's divertable hotkeys, on the photo or in the strip.
+    Hotkey(ButtonId),
+}
+
+/// The selected keyboard's keys: the photo's slots with both layers, and the
+/// divertable hotkeys the photo has no marker for.
+#[derive(Default)]
+struct KeyRow {
+    slots: Vec<KeySlot>,
+    unplaced: Vec<HotkeySlot>,
+}
+
+impl KeyRow {
+    fn new(state: &AppState, points: &[key_points::KeyPoint]) -> Self {
+        let divertable = state
+            .current_record()
+            .and_then(|record| record.capabilities)
+            .map(|caps| caps.keyboard_keys)
+            .unwrap_or_default();
+        let keyboard_bindings = state.keyboard_bindings();
+        let slots: Vec<KeySlot> = FUNCTION_KEYS
+            .iter()
+            .zip(points)
+            .enumerate()
+            .map(|(idx, (key, point))| {
+                let trigger = KeyTrigger {
+                    keycode: key.keycode(),
+                    modifiers: KeyModifiers::default(),
+                };
+                let bound = keyboard_bindings.get(&trigger);
+                let hotkey = point
+                    .control
+                    .and_then(ButtonId::for_keyboard_control)
+                    .filter(|button| divertable.contains(*button))
+                    .map(|button| {
+                        let bound = hotkey_binding(state, button);
+                        SlotHotkey {
+                            button,
+                            binding: binding_label(bound),
+                            binding_icon: bound.map(action_icon_path),
+                        }
+                    });
+                KeySlot {
+                    idx,
+                    label: key.label(),
+                    trigger,
+                    x_frac: point.x_frac,
+                    y_frac: point.y_frac,
+                    binding: binding_label(bound),
+                    binding_icon: bound.map(action_icon_path),
+                    hotkey,
+                }
+            })
+            .collect();
+        let unplaced = divertable
+            .iter()
+            .filter(|button| {
+                !slots.iter().any(|slot| {
+                    slot.hotkey
+                        .as_ref()
+                        .is_some_and(|hotkey| hotkey.button == *button)
+                })
+            })
+            .map(|button| HotkeySlot {
+                button,
+                name: tr!(button.translation_key()),
+                binding: binding_label(hotkey_binding(state, button)),
+            })
+            .collect();
+        Self { slots, unplaced }
+    }
+
+    /// Whether the keyboard has any hotkey to bind, placed or not.
+    fn has_hotkeys(&self) -> bool {
+        !self.unplaced.is_empty() || self.slots.iter().any(|slot| slot.hotkey.is_some())
+    }
+
+    fn has_hotkey(&self, button: ButtonId) -> bool {
+        self.unplaced.iter().any(|slot| slot.button == button)
+            || self.slots.iter().any(|slot| {
+                slot.hotkey
+                    .as_ref()
+                    .is_some_and(|hotkey| hotkey.button == button)
+            })
+    }
+
+    /// The photo slot `selection` highlights, if it sits on the photo.
+    fn slot_of(&self, selection: KeySelection) -> Option<usize> {
+        self.slots
+            .iter()
+            .find(|slot| {
+                [KeyLayer::Function, KeyLayer::Hotkey]
+                    .into_iter()
+                    .any(|layer| slot.selection(layer) == Some(selection))
+            })
+            .map(|slot| slot.idx)
+    }
+}
+
+/// A divertable hotkey the keyboard's photo has no marker for.
+#[derive(Clone)]
+struct HotkeySlot {
+    button: ButtonId,
+    name: SharedString,
+    binding: SharedString,
+}
+
+/// The keyboard's hotkeys that have no place on the photo, as selectable
+/// chips under it. Selecting one opens the same config panel as a key.
+#[derive(IntoElement)]
+struct HotkeyStrip {
+    slots: Vec<HotkeySlot>,
+    selected: Option<ButtonId>,
+    width: f32,
+    view: Entity<FunctionRowView>,
+}
+
+impl RenderOnce for HotkeyStrip {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let pal = theme::palette(cx);
+        let view = self.view;
+        v_flex()
+            .w(px(self.width))
+            .gap_1()
+            .child(editor_section(tr!("keyboard.hotkeys").to_string(), pal))
+            .child(
+                h_flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .children(self.slots.into_iter().map(|slot| {
+                        let selected = self.selected == Some(slot.button);
+                        // The catalog position is the key's stable identity.
+                        let id = ButtonId::KEYBOARD_KEYS
+                            .iter()
+                            .position(|key| *key == slot.button)
+                            .unwrap_or_default();
+                        let view = view.clone();
+                        let button = slot.button;
+                        PresetChip::new(("hotkey-chip", id))
+                            .selected(selected)
+                            .child(
+                                Button::new(("hotkey-select", id))
+                                    .compact()
+                                    .ghost()
+                                    .h_full()
+                                    .label(format!("{}: {}", slot.name, slot.binding))
+                                    .selected(selected)
+                                    .on_click(move |_event, _window, cx| {
+                                        view.update(cx, |v, vcx| {
+                                            v.click(KeySelection::Hotkey(button), vcx);
+                                        });
+                                    }),
+                            )
+                    })),
+            )
+    }
+}
+
+/// The two-pane row: keyboard photo (with its hotkey strip) + an optional
+/// side panel.
 #[derive(IntoElement)]
 struct InspectorRow {
-    keyboard: KeyboardPane,
+    keyboard: gpui::Div,
     panel: Option<gpui::Div>,
 }
 
 impl InspectorRow {
-    fn new(keyboard: KeyboardPane) -> Self {
+    fn new(keyboard: gpui::Div) -> Self {
         Self {
             keyboard,
             panel: None,
@@ -371,6 +640,7 @@ struct KeyboardPane {
     image_path: Option<std::path::PathBuf>,
     glow: Option<(Arc<GlowGeometry>, Hsla)>,
     render_size: (f32, f32),
+    layer: KeyLayer,
     selected: Option<usize>,
     hovered: Option<usize>,
     view: Entity<FunctionRowView>,
@@ -389,10 +659,17 @@ impl KeyboardPane {
             image_path,
             glow,
             render_size,
+            layer: KeyLayer::Function,
             selected: None,
             hovered: None,
             view,
         }
+    }
+
+    #[must_use]
+    fn layer(mut self, layer: KeyLayer) -> Self {
+        self.layer = layer;
+        self
     }
 
     #[must_use]
@@ -415,6 +692,7 @@ impl RenderOnce for KeyboardPane {
         let view_clone = self.view;
         let selected = self.selected;
         let hovered = self.hovered;
+        let layer = self.layer;
         let pal = theme::palette(cx);
 
         div()
@@ -450,6 +728,7 @@ impl RenderOnce for KeyboardPane {
                     let highlighted = key_is_highlighted(slot.idx, selected, hovered);
                     KeyCallout {
                         slot,
+                        layer,
                         count,
                         highlighted,
                         img_w,
@@ -467,7 +746,7 @@ impl RenderOnce for KeyboardPane {
                     .h(px(img_h))
                     .children(self.slots.into_iter().map(|slot| {
                     let highlighted = key_is_highlighted(slot.idx, selected, hovered);
-                    key_click_target(slot, highlighted, (img_w, img_h), &view_clone)
+                    key_click_target(slot, layer, highlighted, (img_w, img_h), &view_clone)
                 })),
             )
     }
@@ -477,6 +756,7 @@ impl RenderOnce for KeyboardPane {
 #[derive(IntoElement)]
 struct KeyCallout {
     slot: KeySlot,
+    layer: KeyLayer,
     count: usize,
     highlighted: bool,
     img_w: f32,
@@ -491,9 +771,9 @@ impl RenderOnce for KeyCallout {
         let top = callout_top_px(idx);
         let view_hover = self.view.clone();
         let view_click = self.view;
-        let binding = self.slot.binding;
-        let binding_icon = self.slot.binding_icon;
-        let highlighted = self.highlighted;
+        let (binding, binding_icon) = self.slot.binding_on(self.layer);
+        let selection = self.slot.selection(self.layer);
+        let highlighted = self.highlighted && selection.is_some();
 
         v_flex()
             .id(("key-callout", idx))
@@ -518,14 +798,18 @@ impl RenderOnce for KeyCallout {
             } else {
                 pal.control
             })
-            .cursor_pointer()
-            .hover(move |s| {
-                s.bg(if highlighted {
-                    theme::accent_tint_hover()
-                } else {
-                    pal.control_hover
+            .when_some(selection, |callout, _| {
+                callout.cursor_pointer().hover(move |s| {
+                    s.bg(if highlighted {
+                        theme::accent_tint_hover()
+                    } else {
+                        pal.control_hover
+                    })
                 })
             })
+            // A key with nothing on this layer stays in place, so the row keeps
+            // its shape, but reads as inert.
+            .when(selection.is_none(), |callout| callout.opacity(0.45))
             .child(
                 div()
                     .text_caption()
@@ -568,11 +852,13 @@ impl RenderOnce for KeyCallout {
                     ),
             )
             .on_hover(move |hovered, _window, cx| {
-                let next = (*hovered).then_some(idx);
+                let next = (*hovered && selection.is_some()).then_some(idx);
                 view_hover.update(cx, |v, vcx| v.set_hovered_key(next, vcx));
             })
             .on_click(move |_ev, _window, cx| {
-                view_click.update(cx, |v, vcx| v.click_key(idx, vcx));
+                if let Some(selection) = selection {
+                    view_click.update(cx, |v, vcx| v.click(selection, vcx));
+                }
             })
     }
 }
@@ -581,6 +867,7 @@ impl RenderOnce for KeyCallout {
 /// panel; hover/selection draws only a subtle keycap ring on the photo.
 fn key_click_target(
     slot: KeySlot,
+    layer: KeyLayer,
     highlighted: bool,
     (img_w, img_h): (f32, f32),
     view: &Entity<FunctionRowView>,
@@ -588,6 +875,8 @@ fn key_click_target(
     let idx = slot.idx;
     let x_frac = slot.x_frac;
     let y_frac = slot.y_frac;
+    let selection = slot.selection(layer);
+    let highlighted = highlighted && selection.is_some();
     let view_hover = view.clone();
     let view_click = view.clone();
     let left = key_target_left_px(x_frac, img_w, KEY_TARGET_W);
@@ -603,7 +892,7 @@ fn key_click_target(
         .flex()
         .items_center()
         .justify_center()
-        .cursor_pointer()
+        .when(selection.is_some(), Styled::cursor_pointer)
         .when(highlighted, |el| {
             el.child(
                 div()
@@ -628,11 +917,13 @@ fn key_click_target(
             )
         })
         .on_hover(move |hovered, _window, cx| {
-            let next = (*hovered).then_some(idx);
+            let next = (*hovered && selection.is_some()).then_some(idx);
             view_hover.update(cx, |v, vcx| v.set_hovered_key(next, vcx));
         })
         .on_click(move |_ev, _window, cx| {
-            view_click.update(cx, |v, vcx| v.click_key(idx, vcx));
+            if let Some(selection) = selection {
+                view_click.update(cx, |v, vcx| v.click(selection, vcx));
+            }
         })
 }
 
@@ -697,7 +988,7 @@ fn paint_keyboard_leaders(
     }
 }
 
-fn next_selection_after_click(current: Option<usize>, clicked: usize) -> Option<usize> {
+fn next_selection_after_click<T: Copy + PartialEq>(current: Option<T>, clicked: T) -> Option<T> {
     (current != Some(clicked)).then_some(clicked)
 }
 
@@ -751,20 +1042,17 @@ fn callout_lane_is_lower(idx: usize) -> bool {
 impl FunctionRowView {
     fn config_panel(
         &self,
-        selected_idx: usize,
-        slots: &[KeySlot],
+        target: KeyTarget,
         view: &Entity<Self>,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         let pal = theme::palette(cx);
-        let slot = &slots[selected_idx];
-        let trigger = slot.trigger.clone();
-        let key_name = trigger.to_string();
+        let key_name = target.name();
 
         // If an editor is active, render it instead of the list.
         if let Some(kind) = self.active_editor {
             return super::editors::editor_card(
-                trigger,
+                target,
                 kind,
                 self.text_state.clone(),
                 self.workflow_draft.clone(),
@@ -773,15 +1061,11 @@ impl FunctionRowView {
             );
         }
 
-        let current = AppState::try_read(cx)
-            .and_then(|state| state.keyboard_bindings().get(&trigger).cloned());
+        let current = AppState::try_read(cx).and_then(|state| target.current(state));
 
         let view_for_pick = view.clone();
-        let trigger_for_pick = trigger.clone();
         let on_pick: PickFn = Rc::new(move |action, _window, cx| {
-            AppState::apply(cx, |state| {
-                state.commit_keyboard_binding(trigger_for_pick.clone(), Some(action))
-            });
+            AppState::apply(cx, |state| target.commit(state, action));
             view_for_pick.update(cx, |_, vcx| vcx.notify());
         });
 
