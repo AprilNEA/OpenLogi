@@ -66,6 +66,11 @@ pub struct Origin {
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Assignment {
+    /// Depot-unique slot identity, e.g. `mx-keys-6b35b_c212`. Options+ ends
+    /// a control's slot with `_c` and its HID++ `0x1b04` control ID in
+    /// decimal; see [`Self::control_id`].
+    #[serde(rename = "slotId", default)]
+    pub slot_id: String,
     /// Empty on older keyboard depots whose assignments carry only `slotId`;
     /// `map_slot_name`-style consumers treat unknown names as "no hotspot".
     #[serde(rename = "slotName", default)]
@@ -77,6 +82,20 @@ pub struct Assignment {
     pub marker: Point,
     #[serde(default)]
     pub label: Direction,
+}
+
+impl Assignment {
+    /// The HID++ `0x1b04` control ID this slot marks, from its `_c<decimal>`
+    /// slot-id suffix (`…_c212` is `0x00d4`, Search). `None` for slots that
+    /// name no control, such as the G513's `g513_g1_m1`.
+    #[must_use]
+    pub fn control_id(&self) -> Option<u16> {
+        let (_, suffix) = self.slot_id.rsplit_once("_c")?;
+        if suffix.is_empty() || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        suffix.parse().ok()
+    }
 }
 
 #[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq)]
@@ -144,6 +163,36 @@ mod tests {
         let origin = meta.origin().expect("origin survives");
         assert_eq!((origin.width, origin.height), (3598, 1315));
         assert_eq!(meta.images[0].assignments[0].slot_name, "");
+        assert_eq!(meta.images[0].assignments[0].control_id(), None);
+    }
+
+    /// Options+ keyboard depots end each control's slot id with `_c` and the
+    /// HID++ control ID in decimal.
+    #[test]
+    fn slot_ids_carry_the_control_id() {
+        let json = r#"{
+          "images": [
+            {
+              "key": "device_keys_image",
+              "origin": { "width": 100, "height": 100 },
+              "assignments": [
+                { "slotId": "ergo-k860-6b359_c212", "slotName": "SLOT_NAME_SEARCH",
+                  "marker": { "x": 27.3, "y": 10.4 } },
+                { "slotId": "mx-keys-6b35b_c10", "slotName": "SLOT_NAME_CALCULATOR",
+                  "marker": { "x": 80, "y": 5 } },
+                { "slotId": "mx-keys-6b35b_cabc", "slotName": "SLOT_NAME_OTHER",
+                  "marker": { "x": 90, "y": 5 } }
+              ]
+            }
+          ]
+        }"#;
+        let meta: Metadata = serde_json::from_str(json).expect("keys depot parses");
+        let ids: Vec<_> = meta.images[0]
+            .assignments
+            .iter()
+            .map(super::Assignment::control_id)
+            .collect();
+        assert_eq!(ids, [Some(0x00d4), Some(0x000a), None]);
     }
 
     /// Camera depots (StreamCam) list settings-slot assignments with no
