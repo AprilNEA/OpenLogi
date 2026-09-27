@@ -12,6 +12,7 @@ use crate::{
     channel::HidppChannel,
     feature::{
         CreatableFeature,
+        adc_measurement::AdcMeasurementFeature,
         adjustable_dpi::AdjustableDpiFeature,
         backlight::BacklightFeature,
         battery_status::BatteryStatusFeature,
@@ -201,7 +202,7 @@ static KNOWN_FEATURES: LazyLock<HashMap<u16, KnownFeature>> = LazyLock::new(|| {
     0x1d4b "WirelessDeviceStatus" => WirelessDeviceStatusFeature,
     0x1df0 "RemainingPairings",
     0x1f1f "FirmwareProperties",
-    0x1f20 "AdcMeasurement",
+    0x1f20 "AdcMeasurement" => AdcMeasurementFeature,
     0x2001 "SwapLeftRightButton",
     0x2005 "ButtonSwapCancel",
     0x2006 "PointerAxesOrientation",
