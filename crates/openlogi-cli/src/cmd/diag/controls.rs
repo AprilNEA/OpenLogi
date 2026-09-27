@@ -5,6 +5,7 @@ use std::fmt;
 use anyhow::{Context, Result};
 use clap::Args;
 use openlogi_hid::ReprogControlEntry;
+use openlogi_hid::reprog_controls::CidFlags;
 
 use crate::cmd::diag::select_device;
 
@@ -31,15 +32,16 @@ pub async fn run(args: ControlsArgs) -> Result<()> {
     }
 
     println!(
-        "  {:>6}  {:>6}  {:>6}  capabilities",
-        "cid", "task", "flags"
+        "  {:>6}  {:>6}  {:>6}  {:>3}  capabilities",
+        "cid", "task", "flags", "pos"
     );
     for control in controls {
         println!(
-            "  0x{:04x}  0x{:04x}  0x{:04x}  {}",
+            "  0x{:04x}  0x{:04x}  0x{:04x}  {:>3}  {}",
             control.cid,
             control.task_id,
             control.flags.raw(),
+            control.position,
             ControlCapabilitiesDisplay(control)
         );
     }
@@ -53,6 +55,9 @@ impl fmt::Display for ControlCapabilitiesDisplay {
         let flags = self.0.flags;
         let mut separator = "";
         for (enabled, name) in [
+            (flags.contains(CidFlags::FUNCTION_KEY), "f-key"),
+            (flags.contains(CidFlags::HOTKEY), "hotkey"),
+            (flags.contains(CidFlags::FN_TOGGLE), "fn-sensitive"),
             (flags.is_divertable(), "divertable"),
             (flags.supports_raw_xy(), "raw-xy"),
             (flags.supports_force_raw_xy(), "force-raw-xy"),
@@ -81,6 +86,7 @@ mod tests {
             cid: 0,
             task_id: 0,
             flags: openlogi_hid::reprog_controls::CidFlags::default(),
+            position: 0,
         };
 
         assert_eq!(ControlCapabilitiesDisplay(entry).to_string(), "-");
@@ -94,6 +100,7 @@ mod tests {
             flags: openlogi_hid::reprog_controls::CidFlags::DIVERTABLE
                 | openlogi_hid::reprog_controls::CidFlags::FORCE_RAW_XY
                 | openlogi_hid::reprog_controls::CidFlags::ANALYTICS_KEY_EVENTS,
+            position: 0,
         };
 
         assert_eq!(
