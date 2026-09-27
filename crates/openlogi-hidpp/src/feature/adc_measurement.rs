@@ -21,7 +21,10 @@
 use num_enum::TryFromPrimitive;
 use openlogi_hidpp_derive::Feature;
 
-use crate::{feature::FeatureEndpoint, protocol::v20::Hidpp20Error};
+use crate::{
+    feature::FeatureEndpoint,
+    protocol::v20::{ErrorType, Hidpp20Error},
+};
 
 /// Implements the `AdcMeasurement` / `0x1F20` feature.
 #[derive(Feature)]
@@ -34,9 +37,18 @@ pub struct AdcMeasurementFeature {
 impl AdcMeasurementFeature {
     /// Reads the measured battery voltage and link/charging state (function
     /// `0`, `getAdcMeasurement`).
+    ///
+    /// A `LogitechInternal` (`0x05`) error answer is [`AdcMeasurement::Unlinked`]:
+    /// a G733 dongle whose headset is switched off answers that instead of a
+    /// clear link bit (captured from hardware), and the kernel reads a protocol
+    /// error from this call as the device being offline. Other errors stay
+    /// errors, so a `Busy` answer does not pass for a switched-off device.
     pub async fn get_adc_measurement(&self) -> Result<AdcMeasurement, Hidpp20Error> {
-        let payload = self.endpoint.call(0, [0; 3]).await?.extend_payload();
-        AdcMeasurement::from_wire(&payload)
+        match self.endpoint.call(0, [0; 3]).await {
+            Ok(response) => AdcMeasurement::from_wire(&response.extend_payload()),
+            Err(Hidpp20Error::Feature(ErrorType::LogitechInternal)) => Ok(AdcMeasurement::Unlinked),
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -45,9 +57,9 @@ impl AdcMeasurementFeature {
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 pub enum AdcMeasurement {
-    /// Flags bit `0` clear: the device reports itself inactive, so there is
-    /// no reading. (A G733 dongle whose headset is off answers a HID++ error
-    /// `0x05` instead.)
+    /// The battery-powered end is not linked — flags bit `0` clear, or the
+    /// `LogitechInternal` error a G733 dongle answers while its headset is
+    /// off — so there is no reading.
     Unlinked,
     /// A live battery reading.
     Linked {

@@ -5,7 +5,7 @@ use hidpp::channel::HidppChannel;
 use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus};
 
 use super::events::{EventFeatureIndices, EventSubscriptionHandle};
-use super::features::{BatteryProbe, ProbedFeatures, probe_features, read_battery};
+use super::features::{BatteryProbe, BatteryRead, ProbedFeatures, probe_features, read_battery};
 use crate::backend::NodeId;
 
 /// How long a device's probe is reused before a fresh read.
@@ -213,16 +213,27 @@ pub(super) async fn probe_or_reuse(
             // Cache hit: the immutable data is reused as-is, but the battery is
             // volatile (#153) — re-read just it through the memoized feature
             // index and fold the reading back into the cache. A failed read
-            // (asleep, mid-host-switch) keeps the last-known value.
+            // (asleep, mid-host-switch) keeps the last-known value; an
+            // unlinked answer clears it.
             if online
                 && let Some(probe) = c.battery
                 && let Some(key) = id.clone()
-                && let Some(battery) = read_battery(channel, index, probe).await
             {
-                let battery =
-                    hold_percentage_while_charging(battery, c.probe.battery.as_ref(), probe);
+                let (battery, unlinked) = match read_battery(channel, index, probe).await {
+                    BatteryRead::Reading(battery) => (
+                        Some(hold_percentage_while_charging(
+                            battery,
+                            c.probe.battery.as_ref(),
+                            probe,
+                        )),
+                        false,
+                    ),
+                    BatteryRead::Unlinked => (None, true),
+                    BatteryRead::Unavailable => return (c.probe.clone(), seen(id)),
+                };
                 let mut entry = c.clone();
-                entry.probe.battery = Some(battery);
+                entry.probe.battery = battery;
+                entry.probe.unlinked = unlinked;
                 return (entry.probe.clone(), CacheOutcome::Update(key, entry));
             }
             (c.probe.clone(), seen(id))

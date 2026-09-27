@@ -8,8 +8,8 @@ use super::Enumerator;
 use super::cache::{CACHE_MISS_GRACE, CacheKey};
 use super::events::{HidppEventSource, observed_event_channel};
 use super::replay_test_support::{
-    BOLT_CHANNEL, BOLT_UID, BoltSlot, DIRECT_CHANNEL, bolt_fixture, connection_notification,
-    direct_fixture, malformed_dpi_fixture, short,
+    BOLT_CHANNEL, BOLT_UID, BoltSlot, DIRECT_CHANNEL, adc_error, adc_reading, bolt_fixture,
+    connection_notification, direct_fixture, headset_fixture, malformed_dpi_fixture, short,
 };
 use crate::replay::{ChannelConnection, NodePresence, OpenOutcome, ReplayBackend, ReplayTopology};
 use crate::{ChannelRegistry, get_dpi};
@@ -398,4 +398,78 @@ async fn malformed_response_is_released_only_after_the_request_barrier() {
     backend
         .require_complete()
         .expect("malformed response cassette consumed");
+}
+
+/// Enumerate once and return the headset's `(online, battery percentage)`.
+async fn headset_state(enumerator: &mut Enumerator) -> (bool, Option<u8>) {
+    let inventories = enumerator
+        .enumerate()
+        .await
+        .expect("headset probe succeeds");
+    let headset = inventories
+        .iter()
+        .find(|inventory| inventory.receiver.product_id == 0x0ab5)
+        .unwrap_or_else(|| panic!("headset listed: {inventories:#?}"));
+    let device = &headset.paired[0];
+    (
+        device.online,
+        device.battery.as_ref().map(|battery| battery.percentage),
+    )
+}
+
+#[tokio::test]
+async fn headset_dongle_goes_offline_while_its_headset_is_off() {
+    // On, switched off (the G733 dongle's captured 0x05 answer), on again.
+    let fixture = headset_fixture(&[
+        adc_reading(3890, 0x01),
+        adc_error(0x05),
+        adc_reading(3885, 0x01),
+    ]);
+    let backend = Arc::new(
+        ReplayBackend::new(
+            ReplayTopology {
+                nodes: vec![fixture.node],
+                channels: vec![fixture.channel],
+            },
+            vec![fixture.cassette],
+        )
+        .expect("valid headset replay"),
+    );
+    let mut enumerator = Enumerator::with_backend(backend.clone());
+    enumerator.timeouts.arrival_drain = Duration::ZERO;
+
+    assert_eq!(headset_state(&mut enumerator).await, (true, Some(65)));
+    assert_eq!(
+        headset_state(&mut enumerator).await,
+        (false, None),
+        "an unlinked headset is offline and its last reading is cleared"
+    );
+    assert_eq!(headset_state(&mut enumerator).await, (true, Some(64)));
+    backend
+        .require_complete()
+        .expect("every scripted headset exchange consumed");
+}
+
+#[tokio::test]
+async fn headset_first_seen_while_off_is_listed_offline() {
+    // No lighting or pointer feature: only the unlinked answer proves a
+    // device, so the node must not be rejected as a receiver's side interface.
+    let fixture = headset_fixture(&[adc_error(0x05)]);
+    let backend = Arc::new(
+        ReplayBackend::new(
+            ReplayTopology {
+                nodes: vec![fixture.node],
+                channels: vec![fixture.channel],
+            },
+            vec![fixture.cassette],
+        )
+        .expect("valid headset replay"),
+    );
+    let mut enumerator = Enumerator::with_backend(backend.clone());
+    enumerator.timeouts.arrival_drain = Duration::ZERO;
+
+    assert_eq!(headset_state(&mut enumerator).await, (false, None));
+    backend
+        .require_complete()
+        .expect("every scripted headset exchange consumed");
 }
