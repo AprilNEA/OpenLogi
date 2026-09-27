@@ -1,9 +1,11 @@
 //! HID++ keyboard Fn-lock writes — fn inversion `0x40a3` (multi-host), with
 //! the single-host `0x40a2` as fallback.
 //!
-//! "Fn-lock on" means the F-row sends plain F1–F12 without holding Fn
-//! ([`FnInversionState::On`]); off restores the printed media/shortcut
-//! functions, with Fn+key producing the F-keys. Multi-host keyboards store the
+//! "Fn-lock on" means the F-row sends plain F1–F12 without holding Fn; off
+//! restores the printed media/shortcut functions, with Fn+key producing the
+//! F-keys. The firmware's *inversion* bit is the opposite: it inverts the F-row
+//! away from plain F-keys, so Fn-lock on is [`FnInversionState::Off`] (see
+//! [`inversion_for_fn_lock`]). Multi-host keyboards store the
 //! state per Easy-Switch slot, so the `0x40a3` path addresses
 //! [`HostIndex::Current`] — the slot the keyboard is talking to right now.
 
@@ -105,13 +107,34 @@ pub(super) async fn set_fn_lock_on_channel(
         .await
         .map_err(|_| WriteError::DeviceUnreachable { index })?;
     let fn_inversion = FnInversion::open(&mut device).await?;
-    fn_inversion.set(FnInversionState::from(on)).await?;
+    fn_inversion.set(inversion_for_fn_lock(on)).await?;
     debug!(index, on, "fn-lock written");
     Ok(())
+}
+
+/// The fn-inversion state that puts the F-row in `fn_lock` mode.
+///
+/// Inversion on makes the keys send their printed functions, with Fn+key for
+/// F1–F12; inversion off makes them send F1–F12. Verified on an ERGO K860
+/// (`0x40a3`), and it matches Solaar's "Swap Fx function" setting, whose
+/// "set" (byte `0x01`) means special functions by default.
+fn inversion_for_fn_lock(fn_lock: bool) -> FnInversionState {
+    FnInversionState::from(!fn_lock)
 }
 
 /// Write keyboard Fn-lock on an already-open [`SharedChannel`] — the fast
 /// path that skips enumeration and channel setup.
 pub async fn set_fn_lock_on(shared: &SharedChannel, on: bool) -> Result<(), WriteError> {
     set_fn_lock_on_channel(shared.channel(), shared.device_index(), on).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fn_lock_clears_the_inversion_bit() {
+        assert_eq!(inversion_for_fn_lock(true), FnInversionState::Off);
+        assert_eq!(inversion_for_fn_lock(false), FnInversionState::On);
+    }
 }
