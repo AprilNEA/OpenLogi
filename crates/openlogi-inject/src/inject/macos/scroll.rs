@@ -1,7 +1,9 @@
 //! Synthetic scroll on macOS: the one-tick scroll actions, the quantised wheel, and the continuous smooth-scroll phases.
 
 use crate::inject::{QuantizedScroll, ScrollQuantizer, SmoothScrollPhase};
-use core_graphics::event::{CGEvent, CGEventTapLocation, EventField, ScrollEventUnit};
+use core_graphics::event::{
+    CGEvent, CGEventFlags, CGEventTapLocation, EventField, ScrollEventUnit,
+};
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use openlogi_core::scroll::ScrollDelta;
 use std::sync::{LazyLock, Mutex};
@@ -11,6 +13,10 @@ use super::tag_synthetic;
 static LINE_SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
     LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
 static PIXEL_SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
+    LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
+static ZOOM_LINE_SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
+    LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
+static ZOOM_PIXEL_SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
     LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
 static SMOOTH_SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
     LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
@@ -23,6 +29,16 @@ const MOMENTUM_PHASE: u32 = 123; // kCGScrollWheelEventMomentumPhase
 /// direction (-1/0/1) scaled by the fixed "one tick" pixel magnitude the
 /// four `Scroll*`/`HorizontalScroll*` actions have always used.
 pub(super) fn dispatch_scroll(dx: i8, dy: i8) {
+    post_unit_scroll(dx, dy, false);
+}
+
+/// One zoom tick: the same magnitude as [`dispatch_scroll`], with Command set
+/// so apps see native zoom rather than a chord of Cmd+= / Cmd+-.
+pub(super) fn dispatch_zoom(dy: i8) {
+    post_unit_scroll(0, dy, true);
+}
+
+fn post_unit_scroll(dx: i8, dy: i8, zoom: bool) {
     let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
         tracing::warn!("CGEventSource::new failed for scroll");
         return;
@@ -33,14 +49,29 @@ pub(super) fn dispatch_scroll(dx: i8, dy: i8) {
         tracing::warn!("CGEvent::new_scroll_event failed");
         return;
     };
+    apply_zoom_flag(&ev, zoom);
     tag_synthetic(&ev);
     ev.post(CGEventTapLocation::HID);
 }
 
 pub(in crate::inject) fn post_scroll(delta: ScrollDelta) {
-    let (quantizer, unit) = match delta {
-        ScrollDelta::Pixels { .. } => (&PIXEL_SCROLL_QUANTIZER, ScrollEventUnit::PIXEL),
-        ScrollDelta::WheelTicks { .. } => (&LINE_SCROLL_QUANTIZER, ScrollEventUnit::LINE),
+    post_quantized_scroll(delta, false);
+}
+
+pub(in crate::inject) fn post_zoom_scroll(delta: ScrollDelta) {
+    post_quantized_scroll(delta, true);
+}
+
+fn post_quantized_scroll(delta: ScrollDelta, zoom: bool) {
+    let (quantizer, unit) = match (zoom, delta) {
+        (false, ScrollDelta::Pixels { .. }) => (&PIXEL_SCROLL_QUANTIZER, ScrollEventUnit::PIXEL),
+        (false, ScrollDelta::WheelTicks { .. }) => (&LINE_SCROLL_QUANTIZER, ScrollEventUnit::LINE),
+        (true, ScrollDelta::Pixels { .. }) => {
+            (&ZOOM_PIXEL_SCROLL_QUANTIZER, ScrollEventUnit::PIXEL)
+        }
+        (true, ScrollDelta::WheelTicks { .. }) => {
+            (&ZOOM_LINE_SCROLL_QUANTIZER, ScrollEventUnit::LINE)
+        }
     };
     let Ok(mut quantizer) = quantizer.lock() else {
         tracing::warn!("macOS scroll quantizer mutex poisoned");
@@ -63,8 +94,15 @@ pub(in crate::inject) fn post_scroll(delta: ScrollDelta) {
     if unit == ScrollEventUnit::PIXEL {
         set_continuous_scroll_fields(&ev, delta);
     }
+    apply_zoom_flag(&ev, zoom);
     tag_synthetic(&ev);
     ev.post(CGEventTapLocation::HID);
+}
+
+fn apply_zoom_flag(event: &CGEvent, zoom: bool) {
+    if zoom {
+        event.set_flags(CGEventFlags::CGEventFlagCommand);
+    }
 }
 
 pub(in crate::inject) fn post_smooth_scroll(delta: ScrollDelta, phase: SmoothScrollPhase) {

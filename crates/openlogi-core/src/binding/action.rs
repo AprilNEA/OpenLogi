@@ -187,6 +187,12 @@ pub enum Action {
     /// cancellation and shutdown. Dispatchers without a release context must
     /// degrade this action to a balanced tap rather than leave keys held.
     HoldShortcut(KeyCombo),
+    /// Zoom the focused view in. Thumb-wheel bindings emit this as continuous
+    /// platform zoom-scroll (Command+scroll on macOS, Control+scroll on
+    /// Windows and Linux); a button or key fires one tick.
+    ZoomIn,
+    /// Zoom the focused view out. Counterpart to [`Action::ZoomIn`].
+    ZoomOut,
 }
 
 /// One step in a [`Action::Workflow`]. A workflow is a `Vec<WorkflowStep>`
@@ -285,6 +291,8 @@ macro_rules! for_each_unit_action {
             ScrollDown "Scroll Down" "actions.scroll_down" Scroll ArrowDown,
             HorizontalScrollLeft "Scroll Left" "actions.scroll_left" Scroll ScrollLeft,
             HorizontalScrollRight "Scroll Right" "actions.scroll_right" Scroll ScrollRight,
+            ZoomIn "Zoom In" "actions.zoom_in" Scroll ZoomIn,
+            ZoomOut "Zoom Out" "actions.zoom_out" Scroll ZoomOut,
         }
     };
 }

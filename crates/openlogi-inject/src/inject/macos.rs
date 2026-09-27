@@ -56,8 +56,8 @@ mod tests;
 use app_services::symbol as app_services_symbol;
 pub(super) use browser::ax_browser_navigate;
 use dock::{app_expose, launchpad, mission_control, show_desktop};
-use scroll::dispatch_scroll;
-pub(super) use scroll::{post_scroll, post_smooth_scroll};
+use scroll::{dispatch_scroll, dispatch_zoom};
+pub(super) use scroll::{post_scroll, post_smooth_scroll, post_zoom_scroll};
 use symbolic_hotkey::{next_desktop, previous_desktop};
 
 // NX_KEYTYPE_* constants from <IOKit/hidsystem/ev_keymap.h>.
@@ -81,6 +81,7 @@ pub(super) fn execute(action: &Action) {
         Effect::Shortcut(shortcut) => press_combo(&combo(shortcut)),
         Effect::Key(combo) | Effect::HeldKey(combo) => press_combo(combo),
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
+        Effect::Zoom { dy } => dispatch_zoom(dy),
         // Media/volume controls are NX system-defined keys, not ordinary
         // keyboard virtual-key events. Posting kVK_Volume* through
         // CGEventCreateKeyboardEvent is ignored by macOS' volume handler.

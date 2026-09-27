@@ -138,6 +138,32 @@ impl HeldOutput {
         }
     }
 
+    /// Add a transient owner. Returns true when this is the first owner
+    /// (the caller must emit the down edge).
+    #[cfg(any(test, target_os = "linux", target_os = "windows"))]
+    fn acquire(&mut self, key: HeldKey) -> bool {
+        let first = !self.owners.contains_key(&key);
+        *self.owners.entry(key).or_default() += 1;
+        first
+    }
+
+    /// Drop a transient owner. Returns true when this was the last owner
+    /// (the caller must emit the up edge).
+    #[cfg(any(test, target_os = "linux", target_os = "windows"))]
+    fn release(&mut self, key: HeldKey) -> bool {
+        match self.owners.get_mut(&key) {
+            Some(owners) if *owners > 1 => {
+                *owners -= 1;
+                false
+            }
+            Some(_) => {
+                self.owners.remove(&key);
+                true
+            }
+            None => false,
+        }
+    }
+
     #[cfg(target_os = "macos")]
     fn modifiers(&self) -> HeldModifiers {
         let mut modifiers = HeldModifiers::default();
@@ -331,6 +357,49 @@ pub fn press_hold(combo: &KeyCombo) -> HeldChord {
     held
 }
 
+/// Borrow `key` for the duration of `body`, sharing ownership with any
+/// active [`HeldChord`]. Linux and Windows zoom frames need this so they
+/// do not emit a Ctrl-up that would tear down a still-held shortcut.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn with_held_key(key: HeldKey, body: impl FnOnce()) {
+    // Construct the owner before posting the edge so unwinding from the
+    // platform backend still balances any ownership it completed.
+    let _guard = TransientHeldKey { key };
+    apply_held_key(key, KeyPhase::Down, HeldOutput::acquire);
+    body();
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+struct TransientHeldKey {
+    key: HeldKey,
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+impl Drop for TransientHeldKey {
+    fn drop(&mut self) {
+        apply_held_key(self.key, KeyPhase::Up, HeldOutput::release);
+    }
+}
+
+/// Apply an ownership change and its matching key edge under the same
+/// `HELD_OUTPUT` lock that [`hold_transition`] uses, so a button-worker
+/// chord cannot observe the map without the physical modifier.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn apply_held_key(key: HeldKey, phase: KeyPhase, change: fn(&mut HeldOutput, HeldKey) -> bool) {
+    let mut output = HELD_OUTPUT.lock().unwrap_or_else(PoisonError::into_inner);
+    if change(&mut output, key) {
+        emit_held_key(key, phase);
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn emit_held_key(key: HeldKey, phase: KeyPhase) {
+    #[cfg(target_os = "linux")]
+    linux::hold_keys(&[key], phase);
+    #[cfg(target_os = "windows")]
+    windows::hold_keys(&[key], phase);
+}
+
 fn hold_transition(released: Option<&KeyCombo>, pressed: Option<&KeyCombo>) {
     cfg_select! {
         target_os = "macos" => {
@@ -441,6 +510,32 @@ pub fn post_scroll(delta: ScrollDelta) {
         }
         target_os = "windows" => {
             windows::post_scroll(delta);
+        }
+        _ => {
+            let _ = delta;
+        }
+    }
+}
+
+/// Synthesise a typed scroll distance with the platform zoom modifier held
+/// (Command on macOS, Control on Windows and Linux).
+///
+/// Fractional wheel ticks are retained the same way as [`post_scroll`]. This
+/// path does not go through smooth-scroll phases: apps treat Command/Control
+/// plus a pixel-phase wheel as ordinary scroll more often than as zoom.
+pub fn post_zoom_scroll(delta: ScrollDelta) {
+    if !delta.is_finite() || (delta.x() == 0.0 && delta.y() == 0.0) {
+        return;
+    }
+    cfg_select! {
+        target_os = "macos" => {
+            macos::post_zoom_scroll(delta);
+        }
+        target_os = "linux" => {
+            linux::post_zoom_scroll(delta);
+        }
+        target_os = "windows" => {
+            windows::post_zoom_scroll(delta);
         }
         _ => {
             let _ = delta;
@@ -704,6 +799,48 @@ mod tests {
             output.transition(Some(&command_b), None),
             HoldTransition {
                 up: vec![HeldKey::Command, HeldKey::Key(command_b.key())],
+                down: vec![],
+            }
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn transient_control_does_not_release_a_held_chord() {
+        let control_a = combo("Ctrl+A");
+        let mut output = HeldOutput::default();
+
+        output.transition(None, Some(&control_a));
+        assert!(!output.acquire(HeldKey::Control));
+        assert!(!output.release(HeldKey::Control));
+        assert_eq!(
+            output.transition(Some(&control_a), None),
+            HoldTransition {
+                up: vec![HeldKey::Control, HeldKey::Key(control_a.key())],
+                down: vec![],
+            }
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn held_chord_started_during_transient_control_keeps_it() {
+        let control_a = combo("Ctrl+A");
+        let mut output = HeldOutput::default();
+
+        assert!(output.acquire(HeldKey::Control));
+        assert_eq!(
+            output.transition(None, Some(&control_a)),
+            HoldTransition {
+                up: vec![],
+                down: vec![HeldKey::Key(control_a.key())],
+            }
+        );
+        assert!(!output.release(HeldKey::Control));
+        assert_eq!(
+            output.transition(Some(&control_a), None),
+            HoldTransition {
+                up: vec![HeldKey::Control, HeldKey::Key(control_a.key())],
                 down: vec![],
             }
         );

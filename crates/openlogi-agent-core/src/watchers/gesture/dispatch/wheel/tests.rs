@@ -139,6 +139,20 @@ fn all_scroll_bindings_emit_on_their_configured_axis_and_sign() {
 }
 
 #[test]
+fn zoom_bindings_emit_continuous_vertical_zoom() {
+    let now = Instant::now();
+    let scale = unscaled(ThumbwheelSensitivity::DEFAULT);
+    assert_eq!(
+        WheelDirection::default().advance(&Action::ZoomIn, 1, scale, now),
+        WheelOutput::Zoom(ScrollDelta::wheel_ticks(0.0, 1.0))
+    );
+    assert_eq!(
+        WheelDirection::default().advance(&Action::ZoomOut, 1, scale, now),
+        WheelOutput::Zoom(ScrollDelta::wheel_ticks(0.0, -1.0))
+    );
+}
+
+#[test]
 fn scroll_scale_changes_apply_only_to_the_current_delta() {
     let mut direction = WheelDirection::default();
     let now = Instant::now();
