@@ -271,6 +271,26 @@ impl Request for ReadSmartShift {
     }
 }
 
+/// Read a keyboard's Fn lock; the answer goes back over `reply`.
+pub struct ReadFnLock {
+    pub route: DeviceRoute,
+    pub reply: oneshot::Sender<Result<bool, WriteError>>,
+}
+
+impl Request for ReadFnLock {
+    type Answer = Result<bool, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .read_fn_lock(context::current(), self.route.clone())
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
+        let _ = self.reply.send(or_unavailable(outcome));
+    }
+}
+
 /// Have the agent re-read `config.toml`.
 ///
 /// The loop holds this one until a connection exists and never answers it
@@ -449,6 +469,7 @@ commands! {
     SetSmartShift,
     ReadDpi,
     ReadSmartShift,
+    ReadFnLock,
     ReloadConfig,
     RequestAccessibilityPrompt,
     StartPairing,

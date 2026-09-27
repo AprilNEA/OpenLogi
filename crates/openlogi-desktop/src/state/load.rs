@@ -32,3 +32,8 @@ pub type DpiLoad = Load<Arc<DpiInfo>>;
 /// stores wheel mode / threshold / torque in its own non-volatile memory, so the
 /// GUI only ever reads and writes the device.
 pub type SmartShiftLoad = Load<Arc<SmartShiftStatus>>;
+
+/// Per-keyboard Fn-lock (`0x40a3` / `0x40a2`) load state: `true` when the
+/// F-row sends F1–F12 without Fn. See [`Load`]. Read from the device rather
+/// than config, because Fn+Esc on the keyboard changes it too.
+pub type FnLockLoad = Load<Arc<bool>>;

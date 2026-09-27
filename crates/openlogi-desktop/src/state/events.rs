@@ -37,6 +37,8 @@ pub(crate) enum StateEvent {
     DpiChanged(DeviceKey),
     /// SmartShift data or write status changed.
     SmartShiftChanged(DeviceKey),
+    /// A keyboard's Fn-lock state changed or finished reading.
+    FnLockChanged(DeviceKey),
     /// Device or standalone-light settings changed.
     LightingChanged(DeviceKey),
     /// Camera settings or activity changed.
@@ -68,6 +70,7 @@ impl StateEvent {
             | Self::BindingsChanged(key)
             | Self::DpiChanged(key)
             | Self::SmartShiftChanged(key)
+            | Self::FnLockChanged(key)
             | Self::LightingChanged(key)
             | Self::DeviceConfigChanged(key) => Some(key),
             Self::AgentChanged
@@ -208,6 +211,7 @@ impl AppState {
             | StateEvent::BindingsChanged(_)
             | StateEvent::DpiChanged(_)
             | StateEvent::SmartShiftChanged(_)
+            | StateEvent::FnLockChanged(_)
             | StateEvent::LightingChanged(_)
             | StateEvent::CameraChanged
             | StateEvent::CameraPermissionChanged
