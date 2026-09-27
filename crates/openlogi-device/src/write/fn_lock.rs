@@ -1,4 +1,4 @@
-//! HID++ keyboard Fn-lock writes — fn inversion `0x40a3` (multi-host), with
+//! HID++ keyboard Fn-lock reads and writes — fn inversion `0x40a3` (multi-host), with
 //! the single-host `0x40a2` as fallback.
 //!
 //! "Fn-lock on" means the F-row sends plain F1–F12 without holding Fn; off
@@ -64,6 +64,22 @@ impl FnInversion {
         }
     }
 
+    /// Read the inversion state (for the current host on `0x40a3`).
+    async fn get(&self) -> Result<FnInversionState, WriteError> {
+        match self {
+            Self::MultiHost(feature) => feature
+                .get_global_fn_inversion(HostIndex::Current)
+                .await
+                .map(|info| info.state)
+                .map_err(|e| classify_hidpp_error(e, HidppOperation::ReadFnLock, 0x40a3)),
+            Self::SingleHost(feature) => feature
+                .get_global_fn_inversion()
+                .await
+                .map(|global| global.state)
+                .map_err(|e| classify_hidpp_error(e, HidppOperation::ReadFnLock, 0x40a2)),
+        }
+    }
+
     /// Write the inversion state (for the current host on `0x40a3`).
     async fn set(&self, state: FnInversionState) -> Result<(), WriteError> {
         match self {
@@ -82,6 +98,36 @@ impl FnInversion {
         }
         Ok(())
     }
+}
+
+/// Read the keyboard's Fn-lock state: `true` = F-row sends F1–F12 directly.
+pub async fn get_fn_lock(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+) -> Result<bool, WriteError> {
+    let index = route.device_index();
+    with_route(backend, route, move |channel| async move {
+        get_fn_lock_on_channel(&channel, index).await
+    })
+    .await
+}
+
+/// The Fn-lock read itself, on an already-open channel at HID++ `index`.
+async fn get_fn_lock_on_channel(
+    channel: &Arc<HidppChannel>,
+    index: u8,
+) -> Result<bool, WriteError> {
+    let mut device = Device::new(Arc::clone(channel), index)
+        .await
+        .map_err(|_| WriteError::DeviceUnreachable { index })?;
+    let state = FnInversion::open(&mut device).await?.get().await?;
+    debug!(index, ?state, "fn-lock read");
+    Ok(state == inversion_for_fn_lock(true))
+}
+
+/// Read keyboard Fn-lock on an already-open [`SharedChannel`].
+pub async fn get_fn_lock_on(shared: &SharedChannel) -> Result<bool, WriteError> {
+    get_fn_lock_on_channel(shared.channel(), shared.device_index()).await
 }
 
 /// Write the keyboard's Fn-lock state: `true` = F-row sends F1–F12 directly.

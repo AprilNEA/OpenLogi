@@ -829,6 +829,16 @@ impl Agent for MockAgent {
         profile_value(&state.settings_for(&route)?.backlight, &route, 0x1982).copied()
     }
 
+    async fn read_fn_lock(self, _: Context, route: DeviceRoute) -> Result<bool, WriteError> {
+        // Fixture profiles don't record Fn lock, so every scripted keyboard
+        // reads as lacking the feature and the GUI hides its control.
+        let state = self.state.lock().await;
+        state.settings_for(&route)?;
+        Err(WriteError::FeatureUnsupported {
+            feature_hex: 0x40a3,
+        })
+    }
+
     async fn request_accessibility_prompt(self, _: Context) {
         info!("request_accessibility_prompt (no-op in the mock)");
     }

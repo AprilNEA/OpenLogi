@@ -119,6 +119,11 @@ pub async fn set_scroll_wheel_mode(
     device::set_scroll_wheel_mode(&*native_backend(), route, resolution, inverted).await
 }
 
+/// Read the Fn-key inversion of the keyboard `route` reaches.
+pub async fn get_fn_lock(route: &DeviceRoute) -> Result<bool, WriteError> {
+    device::get_fn_lock(&*native_backend(), route).await
+}
+
 /// Set the Fn-key inversion of the keyboard `route` reaches.
 pub async fn set_fn_lock(route: &DeviceRoute, on: bool) -> Result<(), WriteError> {
     device::set_fn_lock(&*native_backend(), route, on).await

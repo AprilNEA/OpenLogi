@@ -228,6 +228,17 @@ impl Agent for AgentServer {
             .await
     }
 
+    async fn read_fn_lock(self, _: Context, route: DeviceRoute) -> Result<bool, WriteError> {
+        // The keyboard channel, like the Fn-lock write: the read then shares
+        // the keyboard capture session's connection instead of opening one.
+        self.shared
+            .keyboard_device(&route)
+            .run(HidppOperation::ReadFnLock, |c| async move {
+                openlogi_hid::get_fn_lock_on(&c).await
+            })
+            .await
+    }
+
     async fn request_accessibility_prompt(self, _: Context) {
         Hook::prompt_accessibility();
     }

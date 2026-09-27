@@ -35,7 +35,7 @@ pub use dpi::{
     Dpi, DpiCapabilities, DpiInfo, get_dpi, get_dpi_info, get_dpi_info_on, set_dpi, set_dpi_on,
 };
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
-pub use fn_lock::{set_fn_lock, set_fn_lock_on};
+pub use fn_lock::{get_fn_lock, get_fn_lock_on, set_fn_lock, set_fn_lock_on};
 pub use haptic::{ensure_haptics_armed_on, play_haptic, play_haptic_on};
 pub use hidpp::feature::haptic_feedback::HapticWaveform;
 pub use hires_wheel::{
