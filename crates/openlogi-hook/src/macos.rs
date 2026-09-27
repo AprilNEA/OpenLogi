@@ -511,6 +511,10 @@ fn service_tap(tap: &CGEventTap<'_>, signals: &WatchdogSignals, tap_disabled: &A
                 "Accessibility revoked while the event tap was live — \
                  disabling the tap to avoid wedging system input"
             );
+            // Teardown of a tap that outlived its permission is the freeze
+            // hazard itself: judge it on the short budget, not the probe's.
+            signals.set_phase(TapPhase::Armed);
+            signals.mark_tap_progress();
             break;
         }
         // Observe both disable signals: the callback catches the documented
@@ -523,6 +527,8 @@ fn service_tap(tap: &CGEventTap<'_>, signals: &WatchdogSignals, tap_disabled: &A
                 "the OS keeps disabling the HID tap — releasing it instead of \
                  re-arming a tap nothing is servicing"
             );
+            signals.set_phase(TapPhase::Armed);
+            signals.mark_tap_progress();
             break;
         }
         // Enabling is idempotent while the tap is already live. Only reached
