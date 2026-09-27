@@ -19,6 +19,8 @@ use openlogi_core::scroll::ScrollDelta;
 
 use super::{HeldKey, KeyPhase, QuantizedScroll, ScrollQuantizer};
 
+mod layout;
+
 const HIGH_RES_UNITS_PER_TICK: f64 = 120.0;
 
 #[derive(Default)]
@@ -171,12 +173,23 @@ fn dispatch_scroll(dx: i8, dy: i8) {
     }
 }
 
-/// Not implemented yet: unicode text has no uinput encoding without a keymap.
+/// Type `text` as key presses resolved against the compositor's active
+/// layout (see [`layout`]); characters no key produces are skipped.
 pub(super) fn type_text(text: &str) {
-    tracing::warn!(
-        chars = text.chars().count(),
-        "TypeText injection is not implemented on Linux yet"
-    );
+    let layout = layout::Layout::current();
+    let mut skipped = 0usize;
+    for ch in text.chars() {
+        match layout.stroke(ch) {
+            Some((mods, key)) => press_key(mods, key),
+            None => skipped += 1,
+        }
+    }
+    if skipped > 0 {
+        tracing::warn!(
+            skipped,
+            "TypeText skipped characters the active layout cannot type"
+        );
+    }
 }
 
 pub(super) fn run_apple_script(_src: &str) {
@@ -216,14 +229,16 @@ const KEY_CAPABILITIES: &[KeyCode] = &[
     KeyCode::KEY_MINUS,      KeyCode::KEY_EQUAL,   KeyCode::KEY_LEFTBRACE,
     KeyCode::KEY_RIGHTBRACE, KeyCode::KEY_BACKSLASH, KeyCode::KEY_SEMICOLON,
     KeyCode::KEY_APOSTROPHE, KeyCode::KEY_GRAVE,   KeyCode::KEY_COMMA,
-    KeyCode::KEY_DOT,        KeyCode::KEY_SLASH,
+    KeyCode::KEY_DOT,        KeyCode::KEY_SLASH,     KeyCode::KEY_102ND,
     // Navigation / editing
     KeyCode::KEY_LEFT,  KeyCode::KEY_RIGHT, KeyCode::KEY_UP,       KeyCode::KEY_DOWN,
     KeyCode::KEY_HOME,  KeyCode::KEY_END,   KeyCode::KEY_PAGEUP,   KeyCode::KEY_PAGEDOWN,
     KeyCode::KEY_TAB,   KeyCode::KEY_ENTER, KeyCode::KEY_BACKSPACE, KeyCode::KEY_DELETE,
     KeyCode::KEY_ESC,   KeyCode::KEY_SPACE,
-    // Modifiers (KEY_LEFTMETA used by the LockScreen Super+L fallback)
+    // Modifiers (KEY_LEFTMETA used by the LockScreen Super+L fallback;
+    // KEY_RIGHTALT is AltGr for TypeText)
     KeyCode::KEY_LEFTCTRL, KeyCode::KEY_LEFTSHIFT, KeyCode::KEY_LEFTALT, KeyCode::KEY_LEFTMETA,
+    KeyCode::KEY_RIGHTALT,
     // Function keys
     KeyCode::KEY_F1,  KeyCode::KEY_F2,  KeyCode::KEY_F3,  KeyCode::KEY_F4,
     KeyCode::KEY_F5,  KeyCode::KEY_F6,  KeyCode::KEY_F7,  KeyCode::KEY_F8,
