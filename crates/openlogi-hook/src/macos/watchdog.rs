@@ -471,15 +471,19 @@ mod tests {
     }
 
     #[test]
-    fn resume_armed_publishes_progress_before_the_phase() {
+    fn resume_armed_refreshes_progress_along_with_the_phase() {
+        // The publish order (progress, then phase) is guaranteed by the
+        // helper's body; this pins that leaving a probe always refreshes the
+        // progress mark, without depending on scheduler timing.
         let signals = WatchdogSignals::default();
         signals.set_phase(TapPhase::Probing);
         std::thread::sleep(Duration::from_millis(5));
+        let before = signals.now();
         signals.resume_armed();
         assert_eq!(signals.phase(), TapPhase::Armed);
         assert!(
-            signals.now().saturating_sub(signals.tap_progress_at()) < Duration::from_millis(5),
-            "Armed must never be observable with a pre-probe progress mark"
+            signals.tap_progress_at() + Duration::from_millis(1) >= before,
+            "leaving Probing must publish a fresh progress mark"
         );
     }
 
