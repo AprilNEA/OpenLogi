@@ -65,7 +65,9 @@ pub use succession::Identity;
 /// v31: `Capabilities::dpi_gestures` appended.
 /// v32: `ButtonId::KeyCalculator` appended — the Calculator hotkey becomes a
 ///      divertable slot, the only way to reach it in the keyboard's macOS mode.
-pub const PROTOCOL_VERSION: u32 = 32;
+/// v33: `ButtonId::KeyPreviousTrack`..`KeyBrightnessUp` appended for the ERGO
+///      K860 / MX Keys hotkeys, and `Capabilities::keyboard_keys` appended.
+pub const PROTOCOL_VERSION: u32 = 33;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to

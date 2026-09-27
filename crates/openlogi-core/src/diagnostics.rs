@@ -509,6 +509,7 @@ mod tests {
     };
     use crate::device::{
         BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceKind, DeviceTransports,
+        KeyboardKeys,
     };
 
     fn app() -> AppInfo {
@@ -598,6 +599,7 @@ mod tests {
                         haptic_feedback: false,
                         haptic_panel: false,
                         dpi_gestures: false,
+                        keyboard_keys: KeyboardKeys::default(),
                     }),
                     dpi: Some("1600 dpi (range 200–8000, 5 steps)".to_string()),
                     config_key: "4082d".to_string(),

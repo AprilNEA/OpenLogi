@@ -86,9 +86,38 @@ pub enum ButtonId {
     /// the other side, listing the Calculator key as one that requires their
     /// software on macOS while working out of the box on Windows.
     ///
+    KeyCalculator,
+    /// Keyboard "Previous Track" control (CID `0x00e4`) — F7 on the ERGO K860
+    /// and MX Keys.
+    KeyPreviousTrack,
+    /// Keyboard "Next Track" control (CID `0x00e6`) — F9 on the ERGO K860 and
+    /// MX Keys.
+    KeyNextTrack,
+    /// Keyboard "App Contextual Menu / Right Click" control (CID `0x00ea`) —
+    /// the menu key in the ERGO K860's top-right hotkey cluster. In the
+    /// keyboard's macOS mode the firmware sends a right mouse click for it.
+    KeyContextMenu,
+    /// Keyboard "Screen Lock" control (CID `0x006f`) — the lock key in the ERGO
+    /// K860's top-right hotkey cluster. In macOS mode the firmware sends
+    /// Cmd+Ctrl+Q for it.
+    KeyScreenLock,
+    /// Keyboard "Show Desktop" control (CID `0x006e`) — F5 on the ERGO K860.
+    KeyShowDesktop,
+    /// Keyboard "Mission Control / Task View" control (CID `0x00e0`) — F3 on
+    /// the ERGO K860.
+    KeyTaskView,
+    /// Keyboard "App Switch" control (CID `0x0100`, `Multiplatform_App_Switch`)
+    /// — F4 on the ERGO K860.
+    KeyAppSwitch,
+    /// Keyboard "Brightness Down" control (CID `0x00c7`) — F1 on the ERGO K860
+    /// and MX Keys.
+    KeyBrightnessDown,
+    /// Keyboard "Brightness Up" control (CID `0x00c8`) — F2 on the ERGO K860
+    /// and MX Keys.
+    ///
     /// Declared last: the TOML config and any serialized form encode the
     /// variant identifier / index, so new buttons are append-only.
-    KeyCalculator,
+    KeyBrightnessUp,
 }
 
 impl ButtonId {
@@ -115,7 +144,7 @@ impl ButtonId {
     /// [`ButtonId::ALL`]: that array seeds mouse defaults and the mouse
     /// popover trigger list, while keyboard keys stay native unless the user
     /// binds them (an unbound key is never diverted).
-    pub const KEYBOARD_KEYS: [ButtonId; 10] = [
+    pub const KEYBOARD_KEYS: [ButtonId; 19] = [
         ButtonId::KeySearch,
         ButtonId::KeyDictation,
         ButtonId::KeyEmoji,
@@ -129,6 +158,16 @@ impl ButtonId {
         // Calculator key lives in the hotkey cluster beside the numpad. Kept in
         // the same order as `KEYBOARD_KEY_CIDS` in `openlogi-device`.
         ButtonId::KeyCalculator,
+        // ERGO K860 / MX Keys controls absent from the Signature F-row.
+        ButtonId::KeyPreviousTrack,
+        ButtonId::KeyNextTrack,
+        ButtonId::KeyContextMenu,
+        ButtonId::KeyScreenLock,
+        ButtonId::KeyShowDesktop,
+        ButtonId::KeyTaskView,
+        ButtonId::KeyAppSwitch,
+        ButtonId::KeyBrightnessDown,
+        ButtonId::KeyBrightnessUp,
     ];
 
     /// Whether this button is one the OS hook (macOS `CGEventTap` / Linux evdev)
@@ -204,6 +243,15 @@ impl ButtonId {
             ButtonId::KeyVolumeDown => "Volume Down Key",
             ButtonId::KeyVolumeUp => "Volume Up Key",
             ButtonId::KeyCalculator => "Calculator Key",
+            ButtonId::KeyPreviousTrack => "Previous Track Key",
+            ButtonId::KeyNextTrack => "Next Track Key",
+            ButtonId::KeyContextMenu => "Context Menu Key",
+            ButtonId::KeyScreenLock => "Screen Lock Key",
+            ButtonId::KeyShowDesktop => "Show Desktop Key",
+            ButtonId::KeyTaskView => "Task View Key",
+            ButtonId::KeyAppSwitch => "App Switch Key",
+            ButtonId::KeyBrightnessDown => "Brightness Down Key",
+            ButtonId::KeyBrightnessUp => "Brightness Up Key",
             ButtonId::HapticPanel => "Haptic Panel",
         }
     }
@@ -234,6 +282,15 @@ impl ButtonId {
             ButtonId::KeyVolumeDown => "keyboard.volume_down_key",
             ButtonId::KeyVolumeUp => "keyboard.volume_up_key",
             ButtonId::KeyCalculator => "keyboard.calculator_key",
+            ButtonId::KeyPreviousTrack => "keyboard.previous_track_key",
+            ButtonId::KeyNextTrack => "keyboard.next_track_key",
+            ButtonId::KeyContextMenu => "keyboard.context_menu_key",
+            ButtonId::KeyScreenLock => "keyboard.screen_lock_key",
+            ButtonId::KeyShowDesktop => "keyboard.show_desktop_key",
+            ButtonId::KeyTaskView => "keyboard.task_view_key",
+            ButtonId::KeyAppSwitch => "keyboard.app_switch_key",
+            ButtonId::KeyBrightnessDown => "keyboard.brightness_down_key",
+            ButtonId::KeyBrightnessUp => "keyboard.brightness_up_key",
             ButtonId::HapticPanel => "actions.haptic_panel",
         }
     }

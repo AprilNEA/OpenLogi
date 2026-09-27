@@ -83,7 +83,16 @@ pub fn default_binding(button: ButtonId) -> Action {
         | ButtonId::KeyMute
         | ButtonId::KeyVolumeDown
         | ButtonId::KeyVolumeUp
-        | ButtonId::KeyCalculator => Action::None,
+        | ButtonId::KeyCalculator
+        | ButtonId::KeyPreviousTrack
+        | ButtonId::KeyNextTrack
+        | ButtonId::KeyContextMenu
+        | ButtonId::KeyScreenLock
+        | ButtonId::KeyShowDesktop
+        | ButtonId::KeyTaskView
+        | ButtonId::KeyAppSwitch
+        | ButtonId::KeyBrightnessDown
+        | ButtonId::KeyBrightnessUp => Action::None,
     }
 }
 

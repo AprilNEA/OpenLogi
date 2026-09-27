@@ -17,10 +17,12 @@ use hidpp::{
 };
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, Capabilities, DeviceKind, DeviceModelInfo, DeviceTransports,
+    KeyboardKeys,
 };
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
+use crate::KEYBOARD_KEY_CIDS;
 use crate::reprog_controls::DPI_MODE_SHIFT_CIDS;
 
 use super::events::{EventFeatureIndices, EventSubscriptionHandle};
@@ -341,6 +343,7 @@ async fn probe_extra_capabilities(
         let count = feature.get_count().await.map_err(|_| ())?;
         let mut haptic_panel = false;
         let mut dpi_gestures = false;
+        let mut keyboard_keys = KeyboardKeys::default();
         for index in 0..count {
             let info = feature.get_cid_info(index).await.map_err(|_| ())?;
             haptic_panel |= probe_haptic_controls
@@ -349,11 +352,17 @@ async fn probe_extra_capabilities(
             dpi_gestures |= DPI_MODE_SHIFT_CIDS.contains(&info.cid.0)
                 && info.flags.is_divertable()
                 && info.flags.supports_raw_xy();
+            if info.flags.is_divertable()
+                && let Some((_, key)) = KEYBOARD_KEY_CIDS.iter().find(|(cid, _)| *cid == info.cid.0)
+            {
+                keyboard_keys.insert(*key);
+            }
         }
         // Publish only a complete control walk. A lost reply must retain the
         // cache's last-good capabilities and schedule repair, not hide support.
         caps.haptic_panel = haptic_panel;
         caps.dpi_gestures = dpi_gestures;
+        caps.keyboard_keys = keyboard_keys;
     }
     Ok(())
 }
@@ -424,6 +433,36 @@ mod tests {
                 assert!(!caps.haptic_panel);
             }
         }
+    }
+
+    #[tokio::test]
+    async fn keyboard_keys_list_the_divertable_catalog_controls() {
+        use openlogi_core::binding::ButtonId;
+        // An ERGO K860-shaped table: catalog keys (Calculator, Print Screen,
+        // Lock), a non-divertable catalog key (Search, flags 0), and a
+        // divertable control the catalog doesn't model (Easy-Switch 1).
+        let probe = control_probe(
+            vec![0x0001, 0x1b04],
+            vec![
+                (0x000a, 0x0020),
+                (0x00bf, 0x0020),
+                (0x006f, 0x0020),
+                (0x00d4, 0x0000),
+                (0x00d1, 0x0020),
+            ],
+            None,
+        )
+        .await;
+        let caps = probe.capabilities.unwrap();
+        assert!(!probe.capabilities_incomplete);
+        assert_eq!(
+            caps.keyboard_keys.iter().collect::<Vec<_>>(),
+            [
+                ButtonId::KeyScreenCapture,
+                ButtonId::KeyCalculator,
+                ButtonId::KeyScreenLock
+            ]
+        );
     }
 
     #[tokio::test]

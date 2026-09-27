@@ -40,7 +40,7 @@ use crate::reprog_controls::{self, RawControlEvent, ReprogControlsV4};
 /// catalog (cross-checked against Solaar's `special_keys.py`); the F-row
 /// positions are the Signature-series layout, except the Calculator key, which
 /// is a hotkey beside the numpad rather than an F-row key.
-pub const KEYBOARD_KEY_CIDS: [(u16, ButtonId); 10] = [
+pub const KEYBOARD_KEY_CIDS: [(u16, ButtonId); 20] = [
     (0x00d4, ButtonId::KeySearch),
     (0x0103, ButtonId::KeyDictation),
     (0x0108, ButtonId::KeyEmoji),
@@ -56,6 +56,20 @@ pub const KEYBOARD_KEY_CIDS: [(u16, ButtonId); 10] = [
     // consumer usage `0x0192` (`AL Calculator`), which diversion suppresses —
     // and, as for every key here, only once the user binds it.
     (0x000a, ButtonId::KeyCalculator),
+    // ERGO K860 / MX Keys hotkeys, CIDs from the K860's own 0x1b04 table and
+    // named per Solaar's `special_keys.py`. Print Screen is the same
+    // screen-capture function as the Signature F7 under a different CID, so
+    // it shares that button's binding.
+    (0x00bf, ButtonId::KeyScreenCapture),
+    (0x00e4, ButtonId::KeyPreviousTrack),
+    (0x00e6, ButtonId::KeyNextTrack),
+    (0x00ea, ButtonId::KeyContextMenu),
+    (0x006f, ButtonId::KeyScreenLock),
+    (0x006e, ButtonId::KeyShowDesktop),
+    (0x00e0, ButtonId::KeyTaskView),
+    (0x0100, ButtonId::KeyAppSwitch),
+    (0x00c7, ButtonId::KeyBrightnessDown),
+    (0x00c8, ButtonId::KeyBrightnessUp),
 ];
 
 /// Capture the requested keyboard controls on `route` until `host.shutdown`
