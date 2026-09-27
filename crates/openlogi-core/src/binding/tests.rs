@@ -661,3 +661,30 @@ fn scroll_actions_lower_to_unit_direction() {
         Effect::Scroll { dx: 1, dy: 0 }
     );
 }
+
+#[test]
+fn every_keyboard_key_has_a_control_and_every_control_a_keyboard_key() {
+    for key in ButtonId::KEYBOARD_KEYS {
+        assert!(
+            KEYBOARD_KEY_CIDS.iter().any(|(_, mapped)| *mapped == key),
+            "{key:?} has no 0x1b04 control"
+        );
+    }
+    for (cid, key) in KEYBOARD_KEY_CIDS {
+        assert!(
+            ButtonId::KEYBOARD_KEYS.contains(&key),
+            "{cid:#06x} maps outside KEYBOARD_KEYS"
+        );
+        assert_eq!(ButtonId::for_keyboard_control(cid), Some(key));
+    }
+    // Print Screen on the ERGO K860 shares the Signature screen-capture key.
+    assert_eq!(
+        ButtonId::for_keyboard_control(0x00bf),
+        ButtonId::for_keyboard_control(0x010a)
+    );
+    assert_eq!(
+        ButtonId::for_keyboard_control(0x00d1),
+        None,
+        "Easy-Switch is not a key"
+    );
+}

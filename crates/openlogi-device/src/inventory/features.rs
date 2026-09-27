@@ -15,6 +15,7 @@ use hidpp::{
         unified_battery::UnifiedBatteryFeature,
     },
 };
+use openlogi_core::binding::ButtonId;
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, Capabilities, DeviceKind, DeviceModelInfo, DeviceTransports,
     KeyboardKeys,
@@ -22,7 +23,6 @@ use openlogi_core::device::{
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
-use crate::KEYBOARD_KEY_CIDS;
 use crate::reprog_controls::DPI_MODE_SHIFT_CIDS;
 
 use super::events::{EventFeatureIndices, EventSubscriptionHandle};
@@ -353,9 +353,9 @@ async fn probe_extra_capabilities(
                 && info.flags.is_divertable()
                 && info.flags.supports_raw_xy();
             if info.flags.is_divertable()
-                && let Some((_, key)) = KEYBOARD_KEY_CIDS.iter().find(|(cid, _)| *cid == info.cid.0)
+                && let Some(key) = ButtonId::for_keyboard_control(info.cid.0)
             {
-                keyboard_keys.insert(*key);
+                keyboard_keys.insert(key);
             }
         }
         // Publish only a complete control walk. A lost reply must retain the

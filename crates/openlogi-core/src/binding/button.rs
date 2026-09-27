@@ -120,6 +120,44 @@ pub enum ButtonId {
     KeyBrightnessUp,
 }
 
+/// The divertable keyboard controls OpenLogi models, as
+/// `(0x1b04 control ID, ButtonId)` pairs — the one table both the agent's
+/// diversion and the settings app's key layout read. CID values match Logitech's control
+/// catalog (cross-checked against Solaar's `special_keys.py`); the F-row
+/// positions are the Signature-series layout, except the Calculator key, which
+/// is a hotkey beside the numpad rather than an F-row key.
+pub const KEYBOARD_KEY_CIDS: [(u16, ButtonId); 20] = [
+    (0x00d4, ButtonId::KeySearch),
+    (0x0103, ButtonId::KeyDictation),
+    (0x0108, ButtonId::KeyEmoji),
+    (0x010a, ButtonId::KeyScreenCapture),
+    (0x011c, ButtonId::KeyMicMute),
+    (0x00e5, ButtonId::KeyPlayPause),
+    (0x00e7, ButtonId::KeyMute),
+    (0x00e8, ButtonId::KeyVolumeDown),
+    (0x00e9, ButtonId::KeyVolumeUp),
+    // Last, matching the order of `ButtonId::KEYBOARD_KEYS`. In the keyboard's
+    // macOS mode the firmware emits nothing for this control, so diversion is
+    // the only way to reach it at all; in Windows mode it natively sends
+    // consumer usage `0x0192` (`AL Calculator`), which diversion suppresses —
+    // and, as for every key here, only once the user binds it.
+    (0x000a, ButtonId::KeyCalculator),
+    // ERGO K860 / MX Keys hotkeys, CIDs from the K860's own 0x1b04 table and
+    // named per Solaar's `special_keys.py`. Print Screen is the same
+    // screen-capture function as the Signature F7 under a different CID, so
+    // it shares that button's binding.
+    (0x00bf, ButtonId::KeyScreenCapture),
+    (0x00e4, ButtonId::KeyPreviousTrack),
+    (0x00e6, ButtonId::KeyNextTrack),
+    (0x00ea, ButtonId::KeyContextMenu),
+    (0x006f, ButtonId::KeyScreenLock),
+    (0x006e, ButtonId::KeyShowDesktop),
+    (0x00e0, ButtonId::KeyTaskView),
+    (0x0100, ButtonId::KeyAppSwitch),
+    (0x00c7, ButtonId::KeyBrightnessDown),
+    (0x00c8, ButtonId::KeyBrightnessUp),
+];
+
 impl ButtonId {
     /// Every rebindable button in declaration (physical front-to-side) order —
     /// the iteration source for default-binding seeding and the popover
@@ -156,7 +194,7 @@ impl ButtonId {
         ButtonId::KeyVolumeUp,
         // Last: not part of the Signature F-row that seeded this list — the
         // Calculator key lives in the hotkey cluster beside the numpad. Kept in
-        // the same order as `KEYBOARD_KEY_CIDS` in `openlogi-device`.
+        // the same order as [`KEYBOARD_KEY_CIDS`].
         ButtonId::KeyCalculator,
         // ERGO K860 / MX Keys controls absent from the Signature F-row.
         ButtonId::KeyPreviousTrack,
@@ -169,6 +207,16 @@ impl ButtonId {
         ButtonId::KeyBrightnessDown,
         ButtonId::KeyBrightnessUp,
     ];
+
+    /// The keyboard key a `0x1b04` control ID drives, or `None` for a control
+    /// OpenLogi does not model. Several controls may share one key.
+    #[must_use]
+    pub fn for_keyboard_control(cid: u16) -> Option<Self> {
+        KEYBOARD_KEY_CIDS
+            .iter()
+            .find(|(control, _)| *control == cid)
+            .map(|(_, key)| *key)
+    }
 
     /// Whether this button is one the OS hook (macOS `CGEventTap` / Linux evdev)
     /// remaps: Middle, Back, or Forward. The primary L/R clicks always pass
