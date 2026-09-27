@@ -21,6 +21,8 @@ extend-ignore-identifiers-re = ["^(?:ALS|AlsAutomatic|AlsSaturated)$"]
 PNGs = "PNGs"
 SWCustomHighligt2 = "SWCustomHighligt2"
 udid = "udid"
+# Field name in Mach's mach_timebase_info_data_t.
+numer = "numer"
 
 [default.extend-words]
 # Technical terms and prefixes accepted in prose and compound identifiers.
