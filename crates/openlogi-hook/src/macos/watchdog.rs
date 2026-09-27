@@ -140,6 +140,15 @@ impl WatchdogSignals {
         self.stop_requested.load(Ordering::Acquire)
     }
 
+    /// Leave `Probing` for `Armed`. The fresh progress mark is published
+    /// before the phase: the watchdog loads the phase first (Acquire), so if it
+    /// sees `Armed` it is guaranteed to see this timestamp too, never the
+    /// pre-probe one that would read as a multi-second stall.
+    pub fn resume_armed(&self) {
+        self.mark_tap_progress();
+        self.set_phase(TapPhase::Armed);
+    }
+
     pub fn mark_tap_progress(&self) {
         self.tap_progress_at_ms
             .store(self.now_millis(), Ordering::Release);
@@ -214,7 +223,12 @@ impl LifecycleWatchdog {
         }
 
         let timeout = if let Some(stopped) = self.stop_at {
-            Some((LifecycleExitReason::StopTimedOut, stopped))
+            // Progress the thread made after the request (a slow probe
+            // returning) restarts the clock; a wedged thread never marks it.
+            Some((
+                LifecycleExitReason::StopTimedOut,
+                stopped.max(observation.tap_progress_at),
+            ))
         } else if matches!(
             observation.phase,
             TapPhase::Arming | TapPhase::Armed | TapPhase::Probing
@@ -423,6 +437,49 @@ mod tests {
                 reason: LifecycleExitReason::StopTimedOut,
                 elapsed: TAP_PROBE_BUDGET,
             }
+        );
+    }
+
+    #[test]
+    fn a_stop_during_a_slow_probe_gets_the_short_budget_from_the_probe_end() {
+        // Stop lands at 0 while a probe runs; the probe returns healthy at 2 s
+        // and publishes fresh progress. Teardown then has 1.5 s from 2 s, not
+        // from 0 — which would already be spent.
+        let mut watchdog = LifecycleWatchdog::default();
+        let _ = watchdog.evaluate(
+            Duration::ZERO,
+            observation(TapPhase::Probing, true, Duration::ZERO),
+        );
+        let probe_end = Duration::from_secs(2);
+        assert_eq!(
+            watchdog.evaluate(
+                probe_end + Duration::from_millis(100),
+                observation(TapPhase::Armed, true, probe_end)
+            ),
+            LifecycleDecision::Continue
+        );
+        assert_eq!(
+            watchdog.evaluate(
+                probe_end + TAP_SHUTDOWN_BUDGET,
+                observation(TapPhase::Armed, true, probe_end)
+            ),
+            LifecycleDecision::Exit {
+                reason: LifecycleExitReason::StopTimedOut,
+                elapsed: TAP_SHUTDOWN_BUDGET,
+            }
+        );
+    }
+
+    #[test]
+    fn resume_armed_publishes_progress_before_the_phase() {
+        let signals = WatchdogSignals::default();
+        signals.set_phase(TapPhase::Probing);
+        std::thread::sleep(Duration::from_millis(5));
+        signals.resume_armed();
+        assert_eq!(signals.phase(), TapPhase::Armed);
+        assert!(
+            signals.now().saturating_sub(signals.tap_progress_at()) < Duration::from_millis(5),
+            "Armed must never be observable with a pre-probe progress mark"
         );
     }
 

@@ -513,8 +513,7 @@ fn service_tap(tap: &CGEventTap<'_>, signals: &WatchdogSignals, tap_disabled: &A
             );
             // Teardown of a tap that outlived its permission is the freeze
             // hazard itself: judge it on the short budget, not the probe's.
-            signals.set_phase(TapPhase::Armed);
-            signals.mark_tap_progress();
+            signals.resume_armed();
             break;
         }
         // Observe both disable signals: the callback catches the documented
@@ -527,19 +526,16 @@ fn service_tap(tap: &CGEventTap<'_>, signals: &WatchdogSignals, tap_disabled: &A
                 "the OS keeps disabling the HID tap — releasing it instead of \
                  re-arming a tap nothing is servicing"
             );
-            signals.set_phase(TapPhase::Armed);
-            signals.mark_tap_progress();
+            signals.resume_armed();
             break;
         }
         // Enabling is idempotent while the tap is already live. Only reached
         // while the live capability probe above still succeeds.
         tap.enable();
         // Back to servicing the tap: the short stall budget applies again. The
-        // break paths above deliberately leave `Probing` published — the thread
-        // is still inside CoreGraphics for the synchronous teardown, and the
-        // watchdog stays armed on `Probing` either way.
-        signals.set_phase(TapPhase::Armed);
-        signals.mark_tap_progress();
+        // break paths above publish `Armed` the same way before their
+        // synchronous teardown, so teardown is judged on the short budget too.
+        signals.resume_armed();
     }
 }
 
