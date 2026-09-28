@@ -225,15 +225,18 @@ impl HostSwitchManagerState {
     }
 
     fn begin_transition(&mut self, terminal: bool) -> Option<TransitionIntent> {
-        let restore_blocks_transition = self.slots.iter().any(|slot| match slot {
-            HostSwitchSlot::Recovering(recovery) => !matches!(
-                &self.transition,
-                Some(TransitionPhase::Waiting(intent))
-                    if intent.request.keyboard_transition.announcement_observed()
-                    && recovery.link.keyboard == intent.link.keyboard
-                    && matches!(recovery.restore, RestorePhase::Ready { .. })
-            ),
-            _ => false,
+        // Ready tokens hold no receiver lease. They must block a successor
+        // for their own keyboard, not forwarding from an unrelated keyboard.
+        // A waiting intent already settled its source cleanup, or carries an
+        // authoritative departure. Only in-flight restoration must drain.
+        let restore_blocks_transition = self.slots.iter().any(|slot| {
+            matches!(
+                slot,
+                HostSwitchSlot::Recovering(Recovery {
+                    restore: RestorePhase::Restoring,
+                    ..
+                })
+            )
         });
         if terminal || self.has_running_sessions() || restore_blocks_transition {
             return None;
@@ -752,14 +755,14 @@ mod tests {
     use super::*;
     use openlogi_hid::KeyboardHostTransition;
 
-    fn route(slot: u8) -> DeviceRoute {
+    pub(super) fn route(slot: u8) -> DeviceRoute {
         DeviceRoute::Bolt {
             receiver_uid: "cafe".to_owned(),
             slot,
         }
     }
 
-    fn link(target: u8) -> HostSwitchLink {
+    pub(super) fn link(target: u8) -> HostSwitchLink {
         HostSwitchLink {
             keyboard_key: "keyboard".into(),
             keyboard: route(1),
@@ -1036,3 +1039,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "host_switch/replay_tests.rs"]
+mod replay_tests;

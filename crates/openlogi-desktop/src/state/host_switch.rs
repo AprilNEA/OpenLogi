@@ -27,21 +27,44 @@ impl AppState {
             .get(keyboard_key)
             .map_or(&[][..], |device| device.host_switch_targets.as_slice());
 
-        self.devices()
+        let mut targets: Vec<_> = self
+            .devices()
             .iter()
-            .filter(|record| record.persistent_config_key() != Some(keyboard_key))
-            .filter(|record| is_compatible_target(record))
             .filter_map(|record| {
-                let config_key = record.persistent_config_key()?.to_string();
+                let config_key = record.persistent_config_key()?;
+                let is_selected = selected.iter().any(|key| key == config_key);
+                if config_key == keyboard_key || (!is_selected && !is_compatible_target(record)) {
+                    return None;
+                }
                 Some(HostSwitchTargetDevice {
-                    selected: selected.iter().any(|key| key == &config_key),
-                    config_key,
+                    selected: is_selected,
+                    config_key: config_key.to_string(),
                     display_name: record.display_name.clone(),
                     kind: record.kind,
                     online: record.online,
                 })
             })
-            .collect()
+            .collect();
+        // A saved link must remain removable even when its inventory record or
+        // measured capability disappears. Prefer the saved name when available.
+        for key in selected {
+            if key == keyboard_key || targets.iter().any(|target| &target.config_key == key) {
+                continue;
+            }
+            let config = self.config.devices.get(key);
+            let identity = config.and_then(|config| config.identity.as_ref());
+            targets.push(HostSwitchTargetDevice {
+                config_key: key.clone(),
+                display_name: config
+                    .and_then(|config| config.custom_name.clone())
+                    .or_else(|| identity.map(|identity| identity.display_name.clone()))
+                    .unwrap_or_else(|| key.clone()),
+                kind: identity.map_or(DeviceKind::Unknown, |identity| identity.kind),
+                online: false,
+                selected: true,
+            });
+        }
+        targets
     }
 
     /// Add or remove one follower and reload the agent when persistence wins.
@@ -57,13 +80,15 @@ impl AppState {
             return StateEvents::none();
         };
         let event_key = keyboard.device_key();
-        if target_key == keyboard_key.as_str()
-            || !keyboard
-                .capabilities
-                .is_some_and(|caps| caps.host_switch_controls)
-            || !self.devices().iter().any(|record| {
-                record.persistent_config_key() == Some(target_key) && is_compatible_target(record)
-            })
+        if !keyboard
+            .capabilities
+            .is_some_and(|caps| caps.host_switch_controls)
+            || (enabled
+                && (target_key == keyboard_key.as_str()
+                    || !self.devices().iter().any(|record| {
+                        record.persistent_config_key() == Some(target_key)
+                            && is_compatible_target(record)
+                    })))
         {
             return StateEvents::none();
         }
@@ -267,6 +292,74 @@ mod tests {
             StateEvents::none()
         );
         assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn saved_missing_or_unsupported_followers_remain_removable() {
+        for target_key in ["unit:11121314", "unit:090a0b0c"] {
+            let inventory = host_switch_inventory();
+            let mut config = Config::ephemeral();
+            config.set_selected_device(Some("unit:01020304".into()));
+            config
+                .devices
+                .entry("unit:01020304".into())
+                .or_default()
+                .host_switch_targets = vec![target_key.into()];
+            config
+                .devices
+                .entry(target_key.into())
+                .or_default()
+                .custom_name = Some("Saved follower".into());
+            let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+            let mut state = AppState::new(super::super::Sources {
+                config,
+                inventories: &[inventory],
+                standalone: &[],
+                resolver: &AssetResolver::new(),
+                cameras: &[],
+                persistence: ConfigPersistence::MemoryOnly,
+                ipc_commands: commands,
+            });
+            while receiver.try_recv().is_ok() {}
+            let targets = state.host_switch_target_devices();
+            let saved = targets
+                .iter()
+                .find(|target| target.config_key == target_key)
+                .expect("a saved follower must have a removable row");
+            assert!(saved.selected);
+            assert_eq!(saved.display_name, "Saved follower");
+            if target_key == "unit:11121314" {
+                assert!(!saved.online);
+            }
+            let keyboard = state.current_record().unwrap().device_key();
+            assert_eq!(
+                state.set_host_switch_target_enabled(target_key, false),
+                [StateEvent::DeviceConfigChanged(keyboard)]
+            );
+            assert!(
+                state.config.devices["unit:01020304"]
+                    .host_switch_targets
+                    .is_empty()
+            );
+            assert!(matches!(
+                receiver.try_recv(),
+                Ok(crate::services::ipc::Command::ReloadConfig(_))
+            ));
+            assert!(
+                !state
+                    .host_switch_target_devices()
+                    .iter()
+                    .any(|target| target.config_key == target_key)
+            );
+            assert_eq!(
+                state.set_host_switch_target_enabled(target_key, true),
+                StateEvents::none()
+            );
+            assert!(
+                receiver.try_recv().is_err(),
+                "unavailable targets cannot be re-enabled"
+            );
+        }
     }
 
     #[test]
