@@ -26,7 +26,9 @@ use openlogi_device::write::{
     self as device, Dpi, DpiInfo, FeatureEntry, FirmwareEntity, HapticWaveform, LightingMethod,
     LitraModel, ReprogControlEntry, ScrollResolution, ScrollWheelMode,
 };
-use openlogi_device::{DeviceIoGate, DeviceIoSignal, DeviceRoute};
+use openlogi_device::{
+    DeviceIoGate, DeviceIoSignal, DeviceRoute, HostOperatingSystem, HostPlatformApply,
+};
 
 /// This host's HID stack.
 ///
@@ -124,6 +126,14 @@ pub async fn set_fn_lock(route: &DeviceRoute, on: bool) -> Result<(), WriteError
     device::set_fn_lock(&*native_backend(), route, on).await
 }
 
+/// Select the keyboard platform descriptor matching this host OS.
+pub async fn set_native_host_platform(
+    route: &DeviceRoute,
+    host_os: HostOperatingSystem,
+) -> Result<HostPlatformApply, WriteError> {
+    device::set_native_host_platform(&*native_backend(), route, host_os).await
+}
+
 /// Read the backlight state of the keyboard `route` reaches.
 pub async fn get_backlight(route: &DeviceRoute) -> Result<BacklightState, WriteError> {
     device::get_backlight(&*native_backend(), route).await
@@ -210,6 +220,11 @@ pub async fn dump_reprog_controls(
 /// Read the raw battery report of the device `route` reaches.
 pub async fn read_battery_raw(route: &DeviceRoute) -> Result<String, WriteError> {
     device::read_battery_raw(&*native_backend(), route).await
+}
+
+/// Read the `0x4531` MultiPlatform state of the device `route` reaches.
+pub async fn read_platform_raw(route: &DeviceRoute) -> Result<String, WriteError> {
+    device::read_platform_raw(&*native_backend(), route).await
 }
 
 /// An enumerator over this host's HID stack, with a memory-only probe cache.

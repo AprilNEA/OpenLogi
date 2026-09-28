@@ -10,6 +10,8 @@ use hidpp::{
         DeviceEntityFirmwareInfo, DeviceEntityType, DeviceInformationFeature,
     },
     feature::feature_set::FeatureSetFeature,
+    feature::hosts_info::HostIndex,
+    feature::multi_platform::MultiPlatformFeature,
     feature::unified_battery::UnifiedBatteryFeature,
     protocol::v20::Hidpp20Error,
 };
@@ -192,6 +194,43 @@ pub async fn read_battery_raw(
         Err(WriteError::FeatureUnsupported {
             feature_hex: 0x1004,
         })
+    })
+    .await
+}
+
+/// Diagnostic read of the device's `0x4531` MultiPlatform state: the feature
+/// info, every platform descriptor row, and the platform selected for each
+/// host slot. For `openlogi diag platform`: shows which OS mode (e.g. macOS or
+/// Windows key behavior) a multi-OS keyboard is in without pressing a key.
+pub async fn read_platform_raw(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+) -> Result<String, WriteError> {
+    let index = route.device_index();
+    with_route(backend, route, move |channel| async move {
+        let mut device = Device::new(Arc::clone(&channel), index)
+            .await
+            .map_err(|_| WriteError::DeviceUnreachable { index })?;
+        let feature = open_feature::<MultiPlatformFeature>(&mut device).await?;
+        let hidpp = |e: Hidpp20Error| WriteError::Hidpp(format!("{e:?}"));
+
+        let info = feature.get_feature_infos().await.map_err(hidpp)?;
+        let mut lines = vec![format!("{info:?}")];
+        for descriptor in 0..info.descriptor_count {
+            let row = feature
+                .get_platform_descriptor(descriptor)
+                .await
+                .map_err(hidpp)?;
+            lines.push(format!("{row:?}"));
+        }
+        for host in 0..info.host_count {
+            let platform = feature
+                .get_host_platform(HostIndex::from(host))
+                .await
+                .map_err(hidpp)?;
+            lines.push(format!("{platform:?}"));
+        }
+        Ok(lines.join("\n"))
     })
     .await
 }

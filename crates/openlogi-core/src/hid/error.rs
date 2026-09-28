@@ -133,6 +133,8 @@ pub enum HidppOperation {
     Light,
     /// Play one haptic waveform. Appended last — variant order is wire format.
     PlayHaptic,
+    /// Resolve, write, or verify the keyboard's host-platform mode. Appended last — variant order is wire format.
+    WriteHostPlatform,
 }
 
 /// HID++ feature error kind in a serializable wire-safe form.
