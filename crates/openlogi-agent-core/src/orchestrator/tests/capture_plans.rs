@@ -1,5 +1,7 @@
 //! What a config reload or an app switch publishes to the hook and the capture managers.
 
+use openlogi_hid::reprog_controls::BACK_CIDS;
+
 use super::*;
 
 #[test]
@@ -276,4 +278,84 @@ fn keyboard_control_bindings_never_enter_the_mouse_capture_plan() {
         Action::Screenshot,
         "the key still resolves in the plan's binding map for dispatch"
     );
+}
+
+/// One `0x1b04` control, one owner. A K380's multiplatform Back key is both
+/// a Back-family member the mouse plan diverts for a non-default `Back`
+/// binding and, bound by number, a key of the keyboard session. The explicit
+/// key binding wins: the keyboard's plan releases exactly that control and
+/// keeps diverting the rest of the family.
+#[test]
+fn a_control_the_keyboard_session_owns_leaves_the_keyboard_capture_plan() {
+    let [
+        back,
+        multiplatform_back,
+        multiplatform_back_alt,
+        back_generic,
+    ] = BACK_CIDS;
+    let mut config = Config::default();
+    config.set_binding("kbd", ButtonId::Back, Binding::Single(Action::Copy));
+    config.set_binding(
+        "kbd",
+        ButtonId::control(multiplatform_back),
+        Binding::Single(Action::Paste),
+    );
+    let mut orch = orchestrator(config);
+    let mut keyboard = dev("kbd", 2, true);
+    keyboard.kind = DeviceKind::Keyboard;
+    orch.devices = vec![keyboard];
+    orch.rebuild();
+
+    let spec = orch
+        .keyboard_spec_for()
+        .expect("the bound key publishes a spec");
+    assert_eq!(
+        spec.wanted.keys().copied().collect::<Vec<_>>(),
+        [multiplatform_back]
+    );
+    let plans = orch.shared.capture_plans.borrow();
+    let diverted: Vec<u16> = plans[0]
+        .target
+        .spec
+        .divert_buttons
+        .iter()
+        .map(|(cid, _)| *cid)
+        .collect();
+    assert!(
+        !diverted.contains(&multiplatform_back),
+        "{diverted:#06x?} must leave the keyboard session's control alone"
+    );
+    for cid in [back, multiplatform_back_alt, back_generic] {
+        assert!(
+            diverted.contains(&cid),
+            "{cid:#06x} stays with the Back binding"
+        );
+    }
+}
+
+/// Without a competing key binding, a hand-edited `Back` on a keyboard keeps
+/// its whole family in the mouse plan — the release is per owned control,
+/// not a blanket ban on keyboards.
+#[test]
+fn a_back_binding_alone_keeps_its_whole_family_on_a_keyboard() {
+    let mut config = Config::default();
+    config.set_binding("kbd", ButtonId::Back, Binding::Single(Action::Copy));
+    let mut orch = orchestrator(config);
+    let mut keyboard = dev("kbd", 2, true);
+    keyboard.kind = DeviceKind::Keyboard;
+    orch.devices = vec![keyboard];
+    orch.rebuild();
+
+    assert!(orch.keyboard_spec_for().is_none());
+    let plans = orch.shared.capture_plans.borrow();
+    let diverted: Vec<u16> = plans[0]
+        .target
+        .spec
+        .divert_buttons
+        .iter()
+        .map(|(cid, _)| *cid)
+        .collect();
+    for cid in BACK_CIDS {
+        assert!(diverted.contains(&cid), "{cid:#06x}");
+    }
 }

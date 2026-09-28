@@ -125,8 +125,8 @@ fn control_slots_read_row_by_row_and_name_unknown_controls_by_number() {
     );
 }
 
-/// The same control marked twice (a depot that repeats a key under
-/// `device_buttons_image`) is one slot; Easy-Switch host keys are not keys.
+/// The same control marked twice at the same spot is one slot; Easy-Switch
+/// host keys are not keys.
 #[test]
 fn control_slots_dedupe_repeats_and_skip_easy_switch() {
     let mut asset = asset_with_controls(&[(0x010a, 53.5, 13.8), (0x010a, 53.5, 13.8)]);
@@ -146,6 +146,37 @@ fn control_slots_dedupe_repeats_and_skip_easy_switch() {
         slots[0].target,
         KeyTarget::Control(ButtonId::control(0x010a))
     );
+}
+
+/// A control marked in both image groups is one slot wherever the copies
+/// land after sorting, and the `device_keys_image` position wins even when
+/// the `device_buttons_image` copy would sort first.
+#[test]
+fn control_slots_dedupe_across_image_groups_keeping_the_keys_image_position() {
+    let mut asset = asset_with_controls(&[(0x010a, 53.5, 13.8), (0x0141, 30.0, 13.8)]);
+    asset.metadata.images.push(ImageEntry {
+        key: "device_buttons_image".to_string(),
+        origin: Origin {
+            width: 1872,
+            height: 728,
+        },
+        // Earlier in reading order (further left) and on another row.
+        assignments: vec![
+            control_assignment(0x010a, 5.0, 13.8),
+            control_assignment(0x010a, 53.5, 40.0),
+        ],
+    });
+
+    let slots = key_slots(Some(&asset));
+
+    let screen_capture: Vec<_> = slots
+        .iter()
+        .filter(|slot| slot.target == KeyTarget::Control(ButtonId::control(0x010a)))
+        .collect();
+    assert_eq!(slots.len(), 2);
+    assert_eq!(screen_capture.len(), 1);
+    assert_approx_eq(screen_capture[0].point.x_frac, 0.535 + 0.02);
+    assert_approx_eq(screen_capture[0].point.y_frac, 0.138 + 0.023);
 }
 
 /// The G513 family's `metadata_full.json`: `device_image` markers in

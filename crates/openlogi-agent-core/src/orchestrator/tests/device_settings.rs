@@ -2,6 +2,8 @@
 
 use std::collections::BTreeMap;
 
+use openlogi_hid::reprog_controls::BACK_CIDS;
+
 use super::*;
 
 #[test]
@@ -148,6 +150,14 @@ fn keyboard_spec_diverts_exactly_the_bound_controls() {
         ButtonId::control(0x00e5),
         Binding::Single(Action::None),
     );
+    // A K380's multiplatform Back key is a member of the mouse Back family,
+    // but bound by number it is this keyboard's key and is diverted here.
+    let [_, multiplatform_back, _, _] = BACK_CIDS;
+    config.set_binding(
+        "kbd",
+        ButtonId::control(multiplatform_back),
+        Binding::Single(Action::Paste),
+    );
     let mut orch = orchestrator(config);
     orch.devices = vec![keyboard("kbd", 1, true)];
 
@@ -155,6 +165,7 @@ fn keyboard_spec_diverts_exactly_the_bound_controls() {
     assert_eq!(
         spec.wanted,
         BTreeMap::from([
+            (multiplatform_back, ButtonId::control(multiplatform_back)),
             (0x010a, ButtonId::control(0x010a)),
             (0x01f3, ButtonId::control(0x01f3)),
         ])
@@ -205,10 +216,45 @@ fn keyboard_spec_prefers_the_online_keyboard_over_a_sleeping_slot() {
     orch.devices = vec![keyboard("stale", 1, false), keyboard("live", 2, true)];
     assert_eq!(orch.keyboard_spec_for().expect("spec").config_key, "live");
 
-    // With every keyboard asleep the first one keeps the session, so a nap
-    // does not tear diversion down.
+    // With every bound keyboard asleep, inventory order breaks the tie.
     orch.devices = vec![keyboard("stale", 1, false), keyboard("live", 2, false)];
     assert_eq!(orch.keyboard_spec_for().expect("spec").config_key, "stale");
+}
+
+#[test]
+fn keyboard_spec_skips_a_keyboard_with_no_bound_controls() {
+    // Two keyboards, bindings only on the one inventory order puts second:
+    // the session goes to the bound keyboard, not to the first one found.
+    let mut config = Config::default();
+    config.set_binding(
+        "bound",
+        ButtonId::control(0x010a),
+        Binding::Single(Action::Screenshot),
+    );
+    let mut orch = orchestrator(config);
+    orch.devices = vec![keyboard("unbound", 1, true), keyboard("bound", 2, true)];
+    assert_eq!(orch.keyboard_spec_for().expect("spec").config_key, "bound");
+
+    // An unbound keyboard being online does not make it a candidate: the
+    // bound one holds the session even while asleep.
+    orch.devices = vec![keyboard("unbound", 1, true), keyboard("bound", 2, false)];
+    assert_eq!(orch.keyboard_spec_for().expect("spec").config_key, "bound");
+}
+
+#[test]
+fn keyboard_spec_ignores_an_unbound_stale_slot_while_the_live_keyboard_sleeps() {
+    // #1581: the stale receiver slots of a re-paired MX Keys Mini carry no
+    // bindings. When the live slot naps, the session must stay on it rather
+    // than be torn down because an unbound slot sorted first.
+    let mut config = Config::default();
+    config.set_binding(
+        "live",
+        ButtonId::control(0x010a),
+        Binding::Single(Action::Screenshot),
+    );
+    let mut orch = orchestrator(config);
+    orch.devices = vec![keyboard("stale", 1, false), keyboard("live", 2, false)];
+    assert_eq!(orch.keyboard_spec_for().expect("spec").config_key, "live");
 }
 
 #[test]

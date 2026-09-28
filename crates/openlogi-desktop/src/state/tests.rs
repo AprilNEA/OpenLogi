@@ -49,6 +49,7 @@ mod bindings;
 mod camera;
 mod device_list;
 mod device_names;
+mod fn_lock;
 mod lighting;
 mod profile_scope;
 mod reload;

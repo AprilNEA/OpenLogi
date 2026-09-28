@@ -149,6 +149,15 @@ impl Agent for TestAgent {
         unreachable!("profile capture must never write SmartShift")
     }
 
+    async fn set_fn_lock(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+        _fn_lock: bool,
+    ) -> Result<FnLockState, WriteError> {
+        unreachable!("profile capture must never write Fn-lock")
+    }
+
     async fn read_dpi(self, _: TarpcContext, route: DeviceRoute) -> Result<DpiInfo, WriteError> {
         self.read(ReadFamily::Dpi, &route, |settings| &settings.dpi, 0x2201)
     }

@@ -10,6 +10,8 @@
 //! back to the OS-hook F-row: Esc and F1–F19 as [`KeyTarget::FunctionKey`],
 //! placed by the legacy pixel markers or by even spacing.
 
+use std::collections::HashSet;
+
 use openlogi_core::binding::ButtonId;
 use openlogi_core::config::{FunctionKey, KeyModifiers, KeyTrigger};
 
@@ -98,19 +100,29 @@ pub(super) fn key_slots(asset: Option<&ResolvedAsset>) -> Vec<KeySlotLayout> {
 /// catalog label (or its number). Ordered top row first, then left to right,
 /// so the callout band reads the way the keyboard does; the keys above the
 /// numpad and down the right edge follow the F-row.
+///
+/// One slot per control. The image groups are read in [`KEY_MARKER_IMAGES`]
+/// order, so a control `device_keys_image` marks keeps that position even if
+/// `device_buttons_image` marks it again elsewhere: the keys image is what
+/// the marker calibration was measured against.
 fn control_slots(asset: &ResolvedAsset) -> Vec<KeySlotLayout> {
     // Rows are banded by y; within a band, left to right. Markers on one
     // physical row differ by well under a band.
     const ROW_BAND: f32 = 0.06;
-    let mut slots: Vec<KeySlotLayout> = asset
-        .metadata
-        .images
+    let mut seen = HashSet::new();
+    let mut slots: Vec<KeySlotLayout> = KEY_MARKER_IMAGES
         .iter()
-        .filter(|img| KEY_MARKER_IMAGES.contains(&img.key.as_str()))
+        .flat_map(|key| {
+            asset
+                .metadata
+                .images
+                .iter()
+                .filter(move |img| img.key == *key)
+        })
         .flat_map(|img| img.assignments.iter())
         .filter_map(|assignment| {
             let button = ButtonId::control(assignment.control_id()?);
-            Some(KeySlotLayout {
+            seen.insert(button).then(|| KeySlotLayout {
                 legend: control_legend(button),
                 target: KeyTarget::Control(button),
                 point: calibrated_marker_point(KeyPoint {
@@ -127,9 +139,6 @@ fn control_slots(asset: &ResolvedAsset) -> Vec<KeySlotLayout> {
             .total_cmp(&row_b)
             .then_with(|| a.point.x_frac.total_cmp(&b.point.x_frac))
     });
-    // The same control can be marked twice (a `device_buttons_image` copy);
-    // one slot per control.
-    slots.dedup_by(|a, b| a.target == b.target);
     slots
 }
 

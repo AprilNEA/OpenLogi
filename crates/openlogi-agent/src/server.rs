@@ -237,6 +237,20 @@ impl Agent for AgentServer {
             .await
     }
 
+    async fn set_fn_lock(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        fn_lock: bool,
+    ) -> Result<FnLockState, WriteError> {
+        self.shared
+            .keyboard_device(&route)
+            .run(HidppOperation::WriteFnLock, |c| async move {
+                openlogi_hid::set_fn_lock_on(&c, fn_lock).await
+            })
+            .await
+    }
+
     async fn request_accessibility_prompt(self, _: Context) {
         Hook::prompt_accessibility();
     }

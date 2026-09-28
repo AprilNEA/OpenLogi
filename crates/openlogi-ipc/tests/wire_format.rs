@@ -229,6 +229,25 @@ fn semantic_read_requests() {
         },
         "1b0008463030444341464501",
     );
+    assert_wire(
+        &AgentRequest::ReadFnLock {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+        },
+        "1c0008463030444341464501",
+    );
+    assert_wire(
+        &AgentRequest::SetFnLock {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+            fn_lock: true,
+        },
+        "1d000846303044434146450101",
+    );
 }
 
 /// The agent identity is frozen: a helper from any build has to be able to
@@ -279,6 +298,7 @@ fn action_ring_types() {
     );
     assert_wire(&ActionRingCommandError::SessionNotFound, "00");
     assert_wire(&ActionRingCommandError::SlotEmpty, "01");
+    assert_wire(&HidppOperation::WriteFnLock, "0c");
     assert_wire(&HidppOperation::PlayHaptic, "0e");
     assert_wire(&HidppOperation::ReadFnLock, "0f");
 }

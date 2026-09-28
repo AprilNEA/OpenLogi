@@ -142,6 +142,31 @@ impl Request for SetLighting {
     }
 }
 
+/// Write keyboard Fn-lock now, answered as [`GuiUpdate::FnLockWritten`] with
+/// the state the keyboard echoes back.
+pub struct SetFnLock {
+    pub route: DeviceRoute,
+    pub fn_lock: bool,
+    pub key: DeviceKey,
+}
+
+impl Request for SetFnLock {
+    type Answer = Result<FnLockState, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .set_fn_lock(context::current(), self.route.clone(), self.fn_lock)
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        let _ = updates.send(GuiUpdate::FnLockWritten {
+            key: self.key,
+            result: or_unavailable(outcome),
+        });
+    }
+}
+
 /// Apply a SmartShift configuration now.
 pub struct SetSmartShift {
     pub route: DeviceRoute,
@@ -468,6 +493,7 @@ commands! {
     SetLight,
     SetLightManualPower,
     SetSmartShift,
+    SetFnLock,
     ReadDpi,
     ReadSmartShift,
     ReadFnLock,

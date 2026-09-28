@@ -834,6 +834,20 @@ impl Agent for MockAgent {
         profile_value(&state.settings_for(&route)?.fn_lock, &route, 0x40a3).copied()
     }
 
+    async fn set_fn_lock(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        fn_lock: bool,
+    ) -> Result<FnLockState, WriteError> {
+        let mut state = self.state.lock().await;
+        let settings = state.settings_for_mut(&route)?;
+        let stored = profile_value_mut(&mut settings.fn_lock, &route, 0x40a3)?;
+        stored.fn_lock = fn_lock;
+        info!(%route, fn_lock, "set_fn_lock");
+        Ok(*stored)
+    }
+
     async fn request_accessibility_prompt(self, _: Context) {
         info!("request_accessibility_prompt (no-op in the mock)");
     }

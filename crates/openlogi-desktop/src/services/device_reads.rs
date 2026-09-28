@@ -275,8 +275,26 @@ impl DeviceReads {
         );
     }
 
-    /// Re-read `key`'s Fn-lock after the agent wrote it, keeping the last
-    /// value on screen while the keyboard answers.
+    /// Show `state` as `key`'s Fn-lock reading now. Used for the value the
+    /// GUI just asked the keyboard to take and again for the value the
+    /// keyboard echoed back. A local write supersedes a fetch still in
+    /// flight, so a pre-write reading cannot land on top of it.
+    pub(crate) fn set_fn_lock_ready(&mut self, key: &DeviceKey, state: FnLockState) {
+        let value = Arc::new(state);
+        if let Some(client) = &self.client {
+            client.set::<_, Cached<FnLockState>, WriteError>(
+                query_key(FN_LOCK, key),
+                Some(value.clone()),
+            );
+        }
+        if let Some(read) = self.fn_lock.get_mut(key) {
+            read.load = Load::Ready(value);
+        }
+    }
+
+    /// Re-read `key`'s Fn-lock from the keyboard, keeping the last value on
+    /// screen while it answers. The fallback after a write the keyboard
+    /// refused, when the shown value is no longer known to be its own.
     pub(crate) fn refresh_fn_lock(&mut self, key: &DeviceKey) {
         if let Some(read) = self.fn_lock.get_mut(key) {
             read.query.revalidate();

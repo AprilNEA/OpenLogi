@@ -63,7 +63,8 @@ pub use succession::Identity;
 ///      the macOS dormancy gate.
 /// v30: `Agent::read_wheel` and `Agent::read_backlight` appended.
 /// v31: `Capabilities::dpi_gestures` appended.
-/// v32: `Agent::read_fn_lock` and `HidppOperation::ReadFnLock` appended.
+/// v32: `Agent::read_fn_lock`, `Agent::set_fn_lock` and
+///      `HidppOperation::ReadFnLock` appended.
 pub const PROTOCOL_VERSION: u32 = 32;
 
 /// Environment variable through which the agent hands a supervised helper the
@@ -569,4 +570,8 @@ pub trait Agent {
     async fn read_backlight(route: DeviceRoute) -> Result<BacklightState, WriteError>;
     /// Read the current keyboard Fn-lock state from `route`.
     async fn read_fn_lock(route: DeviceRoute) -> Result<FnLockState, WriteError>;
+    /// Write keyboard Fn-lock on `route` now and answer with the state the
+    /// keyboard echoes back, so the GUI shows what the keyboard took rather
+    /// than what it asked for.
+    async fn set_fn_lock(route: DeviceRoute, fn_lock: bool) -> Result<FnLockState, WriteError>;
 }

@@ -39,7 +39,7 @@
 
 use std::time::{Duration, Instant};
 
-use openlogi_core::hid::{LightCommand, WriteError};
+use openlogi_core::hid::{FnLockState, LightCommand, WriteError};
 use openlogi_ipc::client::{self, ConnectError};
 use openlogi_ipc::{AgentClient, AgentSnapshot, ClientKind, ConfigReloadError, PairingFailure};
 use tarpc::client::RpcError;
@@ -62,8 +62,8 @@ use request::LinkLost;
 pub use request::PollEventMonitor;
 pub use request::{
     CancelPairing, Command, PairDevice, ReadDpi, ReadFnLock, ReadSmartShift, ReloadConfig,
-    RequestAccessibilityPrompt, SetDpi, SetLight, SetLightManualPower, SetLighting, SetSmartShift,
-    StartPairing,
+    RequestAccessibilityPrompt, SetDpi, SetFnLock, SetLight, SetLightManualPower, SetLighting,
+    SetSmartShift, StartPairing,
 };
 
 /// How long to wait before retrying a connect that failed. This is a retry
@@ -98,6 +98,14 @@ pub enum GuiUpdate {
     },
     /// Whether the agent adopted the config currently on disk.
     ConfigReloadResult(Result<(), ConfigReloadError>),
+    /// What a keyboard reports after an Fn-lock write the GUI asked for: the
+    /// state it took, or the typed refusal. Answers [`SetFnLock`].
+    FnLockWritten {
+        /// The keyboard that was written.
+        key: DeviceKey,
+        /// The echoed state, or why the write did not land.
+        result: Result<FnLockState, WriteError>,
+    },
     /// A pairing command could not be delivered, so no session will ever appear
     /// in the observed state to explain the silence. Reported locally rather
     /// than faked as a session the agent never had.
