@@ -145,6 +145,10 @@ pub struct AgentSnapshot {
     /// The last Fn-lock state the agent learned for each keyboard, from a
     /// read, its own write, or the keyboard's change event (its Fn Lock key).
     /// A keyboard it has learned nothing about is absent.
+    ///
+    /// Change events arrive only while the agent captures the keyboard, i.e.
+    /// while at least one of its keys is bound. For a keyboard with nothing
+    /// bound, a press of its Fn Lock key is seen at the next read instead.
     pub fn_locks: Vec<KeyboardFnLock>,
 }
 

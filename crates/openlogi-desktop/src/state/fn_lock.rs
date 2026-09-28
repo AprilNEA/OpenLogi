@@ -82,7 +82,9 @@ impl AppState {
     /// Adopt the Fn-lock states the agent last learned — from a read, its own
     /// write, or a keyboard's change event — so a press of the Fn Lock key
     /// shows while the Keys tab is open. A keyboard the agent reports nothing
-    /// for keeps its own read.
+    /// for keeps its own read. The agent only hears the key while it captures
+    /// the keyboard (a key is bound); otherwise the re-reads on opening the
+    /// device or its Keys tab are what catch a press.
     pub(crate) fn set_agent_fn_locks(&mut self, known: &[KeyboardFnLock]) -> StateEvents {
         let changed: Vec<(DeviceKey, bool)> = self
             .devices()

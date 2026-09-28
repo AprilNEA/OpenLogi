@@ -140,7 +140,9 @@ struct ArmedKeys {
     reporting: Vec<ArmedReporting>,
     diverted: BTreeMap<u16, ButtonId>,
     /// The keyboard's fn-inversion events, relayed as
-    /// [`CapturedInput::FnLock`] while the session listens anyway.
+    /// [`CapturedInput::FnLock`] while the session listens anyway. The session
+    /// exists only while a key is bound, so an unbound keyboard's Fn Lock key
+    /// goes unobserved until something reads the state.
     fn_lock: Option<FnLockEvents>,
 }
 
