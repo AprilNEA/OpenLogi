@@ -37,8 +37,9 @@ use foreground::observe_frontmost_application;
 pub(crate) use foreground::{frontmost_safari_pid, watch_frontmost_application_activations};
 use translate::{translate, translate_key};
 use watchdog::{
-    CallbackActivity, LifecycleDecision, LifecycleExitReason, LifecycleObservation,
-    LifecycleWatchdog, RearmBudget, TapPhase, WatchdogSignals, stuck_callback,
+    CallbackActivity, LIFECYCLE_POLL_INTERVAL, LifecycleDecision, LifecycleExitReason,
+    LifecycleObservation, LifecycleWatchdog, RearmBudget, TapPhase, WatchdogSignals,
+    stuck_callback,
 };
 
 /// Everything `Hook` needs to control the background thread.
@@ -86,7 +87,6 @@ fn can_filter_events() -> bool {
 }
 
 const CALLBACK_WATCHDOG_POLL_INTERVAL: Duration = Duration::from_millis(20);
-const LIFECYCLE_WATCHDOG_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const FREEZE_HAZARD_EXIT_CODE: i32 = 78;
 
 /// Event types the HID tap observes. Pointer *Dragged variants are required
@@ -413,10 +413,14 @@ fn spawn_lifecycle_watchdog(
                 };
                 match watchdog.evaluate(signals.now(), observation) {
                     LifecycleDecision::Continue => {
-                        thread::park_timeout(LIFECYCLE_WATCHDOG_POLL_INTERVAL);
+                        thread::park_timeout(LIFECYCLE_POLL_INTERVAL);
                     }
                     LifecycleDecision::Complete => return,
-                    LifecycleDecision::Exit { reason, elapsed } => {
+                    LifecycleDecision::Exit {
+                        reason,
+                        watched,
+                        stalled,
+                    } => {
                         // The tap thread may have completed immediately after
                         // the decision. Only a still-hazardous phase may exit.
                         let phase = signals.phase();
@@ -446,9 +450,13 @@ fn spawn_lifecycle_watchdog(
                                 "hook stop requested but tap thread did not exit"
                             }
                         };
+                        // `stalled` is uptime since the stall began; `watched` is
+                        // the part this thread was running to see. A wide gap
+                        // between them says the process itself was frozen.
                         error!(
                             reason,
-                            elapsed_ms = duration_millis(elapsed),
+                            stalled_ms = duration_millis(stalled),
+                            watched_ms = duration_millis(watched),
                             ?phase,
                             "HID CGEventTap lifecycle did not make progress before deadline — \
                              exiting agent to restore system input"
@@ -501,10 +509,9 @@ fn service_tap(tap: &CGEventTap<'_>, signals: &WatchdogSignals, tap_disabled: &A
         signals.mark_tap_progress();
         // Everything below this point is a WindowServer or TCC round trip, not
         // tap servicing. Publish that so the lifecycle watchdog judges it
-        // against `TAP_PROBE_BUDGET`: while the display is asleep these calls
+        // against `TAP_PROBE_BUDGET`: around a sleep transition these calls
         // have been measured at ~1.6 s, and charging them to the 1.5 s stall
-        // budget force-exited a perfectly healthy agent once a minute for the
-        // whole of display sleep (#952).
+        // budget force-exited a perfectly healthy agent (#952).
         signals.set_phase(TapPhase::Probing);
         if !Backend::has_accessibility() {
             warn!(
@@ -528,12 +535,14 @@ fn service_tap(tap: &CGEventTap<'_>, signals: &WatchdogSignals, tap_disabled: &A
         // Enabling is idempotent while the tap is already live. Only reached
         // while the live capability probe above still succeeds.
         tap.enable();
-        // Back to servicing the tap: the short stall budget applies again. The
-        // break paths above deliberately leave `Probing` published — the thread
-        // is still inside CoreGraphics for the synchronous teardown, and the
-        // watchdog stays armed on `Probing` either way.
-        signals.set_phase(TapPhase::Armed);
+        // Back to servicing the tap: the short stall budget applies again, so
+        // the fresh mark must be visible before `Armed` is — the watchdog would
+        // otherwise judge a slow probe that already returned against the
+        // pre-probe mark. The break paths above deliberately leave `Probing`
+        // published: the thread is still inside CoreGraphics for the
+        // synchronous teardown.
         signals.mark_tap_progress();
+        signals.set_phase(TapPhase::Armed);
     }
 }
 

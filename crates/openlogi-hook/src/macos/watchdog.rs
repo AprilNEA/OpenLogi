@@ -14,9 +14,19 @@ pub(super) const TAP_SHUTDOWN_BUDGET: Duration = Duration::from_millis(1_500);
 /// than stuck, and an active tap whose thread is not servicing its run loop is
 /// already bounded by CoreGraphics' own tap timeout, which disables the tap and
 /// lets events through. Only a probe that never returns is hazardous, so this
-/// budget is generous enough to clear the multi-second WindowServer round trips
-/// seen while the display is asleep (#952) and still bounded.
+/// budget is generous enough to clear the seconds WindowServer can go without
+/// answering around a sleep transition (#952) and still bounded.
 pub(super) const TAP_PROBE_BUDGET: Duration = Duration::from_secs(10);
+/// How often the lifecycle watchdog evaluates.
+pub(super) const LIFECYCLE_POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// The most stall one evaluation may charge for the time since the previous
+/// one. A longer gap means the watchdog's own thread was not running: around a
+/// sleep transition it has fired 1.0 s and 4.8 s past its budget (#952), which
+/// a thread evaluating every poll cannot do. The tap thread it judges was not
+/// running either, so the excess is no evidence against it. The cap still
+/// charges a starved-but-running watchdog, so repeated starvation cannot hide
+/// a wedged tap thread indefinitely.
+pub(super) const OBSERVATION_GAP: Duration = LIFECYCLE_POLL_INTERVAL.saturating_mul(5);
 /// How many re-arms the hook grants inside [`REARM_WINDOW`] before it gives
 /// the tap up.
 pub(super) const REARM_LIMIT: u32 = 10;
@@ -95,7 +105,9 @@ impl CallbackActivity {
 #[derive(Debug)]
 pub(super) struct WatchdogSignals {
     // `Instant` uses CLOCK_UPTIME_RAW on macOS: monotonic, and paused while
-    // the system sleeps so resume cannot consume either watchdog budget.
+    // the system sleeps. The transition around sleep is not paused, and the
+    // watchdog thread has been observed not running for seconds of it — which
+    // is why the lifecycle watchdog discounts gaps in its own schedule.
     origin: Instant,
     phase: AtomicU8,
     stop_requested: AtomicBool,
@@ -185,13 +197,35 @@ pub(super) enum LifecycleDecision {
     Complete,
     Exit {
         reason: LifecycleExitReason,
-        elapsed: Duration,
+        /// Stall the watchdog was awake to see; what the budget is judged on.
+        watched: Duration,
+        /// Uptime since the stall began. The excess over `watched` is time the
+        /// watchdog itself was not running.
+        stalled: Duration,
     },
 }
 
 #[derive(Debug, Default)]
 pub(super) struct LifecycleWatchdog {
     stop_at: Option<Duration>,
+    /// When the previous evaluation ran.
+    last_evaluated: Option<Duration>,
+    /// The stall being timed, if any.
+    stall: Option<Stall>,
+}
+
+/// One stall under watch: what it would exit for, when it began, which budget
+/// judges it, and how much of it the watchdog was awake to see.
+#[derive(Clone, Copy, Debug)]
+struct Stall {
+    reason: LifecycleExitReason,
+    started: Duration,
+    /// A budget change is a new stall: a stop that waited out a slow probe
+    /// under [`TAP_PROBE_BUDGET`] gets [`TAP_SHUTDOWN_BUDGET`] for the
+    /// teardown that follows, instead of being exited the moment the probe
+    /// returns because the probe alone outlasted the short budget.
+    budget: Duration,
+    watched: Duration,
 }
 
 impl LifecycleWatchdog {
@@ -200,6 +234,11 @@ impl LifecycleWatchdog {
         now: Duration,
         observation: LifecycleObservation,
     ) -> LifecycleDecision {
+        let credit = self.last_evaluated.map_or(Duration::ZERO, |last| {
+            now.saturating_sub(last).min(OBSERVATION_GAP)
+        });
+        self.last_evaluated = Some(now);
+
         match observation.phase {
             TapPhase::Starting => return LifecycleDecision::Continue,
             TapPhase::ThreadExited => return LifecycleDecision::Complete,
@@ -227,9 +266,9 @@ impl LifecycleWatchdog {
             None
         };
         let Some((reason, started)) = timeout else {
+            self.stall = None;
             return LifecycleDecision::Continue;
         };
-        let elapsed = now.saturating_sub(started);
         // A thread that published `Probing` reached that store, so it is alive
         // and inside a named CoreGraphics/TCC call rather than wedged servicing
         // the tap. Judge it against the probe budget for either exit reason —
@@ -239,8 +278,28 @@ impl LifecycleWatchdog {
         } else {
             TAP_SHUTDOWN_BUDGET
         };
-        if elapsed >= budget {
-            LifecycleDecision::Exit { reason, elapsed }
+        // A stall seen for the first time is charged at most one credit for
+        // whatever preceded this evaluation.
+        let watched = match self.stall {
+            Some(stall)
+                if stall.reason == reason && stall.started == started && stall.budget == budget =>
+            {
+                stall.watched + credit
+            }
+            _ => now.saturating_sub(started).min(credit),
+        };
+        self.stall = Some(Stall {
+            reason,
+            started,
+            budget,
+            watched,
+        });
+        if watched >= budget {
+            LifecycleDecision::Exit {
+                reason,
+                watched,
+                stalled: now.saturating_sub(started),
+            }
         } else {
             LifecycleDecision::Continue
         }
@@ -326,42 +385,62 @@ mod tests {
         }
     }
 
+    /// Drive `watchdog` the way its thread does: one evaluation per poll tick
+    /// after the previous one, each of which must keep watching, then one at
+    /// `until`, whose decision is returned.
+    fn watched(
+        watchdog: &mut LifecycleWatchdog,
+        until: Duration,
+        observation: LifecycleObservation,
+    ) -> LifecycleDecision {
+        let mut tick = watchdog
+            .last_evaluated
+            .map_or(Duration::ZERO, |last| last + LIFECYCLE_POLL_INTERVAL);
+        while tick < until {
+            assert_eq!(
+                watchdog.evaluate(tick, observation),
+                LifecycleDecision::Continue,
+                "no decision before {until:?} (tick {tick:?})"
+            );
+            tick += LIFECYCLE_POLL_INTERVAL;
+        }
+        watchdog.evaluate(until, observation)
+    }
+
+    fn exit(
+        reason: LifecycleExitReason,
+        watched: Duration,
+        stalled: Duration,
+    ) -> LifecycleDecision {
+        LifecycleDecision::Exit {
+            reason,
+            watched,
+            stalled,
+        }
+    }
+
     #[test]
     fn armed_tap_stall_exits_at_budget_unless_tap_stops() {
         let mut watchdog = LifecycleWatchdog::default();
+        let stalled = observation(TapPhase::Armed, false, Duration::ZERO);
         assert_eq!(
-            watchdog.evaluate(
-                Duration::ZERO,
-                observation(TapPhase::Armed, false, Duration::ZERO)
-            ),
+            watched(&mut watchdog, Duration::from_nanos(1_499_999_999), stalled),
             LifecycleDecision::Continue
         );
         assert_eq!(
-            watchdog.evaluate(
-                Duration::from_nanos(1_499_999_999),
-                observation(TapPhase::Armed, false, Duration::ZERO)
-            ),
-            LifecycleDecision::Continue
-        );
-        assert_eq!(
-            watchdog.evaluate(
+            watched(&mut watchdog, TAP_SHUTDOWN_BUDGET, stalled),
+            exit(
+                LifecycleExitReason::TapThreadStalled,
                 TAP_SHUTDOWN_BUDGET,
-                observation(TapPhase::Armed, false, Duration::ZERO)
-            ),
-            LifecycleDecision::Exit {
-                reason: LifecycleExitReason::TapThreadStalled,
-                elapsed: TAP_SHUTDOWN_BUDGET,
-            }
+                TAP_SHUTDOWN_BUDGET
+            )
         );
 
         let mut completed = LifecycleWatchdog::default();
-        let _ = completed.evaluate(
-            Duration::ZERO,
-            observation(TapPhase::Armed, false, Duration::ZERO),
-        );
+        let _ = completed.evaluate(Duration::ZERO, stalled);
         assert_eq!(
             completed.evaluate(
-                Duration::from_millis(500),
+                LIFECYCLE_POLL_INTERVAL,
                 observation(TapPhase::TapStopped, false, Duration::ZERO)
             ),
             LifecycleDecision::Complete
@@ -370,35 +449,39 @@ mod tests {
 
     #[test]
     fn a_slow_capability_probe_is_not_a_wedged_tap_thread() {
-        // #952: with the display asleep the between-slice `has_accessibility`
-        // probe (a WindowServer round trip) took ~1.6 s, which the watchdog
-        // charged against the 1.5 s stall budget and force-exited the agent
-        // once a minute for the whole sleep. The probe has its own budget.
+        // #952: a between-slice `has_accessibility` probe (a WindowServer
+        // round trip) that took ~1.6 s around a sleep transition was charged
+        // against the 1.5 s stall budget and force-exited the agent. The
+        // probe has its own budget.
         let mut watchdog = LifecycleWatchdog::default();
         let probing = observation(TapPhase::Probing, false, Duration::ZERO);
         assert_eq!(
-            watchdog.evaluate(TAP_SHUTDOWN_BUDGET, probing),
+            watched(&mut watchdog, TAP_SHUTDOWN_BUDGET, probing),
             LifecycleDecision::Continue
         );
         assert_eq!(
-            watchdog.evaluate(Duration::from_millis(1_740), probing),
+            watched(&mut watchdog, Duration::from_millis(1_740), probing),
             LifecycleDecision::Continue
         );
         // The probe returning re-marks progress; the tap is healthy again.
         assert_eq!(
-            watchdog.evaluate(
+            watched(
+                &mut watchdog,
                 Duration::from_millis(1_800),
                 observation(TapPhase::Armed, false, Duration::from_millis(1_750))
             ),
             LifecycleDecision::Continue
         );
+
         // A probe that never returns is still the freeze hazard.
+        let mut wedged = LifecycleWatchdog::default();
         assert_eq!(
-            watchdog.evaluate(TAP_PROBE_BUDGET, probing),
-            LifecycleDecision::Exit {
-                reason: LifecycleExitReason::TapThreadStalled,
-                elapsed: TAP_PROBE_BUDGET,
-            }
+            watched(&mut wedged, TAP_PROBE_BUDGET, probing),
+            exit(
+                LifecycleExitReason::TapThreadStalled,
+                TAP_PROBE_BUDGET,
+                TAP_PROBE_BUDGET
+            )
         );
     }
 
@@ -410,62 +493,189 @@ mod tests {
         let mut watchdog = LifecycleWatchdog::default();
         let probing = observation(TapPhase::Probing, true, Duration::ZERO);
         assert_eq!(
-            watchdog.evaluate(Duration::ZERO, probing),
+            watched(&mut watchdog, TAP_SHUTDOWN_BUDGET, probing),
             LifecycleDecision::Continue
         );
         assert_eq!(
-            watchdog.evaluate(TAP_SHUTDOWN_BUDGET, probing),
-            LifecycleDecision::Continue
-        );
-        assert_eq!(
-            watchdog.evaluate(TAP_PROBE_BUDGET, probing),
-            LifecycleDecision::Exit {
-                reason: LifecycleExitReason::StopTimedOut,
-                elapsed: TAP_PROBE_BUDGET,
-            }
+            watched(&mut watchdog, TAP_PROBE_BUDGET, probing),
+            exit(
+                LifecycleExitReason::StopTimedOut,
+                TAP_PROBE_BUDGET,
+                TAP_PROBE_BUDGET
+            )
         );
     }
 
     #[test]
-    fn a_stopped_tap_still_exits_on_the_short_stop_budget() {
-        // The probe budget is scoped to the phase that publishes it: once the
-        // tap thread leaves `Probing`, an unfinished stop is judged as before.
+    fn a_teardown_after_a_slow_probe_gets_the_short_stop_budget_afresh() {
+        // A stop that waited out a 1.6 s probe has already outlived the short
+        // budget when the probe returns. The teardown that follows (a few
+        // CoreGraphics calls, then the tap is destroyed) is what the short
+        // budget is for, so it starts over there instead of exiting the agent
+        // before the teardown can begin.
         let mut watchdog = LifecycleWatchdog::default();
-        let _ = watchdog.evaluate(
-            Duration::ZERO,
-            observation(TapPhase::Probing, true, Duration::ZERO),
+        let probing = observation(TapPhase::Probing, true, Duration::ZERO);
+        let probe_returned = Duration::from_millis(1_600);
+        assert_eq!(
+            watched(&mut watchdog, probe_returned, probing),
+            LifecycleDecision::Continue
         );
+        // The thread re-arms, notices the stop at the top of the loop, and
+        // starts the synchronous teardown.
+        let back_in_the_loop = probe_returned + LIFECYCLE_POLL_INTERVAL;
         assert_eq!(
             watchdog.evaluate(
-                TAP_SHUTDOWN_BUDGET,
-                observation(TapPhase::TapStopped, true, Duration::ZERO)
+                back_in_the_loop,
+                observation(TapPhase::Armed, true, probe_returned)
             ),
-            LifecycleDecision::Exit {
-                reason: LifecycleExitReason::StopTimedOut,
-                elapsed: TAP_SHUTDOWN_BUDGET,
-            }
+            LifecycleDecision::Continue,
+            "1.6 s under the probe budget does not exhaust the stop budget"
+        );
+        let tap_stopped = observation(TapPhase::TapStopped, true, probe_returned);
+        // The short budget counts from the last tick before the probe was seen
+        // to have returned: the tick that sees the return charges the whole gap
+        // it straddles, so this is conservative by at most one poll interval.
+        let teardown_deadline = probe_returned + TAP_SHUTDOWN_BUDGET;
+        assert_eq!(
+            watched(
+                &mut watchdog,
+                probe_returned + Duration::from_millis(1_400),
+                tap_stopped
+            ),
+            LifecycleDecision::Continue
+        );
+        // The thread must still exit after the tap is destroyed, on the short
+        // budget counted from leaving the probe.
+        assert_eq!(
+            watched(&mut watchdog, teardown_deadline, tap_stopped),
+            exit(
+                LifecycleExitReason::StopTimedOut,
+                TAP_SHUTDOWN_BUDGET,
+                teardown_deadline
+            )
+        );
+    }
+
+    #[test]
+    fn a_frozen_process_is_not_a_wedged_tap_thread() {
+        // #952, the other half: around a sleep transition the watchdog thread
+        // itself has fired 1.0 s and 4.8 s past its budget, so it was not
+        // running for at least that long — and neither was the tap thread it
+        // judges. The freeze they shared is not charged to the tap thread.
+        let mut watchdog = LifecycleWatchdog::default();
+        let before_freeze = observation(TapPhase::Armed, false, Duration::ZERO);
+        let _ = watched(&mut watchdog, Duration::from_millis(300), before_freeze);
+        // The 11:54:19 exit on the reporting host: 2515 ms since the mark.
+        let thawed = Duration::from_millis(2_815);
+        assert_eq!(
+            watchdog.evaluate(thawed, before_freeze),
+            LifecycleDecision::Continue,
+            "300 ms watched + one capped gap is under budget"
+        );
+        // The thawed tap thread marks progress on its next slice boundary.
+        assert_eq!(
+            watched(
+                &mut watchdog,
+                thawed + TAP_SHUTDOWN_BUDGET,
+                observation(TapPhase::Armed, false, thawed + Duration::from_millis(40))
+            ),
+            LifecycleDecision::Continue
+        );
+
+        // A tap thread that stays silent after the thaw is still wedged: the
+        // budget runs out once the stall the watchdog saw reaches it.
+        let mut wedged = LifecycleWatchdog::default();
+        let _ = watched(&mut wedged, Duration::from_millis(300), before_freeze);
+        let _ = wedged.evaluate(thawed, before_freeze);
+        // 1.5 s budget, less the 300 ms watched and the 500 ms capped gap.
+        let remaining = Duration::from_millis(700);
+        assert_eq!(
+            watched(&mut wedged, thawed + remaining, before_freeze),
+            exit(
+                LifecycleExitReason::TapThreadStalled,
+                TAP_SHUTDOWN_BUDGET,
+                thawed + remaining
+            )
+        );
+    }
+
+    #[test]
+    fn a_late_poll_within_the_observation_gap_still_counts() {
+        // Scheduling jitter up to the gap is ordinary watching: the stall it
+        // spans is charged in full, so a wedged tap gains no time from it.
+        let mut watchdog = LifecycleWatchdog::default();
+        let stalled = observation(TapPhase::Armed, false, Duration::ZERO);
+        let _ = watched(&mut watchdog, Duration::from_millis(1_000), stalled);
+        let late = Duration::from_millis(1_000) + OBSERVATION_GAP;
+        assert_eq!(
+            watchdog.evaluate(late, stalled),
+            exit(LifecycleExitReason::TapThreadStalled, late, late)
+        );
+    }
+
+    #[test]
+    fn a_starved_watchdog_still_catches_a_wedged_tap() {
+        // The cap discounts each gap, never all of it: a watchdog that only
+        // gets scheduled every few seconds still accumulates the stall.
+        let mut watchdog = LifecycleWatchdog::default();
+        let stalled = observation(TapPhase::Armed, false, Duration::ZERO);
+        let _ = watchdog.evaluate(Duration::ZERO, stalled);
+        let starved = |n: u32| Duration::from_secs(3) * n;
+        assert_eq!(
+            watchdog.evaluate(starved(1), stalled),
+            LifecycleDecision::Continue
+        );
+        assert_eq!(
+            watchdog.evaluate(starved(2), stalled),
+            LifecycleDecision::Continue
+        );
+        assert_eq!(
+            watchdog.evaluate(starved(3), stalled),
+            exit(
+                LifecycleExitReason::TapThreadStalled,
+                OBSERVATION_GAP * 3,
+                starved(3)
+            )
+        );
+    }
+
+    #[test]
+    fn a_stop_that_straddles_a_freeze_gets_a_watched_budget() {
+        let mut watchdog = LifecycleWatchdog::default();
+        let stopping = observation(TapPhase::Armed, true, Duration::ZERO);
+        let _ = watched(&mut watchdog, Duration::from_millis(200), stopping);
+        let thawed = Duration::from_secs(5);
+        assert_eq!(
+            watchdog.evaluate(thawed, stopping),
+            LifecycleDecision::Continue
+        );
+        // 1.5 s budget, less the 200 ms watched and the 500 ms capped gap.
+        let remaining = Duration::from_millis(800);
+        assert_eq!(
+            watched(&mut watchdog, thawed + remaining, stopping),
+            exit(
+                LifecycleExitReason::StopTimedOut,
+                TAP_SHUTDOWN_BUDGET,
+                thawed + remaining
+            )
         );
     }
 
     #[test]
     fn tap_creation_or_activation_stall_exits_at_budget() {
         let mut watchdog = LifecycleWatchdog::default();
+        let arming = observation(TapPhase::Arming, false, Duration::ZERO);
         assert_eq!(
-            watchdog.evaluate(
-                Duration::from_nanos(1_499_999_999),
-                observation(TapPhase::Arming, false, Duration::ZERO)
-            ),
+            watched(&mut watchdog, Duration::from_nanos(1_499_999_999), arming),
             LifecycleDecision::Continue
         );
         assert_eq!(
-            watchdog.evaluate(
+            watched(&mut watchdog, TAP_SHUTDOWN_BUDGET, arming),
+            exit(
+                LifecycleExitReason::TapThreadStalled,
                 TAP_SHUTDOWN_BUDGET,
-                observation(TapPhase::Arming, false, Duration::ZERO)
-            ),
-            LifecycleDecision::Exit {
-                reason: LifecycleExitReason::TapThreadStalled,
-                elapsed: TAP_SHUTDOWN_BUDGET,
-            }
+                TAP_SHUTDOWN_BUDGET
+            )
         );
     }
 
@@ -476,22 +686,18 @@ mod tests {
             Duration::ZERO,
             observation(TapPhase::Armed, true, Duration::ZERO),
         );
+        let tap_stopped = observation(TapPhase::TapStopped, true, Duration::ZERO);
         assert_eq!(
-            watchdog.evaluate(
-                Duration::from_millis(500),
-                observation(TapPhase::TapStopped, true, Duration::ZERO)
-            ),
+            watched(&mut watchdog, Duration::from_millis(500), tap_stopped),
             LifecycleDecision::Continue
         );
         assert_eq!(
-            watchdog.evaluate(
+            watched(&mut watchdog, TAP_SHUTDOWN_BUDGET, tap_stopped),
+            exit(
+                LifecycleExitReason::StopTimedOut,
                 TAP_SHUTDOWN_BUDGET,
-                observation(TapPhase::TapStopped, true, Duration::ZERO)
-            ),
-            LifecycleDecision::Exit {
-                reason: LifecycleExitReason::StopTimedOut,
-                elapsed: TAP_SHUTDOWN_BUDGET,
-            }
+                TAP_SHUTDOWN_BUDGET
+            )
         );
 
         let mut completed = LifecycleWatchdog::default();
@@ -501,7 +707,7 @@ mod tests {
         );
         assert_eq!(
             completed.evaluate(
-                Duration::from_millis(500),
+                LIFECYCLE_POLL_INTERVAL,
                 observation(TapPhase::ThreadExited, true, Duration::ZERO)
             ),
             LifecycleDecision::Complete
@@ -513,23 +719,25 @@ mod tests {
         let mut watchdog = LifecycleWatchdog::default();
         let starting = observation(TapPhase::Starting, false, Duration::ZERO);
         assert_eq!(
-            watchdog.evaluate(Duration::ZERO, starting),
+            watched(&mut watchdog, TAP_SHUTDOWN_BUDGET * 2, starting),
             LifecycleDecision::Continue
         );
-        assert_eq!(
-            watchdog.evaluate(TAP_SHUTDOWN_BUDGET * 2, starting),
-            LifecycleDecision::Continue
-        );
+        // Progress marked every slice keeps an armed tap healthy indefinitely.
+        let mut progress = TAP_SHUTDOWN_BUDGET * 2;
+        while progress < TAP_SHUTDOWN_BUDGET * 4 {
+            progress += Duration::from_millis(500);
+            assert_eq!(
+                watched(
+                    &mut watchdog,
+                    progress,
+                    observation(TapPhase::Armed, false, progress)
+                ),
+                LifecycleDecision::Continue
+            );
+        }
         assert_eq!(
             watchdog.evaluate(
-                TAP_SHUTDOWN_BUDGET * 3,
-                observation(TapPhase::Armed, false, Duration::from_secs(4))
-            ),
-            LifecycleDecision::Continue
-        );
-        assert_eq!(
-            watchdog.evaluate(
-                TAP_SHUTDOWN_BUDGET * 4,
+                progress + LIFECYCLE_POLL_INTERVAL,
                 observation(TapPhase::ThreadExited, false, Duration::ZERO)
             ),
             LifecycleDecision::Complete
