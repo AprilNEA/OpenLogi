@@ -11,12 +11,20 @@ use thiserror::Error;
 /// Crosses the agent↔GUI IPC (`start_pairing`), so variant order is wire
 /// format — changes require a `PROTOCOL_VERSION` bump (guarded by
 /// `openlogi-ipc/tests/wire_format.rs`).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReceiverSelector {
     /// The first supported receiver found — fine for the common single-receiver case.
     First,
     /// A specific Bolt receiver by its unique ID.
     BoltUid(String),
+    /// A specific Bolt or Unifying receiver, matched by product and hardware ID.
+    /// A missing receiver is an error; never fall back to another receiver.
+    ReceiverUid {
+        /// USB product ID of the selected receiver.
+        product_id: u16,
+        /// HID++ unique ID from the receiver inventory.
+        uid: String,
+    },
 }
 
 /// A single click in a pointer passkey sequence.

@@ -27,7 +27,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use hidpp::{
     channel::{HidppChannel, HidppMessage},
-    receiver::{self, Receiver},
+    receiver,
 };
 use tokio::sync::mpsc;
 use tracing::{debug, trace};
@@ -215,7 +215,7 @@ pub async fn list_pairing_receivers(
             continue;
         };
         let uid = match family {
-            ReceiverFamily::Bolt => read_bolt_uid(&channel, &node.id).await,
+            ReceiverFamily::Bolt => read_receiver_uid(&channel, &node.id).await,
             ReceiverFamily::Unifying => None,
         };
         out.push(PairingReceiver {
@@ -227,15 +227,13 @@ pub async fn list_pairing_receivers(
     Ok(out)
 }
 
-/// Reads a Bolt receiver's unique ID via the crate's `BoltReceiver`, under
+/// Reads a receiver's unique ID through its protocol implementation, under
 /// the receiver's register phase. `None` when the read fails — or when
 /// another OpenLogi process still holds the phase, which is not read into.
-async fn read_bolt_uid(channel: &Arc<HidppChannel>, node: &NodeId) -> Option<String> {
-    let Some(Receiver::Bolt(bolt)) = receiver::detect(Arc::clone(channel)) else {
-        return None;
-    };
+async fn read_receiver_uid(channel: &Arc<HidppChannel>, node: &NodeId) -> Option<String> {
+    let receiver = receiver::detect(Arc::clone(channel))?;
     let _registers = lock_receiver_registers(node, RECEIVER_REGISTER_TIMEOUT).await?;
-    bolt.get_unique_id().await.ok()
+    receiver.get_unique_id().await.ok()
 }
 
 /// An open receiver channel and the register phase a session runs under.
@@ -258,6 +256,13 @@ async fn open_receiver(
     target: &ReceiverSelector,
 ) -> Result<OpenReceiver, PairingError> {
     for node in backend.enumerate_hidpp().await? {
+        // Do not open unrelated devices before reaching an explicitly chosen
+        // receiver: a failed open on one must not prevent pairing on another.
+        if let ReceiverSelector::ReceiverUid { product_id, .. } = target
+            && node.product_id != *product_id
+        {
+            continue;
+        }
         let Some(channel) = backend.open_hidpp(&node).await? else {
             continue;
         };
@@ -268,9 +273,16 @@ async fn open_receiver(
             ReceiverSelector::First => true,
             ReceiverSelector::BoltUid(want) => {
                 family == ReceiverFamily::Bolt
-                    && read_bolt_uid(&channel, &node.id)
+                    && read_receiver_uid(&channel, &node.id)
                         .await
                         .is_some_and(|uid| uid.eq_ignore_ascii_case(want))
+            }
+            ReceiverSelector::ReceiverUid { product_id, uid } => {
+                channel.product_id == *product_id
+                    && !uid.is_empty()
+                    && read_receiver_uid(&channel, &node.id)
+                        .await
+                        .is_some_and(|actual| actual.eq_ignore_ascii_case(uid))
             }
         };
         if !matched {

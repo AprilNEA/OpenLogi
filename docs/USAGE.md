@@ -3,6 +3,8 @@
 The `openlogi` command-line tool. For install and configuration, see the
 [README](../README.md).
 
+For the desktop app's Add Device flow, see [wireless pairing](PAIRING.md).
+
 ```sh
 openlogi list                 # paired devices: slot, codename, kind, online, battery
 openlogi assets sync          # pre-fetch device renders from the fastest available mirror
