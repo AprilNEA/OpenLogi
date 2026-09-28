@@ -67,6 +67,90 @@ async fn dpi_gesture_arming_never_overwrites_raw_xy_with_plain_diversion() {
     }
 }
 
+/// The M720 Triathlon's thumb button reports
+/// [`reprog_controls::MULTIPLATFORM_GESTURE_BUTTON_CID`] rather than the MX
+/// gesture CID, so arming must find it in the device's own control table:
+/// raw-XY diversion in gesture mode, plain diversion for a single binding, and
+/// left native when a gesture was asked of a control without raw XY.
+#[tokio::test]
+async fn m720_gesture_button_arms_from_its_reported_control_table() {
+    let cid = reprog_controls::MULTIPLATFORM_GESTURE_BUTTON_CID;
+    for (gestures, raw_xy, expected_flags) in [
+        (true, true, vec![0x33]),
+        (true, false, vec![]),
+        (false, true, vec![0x23]),
+        (false, false, vec![0x23]),
+    ] {
+        let (raw, handle) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+            let mut response = vec![0; 20];
+            response[..4].copy_from_slice(&request[..4]);
+            response[0] = 0x11;
+            match (request[2], request[3] >> 4) {
+                (0, 1) => response[4] = 4,
+                (0, 0) => response[4] = 2,
+                (2, 0) => response[4] = 1,
+                (2, 1) => {
+                    response[4..6].copy_from_slice(&cid.to_be_bytes());
+                    // The M720's `getCidInfo` task for this control.
+                    response[6..8].copy_from_slice(&0x00adu16.to_be_bytes());
+                    response[8] = 0x20;
+                    response[12] = u8::from(raw_xy);
+                }
+                (2, 2) => response[4..6].copy_from_slice(&cid.to_be_bytes()),
+                (2, 3) => return Some(request.to_vec()),
+                _ => panic!("unexpected capture request: {request:02x?}"),
+            }
+            Some(response)
+        });
+        let channel = scripted_channel(raw).await;
+        let device = Device::new(channel.clone(), 0xff).await.unwrap();
+        let spec = if gestures {
+            CaptureSpec {
+                divert_gesture_sources: vec![cid],
+                ..CaptureSpec::default()
+            }
+        } else {
+            CaptureSpec {
+                divert_buttons: vec![(cid, ButtonId::GestureButton)],
+                ..CaptureSpec::default()
+            }
+        };
+        let mut armed = ArmedControls::default();
+        arm_controls_into(&device, &channel, 0xff, &spec, &mut armed)
+            .await
+            .unwrap();
+        let writes: Vec<_> = handle
+            .written_reports()
+            .into_iter()
+            .filter(|report| report[2] == 2 && report[3] >> 4 == 3)
+            .map(|report| {
+                assert_eq!(u16::from_be_bytes([report[4], report[5]]), cid);
+                report[6]
+            })
+            .collect();
+        assert_eq!(
+            writes, expected_flags,
+            "gestures {gestures}, raw XY {raw_xy}"
+        );
+        assert_eq!(
+            armed.gesture_cids,
+            if gestures && raw_xy {
+                vec![cid]
+            } else {
+                vec![]
+            }
+        );
+        assert_eq!(
+            armed.button_cids,
+            if gestures {
+                vec![]
+            } else {
+                vec![(cid, ButtonId::GestureButton)]
+            }
+        );
+    }
+}
+
 #[tokio::test]
 async fn pending_restore_waits_for_a_replacement_then_undiverts_through_it() {
     let route = DeviceRoute::Direct {
