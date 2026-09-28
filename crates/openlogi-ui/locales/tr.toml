@@ -564,6 +564,7 @@ open_application_or_folder = "Uygulama veya klasör aç"
 [keyboard]
 editor_unavailable = "Düzenleyici kullanılamıyor"
 no_keyboard_image_available = "Klavye görseli yok"
+native_function = "Yerel işlev"
 search_key = "Arama tuşu"
 dictation_key = "Dikte tuşu"
 emoji_key = "Emoji tuşu"

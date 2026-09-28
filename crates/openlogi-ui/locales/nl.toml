@@ -564,6 +564,7 @@ open_application_or_folder = "Toepassing of map openen"
 [keyboard]
 editor_unavailable = "Editor niet beschikbaar"
 no_keyboard_image_available = "Geen toetsenbordafbeelding beschikbaar"
+native_function = "Standaardfunctie"
 search_key = "Zoektoets"
 dictation_key = "Dicteertoets"
 emoji_key = "Emojitoets"

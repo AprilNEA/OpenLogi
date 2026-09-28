@@ -564,6 +564,7 @@ open_application_or_folder = "Адкрыць праграму або папку"
 [keyboard]
 editor_unavailable = "Рэдактар недаступны"
 no_keyboard_image_available = "Няма выявы клавіятуры"
+native_function = "Стандартная функцыя"
 search_key = "Клавіша пошуку"
 dictation_key = "Клавіша дыктоўкі"
 emoji_key = "Клавіша эмодзі"

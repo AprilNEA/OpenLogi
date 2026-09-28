@@ -564,6 +564,7 @@ open_application_or_folder = "Avaa sovellus tai kansio"
 [keyboard]
 editor_unavailable = "Muokkain ei ole käytettävissä"
 no_keyboard_image_available = "Näppäimistön kuvaa ei ole saatavilla"
+native_function = "Oletustoiminto"
 search_key = "Hakunäppäin"
 dictation_key = "Sanelunäppäin"
 emoji_key = "Emoji-näppäin"

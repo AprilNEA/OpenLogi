@@ -564,6 +564,7 @@ open_application_or_folder = "アプリまたはフォルダを開く"
 [keyboard]
 editor_unavailable = "エディターを利用できません"
 no_keyboard_image_available = "キーボード画像がありません"
+native_function = "標準の機能"
 search_key = "検索キー"
 dictation_key = "音声入力キー"
 emoji_key = "絵文字キー"

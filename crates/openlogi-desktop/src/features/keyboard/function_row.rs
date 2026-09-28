@@ -1,14 +1,17 @@
-//! The keyboard function-row remapper view — the Keys tab body.
+//! The keyboard key remapper view — the Keys tab body.
 //!
 //! A two-pane inspector model (the "pro-tool" layout): the keyboard photo sits
-//! beside a row of mouse-style callout bubbles, and clicking a function key
-//! **selects** it (no popover). A tall, scrollable config panel slides in on the
-//! right while the keyboard physically makes room. Only one key is selected at a
+//! beside a row of mouse-style callout bubbles, and clicking a key **selects**
+//! it (no popover). A tall, scrollable config panel slides in on the right
+//! while the keyboard physically makes room. Only one key is selected at a
 //! time.
 //!
-//! F-key bindings are global (`AppState`'s keyboard map), committed via
-//! [`AppState::commit_keyboard_binding`]. The panel lists the same action
-//! catalog the mouse picker uses, plus a Power User section.
+//! Which keys appear is the asset's call (see [`key_points::key_slots`]): a
+//! depot with control markers shows the keyboard's own HID++ controls, each
+//! bound per device through [`AppState::commit_binding`] and diverted by the
+//! agent while bound; a depot without them shows the OS-hook F-row, bound
+//! globally through [`AppState::commit_keyboard_binding`]. The panel lists
+//! the same action catalog the mouse picker uses, plus a Power User section.
 
 #![expect(
     clippy::needless_pass_by_value,
@@ -32,7 +35,6 @@ use gpui::{
 };
 use gpui_component::{Selectable as _, h_flex, input::InputState, v_flex};
 use openlogi_core::binding::{Action, WorkflowStep};
-use openlogi_core::config::{FunctionKey, KeyModifiers, KeyTrigger};
 
 use super::editors::{
     PowerUserKind, text_editor_placeholder, text_editor_seed, workflow_editor_seed,
@@ -43,8 +45,9 @@ use crate::features::binding_editor::{
     editor_section,
 };
 use crate::features::mouse::geometry::asset_dimensions_for_png;
+use crate::features::profiles::friendly_app_name;
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
-use crate::state::{AppState, StateEvent};
+use crate::state::{AppState, StateEvent, StateEvents};
 use crate::ui::action::localized_action_label;
 use crate::ui::components::MenuRow;
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
@@ -53,15 +56,10 @@ use gpui::{Animation, AnimationExt, img};
 
 mod key_points;
 
-use key_points::key_points;
+pub(crate) use key_points::KeyTarget;
+use key_points::key_slots;
 #[cfg(test)]
 use key_points::{EVEN_SPACING_END, EVEN_SPACING_START, key_x_fractions};
-
-/// The full programmable top row: Esc, then F1-F19 — each key carries its
-/// legend and the [`KeyTrigger`] keycode it binds. MX Keys-class boards expose
-/// all 20; boards with a shorter F-row (a G513 has F1-F12) surface a prefix of
-/// this list, sized by the asset's key markers — see [`key_points()`].
-const FUNCTION_KEYS: [FunctionKey; 20] = FunctionKey::ALL;
 
 /// Width of the config panel (CSS px) when a key is selected.
 const PANEL_W: f32 = 320.;
@@ -206,7 +204,6 @@ impl Render for FunctionRowView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = AppState::try_read(cx);
         let asset = state.and_then(|state| state.current_record()?.asset.as_ref());
-        let bindings = state.map(AppState::keyboard_bindings);
         let glow = state.and_then(|state| {
             state
                 .current_record()
@@ -215,26 +212,20 @@ impl Render for FunctionRowView {
 
         let viewport_h = f32::from(window.viewport_size().height);
         let render_size = keyboard_render_size(asset, viewport_h);
-        let points = key_points(asset);
         let image_path = asset.map(|asset| asset.image_path.clone());
-        let slots: Vec<KeySlot> = FUNCTION_KEYS
-            .iter()
-            .zip(points.iter())
+        let slots: Vec<KeySlot> = key_slots(asset)
+            .into_iter()
             .enumerate()
-            .map(|(idx, (key, point))| {
-                let trigger = KeyTrigger {
-                    keycode: key.keycode(),
-                    modifiers: KeyModifiers::default(),
-                };
-                let bound = bindings.and_then(|bindings| bindings.get(&trigger));
+            .map(|(idx, layout)| {
+                let bound = state.and_then(|state| bound_action(state, &layout.target));
                 KeySlot {
                     idx,
-                    label: key.label(),
-                    trigger,
-                    x_frac: point.x_frac,
-                    y_frac: point.y_frac,
-                    binding: binding_label(bound),
-                    binding_icon: bound.map(action_icon_path),
+                    label: layout.legend.into(),
+                    x_frac: layout.point.x_frac,
+                    y_frac: layout.point.y_frac,
+                    binding: binding_label(bound.as_ref()),
+                    binding_icon: bound.as_ref().map(action_icon_path),
+                    target: layout.target,
                 }
             })
             .collect();
@@ -253,11 +244,11 @@ impl Render for FunctionRowView {
         if let (Some(selected_idx), Some(kind)) = (selected, active_editor)
             && let Some(slot) = slots.get(selected_idx)
         {
-            let current_action = bindings.and_then(|bindings| bindings.get(&slot.trigger));
+            let current_action = state.and_then(|state| bound_action(state, &slot.target));
             match kind {
                 PowerUserKind::Workflow => {
                     if self.workflow_draft.is_empty() {
-                        self.workflow_draft = workflow_editor_seed(current_action);
+                        self.workflow_draft = workflow_editor_seed(current_action.as_ref());
                     }
                 }
                 _ => {
@@ -270,7 +261,7 @@ impl Render for FunctionRowView {
                         );
                     } else {
                         self.new_text_state(
-                            text_editor_seed(current_action, kind),
+                            text_editor_seed(current_action.as_ref(), kind),
                             text_editor_placeholder(kind),
                             window,
                             cx,
@@ -308,16 +299,45 @@ fn keyboard_render_size(asset: Option<&ResolvedAsset>, viewport_h: f32) -> (f32,
     asset_dimensions_for_png(asset, target_h, KEYBOARD_W)
 }
 
-/// One function-row key with its resolved layout + binding.
+/// One key with its resolved layout + binding.
 #[derive(Clone)]
 struct KeySlot {
     idx: usize,
-    label: &'static str,
-    trigger: KeyTrigger,
+    label: SharedString,
+    target: KeyTarget,
     x_frac: f32,
     y_frac: f32,
-    binding: gpui::SharedString,
+    binding: SharedString,
     binding_icon: Option<&'static str>,
+}
+
+/// The action `target` is bound to in the selected device's open profile
+/// (a control) or the global F-row map (a function key). `None` when the key
+/// is on its native function.
+fn bound_action(state: &AppState, target: &KeyTarget) -> Option<Action> {
+    match target {
+        KeyTarget::Control(button) => state
+            .button_bindings()
+            .get(button)
+            .filter(|action| **action != Action::None)
+            .cloned(),
+        KeyTarget::FunctionKey(trigger) => state.keyboard_bindings().get(trigger).cloned(),
+    }
+}
+
+/// Persist `action` for `target`: a control binds per device (and per open
+/// app profile) like any mouse button; a function key binds globally.
+/// `None` returns a control to its native function; for a function key it
+/// clears the trigger.
+pub(super) fn commit_key_action(
+    state: &mut AppState,
+    target: &KeyTarget,
+    action: Option<Action>,
+) -> StateEvents {
+    match target {
+        KeyTarget::Control(button) => state.commit_binding(*button, action.unwrap_or(Action::None)),
+        KeyTarget::FunctionKey(trigger) => state.commit_keyboard_binding(trigger.clone(), action),
+    }
 }
 
 /// The two-pane row: keyboard photo + an optional side panel.
@@ -535,7 +555,7 @@ impl RenderOnce for KeyCallout {
                     } else {
                         pal.text_primary
                     })
-                    .child(self.slot.label),
+                    .child(self.slot.label.clone()),
             )
             .child(
                 h_flex()
@@ -758,13 +778,13 @@ impl FunctionRowView {
     ) -> gpui::Div {
         let pal = theme::palette(cx);
         let slot = &slots[selected_idx];
-        let trigger = slot.trigger.clone();
-        let key_name = trigger.to_string();
+        let target = slot.target.clone();
+        let key_name = slot.label.clone();
 
         // If an editor is active, render it instead of the list.
         if let Some(kind) = self.active_editor {
             return super::editors::editor_card(
-                trigger,
+                target,
                 kind,
                 self.text_state.clone(),
                 self.workflow_draft.clone(),
@@ -773,31 +793,86 @@ impl FunctionRowView {
             );
         }
 
-        let current = AppState::try_read(cx)
-            .and_then(|state| state.keyboard_bindings().get(&trigger).cloned());
+        let state = AppState::try_read(cx);
+        let current = state.and_then(|state| bound_action(state, &target));
+        // A control binds inside the open app profile, like a mouse button.
+        let app = match target {
+            KeyTarget::Control(_) => state.and_then(AppState::editing_app).map(|app| {
+                state
+                    .and_then(|state| state.recent_app_name(app))
+                    .map_or_else(|| friendly_app_name(app), str::to_string)
+            }),
+            KeyTarget::FunctionKey(_) => None,
+        };
 
         let view_for_pick = view.clone();
-        let trigger_for_pick = trigger.clone();
+        let target_for_pick = target.clone();
         let on_pick: PickFn = Rc::new(move |action, _window, cx| {
             AppState::apply(cx, |state| {
-                state.commit_keyboard_binding(trigger_for_pick.clone(), Some(action))
+                commit_key_action(state, &target_for_pick, Some(action))
             });
             view_for_pick.update(cx, |_, vcx| vcx.notify());
         });
 
-        let rows = panel_action_rows(current.as_ref(), &on_pick, view, &pal);
+        let mut rows = Vec::new();
+        if let KeyTarget::Control(_) = target {
+            // A control's resting state is its firmware function, which is
+            // not an action in the catalog: give it a row of its own so the
+            // key can be returned to native (#1172).
+            let view_for_native = view.clone();
+            let target_for_native = target.clone();
+            rows.push(
+                v_flex().child(
+                    MenuRow::new("panel-native")
+                        .selected(current.is_none())
+                        .role(Role::MenuItem)
+                        .child(
+                            h_flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    svg()
+                                        .path("action-icons/keyboard.svg")
+                                        .size_4()
+                                        .flex_none()
+                                        .text_color(pal.text_muted),
+                                )
+                                .child(div().child(tr!("keyboard.native_function"))),
+                        )
+                        .when(current.is_none(), |row| {
+                            row.child(
+                                gpui_component::Icon::new(gpui_component::IconName::Check)
+                                    .size_3()
+                                    .text_color(rgb(ACCENT_BLUE)),
+                            )
+                        })
+                        .on_click(move |_ev, _window, cx| {
+                            AppState::apply(cx, |state| {
+                                commit_key_action(state, &target_for_native, None)
+                            });
+                            view_for_native.update(cx, |_, vcx| vcx.notify());
+                        }),
+                ),
+            );
+        }
+        rows.extend(panel_action_rows(current.as_ref(), &on_pick, view, &pal));
 
         compact_panel(pal)
             .w(px(PANEL_W))
             .max_h(px(500.))
-            .child(title_header(&key_name, &pal))
+            .child(title_header(&key_name, app.as_deref(), &pal))
             .child(divider(pal))
             .child(editor_scroll_list("key-panel-scroll", rows))
     }
 }
 
-/// The panel's title — shows which key is selected, e.g. "F1".
-fn title_header(key_name: &str, pal: &Palette) -> impl IntoElement {
+/// The panel's title — which key is selected, e.g. "F1" or "Screen Capture
+/// Key", and the app profile it binds in when one is open.
+fn title_header(key_name: &SharedString, app: Option<&str>, pal: &Palette) -> impl IntoElement {
+    let title = match app {
+        Some(app) => tr!("actions.bind_control_in_app", name => key_name.clone(), app => app),
+        None => tr!("actions.bind_control", name => key_name.clone()),
+    };
     h_flex()
         .items_center()
         .justify_between()
@@ -808,7 +883,7 @@ fn title_header(key_name: &str, pal: &Palette) -> impl IntoElement {
                 .text_caption()
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(pal.text_muted)
-                .child(tr!("actions.bind_control", name => key_name)),
+                .child(title),
         )
 }
 

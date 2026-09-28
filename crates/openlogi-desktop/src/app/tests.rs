@@ -1,5 +1,6 @@
 use super::home::{connection_icon_path, ordered_device_indices};
 use super::{Capabilities, DetailTab, DeviceKind, DeviceRecord};
+use crate::services::assets::ResolvedAsset;
 use crate::ui::battery::{battery_charging_no_reading, battery_needs_attention};
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, DeviceTransports, LightCapabilities, LightValueRange,
@@ -284,6 +285,27 @@ fn keyboard_with_buttons_shows_keys_tab() {
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(tabs.contains(&DetailTab::Keys));
     assert!(!tabs.contains(&DetailTab::Buttons));
+}
+
+/// A sleeping keyboard whose slot was never probed has no capability data,
+/// but a resolved depot already says which controls it has: the Keys tab
+/// shows them so bindings can be set before the keyboard wakes.
+#[test]
+fn keyboard_with_a_depot_but_no_capabilities_shows_keys_tab() {
+    let mut keyboard = record(DeviceKind::Keyboard, None);
+    keyboard.asset = Some(ResolvedAsset {
+        depot: "mx_keys_mini".to_string(),
+        display_name: "MX Keys Mini".to_string(),
+        kind: Some(DeviceKind::Keyboard),
+        image_path: std::path::PathBuf::from("/tmp/mx-keys-mini.png"),
+        hero_image_path: None,
+        glow: None,
+        metadata: openlogi_assets::Metadata::default(),
+        png_width: 1872,
+        png_height: 728,
+    });
+    assert!(DetailTab::tabs_for(&keyboard).contains(&DetailTab::Keys));
+    assert!(!DetailTab::tabs_for(&record(DeviceKind::Keyboard, None)).contains(&DetailTab::Keys));
 }
 
 /// Each panel is independent: a lighting-only device (e.g. a keyboard with

@@ -564,6 +564,7 @@ open_application_or_folder = "Ouvrir une application ou un dossier"
 [keyboard]
 editor_unavailable = "Éditeur indisponible"
 no_keyboard_image_available = "Aucune image du clavier disponible"
+native_function = "Fonction native"
 search_key = "Touche Recherche"
 dictation_key = "Touche Dictée"
 emoji_key = "Touche Emoji"

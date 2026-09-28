@@ -564,6 +564,7 @@ open_application_or_folder = "Άνοιγμα εφαρμογής ή φακέλο�
 [keyboard]
 editor_unavailable = "Ο επεξεργαστής δεν είναι διαθέσιμος"
 no_keyboard_image_available = "Δεν υπάρχει διαθέσιμη εικόνα πληκτρολογίου"
+native_function = "Εγγενής λειτουργία"
 search_key = "Πλήκτρο αναζήτησης"
 dictation_key = "Πλήκτρο υπαγόρευσης"
 emoji_key = "Πλήκτρο emoji"
