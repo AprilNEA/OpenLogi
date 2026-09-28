@@ -194,7 +194,7 @@ fn a_reload_writes_fn_lock_only_when_its_setting_changed() {
 
     assert_eq!(changed_fn_lock(&unset, &off, keyboard), Some(false));
     assert_eq!(changed_fn_lock(&off, &on, keyboard), Some(true));
-    // An unrelated edit reloads the same value: the keyboard's own Fn+Esc
+    // An unrelated edit reloads the same value: the keyboard's own Fn Lock key
     // state must survive it.
     assert_eq!(changed_fn_lock(&on, &on, keyboard), None);
     assert_eq!(changed_fn_lock(&unset, &unset, keyboard), None);

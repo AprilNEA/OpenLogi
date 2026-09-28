@@ -116,8 +116,9 @@ impl DeviceReads {
     }
 
     /// Start the Fn-lock query unless the same keyboard route is already
-    /// subscribed. Unlike DPI it is revalidated rather than immutable: Fn+Esc
-    /// on the keyboard flips the state without OpenLogi's involvement.
+    /// subscribed. Like DPI it never refreshes on its own, but unlike DPI its
+    /// value goes stale: the keyboard's Fn Lock key flips it without
+    /// OpenLogi's involvement, so [`Self::revalidate_fn_lock`] re-reads it.
     pub(crate) fn ensure_fn_lock(
         &mut self,
         key: DeviceKey,

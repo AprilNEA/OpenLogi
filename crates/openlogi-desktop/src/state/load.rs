@@ -35,5 +35,5 @@ pub type SmartShiftLoad = Load<Arc<SmartShiftStatus>>;
 
 /// Per-keyboard Fn-lock (`0x40a3` / `0x40a2`) load state: `true` when the
 /// F-row sends F1–F12 without Fn. See [`Load`]. Read from the device rather
-/// than config, because Fn+Esc on the keyboard changes it too.
+/// than config, because the keyboard's Fn Lock key changes it too.
 pub type FnLockLoad = Load<Arc<bool>>;

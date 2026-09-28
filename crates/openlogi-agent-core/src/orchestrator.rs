@@ -953,7 +953,7 @@ impl Orchestrator {
     /// this reload changed (the reconnect path is
     /// [`Self::reapply_volatile_settings`]). An unchanged setting is left
     /// alone: every settings edit reloads the config, and re-writing it each
-    /// time would undo Fn+Esc on the keyboard itself.
+    /// time would undo the keyboard's own Fn Lock key.
     fn apply_changed_fn_locks(&self, previous: &Config) {
         for dev in self.devices.iter().filter(|dev| dev.online) {
             let Some(route) = dev.route.clone() else {

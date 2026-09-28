@@ -322,6 +322,9 @@ impl AppView {
                 .map_or_else(StateEvents::none, |idx| state.select_device(idx))
         });
         AppState::load_current_device_reads(cx);
+        // A keyboard opened before keeps its Fn-lock read; the Fn Lock key may
+        // have changed it since, so ask again (a first open's read absorbs it).
+        AppState::update(cx, |state, _| state.revalidate_current_fn_lock());
         self.route = Route::Device { record_key };
         // Land on the device's first relevant tab — Buttons for a mouse,
         // Lighting for a wired keyboard, Device for everything else.

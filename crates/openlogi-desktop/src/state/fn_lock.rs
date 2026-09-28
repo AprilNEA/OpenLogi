@@ -1,4 +1,4 @@
-//! A keyboard's Fn lock: read from the device (Fn+Esc changes it behind
+//! A keyboard's Fn lock: read from the device (its Fn Lock key changes it behind
 //! OpenLogi's back), written through `config.toml` so the agent re-applies it
 //! on reconnect. The read is an swr-backed query owned by the device-read
 //! service.
@@ -30,11 +30,11 @@ impl AppState {
             .ensure_fn_lock(key, route, self.ipc_sender(), cx);
     }
 
-    /// Re-read the selected keyboard's Fn lock, e.g. when the Keys tab opens:
-    /// Fn+Esc on the keyboard may have changed it since the last read.
+    /// Re-read the selected keyboard's Fn lock when its Keys tab or device
+    /// page opens: the keyboard's Fn Lock key may have changed it since.
     pub(crate) fn revalidate_current_fn_lock(&mut self) {
         let key = self.current_record().map(DeviceRecord::device_key);
-        debug!(?key, "Keys tab opened");
+        debug!(?key, "Fn-lock re-read requested");
         if let Some(key) = key {
             self.pointer.reads.revalidate_fn_lock(&key);
         }
@@ -49,7 +49,7 @@ impl AppState {
     }
 
     /// Adopt a Fn-lock read into config when it disagrees with a saved
-    /// setting: Fn+Esc on the keyboard changed it, and the agent re-applies
+    /// setting: the keyboard's Fn Lock key changed it, and the agent re-applies
     /// the saved value on reconnect, so a stale one would undo that press.
     /// A keyboard nobody set from OpenLogi stays unset.
     pub(crate) fn apply_fn_lock_read(&mut self, key: &DeviceKey) {
