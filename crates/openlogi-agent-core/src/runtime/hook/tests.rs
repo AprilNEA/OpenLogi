@@ -189,7 +189,7 @@ fn fail_open_press_pairs_release() {
     );
     assert_eq!(
         remapped_release_disposition(ButtonId::Forward, &mut fail_open),
-        EventDisposition::Suppress
+        EventDisposition::PassThrough
     );
 }
 
@@ -231,6 +231,99 @@ fn queued_key_action_retains_its_press_time_target() {
     assert_eq!(
         queued.recv().expect("action should be queued"),
         (Action::BrowserBack, target)
+    );
+    assert!(owner.shutdown());
+}
+
+#[test]
+fn mouse_press_uses_the_target_published_with_its_binding_not_frontmost_safari() {
+    use super::super::button::ButtonRuntimeEvent;
+    use openlogi_hook::PointerTarget;
+
+    let (dispatcher, mut owner, events) = test_dispatcher();
+    let hooks = Arc::new(RwLock::new(HookMaps {
+        bindings: BTreeMap::from([(ButtonId::Back, Action::PreviousDesktop.into())]),
+        pointer_target: Some(PointerTarget::Desktop),
+        ..HookMaps::default()
+    }));
+    let mouse = EventDevice {
+        vendor_id: Some(0x046d),
+        product_name: Some("Logitech MX Master 3".into()),
+        ..EventDevice::default()
+    };
+    assert_eq!(
+        handle_button(
+            ButtonId::Back,
+            true,
+            Some(&mouse),
+            &hooks,
+            &dispatcher,
+            || { panic!("pointer-scoped binding must not capture foreground Safari") }
+        ),
+        EventDisposition::Suppress
+    );
+    let ButtonRuntimeEvent::Started(press) =
+        events.recv_timeout(Duration::from_secs(1)).expect("down")
+    else {
+        panic!("started");
+    };
+    assert_eq!(
+        press.target(),
+        ActionDispatchTarget::Pointer(PointerTarget::Desktop)
+    );
+    assert_eq!(press.start_action(), Some(&Action::PreviousDesktop));
+    // Pointer movement can restore the native binding before release. The
+    // suppressed down must still have a suppressed up and end its lifecycle.
+    hooks
+        .write()
+        .expect("maps")
+        .bindings
+        .insert(ButtonId::Back, Action::MouseBack.into());
+    assert_eq!(
+        handle_button(
+            ButtonId::Back,
+            false,
+            Some(&mouse),
+            &hooks,
+            &dispatcher,
+            || { panic!("release does not retarget") }
+        ),
+        EventDisposition::Suppress
+    );
+    let ButtonRuntimeEvent::Ended { press: ended, .. } =
+        events.recv_timeout(Duration::from_secs(1)).expect("up")
+    else {
+        panic!("ended");
+    };
+    assert_eq!(ended.token(), press.token());
+
+    // The inverse crossing must not swallow the release of a native press.
+    assert_eq!(
+        handle_button(
+            ButtonId::Back,
+            true,
+            Some(&mouse),
+            &hooks,
+            &dispatcher,
+            || { ActionDispatchTarget::Keyboard }
+        ),
+        EventDisposition::PassThrough
+    );
+    hooks
+        .write()
+        .expect("maps")
+        .bindings
+        .insert(ButtonId::Back, Action::PreviousDesktop.into());
+    assert_eq!(
+        handle_button(
+            ButtonId::Back,
+            false,
+            Some(&mouse),
+            &hooks,
+            &dispatcher,
+            || { panic!("release does not retarget") }
+        ),
+        EventDisposition::PassThrough
     );
     assert!(owner.shutdown());
 }

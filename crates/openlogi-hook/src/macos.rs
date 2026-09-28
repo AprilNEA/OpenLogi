@@ -5,6 +5,7 @@
 )]
 
 mod foreground;
+pub(crate) mod pointer;
 mod sender;
 mod translate;
 mod watchdog;

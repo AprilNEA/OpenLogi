@@ -38,6 +38,12 @@ pub use openlogi_core::binding::ButtonId;
 pub use openlogi_core::config::KeyModifiers;
 pub use openlogi_core::scroll::ScrollDelta;
 
+mod pointer;
+pub use pointer::{
+    PointerContext, PointerTarget, pointer_context, pointer_context_supported,
+    pointer_target_is_focused,
+};
+
 /// Logitech's USB/Bluetooth vendor id (`0x046D`), widened from
 /// [`openlogi_core::hid::LOGITECH_VENDOR_ID`] because the hook's identity
 /// sources (IOKit, evdev) hand it back as a `u32`.

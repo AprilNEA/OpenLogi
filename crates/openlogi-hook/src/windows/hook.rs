@@ -40,6 +40,32 @@ use crate::{
 
 const WHEEL_DELTA: f64 = 120.0;
 
+/// Shared profile identity for both foreground and pointer-owned processes.
+pub(super) fn application_for_process(pid: u32) -> Option<ForegroundApp> {
+    // SAFETY: OpenProcess accepts a PID by value; a successful handle is owned here.
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if process.is_null() {
+        return None;
+    }
+    let mut buf = vec![0u16; 32_768];
+    let mut len = 32_768;
+    // SAFETY: the owned handle is live and buf has len writable UTF-16 units.
+    let ok = unsafe { QueryFullProcessImageNameW(process, 0, buf.as_mut_ptr(), &raw mut len) };
+    // SAFETY: this locally owned handle is closed exactly once after the query.
+    unsafe { CloseHandle(process) };
+    if ok == 0 || len == 0 {
+        return None;
+    }
+    let path = String::from_utf16_lossy(&buf[..len as usize]);
+    let display_name = std::path::Path::new(&path)
+        .file_stem()
+        .map_or_else(|| path.clone(), |stem| stem.to_string_lossy().into_owned());
+    Some(ForegroundApp {
+        id: path.to_lowercase(),
+        display_name,
+    })
+}
+
 thread_local! {
     /// Cursor position carried by the previous mouse message of any kind,
     /// differenced into the relative delta [`MouseEvent::Moved`] carries — see
@@ -122,10 +148,6 @@ impl HookBackend for Backend {
         inner.worker.phase().is_running()
     }
 
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "the path buffer is a fixed 32768 u16s"
-    )]
     fn frontmost_app() -> Option<ForegroundApp> {
         // SAFETY: GetForegroundWindow takes no arguments and returns a window handle
         // or null; no preconditions.
@@ -144,40 +166,7 @@ impl HookBackend for Backend {
             return None;
         }
 
-        // SAFETY: OpenProcess takes the access mask and pid by value and returns a
-        // handle or null (checked); on success we own the handle and close it below.
-        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-        if process.is_null() {
-            return None;
-        }
-
-        let mut buf = vec![0u16; 32_768];
-        let mut len = buf.len() as u32;
-        // SAFETY: `process` is the valid handle from OpenProcess; `buf` is a live
-        // 32768-u16 buffer and `len` holds its length, so the call writes at most
-        // `len` code units and updates `len` with the count written.
-        let ok = unsafe { QueryFullProcessImageNameW(process, 0, buf.as_mut_ptr(), &raw mut len) };
-        // SAFETY: `process` is the handle from OpenProcess, owned here and closed
-        // exactly once now that the query has returned.
-        unsafe {
-            CloseHandle(process);
-        }
-        if ok == 0 || len == 0 {
-            return None;
-        }
-
-        // The lower-cased full path is the identifier profiles key on (it is
-        // what `Config::effective_bindings` compares, alongside its
-        // `exe:<filename>` fallback); the file name is all there is to show a
-        // human, so the display name is the stem with its original casing.
-        let path = String::from_utf16_lossy(&buf[..len as usize]);
-        let display_name = std::path::Path::new(&path)
-            .file_stem()
-            .map_or_else(|| path.clone(), |stem| stem.to_string_lossy().into_owned());
-        Some(ForegroundApp {
-            id: path.to_lowercase(),
-            display_name,
-        })
+        application_for_process(pid)
     }
 
     fn cursor_position() -> Option<CursorPosition> {

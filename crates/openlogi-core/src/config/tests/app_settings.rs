@@ -3,6 +3,39 @@
 use super::*;
 
 #[test]
+fn mouse_profile_target_defaults_for_old_configs_and_roundtrips() {
+    for body in [
+        "schema_version = 7\n",
+        "schema_version = 7\n[app_settings]\nlaunch_at_login = false\n",
+    ] {
+        let parsed: Config = toml::from_str(body).expect("config predating mouse profile target");
+        assert_eq!(
+            parsed.app_settings.mouse_profile_target,
+            MouseProfileTarget::Pointer
+        );
+    }
+    assert_eq!(
+        AppSettings::default().mouse_profile_target,
+        MouseProfileTarget::Pointer
+    );
+
+    for (target, spelling) in [
+        (MouseProfileTarget::Pointer, "pointer"),
+        (MouseProfileTarget::Focused, "focused"),
+    ] {
+        let mut cfg = Config::default();
+        cfg.app_settings.launch_at_login = false;
+        cfg.app_settings.mouse_profile_target = target;
+        let body = toml::to_string_pretty(&cfg).expect("serialize");
+        assert!(body.contains(&format!("mouse_profile_target = \"{spelling}\"")));
+        assert_eq!(
+            write_and_read(&cfg).app_settings.mouse_profile_target,
+            target
+        );
+    }
+}
+
+#[test]
 fn app_settings_default_omits_block() {
     let cfg = Config::default();
     let body = toml::to_string_pretty(&cfg).expect("serialize");

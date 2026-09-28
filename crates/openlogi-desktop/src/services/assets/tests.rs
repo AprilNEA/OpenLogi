@@ -451,6 +451,121 @@ fn standalone_resolution_prefers_the_first_read_root() {
     );
 }
 
+/// A Signature M650 (plain) model, matching the config.toml quoted in
+/// issue #1332: `model_ids = [0xb02a, 0, 0]`, `extended_model_id = 8`.
+fn m650_plain_model() -> DeviceModelInfo {
+    DeviceModelInfo {
+        entity_count: 0,
+        serial_number: None,
+        unit_id: [0; 4],
+        transports: DeviceTransports {
+            btle: true,
+            ..Default::default()
+        },
+        model_ids: [0xb02a, 0, 0],
+        extended_model_id: 8,
+    }
+}
+
+/// The catalog's single entry for `2b02a`: the Signature M650 *L* depot,
+/// whose one `displayName` covers every extended-model-id variant.
+fn m650_l_depot_entry() -> DeviceEntry {
+    DeviceEntry {
+        model_id: "2b02a".to_string(),
+        model_ids: Vec::new(),
+        display_name: "Signature M650 L".to_string(),
+        kind: "mouse".to_string(),
+        asset_path: "assets/signature_m650/".to_string(),
+        files: Vec::new(),
+    }
+}
+
+fn m650_index() -> Index {
+    index_of("signature_m650", m650_l_depot_entry())
+}
+
+#[test]
+fn cached_m650_assets_keep_each_devices_firmware_name() {
+    let root = tempfile::tempdir().expect("create asset root");
+    let depot = root.path().join("signature_m650");
+    std::fs::create_dir_all(&depot).unwrap();
+    std::fs::write(
+        depot.join("metadata.json"),
+        r#"{"images":[{"key":"device_image","origin":{"width":100,"height":200}}]}"#,
+    )
+    .unwrap();
+    std::fs::write(depot.join("front.png"), png_header(100, 200)).unwrap();
+    let resolver = resolver_over(&[root.path()], Some(m650_index()));
+    let model = m650_plain_model();
+
+    // Resolve without a firmware name first, then reuse the same cached
+    // artwork for both names. Neither a cache hit nor a previous device may
+    // decide the next device's display name.
+    for (codename, expected) in [
+        (None, "Signature M650 L"),
+        (Some("Signature M650 Mouse"), "Signature M650"),
+        (Some("Signature M650 L"), "Signature M650 L"),
+        (Some("Signature M650 Mouse"), "Signature M650"),
+    ] {
+        let asset = resolver.resolve(&model, codename).expect("resolve M650");
+        assert_eq!(asset.display_name, expected);
+        assert_eq!(asset.image_path, depot.join("front.png"));
+    }
+    assert_eq!(resolver.resolved.borrow().len(), 1, "artwork stays shared");
+}
+
+#[test]
+fn variant_display_name_preserves_matching_and_whitespace_rules() {
+    // None means leave the catalog name untouched, including its whitespace.
+    for (catalog, codename, correction) in [
+        (
+            "Signature M650 L",
+            Some("Signature M650 Mouse"),
+            Some("Signature M650"),
+        ),
+        ("Signature M650 L", Some("Signature M650 L"), None),
+        ("Signature M650 L", None, None),
+        ("MX Master 3S", Some("M3S"), None),
+        ("MX Master 3S", Some("MX Master"), None),
+        ("MX Master X", Some("MX Master"), None),
+        (
+            "Signature M650 L LEFT",
+            Some("signature m650"),
+            Some("Signature M650"),
+        ),
+        ("Signature M650 L Pro", Some("Signature M650"), None),
+        ("Signature M650", Some("Signature M650 L"), None),
+        ("Other M650 L", Some("Signature M650"), None),
+        ("Signature M650 L", Some(" \t"), None),
+        ("Signature M650 L", Some("Mouse Keyboard Trackball"), None),
+        ("", Some("Signature M650"), None),
+        (
+            " \tSignature\u{2003}M650  l \n",
+            Some("signature\tM650 mouse"),
+            Some("Signature M650"),
+        ),
+        (" MX\tMaster 3S ", Some("MX Master"), None),
+        ("Élan L", Some("Élan Mouse"), Some("Élan")),
+        // Characterize existing behavior, not a new tail-only removal policy.
+        (
+            "Signature M650 L",
+            Some("Signature Mouse M650"),
+            Some("Signature M650"),
+        ),
+        (
+            "Signature M650 L",
+            Some("Signature M650 \u{212a}eyboard"),
+            Some("Signature M650"),
+        ),
+    ] {
+        assert_eq!(
+            variant_display_name_override(catalog, codename).as_deref(),
+            correction,
+            "catalog={catalog:?}, codename={codename:?}"
+        );
+    }
+}
+
 #[test]
 fn cleanup_removes_only_legacy_glow_pngs() {
     let root = tempfile::tempdir().expect("create temp dir");

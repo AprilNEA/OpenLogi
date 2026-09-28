@@ -35,6 +35,8 @@ pub struct HookMaps {
     /// gesture mode), so a hold+swipe resolves to a bound action. HID++
     /// gesture sources use the gesture watcher's separate map instead.
     pub gestures: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
+    /// The pointer identity that selected this snapshot, or focused policy.
+    pub(crate) pointer_target: Option<openlogi_hook::PointerTarget>,
     /// Device whose binding maps this snapshot contains.
     #[cfg_attr(
         not(any(target_os = "windows", test)),
@@ -169,10 +171,9 @@ thread_local! {
     /// Thread-local rather than a shared `Mutex` keeps the hot path lock-free and
     /// free of cross-thread contention on the freeze-sensitive callback.
     static HOLD: RefCell<HoldState> = RefCell::new(HoldState::default());
-    /// Buttons whose physical press was delivered because the action queue
-    /// rejected the remap. Their matching release must also pass through so
-    /// apps never see a stuck auxiliary button (down without up).
-    static FAIL_OPEN_PRESSES: RefCell<HashSet<ButtonId>> = RefCell::new(HashSet::new());
+    /// Accepted non-gesture presses retain their edge disposition even when
+    /// moving the pointer changes the binding before physical release.
+    static SUPPRESSED_PRESSES: RefCell<HashSet<ButtonId>> = RefCell::new(HashSet::new());
     /// Function keys whose held action owns an accepted lifecycle. Repeated
     /// key-down events are auto-repeat, not replacement presses; their first
     /// matching key-up ends the lifecycle.
@@ -248,16 +249,22 @@ fn handle_button(
     if !id.is_os_hook_button() || !button_source_may_remap(device) {
         return EventDisposition::PassThrough;
     }
+    // `try_read` only: a blocking read on the tap thread freezes every pointer
+    // event while a config rebuild holds the write lock. Fail open if unavailable.
+    let (binding, is_gesture, pointer_target) =
+        hooks.try_read().map_or((None, false, None), |maps| {
+            (
+                maps.bindings.get(&id).cloned(),
+                maps.gestures.contains_key(&id),
+                maps.pointer_target,
+            )
+        });
     let action_target = if pressed {
-        capture_target()
+        pointer_target.map_or_else(capture_target, ActionDispatchTarget::Pointer)
     } else {
         ActionDispatchTarget::Keyboard
     };
-
-    // `try_read` only: a blocking read on the tap thread freezes every pointer
-    // event while a config rebuild holds the write lock. Fail open if unavailable.
     if pressed {
-        let is_gesture = hooks.try_read().is_ok_and(|m| m.gestures.contains_key(&id));
         // A refused begin — a second gesture button pressed mid-hold — falls
         // through to the single-action path: the first hold wins and this press
         // still means its plain click.
@@ -270,7 +277,8 @@ fn handle_button(
                 HOLD.with_borrow_mut(|h| h.begin(id, press));
                 return EventDisposition::Suppress;
             }
-            return FAIL_OPEN_PRESSES.with_borrow_mut(|s| remapped_press_disposition(id, false, s));
+            return SUPPRESSED_PRESSES
+                .with_borrow_mut(|s| remapped_press_disposition(id, false, s));
         }
     } else {
         // Drop the HOLD borrow before any queueing (re-entrancy freeze hazard).
@@ -289,27 +297,25 @@ fn handle_button(
             dispatcher.try_hook_button_up(id);
             return EventDisposition::Suppress;
         }
+        let disposition =
+            SUPPRESSED_PRESSES.with_borrow_mut(|s| remapped_release_disposition(id, s));
+        if disposition == EventDisposition::Suppress {
+            dispatcher.try_hook_button_up(id);
+        }
+        return disposition;
     }
 
-    let binding = hooks
-        .try_read()
-        .ok()
-        .and_then(|m| m.bindings.get(&id).cloned());
     let Some(binding) = binding else {
-        return EventDisposition::PassThrough;
+        return SUPPRESSED_PRESSES.with_borrow_mut(|s| remapped_press_disposition(id, false, s));
     };
     if binding_is_native_click(id, &binding) {
-        return EventDisposition::PassThrough;
+        return SUPPRESSED_PRESSES.with_borrow_mut(|s| remapped_press_disposition(id, false, s));
     }
-    if pressed {
-        info!(button = %id, action = %binding.click_action().label(), "button → handling binding");
-        let queued = dispatcher
-            .try_hook_button_down(id, Some(&binding), action_target)
-            .is_some();
-        return FAIL_OPEN_PRESSES.with_borrow_mut(|s| remapped_press_disposition(id, queued, s));
-    }
-    dispatcher.try_hook_button_up(id);
-    FAIL_OPEN_PRESSES.with_borrow_mut(|s| remapped_release_disposition(id, s))
+    info!(button = %id, action = %binding.click_action().label(), "button → handling binding");
+    let queued = dispatcher
+        .try_hook_button_down(id, Some(&binding), action_target)
+        .is_some();
+    SUPPRESSED_PRESSES.with_borrow_mut(|s| remapped_press_disposition(id, queued, s))
 }
 
 fn binding_is_native_click(id: ButtonId, binding: &Binding) -> bool {
@@ -317,31 +323,30 @@ fn binding_is_native_click(id: ButtonId, binding: &Binding) -> bool {
 }
 
 /// Press of a remapped single-action button: suppress when the action was
-/// queued, otherwise pass through and mark `id` so the release pairs.
+/// queued, and remember that decision so release uses the same disposition.
 fn remapped_press_disposition(
     id: ButtonId,
     queued: bool,
-    fail_open: &mut HashSet<ButtonId>,
+    suppressed: &mut HashSet<ButtonId>,
 ) -> EventDisposition {
     if queued {
-        fail_open.remove(&id);
+        suppressed.insert(id);
         EventDisposition::Suppress
     } else {
-        fail_open.insert(id);
+        suppressed.remove(&id);
         EventDisposition::PassThrough
     }
 }
 
-/// Release of a remapped single-action button: pass through only when the
-/// matching press was fail-opened (queue rejection), else suppress.
+/// A release follows its matching press, not the pointer's current profile.
 fn remapped_release_disposition(
     id: ButtonId,
-    fail_open: &mut HashSet<ButtonId>,
+    suppressed: &mut HashSet<ButtonId>,
 ) -> EventDisposition {
-    if fail_open.remove(&id) {
-        EventDisposition::PassThrough
-    } else {
+    if suppressed.remove(&id) {
         EventDisposition::Suppress
+    } else {
+        EventDisposition::PassThrough
     }
 }
 
@@ -483,16 +488,17 @@ pub fn start(
                 } => {
                     #[cfg(target_os = "windows")]
                     if delta.y() == 0.0
-                        && let Some((button, action)) = hooks
-                            .try_read()
-                            .ok()
-                            .and_then(|maps| rebound_thumbwheel_action(&maps, delta.x()))
+                        && let Some((button, action, target)) =
+                            hooks.try_read().ok().and_then(|maps| {
+                                rebound_thumbwheel_action(&maps, delta.x())
+                                    .map(|(button, action)| (button, action, maps.pointer_target))
+                            })
                     {
                         info!(button = %button, action = %action.label(), "native thumb wheel → executing bound action");
                         return queued_event_disposition(try_queue_action(
                             &action_tx,
                             action,
-                            ActionDispatchTarget::capture(),
+                            ActionDispatchTarget::for_pointer(target),
                         ));
                     }
                     if scroll_source_may_intercept(from_trackpad, device.as_ref()) {

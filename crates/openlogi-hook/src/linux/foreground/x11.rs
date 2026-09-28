@@ -17,6 +17,15 @@ use super::{
     FrontmostSource, PollResult, PublishAppId, RECONNECT_DELAY, StopToken, poll_source_or_stop,
 };
 
+/// The WM_CLASS class component is the shared foreground/pointer profile ID.
+pub(in crate::linux) fn window_app_id(conn: &RustConnection, window: Window) -> Option<String> {
+    let wm = WmClass::get(conn, window).ok()?.reply_unchecked().ok()??;
+    std::str::from_utf8(wm.class())
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+}
+
 /// Frontmost backend backed by X11 `_NET_ACTIVE_WINDOW` + `WM_CLASS`.
 ///
 /// Works on an X11 session, and on a Wayland session for XWayland windows;
@@ -142,17 +151,7 @@ impl FrontmostSource for X11Source {
             return None;
         }
 
-        // WM_CLASS is instance_name\0class_name\0; the class component is more
-        // stable across window instances and is what profiles should key on
-        // (e.g. "Firefox", not "Navigator").
-        let wm = WmClass::get(&self.conn, window)
-            .ok()?
-            .reply_unchecked()
-            .ok()??;
-        std::str::from_utf8(wm.class())
-            .ok()
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned)
+        window_app_id(&self.conn, window)
     }
 
     fn observe(

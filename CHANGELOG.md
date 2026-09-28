@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.9] - 2026-09-27
+
+### Fixed
+
+- *(hook)* use AppKit for macOS pointer hit testing ([#1568](https://github.com/AprilNEA/OpenLogi/pull/1568))
+- *(gui)* repair missing launchd agent jobs ([#1303](https://github.com/AprilNEA/OpenLogi/pull/1303))
+- *(hook)* stop leaking GNOME observer sockets ([#1418](https://github.com/AprilNEA/OpenLogi/pull/1418))
+- *(gui)* correct thumb-wheel volume preset labels ([#1436](https://github.com/AprilNEA/OpenLogi/pull/1436))
+
+## [0.8.8] - 2026-09-25
+
+### Added
+
+- *(gui)* add safe per-app profile reset and complete removal
+- *(hid)* recognise Nano receiver 046d:c534 (MK270, MK295) ([#1456](https://github.com/AprilNEA/OpenLogi/pull/1456))
+
+### Fixed
+
+- *(gui)* prefer firmware codename over catalog name for M650 variants ([#1366](https://github.com/AprilNEA/OpenLogi/pull/1366))
+- *(i18n)* clarify which app editors close after deletion
+- *(gui)* render profile confirmation dialogs in the main window
+- *(agent)* divert a single-bound gesture button ([#1569](https://github.com/AprilNEA/OpenLogi/pull/1569))
+
+## [0.8.7] - 2026-09-23
+
+### Added
+
+- *(agent)* default mouse profiles to pointer context
+- *(hook)* expose native pointer window context
+
 ## [0.8.6] - 2026-09-19
 
 ### Added

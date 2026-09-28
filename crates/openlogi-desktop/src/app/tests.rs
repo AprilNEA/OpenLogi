@@ -7,6 +7,51 @@ use openlogi_core::device::{
 };
 use openlogi_core::hid::DeviceRoute;
 
+#[gpui::test]
+fn main_window_renders_profile_confirmation_dialogs(cx: &mut gpui::TestAppContext) {
+    use gpui::{AppContext as _, InteractiveElement as _, ParentElement as _, div};
+    use gpui_component::{Root, WindowExt as _};
+
+    use super::AppView;
+    use crate::services::assets::AssetResolver;
+    use crate::state::{AppState, Sources};
+
+    cx.update(gpui_component::init);
+    cx.update(|cx| {
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let resolver = AssetResolver::new();
+        let state = cx.new(|_| {
+            AppState::new(Sources::in_memory(
+                openlogi_core::config::Config::ephemeral(),
+                &resolver,
+                commands,
+            ))
+        });
+        AppState::set_global(state, cx);
+    });
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| AppView::new(window, cx));
+        Root::new(view, window, cx)
+    });
+    cx.update(|window, cx| {
+        window.open_alert_dialog(cx, |alert, _, _| {
+            alert.confirm().title(
+                div()
+                    .debug_selector(|| "profile-confirmation".into())
+                    .child("Remove Safari profile?"),
+            )
+        });
+        window.draw(cx).clear(cx);
+    });
+    assert!(
+        cx.debug_bounds("profile-confirmation").is_some(),
+        "the production AppView must paint the dialog, even before the agent connects"
+    );
+    cx.simulate_keystrokes("escape");
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(cx.debug_bounds("profile-confirmation").is_none());
+}
+
 /// "Charging" replaces the bogus percentage only when charging *and* the
 /// reading is still 0% (cold start, no cached pre-charge value). A non-zero
 /// charge or a real 0% while discharging keeps the number.

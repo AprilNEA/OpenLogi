@@ -351,6 +351,7 @@ impl Running {
                 self.orchestrator.lock().await.set_camera_active(active);
             }
             WatcherEvent::App(app) => self.apply_foreground(app).await,
+            WatcherEvent::Pointer(context) => self.apply_pointer_context(context).await,
             WatcherEvent::Accessibility(granted) => self.apply_accessibility(granted).await,
             WatcherEvent::InputMonitoring(granted) => {
                 self.observable.set_input_monitoring_granted(granted);
@@ -364,6 +365,14 @@ impl Running {
             WatcherEvent::Lost(Watcher::Camera) => {
                 #[cfg(target_os = "macos")]
                 warn!("camera watcher channel closed — disabling camera automation updates");
+            }
+            WatcherEvent::Lost(Watcher::Pointer) if openlogi_hook::pointer_context_supported() => {
+                warn!("pointer watcher channel closed — disabling pointer-scoped remaps");
+                self.apply_pointer_context(openlogi_hook::PointerContext {
+                    app: None,
+                    target: openlogi_hook::PointerTarget::Unavailable,
+                })
+                .await;
             }
             WatcherEvent::Lost(source) => debug!(?source, "state watcher channel closed"),
         }
@@ -404,6 +413,15 @@ impl Running {
     async fn apply_foreground(&self, app: ForegroundUpdate) {
         if self.orchestrator.lock().await.set_current_app(app) {
             self.inputs.dispatcher.cancel_all_buttons();
+        }
+    }
+
+    async fn apply_pointer_context(&self, context: openlogi_hook::PointerContext) {
+        let current = context.target;
+        if self.orchestrator.lock().await.set_pointer_context(context) {
+            self.inputs
+                .dispatcher
+                .cancel_pointer_buttons_except(current);
         }
     }
 

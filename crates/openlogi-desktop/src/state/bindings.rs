@@ -11,7 +11,7 @@ use crate::features::mouse::thumbwheel::{ThumbwheelPair, ThumbwheelPreset};
 use crate::state::devices::DeviceRecord;
 
 use super::events::StateEvents;
-use super::{AppState, StateEvent};
+use super::{AppState, DeviceKey, StateEvent};
 
 /// The per-app profile the binding panels are editing, and the device it was
 /// chosen for, by the persistent config key its profiles are stored under.
@@ -256,26 +256,64 @@ impl AppState {
         events
     }
 
-    /// Delete the open per-app profile outright and fall back to editing the
-    /// device's global bindings.
-    pub fn remove_editing_app_profile(&mut self) -> StateEvents {
-        let events = self.for_current_device(StateEvent::BindingsChanged);
-        let Some(key) = self
-            .current_record()
-            .and_then(DeviceRecord::persistent_config_key)
-            .map(str::to_string)
-        else {
-            return events;
-        };
-        let Some(app) = self.editing_app().map(str::to_string) else {
-            return events;
-        };
-        self.config
-            .edit(|config| config.remove_app_profile(&key, &app));
-        self.bindings
-            .set_editing_app(&self.config, Some(key.as_str()), None);
-        self.persist_and_reload("per-app profile");
+    /// Restore live default inheritance without leaving the application's editor.
+    pub fn reset_app_profile(&mut self, key: &DeviceKey, app: &str) -> StateEvents {
+        self.clear_app_profile(key.as_str(), app);
+        StateEvent::BindingsChanged(key.clone()).into()
+    }
+
+    /// Delete both per-app configuration sections in one save/reload. A failed
+    /// save restores both sections and leaves both editor selections intact.
+    pub fn remove_all_app_profiles(&mut self, key: &DeviceKey, app: &str) -> StateEvents {
+        let changed = self.config.edit(|config| {
+            let Some(device) = config.devices.get_mut(key.as_str()) else {
+                return false;
+            };
+            let buttons = device.per_app_bindings.remove(app).is_some();
+            let ring = device.action_ring.per_app.remove(app).is_some();
+            buttons || ring
+        });
+        if changed && !self.persist_and_reload("all application profiles") {
+            return StateEvent::BindingsChanged(key.clone()).into();
+        }
+
+        // Both saved sections are gone, so the scoped removals only close their
+        // matching editors; neither writes or reloads an already absent profile.
+        let events = self.remove_app_profile(key, app);
+        let _ = self.remove_action_ring_profile(key, app);
         events
+    }
+
+    /// Remove the named profile, not whichever profile is selected when a
+    /// confirmation completes. Only leave its editor after a successful save.
+    pub fn remove_app_profile(&mut self, key: &DeviceKey, app: &str) -> StateEvents {
+        if self.clear_app_profile(key.as_str(), app)
+            && self
+                .bindings
+                .editing_scope
+                .as_ref()
+                .is_some_and(|scope| scope.persistent_key == key.as_str() && scope.app == app)
+        {
+            self.bindings.editing_scope = None;
+            self.refresh_binding_projections();
+        }
+        StateEvent::BindingsChanged(key.clone()).into()
+    }
+
+    fn clear_app_profile(&mut self, key: &str, app: &str) -> bool {
+        if !self
+            .config
+            .app_profiles(key)
+            .any(|candidate| candidate == app)
+        {
+            // An application selected but never edited is window-local only.
+            return true;
+        }
+        self.config
+            .edit(|config| config.remove_app_profile(key, app));
+        let saved = self.persist_and_reload("per-app profile");
+        self.refresh_binding_projections();
+        saved
     }
 
     /// The open per-app profile's overrides, so the panel can tell an override

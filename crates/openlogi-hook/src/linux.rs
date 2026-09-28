@@ -24,6 +24,7 @@
 )]
 
 mod foreground;
+pub(crate) mod pointer;
 
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
