@@ -850,6 +850,21 @@ async fn fn_lock_addresses_the_current_host_slot_read_from_hosts_info() -> Resul
             default_fn_lock: false,
         }
     );
+    let get = handle
+        .written_reports()
+        .into_iter()
+        .find(|report| report[2] == 0x09 && report[3] >> 4 == 0x00)
+        .expect("a getGlobalFnInversion read");
+    // A read addresses the spec's 0xff "current host": every firmware answers
+    // it, and it must not depend on 0x1815 being readable.
+    assert_eq!(get[4], 0xff);
+    assert!(
+        !handle
+            .written_reports()
+            .into_iter()
+            .any(|report| report[2] == 0x0a),
+        "a read never asks 0x1815 which slot is current"
+    );
 
     let written = set_fn_lock_on(&shared, true).await?;
     assert!(written.fn_lock);
@@ -884,7 +899,7 @@ fn multi_host_keyboard_with_unreadable_hosts_info(request: &[u8]) -> Option<Vec<
 }
 
 #[tokio::test]
-async fn fn_lock_does_not_guess_the_host_when_hosts_info_is_unreadable() {
+async fn fn_lock_write_does_not_guess_the_host_when_hosts_info_is_unreadable() {
     let (raw, handle) =
         ScriptedRawHidChannel::with_responder(multi_host_keyboard_with_unreadable_hosts_info);
     let channel = scripted_channel(raw).await;
@@ -917,17 +932,12 @@ async fn fn_lock_does_not_guess_the_host_when_hosts_info_is_unreadable() {
         "no setGlobalFnInversion without a known host slot"
     );
 
-    let error = get_fn_lock_on(&shared)
+    // The read does not need the slot: 0xff reads work on the MX Keys S, so
+    // the GUI still learns the keyboard's own state while 0x1815 is busy.
+    let state = get_fn_lock_on(&shared)
         .await
-        .expect_err("the read fails the same way");
-    assert!(matches!(
-        error,
-        WriteError::HidppFeature {
-            operation: HidppOperation::ReadFnLock,
-            feature_hex: 0x1815,
-            ..
-        }
-    ));
+        .expect("a read addresses the current host directly");
+    assert!(!state.fn_lock);
 }
 
 /// A single-host keyboard (`0x40a2` only) whose firmware echoes inversion ON

@@ -9,13 +9,14 @@
 //! `fn_lock = true` writes inversion *off* — see [`FnLockState`].
 //!
 //! Multi-host keyboards store the state per Easy-Switch slot. The `0x40a3`
-//! spec offers `0xFF` for "the current host", but the MX Keys S firmware
-//! ignores writes addressed that way (Solaar carries the same workaround), so
-//! the slot is read from `0x1815 HostsInfo` first and addressed explicitly.
-//! `0xFF` is used only for a keyboard that has no `0x1815` at all; a keyboard
-//! that has it but does not answer fails the operation, since a write
-//! addressed to `0xFF` on such a keyboard is exactly the one the firmware
-//! drops.
+//! spec offers `0xFF` for "the current host". The MX Keys S firmware answers
+//! `0xFF` *reads* correctly but silently drops `0xFF` *writes* (Solaar issue
+//! 2280 has the traces; Solaar carries the same workaround), so a write looks
+//! up the slot in `0x1815 HostsInfo` and addresses it explicitly, and fails
+//! when that lookup fails on a keyboard that has the feature — a `0xFF` write
+//! there is exactly the one the firmware ignores. A read addresses `0xFF`
+//! directly: it works on every known keyboard and never depends on `0x1815`,
+//! so a busy hosts-info cannot hide the state the keyboard holds.
 
 use std::sync::Arc;
 
@@ -81,12 +82,17 @@ enum FnInversion {
 impl FnInversion {
     /// Open whichever fn-inversion feature the device exposes. Tries `0x40a3`
     /// first; on a missing-`0x40a3` error (and only that), retries with
-    /// `0x40a2`. `operation` names the read or write this open serves, for
-    /// the error a failed host lookup carries.
-    async fn open(device: &mut Device, operation: HidppOperation) -> Result<Self, WriteError> {
+    /// `0x40a2`. `addressing` decides how a multi-host keyboard is addressed
+    /// — see [`HostAddressing`].
+    async fn open(device: &mut Device, addressing: HostAddressing) -> Result<Self, WriteError> {
         match open_feature::<FnInversionMultiHostFeature>(device).await {
             Ok(feature) => {
-                let host = current_host(device, operation).await?;
+                let host = match addressing {
+                    HostAddressing::Current => HostIndex::Current,
+                    HostAddressing::ExplicitSlot { operation } => {
+                        current_host(device, operation).await?
+                    }
+                };
                 Ok(Self::MultiHost { feature, host })
             }
             Err(err) if is_missing_multi_host(&err) => {
@@ -151,6 +157,19 @@ impl FnInversion {
     }
 }
 
+/// How a multi-host (`0x40a3`) keyboard's Easy-Switch slot is named in a
+/// request.
+#[derive(Debug, Clone, Copy)]
+enum HostAddressing {
+    /// The spec's `0xFF` "current host" selector. Right for a read: every
+    /// known firmware answers it, and it needs no second feature.
+    Current,
+    /// The slot `0x1815 HostsInfo` reports, resolved first. Required for a
+    /// write, which the MX Keys S firmware drops when addressed as `0xFF`;
+    /// `operation` names the write in the error a failed lookup carries.
+    ExplicitSlot { operation: HidppOperation },
+}
+
 /// The Easy-Switch slot the keyboard is currently talking to, read from
 /// `0x1815 HostsInfo`. A keyboard without that feature is addressed as
 /// `0xFF`, the spec's own "current host" selector and the only one it
@@ -202,7 +221,7 @@ async fn get_fn_lock_on_channel(
     let mut device = Device::new(Arc::clone(channel), index)
         .await
         .map_err(|_| WriteError::DeviceUnreachable { index })?;
-    FnInversion::open(&mut device, HidppOperation::ReadFnLock)
+    FnInversion::open(&mut device, HostAddressing::Current)
         .await?
         .get()
         .await
@@ -233,7 +252,13 @@ pub(super) async fn set_fn_lock_on_channel(
     let mut device = Device::new(Arc::clone(channel), index)
         .await
         .map_err(|_| WriteError::DeviceUnreachable { index })?;
-    let fn_inversion = FnInversion::open(&mut device, HidppOperation::WriteFnLock).await?;
+    let fn_inversion = FnInversion::open(
+        &mut device,
+        HostAddressing::ExplicitSlot {
+            operation: HidppOperation::WriteFnLock,
+        },
+    )
+    .await?;
     let echoed = fn_inversion.set(inversion_for(on)).await?;
     if echoed.fn_lock != on {
         // The echo is the firmware's word on what it stored; a mismatch is
