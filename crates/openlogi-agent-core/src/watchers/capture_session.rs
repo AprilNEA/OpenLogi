@@ -179,8 +179,8 @@ impl<Target, Dispatch> CaptureSession<Target, Dispatch> {
         &self.id
     }
 
-    /// Hardware capture identity that decides whether rearming is required.
-    #[cfg(test)]
+    /// Hardware capture identity that decides whether rearming is required,
+    /// and the device a session-reported fact belongs to.
     pub(super) fn target(&self) -> &Target {
         &self.target
     }

@@ -75,7 +75,7 @@ async fn gesture_capture_replay_restores_original_reporting_on_normal_shutdown()
 /// the control back before it completes, exactly as that session does.
 #[tokio::test]
 async fn keyboard_capture_replay_restores_original_reporting_on_normal_shutdown() {
-    let replay = ArmedReplay::enumerate(capture_cassette(
+    let replay = ArmedReplay::enumerate(keyboard_capture_cassette(
         "keyboard capture normal shutdown",
         KEYBOARD_CID,
         KEYBOARD_CONTROL_FLAGS,
@@ -378,24 +378,52 @@ fn capture_cassette(name: &str, cid: u16, control_flags: (u8, u8), armed_flags: 
     cassette(
         name,
         CAPTURE_CHANNEL,
-        vec![
-            root_ping_exchange(),
-            root_feature_lookup_exchange(0x0001, 0x01, 0),
-            feature_set_count_exchange(2),
-            feature_set_entry_exchange(1, 0x0001),
-            feature_set_entry_exchange(2, reprog_controls::FEATURE_ID),
-            reprog_control_count_exchange(1),
-            reprog_control_info_exchange(cid, control_flags),
-            root_ping_exchange(),
-            root_feature_lookup_exchange(reprog_controls::FEATURE_ID, REPROG_FEATURE_INDEX, 4),
-            reprog_control_count_exchange(1),
-            reprog_control_info_exchange(cid, control_flags),
-            reprog_reporting_state_exchange(cid),
-            reprog_reporting_change_exchange(cid, armed_flags),
-            root_feature_lookup_exchange(0x1d4b, 0, 0),
-            reprog_reporting_change_exchange(cid, RESTORED_FLAGS),
-        ],
+        capture_exchanges(cid, control_flags, armed_flags),
     )
+}
+
+/// A keyboard session's exchanges: a capture session's, plus the lookup of the
+/// fn-inversion feature whose change events it relays (absent here, so both
+/// the multi-host and single-host ids are asked for).
+fn keyboard_capture_cassette(
+    name: &str,
+    cid: u16,
+    control_flags: (u8, u8),
+    armed_flags: u8,
+) -> HidCassette {
+    let mut exchanges = capture_exchanges(cid, control_flags, armed_flags);
+    let armed_at = exchanges
+        .iter()
+        .position(|exchange| *exchange == reprog_reporting_state_exchange(cid))
+        .expect("capture arms the control");
+    exchanges.splice(
+        armed_at..armed_at,
+        [
+            root_feature_lookup_exchange(0x40a3, 0, 0),
+            root_feature_lookup_exchange(0x40a2, 0, 0),
+        ],
+    );
+    cassette(name, CAPTURE_CHANNEL, exchanges)
+}
+
+fn capture_exchanges(cid: u16, control_flags: (u8, u8), armed_flags: u8) -> Vec<CassetteExchange> {
+    vec![
+        root_ping_exchange(),
+        root_feature_lookup_exchange(0x0001, 0x01, 0),
+        feature_set_count_exchange(2),
+        feature_set_entry_exchange(1, 0x0001),
+        feature_set_entry_exchange(2, reprog_controls::FEATURE_ID),
+        reprog_control_count_exchange(1),
+        reprog_control_info_exchange(cid, control_flags),
+        root_ping_exchange(),
+        root_feature_lookup_exchange(reprog_controls::FEATURE_ID, REPROG_FEATURE_INDEX, 4),
+        reprog_control_count_exchange(1),
+        reprog_control_info_exchange(cid, control_flags),
+        reprog_reporting_state_exchange(cid),
+        reprog_reporting_change_exchange(cid, armed_flags),
+        root_feature_lookup_exchange(0x1d4b, 0, 0),
+        reprog_reporting_change_exchange(cid, RESTORED_FLAGS),
+    ]
 }
 
 fn bolt_pairing_cancel_cassette() -> HidCassette {

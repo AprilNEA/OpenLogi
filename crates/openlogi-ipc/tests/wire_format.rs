@@ -102,7 +102,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 31);
+    assert_eq!(PROTOCOL_VERSION, 33);
 }
 
 #[test]
@@ -280,6 +280,7 @@ fn action_ring_types() {
     assert_wire(&ActionRingCommandError::SessionNotFound, "00");
     assert_wire(&ActionRingCommandError::SlotEmpty, "01");
     assert_wire(&HidppOperation::PlayHaptic, "0e");
+    assert_wire(&HidppOperation::ReadFnLock, "0f");
 }
 
 #[test]
@@ -342,15 +343,16 @@ fn agent_snapshot() {
         // Pinned on its own in `foreground_apps` below, like the inventory and
         // pairing fields.
         foreground: ForegroundApps::default(),
+        fn_locks: Vec::new(),
     };
-    assert_wire(&snapshot, "010001010705302e362e360100000000000000");
+    assert_wire(&snapshot, "010001010705302e362e36010000000000000000");
 
     // The observation is the snapshot with its generation in front.
     let observed = Observation {
         generation: 3,
         snapshot,
     };
-    assert_wire(&observed, "03010001010705302e362e360100000000000000");
+    assert_wire(&observed, "03010001010705302e362e36010000000000000000");
 }
 
 /// The foreground application rides the snapshot, so both halves are pinned:

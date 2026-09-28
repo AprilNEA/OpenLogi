@@ -8,6 +8,7 @@ pub mod backlight;
 pub mod camera;
 pub mod diag;
 pub mod fixture;
+pub mod fn_lock;
 pub mod light;
 pub mod list;
 pub mod snapshot;
@@ -18,6 +19,8 @@ pub enum Command {
     List(list::ListArgs),
     /// Read or persistently set the keyboard backlight (HID++ 0x1982).
     Backlight(backlight::BacklightArgs),
+    /// Read or set a keyboard's Fn lock (HID++ 0x40a3 / 0x40a2).
+    FnLock(fn_lock::FnLockArgs),
     /// Capture one frame from a Logitech webcam to a PNG.
     Snapshot(snapshot::SnapshotArgs),
     /// Read or write device-level UVC image controls on a webcam.
@@ -45,6 +48,7 @@ impl Command {
         match self {
             Self::List(args) => return list::run(args).await,
             Self::Backlight(args) => backlight::run(args).await?,
+            Self::FnLock(args) => fn_lock::run(args).await?,
             // Camera capture is blocking AVFoundation — no need for the async runtime.
             Self::Snapshot(args) => snapshot::run(args)?,
             // UVC control transfers are blocking IOKit — no async runtime needed.

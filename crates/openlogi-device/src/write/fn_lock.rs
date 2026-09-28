@@ -1,9 +1,11 @@
-//! HID++ keyboard Fn-lock writes — fn inversion `0x40a3` (multi-host), with
+//! HID++ keyboard Fn-lock reads and writes — fn inversion `0x40a3` (multi-host), with
 //! the single-host `0x40a2` as fallback.
 //!
-//! "Fn-lock on" means the F-row sends plain F1–F12 without holding Fn
-//! ([`FnInversionState::On`]); off restores the printed media/shortcut
-//! functions, with Fn+key producing the F-keys. Multi-host keyboards store the
+//! "Fn-lock on" means the F-row sends plain F1–F12 without holding Fn; off
+//! restores the printed media/shortcut functions, with Fn+key producing the
+//! F-keys. The firmware's *inversion* bit is the opposite: it inverts the F-row
+//! away from plain F-keys, so Fn-lock on is [`FnInversionState::Off`] (see
+//! [`inversion_for_fn_lock`]). Multi-host keyboards store the
 //! state per Easy-Switch slot, so the `0x40a3` path addresses
 //! [`HostIndex::Current`] — the slot the keyboard is talking to right now.
 
@@ -18,6 +20,7 @@ use hidpp::{
         },
         hosts_info::HostIndex,
     },
+    protocol::v20,
 };
 use tracing::debug;
 
@@ -62,6 +65,22 @@ impl FnInversion {
         }
     }
 
+    /// Read the inversion state (for the current host on `0x40a3`).
+    async fn get(&self) -> Result<FnInversionState, WriteError> {
+        match self {
+            Self::MultiHost(feature) => feature
+                .get_global_fn_inversion(HostIndex::Current)
+                .await
+                .map(|info| info.state)
+                .map_err(|e| classify_hidpp_error(e, HidppOperation::ReadFnLock, 0x40a3)),
+            Self::SingleHost(feature) => feature
+                .get_global_fn_inversion()
+                .await
+                .map(|global| global.state)
+                .map_err(|e| classify_hidpp_error(e, HidppOperation::ReadFnLock, 0x40a2)),
+        }
+    }
+
     /// Write the inversion state (for the current host on `0x40a3`).
     async fn set(&self, state: FnInversionState) -> Result<(), WriteError> {
         match self {
@@ -80,6 +99,36 @@ impl FnInversion {
         }
         Ok(())
     }
+}
+
+/// Read the keyboard's Fn-lock state: `true` = F-row sends F1–F12 directly.
+pub async fn get_fn_lock(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+) -> Result<bool, WriteError> {
+    let index = route.device_index();
+    with_route(backend, route, move |channel| async move {
+        get_fn_lock_on_channel(&channel, index).await
+    })
+    .await
+}
+
+/// The Fn-lock read itself, on an already-open channel at HID++ `index`.
+async fn get_fn_lock_on_channel(
+    channel: &Arc<HidppChannel>,
+    index: u8,
+) -> Result<bool, WriteError> {
+    let mut device = Device::new(Arc::clone(channel), index)
+        .await
+        .map_err(|_| WriteError::DeviceUnreachable { index })?;
+    let state = FnInversion::open(&mut device).await?.get().await?;
+    debug!(index, ?state, "fn-lock read");
+    Ok(state == inversion_for_fn_lock(true))
+}
+
+/// Read keyboard Fn-lock on an already-open [`SharedChannel`].
+pub async fn get_fn_lock_on(shared: &SharedChannel) -> Result<bool, WriteError> {
+    get_fn_lock_on_channel(shared.channel(), shared.device_index()).await
 }
 
 /// Write the keyboard's Fn-lock state: `true` = F-row sends F1–F12 directly.
@@ -105,13 +154,125 @@ pub(super) async fn set_fn_lock_on_channel(
         .await
         .map_err(|_| WriteError::DeviceUnreachable { index })?;
     let fn_inversion = FnInversion::open(&mut device).await?;
-    fn_inversion.set(FnInversionState::from(on)).await?;
+    fn_inversion.set(inversion_for_fn_lock(on)).await?;
     debug!(index, on, "fn-lock written");
     Ok(())
+}
+
+/// The fn-inversion state that puts the F-row in `fn_lock` mode.
+///
+/// Inversion on makes the keys send their printed functions, with Fn+key for
+/// F1–F12; inversion off makes them send F1–F12. Verified on an ERGO K860
+/// (`0x40a3`), and it matches Solaar's "Swap Fx function" setting, whose
+/// "set" (byte `0x01`) means special functions by default.
+fn inversion_for_fn_lock(fn_lock: bool) -> FnInversionState {
+    FnInversionState::from(!fn_lock)
 }
 
 /// Write keyboard Fn-lock on an already-open [`SharedChannel`] — the fast
 /// path that skips enumeration and channel setup.
 pub async fn set_fn_lock_on(shared: &SharedChannel, on: bool) -> Result<(), WriteError> {
     set_fn_lock_on_channel(shared.channel(), shared.device_index(), on).await
+}
+
+/// Where a keyboard announces Fn-lock changes: its fn-inversion feature
+/// sends an unsolicited event (function 0, software id 0) whenever the state
+/// changes, including from the keyboard's own Fn Lock key. The payload has
+/// the feature's get-reply layout, which differs between the multi-host
+/// `0x40a3` (host slot first) and the single-host `0x40a2`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FnLockEvents {
+    feature_index: u8,
+    multi_host: bool,
+}
+
+impl FnLockEvents {
+    /// The fn-inversion feature of `device`, or `None` when it has neither
+    /// (or the lookup failed, which only costs the live updates).
+    pub(crate) async fn locate(device: &Device) -> Option<Self> {
+        for (id, multi_host) in [(0x40a3, true), (0x40a2, false)] {
+            match device.root().get_feature(id).await {
+                Ok(Some(info)) => {
+                    return Some(Self {
+                        feature_index: info.index,
+                        multi_host,
+                    });
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    debug!(?error, feature = id, "fn-inversion lookup failed");
+                    return None;
+                }
+            }
+        }
+        None
+    }
+
+    /// The Fn-lock state an event from `device_index` reports, or `None` when
+    /// `msg` is not this feature's change event.
+    pub(crate) fn decode(self, msg: &v20::Message, device_index: u8) -> Option<bool> {
+        let header = msg.header();
+        if header.device_index != device_index
+            || header.feature_index != self.feature_index
+            || header.software_id.to_lo() != 0
+            || header.function_id.to_lo() != 0
+        {
+            return None;
+        }
+        let payload = msg.extend_payload();
+        let state = payload[usize::from(self.multi_host)];
+        let state = FnInversionState::try_from(state).ok()?;
+        Some(state == inversion_for_fn_lock(true))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn long(device_index: u8, feature_index: u8, software_id: u8, payload: &[u8]) -> v20::Message {
+        let mut bytes = [0u8; 16];
+        bytes[..payload.len()].copy_from_slice(payload);
+        v20::Message::Long(
+            v20::MessageHeader {
+                device_index,
+                feature_index,
+                function_id: hidpp::nibble::U4::from_lo(0),
+                software_id: hidpp::nibble::U4::from_lo(software_id),
+            },
+            bytes,
+        )
+    }
+
+    #[test]
+    fn decodes_the_keyboards_own_fn_lock_changes() {
+        // Captured from an ERGO K860 (0x40a3 at index 11, device 3) as its
+        // Fn Lock key was pressed: host slot, state, default, capabilities.
+        let events = FnLockEvents {
+            feature_index: 11,
+            multi_host: true,
+        };
+        assert_eq!(events.decode(&long(3, 11, 0, &[0, 0, 1, 1]), 3), Some(true));
+        assert_eq!(
+            events.decode(&long(3, 11, 0, &[0, 1, 1, 1]), 3),
+            Some(false)
+        );
+        // A reply to our own read, another device, or another feature is not
+        // an event.
+        assert_eq!(events.decode(&long(3, 11, 1, &[0, 0, 1, 1]), 3), None);
+        assert_eq!(events.decode(&long(2, 11, 0, &[0, 0, 1, 1]), 3), None);
+        assert_eq!(events.decode(&long(3, 8, 0, &[0, 0, 1, 1]), 3), None);
+
+        let single_host = FnLockEvents {
+            feature_index: 9,
+            multi_host: false,
+        };
+        assert_eq!(single_host.decode(&long(1, 9, 0, &[1, 1]), 1), Some(false));
+    }
+
+    #[test]
+    fn fn_lock_clears_the_inversion_bit() {
+        assert_eq!(inversion_for_fn_lock(true), FnInversionState::Off);
+        assert_eq!(inversion_for_fn_lock(false), FnInversionState::On);
+    }
 }

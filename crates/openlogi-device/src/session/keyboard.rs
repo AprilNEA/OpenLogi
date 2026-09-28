@@ -31,6 +31,7 @@ use super::gesture::{
 };
 use super::restore::rollback_start;
 use crate::channel::route::DeviceRoute;
+use crate::write::FnLockEvents;
 use crate::{ChannelRegistry, SharedChannel};
 
 use crate::reprog_controls::{self, RawControlEvent, ReprogControlsV4};
@@ -101,6 +102,7 @@ async fn arm_keyboard(
         controls: rc,
         reporting: Vec::new(),
         diverted: BTreeMap::new(),
+        fn_lock: FnLockEvents::locate(&device).await,
     };
     if let Err(error) = arm_keys(&controls, wanted, &mut armed).await {
         let pending = armed.into_pending(shared);
@@ -137,6 +139,11 @@ struct ArmedKeys {
     controls: ReprogControlsV4,
     reporting: Vec<ArmedReporting>,
     diverted: BTreeMap<u16, ButtonId>,
+    /// The keyboard's fn-inversion events, relayed as
+    /// [`CapturedInput::FnLock`] while the session listens anyway. The session
+    /// exists only while a key is bound, so an unbound keyboard's Fn Lock key
+    /// goes unobserved until something reads the state.
+    fn_lock: Option<FnLockEvents>,
 }
 
 impl ArmedCapture for ArmedKeys {
@@ -162,7 +169,12 @@ impl ArmedCapture for ArmedKeys {
         let held: Mutex<BTreeSet<u16>> = Mutex::new(BTreeSet::new());
         let feature_index = self.controls.feature_index();
         let diverted = self.diverted.clone();
+        let fn_lock = self.fn_lock;
         move |msg| {
+            if let Some(on) = fn_lock.and_then(|events| events.decode(msg, device_index)) {
+                let _ = sink.send(CapturedInput::FnLock(on));
+                return;
+            }
             let Some(RawControlEvent::DivertedButtons(cids)) =
                 reprog_controls::decode_event(msg, device_index, feature_index)
             else {

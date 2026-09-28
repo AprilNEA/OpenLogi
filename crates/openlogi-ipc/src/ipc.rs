@@ -63,7 +63,9 @@ pub use succession::Identity;
 ///      the macOS dormancy gate.
 /// v30: `Agent::read_wheel` and `Agent::read_backlight` appended.
 /// v31: `Capabilities::dpi_gestures` appended.
-pub const PROTOCOL_VERSION: u32 = 31;
+/// v32: `Agent::read_fn_lock` and `HidppOperation::ReadFnLock` appended.
+/// v33: `AgentSnapshot::fn_locks` appended — live Fn-lock state per keyboard.
+pub const PROTOCOL_VERSION: u32 = 33;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -140,6 +142,23 @@ pub struct AgentSnapshot {
     /// Which application per-app profiles are resolving against. See
     /// [`ForegroundApps`].
     pub foreground: ForegroundApps,
+    /// The last Fn-lock state the agent learned for each keyboard, from a
+    /// read, its own write, or the keyboard's change event (its Fn Lock key).
+    /// A keyboard it has learned nothing about is absent.
+    ///
+    /// Change events arrive only while the agent captures the keyboard, i.e.
+    /// while at least one of its keys is bound. For a keyboard with nothing
+    /// bound, a press of its Fn Lock key is seen at the next read instead.
+    pub fn_locks: Vec<KeyboardFnLock>,
+}
+
+/// One keyboard's last known Fn-lock state in [`AgentSnapshot::fn_locks`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyboardFnLock {
+    /// The keyboard's HID++ route.
+    pub route: DeviceRoute,
+    /// `true` when the F-row sends F1–F12 without holding Fn.
+    pub on: bool,
 }
 
 /// The application the agent currently resolves per-app profiles against, and
@@ -566,4 +585,7 @@ pub trait Agent {
     async fn read_wheel(route: DeviceRoute) -> Result<ScrollWheelMode, WriteError>;
     /// Read the current keyboard-backlight state from `route`.
     async fn read_backlight(route: DeviceRoute) -> Result<BacklightState, WriteError>;
+    /// Read a keyboard's Fn lock from `route`: `true` when the F-row sends
+    /// F1–F12 without holding Fn.
+    async fn read_fn_lock(route: DeviceRoute) -> Result<bool, WriteError>;
 }

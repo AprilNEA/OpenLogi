@@ -166,6 +166,14 @@ impl SharedHandles {
     }
 }
 
+/// The Fn-lock state a config reload asks `device_key` to take: its new
+/// setting, unless it was already set to that before the reload.
+fn changed_fn_lock(previous: &Config, current: &Config, device_key: &str) -> Option<bool> {
+    current
+        .fn_lock(device_key)
+        .filter(|on| previous.fn_lock(device_key) != Some(*on))
+}
+
 /// Owns the config + device selection and keeps [`SharedHandles`] in sync.
 pub struct Orchestrator {
     config: Config,
@@ -661,6 +669,7 @@ impl Orchestrator {
             crate::hardware::write_fn_lock_in_background(
                 self.shared.keyboard_device(&route),
                 fn_lock,
+                Arc::clone(&self.observable),
             );
         }
         if let Some(capabilities) = dev.light_capabilities
@@ -915,7 +924,7 @@ impl Orchestrator {
     pub fn reload_config(&mut self, config: Config) {
         // Parameter-only edits must not erase a transient manual choice while
         // the light remains camera-linked. Changing the policy invalidates it.
-        self.config = config;
+        let previous = std::mem::replace(&mut self.config, config);
         self.shared.scroll_preferences.publish(
             self.config.app_settings.smooth_scroll,
             self.config.app_settings.vertical_scroll_sensitivity,
@@ -937,23 +946,25 @@ impl Orchestrator {
         self.current = pick_current(&self.devices, self.config.selected_device());
         self.rebuild();
         self.apply_native_wheel_modes();
-        self.apply_fn_locks();
+        self.apply_changed_fn_locks(&previous);
         self.reapply_light_settings();
     }
 
-    /// Push the saved Fn-lock state to every online keyboard that has one.
-    /// Runs on config reloads (the reconnect path is
-    /// [`Self::reapply_volatile_settings`]); the write is a single HID++ call,
-    /// so re-applying an unchanged state is cheap.
-    fn apply_fn_locks(&self) {
+    /// Push a newly saved Fn-lock state to every online keyboard whose setting
+    /// this reload changed (the reconnect path is
+    /// [`Self::reapply_volatile_settings`]). An unchanged setting is left
+    /// alone: every settings edit reloads the config, and re-writing it each
+    /// time would undo the keyboard's own Fn Lock key.
+    fn apply_changed_fn_locks(&self, previous: &Config) {
         for dev in self.devices.iter().filter(|dev| dev.online) {
             let Some(route) = dev.route.clone() else {
                 continue;
             };
-            if let Some(fn_lock) = self.config.fn_lock(&dev.config_key) {
+            if let Some(fn_lock) = changed_fn_lock(previous, &self.config, &dev.config_key) {
                 crate::hardware::write_fn_lock_in_background(
                     self.shared.keyboard_device(&route),
                     fn_lock,
+                    Arc::clone(&self.observable),
                 );
             }
         }

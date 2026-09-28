@@ -44,9 +44,9 @@ use crate::features::binding_editor::{
 };
 use crate::features::mouse::geometry::asset_dimensions_for_png;
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
-use crate::state::{AppState, StateEvent};
+use crate::state::{AppState, FnLockLoad, StateEvent};
 use crate::ui::action::localized_action_label;
-use crate::ui::components::MenuRow;
+use crate::ui::components::{MenuRow, Toggle};
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
 use gpui::ease_in_out;
 use gpui::{Animation, AnimationExt, img};
@@ -79,6 +79,9 @@ const CALLOUT_BAND_H: f32 = 118.;
 const KEYS_VERTICAL_RESERVE: f32 = 224.;
 /// Floor on the render height so a tiny window still shows a usable model.
 const KEYBOARD_MIN_IMG_H: f32 = 160.;
+/// Height of the Fn-lock row above the keyboard, taken from the image's
+/// vertical budget while the row is shown.
+const FN_LOCK_ROW_H: f32 = 56.;
 const KEY_CALLOUT_W: f32 = 60.;
 const KEY_CALLOUT_H: f32 = 48.;
 const KEY_CALLOUT_TOP_UPPER: f32 = 4.;
@@ -107,8 +110,12 @@ pub struct FunctionRowView {
 impl FunctionRowView {
     /// Create the view.
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let state_obs =
-            AppState::repaint_on(cx, |event| matches!(event, StateEvent::BindingsChanged(_)));
+        let state_obs = AppState::repaint_on(cx, |event| {
+            matches!(
+                event,
+                StateEvent::BindingsChanged(_) | StateEvent::FnLockChanged(_)
+            )
+        });
         Self {
             selected_key: None,
             hovered_key: None,
@@ -213,8 +220,19 @@ impl Render for FunctionRowView {
                 .and_then(|record| keyboard_glow(state, record))
         });
 
+        let fn_lock = state
+            .and_then(AppState::current_fn_lock)
+            .and_then(|load| match load {
+                FnLockLoad::Ready(on) => Some(**on),
+                FnLockLoad::Unknown
+                | FnLockLoad::Loading
+                | FnLockLoad::Failed(_)
+                | FnLockLoad::Unsupported(_) => None,
+            });
+
         let viewport_h = f32::from(window.viewport_size().height);
-        let render_size = keyboard_render_size(asset, viewport_h);
+        let reserved_h = if fn_lock.is_some() { FN_LOCK_ROW_H } else { 0. };
+        let render_size = keyboard_render_size(asset, viewport_h - reserved_h);
         let points = key_points(asset);
         let image_path = asset.map(|asset| asset.image_path.clone());
         let slots: Vec<KeySlot> = FUNCTION_KEYS
@@ -291,8 +309,48 @@ impl Render for FunctionRowView {
         v_flex()
             .w_full()
             .items_center()
+            .when_some(fn_lock, |column, on| {
+                column.child(fn_lock_row(on, render_size.0, &theme::palette(cx)))
+            })
             .child(InspectorRow::new(keyboard).panel(panel))
     }
+}
+
+/// The keyboard's Fn-lock switch, as wide as the keyboard render it sits on.
+/// Shown only once the keyboard reported its state, so a board without fn
+/// inversion never shows a switch that cannot work.
+fn fn_lock_row(on: bool, width: f32, pal: &Palette) -> impl IntoElement {
+    let description = if on {
+        tr!("keyboard.fn_lock_on_description")
+    } else {
+        tr!("keyboard.fn_lock_off_description")
+    };
+    h_flex()
+        .w(px(width))
+        .h(px(FN_LOCK_ROW_H))
+        .justify_between()
+        .items_center()
+        .gap_4()
+        .child(
+            v_flex()
+                .child(
+                    div()
+                        .text_body()
+                        .text_color(pal.text_primary)
+                        .child(tr!("keyboard.fn_lock")),
+                )
+                .child(
+                    div()
+                        .text_caption()
+                        .text_color(pal.text_muted)
+                        .child(description),
+                ),
+        )
+        .child(
+            Toggle::new("fn-lock-toggle")
+                .selected(on)
+                .on_change(|on, _window, cx| AppState::update_fn_lock(cx, *on)),
+        )
 }
 
 /// The keyboard render size: the actual PNG aspect at up to [`KEYBOARD_W`]

@@ -50,6 +50,7 @@ mod tests {
     use cmd::fixture::record_profile::RecordProfileArgs;
     use cmd::fixture::verify::VerifyArgs;
     use cmd::fixture::{FixtureCmd, FixtureRecordCmd};
+    use cmd::fn_lock::FnLockAction;
 
     /// Clap's own structural validation (arg ID collisions, invalid
     /// `conflicts_with` targets, etc.) — cheap and catches a broken derive
@@ -80,6 +81,28 @@ mod tests {
                 assert!(args.action.is_none());
             }
             other => panic!("expected Backlight, got {other:?}"),
+        }
+    }
+
+    /// A bare `openlogi fn-lock` reads; only an explicit `on`/`off` writes.
+    #[test]
+    fn fn_lock_defaults_to_status_and_parses_on() {
+        let cli = Cli::try_parse_from(["openlogi", "fn-lock", "--device", "K860"])
+            .expect("bare fn-lock invocation parses");
+        match cli.cmd.expect("subcommand present") {
+            Command::FnLock(args) => {
+                assert_eq!(args.device.as_deref(), Some("K860"));
+                assert!(args.action.is_none());
+            }
+            other => panic!("expected FnLock, got {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from(["openlogi", "fn-lock", "on"]).expect("fn-lock on parses");
+        match cli.cmd.expect("subcommand present") {
+            Command::FnLock(args) => {
+                assert!(matches!(args.action, Some(FnLockAction::On)));
+            }
+            other => panic!("expected FnLock, got {other:?}"),
         }
     }
 

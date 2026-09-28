@@ -27,6 +27,7 @@ use super::capture_session::{CaptureRecovery, CaptureSession, CaptureSlot, Recon
 use super::retry::RETRY_DELAY;
 use super::shutdown::{ManagerCompletion, WatcherHandle};
 use crate::hardware::DeviceAccess;
+use crate::observable::ObservableState;
 use crate::receiver_access::{ReceiverRequestState, SessionReceiverLease};
 use crate::runtime::{ActionDispatcher, HidppSessionId};
 
@@ -93,6 +94,8 @@ enum KeyboardSessionEvent {
 struct KeyboardManagerState {
     slot: Option<KeyboardSlot>,
     dispatcher: ActionDispatcher,
+    /// Where the keyboard's Fn-lock change events are published.
+    observable: Arc<ObservableState>,
 }
 
 struct KeyboardSessionChannels {
@@ -105,6 +108,7 @@ struct KeyboardManagerContext {
     access: DeviceAccess,
     receiver_requests: watch::Receiver<ReceiverRequestState>,
     dispatcher: ActionDispatcher,
+    observable: Arc<ObservableState>,
     shutdown: oneshot::Receiver<()>,
 }
 
@@ -116,6 +120,7 @@ pub fn spawn(
     spec: &SharedKeyboardSpec,
     access: DeviceAccess,
     dispatcher: ActionDispatcher,
+    observable: Arc<ObservableState>,
 ) -> WatcherHandle {
     let spec = spec.clone();
     let receiver_requests = access.receiver_access.subscribe_requests();
@@ -125,6 +130,7 @@ pub fn spawn(
             access,
             receiver_requests,
             dispatcher,
+            observable,
             shutdown,
         })
     })
@@ -160,7 +166,8 @@ fn dispatch_input(
         }
         CapturedInput::Gesture(..)
         | CapturedInput::Scroll { .. }
-        | CapturedInput::ThumbwheelDirection { .. } => {}
+        | CapturedInput::ThumbwheelDirection { .. }
+        | CapturedInput::FnLock(_) => {}
     }
 }
 
@@ -209,10 +216,11 @@ fn reconcile_session(
 }
 
 impl KeyboardManagerState {
-    fn new(dispatcher: ActionDispatcher) -> Self {
+    fn new(dispatcher: ActionDispatcher, observable: Arc<ObservableState>) -> Self {
         Self {
             slot: None,
             dispatcher,
+            observable,
         }
     }
 
@@ -355,6 +363,10 @@ impl KeyboardManagerState {
                     );
                     return false;
                 };
+                if let CapturedInput::FnLock(on) = input.input {
+                    self.observable.set_fn_lock(&running.target().route, on);
+                    return false;
+                }
                 dispatch_input(
                     running.id(),
                     input.input,
@@ -529,6 +541,7 @@ async fn manage(context: KeyboardManagerContext) -> ManagerCompletion {
         access,
         receiver_requests,
         dispatcher,
+        observable,
         shutdown,
     } = context;
     let (events, event_rx) = mpsc::unbounded_channel::<KeyboardSessionEvent>();
@@ -537,7 +550,7 @@ async fn manage(context: KeyboardManagerContext) -> ManagerCompletion {
     let channels = KeyboardSessionChannels { access, events };
     capture_manager::run(
         KeyboardManager {
-            state: KeyboardManagerState::new(dispatcher),
+            state: KeyboardManagerState::new(dispatcher, observable),
             channels,
         },
         ManagerInputs {

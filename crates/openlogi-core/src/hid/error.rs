@@ -133,6 +133,9 @@ pub enum HidppOperation {
     Light,
     /// Play one haptic waveform. Appended last — variant order is wire format.
     PlayHaptic,
+    /// Read keyboard Fn-lock (fn inversion). Appended last — variant order is
+    /// wire format.
+    ReadFnLock,
 }
 
 /// HID++ feature error kind in a serializable wire-safe form.

@@ -63,6 +63,7 @@ fn snapshot_candidate(profile: &DeviceProfile) -> AgentSnapshot {
             current: Some(editor.clone()),
             recent: vec![editor],
         },
+        fn_locks: Vec::new(),
     }
 }
 

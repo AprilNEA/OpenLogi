@@ -287,6 +287,12 @@ impl Agent for TestAgent {
             0x1982,
         )
     }
+
+    async fn read_fn_lock(self, _: TarpcContext, _: DeviceRoute) -> Result<bool, WriteError> {
+        Err(WriteError::FeatureUnsupported {
+            feature_hex: 0x40a3,
+        })
+    }
 }
 
 /// The client end of an in-process agent, past the handshake `connect_as`
@@ -362,6 +368,7 @@ fn fixture_agent() -> TestAgent {
             }),
             recent: Vec::new(),
         },
+        fn_locks: Vec::new(),
     };
     TestAgent::from_profile(profile, snapshot)
 }

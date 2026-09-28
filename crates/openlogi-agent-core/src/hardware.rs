@@ -19,6 +19,7 @@
 
 use std::fmt;
 use std::future::Future;
+use std::sync::Arc;
 use std::time::Duration;
 
 use openlogi_core::config::Lighting;
@@ -29,6 +30,7 @@ use openlogi_hid::{
 use tokio::time::error::Elapsed;
 use tracing::{debug, warn};
 
+use crate::observable::ObservableState;
 use crate::receiver_access::ReceiverAccess;
 
 mod context;
@@ -345,14 +347,16 @@ pub fn toggle_smartshift_in_background(op: DeviceOp) {
 /// via [`openlogi_hid::set_fn_lock_on`]. Returns immediately; failures (incl.
 /// keyboards that expose neither `0x40a3` nor `0x40a2` fn inversion) are
 /// logged.
-pub fn write_fn_lock_in_background(op: DeviceOp, on: bool) {
+pub fn write_fn_lock_in_background(op: DeviceOp, on: bool, observable: Arc<ObservableState>) {
     let index = op.route.device_index();
+    let route = op.route.clone();
     op.spawn_write(
         "Fn-lock write",
         move |c| async move { openlogi_hid::set_fn_lock_on(&c, on).await },
         move |result| {
             log_outcome(index, "Fn-lock write", result, |()| {
                 debug!(index, on, "Fn-lock written");
+                observable.set_fn_lock(&route, on);
             });
         },
     );

@@ -683,6 +683,7 @@ fn snapshot_of(state: &State) -> AgentSnapshot {
         camera_active: state.camera_active(),
         pairing: state.phase.clone(),
         foreground: state.foreground(),
+        fn_locks: Vec::new(),
     }
 }
 
@@ -827,6 +828,16 @@ impl Agent for MockAgent {
     ) -> Result<BacklightState, WriteError> {
         let state = self.state.lock().await;
         profile_value(&state.settings_for(&route)?.backlight, &route, 0x1982).copied()
+    }
+
+    async fn read_fn_lock(self, _: Context, route: DeviceRoute) -> Result<bool, WriteError> {
+        // Fixture profiles don't record Fn lock, so every scripted keyboard
+        // reads as lacking the feature and the GUI hides its control.
+        let state = self.state.lock().await;
+        state.settings_for(&route)?;
+        Err(WriteError::FeatureUnsupported {
+            feature_hex: 0x40a3,
+        })
     }
 
     async fn request_accessibility_prompt(self, _: Context) {

@@ -61,7 +61,7 @@ use request::LinkLost;
 #[cfg(all(target_os = "macos", debug_assertions))]
 pub use request::PollEventMonitor;
 pub use request::{
-    CancelPairing, Command, PairDevice, ReadDpi, ReadSmartShift, ReloadConfig,
+    CancelPairing, Command, PairDevice, ReadDpi, ReadFnLock, ReadSmartShift, ReloadConfig,
     RequestAccessibilityPrompt, SetDpi, SetLight, SetLightManualPower, SetLighting, SetSmartShift,
     StartPairing,
 };
@@ -503,6 +503,7 @@ mod tests {
             camera_active,
             pairing: None,
             foreground: ForegroundApps::default(),
+            fn_locks: Vec::new(),
         }
     }
 

@@ -189,6 +189,7 @@ impl HidppWatcherHandles {
 pub(crate) fn spawn_hidpp_watchers(
     shared: &SharedHandles,
     inputs: &InputServices,
+    observable: &Arc<ObservableState>,
 ) -> HidppWatcherHandles {
     let gesture = watchers::gesture::spawn(
         &shared.capture_plans,
@@ -210,6 +211,7 @@ pub(crate) fn spawn_hidpp_watchers(
         &shared.keyboard_spec,
         shared.keyboard_access(),
         inputs.dispatcher.clone(),
+        Arc::clone(observable),
     );
     HidppWatcherHandles {
         gesture,
