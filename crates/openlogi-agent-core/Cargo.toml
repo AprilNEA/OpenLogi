@@ -11,7 +11,7 @@ description = "Headless orchestration shared by the OpenLogi background agent: h
 publish = false
 
 [dependencies]
-openlogi-core = { path = "../openlogi-core" }
+openlogi-core = { path = "../openlogi-core", features = ["worker"] }
 openlogi-inject = { path = "../openlogi-inject" }
 openlogi-hid = { path = "../openlogi-hid" }
 openlogi-hook = { path = "../openlogi-hook" }
@@ -26,4 +26,5 @@ workspace = true
 [dev-dependencies]
 # Only to advance virtual time in the DeviceOp/timed timeout test without a
 # real multi-second sleep.
+openlogi-fixture = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }

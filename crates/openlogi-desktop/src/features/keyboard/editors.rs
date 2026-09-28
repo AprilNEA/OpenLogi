@@ -6,7 +6,7 @@
 //! returns to the action list; the panel itself closes when the key is
 //! deselected.
 //!
-//! [`compact_panel`]: crate::features::mouse::picker::compact_panel
+//! [`compact_panel`]: crate::features::binding_editor::compact_panel
 
 #![expect(
     clippy::needless_pass_by_value,
@@ -28,8 +28,8 @@ use openlogi_core::binding::{Action, KeyCombo, WorkflowStep};
 use openlogi_core::config::KeyTrigger;
 
 use super::function_row::FunctionRowView;
-use crate::features::mouse::picker::{compact_panel, divider, editor_scroll_list, title};
-use crate::state::{AppState, DeviceRecord, StateEvent};
+use crate::features::binding_editor::{compact_panel, divider, editor_scroll_list, title};
+use crate::state::AppState;
 use crate::ui::components::{MenuRow, control_input};
 use crate::ui::theme::{self, Palette, Typography as _};
 
@@ -163,12 +163,8 @@ fn editor_action_row(
                         PowerUserKind::RunShellCommand => Action::RunShellCommand(text),
                         PowerUserKind::Workflow => return,
                     };
-                    AppState::update(cx, |state, cx| {
-                        let key = state.current_record().map(DeviceRecord::device_key);
-                        state.commit_keyboard_binding(trigger_save.clone(), Some(action));
-                        if let Some(key) = key {
-                            cx.emit(StateEvent::BindingsChanged(key));
-                        }
+                    AppState::apply(cx, |state| {
+                        state.commit_keyboard_binding(trigger_save.clone(), Some(action))
                     });
                     view_save.update(cx, |v, vcx| v.close_editor(vcx));
                 }),
@@ -233,12 +229,8 @@ fn workflow_editor_card(
                             move |_e, _window, cx| {
                                 let steps = v.read(cx).workflow_draft().to_vec();
                                 let action = Action::Workflow(steps);
-                                AppState::update(cx, |state, cx| {
-                                    let key = state.current_record().map(DeviceRecord::device_key);
-                                    state.commit_keyboard_binding(trigger.clone(), Some(action));
-                                    if let Some(key) = key {
-                                        cx.emit(StateEvent::BindingsChanged(key));
-                                    }
+                                AppState::apply(cx, |state| {
+                                    state.commit_keyboard_binding(trigger.clone(), Some(action))
                                 });
                                 v.update(cx, |v, vcx| v.close_editor(vcx));
                             }

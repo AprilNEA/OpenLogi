@@ -1,0 +1,40 @@
+# Owner: openlogi-desktop's state::events — whether a StateEvent concerns the
+# device on screen (AppState::repaint_on for a device panel,
+# AppState::is_current_device for anything else). The root view in app.rs
+# matches every event exhaustively per tab and is the one other listener that
+# names the device-changed events itself.
+id: gui-device-panel-relevance-owner
+language: rust
+severity: error
+message: Whether a StateEvent concerns the device on screen is state::events' call. Subscribe a device panel with AppState::repaint_on(cx, topic) and ask AppState::is_current_device(key) elsewhere; do not compare device keys or re-list the device-changed events here.
+note: |
+  Seven panels each carried a copy of the same subscription filter ending in
+  `_ => false`, so a new StateEvent was silently ignored in all of them. See
+  "Single source of truth" in AGENTS.md.
+files:
+  - crates/openlogi-desktop/src/**/*.rs
+ignores:
+  - crates/openlogi-desktop/src/state/events.rs
+  - crates/openlogi-desktop/src/app.rs
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  any:
+    # Comparing against a record's DeviceKey by hand.
+    - kind: binary_expression
+      all:
+        - has:
+            field: operator
+            regex: '^(==|!=)$'
+        - has:
+            kind: call_expression
+            regex: '\.device_key\(\)$'
+    # Re-listing the events that mean "the device on screen changed".
+    - kind: or_pattern
+      regex: 'StateEvent::InventoryChanged\s*\|\s*StateEvent::DeviceSelected'
+      not:
+        has:
+          kind: or_pattern
+          regex: 'StateEvent::InventoryChanged\s*\|\s*StateEvent::DeviceSelected'
+    - kind: macro_invocation
+      regex: 'StateEvent::InventoryChanged\s*\|\s*StateEvent::DeviceSelected'

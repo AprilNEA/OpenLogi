@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, anyhow};
 use openlogi_core::brand;
+use openlogi_core::paths::Profile;
 use xshell::{Shell, cmd};
 
 use super::identity::{Channel, Component};
@@ -13,7 +14,7 @@ use crate::support::fs::ensure_file;
 use crate::support::info_plist::stamp_bundle_version;
 
 /// A nested login-item helper embedded under `Contents/Library/LoginItems`.
-pub(crate) struct Helper {
+pub(crate) struct EmbeddedHelper {
     /// Identity component, which also locates the helper inside the app bundle.
     pub(crate) component: Component,
     /// Cargo package that builds it.
@@ -29,18 +30,18 @@ pub(crate) struct Helper {
 }
 
 /// Every helper the app bundle ships.
-pub(crate) const HELPERS: [Helper; 2] = [
-    Helper {
+pub(crate) const HELPERS: [EmbeddedHelper; 2] = [
+    EmbeddedHelper {
         component: Component::Agent,
         package: "openlogi-agent",
-        binary: "openlogi-agent",
+        binary: brand::Helper::Agent.executable(),
         info_plist: "crates/openlogi-desktop/bundle/agent-release/Info.plist",
         label: "agent helper",
     },
-    Helper {
+    EmbeddedHelper {
         component: Component::Overlay,
         package: "openlogi-overlay",
-        binary: "openlogi-overlay",
+        binary: brand::Helper::Overlay.executable(),
         info_plist: "crates/openlogi-desktop/bundle/overlay-release/Info.plist",
         label: "Actions Ring overlay helper",
     },
@@ -99,11 +100,11 @@ fn embed_helper(
     root: &Path,
     release_dir: &Path,
     app: &Path,
-    helper: &Helper,
+    helper: &EmbeddedHelper,
     icon: &Path,
     channel: Channel,
 ) -> Result<()> {
-    let Helper { binary, label, .. } = *helper;
+    let EmbeddedHelper { binary, label, .. } = *helper;
     println!("==> {label} (embed)");
     let built = release_dir.join(binary);
     ensure_file(&built)?;
@@ -132,14 +133,10 @@ fn embed_helper(
     Ok(())
 }
 
-/// The launchd service label `channel`'s bundle carries — what its embedded
-/// LaunchAgent plist declares, `SMAppService` registers, and `launchctl`
-/// addresses. Frozen once shipped; see [`brand::AGENT_SERVICE_LABEL`].
+/// The launchd service label `channel`'s bundle carries: the one the profile
+/// it runs under will look for.
 pub(crate) fn agent_service_label(channel: Channel) -> String {
-    match channel {
-        Channel::Production => brand::AGENT_SERVICE_LABEL.to_owned(),
-        Channel::Dev => brand::dev_id(brand::AGENT_SERVICE_LABEL),
-    }
+    Profile::from(channel).agent_service_label()
 }
 
 /// The launchd property list `SMAppService` registers the agent from.
@@ -167,12 +164,8 @@ pub(crate) fn agent_service_label(channel: Channel) -> String {
 /// `SuccessfulExit` — when started unwanted (the GUI's
 /// `platform::registration` doc has the model).
 fn agent_launch_plist(channel: Channel) -> Result<plist::Dictionary> {
-    let helper = HELPERS
-        .iter()
-        .find(|helper| helper.component == Component::Agent)
-        .ok_or_else(|| anyhow!("HELPERS carries no agent entry"))?;
     let nested = Component::Agent
-        .nested_bundle(channel)
+        .nested_bundle_dir(channel)
         .ok_or_else(|| anyhow!("the agent component is always a nested bundle"))?;
 
     let mut keep_alive = plist::Dictionary::new();
@@ -184,7 +177,7 @@ fn agent_launch_plist(channel: Channel) -> Result<plist::Dictionary> {
     );
     root.insert(
         "BundleProgram".into(),
-        plist::Value::String(format!("{nested}/Contents/MacOS/{}", helper.binary)),
+        plist::Value::String(brand::Helper::Agent.executable_in(&nested)),
     );
     root.insert("KeepAlive".into(), plist::Value::Dictionary(keep_alive));
     Ok(root)
@@ -201,7 +194,7 @@ pub(crate) fn write_agent_launch_plist(app: &Path, channel: Channel) -> Result<(
         ensure_file(&app.join(bundle_program))
             .context("the agent service plist must be written after the helpers are embedded")?;
     }
-    let dir = app.join("Contents/Library/LaunchAgents");
+    let dir = app.join(brand::LAUNCH_AGENTS_DIR);
     fs_err::create_dir_all(&dir).with_context(|| format!("could not create {}", dir.display()))?;
     let path = dir.join(format!("{}.plist", agent_service_label(channel)));
     plist::Value::Dictionary(content)
@@ -213,21 +206,25 @@ pub(crate) fn write_agent_launch_plist(app: &Path, channel: Channel) -> Result<(
 
 pub(super) fn embed_cli(release_dir: &Path, app: &Path) -> Result<()> {
     println!("==> cli (embed)");
-    let cli_bin = release_dir.join("openlogi");
+    let cli_bin = release_dir.join(brand::CLI_EXECUTABLE);
     ensure_file(&cli_bin)?;
 
     let macos = app.join("Contents/MacOS");
-    fs_err::copy(&cli_bin, macos.join("openlogi"))
+    let embedded = macos.join(brand::CLI_EXECUTABLE);
+    fs_err::copy(&cli_bin, &embedded)
         .with_context(|| "could not copy the CLI binary into the app bundle".to_string())?;
 
-    println!("    embedded {}", macos.join("openlogi").display());
+    println!("    embedded {}", embedded.display());
     Ok(())
 }
 
 /// Every Mach-O the finished bundle must ship, for `channel`'s helper layout.
 fn required_bundle_binaries(app: &Path, channel: Channel) -> Vec<PathBuf> {
     let macos = app.join("Contents/MacOS");
-    let mut required = vec![macos.join("openlogi"), macos.join("openlogi-desktop")];
+    let mut required = vec![
+        macos.join(brand::CLI_EXECUTABLE),
+        macos.join(brand::GUI_EXECUTABLE),
+    ];
     required.extend(HELPERS.iter().map(|helper| {
         helper
             .component

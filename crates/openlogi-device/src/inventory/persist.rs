@@ -5,7 +5,7 @@
 //! but the in-memory cache dies with the process, forcing every agent restart
 //! to re-interview every device. Persisting the cache means a device that was
 //! fully probed once keeps its identity across restarts, even on transports
-//! where a fresh walk is slow or failing (see `BOLT_SLOT_PROBE`).
+//! where a fresh walk is slow or failing (see `BOLT_SLOT_PROBE_TIMEOUT`).
 //!
 //! Only Bolt identities are persisted, because only they are keyed on the
 //! device's *own* identity (the pairing-register unit id), which no re-pairing

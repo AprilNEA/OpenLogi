@@ -9,7 +9,6 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::future::pending;
-use std::thread;
 use std::time::{Instant, SystemTime};
 
 use futures_lite::StreamExt as _;
@@ -23,6 +22,10 @@ use schedule::{
     Schedule, WakeDetector,
 };
 
+use crate::hardware::HardwareContext;
+
+#[cfg(test)]
+mod replay_tests;
 mod schedule;
 
 /// Consecutive *initial* enumerate failures before the watcher declares
@@ -242,41 +245,33 @@ enum RefreshRequest {
 /// Spawn a watcher without publishing channels into a registry.
 #[must_use]
 pub fn spawn() -> InventoryWatcher {
-    spawn_inner(None, openlogi_hid::host::device_io_gate())
+    spawn_inner(None, HardwareContext::production())
 }
 
-/// Spawn the persistent watcher, publish its already-open HID++ channels into
-/// `registry`, and stop active reconciliation while host device I/O is gated.
+/// Spawn the persistent watcher from `hardware`, publish its already-open
+/// HID++ channels into `registry`, and stop active reconciliation while its
+/// device-I/O gate is closed.
 #[must_use]
-pub fn spawn_with_registry(registry: ChannelRegistry, device_io: DeviceIoGate) -> InventoryWatcher {
-    spawn_inner(Some(registry), device_io)
+pub fn spawn_with_hardware(
+    hardware: HardwareContext,
+    registry: ChannelRegistry,
+) -> InventoryWatcher {
+    spawn_inner(Some(registry), hardware)
 }
 
-fn spawn_inner(registry: Option<ChannelRegistry>, device_io: DeviceIoGate) -> InventoryWatcher {
+fn spawn_inner(registry: Option<ChannelRegistry>, hardware: HardwareContext) -> InventoryWatcher {
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let worker_tx = event_tx.clone();
     let (refresh_tx, refresh_rx) = mpsc::channel(1);
-    let spawn_result = thread::Builder::new()
-        .name("openlogi-inventory-watcher".into())
-        .spawn(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    warn!(error = %e, "tokio runtime init failed; watcher exiting");
-                    return;
-                }
-            };
-            rt.block_on(run_watcher(worker_tx, refresh_rx, registry, device_io));
-        });
-    if let Err(e) = spawn_result {
-        // OS thread / fork limits are non-fatal for the agent as a whole, but
-        // enumeration will never run. Say so — sending an empty *snapshot*
-        // here would forge a "checked, no devices" answer for a check that
-        // never happened.
-        warn!(error = %e, "could not spawn inventory watcher — device scanning unavailable");
+    let started = openlogi_core::worker::spawn("openlogi-inventory-watcher", move |runtime| {
+        runtime.block_on(run_watcher(worker_tx, refresh_rx, registry, hardware));
+    });
+    if let Err(error) = started {
+        // OS thread / fork / runtime limits are non-fatal for the agent as a
+        // whole, but enumeration will never run. Say so — sending an empty
+        // *snapshot* here would forge a "checked, no devices" answer for a
+        // check that never happened.
+        warn!(%error, "could not start the inventory watcher — device scanning unavailable");
         let _ = event_tx.send(InventoryEvent::Unavailable);
     }
     InventoryWatcher {
@@ -289,17 +284,16 @@ async fn run_watcher(
     events: mpsc::UnboundedSender<InventoryEvent>,
     refresh_requests: mpsc::Receiver<RefreshRequest>,
     registry: Option<ChannelRegistry>,
-    device_io: DeviceIoGate,
+    hardware: HardwareContext,
 ) {
     // The listener is attached to each inventory-owned channel before its
     // first probe, and its bounded queue is subscribed before every snapshot.
     let (event_notifier, hid_events) = openlogi_hid::inventory::events::event_channel();
-    let mut enumerator =
-        openlogi_hid::host::persisted_enumerator().with_event_notifier(event_notifier);
+    let mut enumerator = hardware.enumerator().with_event_notifier(event_notifier);
     if let Some(registry) = registry {
         enumerator = enumerator.with_registry(registry);
     }
-    let hotplug = match openlogi_hid::watch_hotplug() {
+    let hotplug = match hardware.watch_hotplug() {
         Ok(stream) => Some(stream),
         Err(error) => {
             warn!(
@@ -319,7 +313,8 @@ async fn run_watcher(
         hid_events,
         schedule: Schedule::new(now),
         wake_detector: WakeDetector::new(SystemTime::now(), now),
-        device_io,
+        device_io: hardware.device_io(),
+        hardware,
         refresh_open: true,
     }
     .run()
@@ -330,6 +325,7 @@ struct InventoryWorker {
     events: mpsc::UnboundedSender<InventoryEvent>,
     refresh_requests: mpsc::Receiver<RefreshRequest>,
     enumerator: openlogi_hid::inventory::Enumerator,
+    hardware: HardwareContext,
     state: WatchState,
     hotplug: Option<openlogi_hid::backend::HotplugStream>,
     hid_events: openlogi_hid::inventory::events::EventReceiver,
@@ -396,7 +392,7 @@ impl InventoryWorker {
     async fn reconcile(&mut self, trigger: ReconcileTrigger) -> bool {
         let (event, needs_repair) = match self.enumerator.enumerate().await {
             Ok(inventories) => {
-                let standalone = openlogi_hid::enumerate_standalone().await;
+                let standalone = self.hardware.enumerate_standalone().await;
                 let standalone_failed = standalone.is_err();
                 let open_failures = self.enumerator.open_failures_last_tick();
                 let event = self

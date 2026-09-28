@@ -1,0 +1,11 @@
+# Owner: linux::foreground::x11::window_app_id — the WM_CLASS profile namespace.
+id: hook-x11-app-identity-owner
+language: rust
+severity: error
+message: Use linux::foreground::x11::window_app_id so pointer and foreground profiles share the same WM_CLASS identity.
+files:
+  - crates/openlogi-hook/src/**/*.rs
+ignores:
+  - crates/openlogi-hook/src/linux/foreground/x11.rs
+rule:
+  pattern: WmClass::get($$$ARGS)

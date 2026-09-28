@@ -12,7 +12,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 
 use openlogi_core::binding::{
-    Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Script, Shortcut, WorkflowStep,
+    Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Shortcut,
 };
 use openlogi_core::scroll::ScrollDelta;
 
@@ -58,17 +58,12 @@ pub(super) fn execute(action: &Action) {
         Effect::None => {}
         Effect::Click(button) => post_click(button),
         Effect::Shortcut(shortcut) => press_shortcut(shortcut),
-        Effect::Key(combo) | Effect::HeldKey(combo) => post_custom_shortcut(combo),
+        Effect::Key(combo) | Effect::HeldKey(combo) => press_combo(combo),
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
         Effect::Media(key) => dispatch_media(key),
         Effect::Native(native) => dispatch_native(native),
-        Effect::Script(script) => dispatch_script(script),
-        Effect::Text(text) => {
-            tracing::warn!(
-                chars = text.chars().count(),
-                "TypeText injection is not implemented on Windows yet"
-            );
-        }
+        Effect::Script(script) => super::dispatch_script(script),
+        Effect::Text(text) => type_text(text),
         Effect::AgentSide => {
             tracing::debug!(
                 action = action.label(),
@@ -87,7 +82,7 @@ pub(super) fn execute(action: &Action) {
 /// which isn't a USB HID keyboard usage and so has no [`KeyCombo`]
 /// representation — unlike on macOS/Linux, where the same shortcuts are
 /// ordinary modifier+key chords. [`press_shortcut`] posts the `Err` case
-/// directly instead of routing it through [`post_custom_shortcut`].
+/// directly instead of routing it through [`press_combo`].
 fn combo(shortcut: Shortcut) -> Result<KeyCombo, u16> {
     let text = match shortcut {
         Shortcut::BrowserBack => return Err(VK_BROWSER_BACK),
@@ -109,17 +104,12 @@ fn combo(shortcut: Shortcut) -> Result<KeyCombo, u16> {
         Shortcut::PrevTab => "Ctrl+Shift+Tab",
         Shortcut::ReloadPage => "Ctrl+R",
     };
-    Ok(parse_shortcut(text))
-}
-
-fn parse_shortcut(text: &str) -> KeyCombo {
-    text.parse()
-        .unwrap_or_else(|error| unreachable!("hardcoded shortcut table entry {text:?}: {error}"))
+    Ok(super::parse_shortcut(text))
 }
 
 fn press_shortcut(shortcut: Shortcut) {
     match combo(shortcut) {
-        Ok(combo) => post_custom_shortcut(&combo),
+        Ok(combo) => press_combo(&combo),
         Err(vk) => post_key(vk, &[]),
     }
 }
@@ -160,46 +150,19 @@ fn dispatch_media(key: MediaKey) {
     }
 }
 
-fn dispatch_script(script: Script<'_>) {
-    match script {
-        Script::AppleScript(_) => {
-            tracing::warn!("RunAppleScript is only supported on macOS");
-        }
-        Script::ShellCommand(cmd) => run_shell_command_async(cmd.to_string()),
-        Script::Workflow(steps) => run_workflow_async(steps.to_vec()),
-    }
+/// Not implemented yet: SendInput's KEYEVENTF_UNICODE path is unwired.
+pub(super) fn type_text(text: &str) {
+    tracing::warn!(
+        chars = text.chars().count(),
+        "TypeText injection is not implemented on Windows yet"
+    );
 }
 
-fn run_shell_command_async(cmd: String) {
-    std::thread::spawn(move || run_shell_command(&cmd));
+pub(super) fn run_apple_script(_src: &str) {
+    tracing::warn!("RunAppleScript is only supported on macOS");
 }
 
-fn run_workflow_async(steps: Vec<WorkflowStep>) {
-    std::thread::spawn(move || run_workflow(&steps));
-}
-
-fn run_workflow(steps: &[WorkflowStep]) {
-    for step in steps {
-        match step {
-            WorkflowStep::TypeText(text) => {
-                tracing::warn!(
-                    chars = text.chars().count(),
-                    "workflow TypeText injection is not implemented on Windows yet"
-                );
-            }
-            WorkflowStep::PressKey(combo) => post_custom_shortcut(combo),
-            WorkflowStep::Delay { millis } => {
-                std::thread::sleep(std::time::Duration::from_millis(*millis));
-            }
-            WorkflowStep::RunAppleScript(_) => {
-                tracing::warn!("workflow RunAppleScript is only supported on macOS");
-            }
-            WorkflowStep::RunShellCommand(cmd) => run_shell_command(cmd),
-        }
-    }
-}
-
-fn run_shell_command(cmd: &str) {
+pub(super) fn run_shell_command(cmd: &str) {
     let _ = std::process::Command::new("cmd").args(["/C", cmd]).output();
 }
 
@@ -268,7 +231,7 @@ pub(super) fn post_scroll(delta: ScrollDelta) {
     }
 }
 
-fn post_custom_shortcut(combo: &KeyCombo) {
+pub(super) fn press_combo(combo: &KeyCombo) {
     let Some(vk) = super::hid_usage_to_windows(combo.key().code()) else {
         tracing::warn!(
             usage = combo.key().code(),
@@ -423,7 +386,7 @@ mod tests {
         assert_eq!(combo(Shortcut::BrowserForward), Err(VK_BROWSER_FORWARD));
         // Every chord-shaped row must actually resolve through
         // hid_usage_to_windows, or a `Shortcut` silently no-ops instead of
-        // pressing anything (see `post_custom_shortcut`'s warn-and-drop
+        // pressing anything (see `press_combo`'s warn-and-drop
         // path). Iterates `Shortcut::ALL` rather than a hand-copied list,
         // so a newly added `Shortcut` variant is checked here
         // automatically instead of depending on someone remembering to

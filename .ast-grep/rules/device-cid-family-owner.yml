@@ -1,0 +1,30 @@
+# Owner: openlogi_device::reprog_controls — the Back and Forward control-ID
+# families (BACK_CIDS, FORWARD_CIDS). The typed protocol fork may name a CID
+# of its own; tests may pin a literal CID as an oracle.
+id: device-cid-family-owner
+language: rust
+severity: error
+message: The Back and Forward control IDs are openlogi_device::reprog_controls' (BACK_CIDS, FORWARD_CIDS); name the family instead of respelling a CID here.
+note: |
+  The capture session's divertable-button table once respelled all six CIDs
+  beside two constants nothing read. See "Single source of truth" in
+  AGENTS.md.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-device/src/reprog_controls.rs
+  - crates/openlogi-hidpp/**
+  - "**/tests.rs"
+  - "**/tests/**"
+  - "**/*_tests.rs"
+rule:
+  all:
+    - kind: integer_literal
+    - regex: '^0x00(53|56|[bB][dD]|[cC][eE]|[cC][fF]|[dD][bB])$'
+    - not:
+        inside:
+          kind: mod_item
+          stopBy: end
+          has:
+            field: name
+            regex: '^tests$'
