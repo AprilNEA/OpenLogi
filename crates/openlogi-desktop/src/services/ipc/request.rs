@@ -18,7 +18,8 @@ use std::future::Future;
 
 use openlogi_core::config::Lighting;
 use openlogi_core::hid::{
-    DeviceRoute, Dpi, DpiInfo, LightCommand, ReceiverSelector, SmartShiftStatus, WriteError,
+    DeviceRoute, Dpi, DpiInfo, FnLockState, LightCommand, ReceiverSelector, SmartShiftStatus,
+    WriteError,
 };
 use openlogi_ipc::{AgentClient, ConfigReloadError, PairingCommandError, PairingFailure};
 use tarpc::client::RpcError;
@@ -271,6 +272,26 @@ impl Request for ReadSmartShift {
     }
 }
 
+/// Read a keyboard's Fn-lock state; the answer goes back over `reply`.
+pub struct ReadFnLock {
+    pub route: DeviceRoute,
+    pub reply: oneshot::Sender<Result<FnLockState, WriteError>>,
+}
+
+impl Request for ReadFnLock {
+    type Answer = Result<FnLockState, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .read_fn_lock(context::current(), self.route.clone())
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
+        let _ = self.reply.send(or_unavailable(outcome));
+    }
+}
+
 /// Have the agent re-read `config.toml`.
 ///
 /// The loop holds this one until a connection exists and never answers it
@@ -449,6 +470,7 @@ commands! {
     SetSmartShift,
     ReadDpi,
     ReadSmartShift,
+    ReadFnLock,
     ReloadConfig,
     RequestAccessibilityPrompt,
     StartPairing,

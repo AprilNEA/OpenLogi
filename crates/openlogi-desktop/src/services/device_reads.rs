@@ -5,19 +5,20 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{Context, Subscription};
-use openlogi_core::hid::{DeviceRoute, DpiInfo, SmartShiftStatus, WriteError};
+use openlogi_core::hid::{DeviceRoute, DpiInfo, FnLockState, SmartShiftStatus, WriteError};
 use swr_core::{
     MaybeSend, MaybeSync, QueryOptions, QueryState, Retry, RetryPolicy, Runtime, SwrClient,
 };
 use swr_gpui::Query;
 use tokio::sync::mpsc;
 
-use super::ipc::{Command, ReadDpi, ReadSmartShift};
-use crate::state::{AppState, DeviceKey, DpiLoad, Load, SmartShiftLoad, StateEvent};
+use super::ipc::{Command, ReadDpi, ReadFnLock, ReadSmartShift};
+use crate::state::{AppState, DeviceKey, DpiLoad, FnLockLoad, Load, SmartShiftLoad, StateEvent};
 
 const ROOT: &str = "device-read";
 const DPI: &str = "dpi";
 const SMARTSHIFT: &str = "smartshift";
+const FN_LOCK: &str = "fn-lock";
 
 /// Preserve the old budget: one initial attempt and two retries.
 const READ_RETRY_POLICY: RetryPolicy = RetryPolicy {
@@ -51,6 +52,7 @@ pub(crate) struct DeviceReads {
     next_flight: u64,
     dpi: BTreeMap<DeviceKey, DeviceRead<DpiInfo>>,
     smartshift: BTreeMap<DeviceKey, DeviceRead<SmartShiftStatus>>,
+    fn_lock: BTreeMap<DeviceKey, DeviceRead<FnLockState>>,
 }
 
 impl DeviceReads {
@@ -215,6 +217,78 @@ impl DeviceReads {
         true
     }
 
+    /// Start the Fn-lock query unless the same keyboard route is already
+    /// subscribed. A config write invalidates it through
+    /// [`Self::refresh_fn_lock`] so the row shows what the keyboard took.
+    pub(crate) fn ensure_fn_lock(
+        &mut self,
+        key: DeviceKey,
+        route: DeviceRoute,
+        commands: mpsc::UnboundedSender<Command>,
+        cx: &mut Context<AppState>,
+    ) {
+        if self
+            .fn_lock
+            .get(&key)
+            .is_some_and(|read| read.route == route)
+        {
+            return;
+        }
+        self.remove_fn_lock(&key);
+        let Some((client, runtime)) = self.cache() else {
+            return;
+        };
+        let flight = self.take_flight();
+        let fetch_route = route.clone();
+        let fetcher = Retry::new(
+            runtime,
+            move |_| {
+                let commands = commands.clone();
+                let route = fetch_route.clone();
+                read_ipc(move |reply| ReadFnLock { route, reply }.into(), commands)
+            },
+            READ_RETRY_POLICY,
+        )
+        .retry_if(|error| !fn_lock_error_is_permanent(error));
+        let handle = client.subscribe(query_key(FN_LOCK, &key), fetcher, QueryOptions::immutable());
+        let query = Query::new(&client, handle, cx);
+        let load = project_load(query.read(cx), fn_lock_error_is_permanent);
+        let observed_key = key.clone();
+        let observer = cx.observe(query.state(), move |state, query_state, cx| {
+            let load = project_load(query_state.read(cx), fn_lock_error_is_permanent);
+            if state
+                .device_reads_mut()
+                .update_fn_lock(&observed_key, flight, load)
+            {
+                cx.emit(StateEvent::FnLockChanged(observed_key.clone()));
+            }
+        });
+        self.fn_lock.insert(
+            key,
+            DeviceRead {
+                route,
+                flight,
+                load,
+                query,
+                _observer: observer,
+            },
+        );
+    }
+
+    /// Re-read `key`'s Fn-lock after the agent wrote it, keeping the last
+    /// value on screen while the keyboard answers.
+    pub(crate) fn refresh_fn_lock(&mut self, key: &DeviceKey) {
+        if let Some(read) = self.fn_lock.get_mut(key) {
+            read.query.revalidate();
+        }
+    }
+
+    /// `key`'s Fn-lock load, or `None` while nothing has subscribed to it.
+    #[must_use]
+    pub(crate) fn fn_lock_load(&self, key: &DeviceKey) -> Option<&FnLockLoad> {
+        self.fn_lock.get(key).map(|read| &read.load)
+    }
+
     /// `key`'s DPI load, or `None` while nothing has subscribed to it.
     #[must_use]
     pub(crate) fn dpi_load(&self, key: &DeviceKey) -> Option<&DpiLoad> {
@@ -263,10 +337,11 @@ impl DeviceReads {
         }
     }
 
-    /// Forget both feature queries for a device and fence their old flights.
+    /// Forget every feature query for a device and fence their old flights.
     pub(crate) fn remove(&mut self, key: &DeviceKey) {
         self.remove_dpi(key);
         self.remove_smartshift(key);
+        self.remove_fn_lock(key);
     }
 
     pub(crate) fn remove_dpi(&mut self, key: &DeviceKey) {
@@ -283,12 +358,20 @@ impl DeviceReads {
         }
     }
 
+    fn remove_fn_lock(&mut self, key: &DeviceKey) {
+        if let Some(read) = self.fn_lock.remove(key) {
+            drop(read);
+            self.clear::<FnLockState>(FN_LOCK, key);
+        }
+    }
+
     /// Forget every query whose device is no longer present.
     pub(crate) fn retain_present(&mut self, present: impl Fn(&str) -> bool) {
         let removed: BTreeSet<_> = self
             .dpi
             .keys()
             .chain(self.smartshift.keys())
+            .chain(self.fn_lock.keys())
             .filter(|key| !present(key.as_str()))
             .cloned()
             .collect();
@@ -325,6 +408,21 @@ impl DeviceReads {
 
     fn update_dpi(&mut self, key: &DeviceKey, flight: u64, load: DpiLoad) -> bool {
         let Some(read) = self.dpi.get_mut(key).filter(|read| read.flight == flight) else {
+            return false;
+        };
+        if read.load == load {
+            return false;
+        }
+        read.load = load;
+        true
+    }
+
+    fn update_fn_lock(&mut self, key: &DeviceKey, flight: u64, load: FnLockLoad) -> bool {
+        let Some(read) = self
+            .fn_lock
+            .get_mut(key)
+            .filter(|read| read.flight == flight)
+        else {
             return false;
         };
         if read.load == load {
@@ -399,6 +497,10 @@ fn dpi_error_is_permanent(error: &WriteError) -> bool {
 }
 
 fn smartshift_error_is_permanent(error: &WriteError) -> bool {
+    matches!(error, WriteError::FeatureUnsupported { .. })
+}
+
+fn fn_lock_error_is_permanent(error: &WriteError) -> bool {
     matches!(error, WriteError::FeatureUnsupported { .. })
 }
 
