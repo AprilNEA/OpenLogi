@@ -24,8 +24,8 @@ pub use light::{LightCommand, commands_for_light_settings};
 pub use pairing::{Click, PairingError, PasskeyMethod, ReceiverSelector};
 pub use route::{
     DIRECT_DEVICE_INDEX, DeviceRoute, LOGITECH_VENDOR_ID, RECEIVERS, ReceiverBrand,
-    ReceiverDescriptor, ReceiverProtocol, find_receiver, is_receiver_pid, receiver_display_name,
-    speaks_unifying_protocol,
+    ReceiverDescriptor, ReceiverProtocol, find_receiver, is_litra_bluetooth_product_id,
+    is_receiver_pid, receiver_display_name, speaks_unifying_protocol,
 };
 pub use scroll::{ScrollReportingTarget, ScrollWheelMode};
 pub use smartshift::{
