@@ -17,10 +17,11 @@
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::brand::is_openlogi_foreground_id;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
+use openlogi_core::hid::DeviceRoute;
 use openlogi_hook::Hook;
 use openlogi_ipc::{
     AgentSnapshot, AgentStatus, ForegroundApps, FoundDevice, Generation, InventoryHealth,
-    OBSERVE_HOLD, Observation, PROTOCOL_VERSION, PairingPhase, RECENT_APPS,
+    KeyboardFnLock, OBSERVE_HOLD, Observation, PROTOCOL_VERSION, PairingPhase, RECENT_APPS,
 };
 use tokio::sync::watch;
 
@@ -60,6 +61,7 @@ impl ObservableState {
                 camera_active: false,
                 pairing: None,
                 foreground: ForegroundApps::default(),
+                fn_locks: Vec::new(),
             },
         });
         Self { tx }
@@ -140,6 +142,32 @@ impl ObservableState {
             snapshot.standalone = standalone.to_vec();
             snapshot.status.hid_open_failures = hid_open_failures;
             true
+        });
+    }
+
+    /// Record the Fn-lock state `route`'s keyboard has now — learned from a
+    /// read, the agent's own write, or the keyboard's change event — so a
+    /// client shows a press of the keyboard's Fn Lock key as it happens.
+    pub fn set_fn_lock(&self, route: &DeviceRoute, on: bool) {
+        self.update(|snapshot| {
+            match snapshot
+                .fn_locks
+                .iter_mut()
+                .find(|known| known.route == *route)
+            {
+                Some(known) if known.on == on => false,
+                Some(known) => {
+                    known.on = on;
+                    true
+                }
+                None => {
+                    snapshot.fn_locks.push(KeyboardFnLock {
+                        route: route.clone(),
+                        on,
+                    });
+                    true
+                }
+            }
         });
     }
 
@@ -257,7 +285,7 @@ impl ObservableState {
 
 #[cfg(test)]
 mod tests {
-    use super::ObservableState;
+    use super::{DeviceRoute, KeyboardFnLock, ObservableState};
     use openlogi_core::app::ForegroundApp;
     use openlogi_core::brand::APP_ID;
     use openlogi_core::device::{DeviceInventory, DeviceKind, PairedDevice, ReceiverInfo};
@@ -422,6 +450,40 @@ mod tests {
         assert!(snapshot.status.accessibility_granted);
         assert_eq!(snapshot.inventory.len(), 1);
         assert_eq!(snapshot.status.inventory, InventoryHealth::Ready);
+    }
+
+    #[test]
+    fn each_keyboard_keeps_its_latest_fn_lock_and_repeats_notify_nobody() {
+        let state = state();
+        let route = |receiver_uid: &str, slot| DeviceRoute::Bolt {
+            receiver_uid: receiver_uid.to_string(),
+            slot,
+        };
+        let (k860, other) = (route("91F39DD3", 3), route("AA00", 1));
+        let generation = || state.subscribe().borrow().generation;
+
+        state.set_fn_lock(&k860, false);
+        state.set_fn_lock(&other, true);
+        let before = generation();
+        state.set_fn_lock(&k860, false);
+        assert_eq!(generation(), before, "an unchanged state notifies nobody");
+
+        state.set_fn_lock(&k860, true);
+        assert_eq!(generation(), before + 1);
+        let known = state.read(|snapshot| snapshot.fn_locks.clone());
+        assert_eq!(
+            known,
+            [
+                KeyboardFnLock {
+                    route: k860,
+                    on: true
+                },
+                KeyboardFnLock {
+                    route: other,
+                    on: true
+                },
+            ]
+        );
     }
 
     #[test]

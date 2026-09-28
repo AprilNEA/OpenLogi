@@ -503,6 +503,7 @@ mod tests {
             camera_active,
             pairing: None,
             foreground: ForegroundApps::default(),
+            fn_locks: Vec::new(),
         }
     }
 

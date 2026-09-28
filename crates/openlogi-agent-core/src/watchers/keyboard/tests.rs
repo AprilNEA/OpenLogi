@@ -199,6 +199,7 @@ async fn recovery_manager_waits_for_control_events_and_shutdown_between_retries(
             receiver_requests: access.subscribe_requests(),
             access: device_access,
             dispatcher: actions.dispatcher(),
+            observable: Arc::new(ObservableState::new("test".into())),
             shutdown,
         }));
 

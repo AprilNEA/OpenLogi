@@ -368,6 +368,7 @@ fn fixture_agent() -> TestAgent {
             }),
             recent: Vec::new(),
         },
+        fn_locks: Vec::new(),
     };
     TestAgent::from_profile(profile, snapshot)
 }

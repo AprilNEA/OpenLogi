@@ -683,6 +683,7 @@ fn snapshot_of(state: &State) -> AgentSnapshot {
         camera_active: state.camera_active(),
         pairing: state.phase.clone(),
         foreground: state.foreground(),
+        fn_locks: Vec::new(),
     }
 }
 

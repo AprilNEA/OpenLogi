@@ -669,6 +669,7 @@ impl Orchestrator {
             crate::hardware::write_fn_lock_in_background(
                 self.shared.keyboard_device(&route),
                 fn_lock,
+                Arc::clone(&self.observable),
             );
         }
         if let Some(capabilities) = dev.light_capabilities
@@ -963,6 +964,7 @@ impl Orchestrator {
                 crate::hardware::write_fn_lock_in_background(
                     self.shared.keyboard_device(&route),
                     fn_lock,
+                    Arc::clone(&self.observable),
                 );
             }
         }

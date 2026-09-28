@@ -82,6 +82,10 @@ pub enum CapturedInput {
     /// An instantaneous firmware-reported tap with no observable hold
     /// duration, such as the thumb-wheel touch sensor.
     ButtonPulse(ButtonId),
+    /// The keyboard's Fn lock changed — from its own Fn Lock key or any
+    /// write — to this state (`true`: the F-row sends F1–F12). A device fact,
+    /// not input to dispatch; only keyboard capture emits it.
+    FnLock(bool),
 }
 
 /// HID++-divertable standard buttons: the `0x1b04` control ID and the

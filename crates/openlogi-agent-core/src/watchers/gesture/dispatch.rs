@@ -222,6 +222,9 @@ impl InputDispatcher {
             CapturedInput::ThumbwheelDirection { .. } => {
                 unreachable!("thumb-wheel direction reports return before dispatch")
             }
+            // Only keyboard capture reports Fn lock, and it is a device fact,
+            // not input.
+            CapturedInput::FnLock(_) => {}
         }
     }
 
