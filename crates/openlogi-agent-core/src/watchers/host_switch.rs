@@ -3,8 +3,9 @@
 use std::time::Duration;
 
 use openlogi_hid::{
-    ChannelPool, ChannelRegistry, DeviceIoGate, DeviceRoute, HostSwitchRestoreOutcome,
-    HostSwitchStopReason, PendingHostSwitchRestore, run_host_switch_session, switch_linked_hosts,
+    ChannelPool, ChannelRegistry, DeviceIoGate, DeviceRoute, HostSwitchCaptureMode,
+    HostSwitchRequest, HostSwitchRestoreOutcome, HostSwitchStopReason, PendingHostSwitchRestore,
+    run_host_switch_session, switch_linked_hosts,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
@@ -20,6 +21,8 @@ const DEPARTURE_TIMEOUT: Duration = Duration::from_secs(10);
 /// orchestrator so the transport watcher never needs to understand inventory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostSwitchLink {
+    /// Physical configuration identity used for reconnect capture mode.
+    pub keyboard_key: String,
     /// Keyboard whose host switch keys initiate the transition.
     pub keyboard: DeviceRoute,
     /// Pointing devices that follow the keyboard.
@@ -29,7 +32,11 @@ pub struct HostSwitchLink {
 /// Read-only, lossless, coalescing view of resolved links.
 pub type HostSwitchLinks = watch::Receiver<std::sync::Arc<Vec<HostSwitchLink>>>;
 
+/// Physical presence independently of configured follower links.
+pub type HostSwitchInventory = watch::Receiver<std::sync::Arc<Vec<DeviceRoute>>>;
+
 struct HostSwitchManagerContext {
+    inventory: HostSwitchInventory,
     links: HostSwitchLinks,
     channel_pool: ChannelPool,
     registry: ChannelRegistry,
@@ -43,15 +50,18 @@ struct HostSwitchManagerContext {
 #[must_use]
 pub fn spawn(
     links: &HostSwitchLinks,
+    inventory: &HostSwitchInventory,
     channel_pool: ChannelPool,
     receiver_access: ReceiverAccess,
     registry: ChannelRegistry,
     device_io: DeviceIoGate,
 ) -> WatcherHandle {
     let links = links.clone();
+    let inventory = inventory.clone();
     let receiver_requests = receiver_access.subscribe_requests();
     WatcherHandle::spawn("openlogi-host-switch-watcher", move |shutdown| {
         manage(HostSwitchManagerContext {
+            inventory,
             links,
             channel_pool,
             registry,
@@ -106,7 +116,7 @@ enum RestorePhase {
 struct Recovery {
     link: HostSwitchLink,
     epoch: SessionEpoch,
-    requested_host: Option<u8>,
+    requested_host: Option<HostSwitchRequest>,
     restore: RestorePhase,
 }
 
@@ -132,7 +142,7 @@ impl HostSwitchSlot {
 #[derive(Clone)]
 struct TransitionIntent {
     link: HostSwitchLink,
-    host: u8,
+    request: HostSwitchRequest,
 }
 
 enum TransitionPhase {
@@ -146,7 +156,7 @@ struct SessionCompletion {
 }
 
 struct SessionResult {
-    requested_host: Option<u8>,
+    requested_host: Option<HostSwitchRequest>,
     pending_restore: Option<PendingHostSwitchRestore>,
     failed: bool,
 }
@@ -171,6 +181,7 @@ struct SessionServices {
 }
 
 struct HostSwitchManagerState {
+    announcement_keyboards: Vec<String>,
     slots: Vec<HostSwitchSlot>,
     last_epoch: SessionEpoch,
     transition: Option<TransitionPhase>,
@@ -180,6 +191,7 @@ struct HostSwitchManagerState {
 impl HostSwitchManagerState {
     fn new() -> Self {
         Self {
+            announcement_keyboards: Vec::new(),
             slots: Vec::new(),
             last_epoch: SessionEpoch(0),
             transition: None,
@@ -213,7 +225,20 @@ impl HostSwitchManagerState {
     }
 
     fn begin_transition(&mut self, terminal: bool) -> Option<TransitionIntent> {
-        if terminal || self.has_running_sessions() || self.has_pending_restores() {
+        // Ready tokens hold no receiver lease. They must block a successor
+        // for their own keyboard, not forwarding from an unrelated keyboard.
+        // A waiting intent already settled its source cleanup, or carries an
+        // authoritative departure. Only in-flight restoration must drain.
+        let restore_blocks_transition = self.slots.iter().any(|slot| {
+            matches!(
+                slot,
+                HostSwitchSlot::Recovering(Recovery {
+                    restore: RestorePhase::Restoring,
+                    ..
+                })
+            )
+        });
+        if terminal || self.has_running_sessions() || restore_blocks_transition {
             return None;
         }
         let Some(TransitionPhase::Waiting(intent)) = self
@@ -239,7 +264,7 @@ impl HostSwitchManagerState {
     }
 
     fn deadline(&self, requests: ReceiverRequestState, device_io_allowed: bool) -> Option<Instant> {
-        if requests.any() || !device_io_allowed {
+        if requests.any() || !device_io_allowed || self.transition.is_some() {
             return None;
         }
         self.slots
@@ -290,7 +315,7 @@ impl HostSwitchManagerState {
             let RestorePhase::Ready { retry_at, .. } = &recovery.restore else {
                 continue;
             };
-            if *retry_at > now || requests.any() {
+            if *retry_at > now || requests.any() || self.transition.is_some() {
                 continue;
             }
             let Some(lease) = services.receiver_access.try_acquire_for_session() else {
@@ -336,6 +361,7 @@ impl HostSwitchManagerState {
                 self.last_epoch,
                 lease,
                 services,
+                capture_mode_for(&self.announcement_keyboards, &link.keyboard_key),
             )));
         }
     }
@@ -366,20 +392,39 @@ impl HostSwitchManagerState {
             debug!(route = %session.link.keyboard, "host switch session ended");
         }
         let request_is_current = !terminal && published.contains(&session.link);
+        let mut request = result.requested_host.filter(|_| request_is_current);
+        if let Some(announced) =
+            request.filter(|request| request.keyboard_transition.announcement_observed())
+        {
+            if !self
+                .announcement_keyboards
+                .contains(&session.link.keyboard_key)
+            {
+                self.announcement_keyboards
+                    .push(session.link.keyboard_key.clone());
+            }
+            // Restoration remains owned, but must not prevent a genuine
+            // departure from forwarding through the followers' own channels.
+            self.transition = Some(TransitionPhase::Waiting(TransitionIntent {
+                link: session.link.clone(),
+                request: announced,
+            }));
+            request = None;
+        }
         if let Some(token) = result.pending_restore {
             self.slots.push(HostSwitchSlot::Recovering(Recovery {
                 link: session.link,
                 epoch: session.epoch,
-                requested_host: result.requested_host.filter(|_| request_is_current),
+                requested_host: request,
                 restore: RestorePhase::Ready {
                     token,
                     retry_at: Instant::now() + RETRY_DELAY,
                 },
             }));
-        } else if let Some(host) = result.requested_host.filter(|_| request_is_current) {
+        } else if let Some(request) = request {
             self.transition = Some(TransitionPhase::Waiting(TransitionIntent {
                 link: session.link,
-                host,
+                request,
             }));
         } else if result.failed && request_is_current {
             self.slots.push(HostSwitchSlot::Restarting {
@@ -413,10 +458,10 @@ impl HostSwitchManagerState {
             }
             Ok(HostSwitchRestoreOutcome::Restored) => {
                 let request_is_current = !terminal && published.contains(&recovery.link);
-                if let Some(host) = recovery.requested_host.filter(|_| request_is_current) {
+                if let Some(request) = recovery.requested_host.filter(|_| request_is_current) {
                     self.transition = Some(TransitionPhase::Waiting(TransitionIntent {
                         link: recovery.link,
-                        host,
+                        request,
                     }));
                 }
             }
@@ -431,6 +476,7 @@ impl HostSwitchManagerState {
 async fn manage(context: HostSwitchManagerContext) -> ManagerCompletion {
     let HostSwitchManagerContext {
         mut links,
+        mut inventory,
         channel_pool,
         registry,
         receiver_access,
@@ -454,11 +500,17 @@ async fn manage(context: HostSwitchManagerContext) -> ManagerCompletion {
         let requests = *receiver_requests.borrow_and_update();
         let published = std::sync::Arc::clone(&links.borrow_and_update());
         let io_allowed = device_io.allows_io();
+        let online = std::sync::Arc::clone(&inventory.borrow_and_update());
+        let online_links: Vec<_> = published
+            .iter()
+            .filter(|link| online.contains(&link.keyboard))
+            .cloned()
+            .collect();
         state.reconcile_transition(&published, terminal);
         let wanted = if terminal || requests.any() || state.transition.is_some() {
             &[][..]
         } else {
-            published.as_slice()
+            online_links.as_slice()
         };
         if io_allowed || terminal {
             state.stop_sessions(wanted, terminal);
@@ -472,7 +524,7 @@ async fn manage(context: HostSwitchManagerContext) -> ManagerCompletion {
         if let Some(completion) = state.terminal_completion(terminal) {
             return completion;
         }
-        maybe_spawn_transition(&mut state, &links, &services, terminal);
+        maybe_spawn_transition(&mut state, &links, &inventory, &services, terminal);
 
         let deadline = state.deadline(*receiver_requests.borrow(), device_io.allows_io());
         if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
@@ -488,6 +540,9 @@ async fn manage(context: HostSwitchManagerContext) -> ManagerCompletion {
             Some(event) = event_rx.recv() => {
                 let published = links.borrow().clone();
                 handle_manager_event(&mut state, event, &published, terminal);
+            }
+            result = inventory.changed() => {
+                if result.is_err() { return ManagerCompletion::Unexpected; }
             }
             result = links.changed() => {
                 if result.is_err() {
@@ -542,6 +597,7 @@ fn spawn_session(
     epoch: SessionEpoch,
     receiver_lease: crate::receiver_access::SessionReceiverLease,
     services: &SessionServices,
+    capture_mode: HostSwitchCaptureMode,
 ) -> RunningSession {
     let (stop, stop_rx) = oneshot::channel();
     let session_link = link.clone();
@@ -555,6 +611,7 @@ fn spawn_session(
                 session_link.keyboard.clone(),
                 stop_rx,
                 &registry,
+                capture_mode,
                 device_io,
             )
             .await
@@ -593,6 +650,7 @@ fn spawn_session(
 fn maybe_spawn_transition(
     state: &mut HostSwitchManagerState,
     links: &HostSwitchLinks,
+    inventory: &HostSwitchInventory,
     services: &SessionServices,
     terminal: bool,
 ) {
@@ -600,6 +658,7 @@ fn maybe_spawn_transition(
         return;
     };
     let links = links.clone();
+    let inventory = inventory.clone();
     let pool = services.channel_pool.clone();
     let receiver_access = services.receiver_access.clone();
     let device_io = services.device_io.clone();
@@ -607,6 +666,7 @@ fn maybe_spawn_transition(
     tokio::spawn(async move {
         let task = tokio::spawn(run_transition(
             links,
+            inventory,
             pool,
             receiver_access,
             device_io,
@@ -617,7 +677,8 @@ fn maybe_spawn_transition(
 }
 
 async fn run_transition(
-    mut links: HostSwitchLinks,
+    links: HostSwitchLinks,
+    mut inventory: HostSwitchInventory,
     channel_pool: ChannelPool,
     receiver_access: ReceiverAccess,
     device_io: DeviceIoGate,
@@ -632,15 +693,16 @@ async fn run_transition(
     match switch_linked_hosts(
         &intent.link.keyboard,
         &intent.link.targets,
-        intent.host,
+        intent.request.host,
+        intent.request.keyboard_transition,
         &channel_pool,
     )
     .await
     {
-        Ok(true) => wait_for_departure(&mut links, &intent.link.keyboard).await,
+        Ok(true) => wait_for_departure(&mut inventory, &intent.link.keyboard).await,
         Ok(false) => {}
         Err(error) => {
-            debug!(%error, route = %intent.link.keyboard, host = intent.host, "keyboard host switch failed");
+            debug!(%error, route = %intent.link.keyboard, host = intent.request.host, "keyboard host switch failed");
         }
     }
 }
@@ -658,19 +720,16 @@ fn expedite_pending_restores(state: &mut HostSwitchManagerState) {
     }
 }
 
-async fn wait_for_departure(links: &mut HostSwitchLinks, keyboard: &DeviceRoute) {
+async fn wait_for_departure(inventory: &mut HostSwitchInventory, keyboard: &DeviceRoute) {
     let deadline = tokio::time::sleep(DEPARTURE_TIMEOUT);
     tokio::pin!(deadline);
     loop {
-        let departed = !links
-            .borrow_and_update()
-            .iter()
-            .any(|link| link.keyboard == *keyboard);
+        let departed = !inventory.borrow_and_update().contains(keyboard);
         if departed {
             return;
         }
         tokio::select! {
-            result = links.changed() => {
+            result = inventory.changed() => {
                 if result.is_err() {
                     return;
                 }
@@ -683,19 +742,29 @@ async fn wait_for_departure(links: &mut HostSwitchLinks, keyboard: &DeviceRoute)
     }
 }
 
+fn capture_mode_for(known: &[String], key: &str) -> HostSwitchCaptureMode {
+    if known.iter().any(|known| known == key) {
+        HostSwitchCaptureMode::ChangeHostAnnouncement
+    } else {
+        HostSwitchCaptureMode::Full
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use openlogi_hid::KeyboardHostTransition;
 
-    fn route(slot: u8) -> DeviceRoute {
+    pub(super) fn route(slot: u8) -> DeviceRoute {
         DeviceRoute::Bolt {
             receiver_uid: "cafe".to_owned(),
             slot,
         }
     }
 
-    fn link(target: u8) -> HostSwitchLink {
+    pub(super) fn link(target: u8) -> HostSwitchLink {
         HostSwitchLink {
+            keyboard_key: "keyboard".into(),
             keyboard: route(1),
             targets: vec![route(target)],
         }
@@ -727,7 +796,10 @@ mod tests {
         let mut state = HostSwitchManagerState::new();
         state.transition = Some(TransitionPhase::Waiting(TransitionIntent {
             link: link(2),
-            host: 1,
+            request: HostSwitchRequest {
+                host: 1,
+                keyboard_transition: KeyboardHostTransition::CommandRequired,
+            },
         }));
 
         state.reconcile_transition(&[link(3)], false);
@@ -799,7 +871,10 @@ mod tests {
         }));
         state.transition = Some(TransitionPhase::Waiting(TransitionIntent {
             link: link(2),
-            host: 2,
+            request: HostSwitchRequest {
+                host: 2,
+                keyboard_transition: KeyboardHostTransition::CommandRequired,
+            },
         }));
         assert!(state.begin_transition(false).is_none());
         assert!(matches!(
@@ -815,7 +890,7 @@ mod tests {
             &[link(2)],
             false,
         );
-        assert_eq!(state.begin_transition(false).unwrap().host, 2);
+        assert_eq!(state.begin_transition(false).unwrap().request.host, 2);
         // Another manager wake while switching must not remove Running.
         assert!(state.begin_transition(false).is_none());
         assert!(state.terminal_completion(true).is_none());
@@ -844,6 +919,7 @@ mod tests {
             SessionEpoch(1),
             access.try_acquire_for_session().unwrap(),
             &services,
+            HostSwitchCaptureMode::Full,
         );
         let _exclusive = tokio::time::timeout(
             Duration::from_secs(1),
@@ -876,11 +952,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn departure_publication_finishes_wait_without_advancing_time() {
         let keyboard = route(1);
-        let active = HostSwitchLink {
-            keyboard: keyboard.clone(),
-            targets: vec![route(2)],
-        };
-        let (links, mut published) = watch::channel(std::sync::Arc::new(vec![active]));
+        let (links, mut published) = watch::channel(std::sync::Arc::new(vec![keyboard.clone()]));
         let started = Instant::now();
         let waiting = tokio::spawn(async move {
             wait_for_departure(&mut published, &keyboard).await;
@@ -897,4 +969,77 @@ mod tests {
             "the link publication should reconcile departure immediately"
         );
     }
+
+    #[test]
+    fn stale_completion_cannot_remove_or_command_a_successor() {
+        let mut state = HostSwitchManagerState::new();
+        let (stop, _stopped) = oneshot::channel();
+        state.slots.push(HostSwitchSlot::Running(RunningSession {
+            link: link(2),
+            epoch: SessionEpoch(2),
+            phase: SessionPhase::Active(stop),
+        }));
+        state.handle_session_completion(
+            SessionCompletion {
+                epoch: SessionEpoch(1),
+                result: Ok(SessionResult {
+                    requested_host: Some(HostSwitchRequest {
+                        host: 2,
+                        keyboard_transition: KeyboardHostTransition::AlreadyDeparting {
+                            host_slot: openlogi_hid::ReportedHostSlot::Unknown,
+                        },
+                    }),
+                    pending_restore: None,
+                    failed: false,
+                }),
+            },
+            &[link(2)],
+            false,
+        );
+        assert!(state.owns_keyboard(&route(1)));
+        assert!(state.transition.is_none());
+        assert!(state.announcement_keyboards.is_empty());
+    }
+
+    #[test]
+    fn accepted_announcement_keeps_its_source_and_reconnect_identity() {
+        let mut state = HostSwitchManagerState::new();
+        let (stop, _stopped) = oneshot::channel();
+        state.slots.push(HostSwitchSlot::Running(RunningSession {
+            link: link(2),
+            epoch: SessionEpoch(1),
+            phase: SessionPhase::Active(stop),
+        }));
+        let request = HostSwitchRequest {
+            host: 2,
+            keyboard_transition: KeyboardHostTransition::AlreadyDeparting {
+                host_slot: openlogi_hid::ReportedHostSlot::Unknown,
+            },
+        };
+        state.handle_session_completion(
+            SessionCompletion {
+                epoch: SessionEpoch(1),
+                result: Ok(SessionResult {
+                    requested_host: Some(request),
+                    pending_restore: None,
+                    failed: false,
+                }),
+            },
+            &[link(2)],
+            false,
+        );
+        assert_eq!(state.begin_transition(false).unwrap().request, request);
+        assert_eq!(
+            capture_mode_for(&state.announcement_keyboards, "keyboard"),
+            HostSwitchCaptureMode::ChangeHostAnnouncement
+        );
+        assert_eq!(
+            capture_mode_for(&state.announcement_keyboards, "replacement"),
+            HostSwitchCaptureMode::Full
+        );
+    }
 }
+
+#[cfg(test)]
+#[path = "host_switch/replay_tests.rs"]
+mod replay_tests;

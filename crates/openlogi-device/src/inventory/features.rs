@@ -21,7 +21,7 @@ use openlogi_core::device::{
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
-use crate::reprog_controls::DPI_MODE_SHIFT_CIDS;
+use crate::reprog_controls::{CtrlIdInfo, DPI_MODE_SHIFT_CIDS, host_switch_channel};
 
 use super::events::{EventFeatureIndices, EventSubscriptionHandle};
 use super::mappings::{
@@ -341,11 +341,16 @@ async fn probe_extra_capabilities(
         let count = feature.get_count().await.map_err(|_| ())?;
         let mut haptic_panel = false;
         let mut dpi_gestures = false;
+        let mut host_switch_controls = false;
         for index in 0..count {
             let info = feature.get_cid_info(index).await.map_err(|_| ())?;
             haptic_panel |= probe_haptic_controls
                 && info.cid == control_ids::HAPTIC_PANEL
                 && info.flags.is_divertable();
+            let control: CtrlIdInfo = info.into();
+            host_switch_controls |= caps.host_switching
+                && host_switch_channel(control).is_some()
+                && (control.is_divertable() || control.supports_analytics_events());
             dpi_gestures |= DPI_MODE_SHIFT_CIDS.contains(&info.cid.0)
                 && info.flags.is_divertable()
                 && info.flags.supports_raw_xy();
@@ -354,6 +359,7 @@ async fn probe_extra_capabilities(
         // cache's last-good capabilities and schedule repair, not hide support.
         caps.haptic_panel = haptic_panel;
         caps.dpi_gestures = dpi_gestures;
+        caps.host_switch_controls = host_switch_controls;
     }
     Ok(())
 }
@@ -439,6 +445,22 @@ mod tests {
             assert_eq!(probe.capabilities_incomplete, fail_at.is_some());
             assert_eq!(caps.haptic_panel, fail_at.is_none());
             assert_eq!(caps.dpi_gestures, fail_at.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn host_switch_controls_require_change_host_and_a_complete_reportable_table() {
+        for (features, flags, fail_at, expected) in [
+            (vec![0x0001, 0x1b04, 0x1814], 0x0020, None, true),
+            (vec![0x0001, 0x1b04, 0x1814], 0x0400, None, true),
+            (vec![0x0001, 0x1b04, 0x1814], 0x0000, None, false),
+            (vec![0x0001, 0x1b04], 0x0020, None, false),
+            (vec![0x0001, 0x1b04, 0x1814], 0x0020, Some(1), false),
+        ] {
+            let probe =
+                control_probe(features, vec![(0x00d1, flags), (0x00d2, flags)], fail_at).await;
+            assert_eq!(probe.capabilities_incomplete, fail_at.is_some());
+            assert_eq!(probe.capabilities.unwrap().host_switch_controls, expected);
         }
     }
 

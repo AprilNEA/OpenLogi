@@ -70,6 +70,7 @@ mod device_store;
 mod devices;
 mod dpi;
 mod events;
+mod host_switch;
 mod inventory;
 mod light;
 mod lighting;

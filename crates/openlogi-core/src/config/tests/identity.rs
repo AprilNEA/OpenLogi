@@ -22,6 +22,8 @@ fn device_identity_roundtrips_and_is_iterable() {
             haptic_feedback: false,
             haptic_panel: false,
             dpi_gestures: true,
+            host_switching: false,
+            host_switch_controls: false,
         },
         light_capabilities: None,
         driver_id: None,

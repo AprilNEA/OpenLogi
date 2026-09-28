@@ -3,6 +3,7 @@
 pub mod action_ring;
 pub(crate) mod binding_editor;
 pub mod camera;
+pub mod easy_switch;
 pub mod keyboard;
 pub mod lighting;
 pub mod mouse;

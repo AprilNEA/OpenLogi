@@ -25,7 +25,7 @@ use crate::features::pointer::dpi::DpiPanel;
 use crate::features::pointer::smartshift::SmartShiftPanel;
 use crate::features::profiles::{AppCatalogPicker, ProfileIconCache};
 use crate::services::assets::user_cache_root;
-use crate::state::{AgentLink, AppState, DeviceRecord, StateEvent, StateEvents};
+use crate::state::{AgentLink, AppState, DeviceKey, DeviceRecord, StateEvent, StateEvents};
 use crate::ui::theme::{self, ContentWidth, Typography as _};
 
 pub(crate) mod deeplink;
@@ -39,6 +39,7 @@ mod widgets;
 // gallery card, so it reaches these through the crate-stable `crate::app::…`
 // path rather than the internal `app::home` submodule.
 pub(crate) use home::{glow_canvas, keyboard_glow};
+pub(crate) use widgets::{kind_label, status_badge};
 /// Which screen the root view is showing.
 ///
 /// GPUI has no router, so navigation is a tiny view-local enum that selects
@@ -75,6 +76,8 @@ enum DetailTab {
     ActionsRing,
     /// The keyboard function-row remapper with clickable F-key bubbles.
     Keys,
+    /// Keyboard-initiated Easy-Switch follower configuration.
+    EasySwitch,
     /// Pointer tuning — DPI and presets.
     Pointer,
     /// RGB lighting — color, brightness, on/off.
@@ -124,6 +127,9 @@ impl DetailTab {
         if matches!(record.kind, DeviceKind::Keyboard) && caps.buttons {
             tabs.push(Self::Keys);
         }
+        if caps.host_switch_controls {
+            tabs.push(Self::EasySwitch);
+        }
         if caps.pointer {
             tabs.push(Self::Pointer);
         }
@@ -150,6 +156,7 @@ impl DetailTab {
             Self::Buttons => tr!("device.buttons"),
             Self::ActionsRing => tr!("action_ring.actions_ring"),
             Self::Keys => tr!("device.keys"),
+            Self::EasySwitch => tr!("easy_switch.easy_switch"),
             Self::Pointer => tr!("device.pointer"),
             Self::Lighting | Self::Light => tr!("device.lighting"),
             Self::Camera => tr!("camera.camera"),
@@ -254,11 +261,15 @@ impl AppView {
                 StateEvent::LightingChanged(key) => {
                     on_home || (view.active_tab == DetailTab::Light && is_current(key))
                 }
-                StateEvent::DeviceConfigChanged(key) => {
-                    on_home
-                        || (matches!(view.active_tab, DetailTab::Pointer | DetailTab::Device)
-                            && is_current(key))
-                }
+                StateEvent::DeviceConfigChanged(key) => device_config_change_is_visible(
+                    on_home,
+                    view.active_tab,
+                    AppState::try_read(cx)
+                        .and_then(AppState::current_record)
+                        .map(DeviceRecord::device_key)
+                        .as_ref(),
+                    key,
+                ),
                 StateEvent::CameraChanged => on_home || view.active_tab == DetailTab::Light,
                 // Child entities own these surfaces and subscribe directly. A
                 // language switch already refreshes every window, and the root
@@ -422,6 +433,19 @@ impl AppView {
                     })),
             )
     }
+}
+
+fn device_config_change_is_visible(
+    on_home: bool,
+    active_tab: DetailTab,
+    active_key: Option<&DeviceKey>,
+    changed_key: &DeviceKey,
+) -> bool {
+    on_home
+        || (matches!(
+            active_tab,
+            DetailTab::Pointer | DetailTab::EasySwitch | DetailTab::Device
+        ) && active_key == Some(changed_key))
 }
 
 fn request_accessibility(cx: &mut App) {
