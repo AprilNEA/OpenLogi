@@ -24,10 +24,11 @@ use std::time::Duration;
 use openlogi_core::config::Lighting;
 use openlogi_hid::{
     CaptureChannelSlot, ChannelRegistry, DeviceIoGate, DeviceRoute, Dpi, HidppOperation,
-    ScrollResolution, SharedChannel, SmartShiftStatus, WriteError,
+    HostOperatingSystem, HostPlatformApply, ScrollResolution, SharedChannel, SmartShiftStatus,
+    WriteError,
 };
 use tokio::time::error::Elapsed;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::receiver_access::ReceiverAccess;
 
@@ -353,6 +354,46 @@ pub fn write_fn_lock_in_background(op: DeviceOp, on: bool) {
         move |result| {
             log_outcome(index, "Fn-lock write", result, |()| {
                 debug!(index, on, "Fn-lock written");
+            });
+        },
+    );
+}
+
+/// Reconcile a compatible keyboard's firmware platform with the native host
+/// OS. A missing `0x4531` feature is normal and logged at debug level; other
+/// failures remain visible because a supported keyboard should accept and
+/// report the selected platform.
+pub fn write_native_host_platform_in_background(op: DeviceOp, host_os: HostOperatingSystem) {
+    let index = op.route.device_index();
+    op.spawn_write(
+        "native keyboard platform write",
+        move |channel| async move {
+            openlogi_hid::set_native_host_platform_on(&channel, host_os).await
+        },
+        move |result| {
+            if let Ok(Err(WriteError::FeatureUnsupported { feature_hex })) = &result {
+                debug!(index, feature_hex, "keyboard has no writable multi-platform feature");
+                return;
+            }
+            log_outcome(index, "native keyboard platform write", result, |outcome| match outcome {
+            HostPlatformApply::Updated { platform_index } => info!(
+                index,
+                ?host_os,
+                platform_index,
+                "native keyboard platform written"
+            ),
+            HostPlatformApply::AlreadySelected { platform_index } => debug!(
+                index,
+                ?host_os,
+                platform_index,
+                "native keyboard platform already selected"
+            ),
+            outcome => debug!(
+                index,
+                ?host_os,
+                ?outcome,
+                "native keyboard platform reconciled"
+            ),
             });
         },
     );
