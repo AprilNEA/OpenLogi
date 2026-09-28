@@ -101,6 +101,8 @@ pub struct FunctionRowView {
     text_state: Option<Entity<InputState>>,
     /// Draft copy of the Workflow steps under edit.
     workflow_draft: Vec<WorkflowStep>,
+    /// Whether the last save was rejected because the draft does not parse.
+    draft_invalid: bool,
     _state_obs: Subscription,
 }
 
@@ -115,6 +117,7 @@ impl FunctionRowView {
             active_editor: None,
             text_state: None,
             workflow_draft: Vec::new(),
+            draft_invalid: false,
             _state_obs: state_obs,
         }
     }
@@ -126,6 +129,7 @@ impl FunctionRowView {
             self.active_editor = None;
             self.text_state = None;
             self.workflow_draft.clear();
+            self.draft_invalid = false;
         }
         self.selected_key = idx;
         cx.notify();
@@ -153,6 +157,7 @@ impl FunctionRowView {
         self.active_editor = Some(kind);
         self.text_state = None;
         self.workflow_draft.clear();
+        self.draft_invalid = false;
         cx.notify();
     }
 
@@ -160,6 +165,14 @@ impl FunctionRowView {
         self.active_editor = None;
         self.text_state = None;
         self.workflow_draft.clear();
+        self.draft_invalid = false;
+        cx.notify();
+    }
+
+    /// Keep the editor open and flag its draft: the save it attempted does not
+    /// describe an action.
+    pub(crate) fn mark_draft_invalid(&mut self, cx: &mut Context<Self>) {
+        self.draft_invalid = true;
         cx.notify();
     }
 
@@ -246,6 +259,7 @@ impl Render for FunctionRowView {
             self.active_editor = None;
             self.text_state = None;
             self.workflow_draft.clear();
+            self.draft_invalid = false;
         }
         let selected = self.selected_key;
         let hovered = self.hovered_key;
@@ -768,6 +782,7 @@ impl FunctionRowView {
                 kind,
                 self.text_state.clone(),
                 self.workflow_draft.clone(),
+                self.draft_invalid,
                 view,
                 pal,
             );
@@ -824,23 +839,28 @@ fn panel_action_rows(
 
     let power_user_actions: &[(PowerUserKind, &str, &'static str)] = &[
         (
+            PowerUserKind::KeyboardShortcut,
+            "actions.keyboard_shortcut",
+            "action-icons/keyboard.svg",
+        ),
+        (
             PowerUserKind::TypeText,
-            "Type Text…",
+            "actions.type_text",
             "action-icons/keyboard.svg",
         ),
         (
             PowerUserKind::RunAppleScript,
-            "Run AppleScript…",
+            "actions.run_applescript",
             "action-icons/terminal.svg",
         ),
         (
             PowerUserKind::RunShellCommand,
-            "Run Shell Command…",
+            "actions.run_shell_command",
             "action-icons/terminal.svg",
         ),
         (
             PowerUserKind::Workflow,
-            "Workflow…",
+            "actions.workflow",
             "action-icons/list-checks.svg",
         ),
     ];
@@ -849,12 +869,15 @@ fn panel_action_rows(
         v_flex()
             .child(editor_section(tr!("actions.power_user").to_string(), *pal))
             .children(power_user_actions.iter().enumerate().map(
-                |(idx, (kind, label, icon_path))| {
+                |(idx, (kind, label_key, icon_path))| {
                     let kind = *kind;
                     let view = view.clone();
                     let selected = matches!(
                         (current, kind),
-                        (Some(Action::TypeText(_)), PowerUserKind::TypeText)
+                        (
+                            Some(Action::CustomShortcut(_)),
+                            PowerUserKind::KeyboardShortcut
+                        ) | (Some(Action::TypeText(_)), PowerUserKind::TypeText)
                             | (
                                 Some(Action::RunAppleScript(_)),
                                 PowerUserKind::RunAppleScript
@@ -879,7 +902,7 @@ fn panel_action_rows(
                                         .flex_none()
                                         .text_color(pal.text_muted),
                                 )
-                                .child(div().child((*label).to_string())),
+                                .child(div().child(tr!(*label_key))),
                         )
                         .when(selected, |s| {
                             s.child(

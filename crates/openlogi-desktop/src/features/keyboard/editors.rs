@@ -15,10 +15,11 @@
 )]
 
 use gpui::{
-    App, Entity, FontWeight, IntoElement, ParentElement, RenderOnce, Styled, Window, div, px, svg,
+    App, Entity, FontWeight, IntoElement, ParentElement, RenderOnce, Styled, Window, div,
+    prelude::FluentBuilder as _, px, svg,
 };
 use gpui_component::{
-    Icon, IconName, Sizable as _,
+    ActiveTheme as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants},
     h_flex,
     input::InputState,
@@ -36,6 +37,7 @@ use crate::ui::theme::{self, Palette, Typography as _};
 /// Which power-user editor is showing for the selected key.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum PowerUserKind {
+    KeyboardShortcut,
     TypeText,
     RunAppleScript,
     RunShellCommand,
@@ -45,6 +47,7 @@ pub enum PowerUserKind {
 impl PowerUserKind {
     fn heading_key(self) -> &'static str {
         match self {
+            Self::KeyboardShortcut => "actions.keyboard_shortcut_heading",
             Self::TypeText => "actions.type_text_heading",
             Self::RunAppleScript => "actions.run_applescript_heading",
             Self::RunShellCommand => "actions.run_shell_command_heading",
@@ -55,6 +58,7 @@ impl PowerUserKind {
 
 pub(crate) fn text_editor_placeholder(kind: PowerUserKind) -> gpui::SharedString {
     match kind {
+        PowerUserKind::KeyboardShortcut => "Ctrl+Alt+C".into(),
         PowerUserKind::TypeText => tr!("actions.type_text_placeholder"),
         PowerUserKind::RunAppleScript => "display dialog \"Hello\"".into(),
         PowerUserKind::RunShellCommand => "echo hello".into(),
@@ -64,10 +68,28 @@ pub(crate) fn text_editor_placeholder(kind: PowerUserKind) -> gpui::SharedString
 
 pub(crate) fn text_editor_seed(action: Option<&Action>, kind: PowerUserKind) -> String {
     match (action, kind) {
+        (Some(Action::CustomShortcut(combo)), PowerUserKind::KeyboardShortcut) => {
+            combo.rendered_label()
+        }
         (Some(Action::TypeText(text)), PowerUserKind::TypeText)
         | (Some(Action::RunAppleScript(text)), PowerUserKind::RunAppleScript)
         | (Some(Action::RunShellCommand(text)), PowerUserKind::RunShellCommand) => text.clone(),
         _ => String::new(),
+    }
+}
+
+/// The action a text editor's draft commits, or `None` when the draft is not
+/// one: a keyboard shortcut that does not parse, or the Workflow editor, which
+/// commits its step list instead.
+pub(crate) fn text_editor_action(kind: PowerUserKind, text: String) -> Option<Action> {
+    match kind {
+        PowerUserKind::KeyboardShortcut => {
+            text.parse::<KeyCombo>().ok().map(Action::CustomShortcut)
+        }
+        PowerUserKind::TypeText => Some(Action::TypeText(text)),
+        PowerUserKind::RunAppleScript => Some(Action::RunAppleScript(text)),
+        PowerUserKind::RunShellCommand => Some(Action::RunShellCommand(text)),
+        PowerUserKind::Workflow => None,
     }
 }
 
@@ -84,13 +106,14 @@ pub fn editor_card(
     kind: PowerUserKind,
     text_state: Option<Entity<InputState>>,
     workflow_draft: Vec<WorkflowStep>,
+    draft_invalid: bool,
     view: &Entity<FunctionRowView>,
     pal: Palette,
 ) -> gpui::Div {
     match kind {
         PowerUserKind::Workflow => workflow_editor_card(trigger, workflow_draft, view, pal),
         _ => match text_state {
-            Some(state) => text_editor_card(trigger, kind, state, view, pal),
+            Some(state) => text_editor_card(trigger, kind, state, draft_invalid, view, pal),
             None => compact_panel(pal)
                 .w(px(300.))
                 .child(title(tr!("keyboard.editor_unavailable"), pal)),
@@ -98,12 +121,13 @@ pub fn editor_card(
     }
 }
 
-/// The TypeText / RunAppleScript / RunShellCommand editors share a single text
-/// field; only the commit wrapping differs.
+/// The keyboard-shortcut, TypeText, RunAppleScript, and RunShellCommand
+/// editors share a single text field; only the commit wrapping differs.
 fn text_editor_card(
     trigger: KeyTrigger,
     kind: PowerUserKind,
     text_state: Entity<InputState>,
+    draft_invalid: bool,
     view: &Entity<FunctionRowView>,
     pal: Palette,
 ) -> gpui::Div {
@@ -122,6 +146,11 @@ fn text_editor_card(
                 .p_2()
                 .gap_2()
                 .child(div().child(control_input(&text_state).cleanable(true)))
+                .when(kind == PowerUserKind::KeyboardShortcut, |card| {
+                    card.child(ShortcutHint {
+                        invalid: draft_invalid,
+                    })
+                })
                 .child(editor_action_row(trigger, kind, view)),
         )
 }
@@ -157,11 +186,9 @@ fn editor_action_row(
                         .text_state()
                         .map(|s| s.read(cx).value().to_string())
                         .unwrap_or_default();
-                    let action = match kind {
-                        PowerUserKind::TypeText => Action::TypeText(text),
-                        PowerUserKind::RunAppleScript => Action::RunAppleScript(text),
-                        PowerUserKind::RunShellCommand => Action::RunShellCommand(text),
-                        PowerUserKind::Workflow => return,
+                    let Some(action) = text_editor_action(kind, text) else {
+                        view_save.update(cx, |v, vcx| v.mark_draft_invalid(vcx));
+                        return;
                     };
                     AppState::apply(cx, |state| {
                         state.commit_keyboard_binding(trigger_save.clone(), Some(action))
@@ -237,6 +264,27 @@ fn workflow_editor_card(
                         }),
                 ),
         )
+}
+
+/// Format guidance under the shortcut field, turning into the error once a
+/// save is rejected.
+#[derive(IntoElement)]
+struct ShortcutHint {
+    invalid: bool,
+}
+
+impl RenderOnce for ShortcutHint {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let (text, color) = if self.invalid {
+            (tr!("actions.keyboard_shortcut_invalid"), cx.theme().danger)
+        } else {
+            (
+                tr!("actions.keyboard_shortcut_hint"),
+                theme::palette(cx).text_muted,
+            )
+        };
+        div().text_caption().text_color(color).child(text)
+    }
 }
 
 /// One Workflow step row: type chip + payload preview + remove button.
@@ -343,6 +391,30 @@ mod tests {
             ),
             ""
         );
+    }
+
+    #[test]
+    fn keyboard_shortcut_draft_round_trips_and_rejects_non_shortcuts() {
+        let action = text_editor_action(PowerUserKind::KeyboardShortcut, "alt+space".into())
+            .expect("a modifier and a key is a shortcut");
+        let Action::CustomShortcut(combo) = &action else {
+            panic!("expected a custom shortcut, got {action:?}");
+        };
+        assert!(combo.has_option());
+        // Reopening the editor seeds the saved chord in a form that parses back.
+        let seed = text_editor_seed(Some(&action), PowerUserKind::KeyboardShortcut);
+        assert_eq!(
+            text_editor_action(PowerUserKind::KeyboardShortcut, seed),
+            Some(action)
+        );
+
+        for draft in ["", "ctrl+alt", "ctrl+a+b", "hyper+c"] {
+            assert_eq!(
+                text_editor_action(PowerUserKind::KeyboardShortcut, draft.into()),
+                None,
+                "{draft:?} must not save"
+            );
+        }
     }
 
     #[test]
