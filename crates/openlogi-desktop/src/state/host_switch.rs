@@ -2,7 +2,7 @@
 
 use openlogi_core::device::DeviceKind;
 
-use super::{AppState, DeviceKey, DeviceRecord};
+use super::{AppState, DeviceRecord, StateEvent, StateEvents};
 
 /// One device that can follow the selected keyboard's host key.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -12,17 +12,6 @@ pub(crate) struct HostSwitchTargetDevice {
     pub(crate) kind: DeviceKind,
     pub(crate) online: bool,
     pub(crate) selected: bool,
-}
-
-/// Result of attempting to change one Easy-Switch follower.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum HostSwitchTargetUpdate {
-    /// The request was invalid or already matched the saved configuration.
-    Unchanged,
-    /// The new follower selection was persisted and sent to the agent.
-    Persisted(DeviceKey),
-    /// Persistence failed and the in-memory selection was rolled back.
-    RolledBack,
 }
 
 impl AppState {
@@ -60,12 +49,12 @@ impl AppState {
         &mut self,
         target_key: &str,
         enabled: bool,
-    ) -> HostSwitchTargetUpdate {
+    ) -> StateEvents {
         let Some(keyboard) = self.current_record() else {
-            return HostSwitchTargetUpdate::Unchanged;
+            return StateEvents::none();
         };
         let Some(keyboard_key) = keyboard.persistent_config_key().map(str::to_string) else {
-            return HostSwitchTargetUpdate::Unchanged;
+            return StateEvents::none();
         };
         let event_key = keyboard.device_key();
         if target_key == keyboard_key.as_str()
@@ -76,7 +65,7 @@ impl AppState {
                 record.persistent_config_key() == Some(target_key) && is_compatible_target(record)
             })
         {
-            return HostSwitchTargetUpdate::Unchanged;
+            return StateEvents::none();
         }
 
         let changed = self.config.edit(|config| {
@@ -88,11 +77,11 @@ impl AppState {
             set_target_enabled(targets, target_key, enabled)
         });
         if !changed {
-            HostSwitchTargetUpdate::Unchanged
+            StateEvents::none()
         } else if self.persist_and_reload("Easy-Switch follower") {
-            HostSwitchTargetUpdate::Persisted(event_key)
+            StateEvent::DeviceConfigChanged(event_key).into()
         } else {
-            HostSwitchTargetUpdate::RolledBack
+            StateEvent::SettingsChanged.into()
         }
     }
 
@@ -129,7 +118,7 @@ mod tests {
     };
 
     use super::{
-        super::ConfigPersistence, AppState, DeviceRecord, HostSwitchTargetUpdate,
+        super::ConfigPersistence, AppState, DeviceRecord, StateEvent, StateEvents,
         is_compatible_target, set_target_enabled,
     };
     use crate::services::assets::AssetResolver;
@@ -233,15 +222,15 @@ mod tests {
         let mut config = Config::ephemeral();
         config.set_selected_device(Some("unit:01020304".into()));
         let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-        let mut state = AppState::with_runtime(
+        let mut state = AppState::new(super::super::Sources {
             config,
-            &[inventory],
-            &[],
-            &AssetResolver::new(),
-            &[],
-            ConfigPersistence::MemoryOnly,
-            commands,
-        );
+            inventories: &[inventory],
+            standalone: &[],
+            resolver: &AssetResolver::new(),
+            cameras: &[],
+            persistence: ConfigPersistence::MemoryOnly,
+            ipc_commands: commands,
+        });
         while receiver.try_recv().is_ok() {}
 
         let targets = state.host_switch_target_devices();
@@ -249,22 +238,23 @@ mod tests {
         assert_eq!(targets[0].config_key, "unit:05060708");
         assert_eq!(targets[0].display_name, "MX Master 4");
 
-        assert!(matches!(
+        let keyboard = state.current_record().unwrap().device_key();
+        assert_eq!(
             state.set_host_switch_target_enabled("unit:05060708", true),
-            HostSwitchTargetUpdate::Persisted(_)
-        ));
+            [StateEvent::DeviceConfigChanged(keyboard)]
+        );
         assert_eq!(
             state.config.devices["unit:01020304"].host_switch_targets,
             ["unit:05060708"]
         );
         assert!(matches!(
             receiver.try_recv(),
-            Ok(crate::services::ipc::Command::ReloadConfig)
+            Ok(crate::services::ipc::Command::ReloadConfig(_))
         ));
 
         assert_eq!(
             state.set_host_switch_target_enabled("unit:01020304", true),
-            HostSwitchTargetUpdate::Unchanged
+            StateEvents::none()
         );
         assert_eq!(
             state.config.devices["unit:01020304"].host_switch_targets,
@@ -274,7 +264,7 @@ mod tests {
 
         assert_eq!(
             state.set_host_switch_target_enabled("unit:090a0b0c", true),
-            HostSwitchTargetUpdate::Unchanged
+            StateEvents::none()
         );
         assert!(receiver.try_recv().is_err());
     }
@@ -285,25 +275,25 @@ mod tests {
         let mut config = Config::ephemeral();
         config.set_selected_device(Some("unit:01020304".into()));
         let temp = tempfile::tempdir().expect("temporary config directory");
-        let path = temp.path().join("config.toml");
+        let path = temp.path().join(openlogi_core::paths::CONFIG_FILE);
         let (_, file) = ConfigFile::load_from_path(&path).expect("new tracked config");
         let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-        let mut state = AppState::with_runtime(
+        let mut state = AppState::new(super::super::Sources {
             config,
-            &[inventory],
-            &[],
-            &AssetResolver::new(),
-            &[],
-            ConfigPersistence::UserFile(file),
-            commands,
-        );
+            inventories: &[inventory],
+            standalone: &[],
+            resolver: &AssetResolver::new(),
+            cameras: &[],
+            persistence: ConfigPersistence::UserFile(file),
+            ipc_commands: commands,
+        });
         while receiver.try_recv().is_ok() {}
         std::fs::write(&path, "schema_version = 5\n").expect("create a conflicting edit");
 
-        assert!(matches!(
+        assert_eq!(
             state.set_host_switch_target_enabled("unit:05060708", true),
-            HostSwitchTargetUpdate::RolledBack
-        ));
+            [StateEvent::SettingsChanged]
+        );
         assert!(
             state.config.devices["unit:01020304"]
                 .host_switch_targets

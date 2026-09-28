@@ -17,8 +17,8 @@ use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
 use openlogi_core::config::Lighting;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::hid::{
-    DeviceRoute, Dpi, DpiInfo, LightCommand, PairingError, PasskeyMethod, ReceiverSelector,
-    SmartShiftStatus, WriteError,
+    BacklightState, DeviceRoute, Dpi, DpiInfo, LightCommand, PairingError, PasskeyMethod,
+    ReceiverSelector, ScrollWheelMode, SmartShiftStatus, WriteError,
 };
 use serde::{Deserialize, Serialize};
 pub use succession::Identity;
@@ -61,9 +61,11 @@ pub use succession::Identity;
 /// v28: `Action::HoldShortcut` appended for lifecycle-held keyboard output.
 /// v29: `Agent::declare_client` + [`ClientKind`] appended — typed demand for
 ///      the macOS dormancy gate.
-/// v30: `Capabilities::{host_switching, host_switch_controls}` appended for
+/// v30: `Agent::read_wheel` and `Agent::read_backlight` appended.
+/// v31: `Capabilities::dpi_gestures` appended.
+/// v32: `Capabilities::{host_switching, host_switch_controls}` appended for
 ///      HID++ ChangeHost support and reportable Easy-Switch controls.
-pub const PROTOCOL_VERSION: u32 = 30;
+pub const PROTOCOL_VERSION: u32 = 32;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -562,4 +564,8 @@ pub trait Agent {
     /// arms only on [`ClientKind::Gui`]. The takeover probe never declares —
     /// it speaks only [`Agent::protocol_version`] — and so never arms.
     async fn declare_client(kind: ClientKind);
+    /// Read the current HiResWheel reporting mode from `route`.
+    async fn read_wheel(route: DeviceRoute) -> Result<ScrollWheelMode, WriteError>;
+    /// Read the current keyboard-backlight state from `route`.
+    async fn read_backlight(route: DeviceRoute) -> Result<BacklightState, WriteError>;
 }

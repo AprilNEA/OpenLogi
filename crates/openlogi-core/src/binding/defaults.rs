@@ -48,8 +48,11 @@ pub fn default_binding(button: ButtonId) -> Action {
             reason = "see the left tilt above — same control pair, mirrored direction"
         )]
         ButtonId::WheelTiltRight => Action::HorizontalScrollRight,
-        ButtonId::Back => Action::BrowserBack,
-        ButtonId::Forward => Action::BrowserForward,
+        // Preserve native side-button events unless explicitly rebound.
+        // BrowserBack/BrowserForward are dispatched navigation actions: using
+        // them as seeds would make the capture plan skip their HID++ diversion.
+        ButtonId::Back => Action::MouseBack,
+        ButtonId::Forward => Action::MouseForward,
         ButtonId::DpiToggle => Action::CycleDpiPresets,
         #[expect(
             clippy::match_same_arms,

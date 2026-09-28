@@ -1,0 +1,8 @@
+# ast-grep project config. The rules are the single-source-of-truth guards:
+# each names the module that owns a decision and fails on the ingredients of
+# that decision anywhere else, so the second copy is a red CI job rather than a
+# review comment. Run them with `ast-grep scan` (CI job `ast-grep`, the prek
+# hook of the same name, `cargo xtask ci ast-grep`). Root AGENTS.md, "Single
+# source of truth", says when a rule is added.
+ruleDirs:
+  - .ast-grep/rules

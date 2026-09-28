@@ -49,6 +49,16 @@ optional physical device key.
 - `vertical_scroll_sensitivity`, from `1` through `100` (`14` is 1×);
   continuous trackpad input remains native
 - `thumbwheel_sensitivity`, from `1` through `100` (`14` is 1×)
+- `mouse_profile_target`: `pointer` (default, including existing configs that
+  omit this preference) or `focused`. Mouse button profiles follow the window
+  under the pointer; the desktop uses the global bindings. Keyboard profiles
+  continue to follow the focused application. Pointer targeting is supported
+  on macOS, Windows, and X11; unsupported sessions such as Wayland use the
+  focused application. An unavailable pointer target is not treated as desktop.
+  OpenLogi never activates a background window to send a shortcut: mouse
+  bindings that produce keystrokes or run workflows are skipped unless the
+  hovered window is focused. Global actions such as desktop switching can run
+  without changing application focus.
 
 `[devices."<physical-key>"]` contains per-device state. Receiver keys look like
 `receiver:<receiver-id>:slot:<number>`; direct, raw-HID, and camera devices use

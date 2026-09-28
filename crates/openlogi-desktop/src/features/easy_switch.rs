@@ -4,7 +4,7 @@ use gpui::{Context, IntoElement, ParentElement, Styled, div, prelude::FluentBuil
 use gpui_component::{Icon, IconName, Selectable as _, h_flex, v_flex};
 
 use crate::app::{AppView, kind_label, status_badge};
-use crate::state::{AppState, HostSwitchTargetUpdate, StateEvent};
+use crate::state::AppState;
 use crate::ui::components::{PanelCard, Toggle};
 use crate::ui::theme::{self, Typography as _};
 
@@ -42,16 +42,8 @@ pub(crate) fn easy_switch_panel(cx: &mut Context<AppView>) -> impl IntoElement {
                 Toggle::new(format!("easy-switch-target-{}", target.config_key))
                     .selected(target.selected)
                     .on_change(move |enabled, _window, cx| {
-                        AppState::update(cx, |state, cx| {
-                            match state.set_host_switch_target_enabled(&target_key, *enabled) {
-                                HostSwitchTargetUpdate::Unchanged => {}
-                                HostSwitchTargetUpdate::Persisted(key) => {
-                                    cx.emit(StateEvent::DeviceConfigChanged(key));
-                                }
-                                HostSwitchTargetUpdate::RolledBack => {
-                                    cx.emit(StateEvent::SettingsChanged);
-                                }
-                            }
+                        AppState::apply(cx, |state| {
+                            state.set_host_switch_target_enabled(&target_key, *enabled)
                         });
                     }),
             )

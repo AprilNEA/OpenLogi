@@ -144,7 +144,7 @@ pub async fn set_keyboard_color(
     g: u8,
     b: u8,
 ) -> Result<(), WriteError> {
-    device::set_keyboard_color(&*native_backend(), route, r, g, b).await
+    set_keyboard_color_with(route, LightingMethod::Auto, r, g, b).await
 }
 
 /// Set every key to one colour over a chosen lighting feature.
@@ -155,7 +155,23 @@ pub async fn set_keyboard_color_with(
     g: u8,
     b: u8,
 ) -> Result<(), WriteError> {
-    device::set_keyboard_color_with(&*native_backend(), route, method, r, g, b).await
+    let target = route.clone();
+    let gate = device_io_gate();
+    crate::lighting::LightingJob::spawn(route, move |cancel| async move {
+        device::LightingWrite {
+            method,
+            color: openlogi_core::color::Rgb::new(r, g, b),
+        }
+        .apply(
+            &*native_backend(),
+            &target,
+            || cancel.is_cancelled(),
+            || gate.allows_io(),
+        )
+        .await
+    })?
+    .finish()
+    .await
 }
 
 /// Play a haptic waveform on the device `route` reaches.

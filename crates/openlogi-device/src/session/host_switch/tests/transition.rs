@@ -10,7 +10,7 @@ async fn a_paired_event_sample_does_not_authorize_an_unreachable_destination() {
     let (target_node, target, target_handle) =
         scripted_live_node("reachable-target", TARGET_PID, keyboard_without_hosts_info).await;
     let pool = ChannelPool::with_backend(ScriptedBackend::new(vec![
-        (keyboard_node, ScriptedNode::OpenFails),
+        (keyboard_node, ScriptedOpen::Fails),
         (target_node, target),
     ]));
     let keyboard = DeviceRoute::Direct {
@@ -53,7 +53,7 @@ async fn an_unknown_departure_announcement_moves_the_target_without_reopening_th
     let (target_node, target, target_handle) =
         scripted_live_node("reachable-target", TARGET_PID, keyboard_without_hosts_info).await;
     let pool = ChannelPool::with_backend(ScriptedBackend::new(vec![
-        (keyboard_node, ScriptedNode::OpenFails),
+        (keyboard_node, ScriptedOpen::Fails),
         (target_node, target),
     ]));
     let keyboard = DeviceRoute::Direct {
@@ -94,7 +94,7 @@ async fn an_unreachable_commanded_keyboard_never_moves_a_target() {
     let (target_node, target, target_handle) =
         scripted_live_node("reachable-target", TARGET_PID, keyboard_without_hosts_info).await;
     let pool = ChannelPool::with_backend(ScriptedBackend::new(vec![
-        (keyboard_node, ScriptedNode::OpenFails),
+        (keyboard_node, ScriptedOpen::Fails),
         (target_node, target),
     ]));
     let keyboard = DeviceRoute::Direct {
@@ -131,7 +131,7 @@ async fn an_unverified_analytics_destination_never_moves_a_target() {
     let (target_node, target, target_handle) =
         scripted_live_node("reachable-target", TARGET_PID, keyboard_without_hosts_info).await;
     let pool = ChannelPool::with_backend(ScriptedBackend::new(vec![
-        (keyboard_node, ScriptedNode::OpenFails),
+        (keyboard_node, ScriptedOpen::Fails),
         (target_node, target),
     ]));
     let keyboard = DeviceRoute::Direct {
@@ -495,7 +495,7 @@ async fn a_departure_announcement_for_an_empty_slot_never_moves_a_target() {
     let (target_node, target, target_handle) =
         scripted_live_node("reachable-target", TARGET_PID, keyboard_without_hosts_info).await;
     let pool = ChannelPool::with_backend(ScriptedBackend::new(vec![
-        (keyboard_node, ScriptedNode::OpenFails),
+        (keyboard_node, ScriptedOpen::Fails),
         (target_node, target),
     ]));
     let keyboard = DeviceRoute::Direct {

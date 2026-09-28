@@ -24,7 +24,7 @@ pub(super) const SYSTEM_RESUME_SETTLE: Duration = Duration::from_millis(400);
 /// legacy `0x1000` and voltage `0x1001` batteries do not. Thirty seconds
 /// preserves the probe cache's prior freshness bound, keeps those readings
 /// useful, and bounds recovery without returning to constant full HID scans.
-pub(super) const RECOVERY_SCAN_INTERVAL: Duration = Duration::from_secs(30);
+pub(super) const RECOVERY_SCAN_PERIOD: Duration = Duration::from_secs(30);
 
 /// Wall-clock lead over monotonic time that means the monotonic clock paused
 /// during system sleep. NTP false positives only cause harmless re-apply.
@@ -75,7 +75,7 @@ impl Schedule {
         Self {
             retry_due: None,
             settings_due: None,
-            recovery_due: now + RECOVERY_SCAN_INTERVAL,
+            recovery_due: now + RECOVERY_SCAN_PERIOD,
             retry_count: 0,
         }
     }
@@ -108,7 +108,7 @@ impl Schedule {
     ) {
         self.retry_due = None;
         self.settings_due = None;
-        self.recovery_due = now + RECOVERY_SCAN_INTERVAL;
+        self.recovery_due = now + RECOVERY_SCAN_PERIOD;
 
         if !matches!(trigger, ReconcileTrigger::RepairRetry) {
             self.retry_count = 0;
@@ -215,7 +215,7 @@ mod tests {
             event_time,
         );
 
-        assert_eq!(schedule.recovery_due, event_time + RECOVERY_SCAN_INTERVAL);
+        assert_eq!(schedule.recovery_due, event_time + RECOVERY_SCAN_PERIOD);
     }
 
     #[test]

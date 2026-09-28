@@ -134,6 +134,17 @@ pub enum AssetSourcePreference {
     Fastly,
 }
 
+/// Which application supplies per-app mouse button bindings.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MouseProfileTarget {
+    /// Use the application under the pointer, where the platform supports it.
+    #[default]
+    Pointer,
+    /// Use the application with keyboard focus.
+    Focused,
+}
+
 /// App-wide preferences not tied to any particular device.
 ///
 /// All fields are `#[serde(default)]` so adding a new one is backward
@@ -217,11 +228,6 @@ pub struct AppSettings {
     /// Defaults to the icon the app is signed with.
     #[serde(default)]
     pub app_icon: AppIcon,
-    /// Whether the GUI automatically downloads device images from
-    /// `assets.openlogi.org` when a device appears. `true` (default) keeps
-    /// the current behavior; `false` makes no asset network requests at all
-    /// (the app falls back to bundled art and the synthetic silhouette). A
-    /// manual "Refresh assets" in Settings still fetches on demand regardless.
     /// Whether the GUI automatically downloads device images from the selected
     /// source when a device appears. `true` (default) keeps the current behavior;
     /// `false` makes no asset network requests at all (the app falls back to
@@ -270,6 +276,10 @@ pub struct AppSettings {
     /// `0` / `6` / `12`). `None` keeps each theme's own radius.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui_radius: Option<u8>,
+    /// Application used to select per-app mouse button bindings. Defaults to
+    /// the application under the pointer; unsupported platforms use focus.
+    #[serde(default)]
+    pub mouse_profile_target: MouseProfileTarget,
 }
 
 const SENSITIVITY_MIN: u8 = 1;
@@ -471,6 +481,7 @@ impl Default for AppSettings {
             theme_light: None,
             theme_dark: None,
             ui_radius: None,
+            mouse_profile_target: MouseProfileTarget::Pointer,
         }
     }
 }

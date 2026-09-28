@@ -63,8 +63,9 @@ impl ReportedHostSlotReader {
     /// unpaired slot. `HostsInfo` is the only source of per-slot pairing
     /// status. Unsupported, timed-out, malformed, or errored reads remain
     /// [`ReportedHostSlot::Unknown`]. A commanded transition treats that as
-    /// advisory; an announced transition requires a fresh paired result while
-    /// reachable. Physical departure cannot validate the destination slot.
+    /// advisory; an analytics event requires a fresh paired result while reachable.
+    /// A genuine ChangeHost announcement permits an unknown slot, but an
+    /// explicitly empty slot always fails closed.
     pub(super) async fn read_one(&self, host: u8) -> ReportedHostSlot {
         match self {
             Self::Supported(feature) => read_host_slot(feature, host).await,

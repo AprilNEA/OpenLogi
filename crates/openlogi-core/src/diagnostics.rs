@@ -597,6 +597,7 @@ mod tests {
                         thumbwheel: false,
                         haptic_feedback: false,
                         haptic_panel: false,
+                        dpi_gestures: false,
                         host_switching: false,
                         host_switch_controls: false,
                     }),

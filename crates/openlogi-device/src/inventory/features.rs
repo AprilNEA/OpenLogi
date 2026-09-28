@@ -21,9 +21,9 @@ use openlogi_core::device::{
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
-use super::events::{EventFeatureIndices, EventSubscriptionHandle};
-use crate::reprog_controls::{self, CtrlIdInfo};
+use crate::reprog_controls::{CtrlIdInfo, DPI_MODE_SHIFT_CIDS, host_switch_channel};
 
+use super::events::{EventFeatureIndices, EventSubscriptionHandle};
 use super::mappings::{
     legacy_battery_level_from_percentage, map_battery_level, map_battery_status, map_device_type,
     map_legacy_battery_status, map_voltage_battery_status, normalize_serial_number,
@@ -216,7 +216,7 @@ pub(super) async fn probe_features(
     // for capability derivation instead of discarding it.
     let mut battery_probe = None;
     let mut event_features = EventFeatureIndices::default();
-    let mut reprog_probe = ReprogControlProbePlan::default();
+    let mut probe_haptic_controls = false;
     let mut capabilities = match device.enumerate_features().await {
         Ok(Some(features)) => {
             let ids: Vec<u16> = features.iter().map(|f| f.id).collect();
@@ -227,8 +227,7 @@ pub(super) async fn probe_features(
                 // battery/identity snapshot that will be published.
                 subscriptions.register_device(slot, event_features);
             }
-            reprog_probe.haptic_panel = ids.contains(&0x19b0) || ids.contains(&0x19c0);
-            reprog_probe.host_switch_controls = should_probe_host_switch_controls(&ids);
+            probe_haptic_controls = ids.contains(&0x19b0) || ids.contains(&0x19c0);
             Some(Capabilities::from_feature_ids(&ids))
         }
         Ok(None) => None,
@@ -243,7 +242,7 @@ pub(super) async fn probe_features(
     };
     let mut capabilities_incomplete = false;
     if let Some(caps) = capabilities.as_mut() {
-        capabilities_incomplete = probe_extra_capabilities(&device, caps, reprog_probe)
+        capabilities_incomplete = probe_extra_capabilities(&device, caps, probe_haptic_controls)
             .await
             .is_err();
     }
@@ -321,7 +320,7 @@ pub(super) async fn probe_features(
 async fn probe_extra_capabilities(
     device: &Device,
     caps: &mut Capabilities,
-    reprog_probe: ReprogControlProbePlan,
+    probe_haptic_controls: bool,
 ) -> Result<(), ()> {
     if let Some(feature) = device.get_feature::<HiResWheelFeature>() {
         caps.scroll_inversion = feature
@@ -338,60 +337,31 @@ async fn probe_extra_capabilities(
     {
         caps.thumbwheel = feature.has_thumbwheel().await.unwrap_or(false);
     }
-    if reprog_probe.is_required() {
-        let Some(feature) = device.get_feature::<ReprogControlsFeature>() else {
-            return Err(());
-        };
-        probe_reprog_controls(&feature, caps, reprog_probe)
-            .await
-            .ok_or(())?;
+    if let Some(feature) = device.get_feature::<ReprogControlsFeature>() {
+        let count = feature.get_count().await.map_err(|_| ())?;
+        let mut haptic_panel = false;
+        let mut dpi_gestures = false;
+        let mut host_switch_controls = false;
+        for index in 0..count {
+            let info = feature.get_cid_info(index).await.map_err(|_| ())?;
+            haptic_panel |= probe_haptic_controls
+                && info.cid == control_ids::HAPTIC_PANEL
+                && info.flags.is_divertable();
+            let control: CtrlIdInfo = info.into();
+            host_switch_controls |= caps.host_switching
+                && host_switch_channel(control).is_some()
+                && (control.is_divertable() || control.supports_analytics_events());
+            dpi_gestures |= DPI_MODE_SHIFT_CIDS.contains(&info.cid.0)
+                && info.flags.is_divertable()
+                && info.flags.supports_raw_xy();
+        }
+        // Publish only a complete control walk. A lost reply must retain the
+        // cache's last-good capabilities and schedule repair, not hide support.
+        caps.haptic_panel = haptic_panel;
+        caps.dpi_gestures = dpi_gestures;
+        caps.host_switch_controls = host_switch_controls;
     }
     Ok(())
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-struct ReprogControlProbePlan {
-    haptic_panel: bool,
-    host_switch_controls: bool,
-}
-
-impl ReprogControlProbePlan {
-    const fn is_required(self) -> bool {
-        self.haptic_panel || self.host_switch_controls
-    }
-}
-
-fn should_probe_host_switch_controls(ids: &[u16]) -> bool {
-    ids.contains(&0x1814) && ids.contains(&ReprogControlsFeature::ID)
-}
-
-/// Fill the capabilities derived from the reprogrammable-control table, or
-/// return `None` when a read failed part-way through the walk.
-///
-/// The distinction matters because the answer is memoized for `REFRESH_INTERVAL`:
-/// reporting a lost reply as `false` can hide a supported Actions Ring panel
-/// or Easy-Switch controls for half a minute.
-async fn probe_reprog_controls(
-    feature: &ReprogControlsFeature,
-    caps: &mut Capabilities,
-    plan: ReprogControlProbePlan,
-) -> Option<()> {
-    let count = feature.get_count().await.ok()?;
-    for index in 0..count {
-        let info = feature.get_cid_info(index).await.ok()?;
-        if plan.haptic_panel && info.cid == control_ids::HAPTIC_PANEL {
-            caps.haptic_panel = info.flags.is_divertable();
-        }
-        if plan.host_switch_controls && is_reportable_host_switch_control(info.into()) {
-            caps.host_switch_controls = true;
-        }
-    }
-    Some(())
-}
-
-fn is_reportable_host_switch_control(info: CtrlIdInfo) -> bool {
-    reprog_controls::host_switch_channel(info).is_some()
-        && (info.is_divertable() || info.supports_analytics_events())
 }
 
 #[cfg(test)]
@@ -401,12 +371,98 @@ mod tests {
         battery_voltage::BatteryVoltageFeature, unified_battery::UnifiedBatteryFeature,
     };
 
-    use crate::reprog_controls::CtrlIdInfo;
+    use super::{BatteryProbe, ProbedFeatures, battery_feature_index, probe_features};
+    use crate::channel::scripted::{ScriptedRawHidChannel, feature_error, scripted_channel};
 
-    use super::{
-        BatteryProbe, battery_feature_index, is_reportable_host_switch_control,
-        should_probe_host_switch_controls,
-    };
+    async fn control_probe(
+        features: Vec<u16>,
+        controls: Vec<(u16, u16)>,
+        fail_at: Option<u8>,
+    ) -> ProbedFeatures {
+        let (raw, _) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+            let mut response = vec![0; 20];
+            response[..4].copy_from_slice(&request[..4]);
+            response[0] = 0x11;
+            match (request[2], request[3] >> 4) {
+                (0, 1) => response[4] = 4,
+                (0, 0) => response[4] = 1,
+                (1, 0) => response[4] = u8::try_from(features.len()).unwrap(),
+                (1, 1) => response[4..6]
+                    .copy_from_slice(&features[usize::from(request[4]) - 1].to_be_bytes()),
+                (2, 0) => response[4] = u8::try_from(controls.len()).unwrap(),
+                (2, 1) => {
+                    if fail_at == Some(request[4]) {
+                        return Some(feature_error(request, 0x08));
+                    }
+                    let (cid, flags) = controls[usize::from(request[4])];
+                    response[4..6].copy_from_slice(&cid.to_be_bytes());
+                    let [low, high] = flags.to_le_bytes();
+                    response[8] = low;
+                    response[12] = high;
+                }
+                _ => panic!("unexpected capability request: {request:02x?}"),
+            }
+            Some(response)
+        });
+        let channel = scripted_channel(raw).await;
+        probe_features(&channel, 0xff, None).await.0
+    }
+
+    #[tokio::test]
+    async fn dpi_gestures_require_a_matching_divertable_raw_xy_control() {
+        // A raw-XY gesture button is a decoy: only DPI-family support counts.
+        for cid in [0x00c4, 0x00ed, 0x00fd, 0x0053] {
+            for (flags, supported) in [(0x0120, true), (0x0020, false), (0x0100, false), (0, false)]
+            {
+                let probe = control_probe(
+                    vec![0x0001, 0x1b04],
+                    vec![(0x00c3, 0x0120), (cid, flags)],
+                    None,
+                )
+                .await;
+                let caps = probe.capabilities.unwrap();
+                assert!(!probe.capabilities_incomplete);
+                assert_eq!(
+                    caps.dpi_gestures,
+                    supported && cid != 0x0053,
+                    "CID {cid:04x}, flags {flags:04x}"
+                );
+                assert!(!caps.haptic_panel);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn control_walk_publishes_both_capabilities_only_after_all_rows_succeed() {
+        for fail_at in [Some(0), Some(1), None] {
+            let probe = control_probe(
+                vec![0x0001, 0x1b04, 0x19b0],
+                vec![(0x01a0, 0x0020), (0x00ed, 0x0120)],
+                fail_at,
+            )
+            .await;
+            let caps = probe.capabilities.unwrap();
+            assert_eq!(probe.capabilities_incomplete, fail_at.is_some());
+            assert_eq!(caps.haptic_panel, fail_at.is_none());
+            assert_eq!(caps.dpi_gestures, fail_at.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn host_switch_controls_require_change_host_and_a_complete_reportable_table() {
+        for (features, flags, fail_at, expected) in [
+            (vec![0x0001, 0x1b04, 0x1814], 0x0020, None, true),
+            (vec![0x0001, 0x1b04, 0x1814], 0x0400, None, true),
+            (vec![0x0001, 0x1b04, 0x1814], 0x0000, None, false),
+            (vec![0x0001, 0x1b04], 0x0020, None, false),
+            (vec![0x0001, 0x1b04, 0x1814], 0x0020, Some(1), false),
+        ] {
+            let probe =
+                control_probe(features, vec![(0x00d1, flags), (0x00d2, flags)], fail_at).await;
+            assert_eq!(probe.capabilities_incomplete, fail_at.is_some());
+            assert_eq!(probe.capabilities.unwrap().host_switch_controls, expected);
+        }
+    }
 
     #[test]
     fn battery_index_is_one_based_in_the_enumerated_table() {
@@ -452,31 +508,5 @@ mod tests {
     fn no_battery_feature_means_no_index() {
         assert_eq!(battery_feature_index([0x0001, 0x2201, 0x1b04]), None);
         assert_eq!(battery_feature_index([]), None);
-    }
-
-    #[test]
-    fn host_switch_controls_require_the_reportable_control_table() {
-        assert!(should_probe_host_switch_controls(&[0x1814, 0x1b04]));
-        assert!(!should_probe_host_switch_controls(&[0x1814, 0x1b00]));
-        assert!(!should_probe_host_switch_controls(&[0x1b04]));
-    }
-
-    #[test]
-    fn only_reportable_easy_switch_controls_mark_an_initiator() {
-        let host_control = CtrlIdInfo {
-            cid: 0x00d1,
-            task_id: 0x00ae,
-            flags: 1 << 10,
-        };
-        assert!(is_reportable_host_switch_control(host_control));
-        assert!(!is_reportable_host_switch_control(CtrlIdInfo {
-            flags: 0,
-            ..host_control
-        }));
-        assert!(!is_reportable_host_switch_control(CtrlIdInfo {
-            cid: 0x00c4,
-            task_id: 0,
-            ..host_control
-        }));
     }
 }
