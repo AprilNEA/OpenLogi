@@ -255,7 +255,6 @@ async fn open_receiver(
     backend: &dyn HidBackend,
     target: &ReceiverSelector,
 ) -> Result<OpenReceiver, PairingError> {
-    let mut open_error = None;
     for node in backend.enumerate_hidpp().await? {
         // Do not open unrelated devices before reaching an explicitly chosen
         // receiver: a failed open on one must not prevent pairing on another.
@@ -267,10 +266,11 @@ async fn open_receiver(
         let channel = match backend.open_hidpp(&node).await {
             Ok(Some(channel)) => channel,
             Ok(None) => continue,
-            Err(error) if !matches!(target, ReceiverSelector::First) => {
+            Err(_) if !matches!(target, ReceiverSelector::First) => {
                 // Identity is not known until the receiver opens. A different
                 // same-product receiver must not block an explicit selection.
-                open_error.get_or_insert(error);
+                // Its error cannot be attributed to the selected receiver if
+                // that receiver is missing from the rest of the enumeration.
                 continue;
             }
             Err(error) => return Err(error.into()),
@@ -309,7 +309,7 @@ async fn open_receiver(
             _registers: registers,
         });
     }
-    Err(open_error.map_or(PairingError::ReceiverNotFound, Into::into))
+    Err(PairingError::ReceiverNotFound)
 }
 
 /// Overall guard so a wedged receiver can't hang the session forever.

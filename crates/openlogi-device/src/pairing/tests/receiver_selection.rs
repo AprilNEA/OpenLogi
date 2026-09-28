@@ -101,6 +101,65 @@ async fn an_unselected_receiver_open_error_does_not_block_the_selected_receiver(
 }
 
 #[tokio::test]
+async fn an_unselected_open_error_does_not_mask_a_missing_selected_receiver() {
+    for (tag, selector) in [
+        ("missing-with-error", target(0xc548, BOLT_B)),
+        (
+            "missing-bolt-with-error",
+            ReceiverSelector::BoltUid(BOLT_B.into()),
+        ),
+    ] {
+        let backend = backend(tag);
+        backend
+            .set_node_presence(&node_id(tag, "bolt-b"), NodePresence::Absent)
+            .unwrap();
+        backend
+            .set_open_outcome(&node_id(tag, "bolt-a"), OpenOutcome::Denied)
+            .unwrap();
+        match open_receiver(&backend, &selector).await {
+            Err(error) => assert!(
+                matches!(error, PairingError::ReceiverNotFound),
+                "a different receiver's open error must not hide a missing selection: {error:?}"
+            ),
+            Ok(_) => panic!("the missing selection must never fall back to another receiver"),
+        }
+        assert_eq!(backend.open_count(&node_id(tag, "bolt-a")).unwrap(), 1);
+        assert_eq!(backend.open_count(&node_id(tag, "bolt-b")).unwrap(), 0);
+        for channel in ["bolt-a", "bolt-b"] {
+            assert!(
+                backend
+                    .channel_completion(channel)
+                    .unwrap()
+                    .written_reports
+                    .is_empty(),
+                "no pairing writes are allowed when the selected receiver is missing"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn first_receiver_selection_still_reports_an_open_error() {
+    let backend = backend("first-open-error");
+    backend
+        .set_open_outcome(
+            &node_id("first-open-error", "unifying"),
+            OpenOutcome::Denied,
+        )
+        .unwrap();
+    assert!(matches!(
+        open_receiver(&backend, &ReceiverSelector::First).await,
+        Err(PairingError::Hid(_))
+    ));
+    assert_eq!(
+        backend
+            .open_count(&node_id("first-open-error", "bolt-a"))
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
 async fn selects_second_bolt_by_uid_even_with_unifying_first() {
     let backend = backend("second-bolt");
     let opened = open_receiver(&backend, &target(0xc548, &BOLT_B.to_ascii_lowercase()))
