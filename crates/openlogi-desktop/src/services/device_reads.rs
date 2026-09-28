@@ -158,6 +158,7 @@ impl DeviceReads {
                 .device_reads_mut()
                 .update_fn_lock(&observed_key, flight, load)
             {
+                state.apply_fn_lock_read(&observed_key);
                 cx.emit(StateEvent::FnLockChanged(observed_key.clone()));
             }
         });

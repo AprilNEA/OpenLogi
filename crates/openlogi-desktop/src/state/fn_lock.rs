@@ -7,6 +7,7 @@ use gpui::{App, Context};
 use openlogi_core::device::DeviceKind;
 use tracing::debug;
 
+use super::device_key::DeviceKey;
 use super::devices::DeviceRecord;
 use super::events::StateEvents;
 use super::load::FnLockLoad;
@@ -43,6 +44,36 @@ impl AppState {
     pub fn current_fn_lock(&self) -> Option<&FnLockLoad> {
         self.current_record()
             .and_then(|record| self.pointer.reads.fn_lock_load(&record.device_key()))
+    }
+
+    /// Adopt a Fn-lock read into config when it disagrees with a saved
+    /// setting: Fn+Esc on the keyboard changed it, and the agent re-applies
+    /// the saved value on reconnect, so a stale one would undo that press.
+    /// A keyboard nobody set from OpenLogi stays unset.
+    pub(crate) fn apply_fn_lock_read(&mut self, key: &DeviceKey) {
+        if !self.is_current_device(key) {
+            return;
+        }
+        let Some(FnLockLoad::Ready(on)) = self.pointer.reads.fn_lock_load(key) else {
+            return;
+        };
+        let on = **on;
+        let Some(config_key) = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .map(str::to_string)
+        else {
+            return;
+        };
+        if self
+            .config
+            .fn_lock(&config_key)
+            .is_some_and(|saved| saved != on)
+        {
+            self.config
+                .edit(|config| config.set_fn_lock(&config_key, on));
+            self.persist_and_reload("Fn lock from the keyboard");
+        }
     }
 
     /// Set the selected keyboard's Fn lock from the Keys tab switch.
