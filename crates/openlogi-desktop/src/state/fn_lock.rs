@@ -33,7 +33,9 @@ impl AppState {
     /// Re-read the selected keyboard's Fn lock, e.g. when the Keys tab opens:
     /// Fn+Esc on the keyboard may have changed it since the last read.
     pub(crate) fn revalidate_current_fn_lock(&mut self) {
-        if let Some(key) = self.current_record().map(DeviceRecord::device_key) {
+        let key = self.current_record().map(DeviceRecord::device_key);
+        debug!(?key, "Keys tab opened");
+        if let Some(key) = key {
             self.pointer.reads.revalidate_fn_lock(&key);
         }
     }

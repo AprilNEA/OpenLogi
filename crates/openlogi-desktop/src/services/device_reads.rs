@@ -154,6 +154,7 @@ impl DeviceReads {
         let observed_key = key.clone();
         let observer = cx.observe(query.state(), move |state, query_state, cx| {
             let load = project_load(query_state.read(cx), fn_lock_error_is_permanent);
+            tracing::debug!(key = %observed_key, flight, ?load, "Fn-lock read updated");
             if state
                 .device_reads_mut()
                 .update_fn_lock(&observed_key, flight, load)
@@ -298,7 +299,10 @@ impl DeviceReads {
     /// keyboard may have changed it on its own since the last read.
     pub(crate) fn revalidate_fn_lock(&mut self, key: &DeviceKey) {
         if let Some(read) = self.fn_lock.get_mut(key) {
+            tracing::debug!(%key, load = ?read.load, "re-reading Fn lock");
             read.query.revalidate();
+        } else {
+            tracing::debug!(%key, "no Fn-lock read to refresh");
         }
     }
 
