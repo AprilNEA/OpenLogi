@@ -8,8 +8,8 @@ use openlogi_core::binding::ActionRingSlot;
 use openlogi_core::config::Lighting;
 use openlogi_core::device::DeviceInventory;
 use openlogi_core::hid::{
-    BacklightMode, BacklightState, BacklightStatus, Dpi, DpiInfo, LightCommand, PasskeyMethod,
-    ReceiverSelector, ScrollWheelMode, SmartShiftStatus,
+    BacklightMode, BacklightState, BacklightStatus, Dpi, DpiInfo, FnLockState, LightCommand,
+    PasskeyMethod, ReceiverSelector, ScrollWheelMode, SmartShiftStatus,
 };
 use openlogi_fixture::{
     CANONICAL_DEVICE_PROFILE_JSON, SyntheticIdentityKind, classify_synthetic_identity_bytes,
@@ -39,6 +39,7 @@ enum ReadFamily {
     Smartshift,
     Wheel,
     Backlight,
+    FnLock,
 }
 
 #[derive(Clone)]
@@ -285,6 +286,19 @@ impl Agent for TestAgent {
             &route,
             |settings| &settings.backlight,
             0x1982,
+        )
+    }
+
+    async fn read_fn_lock(
+        self,
+        _: TarpcContext,
+        route: DeviceRoute,
+    ) -> Result<FnLockState, WriteError> {
+        self.read(
+            ReadFamily::FnLock,
+            &route,
+            |settings| &settings.fn_lock,
+            0x40a3,
         )
     }
 }

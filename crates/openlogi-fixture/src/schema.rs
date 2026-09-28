@@ -4,8 +4,8 @@ use std::collections::HashSet;
 
 use openlogi_core::device::{Capabilities, DeviceInventory, LightCapabilities, StandaloneDevice};
 use openlogi_core::hid::{
-    BacklightState, BacklightStatus, DIRECT_DEVICE_INDEX, DeviceRoute, DpiInfo, ScrollWheelMode,
-    SmartShiftStatus,
+    BacklightState, BacklightStatus, DIRECT_DEVICE_INDEX, DeviceRoute, DpiInfo, FnLockState,
+    ScrollWheelMode, SmartShiftStatus,
 };
 use serde::{Deserialize, Deserializer, Serialize, de};
 use thiserror::Error;
@@ -139,6 +139,13 @@ pub enum ProfileSetting<T> {
 }
 
 impl<T> ProfileSetting<T> {
+    /// The absent-feature behavior; the serde default for settings appended
+    /// after schema v1 so older profiles keep loading.
+    #[must_use]
+    pub const fn unsupported() -> Self {
+        Self::Unsupported
+    }
+
     /// Whether the feature is present, independently of value availability.
     #[must_use]
     pub const fn supports_feature(&self) -> bool {
@@ -178,6 +185,10 @@ pub struct ProfileDeviceSettings {
     pub wheel: ProfileSetting<ScrollWheelMode>,
     /// Keyboard-backlight read state.
     pub backlight: ProfileSetting<BacklightState>,
+    /// Keyboard Fn-lock read state. Defaults to unsupported so profiles
+    /// recorded before it existed keep loading.
+    #[serde(default = "ProfileSetting::unsupported")]
+    pub fn_lock: ProfileSetting<FnLockState>,
     /// RGB keyboard-lighting write support.
     pub lighting: ProfileSupport,
     /// Standalone-light command support.

@@ -266,9 +266,11 @@ pub struct DeviceConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub host_switch_targets: Vec<String>,
     /// Keyboard Fn-lock state (HID++ fn inversion, `0x40a2`/`0x40a3`): `true`
-    /// means the F-row sends F1–F12 without holding Fn. The state lives in
-    /// device RAM per host, so the agent re-applies it on reconnect like
-    /// [`Self::dpi`]. `None` means "never set — leave the keyboard alone".
+    /// means the F-row sends F1–F12 without holding Fn. Multi-host keyboards
+    /// store it per Easy-Switch slot and the user can flip it from the
+    /// keyboard (Fn+Esc), so the agent writes it on config reload and
+    /// re-applies it when the keyboard reconnects, like [`Self::dpi`]. `None`
+    /// means "never set — leave the keyboard alone".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fn_lock: Option<bool>,
 }

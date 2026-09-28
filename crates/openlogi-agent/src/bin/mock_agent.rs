@@ -54,8 +54,8 @@ use openlogi_core::device::{
 use openlogi_core::single_instance::{self, InstanceError, Role};
 use openlogi_fixture::{DeviceProfile, FixtureError, ProfileDeviceSettings, ProfileSetting};
 use openlogi_hid::{
-    BacklightState, DeviceRoute, Dpi, DpiInfo, LightCommand, PasskeyMethod, ReceiverSelector,
-    ScrollWheelMode, SmartShiftStatus, WriteError,
+    BacklightState, DeviceRoute, Dpi, DpiInfo, FnLockState, LightCommand, PasskeyMethod,
+    ReceiverSelector, ScrollWheelMode, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
@@ -827,6 +827,11 @@ impl Agent for MockAgent {
     ) -> Result<BacklightState, WriteError> {
         let state = self.state.lock().await;
         profile_value(&state.settings_for(&route)?.backlight, &route, 0x1982).copied()
+    }
+
+    async fn read_fn_lock(self, _: Context, route: DeviceRoute) -> Result<FnLockState, WriteError> {
+        let state = self.state.lock().await;
+        profile_value(&state.settings_for(&route)?.fn_lock, &route, 0x40a3).copied()
     }
 
     async fn request_accessibility_prompt(self, _: Context) {

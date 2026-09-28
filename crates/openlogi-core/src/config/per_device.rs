@@ -287,6 +287,15 @@ impl Config {
         self.devices.get(device_key).and_then(|d| d.fn_lock)
     }
 
+    /// Record the keyboard Fn-lock state for `device_key`; the agent writes
+    /// it on reload and re-applies it when the keyboard reconnects.
+    pub fn set_fn_lock(&mut self, device_key: &str, fn_lock: bool) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .fn_lock = Some(fn_lock);
+    }
+
     /// Record the SmartShift wheel config for `device_key`, so the agent can
     /// re-apply it when the device reconnects (#189).
     pub fn set_smartshift(&mut self, device_key: &str, smartshift: SmartShift) {

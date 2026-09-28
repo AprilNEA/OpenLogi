@@ -14,8 +14,8 @@ use crate::write::smartshift::{
 };
 use crate::write::{HidppFeatureErrorKind, HidppOperation};
 use crate::{
-    BacklightMode, BacklightState, BacklightStatus, SmartShiftAutoDisengage, SmartShiftMode,
-    SmartShiftStatus, SmartShiftThreshold, TunableTorque,
+    BacklightMode, BacklightState, BacklightStatus, FnLockState, SmartShiftAutoDisengage,
+    SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque,
 };
 use hidpp::feature::device_information::DeviceEntityType;
 
@@ -789,4 +789,137 @@ async fn a_channel_failure_aborts_the_dump_instead_of_blaming_the_firmware() {
         !written.iter().any(|report| is_fw_info_for(report, 2)),
         "the dump stops at the failure rather than timing out per entity"
     );
+}
+
+/// A multi-host keyboard: `0x40a3` at index 0x09 and `0x1815 HostsInfo` at
+/// index 0x0a reporting host slot 2 as current. Both fn-inversion echoes
+/// report whatever state the last `set` wrote (shared across the test through
+/// the request the responder sees, since scripted responders are stateless).
+fn multi_host_keyboard_response(request: &[u8]) -> Option<Vec<u8>> {
+    if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
+        return None;
+    }
+    let feature_index = request[2];
+    let function = request[3] >> 4;
+    let mut payload = [0u8; 16];
+    match (feature_index, function) {
+        (0x00, 0x01) => payload[0] = 4,
+        (0x00, 0x00) => {
+            let feature_id = u16::from_be_bytes([request[4], request[5]]);
+            payload[0] = match feature_id {
+                0x40a3 => 0x09,
+                0x1815 => 0x0a,
+                _ => 0x00,
+            };
+        }
+        // getFeatureInfo: capabilities, descriptor caps, 3 hosts, current = 2.
+        (0x0a, 0x00) => payload[..4].copy_from_slice(&[0x07, 0x00, 3, 2]),
+        // getGlobalFnInversion(host): inversion ON (media keys first).
+        (0x09, 0x00) => payload[..4].copy_from_slice(&[request[4], 1, 1, 1]),
+        // setGlobalFnInversion(host, state): echo host and the written state.
+        (0x09, 0x01) => payload[..4].copy_from_slice(&[request[4], request[5], 1, 1]),
+        _ => return None,
+    }
+    // Long replies: `getFeatureInfo` and the inversion echoes carry four
+    // payload bytes, one more than a short report holds.
+    let mut response = vec![0u8; 20];
+    response[0] = 0x11;
+    response[1..4].copy_from_slice(&request[1..4]);
+    response[4..].copy_from_slice(&payload);
+    Some(response)
+}
+
+#[tokio::test]
+async fn fn_lock_addresses_the_current_host_slot_read_from_hosts_info() -> Result<(), WriteError> {
+    let (raw, handle) = ScriptedRawHidChannel::with_responder(multi_host_keyboard_response);
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(
+        channel,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xb378,
+        },
+    );
+
+    // Inversion ON in firmware reads back as Fn-lock off.
+    let state = get_fn_lock_on(&shared).await?;
+    assert_eq!(
+        state,
+        FnLockState {
+            fn_lock: false,
+            default_fn_lock: false,
+        }
+    );
+
+    let written = set_fn_lock_on(&shared, true).await?;
+    assert!(written.fn_lock);
+
+    let set = handle
+        .written_reports()
+        .into_iter()
+        .find(|report| report[2] == 0x09 && report[3] >> 4 == 0x01)
+        .expect("a setGlobalFnInversion write");
+    // Host slot 2 from 0x1815, not the 0xff "current host" the MX Keys S
+    // firmware ignores; Fn-lock on is inversion OFF (0).
+    assert_eq!(&set[4..6], &[2, 0]);
+    Ok(())
+}
+
+/// A single-host keyboard (`0x40a2` only) whose firmware echoes inversion ON
+/// no matter what is written — the keyboard did not take the write.
+fn stubborn_single_host_keyboard_response(request: &[u8]) -> Option<Vec<u8>> {
+    if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
+        return None;
+    }
+    let feature_index = request[2];
+    let function = request[3] >> 4;
+    let mut payload = [0u8; 16];
+    match (feature_index, function) {
+        (0x00, 0x01) => payload[0] = 4,
+        (0x00, 0x00) => {
+            let feature_id = u16::from_be_bytes([request[4], request[5]]);
+            payload[0] = u8::from(feature_id == 0x40a2) * 0x0b;
+        }
+        (0x0b, 0x00 | 0x01) => payload[..2].copy_from_slice(&[1, 1]),
+        _ => return None,
+    }
+    let mut response = vec![0u8; 7];
+    response[0] = 0x10;
+    response[1..4].copy_from_slice(&request[1..4]);
+    response[4..].copy_from_slice(&payload[..3]);
+    Some(response)
+}
+
+#[tokio::test]
+async fn fn_lock_write_that_the_keyboard_does_not_echo_fails() {
+    let (raw, handle) =
+        ScriptedRawHidChannel::with_responder(stubborn_single_host_keyboard_response);
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(
+        channel,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xb342,
+        },
+    );
+
+    let error = set_fn_lock_on(&shared, true)
+        .await
+        .expect_err("an echo that disagrees with the write is not a success");
+    assert_eq!(
+        error,
+        WriteError::UnsupportedResponse {
+            operation: HidppOperation::WriteFnLock,
+            feature_hex: 0x40a2,
+        }
+    );
+    // The single-host fallback wrote inversion OFF once; no 0x1815 lookup
+    // is attempted on a keyboard without 0x40a3.
+    let sets: Vec<_> = handle
+        .written_reports()
+        .into_iter()
+        .filter(|report| report[2] == 0x0b && report[3] >> 4 == 0x01)
+        .collect();
+    assert_eq!(sets.len(), 1);
+    assert_eq!(sets[0][4], 0);
 }

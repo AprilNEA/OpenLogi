@@ -343,16 +343,21 @@ pub fn toggle_smartshift_in_background(op: DeviceOp) {
 
 /// Spawn an OS thread that writes the keyboard Fn-lock state to `op`'s device
 /// via [`openlogi_hid::set_fn_lock_on`]. Returns immediately; failures (incl.
-/// keyboards that expose neither `0x40a3` nor `0x40a2` fn inversion) are
-/// logged.
+/// keyboards that expose neither `0x40a3` nor `0x40a2` fn inversion, and a
+/// keyboard whose read-back disagrees with the write) are logged.
 pub fn write_fn_lock_in_background(op: DeviceOp, on: bool) {
     let index = op.route.device_index();
     op.spawn_write(
         "Fn-lock write",
         move |c| async move { openlogi_hid::set_fn_lock_on(&c, on).await },
         move |result| {
-            log_outcome(index, "Fn-lock write", result, |()| {
-                debug!(index, on, "Fn-lock written");
+            log_outcome(index, "Fn-lock write", result, |state| {
+                debug!(
+                    index,
+                    on,
+                    default = state.default_fn_lock,
+                    "Fn-lock written"
+                );
             });
         },
     );
