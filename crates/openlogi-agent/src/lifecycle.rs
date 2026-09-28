@@ -18,6 +18,8 @@
 //! sunk launch-at-login switch makes an unwanted login start possible; Windows
 //! and Linux only ever start wanted, so their gate passes unconditionally.
 
+#[cfg(target_os = "macos")]
+mod armed_session;
 mod transition;
 
 use std::sync::Arc;
@@ -129,9 +131,19 @@ impl Booted {
     /// respawn. Demand is a [`ClientKind::Gui`] declaration, not a mere
     /// connection: other clients are served without waking anything, and the
     /// takeover probe never declares at all.
+    ///
+    /// The same trigger also fires after a crash, and that start was wanted:
+    /// an agent armed earlier in this login session that did not leave
+    /// through a final exit re-arms at once (see [`armed_session`]).
     #[cfg(target_os = "macos")]
     async fn gate(mut self) -> Option<Wanted> {
         if self.launch_at_login {
+            return Some(Wanted(self));
+        }
+        if armed_session::rearm() {
+            info!(
+                "launch_at_login is off, but this login armed an agent that did not quit — re-arming"
+            );
             return Some(Wanted(self));
         }
         info!("launch_at_login is off — dormant until a client demands arming");
@@ -208,6 +220,8 @@ impl Wanted {
         } = self.0;
         #[cfg(target_os = "macos")]
         let _ = armed_tx.send(());
+        #[cfg(target_os = "macos")]
+        armed_session::record();
         overlay::spawn();
         prompt_missing_accessibility(capture_mouse_events);
 
@@ -273,7 +287,7 @@ impl Armed {
         #[cfg(target_os = "macos")]
         if request_input_monitoring_and_schedule_relaunch().await {
             running
-                .shut_down("Input Monitoring permission relaunch", None)
+                .hand_over("Input Monitoring permission relaunch")
                 .await;
         }
 
@@ -286,6 +300,10 @@ impl Armed {
             tokio::select! {
                 biased;
 
+                // Logout, a developer, or the stale-agent takeover — each
+                // means "stop". The takeover's successor would rather find
+                // the armed session, but it is GUI-started and armed by that
+                // GUI's declaration, so nothing is lost by treating it alike.
                 () = running.signals.recv() => {
                     running.shut_down("shutdown signal", None).await;
                 }
@@ -547,7 +565,27 @@ impl Running {
         self.exit_after_replacement_teardown("binary update");
     }
 
+    /// Leave for good: nobody wants the agent until asked again, so the next
+    /// start in this login is a GUI demand, never a respawn to re-arm.
     async fn shut_down(
+        &mut self,
+        reason: &str,
+        tray_guard: Option<tokio::sync::oneshot::Sender<()>>,
+    ) -> ! {
+        #[cfg(target_os = "macos")]
+        armed_session::clear();
+        self.leave(reason, tray_guard).await
+    }
+
+    /// Leave for a successor that is already scheduled and must start armed:
+    /// the armed-session record stays for it to find.
+    #[cfg(target_os = "macos")]
+    async fn hand_over(&mut self, reason: &str) -> ! {
+        self.leave(reason, None).await
+    }
+
+    /// Drain the HID++ fleet, release the hook, and end the process.
+    async fn leave(
         &mut self,
         reason: &str,
         tray_guard: Option<tokio::sync::oneshot::Sender<()>>,
@@ -559,7 +597,8 @@ impl Running {
     }
 
     /// End after [`Self::complete_replacement`] resolved firmware
-    /// ownership, so a successor starts from native device state.
+    /// ownership, so a successor starts from native device state. A handover
+    /// like [`Self::hand_over`]: the successor finds the armed session.
     #[cfg(any(target_os = "macos", not(unix)))]
     fn exit_after_replacement_teardown(&mut self, reason: &str) -> ! {
         shutdown::release_hook_and_exit(self.hook.take(), &mut self.inputs, reason, None)

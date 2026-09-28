@@ -4,6 +4,31 @@ Durable "why we did it this way" records that are not obvious from the code.
 Add a dated entry when a non-obvious architectural or dependency decision is
 made or revisited.
 
+## 2026-09: A crash respawn re-arms by login session, not by exit code
+
+With `launch_at_login` off, the macOS dormancy gate read every launchd start as
+a login the user opted out of, and left 60 s later with the `exit(0)` launchd
+never respawns. A crash respawn takes the same path — the plist has one trigger
+(`SuccessfulExit` implies `RunAtLoad`) — so one hook-watchdog `exit(78)` on a
+lid close silently ended remapping until the user opened the GUI (#952).
+
+- **The gate asks the session, not launchd.** Arming records the login session
+  (kernel boot session UUID + audit session id) in the runtime dir; every final
+  `exit(0)` — tray Quit, uninstall, SIGTERM — erases it; a handover to a
+  scheduled successor (binary update, Input Monitoring relaunch) keeps it. A
+  start that finds its own session recorded re-arms at once; a login finds a
+  stale session and stays dormant. The boot half is required: audit ids repeat
+  across boots.
+- **Rejected: a second, crash-only plist** (`KeepAlive = {Crashed: true}`, no
+  `RunAtLoad`). `Crashed` does not cover `exit(78)` or a panic's `exit(101)`,
+  which are exactly the exits that need recovery, and it would reintroduce the
+  two-label registration the 2026-08 lifecycle work removed.
+- **SIGTERM is final.** launchd's logout and dev tooling mean "stop". The
+  stale-agent takeover (`takeover.rs`) sends it too, and there the successor
+  would rather find the record; it makes no difference, because the only
+  starts that reach the takeover are GUI kickstarts, and that GUI's
+  declaration arms the successor anyway.
+
 ## 2026-08: The agent stays one process; a crossing edge gets a wire, not an event layer
 
 The 2026-06 daemon split (#165) put the resident input machinery in

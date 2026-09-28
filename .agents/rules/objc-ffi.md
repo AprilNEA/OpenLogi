@@ -6,6 +6,7 @@ paths:
   - "crates/openlogi-camera/**"
   - "crates/openlogi-agent/src/tray.rs"
   - "crates/openlogi-agent/src/status_item.rs"
+  - "crates/openlogi-agent/src/lifecycle/armed_session.rs"
   - "crates/openlogi-agent-core/src/watchers/camera.rs"
   - "crates/openlogi-hook/src/macos.rs"
   - "crates/openlogi-hook/src/macos/**"
@@ -230,6 +231,9 @@ under a `SAFETY` comment. Where it currently lives on macOS:
 - `agent/tray.rs` — `msg_send![super(this), init]`, the notification-center
   `addObserver:selector:name:object:`, and the `NSWorkspace*Notification` name
   statics.
+- `agent/lifecycle/armed_session.rs` — `SessionGetInfo` (`objc2-security`,
+  `AuthSession`) and `sysctlbyname("kern.bootsessionuuid")`: two out-pointer reads
+  that identify the login session, so the dormancy gate can re-arm a crash respawn.
 - `hook/macos.rs` — the whole tap (Core Graphics / Core Foundation C APIs),
   and `AXIsProcessTrusted[WithOptions]` with the two extern statics they need
   (`kAXTrustedCheckOptionPrompt`, `kCFBooleanTrue`). Its module-wide
@@ -300,7 +304,7 @@ framework crates, then verify that `Cargo.lock` still carries one version-aligne
 Every ObjC / Core-framework crate is declared **once** in the workspace table —
 `objc2`, `objc2-app-kit`, `objc2-foundation`, `objc2-core-foundation`,
 `objc2-core-graphics`, `objc2-application-services`, `objc2-io-kit`,
-`objc2-service-management`, `block2`, `core-graphics`, `core-foundation`. The header-gated ones carry
+`objc2-service-management`, `objc2-security`, `block2`, `core-graphics`, `core-foundation`. The header-gated ones carry
 `default-features = false` there, and each member inherits with
 `workspace = true` and adds only the feature modules it uses. A new one belongs
 in that table too, never inline in a member manifest: the unified version is what
