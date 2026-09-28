@@ -4,12 +4,14 @@
 //! Wireless G-series headsets expose `0x1F20` and none of `0x1000` / `0x1001`
 //! / `0x1004` (verified on a G733; the Linux kernel reads a G935 the same
 //! way), so without this feature the inventory probe finds no battery source
-//! for them. Like `BatteryVoltage` (`0x1001`)
-//! the feature reports no percentage — callers estimate one from the voltage.
+//! for them. Like `BatteryVoltage` (`0x1001`) the feature reports no
+//! percentage — callers estimate one from the voltage.
 //!
-//! Only `getAdcMeasurement` (function `0`) is implemented. The firmware also
-//! broadcasts the same payload as event `0`; polling covers the reading, the
-//! same scope `BatteryVoltage` keeps.
+//! `getAdcMeasurement` (function `0`) reads the battery. The firmware also
+//! broadcasts the same payload unsolicited as event `0` when the reading or
+//! the link changes — a G733 dongle sends one the moment its headset is
+//! switched off or on — which
+//! [`AdcMeasurementFeature::is_status_broadcast`] recognizes.
 //!
 //! The wire layout is not in a public Logitech spec: the voltage as a
 //! big-endian millivolt `u16` followed by one flags byte was
@@ -35,6 +37,19 @@ pub struct AdcMeasurementFeature {
 }
 
 impl AdcMeasurementFeature {
+    /// Whether an unsolicited message with `function_id` is this feature's
+    /// status broadcast (event `0`), sent when the reading or the link
+    /// changes.
+    ///
+    /// Deliberately independent of the payload: the broadcast announces a
+    /// change even when its flags value is one [`AdcMeasurement::from_wire`]
+    /// rejects (the kernel names `0x0F`), so a listener that only needs to know
+    /// *that* something changed must not drop it.
+    #[must_use]
+    pub const fn is_status_broadcast(function_id: u8) -> bool {
+        function_id == 0
+    }
+
     /// Reads the measured battery voltage and link/charging state (function
     /// `0`, `getAdcMeasurement`).
     ///
@@ -52,7 +67,8 @@ impl AdcMeasurementFeature {
     }
 }
 
-/// A reading from the `0x1F20` `getAdcMeasurement` function.
+/// A reading from the `0x1F20` `getAdcMeasurement` function, or its event `0`
+/// broadcast.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
