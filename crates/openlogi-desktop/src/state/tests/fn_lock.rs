@@ -92,4 +92,24 @@ fn reopening_the_keys_tab_rereads_fn_lock(cx: &mut gpui::TestAppContext) {
     answer_fn_lock_read(&mut receiver, true);
     cx.run_until_parked();
     assert_eq!(current(cx), Some(FnLockLoad::Ready(Arc::new(true))));
+
+    // A press while the tab stays open reaches the app through the agent's
+    // snapshot, with no read at all.
+    let route = cx.update(|cx| {
+        AppState::try_read(cx)
+            .and_then(AppState::current_record)
+            .and_then(|record| record.route.clone())
+            .expect("the keyboard has a route")
+    });
+    let events = cx.update(|cx| {
+        AppState::update(cx, |state, _| {
+            state.set_agent_fn_locks(&[openlogi_ipc::KeyboardFnLock { route, on: false }])
+        })
+    });
+    assert!(!events.is_empty(), "the change is announced");
+    assert_eq!(current(cx), Some(FnLockLoad::Ready(Arc::new(false))));
+    assert!(
+        receiver.try_recv().is_err(),
+        "the snapshot's value needs no read"
+    );
 }

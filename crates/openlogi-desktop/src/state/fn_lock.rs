@@ -5,6 +5,7 @@
 
 use gpui::{App, Context};
 use openlogi_core::device::DeviceKind;
+use openlogi_ipc::KeyboardFnLock;
 use tracing::debug;
 
 use super::device_key::DeviceKey;
@@ -76,6 +77,35 @@ impl AppState {
                 .edit(|config| config.set_fn_lock(&config_key, on));
             self.persist_and_reload("Fn lock from the keyboard");
         }
+    }
+
+    /// Adopt the Fn-lock states the agent last learned — from a read, its own
+    /// write, or a keyboard's change event — so a press of the Fn Lock key
+    /// shows while the Keys tab is open. A keyboard the agent reports nothing
+    /// for keeps its own read.
+    pub(crate) fn set_agent_fn_locks(&mut self, known: &[KeyboardFnLock]) -> StateEvents {
+        let changed: Vec<(DeviceKey, bool)> = self
+            .devices()
+            .iter()
+            .filter(|record| record.kind == DeviceKind::Keyboard)
+            .filter_map(|record| {
+                let route = record.route.as_ref()?;
+                let on = known.iter().find(|known| known.route == *route)?.on;
+                let key = record.device_key();
+                let shown = matches!(
+                    self.pointer.reads.fn_lock_load(&key),
+                    Some(FnLockLoad::Ready(current)) if **current == on
+                );
+                (!shown).then_some((key, on))
+            })
+            .collect();
+        let mut events = StateEvents::none();
+        for (key, on) in changed {
+            self.pointer.reads.set_fn_lock_ready(&key, on);
+            self.apply_fn_lock_read(&key);
+            events = events.and(StateEvent::FnLockChanged(key));
+        }
+        events
     }
 
     /// Set the selected keyboard's Fn lock from the Keys tab switch.

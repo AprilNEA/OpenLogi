@@ -75,10 +75,15 @@ impl AppState {
         let agent = self.set_agent_link(AgentLink::Ready(snapshot.status.clone()));
         let camera = self.set_camera_active(snapshot.camera_active);
         let foreground = self.set_foreground(snapshot.foreground.clone());
+        let fn_locks = self.set_agent_fn_locks(&snapshot.fn_locks);
 
         SnapshotChanges {
             inventory_ready,
-            events: inventory.and(agent).and(camera).and(foreground),
+            events: inventory
+                .and(agent)
+                .and(camera)
+                .and(foreground)
+                .and(fn_locks),
         }
     }
 
