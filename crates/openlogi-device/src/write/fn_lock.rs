@@ -11,8 +11,11 @@
 //! Multi-host keyboards store the state per Easy-Switch slot. The `0x40a3`
 //! spec offers `0xFF` for "the current host", but the MX Keys S firmware
 //! ignores writes addressed that way (Solaar carries the same workaround), so
-//! the slot is read from `0x1815 HostsInfo` first and addressed explicitly,
-//! falling back to `0xFF` only when the keyboard has no `0x1815`.
+//! the slot is read from `0x1815 HostsInfo` first and addressed explicitly.
+//! `0xFF` is used only for a keyboard that has no `0x1815` at all; a keyboard
+//! that has it but does not answer fails the operation, since a write
+//! addressed to `0xFF` on such a keyboard is exactly the one the firmware
+//! drops.
 
 use std::sync::Arc;
 
@@ -20,6 +23,7 @@ use hidpp::{
     channel::HidppChannel,
     device::Device,
     feature::{
+        CreatableFeature as _,
         fn_inversion::{
             FnInversionMultiHostFeature, FnInversionState, FnInversionWithDefaultStateFeature,
         },
@@ -77,11 +81,12 @@ enum FnInversion {
 impl FnInversion {
     /// Open whichever fn-inversion feature the device exposes. Tries `0x40a3`
     /// first; on a missing-`0x40a3` error (and only that), retries with
-    /// `0x40a2`.
-    async fn open(device: &mut Device) -> Result<Self, WriteError> {
+    /// `0x40a2`. `operation` names the read or write this open serves, for
+    /// the error a failed host lookup carries.
+    async fn open(device: &mut Device, operation: HidppOperation) -> Result<Self, WriteError> {
         match open_feature::<FnInversionMultiHostFeature>(device).await {
             Ok(feature) => {
-                let host = current_host(device).await;
+                let host = current_host(device, operation).await?;
                 Ok(Self::MultiHost { feature, host })
             }
             Err(err) if is_missing_multi_host(&err) => {
@@ -147,22 +152,30 @@ impl FnInversion {
 }
 
 /// The Easy-Switch slot the keyboard is currently talking to, read from
-/// `0x1815 HostsInfo`; `0xFF` when the keyboard has no such feature or the
-/// read fails, which is the spec's own "current host" selector.
-async fn current_host(device: &mut Device) -> HostIndex {
-    let Ok(hosts_info) = open_feature::<HostsInfoFeature>(device).await else {
-        return HostIndex::Current;
-    };
-    match hosts_info.get_feature_info().await {
-        Ok(info) => info.current_host,
-        Err(error) => {
-            debug!(
-                ?error,
-                "hosts-info read failed — addressing the current host as 0xff"
-            );
-            HostIndex::Current
+/// `0x1815 HostsInfo`. A keyboard without that feature is addressed as
+/// `0xFF`, the spec's own "current host" selector and the only one it
+/// offers. A keyboard that has the feature but fails the read fails the
+/// `operation`: guessing `0xFF` there would send the MX Keys S the very write
+/// its firmware ignores, and the echo check would then blame the keyboard
+/// for a lookup that never happened.
+async fn current_host(
+    device: &mut Device,
+    operation: HidppOperation,
+) -> Result<HostIndex, WriteError> {
+    let hosts_info = match open_feature::<HostsInfoFeature>(device).await {
+        Ok(hosts_info) => hosts_info,
+        Err(WriteError::FeatureUnsupported { feature_hex })
+            if feature_hex == HostsInfoFeature::ID =>
+        {
+            return Ok(HostIndex::Current);
         }
-    }
+        Err(error) => return Err(error),
+    };
+    let info = hosts_info
+        .get_feature_info()
+        .await
+        .map_err(|e| classify_hidpp_error(e, operation, HostsInfoFeature::ID))?;
+    Ok(info.current_host)
 }
 
 /// Read the keyboard's Fn-lock state on `route`.
@@ -189,7 +202,10 @@ async fn get_fn_lock_on_channel(
     let mut device = Device::new(Arc::clone(channel), index)
         .await
         .map_err(|_| WriteError::DeviceUnreachable { index })?;
-    FnInversion::open(&mut device).await?.get().await
+    FnInversion::open(&mut device, HidppOperation::ReadFnLock)
+        .await?
+        .get()
+        .await
 }
 
 /// Write the keyboard's Fn-lock state on `route`: `true` = the F-row sends
@@ -217,7 +233,7 @@ pub(super) async fn set_fn_lock_on_channel(
     let mut device = Device::new(Arc::clone(channel), index)
         .await
         .map_err(|_| WriteError::DeviceUnreachable { index })?;
-    let fn_inversion = FnInversion::open(&mut device).await?;
+    let fn_inversion = FnInversion::open(&mut device, HidppOperation::WriteFnLock).await?;
     let echoed = fn_inversion.set(inversion_for(on)).await?;
     if echoed.fn_lock != on {
         // The echo is the firmware's word on what it stored; a mismatch is

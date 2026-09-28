@@ -865,6 +865,71 @@ async fn fn_lock_addresses_the_current_host_slot_read_from_hosts_info() -> Resul
     Ok(())
 }
 
+/// The multi-host keyboard whose `0x1815 getFeatureInfo` answers with a HID++
+/// error (`Busy`): the feature is there, the slot is not readable right now.
+fn multi_host_keyboard_with_unreadable_hosts_info(request: &[u8]) -> Option<Vec<u8>> {
+    if request.len() >= 4 && request[2] == 0x0a && request[3] >> 4 == 0x00 {
+        // HID++ 2.0 error frame: feature index 0xff, then the failing
+        // feature index, the function/software id nibble pair, and the code.
+        let mut response = vec![0u8; 20];
+        response[0] = 0x11;
+        response[1] = request[1];
+        response[2] = 0xff;
+        response[3] = request[2];
+        response[4] = request[3];
+        response[5] = 8; // Busy
+        return Some(response);
+    }
+    multi_host_keyboard_response(request)
+}
+
+#[tokio::test]
+async fn fn_lock_does_not_guess_the_host_when_hosts_info_is_unreadable() {
+    let (raw, handle) =
+        ScriptedRawHidChannel::with_responder(multi_host_keyboard_with_unreadable_hosts_info);
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(
+        channel,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xb378,
+        },
+    );
+
+    let error = set_fn_lock_on(&shared, true)
+        .await
+        .expect_err("a keyboard with 0x1815 that cannot say which slot is current fails the write");
+    assert_eq!(
+        error,
+        WriteError::HidppFeature {
+            operation: HidppOperation::WriteFnLock,
+            feature_hex: 0x1815,
+            kind: HidppFeatureErrorKind::Busy,
+        }
+    );
+    // Nothing was written to 0x40a3: a 0xff-addressed write is the one the
+    // MX Keys S firmware drops, so it is never sent as a guess.
+    assert!(
+        !handle
+            .written_reports()
+            .into_iter()
+            .any(|report| report[2] == 0x09 && report[3] >> 4 == 0x01),
+        "no setGlobalFnInversion without a known host slot"
+    );
+
+    let error = get_fn_lock_on(&shared)
+        .await
+        .expect_err("the read fails the same way");
+    assert!(matches!(
+        error,
+        WriteError::HidppFeature {
+            operation: HidppOperation::ReadFnLock,
+            feature_hex: 0x1815,
+            ..
+        }
+    ));
+}
+
 /// A single-host keyboard (`0x40a2` only) whose firmware echoes inversion ON
 /// no matter what is written — the keyboard did not take the write.
 fn stubborn_single_host_keyboard_response(request: &[u8]) -> Option<Vec<u8>> {
