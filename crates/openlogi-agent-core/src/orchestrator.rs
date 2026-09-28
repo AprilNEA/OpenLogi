@@ -38,7 +38,7 @@ use crate::observable::ObservableState;
 use crate::receiver_access::ReceiverAccess;
 use crate::runtime::hook::{HookMaps, SharedHookMaps};
 use crate::runtime::scroll::ScrollPreferences;
-use crate::watchers::host_switch::{HostSwitchLink, HostSwitchLinks};
+use crate::watchers::host_switch::{HostSwitchInventory, HostSwitchLink, HostSwitchLinks};
 use crate::watchers::keyboard::{KeyboardSpec, SharedKeyboardSpec};
 use crate::{DpiCycleState, DpiCycles};
 
@@ -48,7 +48,7 @@ mod devices;
 use devices::{VOLATILE_REAPPLY_CONFIRM_RETRIES, reapply_targets};
 use devices::{
     any_device_needs_capture_rearm, build_devices, configured_wheel_mode, host_switch_links,
-    is_hidpp_device, pick_current, plan_reapply, stable_id,
+    is_hidpp_device, online_routes, pick_current, plan_reapply, stable_id,
 };
 
 /// The minimal per-device facts the agent needs: the config key (binding /
@@ -119,6 +119,8 @@ pub struct SharedHandles {
     pub receiver_access: ReceiverAccess,
     /// Keyboard → pointing-device routes resolved from `config.toml`.
     pub host_switch_links: HostSwitchLinks,
+    /// Online physical routes, independent of host-switch configuration.
+    pub host_switch_inventory: HostSwitchInventory,
 }
 
 impl SharedHandles {
@@ -208,6 +210,7 @@ pub struct Orchestrator {
     capture_plans_tx: watch::Sender<Arc<Vec<DeviceCapturePlan>>>,
     keyboard_spec_tx: watch::Sender<Option<Arc<KeyboardSpec>>>,
     host_switch_links_tx: watch::Sender<Arc<Vec<HostSwitchLink>>>,
+    host_switch_inventory_tx: watch::Sender<Arc<Vec<DeviceRoute>>>,
     shared: SharedHandles,
     /// The state the GUI observes. Every mutator below that changes one of its
     /// facts republishes here, so the cell cannot go stale behind a new code
@@ -253,6 +256,8 @@ impl Orchestrator {
         let (capture_plans_tx, capture_plans) = watch::channel(Arc::new(Vec::new()));
         let (keyboard_spec_tx, keyboard_spec) = watch::channel(None);
         let (host_switch_links_tx, host_switch_links) = watch::channel(Arc::new(Vec::new()));
+        let (host_switch_inventory_tx, host_switch_inventory) =
+            watch::channel(Arc::new(Vec::new()));
         let shared = SharedHandles {
             device_io: hardware.device_io(),
             channel_pool: hardware.channel_pool(),
@@ -272,6 +277,7 @@ impl Orchestrator {
             capture_rearm_generation: Arc::new(AtomicU64::new(0)),
             receiver_access: ReceiverAccess::default(),
             host_switch_links,
+            host_switch_inventory,
         };
         let orch = Self {
             config,
@@ -292,6 +298,7 @@ impl Orchestrator {
             capture_plans_tx,
             keyboard_spec_tx,
             host_switch_links_tx,
+            host_switch_inventory_tx,
             shared,
             observable,
         };
@@ -442,6 +449,7 @@ impl Orchestrator {
             self.config.keyboard.bindings.clone(),
             "keyboard_bindings",
         );
+        publish_arc_if_changed(&self.host_switch_inventory_tx, online_routes(&self.devices));
         publish_arc_if_changed(
             &self.host_switch_links_tx,
             host_switch_links(&self.config, &self.devices),

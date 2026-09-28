@@ -44,6 +44,8 @@ pub(crate) async fn scripted_channel(raw: impl RawHidChannel) -> Arc<HidppChanne
 /// [`Self::Fails`] is a backend failure the ledger replays a last-good snapshot
 /// through.
 pub(crate) enum ScriptedOpen {
+    /// A live channel with a test-specific firmware responder.
+    Live(Arc<HidppChannel>),
     /// The backend cannot open the node at all — unplugged mid-tick, or denied.
     Fails,
     /// The node opens but carries no HID++ collection.
@@ -88,6 +90,7 @@ impl HidBackend for ScriptedBackend {
     async fn open_hidpp(&self, node: &NodeInfo) -> Result<Option<Arc<HidppChannel>>, BackendError> {
         match self.open_outcome(&node.id) {
             None | Some(ScriptedOpen::Fails) => Err(BackendError::Disconnected),
+            Some(ScriptedOpen::Live(channel)) => Ok(Some(Arc::clone(channel))),
             Some(ScriptedOpen::NotHidpp) => Ok(None),
             Some(ScriptedOpen::UnresponsiveHidpp) => {
                 let (raw, _) = ScriptedRawHidChannel::with_responder(|_| None);

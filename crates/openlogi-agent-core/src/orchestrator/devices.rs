@@ -130,7 +130,7 @@ pub(super) fn host_switch_links(config: &Config, devices: &[AgentDevice]) -> Vec
         .filter_map(|(keyboard_key, settings)| {
             let keyboard = devices
                 .iter()
-                .find(|device| device.config_key == *keyboard_key && device.online)?
+                .find(|device| device.config_key == *keyboard_key)?
                 .route
                 .clone()?;
             let targets = settings
@@ -143,7 +143,11 @@ pub(super) fn host_switch_links(config: &Config, devices: &[AgentDevice]) -> Vec
                         .and_then(|device| device.route.clone())
                 })
                 .collect::<Vec<_>>();
-            (!targets.is_empty()).then_some(HostSwitchLink { keyboard, targets })
+            (!targets.is_empty()).then_some(HostSwitchLink {
+                keyboard_key: keyboard_key.clone(),
+                keyboard,
+                targets,
+            })
         })
         .collect()
 }
@@ -281,4 +285,13 @@ pub(super) fn pick_current(devices: &[AgentDevice], saved: Option<&str>) -> usiz
 
 pub(super) fn is_hidpp_device(device: &AgentDevice) -> bool {
     !matches!(device.route, Some(DeviceRoute::RawHid { .. }))
+}
+
+/// Physical presence must not depend on whether a follower link is configured.
+pub(super) fn online_routes(devices: &[AgentDevice]) -> Vec<DeviceRoute> {
+    devices
+        .iter()
+        .filter(|device| device.online)
+        .filter_map(|device| device.route.clone())
+        .collect()
 }

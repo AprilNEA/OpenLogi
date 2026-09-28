@@ -57,8 +57,10 @@ pub use session::gesture::{
     CapturedInput, PendingCaptureRestore, run_capture_session,
 };
 pub use session::host_switch::{
-    HostSwitchError, HostSwitchRestoreOutcome, HostSwitchSessionFailure, HostSwitchSessionOutcome,
-    HostSwitchStopReason, PendingHostSwitchRestore, run_host_switch_session, switch_linked_hosts,
+    HostSwitchCaptureMode, HostSwitchError, HostSwitchRequest, HostSwitchRestoreOutcome,
+    HostSwitchSessionFailure, HostSwitchSessionOutcome, HostSwitchStopReason,
+    KeyboardHostTransition, PendingHostSwitchRestore, ReportedHostSlot, run_host_switch_session,
+    switch_linked_hosts,
 };
 pub use session::keyboard::{KEYBOARD_KEY_CIDS, run_keyboard_capture_session};
 pub use write::{

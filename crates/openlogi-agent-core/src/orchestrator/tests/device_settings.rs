@@ -47,14 +47,14 @@ fn configured_wheel_mode_leaves_unset_resolution_unmanaged() {
 }
 
 #[test]
-fn host_switch_links_keep_sleeping_targets_but_require_online_keyboard() {
+fn host_switch_links_remain_configured_across_physical_departure() {
     let mut config = Config::default();
     config
         .devices
         .entry("keyboard".into())
         .or_default()
         .host_switch_targets = vec!["mouse".into(), "offline".into(), "missing".into()];
-    let devices = [
+    let mut devices = [
         dev("keyboard", 1, true),
         dev("mouse", 2, true),
         dev("offline", 3, false),
@@ -83,6 +83,17 @@ fn host_switch_links_keep_sleeping_targets_but_require_online_keyboard() {
             }
         ]
     );
+    assert_eq!(links[0].keyboard_key, "keyboard");
+    devices[0].online = false;
+    assert_eq!(host_switch_links(&config, &devices), links);
+    assert!(!super::super::online_routes(&devices).contains(&links[0].keyboard));
+    config
+        .devices
+        .get_mut("keyboard")
+        .unwrap()
+        .host_switch_targets
+        .clear();
+    assert!(host_switch_links(&config, &devices).is_empty());
 }
 
 #[test]
