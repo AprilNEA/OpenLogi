@@ -241,9 +241,22 @@ impl FromStr for KeyCombo {
             return Err(KeyComboParseError::Empty);
         }
 
+        // `+` joins tokens, so a `+` key can only be the last one, written
+        // as a trailing `++` (`Ctrl++`) or alone.
+        let (body, trailing_plus) = if input == "+" {
+            ("", true)
+        } else if let Some(body) = input.strip_suffix("++") {
+            (body, true)
+        } else {
+            (input, false)
+        };
+        let tokens = body
+            .split('+')
+            .filter(|_| !body.is_empty())
+            .chain(trailing_plus.then_some("plus"));
         let mut modifiers = 0;
         let mut key = None;
-        for raw in input.split('+') {
+        for raw in tokens {
             let token = raw.trim();
             if token.is_empty() {
                 return Err(KeyComboParseError::UnknownToken(raw.to_string()));
@@ -254,6 +267,13 @@ impl FromStr for KeyCombo {
             }
             if key.is_some() {
                 return Err(KeyComboParseError::MultipleKeys);
+            }
+            if token.eq_ignore_ascii_case("plus") {
+                // The combo names physical keys by their US-layout position,
+                // where `+` is Shift+`=`: what Ctrl++ (zoom in) sends there.
+                modifiers |= MOD_SHIFT;
+                key = Some(parse_key("=")?);
+                continue;
             }
             key = Some(parse_key(token)?);
         }
@@ -329,6 +349,24 @@ fn parse_key(token: &str) -> Result<KeyboardUsage, KeyComboParseError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_plus_key_is_shift_equals() {
+        for input in ["Ctrl++", "ctrl+plus", "Ctrl + Plus"] {
+            let combo = input.parse::<KeyCombo>().expect(input);
+            assert!(combo.has_control() && combo.has_shift(), "{input}");
+            assert_eq!(combo.key().code(), 0x2e, "{input}");
+            assert_eq!(combo.rendered_label(), "Ctrl+Shift+=");
+            assert_eq!(combo.rendered_label().parse::<KeyCombo>(), Ok(combo));
+        }
+        let alone = "+".parse::<KeyCombo>().expect("a bare plus");
+        assert!(alone.has_shift() && !alone.has_control());
+        assert_eq!(
+            "Ctrl+A++".parse::<KeyCombo>(),
+            Err(KeyComboParseError::MultipleKeys)
+        );
+        let _ = "Ctrl+".parse::<KeyCombo>().unwrap_err();
+    }
 
     #[test]
     fn parses_modifiers_letters_and_navigation_keys() {
