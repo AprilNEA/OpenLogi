@@ -182,3 +182,20 @@ fn orchestrator_exposes_only_the_bounded_confirmation_run() {
         );
     }
 }
+
+#[test]
+fn a_reload_writes_fn_lock_only_when_its_setting_changed() {
+    let keyboard = "unit:k860";
+    let unset = Config::ephemeral();
+    let mut off = Config::ephemeral();
+    off.set_fn_lock(keyboard, false);
+    let mut on = Config::ephemeral();
+    on.set_fn_lock(keyboard, true);
+
+    assert_eq!(changed_fn_lock(&unset, &off, keyboard), Some(false));
+    assert_eq!(changed_fn_lock(&off, &on, keyboard), Some(true));
+    // An unrelated edit reloads the same value: the keyboard's own Fn+Esc
+    // state must survive it.
+    assert_eq!(changed_fn_lock(&on, &on, keyboard), None);
+    assert_eq!(changed_fn_lock(&unset, &unset, keyboard), None);
+}
