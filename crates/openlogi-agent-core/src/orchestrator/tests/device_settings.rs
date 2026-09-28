@@ -1,5 +1,7 @@
 //! Per-device settings the orchestrator derives: wheel mode, host-switch links and the DPI cycle.
 
+use std::collections::BTreeMap;
+
 use super::*;
 
 #[test]
@@ -117,5 +119,133 @@ fn dpi_cycle_drops_offline_device_and_restores_on_return() {
     assert_eq!(
         dpi.by_key.get("mouse").and_then(|s| s.target.clone()),
         orch.devices[0].route
+    );
+}
+
+fn keyboard(key: &str, slot: u8, online: bool) -> AgentDevice {
+    let mut device = dev(key, slot, online);
+    device.kind = DeviceKind::Keyboard;
+    device
+}
+
+#[test]
+fn keyboard_spec_diverts_exactly_the_bound_controls() {
+    let mut config = Config::default();
+    // A catalogued key, a key OpenLogi has no catalog row for, and a key
+    // bound to nothing — only the first two are diverted, by their CID.
+    config.set_binding(
+        "kbd",
+        ButtonId::control(0x010a),
+        Binding::Single(Action::Screenshot),
+    );
+    config.set_binding(
+        "kbd",
+        ButtonId::control(0x01f3),
+        Binding::Single(Action::Copy),
+    );
+    config.set_binding(
+        "kbd",
+        ButtonId::control(0x00e5),
+        Binding::Single(Action::None),
+    );
+    let mut orch = orchestrator(config);
+    orch.devices = vec![keyboard("kbd", 1, true)];
+
+    let spec = orch.keyboard_spec_for().expect("bound keys publish a spec");
+    assert_eq!(
+        spec.wanted,
+        BTreeMap::from([
+            (0x010a, ButtonId::control(0x010a)),
+            (0x01f3, ButtonId::control(0x01f3)),
+        ])
+    );
+    assert_eq!(spec.config_key, "kbd");
+}
+
+#[test]
+fn keyboard_spec_is_absent_without_a_real_binding_or_for_a_disabled_keyboard() {
+    let mut config = Config::default();
+    config.set_binding(
+        "kbd",
+        ButtonId::control(0x010a),
+        Binding::Single(Action::None),
+    );
+    let mut orch = orchestrator(config);
+    orch.devices = vec![keyboard("kbd", 1, true)];
+    assert!(orch.keyboard_spec_for().is_none(), "None is not a binding");
+
+    let mut config = Config::default();
+    config.set_binding(
+        "kbd",
+        ButtonId::control(0x010a),
+        Binding::Single(Action::Screenshot),
+    );
+    config.set_device_enabled("kbd", false);
+    let mut orch = orchestrator(config);
+    orch.devices = vec![keyboard("kbd", 1, true)];
+    assert!(
+        orch.keyboard_spec_for().is_none(),
+        "a disabled keyboard is left fully native"
+    );
+}
+
+#[test]
+fn keyboard_spec_prefers_the_online_keyboard_over_a_sleeping_slot() {
+    // The same MX Keys Mini paired three times (#1581): the stale slots sort
+    // first but must not take the session from the keyboard that is typing.
+    let mut config = Config::default();
+    for key in ["stale", "live"] {
+        config.set_binding(
+            key,
+            ButtonId::control(0x010a),
+            Binding::Single(Action::Screenshot),
+        );
+    }
+    let mut orch = orchestrator(config);
+    orch.devices = vec![keyboard("stale", 1, false), keyboard("live", 2, true)];
+    assert_eq!(orch.keyboard_spec_for().expect("spec").config_key, "live");
+
+    // With every keyboard asleep the first one keeps the session, so a nap
+    // does not tear diversion down.
+    orch.devices = vec![keyboard("stale", 1, false), keyboard("live", 2, false)];
+    assert_eq!(orch.keyboard_spec_for().expect("spec").config_key, "stale");
+}
+
+#[test]
+fn keyboard_spec_never_diverts_reserved_controls() {
+    // The Easy-Switch host keys belong to the host-switch session and the
+    // primary clicks must never be swallowed; a binding that names one is
+    // left native, and a binding naming only those publishes no session.
+    let mut config = Config::default();
+    config.set_binding(
+        "kbd",
+        ButtonId::control(0x00d1),
+        Binding::Single(Action::Copy),
+    );
+    config.set_binding(
+        "kbd",
+        ButtonId::control(0x0050),
+        Binding::Single(Action::Copy),
+    );
+    let mut orch = orchestrator(config);
+    orch.devices = vec![keyboard("kbd", 1, true)];
+    assert!(orch.keyboard_spec_for().is_none());
+
+    let mut config = Config::default();
+    config.set_binding(
+        "kbd",
+        ButtonId::control(0x00d1),
+        Binding::Single(Action::Copy),
+    );
+    config.set_binding(
+        "kbd",
+        ButtonId::control(0x010a),
+        Binding::Single(Action::Screenshot),
+    );
+    let mut orch = orchestrator(config);
+    orch.devices = vec![keyboard("kbd", 1, true)];
+    assert_eq!(
+        orch.keyboard_spec_for().expect("spec").wanted,
+        BTreeMap::from([(0x010a, ButtonId::control(0x010a))])
     );
 }

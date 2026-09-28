@@ -26,7 +26,7 @@ const DIRECT_PRODUCT_ID: u16 = 0xb35b;
 const BOLT_PRODUCT_ID: u16 = 0xc548;
 const REPROG_FEATURE_INDEX: u8 = 0x02;
 const GESTURE_CID: u16 = reprog_controls::GESTURE_BUTTON_CID;
-/// The Mute key, one of [`crate::KEYBOARD_KEY_CIDS`].
+/// The Mute key (`0x1b04` control `0x00e7`).
 const KEYBOARD_CID: u16 = 0x00e7;
 const ORIGINAL_REMAP_CID: u16 = 0x0053;
 /// A `getCidInfo` capability pair (bytes 4 and 8): a mouse control that is
@@ -86,7 +86,7 @@ async fn keyboard_capture_replay_restores_original_reporting_on_normal_shutdown(
     let (shutdown, host) = replay.host(sink);
     let capture = run_keyboard_capture_session(
         replay.route.clone(),
-        BTreeMap::from([(KEYBOARD_CID, ButtonId::KeyMute)]),
+        BTreeMap::from([(KEYBOARD_CID, ButtonId::control(KEYBOARD_CID))]),
         host,
     );
 

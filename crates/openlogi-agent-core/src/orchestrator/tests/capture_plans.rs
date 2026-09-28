@@ -240,3 +240,40 @@ fn macos_side_gesture_capture_follows_mouse_hook_availability() {
         "revoking the movement hook must restore native HID++ controls"
     );
 }
+
+#[test]
+fn keyboard_control_bindings_never_enter_the_mouse_capture_plan() {
+    // The keyboard watcher owns `0x1b04` key diversion. The gesture watcher
+    // also plans a session for every online device, so a keyboard key must
+    // not appear in that plan's divert set or the two sessions would each
+    // divert the same control on the same channel.
+    let mut config = Config::default();
+    config.set_binding(
+        "keyboard",
+        ButtonId::control(0x010a),
+        Binding::Single(Action::Screenshot),
+    );
+    let mut orch = orchestrator(config);
+    let mut keyboard = dev("keyboard", 2, true);
+    keyboard.kind = DeviceKind::Keyboard;
+    orch.devices = vec![keyboard];
+    orch.rebuild();
+
+    let plans = orch.shared.capture_plans.borrow();
+    let plan = plans.first().expect("keyboard plan");
+    let spec = &plan.target.spec;
+    let diverted_controls: Vec<u16> = spec
+        .divert_buttons
+        .iter()
+        .chain(&spec.divert_gesture_buttons)
+        .filter(|(_, button)| button.cid().is_some())
+        .map(|(cid, _)| *cid)
+        .collect();
+    assert!(diverted_controls.is_empty(), "{diverted_controls:#06x?}");
+    assert!(!spec.divert_gesture_sources.contains(&0x010a));
+    assert_eq!(
+        plan.dispatch.bindings[&ButtonId::control(0x010a)].click_action(),
+        Action::Screenshot,
+        "the key still resolves in the plan's binding map for dispatch"
+    );
+}

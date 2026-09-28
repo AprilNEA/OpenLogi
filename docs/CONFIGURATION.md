@@ -77,7 +77,13 @@ Common device fields are:
   pair, or a gesture-direction map.
   `Thumbwheel` is the thumb wheel's capacitive tap — it has no GUI control and
   stays inert unless bound here, because the wheel reports taps from incidental
-  thumb contact as well as from deliberate ones
+  thumb contact as well as from deliberate ones.
+  Keyboard keys are named by their HID++ `0x1b04` control: a catalog name such
+  as `KeyScreenCapture`, `KeyCalculator` or `KeyLock`, or `control:0x<cid>` for
+  any control `openlogi diag controls` reports as divertable. A bound key is
+  diverted to OpenLogi while the agent runs; an unbound key keeps its firmware
+  function, so binding `None` is the same as removing the entry. Naming one
+  control under both spellings in the same table is an error, not a merge
 - `per_app_bindings`: sparse action overlays keyed by macOS bundle id, Linux
   application id, exact lower-cased Windows executable path, or
   `exe:<filename>.exe`. The Buttons panel edits these under its Profile

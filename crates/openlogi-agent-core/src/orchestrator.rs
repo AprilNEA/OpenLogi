@@ -23,7 +23,8 @@ use openlogi_core::device::{
 };
 use openlogi_core::device_order::{DeviceIdentity, PhysicalDeviceKey};
 use openlogi_hid::{
-    CaptureChannelSlot, ChannelPool, ChannelRegistry, DeviceIoGate, DeviceRoute, KEYBOARD_KEY_CIDS,
+    CaptureChannelSlot, ChannelPool, ChannelRegistry, DeviceIoGate, DeviceRoute,
+    is_reserved_keyboard_control,
 };
 use openlogi_ipc::InventoryHealth;
 use tokio::sync::watch;
@@ -376,11 +377,21 @@ impl Orchestrator {
         }
     }
 
-    /// The keyboard key-capture spec for the first known keyboard, or `None`
-    /// when no keyboard is paired or none of its capturable keys carries a
-    /// real binding (an unbound key must never be diverted).
+    /// The keyboard key-capture spec for the managed keyboard, or `None` when
+    /// no keyboard is paired or none of its keys carries a real binding (an
+    /// unbound key must never be diverted).
     ///
-    /// Deliberately does NOT require the keyboard to be online: an idle
+    /// The bound keys *are* the divert set: every
+    /// [`ButtonId::Control`](openlogi_core::binding::ButtonId::Control) in the
+    /// keyboard's effective bindings names the `0x1b04` control to divert, and
+    /// the capture session arms whichever of those the device's own control
+    /// table reports as divertable. No fixed key table sits in between, so a
+    /// keyboard OpenLogi has never seen is remappable the day it ships.
+    ///
+    /// One session at a time: an online keyboard wins over a paired-but-asleep
+    /// one, so a stale receiver slot for the same model (#1581) cannot take
+    /// the session from the keyboard that is actually typing. Beyond that the
+    /// spec deliberately does NOT require the keyboard to be online: an idle
     /// keyboard sleeps within minutes and probe timeouts can flap it offline,
     /// and tearing the capture session down on every nap would hand the
     /// diverted keys back to the firmware (dead bindings) until the re-arm
@@ -388,24 +399,39 @@ impl Orchestrator {
     /// channel is to the always-present receiver — and re-arms diversion on
     /// the device's `0x1d4b` reconnection broadcast.
     fn keyboard_spec_for(&self) -> Option<KeyboardSpec> {
-        let dev = self
+        let mut keyboards = self
             .devices
             .iter()
-            .find(|d| d.kind == DeviceKind::Keyboard && d.route.is_some())?;
+            .filter(|d| d.kind == DeviceKind::Keyboard && d.route.is_some())
+            .filter(|d| self.config.device_enabled(&d.config_key));
+        let first = keyboards.next()?;
+        let dev = keyboards
+            .find(|d| d.online && !first.online)
+            .unwrap_or(first);
         let bindings = button_bindings_for(
             &self.config,
             Some(&dev.config_key),
             self.current_app.as_deref(),
         );
-        let wanted: BTreeMap<u16, _> = KEYBOARD_KEY_CIDS
+        let wanted: BTreeMap<u16, _> = bindings
             .iter()
-            .filter(|(_, button)| {
-                bindings.get(button).is_some_and(|binding| {
-                    matches!(binding, Binding::LongPress(_))
-                        || binding.click_action() != Action::None
-                })
+            .filter_map(|(button, binding)| {
+                let cid = button.cid()?.raw();
+                let bound = matches!(binding, Binding::LongPress(_))
+                    || binding.click_action() != Action::None;
+                if !bound {
+                    return None;
+                }
+                if is_reserved_keyboard_control(cid) {
+                    warn!(
+                        cid = format_args!("{cid:#06x}"),
+                        key = %dev.config_key,
+                        "binding names a control OpenLogi never diverts as a key — left native"
+                    );
+                    return None;
+                }
+                Some((cid, *button))
             })
-            .copied()
             .collect();
         if wanted.is_empty() {
             return None;

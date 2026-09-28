@@ -3,6 +3,9 @@ use crate::receiver_access::ReceiverAccess;
 use openlogi_core::binding::Action;
 use openlogi_hid::{CaptureChannelSlot, ChannelRegistry};
 
+/// The Search key (`0x1b04` control `0x00d4`).
+const SEARCH_KEY: ButtonId = ButtonId::control(0x00d4);
+
 fn target() -> KeyboardTarget {
     KeyboardTarget {
         route: DeviceRoute::Direct {
@@ -20,7 +23,7 @@ fn session_id(epoch: u64) -> HidppSessionId {
 fn dispatch(action: Action) -> KeyboardDispatchPlan {
     KeyboardDispatchPlan {
         config_key: "keyboard-a".to_owned(),
-        bindings: BTreeMap::from([(ButtonId::KeySearch, Binding::Single(action))]),
+        bindings: BTreeMap::from([(SEARCH_KEY, Binding::Single(action))]),
     }
 }
 
@@ -116,7 +119,7 @@ fn target_changes_freeze_dispatch_until_teardown_finishes() {
     let mut session = live_session(7);
     let old_dispatch = session.dispatch().clone();
     let mut replacement = target();
-    replacement.wanted.insert(0x00d4, ButtonId::KeySearch);
+    replacement.wanted.insert(0x00d4, SEARCH_KEY);
     let new_dispatch = dispatch(Action::ShowDesktop);
 
     assert!(

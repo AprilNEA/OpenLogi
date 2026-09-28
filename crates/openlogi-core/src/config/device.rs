@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use super::button_map::{deserialize_button_map, deserialize_button_maps_by_app};
 use super::settings::{
     CameraControls, GestureOwner, LightSettings, Lighting, ScrollResolution, SmartShift,
     ThumbwheelSensitivity, deserialize_gesture_owner,
@@ -449,18 +450,18 @@ struct RawDeviceConfig {
     #[serde(default)]
     links: BTreeMap<String, LinkConfig>,
     /// v2 shape — present on already-migrated files; wins on any key collision.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_button_map")]
     bindings: BTreeMap<ButtonId, Binding>,
     /// v4 stash of turned-off gesture maps (see [`DeviceConfig::disabled_gestures`]).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_button_map")]
     disabled_gestures: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
     /// Legacy v1 per-button single bindings.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_button_map")]
     button_bindings: BTreeMap<ButtonId, Action>,
     /// Legacy v1 flat gesture map (implicitly the gesture button's directions).
     #[serde(default)]
     gesture_bindings: BTreeMap<GestureDirection, Action>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_button_maps_by_app")]
     per_app_bindings: BTreeMap<String, BTreeMap<ButtonId, Action>>,
     #[serde(default)]
     action_ring: ActionRingConfig,

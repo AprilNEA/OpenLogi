@@ -60,7 +60,9 @@ pub use session::host_switch::{
     HostSwitchError, HostSwitchRestoreOutcome, HostSwitchSessionFailure, HostSwitchSessionOutcome,
     HostSwitchStopReason, PendingHostSwitchRestore, run_host_switch_session, switch_linked_hosts,
 };
-pub use session::keyboard::{KEYBOARD_KEY_CIDS, run_keyboard_capture_session};
+pub use session::keyboard::{
+    RESERVED_KEYBOARD_CONTROLS, is_reserved_keyboard_control, run_keyboard_capture_session,
+};
 pub use write::{
     Dpi, DpiCapabilities, DpiInfo, FeatureEntry, FirmwareEntity, FirmwareEntityInfo,
     HapticWaveform, HidppFeatureErrorKind, HidppOperation, LITRA_BEAM_PRODUCT_ID,
