@@ -35,7 +35,9 @@ use super::features::{BatteryProbe, ProbedFeatures};
 /// (the cache is a warm-start optimization, not data anyone must keep).
 /// v2 dropped the `UnifyingSlot` key (slot-keyed, so not re-pair-safe).
 /// v3 adds event-capable feature indexes discovered by the immutable walk.
-const SCHEMA_VERSION: u32 = 3;
+/// v4 adds `Capabilities::keyboard_keys`; a v3 snapshot would publish an empty
+/// set for an already-probed keyboard until something forced a re-probe.
+const SCHEMA_VERSION: u32 = 4;
 
 impl ProbeCacheError {
     /// Report why a store could not keep a snapshot.

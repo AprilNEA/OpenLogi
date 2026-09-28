@@ -43,6 +43,9 @@ pub struct ReprogControlEntry {
     pub task_id: u16,
     /// Capability and classification flags for the control.
     pub flags: CidFlags,
+    /// Physical position the device reports: for a function-row key, which
+    /// F-key it shares (1 = F1); zero when the control has none.
+    pub position: u8,
 }
 
 impl From<CidInfo> for ReprogControlEntry {
@@ -51,6 +54,7 @@ impl From<CidInfo> for ReprogControlEntry {
             cid: info.cid.into(),
             task_id: info.task_id.0,
             flags: info.flags,
+            position: info.position,
         }
     }
 }

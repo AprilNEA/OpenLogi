@@ -35,21 +35,7 @@ use crate::{ChannelRegistry, SharedChannel};
 
 use crate::reprog_controls::{self, RawControlEvent, ReprogControlsV4};
 
-/// The divertable keyboard F-row controls OpenLogi models, as
-/// `(0x1b04 control ID, ButtonId)` pairs. CID values match Logitech's control
-/// catalog (cross-checked against Solaar's `special_keys.py`); the F-row
-/// positions are the Signature-series layout.
-pub const KEYBOARD_KEY_CIDS: [(u16, ButtonId); 9] = [
-    (0x00d4, ButtonId::KeySearch),
-    (0x0103, ButtonId::KeyDictation),
-    (0x0108, ButtonId::KeyEmoji),
-    (0x010a, ButtonId::KeyScreenCapture),
-    (0x011c, ButtonId::KeyMicMute),
-    (0x00e5, ButtonId::KeyPlayPause),
-    (0x00e7, ButtonId::KeyMute),
-    (0x00e8, ButtonId::KeyVolumeDown),
-    (0x00e9, ButtonId::KeyVolumeUp),
-];
+pub use openlogi_core::binding::KEYBOARD_KEY_CIDS;
 
 /// Capture the requested keyboard controls on `route` until `host.shutdown`
 /// resolves, forwarding [`CapturedInput::ButtonDown`] and

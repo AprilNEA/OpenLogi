@@ -6,6 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::binding::ButtonId;
 use crate::hid::DeviceRoute;
 
 mod light;
@@ -134,6 +135,51 @@ pub struct Capabilities {
     /// both diversion and raw-XY reporting for hold-and-swipe gestures.
     #[serde(default)]
     pub dpi_gestures: bool,
+    /// The keyboard keys whose controls the device's `0x1b04` table reports as
+    /// divertable — the keys a binding can actually capture.
+    #[serde(default)]
+    pub keyboard_keys: KeyboardKeys,
+}
+
+/// A set of [`ButtonId::KEYBOARD_KEYS`], one bit per key in that array's
+/// append-only order, so it stays `Copy` inside [`Capabilities`].
+///
+/// Bits past the known keys (set by a newer agent) are kept but never yielded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct KeyboardKeys(u32);
+
+impl KeyboardKeys {
+    /// Add `key`; a button outside [`ButtonId::KEYBOARD_KEYS`] is ignored.
+    pub fn insert(&mut self, key: ButtonId) {
+        if let Some(bit) = Self::bit(key) {
+            self.0 |= bit;
+        }
+    }
+
+    /// Whether `key` is in the set.
+    #[must_use]
+    pub fn contains(self, key: ButtonId) -> bool {
+        Self::bit(key).is_some_and(|bit| self.0 & bit != 0)
+    }
+
+    /// Whether no known key is in the set.
+    #[must_use]
+    pub fn is_empty(self) -> bool {
+        self.iter().next().is_none()
+    }
+
+    /// The keys in the set, in [`ButtonId::KEYBOARD_KEYS`] order.
+    pub fn iter(self) -> impl Iterator<Item = ButtonId> {
+        ButtonId::KEYBOARD_KEYS
+            .into_iter()
+            .filter(move |key| self.contains(*key))
+    }
+
+    fn bit(key: ButtonId) -> Option<u32> {
+        let index = ButtonId::KEYBOARD_KEYS.iter().position(|k| *k == key)?;
+        1u32.checked_shl(u32::try_from(index).ok()?)
+    }
 }
 
 impl Capabilities {
@@ -157,6 +203,7 @@ impl Capabilities {
             haptic_feedback: ids.contains(&0x19b0),
             haptic_panel: false,
             dpi_gestures: false,
+            keyboard_keys: KeyboardKeys::default(),
         }
     }
 
@@ -178,6 +225,7 @@ impl Capabilities {
                 haptic_feedback: false,
                 haptic_panel: false,
                 dpi_gestures: false,
+                keyboard_keys: KeyboardKeys::default(),
             },
             DeviceKind::Keyboard => Self {
                 lighting: true,
@@ -445,9 +493,41 @@ pub struct DeviceInventory {
 mod tests {
     use super::{
         BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
-        DeviceModelInfo, DeviceTransports, LightValueRange, LightValueUnit, PairedDevice,
-        ReceiverInfo,
+        DeviceModelInfo, DeviceTransports, KeyboardKeys, LightValueRange, LightValueUnit,
+        PairedDevice, ReceiverInfo,
     };
+    use crate::binding::ButtonId;
+
+    #[test]
+    fn keyboard_keys_hold_only_keyboard_buttons_in_catalog_order() {
+        let mut keys = KeyboardKeys::default();
+        assert!(keys.is_empty());
+        keys.insert(ButtonId::KeyAppSwitch);
+        keys.insert(ButtonId::KeySearch);
+        keys.insert(ButtonId::KeySearch);
+        // A mouse button has no bit, so it is ignored rather than aliased.
+        keys.insert(ButtonId::LeftClick);
+        assert!(keys.contains(ButtonId::KeySearch));
+        assert!(!keys.contains(ButtonId::LeftClick));
+        assert!(!keys.contains(ButtonId::KeyCalculator));
+        assert_eq!(
+            keys.iter().collect::<Vec<_>>(),
+            [ButtonId::KeySearch, ButtonId::KeyAppSwitch]
+        );
+    }
+
+    #[test]
+    fn keyboard_keys_ignore_bits_past_the_known_keys() {
+        #[derive(serde::Deserialize)]
+        struct Row {
+            keys: KeyboardKeys,
+        }
+        let parse = |text: &str| toml::from_str::<Row>(text).expect("u32 set").keys;
+        // A newer agent may set bits this build has no key for.
+        let keys = parse("keys = 2147483649");
+        assert_eq!(keys.iter().collect::<Vec<_>>(), [ButtonId::KeySearch]);
+        assert!(parse("keys = 2147483648").is_empty());
+    }
 
     fn inventory(slot: u8, wpid: Option<u16>, battery_percentage: u8) -> DeviceInventory {
         DeviceInventory {
@@ -491,6 +571,7 @@ mod tests {
                     haptic_feedback: false,
                     haptic_panel: false,
                     dpi_gestures: false,
+                    keyboard_keys: KeyboardKeys::default(),
                 }),
             }],
         }
@@ -562,6 +643,7 @@ mod tests {
                 haptic_feedback: false,
                 haptic_panel: false,
                 dpi_gestures: false,
+                keyboard_keys: KeyboardKeys::default(),
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
@@ -579,6 +661,7 @@ mod tests {
                 haptic_feedback: false,
                 haptic_panel: false,
                 dpi_gestures: false,
+                keyboard_keys: KeyboardKeys::default(),
             }
         );
         // No driving features → nothing offered.

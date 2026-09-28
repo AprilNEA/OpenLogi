@@ -1,6 +1,9 @@
 use super::*;
 use openlogi_assets::{Assignment, Direction, ImageEntry, Metadata, Origin, Point};
-use openlogi_core::device::DeviceKind;
+use openlogi_core::device::{DeviceKind, KeyboardKeys};
+
+use super::key_points::KeyPoint;
+use crate::state::tests::state_with_a_keyboard;
 use std::path::PathBuf;
 
 #[test]
@@ -8,6 +11,61 @@ fn clicking_the_selected_key_closes_the_panel() {
     assert_eq!(next_selection_after_click(None, 3), Some(3));
     assert_eq!(next_selection_after_click(Some(3), 3), None);
     assert_eq!(next_selection_after_click(Some(3), 4), Some(4));
+}
+
+#[test]
+fn each_hotkey_sits_on_its_marked_key_and_the_rest_go_to_the_strip() {
+    let mut divertable = KeyboardKeys::default();
+    for key in [
+        ButtonId::KeyShowDesktop,
+        ButtonId::KeyCalculator,
+        ButtonId::KeyEmoji,
+    ] {
+        divertable.insert(key);
+    }
+    let state = state_with_a_keyboard(divertable);
+    let point = |control| KeyPoint {
+        x_frac: 0.5,
+        y_frac: 0.1,
+        control,
+    };
+    // Esc, F1 marked Brightness Down (not divertable here), F2 marked Show
+    // Desktop, F3 with no control in its slot id.
+    let row = KeyRow::new(
+        &state,
+        &[
+            point(None),
+            point(Some(0x00c7)),
+            point(Some(0x006e)),
+            point(None),
+        ],
+    );
+
+    let hotkeys: Vec<_> = row
+        .slots
+        .iter()
+        .map(|slot| slot.hotkey.as_ref().map(|hotkey| hotkey.button))
+        .collect();
+    assert_eq!(hotkeys, [None, None, Some(ButtonId::KeyShowDesktop), None]);
+    let unplaced: Vec<_> = row.unplaced.iter().map(|slot| slot.button).collect();
+    assert_eq!(unplaced, [ButtonId::KeyEmoji, ButtonId::KeyCalculator]);
+
+    assert_eq!(
+        row.slot_of(KeySelection::Hotkey(ButtonId::KeyShowDesktop)),
+        Some(2)
+    );
+    assert_eq!(row.slot_of(KeySelection::Function(2)), Some(2));
+    assert_eq!(row.slot_of(KeySelection::Hotkey(ButtonId::KeyEmoji)), None);
+    assert!(row.has_hotkey(ButtonId::KeyEmoji));
+    assert!(!row.has_hotkey(ButtonId::KeyMute));
+    assert!(row.has_hotkeys());
+
+    // Esc has no hotkey: it is inert on that layer but an F-key on the other.
+    assert_eq!(row.slots[0].selection(KeyLayer::Hotkey), None);
+    assert_eq!(
+        row.slots[0].selection(KeyLayer::Function),
+        Some(KeySelection::Function(0))
+    );
 }
 
 #[test]
@@ -214,6 +272,7 @@ fn legacy_asset(
     let assignments = marker_xs
         .iter()
         .map(|x| Assignment {
+            slot_id: String::new(),
             slot_name: String::new(),
             marker: Point { x: *x, y: marker_y },
             label: Direction { x: -1, y: -1 },
@@ -279,6 +338,7 @@ fn assignments_from_markers(markers: &[f32]) -> Vec<Assignment> {
         .iter()
         .enumerate()
         .map(|(idx, x)| Assignment {
+            slot_id: String::new(),
             slot_name: format!("slot-{idx}"),
             marker: Point { x: *x, y: 13.0 },
             label: Direction { x: -1, y: -1 },

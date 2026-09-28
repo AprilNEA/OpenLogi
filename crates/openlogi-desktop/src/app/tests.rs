@@ -2,8 +2,8 @@ use super::home::{connection_icon_path, ordered_device_indices};
 use super::{Capabilities, DetailTab, DeviceKind, DeviceRecord};
 use crate::ui::battery::{battery_charging_no_reading, battery_needs_attention};
 use openlogi_core::device::{
-    BatteryInfo, BatteryLevel, BatteryStatus, DeviceTransports, LightCapabilities, LightValueRange,
-    LightValueUnit,
+    BatteryInfo, BatteryLevel, BatteryStatus, DeviceTransports, KeyboardKeys, LightCapabilities,
+    LightValueRange, LightValueUnit,
 };
 use openlogi_core::hid::DeviceRoute;
 
@@ -233,6 +233,7 @@ fn tabs_follow_capabilities_not_kind() {
         haptic_feedback: false,
         haptic_panel: false,
         dpi_gestures: false,
+        keyboard_keys: KeyboardKeys::default(),
     });
     // After 0x0005 kind-correction the record has kind=Mouse, not Keyboard.
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Mouse, caps));
@@ -256,6 +257,7 @@ fn keyboard_without_asset_hides_buttons_tab() {
         haptic_feedback: false,
         haptic_panel: false,
         dpi_gestures: false,
+        keyboard_keys: KeyboardKeys::default(),
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(
@@ -277,6 +279,7 @@ fn keyboard_with_buttons_shows_keys_tab() {
         haptic_feedback: false,
         haptic_panel: false,
         dpi_gestures: false,
+        keyboard_keys: KeyboardKeys::default(),
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(tabs.contains(&DetailTab::Keys));

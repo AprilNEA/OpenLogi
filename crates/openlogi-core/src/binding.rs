@@ -30,7 +30,7 @@ pub use action_ring::{
     RingAction, RingActionError,
 };
 pub use application_target::{ApplicationTarget, ApplicationTargetError};
-pub use button::ButtonId;
+pub use button::{ButtonId, KEYBOARD_KEY_CIDS};
 pub use category::Category;
 pub use defaults::{default_binding, default_binding_for, default_gesture_binding};
 pub use effect::{Effect, MediaKey, MouseButton, NativeAction, Script, Shortcut};

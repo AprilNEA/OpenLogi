@@ -73,11 +73,90 @@ pub enum ButtonId {
     /// Tilting the main wheel right — `0x1b04` CID `0x005d` ("Right Scroll"),
     /// Logi metadata slot `SLOT_NAME_RIGHT_SCROLL_BUTTON`. Counterpart to
     /// [`ButtonId::WheelTiltLeft`].
+    WheelTiltRight,
+    /// Keyboard "Calculator" control (CID `0x000a`, firmware task
+    /// `CALCULATOR`) — Logi metadata slot `SLOT_NAME_CALCULATOR`. Not an F-row
+    /// key: it sits in the hotkey cluster above/right of the numpad on boards
+    /// like the ERGO K860 and MX Keys S, and is absent from the Signature
+    /// series.
+    ///
+    /// In the keyboard's macOS mode the firmware emits no HID usage at all for
+    /// this key, so diversion is the only way to reach it — an OS-level hook
+    /// has no event to intercept. Logitech documents the same constraint from
+    /// the other side, listing the Calculator key as one that requires their
+    /// software on macOS while working out of the box on Windows.
+    ///
+    KeyCalculator,
+    /// Keyboard "Previous Track" control (CID `0x00e4`) — F7 on the ERGO K860
+    /// and MX Keys.
+    KeyPreviousTrack,
+    /// Keyboard "Next Track" control (CID `0x00e6`) — F9 on the ERGO K860 and
+    /// MX Keys.
+    KeyNextTrack,
+    /// Keyboard "App Contextual Menu / Right Click" control (CID `0x00ea`) —
+    /// the menu key in the ERGO K860's top-right hotkey cluster. In the
+    /// keyboard's macOS mode the firmware sends a right mouse click for it.
+    KeyContextMenu,
+    /// Keyboard "Screen Lock" control (CID `0x006f`) — the lock key in the ERGO
+    /// K860's top-right hotkey cluster. In macOS mode the firmware sends
+    /// Cmd+Ctrl+Q for it.
+    KeyScreenLock,
+    /// Keyboard "Show Desktop" control (CID `0x006e`) — F5 on the ERGO K860.
+    KeyShowDesktop,
+    /// Keyboard "Mission Control / Task View" control (CID `0x00e0`) — F3 on
+    /// the ERGO K860.
+    KeyTaskView,
+    /// Keyboard "App Switch" control (CID `0x0100`, `Multiplatform_App_Switch`)
+    /// — F4 on the ERGO K860.
+    KeyAppSwitch,
+    /// Keyboard "Brightness Down" control (CID `0x00c7`) — F1 on the ERGO K860
+    /// and MX Keys.
+    KeyBrightnessDown,
+    /// Keyboard "Brightness Up" control (CID `0x00c8`) — F2 on the ERGO K860
+    /// and MX Keys.
     ///
     /// Declared last: the TOML config and any serialized form encode the
     /// variant identifier / index, so new buttons are append-only.
-    WheelTiltRight,
+    KeyBrightnessUp,
 }
+
+/// The divertable keyboard controls OpenLogi models, as
+/// `(0x1b04 control ID, ButtonId)` pairs — the one table both the agent's
+/// diversion and the settings app's key layout read. CID values match Logitech's control
+/// catalog (cross-checked against Solaar's `special_keys.py`); the F-row
+/// positions are the Signature-series layout, except the Calculator key, which
+/// is a hotkey beside the numpad rather than an F-row key.
+pub const KEYBOARD_KEY_CIDS: [(u16, ButtonId); 20] = [
+    (0x00d4, ButtonId::KeySearch),
+    (0x0103, ButtonId::KeyDictation),
+    (0x0108, ButtonId::KeyEmoji),
+    (0x010a, ButtonId::KeyScreenCapture),
+    (0x011c, ButtonId::KeyMicMute),
+    (0x00e5, ButtonId::KeyPlayPause),
+    (0x00e7, ButtonId::KeyMute),
+    (0x00e8, ButtonId::KeyVolumeDown),
+    (0x00e9, ButtonId::KeyVolumeUp),
+    // Last, matching the order of `ButtonId::KEYBOARD_KEYS`. In the keyboard's
+    // macOS mode the firmware emits nothing for this control, so diversion is
+    // the only way to reach it at all; in Windows mode it natively sends
+    // consumer usage `0x0192` (`AL Calculator`), which diversion suppresses —
+    // and, as for every key here, only once the user binds it.
+    (0x000a, ButtonId::KeyCalculator),
+    // ERGO K860 / MX Keys hotkeys, CIDs from the K860's own 0x1b04 table and
+    // named per Solaar's `special_keys.py`. Print Screen is the same
+    // screen-capture function as the Signature F7 under a different CID, so
+    // it shares that button's binding.
+    (0x00bf, ButtonId::KeyScreenCapture),
+    (0x00e4, ButtonId::KeyPreviousTrack),
+    (0x00e6, ButtonId::KeyNextTrack),
+    (0x00ea, ButtonId::KeyContextMenu),
+    (0x006f, ButtonId::KeyScreenLock),
+    (0x006e, ButtonId::KeyShowDesktop),
+    (0x00e0, ButtonId::KeyTaskView),
+    (0x0100, ButtonId::KeyAppSwitch),
+    (0x00c7, ButtonId::KeyBrightnessDown),
+    (0x00c8, ButtonId::KeyBrightnessUp),
+];
 
 impl ButtonId {
     /// Every rebindable button in declaration (physical front-to-side) order —
@@ -103,7 +182,7 @@ impl ButtonId {
     /// [`ButtonId::ALL`]: that array seeds mouse defaults and the mouse
     /// popover trigger list, while keyboard keys stay native unless the user
     /// binds them (an unbound key is never diverted).
-    pub const KEYBOARD_KEYS: [ButtonId; 9] = [
+    pub const KEYBOARD_KEYS: [ButtonId; 19] = [
         ButtonId::KeySearch,
         ButtonId::KeyDictation,
         ButtonId::KeyEmoji,
@@ -113,7 +192,31 @@ impl ButtonId {
         ButtonId::KeyMute,
         ButtonId::KeyVolumeDown,
         ButtonId::KeyVolumeUp,
+        // Last: not part of the Signature F-row that seeded this list — the
+        // Calculator key lives in the hotkey cluster beside the numpad. Kept in
+        // the same order as [`KEYBOARD_KEY_CIDS`].
+        ButtonId::KeyCalculator,
+        // ERGO K860 / MX Keys controls absent from the Signature F-row.
+        ButtonId::KeyPreviousTrack,
+        ButtonId::KeyNextTrack,
+        ButtonId::KeyContextMenu,
+        ButtonId::KeyScreenLock,
+        ButtonId::KeyShowDesktop,
+        ButtonId::KeyTaskView,
+        ButtonId::KeyAppSwitch,
+        ButtonId::KeyBrightnessDown,
+        ButtonId::KeyBrightnessUp,
     ];
+
+    /// The keyboard key a `0x1b04` control ID drives, or `None` for a control
+    /// OpenLogi does not model. Several controls may share one key.
+    #[must_use]
+    pub fn for_keyboard_control(cid: u16) -> Option<Self> {
+        KEYBOARD_KEY_CIDS
+            .iter()
+            .find(|(control, _)| *control == cid)
+            .map(|(_, key)| *key)
+    }
 
     /// Whether this button is one the OS hook (macOS `CGEventTap` / Linux evdev)
     /// remaps: Middle, Back, or Forward. The primary L/R clicks always pass
@@ -187,6 +290,16 @@ impl ButtonId {
             ButtonId::KeyMute => "Mute Key",
             ButtonId::KeyVolumeDown => "Volume Down Key",
             ButtonId::KeyVolumeUp => "Volume Up Key",
+            ButtonId::KeyCalculator => "Calculator Key",
+            ButtonId::KeyPreviousTrack => "Previous Track Key",
+            ButtonId::KeyNextTrack => "Next Track Key",
+            ButtonId::KeyContextMenu => "Context Menu Key",
+            ButtonId::KeyScreenLock => "Screen Lock Key",
+            ButtonId::KeyShowDesktop => "Show Desktop Key",
+            ButtonId::KeyTaskView => "Task View Key",
+            ButtonId::KeyAppSwitch => "App Switch Key",
+            ButtonId::KeyBrightnessDown => "Brightness Down Key",
+            ButtonId::KeyBrightnessUp => "Brightness Up Key",
             ButtonId::HapticPanel => "Haptic Panel",
         }
     }
@@ -216,6 +329,16 @@ impl ButtonId {
             ButtonId::KeyMute => "keyboard.mute_key",
             ButtonId::KeyVolumeDown => "keyboard.volume_down_key",
             ButtonId::KeyVolumeUp => "keyboard.volume_up_key",
+            ButtonId::KeyCalculator => "keyboard.calculator_key",
+            ButtonId::KeyPreviousTrack => "keyboard.previous_track_key",
+            ButtonId::KeyNextTrack => "keyboard.next_track_key",
+            ButtonId::KeyContextMenu => "keyboard.context_menu_key",
+            ButtonId::KeyScreenLock => "keyboard.screen_lock_key",
+            ButtonId::KeyShowDesktop => "keyboard.show_desktop_key",
+            ButtonId::KeyTaskView => "keyboard.task_view_key",
+            ButtonId::KeyAppSwitch => "keyboard.app_switch_key",
+            ButtonId::KeyBrightnessDown => "keyboard.brightness_down_key",
+            ButtonId::KeyBrightnessUp => "keyboard.brightness_up_key",
             ButtonId::HapticPanel => "actions.haptic_panel",
         }
     }

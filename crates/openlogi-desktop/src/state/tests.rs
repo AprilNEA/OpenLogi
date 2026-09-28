@@ -13,8 +13,8 @@ use openlogi_core::config::{
 };
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
-    DeviceModelInfo, DeviceTransports, LightCapabilities, LightValueRange, LightValueUnit,
-    PairedDevice, RawDeviceAddress, ReceiverInfo, StandaloneDevice,
+    DeviceModelInfo, DeviceTransports, KeyboardKeys, LightCapabilities, LightValueRange,
+    LightValueUnit, PairedDevice, RawDeviceAddress, ReceiverInfo, StandaloneDevice,
 };
 use openlogi_core::hid::{
     DeviceRoute, Dpi, SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus,
@@ -125,7 +125,7 @@ fn lighting_changed(key: &DeviceKey) -> StateEvent {
 }
 
 /// A state holding the one persistent mouse, so per-device config has a key.
-pub(super) fn state_with_a_known_mouse() -> AppState {
+pub(crate) fn state_with_a_known_mouse() -> AppState {
     let resolver = AssetResolver::new();
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
     let mut inventory = direct_inventory([0xa3, 0x93, 0xca, 0xe0]);
@@ -134,6 +134,24 @@ pub(super) fn state_with_a_known_mouse() -> AppState {
         .as_mut()
         .unwrap()
         .dpi_gestures = true;
+    AppState::new(Sources {
+        inventories: &[inventory],
+        ..Sources::in_memory(Config::ephemeral(), &resolver, commands)
+    })
+}
+
+/// A state holding one persistent keyboard whose `0x1b04` table reported
+/// `keyboard_keys` as divertable.
+pub(crate) fn state_with_a_keyboard(keyboard_keys: KeyboardKeys) -> AppState {
+    let resolver = AssetResolver::new();
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut inventory = direct_inventory([0xa3, 0x93, 0xca, 0xe0]);
+    let keyboard = &mut inventory.paired[0];
+    keyboard.kind = DeviceKind::Keyboard;
+    keyboard.capabilities = Some(Capabilities {
+        keyboard_keys,
+        ..Capabilities::presumed_from_kind(DeviceKind::Keyboard)
+    });
     AppState::new(Sources {
         inventories: &[inventory],
         ..Sources::in_memory(Config::ephemeral(), &resolver, commands)

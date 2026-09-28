@@ -1,6 +1,6 @@
 use openlogi_core::config::{Config, DeviceConfig, LinkConfig};
 use openlogi_core::device::{
-    DeviceInventory, PairedDevice, RawDeviceAddress, ReceiverInfo, StandaloneDevice,
+    DeviceInventory, KeyboardKeys, PairedDevice, RawDeviceAddress, ReceiverInfo, StandaloneDevice,
 };
 
 use crate::services::assets::AssetResolver;
@@ -268,6 +268,7 @@ fn mouse_identity(name: &str) -> DeviceIdentity {
             haptic_feedback: false,
             haptic_panel: false,
             dpi_gestures: false,
+            keyboard_keys: KeyboardKeys::default(),
         },
         light_capabilities: None,
         model_info: None,

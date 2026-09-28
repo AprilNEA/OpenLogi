@@ -4,7 +4,7 @@ use super::*;
 
 #[test]
 fn device_identity_roundtrips_and_is_iterable() {
-    use crate::device::{Capabilities, DeviceKind};
+    use crate::device::{Capabilities, DeviceKind, KeyboardKeys};
 
     let mut cfg = Config::default();
     let mouse = DeviceIdentity {
@@ -22,6 +22,7 @@ fn device_identity_roundtrips_and_is_iterable() {
             haptic_feedback: false,
             haptic_panel: false,
             dpi_gestures: true,
+            keyboard_keys: KeyboardKeys::default(),
         },
         light_capabilities: None,
         driver_id: None,
