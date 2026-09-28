@@ -363,9 +363,7 @@ impl Request for PairDevice {
     }
 }
 
-/// End the pairing session. Nothing to report when the agent is unreachable:
-/// there is no session left for the window to wait on, and the observed state
-/// says so.
+/// End the pairing session, acknowledging only after the agent releases it.
 pub struct CancelPairing;
 
 impl Request for CancelPairing {
@@ -376,10 +374,11 @@ impl Request for CancelPairing {
     }
 
     fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
-        if let Ok(Err(refused)) = outcome {
-            let _ = updates.send(GuiUpdate::PairingUndeliverable(PairingFailure::from(
-                refused,
-            )));
+        match outcome {
+            Ok(Ok(())) => {
+                let _ = updates.send(GuiUpdate::PairingCancelled);
+            }
+            other => report_pairing_refusal(updates, other),
         }
     }
 }
@@ -491,12 +490,27 @@ mod tests {
     }
 
     #[test]
-    fn a_cancel_that_found_no_agent_reports_nothing() {
+    fn a_cancel_that_found_no_agent_releases_the_local_wait_with_an_error() {
         let (updates, mut received) = mpsc::unbounded_channel();
 
         CancelPairing.deliver(Err(Unavailable), &updates);
 
-        assert!(received.try_recv().is_err());
+        assert!(matches!(
+            received.try_recv(),
+            Ok(GuiUpdate::PairingUndeliverable(
+                PairingFailure::AgentRestarted
+            ))
+        ));
+    }
+
+    #[test]
+    fn a_completed_cancel_acknowledges_even_without_a_snapshot_change() {
+        let (updates, mut received) = mpsc::unbounded_channel();
+        CancelPairing.deliver(Ok(Ok(())), &updates);
+        assert!(matches!(
+            received.try_recv(),
+            Ok(GuiUpdate::PairingCancelled)
+        ));
     }
 
     #[test]

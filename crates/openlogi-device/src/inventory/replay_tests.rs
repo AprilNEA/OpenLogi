@@ -15,6 +15,38 @@ use crate::replay::{ChannelConnection, NodePresence, OpenOutcome, ReplayBackend,
 use crate::{ChannelRegistry, get_dpi};
 
 #[tokio::test]
+async fn a_missing_receiver_uid_requests_repair_without_retiring_a_healthy_channel() {
+    let mut fixture = bolt_fixture("uid-repair", &[], 2);
+    fixture.cassette.exchanges[1].response = Some(vec![0x10, 0xff, 0x8f, 0x83, 0xfb, 0x02, 0]);
+    let node_id = fixture.node_id.clone();
+    let backend = Arc::new(
+        ReplayBackend::new(
+            ReplayTopology {
+                nodes: vec![fixture.node],
+                channels: vec![fixture.channel],
+            },
+            vec![fixture.cassette],
+        )
+        .unwrap(),
+    );
+    let mut enumerator = Enumerator::with_backend(backend.clone());
+    let (first, _, healthy) = enumerator.enumerate_reporting_completeness().await.unwrap();
+    assert!(healthy, "a missing UID must not suspend healthy devices");
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].receiver.unique_id, None);
+    assert!(
+        enumerator.retry_needed_last_tick(),
+        "identity needs a bounded repair pass"
+    );
+    let (second, _, healthy) = enumerator.enumerate_reporting_completeness().await.unwrap();
+    assert!(healthy);
+    assert_eq!(second[0].receiver.unique_id.as_deref(), Some(BOLT_UID));
+    assert!(!enumerator.retry_needed_last_tick());
+    assert_eq!(backend.open_count(&node_id).unwrap(), 1);
+    backend.require_complete().unwrap();
+}
+
+#[tokio::test]
 async fn receiver_slots_interleave_on_one_channel_and_lifecycle_events_coalesce() {
     let slots = [
         BoltSlot {

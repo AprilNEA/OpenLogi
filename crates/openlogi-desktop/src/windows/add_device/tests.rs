@@ -53,6 +53,116 @@ fn receiver(name: &str, product_id: u16, uid: Option<&str>) -> ReceiverInfo {
 }
 
 #[gpui::test]
+fn reopening_keeps_the_selected_receiver_for_retry(cx: &mut TestAppContext) {
+    cx.update(gpui_component::init);
+    cx.update(theme::register_builtin_themes);
+    let mut commands = cx.update(install_state);
+    let bolt = receiver("Bolt", 0xc548, Some("00000000AAAABBBB"));
+    cx.update(|cx| {
+        AppState::update(cx, |state, cx| {
+            state
+                .apply_agent_snapshot(&snapshot(vec![bolt.clone()]), &AssetResolver::new(), &[])
+                .events
+                .emit(cx);
+        });
+    });
+    {
+        let (_, visual) = cx.add_window_view(AddDeviceView::new);
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let bounds = visual
+            .debug_bounds("pairing-receiver-c548-00000000AAAABBBB")
+            .unwrap();
+        visual.simulate_click(bounds.center(), Modifiers::default());
+        assert!(matches!(commands.try_recv(), Ok(Command::StartPairing(_))));
+        visual.update(|window, _| window.remove_window());
+    }
+    cx.update(|cx| apply_state(cx, Some(PairingPhase::Failed(PairingFailure::Timeout))));
+    let (_, visual) = cx.add_window_view(AddDeviceView::new);
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let retry = visual
+        .debug_bounds("pairing-retry")
+        .expect("reopening must retain retry");
+    visual.simulate_click(retry.center(), Modifiers::default());
+    let Command::StartPairing(request) = commands.try_recv().unwrap() else {
+        panic!("expected retry");
+    };
+    assert_eq!(request.selector, receiver_selector(&bolt).unwrap());
+}
+
+#[gpui::test]
+fn changing_receiver_waits_for_cancellation_acknowledgement(cx: &mut TestAppContext) {
+    cx.update(gpui_component::init);
+    cx.update(theme::register_builtin_themes);
+    let mut commands = cx.update(install_state);
+    cx.update(|cx| apply_undeliverable(cx, PairingFailure::AlreadyActive));
+    let (_, visual) = cx.add_window_view(AddDeviceView::new);
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let change = visual.debug_bounds("pairing-change-receiver").unwrap();
+    visual.simulate_click(change.center(), Modifiers::default());
+    assert!(matches!(commands.try_recv(), Ok(Command::CancelPairing(_))));
+    visual.update(|_, cx| {
+        assert!(
+            !matches!(cx.global::<PairingUi>(), PairingUi::Idle),
+            "picker must wait for cleanup"
+        );
+        apply_state(cx, None);
+        assert!(matches!(cx.global::<PairingUi>(), PairingUi::Cancelling));
+        apply_cancelled(cx);
+        assert!(matches!(cx.global::<PairingUi>(), PairingUi::Idle));
+    });
+}
+
+#[gpui::test]
+fn a_recovered_receiver_identity_enables_the_same_open_picker(cx: &mut TestAppContext) {
+    cx.update(gpui_component::init);
+    cx.update(theme::register_builtin_themes);
+    let mut commands = cx.update(install_state);
+    let (_, visual) = cx.add_window_view(AddDeviceView::new);
+    for uid in [None, Some("00000000AAAABBBB")] {
+        visual.update(|_, cx| {
+            AppState::update(cx, |state, cx| {
+                state
+                    .apply_agent_snapshot(
+                        &snapshot(vec![receiver("Bolt", 0xc548, uid)]),
+                        &AssetResolver::new(),
+                        &[],
+                    )
+                    .events
+                    .emit(cx);
+            });
+        });
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let choice = visual.debug_bounds("pairing-receiver-c548-00000000AAAABBBB");
+        assert_eq!(choice.is_some(), uid.is_some());
+        if let Some(bounds) = choice {
+            visual.simulate_click(bounds.center(), Modifiers::default());
+        } else {
+            assert!(
+                commands.try_recv().is_err(),
+                "missing identity must never pair by guessing"
+            );
+        }
+    }
+    let Command::StartPairing(request) = commands.try_recv().unwrap() else {
+        panic!("expected selection");
+    };
+    assert_eq!(
+        request.selector,
+        ReceiverSelector::ReceiverUid {
+            product_id: 0xc548,
+            uid: "00000000AAAABBBB".into()
+        }
+    );
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        visual
+            .debug_bounds("pairing-receiver-c548-00000000AAAABBBB")
+            .is_none(),
+        "a submitted choice must not remain clickable"
+    );
+}
+
+#[gpui::test]
 fn choosing_bolt_and_retrying_keep_the_explicit_target(cx: &mut TestAppContext) {
     cx.update(gpui_component::init);
     cx.update(theme::register_builtin_themes);
@@ -71,7 +181,7 @@ fn choosing_bolt_and_retrying_keep_the_explicit_target(cx: &mut TestAppContext) 
                 .emit(cx);
         });
     });
-    let (view, cx) = cx.add_window_view(AddDeviceView::new);
+    let (_, cx) = cx.add_window_view(AddDeviceView::new);
     cx.update(|window, cx| window.draw(cx).clear(cx));
     let choice = cx
         .debug_bounds("pairing-receiver-c548-00000000AAAABBBB")
@@ -110,8 +220,8 @@ fn choosing_bolt_and_retrying_keep_the_explicit_target(cx: &mut TestAppContext) 
         panic!("expected StartPairing");
     };
     assert_eq!(request.selector, receiver_selector(&bolt).unwrap());
-    view.read_with(cx, |view, _| {
-        assert_eq!(view.selected_receiver.as_ref(), Some(&bolt));
+    cx.update(|_, cx| {
+        assert_eq!(cx.global::<PairingSelection>().0.as_ref(), Some(&bolt));
     });
 }
 
@@ -191,6 +301,8 @@ fn change_receiver_clears_a_failure_without_an_agent_session(cx: &mut TestAppCon
         .expect("failure offers a receiver change");
     cx.simulate_click(change.center(), Modifiers::default());
     cx.update(|_, cx| {
+        assert!(matches!(cx.global::<PairingUi>(), PairingUi::Cancelling));
+        apply_cancelled(cx);
         assert!(matches!(cx.global::<PairingUi>(), PairingUi::Idle));
     });
     assert!(matches!(commands.try_recv(), Ok(Command::CancelPairing(_))));

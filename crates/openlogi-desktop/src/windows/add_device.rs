@@ -54,9 +54,18 @@ pub enum PairingUi {
     Paired { slot: u8 },
     /// The session ended without pairing.
     Failed(PairingFailure),
+    /// Waiting for the agent to restore the receiver and release its session.
+    Cancelling,
 }
 
 impl Global for PairingUi {}
+
+/// The user's pairing target outlives the auxiliary window, just like the
+/// agent's session. Closing a window must not discard the target for Retry.
+#[derive(Default)]
+struct PairingSelection(Option<ReceiverInfo>);
+
+impl Global for PairingSelection {}
 
 /// Open the Add Device window. The user chooses a receiver before discovery
 /// starts; re-opening an active session just focuses the existing window.
@@ -84,6 +93,10 @@ pub(crate) fn window_title() -> SharedString {
 /// event stream) belongs to the agent, which is the side that knows what it has
 /// discovered; nothing is folded here any more.
 pub fn apply_state(cx: &mut App, phase: Option<PairingPhase>) {
+    if matches!(cx.try_global::<PairingUi>(), Some(PairingUi::Cancelling)) {
+        // Only the command acknowledgement proves cancellation finished.
+        return;
+    }
     let next = match phase {
         None => PairingUi::Idle,
         Some(PairingPhase::Searching) => PairingUi::Searching,
@@ -103,6 +116,11 @@ pub fn apply_state(cx: &mut App, phase: Option<PairingPhase>) {
 /// appear to explain the silence, so the window has to be told directly.
 pub fn apply_undeliverable(cx: &mut App, failure: PairingFailure) {
     cx.set_global(PairingUi::Failed(failure));
+}
+
+/// The agent has finished cancellation, including when no session existed.
+pub fn apply_cancelled(cx: &mut App) {
+    cx.set_global(PairingUi::Idle);
 }
 
 fn pairing_failure_text(failure: &PairingFailure) -> String {
@@ -155,7 +173,13 @@ fn receiver_selector(receiver: &ReceiverInfo) -> Option<ReceiverSelector> {
 }
 
 fn start_search(cx: &mut App, selector: ReceiverSelector) {
+    cx.set_global(PairingUi::Searching);
     send(cx, StartPairing { selector });
+}
+
+fn cancel_search(cx: &mut App) {
+    cx.set_global(PairingUi::Cancelling);
+    send(cx, CancelPairing);
 }
 
 /// Standalone Add Device window root view.
@@ -169,7 +193,6 @@ pub struct AddDeviceView {
         reason = "held to repaint when the receiver inventory changes"
     )]
     inventory_obs: Subscription,
-    selected_receiver: Option<ReceiverInfo>,
 }
 
 impl AddDeviceView {
@@ -188,7 +211,6 @@ impl AddDeviceView {
             appearance_obs: None,
             state_obs,
             inventory_obs,
-            selected_receiver: None,
         }
     }
 
@@ -236,11 +258,10 @@ impl AddDeviceView {
                     .hover(|s| s.bg(pal.control_hover))
                     .focus_visible(|s| s.bg(pal.control_hover))
                     .child(div().text_body().child(label))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.selected_receiver = Some(receiver.clone());
+                    .on_click(move |_, _, cx| {
+                        cx.set_global(PairingSelection(Some(receiver.clone())));
                         start_search(cx, selector.clone());
-                        cx.notify();
-                    })),
+                    }),
             );
         }
         col
@@ -286,9 +307,12 @@ impl Render for AddDeviceView {
         let body = if state == PairingUi::Idle {
             Self::receiver_picker(pal, cx)
         } else {
-            let target = self.selected_receiver.as_ref().and_then(receiver_selector);
+            let selected = cx
+                .try_global::<PairingSelection>()
+                .and_then(|s| s.0.as_ref());
+            let target = selected.and_then(receiver_selector);
             let mut body = v_flex().w_full().gap_3();
-            if let Some(receiver) = &self.selected_receiver {
+            if let Some(receiver) = selected {
                 body = body.child(hint(receiver_label(receiver), pal));
             }
             body.child(pairing_body(state, pal, target))
@@ -333,6 +357,9 @@ fn pairing_body(
     let mut col = v_flex().w_full().flex_1().gap_4();
     match state {
         PairingUi::Idle => {}
+        PairingUi::Cancelling => {
+            col = col.child(status_line(tr!("pairing.cancelling")));
+        }
         PairingUi::Searching => {
             col = col
                 .child(status_line(tr!("pairing.searching_for_devices")))
@@ -378,7 +405,7 @@ fn pairing_body(
                 ))
                 .child(
                     action_button("ad-done", tr!("common.done"), false)
-                        .on_click(|_, _, cx| send(cx, CancelPairing)),
+                        .on_click(|_, _, cx| cancel_search(cx)),
                 );
         }
         PairingUi::Failed(failure) => {
@@ -404,12 +431,7 @@ fn pairing_body(
                 .child(
                     action_button("ad-change-receiver", tr!("pairing.change_receiver"), false)
                         .debug_selector(|| "pairing-change-receiver".to_string())
-                        .on_click(|_, _, cx| {
-                            // An admission/transport failure may have no agent
-                            // session to clear, so no new snapshot is guaranteed.
-                            cx.set_global(PairingUi::Idle);
-                            send(cx, CancelPairing);
-                        }),
+                        .on_click(|_, _, cx| cancel_search(cx)),
                 );
         }
     }
@@ -530,8 +552,7 @@ fn action_button(id: &'static str, label: impl Into<SharedString>, primary: bool
 }
 
 fn cancel_button() -> impl IntoElement {
-    action_button("ad-cancel", tr!("common.cancel"), false)
-        .on_click(|_, _, cx| send(cx, CancelPairing))
+    action_button("ad-cancel", tr!("common.cancel"), false).on_click(|_, _, cx| cancel_search(cx))
 }
 
 #[cfg(test)]

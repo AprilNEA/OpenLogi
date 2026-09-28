@@ -88,6 +88,19 @@ fn target(product_id: u16, uid: &str) -> ReceiverSelector {
 }
 
 #[tokio::test]
+async fn an_unselected_receiver_open_error_does_not_block_the_selected_receiver() {
+    let backend = backend("open-error");
+    backend
+        .set_open_outcome(&node_id("open-error", "bolt-a"), OpenOutcome::Denied)
+        .unwrap();
+    let opened = open_receiver(&backend, &target(0xc548, BOLT_B))
+        .await
+        .expect("a different receiver's open failure must not block the chosen Bolt");
+    assert!(matches!(opened.family, ReceiverFamily::Bolt));
+    assert_eq!(backend.channel_lifetime_count("bolt-b").unwrap(), 1);
+}
+
+#[tokio::test]
 async fn selects_second_bolt_by_uid_even_with_unifying_first() {
     let backend = backend("second-bolt");
     let opened = open_receiver(&backend, &target(0xc548, &BOLT_B.to_ascii_lowercase()))

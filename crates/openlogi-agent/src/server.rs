@@ -245,7 +245,7 @@ impl Agent for AgentServer {
     }
 
     async fn cancel_pairing(self, _: Context) -> Result<(), PairingCommandError> {
-        self.pairing.cancel()
+        self.pairing.cancel().await
     }
 
     async fn next_pairing(self, _: Context) -> Option<PairingUpdate> {

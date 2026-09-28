@@ -102,6 +102,8 @@ pub enum GuiUpdate {
     /// in the observed state to explain the silence. Reported locally rather
     /// than faked as a session the agent never had.
     PairingUndeliverable(PairingFailure),
+    /// Cancellation completed and the receiver is available for a new choice.
+    PairingCancelled,
 }
 
 /// Handle the GUI holds to talk to the agent: a stream of state updates and a
@@ -194,9 +196,13 @@ async fn observe_loop(
             // delivered at the end of this turn if a connection exists.
             Woken::Command(Some(Command::ReloadConfig(_))) => reload_owed = true,
             Woken::Command(Some(cmd)) => {
+                let pairing_transition =
+                    matches!(cmd, Command::StartPairing(_) | Command::CancelPairing(_));
                 let client = link.ensure(effects, update_tx).await;
                 if cmd.run(client, update_tx).await.is_err() {
                     link.lose(Instant::now());
+                } else if pairing_transition {
+                    link.refresh_state();
                 }
             }
             Woken::Reconnect => {
@@ -503,6 +509,67 @@ mod tests {
             camera_active,
             pairing: None,
             foreground: ForegroundApps::default(),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancellation_discards_an_observation_buffered_before_cleanup() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let old_started = Arc::new(tokio::sync::Notify::new());
+        let release_old = Arc::new(tokio::sync::Notify::new());
+        let old_answered = Arc::new(tokio::sync::Notify::new());
+        let started = old_started.clone();
+        let agent = in_memory_agent(
+            move |request| {
+                let calls = calls.clone();
+                let started = started.clone();
+                let release = release_old.clone();
+                let answered = old_answered.clone();
+                Box::pin(async move {
+                    match request {
+                        AgentRequest::Observe { .. } => {
+                            let call = calls.fetch_add(1, Ordering::SeqCst);
+                            if call > 2 {
+                                return std::future::pending().await;
+                            }
+                            let mut state = snapshot(false);
+                            if call < 2 {
+                                state.pairing = Some(openlogi_ipc::PairingPhase::Searching);
+                            }
+                            if call == 1 {
+                                started.notify_one();
+                                release.notified().await;
+                                answered.notify_one();
+                            }
+                            Ok(AgentResponse::Observe(Observation {
+                                generation: call as u64 + 1,
+                                snapshot: state,
+                            }))
+                        }
+                        AgentRequest::CancelPairing {} => {
+                            release.notify_one();
+                            answered.notified().await;
+                            Ok(AgentResponse::CancelPairing(Ok(())))
+                        }
+                        other => panic!("unexpected request: {other:?}"),
+                    }
+                })
+            },
+            std::future::pending(),
+        );
+        let mut effects = ScriptedEffects::answering([Ok(agent)]);
+        let (update_tx, mut updates) = mpsc::unbounded_channel();
+        let (commands, mut cmd_rx) = mpsc::unbounded_channel();
+        tokio::select! {
+            () = observe_loop(&mut effects, &update_tx, &mut cmd_rx) => panic!("client stopped"),
+            () = async {
+                assert!(matches!(updates.recv().await, Some(GuiUpdate::Snapshot(_))));
+                old_started.notified().await;
+                commands.send(CancelPairing.into()).unwrap();
+                assert!(matches!(updates.recv().await, Some(GuiUpdate::PairingCancelled)));
+                let Some(GuiUpdate::Snapshot(current)) = updates.recv().await else { panic!("expected current state"); };
+                assert_eq!(current.pairing, None, "a stale active phase must not replace cancellation completion");
+            } => {}
         }
     }
 

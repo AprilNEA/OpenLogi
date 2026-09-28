@@ -625,7 +625,17 @@ impl Enumerator {
 
         let seen_keys = self.apply_outcomes(outcomes);
         self.evict_unseen(&seen_keys, &frozen_keys);
-        self.retry_needed_last_tick = !all_healthy || !self.misses.is_empty();
+        // A UID read can fail while every paired device remains healthy.
+        // Request bounded repair without classifying the whole receiver as
+        // unhealthy or retiring its working channel. This lets Add Device
+        // recover an identifiable target without choosing a different receiver.
+        let missing_receiver_identity = inventories.iter().any(|inventory| {
+            let receiver = &inventory.receiver;
+            find_receiver(receiver.vendor_id, receiver.product_id).is_some()
+                && receiver.unique_id.as_ref().is_none_or(String::is_empty)
+        });
+        self.retry_needed_last_tick =
+            !all_healthy || !self.misses.is_empty() || missing_receiver_identity;
         self.flush_cache();
         Ok((inventories, all_complete, all_healthy))
     }
