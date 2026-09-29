@@ -23,6 +23,11 @@ use super::{HeldKey, HeldModifiers, KeyPhase};
     reason = "private ApplicationServices SPI symbols are resolved via dlopen/dlsym FFI"
 )]
 mod app_services;
+#[expect(
+    unsafe_code,
+    reason = "AX attribute copies use an out-pointer and AXChildren's element type is unchecked"
+)]
+mod ax;
 mod browser;
 /// WindowServer window/space actions (Mission Control, App Exposé, Show
 /// Desktop, Launchpad).
@@ -46,6 +51,7 @@ mod dock;
     reason = "Text Input Source Services and UCKeyTranslate have no objc2 bindings"
 )]
 mod keyboard_layout;
+mod main_thread;
 mod scroll;
 /// Space switching and screenshots, posted through their system symbolic
 /// hotkey records ("Move left/right a space", the screenshot shortcuts).

@@ -1,44 +1,18 @@
 //! Browser navigation through the Accessibility tree: find Safari's back and forward buttons and press them, instead of posting the shortcut.
 
 use objc2_application_services::{AXError, AXUIElement};
-use objc2_core_foundation::{CFArray, CFRetained, CFString, CFType, Type as _};
+use objc2_core_foundation::{CFRetained, CFString, Type as _};
+
+use super::ax::{attr_string, children, copy_attr};
 
 /// The AX attribute names needed by [`find_button`], bundled so its argument
 /// list does not grow with the tree depth it searches.
 struct AxAttrs {
     role: CFRetained<CFString>,
     identifier: CFRetained<CFString>,
-    children: CFRetained<CFString>,
-}
-
-/// Adopt the Copy-rule output once; all callers own a releasing smart pointer.
-#[expect(unsafe_code, reason = "AX attribute copying uses an out-pointer")]
-fn copy_attr(el: &AXUIElement, attr: &CFString) -> Option<CFRetained<CFType>> {
-    use std::ptr::NonNull;
-
-    let mut value = std::ptr::null();
-    // SAFETY: both framework objects and the writable out-pointer remain
-    // valid for the call; AX initializes the output on success.
-    let error = unsafe { el.copy_attribute_value(attr, NonNull::from(&mut value)) };
-    if error != AXError::Success {
-        return None;
-    }
-    let value = NonNull::new(value.cast_mut())?;
-    // SAFETY: successful AX Copy output is a valid CF object at +1 ownership.
-    Some(unsafe { CFRetained::from_raw(value) })
-}
-
-fn attr_string(el: &AXUIElement, attr: &CFString) -> Option<String> {
-    Some(
-        copy_attr(el, attr)?
-            .downcast::<CFString>()
-            .ok()?
-            .to_string(),
-    )
 }
 
 /// Retain the matching button independently of the parent arrays as we unwind.
-#[expect(unsafe_code, reason = "AXChildren guarantees a CF-object array")]
 fn find_button(
     el: &AXUIElement,
     target_ids: &[&str],
@@ -63,18 +37,9 @@ fn find_button(
                 .then(|| el.retain());
         }
     }
-    let children = copy_attr(el, &attrs.children)?.downcast::<CFArray>().ok()?;
-    // SAFETY: the outer array type was checked; AXChildren contains CF objects.
-    // Each member is separately downcast before it is used as an AXUIElement.
-    let children = unsafe { CFRetained::cast_unchecked::<CFArray<CFType>>(children) };
-    for child in children {
-        if let Ok(child) = child.downcast::<AXUIElement>()
-            && let Some(button) = find_button(&child, target_ids, attrs, depth - 1)
-        {
-            return Some(button);
-        }
-    }
-    None
+    children(el)
+        .iter()
+        .find_map(|child| find_button(child, target_ids, attrs, depth - 1))
 }
 
 /// Press Safari's Back (`forward=false`) or Forward (`forward=true`)
@@ -93,7 +58,6 @@ pub(in crate::inject) fn ax_browser_navigate(forward: bool, pid: i32) -> bool {
     let attrs = AxAttrs {
         role: CFString::from_static_str("AXRole"),
         identifier: CFString::from_static_str("AXIdentifier"),
-        children: CFString::from_static_str("AXChildren"),
     };
     let ax_press = CFString::from_static_str("AXPress");
     let target_identifiers = if forward {
