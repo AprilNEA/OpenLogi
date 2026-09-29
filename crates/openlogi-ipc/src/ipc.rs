@@ -151,7 +151,9 @@ pub use succession::Identity;
 ///      `BacklightControls` became the bit set of the changes the keyboard
 ///      offers, and `BacklightState::duration` and
 ///      `BacklightChange::Duration` appended — the `0x1982` backlight
-///      timer, five-second steps up to two hours.
+///      timer, five-second steps up to two hours. `Action::BrightnessUp`/
+///      `BrightnessDown` appended — display-brightness actions bindable to
+///      any control, including the MX Mechanical backlight keys.
 pub const PROTOCOL_VERSION: u32 = 41;
 
 /// Environment variable through which the agent hands a supervised helper the

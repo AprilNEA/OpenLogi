@@ -219,6 +219,15 @@ pub enum Action {
     /// returns to the sensor's default DPI. A DPI LED (HID++ `0x1300`) is
     /// lit while the mode is on. Does nothing on other devices.
     TogglePrecisionMode,
+    /// Increase display brightness. Fired through the same dedicated
+    /// media-key mechanism as the volume actions (macOS: the NX system-defined
+    /// brightness key; Linux: `KEY_BRIGHTNESSUP`; Windows has no key event for
+    /// display brightness, so its injector logs and skips). Appended last
+    /// because the variant name is the persisted `config.toml` schema (see
+    /// the stability contract above).
+    BrightnessUp,
+    /// Decrease display brightness. Counterpart to [`Action::BrightnessUp`].
+    BrightnessDown,
 }
 
 /// Which of a held chord's keys stay down for the lifetime of the press.
@@ -316,6 +325,8 @@ macro_rules! for_each_unit_action {
             Screenshot "Screenshot" "actions.screenshot" System Camera,
             CaptureRegion "Capture Region" "actions.capture_region" System Camera,
             Sleep "Sleep" "actions.sleep" System Monitor,
+            BrightnessUp "Brightness Up" "actions.brightness_up" System Monitor,
+            BrightnessDown "Brightness Down" "actions.brightness_down" System Monitor,
             ShowActionsRing "Actions Ring" "action_ring.actions_ring" System Grid,
             // Media
             PlayPause "Play / Pause" "actions.play_pause" Media Play,

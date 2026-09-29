@@ -382,6 +382,10 @@ fn all_catalog_variants_roundtrip_toml() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "The pinned persisted name of every variant belongs in one literal list"
+)]
 fn persisted_action_variant_names_are_stable() {
     let mut actions = Action::catalog();
     actions.extend([
@@ -425,6 +429,8 @@ fn persisted_action_variant_names_are_stable() {
     actual.sort();
     let mut expected = [
         "AppExpose",
+        "BrightnessDown",
+        "BrightnessUp",
         "BrowserBack",
         "BrowserForward",
         "CaptureRegion",
