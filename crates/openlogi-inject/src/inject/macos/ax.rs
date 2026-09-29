@@ -4,7 +4,7 @@
 use std::ptr::NonNull;
 
 use objc2_application_services::{AXError, AXUIElement};
-use objc2_core_foundation::{CFArray, CFRetained, CFString, CFType};
+use objc2_core_foundation::{CFArray, CFBoolean, CFNumber, CFRetained, CFString, CFType};
 
 /// Copy `attr` of `el`, adopting the Copy-rule result.
 pub(super) fn copy_attr(el: &AXUIElement, attr: &CFString) -> Option<CFRetained<CFType>> {
@@ -27,6 +27,14 @@ pub(super) fn attr_string(el: &AXUIElement, attr: &CFString) -> Option<String> {
             .ok()?
             .to_string(),
     )
+}
+
+pub(super) fn attr_i64(el: &AXUIElement, attr: &CFString) -> Option<i64> {
+    copy_attr(el, attr)?.downcast::<CFNumber>().ok()?.as_i64()
+}
+
+pub(super) fn attr_bool(el: &AXUIElement, attr: &CFString) -> Option<bool> {
+    Some(copy_attr(el, attr)?.downcast::<CFBoolean>().ok()?.as_bool())
 }
 
 /// `el`'s `AXChildren`, each retained on its own so it outlives the array.

@@ -52,6 +52,11 @@ mod dock;
 )]
 mod keyboard_layout;
 mod main_thread;
+#[expect(
+    unsafe_code,
+    reason = "Accessibility element creation and actions are unsafe FFI calls"
+)]
+mod menu_shortcut;
 mod scroll;
 /// Space switching and screenshots, posted through their system symbolic
 /// hotkey records ("Move left/right a space", the screenshot shortcuts).
@@ -93,6 +98,9 @@ pub(super) fn execute(action: &Action) {
         // MiddleClick). A button left on its own native click never reaches
         // this — the hook passes it straight through to the OS.
         Effect::Click(button) => dispatch_click(button),
+        Effect::Shortcut(shortcut) if MENU_SHORTCUTS.contains(&shortcut) => {
+            press_menu_shortcut(&combo(shortcut));
+        }
         Effect::Shortcut(shortcut) => press_combo(&combo(shortcut)),
         Effect::Key(combo) | Effect::HeldKey(combo) => press_combo(combo),
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
@@ -125,6 +133,60 @@ fn dispatch_click(button: MouseButton) {
         MouseButton::Back => post_other_button(3),
         MouseButton::Forward => post_other_button(4),
     }
+}
+
+/// Shortcuts pressed as the frontmost app's menu item, so AppKit's remapping
+/// of a shortcut the layout cannot reach finds them (see [`menu_shortcut`]).
+const MENU_SHORTCUTS: [Shortcut; 2] = [Shortcut::BrowserBack, Shortcut::BrowserForward];
+
+/// Install the probes [`menu_shortcut`] reads. Must run on the main thread
+/// before the run loop starts.
+pub(super) fn prepare_menu_shortcuts(mtm: objc2::MainThreadMarker) {
+    menu_shortcut::prepare(mtm, MENU_SHORTCUTS.map(combo));
+}
+
+/// Press `combo` as the frontmost app's menu item. Without one, press the
+/// keys the menus show it as under the current layout, as the user would.
+fn press_menu_shortcut(combo: &KeyCombo) {
+    let localized = menu_shortcut::localized(combo);
+    if menu_shortcut::press_menu_item(combo, localized.as_ref()) {
+        tracing::debug!(
+            ?localized,
+            "shortcut pressed as the frontmost app's menu item"
+        );
+        return;
+    }
+    tracing::debug!(
+        ?localized,
+        "no menu item shows the shortcut — pressing its keys"
+    );
+    let remapped = localized.and_then(|shortcut| {
+        let mut chars = shortcut.key.chars();
+        let key = chars.next().filter(|_| chars.next().is_none())?;
+        Some((
+            layout_key(key, shortcut.modifiers.command)?,
+            shortcut.modifiers,
+        ))
+    });
+    match remapped {
+        Some((vk, modifiers)) => post_key(vk, modifier_flags(modifiers)),
+        None => press_combo(combo),
+    }
+}
+
+fn modifier_flags(modifiers: menu_shortcut::Modifiers) -> CGEventFlags {
+    let mut flags = CGEventFlags::CGEventFlagNull;
+    for (held, flag) in [
+        (modifiers.command, CGEventFlags::CGEventFlagCommand),
+        (modifiers.shift, CGEventFlags::CGEventFlagShift),
+        (modifiers.option, CGEventFlags::CGEventFlagAlternate),
+        (modifiers.control, CGEventFlags::CGEventFlagControl),
+    ] {
+        if held {
+            flags |= flag;
+        }
+    }
+    flags
 }
 
 /// The macOS chord for each named [`Shortcut`].

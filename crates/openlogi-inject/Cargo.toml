@@ -37,11 +37,15 @@ objc2-app-kit = { workspace = true, features = [
   "objc2-core-graphics",
   "NSWorkspace",
   "NSRunningApplication",
+  "NSMenu",
+  "NSMenuItem",
+  "NSApplication",
+  "NSResponder",
 ] }
 objc2-core-graphics = { workspace = true, features = ["CGEvent"] }
 objc2-foundation = { workspace = true }
 objc2-application-services = { workspace = true, features = ["std", "HIServices", "AXUIElement", "AXError", "libc"] }
-objc2-core-foundation = { workspace = true, features = ["std", "CFArray", "CFString", "CFData"] }
+objc2-core-foundation = { workspace = true, features = ["std", "CFArray", "CFString", "CFData", "CFNumber"] }
 dispatch2 = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]

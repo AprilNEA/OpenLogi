@@ -375,6 +375,14 @@ fn hold_transition(released: Option<&KeyCombo>, pressed: Option<&KeyCombo>) {
     }
 }
 
+/// Let the frontmost app's menus answer shortcuts the keyboard layout
+/// remaps, such as Back and Forward on Spanish or German layouts. Call once
+/// on the main thread before its run loop starts.
+#[cfg(target_os = "macos")]
+pub fn prepare_menu_shortcuts(mtm: objc2::MainThreadMarker) {
+    macos::prepare_menu_shortcuts(mtm);
+}
+
 /// Navigate Safari backwards or forwards using `AXPress` on its toolbar
 /// button's stable Accessibility identifier.
 ///

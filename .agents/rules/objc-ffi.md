@@ -39,9 +39,12 @@ files; **keep this table in sync when you add or move one**:
 | `openlogi-hook/src/macos/sender.rs` | the HID sender-id lookup and the IOKit registry walk that resolves it to a device |
 | `openlogi-inject/src/inject/macos.rs` | CGEvent key and click synthesis, media-key `NSEvent`s |
 | `openlogi-inject/src/inject/macos/scroll.rs` | CGEvent scroll synthesis, including the continuous-scroll phase fields |
-| `openlogi-inject/src/inject/macos/browser.rs` | typed `AXUIElement` navigation with `CFRetained` ownership, and the off-thread `NSWorkspace` Safari validation |
+| `openlogi-inject/src/inject/macos/ax.rs` | the shared `AXUIElement` attribute reads (`CFRetained` adoption of the Copy-rule out-pointer) and `AXChildren` iteration |
+| `openlogi-inject/src/inject/macos/browser.rs` | Safari's toolbar-button navigation over `ax.rs`, and the off-thread `NSWorkspace` Safari validation |
+| `openlogi-inject/src/inject/macos/menu_shortcut.rs` | the hidden probe `NSMenu` AppKit remaps for the keyboard layout, and pressing the frontmost app's matching menu item through AX |
 | `openlogi-inject/src/inject/macos/{app_services,dock,symbolic_hotkey}.rs` | the `dlopen`'d private SPIs: `CoreDockSendNotification` and the CGS symbolic-hotkey trio |
 | `openlogi-inject/src/inject/macos/keyboard_layout.rs` | the active keyboard layout's `uchr` data (Text Input Source Services, read on the main thread) and `UCKeyTranslate` over it |
+| `openlogi-inject/src/inject/macos/main_thread.rs` | the bounded hand-off of main-thread work from the action worker to the main queue (`dispatch2`) |
 | `openlogi-overlay/src/platform.rs` | the Actions Ring helper's window policy: accessory activation, non-activating panel, the `NSEvent` global click-away monitor (`block2`), and `CGGetActiveDisplayList` / `CGDisplayBounds` |
 | `openlogi-permissions/src/macos.rs` | non-prompting permission reads + System-Settings deep links; `+[CBManager authorization]` via an `AnyClass` lookup |
 
@@ -243,8 +246,15 @@ under a `SAFETY` comment. Where it currently lives on macOS:
   (the borrow is tied to the pool).
 - `hook/macos/sender.rs` — the sender-id `extern` calls and the IOKit registry
   walk, including the Create-rule `CFString` / `CFNumber` wraps.
-- `inject/macos/browser.rs` — typed AX creation, attribute-copy out-pointers, CF array
-  element typing, `AXPress`, and `NSString::to_str(pool)` for Safari validation.
+- `inject/macos/ax.rs` — AX attribute-copy out-pointers and the unchecked
+  `AXChildren` element type; each child is downcast before use.
+- `inject/macos/browser.rs` — typed AX creation, `AXPress`, and
+  `NSString::to_str(pool)` for Safari validation.
+- `inject/macos/menu_shortcut.rs` — AX application creation and `AXPress` on the
+  frontmost app's menu item. The probe menu itself is safe `objc2-app-kit` on
+  the main thread: AppKit remaps an item for the keyboard layout only once the
+  run loop has turned with it in the main menu, so the agent installs the probes
+  before `NSApplication::run`, and workers read them through `main_thread.rs`.
 - `inject/macos/keyboard_layout.rs` — the input-source copy and property read,
   `LMGetKbdType`, and `UCKeyTranslate` over the copied `uchr` bytes. Text Input
   Source Services must run on the main thread (HIToolbox crashes when another
@@ -291,6 +301,8 @@ temporaries. The call sites that keep an explicit
 - `openlogi-inject`'s `ax_browser_navigate` — the action worker, where `to_str`
   borrows the current frontmost app's bundle id while validating the captured
   Safari process.
+- `openlogi-inject`'s menu-shortcut press — the action worker, where the
+  `NSWorkspace` frontmost-app reads autorelease temporaries.
 - `openlogi-camera`'s device enumeration — every `AVCaptureDevice` string is
   copied out before the pool drains, so no `Retained<T>` escapes it.
 

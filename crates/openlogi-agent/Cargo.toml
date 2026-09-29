@@ -55,6 +55,7 @@ objc2-app-kit = { workspace = true, features = ["NSStatusBar", "NSStatusItem", "
 objc2-core-graphics = { workspace = true, features = ["CGDirectDisplay", "CGDisplayConfiguration", "libc"] }
 objc2-foundation = { workspace = true, features = ["NSString", "NSData", "NSArray", "NSNotification"] }
 objc2-security = { workspace = true, features = ["AuthSession"] }
+openlogi-inject = { path = "../openlogi-inject" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = "5"

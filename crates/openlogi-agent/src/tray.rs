@@ -337,6 +337,9 @@ pub fn run_app_loop(
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 
     let activity_target = install_activity_observer(device_io_signal);
+    // Before `run()`: AppKit remaps the probes for the keyboard layout only
+    // once the loop has turned with them in the main menu.
+    openlogi_inject::prepare_menu_shortcuts(mtm);
     // Bind the status item (+ its target/menu) so they outlive `run()` — the
     // menu items only weakly reference the target. `None` when hidden.
     let _tray = show_in_menu_bar.then(|| install_status_item(mtm, app_icon));

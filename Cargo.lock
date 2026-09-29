@@ -5543,6 +5543,7 @@ dependencies = [
  "openlogi-fixture",
  "openlogi-hid",
  "openlogi-hook",
+ "openlogi-inject",
  "openlogi-ipc",
  "rust-i18n",
  "serde_json",
