@@ -374,6 +374,7 @@ fn translate(event: &evdev::InputEvent, hires_scroll: bool) -> Option<MouseEvent
                 id,
                 pressed: value != 0,
                 device: None,
+                attribution_invalidated: false,
             })
         }
         EventSummary::RelativeAxis(_, axis, value) => match axis {
@@ -579,6 +580,7 @@ mod tests {
                 id: ButtonId::LeftClick,
                 pressed: true,
                 device: None,
+                attribution_invalidated: false,
             })
         );
     }
@@ -592,6 +594,7 @@ mod tests {
                 id: ButtonId::LeftClick,
                 pressed: false,
                 device: None,
+                attribution_invalidated: false,
             })
         );
     }
@@ -605,6 +608,7 @@ mod tests {
                 id: ButtonId::Back,
                 pressed: true,
                 device: None,
+                attribution_invalidated: false,
             })
         );
     }
@@ -618,6 +622,7 @@ mod tests {
                 id: ButtonId::Back,
                 pressed: true,
                 device: None,
+                attribution_invalidated: false,
             })
         );
     }
@@ -631,6 +636,7 @@ mod tests {
                 id: ButtonId::Forward,
                 pressed: true,
                 device: None,
+                attribution_invalidated: false,
             })
         );
     }
