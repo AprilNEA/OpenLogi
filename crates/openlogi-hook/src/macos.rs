@@ -37,9 +37,9 @@ use foreground::observe_frontmost_application;
 pub(crate) use foreground::{frontmost_safari_pid, watch_frontmost_application_activations};
 use translate::{translate, translate_key};
 use watchdog::{
-    CallbackActivity, LIFECYCLE_POLL_INTERVAL, LifecycleDecision, LifecycleExitReason,
-    LifecycleObservation, LifecycleWatchdog, PowerEpoch, RearmBudget, TapPhase, WatchdogSignals,
-    stuck_callback,
+    CALLBACK_POLL_INTERVAL, CallbackActivity, CallbackWatchdog, LIFECYCLE_POLL_INTERVAL,
+    LifecycleDecision, LifecycleExitReason, LifecycleObservation, LifecycleWatchdog, PowerEpoch,
+    RearmBudget, TapPhase, WatchdogSignals,
 };
 
 /// Everything `Hook` needs to control the background thread.
@@ -86,7 +86,6 @@ fn can_filter_events() -> bool {
     .is_ok()
 }
 
-const CALLBACK_WATCHDOG_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const FREEZE_HAZARD_EXIT_CODE: i32 = 78;
 
 /// Event types the HID tap observes. Pointer *Dragged variants are required
@@ -350,28 +349,30 @@ fn spawn_callback_watchdog(
     thread::Builder::new()
         .name("openlogi-hook-watchdog".into())
         .spawn(move || {
+            let mut watchdog = CallbackWatchdog::default();
             loop {
                 let phase = signals.phase();
                 if matches!(phase, TapPhase::TapStopped | TapPhase::ThreadExited) {
                     return;
                 }
-                thread::sleep(CALLBACK_WATCHDOG_POLL_INTERVAL);
-                let Some(entered) = callback_activity.entered_at_ms() else {
-                    continue;
-                };
-                let Some(elapsed) = stuck_callback(signals.now_millis(), entered) else {
+                thread::sleep(CALLBACK_POLL_INTERVAL);
+                let entered = callback_activity.entered_at_ms();
+                let Some(stuck) =
+                    watchdog.evaluate(signals.now_millis(), entered, power_epoch())
+                else {
                     continue;
                 };
                 // Re-sample: a fresh high-frequency event may have rewritten
                 // the complete activity state during the budget check.
-                if callback_activity.entered_at_ms() != Some(entered) {
+                if callback_activity.entered_at_ms() != entered {
                     continue;
                 }
                 if signals.phase() != TapPhase::Armed {
                     continue;
                 }
                 error!(
-                    stuck_ms = duration_millis(elapsed),
+                    stalled_ms = duration_millis(stuck.stalled),
+                    watched_ms = duration_millis(stuck.watched),
                     "OS mouse-hook callback stuck past budget — exiting agent to \
                      restore system input (HID CGEventTap freeze hazard)"
                 );
