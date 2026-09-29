@@ -570,7 +570,7 @@ mod tests {
     use openlogi_core::binding::KeyCombo;
 
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-    use super::{HeldKey, HeldOutput, HoldTransition};
+    use super::{HeldKey, HeldOutput, HoldTransition, held_keys};
     use super::{QuantizedScroll, ScrollQuantizer};
 
     /// Synthetic high-resolution input: eight eighth-ticks must total exactly

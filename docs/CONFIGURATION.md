@@ -114,11 +114,12 @@ MiddleClick = { OpenApplication = { path = "~/Downloads", display_name = "Downlo
 DpiToggle = { short = "ShowDesktop", long = "MissionControl" }
 ```
 
-Chord modifiers are `Cmd`, `Ctrl`, `Alt`, `Shift`, and `Super`. `Cmd` (aliases
-`Meta`, `Win`) is the cross-platform primary modifier: Command on macOS, Control
-on Linux and Windows. `Super` always presses the platform's logo key — Command
-on macOS, the Windows key, `KEY_LEFTMETA` on Linux — so chords such as
-`Super+End` reach GNOME and KDE shortcuts that are bound to Super.
+Chord modifiers are `Cmd`, `Ctrl`, `Alt`, `Shift`, and `Super`. `Cmd` is the
+cross-platform primary modifier: Command on macOS, Control on Linux and Windows,
+so `Cmd+C` copies everywhere. `Super` (aliases `Win`, `Meta`) always presses the
+platform's logo key — Command on macOS, the Windows key, `KEY_LEFTMETA` on Linux —
+so `Win+L` locks Windows and `Super+End` reaches GNOME and KDE shortcuts bound to
+Super.
 
 `CustomShortcut` emits an immediate key-down/key-up pair. `HoldShortcut` keeps
 the chord down until the originating physical button is released, and also

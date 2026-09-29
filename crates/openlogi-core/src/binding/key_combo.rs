@@ -194,7 +194,8 @@ impl KeyCombo {
         self.key
     }
 
-    /// Whether the chord includes Command/Meta (the cross-platform primary modifier).
+    /// Whether the chord includes Command, the cross-platform primary modifier:
+    /// Command on macOS, Control on Linux and Windows.
     #[must_use]
     pub const fn has_command(&self) -> bool {
         self.modifiers & MOD_COMMAND != 0
@@ -218,10 +219,9 @@ impl KeyCombo {
         self.modifiers & MOD_OPTION != 0
     }
 
-    /// Whether the chord includes the Super key (Linux `KEY_LEFTMETA`, the
-    /// Windows key, macOS Command). Unlike [`Self::has_command`], which the
-    /// Linux and Windows backends fold into Control for macOS-authored
-    /// chords, Super always presses the platform's logo key.
+    /// Whether the chord includes the logo key, written `Super`, `Win`, or
+    /// `Meta`: Command on macOS, the Windows key, `KEY_LEFTMETA` on Linux.
+    /// Unlike [`Self::has_command`], it never becomes Control.
     #[must_use]
     pub const fn has_super(&self) -> bool {
         self.modifiers & MOD_SUPER != 0
@@ -305,8 +305,8 @@ impl FromStr for KeyCombo {
 
 fn parse_modifier(token: &str) -> Option<u8> {
     match token.to_ascii_lowercase().as_str() {
-        "cmd" | "command" | "meta" | "win" => Some(MOD_COMMAND),
-        "super" => Some(MOD_SUPER),
+        "cmd" | "command" => Some(MOD_COMMAND),
+        "super" | "win" | "meta" => Some(MOD_SUPER),
         "shift" => Some(MOD_SHIFT),
         "ctrl" | "control" => Some(MOD_CONTROL),
         "alt" | "option" => Some(MOD_OPTION),
@@ -391,10 +391,14 @@ mod tests {
         assert_eq!(combo.key().code(), 0x4d);
         assert_eq!(combo.rendered_label(), "Super+End");
 
-        // `meta` / `win` keep their historical Command meaning.
-        let combo = "Meta+A".parse::<KeyCombo>().expect("valid shortcut failed");
-        assert!(combo.has_command());
-        assert!(!combo.has_super());
+        // `Win` and `Meta` name the same logo key (#893), not Command.
+        for token in ["Win", "Meta"] {
+            let combo = format!("{token}+L")
+                .parse::<KeyCombo>()
+                .expect("valid shortcut failed");
+            assert!(combo.has_super(), "{token}");
+            assert!(!combo.has_command(), "{token}");
+        }
 
         let combo = "Super+Shift+Right"
             .parse::<KeyCombo>()
