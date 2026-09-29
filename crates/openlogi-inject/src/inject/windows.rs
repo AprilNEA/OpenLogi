@@ -3,6 +3,7 @@
 
 use std::mem::size_of;
 use std::sync::{LazyLock, Mutex};
+use std::time::Instant;
 
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, MOUSEEVENTF_HWHEEL,
@@ -12,11 +13,12 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 
 use openlogi_core::binding::{
-    Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Shortcut,
+    Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Shortcut, ZoomDirection,
 };
 use openlogi_core::scroll::ScrollDelta;
 
-use super::{HeldKey, KeyPhase, ScrollQuantizer};
+use super::zoom_notch::ZoomNotchRegistry;
+use super::{BUTTON_ZOOM_SOURCE, HeldKey, KeyPhase, ScrollQuantizer};
 
 const WHEEL_DELTA: i32 = 120;
 const WHEEL_DELTA_F64: f64 = 120.0;
@@ -60,6 +62,15 @@ pub(super) fn execute(action: &Action) {
         Effect::Shortcut(shortcut) => press_shortcut(shortcut),
         Effect::Key(combo) | Effect::HeldKey(combo) => press_combo(combo),
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
+        // A button is its own zoom source: it must not spend progress the
+        // wheel made, nor leave any behind for the wheel to trip over.
+        Effect::Zoom(direction) => post_zoom(
+            match direction {
+                ZoomDirection::In => ZOOM_PER_NOTCH,
+                ZoomDirection::Out => -ZOOM_PER_NOTCH,
+            },
+            BUTTON_ZOOM_SOURCE,
+        ),
         Effect::Media(key) => dispatch_media(key),
         Effect::Native(native) => dispatch_native(native),
         Effect::Script(script) => super::dispatch_script(script),
@@ -189,6 +200,47 @@ fn post_key(vk: u16, modifiers: &[u16]) {
         inputs.push(key_input(*modifier, true));
     }
     send_inputs(&inputs);
+}
+
+/// Magnification one Ctrl+wheel notch is worth, mirroring the fraction the
+/// wheel dispatcher applies per tick.
+const ZOOM_PER_NOTCH: f64 = 0.05;
+
+static ZOOM_NOTCHES: LazyLock<Mutex<ZoomNotchRegistry>> =
+    LazyLock::new(|| Mutex::new(ZoomNotchRegistry::new()));
+
+/// Apply continuous magnification as Ctrl-held wheel notches.
+///
+/// Windows has no gesture event to synthesise: applications zoom on Ctrl+wheel,
+/// where the `MK_CONTROL` bit comes from the real modifier state rather than
+/// the injected event, so Ctrl genuinely goes down around each notch — all
+/// three inputs in one `SendInput` call so nothing can interleave and strand
+/// it.
+///
+/// Because a notch is the smallest step this platform has, fractional
+/// magnification is accumulated until it is worth one; otherwise a
+/// high-resolution wheel would round every step to zero and never zoom.
+pub(super) fn post_zoom(magnification: f64, source: &str) {
+    let notches = {
+        let Ok(mut pending) = ZOOM_NOTCHES.lock() else {
+            tracing::warn!("Windows zoom remainder mutex poisoned");
+            return;
+        };
+        pending.take(source, magnification, ZOOM_PER_NOTCH, Instant::now())
+    };
+    let count = notches.unsigned_abs();
+    let delta = if notches.is_negative() {
+        -WHEEL_DELTA
+    } else {
+        WHEEL_DELTA
+    };
+    for _ in 0..count {
+        send_inputs(&[
+            key_input(VK_CONTROL, false),
+            mouse_input(MOUSEEVENTF_WHEEL, delta),
+            key_input(VK_CONTROL, true),
+        ]);
+    }
 }
 
 /// Synthesise one scroll tick in direction `(dx, dy)`. Unit direction

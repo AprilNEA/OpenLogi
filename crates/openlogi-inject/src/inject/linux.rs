@@ -7,17 +7,19 @@
 
 use std::io;
 use std::sync::{LazyLock, Mutex};
+use std::time::Instant;
 
 use evdev::uinput::VirtualDevice;
 use evdev::{AttributeSet, EventType, InputEvent, KeyCode, RelativeAxisCode};
 use zbus::blocking::Connection as DbusConn;
 
 use openlogi_core::binding::{
-    Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Shortcut,
+    Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Shortcut, ZoomDirection,
 };
 use openlogi_core::scroll::ScrollDelta;
 
-use super::{HeldKey, KeyPhase, QuantizedScroll, ScrollQuantizer};
+use super::zoom_notch::ZoomNotchRegistry;
+use super::{BUTTON_ZOOM_SOURCE, HeldKey, KeyPhase, QuantizedScroll, ScrollQuantizer};
 
 const HIGH_RES_UNITS_PER_TICK: f64 = 120.0;
 
@@ -41,6 +43,15 @@ pub(super) fn execute(action: &Action) {
         Effect::Shortcut(shortcut) => press_combo(&combo(shortcut)),
         Effect::Key(combo) | Effect::HeldKey(combo) => press_combo(combo),
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
+        // A button is its own zoom source: it must not spend progress the
+        // wheel made, nor leave any behind for the wheel to trip over.
+        Effect::Zoom(direction) => post_zoom(
+            match direction {
+                ZoomDirection::In => ZOOM_PER_NOTCH,
+                ZoomDirection::Out => -ZOOM_PER_NOTCH,
+            },
+            BUTTON_ZOOM_SOURCE,
+        ),
         Effect::Media(key) => dispatch_media(key),
         Effect::Native(native) => dispatch_native(action, native),
         Effect::Script(script) => super::dispatch_script(script),
@@ -156,6 +167,42 @@ fn dispatch_native(action: &Action, native: NativeAction) {
         }
         // logind Suspend() via the system bus.
         NativeAction::Sleep => sleep_system(),
+    }
+}
+
+/// Magnification one Ctrl+wheel notch is worth, mirroring the fraction the
+/// wheel dispatcher applies per tick.
+const ZOOM_PER_NOTCH: f64 = 0.05;
+
+static ZOOM_NOTCHES: LazyLock<Mutex<ZoomNotchRegistry>> =
+    LazyLock::new(|| Mutex::new(ZoomNotchRegistry::new()));
+
+/// Apply continuous magnification as Ctrl-held wheel notches.
+///
+/// Toolkits and browsers on X11 and Wayland alike zoom on Ctrl+wheel, and the
+/// modifier comes from the keyboard state the compositor tracks — a `uinput`
+/// wheel event carries no flags of its own — so `KEY_LEFTCTRL` is genuinely
+/// pressed around the notch, each edge in its own `SYN_REPORT` frame the way
+/// [`held_key_events`] does it.
+///
+/// A notch is the smallest step available here, so fractional magnification is
+/// accumulated until it is worth one; otherwise a high-resolution wheel would
+/// round every step to zero and never zoom.
+pub(super) fn post_zoom(magnification: f64, source: &str) {
+    let notches = {
+        let Ok(mut pending) = ZOOM_NOTCHES.lock() else {
+            tracing::warn!("Linux zoom remainder mutex poisoned");
+            return;
+        };
+        pending.take(source, magnification, ZOOM_PER_NOTCH, Instant::now())
+    };
+    let count = notches.unsigned_abs();
+    let value = if notches.is_negative() { -1 } else { 1 };
+    let ctrl = [KeyCode::KEY_LEFTCTRL];
+    for _ in 0..count {
+        emit(&held_key_events(&ctrl, KeyPhase::Down));
+        scroll(RelativeAxisCode::REL_WHEEL, value);
+        emit(&held_key_events(&ctrl, KeyPhase::Up));
     }
 }
 

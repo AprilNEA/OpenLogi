@@ -53,6 +53,7 @@ fn pointer_action_allowed(
         Effect::None
         | Effect::Click(_)
         | Effect::Scroll { .. }
+        | Effect::Zoom(_)
         | Effect::Media(_)
         | Effect::Native(_)
         | Effect::AgentSide => false,
