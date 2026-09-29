@@ -31,7 +31,7 @@ use std::fmt::Write;
 
 use bincode::Options;
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
+use openlogi_core::binding::{ActionRingIcon, ActionRingSlot, KeyCombo};
 use openlogi_core::config::{Lighting, ScrollResolution};
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
@@ -102,7 +102,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 33);
+    assert_eq!(PROTOCOL_VERSION, 34);
 }
 
 #[test]
@@ -257,6 +257,14 @@ fn semantic_read_requests() {
         },
         "1e0008463030444341464501",
     );
+}
+
+/// A chord crosses the wire as its modifier bits and the key's HID usage.
+#[test]
+fn key_combo_modifier_bits() {
+    let combo = |text: &str| text.parse::<KeyCombo>().expect("valid chord");
+    assert_wire(&combo("Cmd+L"), "010f");
+    assert_wire(&combo("Super+L"), "100f");
 }
 
 /// The agent identity is frozen: a helper from any build has to be able to
