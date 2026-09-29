@@ -23,8 +23,8 @@ use openlogi_core::device::{
 };
 use openlogi_core::device_order::{DeviceIdentity, PhysicalDeviceKey};
 use openlogi_hid::{
-    CaptureChannelSlot, ChannelPool, ChannelRegistry, DeviceIoGate, DeviceRoute,
-    is_reserved_keyboard_control,
+    CaptureChannelSlot, ChannelPool, ChannelRegistry, DeviceIoGate, DeviceRoute, FnLockState,
+    HidppOperation, WriteError, is_reserved_keyboard_control,
 };
 use openlogi_ipc::InventoryHealth;
 use tokio::sync::watch;
@@ -34,7 +34,9 @@ use crate::action_ring::ActionRingSessionSpec;
 use crate::capture_plan::{
     DeviceCapturePlan, SharedCapturePlans, hidpp_side_gesture_maps_for, plan_for_device,
 };
-use crate::hardware::{DeviceAccess, DeviceOp, HardwareContext, VolatileMouseSettings};
+use crate::hardware::{
+    DeviceAccess, DeviceOp, FnLockOrder, HardwareContext, VolatileMouseSettings,
+};
 use crate::observable::ObservableState;
 use crate::receiver_access::ReceiverAccess;
 use crate::runtime::hook::{HookMaps, SharedHookMaps};
@@ -120,6 +122,8 @@ pub struct SharedHandles {
     pub receiver_access: ReceiverAccess,
     /// Keyboard → pointing-device routes resolved from `config.toml`.
     pub host_switch_links: HostSwitchLinks,
+    /// Orders every path's Fn-lock writes per keyboard.
+    fn_lock_order: FnLockOrder,
 }
 
 impl SharedHandles {
@@ -164,6 +168,36 @@ impl SharedHandles {
     #[must_use]
     pub fn keyboard_device(&self, route: &DeviceRoute) -> DeviceOp {
         self.keyboard_access().op(route)
+    }
+
+    /// Write `fn_lock` to the keyboard at `route` and return its echo. When a
+    /// newer Fn-lock write for the keyboard is requested before this one gets
+    /// its turn, this one reads the keyboard instead of writing a value that
+    /// is about to be replaced.
+    pub async fn set_fn_lock(
+        &self,
+        route: &DeviceRoute,
+        fn_lock: bool,
+    ) -> Result<FnLockState, WriteError> {
+        let ticket = self.fn_lock_order.request(route);
+        self.keyboard_device(route)
+            .run(HidppOperation::WriteFnLock, |c| async move {
+                match ticket.turn().await {
+                    Some(_turn) => openlogi_hid::set_fn_lock_on(&c, fn_lock).await,
+                    None => openlogi_hid::get_fn_lock_on(&c).await,
+                }
+            })
+            .await
+    }
+
+    /// [`Self::set_fn_lock`] without waiting, for the config-reload and
+    /// reconnect paths; the outcome is logged.
+    fn write_fn_lock_in_background(&self, route: &DeviceRoute, fn_lock: bool) {
+        crate::hardware::write_fn_lock_in_background(
+            self.keyboard_device(route),
+            self.fn_lock_order.request(route),
+            fn_lock,
+        );
     }
 }
 
@@ -273,6 +307,7 @@ impl Orchestrator {
             capture_rearm_generation: Arc::new(AtomicU64::new(0)),
             receiver_access: ReceiverAccess::default(),
             host_switch_links,
+            fn_lock_order: FnLockOrder::default(),
         };
         let orch = Self {
             config,
@@ -694,10 +729,7 @@ impl Orchestrator {
             crate::hardware::set_lighting_in_background(self.shared.device(&route), lighting);
         }
         if let Some(fn_lock) = self.config.fn_lock(key) {
-            crate::hardware::write_fn_lock_in_background(
-                self.shared.keyboard_device(&route),
-                fn_lock,
-            );
+            self.shared.write_fn_lock_in_background(&route, fn_lock);
         }
         if let Some(capabilities) = dev.light_capabilities
             && let Some(light) = self.effective_light_settings(key)
@@ -978,10 +1010,11 @@ impl Orchestrator {
     }
 
     /// Push a changed Fn-lock setting to the online keyboard it belongs to.
-    /// Only the values that differ from `previous` are written: the GUI writes
-    /// the keyboard directly when the user flips the toggle and shows the
-    /// echoed state, so a detached write of an unchanged value on every
-    /// unrelated save would only race that echo. The reconnect path is
+    /// Only the values that differ from `previous` are written, so an
+    /// unrelated save never undoes an Fn+Esc the user pressed on the keyboard.
+    /// The GUI toggle also writes directly through
+    /// [`SharedHandles::set_fn_lock`]; both writes are ordered per keyboard,
+    /// so the newest request is the one that stays. The reconnect path is
     /// [`Self::reapply_volatile_settings`].
     fn apply_changed_fn_locks(&self, previous: &Config) {
         for dev in self.devices.iter().filter(|dev| dev.online) {
@@ -993,10 +1026,7 @@ impl Orchestrator {
                 continue;
             }
             if let Some(fn_lock) = fn_lock {
-                crate::hardware::write_fn_lock_in_background(
-                    self.shared.keyboard_device(&route),
-                    fn_lock,
-                );
+                self.shared.write_fn_lock_in_background(&route, fn_lock);
             }
         }
     }
