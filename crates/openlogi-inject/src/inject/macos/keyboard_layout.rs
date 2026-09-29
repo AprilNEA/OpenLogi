@@ -184,11 +184,15 @@ mod tests {
         static kTISPropertyInputSourceID: &'static CFString;
     }
 
-    /// The test harness runs off the main thread; serialise the reads so two
-    /// tests never race HIToolbox's lazy setup.
+    /// The harness runs tests off the main thread. The main-thread rule
+    /// guards an app whose main thread runs AppKit's event loop alongside the
+    /// read; a test process runs none (enigo reads off-main in exactly that
+    /// case), so serialising the reads is what remains: two tests must not
+    /// race HIToolbox's lazy setup.
     static TIS: Mutex<()> = Mutex::new(());
 
-    /// A layout that ships with every macOS, by input-source ID.
+    /// A layout that ships with every macOS, by input-source ID. The ID's
+    /// case has varied across releases, so it is matched without it.
     fn installed(id: &str) -> Layout {
         let _tis = TIS.lock().unwrap_or_else(PoisonError::into_inner);
         // SAFETY: a Create-rule function; null properties list every source.
@@ -198,7 +202,7 @@ mod tests {
         let sources = unsafe { CFRetained::from_raw(sources) };
         let source = sources
             .iter()
-            .find(|source| source_id(source).is_some_and(|name| name == id))
+            .find(|source| source_id(source).is_some_and(|name| name.eq_ignore_ascii_case(id)))
             .unwrap_or_else(|| panic!("{id} ships with macOS"));
         Layout {
             uchr: layout_data(&source).expect("a keyboard layout has uchr data"),
