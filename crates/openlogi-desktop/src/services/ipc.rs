@@ -39,7 +39,7 @@
 
 use std::time::{Duration, Instant};
 
-use openlogi_core::hid::{FnLockState, LightCommand, WriteError};
+use openlogi_core::hid::{DeviceRoute, FnLockState, LightCommand, WriteError};
 use openlogi_ipc::client::{self, ConnectError};
 use openlogi_ipc::{AgentClient, AgentSnapshot, ClientKind, ConfigReloadError, PairingFailure};
 use tarpc::client::RpcError;
@@ -115,6 +115,8 @@ pub enum GuiUpdate {
     DeviceUnpaired {
         /// The record the user asked to forget.
         record_key: String,
+        /// The pairing the receiver was asked to drop.
+        route: DeviceRoute,
         /// Where its settings live.
         config_key: Option<String>,
         result: Result<(), UnpairFailure>,

@@ -457,6 +457,7 @@ impl Request for UnpairDevice {
         };
         let _ = updates.send(GuiUpdate::DeviceUnpaired {
             record_key: self.record_key,
+            route: self.route,
             config_key: self.config_key,
             result,
         });

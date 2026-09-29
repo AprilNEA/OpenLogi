@@ -447,16 +447,19 @@ impl super::AppState {
     /// The receiver's answer to [`Self::forget_device`]'s unpair. The
     /// inventory rescan the unpair triggers may already have dropped the
     /// card, so the settings go by `config_key` whether it is still shown or
-    /// not — unless the device is back online, paired again, in which case
-    /// they are its settings now.
+    /// not — unless the device is online again through another route, in
+    /// which case the card and settings are that pairing's now. Online
+    /// through the `route` just unpaired can only be a sighting from before
+    /// the unpair, so it does not count.
     pub(crate) fn apply_device_unpaired(
         &mut self,
         record_key: &str,
+        route: &DeviceRoute,
         config_key: Option<&str>,
         result: Result<(), UnpairFailure>,
     ) -> StateEvents {
         match result {
-            Ok(()) if self.device_is_back(record_key, config_key) => StateEvents::none(),
+            Ok(()) if self.device_is_back(record_key, route, config_key) => StateEvents::none(),
             Ok(()) => self.drop_device(record_key, config_key),
             Err(failure) => {
                 let name = self
@@ -473,11 +476,18 @@ impl super::AppState {
         }
     }
 
-    /// Whether the forgotten device is online again — as its old card, or as
-    /// a new card that owns the same settings.
-    fn device_is_back(&self, record_key: &str, config_key: Option<&str>) -> bool {
+    /// Whether the forgotten device is online again through a route other
+    /// than `unpaired` — as its old card, or as a new card that owns the same
+    /// settings.
+    fn device_is_back(
+        &self,
+        record_key: &str,
+        unpaired: &DeviceRoute,
+        config_key: Option<&str>,
+    ) -> bool {
         self.devices.records.iter().any(|record| {
             record.online
+                && record.route.as_ref() != Some(unpaired)
                 && (record.record_key() == record_key
                     || config_key.is_some_and(|key| record.persistent_config_key() == Some(key)))
         })

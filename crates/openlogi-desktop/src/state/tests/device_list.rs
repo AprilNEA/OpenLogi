@@ -596,12 +596,12 @@ fn forgetting_a_receiver_device_unpairs_it_before_dropping_the_card() {
     else {
         panic!("forgetting a receiver device must ask the agent to unpair it");
     };
-    assert_eq!(Some(sent_route), route);
+    assert_eq!(Some(&sent_route), route.as_ref());
     assert_eq!(sent_key, record_key);
     assert_eq!(sent_config.as_deref(), Some(config_key.as_str()));
 
     assert_eq!(
-        state.apply_device_unpaired(&record_key, Some(&config_key), Ok(())),
+        state.apply_device_unpaired(&record_key, &sent_route, Some(&config_key), Ok(())),
         [StateEvent::InventoryChanged]
     );
     assert!(state.devices().is_empty());
@@ -619,9 +619,10 @@ fn a_refused_unpair_keeps_the_device_and_says_why() {
     let (record_key, config_key) = forget_target(&mut state);
     let name = state.devices()[0].display_name.clone();
     let failure = UnpairFailure::Refused(PairingFailure::ReceiverBusy);
+    let route = state.devices()[0].route.clone().expect("a Bolt route");
 
     assert_eq!(
-        state.apply_device_unpaired(&record_key, Some(&config_key), Err(failure.clone())),
+        state.apply_device_unpaired(&record_key, &route, Some(&config_key), Err(failure.clone())),
         [StateEvent::DeviceRemovalFailed { name, failure }]
     );
     assert_eq!(state.devices().len(), 1);
@@ -634,37 +635,59 @@ fn a_refused_unpair_keeps_the_device_and_says_why() {
 fn an_unpaired_device_loses_its_settings_even_after_its_card_is_gone() {
     let (mut state, _commands) = state_with_an_offline_receiver_mouse();
     let (_, config_key) = forget_target(&mut state);
+    let route = state.devices()[0].route.clone().expect("a Bolt route");
 
-    let _ = state.apply_device_unpaired("already-gone", Some(&config_key), Ok(()));
+    let _ = state.apply_device_unpaired("already-gone", &route, Some(&config_key), Ok(()));
 
     assert!(!state.config.devices.contains_key(&config_key));
 }
 
-/// An unpair answer that arrives after the device was paired again and came
-/// online must not delete the device it now is: its card and settings stay.
-#[test]
-fn an_unpair_answer_leaves_a_device_that_is_back_online() {
+/// A mouse seen online on slot 1, then asleep, forgotten from `route`, and
+/// seen again as `after` before the unpair answer arrives.
+fn forget_then_see(after: DeviceInventory) -> (AppState, String, DeviceRoute, String) {
     let resolver = AssetResolver::new();
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
     let mut state = AppState::new(Sources {
         inventories: &[receiver_inventory()],
         ..Sources::in_memory(Config::ephemeral(), &resolver, commands)
     });
-    let with_link = |online: bool| {
-        let mut inventory = receiver_inventory();
-        inventory.paired[0].online = online;
-        inventory
-    };
-    let _ = state.refresh_inventories(&[with_link(false)], &[], &resolver, &[]);
+    let mut asleep = receiver_inventory();
+    asleep.paired[0].online = false;
+    let _ = state.refresh_inventories(&[asleep], &[], &resolver, &[]);
     let (record_key, config_key) = forget_target(&mut state);
-    let _ = state.refresh_inventories(&[with_link(true)], &[], &resolver, &[]);
+    let route = state.devices()[0].route.clone().expect("a Bolt route");
+    let _ = state.refresh_inventories(&[after], &[], &resolver, &[]);
     assert!(state.devices()[0].online);
+    (state, record_key, route, config_key)
+}
+
+/// An unpair answer that arrives after the device came back through another
+/// route must not delete the device it now is: its card and settings stay.
+#[test]
+fn an_unpair_answer_leaves_a_device_back_through_another_route() {
+    let mut repaired = receiver_inventory();
+    repaired.paired[0].slot = 2;
+    let (mut state, record_key, route, config_key) = forget_then_see(repaired);
 
     assert!(
         state
-            .apply_device_unpaired(&record_key, Some(&config_key), Ok(()))
+            .apply_device_unpaired(&record_key, &route, Some(&config_key), Ok(()))
             .is_empty()
     );
     assert!(state.devices()[0].online);
     assert!(state.config.devices.contains_key(&config_key));
+}
+
+/// Online on the slot just unpaired can only be a sighting from before the
+/// unpair: the device still goes.
+#[test]
+fn a_device_seen_on_the_unpaired_slot_still_goes() {
+    let (mut state, record_key, route, config_key) = forget_then_see(receiver_inventory());
+
+    assert_eq!(
+        state.apply_device_unpaired(&record_key, &route, Some(&config_key), Ok(())),
+        [StateEvent::InventoryChanged]
+    );
+    assert!(state.devices().is_empty());
+    assert!(!state.config.devices.contains_key(&config_key));
 }
