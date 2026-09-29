@@ -50,6 +50,14 @@ pub enum Effect<'a> {
         /// Vertical direction: -1 down, 1 up, 0 none.
         dy: i8,
     },
+    /// Synthesise one zoom step in the frontmost application.
+    ///
+    /// Its own effect rather than an [`Effect::Scroll`] every backend would
+    /// have to special-case, and rather than an [`Effect::Shortcut`] whose
+    /// chord only works in document apps: the platforms disagree on the
+    /// mechanism. macOS needs a real magnification gesture; Windows and Linux
+    /// want Ctrl+wheel notches. Carrying the intent lets each backend choose.
+    Zoom(ZoomDirection),
     /// Fire a media/volume key. Every backend reaches these through a
     /// dedicated OS mechanism rather than an ordinary keyboard chord.
     Media(MediaKey),
@@ -272,6 +280,8 @@ impl Action {
             Action::ScrollDown => Effect::Scroll { dx: 0, dy: -1 },
             Action::HorizontalScrollLeft => Effect::Scroll { dx: -1, dy: 0 },
             Action::HorizontalScrollRight => Effect::Scroll { dx: 1, dy: 0 },
+            Action::ZoomIn => Effect::Zoom(ZoomDirection::In),
+            Action::ZoomOut => Effect::Zoom(ZoomDirection::Out),
 
             Action::CustomShortcut(combo) => Effect::Key(combo),
             Action::HoldShortcut(combo) => Effect::HeldKey(combo),
@@ -282,4 +292,13 @@ impl Action {
             Action::Workflow(steps) => Effect::Script(Script::Workflow(steps)),
         }
     }
+}
+
+/// Which way an [`Effect::Zoom`] step goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ZoomDirection {
+    /// Magnify.
+    In,
+    /// Shrink.
+    Out,
 }
