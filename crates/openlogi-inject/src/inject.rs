@@ -570,7 +570,7 @@ mod tests {
     use openlogi_core::binding::KeyCombo;
 
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-    use super::{HeldKey, HeldOutput, HoldTransition, held_keys};
+    use super::{HeldKey, HeldOutput, HoldTransition};
     use super::{QuantizedScroll, ScrollQuantizer};
 
     /// Synthetic high-resolution input: eight eighth-ticks must total exactly
@@ -730,7 +730,7 @@ mod tests {
     fn super_plus_command_owns_the_physical_key_once() {
         let chord = combo("Cmd+Super+A");
         assert_eq!(
-            held_keys(&chord),
+            super::held_keys(&chord),
             vec![HeldKey::Command, HeldKey::Key(chord.key())]
         );
     }
