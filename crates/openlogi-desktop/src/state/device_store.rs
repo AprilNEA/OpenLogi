@@ -31,6 +31,13 @@ impl DeviceStore {
         self.selected.and_then(|index| self.records.get(index))
     }
 
+    /// Look up a device independently of the active UI selection.
+    pub(super) fn record(&self, key: &DeviceKey) -> Option<&DeviceRecord> {
+        self.records
+            .iter()
+            .find(|record| record.device_key() == *key)
+    }
+
     pub(super) fn select(&mut self, index: usize) -> bool {
         if index >= self.records.len() || self.selected == Some(index) {
             return false;

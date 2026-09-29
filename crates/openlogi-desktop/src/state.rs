@@ -377,9 +377,6 @@ impl AppState {
     pub(crate) fn device_reads_mut(&mut self) -> &mut DeviceReads {
         &mut self.pointer.reads
     }
-    pub(crate) fn disable_keys_reads_mut(&mut self) -> &mut DisableKeysReads {
-        &mut self.disable_keys_reads
-    }
     /// Config schema version and the number of devices with saved configuration.
     #[must_use]
     pub fn config_summary(&self) -> (u32, usize) {

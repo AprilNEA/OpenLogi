@@ -401,23 +401,20 @@ impl VolatileMouseSettings {
 /// complete desired known mask, preserves advertised unknown bits, and
 /// verifies the replacement across the previously advertised supported bits
 /// before reporting success.
-pub fn write_disabled_keys_in_background(op: DeviceOp<'_>, desired: DisableKeysMask) {
+pub fn write_disabled_keys_in_background(op: DeviceOp, desired: DisableKeysMask) {
     let index = op.route.device_index();
     op.spawn_write(
         "Disable Keys write",
         move |channel| async move { openlogi_hid::set_disable_keys_on(&channel, desired).await },
-        move |result| match result {
-            Ok(Ok(state)) => debug!(
-                index,
-                desired = desired.bits(),
-                confirmed = state.disabled.bits(),
-                "disabled keys written"
-            ),
-            Ok(Err(error)) => warn!(error = ?error, "Disable Keys write failed"),
-            Err(_) => warn!(
-                index,
-                "Disable Keys write timed out (device asleep/unresponsive)"
-            ),
+        move |result| {
+            log_outcome(index, "Disable Keys write", result, |state| {
+                debug!(
+                    index,
+                    desired = desired.bits(),
+                    confirmed = state.disabled.bits(),
+                    "disabled keys written"
+                );
+            });
         },
     );
 }

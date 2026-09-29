@@ -283,11 +283,8 @@ impl Runtime {
             }
             ipc::GuiUpdate::DisableKeysWriteResult { context, result } => {
                 cx.update(|cx| {
-                    let event_key = context.key.clone();
-                    AppState::update(cx, |state, cx| {
-                        if state.apply_disable_keys_write_result(context, result) {
-                            cx.emit(StateEvent::DisableKeysChanged(event_key));
-                        }
+                    AppState::apply(cx, |state| {
+                        state.apply_disable_keys_write_result(context, result)
                     });
                 });
             }
@@ -301,11 +298,7 @@ impl Runtime {
                             state.apply_config_reload_result(result)
                         }
                         ipc::ConfigReloadContext::DisableKeys(context) => {
-                            let key = context.key.clone();
-                            state
-                                .apply_disable_keys_reload_result(context, result)
-                                .then_some(StateEvent::DisableKeysChanged(key))
-                                .into()
+                            state.apply_disable_keys_reload_result(context, result)
                         }
                     });
                 });

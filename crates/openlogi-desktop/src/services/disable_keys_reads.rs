@@ -11,7 +11,7 @@ use swr_gpui::Query;
 use tokio::sync::mpsc;
 
 use super::ipc::{Command, ReadDisableKeys};
-use crate::state::{AppState, DeviceKey, DisableKeysLoad, Load, StateEvent};
+use crate::state::{AppState, DeviceKey, DisableKeysLoad, Load};
 
 const ROOT: &str = "disable-keys-read";
 const READ_RETRY_POLICY: RetryPolicy = RetryPolicy {
@@ -93,12 +93,9 @@ impl DisableKeysReads {
         let observed_key = key.clone();
         let observer = cx.observe(query.state(), move |state, query_state, cx| {
             let load = project_load(query_state.read(cx));
-            if state
-                .disable_keys_reads_mut()
-                .update(&observed_key, route_generation, load)
-            {
-                cx.emit(StateEvent::DisableKeysChanged(observed_key.clone()));
-            }
+            state
+                .apply_disable_keys_read(&observed_key, route_generation, load)
+                .emit(cx);
         });
         self.reads.insert(
             key,
@@ -206,7 +203,12 @@ impl DisableKeysReads {
         generation
     }
 
-    fn update(&mut self, key: &DeviceKey, route_generation: u64, load: DisableKeysLoad) -> bool {
+    pub(crate) fn update(
+        &mut self,
+        key: &DeviceKey,
+        route_generation: u64,
+        load: DisableKeysLoad,
+    ) -> bool {
         let Some(read) = self
             .reads
             .get_mut(key)

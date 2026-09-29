@@ -8,7 +8,7 @@ use openlogi_core::hid::{DisableKeysMask, DisableKeysState, WriteError};
 
 use crate::services::ipc::{DisableKeysRequestContext, ReloadConfig, SetDisableKeys};
 
-use super::{AppState, DeviceKey, DisableKeysLoad, Load, StateEvent};
+use super::{AppState, DeviceKey, DisableKeysLoad, Load, StateEvent, StateEvents};
 
 /// Route-independent identity retained across disconnects during recovery.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -40,6 +40,18 @@ pub(super) struct DisableKeysDeviceState {
 }
 
 impl AppState {
+    pub(crate) fn apply_disable_keys_read(
+        &mut self,
+        key: &DeviceKey,
+        generation: u64,
+        load: DisableKeysLoad,
+    ) -> StateEvents {
+        self.disable_keys_reads
+            .update(key, generation, load)
+            .then_some(StateEvent::DisableKeysChanged(key.clone()))
+            .into()
+    }
+
     pub(super) fn load_current_disable_keys(&mut self, cx: &mut Context<Self>) {
         let Some((key, route)) = self.current_record().and_then(|record| {
             let supported = record.capabilities.unwrap_or_default().disable_keys;
@@ -103,7 +115,7 @@ impl AppState {
             return None;
         }
         let context = self.allocate_disable_keys_context(&key)?;
-        let state = self.devices.runtime.entry(key.clone()).or_default();
+        let state = self.devices.sessions.entry(key.clone()).or_default();
         if !matches!(
             state.disable_keys.persistence,
             DisableKeysPersistenceStatus::Idle
@@ -113,7 +125,7 @@ impl AppState {
         state.disable_keys.persistence = DisableKeysPersistenceStatus::Applying(context.clone());
         state.disable_keys.error = None;
         if !self.send_ipc(SetDisableKeys { context, desired }) {
-            let state = self.devices.runtime.entry(key.clone()).or_default();
+            let state = self.devices.sessions.entry(key.clone()).or_default();
             state.disable_keys.persistence = DisableKeysPersistenceStatus::Idle;
             state.disable_keys.error = Some("agent is unavailable".into());
         }
@@ -124,7 +136,8 @@ impl AppState {
         &mut self,
         context: DisableKeysRequestContext,
         result: Result<DisableKeysState, WriteError>,
-    ) -> bool {
+    ) -> StateEvents {
+        let events = StateEvents::from(StateEvent::DisableKeysChanged(context.key.clone()));
         let current = match self.disable_keys_status(&context.key) {
             Some(DisableKeysPersistenceStatus::Applying(current)) => Some(current),
             _ => None,
@@ -135,16 +148,16 @@ impl AppState {
             current,
             &context,
         ) {
-            return false;
+            return StateEvents::none();
         }
         let key = context.key.clone();
         let result = match result {
             Ok(confirmed) => confirmed,
             Err(error) => {
-                let state = self.devices.runtime.entry(key).or_default();
+                let state = self.devices.sessions.entry(key).or_default();
                 state.disable_keys.persistence = DisableKeysPersistenceStatus::Idle;
                 state.disable_keys.error = Some(error.to_string());
-                return true;
+                return events;
             }
         };
 
@@ -153,7 +166,7 @@ impl AppState {
         self.config
             .edit(|config| config.set_disabled_keys(key.as_str(), known));
         if let Err(error) = self.config.persist_feature("disabled keys") {
-            let state = self.devices.runtime.entry(key.clone()).or_default();
+            let state = self.devices.sessions.entry(key.clone()).or_default();
             state.disable_keys.persistence = DisableKeysPersistenceStatus::AppliedNotSaved {
                 recovery: DisableKeysRecoveryToken {
                     key,
@@ -162,27 +175,28 @@ impl AppState {
                 confirmed: result,
             };
             state.disable_keys.error = Some(error);
-            return true;
+            return events;
         }
 
-        let state = self.devices.runtime.entry(key.clone()).or_default();
+        let state = self.devices.sessions.entry(key.clone()).or_default();
         state.disable_keys.persistence =
             DisableKeysPersistenceStatus::AwaitingReload(context.clone());
         state.disable_keys.error = None;
         if !self.send_ipc(ReloadConfig::disable_keys(context.clone())) {
-            let state = self.devices.runtime.entry(key).or_default();
+            let state = self.devices.sessions.entry(key).or_default();
             state.disable_keys.persistence =
                 DisableKeysPersistenceStatus::SavedNotReloaded(context);
             state.disable_keys.error = Some("agent is unavailable".into());
         }
-        true
+        events
     }
 
     pub(crate) fn apply_disable_keys_reload_result(
         &mut self,
         context: DisableKeysRequestContext,
         result: Result<(), openlogi_ipc::ConfigReloadError>,
-    ) -> bool {
+    ) -> StateEvents {
+        let events = StateEvents::from(StateEvent::DisableKeysChanged(context.key.clone()));
         let current = match self.disable_keys_status(&context.key) {
             Some(DisableKeysPersistenceStatus::AwaitingReload(current)) => Some(current),
             _ => None,
@@ -193,9 +207,13 @@ impl AppState {
             current,
             &context,
         ) {
-            return false;
+            return StateEvents::none();
         }
-        let state = self.devices.runtime.entry(context.key.clone()).or_default();
+        let state = self
+            .devices
+            .sessions
+            .entry(context.key.clone())
+            .or_default();
         match result {
             Ok(()) => {
                 state.disable_keys.persistence = DisableKeysPersistenceStatus::Idle;
@@ -207,7 +225,7 @@ impl AppState {
                 state.disable_keys.error = Some(error.message);
             }
         }
-        true
+        events
     }
 
     fn retry_disable_keys_save_inner(&mut self, key: &DeviceKey) -> bool {
@@ -220,7 +238,7 @@ impl AppState {
         };
         if let Err(error) = self.config.refresh_feature() {
             self.devices
-                .runtime
+                .sessions
                 .entry(key.clone())
                 .or_default()
                 .disable_keys
@@ -232,7 +250,7 @@ impl AppState {
             .edit(|config| config.set_disabled_keys(recovery.key.as_str(), known));
         if let Err(error) = self.config.persist_feature("disabled keys recovery") {
             self.devices
-                .runtime
+                .sessions
                 .entry(key.clone())
                 .or_default()
                 .disable_keys
@@ -241,7 +259,7 @@ impl AppState {
         }
 
         let next = self.allocate_disable_keys_context(key);
-        let state = self.devices.runtime.entry(key.clone()).or_default();
+        let state = self.devices.sessions.entry(key.clone()).or_default();
         state.disable_keys.error = None;
         if let Some(context) = next {
             state.disable_keys.persistence =
@@ -268,12 +286,12 @@ impl AppState {
             _ => return false,
         };
         let Some(context) = self.allocate_disable_keys_context(&recovery.key) else {
-            let state = self.devices.runtime.entry(key.clone()).or_default();
+            let state = self.devices.sessions.entry(key.clone()).or_default();
             state.disable_keys.persistence =
                 DisableKeysPersistenceStatus::SavedNotReloadedDetached(recovery);
             return true;
         };
-        let state = self.devices.runtime.entry(key.clone()).or_default();
+        let state = self.devices.sessions.entry(key.clone()).or_default();
         state.disable_keys.persistence =
             DisableKeysPersistenceStatus::AwaitingReload(context.clone());
         state.disable_keys.error = None;
@@ -285,11 +303,7 @@ impl AppState {
         &mut self,
         key: &DeviceKey,
     ) -> Option<DisableKeysRequestContext> {
-        let record = self
-            .devices
-            .records
-            .iter()
-            .find(|record| record.device_key() == *key && record.online)?;
+        let record = self.devices.record(key).filter(|record| record.online)?;
         let route = record.route.clone()?;
         let route_generation = self.disable_keys_reads.generation(key)?;
         let request_id = self.next_disable_keys_request_id;
@@ -304,15 +318,13 @@ impl AppState {
 
     fn record_route(&self, key: &DeviceKey) -> Option<&openlogi_core::hid::DeviceRoute> {
         self.devices
-            .records
-            .iter()
-            .find(|record| record.device_key() == *key)
+            .record(key)
             .and_then(|record| record.route.as_ref())
     }
 
     pub(crate) fn invalidate_disable_keys(&mut self, key: &DeviceKey) {
         self.disable_keys_reads.remove(key);
-        let Some(state) = self.devices.runtime.get_mut(key) else {
+        let Some(state) = self.devices.sessions.get_mut(key) else {
             return;
         };
         match state.disable_keys.persistence.clone() {
@@ -346,14 +358,14 @@ impl AppState {
         key: &DeviceKey,
     ) -> Option<&DisableKeysPersistenceStatus> {
         self.devices
-            .runtime
+            .sessions
             .get(key)
             .map(|state| &state.disable_keys.persistence)
     }
 
     pub(crate) fn disable_keys_error(&self, key: &DeviceKey) -> Option<&str> {
         self.devices
-            .runtime
+            .sessions
             .get(key)
             .and_then(|state| state.disable_keys.error.as_deref())
     }
@@ -362,9 +374,7 @@ impl AppState {
         self.config.is_writable()
             && self
                 .devices
-                .records
-                .iter()
-                .find(|record| record.device_key() == *key)
+                .record(key)
                 .is_some_and(|record| record.online && record.is_persistent())
             && matches!(self.disable_keys_reads.load(key), Load::Ready(_))
             && matches!(
@@ -453,15 +463,15 @@ mod tests {
             ConfigPersistence::ReadOnly(_) | ConfigPersistence::MemoryOnly => Config::ephemeral(),
         };
         let (commands, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-        let mut state = AppState::with_runtime(
+        let mut state = AppState::new(super::super::Sources {
             config,
             inventories,
-            &[],
-            &AssetResolver::new(),
-            &[],
+            standalone: &[],
+            resolver: &AssetResolver::new(),
+            cameras: &[],
             persistence,
-            commands,
-        );
+            ipc_commands: commands,
+        });
         while receiver.try_recv().is_ok() {}
         let key = state.current_record().expect("keyboard").device_key();
         state
@@ -475,6 +485,18 @@ mod tests {
             },
         );
         (state, receiver, key)
+    }
+
+    #[test]
+    fn catalog_lookup_is_independent_of_selection_and_handles_missing_keys() {
+        let first = keyboard_inventory(0xb35b, [1, 2, 3, 4]);
+        let second = keyboard_inventory(0xb35c, [5, 6, 7, 8]);
+        let (mut state, _, key) = test_state(ConfigPersistence::MemoryOnly, &[first, second]);
+        let route = state.record_route(&key).cloned();
+        assert!(route.is_some());
+        assert!(state.devices.select(1));
+        assert_eq!(state.record_route(&key), route.as_ref());
+        assert!(state.devices.record(&DeviceKey::from("missing")).is_none());
     }
 
     fn begin(
@@ -578,7 +600,10 @@ mod tests {
             test_state(ConfigPersistence::MemoryOnly, &[inventory]);
         let context = begin(&mut state, &mut receiver);
 
-        assert!(state.apply_disable_keys_write_result(context, Err(WriteError::AgentUnavailable)));
+        assert_eq!(
+            state.apply_disable_keys_write_result(context, Err(WriteError::AgentUnavailable)),
+            [StateEvent::DisableKeysChanged(key.clone())]
+        );
 
         assert_eq!(
             state
@@ -606,13 +631,16 @@ mod tests {
         external.push_str("\n# external edit retained\n");
         std::fs::write(&path, external).expect("external edit");
 
-        assert!(state.apply_disable_keys_write_result(
-            context,
-            Ok(DisableKeysState {
-                supported: DisableKeysMask::CAPS_LOCK | DisableKeysMask::WINDOWS_COMMAND,
-                disabled: DisableKeysMask::CAPS_LOCK,
-            })
-        ));
+        assert_eq!(
+            state.apply_disable_keys_write_result(
+                context,
+                Ok(DisableKeysState {
+                    supported: DisableKeysMask::CAPS_LOCK | DisableKeysMask::WINDOWS_COMMAND,
+                    disabled: DisableKeysMask::CAPS_LOCK,
+                })
+            ),
+            [StateEvent::DisableKeysChanged(key.clone())]
+        );
         assert_eq!(state.config.disabled_keys(key.as_str()), None);
         assert_eq!(state.config_issue(), None);
         assert!(matches!(
@@ -641,20 +669,26 @@ mod tests {
         let (mut state, mut receiver, key) =
             test_state(ConfigPersistence::MemoryOnly, &[inventory]);
         let context = begin(&mut state, &mut receiver);
-        assert!(state.apply_disable_keys_write_result(
-            context,
-            Ok(DisableKeysState {
-                supported: DisableKeysMask::CAPS_LOCK,
-                disabled: DisableKeysMask::CAPS_LOCK,
-            })
-        ));
+        assert_eq!(
+            state.apply_disable_keys_write_result(
+                context,
+                Ok(DisableKeysState {
+                    supported: DisableKeysMask::CAPS_LOCK,
+                    disabled: DisableKeysMask::CAPS_LOCK,
+                })
+            ),
+            [StateEvent::DisableKeysChanged(key.clone())]
+        );
         let reload_context = take_disable_keys_reload(&mut receiver);
-        assert!(state.apply_disable_keys_reload_result(
-            reload_context,
-            Err(openlogi_ipc::ConfigReloadError {
-                message: "scripted".into()
-            })
-        ));
+        assert_eq!(
+            state.apply_disable_keys_reload_result(
+                reload_context,
+                Err(openlogi_ipc::ConfigReloadError {
+                    message: "scripted".into()
+                })
+            ),
+            [StateEvent::DisableKeysChanged(key.clone())]
+        );
         assert!(matches!(
             state.disable_keys_status(&key),
             Some(DisableKeysPersistenceStatus::SavedNotReloaded(_))
@@ -674,13 +708,16 @@ mod tests {
         let context = begin(&mut state, &mut receiver);
         assert!(state.devices.select(1));
 
-        assert!(state.apply_disable_keys_write_result(
-            context,
-            Ok(DisableKeysState {
-                supported: DisableKeysMask::CAPS_LOCK,
-                disabled: DisableKeysMask::CAPS_LOCK,
-            })
-        ));
+        assert_eq!(
+            state.apply_disable_keys_write_result(
+                context,
+                Ok(DisableKeysState {
+                    supported: DisableKeysMask::CAPS_LOCK,
+                    disabled: DisableKeysMask::CAPS_LOCK,
+                })
+            ),
+            [StateEvent::DisableKeysChanged(key.clone())]
+        );
         assert!(matches!(
             state.disable_keys_status(&key),
             Some(DisableKeysPersistenceStatus::AwaitingReload(_))
@@ -704,7 +741,7 @@ mod tests {
             .install_generation_for_test(key.clone(), context.route_generation + 1);
         state
             .devices
-            .runtime
+            .sessions
             .entry(key.clone())
             .or_default()
             .disable_keys

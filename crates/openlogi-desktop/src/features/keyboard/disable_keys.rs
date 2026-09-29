@@ -21,17 +21,8 @@ pub struct DisableKeysPanel {
 
 impl DisableKeysPanel {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let state_obs = cx.subscribe(&AppState::global(cx), |_, _, event: &StateEvent, cx| {
-            let relevant = match event {
-                StateEvent::InventoryChanged | StateEvent::DeviceSelected(_) => true,
-                StateEvent::DisableKeysChanged(key) => AppState::try_read(cx)
-                    .and_then(AppState::current_record)
-                    .is_some_and(|record| record.device_key() == *key),
-                _ => false,
-            };
-            if relevant {
-                cx.notify();
-            }
+        let state_obs = AppState::repaint_on(cx, |event| {
+            matches!(event, StateEvent::DisableKeysChanged(_))
         });
         Self {
             _state_obs: state_obs,

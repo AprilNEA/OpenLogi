@@ -3,10 +3,11 @@
 # AppState::is_current_device for anything else). The root view in app.rs
 # matches every event exhaustively per tab and is the one other listener that
 # names the device-changed events itself.
+# Selection-independent catalog lookups belong to DeviceStore::record instead.
 id: gui-device-panel-relevance-owner
 language: rust
 severity: error
-message: Whether a StateEvent concerns the device on screen is state::events' call. Subscribe a device panel with AppState::repaint_on(cx, topic) and ask AppState::is_current_device(key) elsewhere; do not compare device keys or re-list the device-changed events here.
+message: Whether a StateEvent concerns the device on screen is state::events' call. Subscribe a device panel with AppState::repaint_on(cx, topic) and ask AppState::is_current_device(key) elsewhere. Use DeviceStore::record for selection-independent catalog lookups; do not compare device keys or re-list the device-changed events here.
 note: |
   Seven panels each carried a copy of the same subscription filter ending in
   `_ => false`, so a new StateEvent was silently ignored in all of them. See
@@ -15,6 +16,8 @@ files:
   - crates/openlogi-desktop/src/**/*.rs
 ignores:
   - crates/openlogi-desktop/src/state/events.rs
+  # Catalog lookups are keyed independently of the device on screen.
+  - crates/openlogi-desktop/src/state/device_store.rs
   - crates/openlogi-desktop/src/app.rs
   - "**/tests.rs"
   - "**/tests/**"

@@ -300,7 +300,7 @@ async fn capture_hidpp_settings(
         None => {
             semantic_read(
                 "Disable Keys",
-                client.read_disable_keys(context::current(), source_route.clone()),
+                agent::call(client.read_disable_keys(context::current(), source_route.clone())),
             )
             .await?
         }

@@ -89,10 +89,7 @@ impl AgentServer {
     }
 }
 
-fn disable_keys_device<'a>(
-    shared: &'a SharedRuntime,
-    route: &'a DeviceRoute,
-) -> hardware::DeviceOp<'a> {
+fn disable_keys_device(shared: &SharedHandles, route: &DeviceRoute) -> hardware::DeviceOp {
     shared.keyboard_device(route)
 }
 
