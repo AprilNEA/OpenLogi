@@ -246,7 +246,8 @@ fn post_other_button(button_number: i64) {
 /// into the event's source user-data so OpenLogi's own event tap recognises
 /// and skips its own injections instead of treating them as fresh input
 /// (e.g. re-translating a synthesized button 4/5 into a Back/Forward press,
-/// or misreading a remapped click as a new gesture hold).
+/// misreading a remapped click as a new gesture hold, or firing a remapped
+/// key's binding from a shortcut that presses it).
 fn tag_synthetic(ev: &CGEvent) {
     ev.set_integer_value_field(
         EventField::EVENT_SOURCE_USER_DATA,
@@ -256,17 +257,26 @@ fn tag_synthetic(ev: &CGEvent) {
 
 /// Post one keyboard edge for `vk` with `flags` set.
 fn post_key_phase(vk: u16, flags: CGEventFlags, phase: KeyPhase) {
+    if let Some(event) = key_event(vk, flags, phase) {
+        event.post(CGEventTapLocation::HID);
+    }
+}
+
+/// One keyboard edge for `vk` with `flags` set, tagged as OpenLogi's own so
+/// the hook lets it through.
+fn key_event(vk: u16, flags: CGEventFlags, phase: KeyPhase) -> Option<CGEvent> {
     let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
         tracing::warn!("CGEventSource::new failed");
-        return;
+        return None;
     };
     let down = phase == KeyPhase::Down;
     let Ok(event) = CGEvent::new_keyboard_event(src, vk, down) else {
         tracing::warn!(?phase, "CGEvent::new_keyboard_event failed");
-        return;
+        return None;
     };
     event.set_flags(flags);
-    event.post(CGEventTapLocation::HID);
+    tag_synthetic(&event);
+    Some(event)
 }
 
 /// Post a key-down + key-up pair for `vk` with `flags` set.
@@ -291,6 +301,7 @@ pub(super) fn type_text(text: &str) {
         };
         let s = ch.to_string();
         ev.set_string(&s);
+        tag_synthetic(&ev);
         ev.post(CGEventTapLocation::HID);
     }
 }
