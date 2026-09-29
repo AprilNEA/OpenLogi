@@ -19,7 +19,7 @@
 //! and Linux only ever start wanted, so their gate passes unconditionally.
 
 #[cfg(target_os = "macos")]
-mod armed_session;
+pub(crate) mod armed_session;
 mod transition;
 
 use std::sync::Arc;

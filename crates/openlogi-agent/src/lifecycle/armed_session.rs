@@ -52,8 +52,9 @@ pub(super) fn record() {
 }
 
 /// Forget the armed session: this exit was asked for, and the next start must
-/// not mistake it for a crash.
-pub(super) fn clear() {
+/// not mistake it for a crash. Also the tray-Quit fallback's job when the
+/// lifecycle that would normally do it is already gone.
+pub(crate) fn clear() {
     if let Some(record) = Record::open() {
         record.clear();
     }
@@ -122,11 +123,16 @@ impl Record {
         }
     }
 
+    /// Written beside the record and renamed into place, so a kill mid-write
+    /// leaves the previous record rather than a truncated one. The singleton
+    /// lock makes this process the only writer.
     fn write(&self, session: &LoginSession) -> io::Result<()> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&self.path, session.encode())
+        let staged = self.path.with_extension("tmp");
+        std::fs::write(&staged, session.encode())?;
+        std::fs::rename(&staged, &self.path)
     }
 
     fn clear(&self) {
@@ -208,6 +214,10 @@ mod tests {
 
         record.write(&here).unwrap();
         assert!(record.holds(&here), "a respawn in the same login re-arms");
+        assert!(
+            !record.path.with_extension("tmp").exists(),
+            "the staged copy is renamed into place, not left behind"
+        );
         assert!(
             !record.holds(&session(BOOT, 100_024)),
             "a new login in the same boot stays dormant"
