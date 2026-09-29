@@ -5,9 +5,9 @@ mod inject;
 pub mod uinput;
 
 pub use inject::{
-    DesktopSwitch, HeldChord, SYNTHETIC_EVENT_USER_DATA, SmoothScrollPhase, ax_navigate_browser,
-    execute, natural_scrolling, post_phased_scroll, post_scroll, post_smooth_scroll, press_hold,
-    set_desktop_switch,
+    DesktopSwitch, HeldChord, SYNTHETIC_EVENT_USER_DATA, SmoothScrollPhase, ZoomSource,
+    ax_navigate_browser, execute, natural_scrolling, post_phased_scroll, post_scroll,
+    post_smooth_scroll, post_zoom, press_hold, set_desktop_switch,
 };
 
 #[cfg(target_os = "linux")]
