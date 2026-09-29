@@ -37,18 +37,16 @@ pub(super) fn attr_bool(el: &AXUIElement, attr: &CFString) -> Option<bool> {
     Some(copy_attr(el, attr)?.downcast::<CFBoolean>().ok()?.as_bool())
 }
 
-/// `el`'s `AXChildren`, each retained on its own so it outlives the array.
-pub(super) fn children(el: &AXUIElement) -> Vec<CFRetained<AXUIElement>> {
-    let Some(children) = copy_attr(el, &CFString::from_static_str("AXChildren"))
-        .and_then(|v| v.downcast::<CFArray>().ok())
-    else {
-        return Vec::new();
-    };
-    // SAFETY: the outer array type was checked; AXChildren contains CF objects.
-    // Each member is separately downcast before it is used as an AXUIElement.
-    let children = unsafe { CFRetained::cast_unchecked::<CFArray<CFType>>(children) };
-    children
+/// `el`'s `AXChildren`, each retained on its own so it outlives the array,
+/// read lazily so a search stops at its first match.
+pub(super) fn children(el: &AXUIElement) -> impl Iterator<Item = CFRetained<AXUIElement>> {
+    copy_attr(el, &CFString::from_static_str("AXChildren"))
+        .and_then(|value| value.downcast::<CFArray>().ok())
         .into_iter()
+        .flat_map(|children| {
+            // SAFETY: the outer array type was checked; AXChildren contains CF
+            // objects. Each member is downcast before it is used as an element.
+            unsafe { CFRetained::cast_unchecked::<CFArray<CFType>>(children) }
+        })
         .filter_map(|child| child.downcast::<AXUIElement>().ok())
-        .collect()
 }

@@ -65,7 +65,7 @@ pub(super) struct Modifiers {
 impl MenuShortcut {
     /// `combo` as a menu would show it without remapping; `None` for a key
     /// that types no character.
-    fn written(combo: &KeyCombo) -> Option<Self> {
+    pub(super) fn written(combo: &KeyCombo) -> Option<Self> {
         Some(Self {
             key: combo.key().ascii_char()?.to_string(),
             modifiers: Modifiers {
@@ -168,10 +168,21 @@ pub(super) fn localized(combo: &KeyCombo) -> Option<MenuShortcut> {
     .flatten()
 }
 
+/// How pressing a shortcut's menu item went.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum MenuPress {
+    Pressed,
+    /// The frontmost app shows no enabled item for the shortcut, or would not
+    /// take the press; its keys may still reach that app.
+    NotPressed,
+    /// Another app came to the front during the search. The shortcut was
+    /// meant for the one that left, so nothing else may be sent.
+    TargetChanged,
+}
+
 /// Press the frontmost app's enabled menu item that shows `combo` as
 /// `localized` or, for an app that opted out of remapping, as written.
-/// `false` when no such item exists or the frontmost app changed meanwhile.
-pub(super) fn press_menu_item(combo: &KeyCombo, localized: Option<&MenuShortcut>) -> bool {
+pub(super) fn press_menu_item(combo: &KeyCombo, localized: Option<&MenuShortcut>) -> MenuPress {
     let written = MenuShortcut::written(combo);
     let mut wanted: Vec<&MenuShortcut> = localized.into_iter().collect();
     if let Some(written) = written
@@ -182,7 +193,7 @@ pub(super) fn press_menu_item(combo: &KeyCombo, localized: Option<&MenuShortcut>
     }
     autoreleasepool(|_| {
         let Some(pid) = frontmost_pid() else {
-            return false;
+            return MenuPress::NotPressed;
         };
         // SAFETY: `pid` names a running process; AX reports a stale one as an
         // error on every call.
@@ -190,21 +201,26 @@ pub(super) fn press_menu_item(combo: &KeyCombo, localized: Option<&MenuShortcut>
         let Some(menu_bar) = copy_attr(&app, &CFString::from_static_str("AXMenuBar"))
             .and_then(|bar| bar.downcast::<AXUIElement>().ok())
         else {
-            return false;
+            return MenuPress::NotPressed;
         };
         let attrs = MenuAttrs::new();
-        let Some(item) = wanted
+        let item = wanted
             .iter()
-            .find_map(|shortcut| find_item(&menu_bar, shortcut, &attrs, MENU_DEPTH))
-        else {
-            return false;
-        };
+            .find_map(|shortcut| find_item(&menu_bar, shortcut, &attrs, MENU_DEPTH));
         // The search can take a while; a switch of apps meanwhile cancels.
         if frontmost_pid() != Some(pid) {
-            return false;
+            return MenuPress::TargetChanged;
         }
+        let Some(item) = item else {
+            return MenuPress::NotPressed;
+        };
         // SAFETY: `item` is a retained AXUIElement and the action a valid string.
-        unsafe { item.perform_action(&CFString::from_static_str("AXPress")) == AXError::Success }
+        if unsafe { item.perform_action(&CFString::from_static_str("AXPress")) } == AXError::Success
+        {
+            MenuPress::Pressed
+        } else {
+            MenuPress::NotPressed
+        }
     })
 }
 
@@ -236,7 +252,7 @@ fn find_item(
     if depth == 0 {
         return None;
     }
-    children(el).into_iter().find_map(|child| {
+    children(el).find_map(|child| {
         let is_item = attr_string(&child, &attrs.role).as_deref() == Some("AXMenuItem");
         if is_item
             && let Some(key) = attr_string(&child, &attrs.key)

@@ -37,9 +37,7 @@ fn find_button(
                 .then(|| el.retain());
         }
     }
-    children(el)
-        .iter()
-        .find_map(|child| find_button(child, target_ids, attrs, depth - 1))
+    children(el).find_map(|child| find_button(&child, target_ids, attrs, depth - 1))
 }
 
 /// Press Safari's Back (`forward=false`) or Forward (`forward=true`)

@@ -76,6 +76,7 @@ use app_services::symbol as app_services_symbol;
 pub(super) use browser::ax_browser_navigate;
 use dock::{app_expose, launchpad, mission_control, show_desktop};
 use keyboard_layout::layout_key;
+use menu_shortcut::{MenuPress, MenuShortcut};
 use scroll::dispatch_scroll;
 pub(super) use scroll::{post_scroll, post_smooth_scroll};
 use symbolic_hotkey::{capture_region, next_desktop, previous_desktop, screenshot};
@@ -149,29 +150,49 @@ pub(super) fn prepare_menu_shortcuts(mtm: objc2::MainThreadMarker) {
 /// keys the menus show it as under the current layout, as the user would.
 fn press_menu_shortcut(combo: &KeyCombo) {
     let localized = menu_shortcut::localized(combo);
-    if menu_shortcut::press_menu_item(combo, localized.as_ref()) {
+    match menu_shortcut::press_menu_item(combo, localized.as_ref()) {
+        MenuPress::Pressed => {
+            tracing::debug!(
+                ?localized,
+                "shortcut pressed as the frontmost app's menu item"
+            );
+            return;
+        }
+        MenuPress::TargetChanged => {
+            tracing::debug!(
+                ?localized,
+                "frontmost app changed during the menu search — shortcut dropped"
+            );
+            return;
+        }
+        MenuPress::NotPressed => {}
+    }
+    let Some(shortcut) =
+        localized.filter(|shortcut| MenuShortcut::written(combo).as_ref() != Some(shortcut))
+    else {
+        // Outside the agent, or a layout that keeps the shortcut as written.
+        press_combo(combo);
+        return;
+    };
+    // The layout remaps the shortcut, so its written keys are another
+    // shortcut here: press the remapped one, or nothing.
+    let mut chars = shortcut.key.chars();
+    let Some(vk) = chars
+        .next()
+        .filter(|_| chars.next().is_none())
+        .and_then(|key| layout_key(key, shortcut.modifiers.command))
+    else {
         tracing::debug!(
-            ?localized,
-            "shortcut pressed as the frontmost app's menu item"
+            ?shortcut,
+            "no key types the remapped shortcut — nothing pressed"
         );
         return;
-    }
+    };
     tracing::debug!(
-        ?localized,
-        "no menu item shows the shortcut — pressing its keys"
+        ?shortcut,
+        "no menu item shows the shortcut — pressing its remapped keys"
     );
-    let remapped = localized.and_then(|shortcut| {
-        let mut chars = shortcut.key.chars();
-        let key = chars.next().filter(|_| chars.next().is_none())?;
-        Some((
-            layout_key(key, shortcut.modifiers.command)?,
-            shortcut.modifiers,
-        ))
-    });
-    match remapped {
-        Some((vk, modifiers)) => post_key(vk, modifier_flags(modifiers)),
-        None => press_combo(combo),
-    }
+    post_key(vk, modifier_flags(shortcut.modifiers));
 }
 
 fn modifier_flags(modifiers: menu_shortcut::Modifiers) -> CGEventFlags {
