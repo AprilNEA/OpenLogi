@@ -47,12 +47,12 @@ mod dock;
 )]
 mod keyboard_layout;
 mod scroll;
-/// macOS Space switching actions.
+/// Space switching and screenshots, posted through their system symbolic
+/// hotkey records ("Move left/right a space", the screenshot shortcuts).
 ///
-/// Use the system symbolic hotkey records for "Move left a space" (79) and
-/// "Move right a space" (81). That respects the user's configured shortcut
-/// instead of assuming Ctrl+Left/Right, and temporarily enables the symbolic
-/// hotkey when the user has disabled it.
+/// That respects the user's configured shortcut instead of assuming one, is
+/// independent of the keyboard layout because each record names a physical
+/// key, and temporarily enables a hotkey the user has disabled.
 #[expect(
     unsafe_code,
     reason = "CGS symbolic hotkey SPI is only reachable via dlopen/dlsym FFI"
@@ -67,7 +67,7 @@ use dock::{app_expose, launchpad, mission_control, show_desktop};
 use keyboard_layout::layout_key;
 use scroll::dispatch_scroll;
 pub(super) use scroll::{post_scroll, post_smooth_scroll};
-use symbolic_hotkey::{next_desktop, previous_desktop};
+use symbolic_hotkey::{capture_region, next_desktop, previous_desktop, screenshot};
 
 // NX_KEYTYPE_* constants from <IOKit/hidsystem/ev_keymap.h>.
 const NX_KEYTYPE_SOUND_UP: i32 = 0;
@@ -152,14 +152,11 @@ fn combo(shortcut: Shortcut) -> KeyCombo {
 
 /// Dispatch a window-manager or power [`NativeAction`].
 ///
-/// Window-manager actions go straight to the Dock or WindowServer through
-/// private SPIs rather than a synthesised keyboard chord — see the module docs
-/// on [`mission_control`] and friends for why. Lock Screen is an Apple menu
-/// item, reachable only by its chord.
+/// Window-manager actions and screenshots go straight to the Dock or
+/// WindowServer through private SPIs rather than a synthesised keyboard chord
+/// — see the module docs on [`mission_control`] and friends for why. Lock
+/// Screen is an Apple menu item, reachable only by its chord.
 fn dispatch_native(native: NativeAction) {
-    let cmd = CGEventFlags::CGEventFlagCommand;
-    let shift = CGEventFlags::CGEventFlagShift;
-    let ctrl = CGEventFlags::CGEventFlagControl;
     match native {
         NativeAction::MissionControl => mission_control(),
         NativeAction::AppExpose => app_expose(),
@@ -170,10 +167,8 @@ fn dispatch_native(native: NativeAction) {
         // The Apple menu's Lock Screen item matches the character Q, so the
         // chord goes through the layout like any shortcut.
         NativeAction::LockScreen => press_combo(&super::parse_shortcut("Cmd+Ctrl+Q")),
-        // Screenshot = Cmd+Shift+3 (kVK_ANSI_3 = 0x14)
-        NativeAction::Screenshot => post_key(0x14, cmd | shift),
-        // Capture region to clipboard = Cmd+Shift+Ctrl+4 (kVK_ANSI_4 = 0x15)
-        NativeAction::CaptureRegion => post_key(0x15, cmd | shift | ctrl),
+        NativeAction::Screenshot => screenshot(),
+        NativeAction::CaptureRegion => capture_region(),
         // Sleep has no CGEvent equivalent (the WindowServer ignores a
         // synthesised power key), so ask powermanagement directly. `pmset
         // sleepnow` works for the console user without privileges.

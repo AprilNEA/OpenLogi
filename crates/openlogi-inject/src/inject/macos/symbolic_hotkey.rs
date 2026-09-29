@@ -5,8 +5,22 @@ use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
 use super::app_services_symbol;
 
+/// "Save picture of screen as a file", ⌘⇧3 by default.
+const SCREENSHOT_TO_FILE: u32 = 28;
+/// "Copy picture of selected area to the clipboard", ⌃⌘⇧4 by default.
+const SELECTED_AREA_TO_CLIPBOARD: u32 = 31;
 const SPACE_LEFT: u32 = 79;
 const SPACE_RIGHT: u32 = 81;
+
+/// Save a picture of the screen to the screenshot folder.
+pub(super) fn screenshot() {
+    post_symbolic_hotkey(SCREENSHOT_TO_FILE);
+}
+
+/// Copy a picture of an area the user selects to the clipboard.
+pub(super) fn capture_region() {
+    post_symbolic_hotkey(SELECTED_AREA_TO_CLIPBOARD);
+}
 
 /// Switch to the previous desktop / Space.
 pub(super) fn previous_desktop() {
