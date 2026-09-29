@@ -31,6 +31,32 @@ impl KeyboardUsage {
         self.into_inner()
     }
 
+    /// The character this key types without modifiers on a US layout, for
+    /// backends that must find the key typing it under the user's layout.
+    /// `None` for keys a layout never moves: function, arrow, and editing
+    /// keys keep their position.
+    #[must_use]
+    pub fn ascii_char(self) -> Option<char> {
+        let code = self.into_inner();
+        match code {
+            0x04..=0x1d => Some(char::from(b'a' + code - 0x04)),
+            0x1e..=0x26 => Some(char::from(b'1' + code - 0x1e)),
+            0x27 => Some('0'),
+            0x2d => Some('-'),
+            0x2e => Some('='),
+            0x2f => Some('['),
+            0x30 => Some(']'),
+            0x31 => Some('\\'),
+            0x33 => Some(';'),
+            0x34 => Some('\''),
+            0x35 => Some('`'),
+            0x36 => Some(','),
+            0x37 => Some('.'),
+            0x38 => Some('/'),
+            _ => None,
+        }
+    }
+
     fn label(self) -> String {
         let code = self.into_inner();
         match code {
@@ -329,6 +355,17 @@ fn parse_key(token: &str) -> Result<KeyboardUsage, KeyComboParseError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ascii_char_names_the_character_a_layout_can_move() {
+        let key = |text: &str| text.parse::<KeyCombo>().expect("valid shortcut").key();
+        assert_eq!(key("Cmd+S").ascii_char(), Some('s'));
+        assert_eq!(key("Cmd+3").ascii_char(), Some('3'));
+        assert_eq!(key("Cmd+[").ascii_char(), Some('['));
+        for fixed in ["F5", "Left", "Enter", "Escape", "Tab"] {
+            assert_eq!(key(fixed).ascii_char(), None, "{fixed}");
+        }
+    }
 
     #[test]
     fn parses_modifiers_letters_and_navigation_keys() {

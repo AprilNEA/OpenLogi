@@ -5841,6 +5841,7 @@ version = "0.8.9"
 dependencies = [
  "core-foundation 0.10.0",
  "core-graphics 0.25.0",
+ "dispatch2",
  "evdev",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",

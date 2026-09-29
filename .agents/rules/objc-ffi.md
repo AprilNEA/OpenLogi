@@ -40,6 +40,7 @@ files; **keep this table in sync when you add or move one**:
 | `openlogi-inject/src/inject/macos/scroll.rs` | CGEvent scroll synthesis, including the continuous-scroll phase fields |
 | `openlogi-inject/src/inject/macos/browser.rs` | typed `AXUIElement` navigation with `CFRetained` ownership, and the off-thread `NSWorkspace` Safari validation |
 | `openlogi-inject/src/inject/macos/{app_services,dock,symbolic_hotkey}.rs` | the `dlopen`'d private SPIs: `CoreDockSendNotification` and the CGS symbolic-hotkey trio |
+| `openlogi-inject/src/inject/macos/keyboard_layout.rs` | the active keyboard layout's `uchr` data (Text Input Source Services, read on the main thread) and `UCKeyTranslate` over it |
 | `openlogi-overlay/src/platform.rs` | the Actions Ring helper's window policy: accessory activation, non-activating panel, the `NSEvent` global click-away monitor (`block2`), and `CGGetActiveDisplayList` / `CGDisplayBounds` |
 | `openlogi-permissions/src/macos.rs` | non-prompting permission reads + System-Settings deep links; `+[CBManager authorization]` via an `AnyClass` lookup |
 
@@ -206,7 +207,11 @@ its single user. The current set, all deliberate:
 - `openlogi-agent-core/src/watchers/camera.rs`: the CoreMediaIO property API —
   same reason.
 - `openlogi-inject`: the `dlopen`/`dlsym`-resolved private SPIs
-  (`CoreDockSendNotification`, the CGS symbolic-hotkey trio).
+  (`CoreDockSendNotification`, the CGS symbolic-hotkey trio), and in
+  `keyboard_layout.rs` Text Input Source Services, `LMGetKbdType`, and
+  `UCKeyTranslate` — `objc2-carbon` skips HIToolbox and `objc2-core-services`
+  skips CarbonCore. `UCKeyTranslate`'s lengths are `UniCharCount`, an
+  `unsigned long`: `usize`, not `u32`.
 - the `disclaim` crate: `responsibility_spawnattrs_setdisclaim` (private SPI).
 
 `openlogi-camera`'s `AVAuthorizationStatus` integers remain on the
@@ -236,6 +241,12 @@ under a `SAFETY` comment. Where it currently lives on macOS:
   walk, including the Create-rule `CFString` / `CFNumber` wraps.
 - `inject/macos/browser.rs` — typed AX creation, attribute-copy out-pointers, CF array
   element typing, `AXPress`, and `NSString::to_str(pool)` for Safari validation.
+- `inject/macos/keyboard_layout.rs` — the input-source copy and property read,
+  `LMGetKbdType`, and `UCKeyTranslate` over the copied `uchr` bytes. Text Input
+  Source Services must run on the main thread (HIToolbox crashes when another
+  thread reads the layout), so a worker hands the read to the main queue and
+  waits a bounded time; only `UCKeyTranslate`, a pure function of the copied
+  data, runs on the worker.
 - `permissions/macos.rs` — the CoreBluetooth force-link and the `CBManager`
   class-method send. `IOHIDCheckAccess` needs none: `objc2-io-kit` exposes it as
   a safe fn, in `openlogi-permissions` and `openlogi-hid` alike.
