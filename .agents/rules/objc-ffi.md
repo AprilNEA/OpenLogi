@@ -235,9 +235,11 @@ under a `SAFETY` comment. Where it currently lives on macOS:
   `AuthSession`) and `sysctlbyname("kern.bootsessionuuid")`: two out-pointer reads
   that identify the login session, so the dormancy gate can re-arm a crash respawn.
 - `hook/macos.rs` — the whole tap (Core Graphics / Core Foundation C APIs),
-  and `AXIsProcessTrusted[WithOptions]` with the two extern statics they need
-  (`kAXTrustedCheckOptionPrompt`, `kCFBooleanTrue`). Its module-wide
-  `#![expect(unsafe_code)]` covers the two files below as well.
+  `AXIsProcessTrusted[WithOptions]` with the two extern statics they need
+  (`kAXTrustedCheckOptionPrompt`, `kCFBooleanTrue`), and the `kern.sleeptime` /
+  `kern.waketime` `sysctlbyname` reads the lifecycle watchdog gates its gap
+  discount on. Its module-wide `#![expect(unsafe_code)]` covers the two files
+  below as well.
 - `hook/macos/foreground.rs` — the `NSWorkspace` activation-observer
   registration and typed notification payload, and `NSString::to_str(pool)`
   (the borrow is tied to the pool).

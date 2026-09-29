@@ -40,17 +40,20 @@ crate's own load-bearing behavior.
   stop, the thread exited). The watchdog must not call the Accessibility trust API —
   that query can stall during TCC revocation; monitor tap-thread progress instead, and
   force-exit the agent if revocation or shutdown stalls so macOS releases the HID tap.
-- A lifecycle budget is charged only for stall the watchdog was awake to see. Around a
-  sleep transition the watchdog thread has fired 1.0 s and 4.8 s past its budget, which
-  a thread evaluating every 100 ms cannot do: it was not running, and neither was the
-  tap thread it judges. Reading its own schedule gap as tap-thread stall force-exited
-  healthy agents on lid close (#952). Likewise the between-slice capability probe runs
-  under `TapPhase::Probing` with its own budget: it is a WindowServer/TCC round trip,
-  not tap servicing — and a stop that waited out a slow probe gets the short budget
-  afresh for the teardown. Refresh progress *before* publishing `Armed` again, or the
-  watchdog judges a probe that already returned against the pre-probe mark. The exit
-  log carries both `stalled_ms` (uptime since the stall began) and `watched_ms`; a wide
-  gap between them is the process-frozen signature.
+- A lifecycle budget is charged only for stall the watchdog was awake to see, and a gap
+  in the watchdog's own schedule is discounted only when a kernel sleep or wake fell
+  inside it (`kern.sleeptime` / `kern.waketime` moved). Around such a transition the
+  watchdog thread has fired 1.0 s and 4.8 s past its budget, which a thread evaluating
+  every 100 ms cannot do: it was not running, and neither was the tap thread it judges.
+  Reading its own schedule gap as tap-thread stall force-exited healthy agents on lid
+  close (#952). A gap with no transition in it is charged in full, so a watchdog merely
+  delayed by scheduling still catches a wedged tap on schedule. Likewise the
+  between-slice capability probe runs under `TapPhase::Probing` with its own budget: it
+  is a WindowServer/TCC round trip, not tap servicing — and a stop that waited out a
+  slow probe gets the short budget afresh for the teardown. Refresh progress *before*
+  publishing `Armed` again, or the watchdog judges a probe that already returned against
+  the pre-probe mark. The exit log carries both `stalled_ms` (uptime since the stall
+  began) and `watched_ms`; a wide gap between them is the process-frozen signature.
 - The off-main `frontmost_application` read keeps its explicit `autoreleasepool` — the
   watcher thread has no run loop; that is the only place in this crate a pool belongs.
   Every string it copies out (bundle id *and* localized name) must be owned before the

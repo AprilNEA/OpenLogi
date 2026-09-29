@@ -38,7 +38,7 @@ pub(crate) use foreground::{frontmost_safari_pid, watch_frontmost_application_ac
 use translate::{translate, translate_key};
 use watchdog::{
     CallbackActivity, LIFECYCLE_POLL_INTERVAL, LifecycleDecision, LifecycleExitReason,
-    LifecycleObservation, LifecycleWatchdog, RearmBudget, TapPhase, WatchdogSignals,
+    LifecycleObservation, LifecycleWatchdog, PowerEpoch, RearmBudget, TapPhase, WatchdogSignals,
     stuck_callback,
 };
 
@@ -388,6 +388,44 @@ fn spawn_callback_watchdog(
         .map(|_| ())
 }
 
+/// The kernel's last sleep and wake instants, for [`PowerEpoch`]. A failed
+/// read yields the zero epoch, which never differs from itself, so the
+/// watchdog then charges every gap in full — the behaviour before #952.
+fn power_epoch() -> PowerEpoch {
+    PowerEpoch {
+        slept_us: kernel_instant_us(c"kern.sleeptime"),
+        woke_us: kernel_instant_us(c"kern.waketime"),
+    }
+}
+
+/// One `timeval` sysctl as microseconds since the epoch; zero when unreadable.
+fn kernel_instant_us(name: &std::ffi::CStr) -> i64 {
+    let mut value = libc::timeval {
+        tv_sec: 0,
+        tv_usec: 0,
+    };
+    let mut len = std::mem::size_of::<libc::timeval>();
+    // SAFETY: `name` is NUL-terminated; `value` and `len` describe a live,
+    // correctly sized buffer the kernel fills up to `len` before storing the
+    // byte count back into `len`. Nothing is written (null new value, 0).
+    let rc = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            (&raw mut value).cast(),
+            &raw mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 || len != std::mem::size_of::<libc::timeval>() {
+        return 0;
+    }
+    value
+        .tv_sec
+        .saturating_mul(1_000_000)
+        .saturating_add(i64::from(value.tv_usec))
+}
+
 /// Independent lifecycle watchdog for paths that never enter the Rust tap
 /// callback (for example, TCC revocation wedging `CFRunLoopRunInMode` or the
 /// Accessibility query itself).
@@ -410,6 +448,7 @@ fn spawn_lifecycle_watchdog(
                     phase: signals.phase(),
                     stop_requested: signals.stop_requested(),
                     tap_progress_at: signals.tap_progress_at(),
+                    power: power_epoch(),
                 };
                 match watchdog.evaluate(signals.now(), observation) {
                     LifecycleDecision::Continue => {

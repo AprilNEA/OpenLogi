@@ -19,13 +19,15 @@ pub(super) const TAP_SHUTDOWN_BUDGET: Duration = Duration::from_millis(1_500);
 pub(super) const TAP_PROBE_BUDGET: Duration = Duration::from_secs(10);
 /// How often the lifecycle watchdog evaluates.
 pub(super) const LIFECYCLE_POLL_INTERVAL: Duration = Duration::from_millis(100);
-/// The most stall one evaluation may charge for the time since the previous
-/// one. A longer gap means the watchdog's own thread was not running: around a
-/// sleep transition it has fired 1.0 s and 4.8 s past its budget (#952), which
-/// a thread evaluating every poll cannot do. The tap thread it judges was not
-/// running either, so the excess is no evidence against it. The cap still
-/// charges a starved-but-running watchdog, so repeated starvation cannot hide
-/// a wedged tap thread indefinitely.
+/// The most stall one evaluation may charge for a gap that spanned a kernel
+/// sleep or wake ([`PowerEpoch`]). Around such a transition the watchdog
+/// thread has fired 1.0 s and 4.8 s past its budget (#952), which a thread
+/// evaluating every poll cannot do: it was not running, and neither was the
+/// tap thread it judges, so the excess is no evidence against it. A gap with
+/// no transition in it is charged in full — a watchdog merely delayed by
+/// scheduling still catches a wedged tap on schedule — and the cap still
+/// charges every discounted gap, so repeated sleep cycles cannot hide a
+/// wedged tap thread indefinitely.
 pub(super) const OBSERVATION_GAP: Duration = LIFECYCLE_POLL_INTERVAL.saturating_mul(5);
 /// How many re-arms the hook grants inside [`REARM_WINDOW`] before it gives
 /// the tap up.
@@ -107,7 +109,8 @@ pub(super) struct WatchdogSignals {
     // `Instant` uses CLOCK_UPTIME_RAW on macOS: monotonic, and paused while
     // the system sleeps. The transition around sleep is not paused, and the
     // watchdog thread has been observed not running for seconds of it — which
-    // is why the lifecycle watchdog discounts gaps in its own schedule.
+    // is why the lifecycle watchdog discounts a gap in its own schedule that
+    // spanned such a transition.
     origin: Instant,
     phase: AtomicU8,
     stop_requested: AtomicBool,
@@ -178,11 +181,25 @@ impl Drop for TapThreadExitGuard {
     }
 }
 
+/// The kernel's last sleep and wake instants — `kern.sleeptime` and
+/// `kern.waketime`, as microseconds since the epoch — compared for equality
+/// only. A change between two evaluations means the gap contained a system
+/// sleep or wake, the one kind of gap the watchdogs discount: both late #952
+/// exits on the reporting host straddled one (5 ms after `System Wake`, and
+/// within the second of a DarkWake). `kern.waketime` moves on every wake from
+/// sleep, dark or full, not on a DarkWake's promotion to a full wake.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct PowerEpoch {
+    pub slept_us: i64,
+    pub woke_us: i64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct LifecycleObservation {
     pub phase: TapPhase,
     pub stop_requested: bool,
     pub tap_progress_at: Duration,
+    pub power: PowerEpoch,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -208,8 +225,8 @@ pub(super) enum LifecycleDecision {
 #[derive(Debug, Default)]
 pub(super) struct LifecycleWatchdog {
     stop_at: Option<Duration>,
-    /// When the previous evaluation ran.
-    last_evaluated: Option<Duration>,
+    /// When the previous evaluation ran, and the power epoch it saw.
+    last_evaluated: Option<(Duration, PowerEpoch)>,
     /// The stall being timed, if any.
     stall: Option<Stall>,
 }
@@ -234,10 +251,18 @@ impl LifecycleWatchdog {
         now: Duration,
         observation: LifecycleObservation,
     ) -> LifecycleDecision {
-        let credit = self.last_evaluated.map_or(Duration::ZERO, |last| {
-            now.saturating_sub(last).min(OBSERVATION_GAP)
+        // The whole gap counts, unless a kernel sleep or wake fell inside it:
+        // then the process was frozen for an unknown part of it, and at most
+        // `OBSERVATION_GAP` is charged.
+        let credit = self.last_evaluated.map_or(Duration::ZERO, |(last, power)| {
+            let gap = now.saturating_sub(last);
+            if power == observation.power {
+                gap
+            } else {
+                gap.min(OBSERVATION_GAP)
+            }
         });
-        self.last_evaluated = Some(now);
+        self.last_evaluated = Some((now, observation.power));
 
         match observation.phase {
             TapPhase::Starting => return LifecycleDecision::Continue,
@@ -382,6 +407,18 @@ mod tests {
             phase,
             stop_requested,
             tap_progress_at,
+            power: PowerEpoch::default(),
+        }
+    }
+
+    /// `observation` as seen after the kernel slept and woke once more.
+    fn after_sleep(observation: LifecycleObservation) -> LifecycleObservation {
+        LifecycleObservation {
+            power: PowerEpoch {
+                slept_us: observation.power.slept_us + 1,
+                woke_us: observation.power.woke_us + 1,
+            },
+            ..observation
         }
     }
 
@@ -395,7 +432,7 @@ mod tests {
     ) -> LifecycleDecision {
         let mut tick = watchdog
             .last_evaluated
-            .map_or(Duration::ZERO, |last| last + LIFECYCLE_POLL_INTERVAL);
+            .map_or(Duration::ZERO, |(last, _)| last + LIFECYCLE_POLL_INTERVAL);
         while tick < until {
             assert_eq!(
                 watchdog.evaluate(tick, observation),
@@ -565,10 +602,12 @@ mod tests {
         let mut watchdog = LifecycleWatchdog::default();
         let before_freeze = observation(TapPhase::Armed, false, Duration::ZERO);
         let _ = watched(&mut watchdog, Duration::from_millis(300), before_freeze);
-        // The 11:54:19 exit on the reporting host: 2515 ms since the mark.
+        // The 11:54:19 exit on the reporting host: 2515 ms since the mark,
+        // with the kernel's System Sleep and System Wake inside the gap.
         let thawed = Duration::from_millis(2_815);
+        let after_thaw = after_sleep(before_freeze);
         assert_eq!(
-            watchdog.evaluate(thawed, before_freeze),
+            watchdog.evaluate(thawed, after_thaw),
             LifecycleDecision::Continue,
             "300 ms watched + one capped gap is under budget"
         );
@@ -577,7 +616,11 @@ mod tests {
             watched(
                 &mut watchdog,
                 thawed + TAP_SHUTDOWN_BUDGET,
-                observation(TapPhase::Armed, false, thawed + Duration::from_millis(40))
+                after_sleep(observation(
+                    TapPhase::Armed,
+                    false,
+                    thawed + Duration::from_millis(40)
+                ))
             ),
             LifecycleDecision::Continue
         );
@@ -586,11 +629,11 @@ mod tests {
         // budget runs out once the stall the watchdog saw reaches it.
         let mut wedged = LifecycleWatchdog::default();
         let _ = watched(&mut wedged, Duration::from_millis(300), before_freeze);
-        let _ = wedged.evaluate(thawed, before_freeze);
+        let _ = wedged.evaluate(thawed, after_thaw);
         // 1.5 s budget, less the 300 ms watched and the 500 ms capped gap.
         let remaining = Duration::from_millis(700);
         assert_eq!(
-            watched(&mut wedged, thawed + remaining, before_freeze),
+            watched(&mut wedged, thawed + remaining, after_thaw),
             exit(
                 LifecycleExitReason::TapThreadStalled,
                 TAP_SHUTDOWN_BUDGET,
@@ -614,27 +657,50 @@ mod tests {
     }
 
     #[test]
-    fn a_starved_watchdog_still_catches_a_wedged_tap() {
-        // The cap discounts each gap, never all of it: a watchdog that only
-        // gets scheduled every few seconds still accumulates the stall.
+    fn a_gap_with_no_sleep_in_it_is_charged_in_full() {
+        // A watchdog delayed by scheduling alone, with the tap thread wedged
+        // the whole time, must not read the delay as a freeze: without a
+        // kernel sleep or wake in the gap every millisecond counts, and the
+        // exit lands on the first poll past the budget.
         let mut watchdog = LifecycleWatchdog::default();
         let stalled = observation(TapPhase::Armed, false, Duration::ZERO);
-        let _ = watchdog.evaluate(Duration::ZERO, stalled);
-        let starved = |n: u32| Duration::from_secs(3) * n;
         assert_eq!(
-            watchdog.evaluate(starved(1), stalled),
+            watchdog.evaluate(Duration::ZERO, stalled),
             LifecycleDecision::Continue
         );
+        let delayed = Duration::from_secs(3);
         assert_eq!(
-            watchdog.evaluate(starved(2), stalled),
+            watchdog.evaluate(delayed, stalled),
+            exit(LifecycleExitReason::TapThreadStalled, delayed, delayed)
+        );
+    }
+
+    #[test]
+    fn repeated_sleep_cycles_still_accumulate_a_wedged_tap() {
+        // The cap discounts each transition gap, never all of it: a tap thread
+        // wedged across a DarkWake cycle is still caught after a few cycles.
+        let mut watchdog = LifecycleWatchdog::default();
+        let cycle = Duration::from_secs(3);
+        let mut stalled = observation(TapPhase::Armed, false, Duration::ZERO);
+        assert_eq!(
+            watchdog.evaluate(Duration::ZERO, stalled),
             LifecycleDecision::Continue
         );
+        for n in 1..3 {
+            stalled = after_sleep(stalled);
+            assert_eq!(
+                watchdog.evaluate(cycle * n, stalled),
+                LifecycleDecision::Continue,
+                "cycle {n}: {n} capped gaps are under budget"
+            );
+        }
+        stalled = after_sleep(stalled);
         assert_eq!(
-            watchdog.evaluate(starved(3), stalled),
+            watchdog.evaluate(cycle * 3, stalled),
             exit(
                 LifecycleExitReason::TapThreadStalled,
                 OBSERVATION_GAP * 3,
-                starved(3)
+                cycle * 3
             )
         );
     }
@@ -645,14 +711,15 @@ mod tests {
         let stopping = observation(TapPhase::Armed, true, Duration::ZERO);
         let _ = watched(&mut watchdog, Duration::from_millis(200), stopping);
         let thawed = Duration::from_secs(5);
+        let after_thaw = after_sleep(stopping);
         assert_eq!(
-            watchdog.evaluate(thawed, stopping),
+            watchdog.evaluate(thawed, after_thaw),
             LifecycleDecision::Continue
         );
         // 1.5 s budget, less the 200 ms watched and the 500 ms capped gap.
         let remaining = Duration::from_millis(800);
         assert_eq!(
-            watched(&mut watchdog, thawed + remaining, stopping),
+            watched(&mut watchdog, thawed + remaining, after_thaw),
             exit(
                 LifecycleExitReason::StopTimedOut,
                 TAP_SHUTDOWN_BUDGET,
