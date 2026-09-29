@@ -42,6 +42,7 @@ use crate::receiver_access::ReceiverAccess;
 use crate::runtime::hook::{HookMaps, SharedHookMaps};
 use crate::runtime::scroll::ScrollPreferences;
 use crate::watchers::host_switch::{HostSwitchLink, HostSwitchLinks};
+use crate::watchers::inventory::InventoryRefresh;
 use crate::watchers::keyboard::{KeyboardSpec, SharedKeyboardSpec};
 use crate::{DpiCycleState, DpiCycles};
 
@@ -124,6 +125,9 @@ pub struct SharedHandles {
     pub host_switch_links: HostSwitchLinks,
     /// Orders every path's Fn-lock writes per keyboard.
     fn_lock_order: FnLockOrder,
+    /// The running inventory watcher's refresh handle, published at arming;
+    /// `None` while no watcher runs.
+    inventory_refresh: Arc<RwLock<Option<InventoryRefresh>>>,
 }
 
 impl SharedHandles {
@@ -188,6 +192,24 @@ impl SharedHandles {
                 }
             })
             .await
+    }
+
+    /// Hand requests to the inventory watcher started at arming.
+    pub fn publish_inventory_refresh(&self, refresh: InventoryRefresh) {
+        write_value(&self.inventory_refresh, Some(refresh), "inventory refresh");
+    }
+
+    /// Have the inventory watcher rescan receivers after a pairing-table
+    /// change. Nothing is scanning while the agent is unarmed, and arming
+    /// starts with a full scan, so there is then nothing to ask.
+    pub fn request_receiver_rescan(&self) {
+        let Ok(refresh) = self.inventory_refresh.read() else {
+            warn!("inventory refresh handle poisoned — receiver rescan skipped");
+            return;
+        };
+        if let Some(refresh) = refresh.as_ref() {
+            refresh.request_receiver_rescan();
+        }
     }
 
     /// [`Self::set_fn_lock`] without waiting, for the config-reload and
@@ -308,6 +330,7 @@ impl Orchestrator {
             receiver_access: ReceiverAccess::default(),
             host_switch_links,
             fn_lock_order: FnLockOrder::default(),
+            inventory_refresh: Arc::new(RwLock::new(None)),
         };
         let orch = Self {
             config,

@@ -13,6 +13,7 @@ use std::time::{Instant, SystemTime};
 
 use futures_lite::StreamExt as _;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
+use openlogi_hid::inventory::events::HidppEventSource;
 use openlogi_hid::{ChannelRegistry, DeviceIoGate};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -226,6 +227,13 @@ impl InventoryRefresh {
     pub fn request_settings_confirmation(&self) {
         let _ = self.sender.try_send(RefreshRequest::SettingsConfirmation);
     }
+
+    /// Rescan after the agent changed a receiver's pairing table. A receiver
+    /// announces a new pairing with a connection notification, which already
+    /// triggers a scan, but removing one sends none the watcher listens to.
+    pub fn request_receiver_rescan(&self) {
+        let _ = self.sender.try_send(RefreshRequest::ReceiverPairingChanged);
+    }
 }
 
 /// The watcher's event stream plus its settings-confirmation request handle.
@@ -240,6 +248,7 @@ pub struct InventoryWatcher {
 #[derive(Clone, Copy)]
 enum RefreshRequest {
     SettingsConfirmation,
+    ReceiverPairingChanged,
 }
 
 /// Spawn a watcher without publishing channels into a registry.
@@ -461,6 +470,9 @@ impl InventoryWorker {
                 } => match request {
                     Some(RefreshRequest::SettingsConfirmation) => {
                         self.schedule.request_settings_confirmation(Instant::now());
+                    }
+                    Some(RefreshRequest::ReceiverPairingChanged) => {
+                        break ReconcileTrigger::HidEvent(HidppEventSource::ReceiverConnection);
                     }
                     None => self.refresh_open = false,
                 },

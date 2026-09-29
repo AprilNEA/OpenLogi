@@ -65,7 +65,8 @@ pub use succession::Identity;
 /// v31: `Capabilities::dpi_gestures` appended.
 /// v32: `Agent::read_fn_lock`, `Agent::set_fn_lock` and
 ///      `HidppOperation::ReadFnLock` appended.
-pub const PROTOCOL_VERSION: u32 = 32;
+/// v33: `Agent::unpair_device` appended.
+pub const PROTOCOL_VERSION: u32 = 33;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -574,4 +575,11 @@ pub trait Agent {
     /// keyboard echoes back, so the GUI shows what the keyboard took rather
     /// than what it asked for.
     async fn set_fn_lock(route: DeviceRoute, fn_lock: bool) -> Result<FnLockState, WriteError>;
+    /// Remove the device `route` names from the receiver it is paired to, so a
+    /// forgotten device stops coming back with the next inventory. The device
+    /// must pair again to reach this host through that receiver. Refused with
+    /// [`PairingFailure::ReceiverBusy`] while a pairing session holds the
+    /// receiver, and with [`PairingFailure::ReceiverNotFound`] for a route
+    /// that names no receiver slot or a receiver that is not connected.
+    async fn unpair_device(route: DeviceRoute) -> Result<(), PairingFailure>;
 }

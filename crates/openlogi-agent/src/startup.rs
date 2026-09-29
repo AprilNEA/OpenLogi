@@ -275,6 +275,7 @@ pub(crate) fn spawn_state_watchers(
         shared.hardware(),
         shared.channel_registry.clone(),
     );
+    shared.publish_inventory_refresh(inventory.refresh.clone());
     let mut pointer = watchers::pointer::spawn();
     // Publish capability even when an unsupported source has no worker and
     // closes immediately. The orchestrator starts unknown, never guessing.

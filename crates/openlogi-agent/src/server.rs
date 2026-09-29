@@ -25,7 +25,7 @@ use openlogi_ipc::transport;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus, ClientKind,
     ConfigReloadError, Generation, Identity, MonitorEvent, Observation, PROTOCOL_VERSION,
-    PairingCommandError, PairingUpdate, RingObservation,
+    PairingCommandError, PairingFailure, PairingUpdate, RingObservation,
 };
 use succession::Compat;
 
@@ -264,6 +264,10 @@ impl Agent for AgentServer {
 
     async fn cancel_pairing(self, _: Context) -> Result<(), PairingCommandError> {
         self.pairing.cancel()
+    }
+
+    async fn unpair_device(self, _: Context, route: DeviceRoute) -> Result<(), PairingFailure> {
+        self.pairing.unpair(&route).await
     }
 
     async fn next_pairing(self, _: Context) -> Option<PairingUpdate> {

@@ -547,6 +547,28 @@ impl State {
         self.clock.advance(duration);
     }
 
+    /// Drop the paired device `route` names, as its receiver does on unpair.
+    fn unpair(&mut self, route: &DeviceRoute) -> Result<(), PairingFailure> {
+        let (DeviceRoute::Bolt { receiver_uid, slot }
+        | DeviceRoute::Unifying { receiver_uid, slot }) = route
+        else {
+            return Err(PairingFailure::ReceiverNotFound);
+        };
+        let names =
+            |uid: Option<&str>| uid.is_some_and(|uid| uid.eq_ignore_ascii_case(receiver_uid));
+        let inventory = self
+            .profile
+            .inventories
+            .iter_mut()
+            .find(|inventory| names(inventory.receiver.unique_id.as_deref()))
+            .ok_or(PairingFailure::ReceiverNotFound)?;
+        inventory.paired.retain(|device| device.slot != *slot);
+        if names(Some(RECEIVER_UID)) {
+            self.paired_extra.retain(|device| device.slot != *slot);
+        }
+        Ok(())
+    }
+
     /// Append the scripted pairing candidate to the Bolt receiver's inventory
     /// and return its assigned slot.
     fn pair_scripted(&mut self, name: &str) -> u8 {
@@ -846,6 +868,12 @@ impl Agent for MockAgent {
         stored.fn_lock = fn_lock;
         info!(%route, fn_lock, "set_fn_lock");
         Ok(*stored)
+    }
+
+    async fn unpair_device(self, _: Context, route: DeviceRoute) -> Result<(), PairingFailure> {
+        let result = self.state.lock().await.unpair(&route);
+        info!(%route, ok = result.is_ok(), "unpair_device");
+        result
     }
 
     async fn request_accessibility_prompt(self, _: Context) {

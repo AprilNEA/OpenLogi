@@ -19,8 +19,8 @@ use openlogi_ipc::client::ProtocolSkew;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentStatus, ClientKind,
     ConfigReloadError, ForegroundApps, Generation, Identity, InventoryHealth, MonitorEvent,
-    Observation, PROTOCOL_VERSION, PairingCommandError, PairingPhase, PairingUpdate,
-    RingObservation,
+    Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase,
+    PairingUpdate, RingObservation,
 };
 use tarpc::client::RpcError;
 use tarpc::context::Context as TarpcContext;
@@ -156,6 +156,14 @@ impl Agent for TestAgent {
         _fn_lock: bool,
     ) -> Result<FnLockState, WriteError> {
         unreachable!("profile capture must never write Fn-lock")
+    }
+
+    async fn unpair_device(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+    ) -> Result<(), PairingFailure> {
+        unreachable!("profile capture must never unpair a device")
     }
 
     async fn read_dpi(self, _: TarpcContext, route: DeviceRoute) -> Result<DpiInfo, WriteError> {

@@ -102,7 +102,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 32);
+    assert_eq!(PROTOCOL_VERSION, 33);
 }
 
 #[test]
@@ -247,6 +247,15 @@ fn semantic_read_requests() {
             fn_lock: true,
         },
         "1d000846303044434146450101",
+    );
+    assert_wire(
+        &AgentRequest::UnpairDevice {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+        },
+        "1e0008463030444341464501",
     );
 }
 
