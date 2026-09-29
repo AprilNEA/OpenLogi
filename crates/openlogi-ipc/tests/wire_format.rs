@@ -103,7 +103,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 35);
+    assert_eq!(PROTOCOL_VERSION, 36);
 }
 
 #[test]
@@ -575,6 +575,12 @@ fn device_settings_payloads() {
             actual: 0x01,
         },
         "0f11fb2145a101",
+    );
+    assert_wire(
+        &WriteError::WriteSuperseded {
+            operation: HidppOperation::WriteDisableKeys,
+        },
+        "1011",
     );
     let dpi: Result<DpiInfo, WriteError> = Ok(DpiInfo {
         current: Dpi::new(1600),

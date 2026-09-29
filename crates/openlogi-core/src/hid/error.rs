@@ -124,6 +124,12 @@ pub enum WriteError {
         /// Complete actual effective mask.
         actual: u64,
     },
+    /// A newer setting intent superseded this request before it completed.
+    #[error("write superseded by a newer setting during {operation:?}")]
+    WriteSuperseded {
+        /// Operation whose result must not be persisted by its caller.
+        operation: HidppOperation,
+    },
 }
 
 /// HID++ operation being performed when a device write/read failed.

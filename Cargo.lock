@@ -5565,6 +5565,7 @@ version = "0.8.9"
 dependencies = [
  "futures-lite",
  "openlogi-core",
+ "openlogi-device",
  "openlogi-fixture",
  "openlogi-hid",
  "openlogi-hook",

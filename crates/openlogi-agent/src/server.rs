@@ -269,11 +269,7 @@ impl Agent for AgentServer {
         route: DeviceRoute,
         desired: openlogi_hid::DisableKeysMask,
     ) -> Result<openlogi_hid::DisableKeysState, WriteError> {
-        disable_keys_device(&self.shared, &route)
-            .run(HidppOperation::WriteDisableKeys, |channel| async move {
-                openlogi_hid::set_disable_keys_on(&channel, desired).await
-            })
-            .await
+        self.shared.set_disable_keys(&route, desired).await
     }
 
     async fn request_accessibility_prompt(self, _: Context) {

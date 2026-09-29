@@ -28,6 +28,7 @@ mod camera;
 mod capture_plans;
 mod device_list;
 mod device_settings;
+mod disabled_keys;
 mod publication;
 mod reapply;
 
