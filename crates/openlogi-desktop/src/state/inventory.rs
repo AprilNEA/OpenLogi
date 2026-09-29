@@ -406,7 +406,10 @@ impl super::AppState {
     /// A receiver keeps a device's pairing until it is told to drop it, and
     /// the next inventory would bring that card back (#1581), so a device on
     /// a receiver is unpaired first; [`Self::apply_device_unpaired`] finishes
-    /// once the receiver has answered.
+    /// once the receiver has answered. A connected receiver lists every slot
+    /// it pairs, so a card without a route is one whose receiver is absent:
+    /// there is nothing to unpair, and once the receiver returns its slot
+    /// shows again with a route to unpair through.
     pub(crate) fn forget_device(&mut self, record_key: &str) -> StateEvents {
         let Some(record) = self
             .devices
@@ -444,7 +447,8 @@ impl super::AppState {
     /// The receiver's answer to [`Self::forget_device`]'s unpair. The
     /// inventory rescan the unpair triggers may already have dropped the
     /// card, so the settings go by `config_key` whether it is still shown or
-    /// not.
+    /// not — unless the device is back online, paired again, in which case
+    /// they are its settings now.
     pub(crate) fn apply_device_unpaired(
         &mut self,
         record_key: &str,
@@ -452,6 +456,7 @@ impl super::AppState {
         result: Result<(), UnpairFailure>,
     ) -> StateEvents {
         match result {
+            Ok(()) if self.device_is_back(record_key, config_key) => StateEvents::none(),
             Ok(()) => self.drop_device(record_key, config_key),
             Err(failure) => {
                 let name = self
@@ -466,6 +471,16 @@ impl super::AppState {
                 StateEvent::DeviceRemovalFailed { name, failure }.into()
             }
         }
+    }
+
+    /// Whether the forgotten device is online again — as its old card, or as
+    /// a new card that owns the same settings.
+    fn device_is_back(&self, record_key: &str, config_key: Option<&str>) -> bool {
+        self.devices.records.iter().any(|record| {
+            record.online
+                && (record.record_key() == record_key
+                    || config_key.is_some_and(|key| record.persistent_config_key() == Some(key)))
+        })
     }
 
     /// Drop `config_key`'s settings, then the card. Dropping the config entry

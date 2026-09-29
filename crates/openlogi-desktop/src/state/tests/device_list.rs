@@ -639,3 +639,32 @@ fn an_unpaired_device_loses_its_settings_even_after_its_card_is_gone() {
 
     assert!(!state.config.devices.contains_key(&config_key));
 }
+
+/// An unpair answer that arrives after the device was paired again and came
+/// online must not delete the device it now is: its card and settings stay.
+#[test]
+fn an_unpair_answer_leaves_a_device_that_is_back_online() {
+    let resolver = AssetResolver::new();
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::new(Sources {
+        inventories: &[receiver_inventory()],
+        ..Sources::in_memory(Config::ephemeral(), &resolver, commands)
+    });
+    let with_link = |online: bool| {
+        let mut inventory = receiver_inventory();
+        inventory.paired[0].online = online;
+        inventory
+    };
+    let _ = state.refresh_inventories(&[with_link(false)], &[], &resolver, &[]);
+    let (record_key, config_key) = forget_target(&mut state);
+    let _ = state.refresh_inventories(&[with_link(true)], &[], &resolver, &[]);
+    assert!(state.devices()[0].online);
+
+    assert!(
+        state
+            .apply_device_unpaired(&record_key, Some(&config_key), Ok(()))
+            .is_empty()
+    );
+    assert!(state.devices()[0].online);
+    assert!(state.config.devices.contains_key(&config_key));
+}
