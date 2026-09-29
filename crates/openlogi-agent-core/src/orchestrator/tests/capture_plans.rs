@@ -179,7 +179,7 @@ fn hook_maps_publish_selection_and_preserve_learned_thumbwheel_polarity() {
 }
 
 #[test]
-fn macos_side_gesture_capture_follows_mouse_hook_availability() {
+fn side_gesture_capture_follows_platform_ownership_and_hook_availability() {
     let mut config = Config::default();
     config.set_gesture_mode("a", ButtonId::Forward, true);
     let mut orch = orchestrator(config);
@@ -206,35 +206,37 @@ fn macos_side_gesture_capture_follows_mouse_hook_availability() {
         capture_plans
             .has_changed()
             .expect("publication remains open"),
-        cfg!(target_os = "macos"),
+        cfg!(any(target_os = "macos", target_os = "windows")),
         "only a semantic capture-plan change should wake reconciliation"
     );
     let _ = capture_plans.borrow_and_update();
+    let hook_maps = orch
+        .shared
+        .hook_maps
+        .read()
+        .expect("hook maps should not be poisoned");
     if cfg!(target_os = "macos") {
-        let hook_maps = orch
-            .shared
-            .hook_maps
-            .read()
-            .expect("hook maps should not be poisoned");
         assert!(!hook_maps.bindings.contains_key(&ButtonId::Forward));
         assert!(!hook_maps.gestures.contains_key(&ButtonId::Forward));
         assert!(side_gesture_is_armed(&orch));
+    } else if cfg!(target_os = "windows") {
+        assert!(hook_maps.gestures.contains_key(&ButtonId::Forward));
+        assert!(
+            side_gesture_is_armed(&orch),
+            "Windows must request HID++ raw XY while retaining the passive hook fallback"
+        );
     } else {
-        let hook_maps = orch
-            .shared
-            .hook_maps
-            .read()
-            .expect("hook maps should not be poisoned");
         assert!(hook_maps.gestures.contains_key(&ButtonId::Forward));
         assert!(!side_gesture_is_armed(&orch));
     }
+    drop(hook_maps);
 
     orch.set_os_mouse_hook_available(false);
     assert_eq!(
         capture_plans
             .has_changed()
             .expect("publication remains open"),
-        cfg!(target_os = "macos"),
+        cfg!(any(target_os = "macos", target_os = "windows")),
         "only a semantic capture-plan change should wake reconciliation"
     );
     assert!(
@@ -358,4 +360,44 @@ fn a_back_binding_alone_keeps_its_whole_family_on_a_keyboard() {
     for cid in BACK_CIDS {
         assert!(diverted.contains(&cid), "{cid:#06x}");
     }
+}
+#[cfg(target_os = "windows")]
+#[test]
+fn two_mouse_hidpp_plans_are_device_scoped_while_hook_fallback_is_selected_device_global() {
+    let mut config = Config::default();
+    config.set_gesture_mode("selected", ButtonId::Forward, true);
+    let mut orch = orchestrator(config);
+    orch.devices = vec![dev("selected", 1, true), dev("other", 2, true)];
+    orch.rebuild();
+    orch.set_os_mouse_hook_available(true);
+
+    let plans = orch.shared.capture_plans.borrow();
+    let selected = plans
+        .iter()
+        .find(|plan| plan.dispatch.config_key == "selected")
+        .expect("selected device plan");
+    let other = plans
+        .iter()
+        .find(|plan| plan.dispatch.config_key == "other")
+        .expect("other device plan");
+    assert!(
+        selected
+            .dispatch
+            .side_gesture_bindings
+            .contains_key(&ButtonId::Forward),
+        "HID++ input keeps the selected device's dispatch plan"
+    );
+    assert!(other.dispatch.side_gesture_bindings.is_empty());
+    drop(plans);
+
+    let hook_maps = orch
+        .shared
+        .hook_maps
+        .read()
+        .expect("hook maps should not be poisoned");
+    assert_eq!(hook_maps.selected_device.as_deref(), Some("selected"));
+    assert!(
+        hook_maps.gestures.contains_key(&ButtonId::Forward),
+        "the passive Windows fallback is one selected-device map, not a per-source map"
+    );
 }

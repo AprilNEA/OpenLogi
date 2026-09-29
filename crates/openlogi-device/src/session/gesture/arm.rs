@@ -28,8 +28,8 @@ pub(super) struct ArmedControls {
     /// The gesture-source CIDs diverted with raw-XY reporting: the
     /// `spec.divert_gesture_sources` members the device exposes.
     pub(super) gesture_cids: Vec<u16>,
-    /// Raw-XY-capable additional CIDs diverted as gesture sources (macOS side
-    /// buttons and a gesture-mode DPI/ModeShift button).
+    /// Raw-XY-capable additional CIDs diverted as gesture sources (side
+    /// buttons on supported desktops and a gesture-mode DPI/ModeShift button).
     pub(super) gesture_button_cids: Vec<(u16, ButtonId)>,
     /// DPI/ModeShift CIDs diverted as plain buttons when gesture mode is off.
     pub(super) dpi_cids: Vec<u16>,
