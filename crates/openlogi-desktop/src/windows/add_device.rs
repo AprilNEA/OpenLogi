@@ -113,7 +113,7 @@ pub fn apply_undeliverable(cx: &mut App, failure: PairingFailure) {
     cx.set_global(PairingUi::Failed(failure));
 }
 
-fn pairing_failure_text(failure: &PairingFailure) -> String {
+pub(crate) fn pairing_failure_text(failure: &PairingFailure) -> String {
     match failure {
         PairingFailure::Hid { message } => {
             tr!("pairing.hid_transport_error", message => message.clone()).to_string()

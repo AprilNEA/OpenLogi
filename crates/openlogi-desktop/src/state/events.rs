@@ -13,6 +13,7 @@ use gpui::{App, Context, EventEmitter, Subscription};
 use super::AppState;
 use super::device_key::DeviceKey;
 use super::devices::DeviceRecord;
+use crate::services::ipc::UnpairFailure;
 
 /// Semantic changes emitted by the shared application-state entity.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,6 +30,13 @@ pub(crate) enum StateEvent {
     DiagnosticsChanged,
     /// The merged device inventory changed.
     InventoryChanged,
+    /// A device the user asked to forget stayed, because its receiver kept
+    /// the pairing.
+    DeviceRemovalFailed {
+        /// The device's display name.
+        name: String,
+        failure: UnpairFailure,
+    },
     /// The active device changed.
     DeviceSelected(DeviceKey),
     /// Mouse, keyboard, gesture, or Actions Ring bindings changed.
@@ -77,6 +85,7 @@ impl StateEvent {
             | Self::ForegroundChanged
             | Self::DiagnosticsChanged
             | Self::InventoryChanged
+            | Self::DeviceRemovalFailed { .. }
             | Self::CameraChanged
             | Self::CameraPermissionChanged
             | Self::SettingsChanged
@@ -205,6 +214,8 @@ impl AppState {
     ) -> bool {
         match event {
             StateEvent::InventoryChanged | StateEvent::DeviceSelected(_) => true,
+            // A dialog, not panel content.
+            StateEvent::DeviceRemovalFailed { .. } => false,
             StateEvent::AgentChanged
             | StateEvent::ForegroundChanged
             | StateEvent::DiagnosticsChanged

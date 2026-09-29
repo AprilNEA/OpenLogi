@@ -63,7 +63,7 @@ pub use request::PollEventMonitor;
 pub use request::{
     CancelPairing, Command, PairDevice, ReadDpi, ReadFnLock, ReadSmartShift, ReloadConfig,
     RequestAccessibilityPrompt, SetDpi, SetFnLock, SetLight, SetLightManualPower, SetLighting,
-    SetSmartShift, StartPairing,
+    SetSmartShift, StartPairing, UnpairDevice,
 };
 
 /// How long to wait before retrying a connect that failed. This is a retry
@@ -110,6 +110,24 @@ pub enum GuiUpdate {
     /// in the observed state to explain the silence. Reported locally rather
     /// than faked as a session the agent never had.
     PairingUndeliverable(PairingFailure),
+    /// Whether the receiver let a forgotten device go. Answers
+    /// [`UnpairDevice`].
+    DeviceUnpaired {
+        /// The record the user asked to forget.
+        record_key: String,
+        /// Where its settings live.
+        config_key: Option<String>,
+        result: Result<(), UnpairFailure>,
+    },
+}
+
+/// Why a forgotten device kept its receiver pairing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UnpairFailure {
+    /// The agent refused, or the receiver failed the write.
+    Refused(PairingFailure),
+    /// No agent could be reached to ask.
+    AgentUnreachable,
 }
 
 /// Handle the GUI holds to talk to the agent: a stream of state updates and a

@@ -27,7 +27,7 @@ use tarpc::context;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
-use super::GuiUpdate;
+use super::{GuiUpdate, UnpairFailure};
 use crate::state::DeviceKey;
 
 /// The GPUI-bound update stream a request may deliver through.
@@ -430,6 +430,39 @@ impl Request for CancelPairing {
     }
 }
 
+/// Remove a forgotten device's pairing from its receiver, answered as
+/// [`GuiUpdate::DeviceUnpaired`] so the card goes only once the receiver has
+/// let the device go.
+pub struct UnpairDevice {
+    pub route: DeviceRoute,
+    pub record_key: String,
+    /// Where the device's settings live, dropped once the receiver lets go.
+    pub config_key: Option<String>,
+}
+
+impl Request for UnpairDevice {
+    type Answer = Result<(), PairingFailure>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .unpair_device(context::current(), self.route.clone())
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        let result = match outcome {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(failure)) => Err(UnpairFailure::Refused(failure)),
+            Err(Unavailable) => Err(UnpairFailure::AgentUnreachable),
+        };
+        let _ = updates.send(GuiUpdate::DeviceUnpaired {
+            record_key: self.record_key,
+            config_key: self.config_key,
+            result,
+        });
+    }
+}
+
 /// Drain the agent's live event-monitor buffer for the debug Diagnostics
 /// monitor. The first poll enables monitoring agent-side; the agent
 /// auto-disables it once polls stop. An unreachable agent has nothing to
@@ -502,6 +535,7 @@ commands! {
     StartPairing,
     PairDevice,
     CancelPairing,
+    UnpairDevice,
     #[cfg(all(target_os = "macos", debug_assertions))]
     PollEventMonitor,
 }
