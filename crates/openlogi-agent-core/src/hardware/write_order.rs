@@ -191,18 +191,16 @@ impl<T: Clone> PendingWrite<T> {
         self.ticket.clone()
     }
 
-    /// A late success may record what finished, but cannot displace a newer
-    /// committed intent. Return whether this request still owns the result.
+    /// Commit only a current result that the caller can return as success.
+    /// A superseded completion must not strand saved policy if its successor
+    /// fails: the client never accepted or saved that intermediate value.
     pub(crate) fn confirm(self) -> bool {
         let mut state = self.ticket.queue.state();
-        if state
-            .committed
-            .as_ref()
-            .is_none_or(|intent| intent.number < self.intent.number)
-        {
-            state.committed = Some(self.intent.clone());
+        if state.latest() != self.intent.number {
+            return false;
         }
-        state.latest() == self.intent.number
+        state.committed = Some(self.intent.clone());
+        true
     }
 }
 
@@ -322,6 +320,25 @@ mod tests {
                 drop(second);
             }
             assert!(policy.turn().await.is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn superseded_confirmation_preserves_the_last_accepted_intent() {
+        for previous_manual in [false, true] {
+            let order = WriteOrder::default();
+            order.sync_policy(&route(1), Some(1));
+            let (_, mut accepted) = order.policy(&route(1)).expect("saved policy");
+            if previous_manual {
+                let confirmed = order.begin(&route(1), Some(2));
+                accepted = confirmed.ticket();
+                assert!(confirmed.confirm());
+            }
+            let first = order.begin(&route(1), Some(0));
+            let second = order.begin(&route(1), Some(3));
+            assert!(!first.confirm());
+            drop(second);
+            assert!(accepted.turn().await.is_some());
         }
     }
 

@@ -153,6 +153,65 @@ async fn cancelled_or_failed_manual_request_releases_saved_policy() {
 }
 
 #[tokio::test]
+async fn a_superseded_completion_does_not_strand_policy_when_its_successor_fails() {
+    use openlogi_fixture::RequestMatch;
+    use std::time::Duration;
+
+    // Cancellation, a rejected request, and a successful newer choice must
+    // respectively restore saved policy, restore it, and keep the new choice.
+    for successor in [None, Some(0x40), Some(0x00)] {
+        let shared = orchestrator(Config::default()).shared();
+        let keyboard = Keyboard::publish(&shared).await;
+        keyboard.configure(&shared);
+        let get_state = [0x10, 0xff, 5, 0x10, 0, 0, 0];
+        keyboard
+            .reports
+            .hold_next_response(RequestMatch::Hidpp20, &get_state)
+            .release();
+        let readback = keyboard
+            .reports
+            .hold_next_response(RequestMatch::Hidpp20, &get_state);
+        let writer = shared.clone();
+        let route = keyboard.route.clone();
+        let first = tokio::spawn(async move {
+            writer
+                .set_disable_keys(&route, DisableKeysMask::EMPTY)
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), readback.request_written())
+            .await
+            .expect("first request reached readback");
+        let mut second = Box::pin(shared.set_disable_keys(
+            &keyboard.route,
+            DisableKeysMask::from_bits_retain(successor.unwrap_or(0x00)),
+        ));
+        assert!(futures_lite::future::poll_once(&mut second).await.is_none());
+        readback.release();
+        assert_eq!(
+            first.await.expect("first task").expect_err("superseded"),
+            WriteError::WriteSuperseded {
+                operation: HidppOperation::WriteDisableKeys,
+            }
+        );
+        match successor {
+            None => drop(second),
+            Some(0x40) => assert!(matches!(
+                second.await.expect_err("unsupported mask"),
+                WriteError::UnsupportedMask { .. }
+            )),
+            Some(_) => assert_eq!(
+                second.await.expect("new choice confirmed").disabled.bits(),
+                0x80
+            ),
+        }
+        finish(shared.reapply_disabled_keys(&keyboard.route)).await;
+        let expected = if successor == Some(0x00) { 0x80 } else { 0x81 };
+        assert_eq!(keyboard.disabled.load(Ordering::SeqCst), expected);
+        keyboard.assert_writes(&[0x80, expected]);
+    }
+}
+
+#[tokio::test]
 async fn superseded_manual_request_reports_failure_without_writing() {
     let shared = orchestrator(Config::default()).shared();
     let keyboard = Keyboard::publish(&shared).await;
