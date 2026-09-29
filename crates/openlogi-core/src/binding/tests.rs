@@ -381,10 +381,10 @@ fn all_catalog_variants_roundtrip_toml() {
     }
 }
 
-#[test]
-fn persisted_action_variant_names_are_stable() {
-    let mut actions = Action::catalog();
-    actions.extend([
+/// One sample of every payload-carrying variant, which
+/// [`Action::catalog`] leaves out because it lists only the unit actions.
+fn payload_action_samples() -> [Action; 9] {
+    [
         Action::SetDpiPreset(0),
         Action::CustomShortcut(
             "F1".parse()
@@ -407,7 +407,13 @@ fn persisted_action_variant_names_are_stable() {
                 .parse()
                 .unwrap_or_else(|error| panic!("valid shortcut failed: {error}")),
         ),
-    ]);
+    ]
+}
+
+#[test]
+fn persisted_action_variant_names_are_stable() {
+    let mut actions = Action::catalog();
+    actions.extend(payload_action_samples());
     let mut actual: Vec<String> = actions
         .into_iter()
         .map(
@@ -479,6 +485,8 @@ fn persisted_action_variant_names_are_stable() {
         "VolumeDown",
         "VolumeUp",
         "Workflow",
+        "ZoomIn",
+        "ZoomOut",
     ];
     expected.sort_unstable();
     assert_eq!(actual, expected);
@@ -842,4 +850,12 @@ fn mouse_buttons_sort_ahead_of_every_keyboard_control() {
         assert_eq!(button.config_name().parse::<ButtonId>(), Ok(button));
     }
     assert_eq!(default_binding(ButtonId::control(0x01f3)), Action::None);
+}
+
+#[test]
+fn zoom_actions_lower_to_their_own_effect_not_a_scroll() {
+    // A backend has to hold the platform's zoom modifier around the tick, so
+    // zoom must not arrive as a plain `Effect::Scroll` it would inject bare.
+    assert_eq!(Action::ZoomIn.effect(), Effect::Zoom(ZoomDirection::In));
+    assert_eq!(Action::ZoomOut.effect(), Effect::Zoom(ZoomDirection::Out));
 }
