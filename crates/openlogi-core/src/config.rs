@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+mod button_map;
 mod device;
 #[cfg(feature = "fs")]
 mod file;

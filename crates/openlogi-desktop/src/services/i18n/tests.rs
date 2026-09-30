@@ -1,4 +1,4 @@
-use openlogi_core::binding::{Action, ActionRingIcon, ButtonId, GestureDirection};
+use openlogi_core::binding::{Action, ActionRingIcon, ButtonId, GestureDirection, KNOWN_CONTROLS};
 
 use crate::features::mouse::thumbwheel::ThumbwheelPreset;
 
@@ -13,7 +13,12 @@ fn typed_translation_keys_resolve() {
     let covered = |key: &str| rust_i18n::t!(key) != key;
     assert!(covered("app.settings"), "desktop catalog is not wired up");
 
-    for b in ButtonId::ALL.into_iter().chain(ButtonId::KEYBOARD_KEYS) {
+    for b in ButtonId::ALL
+        .into_iter()
+        .chain(KNOWN_CONTROLS.iter().map(|control| ButtonId::Control(control.id)))
+        // A control with no catalog row resolves to the one generic key.
+        .chain([ButtonId::control(0xffff)])
+    {
         assert!(
             covered(b.translation_key()),
             "no catalog key for ButtonId::{b:?}"

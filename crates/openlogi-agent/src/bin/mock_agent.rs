@@ -54,8 +54,8 @@ use openlogi_core::device::{
 use openlogi_core::single_instance::{self, InstanceError, Role};
 use openlogi_fixture::{DeviceProfile, FixtureError, ProfileDeviceSettings, ProfileSetting};
 use openlogi_hid::{
-    BacklightState, DeviceRoute, Dpi, DpiInfo, LightCommand, PasskeyMethod, ReceiverSelector,
-    ScrollWheelMode, SmartShiftStatus, WriteError,
+    BacklightState, DeviceRoute, Dpi, DpiInfo, FnLockState, LightCommand, PasskeyMethod,
+    ReceiverSelector, ScrollWheelMode, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
@@ -547,6 +547,28 @@ impl State {
         self.clock.advance(duration);
     }
 
+    /// Drop the paired device `route` names, as its receiver does on unpair.
+    fn unpair(&mut self, route: &DeviceRoute) -> Result<(), PairingFailure> {
+        let (DeviceRoute::Bolt { receiver_uid, slot }
+        | DeviceRoute::Unifying { receiver_uid, slot }) = route
+        else {
+            return Err(PairingFailure::ReceiverNotFound);
+        };
+        let names =
+            |uid: Option<&str>| uid.is_some_and(|uid| uid.eq_ignore_ascii_case(receiver_uid));
+        let inventory = self
+            .profile
+            .inventories
+            .iter_mut()
+            .find(|inventory| names(inventory.receiver.unique_id.as_deref()))
+            .ok_or(PairingFailure::ReceiverNotFound)?;
+        inventory.paired.retain(|device| device.slot != *slot);
+        if names(Some(RECEIVER_UID)) {
+            self.paired_extra.retain(|device| device.slot != *slot);
+        }
+        Ok(())
+    }
+
     /// Append the scripted pairing candidate to the Bolt receiver's inventory
     /// and return its assigned slot.
     fn pair_scripted(&mut self, name: &str) -> u8 {
@@ -827,6 +849,31 @@ impl Agent for MockAgent {
     ) -> Result<BacklightState, WriteError> {
         let state = self.state.lock().await;
         profile_value(&state.settings_for(&route)?.backlight, &route, 0x1982).copied()
+    }
+
+    async fn read_fn_lock(self, _: Context, route: DeviceRoute) -> Result<FnLockState, WriteError> {
+        let state = self.state.lock().await;
+        profile_value(&state.settings_for(&route)?.fn_lock, &route, 0x40a3).copied()
+    }
+
+    async fn set_fn_lock(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        fn_lock: bool,
+    ) -> Result<FnLockState, WriteError> {
+        let mut state = self.state.lock().await;
+        let settings = state.settings_for_mut(&route)?;
+        let stored = profile_value_mut(&mut settings.fn_lock, &route, 0x40a3)?;
+        stored.fn_lock = fn_lock;
+        info!(%route, fn_lock, "set_fn_lock");
+        Ok(*stored)
+    }
+
+    async fn unpair_device(self, _: Context, route: DeviceRoute) -> Result<(), PairingFailure> {
+        let result = self.state.lock().await.unpair(&route);
+        info!(%route, ok = result.is_ok(), "unpair_device");
+        result
     }
 
     async fn request_accessibility_prompt(self, _: Context) {

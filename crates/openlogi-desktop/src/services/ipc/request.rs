@@ -18,7 +18,8 @@ use std::future::Future;
 
 use openlogi_core::config::Lighting;
 use openlogi_core::hid::{
-    DeviceRoute, Dpi, DpiInfo, LightCommand, ReceiverSelector, SmartShiftStatus, WriteError,
+    DeviceRoute, Dpi, DpiInfo, FnLockState, LightCommand, ReceiverSelector, SmartShiftStatus,
+    WriteError,
 };
 use openlogi_ipc::{AgentClient, ConfigReloadError, PairingCommandError, PairingFailure};
 use tarpc::client::RpcError;
@@ -26,7 +27,7 @@ use tarpc::context;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
-use super::GuiUpdate;
+use super::{GuiUpdate, UnpairFailure};
 use crate::state::DeviceKey;
 
 /// The GPUI-bound update stream a request may deliver through.
@@ -138,6 +139,31 @@ impl Request for SetLighting {
 
     fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
         log_rejection("lighting", outcome);
+    }
+}
+
+/// Write keyboard Fn-lock now, answered as [`GuiUpdate::FnLockWritten`] with
+/// the state the keyboard echoes back.
+pub struct SetFnLock {
+    pub route: DeviceRoute,
+    pub fn_lock: bool,
+    pub key: DeviceKey,
+}
+
+impl Request for SetFnLock {
+    type Answer = Result<FnLockState, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .set_fn_lock(context::current(), self.route.clone(), self.fn_lock)
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        let _ = updates.send(GuiUpdate::FnLockWritten {
+            key: self.key,
+            result: or_unavailable(outcome),
+        });
     }
 }
 
@@ -271,6 +297,26 @@ impl Request for ReadSmartShift {
     }
 }
 
+/// Read a keyboard's Fn-lock state; the answer goes back over `reply`.
+pub struct ReadFnLock {
+    pub route: DeviceRoute,
+    pub reply: oneshot::Sender<Result<FnLockState, WriteError>>,
+}
+
+impl Request for ReadFnLock {
+    type Answer = Result<FnLockState, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .read_fn_lock(context::current(), self.route.clone())
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
+        let _ = self.reply.send(or_unavailable(outcome));
+    }
+}
+
 /// Have the agent re-read `config.toml`.
 ///
 /// The loop holds this one until a connection exists and never answers it
@@ -383,6 +429,40 @@ impl Request for CancelPairing {
     }
 }
 
+/// Remove a forgotten device's pairing from its receiver, answered as
+/// [`GuiUpdate::DeviceUnpaired`] so the card goes only once the receiver has
+/// let the device go.
+pub struct UnpairDevice {
+    pub route: DeviceRoute,
+    pub record_key: String,
+    /// Where the device's settings live, dropped once the receiver lets go.
+    pub config_key: Option<String>,
+}
+
+impl Request for UnpairDevice {
+    type Answer = Result<(), PairingFailure>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .unpair_device(context::current(), self.route.clone())
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        let result = match outcome {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(failure)) => Err(UnpairFailure::Refused(failure)),
+            Err(Unavailable) => Err(UnpairFailure::AgentUnreachable),
+        };
+        let _ = updates.send(GuiUpdate::DeviceUnpaired {
+            record_key: self.record_key,
+            route: self.route,
+            config_key: self.config_key,
+            result,
+        });
+    }
+}
+
 /// Drain the agent's live event-monitor buffer for the debug Diagnostics
 /// monitor. The first poll enables monitoring agent-side; the agent
 /// auto-disables it once polls stop. An unreachable agent has nothing to
@@ -446,13 +526,16 @@ commands! {
     SetLight,
     SetLightManualPower,
     SetSmartShift,
+    SetFnLock,
     ReadDpi,
     ReadSmartShift,
+    ReadFnLock,
     ReloadConfig,
     RequestAccessibilityPrompt,
     StartPairing,
     PairDevice,
     CancelPairing,
+    UnpairDevice,
     #[cfg(all(target_os = "macos", debug_assertions))]
     PollEventMonitor,
 }

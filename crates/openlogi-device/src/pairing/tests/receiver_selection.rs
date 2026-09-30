@@ -8,7 +8,7 @@ use crate::replay::{
 };
 use crate::{NodeId, NodeInfo};
 
-use super::super::{PairingError, ReceiverFamily, ReceiverSelector, open_receiver};
+use super::super::{PairingError, ReceiverFamily, ReceiverSelector, ReceiverTarget, open_receiver};
 
 const BOLT_A: &str = "00000000AAAABBBB";
 const BOLT_B: &str = "00000000CCCCDDDD";
@@ -93,7 +93,7 @@ async fn an_unselected_receiver_open_error_does_not_block_the_selected_receiver(
     backend
         .set_open_outcome(&node_id("open-error", "bolt-a"), OpenOutcome::Denied)
         .unwrap();
-    let opened = open_receiver(&backend, &target(0xc548, BOLT_B))
+    let opened = open_receiver(&backend, &ReceiverTarget::Selector(&target(0xc548, BOLT_B)))
         .await
         .expect("a different receiver's open failure must not block the chosen Bolt");
     assert!(matches!(opened.family, ReceiverFamily::Bolt));
@@ -116,7 +116,7 @@ async fn an_unselected_open_error_does_not_mask_a_missing_selected_receiver() {
         backend
             .set_open_outcome(&node_id(tag, "bolt-a"), OpenOutcome::Denied)
             .unwrap();
-        match open_receiver(&backend, &selector).await {
+        match open_receiver(&backend, &ReceiverTarget::Selector(&selector)).await {
             Err(error) => assert!(
                 matches!(error, PairingError::ReceiverNotFound),
                 "a different receiver's open error must not hide a missing selection: {error:?}"
@@ -148,7 +148,11 @@ async fn first_receiver_selection_still_reports_an_open_error() {
         )
         .unwrap();
     assert!(matches!(
-        open_receiver(&backend, &ReceiverSelector::First).await,
+        open_receiver(
+            &backend,
+            &ReceiverTarget::Selector(&ReceiverSelector::First)
+        )
+        .await,
         Err(PairingError::Hid(_))
     ));
     assert_eq!(
@@ -162,9 +166,12 @@ async fn first_receiver_selection_still_reports_an_open_error() {
 #[tokio::test]
 async fn selects_second_bolt_by_uid_even_with_unifying_first() {
     let backend = backend("second-bolt");
-    let opened = open_receiver(&backend, &target(0xc548, &BOLT_B.to_ascii_lowercase()))
-        .await
-        .expect("selected Bolt receiver opens");
+    let opened = open_receiver(
+        &backend,
+        &ReceiverTarget::Selector(&target(0xc548, &BOLT_B.to_ascii_lowercase())),
+    )
+    .await
+    .expect("selected Bolt receiver opens");
     assert!(matches!(opened.family, ReceiverFamily::Bolt));
     assert_eq!(
         backend
@@ -189,9 +196,12 @@ async fn selects_second_bolt_by_uid_even_with_unifying_first() {
 #[tokio::test]
 async fn selects_unifying_by_its_serial_without_opening_bolt() {
     let backend = backend("unifying");
-    let opened = open_receiver(&backend, &target(0xc52b, "11223344"))
-        .await
-        .expect("selected Unifying receiver opens");
+    let opened = open_receiver(
+        &backend,
+        &ReceiverTarget::Selector(&target(0xc52b, "11223344")),
+    )
+    .await
+    .expect("selected Unifying receiver opens");
     assert!(matches!(opened.family, ReceiverFamily::Unifying));
     assert_eq!(
         backend.open_count(&node_id("unifying", "bolt-a")).unwrap(),
@@ -210,7 +220,7 @@ async fn disconnected_selection_never_falls_back_to_another_receiver() {
         .set_node_presence(&node_id("missing", "bolt-b"), NodePresence::Absent)
         .unwrap();
     assert!(matches!(
-        open_receiver(&backend, &target(0xc548, BOLT_B)).await,
+        open_receiver(&backend, &ReceiverTarget::Selector(&target(0xc548, BOLT_B))).await,
         Err(PairingError::ReceiverNotFound)
     ));
     assert_eq!(

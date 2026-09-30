@@ -123,7 +123,7 @@ pub fn apply_cancelled(cx: &mut App) {
     cx.set_global(PairingUi::Idle);
 }
 
-fn pairing_failure_text(failure: &PairingFailure) -> String {
+pub(crate) fn pairing_failure_text(failure: &PairingFailure) -> String {
     match failure {
         PairingFailure::Hid { message } => {
             tr!("pairing.hid_transport_error", message => message.clone()).to_string()

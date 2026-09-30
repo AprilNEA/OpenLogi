@@ -624,13 +624,74 @@ fn light_tab(
 /// Device tab: device details and configuration cards stacked.
 fn device_tab(cx: &mut Context<AppView>) -> impl IntoElement {
     let pal = theme::palette(cx);
+    let keyboard = AppState::try_read(cx)
+        .and_then(AppState::current_record)
+        .is_some_and(|record| record.kind == DeviceKind::Keyboard);
     tab_body(
         ContentWidth::Small,
         v_flex()
             .w_full()
             .gap_3()
             .child(device_details_card(pal, cx))
+            .when(keyboard, |column| column.child(keyboard_card(pal, cx)))
             .child(configuration_card(pal, cx)),
+    )
+}
+
+/// What the Fn-lock row knows: whether the keyboard has the control and
+/// which state to show (the keyboard's own reading once it lands, else the
+/// persisted preference — see `AppState::current_fn_lock_shown`).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct FnLockFacts {
+    supported: bool,
+    fn_lock: bool,
+}
+
+/// Keyboard card: the Fn-lock toggle. Written to `config.toml` and pushed to
+/// the keyboard by the agent; the state shown is the keyboard's own reading
+/// once it lands, so a change made on the keyboard (Fn+Esc) is visible too.
+fn keyboard_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
+    let facts = AppState::try_read(cx).map_or_else(FnLockFacts::default, |state| FnLockFacts {
+        supported: state.current_fn_lock_supported(),
+        fn_lock: state.current_fn_lock_shown(),
+    });
+    let description = if facts.supported {
+        tr!("device.fn_lock_description")
+    } else {
+        tr!("device.fn_lock_unsupported")
+    };
+    let row = h_flex()
+        .justify_between()
+        .items_center()
+        .gap_4()
+        .child(
+            v_flex()
+                .child(
+                    div()
+                        .text_body()
+                        .text_color(pal.text_primary)
+                        .child(tr!("device.fn_lock")),
+                )
+                .child(
+                    div()
+                        .text_caption()
+                        .text_color(pal.text_muted)
+                        .child(description),
+                ),
+        )
+        .child(
+            Toggle::new("fn-lock-toggle")
+                .selected(facts.fn_lock)
+                .disabled(!facts.supported)
+                .label((!facts.supported).then(|| tr!("common.unavailable")))
+                .on_change(|fn_lock, _window, cx| {
+                    AppState::apply(cx, |state| state.commit_fn_lock(*fn_lock));
+                }),
+        );
+    PanelCard::new(
+        tr!("device.keys"),
+        Icon::empty().path("action-icons/keyboard.svg"),
+        row,
     )
 }
 

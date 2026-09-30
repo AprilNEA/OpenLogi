@@ -44,9 +44,11 @@ fn modifiers_from_flags(flags: CGEventFlags) -> KeyModifiers {
 }
 
 /// Translate a keyboard `CGEvent` into a [`KeyEvent`]. Returns `None` for
-/// non-key event types (the mouse path handles those) and for `FlagsChanged`
+/// non-key event types (the mouse path handles those), for `FlagsChanged`
 /// (modifier state rides on the next key event via its flags; a standalone
-/// flags change carries no key of interest to the remapper).
+/// flags change carries no key of interest to the remapper), and for a key
+/// OpenLogi itself posted: a shortcut bound to a remapped key must not fire
+/// that key's own binding, or two keys bound to each other would loop.
 pub(super) fn translate_key(etype: CGEventType, event: &CGEvent) -> Option<KeyEvent> {
     let pressed = match etype {
         CGEventType::KeyDown => true,
@@ -54,6 +56,11 @@ pub(super) fn translate_key(etype: CGEventType, event: &CGEvent) -> Option<KeyEv
         // FlagsChanged: no key to remap here.
         _ => return None,
     };
+    if event.get_integer_value_field(EventField::EVENT_SOURCE_USER_DATA)
+        == openlogi_inject::SYNTHETIC_EVENT_USER_DATA
+    {
+        return None;
+    }
     let keycode = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
     let keycode = u16::try_from(keycode).ok()?;
     Some(KeyEvent {
@@ -263,4 +270,29 @@ fn fractional_line_scroll_delta(event: &CGEvent, axis: ScrollAxisFields) -> f64 
 )]
 fn line_scroll_delta(event: &CGEvent, axis: ScrollAxisFields) -> f64 {
     event.get_integer_value_field(axis.line) as f64
+}
+
+#[cfg(test)]
+mod tests {
+    use core_graphics::event::{CGEvent, CGEventType, EventField};
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+
+    use super::translate_key;
+
+    fn key_down(vk: u16) -> CGEvent {
+        let source = CGEventSource::new(CGEventSourceStateID::Private).expect("an event source");
+        CGEvent::new_keyboard_event(source, vk, true).expect("a keyboard event")
+    }
+
+    #[test]
+    fn a_key_openlogi_posted_is_not_translated() {
+        let event = key_down(0x7a);
+        assert!(translate_key(CGEventType::KeyDown, &event).is_some());
+
+        event.set_integer_value_field(
+            EventField::EVENT_SOURCE_USER_DATA,
+            openlogi_inject::SYNTHETIC_EVENT_USER_DATA,
+        );
+        assert!(translate_key(CGEventType::KeyDown, &event).is_none());
+    }
 }

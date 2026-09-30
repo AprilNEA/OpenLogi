@@ -120,8 +120,12 @@ impl DetailTab {
         if caps.haptic_panel || (caps.buttons && can_show_mouse_model) {
             tabs.push(Self::ActionsRing);
         }
-        // Function-row remapper when the keyboard reports remappable buttons.
-        if matches!(record.kind, DeviceKind::Keyboard) && caps.buttons {
+        // The Keys tab needs something to bind: HID++ controls (measured, or
+        // last-good for a sleeping keyboard) or the OS-hook F-row a depot
+        // without control markers falls back to. A keyboard with neither
+        // capability data nor a depot — a receiver slot never probed — gets
+        // nothing to configure yet, so no tab.
+        if matches!(record.kind, DeviceKind::Keyboard) && (caps.buttons || record.asset.is_some()) {
             tabs.push(Self::Keys);
         }
         if caps.pointer {
@@ -180,12 +184,28 @@ pub struct AppView {
     /// reads; feature entities subscribe to their own events directly.
     #[expect(dead_code, reason = "held to keep the AppState subscription alive")]
     state_obs: Subscription,
+    /// Explains a forget the receiver refused, which needs the window.
+    #[expect(dead_code, reason = "held to keep the AppState subscription alive")]
+    removal_obs: Subscription,
     /// Whether the last frame was the fail-closed configuration-error screen.
     /// A successful save must redraw that screen even though the error is gone.
     config_issue_visible: bool,
     accessibility_dismissed: bool,
     /// Which section of the device-detail screen is showing.
     active_tab: DetailTab,
+}
+
+/// Open the dialog that says why a device the user asked to forget stayed.
+fn explain_refused_removals(
+    state: &Entity<AppState>,
+    window: &mut Window,
+    cx: &mut Context<AppView>,
+) -> Subscription {
+    cx.subscribe_in(state, window, |_, _, event: &StateEvent, window, cx| {
+        if let StateEvent::DeviceRemovalFailed { name, failure } = event {
+            home::open_removal_failed(window, cx, name, failure);
+        }
+    })
 }
 
 impl Focusable for AppView {
@@ -248,7 +268,7 @@ impl AppView {
                         )
                         && is_current(key)
                 }
-                StateEvent::DpiChanged(key) => {
+                StateEvent::DpiChanged(key) | StateEvent::FnLockChanged(key) => {
                     !on_home && view.active_tab == DetailTab::Device && is_current(key)
                 }
                 StateEvent::LightingChanged(key) => {
@@ -262,8 +282,10 @@ impl AppView {
                 StateEvent::CameraChanged => on_home || view.active_tab == DetailTab::Light,
                 // Child entities own these surfaces and subscribe directly. A
                 // language switch already refreshes every window, and the root
-                // caches no localized text.
+                // caches no localized text. A refused removal is a dialog,
+                // opened through `removal_obs`.
                 StateEvent::SmartShiftChanged(_)
+                | StateEvent::DeviceRemovalFailed { .. }
                 | StateEvent::CameraPermissionChanged
                 | StateEvent::DiagnosticsChanged
                 | StateEvent::LanguageChanged => false,
@@ -280,6 +302,7 @@ impl AppView {
                 cx.notify();
             }
         });
+        let removal_obs = explain_refused_removals(&state, window, cx);
         Self {
             focus_handle,
             route: Route::Home,
@@ -297,6 +320,7 @@ impl AppView {
             _app_catalog_obs: app_catalog_obs,
             appearance_obs: None,
             state_obs,
+            removal_obs,
             config_issue_visible: false,
             accessibility_dismissed: false,
             active_tab: DetailTab::Buttons,

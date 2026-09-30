@@ -38,6 +38,8 @@ pub use hidpp::receiver::bolt::DeviceKind as BoltDeviceKind;
 // pairing API names them through here.
 pub use openlogi_core::hid::pairing::{Click, PairingError, PasskeyMethod, ReceiverSelector};
 
+use openlogi_core::hid::DeviceRoute;
+
 use crate::backend::{HidBackend, NodeId};
 use crate::host_lock::{RECEIVER_REGISTER_TIMEOUT, ReceiverRegisterPhase, lock_receiver_registers};
 
@@ -228,12 +230,23 @@ pub async fn list_pairing_receivers(
 }
 
 /// Reads a receiver's unique ID through its protocol implementation, under
-/// the receiver's register phase. `None` when the read fails — or when
+/// the receiver's register phase. None when the read fails or when
 /// another OpenLogi process still holds the phase, which is not read into.
 async fn read_receiver_uid(channel: &Arc<HidppChannel>, node: &NodeId) -> Option<String> {
     let receiver = receiver::detect(Arc::clone(channel))?;
     let _registers = lock_receiver_registers(node, RECEIVER_REGISTER_TIMEOUT).await?;
     receiver.get_unique_id().await.ok()
+}
+
+/// Which receiver an operation addresses.
+enum ReceiverTarget<'a> {
+    /// The receiver a pairing session was asked to open.
+    Selector(&'a ReceiverSelector),
+    /// The receiver a paired device's route names.
+    Route {
+        family: ReceiverFamily,
+        uid: &'a str,
+    },
 }
 
 /// An open receiver channel and the register phase a session runs under.
@@ -253,12 +266,12 @@ struct OpenReceiver {
 /// register phase.
 async fn open_receiver(
     backend: &dyn HidBackend,
-    target: &ReceiverSelector,
+    target: &ReceiverTarget<'_>,
 ) -> Result<OpenReceiver, PairingError> {
     for node in backend.enumerate_hidpp().await? {
         // Do not open unrelated devices before reaching an explicitly chosen
         // receiver: a failed open on one must not prevent pairing on another.
-        if let ReceiverSelector::ReceiverUid { product_id, .. } = target
+        if let ReceiverTarget::Selector(ReceiverSelector::ReceiverUid { product_id, .. }) = target
             && node.product_id != *product_id
         {
             continue;
@@ -266,7 +279,7 @@ async fn open_receiver(
         let channel = match backend.open_hidpp(&node).await {
             Ok(Some(channel)) => channel,
             Ok(None) => continue,
-            Err(_) if !matches!(target, ReceiverSelector::First) => {
+            Err(_) if !matches!(target, ReceiverTarget::Selector(ReceiverSelector::First)) => {
                 // Identity is not known until the receiver opens. A different
                 // same-product receiver must not block an explicit selection.
                 // Its error cannot be attributed to the selected receiver if
@@ -279,16 +292,25 @@ async fn open_receiver(
             continue;
         };
         let matched = match target {
-            ReceiverSelector::First => true,
-            ReceiverSelector::BoltUid(want) => {
+            ReceiverTarget::Selector(ReceiverSelector::First) => true,
+            ReceiverTarget::Selector(ReceiverSelector::BoltUid(want)) => {
                 family == ReceiverFamily::Bolt
                     && read_receiver_uid(&channel, &node.id)
                         .await
                         .is_some_and(|uid| uid.eq_ignore_ascii_case(want))
             }
-            ReceiverSelector::ReceiverUid { product_id, uid } => {
+            ReceiverTarget::Selector(ReceiverSelector::ReceiverUid { product_id, uid }) => {
                 channel.product_id == *product_id
                     && !uid.is_empty()
+                    && read_receiver_uid(&channel, &node.id)
+                        .await
+                        .is_some_and(|actual| actual.eq_ignore_ascii_case(uid))
+            }
+            ReceiverTarget::Route {
+                family: wanted,
+                uid,
+            } => {
+                family == *wanted
                     && read_receiver_uid(&channel, &node.id)
                         .await
                         .is_some_and(|actual| actual.eq_ignore_ascii_case(uid))
@@ -330,7 +352,7 @@ pub async fn run_pairing(
     mut commands: mpsc::UnboundedReceiver<PairingCommand>,
     events: mpsc::UnboundedSender<PairingEvent>,
 ) -> Result<(), PairingError> {
-    let receiver = match open_receiver(backend, &target).await {
+    let receiver = match open_receiver(backend, &ReceiverTarget::Selector(&target)).await {
         Ok(receiver) => receiver,
         Err(e) => {
             let _ = events.send(PairingEvent::Failed(e.clone()));
@@ -555,13 +577,21 @@ async fn cancel(channel: &HidppChannel, state: &SessionState) {
     }
 }
 
-/// Removes the device on `slot` from the receiver named by `target`.
-pub async fn unpair(
-    backend: &dyn HidBackend,
-    target: ReceiverSelector,
-    slot: u8,
-) -> Result<(), PairingError> {
-    let receiver = open_receiver(backend, &target).await?;
+/// Removes the device `route` reaches from the receiver it is paired to. The
+/// slot is freed: the device reaches this host through that receiver again
+/// only once it is paired again. A route that names no receiver slot has no
+/// receiver to find.
+pub async fn unpair(backend: &dyn HidBackend, route: &DeviceRoute) -> Result<(), PairingError> {
+    let (family, uid, slot) = match route {
+        DeviceRoute::Bolt { receiver_uid, slot } => (ReceiverFamily::Bolt, receiver_uid, *slot),
+        DeviceRoute::Unifying { receiver_uid, slot } => {
+            (ReceiverFamily::Unifying, receiver_uid, *slot)
+        }
+        DeviceRoute::Direct { .. } | DeviceRoute::RawHid { .. } => {
+            return Err(PairingError::ReceiverNotFound);
+        }
+    };
+    let receiver = open_receiver(backend, &ReceiverTarget::Route { family, uid }).await?;
     let channel = &receiver.channel;
     match receiver.family {
         ReceiverFamily::Bolt => {

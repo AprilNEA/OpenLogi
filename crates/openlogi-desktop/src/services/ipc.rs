@@ -39,7 +39,7 @@
 
 use std::time::{Duration, Instant};
 
-use openlogi_core::hid::{LightCommand, WriteError};
+use openlogi_core::hid::{DeviceRoute, FnLockState, LightCommand, WriteError};
 use openlogi_ipc::client::{self, ConnectError};
 use openlogi_ipc::{AgentClient, AgentSnapshot, ClientKind, ConfigReloadError, PairingFailure};
 use tarpc::client::RpcError;
@@ -61,9 +61,9 @@ use request::LinkLost;
 #[cfg(all(target_os = "macos", debug_assertions))]
 pub use request::PollEventMonitor;
 pub use request::{
-    CancelPairing, Command, PairDevice, ReadDpi, ReadSmartShift, ReloadConfig,
-    RequestAccessibilityPrompt, SetDpi, SetLight, SetLightManualPower, SetLighting, SetSmartShift,
-    StartPairing,
+    CancelPairing, Command, PairDevice, ReadDpi, ReadFnLock, ReadSmartShift, ReloadConfig,
+    RequestAccessibilityPrompt, SetDpi, SetFnLock, SetLight, SetLightManualPower, SetLighting,
+    SetSmartShift, StartPairing, UnpairDevice,
 };
 
 /// How long to wait before retrying a connect that failed. This is a retry
@@ -98,12 +98,40 @@ pub enum GuiUpdate {
     },
     /// Whether the agent adopted the config currently on disk.
     ConfigReloadResult(Result<(), ConfigReloadError>),
+    /// What a keyboard reports after an Fn-lock write the GUI asked for: the
+    /// state it took, or the typed refusal. Answers [`SetFnLock`].
+    FnLockWritten {
+        /// The keyboard that was written.
+        key: DeviceKey,
+        /// The echoed state, or why the write did not land.
+        result: Result<FnLockState, WriteError>,
+    },
     /// A pairing command could not be delivered, so no session will ever appear
     /// in the observed state to explain the silence. Reported locally rather
     /// than faked as a session the agent never had.
     PairingUndeliverable(PairingFailure),
     /// Cancellation completed and the receiver is available for a new choice.
     PairingCancelled,
+    /// Whether the receiver let a forgotten device go. Answers
+    /// UnpairDevice.
+    DeviceUnpaired {
+        /// The record the user asked to forget.
+        record_key: String,
+        /// The pairing the receiver was asked to drop.
+        route: DeviceRoute,
+        /// Where its settings live.
+        config_key: Option<String>,
+        result: Result<(), UnpairFailure>,
+    },
+}
+
+/// Why a forgotten device kept its receiver pairing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UnpairFailure {
+    /// The agent refused, or the receiver failed the write.
+    Refused(PairingFailure),
+    /// No agent could be reached to ask.
+    AgentUnreachable,
 }
 
 /// Handle the GUI holds to talk to the agent: a stream of state updates and a

@@ -20,6 +20,14 @@ crate's own load-bearing behavior.
   (`CGEventTapCreate` → NULL when the grant is gone); keep both, in that order — the
   trust read is the cheap short-circuit, the probe is the truth. Never probe with
   `ListenOnly`: that asks about Input Monitoring, a different grant.
+- The live tap probes on cue, not every slice. `grant::ProbeCue` owns an `axwatch`
+  watch — the `com.apple.accessibility.api` distributed notification plus tccd's
+  `com.apple.tcc.access.changed` Darwin notification, the only one that fires when the
+  row is *removed* — and a `PROBE_HEARTBEAT` backstop; each probe is a WindowServer
+  round trip that stalls for seconds around a sleep transition (#952). Keep the
+  heartbeat: the notifications are freshness, not a completeness proof, and the probe
+  stays the authority. Delivery needs the agent's main-thread `NSApplication` loop,
+  which `run_app_loop` starts once the core arms.
 - Re-enabling the tap each slice is idempotent and recovers a disable the OS never
   reported. Charge `RearmBudget` from both `TapDisabledBy*` and
   `CGEventTapIsEnabled`: a tap the system keeps disabling must be let go instead of
@@ -40,6 +48,22 @@ crate's own load-bearing behavior.
   stop, the thread exited). The watchdog must not call the Accessibility trust API —
   that query can stall during TCC revocation; monitor tap-thread progress instead, and
   force-exit the agent if revocation or shutdown stalls so macOS releases the HID tap.
+- A watchdog budget — lifecycle and callback alike — is charged only for stall the
+  watchdog was awake to see, and a gap in a watchdog's own schedule is discounted only
+  when a kernel sleep or wake fell inside it (`kern.sleeptime` / `kern.waketime`
+  moved). Around such a transition the lifecycle watchdog thread has fired 1.0 s and
+  4.8 s past its budget, which a thread evaluating every 100 ms cannot do: it was not
+  running, and neither was the tap thread it judges. Reading its own schedule gap as
+  tap-thread stall force-exited healthy agents on lid close (#952); the callback
+  watchdog would read a callback entered just before the same freeze the same way. A
+  gap with no transition in it is charged in full, so a watchdog merely delayed by
+  scheduling still catches a wedged tap on schedule. Likewise the between-slice
+  capability probe runs under `TapPhase::Probing` with its own budget: it is a
+  WindowServer/TCC round trip, not tap servicing — and a stop that waited out a slow
+  probe gets the short budget afresh for the teardown. Refresh progress *before*
+  publishing `Armed` again, or the watchdog judges a probe that already returned against
+  the pre-probe mark. Both exit logs carry `stalled_ms` (uptime since the stall began)
+  and `watched_ms`; a wide gap between them is the process-frozen signature.
 - The off-main `frontmost_application` read keeps its explicit `autoreleasepool` — the
   watcher thread has no run loop; that is the only place in this crate a pool belongs.
   Every string it copies out (bundle id *and* localized name) must be owned before the
