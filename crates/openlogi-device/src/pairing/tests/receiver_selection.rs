@@ -8,7 +8,10 @@ use crate::replay::{
 };
 use crate::{NodeId, NodeInfo};
 
-use super::super::{PairingError, ReceiverFamily, ReceiverSelector, ReceiverTarget, open_receiver};
+use super::super::{
+    PairingError, ReceiverFamily, ReceiverIdentityCache, ReceiverSelector, ReceiverTarget,
+    open_receiver, open_receiver_with_inventory,
+};
 
 const BOLT_A: &str = "00000000AAAABBBB";
 const BOLT_B: &str = "00000000CCCCDDDD";
@@ -85,6 +88,155 @@ fn target(product_id: u16, uid: &str) -> ReceiverSelector {
         product_id,
         uid: uid.into(),
     }
+}
+
+#[tokio::test]
+async fn route_selection_reports_an_open_error() {
+    let backend = backend("route-open-error");
+    backend
+        .set_open_outcome(
+            &node_id("route-open-error", "unifying"),
+            OpenOutcome::Denied,
+        )
+        .unwrap();
+    assert!(matches!(
+        open_receiver(
+            &backend,
+            &ReceiverTarget::Route {
+                family: ReceiverFamily::Unifying,
+                uid: "11223344",
+            }
+        )
+        .await,
+        Err(PairingError::Hid(_))
+    ));
+}
+
+#[tokio::test]
+async fn selected_receiver_open_error_is_visible() {
+    for (tag, selector) in [
+        ("selected-open-error", target(0xc548, BOLT_B)),
+        (
+            "selected-bolt-open-error",
+            ReceiverSelector::BoltUid(BOLT_B.into()),
+        ),
+    ] {
+        let backend = backend(tag);
+        let identities = known_bolt(tag, "bolt-b", BOLT_B);
+        backend
+            .set_open_outcome(&node_id(tag, "bolt-b"), OpenOutcome::Denied)
+            .unwrap();
+        assert!(matches!(
+            open_receiver_with_inventory(
+                &backend,
+                &ReceiverTarget::Selector(&selector),
+                Some(&identities),
+            )
+            .await,
+            Err(PairingError::Hid(_))
+        ));
+        assert!(
+            backend
+                .channel_completion("bolt-b")
+                .unwrap()
+                .written_reports
+                .is_empty()
+        );
+    }
+}
+
+fn known_bolt(tag: &str, name: &str, uid: &str) -> ReceiverIdentityCache {
+    let identities = ReceiverIdentityCache::default();
+    identities.observe(
+        &node_id(tag, name),
+        &openlogi_core::device::ReceiverInfo {
+            name: name.into(),
+            vendor_id: 0x046d,
+            product_id: 0xc548,
+            unique_id: Some(uid.into()),
+        },
+    );
+    identities
+}
+
+#[tokio::test]
+async fn changed_node_product_does_not_inherit_a_cached_receivers_error() {
+    let tag = "changed-node-product";
+    let backend = backend(tag);
+    let identities = known_bolt(tag, "unifying", BOLT_B);
+    backend
+        .set_node_presence(&node_id(tag, "bolt-b"), NodePresence::Absent)
+        .unwrap();
+    backend
+        .set_open_outcome(&node_id(tag, "unifying"), OpenOutcome::Denied)
+        .unwrap();
+    assert!(matches!(
+        open_receiver_with_inventory(
+            &backend,
+            &ReceiverTarget::Selector(&ReceiverSelector::BoltUid(BOLT_B.into())),
+            Some(&identities),
+        )
+        .await,
+        Err(PairingError::ReceiverNotFound)
+    ));
+    assert!(backend.channel_completion("bolt-a").unwrap().is_complete());
+}
+
+#[tokio::test]
+async fn cached_missing_selection_still_ignores_an_unrelated_open_error() {
+    let tag = "cached-missing";
+    let backend = backend(tag);
+    let identities = known_bolt(tag, "bolt-b", BOLT_B);
+    backend
+        .set_node_presence(&node_id(tag, "bolt-b"), NodePresence::Absent)
+        .unwrap();
+    backend
+        .set_open_outcome(&node_id(tag, "bolt-a"), OpenOutcome::Denied)
+        .unwrap();
+    assert!(matches!(
+        open_receiver_with_inventory(
+            &backend,
+            &ReceiverTarget::Selector(&target(0xc548, BOLT_B)),
+            Some(&identities),
+        )
+        .await,
+        Err(PairingError::ReceiverNotFound)
+    ));
+    assert_eq!(backend.open_count(&node_id(tag, "bolt-b")).unwrap(), 0);
+    assert!(
+        backend
+            .channel_completion("bolt-a")
+            .unwrap()
+            .written_reports
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn cached_identity_never_replaces_a_live_uid_check() {
+    let tag = "stale-identity";
+    let backend = backend(tag);
+    let identities = known_bolt(tag, "bolt-a", BOLT_B);
+    backend
+        .set_node_presence(&node_id(tag, "bolt-b"), NodePresence::Absent)
+        .unwrap();
+    assert!(matches!(
+        open_receiver_with_inventory(
+            &backend,
+            &ReceiverTarget::Selector(&target(0xc548, BOLT_B)),
+            Some(&identities),
+        )
+        .await,
+        Err(PairingError::ReceiverNotFound)
+    ));
+    assert!(backend.channel_completion("bolt-a").unwrap().is_complete());
+    assert_eq!(
+        backend
+            .channel_completion("bolt-a")
+            .unwrap()
+            .written_reports,
+        vec![vec![0x10, 0xff, 0x83, 0xfb, 0, 0, 0]]
+    );
 }
 
 #[tokio::test]

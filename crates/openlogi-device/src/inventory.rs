@@ -16,6 +16,7 @@ use tracing::{debug, warn};
 use crate::ChannelRegistry;
 use crate::backend::{BackendError, HidBackend, NodeId, NodeInfo};
 use crate::channel::route::{DeviceRoute, find_receiver};
+use crate::pairing::ReceiverIdentityCache;
 use ledger::{NodeLedger, SettledNode};
 
 mod cache;
@@ -77,6 +78,8 @@ pub struct Enumerator {
     /// Optional publication sink used by the persistent Agent watcher. One-shot
     /// callers keep this `None` and retain the route-opening library behavior.
     registry: Option<ChannelRegistry>,
+    /// Runtime receiver-to-node evidence shared with pairing on this backend.
+    receiver_identities: Option<ReceiverIdentityCache>,
     /// Where the immutable probe cache is kept across restarts, `None` for a
     /// memory-only enumerator (one-shot CLI calls, tests).
     store: Option<Arc<dyn ProbeCacheStore>>,
@@ -346,6 +349,7 @@ impl Enumerator {
             channels: ChannelCache::default(),
             ledger: NodeLedger::default(),
             registry: None,
+            receiver_identities: None,
             store: None,
             cache_dirty: false,
             open_failures_last_tick: false,
@@ -360,6 +364,13 @@ impl Enumerator {
     #[must_use]
     pub fn with_registry(mut self, registry: ChannelRegistry) -> Self {
         self.registry = Some(registry);
+        self
+    }
+
+    /// Share receiver-to-node inventory evidence with pairing on this backend.
+    #[must_use]
+    pub fn with_receiver_identity_cache(mut self, identities: ReceiverIdentityCache) -> Self {
+        self.receiver_identities = Some(identities);
         self
     }
 
@@ -457,6 +468,9 @@ impl Enumerator {
 
         if let Some(registry) = &self.registry {
             registry.retain_nodes(&seen_nodes);
+        }
+        if let Some(identities) = &self.receiver_identities {
+            identities.retain_nodes(&seen_nodes);
         }
         self.channels.retire_absent(&seen_nodes);
         self.channels.reap_absent(&seen_nodes, |cached| {
@@ -568,6 +582,11 @@ impl Enumerator {
             all_healthy &= probe.verdict.is_healthy();
             self.hold_or_note_cache_keys(&node, &probe, &mut frozen_keys);
             outcomes.extend(probe.outcomes);
+            if let Some(identities) = &self.receiver_identities
+                && let Some(inventory) = &probe.inventory
+            {
+                identities.observe(&node, &inventory.receiver);
+            }
             let settled = settle_probe(&mut self.ledger, &node, probe.verdict, probe.inventory);
             // Every node waits for the ledger's consecutive-failure threshold,
             // receivers included. One full-budget timeout is not evidence of

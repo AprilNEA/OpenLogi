@@ -30,7 +30,7 @@ use hidpp::{
     receiver,
 };
 use tokio::sync::mpsc;
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 
 pub use hidpp::receiver::bolt::DeviceKind as BoltDeviceKind;
 // Click / PasskeyMethod / ReceiverSelector / PairingError are pure data with
@@ -43,8 +43,11 @@ use openlogi_core::hid::DeviceRoute;
 use crate::backend::{HidBackend, NodeId};
 use crate::host_lock::{RECEIVER_REGISTER_TIMEOUT, ReceiverRegisterPhase, lock_receiver_registers};
 
+mod identities;
 mod notification;
 mod registers;
+
+pub use identities::ReceiverIdentityCache;
 
 use notification::{Notification, decode, parse_notification, subscribe};
 use registers::{
@@ -268,6 +271,33 @@ async fn open_receiver(
     backend: &dyn HidBackend,
     target: &ReceiverTarget<'_>,
 ) -> Result<OpenReceiver, PairingError> {
+    open_receiver_with_inventory(backend, target, None).await
+}
+
+impl ReceiverTarget<'_> {
+    fn matches_identity(&self, product_id: u16, uid: &str) -> bool {
+        match self {
+            Self::Selector(ReceiverSelector::First) => true,
+            Self::Selector(ReceiverSelector::BoltUid(want)) => {
+                family_for(product_id) == Some(ReceiverFamily::Bolt)
+                    && uid.eq_ignore_ascii_case(want)
+            }
+            Self::Selector(ReceiverSelector::ReceiverUid {
+                product_id: wanted,
+                uid: want,
+            }) => product_id == *wanted && !want.is_empty() && uid.eq_ignore_ascii_case(want),
+            Self::Route { family, uid: want } => {
+                family_for(product_id) == Some(*family) && uid.eq_ignore_ascii_case(want)
+            }
+        }
+    }
+}
+
+async fn open_receiver_with_inventory(
+    backend: &dyn HidBackend,
+    target: &ReceiverTarget<'_>,
+    identities: Option<&ReceiverIdentityCache>,
+) -> Result<OpenReceiver, PairingError> {
     for node in backend.enumerate_hidpp().await? {
         // Do not open unrelated devices before reaching an explicitly chosen
         // receiver: a failed open on one must not prevent pairing on another.
@@ -279,11 +309,31 @@ async fn open_receiver(
         let channel = match backend.open_hidpp(&node).await {
             Ok(Some(channel)) => channel,
             Ok(None) => continue,
-            Err(_) if !matches!(target, ReceiverTarget::Selector(ReceiverSelector::First)) => {
-                // Identity is not known until the receiver opens. A different
-                // same-product receiver must not block an explicit selection.
-                // Its error cannot be attributed to the selected receiver if
-                // that receiver is missing from the rest of the enumeration.
+            Err(error)
+                if matches!(
+                    target,
+                    ReceiverTarget::Selector(
+                        ReceiverSelector::ReceiverUid { .. } | ReceiverSelector::BoltUid(_)
+                    )
+                ) =>
+            {
+                // Inventory can identify a previously visible receiver even
+                // when opening it now fails. Without that evidence, a failed
+                // same-product node could belong to a different receiver.
+                if identities
+                    .and_then(|cache| cache.identity(&node.id))
+                    .is_some_and(|(product_id, uid)| {
+                        node.vendor_id == crate::LOGITECH_VENDOR_ID
+                            && node.product_id == product_id
+                            && target.matches_identity(product_id, &uid)
+                    })
+                {
+                    return Err(error.into());
+                }
+                warn!(
+                    ?error,
+                    "receiver open failed before its selected identity could be confirmed"
+                );
                 continue;
             }
             Err(error) => return Err(error.into()),
@@ -349,16 +399,32 @@ const DISCOVERY_TIMEOUT: u8 = 30;
 pub async fn run_pairing(
     backend: &dyn HidBackend,
     target: ReceiverSelector,
-    mut commands: mpsc::UnboundedReceiver<PairingCommand>,
+    commands: mpsc::UnboundedReceiver<PairingCommand>,
     events: mpsc::UnboundedSender<PairingEvent>,
 ) -> Result<(), PairingError> {
-    let receiver = match open_receiver(backend, &ReceiverTarget::Selector(&target)).await {
-        Ok(receiver) => receiver,
-        Err(e) => {
-            let _ = events.send(PairingEvent::Failed(e.clone()));
-            return Err(e);
-        }
-    };
+    run_pairing_with_inventory(backend, target, commands, events, None).await
+}
+
+/// Run pairing with receiver identities learned by this backend's inventory.
+/// Known selected-node open failures retain their HID diagnostic; unrelated
+/// failures still cannot redirect or mask a missing explicit selection.
+pub async fn run_pairing_with_inventory(
+    backend: &dyn HidBackend,
+    target: ReceiverSelector,
+    mut commands: mpsc::UnboundedReceiver<PairingCommand>,
+    events: mpsc::UnboundedSender<PairingEvent>,
+    identities: Option<&ReceiverIdentityCache>,
+) -> Result<(), PairingError> {
+    let receiver =
+        match open_receiver_with_inventory(backend, &ReceiverTarget::Selector(&target), identities)
+            .await
+        {
+            Ok(receiver) => receiver,
+            Err(e) => {
+                let _ = events.send(PairingEvent::Failed(e.clone()));
+                return Err(e);
+            }
+        };
     let OpenReceiver {
         channel, family, ..
     } = &receiver;
