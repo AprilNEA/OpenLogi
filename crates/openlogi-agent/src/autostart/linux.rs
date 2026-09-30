@@ -142,6 +142,7 @@ fn exclude_dirs(dirs: Vec<PathBuf>, exclude: &[PathBuf]) -> Vec<PathBuf> {
 
 fn apply(enabled: bool) -> io::Result<()> {
     let exe = std::env::current_exe()?;
+    let launch = LaunchCommand::for_agent(&exe);
     migrate_legacy_unit();
 
     let path = generated_unit_path()?;
@@ -171,14 +172,14 @@ fn apply(enabled: bool) -> io::Result<()> {
     // would shadow the package (later changes to the packaged unit would never
     // reach this user) and outlive it (uninstall cannot reach a home
     // directory). Enable the packaged unit instead and write nothing.
-    if enabled && let Some(packaged) = packaged_unit_for(&exe) {
+    if enabled && let Some(packaged) = packaged_unit_for(&launch.program) {
         remove_generated_unit()?;
         info!(path = %packaged.display(), "enabling the packaged systemd user unit");
         enable_unit();
         return Ok(());
     }
 
-    let desired = enabled.then(|| render_unit(&exe.to_string_lossy()));
+    let desired = enabled.then(|| launch.render_unit());
     match (desired.as_deref(), current.as_deref()) {
         (Some(want), Some(have)) if want == have => {
             debug!(path = %path.display(), "systemd user unit already current");
@@ -476,11 +477,68 @@ fn remove_generated_unit() -> io::Result<()> {
     Ok(())
 }
 
-/// Render the systemd user unit for the given executable path.
+/// What `ExecStart` has to run to bring *this* agent back at login.
 ///
-/// `Restart=on-failure` mirrors the macOS `KeepAlive=SuccessfulExit:false`
-/// semantics: the agent is respawned after a crash but a clean `exit(0)` (e.g.
-/// the tray's Quit) stays stopped until the next login.
+/// Normally the executable itself. Inside an AppImage the executable lives on
+/// a FUSE mount the runtime creates per launch and tears down when the last
+/// process from that launch exits, so a unit naming it would point at nothing
+/// by the next login. There the durable path is the AppImage file, and its
+/// `AppRun` dispatches on the first argument to start the agent instead of
+/// the GUI (`packaging/linux/appimage/AppRun`).
+#[derive(Debug, PartialEq, Eq)]
+struct LaunchCommand {
+    program: PathBuf,
+    args: Vec<String>,
+}
+
+impl LaunchCommand {
+    fn for_agent(exe: &Path) -> Self {
+        Self::for_agent_in(
+            exe,
+            std::env::var_os("APPIMAGE").map(PathBuf::from),
+            std::env::var_os("APPDIR").map(PathBuf::from),
+        )
+    }
+
+    /// [`Self::for_agent`] over the two variables the AppImage runtime exports.
+    ///
+    /// Both must agree with the running executable: `APPIMAGE` alone is what
+    /// any process launched *from* an AppImage inherits, so an agent installed
+    /// from a package but started by an AppImage GUI must still register its
+    /// own path, not the GUI's image.
+    fn for_agent_in(exe: &Path, appimage: Option<PathBuf>, appdir: Option<PathBuf>) -> Self {
+        if let (Some(appimage), Some(appdir)) = (appimage, appdir)
+            && exe.starts_with(&appdir)
+        {
+            return Self {
+                program: appimage,
+                args: vec![openlogi_core::brand::Helper::Agent.executable().to_owned()],
+            };
+        }
+        Self {
+            program: exe.to_path_buf(),
+            args: Vec::new(),
+        }
+    }
+
+    /// Render the systemd user unit that launches this command.
+    ///
+    /// `Restart=on-failure` mirrors the macOS `KeepAlive=SuccessfulExit:false`
+    /// semantics: the agent is respawned after a crash but a clean `exit(0)`
+    /// (e.g. the tray's Quit) stays stopped until the next login.
+    fn render_unit(&self) -> String {
+        let mut exec_start = escape_systemd_exec(&self.program.to_string_lossy());
+        for arg in &self.args {
+            exec_start.push(' ');
+            exec_start.push_str(&escape_systemd_exec(arg));
+        }
+        render_unit_with_exec(&exec_start)
+    }
+}
+
+/// The unit for a bare executable path: [`LaunchCommand::render_unit`] with
+/// no arguments, kept as the shorthand the tests are written against.
+#[cfg(test)]
 fn render_unit(exe: &str) -> String {
     render_unit_with_exec(&escape_systemd_exec(exe))
 }

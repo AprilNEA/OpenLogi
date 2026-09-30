@@ -23,6 +23,8 @@ devenv shell -- cargo run -p xtask -- <command>
 - `macos package` — build the app bundle, optionally sign it, then create the branded DMG.
 - `linux package` — build release binaries and package `.deb`, `.rpm`, and
   `.pkg.tar.zst` artifacts with nfpm.
+- `linux appimage [--no-build] [--runtime-file <path>]` — stage the same
+  `nfpm.yaml` contents into an AppDir and wrap it with appimagetool.
 - `release changelog` — write the next workspace version's section into
   `CHANGELOG.md` with git-cliff.
 - `release check-publish` — verify that every crates.io package has a publishable,
@@ -114,6 +116,9 @@ xtask/
         dmg.rs
       linux.rs               # Linux domain entry
       linux/
+        appimage.rs            # nfpm.yaml contents -> AppDir -> appimagetool
+        appimage/tests.rs
+        arch.rs                # host arch as nfpm and AppImage spell it
         package.rs
         package/tests.rs
       release.rs             # release metadata entry

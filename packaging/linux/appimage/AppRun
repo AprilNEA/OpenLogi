@@ -1,0 +1,32 @@
+#!/bin/sh
+# OpenLogi AppImage entry point.
+#
+# The AppImage runtime mounts the image and runs this script with $APPDIR set
+# to the mount. Every OpenLogi executable lives in usr/bin, so putting that
+# directory first on PATH is what lets the GUI find the agent, and the agent
+# the overlay, the same way they do in a package install: as siblings.
+#
+# `OpenLogi.AppImage` starts the GUI. `OpenLogi.AppImage <executable> ...`
+# runs any other bundled executable instead, e.g.
+#   ./OpenLogi.AppImage openlogi list
+#   ./OpenLogi.AppImage openlogi-agent
+# The agent's launch-at-login unit uses that second form, since the mounted
+# path only exists while some process from this image is still running.
+set -eu
+
+HERE="$(dirname "$(readlink -f "$0")")"
+export PATH="$HERE/usr/bin${PATH:+:$PATH}"
+
+case "${1:-}" in
+  "" | -*) bin=openlogi-desktop ;;
+  *)
+    if [ -x "$HERE/usr/bin/$1" ]; then
+      bin="$1"
+      shift
+    else
+      bin=openlogi-desktop
+    fi
+    ;;
+esac
+
+exec "$HERE/usr/bin/$bin" "$@"
