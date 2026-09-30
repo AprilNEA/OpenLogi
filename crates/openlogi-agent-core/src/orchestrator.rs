@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{Action, Binding};
+use openlogi_core::binding::{Action, Binding, ButtonId};
 use openlogi_core::bindings::{button_bindings_for, oshook_gestures_for};
 use openlogi_core::config::{Config, LightSettings, MouseProfileTarget, canonical_device_key};
 use openlogi_core::device::{
@@ -23,8 +23,8 @@ use openlogi_core::device::{
 };
 use openlogi_core::device_order::{DeviceIdentity, PhysicalDeviceKey};
 use openlogi_hid::{
-    CaptureChannelSlot, ChannelPool, ChannelRegistry, DeviceIoGate, DeviceRoute,
-    HostOperatingSystem, KEYBOARD_KEY_CIDS,
+    CaptureChannelSlot, ChannelPool, ChannelRegistry, DeviceIoGate, DeviceRoute, FnLockState,
+    HidppOperation, HostOperatingSystem, WriteError, is_reserved_keyboard_control,
 };
 use openlogi_ipc::InventoryHealth;
 use tokio::sync::watch;
@@ -34,12 +34,15 @@ use crate::action_ring::ActionRingSessionSpec;
 use crate::capture_plan::{
     DeviceCapturePlan, SharedCapturePlans, hidpp_side_gesture_maps_for, plan_for_device,
 };
-use crate::hardware::{DeviceAccess, DeviceOp, HardwareContext, VolatileMouseSettings};
+use crate::hardware::{
+    DeviceAccess, DeviceOp, FnLockOrder, HardwareContext, VolatileMouseSettings,
+};
 use crate::observable::ObservableState;
 use crate::receiver_access::ReceiverAccess;
 use crate::runtime::hook::{HookMaps, SharedHookMaps};
 use crate::runtime::scroll::ScrollPreferences;
 use crate::watchers::host_switch::{HostSwitchLink, HostSwitchLinks};
+use crate::watchers::inventory::InventoryRefresh;
 use crate::watchers::keyboard::{KeyboardSpec, SharedKeyboardSpec};
 use crate::{DpiCycleState, DpiCycles};
 
@@ -120,6 +123,11 @@ pub struct SharedHandles {
     pub receiver_access: ReceiverAccess,
     /// Keyboard → pointing-device routes resolved from `config.toml`.
     pub host_switch_links: HostSwitchLinks,
+    /// Orders every path's Fn-lock writes per keyboard.
+    fn_lock_order: FnLockOrder,
+    /// The running inventory watcher's refresh handle, published at arming;
+    /// `None` while no watcher runs.
+    inventory_refresh: Arc<RwLock<Option<InventoryRefresh>>>,
 }
 
 impl SharedHandles {
@@ -164,6 +172,54 @@ impl SharedHandles {
     #[must_use]
     pub fn keyboard_device(&self, route: &DeviceRoute) -> DeviceOp {
         self.keyboard_access().op(route)
+    }
+
+    /// Write `fn_lock` to the keyboard at `route` and return its echo. When a
+    /// newer Fn-lock write for the keyboard is requested before this one gets
+    /// its turn, this one reads the keyboard instead of writing a value that
+    /// is about to be replaced.
+    pub async fn set_fn_lock(
+        &self,
+        route: &DeviceRoute,
+        fn_lock: bool,
+    ) -> Result<FnLockState, WriteError> {
+        let ticket = self.fn_lock_order.request(route);
+        self.keyboard_device(route)
+            .run(HidppOperation::WriteFnLock, |c| async move {
+                match ticket.turn().await {
+                    Some(_turn) => openlogi_hid::set_fn_lock_on(&c, fn_lock).await,
+                    None => openlogi_hid::get_fn_lock_on(&c).await,
+                }
+            })
+            .await
+    }
+
+    /// Hand requests to the inventory watcher started at arming.
+    pub fn publish_inventory_refresh(&self, refresh: InventoryRefresh) {
+        write_value(&self.inventory_refresh, Some(refresh), "inventory refresh");
+    }
+
+    /// Have the inventory watcher rescan receivers after a pairing-table
+    /// change. Nothing is scanning while the agent is unarmed, and arming
+    /// starts with a full scan, so there is then nothing to ask.
+    pub fn request_receiver_rescan(&self) {
+        let Ok(refresh) = self.inventory_refresh.read() else {
+            warn!("inventory refresh handle poisoned — receiver rescan skipped");
+            return;
+        };
+        if let Some(refresh) = refresh.as_ref() {
+            refresh.request_receiver_rescan();
+        }
+    }
+
+    /// [`Self::set_fn_lock`] without waiting, for the config-reload and
+    /// reconnect paths; the outcome is logged.
+    fn write_fn_lock_in_background(&self, route: &DeviceRoute, fn_lock: bool) {
+        crate::hardware::write_fn_lock_in_background(
+            self.keyboard_device(route),
+            self.fn_lock_order.request(route),
+            fn_lock,
+        );
     }
 }
 
@@ -273,6 +329,8 @@ impl Orchestrator {
             capture_rearm_generation: Arc::new(AtomicU64::new(0)),
             receiver_access: ReceiverAccess::default(),
             host_switch_links,
+            fn_lock_order: FnLockOrder::default(),
+            inventory_refresh: Arc::new(RwLock::new(None)),
         };
         let orch = Self {
             config,
@@ -377,11 +435,24 @@ impl Orchestrator {
         }
     }
 
-    /// The keyboard key-capture spec for the first known keyboard, or `None`
-    /// when no keyboard is paired or none of its capturable keys carries a
-    /// real binding (an unbound key must never be diverted).
+    /// The keyboard key-capture spec for the managed keyboard, or `None` when
+    /// no enabled keyboard carries a real binding (an unbound key must never
+    /// be diverted).
     ///
-    /// Deliberately does NOT require the keyboard to be online: an idle
+    /// The bound keys *are* the divert set: every
+    /// [`ButtonId::Control`] in the
+    /// keyboard's effective bindings names the `0x1b04` control to divert, and
+    /// the capture session arms whichever of those the device's own control
+    /// table reports as divertable. No fixed key table sits in between, so a
+    /// keyboard OpenLogi has never seen is remappable the day it ships.
+    ///
+    /// One session at a time, and only a keyboard with something bound can
+    /// hold it: an online bound keyboard wins over an asleep one, so a stale
+    /// receiver slot for the same model (#1581) — which carries no bindings —
+    /// never takes the session from the keyboard that is actually typing, and
+    /// never shadows it while it naps. Among bound keyboards in the same
+    /// online state, inventory order breaks the tie. Beyond that the spec
+    /// deliberately does NOT require the keyboard to be online: an idle
     /// keyboard sleeps within minutes and probe timeouts can flap it offline,
     /// and tearing the capture session down on every nap would hand the
     /// diverted keys back to the firmware (dead bindings) until the re-arm
@@ -389,33 +460,41 @@ impl Orchestrator {
     /// channel is to the always-present receiver — and re-arms diversion on
     /// the device's `0x1d4b` reconnection broadcast.
     fn keyboard_spec_for(&self) -> Option<KeyboardSpec> {
-        let dev = self
+        let candidates: Vec<KeyboardCandidate<'_>> = self
             .devices
             .iter()
-            .find(|d| d.kind == DeviceKind::Keyboard && d.route.is_some())?;
-        let bindings = button_bindings_for(
-            &self.config,
-            Some(&dev.config_key),
-            self.current_app.as_deref(),
-        );
-        let wanted: BTreeMap<u16, _> = KEYBOARD_KEY_CIDS
-            .iter()
-            .filter(|(_, button)| {
-                bindings.get(button).is_some_and(|binding| {
-                    matches!(binding, Binding::LongPress(_))
-                        || binding.click_action() != Action::None
+            .filter(|d| d.kind == DeviceKind::Keyboard && d.route.is_some())
+            .filter(|d| self.config.device_enabled(&d.config_key))
+            .filter_map(|dev| {
+                let bindings = button_bindings_for(
+                    &self.config,
+                    Some(&dev.config_key),
+                    self.current_app.as_deref(),
+                );
+                let divert = keyboard_divert_set(&bindings);
+                (!divert.wanted.is_empty()).then_some(KeyboardCandidate {
+                    dev,
+                    bindings,
+                    divert,
                 })
             })
-            .copied()
             .collect();
-        if wanted.is_empty() {
-            return None;
+        let chosen = candidates
+            .iter()
+            .find(|candidate| candidate.dev.online)
+            .or_else(|| candidates.first())?;
+        for &cid in &chosen.divert.reserved {
+            warn!(
+                cid = format_args!("{cid:#06x}"),
+                key = %chosen.dev.config_key,
+                "binding names a control OpenLogi never diverts as a key — left native"
+            );
         }
         Some(KeyboardSpec {
-            config_key: dev.config_key.clone(),
-            route: dev.route.clone()?,
-            wanted,
-            bindings,
+            config_key: chosen.dev.config_key.clone(),
+            route: chosen.dev.route.clone()?,
+            wanted: chosen.divert.wanted.clone(),
+            bindings: chosen.bindings.clone(),
         })
     }
 
@@ -492,8 +571,16 @@ impl Orchestrator {
     }
 
     /// One capture plan per online device, from the current config + app.
+    ///
+    /// A `0x1b04` control has one owner per device. The keyboard session owns
+    /// every control the keyboard spec names, so those are released from the
+    /// keyboard's own plan here: a hand-edited `Back = …` on a K380 would
+    /// otherwise have both sessions divert the multiplatform Back key
+    /// (`0x00bd`, a [`BACK_CIDS`](openlogi_hid::reprog_controls::BACK_CIDS)
+    /// member), each reading the other's diverted state back as "original".
     fn capture_plans_for(&self) -> Vec<DeviceCapturePlan> {
         let rearm_generation = self.shared.capture_rearm_generation.load(Ordering::Relaxed);
+        let keyboard = self.keyboard_spec_for();
         self.devices
             .iter()
             .filter(|dev| dev.online && self.config.device_enabled(&dev.config_key))
@@ -517,6 +604,12 @@ impl Orchestrator {
                     self.os_mouse_hook_available,
                 );
                 plan.dispatch.pointer_target = pointer_target;
+                if let Some(keyboard) = keyboard
+                    .as_ref()
+                    .filter(|keyboard| keyboard.route == plan.target.route)
+                {
+                    plan.release_controls(&keyboard.wanted);
+                }
                 Some(plan)
             })
             .collect()
@@ -659,10 +752,7 @@ impl Orchestrator {
             crate::hardware::set_lighting_in_background(self.shared.device(&route), lighting);
         }
         if let Some(fn_lock) = self.config.fn_lock(key) {
-            crate::hardware::write_fn_lock_in_background(
-                self.shared.keyboard_device(&route),
-                fn_lock,
-            );
+            self.shared.write_fn_lock_in_background(&route, fn_lock);
         }
         if dev.kind == DeviceKind::Keyboard
             && self.config.app_settings.enforce_native_keyboard_platform
@@ -923,9 +1013,9 @@ impl Orchestrator {
 
     /// Replace the config (after `config.toml` changed) and rebuild everything.
     pub fn reload_config(&mut self, config: Config) {
+        let previous = std::mem::replace(&mut self.config, config);
         // Parameter-only edits must not erase a transient manual choice while
         // the light remains camera-linked. Changing the policy invalidates it.
-        self.config = config;
         self.shared.scroll_preferences.publish(
             self.config.app_settings.smooth_scroll,
             self.config.app_settings.vertical_scroll_sensitivity,
@@ -947,25 +1037,29 @@ impl Orchestrator {
         self.current = pick_current(&self.devices, self.config.selected_device());
         self.rebuild();
         self.apply_native_wheel_modes();
-        self.apply_fn_locks();
+        self.apply_changed_fn_locks(&previous);
         self.apply_native_keyboard_platforms();
         self.reapply_light_settings();
     }
 
-    /// Push the saved Fn-lock state to every online keyboard that has one.
-    /// Runs on config reloads (the reconnect path is
-    /// [`Self::reapply_volatile_settings`]); the write is a single HID++ call,
-    /// so re-applying an unchanged state is cheap.
-    fn apply_fn_locks(&self) {
+    /// Push a changed Fn-lock setting to the online keyboard it belongs to.
+    /// Only the values that differ from `previous` are written, so an
+    /// unrelated save never undoes an Fn+Esc the user pressed on the keyboard.
+    /// The GUI toggle also writes directly through
+    /// [`SharedHandles::set_fn_lock`]; both writes are ordered per keyboard,
+    /// so the newest request is the one that stays. The reconnect path is
+    /// [`Self::reapply_volatile_settings`].
+    fn apply_changed_fn_locks(&self, previous: &Config) {
         for dev in self.devices.iter().filter(|dev| dev.online) {
             let Some(route) = dev.route.clone() else {
                 continue;
             };
-            if let Some(fn_lock) = self.config.fn_lock(&dev.config_key) {
-                crate::hardware::write_fn_lock_in_background(
-                    self.shared.keyboard_device(&route),
-                    fn_lock,
-                );
+            let fn_lock = self.config.fn_lock(&dev.config_key);
+            if fn_lock == previous.fn_lock(&dev.config_key) {
+                continue;
+            }
+            if let Some(fn_lock) = fn_lock {
+                self.shared.write_fn_lock_in_background(&route, fn_lock);
             }
         }
     }
@@ -1027,6 +1121,45 @@ fn write_value<T>(lock: &RwLock<T>, value: T, name: &str) {
 }
 
 /// Publish a fresh immutable snapshot only when its projected value changed.
+/// A keyboard that could hold the key-capture session: it is enabled, has a
+/// route, and at least one of its keys is bound.
+struct KeyboardCandidate<'a> {
+    dev: &'a AgentDevice,
+    bindings: BTreeMap<ButtonId, Binding>,
+    divert: KeyboardDivertSet,
+}
+
+/// The `0x1b04` controls a keyboard's bindings ask to divert, split into the
+/// ones the session will arm and the reserved ones it refuses.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct KeyboardDivertSet {
+    wanted: BTreeMap<u16, ButtonId>,
+    reserved: Vec<u16>,
+}
+
+/// Which of `bindings` carry a real action on a keyboard control. A
+/// [`Binding::LongPress`] is bound whatever its arms hold; a single binding is
+/// bound unless it is [`Action::None`], the "leave native" value.
+fn keyboard_divert_set(bindings: &BTreeMap<ButtonId, Binding>) -> KeyboardDivertSet {
+    let mut set = KeyboardDivertSet::default();
+    for (button, binding) in bindings {
+        let Some(cid) = button.cid().map(openlogi_core::binding::Cid::raw) else {
+            continue;
+        };
+        let bound =
+            matches!(binding, Binding::LongPress(_)) || binding.click_action() != Action::None;
+        if !bound {
+            continue;
+        }
+        if is_reserved_keyboard_control(cid) {
+            set.reserved.push(cid);
+        } else {
+            set.wanted.insert(cid, *button);
+        }
+    }
+    set
+}
+
 fn publish_arc_if_changed<T: PartialEq>(publication: &watch::Sender<Arc<T>>, value: T) {
     publication.send_if_modified(|current| {
         if current.as_ref() == &value {

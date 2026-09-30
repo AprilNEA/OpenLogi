@@ -13,6 +13,7 @@ use gpui::{App, Context, EventEmitter, Subscription};
 use super::AppState;
 use super::device_key::DeviceKey;
 use super::devices::DeviceRecord;
+use crate::services::ipc::UnpairFailure;
 
 /// Semantic changes emitted by the shared application-state entity.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,6 +30,13 @@ pub(crate) enum StateEvent {
     DiagnosticsChanged,
     /// The merged device inventory changed.
     InventoryChanged,
+    /// A device the user asked to forget stayed, because its receiver kept
+    /// the pairing.
+    DeviceRemovalFailed {
+        /// The device's display name.
+        name: String,
+        failure: UnpairFailure,
+    },
     /// The active device changed.
     DeviceSelected(DeviceKey),
     /// Mouse, keyboard, gesture, or Actions Ring bindings changed.
@@ -37,6 +45,8 @@ pub(crate) enum StateEvent {
     DpiChanged(DeviceKey),
     /// SmartShift data or write status changed.
     SmartShiftChanged(DeviceKey),
+    /// The keyboard's Fn-lock read landed or changed.
+    FnLockChanged(DeviceKey),
     /// Device or standalone-light settings changed.
     LightingChanged(DeviceKey),
     /// Camera settings or activity changed.
@@ -68,12 +78,14 @@ impl StateEvent {
             | Self::BindingsChanged(key)
             | Self::DpiChanged(key)
             | Self::SmartShiftChanged(key)
+            | Self::FnLockChanged(key)
             | Self::LightingChanged(key)
             | Self::DeviceConfigChanged(key) => Some(key),
             Self::AgentChanged
             | Self::ForegroundChanged
             | Self::DiagnosticsChanged
             | Self::InventoryChanged
+            | Self::DeviceRemovalFailed { .. }
             | Self::CameraChanged
             | Self::CameraPermissionChanged
             | Self::SettingsChanged
@@ -202,12 +214,15 @@ impl AppState {
     ) -> bool {
         match event {
             StateEvent::InventoryChanged | StateEvent::DeviceSelected(_) => true,
+            // A dialog, not panel content.
+            StateEvent::DeviceRemovalFailed { .. } => false,
             StateEvent::AgentChanged
             | StateEvent::ForegroundChanged
             | StateEvent::DiagnosticsChanged
             | StateEvent::BindingsChanged(_)
             | StateEvent::DpiChanged(_)
             | StateEvent::SmartShiftChanged(_)
+            | StateEvent::FnLockChanged(_)
             | StateEvent::LightingChanged(_)
             | StateEvent::CameraChanged
             | StateEvent::CameraPermissionChanged

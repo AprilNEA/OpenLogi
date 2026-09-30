@@ -175,3 +175,41 @@ fn empty_dpi_presets_skip_serialization() {
         "empty dpi_presets should be omitted: {body}"
     );
 }
+
+/// `KeyScreenCapture` and `control:0x010a` are one control. TOML cannot see
+/// that collision, so the config layer must — a last-wins map would drop one
+/// binding and save the loss.
+#[test]
+fn a_control_named_under_two_spellings_is_rejected() {
+    let device_table = format!(
+        "schema_version = {SCHEMA_VERSION}\n\
+         [devices.\"unit:1\".bindings]\n\
+         KeyScreenCapture = \"Sleep\"\n\
+         \"control:0x010a\" = \"Copy\"\n"
+    );
+    let err = toml::from_str::<Config>(&device_table)
+        .expect_err("one control bound under two names must not load");
+    assert!(
+        err.to_string()
+            .contains("`KeyScreenCapture` and `control:0x010a`"),
+        "{err}"
+    );
+
+    let per_app_table = format!(
+        "schema_version = {SCHEMA_VERSION}\n\
+         [devices.\"unit:1\".per_app_bindings.\"com.example.App\"]\n\
+         \"control:0x010a\" = \"Copy\"\n\
+         KeyScreenCapture = \"Sleep\"\n"
+    );
+    toml::from_str::<Config>(&per_app_table).expect_err("the guard covers per-app overlays too");
+
+    // Distinct controls under mixed spellings still load.
+    let mixed = format!(
+        "schema_version = {SCHEMA_VERSION}\n\
+         [devices.\"unit:1\".bindings]\n\
+         KeyScreenCapture = \"Sleep\"\n\
+         \"control:0x01f3\" = \"Copy\"\n"
+    );
+    let config: Config = toml::from_str(&mixed).expect("distinct controls load");
+    assert_eq!(config.stored_bindings("unit:1").len(), 2);
+}

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use openlogi_core::hid::{DpiInfo, SmartShiftStatus};
+use openlogi_core::hid::{DpiInfo, FnLockState, SmartShiftStatus};
 
 /// State projected from an swr-backed device query: unqueried, in flight,
 /// resolved, transiently failed, or permanently unsupported.
@@ -32,3 +32,8 @@ pub type DpiLoad = Load<Arc<DpiInfo>>;
 /// stores wheel mode / threshold / torque in its own non-volatile memory, so the
 /// GUI only ever reads and writes the device.
 pub type SmartShiftLoad = Load<Arc<SmartShiftStatus>>;
+
+/// Per-keyboard Fn-lock (`0x40a2` / `0x40a3`) load state. See [`Load`]. The
+/// read shows what the keyboard holds right now — it can differ from the
+/// persisted `fn_lock` after the user pressed Fn+Esc on the keyboard.
+pub type FnLockLoad = Load<Arc<FnLockState>>;

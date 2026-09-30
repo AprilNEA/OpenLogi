@@ -80,9 +80,14 @@ tunable_torque = 50
 host_switch_targets = ["receiver:aabbccdd:slot:1"]
 fn_lock = false
 
+# Keyboard keys are named by their HID++ control: a catalog name such as
+# `KeyScreenCapture`, or `control:0x<cid>` for any control `openlogi diag
+# controls` lists as divertable. An unlisted key keeps its firmware function.
 [devices."receiver:aabbccdd:slot:2".bindings]
 KeySearch = "MissionControl"
 KeyScreenCapture = "Sleep"
+KeyCalculator = { OpenApplication = { path = "/System/Applications/Calculator.app", display_name = "Calculator" } }
+"control:0x01f3" = { CustomShortcut = "Cmd+Shift+4" }
 
 # Since schema 5 a device is keyed by what it *is* — `unit:<hex>` or
 # `serial:<s>` — rather than by the route it was reached on, so its settings

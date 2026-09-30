@@ -149,7 +149,7 @@ fn actions_ring_is_available_to_normal_and_gesture_pickers() {
 
 /// On-disk shape: a `ButtonId` → [`Binding`] map, as `DeviceConfig.bindings`
 /// serializes it.
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct BindingWrapper {
     bindings: BTreeMap<ButtonId, Binding>,
 }
@@ -213,10 +213,10 @@ fn binding_long_press_roundtrips_without_overlapping_other_table_shapes() {
 #[test]
 fn binding_long_press_requires_exact_short_and_long_fields() {
     let missing_long = "[bindings.Back]\nshort = \"Copy\"";
-    assert!(toml::from_str::<BindingWrapper>(missing_long).is_err());
+    toml::from_str::<BindingWrapper>(missing_long).expect_err("a long press needs both halves");
 
     let unknown = "[bindings.Back]\nshort = \"Copy\"\nlong = \"Paste\"\nthreshold_ms = 900";
-    assert!(toml::from_str::<BindingWrapper>(unknown).is_err());
+    toml::from_str::<BindingWrapper>(unknown).expect_err("a long press rejects unknown fields");
 }
 
 /// The untagged-routing safety guard. A TOML table keyed by ANY
@@ -660,4 +660,86 @@ fn scroll_actions_lower_to_unit_direction() {
         Action::HorizontalScrollRight.effect(),
         Effect::Scroll { dx: 1, dy: 0 }
     );
+}
+
+// ── ButtonId persistence ─────────────────────────────────────────────────
+
+#[test]
+fn button_ids_persist_as_their_config_names() {
+    let mut bindings = BTreeMap::new();
+    bindings.insert(ButtonId::MiddleClick, Binding::Single(Action::Copy));
+    bindings.insert(
+        ButtonId::control(0x010a),
+        Binding::Single(Action::Screenshot),
+    );
+    bindings.insert(ButtonId::control(0x01f3), Binding::Single(Action::Paste));
+    let toml = toml::to_string_pretty(&BindingWrapper {
+        bindings: bindings.clone(),
+    })
+    .expect("serialize");
+
+    assert!(toml.contains("MiddleClick = \"Copy\""), "{toml}");
+    assert!(toml.contains("KeyScreenCapture = \"Screenshot\""), "{toml}");
+    assert!(toml.contains("\"control:0x01f3\" = \"Paste\""), "{toml}");
+    assert_eq!(binding_roundtrip(bindings.clone()), bindings);
+}
+
+#[test]
+fn the_original_key_names_still_load_as_controls() {
+    // Files written by 0.7–0.8.9 name keyboard keys with these variants; the
+    // catalog keeps every name so those files load unchanged.
+    let parsed: BindingWrapper = toml::from_str(
+        r#"
+        [bindings]
+        KeySearch = "MissionControl"
+        KeyDictation = "Copy"
+        KeyEmoji = "Copy"
+        KeyScreenCapture = "Sleep"
+        KeyMicMute = "Copy"
+        KeyPlayPause = "Copy"
+        KeyMute = "Copy"
+        KeyVolumeDown = "Copy"
+        KeyVolumeUp = "Copy"
+        "#,
+    )
+    .expect("legacy key names parse");
+    let keys: Vec<u16> = parsed
+        .bindings
+        .keys()
+        .map(|button| button.cid().expect("a keyboard key").raw())
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            0x00d4, 0x00e5, 0x00e7, 0x00e8, 0x00e9, 0x0103, 0x0108, 0x010a, 0x011c
+        ]
+    );
+    assert_eq!(
+        parsed.bindings[&ButtonId::control(0x010a)],
+        Binding::Single(Action::Sleep)
+    );
+}
+
+#[test]
+fn unknown_button_names_are_rejected_not_ignored() {
+    toml::from_str::<BindingWrapper>("[bindings]\nKeyBogus = \"Copy\"\n")
+        .expect_err("an unknown button name must fail the whole map");
+    toml::from_str::<BindingWrapper>("[bindings]\n\"control:010a\" = \"Copy\"\n")
+        .expect_err("the numeric form requires the 0x prefix");
+    "Control(266)"
+        .parse::<ButtonId>()
+        .expect_err("the Rust debug shape is not a config name");
+}
+
+#[test]
+fn mouse_buttons_sort_ahead_of_every_keyboard_control() {
+    assert!(ButtonId::WheelTiltRight < ButtonId::control(0x0001));
+    assert!(ButtonId::control(0x00e5) < ButtonId::control(0x0141));
+    assert_eq!(ButtonId::control(0x010a).to_string(), "Screen Capture Key");
+    assert_eq!(ButtonId::control(0x01f3).to_string(), "Control 0x01f3");
+    // Every unit variant has a persisted name and round-trips through it.
+    for button in ButtonId::ALL {
+        assert_eq!(button.config_name().parse::<ButtonId>(), Ok(button));
+    }
+    assert_eq!(default_binding(ButtonId::control(0x01f3)), Action::None);
 }
