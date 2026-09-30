@@ -349,7 +349,8 @@ fn spawn_callback_watchdog(
     thread::Builder::new()
         .name("openlogi-hook-watchdog".into())
         .spawn(move || {
-            let mut watchdog = CallbackWatchdog::default();
+            let mut watchdog =
+                CallbackWatchdog::watching_since(signals.now_millis(), power_epoch());
             loop {
                 let phase = signals.phase();
                 if matches!(phase, TapPhase::TapStopped | TapPhase::ThreadExited) {

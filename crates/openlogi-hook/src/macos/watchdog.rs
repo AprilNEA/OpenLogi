@@ -388,6 +388,17 @@ pub(super) struct CallbackWatchdog {
 }
 
 impl CallbackWatchdog {
+    /// A watchdog that began watching at `now_ms`. Its thread sleeps one poll
+    /// interval before the first poll, so that poll's gap — and any
+    /// scheduling delay in it — is charged like every later one, instead of
+    /// a first poll with no predecessor crediting nothing.
+    pub fn watching_since(now_ms: u64, power: PowerEpoch) -> Self {
+        Self {
+            last_polled: Some((now_ms, power)),
+            entry: None,
+        }
+    }
+
     /// Fold one poll at `now_ms`; `entered_at_ms` is the callback's entry time
     /// while it is inside the callback, `None` while it is idle.
     pub fn evaluate(
@@ -902,6 +913,24 @@ mod tests {
             slept_us: n,
             woke_us: n,
         }
+    }
+
+    #[test]
+    fn the_first_poll_is_charged_from_spawn() {
+        // The thread sleeps before its first poll. A callback that wedged in
+        // that window, with the poll itself delayed past the budget, exits on
+        // that poll rather than being granted a second budget.
+        let mut watchdog = CallbackWatchdog::watching_since(0, epoch(0));
+        assert_eq!(
+            watchdog.evaluate(300, Some(5), epoch(0)),
+            Some(StuckCallback {
+                watched: Duration::from_millis(295),
+                stalled: Duration::from_millis(295),
+            })
+        );
+        // Unless the kernel slept and woke inside that first gap.
+        let mut slept = CallbackWatchdog::watching_since(0, epoch(0));
+        assert_eq!(slept.evaluate(300, Some(5), epoch(1)), None);
     }
 
     #[test]
