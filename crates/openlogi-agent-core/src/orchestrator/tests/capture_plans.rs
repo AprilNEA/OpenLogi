@@ -188,7 +188,7 @@ fn side_gesture_capture_follows_platform_ownership_and_hook_availability() {
     let mut capture_plans = orch.shared.capture_plans.clone();
     let _ = capture_plans.borrow_and_update();
 
-    let side_gesture_is_armed = |orch: &Orchestrator| {
+    let side_gesture_is_requested = |orch: &Orchestrator| {
         orch.shared.capture_plans.borrow()[0]
             .target
             .spec
@@ -197,7 +197,7 @@ fn side_gesture_capture_follows_platform_ownership_and_hook_availability() {
             .any(|&(_, button)| button == ButtonId::Forward)
     };
     assert!(
-        !side_gesture_is_armed(&orch),
+        !side_gesture_is_requested(&orch),
         "HID++ diversion must wait for the movement hook"
     );
 
@@ -218,16 +218,16 @@ fn side_gesture_capture_follows_platform_ownership_and_hook_availability() {
     if cfg!(target_os = "macos") {
         assert!(!hook_maps.bindings.contains_key(&ButtonId::Forward));
         assert!(!hook_maps.gestures.contains_key(&ButtonId::Forward));
-        assert!(side_gesture_is_armed(&orch));
+        assert!(side_gesture_is_requested(&orch));
     } else if cfg!(target_os = "windows") {
         assert!(hook_maps.gestures.contains_key(&ButtonId::Forward));
         assert!(
-            side_gesture_is_armed(&orch),
+            side_gesture_is_requested(&orch),
             "Windows must request HID++ raw XY while retaining the passive hook fallback"
         );
     } else {
         assert!(hook_maps.gestures.contains_key(&ButtonId::Forward));
-        assert!(!side_gesture_is_armed(&orch));
+        assert!(!side_gesture_is_requested(&orch));
     }
     drop(hook_maps);
 
@@ -240,7 +240,7 @@ fn side_gesture_capture_follows_platform_ownership_and_hook_availability() {
         "only a semantic capture-plan change should wake reconciliation"
     );
     assert!(
-        !side_gesture_is_armed(&orch),
+        !side_gesture_is_requested(&orch),
         "revoking the movement hook must restore native HID++ controls"
     );
 }
