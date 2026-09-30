@@ -24,3 +24,5 @@ fi
 
 echo "OpenLogi installed. Enable the background agent for your user with:"
 echo "  systemctl --user enable --now openlogi-agent.service"
+echo "On GNOME Wayland, enable per-app profiles with:"
+echo "  gnome-extensions enable openlogi-frontmost@openlogi.dev"
