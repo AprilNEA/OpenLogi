@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.10] - 2026-09-30
+
+### Added
+
+- *(agent)* read privacy grants on notification instead of a 1.2 s poll
+- *(hook)* probe the Accessibility grant on cue, with a heartbeat backstop
+- *(core)* add a Super modifier and make Win/Meta name it ([#1387](https://github.com/AprilNEA/OpenLogi/pull/1387))
+- *(keyboard)* key controls by HID++ control ID, fix Keys tab and Fn-lock ([#1604](https://github.com/AprilNEA/OpenLogi/pull/1604))
+
+### Fixed
+
+- *(hook)* charge the callback watchdog's first poll from its spawn
+- *(hook)* give the callback watchdog the same watched-time rule
+- *(hook)* discount only the watchdog gaps that spanned a kernel sleep or wake
+- *(hook)* do not charge the tap thread for time the watchdog was not running
+- *(hook)* give the macOS tap's capability probes their own watchdog budget
+- *(agent)* keep the armed-session record whole and clear it on the Quit fallback
+- *(agent)* re-arm a crash respawn instead of going dormant
+- *(macos)* press shortcut keys where the active layout types them ([#948](https://github.com/AprilNEA/OpenLogi/pull/948))
+- *(gui)* unpair a forgotten receiver device so it stays deleted ([#1617](https://github.com/AprilNEA/OpenLogi/pull/1617))
+- *(macos)* keep the hook from hearing the keys OpenLogi posts ([#1618](https://github.com/AprilNEA/OpenLogi/pull/1618))
+
 ## [0.8.9] - 2026-09-27
 
 ### Fixed
