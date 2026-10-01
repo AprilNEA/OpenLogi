@@ -92,7 +92,9 @@ Common device fields are:
   differently and a profile authored under one namespace will not match under
   another. An overlay holds one action per button; gesture-direction maps live
   in `bindings`
-- `action_ring`: default and complete per-application eight-slot layouts
+- `action_ring`: default and complete per-application eight-slot layouts;
+  `action_ring.per_app` takes the same selectors as `per_app_bindings`,
+  including the Windows `exe:<filename>` fallback
 - `lighting`, `smartshift`, standalone `light`, and camera controls / profiles
 - `host_switch_targets` and `fn_lock` for compatible keyboards
 - `identity` and `disabled_gestures`, which are application-managed metadata
