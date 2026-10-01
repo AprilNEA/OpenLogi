@@ -128,6 +128,10 @@ unwrap_used = "warn"
 expect_used = "warn"
 missing_errors_doc = "allow"
 doc_markdown = "allow"
+# Pedantic since clippy 1.99. Its rewrite, `assert_eq!(v, [] as [T; 0])`, prints
+# the leftover on failure, but the cast and the `Debug + PartialEq` bound on every
+# element type cost the tests more than that message is worth.
+assert_is_empty = "allow"
 # Machine-checks the suppression policy in .claude/rules/rust.md: every
 # suppression states a reason, and reaches for `expect` unless it cannot work.
 # Blind spot worth knowing: `allow_attributes` only sees outer `#[allow]`, so a
