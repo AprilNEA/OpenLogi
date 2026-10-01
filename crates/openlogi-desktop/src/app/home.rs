@@ -29,6 +29,7 @@ use gpui_component::{
 use openlogi_core::config::{DeviceViewMode, LightSettings};
 use openlogi_core::device::{DeviceKind, DeviceTransports};
 use openlogi_core::hid::DeviceRoute;
+use openlogi_ipc::PairingFailure;
 
 use super::AppView;
 use super::status::{loading_body, notice_body};
@@ -37,10 +38,12 @@ use super::widgets::{
 };
 use crate::features::lighting::visual as light_visual;
 use crate::services::assets::GlowGeometry;
-use crate::state::{AppState, DeviceRecord, StateEvent};
+use crate::services::ipc::UnpairFailure;
+use crate::state::{AppState, DeviceRecord};
 use crate::ui::battery::{BatteryIndicator, glance_hint};
 use crate::ui::components::control_input;
 use crate::ui::theme::{self, ContentWidth, HEADER_H, Palette, Typography as _};
+use crate::windows::add_device::pairing_failure_text;
 
 /// Home (gallery) top bar: title/count, the persisted layout switcher, Settings,
 /// and Add Device.
@@ -424,14 +427,34 @@ fn open_delete_confirmation(window: &mut Window, cx: &mut App, record_key: Strin
             .on_ok({
                 let record_key = record_key.clone();
                 move |_event, _window, cx| {
-                    AppState::update(cx, |state, cx| {
-                        if state.forget_device(&record_key) {
-                            cx.emit(StateEvent::InventoryChanged);
-                        }
-                    });
+                    AppState::apply(cx, |state| state.forget_device(&record_key));
                     true
                 }
             })
+    });
+}
+
+/// Say why a device the user asked to forget is still here: its receiver kept
+/// the pairing, so deleting only its settings would bring the card back.
+pub(super) fn open_removal_failed(
+    window: &mut Window,
+    cx: &mut App,
+    name: &str,
+    failure: &UnpairFailure,
+) {
+    let title = tr!("device.delete_device_failed", name => name.to_string());
+    let description = match failure {
+        UnpairFailure::AgentUnreachable => tr!("agent.cant_reach_the_background_service"),
+        UnpairFailure::Refused(PairingFailure::ReceiverBusy) => {
+            tr!("device.delete_device_receiver_busy")
+        }
+        UnpairFailure::Refused(PairingFailure::ReceiverNotFound) => {
+            tr!("device.delete_device_receiver_missing")
+        }
+        UnpairFailure::Refused(other) => pairing_failure_text(other).into(),
+    };
+    window.open_alert_dialog(cx, move |alert, _, _| {
+        alert.title(title.clone()).description(description.clone())
     });
 }
 
@@ -471,9 +494,8 @@ fn open_rename_dialog(
                 let record_key = record_key.clone();
                 move |_, _, cx| {
                     let custom_name = input.read(cx).value().to_string();
-                    AppState::update(cx, |state, cx| {
-                        state.set_device_custom_name(&record_key, &custom_name);
-                        cx.emit(StateEvent::InventoryChanged);
+                    AppState::apply(cx, |state| {
+                        state.commit_device_custom_name(&record_key, &custom_name)
                     });
                     true
                 }
@@ -620,7 +642,8 @@ pub(super) fn device_scanning_state(cx: &App) -> Div {
 }
 
 /// Home body when the agent reports enumeration as broken
-/// ([`InventoryHealth::Unavailable`]): scanning never completed and won't
+/// ([`InventoryHealth::Unavailable`](openlogi_ipc::InventoryHealth::Unavailable)): scanning
+/// never completed and won't
 /// just by waiting, so showing a spinner (or claiming "no devices") would
 /// both be wrong. The agent keeps retrying and a recovery flows back in as a
 /// regular snapshot.

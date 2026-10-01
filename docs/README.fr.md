@@ -1,7 +1,7 @@
 > [!WARNING]
 > **OpenLogi est en cours de développement actif** et n'est pas encore stable — les fonctionnalités et la configuration peuvent encore changer. Mettez une **Star** ⭐ au dépôt et **suivez-le** 👀 pour être averti dès qu'une nouvelle version est publiée.
 
-<h4 align="right"><a href="../README.md">English</a> | <a href="README.zh-CN.md">简体中文</a> | <a href="README.ja.md">日本語</a> | <a href="README.de.md">Deutsch</a> | <strong>Français</strong> | <a href="README.ko.md">한국어</a></h4>
+<h4 align="right"><a href="../README.md">English</a> | <a href="README.zh-CN.md">简体中文</a> | <a href="README.ja.md">日本語</a> | <a href="README.de.md">Deutsch</a> | <strong>Français</strong> | <a href="README.ko.md">한국어</a> | <a href="README.ru.md">Русский</a></h4>
 
 <p align="center">
     <img src="https://assets.openlogi.org/brand/openlogi-icon.png" width="138" alt="OpenLogi"/>
@@ -25,7 +25,13 @@
 
 <p align="center">
     <a href="https://trendshift.io/repositories/42303" target="_blank">
-    <img src="https://trendshift.io/api/badge/trendshift/repositories/42303/daily?language=Rust" alt="AprilNEA%2FOpenLogi | Trendshift" width="250" height="55"/></a>
+    <img src="https://trendshift.io/api/badge/repositories/42303" alt="AprilNEA%2FOpenLogi | Trendshift" width="250" height="55"/></a>
+    <a href="https://www.producthunt.com/products/openlogi?embed=true&amp;utm_source=badge-featured&amp;utm_medium=badge&amp;utm_campaign=badge-openlogi" target="_blank" rel="noopener noreferrer">
+    <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="https://api.producthunt.com/widgets/embed-image/v1/top-post-badge.svg?post_id=openlogi&amp;theme=dark&amp;period=daily">
+        <source media="(prefers-color-scheme: light)" srcset="https://api.producthunt.com/widgets/embed-image/v1/top-post-badge.svg?post_id=openlogi&amp;theme=light&amp;period=daily">
+        <img alt="OpenLogi - A local-first alternative to Logitech Options+ | Product Hunt" width="250" height="54" src="https://api.producthunt.com/widgets/embed-image/v1/top-post-badge.svg?post_id=openlogi&amp;theme=light&amp;period=daily">
+    </picture></a>
 </p>
 
 > **Assez d'Options+ ? Essayez OpenLogi.**
@@ -40,7 +46,7 @@ Ce qu'OpenLogi fait et qu'Options+ ne fait pas :
 
 - **Rester léger.** Du Rust natif + GPUI.
 - **Tourner sous Linux.** Linux est une plateforme de premier rang pour OpenLogi.
-- **Choisir son bouton de gestes.** Confiez le rôle de gestes à n'importe quel bouton physique — ou désactivez complètement les gestes.
+- **Des gestes sur les boutons pris en charge.** Affectez des actions gestuelles aux commandes prises en charge — ou désactivez complètement les gestes.
 - **Une configuration en texte brut.** Tout tient dans un fichier TOML, synchronisable entre machines comme vous voulez.
 - **Scriptable.** Une vraie CLI en plus de la GUI.
 
@@ -54,7 +60,9 @@ Ce qu'OpenLogi fait et qu'Options+ ne fait pas :
 **Souris**
 
 - Capture et remappage des boutons du milieu, mode-shift et molette de pouce (le bouton du milieu partout, le reste selon l'appareil)
-- Affectations de gestes par direction avec capture en direct, sur n'importe quel bouton compatible
+- Affectations de gestes par direction avec capture en direct sur les commandes prises en charge : Précédent/Suivant, DPI/ModeShift, bouton de gestes dédié et panneau haptique
+  - Les gestes DPI/ModeShift nécessitent une prise en charge de la redirection des événements (diversion) et de raw-XY signalée par l'appareil.
+  - Les boutons gauche et droit et les commandes des molettes ne peuvent pas recevoir de nouvelles affectations de gestes ; les affectations existantes du bouton du milieu sont conservées.
 - Actions Ring : un anneau d'actions à huit emplacements centré sur le curseur (`ShowActionsRing`), avec des dispositions par application
 - Contrôle DPI avec préréglages et actions Cycle / Set-preset (`0x2201`)
 - Molette SmartShift : mode, sensibilité et panneau de cran permanent (`0x2111`)
@@ -106,7 +114,7 @@ Téléchargez le `.deb` ou le `.rpm` depuis la [dernière release](https://githu
 
 ```sh
 # Debian / Ubuntu
-sudo dpkg -i openlogi_*.deb
+sudo dpkg -i openlogi-*.deb
 
 # Fedora / RHEL
 sudo rpm -i openlogi-*.rpm
@@ -175,4 +183,4 @@ Merci à [@kubai087](https://github.com/kubai087) pour la conception du logo Ope
 
 ## Activité du dépôt
 
-![Repobeats analytics image](https://repobeats.axiom.co/api/embed/4a0b576a03e9d528ad31ccf4797a1286c045d021.svg "Repobeats analytics image")
+![Repobeats analytics image](https://repobeats.com/AprilNEA/OpenLogi "Repobeats analytics image")

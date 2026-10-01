@@ -14,6 +14,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use openlogi_core::brand;
 use openlogi_ipc::RUN_ENV;
 use succession::eviction::{self, AnonymousOutcome, Policy};
 use succession::supervision::{Event, Supervisor};
@@ -156,9 +157,11 @@ fn report(event: &Event<'_>, helper: &Path, pressed_anonymous: &mut bool) {
 
 fn overlay_binary_path() -> Option<PathBuf> {
     let executable = std::env::current_exe().ok()?;
-    let sibling = executable
-        .parent()?
-        .join(format!("openlogi-overlay{}", std::env::consts::EXE_SUFFIX));
+    let sibling = executable.parent()?.join(format!(
+        "{}{}",
+        brand::Helper::Overlay.executable(),
+        std::env::consts::EXE_SUFFIX
+    ));
     if sibling.is_file() {
         return Some(sibling);
     }
@@ -168,12 +171,7 @@ fn overlay_binary_path() -> Option<PathBuf> {
         path.extension()
             .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
     }) {
-        for relative in [
-            "Contents/Library/LoginItems/OpenLogi Overlay Dev.app/Contents/MacOS/openlogi-overlay",
-            "Contents/Library/LoginItems/OpenLogi Overlay.app/Contents/MacOS/openlogi-overlay",
-            // Bundles built before the helpers were renamed to their display names.
-            "Contents/Library/LoginItems/OpenLogiOverlay.app/Contents/MacOS/openlogi-overlay",
-        ] {
+        for relative in brand::Helper::Overlay.executable_candidates() {
             let candidate = app.join(relative);
             if candidate.is_file() {
                 return Some(candidate);
@@ -181,7 +179,7 @@ fn overlay_binary_path() -> Option<PathBuf> {
         }
     }
 
-    find_on_path("openlogi-overlay")
+    find_on_path(brand::Helper::Overlay.executable())
 }
 
 fn find_on_path(name: &str) -> Option<PathBuf> {

@@ -253,9 +253,7 @@ impl RawHidChannel for WindowsHidppChannel {
     }
 
     async fn write_report(&self, src: &[u8]) -> Result<usize, Box<dyn Error + Send + Sync>> {
-        if !self.device_io.allows_io() {
-            return Err(super::device_io_error());
-        }
+        self.device_io.ensure_allowed()?;
         let endpoint = match src.first().copied().and_then(endpoint_for_report_id) {
             Some(ReportEndpoint::Short) => self.short.as_ref(),
             Some(ReportEndpoint::Long) => Some(&self.long),
@@ -271,9 +269,7 @@ impl RawHidChannel for WindowsHidppChannel {
             )
         })?;
 
-        if !self.device_io.allows_io() {
-            return Err(super::device_io_error());
-        }
+        self.device_io.ensure_allowed()?;
         let result = endpoint.write_report(src).await;
         if let Err(e) = &result
             && is_permanent_disconnect(e.as_ref())

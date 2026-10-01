@@ -1,0 +1,28 @@
+# Owner: openlogi_ipc::client::Observer — the observe loop's connection state:
+# the client, the generation ledger, and the one observe call in flight, armed
+# again after every answer. Only the IPC clients are in scope: the agent side
+# serves these calls.
+id: ipc-observe-owner
+language: rust
+severity: error
+message: Observing the agent is openlogi_ipc::client::Observer's job (Observer::state or Observer::action_ring, then next()). Do not call observe or observe_action_ring on the client here.
+note: |
+  The settings app and the overlay each kept their own client, ledger and
+  call-in-flight bundle around these two calls. See "Single source of truth"
+  in AGENTS.md.
+files:
+  - crates/openlogi-desktop/**/*.rs
+  - crates/openlogi-overlay/**/*.rs
+  - crates/openlogi-cli/**/*.rs
+rule:
+  any:
+    - pattern: $CLIENT.observe_action_ring($$$ARGS)
+    # tarpc's observe takes a request context first; GPUI's `cx.observe` takes
+    # an entity and a closure, and is not this.
+    - all:
+        - pattern: $CLIENT.observe($CTX, $SINCE)
+        - has:
+            field: arguments
+            has:
+              nthChild: 1
+              regex: '(?i)context|ctx'

@@ -14,6 +14,8 @@ use std::sync::{LazyLock, Mutex, PoisonError};
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use openlogi_core::binding::KeyboardUsage;
 use openlogi_core::binding::{Action, KeyCombo};
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+use openlogi_core::binding::{Script, WorkflowStep};
 use openlogi_core::scroll::ScrollDelta;
 
 #[cfg(target_os = "macos")]
@@ -24,6 +26,13 @@ mod linux;
 
 #[cfg(target_os = "windows")]
 mod windows;
+
+#[cfg(target_os = "linux")]
+use linux as platform;
+#[cfg(target_os = "macos")]
+use macos as platform;
+#[cfg(target_os = "windows")]
+use windows as platform;
 
 /// Which isolated edge of a held keyboard chord to synthesize.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,6 +50,12 @@ enum KeyPhase {
 enum HeldKey {
     #[cfg(target_os = "macos")]
     Command,
+    /// The platform logo key: Linux `KEY_LEFTMETA` or the Windows key. On macOS
+    /// the logo key *is* Command, so `Super` chords own `HeldKey::Command`
+    /// there — one physical key, one owner — exactly as `Cmd` chords own
+    /// `HeldKey::Control` on Linux and Windows.
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    Super,
     Control,
     Shift,
     Alt,
@@ -152,7 +167,7 @@ static HELD_OUTPUT: LazyLock<Mutex<HeldOutput>> =
 fn held_keys(combo: &KeyCombo) -> Vec<HeldKey> {
     let mut keys = Vec::with_capacity(4);
     #[cfg(target_os = "macos")]
-    if combo.has_command() {
+    if combo.has_command() || combo.has_super() {
         keys.push(HeldKey::Command);
     }
     #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -169,8 +184,58 @@ fn held_keys(combo: &KeyCombo) -> Vec<HeldKey> {
     if combo.has_option() {
         keys.push(HeldKey::Alt);
     }
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    if combo.has_super() {
+        keys.push(HeldKey::Super);
+    }
     keys.push(HeldKey::Key(combo.key()));
     keys
+}
+
+/// A shortcut-table entry, parsed once into the chord it names. The tables are
+/// hand-written constants, so a parse failure is a programming error.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+fn parse_shortcut(text: &str) -> KeyCombo {
+    text.parse()
+        .unwrap_or_else(|error| unreachable!("hardcoded shortcut table entry {text:?}: {error}"))
+}
+
+/// Run a script off the caller's thread: a shell command, an AppleScript or a
+/// workflow can take seconds, and the caller is the input hook.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+fn dispatch_script(script: Script<'_>) {
+    match script {
+        Script::AppleScript(src) => {
+            let src = src.to_string();
+            std::thread::spawn(move || platform::run_apple_script(&src));
+        }
+        Script::ShellCommand(cmd) => {
+            let cmd = cmd.to_string();
+            std::thread::spawn(move || platform::run_shell_command(&cmd));
+        }
+        Script::Workflow(steps) => {
+            let steps = steps.to_vec();
+            std::thread::spawn(move || run_workflow(&steps));
+        }
+    }
+}
+
+/// Run workflow steps in order on the current (worker) thread, so a `Delay`
+/// never stalls the event tap. Each step is one call into the platform
+/// backend; a backend that cannot perform a step logs and moves on.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+fn run_workflow(steps: &[WorkflowStep]) {
+    for step in steps {
+        match step {
+            WorkflowStep::TypeText(text) => platform::type_text(text),
+            WorkflowStep::PressKey(combo) => platform::press_combo(combo),
+            WorkflowStep::Delay { millis } => {
+                std::thread::sleep(std::time::Duration::from_millis(*millis));
+            }
+            WorkflowStep::RunAppleScript(src) => platform::run_apple_script(src),
+            WorkflowStep::RunShellCommand(cmd) => platform::run_shell_command(cmd),
+        }
+    }
 }
 
 /// Synthesise the OS-level event for `action`.
@@ -310,18 +375,18 @@ fn hold_transition(released: Option<&KeyCombo>, pressed: Option<&KeyCombo>) {
     }
 }
 
-/// Navigate the browser identified by `pid` backwards or forwards using the
-/// Accessibility API (`AXPress` on the "Go back" / "Go forward" toolbar button).
+/// Navigate Safari backwards or forwards using `AXPress` on its toolbar
+/// button's stable Accessibility identifier.
 ///
-/// Call this from the gesture watcher **at the moment the button press arrives**
-/// so `pid` reflects the correct frontmost app rather than whatever happens to
-/// be frontmost when the async dispatch completes. Returns `true` on success.
+/// Pass the Safari process captured when the button press arrived. The call
+/// returns `false` if that process is no longer frontmost or the frontmost app
+/// is not Safari.
 /// No-op (returns `false`) on non-macOS platforms.
 #[must_use]
 pub fn ax_navigate_browser(pid: i32, forward: bool) -> bool {
     #[cfg(target_os = "macos")]
     {
-        macos::ax_browser_navigate(forward, Some(pid))
+        macos::ax_browser_navigate(forward, pid)
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -618,6 +683,83 @@ mod tests {
             output.transition(Some(&command_a), None),
             HoldTransition {
                 up: vec![HeldKey::Command, HeldKey::Key(command_a.key())],
+                down: vec![],
+            }
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn super_and_command_share_one_physical_output() {
+        let super_a = combo("Super+A");
+        let command_b = combo("Cmd+B");
+        let mut output = HeldOutput::default();
+
+        assert_eq!(
+            output.transition(None, Some(&super_a)),
+            HoldTransition {
+                up: vec![],
+                down: vec![HeldKey::Command, HeldKey::Key(super_a.key())],
+            }
+        );
+        assert_eq!(
+            output.transition(None, Some(&command_b)),
+            HoldTransition {
+                up: vec![],
+                down: vec![HeldKey::Key(command_b.key())],
+            }
+        );
+        assert_eq!(
+            output.transition(Some(&super_a), None),
+            HoldTransition {
+                up: vec![HeldKey::Key(super_a.key())],
+                down: vec![],
+            }
+        );
+        assert_eq!(
+            output.transition(Some(&command_b), None),
+            HoldTransition {
+                up: vec![HeldKey::Command, HeldKey::Key(command_b.key())],
+                down: vec![],
+            }
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn super_plus_command_owns_the_physical_key_once() {
+        let chord = combo("Cmd+Super+A");
+        assert_eq!(
+            super::held_keys(&chord),
+            vec![HeldKey::Command, HeldKey::Key(chord.key())]
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[test]
+    fn super_is_distinct_from_control() {
+        let super_a = combo("Super+A");
+        let command_b = combo("Cmd+B");
+        let mut output = HeldOutput::default();
+
+        assert_eq!(
+            output.transition(None, Some(&super_a)),
+            HoldTransition {
+                up: vec![],
+                down: vec![HeldKey::Super, HeldKey::Key(super_a.key())],
+            }
+        );
+        assert_eq!(
+            output.transition(None, Some(&command_b)),
+            HoldTransition {
+                up: vec![],
+                down: vec![HeldKey::Control, HeldKey::Key(command_b.key())],
+            }
+        );
+        assert_eq!(
+            output.transition(Some(&super_a), None),
+            HoldTransition {
+                up: vec![HeldKey::Super, HeldKey::Key(super_a.key())],
                 down: vec![],
             }
         );
