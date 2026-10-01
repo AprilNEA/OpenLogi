@@ -193,6 +193,8 @@ crates/
   openlogi-overlay/ the `openlogi-overlay` binary — the cursor-centred Actions Ring
 ```
 
+The [proposed peripheral architecture](PERIPHERAL_ARCHITECTURE.md) covers built-in drivers, loadable device descriptors, and sandboxed code plugins. It describes the intended extension contracts and migration; it does not describe released device support.
+
 ## Agent guidance
 
 Shared rules have one tracked source: [`.agents/rules/`](../.agents/rules/).
