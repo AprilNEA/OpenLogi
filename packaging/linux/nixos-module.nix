@@ -25,6 +25,14 @@ in
     environment.systemPackages = [ cfg.package ];
     services.udev.packages = [ cfg.package ];
 
+    # The udev rule grants /dev/uinput with TAG+="uaccess", which logind applies
+    # in response to a device event — and a host that has never loaded the
+    # uinput module has no such device, so the node stays root-owned and the
+    # agent cannot create the virtual device button remapping needs. The other
+    # packaging paths ship /etc/modules-load.d/openlogi.conf for this; on NixOS
+    # the equivalent is asking for the module here.
+    boot.kernelModules = [ "uinput" ];
+
     systemd.user.services.openlogi-agent = {
       description = "OpenLogi background agent";
       wantedBy = lib.optionals cfg.launchAtLogin [ "graphical-session.target" ];
