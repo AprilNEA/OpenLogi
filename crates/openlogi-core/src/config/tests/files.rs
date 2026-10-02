@@ -92,11 +92,8 @@ fn migrated_load_backs_up_the_pre_migration_source_exactly_once() {
 fn config_backups_rotate_between_generations() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("config.toml");
-    fs::write(&path, b"first").expect("write first generation");
-    super::backup_existing_config(&path).expect("back up first generation");
-
-    fs::write(&path, b"second").expect("write second generation");
-    super::backup_existing_config(&path).expect("back up second generation");
+    super::backup_existing_config(&path, b"first").expect("back up first generation");
+    super::backup_existing_config(&path, b"second").expect("back up second generation");
 
     assert_eq!(
         fs::read(super::config_backup_path(&path, 1).expect("backup path"))
@@ -328,5 +325,28 @@ fn saving_through_a_symlink_writes_the_target_and_keeps_the_link() {
         fs::read_to_string(&target)
             .expect("read target")
             .contains("selected_device = \"three\"")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_resolution_follows_the_full_hop_limit() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let target = dir.path().join("config.toml");
+    fs::write(&target, "").expect("write target");
+    let link = |hop: usize| dir.path().join(format!("link{hop}"));
+    let mut previous = target.clone();
+    for hop in 1..=41 {
+        std::os::unix::fs::symlink(&previous, link(hop)).expect("symlink");
+        previous = link(hop);
+    }
+
+    assert_eq!(
+        super::resolve_symlinks(&link(40)).expect("40 hops is within the limit"),
+        target
+    );
+    assert!(
+        super::resolve_symlinks(&link(41)).is_err(),
+        "41 hops exceeds the limit"
     );
 }

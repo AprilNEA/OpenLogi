@@ -155,16 +155,24 @@ impl ConfigFile {
     /// Returns a [`ConfigError::Write`] with [`io::ErrorKind::WouldBlock`] if
     /// another writer holds the lock, rather than blocking the caller.
     pub fn save(&mut self, config: &Config) -> Result<(), ConfigError> {
-        if let Some(parent) = self.path.parent() {
+        // Atomic replacement must update the target, not replace its symlink.
+        // Resolve once so the lock, conflict check, backup and commit use the
+        // same target path even if the config link is repointed during a save.
+        let target = resolve_symlinks(&self.path).map_err(|source| ConfigError::Read {
+            path: self.path.clone(),
+            source,
+        })?;
+        if let Some(parent) = target.parent() {
             fs::create_dir_all(parent).map_err(|source| ConfigError::Write {
-                path: self.path.clone(),
+                path: target.clone(),
                 source,
             })?;
         }
         // Lock a stable inode, not the config that atomic replacement swaps out.
+        // Place the sidecar beside the target so symlink aliases share the lock.
         // Keep the sidecar on disk: unlinking it would let writers lock different
         // inodes. The handle holds the lock through the check, backups and commit.
-        let lock_path = self.path.with_added_extension("lock");
+        let lock_path = target.with_added_extension("lock");
         let lock = fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -179,7 +187,7 @@ impl ConfigFile {
             path: lock_path,
             source: source.into(),
         })?;
-        let current = match fs::read_to_string(&self.path) {
+        let current = match fs::read_to_string(&target) {
             Ok(source) => Some(source),
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
             Err(source) => {
@@ -217,23 +225,14 @@ impl ConfigFile {
         }
 
         let body = render_config(config, self.source.as_deref(), &self.path)?;
-        backup_config_once(&self.path).map_err(|source| ConfigError::Write {
-            path: self.path.clone(),
-            source,
-        })?;
-        // The atomic write renames a staged file over its target, which would
-        // replace a symlinked config (a dotfiles manager such as GNU stow)
-        // with a plain copy. Commit to the file the link points at instead.
-        let target = resolve_symlinks(&self.path).map_err(|source| ConfigError::Write {
-            path: self.path.clone(),
-            source,
-        })?;
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent).map_err(|source| ConfigError::Write {
-                path: target.clone(),
+        // Backed up from the revision the conflict check just verified, not
+        // a fresh read that could observe a different file.
+        backup_config_once(&self.path, current.as_deref()).map_err(|source| {
+            ConfigError::Write {
+                path: self.path.clone(),
                 source,
-            })?;
-        }
+            }
+        })?;
         write_atomic(&target, body.as_bytes()).map_err(|source| ConfigError::Write {
             path: target,
             source,
@@ -401,23 +400,24 @@ fn reconcile_item(current: &mut Item, generated: &Item) {
     }
 }
 
-fn backup_config_once(path: &Path) -> io::Result<()> {
+/// Back up `current` (the config's on-disk text, `None` when it does not
+/// exist yet) the first time this process saves `path`.
+fn backup_config_once(path: &Path, current: Option<&str>) -> io::Result<()> {
     let mut backed_up = BACKED_UP_CONFIGS
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
     if backed_up.contains(path) {
         return Ok(());
     }
-    match fs::metadata(path) {
-        Ok(_) => backup_existing_config(path)?,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
+    if let Some(current) = current {
+        backup_existing_config(path, current.as_bytes())?;
     }
     backed_up.insert(path.to_path_buf());
     Ok(())
 }
 
-pub(super) fn backup_existing_config(path: &Path) -> io::Result<()> {
+/// Rotate the backups beside `path` and store `current` as the newest.
+pub(super) fn backup_existing_config(path: &Path, current: &[u8]) -> io::Result<()> {
     for generation in (1..CONFIG_BACKUP_GENERATIONS).rev() {
         let source = config_backup_path(path, generation)?;
         match fs::read(&source) {
@@ -426,7 +426,7 @@ pub(super) fn backup_existing_config(path: &Path) -> io::Result<()> {
             Err(error) => return Err(error),
         }
     }
-    write_atomic(&config_backup_path(path, 1)?, &fs::read(path)?)
+    write_atomic(&config_backup_path(path, 1)?, current)
 }
 
 /// Path of the pre-migration copy: the config's own name with
@@ -461,11 +461,12 @@ pub(super) fn config_backup_path(path: &Path, generation: usize) -> io::Result<P
 /// Follow `path` through every symlink to the file it finally names, which
 /// need not exist yet (a dangling link is written through, not replaced).
 /// Relative link targets resolve against the link's own directory.
-fn resolve_symlinks(path: &Path) -> io::Result<PathBuf> {
-    // The kernel's own loop limit (`MAXSYMLINKS` on Linux and macOS).
+pub(super) fn resolve_symlinks(path: &Path) -> io::Result<PathBuf> {
+    // Linux's loop limit (`MAXSYMLINKS`); macOS stops at 32. Inclusive, so
+    // the file reached by the last permitted hop is still examined.
     const MAX_LINKS: usize = 40;
     let mut current = path.to_path_buf();
-    for _ in 0..MAX_LINKS {
+    for _ in 0..=MAX_LINKS {
         match fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 let link = fs::read_link(&current)?;
