@@ -10,6 +10,7 @@ pub mod diag;
 pub mod fixture;
 pub mod light;
 pub mod list;
+pub mod peripheral;
 pub mod snapshot;
 
 #[derive(Debug, Subcommand)]
@@ -34,6 +35,9 @@ pub enum Command {
     /// Inspect and control standalone Logitech lights.
     #[command(subcommand)]
     Light(light::LightCmd),
+    /// Inspect peripheral capabilities, native bindings, and local plugins through the agent.
+    #[command(subcommand)]
+    Peripheral(peripheral::PeripheralCmd),
 }
 
 impl Command {
@@ -54,6 +58,7 @@ impl Command {
             Self::Diag(cmd) => cmd.run().await?,
             Self::Fixture(cmd) => cmd.run().await?,
             Self::Light(cmd) => cmd.run().await?,
+            Self::Peripheral(cmd) => cmd.run().await?,
         }
         Ok(ExitCode::SUCCESS)
     }

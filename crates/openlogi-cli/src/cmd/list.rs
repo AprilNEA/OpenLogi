@@ -30,23 +30,33 @@ const NOTHING_FOUND: u8 = 2;
 /// is present, so scripts can tell "no hardware" apart from a failed
 /// enumeration.
 pub async fn run(_args: ListArgs) -> Result<ExitCode> {
-    let (inventories, agent_status) = if let Some(snapshot) = agent_snapshot().await {
-        eprintln!("(inventory read from the running agent)");
-        (snapshot.inventory, Some(snapshot.status))
-    } else {
-        eprintln!(
-            "(no agent reachable — reading hardware directly; macOS judges this \
+    let (inventories, cameras, peripherals, agent_status) =
+        if let Some(snapshot) = agent_snapshot().await {
+            eprintln!("(inventory read from the running agent)");
+            (
+                snapshot.inventory,
+                snapshot.peripherals.cameras().cloned().collect::<Vec<_>>(),
+                snapshot.peripherals.devices,
+                Some(snapshot.status),
+            )
+        } else {
+            eprintln!(
+                "(no agent reachable — reading hardware directly; macOS judges this \
              process's Input Monitoring grant, not the agent's)"
-        );
-        let inventories = openlogi_hid::enumerate()
-            .await
-            .context("failed to enumerate HID++ devices")?;
-        (inventories, None)
-    };
-    let cameras = openlogi_camera::enumerate_cameras();
+            );
+            let inventories = openlogi_hid::enumerate()
+                .await
+                .context("failed to enumerate HID++ devices")?;
+            (
+                inventories,
+                openlogi_camera::enumerate_cameras(),
+                Vec::new(),
+                None,
+            )
+        };
 
-    if inventories.is_empty() && cameras.is_empty() {
-        println!("No Logitech HID++ devices or webcams found.");
+    if inventories.is_empty() && cameras.is_empty() && peripherals.is_empty() {
+        println!("No supported devices found.");
         println!();
         print_empty_notes(agent_status.as_ref());
         return Ok(ExitCode::from(NOTHING_FOUND));
@@ -66,6 +76,26 @@ pub async fn run(_args: ListArgs) -> Result<ExitCode> {
         print_cameras(&cameras);
     }
 
+    for record in peripherals.iter().filter(|record| {
+        !matches!(
+            openlogi_core::peripheral::builtin::BuiltinDriver::find(record.driver.driver.as_ref()),
+            Some(
+                openlogi_core::peripheral::builtin::BuiltinDriver::Hidpp
+                    | openlogi_core::peripheral::builtin::BuiltinDriver::Camera
+            )
+        )
+    }) {
+        println!(
+            "{} ({}, {:?}, driver={})",
+            record.name, record.model, record.connection, record.driver.driver
+        );
+        for status in &record.operations {
+            println!(
+                "  {}: {:?}; {:?}",
+                status.capability, status.application, status.verification
+            );
+        }
+    }
     Ok(ExitCode::SUCCESS)
 }
 
