@@ -65,6 +65,22 @@ fn app_switch_republishes_capture_plans() {
 }
 
 #[test]
+fn app_switch_cancels_held_buttons_only_when_a_per_app_override_is_involved() {
+    let mut config = Config::default();
+    config.set_per_app_binding("a", "editor", ButtonId::Back, Some(Action::Undo));
+    let mut orch = orchestrator(config);
+    orch.devices = vec![dev("a", 1, true)];
+    orch.rebuild();
+    // No profile on either side: a desktop-switch gesture changing the front
+    // app must not end its own hold (#1634).
+    assert!(!orch.set_current_app(Some(ForegroundApp::unnamed("finder".into()))));
+    assert!(!orch.set_current_app(Some(ForegroundApp::unnamed("safari".into()))));
+    // Entering or leaving an app with a profile changes the bindings.
+    assert!(orch.set_current_app(Some(ForegroundApp::unnamed("editor".into()))));
+    assert!(orch.set_current_app(Some(ForegroundApp::unnamed("safari".into()))));
+}
+
+#[test]
 fn pointer_profiles_switch_to_desktop_without_changing_keyboard_focus() {
     use openlogi_hook::{PointerContext, PointerTarget};
 

@@ -13,6 +13,12 @@ pub const GESTURE_SWIPE_THRESHOLD: i32 = 50;
 /// Maximum cross-axis travel allowed at the threshold, so only a reasonably
 /// straight swipe commits. Grows with the dominant axis (`max(deadzone, 35%)`).
 pub const GESTURE_SWIPE_DEADZONE: i32 = 40;
+/// How long the pointer must rest mid-hold before the next swipe may repeat
+/// the direction that just committed — the mouse equivalent of lifting a finger
+/// between trackpad swipes. Without a pause, motion that keeps going the same
+/// way is the same swipe and never fires twice.
+// ponytail: fixed constant, make it a user setting if people want to tune it.
+pub const GESTURE_REARM_PAUSE: std::time::Duration = std::time::Duration::from_millis(250);
 /// Minimum time a gesture button must be held before its travel can commit to a
 /// swipe. Distinguishes a deliberate hold-and-swipe from a quick click whose
 /// cursor happened to be moving. Shared by both gesture paths (the HID++ thumb
@@ -88,9 +94,16 @@ pub struct SwipeAccumulator {
     /// arbitrarily long hold can never overflow).
     dx: i32,
     dy: i32,
-    /// Set once a direction has committed this hold, so it fires exactly once
-    /// and the release isn't then also read as a click.
+    /// Set once a direction has committed this hold, so the release isn't
+    /// then also read as a click.
     fired: bool,
+    /// The direction committed by the current stroke. Travel restarts from
+    /// zero after each commit, so one hold can chain swipes (left, right,
+    /// left...) the way Options+ does; motion that continues this direction is
+    /// the same stroke and is dropped until a [`GESTURE_REARM_PAUSE`].
+    last: Option<GestureDirection>,
+    /// When the last motion arrived, to detect the pause that ends a stroke.
+    moved_at: Option<Instant>,
 }
 
 impl SwipeAccumulator {
@@ -100,6 +113,8 @@ impl SwipeAccumulator {
         self.dx = 0;
         self.dy = 0;
         self.fired = false;
+        self.last = None;
+        self.moved_at = None;
     }
 
     /// Whether a hold is in progress (between [`Self::begin`] and [`Self::end`]),
@@ -110,11 +125,28 @@ impl SwipeAccumulator {
     }
 
     /// Feed a pointer-move / raw-XY delta into the current hold. Returns
-    /// `Some(direction)` exactly once per hold — the instant travel commits, and
-    /// only after the hold passes [`GESTURE_HOLD_FOR_SWIPE`] — and `None` while
-    /// still too short, already committed, or not holding.
+    /// `Some(direction)` the instant travel commits (only after the hold passes
+    /// [`GESTURE_HOLD_FOR_SWIPE`]), then restarts travel so the same hold can
+    /// commit again; `None` while still too short or not holding.
     pub fn accumulate(&mut self, dx: i32, dy: i32) -> Option<GestureDirection> {
-        if self.fired || self.held_since.is_none() {
+        self.held_since?;
+        let now = Instant::now();
+        if self
+            .moved_at
+            .is_some_and(|t| now.saturating_duration_since(t) >= GESTURE_REARM_PAUSE)
+        {
+            // A rest ends the stroke: the next swipe may repeat the last
+            // direction. Travel already summed is kept, so a reversal paused
+            // halfway still completes.
+            self.last = None;
+        }
+        self.moved_at = Some(now);
+        // Motion still heading the committed way is the same stroke (overshoot
+        // and its drift included): drop that report, so a long swipe fires once
+        // and a reversal counts from the turning point at the normal threshold.
+        // Only the report is dropped — reversal progress already summed survives
+        // a stray jitter packet.
+        if self.last.is_some_and(|dir| continues(dir, dx, dy)) {
             return None;
         }
         self.dx = self.dx.saturating_add(dx);
@@ -124,6 +156,9 @@ impl SwipeAccumulator {
             .is_some_and(|t| t.elapsed() >= GESTURE_HOLD_FOR_SWIPE);
         if held_long_enough && let Some(dir) = detect_swipe(self.dx, self.dy) {
             self.fired = true;
+            self.last = Some(dir);
+            self.dx = 0;
+            self.dy = 0;
             return Some(dir);
         }
         None
@@ -148,6 +183,28 @@ impl SwipeAccumulator {
         if self.held_since.is_some() {
             self.held_since = Instant::now().checked_sub(GESTURE_HOLD_FOR_SWIPE * 2);
         }
+    }
+
+    /// Test-only seam: age the last motion past [`GESTURE_REARM_PAUSE`], as if
+    /// the pointer had rested, without sleeping.
+    #[doc(hidden)]
+    pub fn rest_for_test(&mut self) {
+        if let Some(moved_at) = self.moved_at {
+            self.moved_at = moved_at.checked_sub(GESTURE_REARM_PAUSE * 2);
+        }
+    }
+}
+
+/// Whether one motion report keeps heading in the already-committed direction
+/// (dominant along it), rather than reversing or turning.
+fn continues(direction: GestureDirection, dx: i32, dy: i32) -> bool {
+    let (ax, ay) = (dx.saturating_abs(), dy.saturating_abs());
+    match direction {
+        GestureDirection::Left => dx < 0 && ax >= ay,
+        GestureDirection::Right => dx > 0 && ax >= ay,
+        GestureDirection::Up => dy < 0 && ay >= ax,
+        GestureDirection::Down => dy > 0 && ay >= ax,
+        GestureDirection::Click => false,
     }
 }
 
@@ -222,8 +279,96 @@ mod tests {
             acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
             Some(GestureDirection::Right)
         );
-        // Further travel in the same hold must not re-fire.
+        // Continuing the same swipe must not re-fire.
         assert_eq!(acc.accumulate(50, 0), None);
+    }
+
+    #[test]
+    fn accumulator_chains_reversals_within_one_hold() {
+        let mut acc = SwipeAccumulator::default();
+        acc.begin();
+        acc.backdate_hold_for_test();
+        let t = GESTURE_SWIPE_THRESHOLD + 10;
+        // Each reversal fires at the normal threshold (issue #1634).
+        assert_eq!(acc.accumulate(-t, 0), Some(GestureDirection::Left));
+        assert_eq!(acc.accumulate(t, 0), Some(GestureDirection::Right));
+        assert_eq!(acc.accumulate(-t, 0), Some(GestureDirection::Left));
+        assert!(!acc.end(), "a hold that swiped is not a click");
+    }
+
+    #[test]
+    fn accumulator_fires_one_long_swipe_once() {
+        let mut acc = SwipeAccumulator::default();
+        acc.begin();
+        acc.backdate_hold_for_test();
+        assert_eq!(
+            acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+            Some(GestureDirection::Right)
+        );
+        // Keep going right, drifting a little upward, far past any threshold.
+        for _ in 0..40 {
+            assert_eq!(acc.accumulate(10, -3), None);
+        }
+    }
+
+    #[test]
+    fn accumulator_reverses_from_the_turning_point_after_an_overshoot() {
+        let mut acc = SwipeAccumulator::default();
+        acc.begin();
+        acc.backdate_hold_for_test();
+        assert_eq!(
+            acc.accumulate(-(GESTURE_SWIPE_THRESHOLD + 10), 0),
+            Some(GestureDirection::Left)
+        );
+        // Overshoot 100 units left, then turn: the normal threshold suffices.
+        for _ in 0..10 {
+            assert_eq!(acc.accumulate(-10, 0), None);
+        }
+        assert_eq!(
+            acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+            Some(GestureDirection::Right)
+        );
+    }
+
+    #[test]
+    fn accumulator_reversal_survives_jitter_back_toward_the_last_swipe() {
+        let mut acc = SwipeAccumulator::default();
+        acc.begin();
+        acc.backdate_hold_for_test();
+        assert_eq!(
+            acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+            Some(GestureDirection::Right)
+        );
+        // Left 30, a one-unit rightward jitter packet, then left 30 more.
+        assert_eq!(acc.accumulate(-30, 0), None);
+        assert_eq!(acc.accumulate(1, 0), None);
+        assert_eq!(acc.accumulate(-30, 0), Some(GestureDirection::Left));
+    }
+
+    #[test]
+    fn accumulator_reversal_survives_a_rest_halfway() {
+        let mut acc = SwipeAccumulator::default();
+        acc.begin();
+        acc.backdate_hold_for_test();
+        assert_eq!(
+            acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+            Some(GestureDirection::Right)
+        );
+        assert_eq!(acc.accumulate(-30, 0), None);
+        acc.rest_for_test();
+        assert_eq!(acc.accumulate(-30, 0), Some(GestureDirection::Left));
+    }
+
+    #[test]
+    fn accumulator_repeats_a_direction_after_a_rest() {
+        let mut acc = SwipeAccumulator::default();
+        acc.begin();
+        acc.backdate_hold_for_test();
+        let t = GESTURE_SWIPE_THRESHOLD + 10;
+        assert_eq!(acc.accumulate(t, 0), Some(GestureDirection::Right));
+        assert_eq!(acc.accumulate(t, 0), None, "still the same stroke");
+        acc.rest_for_test();
+        assert_eq!(acc.accumulate(t, 0), Some(GestureDirection::Right));
     }
 
     #[test]
