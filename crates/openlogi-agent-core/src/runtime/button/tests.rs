@@ -374,6 +374,9 @@ fn hidpp_edges_and_pulses_retain_their_press_time_targets() {
 #[test]
 fn pointer_change_cancels_old_target_but_preserves_keyboard_and_new_target() {
     use openlogi_hook::PointerTarget;
+    // A bound press holds output against the old target and ends; an unbound
+    // gesture hold follows the pointer instead (the retarget test below).
+    let bound = Binding::Single(Action::Copy);
     for old in [
         PointerTarget::Window {
             process_id: 41,
@@ -389,7 +392,7 @@ fn pointer_change_cancels_old_target_but_preserves_keyboard_and_new_target() {
         let old_press = input
             .try_hook_down_with_target(
                 ButtonId::Back,
-                None,
+                Some(&bound),
                 ActionDispatchTarget::for_pointer(Some(old), || Some(417)),
             )
             .expect("old down");
@@ -429,6 +432,39 @@ fn pointer_change_cancels_old_target_but_preserves_keyboard_and_new_target() {
         assert_eq!(press.token(), &keyboard);
         assert!(owner.shutdown());
     }
+}
+
+#[test]
+fn pointer_change_retargets_a_gesture_hold_instead_of_canceling_it() {
+    use openlogi_hook::PointerTarget;
+    let (sent, received) = mpsc::channel();
+    let mut owner = ButtonRuntimeOwner::spawn(move |event| sent.send(event).expect("receiver"))
+        .expect("worker");
+    let input = owner.input();
+    let old = PointerTarget::Window {
+        process_id: 41,
+        window_id: 7,
+    };
+    let current = PointerTarget::Desktop;
+    let hold = input
+        .try_hook_down_with_target(
+            ButtonId::GestureButton,
+            None,
+            ActionDispatchTarget::for_pointer(Some(old), || None),
+        )
+        .expect("gesture down");
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Started(_)
+    ));
+    // The first swipe switched desktops, changing the hovered window (#1634).
+    input.cancel_pointer_except(current);
+    assert!(input.try_trigger_while_pressed(&hold, &Action::Copy));
+    let ButtonRuntimeEvent::Triggered { press, .. } = recv_event(&received) else {
+        panic!("the hold must survive the pointer change and keep triggering");
+    };
+    assert_eq!(press.token(), &hold);
+    assert!(owner.shutdown());
 }
 
 #[test]
