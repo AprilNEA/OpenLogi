@@ -3,7 +3,7 @@
 use super::{
     App, AppState, Entity, FluentBuilder, IconName, InteractiveElement, ParentElement,
     SettingField, SettingGroup, SettingItem, SettingPage, Slider, SliderState, Styled,
-    ThumbwheelSensitivity, VerticalScrollSensitivity, div, h_flex, px, theme, v_flex,
+    GestureAxisBias, GestureSensitivity, ThumbwheelSensitivity, VerticalScrollSensitivity, div, h_flex, px, theme, v_flex,
 };
 use crate::ui::theme::Typography as _;
 use gpui_base::Button as BaseButton;
@@ -17,6 +17,8 @@ use crate::platform::registration::ServiceStatus;
 pub(super) struct SensitivitySliders {
     pub(super) vertical_scroll: Entity<SliderState>,
     pub(super) thumbwheel: Entity<SliderState>,
+    pub(super) gesture: Entity<SliderState>,
+    pub(super) gesture_bias: Entity<SliderState>,
 }
 
 pub(super) fn general_page(
@@ -26,6 +28,8 @@ pub(super) fn general_page(
     let SensitivitySliders {
         vertical_scroll,
         thumbwheel,
+        gesture,
+        gesture_bias,
     } = sliders;
     let group = SettingGroup::new()
         .item(mouse_profile_target_item())
@@ -45,6 +49,20 @@ pub(super) fn general_page(
                 SettingField::render(move |_, _, cx| thumbwheel_sensitivity_field(&thumbwheel, cx)),
             )
             .description(tr!("pointer.thumbwheel_sensitivity_description")),
+        )
+        .item(
+            SettingItem::new(
+                tr!("pointer.gesture_sensitivity"),
+                SettingField::render(move |_, _, cx| gesture_sensitivity_field(&gesture, cx)),
+            )
+            .description(tr!("pointer.gesture_sensitivity_description")),
+        )
+        .item(
+            SettingItem::new(
+                tr!("pointer.gesture_axis_bias"),
+                SettingField::render(move |_, _, cx| gesture_axis_bias_field(&gesture_bias, cx)),
+            )
+            .description(tr!("pointer.gesture_axis_bias_description")),
         )
         .item(launch_at_login_item());
 
@@ -154,6 +172,27 @@ fn vertical_scroll_sensitivity_field(slider: &Entity<SliderState>, cx: &mut App)
         slider,
         value.to_string(),
         value == VerticalScrollSensitivity::DEFAULT,
+        cx,
+    )
+}
+
+
+fn gesture_sensitivity_field(slider: &Entity<SliderState>, cx: &mut App) -> gpui::Div {
+    let value = GestureSensitivity::from_rounded(slider.read(cx).value().start());
+    sensitivity_field(
+        slider,
+        value.to_string(),
+        value == GestureSensitivity::DEFAULT,
+        cx,
+    )
+}
+
+fn gesture_axis_bias_field(slider: &Entity<SliderState>, cx: &mut App) -> gpui::Div {
+    let value = GestureAxisBias::from_rounded(slider.read(cx).value().start());
+    sensitivity_field(
+        slider,
+        value.to_string(),
+        value == GestureAxisBias::DEFAULT,
         cx,
     )
 }

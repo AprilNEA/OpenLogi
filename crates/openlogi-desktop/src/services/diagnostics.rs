@@ -63,6 +63,8 @@ fn app_info(state: Option<&AppState>, running_from_bundle: bool) -> AppInfo {
         show_in_menu_bar: settings.map(|s| s.show_in_menu_bar),
         check_for_updates: settings.map(|s| s.check_for_updates),
         thumbwheel_sensitivity: settings.map(|s| s.thumbwheel_sensitivity.into()),
+        gesture_sensitivity: settings.map(|s| s.gesture_sensitivity.into()),
+        gesture_axis_bias: settings.map(|s| s.gesture_axis_bias.into()),
         config_schema_version: config.map(|(version, _)| version),
         configured_device_count: config.map(|(_, count)| count),
         running_from_bundle,
