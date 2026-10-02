@@ -241,7 +241,9 @@ pub fn plan_for_device(
 #[cfg(test)]
 mod tests {
     use openlogi_core::binding::{Binding, LongPressBinding};
-    use openlogi_hid::reprog_controls::{GESTURE_BUTTON_CID, HAPTIC_PANEL_CID};
+    use openlogi_hid::reprog_controls::{
+        GESTURE_BUTTON_CID, HAPTIC_PANEL_CID, MULTIPLATFORM_GESTURE_BUTTON_CID,
+    };
 
     use super::*;
 
@@ -597,8 +599,16 @@ mod tests {
                 .spec
                 .divert_buttons
                 .iter()
-                .any(|&(cid, _)| cid == GESTURE_BUTTON_CID),
+                .any(|&(cid, _)| cid == GESTURE_BUTTON_CID
+                    || cid == MULTIPLATFORM_GESTURE_BUTTON_CID),
             "the gesture owner is delivered via raw-XY divert, never a plain one"
+        );
+        assert!(
+            plan.target
+                .spec
+                .divert_gesture_sources
+                .contains(&MULTIPLATFORM_GESTURE_BUTTON_CID),
+            "the M720's gesture CID must be armed for gestures"
         );
     }
 
@@ -616,6 +626,15 @@ mod tests {
                 .divert_buttons
                 .contains(&(GESTURE_BUTTON_CID, ButtonId::GestureButton)),
             "a gestures-off Mission Control binding must reach the agent"
+        );
+        // The M720 Triathlon's thumb button reports the multiplatform CID;
+        // without it in the plan the binding never reached the agent there.
+        assert!(
+            plan.target
+                .spec
+                .divert_buttons
+                .contains(&(MULTIPLATFORM_GESTURE_BUTTON_CID, ButtonId::GestureButton)),
+            "the multiplatform gesture CID must be diverted too"
         );
     }
 
