@@ -21,6 +21,7 @@ members = [
     "crates/openlogi-ui",
     "crates/openlogi-overlay",
     "crates/openlogi-hook",
+    "crates/openlogi-plugin",
     "xtask",
 ]
 # The CLI used to be the root package, so a bare `cargo build` / `cargo run`

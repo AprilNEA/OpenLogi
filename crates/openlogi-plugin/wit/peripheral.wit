@@ -1,0 +1,80 @@
+package openlogi:peripheral@1.0.0;
+
+interface types {
+    enum error-kind { invalid, permission-denied, unavailable, resource-limit, io, uncertain }
+    record failure { kind: error-kind, message: string }
+    variant value { boolean(bool), integer(s64), number(f64), text(string) }
+    record setting { key: string, value: value }
+    record label { locale: string, text: string }
+    enum trigger { short-press, press-release }
+    record usage { page: u16, usage: u16 }
+    record control { id: string, labels: list<label>, trigger: trigger, source: option<usage> }
+    variant capability-kind { input-remap(list<control>), extension, unsupported }
+    record capability { id: string, version: u32, required: bool, kind: capability-kind }
+    enum transition { press, release, trigger }
+    record input-event { capability: string, control: string, transition: transition }
+    record completion { request: u64, outcome: result<_, failure> }
+    variant update { input(input-event), setting(setting), completed(completion) }
+    enum report-kind { input, output, feature-read, feature-write }
+    record report { kind: report-kind, id: u8, payload: list<u8> }
+    record device-report { endpoint: string, report: report }
+    record io-completion { request: u64, outcome: result<option<report>, failure> }
+    variant event { report(device-report), completed(io-completion), timer(u64), resumed }
+    record key-binding { control: string, key: option<u16> }
+    variant command { settings(list<setting>), key(key-binding) }
+    record request { id: u64, revision: u64, capability: string, command: command }
+    enum detach-reason { disabled, disconnected, suspended, replaced, shutdown, fault }
+    record context { generation: u64, model: string }
+    record endpoint-facts { role: string, vendor: u16, product: u16, collection: option<usage>, max-report-bytes: option<u32> }
+}
+
+interface session {
+    use types.{endpoint-facts};
+    resource endpoint {
+        facts: func() -> endpoint-facts;
+    }
+    endpoints: func() -> list<endpoint>;
+}
+
+interface hid {
+    use session.{endpoint};
+    use types.{report, failure};
+    subscribe: func(device: borrow<endpoint>, report-ids: list<u8>) -> result<_, failure>;
+    submit: func(device: borrow<endpoint>, data: report) -> result<u64, failure>;
+}
+
+interface native-remap {
+    use types.{failure};
+    set-key: func(control: string, keyboard-usage: option<u16>) -> result<u64, failure>;
+}
+
+interface time {
+    use types.{failure};
+    monotonic-ms: func() -> u64;
+    schedule: func(after-ms: u32) -> result<u64, failure>;
+}
+
+interface settings {
+    use types.{setting};
+    read: func() -> list<setting>;
+}
+
+interface diagnostics {
+    enum level { debug, info, warning, error }
+    emit: func(level: level, message: string);
+}
+
+world driver {
+    import session;
+    import hid;
+    import native-remap;
+    import time;
+    import settings;
+    import diagnostics;
+    use types.{context, setting, capability, failure, request, update, event, detach-reason};
+    export attach: func(context: context, parameters: list<setting>) -> result<list<capability>, failure>;
+    export apply: func(request: request) -> result<list<update>, failure>;
+    export event: func(event: event) -> result<list<update>, failure>;
+    export detach: func(reason: detach-reason) -> result<_, failure>;
+    export migrate-settings: func(from-version: u32, settings: list<setting>) -> result<list<setting>, failure>;
+}

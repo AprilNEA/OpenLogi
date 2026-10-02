@@ -1,0 +1,23 @@
+[package]
+name = "openlogi-counter-button"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT OR Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+alternate = []
+conformance-faults = []
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+
+[workspace]
+
+[dependencies]
+wit-bindgen = "0.62.0"
