@@ -379,7 +379,9 @@ impl Orchestrator {
     /// An unidentified target (an overlay, a failed lookup) can last a whole
     /// session. It selects the focused profile, never the desktop's, yet stays
     /// pointer-scoped: its presses still end when the pointer reaches an
-    /// identified target, whose profile they were not resolved against.
+    /// identified target, whose profile they were not resolved against. With
+    /// no focused application there is no such profile and the global bindings
+    /// apply, as focused mode applies them in the same state.
     fn mouse_context(&self) -> (Option<&str>, Option<openlogi_hook::PointerTarget>) {
         let target = self.pointer_context.target;
         if self.config.app_settings.mouse_profile_target == MouseProfileTarget::Focused
