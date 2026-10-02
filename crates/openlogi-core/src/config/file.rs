@@ -206,13 +206,12 @@ impl ConfigFile {
             })?;
         }
         let body = render_config(config, self.source.as_deref(), &self.path)?;
-        // Backed up from the revision the conflict check just verified, not
-        // a fresh read that could observe a different file.
-        backup_config_once(&self.path, current.as_deref()).map_err(|source| {
-            ConfigError::Write {
-                path: self.path.clone(),
-                source,
-            }
+        // Re-read at backup time so an edit landing after the conflict check
+        // is still recoverable, but from the resolved target rather than
+        // through the link, which may have been repointed since.
+        backup_config_once(&self.path, &target).map_err(|source| ConfigError::Write {
+            path: self.path.clone(),
+            source,
         })?;
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent).map_err(|source| ConfigError::Write {
@@ -387,17 +386,19 @@ fn reconcile_item(current: &mut Item, generated: &Item) {
     }
 }
 
-/// Back up `current` (the config's on-disk text, `None` when it does not
-/// exist yet) the first time this process saves `path`.
-fn backup_config_once(path: &Path, current: Option<&str>) -> io::Result<()> {
+/// Back up the contents of `target` (the file `path` resolves to) beside
+/// `path` the first time this process saves it.
+fn backup_config_once(path: &Path, target: &Path) -> io::Result<()> {
     let mut backed_up = BACKED_UP_CONFIGS
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
     if backed_up.contains(path) {
         return Ok(());
     }
-    if let Some(current) = current {
-        backup_existing_config(path, current.as_bytes())?;
+    match fs::read(target) {
+        Ok(current) => backup_existing_config(path, &current)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
     }
     backed_up.insert(path.to_path_buf());
     Ok(())
