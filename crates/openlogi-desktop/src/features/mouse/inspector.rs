@@ -12,7 +12,7 @@ use gpui_component::{
     Disableable as _, Icon, IconName, Selectable as _, Sizable as _, button::Button, h_flex,
     input::InputState, scroll::ScrollableElement as _, v_flex,
 };
-use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
+use openlogi_core::binding::{Action, ButtonId, GestureDirection, KeyCombo, default_binding};
 
 use super::hotspots::MouseControlId;
 use super::thumbwheel::ThumbwheelPreset;
@@ -44,12 +44,16 @@ pub(super) struct BindingInspectorData<'a> {
 struct ActionPickerContext<'a> {
     open: bool,
     search: &'a Entity<InputState>,
+    shortcut_input: &'a Entity<InputState>,
+    shortcut_hold: bool,
     view: &'a Entity<MouseModelView>,
 }
 
 pub(super) fn binding_inspector(
     data: BindingInspectorData<'_>,
     action_search: &Entity<InputState>,
+    shortcut_input: &Entity<InputState>,
+    shortcut_hold: bool,
     view: &Entity<MouseModelView>,
     cx: &Context<MouseModelView>,
 ) -> gpui::Div {
@@ -57,6 +61,8 @@ pub(super) fn binding_inspector(
     let picker = ActionPickerContext {
         open: data.action_picker_open,
         search: action_search,
+        shortcut_input,
+        shortcut_hold,
         view,
     };
     let body = match data.selected {
@@ -223,7 +229,7 @@ fn button_inspector(
             panel.child(action_library(
                 "inspector-action",
                 Some(&action),
-                picker.search,
+                picker,
                 &on_pick,
                 pal,
                 cx,
@@ -276,7 +282,7 @@ fn inherited_gesture_inspector(
             panel.child(action_library(
                 "inspector-gesture-override",
                 None,
-                picker.search,
+                picker,
                 &on_pick,
                 pal,
                 cx,
@@ -337,7 +343,7 @@ fn gesture_inspector(
             panel.child(action_library(
                 "inspector-gesture-action",
                 Some(&current),
-                picker.search,
+                picker,
                 &on_pick,
                 pal,
                 cx,
@@ -578,6 +584,7 @@ fn selection_card(
 ) -> impl IntoElement {
     let toggle = picker.view.clone();
     let search = picker.search.clone();
+    let shortcut_input = picker.shortcut_input.clone();
     let opening = !picker.open;
     let accessible_label = value.clone();
     BaseButton::new(id)
@@ -635,8 +642,12 @@ fn selection_card(
         .on_click(move |_, window, cx| {
             if opening {
                 search.update(cx, |search, cx| search.set_value("", window, cx));
+                shortcut_input.update(cx, |input, cx| input.set_value("", window, cx));
             }
             toggle.update(cx, |view, cx| {
+                if opening {
+                    view.set_shortcut_hold(false);
+                }
                 view.toggle_action_picker();
                 cx.notify();
             });
@@ -646,18 +657,18 @@ fn selection_card(
 fn action_library(
     id_prefix: &'static str,
     current: Option<&Action>,
-    action_search: &Entity<InputState>,
+    picker: ActionPickerContext<'_>,
     on_pick: &PickFn,
     pal: Palette,
     cx: &Context<MouseModelView>,
 ) -> impl IntoElement {
-    let query = action_search.read(cx).value();
+    let query = picker.search.read(cx).value();
     let rows = action_rows_matching(id_prefix, current, &query, on_pick, pal);
     v_flex()
         .gap_2()
         .pt_1()
         .child(editor_section(tr!("actions.actions"), pal))
-        .child(control_input(action_search).cleanable(true))
+        .child(control_input(picker.search).cleanable(true))
         .child(
             v_flex()
                 .gap_0p5()
@@ -671,6 +682,86 @@ fn action_library(
                     )
                 })
                 .children(rows),
+        )
+        .child(custom_shortcut_editor(picker, on_pick, pal, cx))
+}
+
+/// Free-text `KeyCombo` recorder shared by every `action_library` call site.
+/// Mirrors `action_ring/editor.rs::shortcut_editor`, plus a Hold/Tap choice a
+/// ring wedge (selected by releasing over it) has no physical use for.
+fn custom_shortcut_editor(
+    picker: ActionPickerContext<'_>,
+    on_pick: &PickFn,
+    pal: Palette,
+    cx: &Context<MouseModelView>,
+) -> impl IntoElement {
+    let hold = picker.shortcut_hold;
+    let view_tap = picker.view.clone();
+    let view_hold = picker.view.clone();
+    let submit_input = picker.shortcut_input.clone();
+    let on_pick = on_pick.clone();
+    let is_valid = picker
+        .shortcut_input
+        .read(cx)
+        .value()
+        .parse::<KeyCombo>()
+        .is_ok();
+
+    v_flex()
+        .gap_1()
+        .child(editor_section(tr!("actions.custom_shortcut"), pal))
+        .child(
+            h_flex()
+                .gap_2()
+                .child(
+                    control_button("shortcut-tap")
+                        .selected(!hold)
+                        .label(tr!("actions.shortcut_tap"))
+                        .on_click(move |_, _, cx| {
+                            view_tap.update(cx, |v, cx| {
+                                v.set_shortcut_hold(false);
+                                cx.notify();
+                            });
+                        }),
+                )
+                .child(
+                    control_button("shortcut-hold")
+                        .selected(hold)
+                        .label(tr!("actions.shortcut_hold"))
+                        .on_click(move |_, _, cx| {
+                            view_hold.update(cx, |v, cx| {
+                                v.set_shortcut_hold(true);
+                                cx.notify();
+                            });
+                        }),
+                ),
+        )
+        .child(
+            h_flex()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(control_input(picker.shortcut_input).cleanable(true)),
+                )
+                .child(
+                    Button::new("shortcut-add")
+                        .compact()
+                        .label(tr!("common.add"))
+                        .disabled(!is_valid)
+                        .on_click(move |_, window, cx| {
+                            let text = submit_input.read(cx).value().to_string();
+                            if let Ok(combo) = text.parse::<KeyCombo>() {
+                                let action = if hold {
+                                    Action::HoldShortcut(combo)
+                                } else {
+                                    Action::CustomShortcut(combo)
+                                };
+                                (on_pick)(action, window, cx);
+                            }
+                        }),
+                ),
         )
 }
 
