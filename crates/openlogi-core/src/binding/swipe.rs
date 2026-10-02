@@ -135,19 +135,18 @@ impl SwipeAccumulator {
             .moved_at
             .is_some_and(|t| now.saturating_duration_since(t) >= GESTURE_REARM_PAUSE)
         {
-            // A rest ends the stroke: the next swipe starts fresh and may repeat
-            // the last direction.
+            // A rest ends the stroke: the next swipe may repeat the last
+            // direction. Travel already summed is kept, so a reversal paused
+            // halfway still completes.
             self.last = None;
-            self.dx = 0;
-            self.dy = 0;
         }
         self.moved_at = Some(now);
         // Motion still heading the committed way is the same stroke (overshoot
-        // and its drift included): drop it whole, so a long swipe fires once and
-        // a reversal counts from the turning point at the normal threshold.
+        // and its drift included): drop that report, so a long swipe fires once
+        // and a reversal counts from the turning point at the normal threshold.
+        // Only the report is dropped — reversal progress already summed survives
+        // a stray jitter packet.
         if self.last.is_some_and(|dir| continues(dir, dx, dy)) {
-            self.dx = 0;
-            self.dy = 0;
             return None;
         }
         self.dx = self.dx.saturating_add(dx);
@@ -329,6 +328,35 @@ mod tests {
             acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
             Some(GestureDirection::Right)
         );
+    }
+
+    #[test]
+    fn accumulator_reversal_survives_jitter_back_toward_the_last_swipe() {
+        let mut acc = SwipeAccumulator::default();
+        acc.begin();
+        acc.backdate_hold_for_test();
+        assert_eq!(
+            acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+            Some(GestureDirection::Right)
+        );
+        // Left 30, a one-unit rightward jitter packet, then left 30 more.
+        assert_eq!(acc.accumulate(-30, 0), None);
+        assert_eq!(acc.accumulate(1, 0), None);
+        assert_eq!(acc.accumulate(-30, 0), Some(GestureDirection::Left));
+    }
+
+    #[test]
+    fn accumulator_reversal_survives_a_rest_halfway() {
+        let mut acc = SwipeAccumulator::default();
+        acc.begin();
+        acc.backdate_hold_for_test();
+        assert_eq!(
+            acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+            Some(GestureDirection::Right)
+        );
+        assert_eq!(acc.accumulate(-30, 0), None);
+        acc.rest_for_test();
+        assert_eq!(acc.accumulate(-30, 0), Some(GestureDirection::Left));
     }
 
     #[test]
