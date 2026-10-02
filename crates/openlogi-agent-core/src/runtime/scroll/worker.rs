@@ -3,54 +3,98 @@
 use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use openlogi_core::config::VerticalScrollSensitivity;
+use openlogi_core::config::{
+    SmoothScrollAcceleration, SmoothScrollDurationMs, SmoothScrollStep, SmoothScrollTuning,
+    VerticalScrollSensitivity,
+};
 use openlogi_core::scroll::ScrollDelta;
 use tracing::warn;
 
-use super::{ScrollEngine, ScrollFrame, ScrollSource, WheelDelta};
+use super::{MotionTuning, ScrollEngine, ScrollFrame, ScrollSource, WheelDelta};
 use crate::runtime::HidppSessionId;
 
 /// OS-hook callbacks must fail open rather than wait for the worker.
 const INPUT_QUEUE_CAPACITY: usize = 128;
 /// Bounds graceful process shutdown if platform injection stops returning.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
-const SMOOTH_SCROLL_FLAG: u8 = 0x80;
-const SENSITIVITY_MASK: u8 = !SMOOTH_SCROLL_FLAG;
+const SMOOTH_SCROLL_FLAG: u64 = 1 << 63;
+const SENSITIVITY_SHIFT: u32 = 48;
+const DURATION_SHIFT: u32 = 32;
+const STEP_SHIFT: u32 = 16;
+const ACCELERATION_SHIFT: u32 = 8;
 
 #[derive(Clone, Copy)]
 struct ScrollPreferenceSnapshot {
     smooth_scroll: bool,
     vertical_sensitivity: VerticalScrollSensitivity,
+    tuning: SmoothScrollTuning,
+}
+
+impl ScrollPreferenceSnapshot {
+    fn motion_tuning(self, source: &ScrollSource) -> MotionTuning {
+        let preaccelerated = os_hook_input_is_preaccelerated(source);
+        MotionTuning {
+            step: self.tuning.step.multiplier(),
+            duration: Duration::from_millis(u64::from(u16::from(self.tuning.duration))),
+            max_gain: if preaccelerated {
+                1.0
+            } else {
+                self.tuning.acceleration.max_gain()
+            },
+            preaccelerated,
+        }
+    }
+}
+
+/// Whether `source` delivers wheel distance with an OS acceleration curve
+/// already applied. macOS bakes its scroll-acceleration curve into the
+/// fractional line deltas the hook reports — a fast spin arrives an order of
+/// magnitude longer than the wheel's physical rotation — so applying
+/// tick-rate gain on top would accelerate twice. Diverted HID++ wheels
+/// report raw counts and keep the configured gain, as do the raw-delta
+/// hooks on other platforms.
+fn os_hook_input_is_preaccelerated(source: &ScrollSource) -> bool {
+    cfg!(target_os = "macos") && matches!(source, ScrollSource::OsHook(_))
 }
 
 /// Atomically published settings read from input callbacks and the scroll
 /// worker without taking the orchestrator's config lock.
 ///
-/// The smooth-scroll flag occupies the high bit and the validated `1..=100`
-/// sensitivity occupies the low seven bits. One byte therefore publishes a
-/// consistent settings snapshot instead of two independently changing values.
+/// The smooth-scroll flag occupies the high bit and the validated sensitivity,
+/// duration, step, and acceleration values occupy fixed byte lanes below it.
+/// One word therefore publishes a consistent settings snapshot instead of
+/// independently changing values.
 pub struct ScrollPreferences {
-    encoded: AtomicU8,
+    encoded: AtomicU64,
 }
 
 impl ScrollPreferences {
     /// Create a live settings cell from validated config values.
     #[must_use]
-    pub fn new(smooth_scroll: bool, vertical_sensitivity: VerticalScrollSensitivity) -> Self {
+    pub fn new(
+        smooth_scroll: bool,
+        vertical_sensitivity: VerticalScrollSensitivity,
+        tuning: SmoothScrollTuning,
+    ) -> Self {
         Self {
-            encoded: AtomicU8::new(Self::encode(smooth_scroll, vertical_sensitivity)),
+            encoded: AtomicU64::new(Self::encode(smooth_scroll, vertical_sensitivity, tuning)),
         }
     }
 
-    /// Publish both settings as one snapshot.
-    pub fn publish(&self, smooth_scroll: bool, vertical_sensitivity: VerticalScrollSensitivity) {
+    /// Publish every scroll setting as one snapshot.
+    pub fn publish(
+        &self,
+        smooth_scroll: bool,
+        vertical_sensitivity: VerticalScrollSensitivity,
+        tuning: SmoothScrollTuning,
+    ) {
         self.encoded.store(
-            Self::encode(smooth_scroll, vertical_sensitivity),
+            Self::encode(smooth_scroll, vertical_sensitivity, tuning),
             Ordering::Relaxed,
         );
     }
@@ -67,21 +111,47 @@ impl ScrollPreferences {
         self.load().vertical_sensitivity
     }
 
-    fn encode(smooth_scroll: bool, vertical_sensitivity: VerticalScrollSensitivity) -> u8 {
-        let sensitivity = u8::from(vertical_sensitivity);
-        debug_assert_eq!(sensitivity & SMOOTH_SCROLL_FLAG, 0);
-        sensitivity | if smooth_scroll { SMOOTH_SCROLL_FLAG } else { 0 }
+    /// The current smooth-scroll motion settings.
+    #[must_use]
+    pub fn smooth_scroll_tuning(&self) -> SmoothScrollTuning {
+        self.load().tuning
     }
 
+    fn encode(
+        smooth_scroll: bool,
+        vertical_sensitivity: VerticalScrollSensitivity,
+        tuning: SmoothScrollTuning,
+    ) -> u64 {
+        u64::from(u8::from(vertical_sensitivity)) << SENSITIVITY_SHIFT
+            | u64::from(u16::from(tuning.duration)) << DURATION_SHIFT
+            | u64::from(u8::from(tuning.step)) << STEP_SHIFT
+            | u64::from(u8::from(tuning.acceleration)) << ACCELERATION_SHIFT
+            | if smooth_scroll { SMOOTH_SCROLL_FLAG } else { 0 }
+    }
+
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "each lane is masked to the width its validated value was encoded from"
+    )]
     fn load(&self) -> ScrollPreferenceSnapshot {
         let encoded = self.encoded.load(Ordering::Relaxed);
-        let raw_sensitivity = encoded & SENSITIVITY_MASK;
-        let Ok(vertical_sensitivity) = VerticalScrollSensitivity::try_new(raw_sensitivity) else {
+        let lane = |shift: u32| (encoded >> shift) as u8;
+        let (Ok(vertical_sensitivity), Ok(step), Ok(duration), Ok(acceleration)) = (
+            VerticalScrollSensitivity::try_new(lane(SENSITIVITY_SHIFT)),
+            SmoothScrollStep::try_new(lane(STEP_SHIFT)),
+            SmoothScrollDurationMs::try_new((encoded >> DURATION_SHIFT) as u16),
+            SmoothScrollAcceleration::try_new(lane(ACCELERATION_SHIFT)),
+        ) else {
             unreachable!("ScrollPreferences is initialized and published from validated values");
         };
         ScrollPreferenceSnapshot {
             smooth_scroll: encoded & SMOOTH_SCROLL_FLAG != 0,
             vertical_sensitivity,
+            tuning: SmoothScrollTuning {
+                step,
+                duration,
+                acceleration,
+            },
         }
     }
 }
@@ -443,9 +513,17 @@ fn run_worker(
         );
         match command {
             Ok(ScrollCommand::Input(input)) if cancellations.accepts(&input) => {
+                let snapshot = preferences.load();
                 match input.output {
-                    ScrollOutputMode::Smooth { at } if preferences.smooth_scroll_enabled() => {
-                        engine.impulse(input.source, input.impulse, at, emit_smooth);
+                    ScrollOutputMode::Smooth { at } if snapshot.smooth_scroll => {
+                        let tuning = snapshot.motion_tuning(&input.source);
+                        tracing::trace!(
+                            x = input.impulse.x,
+                            y = input.impulse.y,
+                            queued_us = at.elapsed().as_micros(),
+                            "smooth wheel impulse"
+                        );
+                        engine.impulse(input.source, input.impulse, at, tuning, emit_smooth);
                     }
                     ScrollOutputMode::Direct => {
                         engine.cancel_source(&input.source, emit_smooth);
@@ -477,11 +555,66 @@ mod tests {
         VerticalScrollSensitivity::try_new(raw).expect("test sensitivity is valid")
     }
 
+    /// Step 1× with acceleration off, so worker traces animate exactly the
+    /// distances they queue.
+    fn neutral_tuning() -> SmoothScrollTuning {
+        SmoothScrollTuning {
+            step: SmoothScrollStep::MIN,
+            duration: SmoothScrollDurationMs::MIN,
+            acceleration: SmoothScrollAcceleration::MIN,
+        }
+    }
+
     fn preferences(smooth_scroll: bool, sensitivity: u8) -> Arc<ScrollPreferences> {
         Arc::new(ScrollPreferences::new(
             smooth_scroll,
             self::sensitivity(sensitivity),
+            neutral_tuning(),
         ))
+    }
+
+    #[test]
+    fn preaccelerated_os_hook_input_forfeits_configured_gain() {
+        let snapshot = ScrollPreferenceSnapshot {
+            smooth_scroll: true,
+            vertical_sensitivity: sensitivity(14),
+            tuning: SmoothScrollTuning {
+                step: SmoothScrollStep::MAX,
+                duration: SmoothScrollDurationMs::MIN,
+                acceleration: SmoothScrollAcceleration::MAX,
+            },
+        };
+        let configured = SmoothScrollAcceleration::MAX.max_gain();
+        let hook = ScrollSource::OsHook(thread::current().id());
+        let hidpp = ScrollSource::Hidpp(HidppSessionId::with_epoch("mouse-a", 1));
+
+        let hook_gain = snapshot.motion_tuning(&hook).max_gain;
+        if cfg!(target_os = "macos") {
+            assert!((hook_gain - 1.0).abs() < f64::EPSILON);
+        } else {
+            assert!((hook_gain - configured).abs() < f64::EPSILON);
+        }
+        assert!((snapshot.motion_tuning(&hidpp).max_gain - configured).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn preferences_round_trip_every_published_lane() {
+        let tuning = SmoothScrollTuning {
+            step: SmoothScrollStep::try_new(12).expect("valid step"),
+            duration: SmoothScrollDurationMs::try_new(500).expect("valid duration"),
+            acceleration: SmoothScrollAcceleration::try_new(9).expect("valid acceleration"),
+        };
+        let preferences = ScrollPreferences::new(false, sensitivity(28), neutral_tuning());
+        preferences.publish(true, sensitivity(28), tuning);
+
+        assert!(preferences.smooth_scroll_enabled());
+        assert_eq!(preferences.vertical_sensitivity(), sensitivity(28));
+        assert_eq!(preferences.smooth_scroll_tuning(), tuning);
+
+        preferences.publish(false, sensitivity(100), neutral_tuning());
+        assert!(!preferences.smooth_scroll_enabled());
+        assert_eq!(preferences.vertical_sensitivity(), sensitivity(100));
+        assert_eq!(preferences.smooth_scroll_tuning(), neutral_tuning());
     }
 
     fn standalone_input(
@@ -569,14 +702,14 @@ mod tests {
         let (input, receiver, _controls) = standalone_input(2, Arc::clone(&preferences));
         assert!(!input.try_hook_scroll(ScrollDelta::wheel_ticks(0.0, 1.0)));
 
-        preferences.publish(false, sensitivity(7));
+        preferences.publish(false, sensitivity(7), neutral_tuning());
         assert!(input.try_hook_scroll(ScrollDelta::wheel_ticks(0.0, 2.0)));
         assert!(matches!(
             queued_input(&receiver).output,
             ScrollOutputMode::Direct
         ));
 
-        preferences.publish(true, sensitivity(28));
+        preferences.publish(true, sensitivity(28), neutral_tuning());
         assert!(input.try_hook_scroll(ScrollDelta::wheel_ticks(0.0, 1.0)));
         let queued = queued_input(&receiver);
         assert_eq!(queued.impulse, WheelDelta { x: 0.0, y: 2.0 });
