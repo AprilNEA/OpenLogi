@@ -17,6 +17,7 @@ pub mod event_monitor;
 pub mod hardware;
 pub mod observable;
 pub mod orchestrator;
+pub mod peripherals;
 pub mod receiver_access;
 pub mod runtime;
 pub mod watchers;
