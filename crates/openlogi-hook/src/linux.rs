@@ -399,7 +399,8 @@ fn translate(event: &evdev::InputEvent, hires_scroll: bool) -> Option<MouseEvent
                         RelativeAxisCode::REL_HWHEEL_HI_RES => {
                             Some(scroll(v / f64::from(HIRES_UNITS_PER_TICK), 0.0))
                         }
-                        // Low-res ticks are redundant when hi-res is active.
+                        // The low-res companion follows its hi-res event's
+                        // disposition instead (see `PendingFrame`).
                         _ => None,
                     }
                 } else {
@@ -427,6 +428,73 @@ fn key_to_button(key: KeyCode) -> Option<ButtonId> {
         // BTN_TASK is the closest generic match for a mode/DPI toggle button.
         KeyCode::BTN_TASK => Some(ButtonId::DpiToggle),
         _ => None,
+    }
+}
+
+/// The events of one evdev frame, held until its `SYN_REPORT` and then
+/// re-injected through the virtual device.
+///
+/// A hi-res wheel reports a motion as `REL_WHEEL_HI_RES` (`REL_HWHEEL_HI_RES`)
+/// plus, once a whole detent accumulates, a low-res `REL_WHEEL` (`REL_HWHEEL`)
+/// companion in the same frame. Only the hi-res event reaches the callback, so
+/// the companion takes its disposition, per axis. A passed-through hi-res event
+/// needs its companion: libinput derives the legacy discrete wheel axis, which
+/// older compositors such as mutter 42 scroll by, from the low-res count alone
+/// and reports it separately from the hi-res `v120` value, so forwarding both
+/// does not double the distance. A suppressed hi-res event takes its companion
+/// with it, because whoever consumed the motion re-injects all of it (the
+/// agent's injector emits its own low-res count).
+///
+/// The kernel sends the pair in either order (`hid-input` low-res first,
+/// `hid-logitech-hidpp` hi-res first), so companions are filtered when the
+/// frame closes, not as they arrive.
+#[derive(Debug, Default)]
+struct PendingFrame {
+    events: Vec<evdev::InputEvent>,
+    vertical_hires_suppressed: bool,
+    horizontal_hires_suppressed: bool,
+}
+
+impl PendingFrame {
+    /// Apply the callback's `disposition` to one non-sync `event`.
+    fn record(&mut self, event: evdev::InputEvent, disposition: EventDisposition) {
+        match (disposition, event.destructure()) {
+            (EventDisposition::PassThrough, _) => self.events.push(event),
+            (
+                EventDisposition::Suppress,
+                EventSummary::RelativeAxis(_, RelativeAxisCode::REL_WHEEL_HI_RES, _),
+            ) => self.vertical_hires_suppressed = true,
+            (
+                EventDisposition::Suppress,
+                EventSummary::RelativeAxis(_, RelativeAxisCode::REL_HWHEEL_HI_RES, _),
+            ) => self.horizontal_hires_suppressed = true,
+            (EventDisposition::Suppress, _) => {}
+        }
+    }
+
+    /// Close the frame at its `SYN_REPORT`: drop the companions of suppressed
+    /// hi-res events and hand the rest to `emit`, unless nothing is left.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error from `emit`; the frame's events are then unsent.
+    fn flush(
+        &mut self,
+        emit: impl FnOnce(&[evdev::InputEvent]) -> io::Result<()>,
+    ) -> io::Result<()> {
+        let vertical = std::mem::take(&mut self.vertical_hires_suppressed);
+        let horizontal = std::mem::take(&mut self.horizontal_hires_suppressed);
+        self.events.retain(|event| match event.destructure() {
+            EventSummary::RelativeAxis(_, RelativeAxisCode::REL_WHEEL, _) => !vertical,
+            EventSummary::RelativeAxis(_, RelativeAxisCode::REL_HWHEEL, _) => !horizontal,
+            _ => true,
+        });
+        if self.events.is_empty() {
+            return Ok(());
+        }
+        emit(&self.events)?;
+        self.events.clear();
+        Ok(())
     }
 }
 
@@ -459,8 +527,7 @@ fn device_thread(
 
     let device_fd = device.as_raw_fd();
     let stop_fd = stop_rx.as_raw_fd();
-    // Events that will be re-injected at the next SYN_REPORT.
-    let mut pending: Vec<evdev::InputEvent> = Vec::new();
+    let mut frame = PendingFrame::default();
 
     debug!("hook started on {}", path.display());
 
@@ -485,44 +552,24 @@ fn device_thread(
                 // Flush the report. `emit()` appends its own SYN_REPORT, so the
                 // incoming sync event is dropped rather than re-emitted — pushing
                 // it would send a redundant second SYN_REPORT.
-                if !pending.is_empty() {
-                    if let Err(e) = virtual_device.emit(&pending) {
-                        // The physical device is grabbed, so these pass-through
-                        // events can't reach the desktop any other way. A uinput
-                        // emit failure means the virtual device is broken, so
-                        // stop here — dropping the grab restores normal input —
-                        // rather than silently dropping events on every report.
-                        error!(
-                            "uinput emit failed on {}: {e} — stopping hook for this device",
-                            path.display()
-                        );
-                        break 'read;
-                    }
-                    pending.clear();
+                if let Err(e) = frame.flush(|events| virtual_device.emit(events)) {
+                    // The physical device is grabbed, so these pass-through
+                    // events can't reach the desktop any other way. A uinput
+                    // emit failure means the virtual device is broken, so
+                    // stop here — dropping the grab restores normal input —
+                    // rather than silently dropping events on every report.
+                    error!(
+                        "uinput emit failed on {}: {e} — stopping hook for this device",
+                        path.display()
+                    );
+                    break 'read;
                 }
             } else {
                 let disposition = match translate(&event, hires_scroll) {
                     Some(me) => cb(HookEvent::Mouse(me)),
-                    // Low-res companions (REL_WHEEL/REL_HWHEEL) must be suppressed when hi-res
-                    // is active — passing them through would double the scroll distance.
-                    None if hires_scroll
-                        && matches!(
-                            event.destructure(),
-                            EventSummary::RelativeAxis(
-                                _,
-                                RelativeAxisCode::REL_WHEEL | RelativeAxisCode::REL_HWHEEL,
-                                _
-                            )
-                        ) =>
-                    {
-                        EventDisposition::Suppress
-                    }
                     None => EventDisposition::PassThrough,
                 };
-                match disposition {
-                    EventDisposition::PassThrough => pending.push(event),
-                    EventDisposition::Suppress => {}
-                }
+                frame.record(event, disposition);
             }
         }
     }
@@ -740,6 +787,163 @@ mod tests {
     fn translate_sync_event_returns_none() {
         let event = InputEvent::new(EventType::SYNCHRONIZATION.0, 0, 0);
         assert!(translate(&event, false).is_none());
+    }
+
+    // ── PendingFrame ─────────────────────────────────────────────────────────
+
+    use EventDisposition::{PassThrough, Suppress};
+
+    fn rel(axis: RelativeAxisCode, value: i32) -> InputEvent {
+        InputEvent::new(EventType::RELATIVE.0, axis.0, value)
+    }
+
+    /// Record one frame's events in arrival order, close it, and return what
+    /// it re-injects, or `None` when it emits nothing.
+    fn close_frame(
+        frame: &mut PendingFrame,
+        events: &[(InputEvent, EventDisposition)],
+    ) -> Option<Vec<InputEvent>> {
+        for &(event, disposition) in events {
+            frame.record(event, disposition);
+        }
+        let mut emitted = None;
+        frame
+            .flush(|events| {
+                emitted = Some(events.to_vec());
+                Ok(())
+            })
+            .expect("a successful emit must not fail the flush");
+        emitted
+    }
+
+    #[test]
+    fn passed_through_hires_keeps_its_low_res_companion() {
+        // libinput's legacy discrete wheel axis counts only REL_WHEEL; without
+        // it, compositors on that axis never scroll.
+        let hires = rel(RelativeAxisCode::REL_WHEEL_HI_RES, -120);
+        let companion = rel(RelativeAxisCode::REL_WHEEL, -1);
+        assert_eq!(
+            close_frame(
+                &mut PendingFrame::default(),
+                &[(hires, PassThrough), (companion, PassThrough)],
+            ),
+            Some(vec![hires, companion]),
+        );
+    }
+
+    #[test]
+    fn suppressed_hires_drops_its_low_res_companion() {
+        let motion = rel(RelativeAxisCode::REL_X, 3);
+        assert_eq!(
+            close_frame(
+                &mut PendingFrame::default(),
+                &[
+                    (motion, PassThrough),
+                    (rel(RelativeAxisCode::REL_WHEEL_HI_RES, 120), Suppress),
+                    (rel(RelativeAxisCode::REL_WHEEL, 1), PassThrough),
+                ],
+            ),
+            Some(vec![motion]),
+        );
+    }
+
+    #[test]
+    fn companion_follows_its_hires_event_in_either_order() {
+        let pairs = [
+            (
+                RelativeAxisCode::REL_WHEEL_HI_RES,
+                RelativeAxisCode::REL_WHEEL,
+            ),
+            (
+                RelativeAxisCode::REL_HWHEEL_HI_RES,
+                RelativeAxisCode::REL_HWHEEL,
+            ),
+        ];
+        for (hires_axis, companion_axis) in pairs {
+            let hires = rel(hires_axis, 120);
+            let companion = rel(companion_axis, 1);
+            for disposition in [PassThrough, Suppress] {
+                for arrivals in [
+                    [(hires, disposition), (companion, PassThrough)],
+                    [(companion, PassThrough), (hires, disposition)],
+                ] {
+                    let expected = (disposition == PassThrough)
+                        .then(|| arrivals.map(|(event, _)| event).to_vec());
+                    assert_eq!(
+                        close_frame(&mut PendingFrame::default(), &arrivals),
+                        expected,
+                        "{arrivals:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn companion_follows_only_its_own_axis() {
+        // The callback judges each axis on its own, so one frame can suppress
+        // the vertical wheel and pass the horizontal one.
+        let horizontal_hires = rel(RelativeAxisCode::REL_HWHEEL_HI_RES, -120);
+        let horizontal = rel(RelativeAxisCode::REL_HWHEEL, -1);
+        assert_eq!(
+            close_frame(
+                &mut PendingFrame::default(),
+                &[
+                    (rel(RelativeAxisCode::REL_WHEEL_HI_RES, 120), Suppress),
+                    (horizontal_hires, PassThrough),
+                    (rel(RelativeAxisCode::REL_WHEEL, 1), PassThrough),
+                    (horizontal, PassThrough),
+                ],
+            ),
+            Some(vec![horizontal_hires, horizontal]),
+        );
+    }
+
+    #[test]
+    fn hires_suppression_ends_with_its_frame() {
+        let hires = rel(RelativeAxisCode::REL_WHEEL_HI_RES, 120);
+        let companion = rel(RelativeAxisCode::REL_WHEEL, 1);
+        let mut frame = PendingFrame::default();
+        assert_eq!(
+            close_frame(&mut frame, &[(hires, Suppress), (companion, PassThrough)]),
+            None,
+        );
+        assert_eq!(
+            close_frame(
+                &mut frame,
+                &[(hires, PassThrough), (companion, PassThrough)]
+            ),
+            Some(vec![hires, companion]),
+            "a suppression must not drop the next frame's companion"
+        );
+    }
+
+    #[test]
+    fn low_res_wheel_without_hires_keeps_the_callback_disposition() {
+        // Without REL_WHEEL_HI_RES the low-res wheel is the event the callback
+        // judges, and suppressing one axis leaves the other alone.
+        let vertical = rel(RelativeAxisCode::REL_WHEEL, -2);
+        let horizontal = rel(RelativeAxisCode::REL_HWHEEL, 1);
+        assert_eq!(
+            close_frame(
+                &mut PendingFrame::default(),
+                &[(vertical, Suppress), (horizontal, PassThrough)],
+            ),
+            Some(vec![horizontal]),
+        );
+        assert_eq!(
+            close_frame(&mut PendingFrame::default(), &[(vertical, PassThrough)]),
+            Some(vec![vertical]),
+        );
+    }
+
+    #[test]
+    fn flush_reports_emit_failure() {
+        let mut frame = PendingFrame::default();
+        frame.record(rel(RelativeAxisCode::REL_X, 1), PassThrough);
+        frame
+            .flush(|_| Err(io::Error::other("uinput device gone")))
+            .expect_err("the device loop stops the hook on this error");
     }
 
     // ── is_hookable_mouse ────────────────────────────────────────────────────
