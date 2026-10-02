@@ -6,6 +6,7 @@ use hidpp::{
     feature::hires_wheel::HiResWheelFeature,
     feature::{
         CreatableFeature,
+        adc_measurement::{AdcMeasurement, AdcMeasurementFeature},
         battery_status::BatteryStatusFeature,
         battery_voltage::BatteryVoltageFeature,
         device_information::{DeviceInformationFeature, DeviceTransport},
@@ -25,9 +26,9 @@ use crate::reprog_controls::DPI_MODE_SHIFT_CIDS;
 
 use super::events::{EventFeatureIndices, EventSubscriptionHandle};
 use super::mappings::{
-    legacy_battery_level_from_percentage, map_battery_level, map_battery_status, map_device_type,
-    map_legacy_battery_status, map_voltage_battery_status, normalize_serial_number,
-    voltage_battery_percentage,
+    legacy_battery_level_from_percentage, map_adc_battery_status, map_battery_level,
+    map_battery_status, map_device_type, map_legacy_battery_status, map_voltage_battery_status,
+    normalize_serial_number, voltage_battery_percentage,
 };
 
 /// Everything a single device probe yields. Any field is `None` when the
@@ -60,31 +61,62 @@ pub(super) struct ProbedFeatures {
     /// so `capabilities` above understates what the device can do. Memoizing
     /// that would hide a panel in the GUI for `REFRESH_INTERVAL`.
     pub(super) capabilities_incomplete: bool,
+    /// The battery feature answered that the battery-powered end is not
+    /// linked: a headset dongle whose headset is switched off. Volatile like
+    /// `battery`, so never persisted. Invariant: `true` implies `battery` is
+    /// `None`; the only writers are [`probe_features`] and the cache's battery
+    /// re-read, both of which take the pair from one [`BatteryRead`].
+    #[serde(skip)]
+    pub(super) unlinked: bool,
+}
+
+/// What one battery read learned about the device.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum BatteryRead {
+    /// A live reading.
+    Reading(BatteryInfo),
+    /// The battery-powered end is not linked (see [`ProbedFeatures::unlinked`]).
+    Unlinked,
+    /// No usable answer — asleep, mid-host-switch, a timeout. Says nothing
+    /// about presence.
+    Unavailable,
+}
+
+impl BatteryRead {
+    /// The `(battery, unlinked)` pair a probe records for this read.
+    pub(super) fn into_parts(self) -> (Option<BatteryInfo>, bool) {
+        match self {
+            Self::Reading(battery) => (Some(battery), false),
+            Self::Unlinked => (None, true),
+            Self::Unavailable => (None, false),
+        }
+    }
 }
 
 /// Which battery feature a device exposes plus its runtime feature index. Newer
 /// devices answer the unified `0x1004`; MX2S-era ones only the legacy `0x1000`
 /// — the same enhanced-then-legacy split SmartShift has with `0x2111`/`0x2110`.
 /// G-series wireless gaming devices (G915, G903 LS) expose neither and report
-/// battery only as a voltage via `0x1001`.
+/// battery only as a voltage via `0x1001`; wireless G-series headsets (G733)
+/// report it as a voltage via `0x1F20` instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) enum BatteryProbe {
     Unified(u8),
     Legacy(u8),
     Voltage(u8),
+    Adc(u8),
 }
 
 /// Read just the battery by addressing its feature at the known runtime index —
 /// one round-trip, with no `Device::new` ping and no feature-table walk. This is
 /// both the full probe's battery read (the walk just produced the index) and the
-/// cheap per-reconciliation refresh for cache hits. `None` when the device
-/// doesn't answer (asleep, switched hosts).
+/// cheap per-reconciliation refresh for cache hits.
 pub(super) async fn read_battery(
     channel: &Arc<HidppChannel>,
     slot: u8,
     probe: BatteryProbe,
-) -> Option<BatteryInfo> {
-    match probe {
+) -> BatteryRead {
+    let reading = match probe {
         BatteryProbe::Unified(feature_index) => {
             let feature = UnifiedBatteryFeature::new(Arc::clone(channel), slot, feature_index);
             feature
@@ -126,19 +158,36 @@ pub(super) async fn read_battery(
                 }
             })
         }
-    }
+        BatteryProbe::Adc(feature_index) => {
+            let feature = AdcMeasurementFeature::new(Arc::clone(channel), slot, feature_index);
+            match feature.get_adc_measurement().await {
+                Ok(AdcMeasurement::Linked { voltage_mv, status }) => {
+                    let percentage = voltage_battery_percentage(voltage_mv);
+                    Some(BatteryInfo {
+                        percentage,
+                        level: legacy_battery_level_from_percentage(percentage),
+                        status: map_adc_battery_status(status),
+                    })
+                }
+                Ok(AdcMeasurement::Unlinked) => return BatteryRead::Unlinked,
+                _ => None,
+            }
+        }
+    };
+    reading.map_or(BatteryRead::Unavailable, BatteryRead::Reading)
 }
 
 /// Locate a device's battery feature in an enumerated feature-ID table,
 /// preferring the unified `0x1004`, then the legacy `0x1000`, then the
-/// voltage-only `0x1001` (which reports no percentage, so a direct source
-/// always outranks it). The table is 1-based (index 0 is the implicit root
+/// voltage-only `0x1001` and `0x1F20` (which report no percentage, so a direct
+/// source always outranks them). The table is 1-based (index 0 is the implicit root
 /// feature, which enumeration omits).
 pub(super) fn battery_feature_index(ids: impl IntoIterator<Item = u16>) -> Option<BatteryProbe> {
     // A feature table holds at most `u8::MAX` entries (its count is a u8), so a
     // 1-based index always fits.
     let mut legacy = None;
     let mut voltage = None;
+    let mut adc = None;
     for (pos, id) in ids.into_iter().enumerate() {
         // Stop gracefully past u8::MAX instead of `?`-returning None, which would
         // discard a `legacy` already found. (The table caps at 255, so unreachable.)
@@ -154,8 +203,11 @@ pub(super) fn battery_feature_index(ids: impl IntoIterator<Item = u16>) -> Optio
         if id == BatteryVoltageFeature::ID && voltage.is_none() {
             voltage = Some(BatteryProbe::Voltage(index));
         }
+        if id == AdcMeasurementFeature::ID && adc.is_none() {
+            adc = Some(BatteryProbe::Adc(index));
+        }
     }
-    legacy.or(voltage)
+    legacy.or(voltage).or(adc)
 }
 
 /// Read the marketing identity from HID++ `0x0005` when the device exposes it.
@@ -247,9 +299,9 @@ pub(super) async fn probe_features(
             .is_err();
     }
 
-    let battery = match battery_probe {
-        Some(probe) => read_battery(channel, slot, probe).await,
-        None => None,
+    let (battery, unlinked) = match battery_probe {
+        Some(probe) => read_battery(channel, slot, probe).await.into_parts(),
+        None => (None, false),
     };
 
     let mut identity_incomplete = false;
@@ -305,6 +357,7 @@ pub(super) async fn probe_features(
             capabilities,
             identity_incomplete,
             capabilities_incomplete,
+            unlinked,
         },
         battery_probe,
         event_features,
@@ -361,11 +414,17 @@ async fn probe_extra_capabilities(
 #[cfg(test)]
 mod tests {
     use hidpp::feature::{
-        CreatableFeature as _, battery_status::BatteryStatusFeature,
-        battery_voltage::BatteryVoltageFeature, unified_battery::UnifiedBatteryFeature,
+        CreatableFeature as _, adc_measurement::AdcMeasurementFeature,
+        battery_status::BatteryStatusFeature, battery_voltage::BatteryVoltageFeature,
+        unified_battery::UnifiedBatteryFeature,
     };
 
-    use super::{BatteryProbe, ProbedFeatures, battery_feature_index, probe_features};
+    use openlogi_core::device::{BatteryLevel, BatteryStatus};
+
+    use super::{
+        BatteryProbe, BatteryRead, ProbedFeatures, battery_feature_index, probe_features,
+        read_battery,
+    };
     use crate::channel::scripted::{ScriptedRawHidChannel, feature_error, scripted_channel};
 
     async fn control_probe(
@@ -480,6 +539,90 @@ mod tests {
         assert_eq!(battery_feature_index(table), Some(BatteryProbe::Legacy(2)));
         let table = [BatteryVoltageFeature::ID, UnifiedBatteryFeature::ID];
         assert_eq!(battery_feature_index(table), Some(BatteryProbe::Unified(2)));
+    }
+
+    #[test]
+    fn adc_battery_is_found_when_it_is_the_only_source() {
+        // The G733 feature table: 0x1F20 is its only battery source, at 8.
+        let table = [
+            0x0001, 0x0003, 0x0005, 0x8070, 0x8010, 0x8310, 0x8300, 0x1f20,
+        ];
+        assert_eq!(AdcMeasurementFeature::ID, 0x1f20);
+        assert_eq!(battery_feature_index(table), Some(BatteryProbe::Adc(8)));
+    }
+
+    /// Reads the battery through a scripted `0x1F20` at feature index 8 whose
+    /// `getAdcMeasurement` answers `wire`, or the HID++ error code `wire[0]`
+    /// when `error` is set.
+    async fn adc_battery(wire: [u8; 3], error: bool) -> BatteryRead {
+        let (raw, _) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+            assert_eq!(
+                (request[2], request[3] >> 4),
+                (8, 0),
+                "unexpected request: {request:02x?}"
+            );
+            if error {
+                return Some(feature_error(request, wire[0]));
+            }
+            let mut response = vec![0; 20];
+            response[..4].copy_from_slice(&request[..4]);
+            response[0] = 0x11;
+            response[4..7].copy_from_slice(&wire);
+            Some(response)
+        });
+        let channel = scripted_channel(raw).await;
+        read_battery(&channel, 0xff, BatteryProbe::Adc(8)).await
+    }
+
+    #[tokio::test]
+    async fn adc_battery_estimates_a_percentage_from_the_voltage() {
+        // The G733's live answer: 3905 mV, linked, on battery.
+        let BatteryRead::Reading(battery) = adc_battery([0x0f, 0x41, 0x01], false).await else {
+            panic!("expected a reading");
+        };
+        assert_eq!(battery.percentage, 67);
+        assert_eq!(battery.level, BatteryLevel::Good);
+        assert_eq!(battery.status, BatteryStatus::Discharging);
+
+        let BatteryRead::Reading(charging) = adc_battery([0x10, 0x04, 0x03], false).await else {
+            panic!("expected a reading");
+        };
+        assert_eq!(charging.status, BatteryStatus::Charging);
+    }
+
+    #[tokio::test]
+    async fn adc_battery_tells_unlinked_from_unavailable() {
+        // G733 headset switched off: its dongle answers error 0x05, captured
+        // from hardware.
+        assert_eq!(adc_battery([0x05, 0, 0], true).await, BatteryRead::Unlinked);
+        // Link bit clear (Solaar and the kernel read it as device inactive).
+        assert_eq!(
+            adc_battery([0x00, 0x00, 0x00], false).await,
+            BatteryRead::Unlinked
+        );
+        // The kernel's explicit "unknown" flags value is no reading, not a
+        // switched-off device.
+        assert_eq!(
+            adc_battery([0x0f, 0x41, 0x0f], false).await,
+            BatteryRead::Unavailable
+        );
+        // Neither is a busy device.
+        assert_eq!(
+            adc_battery([0x08, 0, 0], true).await,
+            BatteryRead::Unavailable
+        );
+    }
+
+    #[test]
+    fn adc_battery_ranks_below_every_other_source() {
+        for (other, expected) in [
+            (UnifiedBatteryFeature::ID, BatteryProbe::Unified(2)),
+            (BatteryStatusFeature::ID, BatteryProbe::Legacy(2)),
+            (BatteryVoltageFeature::ID, BatteryProbe::Voltage(2)),
+        ] {
+            let table = [AdcMeasurementFeature::ID, other];
+            assert_eq!(battery_feature_index(table), Some(expected), "{other:#06x}");
+        }
     }
 
     #[test]

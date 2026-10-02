@@ -11,6 +11,7 @@ use crate::{
     protocol::v20::{self, Hidpp20Error},
 };
 
+pub mod adc_measurement;
 pub mod adjustable_dpi;
 pub mod backlight;
 pub mod battery_status;

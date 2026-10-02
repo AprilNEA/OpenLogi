@@ -8,8 +8,9 @@ use super::Enumerator;
 use super::cache::{CACHE_MISS_GRACE, CacheKey};
 use super::events::{HidppEventSource, observed_event_channel};
 use super::replay_test_support::{
-    BOLT_CHANNEL, BOLT_UID, BoltSlot, DIRECT_CHANNEL, bolt_fixture, connection_notification,
-    direct_fixture, malformed_dpi_fixture, short,
+    BOLT_CHANNEL, BOLT_UID, BoltSlot, DIRECT_CHANNEL, HEADSET_CHANNEL, adc_error, adc_reading,
+    bolt_fixture, connection_notification, direct_fixture, headset_fixture, malformed_dpi_fixture,
+    short,
 };
 use crate::replay::{ChannelConnection, NodePresence, OpenOutcome, ReplayBackend, ReplayTopology};
 use crate::{ChannelRegistry, get_dpi};
@@ -398,4 +399,119 @@ async fn malformed_response_is_released_only_after_the_request_barrier() {
     backend
         .require_complete()
         .expect("malformed response cassette consumed");
+}
+
+/// Enumerate once and return the headset's `(online, battery percentage)`.
+async fn headset_state(enumerator: &mut Enumerator) -> (bool, Option<u8>) {
+    let inventories = enumerator
+        .enumerate()
+        .await
+        .expect("headset probe succeeds");
+    let headset = inventories
+        .iter()
+        .find(|inventory| inventory.receiver.product_id == 0x0ab5)
+        .unwrap_or_else(|| panic!("headset listed: {inventories:#?}"));
+    let device = &headset.paired[0];
+    (
+        device.online,
+        device.battery.as_ref().map(|battery| battery.percentage),
+    )
+}
+
+#[tokio::test]
+async fn headset_dongle_goes_offline_while_its_headset_is_off() {
+    // On, switched off (the G733 dongle's captured 0x05 answer), on again.
+    let fixture = headset_fixture(&[
+        adc_reading(3890, 0x01),
+        adc_error(0x05),
+        adc_reading(3885, 0x01),
+    ]);
+    let backend = Arc::new(
+        ReplayBackend::new(
+            ReplayTopology {
+                nodes: vec![fixture.node],
+                channels: vec![fixture.channel],
+            },
+            vec![fixture.cassette],
+        )
+        .expect("valid headset replay"),
+    );
+    let mut enumerator = Enumerator::with_backend(backend.clone());
+    enumerator.timeouts.arrival_drain = Duration::ZERO;
+
+    assert_eq!(headset_state(&mut enumerator).await, (true, Some(65)));
+    assert_eq!(
+        headset_state(&mut enumerator).await,
+        (false, None),
+        "an unlinked headset is offline and its last reading is cleared"
+    );
+    assert_eq!(headset_state(&mut enumerator).await, (true, Some(64)));
+    backend
+        .require_complete()
+        .expect("every scripted headset exchange consumed");
+}
+
+#[tokio::test]
+async fn headset_first_seen_while_off_is_listed_offline() {
+    // No lighting or pointer feature: only the unlinked answer proves a
+    // device, so the node must not be rejected as a receiver's side interface.
+    let fixture = headset_fixture(&[adc_error(0x05)]);
+    let backend = Arc::new(
+        ReplayBackend::new(
+            ReplayTopology {
+                nodes: vec![fixture.node],
+                channels: vec![fixture.channel],
+            },
+            vec![fixture.cassette],
+        )
+        .expect("valid headset replay"),
+    );
+    let mut enumerator = Enumerator::with_backend(backend.clone());
+    enumerator.timeouts.arrival_drain = Duration::ZERO;
+
+    assert_eq!(headset_state(&mut enumerator).await, (false, None));
+    backend
+        .require_complete()
+        .expect("every scripted headset exchange consumed");
+}
+
+#[tokio::test]
+async fn headset_switch_off_broadcast_requests_reconciliation_to_offline() {
+    let fixture = headset_fixture(&[adc_reading(3890, 0x01), adc_error(0x05)]);
+    let backend = Arc::new(
+        ReplayBackend::new(
+            ReplayTopology {
+                nodes: vec![fixture.node],
+                channels: vec![fixture.channel],
+            },
+            vec![fixture.cassette],
+        )
+        .expect("valid headset replay"),
+    );
+    let (notifier, mut events, observed) = observed_event_channel();
+    let mut enumerator = Enumerator::with_backend(backend.clone()).with_event_notifier(notifier);
+    enumerator.timeouts.arrival_drain = Duration::ZERO;
+    assert_eq!(headset_state(&mut enumerator).await, (true, Some(65)));
+
+    // The broadcast a G733 dongle sent as its headset switched off (captured
+    // as `11 ff 08 00 00 00 00`; 0x1F20 sits at index 2 in this fixture).
+    let mut switched_off = vec![0x11, 0xff, 0x02, 0x00];
+    switched_off.extend_from_slice(&[0; 16]);
+    assert_eq!(
+        backend
+            .emit_channel_report(HEADSET_CHANNEL, &switched_off)
+            .expect("known channel"),
+        1
+    );
+    tokio::time::timeout(Duration::from_secs(2), observed.wait_for(1))
+        .await
+        .expect("the broadcast must be recognised as a reconciliation request");
+    assert_eq!(events.try_recv(), Ok(HidppEventSource::AdcMeasurement));
+
+    // The reconciliation it requests re-reads the battery and finds the
+    // headset unlinked, without waiting for the recovery scan.
+    assert_eq!(headset_state(&mut enumerator).await, (false, None));
+    backend
+        .require_complete()
+        .expect("every scripted headset exchange consumed");
 }
