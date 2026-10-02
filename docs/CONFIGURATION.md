@@ -64,8 +64,10 @@ optional physical device key.
   on macOS, Windows, and X11; unsupported sessions such as Wayland use the
   focused application, and so does a pointer over a surface OpenLogi cannot
   identify, such as a system overlay, or a lookup that fails. An unidentified
-  surface is never treated as desktop. OpenLogi never activates a background
-  window to send a shortcut: over an identified window or the desktop, mouse
+  surface uses the focused application's profile rather than the desktop's;
+  with no focused application there is no such profile and the global bindings
+  apply, as in focused mode. OpenLogi never activates a background window to
+  send a shortcut: over an identified window or the desktop, mouse
   bindings that produce keystrokes or run workflows are skipped unless the
   hovered window is focused. Global actions such as desktop switching can run
   without changing application focus.

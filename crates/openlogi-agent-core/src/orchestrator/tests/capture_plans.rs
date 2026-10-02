@@ -201,6 +201,51 @@ fn unidentified_pointer_context_uses_the_focused_profile_never_the_desktop() {
 }
 
 #[test]
+fn unidentified_pointer_context_without_a_focused_app_uses_the_global_bindings() {
+    use openlogi_hook::{PointerContext, PointerTarget};
+    // Before the foreground watcher publishes an app there is no focused
+    // profile to fall back on. The global bindings then apply, exactly as
+    // `mouse_profile_target = "focused"` applies them in the same state, and
+    // the press stays pointer-scoped so it ends once a target is identified.
+    let bindings = |config: &mut Config| {
+        config.set_binding(
+            "a",
+            ButtonId::Back,
+            Binding::Single(Action::PreviousDesktop),
+        );
+        config.set_per_app_binding("a", "browser", ButtonId::Back, Some(Action::BrowserBack));
+    };
+    let mut config = Config::default();
+    bindings(&mut config);
+    let mut orch = orchestrator(config);
+    orch.devices = vec![dev("a", 1, true)];
+    orch.set_current_app(None);
+    orch.rebuild();
+    orch.set_pointer_context(PointerContext {
+        app: None,
+        target: PointerTarget::Unavailable,
+    });
+    assert_eq!(published_back_binding(&orch), Some(Action::PreviousDesktop));
+    assert_eq!(
+        orch.shared.hook_maps.read().expect("maps").pointer_target,
+        Some(PointerTarget::Unavailable)
+    );
+
+    let mut config = Config::default();
+    config.app_settings.mouse_profile_target = openlogi_core::config::MouseProfileTarget::Focused;
+    bindings(&mut config);
+    let mut orch = orchestrator(config);
+    orch.devices = vec![dev("a", 1, true)];
+    orch.set_current_app(None);
+    orch.rebuild();
+    assert_eq!(published_back_binding(&orch), Some(Action::PreviousDesktop));
+    assert_eq!(
+        orch.shared.hook_maps.read().expect("maps").pointer_target,
+        None
+    );
+}
+
+#[test]
 fn hook_maps_publish_selection_and_preserve_learned_thumbwheel_polarity() {
     let mut orch = orchestrator(Config::default());
     orch.devices = vec![dev("a", 1, true)];
