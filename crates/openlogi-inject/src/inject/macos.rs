@@ -75,6 +75,7 @@ mod spaces;
 mod symbolic_hotkey;
 #[cfg(test)]
 mod tests;
+mod zoom;
 
 use app_services::symbol as app_services_symbol;
 pub(super) use browser::ax_browser_navigate;
@@ -85,6 +86,8 @@ use scroll::dispatch_scroll;
 pub(super) use scroll::{post_scroll, post_smooth_scroll};
 use spaces::{next_desktop, previous_desktop};
 use symbolic_hotkey::{capture_region, screenshot};
+use zoom::dispatch_zoom;
+pub(super) use zoom::post_zoom;
 
 // NX_KEYTYPE_* constants from <IOKit/hidsystem/ev_keymap.h>.
 const NX_KEYTYPE_SOUND_UP: i32 = 0;
@@ -110,6 +113,7 @@ pub(super) fn execute(action: &Action) {
         Effect::Shortcut(shortcut) => press_combo(&combo(shortcut)),
         Effect::Key(combo) | Effect::HeldKey(combo) => press_combo(combo),
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
+        Effect::Zoom(direction) => dispatch_zoom(direction),
         // Media/volume controls are NX system-defined keys, not ordinary
         // keyboard virtual-key events. Posting kVK_Volume* through
         // CGEventCreateKeyboardEvent is ignored by macOS' volume handler.
