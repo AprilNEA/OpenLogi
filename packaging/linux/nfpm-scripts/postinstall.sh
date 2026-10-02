@@ -6,7 +6,7 @@ set -eu
 # before the script exits so the agent can open /dev/hidraw* and the mouse's
 # /dev/input/event* node immediately, even for a device connected before the
 # install.
-if command -v udevadm >/dev/null 2>&1; then
+if command -v udevadm >/dev/null 2>&1 && [ -S /run/udev/control ]; then
   udevadm control --reload-rules
   udevadm trigger --subsystem-match=hidraw
   udevadm trigger --subsystem-match=input
