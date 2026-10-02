@@ -131,30 +131,73 @@ fn pointer_profiles_switch_to_desktop_without_changing_keyboard_focus() {
 }
 
 #[test]
-fn unavailable_pointer_context_does_not_fall_back_to_browser_profile() {
+fn unidentified_pointer_context_uses_the_focused_profile_never_the_desktop() {
     use openlogi_hook::{PointerContext, PointerTarget};
     let mut config = Config::default();
+    config.set_binding(
+        "a",
+        ButtonId::Back,
+        Binding::Single(Action::PreviousDesktop),
+    );
     config.set_per_app_binding("a", "browser", ButtonId::Back, Some(Action::BrowserBack));
     let mut orch = orchestrator(config);
     orch.devices = vec![dev("a", 1, true)];
     orch.set_current_app(Some(ForegroundApp::unnamed("browser".into())));
-    orch.set_pointer_context(PointerContext {
+    let published_pointer_target = |orch: &Orchestrator| {
+        let hook = orch.shared.hook_maps.read().expect("maps").pointer_target;
+        let plan = orch
+            .shared
+            .capture_plans
+            .borrow()
+            .first()
+            .expect("mouse plan")
+            .dispatch
+            .pointer_target;
+        assert_eq!(hook, plan, "OS hook and HID++ share one mouse context");
+        hook
+    };
+    assert!(orch.set_pointer_context(PointerContext {
         app: None,
-        target: PointerTarget::Unavailable,
-    });
-    assert_ne!(published_back_binding(&orch), Some(Action::BrowserBack));
+        target: PointerTarget::Desktop,
+    }));
+    assert_eq!(published_back_binding(&orch), Some(Action::PreviousDesktop));
+
+    // An overlay or a failed lookup leaves the target unidentified, possibly
+    // for the whole session. The mouse then uses the focused application's
+    // profile, as `mouse_profile_target = "focused"` would, never the
+    // desktop's, and every press stays revalidated against the pointer.
+    assert!(
+        orch.set_pointer_context(PointerContext {
+            app: None,
+            target: PointerTarget::Unavailable,
+        }),
+        "presses resolved against the desktop's profile must end"
+    );
+    assert_eq!(published_back_binding(&orch), Some(Action::BrowserBack));
     assert_eq!(
-        orch.shared.hook_maps.read().expect("maps").pointer_target,
+        published_pointer_target(&orch),
         Some(PointerTarget::Unavailable)
     );
 
-    // Unsupported compositors explicitly retain focused profiles; a transient
-    // lookup failure on a supported platform never takes this branch.
+    // Reaching an identified target ends presses resolved against the
+    // focused profile, exactly as moving between two windows does.
+    assert!(orch.set_pointer_context(PointerContext {
+        app: None,
+        target: PointerTarget::Desktop,
+    }));
+    assert_eq!(published_back_binding(&orch), Some(Action::PreviousDesktop));
+    assert_eq!(
+        published_pointer_target(&orch),
+        Some(PointerTarget::Desktop)
+    );
+
+    // Unsupported compositors follow focus outright: nothing to revalidate.
     orch.set_pointer_context(PointerContext {
         app: None,
         target: PointerTarget::Unsupported,
     });
     assert_eq!(published_back_binding(&orch), Some(Action::BrowserBack));
+    assert_eq!(published_pointer_target(&orch), None);
 }
 
 #[test]

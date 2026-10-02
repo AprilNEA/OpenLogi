@@ -34,7 +34,9 @@ pub(crate) enum ActionDispatchTarget {
     /// The ordinary browser-navigation shortcut target captured outside Safari.
     Keyboard,
     /// The pointer context that selected the binding. Validated off the tap
-    /// before output, never substituted with an unrelated foreground window.
+    /// before output. An identified window or desktop is never substituted
+    /// with an unrelated foreground window; an unidentified target selected
+    /// the focused profile, so it dispatches to focus.
     Pointer(openlogi_hook::PointerTarget),
 }
 
