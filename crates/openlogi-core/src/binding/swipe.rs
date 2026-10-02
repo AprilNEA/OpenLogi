@@ -13,6 +13,11 @@ pub const GESTURE_SWIPE_THRESHOLD: i32 = 50;
 /// Maximum cross-axis travel allowed at the threshold, so only a reasonably
 /// straight swipe commits. Grows with the dominant axis (`max(deadzone, 35%)`).
 pub const GESTURE_SWIPE_DEADZONE: i32 = 40;
+/// Travel needed to repeat the *same* direction within one hold. Larger than
+/// [`GESTURE_SWIPE_THRESHOLD`] so one long swipe doesn't fire several times;
+/// a reversal re-arms at the normal threshold.
+// ponytail: fixed constant, make it a user setting if people want to tune it.
+pub const GESTURE_REPEAT_DISTANCE: i32 = 3 * GESTURE_SWIPE_THRESHOLD;
 /// Minimum time a gesture button must be held before its travel can commit to a
 /// swipe. Distinguishes a deliberate hold-and-swipe from a quick click whose
 /// cursor happened to be moving. Shared by both gesture paths (the HID++ thumb
@@ -88,9 +93,13 @@ pub struct SwipeAccumulator {
     /// arbitrarily long hold can never overflow).
     dx: i32,
     dy: i32,
-    /// Set once a direction has committed this hold, so it fires exactly once
-    /// and the release isn't then also read as a click.
+    /// Set once a direction has committed this hold, so the release isn't
+    /// then also read as a click.
     fired: bool,
+    /// The last direction committed this hold. Travel restarts from zero after
+    /// each commit, so one hold can chain swipes (left, right, left...) the way
+    /// Options+ does; repeating this direction needs [`GESTURE_REPEAT_DISTANCE`].
+    last: Option<GestureDirection>,
 }
 
 impl SwipeAccumulator {
@@ -100,6 +109,7 @@ impl SwipeAccumulator {
         self.dx = 0;
         self.dy = 0;
         self.fired = false;
+        self.last = None;
     }
 
     /// Whether a hold is in progress (between [`Self::begin`] and [`Self::end`]),
@@ -110,20 +120,25 @@ impl SwipeAccumulator {
     }
 
     /// Feed a pointer-move / raw-XY delta into the current hold. Returns
-    /// `Some(direction)` exactly once per hold — the instant travel commits, and
-    /// only after the hold passes [`GESTURE_HOLD_FOR_SWIPE`] — and `None` while
-    /// still too short, already committed, or not holding.
+    /// `Some(direction)` the instant travel commits (only after the hold passes
+    /// [`GESTURE_HOLD_FOR_SWIPE`]), then restarts travel so the same hold can
+    /// commit again; `None` while still too short or not holding.
     pub fn accumulate(&mut self, dx: i32, dy: i32) -> Option<GestureDirection> {
-        if self.fired || self.held_since.is_none() {
-            return None;
-        }
+        self.held_since?;
         self.dx = self.dx.saturating_add(dx);
         self.dy = self.dy.saturating_add(dy);
         let held_long_enough = self
             .held_since
             .is_some_and(|t| t.elapsed() >= GESTURE_HOLD_FOR_SWIPE);
         if held_long_enough && let Some(dir) = detect_swipe(self.dx, self.dy) {
+            let travel = self.dx.saturating_abs().max(self.dy.saturating_abs());
+            if self.last == Some(dir) && travel < GESTURE_REPEAT_DISTANCE {
+                return None;
+            }
             self.fired = true;
+            self.last = Some(dir);
+            self.dx = 0;
+            self.dy = 0;
             return Some(dir);
         }
         None
@@ -222,8 +237,27 @@ mod tests {
             acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
             Some(GestureDirection::Right)
         );
-        // Further travel in the same hold must not re-fire.
+        // Further short travel in the same direction must not re-fire.
         assert_eq!(acc.accumulate(50, 0), None);
+    }
+
+    #[test]
+    fn accumulator_chains_swipes_within_one_hold() {
+        let mut acc = SwipeAccumulator::default();
+        acc.begin();
+        acc.backdate_hold_for_test();
+        let t = GESTURE_SWIPE_THRESHOLD + 10;
+        assert_eq!(acc.accumulate(-t, 0), Some(GestureDirection::Left));
+        // Reversing re-arms at the normal threshold (issue #1634).
+        assert_eq!(acc.accumulate(t, 0), Some(GestureDirection::Right));
+        assert_eq!(acc.accumulate(-t, 0), Some(GestureDirection::Left));
+        // Same direction again needs the longer repeat distance.
+        assert_eq!(acc.accumulate(-t, 0), None);
+        assert_eq!(
+            acc.accumulate(-GESTURE_REPEAT_DISTANCE, 0),
+            Some(GestureDirection::Left)
+        );
+        assert!(!acc.end(), "a hold that swiped is not a click");
     }
 
     #[test]
