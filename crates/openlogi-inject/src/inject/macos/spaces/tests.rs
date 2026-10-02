@@ -7,7 +7,7 @@ fn dock_swipe_encodes_both_directions_and_balanced_phases() {
         (Direction::Previous, -1.0_f64, -9999.0_f64),
         (Direction::Next, 1.0_f64, 9999.0_f64),
     ] {
-        let events = swipe_events(direction).expect("CGEvent allocation");
+        let events = field_swipe_events(direction).expect("CGEvent allocation");
         for (event, phase) in events.iter().zip([1, 4]) {
             assert_eq!(CGEvent::r#type(Some(event)), CGEventType(30));
             for (field, expected) in [(55, 30), (110, 23), (123, 1), (132, phase)] {
@@ -24,6 +24,23 @@ fn dock_swipe_encodes_both_directions_and_balanced_phases() {
                 CGEvent::double_value_field(Some(event), CGEventField(129)).to_bits(),
                 velocity.to_bits()
             );
+            assert_eq!(
+                CGEvent::integer_value_field(Some(event), CGEventField::EventSourceUserData),
+                crate::inject::SYNTHETIC_EVENT_USER_DATA
+            );
+        }
+    }
+}
+
+#[test]
+fn hid_dock_swipe_wraps_both_phases_in_tagged_dock_events() {
+    if AnyClass::get(c"HIDEvent").is_none() {
+        return;
+    }
+    for direction in [Direction::Previous, Direction::Next] {
+        let events = hid_swipe_events(direction).expect("HIDEvent-backed CGEvents");
+        for event in &events {
+            assert_eq!(CGEvent::r#type(Some(event)), CGEventType(30));
             assert_eq!(
                 CGEvent::integer_value_field(Some(event), CGEventField::EventSourceUserData),
                 crate::inject::SYNTHETIC_EVENT_USER_DATA

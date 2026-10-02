@@ -11,8 +11,9 @@ use std::sync::{LazyLock, mpsc};
 use std::time::{Duration, Instant};
 
 use block2::RcBlock;
-use objc2::rc::{Retained, autoreleasepool};
-use objc2::runtime::ProtocolObject;
+use objc2::msg_send;
+use objc2::rc::{Allocated, Retained, autoreleasepool};
+use objc2::runtime::{AnyClass, AnyObject, ProtocolObject};
 use objc2_app_kit::{NSWorkspace, NSWorkspaceActiveSpaceDidChangeNotification};
 use objc2_core_foundation::{
     CFArray, CFDictionary, CFNumber, CFRetained, CFString, CFType, CFUUID,
@@ -20,7 +21,7 @@ use objc2_core_foundation::{
 use objc2_core_graphics::{
     CGError, CGEvent, CGEventField, CGEventTapLocation, CGEventType, CGGetDisplaysWithPoint,
 };
-use objc2_foundation::{NSNotification, NSNotificationCenter, NSObjectProtocol};
+use objc2_foundation::{NSNotification, NSNotificationCenter, NSObjectProtocol, NSProcessInfo};
 
 use super::super::space_switch::{self, Backend, Direction, Failure, Lease, PostGate, SpaceState};
 use super::{app_services, app_services_symbol};
@@ -183,6 +184,18 @@ impl Backend for Native {
 }
 
 fn swipe_events(direction: Direction) -> Option<[CFRetained<CGEvent>; 2]> {
+    if NSProcessInfo::processInfo()
+        .operatingSystemVersion()
+        .majorVersion
+        >= 27
+    {
+        hid_swipe_events(direction)
+    } else {
+        field_swipe_events(direction)
+    }
+}
+
+fn field_swipe_events(direction: Direction) -> Option<[CFRetained<CGEvent>; 2]> {
     let make = |phase| {
         let event = CGEvent::new(None)?;
         // Establish the private DockControl type before setting its fields,
@@ -204,6 +217,68 @@ fn swipe_events(direction: Direction) -> Option<[CFRetained<CGEvent>; 2]> {
     };
     // Prepare both phases before posting either: allocation failure cannot
     // leave an unterminated gesture. Send exactly one adjacent-Space swipe.
+    Some([make(1)?, make(4)?])
+}
+
+const HID_TYPE_VELOCITY: u32 = 9;
+const HID_TYPE_DOCK_SWIPE: u32 = 23;
+const HID_FIELD_MOTION: u32 = HID_TYPE_DOCK_SWIPE << 16 | 1;
+const HID_FIELD_PROGRESS: u32 = HID_TYPE_DOCK_SWIPE << 16 | 2;
+const HID_FIELD_FLAVOR: u32 = HID_TYPE_DOCK_SWIPE << 16 | 5;
+const HID_FIELD_VELOCITY_X: u32 = HID_TYPE_VELOCITY << 16;
+const HID_FIELD_VELOCITY_Y: u32 = HID_TYPE_VELOCITY << 16 | 1;
+const HID_MOTION_HORIZONTAL: isize = 1;
+const HID_FLAVOR_DOCK_PRIMARY: isize = 3;
+const HID_OPTION_PHASE_SHIFT: u32 = 24;
+
+type SetHidEvent = unsafe extern "C" fn(*const CGEvent, *const c_void);
+
+fn hid_event(class: &AnyClass, kind: u32) -> Option<Retained<AnyObject>> {
+    // SAFETY: `-[HIDEvent initWithType:timestamp:senderID:]` takes (u32, u64, u64).
+    unsafe {
+        let this: Allocated<AnyObject> = msg_send![class, alloc];
+        msg_send![this, initWithType: kind, timestamp: 0_u64, senderID: 0_u64]
+    }
+}
+
+/// macOS 27 reads an `IOHIDEvent` attached to the event instead of its private
+/// fields, and signs progress and velocity the other way round.
+fn hid_swipe_events(direction: Direction) -> Option<[CFRetained<CGEvent>; 2]> {
+    let class = AnyClass::get(c"HIDEvent")?;
+    let set_hid = app_services::sky_light_symbol(c"SLEventSetIOHIDEvent")?;
+    // SAFETY: the resolved SPI has the `void(CGEventRef, IOHIDEventRef)` ABI.
+    let set_hid = unsafe { std::mem::transmute::<*mut c_void, SetHidEvent>(set_hid) };
+    let sign = -direction.sign();
+    let make = |phase: u32| {
+        let hid = hid_event(class, HID_TYPE_DOCK_SWIPE)?;
+        // SAFETY: private `HIDEvent` setters taking (u32), (NSInteger, u32),
+        // (double, u32) and (HIDEvent) respectively.
+        unsafe {
+            let _: () = msg_send![&*hid, setOptions: phase << HID_OPTION_PHASE_SHIFT];
+            let _: () = msg_send![&*hid, setIntegerValue: HID_MOTION_HORIZONTAL, forField: HID_FIELD_MOTION];
+            let _: () = msg_send![&*hid, setIntegerValue: HID_FLAVOR_DOCK_PRIMARY, forField: HID_FIELD_FLAVOR];
+            let _: () = msg_send![&*hid, setDoubleValue: sign, forField: HID_FIELD_PROGRESS];
+            if phase == 4 {
+                let velocity = hid_event(class, HID_TYPE_VELOCITY)?;
+                let speed = sign * 9999.0;
+                let _: () =
+                    msg_send![&*velocity, setDoubleValue: speed, forField: HID_FIELD_VELOCITY_X];
+                let _: () =
+                    msg_send![&*velocity, setDoubleValue: speed, forField: HID_FIELD_VELOCITY_Y];
+                let _: () = msg_send![&*hid, appendEvent: &*velocity];
+            }
+        }
+        let event = CGEvent::new(None)?;
+        CGEvent::set_type(Some(&event), CGEventType(30));
+        // SAFETY: both objects are live; SkyLight retains the HID event.
+        unsafe { set_hid(&raw const *event, Retained::as_ptr(&hid).cast()) };
+        CGEvent::set_integer_value_field(
+            Some(&event),
+            CGEventField::EventSourceUserData,
+            super::super::SYNTHETIC_EVENT_USER_DATA,
+        );
+        Some(event)
+    };
     Some([make(1)?, make(4)?])
 }
 
