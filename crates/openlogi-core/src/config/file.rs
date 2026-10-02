@@ -221,8 +221,21 @@ impl ConfigFile {
             path: self.path.clone(),
             source,
         })?;
-        write_atomic(&self.path, body.as_bytes()).map_err(|source| ConfigError::Write {
+        // The atomic write renames a staged file over its target, which would
+        // replace a symlinked config (a dotfiles manager such as GNU stow)
+        // with a plain copy. Commit to the file the link points at instead.
+        let target = resolve_symlinks(&self.path).map_err(|source| ConfigError::Write {
             path: self.path.clone(),
+            source,
+        })?;
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(|source| ConfigError::Write {
+                path: target.clone(),
+                source,
+            })?;
+        }
+        write_atomic(&target, body.as_bytes()).map_err(|source| ConfigError::Write {
+            path: target,
             source,
         })?;
         // The migrated file is gone from disk now, and its copy is safely
@@ -443,6 +456,33 @@ pub(super) fn config_backup_path(path: &Path, generation: usize) -> io::Result<P
     let mut backup_name = OsString::from(file_name);
     backup_name.push(format!(".backup.{generation}"));
     Ok(path.with_file_name(backup_name))
+}
+
+/// Follow `path` through every symlink to the file it finally names, which
+/// need not exist yet (a dangling link is written through, not replaced).
+/// Relative link targets resolve against the link's own directory.
+fn resolve_symlinks(path: &Path) -> io::Result<PathBuf> {
+    // The kernel's own loop limit (`MAXSYMLINKS` on Linux and macOS).
+    const MAX_LINKS: usize = 40;
+    let mut current = path.to_path_buf();
+    for _ in 0..MAX_LINKS {
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                let link = fs::read_link(&current)?;
+                current = match current.parent() {
+                    Some(parent) => parent.join(link),
+                    None => link,
+                };
+            }
+            Ok(_) => return Ok(current),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(current),
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "too many levels of symbolic links",
+    ))
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {

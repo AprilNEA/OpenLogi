@@ -288,3 +288,45 @@ fn a_failed_backup_write_leaves_the_migration_backup_still_owed() {
         "the retried save still has the pre-migration source to write"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn saving_through_a_symlink_writes_the_target_and_keeps_the_link() {
+    // Dotfiles managers (GNU stow, home-manager) link `config.toml` into a
+    // separate tree; a save must update that tree, not replace the link.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let dotfiles = dir.path().join("dotfiles/openlogi");
+    let config_dir = dir.path().join("config/openlogi");
+    fs::create_dir_all(&dotfiles).expect("create dotfiles dir");
+    fs::create_dir_all(&config_dir).expect("create config dir");
+    let target = dotfiles.join("config.toml");
+    let link = config_dir.join("config.toml");
+    fs::write(&target, "schema_version = 6\nselected_device = \"one\"\n").expect("write");
+    std::os::unix::fs::symlink("../../dotfiles/openlogi/config.toml", &link).expect("symlink");
+
+    let (mut config, mut file) = ConfigFile::load_from_path(&link).expect("load through link");
+    config.set_selected_device(Some("two".into()));
+    file.save(&config).expect("save through link");
+
+    assert!(
+        fs::symlink_metadata(&link)
+            .expect("stat link")
+            .file_type()
+            .is_symlink(),
+        "the save must not replace the symlink with a regular file"
+    );
+    let saved = fs::read_to_string(&target).expect("read target");
+    assert!(saved.contains("selected_device = \"two\""), "{saved}");
+    assert!(
+        config_dir.join("config.toml.backup.1").exists(),
+        "backups stay beside the config path, outside the dotfiles tree"
+    );
+
+    config.set_selected_device(Some("three".into()));
+    file.save(&config).expect("second save through link");
+    assert!(
+        fs::read_to_string(&target)
+            .expect("read target")
+            .contains("selected_device = \"three\"")
+    );
+}
