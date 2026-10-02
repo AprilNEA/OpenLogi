@@ -30,6 +30,7 @@ use super::bundle::{EmbeddedHelper, HELPERS, write_agent_launch_plist};
 use crate::icon::IconPipeline as _;
 use crate::icon::macos::AppBundle;
 use crate::support::fs::{ensure_file, repo_root};
+use crate::support::info_plist;
 
 /// The dev bundle is the dev bundle; there is no channel to choose.
 const CHANNEL: Channel = Channel::Dev;
@@ -80,6 +81,7 @@ pub(crate) fn run(args: &Args) -> Result<()> {
         .context("could not write the dev app Info.plist")?;
     fs_err::copy(&icon, app.join("Contents/Resources/AppIcon.icns"))?;
     AppBundle.install(&app)?;
+    info_plist::localize_app(&app, &root.join(info_plist::LOCALES_DIR))?;
 
     // Clear the whole login-items directory rather than the bundles about to be
     // written: helper directory names have changed more than once, and a
