@@ -86,6 +86,12 @@ Things OpenLogi does that Options+ won't:
 > [!IMPORTANT]
 > Quit **Logi Options+** first: the two applications fight over HID++ access, and only one can own a given receiver at a time.
 
+### Conflicting software
+
+OpenLogi and any other app that manages your Logitech devices — Logi Options+/Options, Logitech Control Center, or a Linux HID++ tool such as Solaar — will fight over the same receiver or Bluetooth-direct connection, because HID++ device ownership is exclusive: only one process can hold it. Quitting the other app's foreground window is not always enough — check that it doesn't also run a background helper or login item (Activity Monitor on macOS, Task Manager on Windows, or your process list on Linux) and disable that too, or the conflict returns on the next reboot.
+
+A separate, narrower conflict can happen with any tool that also installs a system-wide input remapper (Karabiner-Elements, SteerMouse, BetterMouse, USB Overdrive, Mac Mouse Fix, LinearMouse, SmoothScroll on macOS): both can see and act on the same physical button press, which shows up as a doubled or seemingly-ignored remap rather than a hardware conflict. On macOS, OpenLogi's Settings → Diagnostics panel automatically detects the known ones and warns you; there is currently no equivalent detection for Linux-side HID++ tool conflicts (e.g. Solaar) — if bindings behave unexpectedly, check what else is managing the device before assuming it's an OpenLogi bug.
+
 ### macOS
 
 Requires macOS 13 or later.
