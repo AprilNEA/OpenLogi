@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use openlogi_camera::Camera;
 use openlogi_core::binding::{
-    Action, ActionRingIcon, ActionRingSlot, Binding, ButtonId, GestureDirection, RingAction,
+    Action, ActionRingIcon, ActionRingSlot, Binding, ButtonId, GestureDirection, GestureResponse,
+    RingAction,
 };
 use openlogi_core::config::{
     Config, DeviceIdentity, LightSettings, Lighting, ScrollResolution, ThumbwheelSensitivity,

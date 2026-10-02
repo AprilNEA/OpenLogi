@@ -13,11 +13,36 @@ use super::{
     ThumbwheelSensitivity,
 };
 use crate::binding::{
-    ActionRingConfig, ActionRingIcon, ActionRingSlot, Binding, ButtonId, RingAction,
+    ActionRingConfig, ActionRingIcon, ActionRingSlot, Binding, ButtonId, GestureResponse,
+    RingAction,
 };
 use crate::hid::Dpi;
 
 impl Config {
+    /// The effective gesture response for one control on `device_key`.
+    /// An unset control retains [`GestureResponse::default`].
+    #[must_use]
+    pub fn gesture_response(&self, device_key: &str, button: ButtonId) -> GestureResponse {
+        self.devices
+            .get(device_key)
+            .and_then(|device| device.gesture_responses.get(&button).copied())
+            .unwrap_or_default()
+    }
+
+    /// Set one gesture control's response on `device_key`.
+    pub fn set_gesture_response(
+        &mut self,
+        device_key: &str,
+        button: ButtonId,
+        response: GestureResponse,
+    ) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .gesture_responses
+            .insert(button, response);
+    }
+
     /// The bindings stored for `device_key` as they were committed, or an
     /// empty map when the device has none yet. The effective per-button map,
     /// with defaults and the per-app overlay applied, is
