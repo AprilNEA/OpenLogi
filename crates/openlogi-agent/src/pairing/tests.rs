@@ -53,6 +53,98 @@ fn is_idle(manager: &PairingManager) -> bool {
 }
 
 #[tokio::test]
+async fn cancellation_acknowledges_only_after_terminal_cleanup() {
+    let (ctrl_tx, mut ctrl_rx) = mpsc::unbounded_channel();
+    let manager = manager_with_ctrl(ctrl_tx);
+    let session = start_session(&manager, &mut ctrl_rx).await;
+    let mut cancel = std::pin::pin!(manager.cancel());
+    assert!(
+        futures::poll!(&mut cancel).is_pending(),
+        "cancel acknowledged before receiver cleanup"
+    );
+    assert!(matches!(
+        ctrl_rx.try_recv().unwrap(),
+        PairingControl::Cancel { .. }
+    ));
+    apply_session_event(
+        PairingSessionEvent {
+            session,
+            event: PairingEvent::Failed(PairingError::Cancelled),
+        },
+        &manager.session,
+        &manager.observable,
+    );
+    cancel.await.unwrap();
+    assert!(!manager.shared.receiver_access.exclusive_requested());
+    manager
+        .start(ReceiverSelector::First)
+        .await
+        .expect("the next choice can start immediately after acknowledgement");
+}
+
+#[tokio::test]
+async fn cancellation_dismisses_a_result_that_won_the_terminal_race() {
+    let (ctrl_tx, mut ctrl_rx) = mpsc::unbounded_channel();
+    let manager = manager_with_ctrl(ctrl_tx);
+    let session = start_session(&manager, &mut ctrl_rx).await;
+    let mut cancel = std::pin::pin!(manager.cancel());
+    assert!(futures::poll!(&mut cancel).is_pending());
+    assert!(matches!(
+        ctrl_rx.try_recv().unwrap(),
+        PairingControl::Cancel { .. }
+    ));
+    apply_session_event(
+        PairingSessionEvent {
+            session,
+            event: PairingEvent::Paired { slot: 1 },
+        },
+        &manager.session,
+        &manager.observable,
+    );
+    cancel.await.unwrap();
+    assert_eq!(
+        manager.observable.snapshot().pairing,
+        None,
+        "cancellation must also dismiss a simultaneous terminal result"
+    );
+}
+
+#[tokio::test]
+async fn late_cancellation_completion_does_not_dismiss_a_replacement_result() {
+    let (ctrl_tx, mut ctrl_rx) = mpsc::unbounded_channel();
+    let manager = manager_with_ctrl(ctrl_tx);
+    let first = start_session(&manager, &mut ctrl_rx).await;
+    let mut cancel = std::pin::pin!(manager.cancel());
+    assert!(futures::poll!(&mut cancel).is_pending());
+    assert!(matches!(
+        ctrl_rx.try_recv().unwrap(),
+        PairingControl::Cancel { .. }
+    ));
+    apply_session_event(
+        PairingSessionEvent {
+            session: first,
+            event: PairingEvent::Failed(PairingError::Cancelled),
+        },
+        &manager.session,
+        &manager.observable,
+    );
+    let second = start_session(&manager, &mut ctrl_rx).await;
+    apply_session_event(
+        PairingSessionEvent {
+            session: second,
+            event: PairingEvent::Paired { slot: 2 },
+        },
+        &manager.session,
+        &manager.observable,
+    );
+    cancel.await.unwrap();
+    assert_eq!(
+        manager.observable.snapshot().pairing,
+        Some(PairingPhase::Paired { slot: 2 })
+    );
+}
+
+#[tokio::test]
 async fn start_rolls_back_pause_when_watcher_send_fails() {
     let (ctrl_tx, ctrl_rx) = mpsc::unbounded_channel();
     drop(ctrl_rx);
@@ -100,7 +192,7 @@ async fn cancel_without_active_session_is_a_noop_success() {
     let (ctrl_tx, mut ctrl_rx) = mpsc::unbounded_channel();
     let manager = manager_with_ctrl(ctrl_tx);
 
-    let result = manager.cancel();
+    let result = manager.cancel().await;
 
     assert_eq!(result, Ok(()));
     let sent = ctrl_rx.try_recv();
@@ -460,7 +552,8 @@ async fn terminal_cleanup_is_exactly_once_and_releases_receiver_lease() {
         ctrl_rx.try_recv().unwrap(),
         PairingControl::Pair { .. }
     ));
-    manager.cancel().unwrap();
+    let mut cancel = std::pin::pin!(manager.cancel());
+    assert!(futures::poll!(&mut cancel).is_pending());
     assert!(
         matches!(ctrl_rx.try_recv().unwrap(), PairingControl::Cancel { session } if session == first)
     );
@@ -475,19 +568,18 @@ async fn terminal_cleanup_is_exactly_once_and_releases_receiver_lease() {
             .requested(ExclusiveAccessReason::Pairing)
     );
 
-    let first_terminal = apply_session_event(
-        PairingSessionEvent {
-            session: first,
-            event: PairingEvent::Failed(PairingError::Cancelled),
-        },
-        &manager.session,
-        &manager.observable,
-    );
-
     assert!(matches!(
-        first_terminal,
+        apply_session_event(
+            PairingSessionEvent {
+                session: first,
+                event: PairingEvent::Failed(PairingError::Cancelled),
+            },
+            &manager.session,
+            &manager.observable,
+        ),
         Some(PairingUpdate::Failed(PairingFailure::Cancelled))
     ));
+    cancel.await.unwrap();
     assert!(is_idle(&manager));
     assert_eq!(manager.observable.snapshot().pairing, None);
     assert!(!manager.shared.receiver_access.exclusive_requested());

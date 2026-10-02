@@ -1,0 +1,388 @@
+use openlogi_fixture::{
+    CassetteExchange, FIXTURE_SCHEMA_VERSION, HidCassette, ReportSupport, RequestMatch,
+};
+
+use crate::replay::{
+    ChannelConnection, NodePresence, OpenOutcome, RawWriterAvailability, ReplayBackend,
+    ReplayChannel, ReplayNode, ReplayTopology,
+};
+use crate::{NodeId, NodeInfo};
+
+use super::super::{
+    PairingError, ReceiverFamily, ReceiverIdentityCache, ReceiverSelector, ReceiverTarget,
+    open_receiver, open_receiver_with_inventory,
+};
+
+const BOLT_A: &str = "00000000AAAABBBB";
+const BOLT_B: &str = "00000000CCCCDDDD";
+
+fn backend(tag: &str) -> ReplayBackend {
+    let mut nodes = Vec::new();
+    let mut channels = Vec::new();
+    let mut cassettes = Vec::new();
+    for (name, product_id, uid) in [
+        ("unifying", 0xc52b, "11223344"),
+        ("bolt-a", 0xc548, BOLT_A),
+        ("bolt-b", 0xc548, BOLT_B),
+    ] {
+        nodes.push(ReplayNode {
+            info: NodeInfo {
+                id: node_id(tag, name),
+                vendor_id: 0x046d,
+                product_id,
+                usage_page: 0xff00,
+                usage_id: 2,
+                name: name.into(),
+                manufacturer: None,
+                serial_number: None,
+            },
+            presence: NodePresence::Present,
+            open_outcome: OpenOutcome::Hidpp,
+            channel: Some(name.into()),
+            raw_writer: RawWriterAvailability::Unavailable,
+            receiver_slots: Vec::new(),
+        });
+        channels.push(ReplayChannel {
+            id: name.into(),
+            connection: ChannelConnection::Connected,
+            report_support: ReportSupport::ShortAndLong,
+        });
+        let (register, subregister) = if product_id == 0xc548 {
+            (0xfb, 0)
+        } else {
+            (0xb5, 3)
+        };
+        let mut response = vec![0x11, 0xff, 0x83, register];
+        if product_id == 0xc548 {
+            response.extend_from_slice(uid.as_bytes());
+        } else {
+            response.extend_from_slice(&[3, 0x11, 0x22, 0x33, 0x44, 0, 6]);
+            response.resize(20, 0);
+        }
+        cassettes.push(HidCassette {
+            schema_version: FIXTURE_SCHEMA_VERSION,
+            name: name.into(),
+            channel: name.into(),
+            report_support: ReportSupport::ShortAndLong,
+            exchanges: vec![CassetteExchange {
+                request: vec![0x10, 0xff, 0x83, register, subregister, 0, 0],
+                response: Some(response),
+                request_match: RequestMatch::Exact,
+                required: true,
+            }],
+        });
+    }
+    ReplayBackend::new(ReplayTopology { nodes, channels }, cassettes)
+        .expect("valid receiver topology")
+}
+
+fn node_id(tag: &str, name: &str) -> NodeId {
+    NodeId::from(format!(
+        "pairing-selection-{}-{tag}-{name}",
+        std::process::id()
+    ))
+}
+
+fn target(product_id: u16, uid: &str) -> ReceiverSelector {
+    ReceiverSelector::ReceiverUid {
+        product_id,
+        uid: uid.into(),
+    }
+}
+
+#[tokio::test]
+async fn route_selection_reports_an_open_error() {
+    let backend = backend("route-open-error");
+    backend
+        .set_open_outcome(
+            &node_id("route-open-error", "unifying"),
+            OpenOutcome::Denied,
+        )
+        .unwrap();
+    assert!(matches!(
+        open_receiver(
+            &backend,
+            &ReceiverTarget::Route {
+                family: ReceiverFamily::Unifying,
+                uid: "11223344",
+            }
+        )
+        .await,
+        Err(PairingError::Hid(_))
+    ));
+}
+
+#[tokio::test]
+async fn selected_receiver_open_error_is_visible() {
+    for (tag, selector) in [
+        ("selected-open-error", target(0xc548, BOLT_B)),
+        (
+            "selected-bolt-open-error",
+            ReceiverSelector::BoltUid(BOLT_B.into()),
+        ),
+    ] {
+        let backend = backend(tag);
+        let identities = known_bolt(tag, "bolt-b", BOLT_B);
+        backend
+            .set_open_outcome(&node_id(tag, "bolt-b"), OpenOutcome::Denied)
+            .unwrap();
+        assert!(matches!(
+            open_receiver_with_inventory(
+                &backend,
+                &ReceiverTarget::Selector(&selector),
+                Some(&identities),
+            )
+            .await,
+            Err(PairingError::Hid(_))
+        ));
+        assert!(
+            backend
+                .channel_completion("bolt-b")
+                .unwrap()
+                .written_reports
+                .is_empty()
+        );
+    }
+}
+
+fn known_bolt(tag: &str, name: &str, uid: &str) -> ReceiverIdentityCache {
+    let identities = ReceiverIdentityCache::default();
+    identities.observe(
+        &node_id(tag, name),
+        &openlogi_core::device::ReceiverInfo {
+            name: name.into(),
+            vendor_id: 0x046d,
+            product_id: 0xc548,
+            unique_id: Some(uid.into()),
+        },
+    );
+    identities
+}
+
+#[tokio::test]
+async fn changed_node_product_does_not_inherit_a_cached_receivers_error() {
+    let tag = "changed-node-product";
+    let backend = backend(tag);
+    let identities = known_bolt(tag, "unifying", BOLT_B);
+    backend
+        .set_node_presence(&node_id(tag, "bolt-b"), NodePresence::Absent)
+        .unwrap();
+    backend
+        .set_open_outcome(&node_id(tag, "unifying"), OpenOutcome::Denied)
+        .unwrap();
+    assert!(matches!(
+        open_receiver_with_inventory(
+            &backend,
+            &ReceiverTarget::Selector(&ReceiverSelector::BoltUid(BOLT_B.into())),
+            Some(&identities),
+        )
+        .await,
+        Err(PairingError::ReceiverNotFound)
+    ));
+    assert!(backend.channel_completion("bolt-a").unwrap().is_complete());
+}
+
+#[tokio::test]
+async fn cached_missing_selection_still_ignores_an_unrelated_open_error() {
+    let tag = "cached-missing";
+    let backend = backend(tag);
+    let identities = known_bolt(tag, "bolt-b", BOLT_B);
+    backend
+        .set_node_presence(&node_id(tag, "bolt-b"), NodePresence::Absent)
+        .unwrap();
+    backend
+        .set_open_outcome(&node_id(tag, "bolt-a"), OpenOutcome::Denied)
+        .unwrap();
+    assert!(matches!(
+        open_receiver_with_inventory(
+            &backend,
+            &ReceiverTarget::Selector(&target(0xc548, BOLT_B)),
+            Some(&identities),
+        )
+        .await,
+        Err(PairingError::ReceiverNotFound)
+    ));
+    assert_eq!(backend.open_count(&node_id(tag, "bolt-b")).unwrap(), 0);
+    assert!(
+        backend
+            .channel_completion("bolt-a")
+            .unwrap()
+            .written_reports
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn cached_identity_never_replaces_a_live_uid_check() {
+    let tag = "stale-identity";
+    let backend = backend(tag);
+    let identities = known_bolt(tag, "bolt-a", BOLT_B);
+    backend
+        .set_node_presence(&node_id(tag, "bolt-b"), NodePresence::Absent)
+        .unwrap();
+    assert!(matches!(
+        open_receiver_with_inventory(
+            &backend,
+            &ReceiverTarget::Selector(&target(0xc548, BOLT_B)),
+            Some(&identities),
+        )
+        .await,
+        Err(PairingError::ReceiverNotFound)
+    ));
+    assert!(backend.channel_completion("bolt-a").unwrap().is_complete());
+    assert_eq!(
+        backend
+            .channel_completion("bolt-a")
+            .unwrap()
+            .written_reports,
+        vec![vec![0x10, 0xff, 0x83, 0xfb, 0, 0, 0]]
+    );
+}
+
+#[tokio::test]
+async fn an_unselected_receiver_open_error_does_not_block_the_selected_receiver() {
+    let backend = backend("open-error");
+    backend
+        .set_open_outcome(&node_id("open-error", "bolt-a"), OpenOutcome::Denied)
+        .unwrap();
+    let opened = open_receiver(&backend, &ReceiverTarget::Selector(&target(0xc548, BOLT_B)))
+        .await
+        .expect("a different receiver's open failure must not block the chosen Bolt");
+    assert!(matches!(opened.family, ReceiverFamily::Bolt));
+    assert_eq!(backend.channel_lifetime_count("bolt-b").unwrap(), 1);
+}
+
+#[tokio::test]
+async fn an_unselected_open_error_does_not_mask_a_missing_selected_receiver() {
+    for (tag, selector) in [
+        ("missing-with-error", target(0xc548, BOLT_B)),
+        (
+            "missing-bolt-with-error",
+            ReceiverSelector::BoltUid(BOLT_B.into()),
+        ),
+    ] {
+        let backend = backend(tag);
+        backend
+            .set_node_presence(&node_id(tag, "bolt-b"), NodePresence::Absent)
+            .unwrap();
+        backend
+            .set_open_outcome(&node_id(tag, "bolt-a"), OpenOutcome::Denied)
+            .unwrap();
+        match open_receiver(&backend, &ReceiverTarget::Selector(&selector)).await {
+            Err(error) => assert!(
+                matches!(error, PairingError::ReceiverNotFound),
+                "a different receiver's open error must not hide a missing selection: {error:?}"
+            ),
+            Ok(_) => panic!("the missing selection must never fall back to another receiver"),
+        }
+        assert_eq!(backend.open_count(&node_id(tag, "bolt-a")).unwrap(), 1);
+        assert_eq!(backend.open_count(&node_id(tag, "bolt-b")).unwrap(), 0);
+        for channel in ["bolt-a", "bolt-b"] {
+            assert!(
+                backend
+                    .channel_completion(channel)
+                    .unwrap()
+                    .written_reports
+                    .is_empty(),
+                "no pairing writes are allowed when the selected receiver is missing"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn first_receiver_selection_still_reports_an_open_error() {
+    let backend = backend("first-open-error");
+    backend
+        .set_open_outcome(
+            &node_id("first-open-error", "unifying"),
+            OpenOutcome::Denied,
+        )
+        .unwrap();
+    assert!(matches!(
+        open_receiver(
+            &backend,
+            &ReceiverTarget::Selector(&ReceiverSelector::First)
+        )
+        .await,
+        Err(PairingError::Hid(_))
+    ));
+    assert_eq!(
+        backend
+            .open_count(&node_id("first-open-error", "bolt-a"))
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn selects_second_bolt_by_uid_even_with_unifying_first() {
+    let backend = backend("second-bolt");
+    let opened = open_receiver(
+        &backend,
+        &ReceiverTarget::Selector(&target(0xc548, &BOLT_B.to_ascii_lowercase())),
+    )
+    .await
+    .expect("selected Bolt receiver opens");
+    assert!(matches!(opened.family, ReceiverFamily::Bolt));
+    assert_eq!(
+        backend
+            .open_count(&node_id("second-bolt", "unifying"))
+            .unwrap(),
+        0
+    );
+    for channel in ["bolt-a", "bolt-b"] {
+        assert_eq!(
+            backend
+                .channel_completion(channel)
+                .unwrap()
+                .written_reports
+                .len(),
+            1
+        );
+    }
+    assert_eq!(backend.channel_lifetime_count("bolt-a").unwrap(), 0);
+    assert_eq!(backend.channel_lifetime_count("bolt-b").unwrap(), 1);
+}
+
+#[tokio::test]
+async fn selects_unifying_by_its_serial_without_opening_bolt() {
+    let backend = backend("unifying");
+    let opened = open_receiver(
+        &backend,
+        &ReceiverTarget::Selector(&target(0xc52b, "11223344")),
+    )
+    .await
+    .expect("selected Unifying receiver opens");
+    assert!(matches!(opened.family, ReceiverFamily::Unifying));
+    assert_eq!(
+        backend.open_count(&node_id("unifying", "bolt-a")).unwrap(),
+        0
+    );
+    assert_eq!(
+        backend.open_count(&node_id("unifying", "bolt-b")).unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn disconnected_selection_never_falls_back_to_another_receiver() {
+    let backend = backend("missing");
+    backend
+        .set_node_presence(&node_id("missing", "bolt-b"), NodePresence::Absent)
+        .unwrap();
+    assert!(matches!(
+        open_receiver(&backend, &ReceiverTarget::Selector(&target(0xc548, BOLT_B))).await,
+        Err(PairingError::ReceiverNotFound)
+    ));
+    assert_eq!(
+        backend.open_count(&node_id("missing", "unifying")).unwrap(),
+        0
+    );
+    let completion = backend.channel_completion("bolt-a").unwrap();
+    assert_eq!(
+        completion.written_reports,
+        vec![vec![0x10, 0xff, 0x83, 0xfb, 0, 0, 0]],
+        "only an identity read is allowed on a different receiver"
+    );
+}

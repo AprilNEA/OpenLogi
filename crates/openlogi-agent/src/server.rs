@@ -263,7 +263,7 @@ impl Agent for AgentServer {
     }
 
     async fn cancel_pairing(self, _: Context) -> Result<(), PairingCommandError> {
-        self.pairing.cancel()
+        self.pairing.cancel().await
     }
 
     async fn unpair_device(self, _: Context, route: DeviceRoute) -> Result<(), PairingFailure> {

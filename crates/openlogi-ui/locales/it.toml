@@ -345,6 +345,12 @@ workflow_step_count_plural = "Flusso di lavoro (%{count} passaggi)"
 open_named_target = "Apri %{name}"
 
 [pairing]
+choose_receiver = "Choose a receiver"
+choose_receiver_hint = "Put the device in pairing mode, then choose its Bolt or Unifying receiver to start searching."
+connect_receiver = "Connect a Bolt or Unifying receiver to pair a device."
+receiver_unavailable = "%{name} could not be identified yet. OpenLogi will retry automatically."
+change_receiver = "Change receiver"
+cancelling = "Finishing pairing cancellation..."
 add_device = "Aggiungi dispositivo"
 add_device_dialog = "Aggiungi dispositivo…"
 pairing_mode_description = "Metti il dispositivo in modalità di associazione, quindi avvia la ricerca."
