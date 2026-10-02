@@ -27,6 +27,7 @@ fn snapshot() -> AgentSnapshot {
             agent_version: "test-agent".into(),
             input_monitoring_granted: true,
             hid_open_failures: false,
+            battery_widget: openlogi_core::device::BatteryWidgetStatus::Disabled,
         },
         inventory: vec![DeviceInventory {
             receiver: ReceiverInfo {
