@@ -97,3 +97,21 @@ fn equal_runtime_projection_does_not_wake_managers() {
             .expect("publication remains open")
     );
 }
+
+#[test]
+fn config_reload_wakes_integrations_without_an_inventory_change() {
+    let mut orch = orchestrator(Config::default());
+    let mut changes = orch.subscribe_config_changes();
+    assert!(!changes.has_changed().unwrap());
+
+    let mut config = Config::default();
+    config.app_settings.macos_battery_widget = true;
+    orch.reload_config(config);
+    assert!(changes.has_changed().unwrap());
+    assert!(orch.config().app_settings.macos_battery_widget);
+    changes.borrow_and_update();
+
+    orch.reload_config(Config::default());
+    assert!(changes.has_changed().unwrap());
+    assert!(!orch.config().app_settings.macos_battery_widget);
+}

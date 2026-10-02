@@ -77,6 +77,18 @@ show_in_the_notification_area = "Паказваць у вобласці апав
 notification_area_visibility_description = "Паказваць значок OpenLogi ў вобласці апавяшчэнняў панэлі задач пасля перазапуску фонавага агента."
 openlogi = "OpenLogi"
 
+[battery_widget]
+setting = "Show batteries in macOS widget"
+description = "Experimental. Shows Bolt and Unifying mice and keyboards in the macOS Batteries widget. May stop working after a macOS update."
+starting = "Starting"
+waiting = "Waiting for OpenLogi agent"
+active_singular = "Active · %{count} device"
+active_plural = "Active · %{count} devices"
+empty = "Connect a mouse or keyboard through Bolt or Unifying. macOS shows Bluetooth devices itself."
+unavailable = "Unavailable on this version of macOS"
+failed_singular = "Battery updates failed · %{count} device published"
+failed_plural = "Battery updates failed · %{count} devices published"
+
 [device]
 no_devices_connected = "Прылады не падключаны"
 devices = "Прылады"

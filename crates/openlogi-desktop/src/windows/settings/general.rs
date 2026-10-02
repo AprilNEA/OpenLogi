@@ -12,6 +12,9 @@ use openlogi_core::config::MouseProfileTarget;
 
 use crate::platform::registration::ServiceStatus;
 
+#[cfg(target_os = "macos")]
+mod battery_widget;
+
 /// The page's two sensitivity sliders, named so a call site cannot swap two
 /// same-typed `Entity<SliderState>`s without the compiler noticing.
 pub(super) struct SensitivitySliders {
@@ -82,10 +85,15 @@ pub(super) fn general_page(
         }),
     );
 
-    SettingPage::new(tr!("app.general"))
+    let page = SettingPage::new(tr!("app.general"))
         .icon(IconName::Settings)
         .resettable(false)
-        .group(group)
+        .group(group);
+
+    #[cfg(target_os = "macos")]
+    let page = page.group(battery_widget::settings_group());
+
+    page
 }
 
 fn mouse_profile_target_item() -> SettingItem {

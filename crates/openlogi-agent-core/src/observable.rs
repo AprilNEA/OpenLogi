@@ -16,7 +16,7 @@
 
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::brand::is_openlogi_foreground_id;
-use openlogi_core::device::{DeviceInventory, StandaloneDevice};
+use openlogi_core::device::{BatteryWidgetStatus, DeviceInventory, StandaloneDevice};
 use openlogi_hook::Hook;
 use openlogi_ipc::{
     AgentSnapshot, AgentStatus, ForegroundApps, FoundDevice, Generation, InventoryHealth,
@@ -54,6 +54,7 @@ impl ObservableState {
                     agent_version,
                     input_monitoring_granted: openlogi_hid::permissions::has_access(),
                     hid_open_failures: false,
+                    battery_widget: BatteryWidgetStatus::Disabled,
                 },
                 inventory: Vec::new(),
                 standalone: Vec::new(),
@@ -139,6 +140,17 @@ impl ObservableState {
             snapshot.inventory = inventories.to_vec();
             snapshot.standalone = standalone.to_vec();
             snapshot.status.hid_open_failures = hid_open_failures;
+            true
+        });
+    }
+
+    /// Publish the publisher's actual registry state, independently of inventory.
+    pub fn set_battery_widget(&self, status: BatteryWidgetStatus) {
+        self.update(|snapshot| {
+            if snapshot.status.battery_widget == status {
+                return false;
+            }
+            snapshot.status.battery_widget = status;
             true
         });
     }
@@ -366,6 +378,32 @@ mod tests {
             "the name a client renders changed"
         );
         assert_eq!(recent(&state), ["com.example.App"]);
+    }
+
+    #[test]
+    fn battery_widget_changes_wake_observers_without_an_inventory_change() {
+        use openlogi_core::device::BatteryWidgetStatus;
+
+        let state = state();
+        let mut rx = state.subscribe();
+        let active = BatteryWidgetStatus::Active {
+            published_devices: 2,
+        };
+        state.set_battery_widget(active.clone());
+        assert!(rx.has_changed().unwrap());
+        rx.borrow_and_update();
+
+        state.set_battery_widget(active);
+        assert!(!rx.has_changed().unwrap());
+
+        let failed = BatteryWidgetStatus::Failed {
+            published_devices: 1,
+            reason: "registration failed".into(),
+        };
+        state.set_battery_widget(failed.clone());
+        assert!(rx.has_changed().unwrap());
+        assert_eq!(state.snapshot().status.battery_widget, failed);
+        assert_eq!(state.snapshot().status.inventory, InventoryHealth::Scanning);
     }
 
     #[test]

@@ -77,6 +77,18 @@ show_in_the_notification_area = "Im Infobereich anzeigen"
 notification_area_visibility_description = "OpenLogi-Symbol im Infobereich der Taskleiste anzeigen. Wird beim nächsten Start des Hintergrund-Agenten wirksam."
 openlogi = "OpenLogi"
 
+[battery_widget]
+setting = "Akkus im macOS-Widget anzeigen"
+description = "Experimentell. Zeigt Mäuse und Tastaturen mit Bolt oder Unifying im macOS-Widget „Batterien“. Kann nach einem macOS-Update ausfallen."
+starting = "Wird gestartet"
+waiting = "Warte auf OpenLogi-Agent"
+active_singular = "Aktiv · %{count} Gerät"
+active_plural = "Aktiv · %{count} Geräte"
+empty = "Verbinde eine Maus oder Tastatur über Bolt oder Unifying. Bluetooth-Geräte zeigt macOS selbst an."
+unavailable = "Auf dieser macOS-Version nicht verfügbar"
+failed_singular = "Akkuaktualisierung fehlgeschlagen · %{count} Gerät veröffentlicht"
+failed_plural = "Akkuaktualisierung fehlgeschlagen · %{count} Geräte veröffentlicht"
+
 [device]
 no_devices_connected = "Kein Gerät verbunden"
 devices = "Geräte"

@@ -226,6 +226,8 @@ impl SharedHandles {
 /// Owns the config + device selection and keeps [`SharedHandles`] in sync.
 pub struct Orchestrator {
     config: Config,
+    /// Wakes runtime integrations after a configuration has been adopted.
+    config_changes: watch::Sender<()>,
     devices: Vec<AgentDevice>,
     current: usize,
     current_app: Option<String>,
@@ -334,6 +336,7 @@ impl Orchestrator {
         };
         let orch = Self {
             config,
+            config_changes: watch::channel(()).0,
             devices: Vec::new(),
             current: 0,
             current_app: None,
@@ -1002,6 +1005,18 @@ impl Orchestrator {
         previous != self.mouse_context().1
     }
 
+    /// Borrow the live agent config (custom names, settings).
+    #[must_use]
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
+    /// Subscribe to adopted configuration changes, including custom device names.
+    #[must_use]
+    pub fn subscribe_config_changes(&self) -> watch::Receiver<()> {
+        self.config_changes.subscribe()
+    }
+
     /// Replace the config (after `config.toml` changed) and rebuild everything.
     pub fn reload_config(&mut self, config: Config) {
         let previous = std::mem::replace(&mut self.config, config);
@@ -1030,6 +1045,7 @@ impl Orchestrator {
         self.apply_native_wheel_modes();
         self.apply_changed_fn_locks(&previous);
         self.reapply_light_settings();
+        self.config_changes.send_replace(());
     }
 
     /// Push a changed Fn-lock setting to the online keyboard it belongs to.
