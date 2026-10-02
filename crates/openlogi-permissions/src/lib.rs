@@ -36,7 +36,12 @@ mod macos;
 mod tests;
 
 /// Tri-state result of a permission query.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+///
+/// Declared on every platform, like [`Permission::Accessibility`] beside it,
+/// rather than only on the two that can answer one. Windows has no permission
+/// to report, but the module docs above still name this type, and a `cfg` that
+/// deletes it there turns those docs into a broken intra-doc link that fails
+/// the whole crate's rustdoc build on Windows alone.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PermissionStatus {
     /// The app may use the capability.

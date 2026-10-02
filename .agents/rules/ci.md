@@ -157,7 +157,7 @@ warning that host clippy `-D warnings` does not surface still fails CI.
 | `tests (macos, <arch>)` | `cargo test --workspace --all-targets` | macOS. CI matrix is arm64 (`macos-latest`) and x86_64 (`macos-15-intel`) |
 | `tests (windows)` | `cargo test --workspace --exclude openlogi-desktop` | **Windows** only — the one place the `cfg(windows)` tests execute; nothing reproduces it elsewhere |
 | `cargo-deny` | `cargo deny --config .cargo/deny.toml --all-features --manifest-path crates/openlogi/Cargo.toml check` | any (needs `cargo-deny`; `nix run nixpkgs#cargo-deny -- …` also works) |
-| `clippy (windows)` | `cargo clippy --workspace --all-targets -- -D warnings` | **Windows**. Elsewhere: `devenv tasks run openlogi:check-windows` (ring-free subset, not the full workspace) |
+| `clippy (windows)` | `cargo clippy --workspace --all-targets -- -D warnings`, then the `rustdoc` job's `cargo doc` line | **Windows**. Also carries the Windows rustdoc gate: a `cfg`-gated doc target missing only on Windows resolves fine in the Linux `rustdoc` job. Elsewhere: `devenv tasks run openlogi:check-windows` (ring-free subset, not the full workspace) |
 | `wasm (portable crates)` | `cargo check -p openlogi-hidpp -p openlogi-device --target wasm32-unknown-unknown` then `cargo check -p openlogi-core --no-default-features --target wasm32-unknown-unknown` | any (needs the `wasm32-unknown-unknown` std; devenv installs it) |
 
 CI always sets `CARGO_TERM_COLOR=always`, `CARGO_INCREMENTAL=0`, and
