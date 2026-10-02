@@ -780,3 +780,18 @@ async fn pending_restore_follows_a_disabled_devices_latest_route() {
         "restore must follow the mouse onto the receiver inventory names now"
     );
 }
+
+#[test]
+fn a_pointer_only_plan_change_keeps_held_presses() {
+    let old = plan().dispatch;
+    let mut moved = old.clone();
+    // A Next Desktop swipe leaves the pointer over another window (#1634).
+    moved.pointer_target = Some(openlogi_hook::PointerTarget::Desktop);
+    assert!(same_bindings(&old, &moved));
+
+    let mut rebound = old.clone();
+    rebound
+        .bindings
+        .insert(ButtonId::Back, Binding::Single(Action::Copy));
+    assert!(!same_bindings(&old, &rebound));
+}
