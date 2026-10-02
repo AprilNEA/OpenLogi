@@ -125,6 +125,37 @@ fn selecting_another_control_closes_the_action_picker(cx: &mut TestAppContext) {
     cx.run_until_parked();
 }
 
+#[gpui::test]
+fn clearing_custom_action_drafts_resets_text_and_invalid_state(cx: &mut TestAppContext) {
+    cx.update(gpui_component::init);
+    install_app_state(cx);
+    let (view, cx) = cx.add_window_view(MouseModelView::new);
+    cx.run_until_parked();
+
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            view.custom_shortcut_input
+                .update(cx, |input, cx| input.set_value("Cmd+K", window, cx));
+            view.custom_application_input
+                .update(cx, |input, cx| input.set_value("/bin/true", window, cx));
+            view.custom_shortcut_invalid = true;
+            view.custom_application_invalid = true;
+
+            view.clear_custom_action_drafts(window, cx);
+        });
+    });
+
+    view.update(cx, |view, cx| {
+        assert_eq!(view.custom_shortcut_input.read(cx).value(), "");
+        assert_eq!(view.custom_application_input.read(cx).value(), "");
+        assert!(!view.custom_shortcut_invalid);
+        assert!(!view.custom_application_invalid);
+    });
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
 #[test]
 fn active_thumbwheel_directions_highlight_the_paired_control() {
     assert_eq!(
