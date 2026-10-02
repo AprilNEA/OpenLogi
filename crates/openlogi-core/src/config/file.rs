@@ -152,7 +152,17 @@ impl ConfigFile {
 
     /// Save `config` only if the file still matches the loaded revision.
     pub fn save(&mut self, config: &Config) -> Result<(), ConfigError> {
-        let current = match fs::read_to_string(&self.path) {
+        // The atomic write renames a staged file over its target, which would
+        // replace a symlinked config (a dotfiles manager such as GNU stow)
+        // with a plain copy, so it commits to the file the link points at.
+        // Resolved once, up front: the conflict check, the backup and the
+        // write must all see the same file even if the link is repointed
+        // mid-save.
+        let target = resolve_symlinks(&self.path).map_err(|source| ConfigError::Read {
+            path: self.path.clone(),
+            source,
+        })?;
+        let current = match fs::read_to_string(&target) {
             Ok(source) => Some(source),
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
             Err(source) => {
@@ -196,12 +206,21 @@ impl ConfigFile {
             })?;
         }
         let body = render_config(config, self.source.as_deref(), &self.path)?;
-        backup_config_once(&self.path).map_err(|source| ConfigError::Write {
+        // Re-read at backup time so an edit landing after the conflict check
+        // is still recoverable, but from the resolved target rather than
+        // through the link, which may have been repointed since.
+        backup_config_once(&self.path, &target).map_err(|source| ConfigError::Write {
             path: self.path.clone(),
             source,
         })?;
-        write_atomic(&self.path, body.as_bytes()).map_err(|source| ConfigError::Write {
-            path: self.path.clone(),
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(|source| ConfigError::Write {
+                path: target.clone(),
+                source,
+            })?;
+        }
+        write_atomic(&target, body.as_bytes()).map_err(|source| ConfigError::Write {
+            path: target,
             source,
         })?;
         // The migrated file is gone from disk now, and its copy is safely
@@ -367,15 +386,17 @@ fn reconcile_item(current: &mut Item, generated: &Item) {
     }
 }
 
-fn backup_config_once(path: &Path) -> io::Result<()> {
+/// Back up the contents of `target` (the file `path` resolves to) beside
+/// `path` the first time this process saves it.
+fn backup_config_once(path: &Path, target: &Path) -> io::Result<()> {
     let mut backed_up = BACKED_UP_CONFIGS
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
     if backed_up.contains(path) {
         return Ok(());
     }
-    match fs::metadata(path) {
-        Ok(_) => backup_existing_config(path)?,
+    match fs::read(target) {
+        Ok(current) => backup_existing_config(path, &current)?,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
@@ -383,7 +404,8 @@ fn backup_config_once(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-pub(super) fn backup_existing_config(path: &Path) -> io::Result<()> {
+/// Rotate the backups beside `path` and store `current` as the newest.
+pub(super) fn backup_existing_config(path: &Path, current: &[u8]) -> io::Result<()> {
     for generation in (1..CONFIG_BACKUP_GENERATIONS).rev() {
         let source = config_backup_path(path, generation)?;
         match fs::read(&source) {
@@ -392,7 +414,7 @@ pub(super) fn backup_existing_config(path: &Path) -> io::Result<()> {
             Err(error) => return Err(error),
         }
     }
-    write_atomic(&config_backup_path(path, 1)?, &fs::read(path)?)
+    write_atomic(&config_backup_path(path, 1)?, current)
 }
 
 /// Path of the pre-migration copy: the config's own name with
@@ -422,6 +444,34 @@ pub(super) fn config_backup_path(path: &Path, generation: usize) -> io::Result<P
     let mut backup_name = OsString::from(file_name);
     backup_name.push(format!(".backup.{generation}"));
     Ok(path.with_file_name(backup_name))
+}
+
+/// Follow `path` through every symlink to the file it finally names, which
+/// need not exist yet (a dangling link is written through, not replaced).
+/// Relative link targets resolve against the link's own directory.
+pub(super) fn resolve_symlinks(path: &Path) -> io::Result<PathBuf> {
+    // Linux's loop limit (`MAXSYMLINKS`); macOS stops at 32. Inclusive, so
+    // the file reached by the last permitted hop is still examined.
+    const MAX_LINKS: usize = 40;
+    let mut current = path.to_path_buf();
+    for _ in 0..=MAX_LINKS {
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                let link = fs::read_link(&current)?;
+                current = match current.parent() {
+                    Some(parent) => parent.join(link),
+                    None => link,
+                };
+            }
+            Ok(_) => return Ok(current),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(current),
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "too many levels of symbolic links",
+    ))
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
