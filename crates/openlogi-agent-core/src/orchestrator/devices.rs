@@ -3,6 +3,7 @@
 //! re-apply plan and the host-switch links.
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 
 use openlogi_core::config::Config;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
@@ -59,14 +60,12 @@ pub(super) fn build_devices(
                 model.serial_number.as_deref(),
                 model.unit_id,
             );
-            // An offline probe reports an all-zero unit id, which is not a
-            // physical identity — offer it only while the device is online,
-            // exactly as the GUI does, or every sleeping device would resolve
-            // to the same non-key.
+            // Always offer the probe's identity; `resolve_hint` / `is_physical`
+            // drop empty serial / all-zero unit so those stay route-keyed.
+            // Offline Easy-Switch siblings often retain a cached serial (#1560).
             let identity =
                 DeviceIdentity::from_parts(model.serial_number.as_deref(), model.unit_id);
-            let Some(config_key) =
-                config.resolve_device_key(&stable_id, paired.online.then_some(&identity))
+            let Some(config_key) = config.resolve_device_key(&stable_id, identity.resolve_hint())
             else {
                 continue;
             };
@@ -93,8 +92,7 @@ pub(super) fn build_devices(
             device.unit_id,
         );
         let identity = DeviceIdentity::from_parts(device.serial_number.as_deref(), device.unit_id);
-        let Some(config_key) =
-            config.resolve_device_key(&stable_id, device.online.then_some(&identity))
+        let Some(config_key) = config.resolve_device_key(&stable_id, identity.resolve_hint())
         else {
             continue;
         };
@@ -111,6 +109,7 @@ pub(super) fn build_devices(
             online: device.online,
         });
     }
+    let mut devices = fold_devices_by_config_key(config, devices);
     // Order by the same canonical key the GUI carousel uses, so the
     // no-saved-selection fallback (`pick_current` -> index 0) targets the device
     // the GUI shows first rather than whatever HID node enumerated first.
@@ -121,6 +120,63 @@ pub(super) fn build_devices(
             .then_with(|| a.model_key.cmp(&b.model_key))
     });
     devices
+}
+
+/// Collapse Easy-Switch sibling slots that share one [`AgentDevice::config_key`]
+/// into a single agent device — the same fold the GUI applies via
+/// `fold_by_inventory_key` (#1560).
+///
+/// Online always wins. When every candidate is offline, prefer a route already
+/// present in that device's `config.links`, else the lowest slot number.
+fn fold_devices_by_config_key(config: &Config, devices: Vec<AgentDevice>) -> Vec<AgentDevice> {
+    let mut by_key: HashMap<String, AgentDevice> = HashMap::new();
+    for device in devices {
+        match by_key.entry(device.config_key.clone()) {
+            Entry::Vacant(slot) => {
+                slot.insert(device);
+            }
+            Entry::Occupied(mut slot) => {
+                if prefer_folded_device(config, &device, slot.get()) {
+                    slot.insert(device);
+                }
+            }
+        }
+    }
+    by_key.into_values().collect()
+}
+
+/// Whether `candidate` should replace `incumbent` when both share a config key.
+fn prefer_folded_device(config: &Config, candidate: &AgentDevice, incumbent: &AgentDevice) -> bool {
+    match (candidate.online, incumbent.online) {
+        (false, true) => false,
+        // Online candidate wins; both online keeps insertion order ("later
+        // wins"), matching the GUI.
+        (true, _) => true,
+        (false, false) => prefer_offline_survivor(config, candidate, incumbent),
+    }
+}
+
+fn prefer_offline_survivor(
+    config: &Config,
+    candidate: &AgentDevice,
+    incumbent: &AgentDevice,
+) -> bool {
+    let candidate_linked = route_in_device_links(config, candidate);
+    let incumbent_linked = route_in_device_links(config, incumbent);
+    match (candidate_linked, incumbent_linked) {
+        (true, false) => true,
+        (false, true) => false,
+        _ => candidate.slot < incumbent.slot,
+    }
+}
+
+fn route_in_device_links(config: &Config, device: &AgentDevice) -> bool {
+    let Some(entry) = config.devices.get(device.config_key.as_str()) else {
+        return false;
+    };
+    entry
+        .links
+        .contains_key(stable_id(device).route_key().as_str())
 }
 
 pub(super) fn host_switch_links(config: &Config, devices: &[AgentDevice]) -> Vec<HostSwitchLink> {
