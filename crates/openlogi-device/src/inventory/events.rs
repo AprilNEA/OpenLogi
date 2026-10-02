@@ -7,7 +7,7 @@
 //! reconciliation from the enumerator.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use hidpp::channel::{HidppChannel, HidppMessage, MessageListenerGuard};
 use hidpp::feature::unified_battery::BatteryEvent;
@@ -36,18 +36,28 @@ pub enum HidppEventSource {
 /// The sending half of the bounded HID++ reconciliation-request channel.
 ///
 /// Clones are installed only on inventory-owned channels. Capacity is one:
-/// every source asks for the same full reconciliation, so a burst has no
-/// additional meaning and must not grow memory while a slow probe is running.
+/// every source asks for the same full reconciliation. Reconnect provenance
+/// takes priority over battery changes so a burst cannot lose a settings reset.
 #[derive(Clone)]
 pub struct EventNotifier {
-    sender: mpsc::Sender<HidppEventSource>,
+    sender: mpsc::Sender<()>,
+    pending: Arc<Mutex<Option<HidppEventSource>>>,
     #[cfg(test)]
     observation: Option<Arc<EventObservation>>,
 }
 
 impl EventNotifier {
     fn notify(&self, source: HidppEventSource) {
-        let _ = self.sender.try_send(source);
+        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        match *pending {
+            None => {
+                *pending = Some(source);
+                let _ = self.sender.try_send(());
+            }
+            Some(HidppEventSource::UnifiedBattery) => *pending = Some(source),
+            Some(_) => {}
+        }
+        drop(pending);
         #[cfg(test)]
         if let Some(observation) = &self.observation {
             observation.count.fetch_add(1, Ordering::Release);
@@ -57,19 +67,45 @@ impl EventNotifier {
 }
 
 /// The receiving half of the coalesced HID++ reconciliation-request channel.
-pub type EventReceiver = mpsc::Receiver<HidppEventSource>;
+pub struct EventReceiver {
+    receiver: mpsc::Receiver<()>,
+    pending: Arc<Mutex<Option<HidppEventSource>>>,
+}
+
+impl EventReceiver {
+    /// Wait for a coalesced request, retaining reconnects over battery changes.
+    pub async fn recv(&mut self) -> Option<HidppEventSource> {
+        self.receiver.recv().await?;
+        self.pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+    }
+
+    /// Take an already queued request without waiting.
+    pub fn try_recv(&mut self) -> Result<HidppEventSource, mpsc::error::TryRecvError> {
+        self.receiver.try_recv()?;
+        self.pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+            .ok_or(mpsc::error::TryRecvError::Empty)
+    }
+}
 
 /// Build the bounded channel used by an inventory watcher and its enumerator.
 #[must_use]
 pub fn event_channel() -> (EventNotifier, EventReceiver) {
     let (sender, receiver) = mpsc::channel(1);
+    let pending = Arc::new(Mutex::new(None));
     (
         EventNotifier {
             sender,
+            pending: Arc::clone(&pending),
             #[cfg(test)]
             observation: None,
         },
-        receiver,
+        EventReceiver { receiver, pending },
     )
 }
 
@@ -101,19 +137,13 @@ impl EventObserver {
 /// Build the production capacity-one event channel plus a decode observation barrier.
 #[cfg(test)]
 pub(crate) fn observed_event_channel() -> (EventNotifier, EventReceiver, EventObserver) {
-    let (sender, receiver) = mpsc::channel(1);
+    let (mut notifier, receiver) = event_channel();
     let observation = Arc::new(EventObservation {
         count: AtomicUsize::new(0),
         changed: Notify::new(),
     });
-    (
-        EventNotifier {
-            sender,
-            observation: Some(Arc::clone(&observation)),
-        },
-        receiver,
-        EventObserver { observation },
-    )
+    notifier.observation = Some(Arc::clone(&observation));
+    (notifier, receiver, EventObserver { observation })
 }
 
 /// Runtime feature indexes whose unsolicited events affect inventory.
@@ -435,5 +465,22 @@ mod tests {
             Ok(HidppEventSource::ReceiverConnection)
         );
         assert_eq!(receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+    }
+
+    #[test]
+    fn reconnect_upgrades_a_pending_battery_request() {
+        for source in [
+            HidppEventSource::ReceiverConnection,
+            HidppEventSource::WirelessDeviceStatus,
+        ] {
+            let (notifier, mut receiver) = event_channel();
+            notifier.notify(HidppEventSource::UnifiedBattery);
+            notifier.notify(source);
+            notifier.notify(HidppEventSource::UnifiedBattery);
+            assert_eq!(receiver.try_recv(), Ok(source));
+            assert_eq!(receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+            notifier.notify(HidppEventSource::UnifiedBattery);
+            assert_eq!(receiver.try_recv(), Ok(HidppEventSource::UnifiedBattery));
+        }
     }
 }

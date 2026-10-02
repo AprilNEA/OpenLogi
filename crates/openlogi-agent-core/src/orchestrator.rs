@@ -24,7 +24,7 @@ use openlogi_core::device::{
 use openlogi_core::device_order::{DeviceIdentity, PhysicalDeviceKey};
 use openlogi_hid::{
     CaptureChannelSlot, ChannelPool, ChannelRegistry, DeviceIoGate, DeviceRoute, FnLockState,
-    HidppOperation, WriteError, is_reserved_keyboard_control,
+    HidppOperation, HostOperatingSystem, WriteError, is_reserved_keyboard_control,
 };
 use openlogi_ipc::InventoryHealth;
 use tokio::sync::watch;
@@ -754,6 +754,15 @@ impl Orchestrator {
         if let Some(fn_lock) = self.config.fn_lock(key) {
             self.shared.write_fn_lock_in_background(&route, fn_lock);
         }
+        if dev.kind == DeviceKind::Keyboard
+            && self.config.app_settings.enforce_native_keyboard_platform
+            && let Some(host_os) = native_host_operating_system(std::env::consts::OS)
+        {
+            crate::hardware::write_native_host_platform_in_background(
+                self.shared.keyboard_device(&route),
+                host_os,
+            );
+        }
         if let Some(capabilities) = dev.light_capabilities
             && let Some(light) = self.effective_light_settings(key)
         {
@@ -1029,6 +1038,7 @@ impl Orchestrator {
         self.rebuild();
         self.apply_native_wheel_modes();
         self.apply_changed_fn_locks(&previous);
+        self.apply_native_keyboard_platforms();
         self.reapply_light_settings();
     }
 
@@ -1051,6 +1061,31 @@ impl Orchestrator {
             if let Some(fn_lock) = fn_lock {
                 self.shared.write_fn_lock_in_background(&route, fn_lock);
             }
+        }
+    }
+
+    /// Apply the opt-in native host-platform policy immediately after a config
+    /// reload; appearance, reconnect, and wake use
+    /// [`Self::reapply_volatile_settings`].
+    fn apply_native_keyboard_platforms(&self) {
+        if !self.config.app_settings.enforce_native_keyboard_platform {
+            return;
+        }
+        let Some(host_os) = native_host_operating_system(std::env::consts::OS) else {
+            return;
+        };
+        for dev in self.devices.iter().filter(|dev| {
+            dev.online
+                && dev.kind == DeviceKind::Keyboard
+                && self.config.device_enabled(&dev.config_key)
+        }) {
+            let Some(route) = dev.route.clone() else {
+                continue;
+            };
+            crate::hardware::write_native_host_platform_in_background(
+                self.shared.keyboard_device(&route),
+                host_os,
+            );
         }
     }
 
@@ -1146,6 +1181,15 @@ fn publish_optional_arc_if_changed<T: PartialEq>(
         *current = value.map(Arc::new);
         true
     });
+}
+
+fn native_host_operating_system(os: &str) -> Option<HostOperatingSystem> {
+    match os {
+        "windows" => Some(HostOperatingSystem::Windows),
+        "macos" => Some(HostOperatingSystem::MacOs),
+        "linux" => Some(HostOperatingSystem::Linux),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

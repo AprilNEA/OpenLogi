@@ -280,6 +280,11 @@ pub struct AppSettings {
     /// the application under the pointer; unsupported platforms use focus.
     #[serde(default)]
     pub mouse_profile_target: MouseProfileTarget,
+    /// Restore the native firmware platform on compatible keyboards after
+    /// appearance, reconnect, or resume. Opt-in to preserve intentional layouts.
+    /// Appended last because this struct crosses the IPC wire positionally.
+    #[serde(default)]
+    pub enforce_native_keyboard_platform: bool,
 }
 
 const SENSITIVITY_MIN: u8 = 1;
@@ -482,6 +487,7 @@ impl Default for AppSettings {
             theme_dark: None,
             ui_radius: None,
             mouse_profile_target: MouseProfileTarget::Pointer,
+            enforce_native_keyboard_platform: false,
         }
     }
 }
