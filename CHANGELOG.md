@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.12] - 2026-10-02
+
+### Added
+
+- *(cli)* persist verified automation settings with save
+
+### Fixed
+
+- *(core)* serialize configuration saves across processes
+
 ## [0.8.11] - 2026-10-02
 
 ### Added
