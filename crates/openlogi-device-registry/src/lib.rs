@@ -11,8 +11,13 @@
 #![deny(rustdoc::bare_urls)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
+pub mod driver;
 pub mod litra;
+pub mod native_remap;
 pub mod receiver;
 
 /// Logitech's USB/Bluetooth vendor ID.
 pub const LOGITECH_VENDOR_ID: u16 = 0x046d;
+
+/// Built-in protocol driver identity, independent of a product model.
+pub const HIDPP_DRIVER_ID: &str = "org.openlogi.hidpp";

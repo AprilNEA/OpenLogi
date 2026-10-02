@@ -29,7 +29,7 @@ use windows::core::{GUID, Interface, w};
 
 use crate::Camera;
 use crate::com_windows::ComApartment;
-use crate::controls::{
+use openlogi_core::camera::{
     AutoState, AutoToggle, CameraControl, CameraState, ControlError, ControlRange,
 };
 
@@ -64,7 +64,11 @@ enum Prop {
     Unsupported,
 }
 
-impl CameraControl {
+trait Property {
+    fn prop(self) -> Prop;
+}
+
+impl Property for CameraControl {
     fn prop(self) -> Prop {
         match self {
             Self::Zoom => Prop::CameraControl(CC_ZOOM),
@@ -81,7 +85,7 @@ impl CameraControl {
     }
 }
 
-impl AutoToggle {
+impl Property for AutoToggle {
     /// The property whose auto/manual flag backs this toggle.
     fn prop(self) -> Prop {
         match self {

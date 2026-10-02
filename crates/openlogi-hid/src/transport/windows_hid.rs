@@ -187,6 +187,13 @@ fn bool_result(ok: bool) -> Result<(), io::Error> {
 
 struct HidHandle(HANDLE);
 
+/// Query report limits with a metadata-only handle before admitting a plugin report.
+pub(crate) fn report_capabilities(path: &[u16]) -> Result<HIDP_CAPS, NativeWriteError> {
+    HidHandle::open(path, 0)
+        .map_err(|error| NativeWriteError::LastOsError("CreateFileW(metadata)", error))?
+        .caps()
+}
+
 impl HidHandle {
     fn open(path: &[u16], desired_access: u32) -> Result<Self, io::Error> {
         // SAFETY: `path` is a NUL-terminated UTF-16 string (the terminator is

@@ -21,6 +21,8 @@ extend-ignore-identifiers-re = ["^(?:ALS|AlsAutomatic|AlsSaturated)$"]
 PNGs = "PNGs"
 SWCustomHighligt2 = "SWCustomHighligt2"
 udid = "udid"
+# openlogi-async-hid uses this spelling for its public writer constructor.
+open_writeable = "open_writeable"
 
 [default.extend-words]
 # Technical terms and prefixes accepted in prose and compound identifiers.

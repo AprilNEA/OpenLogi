@@ -19,6 +19,7 @@ pub mod app;
 pub mod binding;
 pub mod bindings;
 pub mod brand;
+pub mod camera;
 pub mod color;
 pub mod config;
 pub mod device;
@@ -32,6 +33,7 @@ pub mod locale;
 pub mod logging;
 #[cfg(feature = "fs")]
 pub mod paths;
+pub mod peripheral;
 pub mod scroll;
 #[cfg(feature = "fs")]
 pub mod single_instance;
