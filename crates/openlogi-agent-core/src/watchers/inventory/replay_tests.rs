@@ -379,6 +379,14 @@ async fn a_mouse_that_wakes_while_device_io_is_paused_is_published_on_resume() {
             .is_none(),
         "a paused gate must not publish the woken mouse"
     );
+    assert_eq!(
+        mouse
+            .backend
+            .open_count(&mouse.after_wake)
+            .expect("known node"),
+        0,
+        "a paused gate must not open the woken mouse either"
+    );
     assert!(device_io_signal.resume());
     let woken = published(&mut watcher, has_devices).await;
 
