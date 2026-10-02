@@ -75,7 +75,7 @@ fn accumulate_tags_a_committed_swipe_with_the_held_press() {
     assert_eq!(
         hold.accumulate(50, 0),
         None,
-        "short same-direction travel does not repeat"
+        "continuing the same swipe does not repeat"
     );
     assert_eq!(hold.end(ButtonId::Back), Some((press, false)));
 }
