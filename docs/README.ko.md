@@ -1,6 +1,9 @@
 > [!WARNING]
 > **OpenLogi는 활발히 개발 중**이며 아직 안정 단계가 아닙니다 — 기능과 설정이 변경될 수 있습니다. 저장소에 **Star** ⭐ 와 **Watch** 👀 를 눌러 두면 새 릴리스가 나올 때 알림을 받을 수 있습니다.
 
+> [!CAUTION]
+> **OpenLogi는 암호화폐 토큰이 없습니다.** 우리는 pump.fun을 비롯한 그 어디에서도 토큰을 만들거나 승인하거나 지지한 적이 없으며, 앞으로도 없을 것입니다. OpenLogi의 이름이나 로고를 사용하는 토큰은 이 프로젝트와 아무런 관련이 없는 사기입니다.
+
 <h4 align="right"><a href="../README.md">English</a> | <a href="README.zh-CN.md">简体中文</a> | <a href="README.ja.md">日本語</a> | <a href="README.de.md">Deutsch</a> | <a href="README.fr.md">Français</a> | <strong>한국어</strong> | <a href="README.ru.md">Русский</a></h4>
 
 <p align="center">

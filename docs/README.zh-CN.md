@@ -1,6 +1,9 @@
 > [!WARNING]
 > **OpenLogi 仍在积极开发中**，尚未稳定 —— 功能与配置仍可能变动。点个 **Star** ⭐ 并 **Watch** 👀 本仓库，在新版本发布时获得通知。
 
+> [!CAUTION]
+> **OpenLogi 没有任何加密货币代币。** 我们从未在 pump.fun 或其他任何平台创建、授权或认可过任何代币，将来也不会。任何使用 OpenLogi 名称或标志的代币均为骗局，与本项目无关。
+
 <h4 align="right"><a href="../README.md">English</a> | <strong>简体中文</strong> | <a href="README.ja.md">日本語</a> | <a href="README.de.md">Deutsch</a> | <a href="README.fr.md">Français</a> | <a href="README.ko.md">한국어</a> | <a href="README.ru.md">Русский</a></h4>
 
 <p align="center">
