@@ -25,6 +25,30 @@ const MANIFEST_URL: &str = match option_env!("OPENLOGI_UPDATE_MANIFEST_URL") {
     None => "https://updates.openlogi.org/channels/stable/latest.json",
 };
 
+/// The host update checks ask for a new version, parsed from [`MANIFEST_URL`]
+/// rather than hardcoded — so the consent dialog names where the traffic
+/// actually goes even on a build with `OPENLOGI_UPDATE_MANIFEST_URL` set to an
+/// alternate mirror, instead of always claiming `updates.openlogi.org`.
+#[must_use]
+pub(crate) fn manifest_host() -> &'static str {
+    MANIFEST_URL
+        .split("://")
+        .nth(1)
+        .and_then(|rest| rest.split('/').next())
+        .unwrap_or(MANIFEST_URL)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::manifest_host;
+
+    #[test]
+    fn manifest_host_is_the_bare_domain() {
+        // The default MANIFEST_URL compiled into a non-release build.
+        assert_eq!(manifest_host(), "updates.openlogi.org");
+    }
+}
+
 /// Base64 minisign public key, embedded at build time by the release workflow.
 /// Absent in local/dev builds, which then fail closed (see [`new_entity`]).
 const MINISIGN_PUBLIC_KEY: Option<&str> = option_env!("OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY");
