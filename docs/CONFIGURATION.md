@@ -36,7 +36,7 @@ profiles so they keep their native direction.
 
 ## Shape
 
-`schema_version` is required and currently `7`. `selected_device` is an
+`schema_version` is required and currently `8`. `selected_device` is an
 optional physical device key.
 
 `[app_settings]` contains application-wide preferences:
@@ -69,9 +69,28 @@ A camera without a USB serial has no unique port-stable identity. Its
 remain distinguishable; moving it to another USB port may require naming it
 again.
 
-Common device fields are:
+Schema 8 groups hardware settings under
+`[devices."<physical-key>".capabilities."<capability-id>"]`, with `version = 1`
+in each group. Schema 7 flat settings load through the same typed reader and
+are grouped on save. A file cannot contain both forms for the same capability.
+Unknown capability versions remain stored and inert; an unrelated save does
+not discard them.
 
-- `custom_name`, `enabled`, `dpi`, `dpi_presets`, thumb-wheel sensitivity,
+| Capability ID | Settings |
+| --- | --- |
+| `input-remap/main` | `bindings`, `per_app_bindings`, `disabled_gestures`, `action_ring` |
+| `pointer/main` | `dpi`, `dpi_presets` |
+| `wheel/main` | `smartshift`, `invert_scroll`, `scroll_resolution`, `thumbwheel_sensitivity` |
+| `keyboard-lighting/main` | `lighting` |
+| `light/main` | `light` |
+| `camera/main` | `camera_controls`, `camera_profiles`, `camera_profile` |
+| `fn-lock/main` | `fn_lock` |
+| `host-switch/main` | `host_switch_targets` |
+
+`custom_name`, `enabled`, `identity`, and route-specific `links` remain on
+the device record. The settings retain these meanings:
+
+- `dpi`, `dpi_presets`, thumb-wheel sensitivity,
   scroll inversion, and scroll resolution
 - `bindings`: a button maps to one action, an independent short/long action
   pair, or a gesture-direction map.
@@ -97,7 +116,14 @@ Common device fields are:
   including the Windows `exe:<filename>` fallback
 - `lighting`, `smartshift`, standalone `light`, and camera controls / profiles
 - `host_switch_targets` and `fn_lock` for compatible keyboards
-- `identity` and `disabled_gestures`, which are application-managed metadata
+- `disabled_gestures`, which is application-managed metadata
+
+DJI and external drivers use `[[peripherals]]` rules with an explicit model,
+physical, or session scope and capability-keyed settings. `[plugins]` selects
+exact installed package digests. Device grants and native recovery state stay
+in agent-owned storage. See [Peripheral setup](PERIPHERALS.md) for examples,
+plugin commands, and the distinction between applied configuration and a
+verified key event.
 
 `[keyboard.bindings]` contains global key triggers such as `f1` or
 `shift+command+f5`. Supported trigger modifiers are `shift`, `control`,
@@ -123,7 +149,7 @@ platform's logo key — Command on macOS, the Windows key, `KEY_LEFTMETA` on Lin
 so `Win+L` locks Windows and `Super+End` reaches GNOME and KDE shortcuts bound to
 Super.
 
-`CustomShortcut` emits an immediate key-down/key-up pair. `HoldShortcut` keeps
+For captured input actions, `CustomShortcut` emits an immediate key-down/key-up pair. A native mapping capability instead passes the target HID usage to its host backend and does not synthesize input. DJI supports a single key such as F18, without modifiers or hold behavior. `HoldShortcut` keeps
 the chord down until the originating physical button is released, and also
 releases it if capture is interrupted, the binding becomes invalid, or the
 agent shuts down. Use it for push-to-talk and other hold-to-activate controls.

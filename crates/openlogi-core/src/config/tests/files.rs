@@ -136,7 +136,10 @@ fn human_readable_toml_layout() {
         body.contains(&format!("schema_version = {SCHEMA_VERSION}")),
         "got: {body}"
     );
-    assert!(body.contains("[devices.2b042.bindings]"), "got: {body}");
+    assert!(
+        body.contains("[devices.2b042.capabilities.\"input-remap/main\".bindings]"),
+        "got: {body}"
+    );
     // A `Single` binding serializes byte-identically to the pre-v2 bare
     // `Action`, so the leaf line is unchanged.
     assert!(body.contains("Back = \"BrowserBack\""), "got: {body}");

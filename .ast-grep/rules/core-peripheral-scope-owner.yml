@@ -1,0 +1,15 @@
+id: core-peripheral-scope-owner
+language: rust
+severity: error
+message: Use Config::peripheral_selection for saved peripheral scope precedence.
+note: openlogi-core/src/config/peripheral.rs owns session, physical, and model rule selection.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-core/src/config/peripheral.rs
+  - '**/tests.rs'
+  - '**/tests/**'
+rule:
+  all:
+    - kind: match_expression
+    - regex: '(?s)ConfigScope::Session.*=>\s*3'
