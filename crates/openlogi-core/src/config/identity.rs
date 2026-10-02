@@ -314,6 +314,7 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
     fold_option_field!(camera_profile);
     fold_option_field!(thumbwheel_sensitivity);
     fold_option_field!(fn_lock);
+    fold_option_field!(disabled_keys);
     // The user-assigned alias. Without this a legacy entry carrying a name
     // folded into a canonical entry with none would drop it silently — the
     // one field here a user typed by hand, so the loss is the most visible.
@@ -948,6 +949,53 @@ mod tests {
             Some(LightSettings::default()),
             "the standalone-light setting is not silently discarded"
         );
+    }
+
+    #[test]
+    fn disabled_keys_adoption_preserves_all_policy_states() {
+        use crate::config::DisableKey;
+        use std::collections::BTreeSet;
+
+        let policies = [
+            None,
+            Some(BTreeSet::new()),
+            Some(BTreeSet::from([DisableKey::CapsLock])),
+            Some(BTreeSet::from([DisableKey::WindowsCommand])),
+        ];
+        for canonical_policy in &policies {
+            for legacy_policy in &policies {
+                let mut config = Config::default();
+                let route = "receiver:82839805:slot:1";
+                let canonical = PhysicalDeviceKey::parse("unit:6be9d300").expect("valid");
+                config.devices.insert(
+                    route.into(),
+                    DeviceConfig {
+                        disabled_keys: legacy_policy.clone(),
+                        ..DeviceConfig::default()
+                    },
+                );
+                config.devices.insert(
+                    canonical.as_str().into(),
+                    DeviceConfig {
+                        disabled_keys: canonical_policy.clone(),
+                        ..DeviceConfig::default()
+                    },
+                );
+
+                assert!(config.adopt_route(&canonical, route, None));
+                let expected = canonical_policy.as_ref().or(legacy_policy.as_ref());
+                assert_eq!(
+                    config.disabled_keys(canonical.as_str()),
+                    expected,
+                    "canonical={canonical_policy:?}, legacy={legacy_policy:?}"
+                );
+                assert!(!config.devices.contains_key(route));
+                assert!(!config.adopt_route(&canonical, route, None));
+                let restored: Config =
+                    toml::from_str(&toml::to_string(&config).expect("serialize")).expect("reload");
+                assert_eq!(restored.disabled_keys(canonical.as_str()), expected);
+            }
+        }
     }
 
     #[test]

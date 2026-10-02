@@ -281,12 +281,26 @@ impl Runtime {
                     });
                 });
             }
+            ipc::GuiUpdate::DisableKeysWriteResult { context, result } => {
+                cx.update(|cx| {
+                    AppState::apply(cx, |state| {
+                        state.apply_disable_keys_write_result(context, result)
+                    });
+                });
+            }
             ipc::GuiUpdate::PairingUndeliverable(failure) => {
                 cx.update(|cx| windows::add_device::apply_undeliverable(cx, failure));
             }
-            ipc::GuiUpdate::ConfigReloadResult(result) => {
+            ipc::GuiUpdate::ConfigReloadResult { context, result } => {
                 cx.update(|cx| {
-                    AppState::apply(cx, |state| state.apply_config_reload_result(result));
+                    AppState::apply(cx, |state| match context {
+                        ipc::ConfigReloadContext::General => {
+                            state.apply_config_reload_result(result)
+                        }
+                        ipc::ConfigReloadContext::DisableKeys(context) => {
+                            state.apply_disable_keys_reload_result(context, result)
+                        }
+                    });
                 });
             }
             ipc::GuiUpdate::FnLockWritten { key, result } => {

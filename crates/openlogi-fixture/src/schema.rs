@@ -4,8 +4,8 @@ use std::collections::HashSet;
 
 use openlogi_core::device::{Capabilities, DeviceInventory, LightCapabilities, StandaloneDevice};
 use openlogi_core::hid::{
-    BacklightState, BacklightStatus, DIRECT_DEVICE_INDEX, DeviceRoute, DpiInfo, FnLockState,
-    ScrollWheelMode, SmartShiftStatus,
+    BacklightState, BacklightStatus, DIRECT_DEVICE_INDEX, DeviceRoute, DisableKeysState, DpiInfo,
+    FnLockState, ScrollWheelMode, SmartShiftStatus,
 };
 use serde::{Deserialize, Deserializer, Serialize, de};
 use thiserror::Error;
@@ -189,6 +189,9 @@ pub struct ProfileDeviceSettings {
     /// recorded before it existed keep loading.
     #[serde(default = "ProfileSetting::unsupported")]
     pub fn_lock: ProfileSetting<FnLockState>,
+    /// Fixed lock/system-key disabling read state.
+    #[serde(default = "ProfileSetting::unsupported")]
+    pub disable_keys: ProfileSetting<DisableKeysState>,
     /// RGB keyboard-lighting write support.
     pub lighting: ProfileSupport,
     /// Standalone-light command support.
@@ -466,6 +469,17 @@ fn validate_setting_values(settings: &ProfileDeviceSettings) -> Result<(), Fixtu
     if let Some(backlight) = settings.backlight.value() {
         validate_backlight(&settings.route, *backlight)?;
     }
+    if let Some(disable_keys) = settings.disable_keys.value()
+        && !(disable_keys.disabled & !disable_keys.supported).is_empty()
+    {
+        return Err(FixtureError::invalid(
+            "device profile",
+            format!(
+                "route {} disables keys outside its supported mask",
+                settings.route
+            ),
+        ));
+    }
     if settings.backlight.supports_feature() && settings.lighting.is_supported() {
         return Err(FixtureError::invalid(
             "device profile",
@@ -545,6 +559,7 @@ fn validate_setting_support(
             || settings.smartshift.supports_feature()
             || settings.wheel.supports_feature()
             || settings.backlight.supports_feature()
+            || settings.disable_keys.supports_feature()
             || settings.lighting.is_supported()
         {
             return Err(FixtureError::invalid(
@@ -594,6 +609,12 @@ fn validate_setting_support(
                 "lighting",
                 settings.lighting.is_supported(),
                 capabilities.lighting,
+            )?;
+            validate_capability_support(
+                settings,
+                "Disable Keys",
+                settings.disable_keys.supports_feature(),
+                capabilities.disable_keys,
             )?;
         }
     }

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use openlogi_core::hid::{DpiInfo, FnLockState, SmartShiftStatus};
+use openlogi_core::hid::{DisableKeysState, DpiInfo, FnLockState, SmartShiftStatus};
 
 /// State projected from an swr-backed device query: unqueried, in flight,
 /// resolved, transiently failed, or permanently unsupported.
@@ -37,3 +37,5 @@ pub type SmartShiftLoad = Load<Arc<SmartShiftStatus>>;
 /// read shows what the keyboard holds right now — it can differ from the
 /// persisted `fn_lock` after the user pressed Fn+Esc on the keyboard.
 pub type FnLockLoad = Load<Arc<FnLockState>>;
+/// Per-device Disable Keys capability/current-state load.
+pub type DisableKeysLoad = Load<Arc<DisableKeysState>>;

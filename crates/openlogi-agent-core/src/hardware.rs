@@ -23,8 +23,8 @@ use std::time::Duration;
 
 use openlogi_core::config::Lighting;
 use openlogi_hid::{
-    CaptureChannelSlot, ChannelRegistry, DeviceIoGate, DeviceRoute, Dpi, HidppOperation,
-    ScrollResolution, SharedChannel, SmartShiftStatus, WriteError,
+    CaptureChannelSlot, ChannelRegistry, DeviceIoGate, DeviceRoute, DisableKeysMask, Dpi,
+    HidppOperation, ScrollResolution, SharedChannel, SmartShiftStatus, WriteError,
 };
 use tokio::time::error::Elapsed;
 use tracing::{debug, warn};
@@ -32,11 +32,11 @@ use tracing::{debug, warn};
 use crate::receiver_access::ReceiverAccess;
 
 mod context;
-mod fn_lock;
 mod light;
+mod write_order;
 
 pub use context::HardwareContext;
-pub(crate) use fn_lock::{FnLockOrder, FnLockTicket};
+pub(crate) use write_order::{WriteOrder, WriteTicket};
 
 /// Upper bound on a single HID++ write. `hidpp` has no request timeout of its
 /// own, so without this an asleep / unresponsive device would hang (and leak)
@@ -172,12 +172,51 @@ impl DeviceOp {
         F: FnOnce(SharedChannel) -> Fut,
         Fut: Future<Output = Result<T, WriteError>>,
     {
+        self.run_task(op, |device| async move { f(device.resolve()?).await })
+            .await
+    }
+
+    async fn run_task<F, Fut, T>(self, op: HidppOperation, f: F) -> Result<T, WriteError>
+    where
+        F: FnOnce(Self) -> Fut,
+        Fut: Future<Output = Result<T, WriteError>>,
+    {
         if !self.access.device_io.allows_io() {
             return Err(WriteError::DeviceNotFound);
         }
         let _lease = self.access.receiver_access.acquire_for_io().await;
-        let shared = self.resolve()?;
-        timed(op, f(shared)).await
+        timed(op, f(self)).await
+    }
+
+    /// Resolve only after both receiver access and the setting turn. A channel
+    /// captured before either wait may already have been replaced by inventory.
+    pub(crate) async fn run_ordered<V, F, Fut, T>(
+        self,
+        op: HidppOperation,
+        ticket: WriteTicket<V>,
+        f: F,
+    ) -> Result<Option<T>, WriteError>
+    where
+        F: FnOnce(SharedChannel) -> Fut,
+        Fut: Future<Output = Result<T, WriteError>>,
+    {
+        self.run_task(op, |device| device.with_turn(ticket, f))
+            .await
+    }
+
+    async fn with_turn<V, F, Fut, T>(
+        self,
+        ticket: WriteTicket<V>,
+        f: F,
+    ) -> Result<Option<T>, WriteError>
+    where
+        F: FnOnce(SharedChannel) -> Fut,
+        Fut: Future<Output = Result<T, WriteError>>,
+    {
+        let Some(_turn) = ticket.turn().await else {
+            return Ok(None);
+        };
+        f(self.resolve()?).await.map(Some)
     }
 
     /// Own the whole lighting transaction outside the requester runtime. The
@@ -225,18 +264,15 @@ impl DeviceOp {
     /// never answers within `WRITE_TIMEOUT` warns instead of hanging the
     /// thread forever.
     ///
-    /// Resolves the channel on the calling thread before spawning — every
-    /// `*_in_background` write did this, so a resolution failure (no target,
-    /// registry miss) never pays for a thread spawn, and the lease (acquired
-    /// only once the thread is running) is never awaited for a write that was
-    /// already going nowhere.
+    /// Checks for a usable route before spawning, then resolves again after
+    /// receiver access so a queued operation cannot retain a retired channel.
     pub fn detach<F, Fut, T>(self, label: &'static str, f: F)
     where
         F: FnOnce(SharedChannel) -> Fut + Send + 'static,
         Fut: Future<Output = Result<T, WriteError>>,
     {
         let index = self.route.device_index();
-        self.spawn_write(label, f, move |result| {
+        let _ = self.spawn_write(label, f, move |result| {
             log_outcome(index, label, result, |_| {
                 debug!(index, label, "background write completed");
             });
@@ -257,32 +293,57 @@ impl DeviceOp {
         label: &'static str,
         f: F,
         log: impl FnOnce(Result<Result<T, WriteError>, Elapsed>) + Send + 'static,
-    ) where
+    ) -> Option<std::thread::JoinHandle<()>>
+    where
         F: FnOnce(SharedChannel) -> Fut + Send + 'static,
         Fut: Future<Output = Result<T, WriteError>>,
     {
-        let shared = match self.resolve() {
-            Ok(shared) => shared,
-            Err(reason) => {
-                debug!(route = %self.route, label, %reason, "background write skipped");
-                return;
-            }
-        };
-        let DeviceAccess {
-            receiver_access,
-            device_io,
-            ..
-        } = self.access;
-        std::thread::spawn(move || {
+        self.spawn_task(
+            label,
+            |device| async move { f(device.resolve()?).await },
+            log,
+        )
+    }
+
+    fn spawn_ordered<V: Send + 'static, F, Fut, T>(
+        self,
+        label: &'static str,
+        ticket: WriteTicket<V>,
+        f: F,
+        log: impl FnOnce(Result<Result<Option<T>, WriteError>, Elapsed>) + Send + 'static,
+    ) -> Option<std::thread::JoinHandle<()>>
+    where
+        F: FnOnce(SharedChannel) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, WriteError>>,
+    {
+        self.spawn_task(label, |device| device.with_turn(ticket, f), log)
+    }
+
+    fn spawn_task<F, Fut, T>(
+        self,
+        label: &'static str,
+        f: F,
+        log: impl FnOnce(Result<Result<T, WriteError>, Elapsed>) + Send + 'static,
+    ) -> Option<std::thread::JoinHandle<()>>
+    where
+        F: FnOnce(Self) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, WriteError>>,
+    {
+        if let Err(reason) = self.resolve() {
+            debug!(route = %self.route, label, %reason, "background write skipped");
+            return None;
+        }
+        let receiver_access = self.access.receiver_access.clone();
+        Some(std::thread::spawn(move || {
             let Some(rt) = one_shot_runtime(label) else {
                 return;
             };
             let result = rt.block_on(async {
                 let _lease = receiver_access.acquire_for_io().await;
-                if !device_io.allows_io() {
+                if !self.access.device_io.allows_io() {
                     return None;
                 }
-                Some(tokio::time::timeout(WRITE_TIMEOUT, f(shared)).await)
+                Some(tokio::time::timeout(WRITE_TIMEOUT, f(self)).await)
             });
             if let Some(result) = result {
                 log(result);
@@ -292,7 +353,7 @@ impl DeviceOp {
                     "host device I/O suspended — background write skipped"
                 );
             }
-        });
+        }))
     }
 }
 
@@ -332,7 +393,7 @@ fn one_shot_runtime(label: &str) -> Option<tokio::runtime::Runtime> {
 /// SmartShift feature) are logged.
 pub fn toggle_smartshift_in_background(op: DeviceOp) {
     let index = op.route.device_index();
-    op.spawn_write(
+    let _ = op.spawn_write(
         "SmartShift toggle",
         |c| async move { openlogi_hid::toggle_smartshift_on(&c).await },
         move |result| {
@@ -348,16 +409,12 @@ pub fn toggle_smartshift_in_background(op: DeviceOp) {
 /// keyboard was requested after `ticket`. Returns immediately; failures (incl.
 /// keyboards that expose neither `0x40a3` nor `0x40a2` fn inversion, and a
 /// keyboard whose read-back disagrees with the write) are logged.
-pub(crate) fn write_fn_lock_in_background(op: DeviceOp, ticket: FnLockTicket, on: bool) {
+pub(crate) fn write_fn_lock_in_background(op: DeviceOp, ticket: WriteTicket<bool>, on: bool) {
     let index = op.route.device_index();
-    op.spawn_write(
+    let _ = op.spawn_ordered(
         "Fn-lock write",
-        move |c| async move {
-            let Some(_turn) = ticket.turn().await else {
-                return Ok(None);
-            };
-            openlogi_hid::set_fn_lock_on(&c, on).await.map(Some)
-        },
+        ticket,
+        move |c| async move { openlogi_hid::set_fn_lock_on(&c, on).await },
         move |result| {
             log_outcome(index, "Fn-lock write", result, |state| {
                 if let Some(state) = state {
@@ -393,6 +450,39 @@ impl VolatileMouseSettings {
     pub fn is_empty(&self) -> bool {
         *self == Self::default()
     }
+}
+
+/// Spawn a guarded Disable Keys replacement on the keyboard channel.
+///
+/// Config reload and reconnect/wake reapply share this path. The device layer validates the
+/// complete desired known mask, preserves advertised unknown bits, and
+/// verifies the replacement across the previously advertised supported bits
+/// before reporting success.
+pub(crate) fn write_disabled_keys_in_background(
+    op: DeviceOp,
+    ticket: WriteTicket<Option<DisableKeysMask>>,
+    desired: DisableKeysMask,
+) -> Option<std::thread::JoinHandle<()>> {
+    let index = op.route.device_index();
+    op.spawn_ordered(
+        "Disable Keys write",
+        ticket,
+        move |channel| async move { openlogi_hid::set_disable_keys_on(&channel, desired).await },
+        move |result| {
+            log_outcome(index, "Disable Keys write", result, |state| {
+                if let Some(state) = state {
+                    debug!(
+                        index,
+                        desired = desired.bits(),
+                        confirmed = state.disabled.bits(),
+                        "disabled keys written"
+                    );
+                } else {
+                    debug!(index, "Disable Keys write superseded");
+                }
+            });
+        },
+    )
 }
 
 /// Re-apply every volatile mouse setting for `op`'s device on a **single**
@@ -548,7 +638,7 @@ fn log_wheel_result(
 /// shared channel. Returns immediately; failures are logged.
 pub fn write_dpi_in_background(op: DeviceOp, dpi: Dpi) {
     let index = op.route.device_index();
-    op.spawn_write(
+    let _ = op.spawn_write(
         "DPI write",
         move |c| async move { openlogi_hid::set_dpi_on(&c, dpi).await },
         move |result| {
@@ -564,7 +654,7 @@ pub fn write_dpi_in_background(op: DeviceOp, dpi: Dpi) {
 /// debug level.
 pub fn write_scroll_wheel_mode_in_background(op: DeviceOp, change: WheelModeChange) {
     let index = op.route.device_index();
-    op.spawn_write(
+    let _ = op.spawn_write(
         "wheel mode write",
         move |shared| async move { change.apply_on(&shared).await },
         move |result| log_wheel_result(index, change, result),

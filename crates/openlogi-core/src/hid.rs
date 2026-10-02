@@ -9,6 +9,7 @@
 //! HID stack.
 
 pub mod backlight;
+pub mod disable_keys;
 pub mod dpi;
 pub mod error;
 pub mod fn_lock;
@@ -19,6 +20,7 @@ pub mod scroll;
 pub mod smartshift;
 
 pub use backlight::{BacklightMode, BacklightState, BacklightStatus};
+pub use disable_keys::{DisableKeysMask, DisableKeysState};
 pub use dpi::{Dpi, DpiCapabilities, DpiInfo};
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
 pub use fn_lock::FnLockState;

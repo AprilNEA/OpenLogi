@@ -7,6 +7,30 @@ use openlogi_hid::reprog_controls::BACK_CIDS;
 use super::*;
 
 #[test]
+fn disable_keys_reapply_distinguishes_unmanaged_empty_and_nonempty_config() {
+    let mut config = Config::default();
+    assert_eq!(configured_disabled_keys(&config, "keyboard"), None);
+
+    config.set_disabled_keys("keyboard", BTreeSet::new());
+    assert_eq!(
+        configured_disabled_keys(&config, "keyboard"),
+        Some(openlogi_hid::DisableKeysMask::EMPTY)
+    );
+
+    config.set_disabled_keys(
+        "keyboard",
+        BTreeSet::from([DisableKey::CapsLock, DisableKey::WindowsCommand]),
+    );
+    assert_eq!(
+        configured_disabled_keys(&config, "keyboard"),
+        Some(
+            openlogi_hid::DisableKeysMask::CAPS_LOCK
+                | openlogi_hid::DisableKeysMask::WINDOWS_COMMAND
+        )
+    );
+}
+
+#[test]
 fn configured_wheel_mode_gates_resolution_and_inversion_independently() {
     let mut config = Config::default();
     config.set_scroll_resolution("a", Some(ScrollResolution::Low));
