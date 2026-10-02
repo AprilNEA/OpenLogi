@@ -250,7 +250,7 @@ impl CaptureAccum {
         if *overlap {
             return;
         }
-        // Commit the instant a clean direction emerges (mid-swipe, once per hold);
+        // Commit the instant a clean direction emerges (mid-swipe, repeatable per hold);
         // the accumulator gates on hold duration internally and drops travel that
         // arrives outside a hold.
         if let Some(direction) = swipe.accumulate(i32::from(dx), i32::from(dy)) {
