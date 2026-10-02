@@ -67,7 +67,8 @@ pub use succession::Identity;
 ///      `HidppOperation::ReadFnLock` appended.
 /// v33: `Agent::unpair_device` appended.
 /// v34: `KeyCombo` gains the Super modifier bit (`Super`, `Win`, `Meta`).
-pub const PROTOCOL_VERSION: u32 = 34;
+/// v35: battery freshness and preferences; acknowledged device selection for tray clicks.
+pub const PROTOCOL_VERSION: u32 = 35;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -144,6 +145,19 @@ pub struct AgentSnapshot {
     /// Which application per-app profiles are resolving against. See
     /// [`ForegroundApps`].
     pub foreground: ForegroundApps,
+    /// Most recent unacknowledged tray request, retained across GUI launches.
+    pub device_selection: Option<DeviceSelection>,
+}
+
+/// A tray click addressed to one physical device and one agent publication.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceSelection {
+    /// Agent run, preventing a delayed acknowledgement from clearing a new run's request.
+    pub agent: Identity,
+    /// Publication generation, also distinguishing repeated clicks on the same device.
+    pub request_id: u64,
+    /// Config key shared by the device's transports.
+    pub device_key: String,
 }
 
 /// The application the agent currently resolves per-app profiles against, and
@@ -583,4 +597,6 @@ pub trait Agent {
     /// receiver, and with [`PairingFailure::ReceiverNotFound`] for a route
     /// that names no receiver slot or a receiver that is not connected.
     async fn unpair_device(route: DeviceRoute) -> Result<(), PairingFailure>;
+    /// Acknowledge only the exact device selection the GUI has displayed.
+    async fn acknowledge_device_selection(request: DeviceSelection);
 }

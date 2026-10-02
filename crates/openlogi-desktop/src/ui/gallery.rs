@@ -381,6 +381,7 @@ impl ComponentGallery {
 
     fn battery_panel(pal: Palette) -> gpui::Div {
         let battery = |percentage, level, status| BatteryInfo {
+            freshness: openlogi_core::device::BatteryFreshness::Current,
             percentage,
             level,
             status,

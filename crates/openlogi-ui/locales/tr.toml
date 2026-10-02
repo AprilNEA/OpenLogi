@@ -78,6 +78,16 @@ notification_area_visibility_description = "OpenLogi simgesini görev çubuğu b
 openlogi = "OpenLogi"
 
 [device]
+battery_preferences = "Battery"
+battery_show_in_menu = "Show battery in menu"
+battery_warn_low = "Warn when battery is low"
+battery_warn_description = "Notify at 20% or less and change the OpenLogi icon color."
+battery_unknown = "Battery level unknown"
+battery_tray_charging = "Charging"
+battery_tray_low = "Low"
+battery_tray_critical = "Critical"
+battery_alert_title = "%{name}: battery low"
+battery_alert_body = "%{percentage}% remaining. Charge the device or replace its battery."
 no_devices_connected = "Bağlı cihaz yok"
 devices = "Cihazlar"
 device_count_plural = "%{count} cihaz"

@@ -324,6 +324,25 @@ impl Request for ReadFnLock {
 /// verdict: a reload that did not happen is not one the agent refused.
 pub struct ReloadConfig;
 
+/// Acknowledge a tray request after the selected device page is visible.
+pub struct AcknowledgeDeviceSelection(pub openlogi_ipc::DeviceSelection);
+
+impl Request for AcknowledgeDeviceSelection {
+    type Answer = ();
+
+    async fn call(&self, client: &AgentClient) -> Result<(), RpcError> {
+        client
+            .acknowledge_device_selection(context::current(), self.0.clone())
+            .await
+    }
+
+    fn deliver(self, outcome: Result<(), Unavailable>, _: &UpdateSender) {
+        if outcome.is_err() {
+            debug!("device selection acknowledgement awaits the next snapshot");
+        }
+    }
+}
+
 impl Request for ReloadConfig {
     type Answer = Result<(), ConfigReloadError>;
 
@@ -532,6 +551,7 @@ commands! {
     ReadSmartShift,
     ReadFnLock,
     ReloadConfig,
+    AcknowledgeDeviceSelection,
     RequestAccessibilityPrompt,
     StartPairing,
     PairDevice,
