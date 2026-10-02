@@ -109,15 +109,22 @@ impl RestorePlan for CaptureRestorePlan {
         let channel = Arc::clone(current.channel());
         let device_index = current.device_index();
         let mut restored = true;
+        // `_secondary`: `current` may be inventory-owned and under
+        // concurrent probing (this restore can race a fresh inventory pass
+        // on the very channel it just published), so these writes must not
+        // share a correlation key with that probe traffic — see #1128.
         if let Some(reprog) = &self.reprog {
-            let controls =
-                ReprogControlsV4::new(channel.clone(), device_index, reprog.feature_index);
+            let controls = ReprogControlsV4::new_secondary(
+                channel.clone(),
+                device_index,
+                reprog.feature_index,
+            );
             for &reporting in &reprog.controls {
                 restored &= restore_reporting(&controls, reporting, "captured control").await;
             }
         }
         if let Some(feature_index) = self.thumb_index {
-            let thumbwheel = Thumbwheel::new(channel, device_index, feature_index);
+            let thumbwheel = Thumbwheel::new_secondary(channel, device_index, feature_index);
             restored &= restore_result(thumbwheel.undivert().await, "thumb wheel");
         }
         restored

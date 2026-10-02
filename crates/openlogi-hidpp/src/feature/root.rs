@@ -32,6 +32,26 @@ impl CreatableFeature for RootFeature {
 impl Feature for RootFeature {}
 
 impl RootFeature {
+    /// Binds to the root feature on `chan`, stamping requests with the
+    /// channel's secondary software id (see
+    /// [`crate::channel::HidppChannel::get_secondary_sw_id`]) instead of its
+    /// primary one.
+    ///
+    /// For a second, distinct in-process consumer of a channel another
+    /// consumer already holds open — namely input capture, which reuses an
+    /// inventory-owned channel rather than opening its own (see
+    /// `openlogi-device`'s channel registry). Without this, capture's own
+    /// `getFeature`/`ping` calls share inventory's probe traffic's exact
+    /// correlation key, and the two calls queue behind each other on the wire
+    /// — occasionally past either side's own timeout, which each side reads
+    /// as the other's channel having died.
+    #[must_use]
+    pub fn new_secondary(chan: Arc<HidppChannel>, device_index: u8, _feature_index: u8) -> Self {
+        Self {
+            endpoint: FeatureEndpoint::new_secondary(chan, device_index, 0),
+        }
+    }
+
     /// Retrieves information about a specific feature ID, including its index
     /// in the feature table, its type and its version.
     ///
