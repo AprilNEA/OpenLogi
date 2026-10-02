@@ -4,6 +4,50 @@ use super::*;
 
 const GESTURE: &[u16] = &[reprog_controls::GESTURE_BUTTON_CID];
 
+#[test]
+fn alternate_gesture_control_delivers_click_and_swipe() {
+    for swipe in [false, true] {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut acc = CaptureAccum::default();
+        let sources = &[0x00d0];
+        handle_reprog(
+            &mut acc,
+            RawControlEvent::DivertedButtons([0x00d0, 0, 0, 0]),
+            sources,
+            &[],
+            &[],
+            &tx,
+        );
+        if swipe {
+            acc.backdate_hold_for_test();
+            handle_reprog(
+                &mut acc,
+                RawControlEvent::RawXy { dx: 120, dy: 5 },
+                sources,
+                &[],
+                &[],
+                &tx,
+            );
+        }
+        handle_reprog(&mut acc, release(), sources, &[], &[], &tx);
+        assert_eq!(
+            next_gesture(&mut rx),
+            Ok(CapturedInput::Gesture(
+                ButtonId::GestureButton,
+                if swipe {
+                    GestureDirection::Right
+                } else {
+                    GestureDirection::Click
+                }
+            ))
+        );
+        assert!(
+            next_gesture(&mut rx).is_err(),
+            "one hold must dispatch only once"
+        );
+    }
+}
+
 const PANEL: &[u16] = &[reprog_controls::HAPTIC_PANEL_CID];
 
 const BOTH: &[u16] = &[
@@ -439,25 +483,41 @@ fn a_plain_diverted_gesture_button_presses_without_gesturing() {
     // single binding needs delivery) must dispatch as a button press only —
     // the swipe accumulator belongs to the raw-XY gesture diverts and must
     // not also emit a gesture click on release.
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    let mut acc = CaptureAccum::default();
-    let buttons = [(reprog_controls::GESTURE_BUTTON_CID, ButtonId::GestureButton)];
+    for cid in [0x00c3, 0x00d0] {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut acc = CaptureAccum::default();
+        let buttons = [(cid, ButtonId::GestureButton)];
+        handle_reprog(
+            &mut acc,
+            RawControlEvent::DivertedButtons([cid, 0, 0, 0]),
+            &[],
+            &[],
+            &buttons,
+            &tx,
+        );
+        handle_reprog(
+            &mut acc,
+            RawControlEvent::RawXy { dx: 120, dy: 5 },
+            &[],
+            &[],
+            &buttons,
+            &tx,
+        );
+        handle_reprog(&mut acc, release(), &[], &[], &buttons, &tx);
 
-    handle_reprog(&mut acc, press(), &[], &[], &buttons, &tx);
-    handle_reprog(&mut acc, release(), &[], &[], &buttons, &tx);
-
-    assert_eq!(
-        rx.try_recv(),
-        Ok(CapturedInput::ButtonDown(ButtonId::GestureButton))
-    );
-    assert_eq!(
-        rx.try_recv(),
-        Ok(CapturedInput::ButtonUp(ButtonId::GestureButton))
-    );
-    assert!(
-        rx.try_recv().is_err(),
-        "a plain-diverted gesture button must not also emit a gesture click"
-    );
+        assert_eq!(
+            rx.try_recv(),
+            Ok(CapturedInput::ButtonDown(ButtonId::GestureButton))
+        );
+        assert_eq!(
+            rx.try_recv(),
+            Ok(CapturedInput::ButtonUp(ButtonId::GestureButton))
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "a plain-diverted gesture button must not also emit a gesture click"
+        );
+    }
 }
 
 #[test]

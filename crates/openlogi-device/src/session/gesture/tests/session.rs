@@ -3,6 +3,91 @@
 use super::*;
 
 #[tokio::test]
+async fn alternate_gesture_control_arming_respects_mode_and_capabilities() {
+    for cid in [0x00d0u16, 0x00c3, 0x00d7] {
+        for flags in [0x0120u16, 0x0020, 0x0100, 0] {
+            for gestures in [false, true] {
+                let (raw, handle) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+                    let mut response = vec![0; 20];
+                    response[..4].copy_from_slice(&request[..4]);
+                    response[0] = 0x11;
+                    match (request[2], request[3] >> 4) {
+                        (0, 1) => response[4] = 4,
+                        (0, 0) => response[4] = 2,
+                        (2, 0) => response[4] = 1,
+                        (2, 1) => {
+                            response[4..6].copy_from_slice(&cid.to_be_bytes());
+                            let [low, high] = flags.to_le_bytes();
+                            response[8] = low;
+                            response[12] = high;
+                        }
+                        (2, 2) => response[4..6].copy_from_slice(&cid.to_be_bytes()),
+                        (2, 3) => return Some(request.to_vec()),
+                        _ => panic!("unexpected capture request: {request:02x?}"),
+                    }
+                    Some(response)
+                });
+                let channel = scripted_channel(raw).await;
+                let device = Device::new(channel.clone(), 0xff).await.unwrap();
+                let sources: Vec<_> = GESTURE_SOURCE_BUTTONS
+                    .into_iter()
+                    .filter(|(_, button)| *button == ButtonId::GestureButton)
+                    .collect();
+                let spec = if gestures {
+                    CaptureSpec {
+                        divert_gesture_sources: sources.iter().map(|&(cid, _)| cid).collect(),
+                        ..CaptureSpec::default()
+                    }
+                } else {
+                    CaptureSpec {
+                        divert_buttons: sources,
+                        ..CaptureSpec::default()
+                    }
+                };
+                let mut armed = ArmedControls::default();
+                arm_controls_into(&device, &channel, 0xff, &spec, &mut armed)
+                    .await
+                    .unwrap();
+                let expected =
+                    cid != 0x00d7 && flags & 0x0020 != 0 && (!gestures || flags & 0x0100 != 0);
+                let writes: Vec<_> = handle
+                    .written_reports()
+                    .into_iter()
+                    .filter(|report| report[2] == 2 && report[3] >> 4 == 3)
+                    .map(|report| report[4..7].to_vec())
+                    .collect();
+                let [hi, lo] = cid.to_be_bytes();
+                assert_eq!(
+                    writes,
+                    if expected {
+                        vec![vec![hi, lo, if gestures { 0x33 } else { 0x23 }]]
+                    } else {
+                        vec![]
+                    },
+                    "CID {cid:04x}, flags {flags:04x}, gestures {gestures}"
+                );
+                assert_eq!(
+                    armed.gesture_cids,
+                    if expected && gestures {
+                        vec![cid]
+                    } else {
+                        vec![]
+                    }
+                );
+                assert_eq!(
+                    armed.button_cids,
+                    if expected && !gestures {
+                        vec![(cid, ButtonId::GestureButton)]
+                    } else {
+                        vec![]
+                    }
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn dpi_gesture_arming_never_overwrites_raw_xy_with_plain_diversion() {
     for cid in [0x00c4u16, 0x00ed, 0x00fd] {
         for (gestures, raw_xy, expected_flags) in [
