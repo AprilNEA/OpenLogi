@@ -78,5 +78,6 @@ pub use write::{
     set_keyboard_color, set_keyboard_color_on, set_keyboard_color_with, set_keyboard_color_with_on,
     set_scroll_inversion, set_scroll_inversion_on, set_scroll_resolution, set_scroll_resolution_on,
     set_scroll_wheel_mode, set_scroll_wheel_mode_on, set_smartshift, set_smartshift_on,
-    set_smartshift_sensitivity, toggle_smartshift, toggle_smartshift_on,
+    set_smartshift_sensitivity, set_smartshift_torque, set_smartshift_torque_on, toggle_smartshift,
+    toggle_smartshift_on,
 };
