@@ -83,6 +83,8 @@ struct AgentDevice {
 /// consumers receive only read capabilities through this type.
 #[derive(Clone)]
 pub struct SharedHandles {
+    /// Coalesced peripheral desired state and the armed driver owner.
+    pub peripherals: crate::peripherals::Handle,
     /// Backend identity, I/O gate, channel pool, and inventory source shared by
     /// every hardware-dependent agent service.
     hardware: HardwareContext,
@@ -159,6 +161,7 @@ impl SharedHandles {
             registry: self.channel_registry.clone(),
             receiver_access: self.receiver_access.clone(),
             device_io: self.device_io.clone(),
+            ownership: self.hardware.ownership(),
         }
     }
 
@@ -270,6 +273,7 @@ pub struct Orchestrator {
     /// facts republishes here, so the cell cannot go stale behind a new code
     /// path — see [`ObservableState`].
     observable: Arc<ObservableState>,
+    ownership_reporter: crate::peripherals::ownership::Reporter,
 }
 
 /// See [`Orchestrator::inventory`] (the field) — the agent-side superset of
@@ -310,7 +314,11 @@ impl Orchestrator {
         let (capture_plans_tx, capture_plans) = watch::channel(Arc::new(Vec::new()));
         let (keyboard_spec_tx, keyboard_spec) = watch::channel(None);
         let (host_switch_links_tx, host_switch_links) = watch::channel(Arc::new(Vec::new()));
+        let ownership_reporter = hardware
+            .ownership()
+            .owner(crate::peripherals::ownership::Owner::Runtime);
         let shared = SharedHandles {
+            peripherals: crate::peripherals::Handle::new(&config),
             device_io: hardware.device_io(),
             channel_pool: hardware.channel_pool(),
             hardware,
@@ -333,6 +341,7 @@ impl Orchestrator {
             inventory_refresh: Arc::new(RwLock::new(None)),
         };
         let orch = Self {
+            ownership_reporter,
             config,
             devices: Vec::new(),
             current: 0,
@@ -391,6 +400,13 @@ impl Orchestrator {
     /// so they're built together here and published under one lock — keeping
     /// `rebuild` and `set_current_app` from drifting into a half-populated write.
     fn hook_maps_for(&self, key: Option<&str>) -> HookMaps {
+        if key
+            .and_then(|key| self.devices.iter().find(|device| device.config_key == key))
+            .and_then(|device| device.route.as_ref())
+            .is_some_and(|route| !self.shared.hardware.ownership().requests().allows(route))
+        {
+            return HookMaps::default();
+        }
         // A disabled selected device gets empty maps: the OS hook then passes
         // its events through untouched instead of applying remaps to a device
         // the user asked OpenLogi to leave alone.
@@ -422,15 +438,17 @@ impl Orchestrator {
     /// hardware capture sessions. Selection, polarity, and bindings share the
     /// one lock the callback reads, so a device switch cannot combine facts
     /// from two devices.
-    fn publish_hook_maps(&self, mut maps: HookMaps) {
+    fn publish_hook_maps(&self, mut maps: HookMaps) -> bool {
         match self.shared.hook_maps.write() {
             Ok(mut current) => {
                 maps.thumbwheel_positive_is_forward =
                     std::mem::take(&mut current.thumbwheel_positive_is_forward);
                 *current = maps;
+                true
             }
             Err(error) => {
                 warn!(%error, lock = "hook_maps", "lock poisoned — keeping stale value");
+                false
             }
         }
     }
@@ -503,6 +521,28 @@ impl Orchestrator {
         let key = self.current_key();
         self.publish_hook_maps(self.hook_maps_for(key));
         self.publish_device_runtime();
+    }
+
+    /// Withdraw dispatch for handed-off devices before acknowledging the request.
+    pub async fn refresh_driver_ownership(&self, dispatcher: &crate::runtime::ActionDispatcher) {
+        let requests = self.shared.hardware.ownership().requests();
+        let maps = self.hook_maps_for(self.current_key());
+        let scope = if self.current_key().is_some() && maps.selected_device.is_none() {
+            crate::runtime::ButtonDrain::HookButtons
+        } else {
+            crate::runtime::ButtonDrain::Queued
+        };
+        if !self.publish_hook_maps(maps) {
+            return;
+        }
+        if requests.has_requests()
+            && let Err(error) = dispatcher.drain_buttons(scope).await
+        {
+            warn!(%error, "button handlers have not finished the driver handoff");
+            return;
+        }
+        self.ownership_reporter
+            .observe(&requests, Vec::new(), HashSet::new());
     }
 
     /// Republish the runtime views derived from the device set + config: the
@@ -1004,6 +1044,7 @@ impl Orchestrator {
 
     /// Replace the config (after `config.toml` changed) and rebuild everything.
     pub fn reload_config(&mut self, config: Config) {
+        self.shared.peripherals.reload(&config);
         let previous = std::mem::replace(&mut self.config, config);
         // Parameter-only edits must not erase a transient manual choice while
         // the light remains camera-linked. Changing the policy invalidates it.

@@ -475,11 +475,38 @@ impl CaptureManager for KeyboardManager {
     type Published = Option<Arc<KeyboardSpec>>;
     type Event = KeyboardSessionEvent;
 
-    async fn reconcile(&mut self, requests: ReceiverRequestState, published: &Self::Published) {
+    async fn reconcile(
+        &mut self,
+        requests: ReceiverRequestState,
+        published: &Self::Published,
+        ownership: &crate::peripherals::ownership::Requests,
+    ) {
+        let published = published
+            .as_ref()
+            .filter(|spec| ownership.allows(&spec.route))
+            .cloned();
         let want = wanted_session_for(requests, published.as_deref());
         self.state
             .reconcile(requests, true, published.is_some(), want, &self.channels)
             .await;
+    }
+
+    fn owned_routes(&self) -> Vec<DeviceRoute> {
+        self.state
+            .slot
+            .as_ref()
+            .and_then(|slot| {
+                slot.session()
+                    .map(|s| s.target().route.clone())
+                    .or_else(|| {
+                        slot.recovery()?
+                            .pending_restore
+                            .as_ref()
+                            .map(|r| r.token.route().clone())
+                    })
+            })
+            .into_iter()
+            .collect()
     }
 
     fn handle_session_event(
@@ -540,6 +567,10 @@ async fn manage(context: KeyboardManagerContext) -> ManagerCompletion {
     let (events, event_rx) = mpsc::unbounded_channel::<KeyboardSessionEvent>();
     let registry_changes = access.registry.subscribe();
     let device_io = access.device_io.clone();
+    let ownership = access.ownership.subscribe();
+    let reporter = access
+        .ownership
+        .owner(crate::peripherals::ownership::Owner::Keyboard);
     let channels = KeyboardSessionChannels { access, events };
     capture_manager::run(
         KeyboardManager {
@@ -547,6 +578,8 @@ async fn manage(context: KeyboardManagerContext) -> ManagerCompletion {
             channels,
         },
         ManagerInputs {
+            ownership,
+            reporter,
             published: spec,
             receiver_requests,
             registry_changes,

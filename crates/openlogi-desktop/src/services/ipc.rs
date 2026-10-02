@@ -516,6 +516,7 @@ mod tests {
     /// A snapshot the tests can tell apart by its camera flag.
     fn snapshot(camera_active: bool) -> AgentSnapshot {
         AgentSnapshot {
+            peripherals: openlogi_core::peripheral::PeripheralSnapshot::default(),
             status: AgentStatus {
                 accessibility_granted: true,
                 hook_installed: true,

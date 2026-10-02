@@ -88,6 +88,8 @@ pub struct DeviceAccess {
     pub receiver_access: ReceiverAccess,
     /// Host-lifecycle gate shared by every producer of proactive device I/O.
     pub device_io: DeviceIoGate,
+    /// Per-transport admission shared with the external-driver controller.
+    pub ownership: crate::peripherals::ownership::Ownership,
 }
 
 impl DeviceAccess {
@@ -175,6 +177,11 @@ impl DeviceOp {
         if !self.access.device_io.allows_io() {
             return Err(WriteError::DeviceNotFound);
         }
+        let _ownership = self
+            .access
+            .ownership
+            .operation(&self.route)
+            .map_err(|e| WriteError::Hid(e.to_string()))?;
         let _lease = self.access.receiver_access.acquire_for_io().await;
         let shared = self.resolve()?;
         timed(op, f(shared)).await
@@ -192,6 +199,7 @@ impl DeviceOp {
             registry,
             receiver_access,
             device_io,
+            ownership,
         } = self.access;
         let route = self.route.clone();
         let (r, g, b) = lighting_rgb(lighting);
@@ -200,6 +208,9 @@ impl DeviceOp {
             color: openlogi_core::color::Rgb::new(r, g, b),
         };
         openlogi_hid::lighting::LightingJob::spawn(&self.route, move |cancel| async move {
+            let _ownership = ownership
+                .operation(&route)
+                .map_err(|e| WriteError::Hid(e.to_string()))?;
             let _lease = tokio::time::timeout(WRITE_TIMEOUT, receiver_access.acquire_for_io())
                 .await
                 .map_err(|_| WriteError::RequestTimedOut {
@@ -261,6 +272,13 @@ impl DeviceOp {
         F: FnOnce(SharedChannel) -> Fut + Send + 'static,
         Fut: Future<Output = Result<T, WriteError>>,
     {
+        let ownership = match self.access.ownership.operation(&self.route) {
+            Ok(ownership) => ownership,
+            Err(error) => {
+                debug!(route = %self.route, label, %error, "background write unavailable");
+                return;
+            }
+        };
         let shared = match self.resolve() {
             Ok(shared) => shared,
             Err(reason) => {
@@ -274,6 +292,7 @@ impl DeviceOp {
             ..
         } = self.access;
         std::thread::spawn(move || {
+            let _ownership = ownership;
             let Some(rt) = one_shot_runtime(label) else {
                 return;
             };
@@ -410,6 +429,13 @@ impl VolatileMouseSettings {
 /// other function here) because it only ever reads its fields — it never
 /// hands the operation itself to [`DeviceOp::run`] or [`DeviceOp::detach`].
 pub fn reapply_mouse_volatile_in_background(op: &DeviceOp, settings: VolatileMouseSettings) {
+    let ownership = match op.access.ownership.operation(&op.route) {
+        Ok(ownership) => ownership,
+        Err(error) => {
+            debug!(route = %op.route, %error, "volatile reapply unavailable");
+            return;
+        }
+    };
     let VolatileMouseSettings {
         wheel,
         dpi,
@@ -426,6 +452,7 @@ pub fn reapply_mouse_volatile_in_background(op: &DeviceOp, settings: VolatileMou
     let device_io = op.access.device_io.clone();
     let index = op.route.device_index();
     std::thread::spawn(move || {
+        let _ownership = ownership;
         let Some(rt) = one_shot_runtime("volatile reapply") else {
             return;
         };
@@ -629,6 +656,7 @@ mod tests {
             registry: registry.clone(),
             receiver_access: receiver_access.clone(),
             device_io: device_io.clone(),
+            ownership: crate::peripherals::ownership::Ownership::default(),
         }
         .op(route)
     }

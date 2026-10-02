@@ -150,6 +150,16 @@ pub async fn probe_version() -> Result<u32, ConnectError> {
     probe_with(open()).await
 }
 
+/// Run a package lifecycle request with a deadline that includes bounded compilation and cleanup.
+pub async fn plugin_command(
+    client: &AgentClient,
+    command: openlogi_core::peripheral::PluginCommand,
+) -> Result<Result<(), openlogi_core::peripheral::PeripheralError>, RpcError> {
+    let mut context = context::current();
+    context.deadline = Instant::now() + Duration::from_secs(60);
+    client.plugin_command(context, command).await
+}
+
 /// A tarpc client on a fresh connection to the agent's socket.
 async fn open() -> Result<AgentClient, ConnectError> {
     let stream = transport::connect().await?;

@@ -71,6 +71,8 @@ use tokio::sync::Mutex;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tracing::{info, warn};
 
+#[path = "mock_agent/peripherals.rs"]
+mod peripherals;
 #[path = "mock_agent/profile.rs"]
 mod profile;
 
@@ -170,6 +172,17 @@ fn main() -> ExitCode {
 }
 
 fn state_from_args(args: impl Iterator<Item = OsString>) -> Result<State, String> {
+    let mut args = args.peekable();
+    if args.peek().is_some_and(|arg| arg == "--scenario") {
+        args.next();
+        let name = args
+            .next()
+            .ok_or_else(|| "--scenario requires a name".to_string())?;
+        if let Some(extra) = args.next() {
+            return Err(format!("unexpected argument {}", extra.to_string_lossy()));
+        }
+        return peripherals::scenario(&name.to_string_lossy());
+    }
     if let Some(path) = parse_fixture_arg(args)? {
         let profile = load_fixture_profile(&path)?;
         State::new(profile, MockClock::Test(Duration::ZERO)).map_err(|error| error.to_string())
@@ -305,6 +318,8 @@ struct PairingSession {
 struct State {
     /// Validated device facts and mutable setting readback state.
     profile: DeviceProfile,
+    peripherals: openlogi_core::peripheral::PeripheralSnapshot,
+    peripheral_only: bool,
     /// Devices added by a scripted pairing session, appended to the Bolt
     /// receiver's paired list. The scripted devices themselves are rebuilt per
     /// poll, so this holds only what pairing added.
@@ -336,6 +351,8 @@ impl State {
             .saturating_add(1);
         Ok(Self {
             profile,
+            peripherals: openlogi_core::peripheral::PeripheralSnapshot::default(),
+            peripheral_only: false,
             paired_extra: Vec::new(),
             next_slot,
             pairing: None,
@@ -456,6 +473,9 @@ impl State {
     /// is re-derived from elapsed time: successive snapshots visibly differ and
     /// the GUI's poll → repaint loop can be watched working.
     fn render_inventory(&self) -> Vec<DeviceInventory> {
+        if self.peripheral_only {
+            return Vec::new();
+        }
         let mut inventories = self.profile.inventories.clone();
         if self.clock.is_demo()
             && let Some(mouse) = inventories
@@ -480,6 +500,9 @@ impl State {
     }
 
     fn standalone(&self) -> Vec<StandaloneDevice> {
+        if self.peripheral_only {
+            return Vec::new();
+        }
         self.profile.standalone.clone()
     }
 
@@ -698,10 +721,23 @@ impl MockAgent {
 
 /// Render what the GUI observes out of the scripted state.
 fn snapshot_of(state: &State) -> AgentSnapshot {
+    let inventory = state.render_inventory();
+    let standalone = state.standalone();
+    let mut peripherals = state.peripherals.clone();
+    peripherals
+        .devices
+        .extend(openlogi_core::peripheral::builtin::inventory(
+            &inventory,
+            &standalone,
+            &[],
+            1,
+            None,
+        ));
     AgentSnapshot {
+        peripherals,
         status: agent_status(),
-        inventory: state.render_inventory(),
-        standalone: state.standalone(),
+        inventory,
+        standalone,
         camera_active: state.camera_active(),
         pairing: state.phase.clone(),
         foreground: state.foreground(),
@@ -717,6 +753,34 @@ fn snapshot_of(state: &State) -> AgentSnapshot {
               the real server impl, which is the point of the mock"
 )]
 impl Agent for MockAgent {
+    async fn plugin_command(
+        self,
+        _: Context,
+        _: openlogi_core::peripheral::PluginCommand,
+    ) -> Result<(), openlogi_core::peripheral::PeripheralError> {
+        Err(openlogi_core::peripheral::PeripheralError::Unsupported(
+            "mock agent does not load executable packages".into(),
+        ))
+    }
+    async fn resolve_peripheral(
+        self,
+        _: Context,
+        id: String,
+    ) -> Result<(), openlogi_core::peripheral::PeripheralError> {
+        let config = peripherals::load_config()?;
+        let mut state = self.state.lock().await;
+        peripherals::resolve(&mut state.peripherals, &config, &id)
+    }
+    async fn retry_peripheral(
+        self,
+        _: Context,
+        session: openlogi_core::peripheral::SessionId,
+    ) -> Result<(), openlogi_core::peripheral::PeripheralError> {
+        let config = peripherals::load_config()?;
+        let mut state = self.state.lock().await;
+        peripherals::retry(&mut state.peripherals, &config, &session)
+    }
+
     async fn protocol_version(self, _: Context) -> u32 {
         PROTOCOL_VERSION
     }
@@ -738,7 +802,10 @@ impl Agent for MockAgent {
     }
 
     async fn reload_config(self, _: Context) -> Result<(), ConfigReloadError> {
-        info!("reload_config (no-op in the mock)");
+        let config = peripherals::load_config().map_err(|error| ConfigReloadError {
+            message: error.to_string(),
+        })?;
+        peripherals::reconcile(&mut self.state.lock().await.peripherals, &config);
         Ok(())
     }
 

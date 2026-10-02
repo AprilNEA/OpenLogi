@@ -36,6 +36,7 @@ struct HostSwitchManagerContext {
     receiver_access: ReceiverAccess,
     receiver_requests: watch::Receiver<ReceiverRequestState>,
     device_io: DeviceIoGate,
+    ownership: crate::peripherals::ownership::Ownership,
     shutdown: oneshot::Receiver<()>,
 }
 
@@ -44,20 +45,19 @@ struct HostSwitchManagerContext {
 pub fn spawn(
     links: &HostSwitchLinks,
     channel_pool: ChannelPool,
-    receiver_access: ReceiverAccess,
-    registry: ChannelRegistry,
-    device_io: DeviceIoGate,
+    access: crate::hardware::DeviceAccess,
 ) -> WatcherHandle {
     let links = links.clone();
-    let receiver_requests = receiver_access.subscribe_requests();
+    let receiver_requests = access.receiver_access.subscribe_requests();
     WatcherHandle::spawn("openlogi-host-switch-watcher", move |shutdown| {
         manage(HostSwitchManagerContext {
             links,
             channel_pool,
-            registry,
-            receiver_access,
+            registry: access.registry,
+            receiver_access: access.receiver_access,
             receiver_requests,
-            device_io,
+            device_io: access.device_io,
+            ownership: access.ownership,
             shutdown,
         })
     })
@@ -168,6 +168,7 @@ struct SessionServices {
     receiver_access: ReceiverAccess,
     device_io: DeviceIoGate,
     events: mpsc::UnboundedSender<ManagerEvent>,
+    ownership: crate::peripherals::ownership::Ownership,
 }
 
 struct HostSwitchManagerState {
@@ -184,6 +185,25 @@ impl HostSwitchManagerState {
             last_epoch: SessionEpoch(0),
             transition: None,
             task_failed: false,
+        }
+    }
+
+    fn report_ownership(
+        &self,
+        reporter: &crate::peripherals::ownership::Reporter,
+        requested: &crate::peripherals::ownership::Requests,
+    ) {
+        if !self.task_failed && requested.has_requests() {
+            let routes = self
+                .slots
+                .iter()
+                .filter_map(|slot| match slot {
+                    HostSwitchSlot::Running(session) => Some(session.link.keyboard.clone()),
+                    HostSwitchSlot::Recovering(recovery) => Some(recovery.link.keyboard.clone()),
+                    HostSwitchSlot::Restarting { .. } => None,
+                })
+                .collect();
+            reporter.observe(requested, routes, std::collections::HashSet::new());
         }
     }
 
@@ -436,23 +456,37 @@ async fn manage(context: HostSwitchManagerContext) -> ManagerCompletion {
         receiver_access,
         mut receiver_requests,
         mut device_io,
+        ownership,
         mut shutdown,
     } = context;
     let (events, mut event_rx) = mpsc::unbounded_channel();
     let mut registry_changes = registry.subscribe();
+    let reporter = ownership.owner(crate::peripherals::ownership::Owner::HostSwitch);
+    let mut admission = ownership.subscribe();
     let services = SessionServices {
         channel_pool,
         registry,
         receiver_access,
         device_io: device_io.clone(),
         events,
+        ownership,
     };
     let mut state = HostSwitchManagerState::new();
     let mut terminal = false;
 
     loop {
         let requests = *receiver_requests.borrow_and_update();
-        let published = std::sync::Arc::clone(&links.borrow_and_update());
+        let requested = admission.borrow_and_update().clone();
+        let published: Vec<_> = links
+            .borrow_and_update()
+            .iter()
+            .filter(|link| {
+                std::iter::once(&link.keyboard)
+                    .chain(&link.targets)
+                    .all(|route| requested.allows(route))
+            })
+            .cloned()
+            .collect();
         let io_allowed = device_io.allows_io();
         state.reconcile_transition(&published, terminal);
         let wanted = if terminal || requests.any() || state.transition.is_some() {
@@ -474,6 +508,8 @@ async fn manage(context: HostSwitchManagerContext) -> ManagerCompletion {
         }
         maybe_spawn_transition(&mut state, &links, &services, terminal);
 
+        state.report_ownership(&reporter, &requested);
+
         let deadline = state.deadline(*receiver_requests.borrow(), device_io.allows_io());
         if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
             continue;
@@ -482,14 +518,17 @@ async fn manage(context: HostSwitchManagerContext) -> ManagerCompletion {
         tokio::select! {
             biased;
 
-            _ = &mut shutdown, if !terminal => {
-                terminal = true;
-            }
+            _ = &mut shutdown, if !terminal => terminal = true,
             Some(event) = event_rx.recv() => {
                 let published = links.borrow().clone();
                 handle_manager_event(&mut state, event, &published, terminal);
             }
             result = links.changed() => {
+                if result.is_err() {
+                    return ManagerCompletion::Unexpected;
+                }
+            }
+            result = admission.changed() => {
                 if result.is_err() {
                     return ManagerCompletion::Unexpected;
                 }
@@ -601,6 +640,7 @@ fn maybe_spawn_transition(
     };
     let links = links.clone();
     let pool = services.channel_pool.clone();
+    let ownership = services.ownership.clone();
     let receiver_access = services.receiver_access.clone();
     let device_io = services.device_io.clone();
     let events = services.events.clone();
@@ -611,6 +651,7 @@ fn maybe_spawn_transition(
             receiver_access,
             device_io,
             intent,
+            ownership,
         ));
         let _ = events.send(ManagerEvent::Transition(task.await));
     });
@@ -622,7 +663,19 @@ async fn run_transition(
     receiver_access: ReceiverAccess,
     device_io: DeviceIoGate,
     intent: TransitionIntent,
+    ownership: crate::peripherals::ownership::Ownership,
 ) {
+    let admitted = std::iter::once(&intent.link.keyboard)
+        .chain(&intent.link.targets)
+        .map(|route| ownership.operation(route))
+        .collect::<Result<Vec<_>, _>>();
+    let _ownership = match admitted {
+        Ok(admitted) => admitted,
+        Err(error) => {
+            debug!(%error, "host transition unavailable during driver handoff");
+            return;
+        }
+    };
     let _lease = receiver_access
         .acquire_exclusive(ExclusiveAccessReason::HostTransition)
         .await;
@@ -833,6 +886,7 @@ mod tests {
         let (_signal, gate) = openlogi_hid::device_io_channel();
         let (events, mut received) = mpsc::unbounded_channel();
         let services = SessionServices {
+            ownership: crate::peripherals::ownership::Ownership::default(),
             channel_pool: openlogi_hid::channel_pool(),
             registry,
             receiver_access: access.clone(),

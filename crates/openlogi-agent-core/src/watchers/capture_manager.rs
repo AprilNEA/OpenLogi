@@ -6,12 +6,15 @@
 //! on, and in which order, does not. [`run`] is that loop; a
 //! [`CaptureManager`] is the state machine it drives.
 
+use std::collections::HashSet;
+
 use openlogi_hid::{DeviceIoGate, PendingCaptureRestore};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 
 use super::retry::wait_for_deadline;
 use super::shutdown::ManagerCompletion;
+use crate::peripherals::ownership::{Reporter, Requests};
 use crate::receiver_access::ReceiverRequestState;
 
 /// Firmware ownership a finished session could not release, and when its
@@ -30,7 +33,15 @@ pub(super) trait CaptureManager {
 
     /// Bring the tracked sessions in line with `published`. Only called while
     /// host device I/O is allowed.
-    async fn reconcile(&mut self, requests: ReceiverRequestState, published: &Self::Published);
+    async fn reconcile(
+        &mut self,
+        requests: ReceiverRequestState,
+        published: &Self::Published,
+        ownership: &Requests,
+    );
+
+    /// Active, draining, or recovery routes still owned by this manager.
+    fn owned_routes(&self) -> Vec<openlogi_hid::DeviceRoute>;
 
     /// Apply one session report. Returns whether it calls for a reconcile.
     fn handle_session_event(
@@ -75,6 +86,8 @@ pub(super) struct ManagerInputs<M: CaptureManager> {
     pub(super) events: mpsc::UnboundedReceiver<M::Event>,
     /// The process lifecycle's stop request.
     pub(super) shutdown: oneshot::Receiver<()>,
+    pub(super) ownership: watch::Receiver<Requests>,
+    pub(super) reporter: Reporter,
 }
 
 /// A registry change matters only while a restore is owed; otherwise this
@@ -102,17 +115,25 @@ pub(super) async fn run<M: CaptureManager>(
         mut device_io,
         mut events,
         mut shutdown,
+        mut ownership,
+        reporter,
     } = inputs;
     let mut reconcile = true;
+    let mut admission = ownership.borrow_and_update().clone();
 
     loop {
         if reconcile {
             reconcile = false;
+            admission = ownership.borrow_and_update().clone();
             if device_io.allows_io() {
                 let requests = *receiver_requests.borrow_and_update();
                 let wanted = published.borrow_and_update().clone();
-                manager.reconcile(requests, &wanted).await;
+                manager.reconcile(requests, &wanted, &admission).await;
             }
+        }
+
+        if admission.has_requests() {
+            reporter.observe(&admission, manager.owned_routes(), HashSet::new());
         }
 
         let requests = *receiver_requests.borrow();
@@ -145,6 +166,10 @@ pub(super) async fn run<M: CaptureManager>(
                 Err(_) => return ManagerCompletion::Unexpected,
             },
             result = receiver_requests.changed() => match result {
+                Ok(()) => reconcile = true,
+                Err(_) => return ManagerCompletion::Unexpected,
+            },
+            result = ownership.changed() => match result {
                 Ok(()) => reconcile = true,
                 Err(_) => return ManagerCompletion::Unexpected,
             },

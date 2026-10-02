@@ -38,10 +38,6 @@ pub struct HookMaps {
     /// The pointer identity that selected this snapshot, or focused policy.
     pub(crate) pointer_target: Option<openlogi_hook::PointerTarget>,
     /// Device whose binding maps this snapshot contains.
-    #[cfg_attr(
-        not(any(target_os = "windows", test)),
-        expect(dead_code, reason = "read only by the Windows native-wheel fallback")
-    )]
     pub(crate) selected_device: Option<String>,
     /// Per-device `0x2150 default_dir`, learned by HID++ capture sessions:
     /// `true` means a positive native horizontal delta is physical forward/up.
@@ -251,14 +247,16 @@ fn handle_button(
     }
     // `try_read` only: a blocking read on the tap thread freezes every pointer
     // event while a config rebuild holds the write lock. Fail open if unavailable.
-    let (binding, is_gesture, pointer_target) =
-        hooks.try_read().map_or((None, false, None), |maps| {
-            (
-                maps.bindings.get(&id).cloned(),
-                maps.gestures.contains_key(&id),
-                maps.pointer_target,
-            )
-        });
+    // Retain the read guard through enqueueing. A handoff can then withdraw the
+    // maps and drain every previously accepted mouse press under one ordering.
+    let maps = hooks.try_read().ok();
+    let (binding, is_gesture, pointer_target) = maps.as_ref().map_or((None, false, None), |maps| {
+        (
+            maps.bindings.get(&id).cloned(),
+            maps.gestures.contains_key(&id),
+            maps.pointer_target,
+        )
+    });
     let action_target = if pressed {
         pointer_target.map_or_else(capture_target, ActionDispatchTarget::Pointer)
     } else {
@@ -285,9 +283,8 @@ fn handle_button(
         let ended = HOLD.with_borrow_mut(|h| h.end(id));
         if let Some((press, was_click)) = ended {
             if was_click {
-                let action = hooks
-                    .try_read()
-                    .ok()
+                let action = maps
+                    .as_ref()
                     .map(|m| resolve_gesture_click(&m.gestures, id));
                 if let Some(action) = action {
                     info!(button = %id, action = %action.label(), "gesture click → executing bound action");
