@@ -637,17 +637,72 @@ fn wheel_configuration_changes_refresh_without_rearming_hardware() {
     assert!(session.is_active());
 }
 
-#[test]
-fn a_pointer_only_plan_change_keeps_held_presses() {
-    let old = plan().dispatch;
-    let mut moved = old.clone();
-    // A Next Desktop swipe leaves the pointer over another window (#1634).
-    moved.pointer_target = Some(openlogi_hook::PointerTarget::Desktop);
-    assert!(same_bindings(&old, &moved));
+#[tokio::test]
+async fn a_pointer_only_plan_refresh_keeps_a_held_gesture() {
+    use crate::runtime::scroll::{ScrollPreferences, ScrollRuntime};
 
-    let mut rebound = old.clone();
-    rebound
-        .bindings
-        .insert(ButtonId::Back, Binding::Single(Action::Copy));
-    assert!(!same_bindings(&old, &rebound));
+    let (_signal, device_io) = openlogi_hid::device_io_channel();
+    let (ring, _ring_rx) = mpsc::unbounded_channel();
+    let device_access = DeviceAccess {
+        channel: CaptureChannelSlot::default(),
+        registry: openlogi_hid::ChannelRegistry::default(),
+        receiver_access: ReceiverAccess::default(),
+        device_io,
+    };
+    let mut actions =
+        crate::runtime::ActionRuntime::new(Arc::default(), device_access, ring).unwrap();
+    let mut scroll = ScrollRuntime::spawn(Arc::new(ScrollPreferences::new(
+        false,
+        VerticalScrollSensitivity::default(),
+    )))
+    .unwrap();
+    let mut dispatcher = InputDispatcher::new(GestureOutputs::new(
+        actions.dispatcher(),
+        scroll.input(),
+        Arc::default(),
+    ));
+
+    let mut held = plan();
+    held.dispatch.gesture_bindings.insert(
+        ButtonId::GestureButton,
+        [(GestureDirection::Left, Action::PreviousDesktop)].into(),
+    );
+    let mut session = live_session_from_plan(7, held.clone());
+    let id = session.id().clone();
+    dispatcher.dispatch(
+        &id,
+        session.dispatch(),
+        CapturedInput::ButtonDown(ButtonId::GestureButton),
+    );
+    assert!(dispatcher.holds_gesture_press(&id, ButtonId::GestureButton));
+
+    // The swipe switched desktops, leaving the pointer over another window
+    // (#1634): the republished plan differs only in its pointer target.
+    let mut moved = held;
+    moved.dispatch.pointer_target = Some(openlogi_hook::PointerTarget::Desktop);
+    reconcile_session(
+        &mut session,
+        Some((&moved.target, &moved.dispatch)),
+        &mut dispatcher,
+    );
+    assert!(
+        dispatcher.holds_gesture_press(&id, ButtonId::GestureButton),
+        "a pointer-only refresh must not end the hold that caused it"
+    );
+
+    // A real binding change still ends every admitted press.
+    let mut rebound = moved;
+    rebound.dispatch.gesture_bindings.insert(
+        ButtonId::GestureButton,
+        [(GestureDirection::Left, Action::Copy)].into(),
+    );
+    reconcile_session(
+        &mut session,
+        Some((&rebound.target, &rebound.dispatch)),
+        &mut dispatcher,
+    );
+    assert!(!dispatcher.holds_gesture_press(&id, ButtonId::GestureButton));
+
+    scroll.shutdown();
+    actions.shutdown();
 }
