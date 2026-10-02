@@ -138,7 +138,8 @@ pub enum AssetSourcePreference {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MouseProfileTarget {
-    /// Use the application under the pointer, where the platform supports it.
+    /// Use the application under the pointer wherever it can be identified,
+    /// and the focused one elsewhere.
     #[default]
     Pointer,
     /// Use the application with keyboard focus.
@@ -277,7 +278,8 @@ pub struct AppSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui_radius: Option<u8>,
     /// Application used to select per-app mouse button bindings. Defaults to
-    /// the application under the pointer; unsupported platforms use focus.
+    /// the application under the pointer; unsupported platforms and
+    /// unidentified pointer targets use focus.
     #[serde(default)]
     pub mouse_profile_target: MouseProfileTarget,
 }

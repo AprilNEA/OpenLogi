@@ -373,17 +373,26 @@ impl Orchestrator {
             .map(|d| d.config_key.as_str())
     }
 
+    /// The app whose mouse profile applies, and the pointer target dispatch
+    /// revalidates (`None`: dispatch follows focus, unrevalidated).
+    ///
+    /// An unidentified target (an overlay, a failed lookup) can last a whole
+    /// session. It selects the focused profile, never the desktop's, yet stays
+    /// pointer-scoped: its presses still end when the pointer reaches an
+    /// identified target, whose profile they were not resolved against.
     fn mouse_context(&self) -> (Option<&str>, Option<openlogi_hook::PointerTarget>) {
+        let target = self.pointer_context.target;
         if self.config.app_settings.mouse_profile_target == MouseProfileTarget::Focused
-            || self.pointer_context.target == openlogi_hook::PointerTarget::Unsupported
+            || target == openlogi_hook::PointerTarget::Unsupported
         {
-            (self.current_app.as_deref(), None)
-        } else {
-            (
-                self.pointer_context.app.as_ref().map(|app| app.id.as_str()),
-                Some(self.pointer_context.target),
-            )
+            return (self.current_app.as_deref(), None);
         }
+        let app = if target == openlogi_hook::PointerTarget::Unavailable {
+            self.current_app.as_deref()
+        } else {
+            self.pointer_context.app.as_ref().map(|app| app.id.as_str())
+        };
+        (app, Some(target))
     }
 
     /// Build the OS-hook callback's maps for `key` and its mouse context. Both hook
