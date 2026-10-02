@@ -241,8 +241,13 @@ fn pointer_change_cancels_old_target_but_preserves_keyboard_and_new_target() {
         window_id: 7,
     };
     let current = PointerTarget::Desktop;
+    let bound = Binding::Single(Action::Copy);
     let old_press = input
-        .try_hook_down_with_target(ButtonId::Back, None, ActionDispatchTarget::Pointer(old))
+        .try_hook_down_with_target(
+            ButtonId::Back,
+            Some(&bound),
+            ActionDispatchTarget::Pointer(old),
+        )
         .expect("old down");
     let new_press = input
         .try_hook_down_with_target(
@@ -276,6 +281,39 @@ fn pointer_change_cancels_old_target_but_preserves_keyboard_and_new_target() {
         panic!("keyboard must survive");
     };
     assert_eq!(press.token(), &keyboard);
+    assert!(owner.shutdown());
+}
+
+#[test]
+fn pointer_change_retargets_a_gesture_hold_instead_of_canceling_it() {
+    use openlogi_hook::PointerTarget;
+    let (sent, received) = mpsc::channel();
+    let mut owner = ButtonRuntimeOwner::spawn(move |event| sent.send(event).expect("receiver"))
+        .expect("worker");
+    let input = owner.input();
+    let old = PointerTarget::Window {
+        process_id: 41,
+        window_id: 7,
+    };
+    let current = PointerTarget::Desktop;
+    let hold = input
+        .try_hook_down_with_target(
+            ButtonId::GestureButton,
+            None,
+            ActionDispatchTarget::Pointer(old),
+        )
+        .expect("gesture down");
+    assert!(matches!(
+        recv_event(&received),
+        ButtonRuntimeEvent::Started(_)
+    ));
+    // The first swipe switched desktops, changing the hovered window (#1634).
+    input.cancel_pointer_except(current);
+    assert!(input.try_trigger_while_pressed(&hold, &Action::Copy));
+    let ButtonRuntimeEvent::Triggered { press, .. } = recv_event(&received) else {
+        panic!("the hold must survive the pointer change and keep triggering");
+    };
+    assert_eq!(press.token(), &hold);
     assert!(owner.shutdown());
 }
 

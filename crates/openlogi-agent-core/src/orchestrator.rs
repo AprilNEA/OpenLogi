@@ -969,20 +969,31 @@ impl Orchestrator {
     /// divert set is part of its identity) over nothing. The observable cell
     /// still gets the whole value — it dedupes on its own, and its recent list
     /// is the only source a client has for these identifiers. Returns whether
-    /// the effective app identifier changed and active button lifecycles must
-    /// be canceled.
+    /// the app changed in a way that alters bindings (the old or new app has a
+    /// per-app override), so active button lifecycles must be canceled.
     pub fn set_current_app(&mut self, app: Option<ForegroundApp>) -> bool {
         let id = app.as_ref().map(|app| app.id.clone());
         self.observable.set_foreground(app);
         if id == self.current_app {
             return false;
         }
-        self.current_app = id;
+        let previous = std::mem::replace(&mut self.current_app, id);
         self.publish_hook_maps(self.hook_maps_for(self.current_key()));
         // Capture plans are app-scoped (per-app binding overlays); republish
         // them with the keyboard's effective bindings.
         self.publish_device_runtime();
-        true
+        // Only a per-app override on either side changes what a held button
+        // resolves to. Without one, keep the hold: a gesture that switches
+        // desktops changes the front app and must not end its own hold (#1634).
+        let overridden = |app: Option<&str>| {
+            app.is_some_and(|app| {
+                self.config
+                    .devices
+                    .keys()
+                    .any(|key| self.config.has_app_override(key, app))
+            })
+        };
+        overridden(previous.as_deref()) || overridden(self.current_app.as_deref())
     }
 
     /// Publish a pointer-window change separately from keyboard focus. The

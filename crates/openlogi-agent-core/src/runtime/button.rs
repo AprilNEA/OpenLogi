@@ -372,6 +372,16 @@ impl ButtonState {
     }
 
     fn cancel_pointer_except(&mut self, current: openlogi_hook::PointerTarget) -> Vec<ActivePress> {
+        // A lifecycle-only press (a gesture hold) holds no output, and its own
+        // swipe may be what changed the hovered window (Next Desktop). Follow
+        // the pointer instead of canceling, so one hold can chain swipes.
+        for press in self.active.values_mut() {
+            if press.behavior == PressBehavior::LifecycleOnly
+                && matches!(press.target, ActionDispatchTarget::Pointer(_))
+            {
+                press.target = ActionDispatchTarget::Pointer(current);
+            }
+        }
         self.active.extract_if(|_, press| matches!(press.target, ActionDispatchTarget::Pointer(target) if target != current))
             .map(|(_, press)| press)
             .collect()

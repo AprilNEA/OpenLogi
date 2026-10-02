@@ -636,3 +636,18 @@ fn wheel_configuration_changes_refresh_without_rearming_hardware() {
     );
     assert!(session.is_active());
 }
+
+#[test]
+fn a_pointer_only_plan_change_keeps_held_presses() {
+    let old = plan().dispatch;
+    let mut moved = old.clone();
+    // A Next Desktop swipe leaves the pointer over another window (#1634).
+    moved.pointer_target = Some(openlogi_hook::PointerTarget::Desktop);
+    assert!(same_bindings(&old, &moved));
+
+    let mut rebound = old.clone();
+    rebound
+        .bindings
+        .insert(ButtonId::Back, Binding::Single(Action::Copy));
+    assert!(!same_bindings(&old, &rebound));
+}
