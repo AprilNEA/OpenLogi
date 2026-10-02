@@ -31,12 +31,12 @@ use objc2::runtime::{AnyObject, NSObject, ProtocolObject};
 use objc2::{
     AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel,
 };
+use objc2_app_kit::NSMenuDelegate;
 use objc2_app_kit::NSStatusItem;
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSImage, NSRunningApplication, NSWorkspace,
     NSWorkspaceSessionDidBecomeActiveNotification, NSWorkspaceSessionDidResignActiveNotification,
 };
-use objc2_app_kit::NSMenuDelegate;
 use objc2_foundation::{NSNotification, NSObjectProtocol, NSString};
 use openlogi_core::brand::{self, DeeplinkCommand};
 use openlogi_core::config::AppIcon;
