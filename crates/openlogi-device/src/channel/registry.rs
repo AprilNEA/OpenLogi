@@ -225,6 +225,22 @@ impl Default for ChannelRegistry {
 }
 
 impl ChannelRegistry {
+    /// All routes published by the selected OS nodes, including receiver children.
+    pub fn routes_for_nodes(
+        &self,
+        nodes: &HashSet<NodeId>,
+    ) -> Result<Vec<DeviceRoute>, crate::backend::BackendError> {
+        let state = self.inner.state.read().map_err(|_| {
+            crate::backend::BackendError::Backend("channel registry is poisoned".into())
+        })?;
+        Ok(state
+            .publications
+            .iter()
+            .filter(|p| nodes.contains(&p.node))
+            .flat_map(|p| p.routes.iter().cloned())
+            .collect())
+    }
+
     /// Replace every route published by `node`, preserving that node's original
     /// collision priority when it was already present.
     pub(crate) fn replace_node(
@@ -509,5 +525,14 @@ mod tests {
             registry.publisher_lookup_for_test(&direct(0xb36b)),
             Some("b")
         );
+    }
+
+    #[test]
+    fn poisoned_registry_cannot_report_an_unowned_transport() {
+        let registry = super::ChannelRegistry::default();
+        registry.inner.poison_for_test();
+        registry
+            .routes_for_nodes(&HashSet::new())
+            .expect_err("poison must prevent handoff admission");
     }
 }
