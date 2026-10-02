@@ -193,7 +193,7 @@ crates/
   openlogi-overlay/ the `openlogi-overlay` binary — the cursor-centred Actions Ring
 ```
 
-The [proposed peripheral architecture](PERIPHERAL_ARCHITECTURE.md) covers built-in drivers, loadable device descriptors, and sandboxed code plugins. It describes the intended extension contracts and migration; it does not describe released device support.
+The [peripheral architecture](PERIPHERAL_ARCHITECTURE.md) covers built-in drivers, loadable device descriptors, and sandboxed code plugins. The [setup guide](PERIPHERALS.md) documents implemented commands, current limits, and separate hardware acceptance.
 
 ## Agent guidance
 

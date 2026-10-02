@@ -96,6 +96,8 @@ impl AppState {
         } else {
             new_list
         };
+        let mut new_list = new_list;
+        super::devices::append_peripherals(&mut new_list, &self.agent.peripherals);
         let merged_list = self.merge_inventory_snapshot(new_list);
         // Capture any newly-probed identity before the unchanged-check can early
         // out: a device whose capabilities just resolved keeps the same

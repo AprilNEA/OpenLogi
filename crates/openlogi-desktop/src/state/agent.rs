@@ -26,6 +26,8 @@ pub(super) struct AgentSession {
     link: AgentLink,
     foreground: ForegroundApps,
     last_ready_inventory: Vec<DeviceInventory>,
+    last_standalone: Vec<openlogi_core::device::StandaloneDevice>,
+    pub(super) peripherals: openlogi_core::peripheral::PeripheralSnapshot,
     #[cfg(all(target_os = "macos", debug_assertions))]
     monitor_events: std::collections::VecDeque<openlogi_ipc::MonitorEvent>,
     #[cfg(all(target_os = "macos", debug_assertions))]
@@ -38,6 +40,8 @@ impl Default for AgentSession {
             link: AgentLink::Connecting,
             foreground: ForegroundApps::default(),
             last_ready_inventory: Vec::new(),
+            last_standalone: Vec::new(),
+            peripherals: openlogi_core::peripheral::PeripheralSnapshot::default(),
             #[cfg(all(target_os = "macos", debug_assertions))]
             monitor_events: std::collections::VecDeque::new(),
             #[cfg(all(target_os = "macos", debug_assertions))]
@@ -60,16 +64,26 @@ impl AppState {
         cameras: &[Camera],
     ) -> SnapshotChanges {
         let inventory_ready = snapshot.status.inventory == InventoryHealth::Ready;
+        let peripherals_changed = self.agent.peripherals != snapshot.peripherals;
+        self.agent.peripherals = snapshot.peripherals.clone();
         // Merge only completed enumerations. A scanning agent serves an empty
         // pre-enumeration list, which must not burn the GUI's miss grace or
         // replace the last known device set.
         let inventory = if inventory_ready {
             self.refresh_inventories(&snapshot.inventory, &snapshot.standalone, resolver, cameras)
+        } else if peripherals_changed {
+            let inventories = self.agent.last_ready_inventory.clone();
+            let standalone = self.agent.last_standalone.clone();
+            self.refresh_inventories(&inventories, &standalone, resolver, cameras)
         } else {
             StateEvents::none()
         };
         if inventory_ready {
             self.store_inventory_snapshot(&snapshot.inventory);
+            self.agent.last_standalone.clone_from(&snapshot.standalone);
+        }
+        if peripherals_changed {
+            self.reconcile_camera_profiles();
         }
 
         let agent = self.set_agent_link(AgentLink::Ready(snapshot.status.clone()));
@@ -78,7 +92,15 @@ impl AppState {
 
         SnapshotChanges {
             inventory_ready,
-            events: inventory.and(agent).and(camera).and(foreground),
+            events: inventory
+                .and(agent)
+                .and(camera)
+                .and(foreground)
+                .and(if peripherals_changed {
+                    StateEvent::PeripheralsChanged.into()
+                } else {
+                    StateEvents::none()
+                }),
         }
     }
 

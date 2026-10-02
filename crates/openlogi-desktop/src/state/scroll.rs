@@ -151,6 +151,7 @@ mod tests {
         /// independently of any real HID++ probe.
         fn set_current_record_for_test(&mut self, config_key: &str, route_key: &str) {
             let record = DeviceRecord {
+                peripheral: None,
                 config_key: config_key.to_string(),
                 canonical_key: None,
                 persistent: true,

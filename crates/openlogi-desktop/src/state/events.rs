@@ -30,6 +30,8 @@ pub(crate) enum StateEvent {
     DiagnosticsChanged,
     /// The merged device inventory changed.
     InventoryChanged,
+    /// Peripheral capabilities, package state, or operation feedback changed.
+    PeripheralsChanged,
     /// A device the user asked to forget stayed, because its receiver kept
     /// the pairing.
     DeviceRemovalFailed {
@@ -85,6 +87,7 @@ impl StateEvent {
             | Self::ForegroundChanged
             | Self::DiagnosticsChanged
             | Self::InventoryChanged
+            | Self::PeripheralsChanged
             | Self::DeviceRemovalFailed { .. }
             | Self::CameraChanged
             | Self::CameraPermissionChanged
@@ -191,8 +194,18 @@ impl AppState {
         cx: &mut Context<V>,
         topic: impl Fn(&StateEvent) -> bool + 'static,
     ) -> Subscription {
-        cx.subscribe(&Self::global(cx), move |_, state, event, cx| {
+        Self::observe_panel(cx, topic, |_, _| {})
+    }
+
+    /// Update cached panel controls at the same device-event boundary as repainting.
+    pub(crate) fn observe_panel<V: 'static>(
+        cx: &mut Context<V>,
+        topic: impl Fn(&StateEvent) -> bool + 'static,
+        update: impl Fn(&mut V, &mut Context<V>) + 'static,
+    ) -> Subscription {
+        cx.subscribe(&Self::global(cx), move |view, state, event, cx| {
             if state.read(cx).concerns_device_panel(event, &topic) {
+                update(view, cx);
                 cx.notify();
             }
         })
@@ -217,6 +230,7 @@ impl AppState {
             // A dialog, not panel content.
             StateEvent::DeviceRemovalFailed { .. } => false,
             StateEvent::AgentChanged
+            | StateEvent::PeripheralsChanged
             | StateEvent::ForegroundChanged
             | StateEvent::DiagnosticsChanged
             | StateEvent::BindingsChanged(_)

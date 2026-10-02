@@ -1,0 +1,11 @@
+id: gui-camera-io-owner
+language: rust
+severity: error
+message: Camera discovery and controls belong to the agent; use the peripheral snapshot and save-and-reload flow. Native preview remains in the GUI.
+note: Moving camera control I/O to the agent gives reconnect and settings application one lifecycle owner.
+files:
+  - crates/openlogi-desktop/src/**/*.rs
+  - crates/openlogi-overlay/src/**/*.rs
+rule:
+  kind: identifier
+  regex: '^(enumerate_cameras|read_camera_state|control_range|control_ranges|set_control|set_auto|apply_settings)$'

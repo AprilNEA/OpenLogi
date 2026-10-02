@@ -6,5 +6,6 @@ pub mod camera;
 pub mod keyboard;
 pub mod lighting;
 pub mod mouse;
+pub mod peripheral;
 pub mod pointer;
 pub mod profiles;

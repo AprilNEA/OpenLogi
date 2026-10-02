@@ -180,6 +180,7 @@ fn connection_icon_matches_route() {
 
 fn record(kind: DeviceKind, capabilities: Option<Capabilities>) -> DeviceRecord {
     DeviceRecord {
+        peripheral: None,
         config_key: "test".to_string(),
         canonical_key: None,
         persistent: true,

@@ -48,6 +48,20 @@ pub(super) struct ConfigState {
 }
 
 impl ConfigState {
+    pub(super) fn refresh(&mut self) -> Result<(), openlogi_core::peripheral::PeripheralError> {
+        let ConfigPersistence::UserFile(file) = &self.persistence else {
+            return Ok(());
+        };
+        let (config, file) = file.reload().map_err(|error| {
+            openlogi_core::peripheral::PeripheralError::ConfigWriteFailed(error.to_string())
+        })?;
+        self.current = config.clone();
+        self.persisted = config;
+        self.persistence = ConfigPersistence::UserFile(file);
+        self.issue = None;
+        Ok(())
+    }
+
     pub(super) fn new(current: Config, persistence: ConfigPersistence) -> Self {
         let issue = match &persistence {
             ConfigPersistence::ReadOnly(error) => Some(ConfigIssue::Persistence(error.clone())),

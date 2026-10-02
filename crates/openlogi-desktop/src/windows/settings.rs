@@ -58,6 +58,7 @@ mod assets;
 mod diagnostics;
 mod general;
 mod language;
+mod plugins;
 // Windows needs no privacy grants — the WH_MOUSE_LL hook and raw HID access
 // work without one — so there the page would render empty; register it only
 // where it has content. `SettingsPage::index` tracks the shift.
@@ -116,6 +117,11 @@ pub struct SettingsView {
     theme_filter: ThemeFilter,
     /// Free-text filter for the Appearance theme grid (search 50+ themes by name).
     theme_search: Entity<InputState>,
+    plugin_path: Entity<InputState>,
+    plugin_descriptors: std::collections::BTreeMap<
+        String,
+        std::collections::BTreeSet<openlogi_core::peripheral::DescriptorId>,
+    >,
     /// Page selected when the window first opens. Consumed once by the Settings
     /// widget's keyed state, so it only steers a fresh open (an already-open
     /// window is just focused).
@@ -176,6 +182,7 @@ impl SettingsView {
             if matches!(
                 event,
                 StateEvent::AgentChanged
+                    | StateEvent::PeripheralsChanged
                     | StateEvent::DiagnosticsChanged
                     | StateEvent::InventoryChanged
                     | StateEvent::CameraPermissionChanged
@@ -194,6 +201,7 @@ impl SettingsView {
 
         let theme_search =
             cx.new(|cx| InputState::new(window, cx).placeholder(tr!("appearance.filter_themes")));
+        let plugin_path = cx.new(|cx| InputState::new(window, cx));
         cx.subscribe(&theme_search, |_, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 cx.notify();
@@ -257,6 +265,8 @@ impl SettingsView {
             _installation_obs: installation_obs,
             theme_filter: ThemeFilter::All,
             theme_search,
+            plugin_path,
+            plugin_descriptors: std::collections::BTreeMap::new(),
             initial_page,
             language_select,
             asset_source_select,
@@ -471,7 +481,8 @@ impl Render for SettingsView {
                 self.asset_source_select.clone(),
                 self.asset_cache_desc.clone(),
             ))
-            .page(about::about_page(view, self.copied));
+            .page(about::about_page(view.clone(), self.copied))
+            .page(plugins::plugins_page(view, self.plugin_path.clone()));
         // Surfaces competing macOS event taps (a pointer-lag cause) and, in debug
         // builds, the full tap list and a live event monitor. Appended after
         // About so [`SettingsPage::index`] stays platform-independent.

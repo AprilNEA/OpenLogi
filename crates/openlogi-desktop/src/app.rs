@@ -9,7 +9,9 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     v_flex,
 };
-use openlogi_core::device::{Capabilities, DeviceKind};
+#[cfg(test)]
+use openlogi_core::device::Capabilities;
+use openlogi_core::device::DeviceKind;
 use openlogi_ipc::InventoryHealth;
 use tracing::info;
 
@@ -21,6 +23,7 @@ use crate::features::keyboard::function_row::FunctionRowView;
 use crate::features::lighting::keyboard_rgb::LightingPanel;
 use crate::features::lighting::standalone::LightPanel;
 use crate::features::mouse::view::MouseModelView;
+use crate::features::peripheral::PeripheralPanel;
 use crate::features::pointer::dpi::DpiPanel;
 use crate::features::pointer::smartshift::SmartShiftPanel;
 use crate::features::profiles::{AppCatalogPicker, ProfileIconCache};
@@ -83,6 +86,8 @@ enum DetailTab {
     Camera,
     /// Standalone light controls driven by a raw-HID device driver.
     Light,
+    /// Capability controls for standard HID and plugin devices.
+    Controls,
     /// Device info and configuration.
     Device,
 }
@@ -91,7 +96,7 @@ impl DetailTab {
     /// The detail sections shown for `record`, in tab order. Always non-empty:
     /// every device gets at least the info tab.
     ///
-    /// Each panel is gated on the device's actual [`Capabilities`] — the HID++
+    /// Each panel is gated on the device's actual [`openlogi_core::device::Capabilities`] — the HID++
     /// features it announced — not on its [`DeviceKind`]. A panel shows iff the
     /// device can do that thing, so a misclassified device can't lose its
     /// panels (issue #127). Devices we never probed (offline at startup) have no
@@ -102,22 +107,35 @@ impl DetailTab {
     /// only useful for pointer-type devices; keyboards get the Keys panel
     /// instead, even when they expose ReprogControls over HID++.
     fn tabs_for(record: &DeviceRecord) -> Vec<Self> {
-        let caps = record
-            .capabilities
-            .unwrap_or_else(|| Capabilities::presumed_from_kind(record.kind));
+        use openlogi_core::peripheral::Capability;
+        let caps = record.capability_records();
+        let buttons = caps
+            .iter()
+            .any(|c| matches!(c.capability, Capability::InputRemap(_)));
         // Buttons panel is a mouse-model silhouette — only for pointer devices.
         // Keyboards get the Keys panel instead, even when they expose ReprogControls.
         let can_show_mouse_model = matches!(record.kind, DeviceKind::Mouse | DeviceKind::Trackball);
         let mut tabs = Vec::new();
         // A webcam is a UVC device with no HID++ capabilities; its detail screen
         // leads with the live preview, then the generic info tab.
-        if matches!(record.kind, DeviceKind::Camera) {
+        if caps
+            .iter()
+            .any(|c| matches!(c.capability, Capability::Camera(_)))
+        {
             tabs.push(Self::Camera);
         }
-        if caps.buttons && can_show_mouse_model {
+        if record.extension().is_some() {
+            tabs.push(Self::Controls);
+        }
+        if buttons && can_show_mouse_model && record.extension().is_none() {
             tabs.push(Self::Buttons);
         }
-        if caps.haptic_panel || (caps.buttons && can_show_mouse_model) {
+        if record.extension().is_none()
+            && (caps
+                .iter()
+                .any(|c| matches!(c.capability, Capability::Haptics))
+                || (buttons && can_show_mouse_model))
+        {
             tabs.push(Self::ActionsRing);
         }
         // The Keys tab needs something to bind: HID++ controls (measured, or
@@ -125,16 +143,28 @@ impl DetailTab {
         // without control markers falls back to. A keyboard with neither
         // capability data nor a depot — a receiver slot never probed — gets
         // nothing to configure yet, so no tab.
-        if matches!(record.kind, DeviceKind::Keyboard) && (caps.buttons || record.asset.is_some()) {
+        if record.extension().is_none()
+            && matches!(record.kind, DeviceKind::Keyboard)
+            && (buttons || record.asset.is_some())
+        {
             tabs.push(Self::Keys);
         }
-        if caps.pointer {
+        if caps
+            .iter()
+            .any(|c| matches!(c.capability, Capability::Pointer))
+        {
             tabs.push(Self::Pointer);
         }
-        if caps.lighting {
+        if caps
+            .iter()
+            .any(|c| matches!(c.capability, Capability::KeyboardLighting))
+        {
             tabs.push(Self::Lighting);
         }
-        if record.light_capabilities.is_some() {
+        if caps
+            .iter()
+            .any(|c| matches!(c.capability, Capability::Light(_)))
+        {
             tabs.push(Self::Light);
         }
         tabs.push(Self::Device);
@@ -158,6 +188,7 @@ impl DetailTab {
             Self::Lighting | Self::Light => tr!("device.lighting"),
             Self::Camera => tr!("camera.camera"),
             Self::Device => tr!("device.device"),
+            Self::Controls => tr!("peripheral.controls"),
         }
     }
 }
@@ -175,6 +206,7 @@ pub struct AppView {
     camera_preview: Entity<CameraPreview>,
     camera_controls: Entity<CameraControlsPanel>,
     light_panel: Entity<LightPanel>,
+    peripheral_panel: Entity<PeripheralPanel>,
     profile_icons: ProfileIconCache,
     app_catalog: Entity<AppCatalogPicker>,
     /// Redraw the profile picker after discovery, filtering, or expansion changes.
@@ -248,6 +280,7 @@ impl AppView {
         let camera_preview = cx.new(CameraPreview::new);
         let camera_controls = cx.new(CameraControlsPanel::new);
         let light_panel = cx.new(LightPanel::new);
+        let peripheral_panel = cx.new(PeripheralPanel::new);
         let profile_icons = ProfileIconCache::default();
         let app_catalog = cx.new(|cx| AppCatalogPicker::new(profile_icons.clone(), window, cx));
         let app_catalog_obs = cx.observe(&app_catalog, |_, _, cx| cx.notify());
@@ -257,6 +290,7 @@ impl AppView {
             let on_home = matches!(view.route, Route::Home);
             let relevant = match event {
                 StateEvent::AgentChanged
+                | StateEvent::PeripheralsChanged
                 | StateEvent::InventoryChanged
                 | StateEvent::DeviceSelected(_) => true,
                 StateEvent::ForegroundChanged => !on_home,
@@ -315,6 +349,7 @@ impl AppView {
             camera_preview,
             camera_controls,
             light_panel,
+            peripheral_panel,
             profile_icons,
             app_catalog,
             _app_catalog_obs: app_catalog_obs,
@@ -632,6 +667,7 @@ impl AppView {
                         camera_preview: &self.camera_preview,
                         camera_controls: &self.camera_controls,
                         light_panel: &self.light_panel,
+                        peripheral_panel: &self.peripheral_panel,
                     },
                     &self.profile_icons,
                     &self.app_catalog,

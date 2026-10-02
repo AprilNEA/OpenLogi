@@ -1,6 +1,6 @@
 # Extensible peripheral architecture
 
-Status: proposed design, 2026-10-01. Baseline: `bd5c1e7` (`v0.8.11`). The APIs, schemas, commands, and module names proposed below are not implemented or released.
+Status: V1 code implemented; acceptance pending, 2026-10-02. Baseline: `bd5c1e7` (`v0.8.11`). The shared capabilities, native mapping, descriptor loader, Wasm runner, package lifecycle, and client integration are implemented on the feature branch. This document retains the complete architecture contract; [Peripheral setup](PERIPHERALS.md) describes the available commands and current limits. Hardware acceptance and release have not occurred.
 
 OpenLogi can retain its process and crate boundaries while supporting devices from multiple manufacturers. The missing boundary is between device identification, driver selection, and capability execution. Adding more product IDs to the current standalone inventory does not establish that boundary.
 
@@ -77,6 +77,8 @@ Use the following distinct concepts in `openlogi-core::peripheral`:
 
 A USB receiver, its audio interface, its HID interface, and its paired transmitters are not interchangeable identities. Discovery publishes endpoint metadata and parent relationships. A driver can group siblings only through verified topology or protocol evidence. Matching equal VID/PID values is not evidence that two endpoints belong to one physical unit.
 
+The HID adapters group composite interfaces by the nearest USB device ancestor on macOS, the canonical USB device directory and its inode on Linux, and `DEVPKEY_Device_ContainerId` on Windows. A macOS virtual HID service without a USB device ancestor remains ungrouped. These values establish current topology only; the host does not promote them to a persistent physical identity. A selector requiring unavailable interface or report metadata does not match.
+
 Each endpoint observation includes its transport, available matching fields, parent relation, and a generation. Unknown interface or usage fields remain unknown; they do not satisfy an exact selector. OS paths, LocationID, and RegistryID can locate a current endpoint. They do not become persistent physical keys. A serial becomes identity only when its driver has evidence that the serial is suitable; otherwise it remains display metadata.
 
 Configuration has three explicit scopes:
@@ -122,6 +124,8 @@ Selection is deterministic:
 Selectors are finite alternatives of exact fields. Fields within one alternative are ANDead; alternatives for the same endpoint role are ORed. All required roles must resolve within one verified endpoint group. There are no arbitrary predicates, regexes, plugin-supplied scores, or priority integers. A selector with an interface constraint outranks the same selector without that constraint. An interface-only refinement and a usage-only refinement can be incomparable; file order must not decide the winner.
 
 Two descriptors with equal matches can share an implementation but still have conflicting parameters. Do not merge their fields. Catalog diagnostics show the candidates, the selected owner, the reason, and any explicit override.
+
+Configuration scope precedence has one owner, `Config::peripheral_selection`: session, then verified physical identity, then model. An explicit model-scoped selection must use the selected descriptor's model, so changing the descriptor cannot silently discard that rule or its disabled state. Session-scoped replacement retains the attachment's session identity while invalidating the old driver's input producers and draining its I/O.
 
 ## Capability contracts
 
@@ -177,7 +181,7 @@ HID selectors require VID, PID, usage page, and usage. USB interface number and 
 
 Reject unknown common fields, numeric overflow, duplicate control IDs, inconsistent role definitions, unsupported identity policies, empty selectors, and excessive counts. Repeated match alternatives for one role are allowed. Descriptor, model, and driver IDs use bounded namespaced ASCII identifiers; IDs cannot contain path separators. Validate driver parameters before hardware access. Descriptors cannot contain shell commands, bytecode, report-writing recipes, environment interpolation, remote includes, or arbitrary library paths. A new protocol requires executable driver code.
 
-This complete example describes the verified DJI Mic 3 mapping. It is a proposed descriptor, not a file accepted by the released application:
+This complete example describes the verified DJI Mic 3 mapping. The V1 loader accepts this format:
 
 ```toml
 schema = 1
@@ -347,6 +351,8 @@ These are admission limits, not measured performance claims or an allocation pro
 
 Use [fuel and epoch interruption](https://docs.wasmtime.dev/examples-interrupting-wasm.html) to stop nonterminating guest code. Charge host submissions separately because Wasm fuel does not bound host work. Timers and fresh events do not reset the sustained-work budget. Host I/O must remain deadline-bound and cancellable. On quota or queue overflow, invalidate the session and perform host cleanup rather than continuing with incomplete input state.
 
+A native HID deadline ends the guest's wait and reports an uncertain outcome. It does not cancel an already submitted OS operation by dropping its future. Submitted work retains its native buffers and device claim until completion; the existing inventory reconciliation then releases the retirement obligation. New owners wait for that release.
+
 Compilation runs outside the input loop, one candidate at a time, with size/structural admission checks and aggregate memory accounting. Fuel does not constrain the compiler. Compiler failure and resource pressure remain part of the runtime risk; do not advertise a hard process-memory sandbox. Activation waits for compilation, so a failed candidate does not replace a working plugin.
 
 Pulley is chosen to avoid runtime-generated native executable code and a default JIT entitlement expansion. The signed and notarized macOS agent must still pass a real load/execute/trap test. Do not silently switch to JIT, weaken library validation, add unsigned-executable-memory entitlements, or request root if that test fails. The existing agent signing currently supplies no JIT entitlement.
@@ -420,7 +426,7 @@ The existing [`KeyCombo` and `KeyboardUsage`](../crates/openlogi-core/src/bindin
 
 Invoke `hidutil` with structured process arguments and decimal JSON integers. The host constructs `--matching {"VendorID":11427,"ProductID":16405}` from the selected descriptor. The plugin cannot omit or broaden the selector. This mapping acts on HID services and leaves audio configuration unchanged.
 
-There is no current `hidutil` mapping manager in this repository. Add one host adapter and one agent effect owner, then reuse those owners for every native-mapping descriptor. Do not add a virtual keyboard, a new capture process, simulated keystrokes, or a private DJI protocol.
+The native host adapter lives in `openlogi-hid::native_mapping`. The agent effect owner lives in `openlogi-agent-core::peripherals::mapping`. Every native-mapping descriptor uses these owners. The implementation adds no virtual keyboard, capture process, simulated DJI keystrokes, or private DJI protocol.
 
 The mapping algorithm operates on the current property:
 
@@ -459,11 +465,11 @@ For DJI, successful property readback establishes that configuration was applied
 
 ## Configuration and compatibility
 
-The baseline user configuration schema is `7`; internal IPC protocol version is `34`. This design does not change either number. Implementation must bump the applicable versions and provide migration and wire tests.
+The baseline user configuration schema was `7`; internal IPC protocol version was `34`. The V1 implementation uses schema `8` and protocol `35`, with migration and fixed-byte wire tests.
 
 Introduce a typed `PeripheralConfig` with explicit scope and capability-keyed settings. Retain `DeviceConfig` as a legacy reader during migration, then normalize once at the configuration boundary. Do not let both forms independently dispatch settings to the same device.
 
-The following is a proposed configuration fragment; it omits the future schema header and is not valid released OpenLogi configuration:
+The following configuration fragment uses the V1 peripheral settings format:
 
 ```toml
 [[peripherals]]
@@ -503,7 +509,7 @@ Append normalized inventory and capability operations to the [existing IPC contr
 
 ## Repository ownership and migration
 
-The following is the intended module map, not scaffolding to add before implementation:
+The implementation uses the following module boundaries:
 
 | Owner | Responsibility |
 | --- | --- |
@@ -513,7 +519,8 @@ The following is the intended module map, not scaffolding to add before implemen
 | `openlogi-hid` | HID host services and cfg-gated native mapping adapter |
 | `openlogi-agent-core::peripherals` | Catalog normalization, selection, claims, sessions, reconciliation, and effect journal |
 | New `openlogi-plugin` crate | Manifest/descriptor parsing, canonical WIT, host-interface contracts, generated boundary bindings, Wasmtime runner, and SDK-facing contract |
-| `openlogi-agent` | Built-in binding table, host-service construction, package state and lifecycle wiring |
+| `openlogi-agent-core::peripherals` | Built-in bindings, host-service construction, package state and lifecycle |
+| `openlogi-agent` | Server, startup, and process-lifecycle wiring |
 | `openlogi-ipc` | Normalized snapshot and typed operations for clients |
 | `openlogi-desktop` / `openlogi-ui` | Capability presentation, existing target pickers, localization, and status rendering |
 | `openlogi-camera` | Camera discovery/control adapter and existing native media path |
@@ -585,8 +592,12 @@ Never request a long press or double press as the test gesture. Do not use a gre
 
 References: [DJI Mic 3 manual](https://dl.djicdn.com/downloads/DJI%20Mic%203/202508282/DJI_Mic_3_User_Manual__EN.pdf), [Raycast hotkey documentation](https://manual.raycast.com/command-aliases-and-hotkeys). Earlier DJI projects with PID `0x4011`, simulated input, or Mic Mini private commands do not change this Mic 3 path.
 
-### Design verification and remaining implementation gates
+### Implementation coverage and remaining gates
 
-This change can validate Markdown links, TOML syntax, example references, and consistency between the contracts. It cannot validate a loader, runner, native mapping manager, or hardware behavior that has not been implemented.
+The implementation provides normalized capability records, capability-group configuration migration, the native mapping journal, transactional descriptor loading, the WIT/Pulley runner, digest-bound grants, package rollback, and desktop/CLI operations. The counter-button package contains an executable component. Tests exercise its state, replacement, permission boundaries, and resource failures.
 
-Real hardware acceptance is not completed by this design change. The signed Pulley runtime test, mapping behavior with multiple event services, external-writer race behavior, runtime resource measurements, and the complete DJI checklist remain implementation gates.
+Existing HID++, Litra, and camera adapters retain their authoritative protocol implementations and participate in catalog selection before probing. Explicit replacement of a HID++ or Litra owner waits for runtime withdrawal, firmware restoration, admitted I/O, and native channel retirement. Pairing also acquires admission before receiver identity probes. The shared selection path keeps failed or disabled built-in records visible without starting another protocol owner.
+
+External camera descriptors can select the native UVC control adapter for supported Logitech cameras while retaining attachment identity and desired controls. Camera discovery and the macOS control backend still restrict this adapter to Logitech; adding another camera vendor requires a host-adapter change and hardware validation. Camera preview remains native. V1 Wasm host services cover HID and native key effects; UVC controls and media streams are unavailable to Wasm components. Adding a transport or a host service still requires an explicit host implementation.
+
+See [Peripheral setup](PERIPHERALS.md#storage-and-validation) for runnable probes, local performance measurements, and hardware evidence. The device suite passes all 286 tests, including driver handoff, channel reopening with cached probes, and strict cassette-consumption checks. Native UI inspection remains unverified: the computer-use connection fails with `Sky Computer Use native pipe startup failed`. Real hardware acceptance remains separate from automated tests. Native plugin conformance on Linux and Windows, signed/notarized agent acceptance, external-writer races, and the complete DJI checklist require their corresponding hosts and devices.

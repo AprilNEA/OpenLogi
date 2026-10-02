@@ -6,6 +6,45 @@ use super::events::StateEvents;
 use super::{AppState, StateEvent};
 
 impl AppState {
+    pub(super) fn reconcile_camera_profiles(&mut self) {
+        use openlogi_core::peripheral::{ApplicationStatus, Capability, PeripheralError};
+        let cameras: Vec<_> = self
+            .agent
+            .peripherals
+            .devices
+            .iter()
+            .flat_map(|record| {
+                record.capabilities.iter().filter_map(|capability| {
+                    let Capability::Camera(camera) = &capability.capability else {
+                        return None;
+                    };
+                    let write_failed = record.operations.iter().any(|s| {
+                        s.capability == capability.id
+                            && matches!(
+                                s.application,
+                                ApplicationStatus::Failed(
+                                    PeripheralError::WriteFailed(_)
+                                        | PeripheralError::ReadbackMismatch
+                                )
+                            )
+                    });
+                    Some((
+                        camera.camera.config_key(),
+                        camera.camera.unique_id.clone(),
+                        write_failed,
+                    ))
+                })
+            })
+            .collect();
+        for (key, uid, write_failed) in cameras {
+            self.migrate_legacy_camera_key(&key, &uid);
+            // A partial batch must not replace a saved profile with the next observed values.
+            if write_failed && self.camera_active_profile(&key).is_some() {
+                let _ = self.commit_camera_active_profile(&key, None);
+            }
+        }
+    }
+
     /// Request Camera access and retain the permission poll for the app
     /// entity's lifetime. Repeated requests reuse an active poll; a completed
     /// poll may be replaced if authorization is still undetermined.
@@ -53,71 +92,24 @@ impl AppState {
             .iter()
             .any(|r| matches!(r.kind, openlogi_core::device::DeviceKind::Camera))
     }
-    /// The saved value of a UVC control for `config_key`, if any.
-    #[must_use]
-    pub fn camera_control(&self, config_key: &str, control: CameraControl) -> Option<i32> {
-        self.config
-            .camera_controls(config_key)?
-            .0
-            .get(control.name())
-            .copied()
-    }
-    /// The saved state of a camera auto toggle for `config_key`, if any.
-    #[must_use]
-    pub fn camera_auto(
-        &self,
-        config_key: &str,
-        toggle: openlogi_camera::AutoToggle,
-    ) -> Option<bool> {
-        self.config
-            .camera_controls(config_key)?
-            .0
-            .get(toggle.name())
-            .map(|v| *v != 0)
-    }
-    /// Persist a UVC control for `config_key`. No agent IPC — webcams are
-    /// driven straight from the GUI over USB, so the agent never sees this.
-    pub fn commit_camera_control(
-        &mut self,
-        config_key: &str,
-        control: CameraControl,
-        value: i32,
-    ) -> StateEvents {
-        self.commit_camera_entry(config_key, control.name(), value);
-        StateEvent::CameraChanged.into()
-    }
-    /// Persist a camera auto toggle for `config_key` (stored as 0/1).
-    pub fn commit_camera_auto(
-        &mut self,
-        config_key: &str,
-        toggle: openlogi_camera::AutoToggle,
-        on: bool,
-    ) -> StateEvents {
-        self.commit_camera_entry(config_key, toggle.name(), i32::from(on));
-        StateEvent::CameraChanged.into()
-    }
-    /// Persist a batch of auto toggles and control values for `config_key` as
-    /// one announced change — what a reset or an applied profile writes.
+    /// Save one desired native-control batch and ask the agent to reconcile it.
     pub fn commit_camera_settings(
         &mut self,
         config_key: &str,
         autos: &[(openlogi_camera::AutoToggle, bool)],
         values: &[(CameraControl, i32)],
     ) -> StateEvents {
+        let mut controls = self.config.camera_controls(config_key).unwrap_or_default();
         for (toggle, on) in autos {
-            self.commit_camera_entry(config_key, toggle.name(), i32::from(*on));
+            controls.0.insert(toggle.name().into(), i32::from(*on));
         }
         for (control, value) in values {
-            self.commit_camera_entry(config_key, control.name(), *value);
+            controls.0.insert(control.name().into(), *value);
         }
-        StateEvent::CameraChanged.into()
-    }
-    fn commit_camera_entry(&mut self, config_key: &str, name: &str, value: i32) {
-        let mut controls = self.config.camera_controls(config_key).unwrap_or_default();
-        controls.0.insert(name.to_string(), value);
         self.config
             .edit(|config| config.set_camera_controls(config_key, controls));
-        self.persist_config("camera controls");
+        self.persist_and_reload("camera controls");
+        StateEvent::CameraChanged.into()
     }
     /// Lift settings from the legacy port-bound `camera-<unique_id>` key onto
     /// the stable serial/model key when the latter has none. Inventory identity
@@ -126,13 +118,9 @@ impl AppState {
     /// use capture-id suffixes, so two serial-less same-model units honestly
     /// share one settings bag rather than risk cross-assigning on port moves.
     pub fn migrate_legacy_camera_key(&mut self, config_key: &str, capture_id: &str) {
-        if self.camera_key_has_settings(config_key) {
+        let Some(port_key) = self.config.legacy_camera_key(config_key, capture_id) else {
             return;
-        }
-        let port_key = format!("camera-{capture_id}");
-        if port_key == config_key || !self.camera_key_has_settings(&port_key) {
-            return;
-        }
+        };
         let controls = self.config.camera_controls(&port_key);
         let profiles = self.config.camera_profiles(&port_key);
         let active = self.config.camera_active_profile(&port_key);
@@ -148,12 +136,7 @@ impl AppState {
             }
             config.devices.remove(&port_key);
         });
-        self.persist_config("camera key migration");
-    }
-    fn camera_key_has_settings(&self, key: &str) -> bool {
-        self.config.camera_controls(key).is_some()
-            || !self.config.camera_profiles(key).is_empty()
-            || self.config.camera_active_profile(key).is_some()
+        self.persist_and_reload("camera key migration");
     }
     /// User-saved camera profiles for `config_key` (name → snapshot).
     #[must_use]

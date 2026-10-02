@@ -55,6 +55,8 @@ Things OpenLogi does that Options+ won't:
 - Button remapping via the OS input hook: a built-in action catalog plus custom keyboard shortcuts authored in the TOML config, including independent short/long-press actions and hold-until-release chords for push-to-talk¹
 - Per-application profile overlays that auto-switch on app focus (macOS + Windows; Linux on X11 / XWayland only)
 - Litra lights: power, brightness, and color temperature, with optional auto power that follows camera activity
+- DJI Mic 3 on macOS: map the transmitter's linking-button short press to F18 with a device-scoped native mapping. [Setup and peripheral extensions](docs/PERIPHERALS.md)
+- Local device descriptors and sandboxed Wasm plugins, with explicit device grants, disable, and rollback
 
 **Mouse**
 
@@ -77,7 +79,7 @@ Things OpenLogi does that Options+ won't:
 - Any Logitech UVC webcam (Brio, StreamCam, the C920 series, …), plug and play
 - Live preview that opens the camera only while you watch — leaving it releases the camera entirely and the LED goes off
 - Image controls written straight to the UVC hardware — zoom, focus, exposure, brightness, contrast, saturation, sharpness, white balance, tint, anti-flicker, and low-light compensation, with auto-mode toggles for focus / exposure / white balance — so changes apply in Meet / Zoom / OBS and every other app using the camera
-- One-click profiles: built-in Default / Streaming / Video call plus custom snapshots; settings persist per camera and are written back to the hardware on the next view
+- One-click profiles: built-in Default / Streaming / Video call plus custom snapshots; the agent reapplies saved controls when the camera reconnects
 
 ¹ Media key actions use D-Bus MPRIS on Linux; a handful of macOS-specific actions have no universal Linux equivalent and are no-ops. Windows maps platform actions to native equivalents where available.
 
