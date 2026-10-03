@@ -162,7 +162,9 @@ pub(crate) fn agent_service_label(channel: Channel) -> String {
 /// One plist for both `launch_at_login` states: the preference is sunk into
 /// the agent, which idles out with a clean `exit(0)` — left down by
 /// `SuccessfulExit` — when started unwanted (the GUI's
-/// `platform::registration` doc has the model).
+/// `platform::registration` doc has the model). The agent tells a crash
+/// respawn from a login itself, by login session, since this plist gives both
+/// the same trigger (`docs/DECISIONS.md`, 2026-09).
 fn agent_launch_plist(channel: Channel) -> Result<plist::Dictionary> {
     let nested = Component::Agent
         .nested_bundle_dir(channel)

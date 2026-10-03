@@ -18,6 +18,8 @@
 //! sunk launch-at-login switch makes an unwanted login start possible; Windows
 //! and Linux only ever start wanted, so their gate passes unconditionally.
 
+#[cfg(target_os = "macos")]
+pub(crate) mod armed_session;
 mod transition;
 
 use std::sync::Arc;
@@ -30,7 +32,6 @@ use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedHandles};
 use openlogi_agent_core::runtime::hook;
 use openlogi_agent_core::watchers::foreground_app::ForegroundUpdate;
-use openlogi_agent_core::watchers::input_monitoring::{Access, needs_successor};
 use openlogi_agent_core::watchers::inventory::{InventoryEvent, InventoryRefresh};
 use openlogi_core::config::Config;
 use openlogi_hook::Hook;
@@ -130,9 +131,19 @@ impl Booted {
     /// respawn. Demand is a [`ClientKind::Gui`] declaration, not a mere
     /// connection: other clients are served without waking anything, and the
     /// takeover probe never declares at all.
+    ///
+    /// The same trigger also fires after a crash, and that start was wanted:
+    /// an agent armed earlier in this login session that did not leave
+    /// through a final exit re-arms at once (see [`armed_session`]).
     #[cfg(target_os = "macos")]
     async fn gate(mut self) -> Option<Wanted> {
         if self.launch_at_login {
+            return Some(Wanted(self));
+        }
+        if armed_session::rearm() {
+            info!(
+                "launch_at_login is off, but this login armed an agent that did not quit — re-arming"
+            );
             return Some(Wanted(self));
         }
         info!("launch_at_login is off — dormant until a client demands arming");
@@ -209,6 +220,8 @@ impl Wanted {
         } = self.0;
         #[cfg(target_os = "macos")]
         let _ = armed_tx.send(());
+        #[cfg(target_os = "macos")]
+        armed_session::record();
         overlay::spawn();
         prompt_missing_accessibility(capture_mouse_events);
 
@@ -237,7 +250,6 @@ impl Wanted {
                 hidpp_watchers: WatcherFleet::Inactive,
                 hook: None,
                 capture_mouse_events,
-                input_monitoring: Access::Granted,
             },
         }
     }
@@ -265,9 +277,6 @@ struct Running {
     /// revoke (dropping the handle stops its thread).
     hook: Option<Hook>,
     capture_mouse_events: bool,
-    /// What this process can do with Input Monitoring, decided at arming. Off
-    /// macOS nothing gates HID access, so it is never anything else.
-    input_monitoring: Access,
 }
 
 impl Armed {
@@ -276,19 +285,10 @@ impl Armed {
     async fn run(self) {
         let Self { mut running } = self;
         #[cfg(target_os = "macos")]
-        {
-            let arming = request_input_monitoring().await;
-            running.input_monitoring = arming.access();
-            // Only a grant the user actually gave is worth restarting into; a
-            // refusal has to be left alone, or the agent asks again on every
-            // launch.
-            if arming == AccessAtArming::GrantedToSuccessor
-                && schedule_input_monitoring_relaunch()
-            {
-                running
-                    .shut_down("Input Monitoring permission relaunch", None)
-                    .await;
-            }
+        if request_input_monitoring_and_schedule_relaunch().await {
+            running
+                .hand_over("Input Monitoring permission relaunch")
+                .await;
         }
 
         // HID++ watchers need no Accessibility — start them up front.
@@ -300,6 +300,10 @@ impl Armed {
             tokio::select! {
                 biased;
 
+                // Logout, a developer, or the stale-agent takeover — each
+                // means "stop". The takeover's successor would rather find
+                // the armed session, but it is GUI-started and armed by that
+                // GUI's declaration, so nothing is lost by treating it alike.
                 () = running.signals.recv() => {
                     running.shut_down("shutdown signal", None).await;
                 }
@@ -368,19 +372,7 @@ impl Running {
             WatcherEvent::Pointer(context) => self.apply_pointer_context(context).await,
             WatcherEvent::Accessibility(granted) => self.apply_accessibility(granted).await,
             WatcherEvent::InputMonitoring(granted) => {
-                // Publish before considering the restart: a client must never be
-                // told the grant is missing while the agent is on its way out
-                // to pick it up.
                 self.observable.set_input_monitoring_granted(granted);
-                // A grant this process cannot use is worth nothing until a
-                // successor starts, so become one instead of retrying a
-                // permission that can never take effect here.
-                if needs_successor(self.input_monitoring, granted)
-                    && schedule_input_monitoring_relaunch()
-                {
-                    self.shut_down("Input Monitoring permission relaunch", None)
-                        .await;
-                }
             }
             // Watcher thread death — without a snapshot the GUI would scan
             // forever.
@@ -573,7 +565,27 @@ impl Running {
         self.exit_after_replacement_teardown("binary update");
     }
 
+    /// Leave for good: nobody wants the agent until asked again, so the next
+    /// start in this login is a GUI demand, never a respawn to re-arm.
     async fn shut_down(
+        &mut self,
+        reason: &str,
+        tray_guard: Option<tokio::sync::oneshot::Sender<()>>,
+    ) -> ! {
+        #[cfg(target_os = "macos")]
+        armed_session::clear();
+        self.leave(reason, tray_guard).await
+    }
+
+    /// Leave for a successor that is already scheduled and must start armed:
+    /// the armed-session record stays for it to find.
+    #[cfg(target_os = "macos")]
+    async fn hand_over(&mut self, reason: &str) -> ! {
+        self.leave(reason, None).await
+    }
+
+    /// Drain the HID++ fleet, release the hook, and end the process.
+    async fn leave(
         &mut self,
         reason: &str,
         tray_guard: Option<tokio::sync::oneshot::Sender<()>>,
@@ -585,7 +597,8 @@ impl Running {
     }
 
     /// End after [`Self::complete_replacement`] resolved firmware
-    /// ownership, so a successor starts from native device state.
+    /// ownership, so a successor starts from native device state. A handover
+    /// like [`Self::hand_over`]: the successor finds the armed session.
     #[cfg(any(target_os = "macos", not(unix)))]
     fn exit_after_replacement_teardown(&mut self, reason: &str) -> ! {
         shutdown::release_hook_and_exit(self.hook.take(), &mut self.inputs, reason, None)
@@ -601,55 +614,13 @@ fn prompt_missing_accessibility(capture_mouse_events: bool) {
     }
 }
 
-/// Arrange for a successor to start with a grant this process cannot use, and
-/// report whether one is on its way. The grant is only ever applied to the next
-/// launch of this identity, so leaving is the only way to use it.
-#[cfg(target_os = "macos")]
-fn schedule_input_monitoring_relaunch() -> bool {
-    crate::binary_watch::schedule_after_input_monitoring_grant()
-}
-
-/// Nothing to arrange: HID access is never gated off macOS, so no observation
-/// there can call for a relaunch.
-#[cfg(not(target_os = "macos"))]
-fn schedule_input_monitoring_relaunch() -> bool {
-    false
-}
-
-/// What arming found out about macOS Input Monitoring.
-#[cfg(target_os = "macos")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AccessAtArming {
-    /// The agent may open HID devices in this process already.
-    InEffect,
-    /// The consent dialog was answered with a grant. macOS applies it to the
-    /// next launch of this identity rather than to the process that asked, so
-    /// the agent has to leave and come back.
-    GrantedToSuccessor,
-    /// Not granted. The agent runs without HID access, and a grant made later
-    /// in System Settings reaches it only through a restart.
-    Denied,
-}
-
-#[cfg(target_os = "macos")]
-impl AccessAtArming {
-    /// What this process can do with the permission from here on.
-    fn access(self) -> Access {
-        match self {
-            Self::InEffect => Access::Granted,
-            Self::GrantedToSuccessor | Self::Denied => Access::NeedsSuccessor,
-        }
-    }
-}
-
-/// Request Input Monitoring before starting the HID inventory on macOS, and
-/// report what this process can do with the result.
+/// Request Input Monitoring before starting the HID inventory on macOS.
 ///
 /// The agent (not the GUI) owns every HID++ device open, so it must be the
 /// binary the user authorizes. A newly granted permission requires a process
 /// relaunch before macOS lets the agent open HID devices.
 #[cfg(target_os = "macos")]
-async fn request_input_monitoring() -> AccessAtArming {
+async fn request_input_monitoring_and_schedule_relaunch() -> bool {
     // Without this, macOS never registers a decision at all:
     // `IOHIDDeviceOpen` is silently denied, the permission never appears in
     // System Settings for the user to grant, and no HID++ device is ever
@@ -662,12 +633,12 @@ async fn request_input_monitoring() -> AccessAtArming {
         })
         .await;
         match access_after_prompt {
-            Ok(true) => AccessAtArming::GrantedToSuccessor,
-            Ok(false) => AccessAtArming::Denied,
+            Ok(true) => return crate::binary_watch::schedule_after_input_monitoring_grant(),
+            Ok(false) => {}
             Err(e) => {
                 warn!(error = %e, "Input Monitoring permission request task failed");
-                AccessAtArming::Denied
             }
         }
     }
+    false
 }

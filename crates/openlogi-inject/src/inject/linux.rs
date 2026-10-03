@@ -426,6 +426,9 @@ fn modifiers_to_keycodes(combo: &openlogi_core::binding::KeyCombo) -> Vec<KeyCod
     if combo.has_option() {
         modifiers.push(KeyCode::KEY_LEFTALT);
     }
+    if combo.has_super() {
+        modifiers.push(KeyCode::KEY_LEFTMETA);
+    }
     modifiers
 }
 
@@ -434,6 +437,7 @@ fn held_keycode(key: HeldKey) -> Option<KeyCode> {
         HeldKey::Control => Some(KeyCode::KEY_LEFTCTRL),
         HeldKey::Shift => Some(KeyCode::KEY_LEFTSHIFT),
         HeldKey::Alt => Some(KeyCode::KEY_LEFTALT),
+        HeldKey::Super => Some(KeyCode::KEY_LEFTMETA),
         HeldKey::Key(usage) => {
             let key = hid_usage_to_linux(usage.code());
             if key.is_none() {

@@ -93,8 +93,9 @@ pub enum ConfigError {
 
 /// A loaded config file plus the exact source revision it came from.
 ///
-/// Saving compares that source with the current file before writing, so an
-/// editor or another process cannot be overwritten by a stale GUI snapshot.
+/// Saving compares that source with the current file before writing and locks
+/// out other cooperating writers through a persistent sidecar. External editors
+/// that do not take the lock can still race with a save after its revision check.
 /// Existing comments and formatting are retained for keys that still exist.
 #[derive(Debug, Clone)]
 pub struct ConfigFile {
@@ -151,7 +152,33 @@ impl ConfigFile {
     }
 
     /// Save `config` only if the file still matches the loaded revision.
+    /// Returns a [`ConfigError::Write`] with [`io::ErrorKind::WouldBlock`] if
+    /// another writer holds the lock, rather than blocking the caller.
     pub fn save(&mut self, config: &Config) -> Result<(), ConfigError> {
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent).map_err(|source| ConfigError::Write {
+                path: self.path.clone(),
+                source,
+            })?;
+        }
+        // Lock a stable inode, not the config that atomic replacement swaps out.
+        // Keep the sidecar on disk: unlinking it would let writers lock different
+        // inodes. The handle holds the lock through the check, backups and commit.
+        let lock_path = self.path.with_added_extension("lock");
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(|source| ConfigError::Write {
+                path: lock_path.clone(),
+                source,
+            })?;
+        lock.try_lock().map_err(|source| ConfigError::Write {
+            path: lock_path,
+            source: source.into(),
+        })?;
         let current = match fs::read_to_string(&self.path) {
             Ok(source) => Some(source),
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
@@ -189,12 +216,6 @@ impl ConfigFile {
             })?;
         }
 
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent).map_err(|source| ConfigError::Write {
-                path: self.path.clone(),
-                source,
-            })?;
-        }
         let body = render_config(config, self.source.as_deref(), &self.path)?;
         backup_config_once(&self.path).map_err(|source| ConfigError::Write {
             path: self.path.clone(),

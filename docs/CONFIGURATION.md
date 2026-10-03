@@ -77,7 +77,13 @@ Common device fields are:
   pair, or a gesture-direction map.
   `Thumbwheel` is the thumb wheel's capacitive tap — it has no GUI control and
   stays inert unless bound here, because the wheel reports taps from incidental
-  thumb contact as well as from deliberate ones
+  thumb contact as well as from deliberate ones.
+  Keyboard keys are named by their HID++ `0x1b04` control: a catalog name such
+  as `KeyScreenCapture`, `KeyCalculator` or `KeyLock`, or `control:0x<cid>` for
+  any control `openlogi diag controls` reports as divertable. A bound key is
+  diverted to OpenLogi while the agent runs; an unbound key keeps its firmware
+  function, so binding `None` is the same as removing the entry. Naming one
+  control under both spellings in the same table is an error, not a merge
 - `per_app_bindings`: sparse action overlays keyed by macOS bundle id, Linux
   application id, exact lower-cased Windows executable path, or
   `exe:<filename>.exe`. The Buttons panel edits these under its Profile
@@ -86,7 +92,9 @@ Common device fields are:
   differently and a profile authored under one namespace will not match under
   another. An overlay holds one action per button; gesture-direction maps live
   in `bindings`
-- `action_ring`: default and complete per-application eight-slot layouts
+- `action_ring`: default and complete per-application eight-slot layouts;
+  `action_ring.per_app` takes the same selectors as `per_app_bindings`,
+  including the Windows `exe:<filename>` fallback
 - `lighting`, `smartshift`, standalone `light`, and camera controls / profiles
 - `host_switch_targets` and `fn_lock` for compatible keyboards
 - `identity` and `disabled_gestures`, which are application-managed metadata
@@ -107,6 +115,13 @@ Forward = { HoldShortcut = "Ctrl+Space" }
 MiddleClick = { OpenApplication = { path = "~/Downloads", display_name = "Downloads" } }
 DpiToggle = { short = "ShowDesktop", long = "MissionControl" }
 ```
+
+Chord modifiers are `Cmd`, `Ctrl`, `Alt`, `Shift`, and `Super`. `Cmd` is the
+cross-platform primary modifier: Command on macOS, Control on Linux and Windows,
+so `Cmd+C` copies everywhere. `Super` (aliases `Win`, `Meta`) always presses the
+platform's logo key — Command on macOS, the Windows key, `KEY_LEFTMETA` on Linux —
+so `Win+L` locks Windows and `Super+End` reaches GNOME and KDE shortcuts bound to
+Super.
 
 `CustomShortcut` emits an immediate key-down/key-up pair. `HoldShortcut` keeps
 the chord down until the originating physical button is released, and also
