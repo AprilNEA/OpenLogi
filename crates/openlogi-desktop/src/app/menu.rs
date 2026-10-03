@@ -83,13 +83,7 @@ pub fn install(cx: &mut App) {
     cx.on_action(|_: &OpenAddDevice, cx| crate::windows::add_device::open(cx));
     cx.on_action(|_: &BringAllToFront, cx| cx.activate(true));
     cx.on_action(|_: &CheckForUpdates, cx| check_for_updates(cx));
-    cx.on_action(|_: &OpenConfigFolder, cx| {
-        if let Ok(path) = openlogi_core::paths::config_dir()
-            && let Some(url) = file_url(&path)
-        {
-            cx.open_url(&url);
-        }
-    });
+    cx.on_action(|_: &OpenConfigFolder, cx| open_config_folder(cx));
     cx.on_action(|_: &OpenHelp, cx| cx.open_url(HELP_URL));
     cx.on_action(|_: &OpenLatestRelease, cx| cx.open_url(RELEASES_URL));
     cx.on_action(|_: &OpenRepository, cx| cx.open_url(REPO_URL));
@@ -263,6 +257,23 @@ fn device_menu_items(cx: &App) -> Vec<MenuItem> {
     items
 }
 
-pub(crate) fn file_url(path: &std::path::Path) -> Option<String> {
+fn file_url(path: &std::path::Path) -> Option<String> {
     Url::from_file_path(path).ok().map(Into::into)
+}
+
+/// Reveal the user's configuration directory in the OS file manager.
+///
+/// Every in-window button that offers this calls here directly instead of
+/// dispatching [`OpenConfigFolder`]. `App::dispatch_action` routes through
+/// the *active* window and drops the action when that window cannot be
+/// resolved — it logs "window not found" and swallows the error — which left
+/// the button on the fail-closed configuration-error screen doing nothing at
+/// all. Only the menu bar, which has no view to call from, goes through the
+/// action.
+pub(crate) fn open_config_folder(cx: &mut App) {
+    if let Ok(path) = openlogi_core::paths::config_dir()
+        && let Some(url) = file_url(&path)
+    {
+        cx.open_url(&url);
+    }
 }
