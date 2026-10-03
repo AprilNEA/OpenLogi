@@ -96,6 +96,16 @@ fn print_empty_notes(status: Option<&AgentStatus>) {
                  cannot browse into the app bundle — use Go to Folder)."
             );
         }
+        // Off macOS there is no Input Monitoring gate, so a failed open on
+        // Linux is almost always missing hidraw access, not a stale session.
+        Some(status) if status.hid_open_failures && cfg!(target_os = "linux") => {
+            println!("Notes:");
+            println!(
+                "  - The agent's device opens keep failing. On Linux, HID++ access needs \
+                 OpenLogi's udev rules (shipped by the packages; for a source build see \
+                 docs/INSTALL-linux.md)."
+            );
+        }
         Some(status) if status.hid_open_failures => {
             println!("Notes:");
             println!(
