@@ -28,7 +28,7 @@ pub(super) struct Permit(Arc<AtomicUsize>);
 impl Permit {
     fn acquire(count: &Arc<AtomicUsize>) -> Option<Self> {
         count
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |value| {
                 (value < PERIPHERAL_QUEUE_CAPACITY).then_some(value + 1)
             })
             .ok()?;

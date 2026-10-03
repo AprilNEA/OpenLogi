@@ -21,7 +21,7 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["sync"], optional = true }
 toml.workspace = true
 wasmparser = "0.260.0"
-wasmtime = { version = "49.0.1", default-features = false, features = ["std", "runtime", "component-model", "cranelift", "pulley"], optional = true }
+wasmtime = { version = "49.0.2", default-features = false, features = ["std", "runtime", "component-model", "cranelift", "pulley"], optional = true }
 
 [lints]
 workspace = true

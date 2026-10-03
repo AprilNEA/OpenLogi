@@ -30,6 +30,7 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 futures = "0.3"
+openlogi-ipc = { path = "../openlogi-ipc", version = "0.8.11", features = ["test-support"] }
 tempfile = "3"
 
 [lints]

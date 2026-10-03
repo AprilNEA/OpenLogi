@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.8.11] - 2026-10-01
+## [0.8.11] - 2026-10-02
 
 ### Added
 
@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- clear the lints rustc 1.99 raises on untouched code ([#1638](https://github.com/AprilNEA/OpenLogi/pull/1638))
 - *(core)* match Actions Ring layouts with the per-app selector ([#643](https://github.com/AprilNEA/OpenLogi/pull/643))
 - *(macos)* drive the device-I/O gate from powerd instead of workspace notifications ([#1323](https://github.com/AprilNEA/OpenLogi/pull/1323))
 - *(macos)* confirm desktop switches with private space APIs ([#1586](https://github.com/AprilNEA/OpenLogi/pull/1586))

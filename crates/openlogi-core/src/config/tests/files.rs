@@ -209,6 +209,53 @@ fn tracked_save_preserves_comments_and_rejects_concurrent_edits() {
 }
 
 #[test]
+fn tracked_save_respects_the_writer_lock_and_releases_it_after_errors() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    let lock_path = dir.path().join("config.toml.lock");
+    let original = "schema_version = 6\nselected_device = \"original\"\n";
+    fs::write(&path, original).expect("write original");
+    let (mut config, mut file) = ConfigFile::load_from_path(&path).expect("load");
+    let (stale_config, mut stale_file) = ConfigFile::load_from_path(&path).expect("load stale");
+    config.set_selected_device(Some("replacement".into()));
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .expect("open lock");
+    lock.try_lock().expect("hold writer lock");
+    let error = file
+        .save(&config)
+        .expect_err("another writer holds the lock");
+    assert_matches!(error, ConfigError::Write { source, .. }
+        if source.kind() == std::io::ErrorKind::WouldBlock);
+    assert_eq!(fs::read_to_string(&path).expect("read unchanged"), original);
+    assert!(!dir.path().join("config.toml.backup.1").exists());
+    drop(lock);
+
+    file.save(&config).expect("retry after release");
+    assert_eq!(
+        Config::load_from_path(&path)
+            .expect("reload")
+            .selected_device(),
+        Some("replacement")
+    );
+    assert_matches!(
+        stale_file.save(&stale_config),
+        Err(ConfigError::Conflict { .. })
+    );
+    // Reopen the same persistent sidecar after both success and conflict.
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .expect("sidecar remains");
+    lock.try_lock().expect("neither save leaked its lock");
+}
+
+#[test]
 fn a_failed_backup_write_leaves_the_migration_backup_still_owed() {
     // The pre-migration file is the user's only recovery path from a
     // key-rewriting migration. If the backup write fails — full disk,
