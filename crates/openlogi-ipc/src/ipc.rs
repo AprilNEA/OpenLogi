@@ -67,7 +67,7 @@ pub use succession::Identity;
 ///      `HidppOperation::ReadFnLock` appended.
 /// v33: `Agent::unpair_device` appended.
 /// v34: `KeyCombo` gains the Super modifier bit (`Super`, `Win`, `Meta`).
-pub const PROTOCOL_VERSION: u32 = 34;
+pub const PROTOCOL_VERSION: u32 = 35;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -129,7 +129,7 @@ pub struct AgentStatus {
 /// Status and inventory as one poll result. Kept together so the GUI never
 /// pairs inventory readiness from one orchestrator state with the inventory
 /// list from another.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentSnapshot {
     pub status: AgentStatus,
     pub inventory: Vec<DeviceInventory>,
@@ -144,6 +144,8 @@ pub struct AgentSnapshot {
     /// Which application per-app profiles are resolving against. See
     /// [`ForegroundApps`].
     pub foreground: ForegroundApps,
+    /// Agent-owned normalized peripheral sessions and extension diagnostics.
+    pub peripherals: openlogi_core::peripheral::PeripheralSnapshot,
 }
 
 /// The application the agent currently resolves per-app profiles against, and
@@ -222,7 +224,7 @@ pub const OBSERVE_HOLD: Duration = Duration::from_secs(20);
 pub type Generation = u64;
 
 /// The agent's observable state together with the generation it belongs to.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Observation {
     /// See [`Generation`]. Pass it back to the next [`Agent::observe`].
     pub generation: Generation,
@@ -583,4 +585,19 @@ pub trait Agent {
     /// receiver, and with [`PairingFailure::ReceiverNotFound`] for a route
     /// that names no receiver slot or a receiver that is not connected.
     async fn unpair_device(route: DeviceRoute) -> Result<(), PairingFailure>;
+
+    /// Install or explicitly grant exact local plugin content. Installation does not enable I/O.
+    async fn plugin_command(
+        command: openlogi_core::peripheral::PluginCommand,
+    ) -> Result<(), openlogi_core::peripheral::PeripheralError>;
+
+    /// Relinquish a conflicted native effect and reconcile the saved rule.
+    async fn resolve_peripheral(
+        rule: String,
+    ) -> Result<(), openlogi_core::peripheral::PeripheralError>;
+
+    /// Retry the current peripheral attachment after a contained plugin fault.
+    async fn retry_peripheral(
+        session: openlogi_core::peripheral::SessionId,
+    ) -> Result<(), openlogi_core::peripheral::PeripheralError>;
 }

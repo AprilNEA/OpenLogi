@@ -1,0 +1,21 @@
+id: gui-capability-projection-owner
+language: rust
+severity: error
+message: Consume the agent's CapabilityRecord values or openlogi_core::peripheral::builtin projection; do not reconstruct driver capabilities in a client.
+note: The shared projection preserves the same capabilities in live, offline, CLI, and mock inventories.
+files:
+  - crates/openlogi-desktop/src/**/*.rs
+  - crates/openlogi-cli/src/**/*.rs
+ignores:
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  all:
+    - pattern: CapabilityRecord { $$$FIELDS }
+    - not:
+        inside:
+          kind: mod_item
+          stopBy: end
+          has:
+            field: name
+            regex: '^tests$'

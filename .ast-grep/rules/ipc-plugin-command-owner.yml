@@ -1,0 +1,11 @@
+id: ipc-plugin-command-owner
+language: rust
+severity: error
+message: Call openlogi_ipc::client::plugin_command; the shared helper owns the package-operation RPC deadline.
+note: GUI and CLI must use the same deadline for package validation, migration, and activation.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-ipc/src/client.rs
+rule:
+  pattern: $CLIENT.plugin_command($$$ARGS)

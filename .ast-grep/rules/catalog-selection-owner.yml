@@ -1,0 +1,16 @@
+id: catalog-selection-owner
+language: rust
+severity: error
+message: Use Catalog::select_with_config for saved scope precedence and driver selection.
+note: The catalog owns selection. Host adapters supply endpoint facts and current attachment evidence.
+files:
+  - crates/openlogi-agent-core/src/peripherals/controller.rs
+  - crates/openlogi-agent-core/src/peripherals/controller/**/*.rs
+ignores:
+  - '**/tests.rs'
+  - '**/tests/**'
+rule:
+  pattern: $CATALOG.select($$$ARGS)
+constraints:
+  CATALOG:
+    regex: '(^|\.)catalog$'

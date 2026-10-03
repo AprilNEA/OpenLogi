@@ -23,7 +23,10 @@ use std::fmt;
 /// Distinct from the HID++ layer's own `ControlId` on purpose: this is the
 /// config-facing identity of a rebindable control, and the two crates never
 /// depend on each other.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(transparent)]
 pub struct Cid(u16);
 
 impl Cid {

@@ -23,6 +23,8 @@ pub struct HardwareContext {
     device_io: DeviceIoGate,
     channel_pool: ChannelPool,
     probe_cache: Option<Arc<dyn ProbeCacheStore>>,
+    peripheral_discovery: bool,
+    ownership: crate::peripherals::ownership::Ownership,
 }
 
 impl HardwareContext {
@@ -32,11 +34,13 @@ impl HardwareContext {
     pub fn production() -> Self {
         let probe_cache = FileProbeCacheStore::in_data_dir()
             .map(|store| Arc::new(store) as Arc<dyn ProbeCacheStore>);
-        Self::from_parts(
+        let mut context = Self::from_parts(
             openlogi_hid::host::backend(),
             openlogi_hid::host::device_io_gate(),
             probe_cache,
-        )
+        );
+        context.peripheral_discovery = true;
+        context
     }
 
     /// Build an injected, memory-cache-only context over `backend` and
@@ -57,6 +61,12 @@ impl HardwareContext {
     #[must_use]
     pub fn device_io(&self) -> DeviceIoGate {
         self.device_io.clone()
+    }
+
+    /// Admission and acknowledged handoff for the existing protocol owners.
+    #[must_use]
+    pub fn ownership(&self) -> crate::peripherals::ownership::Ownership {
+        self.ownership.clone()
     }
 
     /// The shared route-opening channel pool derived from this context's
@@ -104,18 +114,61 @@ impl HardwareContext {
         openlogi_hid::inventory::standalone::enumerate_standalone(&*self.backend).await
     }
 
+    pub(crate) async fn enumerate_peripherals(
+        &self,
+    ) -> Result<
+        Vec<openlogi_hid::peripheral::DiscoveredEndpoint>,
+        openlogi_core::peripheral::PeripheralError,
+    > {
+        if !self.peripheral_discovery {
+            return Ok(Vec::new());
+        }
+        openlogi_hid::peripheral::discover(&self.device_io).await
+    }
+
+    pub(crate) async fn enumerate_cameras(
+        &self,
+    ) -> Result<Vec<openlogi_core::camera::Camera>, openlogi_core::peripheral::PeripheralError>
+    {
+        use openlogi_core::peripheral::PeripheralError;
+        if !self.peripheral_discovery {
+            return Ok(Vec::new());
+        }
+        let gate = self.device_io.clone();
+        tokio::task::spawn_blocking(move || {
+            gate.ensure_allowed()
+                .map_err(|_| PeripheralError::Suspended)?;
+            let cameras = openlogi_camera::enumerate_cameras();
+            gate.ensure_allowed()
+                .map_err(|_| PeripheralError::Suspended)?;
+            Ok(cameras)
+        })
+        .await
+        .map_err(|e| PeripheralError::DiscoveryUnavailable(e.to_string()))?
+    }
+
     pub(crate) async fn run_pairing(
         &self,
         target: ReceiverSelector,
         commands: mpsc::UnboundedReceiver<PairingCommand>,
         events: mpsc::UnboundedSender<PairingEvent>,
     ) -> Result<(), PairingError> {
-        openlogi_hid::pairing::run_pairing(&*self.backend, target, commands, events).await
+        openlogi_hid::pairing::run_pairing_admitted(
+            &*self.backend,
+            target,
+            commands,
+            events,
+            |node| self.ownership.node_operation(node),
+        )
+        .await
     }
 
     /// Remove the device `route` reaches from its receiver's pairing table.
     pub async fn unpair(&self, route: &DeviceRoute) -> Result<(), PairingError> {
-        openlogi_hid::pairing::unpair(&*self.backend, route).await
+        openlogi_hid::pairing::unpair_admitted(&*self.backend, route, |node| {
+            self.ownership.node_operation(node)
+        })
+        .await
     }
 
     pub(super) async fn apply_litra(
@@ -138,6 +191,8 @@ impl HardwareContext {
             device_io,
             channel_pool,
             probe_cache,
+            peripheral_discovery: false,
+            ownership: crate::peripherals::ownership::Ownership::default(),
         }
     }
 }

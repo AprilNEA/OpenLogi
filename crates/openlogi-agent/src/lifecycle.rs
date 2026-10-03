@@ -247,7 +247,7 @@ impl Wanted {
                 ring_haptics,
                 signals,
                 shutdown_requests,
-                hidpp_watchers: WatcherFleet::Inactive,
+                device_watchers: WatcherFleet::Inactive,
                 hook: None,
                 capture_mouse_events,
             },
@@ -272,7 +272,7 @@ struct Running {
     ring_haptics: server::RingHapticPlayer,
     signals: ShutdownSignals,
     shutdown_requests: ShutdownRequests,
-    hidpp_watchers: WatcherFleet,
+    device_watchers: WatcherFleet,
     /// The OS hook, installed once Accessibility is granted and dropped on
     /// revoke (dropping the handle stops its thread).
     hook: Option<Hook>,
@@ -292,7 +292,7 @@ impl Armed {
         }
 
         // HID++ watchers need no Accessibility — start them up front.
-        running.restart_hidpp_watchers();
+        running.restart_device_watchers();
         let (mut watchers, inventory_refresh) = startup::spawn_state_watchers(&running.shared);
 
         info!("openlogi-agent started");
@@ -310,7 +310,7 @@ impl Armed {
                 Some(request) = running.shutdown_requests.recv() => {
                     running.handle_shutdown_request(request).await;
                 }
-                (request, stopped) = running.hidpp_watchers.replacement_ready() => {
+                (request, stopped) = running.device_watchers.replacement_ready() => {
                     running.complete_replacement(request, stopped);
                 }
                 Some(event) = watchers.next() => {
@@ -399,6 +399,15 @@ impl Running {
     /// Fold one inventory-watcher event into the orchestrator.
     async fn apply_inventory(&self, event: InventoryEvent, refresh: &InventoryRefresh) {
         match event {
+            InventoryEvent::DriverAssignments => {
+                self.orchestrator
+                    .lock()
+                    .await
+                    .refresh_driver_ownership(&self.inputs.dispatcher)
+                    .await;
+            }
+            InventoryEvent::Peripherals(result) => self.shared.peripherals.discover(result),
+            InventoryEvent::Cameras(result) => self.shared.peripherals.discover_cameras(result),
             InventoryEvent::Snapshot {
                 inventories,
                 standalone,
@@ -418,6 +427,7 @@ impl Running {
             // Devices likely power-cycled during the sleep; the next snapshot
             // re-applies their volatile settings (#189).
             InventoryEvent::SystemWake => {
+                self.shared.peripherals.wake();
                 self.orchestrator
                     .lock()
                     .await
@@ -518,7 +528,7 @@ impl Running {
                 self.shut_down("the app was uninstalled", None).await;
             }
             ShutdownRequest::Restart { path, retry } => {
-                self.hidpp_watchers
+                self.device_watchers
                     .begin_replacement(Replacement { path, retry });
             }
         }
@@ -529,23 +539,26 @@ impl Running {
     fn complete_replacement(&mut self, request: Replacement, stopped: bool) {
         if !stopped {
             warn!("HID++ teardown was unclean — refusing replacement and retrying");
-            self.restart_hidpp_watchers();
+            self.restart_device_watchers();
             let _ = request.retry.send(());
             return;
         }
         self.restart(request);
     }
 
-    fn restart_hidpp_watchers(&mut self) {
-        self.hidpp_watchers =
-            WatcherFleet::Running(startup::spawn_hidpp_watchers(&self.shared, &self.inputs));
+    fn restart_device_watchers(&mut self) {
+        self.device_watchers = WatcherFleet::Running(startup::spawn_device_watchers(
+            &self.shared,
+            &self.inputs,
+            Arc::clone(&self.observable),
+        ));
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
     fn restart(&mut self, Replacement { path, retry }: Replacement) {
         let error = crate::binary_watch::replace_process(&path);
         warn!(%error, path = %path.display(), "exec of the updated agent failed — restoring the current image and retrying");
-        self.restart_hidpp_watchers();
+        self.restart_device_watchers();
         let _ = retry.send(());
     }
 
@@ -553,7 +566,7 @@ impl Running {
     fn restart(&mut self, Replacement { path, retry }: Replacement) {
         if let Err(error) = crate::binary_watch::schedule(&path) {
             warn!(%error, "could not schedule updated agent relaunch — keeping the current image and retrying");
-            self.restart_hidpp_watchers();
+            self.restart_device_watchers();
             let _ = retry.send(());
             return;
         }
@@ -590,7 +603,7 @@ impl Running {
         reason: &str,
         tray_guard: Option<tokio::sync::oneshot::Sender<()>>,
     ) -> ! {
-        std::mem::replace(&mut self.hidpp_watchers, WatcherFleet::Inactive)
+        std::mem::replace(&mut self.device_watchers, WatcherFleet::Inactive)
             .stop_for_exit()
             .await;
         shutdown::release_hook_and_exit(self.hook.take(), &mut self.inputs, reason, tray_guard)

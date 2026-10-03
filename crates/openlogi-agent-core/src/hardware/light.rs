@@ -196,6 +196,10 @@ async fn apply_light_settings(
     if generation.load(Ordering::Acquire) != expected_generation {
         return Ok(false);
     }
+    let _ownership = hardware
+        .ownership()
+        .operation(target)
+        .map_err(|e| WriteError::Hid(e.to_string()))?;
     for command in commands_for_light_settings(*light, capabilities) {
         if !hardware.device_io().allows_io() {
             return Ok(false);
@@ -219,6 +223,10 @@ pub(super) async fn apply_light(
     if !hardware.device_io().allows_io() {
         return Err(WriteError::DeviceNotFound);
     }
+    let _ownership = hardware
+        .ownership()
+        .operation(route)
+        .map_err(|e| WriteError::Hid(e.to_string()))?;
     apply_light_unlocked(hardware, route, command).await
 }
 

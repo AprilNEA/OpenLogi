@@ -20,6 +20,7 @@ type Step = Box<dyn FnOnce(AgentRequest) -> AgentResponse + Send>;
 
 fn snapshot() -> AgentSnapshot {
     AgentSnapshot {
+        peripherals: openlogi_core::peripheral::PeripheralSnapshot::default(),
         status: AgentStatus {
             accessibility_granted: false,
             hook_installed: false,

@@ -18,6 +18,8 @@ mod transport;
 
 pub mod host;
 pub mod lighting;
+pub mod native_mapping;
+pub mod peripheral;
 pub mod permissions;
 pub mod probe_cache;
 pub mod recording;

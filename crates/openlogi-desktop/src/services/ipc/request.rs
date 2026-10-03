@@ -29,6 +29,7 @@ use tracing::{debug, warn};
 
 use super::{GuiUpdate, UnpairFailure};
 use crate::state::DeviceKey;
+use openlogi_core::peripheral::{PeripheralError, PluginCommand, SessionId};
 
 /// The GPUI-bound update stream a request may deliver through.
 pub(super) type UpdateSender = mpsc::UnboundedSender<GuiUpdate>;
@@ -95,6 +96,52 @@ fn or_unavailable<T>(outcome: Result<Result<T, WriteError>, Unavailable>) -> Res
 fn log_rejection(what: &str, outcome: Result<Result<(), WriteError>, Unavailable>) {
     if let Ok(Err(error)) = outcome {
         warn!(%error, what, "agent rejected device command");
+    }
+}
+
+/// Lifecycle requests share result delivery and one pending UI operation.
+pub enum PeripheralOperation {
+    Plugin(PluginCommand),
+    Resolve(String),
+    Retry(SessionId),
+}
+
+pub struct ManagePeripheral {
+    pub id: u64,
+    pub operation: PeripheralOperation,
+}
+
+impl Request for ManagePeripheral {
+    type Answer = Result<(), PeripheralError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        match &self.operation {
+            PeripheralOperation::Plugin(command) => {
+                openlogi_ipc::client::plugin_command(client, command.clone()).await
+            }
+            PeripheralOperation::Resolve(rule) => {
+                client
+                    .resolve_peripheral(context::current(), rule.clone())
+                    .await
+            }
+            PeripheralOperation::Retry(session) => {
+                client
+                    .retry_peripheral(context::current(), session.clone())
+                    .await
+            }
+        }
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        let result = outcome.unwrap_or_else(|_| {
+            Err(PeripheralError::DriverUnavailable(
+                "agent is unreachable".into(),
+            ))
+        });
+        let _ = updates.send(GuiUpdate::PeripheralCommandResult {
+            id: self.id,
+            result,
+        });
     }
 }
 
@@ -522,6 +569,7 @@ macro_rules! commands {
 }
 
 commands! {
+    ManagePeripheral,
     SetDpi,
     SetLighting,
     SetLight,

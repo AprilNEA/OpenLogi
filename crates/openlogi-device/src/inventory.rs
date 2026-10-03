@@ -70,6 +70,8 @@ pub struct Enumerator {
     /// steadily-connected node is opened once here and reused until it
     /// disconnects.
     channels: ChannelCache<NodeId, CachedChannel>,
+    excluded: HashSet<NodeId>,
+    selected: Option<HashSet<NodeId>>,
     /// Per-node last-good inventory + consecutive-failure counts: replays a
     /// node's snapshot through transient probe failures and decides when its
     /// cached channel must be dropped and reopened (see [`crate::inventory::ledger`]).
@@ -315,6 +317,33 @@ fn append_live_cached_channels(
 }
 
 impl Enumerator {
+    /// Exclude nodes assigned to another driver after firmware restoration.
+    /// Retired channels remain owned until every current user has released them.
+    pub fn exclude_driver_nodes(&mut self, nodes: HashSet<NodeId>) {
+        self.excluded = nodes;
+        for node in &self.excluded {
+            if let Some(registry) = &self.registry {
+                registry.remove_node(node);
+            }
+            self.channels.retire_node(node);
+        }
+        self.channels.reap_absent(&HashSet::new(), |cached| {
+            Arc::strong_count(&cached.channel) == 1
+        });
+    }
+
+    /// Nodes whose native channel or reader is still owned, including retiring channels.
+    #[must_use]
+    pub fn owned_nodes(&self) -> HashSet<NodeId> {
+        self.channels.owned_nodes()
+    }
+
+    /// Admit only catalog-selected nodes for new opens and probes.
+    /// Existing unselected channels remain available until explicit retirement.
+    pub fn select_driver_nodes(&mut self, nodes: HashSet<NodeId>) {
+        self.selected = Some(nodes);
+    }
+
     /// Whether the most recent [`enumerate`](Self::enumerate) pass failed to
     /// open at least one HID++ node. `false` before the first pass.
     ///
@@ -344,6 +373,8 @@ impl Enumerator {
             misses: HashMap::new(),
             node_cache_keys: HashMap::new(),
             channels: ChannelCache::default(),
+            excluded: HashSet::new(),
+            selected: None,
             ledger: NodeLedger::default(),
             registry: None,
             store: None,
@@ -398,6 +429,19 @@ impl Enumerator {
         let mut retiring = Vec::new();
         for info in candidates {
             let node = info.id.clone();
+            if self.excluded.contains(&node) {
+                continue;
+            }
+            if self
+                .selected
+                .as_ref()
+                .is_some_and(|selected| !selected.contains(&node))
+            {
+                if self.channels.get(&node).is_some() {
+                    seen_nodes.insert(node);
+                }
+                continue;
+            }
             seen_nodes.insert(node.clone());
             if !self
                 .channels
@@ -453,6 +497,15 @@ impl Enumerator {
         // collection while its already-open handle and ordinary mouse link are
         // still live. Keep probing that cached channel instead of turning one
         // incomplete OS snapshot into an offline device and stopping capture.
+        // Unselected cached channels are retained only for pending restoration.
+        if let Some(selected) = &self.selected {
+            seen_nodes.extend(
+                self.channels
+                    .active_iter()
+                    .filter(|(node, _)| !selected.contains(*node))
+                    .map(|(node, _)| node.clone()),
+            );
+        }
         append_live_cached_channels(&mut seen_nodes, &self.channels, &mut active);
 
         if let Some(registry) = &self.registry {

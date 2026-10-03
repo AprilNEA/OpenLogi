@@ -35,6 +35,10 @@ impl<Node, Channel> Default for ChannelCache<Node, Channel> {
 }
 
 impl<Node: Eq + Hash + Clone, Channel> ChannelCache<Node, Channel> {
+    pub(super) fn owned_nodes(&self) -> HashSet<Node> {
+        self.channels.keys().cloned().collect()
+    }
+
     pub(super) fn get(&self, node: &Node) -> Option<&Channel> {
         match self.channels.get(node)? {
             ChannelState::Active(channel) => Some(channel),

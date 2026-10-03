@@ -8,7 +8,7 @@ use futures::future::BoxFuture;
 use tokio::sync::oneshot;
 use tracing::{info, warn};
 
-use crate::startup::HidppWatcherHandles;
+use crate::startup::DeviceWatcherHandles;
 
 const STOP_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -19,7 +19,7 @@ pub(super) struct Replacement {
 
 pub(super) enum WatcherFleet {
     Inactive,
-    Running(HidppWatcherHandles),
+    Running(DeviceWatcherHandles),
     Replacing {
         request: Replacement,
         teardown: BoxFuture<'static, bool>,

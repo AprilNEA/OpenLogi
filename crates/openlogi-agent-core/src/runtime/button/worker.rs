@@ -5,9 +5,9 @@ use std::sync::mpsc;
 use std::time::Instant;
 
 use super::{
-    ActivePress, ButtonCommand, ButtonInput, ButtonRuntimeEvent, ButtonState, CancelReason,
-    EVENT_QUEUE_CAPACITY, EndReason, PressBehavior, PressToken, SHUTDOWN_POLL_PERIOD,
-    ShutdownRequest,
+    ActivePress, ButtonCommand, ButtonDrain, ButtonInput, ButtonRuntimeEvent, ButtonSource,
+    ButtonState, CancelReason, EVENT_QUEUE_CAPACITY, EndReason, PressBehavior, PressControl,
+    PressToken, SHUTDOWN_POLL_PERIOD, ShutdownRequest,
 };
 
 pub(super) fn run_worker(
@@ -84,7 +84,16 @@ fn process_command(
             generation: input_generation,
             input,
         } if input_generation == generation => process_input(state, input, emit),
-        ButtonCommand::Input { .. } | ButtonCommand::Wake => {}
+        ButtonCommand::Peripheral {
+            generation: input_generation,
+            input,
+            validity,
+            permit,
+        } if input_generation == generation && validity.alive() => {
+            drop(permit);
+            process_input(state, input, emit);
+        }
+        ButtonCommand::Input { .. } | ButtonCommand::Peripheral { .. } | ButtonCommand::Wake => {}
         ButtonCommand::CancelStalePress(token) => {
             if let Some(press) = state.cancel_press(&token) {
                 emit(ButtonRuntimeEvent::Ended {
@@ -102,6 +111,19 @@ fn process_command(
         }
         ButtonCommand::CancelHooks => {
             emit_canceled(state.cancel_hooks(), CancelReason::SourceEnded, emit);
+        }
+        ButtonCommand::Drain(scope, done) => {
+            if matches!(scope, ButtonDrain::HookButtons) {
+                emit_canceled(
+                    state.cancel_where(|key| {
+                        matches!(key.source, ButtonSource::OsHook(_))
+                            && matches!(key.control, PressControl::Button(_))
+                    }),
+                    CancelReason::SourceEnded,
+                    emit,
+                );
+            }
+            emit(ButtonRuntimeEvent::Drained(done));
         }
         ButtonCommand::CancelPointerExcept(current) => {
             emit_canceled(
@@ -226,7 +248,7 @@ fn emit_settled_events(
                 matches!(press.behavior, PressBehavior::LongPressFired)
                     && due_presses.contains(press.token())
             }
-            ButtonRuntimeEvent::Started(_) => false,
+            ButtonRuntimeEvent::Started(_) | ButtonRuntimeEvent::Drained(_) => false,
         });
     for event in deadline_events.into_iter().chain(ordered_events) {
         emit(event);
@@ -257,6 +279,17 @@ fn synchronize_generation(
         emit_canceled(state.cancel_all(), CancelReason::Invalidated, emit);
         *generation = current;
     }
+    let canceled = state
+        .active
+        .extract_if(|_, press| {
+            press
+                .validity
+                .as_ref()
+                .is_some_and(|validity| !validity.alive())
+        })
+        .map(|(_, press)| press)
+        .collect();
+    emit_canceled(canceled, CancelReason::SourceEnded, emit);
 }
 
 pub(super) fn process_input(

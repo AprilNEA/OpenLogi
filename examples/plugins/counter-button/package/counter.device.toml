@@ -1,0 +1,18 @@
+schema = 1
+id = "dev.example.counter-button.test-device"
+revision = "1.0.0"
+model = "example.counter-button"
+name = "Synthetic counter button"
+driver = { id = "dev.example.counter-button", parameters = 1 }
+platforms = ["macos", "linux", "windows"]
+identity = { strategy = "unverified", default_scope = "session" }
+
+[[matches]]
+role = "controls"
+transport = "usb-hid"
+vendor_id = 65535
+product_id = 1
+usage_page = 65280
+usage = 1
+
+[parameters]

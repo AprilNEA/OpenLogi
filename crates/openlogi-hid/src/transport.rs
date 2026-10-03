@@ -3,7 +3,7 @@
 //! `hidpp` derives short/long-report support by reading the HID report
 //! descriptor, but `async-hid 0.4` only exposes descriptors on Linux. We avoid
 //! that path by pre-filtering to the Logitech HID++ vendor collections at
-//! enumeration time (see [`HIDPP_LONG_COLLECTIONS`]) and reporting support
+//! enumeration time (see [`openlogi_device_registry::driver::HidppReports`]) and reporting support
 //! straight from [`hidpp::channel::RawHidChannel::supports_short_long_hidpp`]: USB / receiver
 //! collections carry both reports; BLE-direct collections are long-only, and the
 //! `hidpp` channel up-converts outgoing short messages to long for them.
@@ -29,7 +29,6 @@ use tracing::{debug, warn};
 use crate::LOGITECH_VENDOR_ID;
 use openlogi_device::backend::{BackendError, HotplugEvent, NodeId, NodeInfo};
 use openlogi_device::host_lock;
-use openlogi_device::write::matches_litra;
 use openlogi_device::{DeviceIoGate, DeviceIoSignal, device_io_channel};
 
 /// Collapses `async-hid`'s error taxonomy into the backend-agnostic
@@ -85,7 +84,7 @@ fn node_id(info: &DeviceInfo) -> NodeId {
 
 /// Restates an `async-hid` node as the backend-agnostic [`NodeInfo`] every
 /// layer above this module stores, filters and routes on.
-fn node_info(info: &DeviceInfo) -> NodeInfo {
+pub(crate) fn node_info(info: &DeviceInfo) -> NodeInfo {
     {
         NodeInfo {
             id: node_id(info),
@@ -166,51 +165,25 @@ mod windows;
 // channel in `windows` when async-hid's async write path fails.
 #[cfg(target_os = "windows")]
 mod windows_hid;
+
 #[cfg(target_os = "windows")]
 use windows::WindowsHidppChannel;
 #[cfg(test)]
 use windows::normalize_collection_path;
+#[cfg(target_os = "windows")]
+pub(crate) use windows_hid::report_capabilities;
 
 /// HID++ long-report vendor collections, as `(usage_page, usage_id, long_only)`.
 ///
 /// Logitech exposes its HID++ long-report (report id `0x11`) under a
-/// vendor-defined HID collection, but the page differs by transport:
-///
-/// - `0xFF00 / 0x0002` — USB, Logi Bolt / Unifying receivers, and
-///   Bluetooth-*classic* devices (MX Master over BT).
-/// - `0xFF43 / 0x0202` — Bluetooth-*Low-Energy* directly-paired devices
-///   (e.g. the Logitech Lift / Signature mice). Same HID++ protocol, just a
-///   different vendor page on the BLE HID report descriptor.
-/// - `0xFF43 / 0x0602` — wired G-series gaming keyboards (e.g. the G513): a
-///   distinct vendor collection on the same `0xFF43` page. Carries both report
-///   widths, so it is not long-only.
-///
-/// `long_only` marks a transport that exposes *only* the long report — no
-/// short-report (`0x10`) collection — so short HID++ requests must be
-/// up-converted to long (handled by the `hidpp` channel). BLE-direct devices on
-/// macOS are long-only; USB / receiver / wired-keyboard devices carry both.
-/// Keeping the flag in this table means a new long-only transport is a
-/// single-line addition here, with no second site to update.
-///
-/// Filtering on these pairs gives us one HID node per physical HID++ device on
-/// every supported OS, without reading report descriptors (`async-hid 0.4`
-/// only exposes those on Linux).
-const HIDPP_LONG_COLLECTIONS: [(u16, u16, bool); 3] = [
-    (0xff00, 0x0002, false),
-    (0xff43, 0x0202, true),
-    (0xff43, 0x0602, false),
-];
-
-/// Whether `(usage_page, usage_id)` is one of the HID++ long-report collections.
+/// vendor-defined HID collection. The shared registry owns those identities.
 fn is_hidpp_long_collection(usage_page: u16, usage_id: u16) -> bool {
-    HIDPP_LONG_COLLECTIONS
-        .iter()
-        .any(|&(page, usage, _)| (page, usage) == (usage_page, usage_id))
+    openlogi_device_registry::driver::HidppReports::for_collection(usage_page, usage_id).is_some()
 }
 
 /// Whether the matched HID++ collection exposes only the long report, so short
 /// requests must be re-framed as long (done in the `hidpp` channel). `false` for
-/// pages not in [`HIDPP_LONG_COLLECTIONS`].
+/// unrecognized collections.
 // Windows routes short vs long by report id over the composite channel
 // (WindowsHidppChannel), so the long-only up-conversion path — and thus this
 // helper — is only reached off Windows. Still compiled + unit-tested there.
@@ -225,9 +198,8 @@ fn is_hidpp_long_collection(usage_page: u16, usage_id: u16) -> bool {
     )
 )]
 fn is_long_only_collection(usage_page: u16, usage_id: u16) -> bool {
-    HIDPP_LONG_COLLECTIONS
-        .iter()
-        .any(|&(page, usage, long_only)| long_only && (page, usage) == (usage_page, usage_id))
+    openlogi_device_registry::driver::HidppReports::for_collection(usage_page, usage_id)
+        == Some(openlogi_device_registry::driver::HidppReports::LongOnly)
 }
 
 /// Process-wide HID backend, created once and reused for every enumeration.
@@ -324,10 +296,10 @@ fn is_hidpp_candidate(
     usage_id: u16,
     receiver_child: bool,
 ) -> bool {
-    vendor_id == LOGITECH_VENDOR_ID
-        && is_hidpp_long_collection(usage_page, usage_id)
-        && !matches_litra(vendor_id, product_id, usage_page, usage_id)
-        && !receiver_child
+    !receiver_child
+        && openlogi_device_registry::driver::BuiltinDriver::for_hid(
+            vendor_id, product_id, usage_page, usage_id,
+        ) == Some(openlogi_device_registry::driver::BuiltinDriver::Hidpp)
 }
 
 /// Returns `true` when a HID++ node is a virtual per-device interface created by

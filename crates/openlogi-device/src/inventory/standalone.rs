@@ -27,30 +27,38 @@ pub async fn enumerate_standalone(
                 device.usage_page,
                 device.usage_id,
             )?;
-            let identity = device.identity();
-            Some(StandaloneDevice {
-                address: RawDeviceAddress {
-                    vendor_id: device.vendor_id,
-                    product_id: device.product_id,
-                    usage_page: device.usage_page,
-                    usage_id: device.usage_id,
-                    identity,
-                },
-                display_name: device.name.clone(),
-                manufacturer: device.manufacturer.clone(),
-                serial_number: device.serial_number.clone(),
-                unit_id: [0; 4],
-                kind: DeviceKind::Light,
-                online: true,
-                capabilities: None,
-                light_capabilities: Some(litra_capabilities(descriptor.model)),
-                driver_id: descriptor.driver_id.to_owned(),
-                registry_model_id: Some(descriptor.registry_model_id.to_owned()),
-            })
+            Some(describe(&device, descriptor))
         })
         .collect();
     validate_no_ambiguous_nodes(&devices)?;
     Ok(devices)
+}
+
+/// Publish a catalog-selected Litra collection without probing hardware.
+#[must_use]
+pub fn describe(
+    device: &crate::backend::NodeInfo,
+    descriptor: &openlogi_device_registry::litra::LitraDescriptor,
+) -> StandaloneDevice {
+    StandaloneDevice {
+        address: RawDeviceAddress {
+            vendor_id: device.vendor_id,
+            product_id: device.product_id,
+            usage_page: device.usage_page,
+            usage_id: device.usage_id,
+            identity: device.identity(),
+        },
+        display_name: device.name.clone(),
+        manufacturer: device.manufacturer.clone(),
+        serial_number: device.serial_number.clone(),
+        unit_id: [0; 4],
+        kind: DeviceKind::Light,
+        online: true,
+        capabilities: None,
+        light_capabilities: Some(litra_capabilities(descriptor.model)),
+        driver_id: descriptor.driver_id.to_owned(),
+        registry_model_id: Some(descriptor.registry_model_id.to_owned()),
+    }
 }
 
 /// Reject multiple nodes that the route cannot distinguish safely.
@@ -60,7 +68,7 @@ pub async fn enumerate_standalone(
 /// transient re-find hint, so two such nodes with the same tuple are
 /// indistinguishable and must not be exposed as independently selectable
 /// devices.
-fn validate_no_ambiguous_nodes(devices: &[StandaloneDevice]) -> Result<(), InventoryError> {
+pub fn validate_no_ambiguous_nodes(devices: &[StandaloneDevice]) -> Result<(), InventoryError> {
     let mut groups: HashMap<(u16, u16, u16, u16), Vec<&StandaloneDevice>> = HashMap::new();
     for device in devices {
         let address = &device.address;

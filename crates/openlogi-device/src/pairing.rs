@@ -256,7 +256,7 @@ enum ReceiverTarget<'a> {
 }
 
 /// An open receiver channel and the register phase a session runs under.
-struct OpenReceiver {
+struct OpenReceiver<G> {
     channel: Arc<HidppChannel>,
     family: ReceiverFamily,
     /// Held for the whole session: every register write in the flow — the
@@ -266,19 +266,26 @@ struct OpenReceiver {
     /// every OpenLogi process defer to it meanwhile, replaying their last
     /// snapshot, and pick the new pairing up once it is released.
     _registers: ReceiverRegisterPhase,
+    _admission: G,
 }
 
 /// Opens the channel for the receiver named by `target` and takes its
 /// register phase.
-async fn open_receiver(
+async fn open_receiver<G>(
     backend: &dyn HidBackend,
     target: &ReceiverTarget<'_>,
-) -> Result<OpenReceiver, PairingError> {
+    admit: impl Fn(&NodeId) -> Option<G>,
+) -> Result<OpenReceiver<G>, PairingError> {
+    let mut reserved = false;
     for node in backend.enumerate_hidpp().await? {
-        let Some(channel) = backend.open_hidpp(&node).await? else {
+        let Some(family) = family_for(node.product_id) else {
             continue;
         };
-        let Some(family) = family_for(channel.product_id) else {
+        let Some(admission) = admit(&node.id) else {
+            reserved = true;
+            continue;
+        };
+        let Some(channel) = backend.open_hidpp(&node).await? else {
             continue;
         };
         let (want_family, want_uid) = match target {
@@ -310,9 +317,14 @@ async fn open_receiver(
             channel,
             family,
             _registers: registers,
+            _admission: admission,
         });
     }
-    Err(PairingError::ReceiverNotFound)
+    Err(if reserved {
+        PairingError::Hid("a receiver transport is assigned to another driver".into())
+    } else {
+        PairingError::ReceiverNotFound
+    })
 }
 
 /// Overall guard so a wedged receiver can't hang the session forever.
@@ -330,10 +342,22 @@ const DISCOVERY_TIMEOUT: u8 = 30;
 pub async fn run_pairing(
     backend: &dyn HidBackend,
     target: ReceiverSelector,
-    mut commands: mpsc::UnboundedReceiver<PairingCommand>,
+    commands: mpsc::UnboundedReceiver<PairingCommand>,
     events: mpsc::UnboundedSender<PairingEvent>,
 ) -> Result<(), PairingError> {
-    let receiver = match open_receiver(backend, &ReceiverTarget::Selector(&target)).await {
+    run_pairing_admitted(backend, target, commands, events, |_| Some(())).await
+}
+
+/// Run pairing with a node admission held through the final cleanup write.
+/// Reserved nodes are skipped before receiver UID probing; unrelated receivers remain available.
+pub async fn run_pairing_admitted<G>(
+    backend: &dyn HidBackend,
+    target: ReceiverSelector,
+    mut commands: mpsc::UnboundedReceiver<PairingCommand>,
+    events: mpsc::UnboundedSender<PairingEvent>,
+    admit: impl Fn(&NodeId) -> Option<G>,
+) -> Result<(), PairingError> {
+    let receiver = match open_receiver(backend, &ReceiverTarget::Selector(&target), admit).await {
         Ok(receiver) => receiver,
         Err(e) => {
             let _ = events.send(PairingEvent::Failed(e.clone()));
@@ -563,6 +587,15 @@ async fn cancel(channel: &HidppChannel, state: &SessionState) {
 /// only once it is paired again. A route that names no receiver slot has no
 /// receiver to find.
 pub async fn unpair(backend: &dyn HidBackend, route: &DeviceRoute) -> Result<(), PairingError> {
+    unpair_admitted(backend, route, |_| Some(())).await
+}
+
+/// Unpair through an admitted node, retaining admission until its channel closes.
+pub async fn unpair_admitted<G>(
+    backend: &dyn HidBackend,
+    route: &DeviceRoute,
+    admit: impl Fn(&NodeId) -> Option<G>,
+) -> Result<(), PairingError> {
     let (family, uid, slot) = match route {
         DeviceRoute::Bolt { receiver_uid, slot } => (ReceiverFamily::Bolt, receiver_uid, *slot),
         DeviceRoute::Unifying { receiver_uid, slot } => {
@@ -572,7 +605,7 @@ pub async fn unpair(backend: &dyn HidBackend, route: &DeviceRoute) -> Result<(),
             return Err(PairingError::ReceiverNotFound);
         }
     };
-    let receiver = open_receiver(backend, &ReceiverTarget::Route { family, uid }).await?;
+    let receiver = open_receiver(backend, &ReceiverTarget::Route { family, uid }, admit).await?;
     let channel = &receiver.channel;
     match receiver.family {
         ReceiverFamily::Bolt => {

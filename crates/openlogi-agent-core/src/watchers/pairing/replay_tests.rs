@@ -21,6 +21,121 @@ const CHANNEL: &str = "agent-bolt-pairing";
 const BOLT_PRODUCT_ID: u16 = 0xc548;
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one replay follows admission, cancellation, firmware restoration, and channel release"
+)]
+async fn driver_handoff_skips_a_reserved_receiver_and_waits_for_pairing_restoration() {
+    use crate::peripherals::ownership::Owner;
+    use openlogi_core::peripheral::{EndpointId, SessionId};
+    use std::collections::HashSet;
+    let node = NodeId::from("pairing-owner".to_owned());
+    let blocked = NodeId::from("plugin-owner".to_owned());
+    let mut topology = bolt_topology(node.clone());
+    let mut reserved = topology.nodes[0].clone();
+    reserved.info.id = blocked.clone();
+    topology.nodes.insert(0, reserved);
+    let backend =
+        Arc::new(ReplayBackend::new(topology, vec![bolt_pairing_cancel_cassette()]).unwrap());
+    let cleanup = backend
+        .hold_next_response(
+            CHANNEL,
+            RequestMatch::Exact,
+            &receiver_notification_flags_write([0, 0, 0]),
+        )
+        .unwrap();
+    let (_signal, gate) = device_io_channel();
+    let hardware = HardwareContext::injected(backend.clone(), gate);
+    let ownership = hardware.ownership();
+    let blocked_session = SessionId {
+        endpoint: EndpointId("blocked".into()),
+        generation: 1,
+    };
+    ownership
+        .reserve(
+            &blocked_session,
+            HashSet::from([blocked.clone()]),
+            Vec::new(),
+        )
+        .unwrap();
+    let reporters: Vec<_> = [
+        Owner::Gesture,
+        Owner::Keyboard,
+        Owner::HostSwitch,
+        Owner::Runtime,
+        Owner::Inventory,
+    ]
+    .into_iter()
+    .map(|owner| ownership.owner(owner))
+    .collect();
+    let (control, mut events) = spawn_with_hardware(hardware);
+    let pairing = PairingSessionId::new(11);
+    control
+        .send(PairingControl::Start {
+            session: pairing,
+            selector: ReceiverSelector::First,
+        })
+        .unwrap();
+    let started = tokio::time::timeout(Duration::from_secs(2), events.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(started.event, PairingEvent::Searching));
+    assert_eq!(
+        backend.open_count(&blocked).unwrap(),
+        0,
+        "pairing must not probe the plugin-owned receiver"
+    );
+    let replacement = SessionId {
+        endpoint: EndpointId("replacement".into()),
+        generation: 2,
+    };
+    ownership
+        .reserve(&replacement, HashSet::from([node]), Vec::new())
+        .unwrap();
+    for reporter in &reporters {
+        reporter.observe(&ownership.requests(), Vec::new(), HashSet::new());
+    }
+    assert!(
+        !ownership.ready(&replacement),
+        "an admitted pairing session still owns its receiver"
+    );
+    control
+        .send(PairingControl::Cancel { session: pairing })
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), cleanup.request_written())
+        .await
+        .unwrap();
+    assert!(
+        !ownership.ready(&replacement),
+        "the final firmware restore is still in flight"
+    );
+    assert!(
+        ownership.requests().excluded().is_empty(),
+        "restore must finish before channel retirement"
+    );
+    cleanup.release();
+    let completed = tokio::time::timeout(Duration::from_secs(2), events.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        completed.event,
+        PairingEvent::Failed(PairingError::Cancelled)
+    ));
+    assert!(
+        !ownership.ready(&replacement),
+        "inventory must acknowledge retirement separately"
+    );
+    for reporter in &reporters {
+        reporter.observe(&ownership.requests(), Vec::new(), HashSet::new());
+    }
+    assert!(ownership.ready(&replacement));
+    assert_eq!(backend.channel_lifetime_count(CHANNEL).unwrap(), 0);
+    backend.require_complete().unwrap();
+}
+
+#[tokio::test]
 async fn injected_pairing_waits_for_receiver_cleanup_before_terminal_failure() {
     let node_id = NodeId::from("agent-bolt-pairing-node".to_string());
     let backend = Arc::new(

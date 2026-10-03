@@ -163,33 +163,36 @@ impl InputServices {
     }
 }
 
-/// Graceful-shutdown handles for the three firmware-owning HID++ managers.
-pub(crate) struct HidppWatcherHandles {
+/// Graceful-shutdown handles for every device-owning manager.
+pub(crate) struct DeviceWatcherHandles {
     gesture: WatcherHandle,
     host_switch: WatcherHandle,
     keyboard: WatcherHandle,
+    peripherals: WatcherHandle,
 }
 
-impl HidppWatcherHandles {
+impl DeviceWatcherHandles {
     /// Stop all managers concurrently and confirm firmware teardown. The
     /// lifecycle retains this future and owns the terminal-exit deadline.
     pub(crate) async fn stop_and_wait(self) -> bool {
-        let (gesture, host_switch, keyboard) = tokio::join!(
+        let (gesture, host_switch, keyboard, peripherals) = tokio::join!(
             self.gesture.stop_and_wait("gesture"),
             self.host_switch.stop_and_wait("host-switch"),
             self.keyboard.stop_and_wait("keyboard"),
+            self.peripherals.stop_and_wait("peripherals"),
         );
-        [gesture, host_switch, keyboard]
+        [gesture, host_switch, keyboard, peripherals]
             .into_iter()
             .all(StopOutcome::is_stopped)
     }
 }
 
 /// Start the HID++ background sessions that do not need Accessibility.
-pub(crate) fn spawn_hidpp_watchers(
+pub(crate) fn spawn_device_watchers(
     shared: &SharedHandles,
     inputs: &InputServices,
-) -> HidppWatcherHandles {
+    observable: Arc<ObservableState>,
+) -> DeviceWatcherHandles {
     let gesture = watchers::gesture::spawn(
         &shared.capture_plans,
         shared.device_access(),
@@ -202,19 +205,23 @@ pub(crate) fn spawn_hidpp_watchers(
     let host_switch = watchers::host_switch::spawn(
         &shared.host_switch_links,
         shared.channel_pool.clone(),
-        shared.receiver_access.clone(),
-        shared.channel_registry.clone(),
-        shared.device_io.clone(),
+        shared.keyboard_access(),
     );
     let keyboard = watchers::keyboard::spawn(
         &shared.keyboard_spec,
         shared.keyboard_access(),
         inputs.dispatcher.clone(),
     );
-    HidppWatcherHandles {
+    DeviceWatcherHandles {
         gesture,
         host_switch,
         keyboard,
+        peripherals: shared.peripherals.spawn(
+            shared.hardware(),
+            shared.channel_registry.clone(),
+            observable,
+            inputs.dispatcher.clone(),
+        ),
     }
 }
 
@@ -275,9 +282,10 @@ pub(crate) fn spawn_state_watchers(
     /// notification for it. Every edit measured so far posts one, so this
     /// bounds a lost notification, not the status latency clients see.
     const GRANT_HEARTBEAT: Duration = Duration::from_secs(5);
-    let inventory = watchers::inventory::spawn_with_hardware(
+    let inventory = watchers::inventory::spawn_with_catalog(
         shared.hardware(),
         shared.channel_registry.clone(),
+        shared.peripherals.clone(),
     );
     shared.publish_inventory_refresh(inventory.refresh.clone());
     let mut pointer = watchers::pointer::spawn();

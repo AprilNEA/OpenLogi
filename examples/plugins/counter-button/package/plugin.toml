@@ -1,0 +1,23 @@
+schema = 1
+id = "dev.example.counter-button"
+version = "0.1.0"
+world = "openlogi:peripheral/driver@1.0.0"
+entry = "driver.wasm"
+descriptors = ["counter.device.toml"]
+platforms = ["macos", "linux", "windows"]
+parameter_schema = 1
+settings_schema = 1
+
+[[permissions]]
+service = "hid"
+endpoint = "controls"
+operations = ["input"]
+report_ids = [1]
+max_report_bytes = 3
+
+[settings.minimum_count]
+type = "integer"
+minimum = 1
+maximum = 10
+default = 1
+labels = { en = "Presses per trigger" }

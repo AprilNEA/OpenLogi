@@ -254,6 +254,21 @@ pub fn agent_socket_path() -> Result<PathBuf, PathsError> {
     agent_socket_path_for(Profile::current())
 }
 
+/// Loadable device descriptors, read on startup and explicit configuration reload.
+pub fn device_descriptors_dir() -> Result<PathBuf, PathsError> {
+    Ok(config_dir()?.join("devices.d"))
+}
+
+/// Content-addressed installed peripheral packages.
+pub fn plugin_packages_dir() -> Result<PathBuf, PathsError> {
+    Ok(data_dir()?.join("plugins"))
+}
+
+/// Agent-owned native effects and package grants, separate from desired configuration.
+pub fn peripheral_state_dir() -> Result<PathBuf, PathsError> {
+    Ok(state_dir()?.join("peripherals"))
+}
+
 /// [`agent_socket_path`] for a named profile: where tooling waits for a dev
 /// agent it just started, without being a dev-profile process itself.
 pub fn agent_socket_path_for(profile: Profile) -> Result<PathBuf, PathsError> {

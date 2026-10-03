@@ -45,6 +45,8 @@ const RAW_NODE_MISS_GRACE: u8 = 2;
 /// What the watcher tells the agent.
 #[derive(Debug)]
 pub enum InventoryEvent {
+    /// Driver ownership changed; withdraw incompatible runtime dispatch before acknowledgement.
+    DriverAssignments,
     /// A completed enumeration — empty means "checked, no devices".
     Snapshot {
         /// HID++ receiver/direct inventory.
@@ -65,6 +67,15 @@ pub enum InventoryEvent {
     /// set/route/online state looks unchanged across the gap, so the agent
     /// re-applies volatile settings on the next snapshot (#189).
     SystemWake,
+    /// General HID endpoint facts from the same event-first discovery lifecycle.
+    Peripherals(
+        Result<
+            Vec<openlogi_hid::peripheral::DiscoveredEndpoint>,
+            openlogi_core::peripheral::PeripheralError,
+        >,
+    ),
+    /// Native camera metadata from the same reconciliation schedule.
+    Cameras(Result<Vec<openlogi_core::camera::Camera>, openlogi_core::peripheral::PeripheralError>),
 }
 
 /// The watcher's cross-pass memory, factored out of the I/O loop so the
@@ -256,7 +267,7 @@ enum RefreshRequest {
 /// Spawn a watcher without publishing channels into a registry.
 #[must_use]
 pub fn spawn() -> InventoryWatcher {
-    spawn_inner(None, HardwareContext::production())
+    spawn_inner(None, HardwareContext::production(), None)
 }
 
 /// Spawn the persistent watcher from `hardware`, publish its already-open
@@ -267,17 +278,31 @@ pub fn spawn_with_hardware(
     hardware: HardwareContext,
     registry: ChannelRegistry,
 ) -> InventoryWatcher {
-    spawn_inner(Some(registry), hardware)
+    spawn_inner(Some(registry), hardware, None)
 }
 
-fn spawn_inner(registry: Option<ChannelRegistry>, hardware: HardwareContext) -> InventoryWatcher {
+/// Start the production inventory with catalog selection before every protocol probe.
+#[must_use]
+pub fn spawn_with_catalog(
+    hardware: HardwareContext,
+    registry: ChannelRegistry,
+    catalog: crate::peripherals::Handle,
+) -> InventoryWatcher {
+    spawn_inner(Some(registry), hardware, Some(catalog))
+}
+
+fn spawn_inner(
+    registry: Option<ChannelRegistry>,
+    hardware: HardwareContext,
+    catalog: Option<crate::peripherals::Handle>,
+) -> InventoryWatcher {
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let worker_tx = event_tx.clone();
     let (refresh_tx, refresh_rx) = mpsc::channel(1);
     let (rescan_tx, rescan_rx) = mpsc::channel(1);
     let started = openlogi_core::worker::spawn("openlogi-inventory-watcher", move |runtime| {
         runtime.block_on(run_watcher(
-            worker_tx, refresh_rx, rescan_rx, registry, hardware,
+            worker_tx, refresh_rx, rescan_rx, registry, hardware, catalog,
         ));
     });
     if let Err(error) = started {
@@ -303,6 +328,7 @@ async fn run_watcher(
     rescans: mpsc::Receiver<()>,
     registry: Option<ChannelRegistry>,
     hardware: HardwareContext,
+    catalog: Option<crate::peripherals::Handle>,
 ) {
     // The listener is attached to each inventory-owned channel before its
     // first probe, and its bounded queue is subscribed before every snapshot.
@@ -322,7 +348,11 @@ async fn run_watcher(
         }
     };
     let now = Instant::now();
+    let ownership = hardware.ownership();
     InventoryWorker {
+        catalog,
+        assignments: ownership.subscribe(),
+        reporter: ownership.owner(crate::peripherals::ownership::Owner::Inventory),
         events,
         refresh_requests,
         rescans,
@@ -342,6 +372,9 @@ async fn run_watcher(
 }
 
 struct InventoryWorker {
+    catalog: Option<crate::peripherals::Handle>,
+    assignments: tokio::sync::watch::Receiver<crate::peripherals::ownership::Requests>,
+    reporter: crate::peripherals::ownership::Reporter,
     events: mpsc::UnboundedSender<InventoryEvent>,
     refresh_requests: mpsc::Receiver<RefreshRequest>,
     rescans: mpsc::Receiver<()>,
@@ -412,9 +445,54 @@ impl InventoryWorker {
     }
 
     async fn reconcile(&mut self, trigger: ReconcileTrigger) -> bool {
+        let plan = if let Some(catalog) = &self.catalog {
+            let peripherals = self.hardware.enumerate_peripherals().await;
+            let cameras = self.hardware.enumerate_cameras().await;
+            Some(catalog.plan(peripherals, cameras).await)
+        } else {
+            None
+        };
+        let changed = self.assignments.has_changed().unwrap_or(false);
+        let assignments = self.assignments.borrow_and_update().clone();
+        if (changed || assignments.has_requests())
+            && self.events.send(InventoryEvent::DriverAssignments).is_err()
+        {
+            return false;
+        }
+        self.enumerator
+            .exclude_driver_nodes(assignments.excluded().clone());
+        let plan = match plan {
+            Some(Ok(plan)) => {
+                self.enumerator.select_driver_nodes(plan.hidpp);
+                Some(plan.standalone)
+            }
+            Some(Err(error)) => {
+                self.enumerator.select_driver_nodes(HashSet::new());
+                self.reporter
+                    .observe(&assignments, Vec::new(), self.enumerator.owned_nodes());
+                warn!(%error, "catalog admission failed before protocol probing");
+                self.schedule.scan_finished(trigger, true, Instant::now());
+                return self
+                    .events
+                    .send(InventoryEvent::Peripherals(Err(error)))
+                    .is_ok();
+            }
+            None => None,
+        };
         let (event, needs_repair) = match self.enumerator.enumerate().await {
             Ok(inventories) => {
-                let standalone = self.hardware.enumerate_standalone().await;
+                let standalone = match plan {
+                    Some(devices) => Ok(devices),
+                    None => self.hardware.enumerate_standalone().await,
+                }
+                .map(|devices| {
+                    devices
+                        .into_iter()
+                        .filter(|device| {
+                            assignments.allows(&openlogi_hid::DeviceRoute::from(&device.address))
+                        })
+                        .collect()
+                });
                 let standalone_failed = standalone.is_err();
                 let open_failures = self.enumerator.open_failures_last_tick();
                 let event = self
@@ -440,8 +518,25 @@ impl InventoryWorker {
             debug!("inventory watcher receiver dropped — exiting");
             return false;
         }
+        if self.catalog.is_none() {
+            let cameras = self.hardware.enumerate_cameras().await;
+            if self.events.send(InventoryEvent::Cameras(cameras)).is_err() {
+                return false;
+            }
+            let peripherals = self.hardware.enumerate_peripherals().await;
+            if self
+                .events
+                .send(InventoryEvent::Peripherals(peripherals))
+                .is_err()
+            {
+                return false;
+            }
+        }
+        let owned = self.enumerator.owned_nodes();
+        let handoff_pending = !owned.is_disjoint(assignments.excluded());
+        self.reporter.observe(&assignments, Vec::new(), owned);
         self.schedule
-            .scan_finished(trigger, needs_repair, Instant::now());
+            .scan_finished(trigger, needs_repair || handoff_pending, Instant::now());
         true
     }
 
@@ -451,6 +546,11 @@ impl InventoryWorker {
             let sleep = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline));
             tokio::pin!(sleep);
             tokio::select! {
+                changed = self.assignments.changed() => {
+                    if changed.is_ok() {
+                        break ReconcileTrigger::RepairRetry;
+                    }
+                }
                 hotplug_event = async {
                     match self.hotplug.as_mut() {
                         Some(stream) => stream.next().await,

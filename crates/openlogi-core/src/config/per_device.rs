@@ -195,6 +195,24 @@ impl Config {
             .and_then(|d| d.camera_controls.clone())
     }
 
+    /// Select legacy port settings only until the canonical camera key has settings.
+    /// The agent uses this decision before the GUI persists a key migration.
+    #[must_use]
+    pub fn legacy_camera_key(&self, canonical: &str, capture_id: &str) -> Option<String> {
+        let has_settings = |key: &str| {
+            self.devices.get(key).is_some_and(|device| {
+                device.camera_controls.is_some()
+                    || !device.camera_profiles.is_empty()
+                    || device.camera_profile.is_some()
+            })
+        };
+        if has_settings(canonical) {
+            return None;
+        }
+        let legacy = format!("camera-{capture_id}");
+        (legacy != canonical && has_settings(&legacy)).then_some(legacy)
+    }
+
     /// Replace the saved UVC image controls for `device_key`.
     pub fn set_camera_controls(&mut self, device_key: &str, controls: CameraControls) {
         self.devices

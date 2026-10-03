@@ -12,10 +12,9 @@
 //! Linux uses V4L2 for both, through the kernel's `uvcvideo` driver. Other
 //! platforms return an empty list.
 
-use serde::Serialize;
-
-mod controls;
-pub use controls::{AutoState, AutoToggle, CameraControl, CameraState, ControlError, ControlRange};
+pub use openlogi_core::camera::{
+    AutoState, AutoToggle, Camera, CameraControl, CameraState, ControlError, ControlRange,
+};
 
 mod capture_types;
 pub use capture_types::{CaptureError, Frame};
@@ -136,7 +135,9 @@ pub use capture::{
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 mod uvc {
     //! Stub UVC control backend for platforms without one.
-    use crate::controls::{AutoToggle, CameraControl, CameraState, ControlError, ControlRange};
+    use openlogi_core::camera::{
+        AutoToggle, CameraControl, CameraState, ControlError, ControlRange,
+    };
 
     /// Stub: no UVC backend on this platform.
     pub fn control_range(_id: &str, _c: CameraControl) -> Result<ControlRange, ControlError> {
@@ -197,57 +198,6 @@ pub enum CameraAuthorization {
     Undetermined,
 }
 
-/// A connected USB Video Class camera.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Camera {
-    /// Human-readable name, e.g. `"Logitech StreamCam"`.
-    pub name: String,
-    /// OS capture-layer identifier (AVFoundation `uniqueID`, DirectShow device
-    /// path). Used to open preview/controls; may embed a USB location and so
-    /// change when the camera is moved to another port.
-    pub unique_id: String,
-    /// USB `iSerialNumber` when the device reports one. Port-stable; preferred
-    /// for persisted config keys via [`Self::config_key`].
-    pub serial_number: Option<String>,
-    /// USB vendor id (`0x046d` for Logitech).
-    pub vendor_id: u16,
-    /// USB product id (e.g. `0x0893` for the StreamCam).
-    pub product_id: u16,
-    /// Largest supported frame size `(width, height)`, when the OS reports the
-    /// device's formats. Read from metadata only — no capture, no permission.
-    pub max_resolution: Option<(u32, u32)>,
-    /// Highest supported frame rate (fps) across all formats, when known.
-    pub max_fps: Option<u32>,
-}
-
-impl Camera {
-    /// Persistence key that is stable across USB ports.
-    ///
-    /// Prefers the USB serial when the device reports one. When it doesn't,
-    /// falls back to a model-scoped key (`camera:vid:pid`) so settings survive
-    /// a port change. Two serial-less units of the same model share this key
-    /// (no stronger USB identity); the GUI keeps them as separate live cards
-    /// via the OS capture id, not via this settings key.
-    #[must_use]
-    pub fn config_key(&self) -> String {
-        if let Some(serial) = self
-            .serial_number
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            format!(
-                "camera:{:04x}:{:04x}:serial:{}",
-                self.vendor_id,
-                self.product_id,
-                serial.to_ascii_lowercase()
-            )
-        } else {
-            format!("camera:{:04x}:{:04x}", self.vendor_id, self.product_id)
-        }
-    }
-}
-
 /// Whether this platform has a live-capture backend (preview + snapshot).
 /// Enumeration and UVC controls can be supported without it.
 #[must_use]
@@ -293,7 +243,7 @@ fn enumerate_all() -> Vec<Camera> {
     macos::enumerate()
         .iter()
         .filter_map(|raw| {
-            let mut camera = Camera::from_raw(&raw.name, &raw.unique_id, &raw.model_id)?;
+            let mut camera = camera_from_raw(&raw.name, &raw.unique_id, &raw.model_id)?;
             if raw.max_width > 0 && raw.max_height > 0 {
                 camera.max_resolution = Some((raw.max_width, raw.max_height));
             }
@@ -324,28 +274,25 @@ fn enumerate_all() -> Vec<Camera> {
 }
 
 #[cfg(any(test, target_os = "macos"))]
-impl Camera {
-    /// Build a [`Camera`] from an OS-reported `(name, unique_id, model_id)`.
-    ///
-    /// Returns `None` when `model_id` carries no USB vendor/product id — i.e.
-    /// it isn't a real USB camera (the macOS FaceTime camera's modelID is just
-    /// `"FaceTime HD Camera"`), so it can't be attributed to a vendor and is
-    /// dropped before the Logitech filter even runs. Format fields start `None`;
-    /// the platform backend fills them in.
-    fn from_raw(name: &str, unique_id: &str, model_id: &str) -> Option<Self> {
-        let (vendor_id, product_id) = parse_vid_pid(model_id)?;
-        Some(Self {
-            name: name.to_string(),
-            unique_id: unique_id.to_string(),
-            serial_number: None,
-            vendor_id,
-            product_id,
-            max_resolution: None,
-            max_fps: None,
-        })
-    }
+/// Build a [`Camera`] from an OS-reported `(name, unique_id, model_id)`.
+///
+/// Returns `None` when `model_id` carries no USB vendor/product id — i.e.
+/// it isn't a real USB camera (the macOS FaceTime camera's modelID is just
+/// `"FaceTime HD Camera"`), so it can't be attributed to a vendor and is
+/// dropped before the Logitech filter even runs. Format fields start `None`;
+/// the platform backend fills them in.
+fn camera_from_raw(name: &str, unique_id: &str, model_id: &str) -> Option<Camera> {
+    let (vendor_id, product_id) = parse_vid_pid(model_id)?;
+    Some(Camera {
+        name: name.to_string(),
+        unique_id: unique_id.to_string(),
+        serial_number: None,
+        vendor_id,
+        product_id,
+        max_resolution: None,
+        max_fps: None,
+    })
 }
-
 /// Pull the USB vendor/product id out of an `AVCaptureDevice` modelID such as
 /// `"UVC Camera VendorID_1133 ProductID_2195"`. Both ids are **decimal** in
 /// that string (1133 == 0x046d, 2195 == 0x0893). `None` if either marker is
@@ -386,7 +333,7 @@ mod tests {
     #[test]
     fn from_raw_keeps_usb_cameras_and_drops_the_rest() {
         assert_eq!(
-            Camera::from_raw(
+            camera_from_raw(
                 "Logitech StreamCam",
                 "0x1123000046d0893",
                 "UVC Camera VendorID_1133 ProductID_2195",
@@ -402,7 +349,7 @@ mod tests {
             })
         );
         assert_eq!(
-            Camera::from_raw("FaceTime HD Camera", "uuid", "FaceTime HD Camera"),
+            camera_from_raw("FaceTime HD Camera", "uuid", "FaceTime HD Camera"),
             None
         );
     }
