@@ -80,6 +80,8 @@ openlogi-device = { path = "../openlogi-device" }
 openlogi-fixture = { workspace = true }
 tempfile = "3.27.0"
 tokio = { workspace = true, features = ["test-util"] }
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+rusqlite.workspace = true
 
 [package.metadata.bundle]
 name = "OpenLogi"

@@ -131,6 +131,28 @@ fn recovery_rejects_oversized_sources_and_targets_before_reading_them() {
 }
 
 #[test]
+fn target_changed_during_final_source_check_is_not_overwritten() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("config.toml");
+    let source = dir.path().join("source.toml");
+    fs::write(&target, config_text(800)).unwrap();
+    fs::write(&source, config_text(1600)).unwrap();
+    let plan = RecoveryPlan::prepare(&target, &source).unwrap();
+    let mut checks = 0;
+    let error = plan
+        .apply_with_source_check(|plan| {
+            checks += 1;
+            if checks == 2 {
+                fs::write(&target, config_text(2400)).unwrap();
+            }
+            plan.source_unchanged()
+        })
+        .unwrap_err();
+    assert!(matches!(error, ConfigError::Conflict { .. }));
+    assert_eq!(fs::read_to_string(&target).unwrap(), config_text(2400));
+}
+
+#[test]
 fn preview_compares_default_preferences_as_effective_values() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("config.toml");
@@ -495,24 +517,41 @@ fn recovery_keeps_the_writer_lock_through_both_revision_checks() {
     );
 }
 
+#[cfg(target_os = "macos")]
 #[test]
-fn target_changed_during_final_source_check_is_not_overwritten() {
+fn import_discovery_rejects_nonregular_and_oversized_targets() {
+    use std::{sync::mpsc, thread, time::Duration};
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("config.toml");
-    let source = dir.path().join("source.toml");
+    crate::file_input::tests::create_fifo(&target);
+    let read_target = target.clone();
+    let (tx, rx) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        tx.send(RecoveryPlan::read_import_target(&read_target))
+            .unwrap();
+    });
+    let result = rx.recv_timeout(Duration::from_secs(1));
+    if result.is_err() {
+        drop(
+            fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&target)
+                .unwrap(),
+        );
+    }
+    reader.join().unwrap();
+    assert!(matches!(
+        result.expect("target discovery blocked on FIFO"),
+        Err(ConfigError::Read { .. })
+    ));
+    fs::remove_file(&target).unwrap();
+    let file = fs::File::create(&target).unwrap();
+    file.set_len((MAX_RECOVERY_BYTES + 1) as u64).unwrap();
+    assert!(matches!(
+        RecoveryPlan::read_import_target(&target),
+        Err(ConfigError::Read { .. })
+    ));
     fs::write(&target, config_text(800)).unwrap();
-    fs::write(&source, config_text(1600)).unwrap();
-    let plan = RecoveryPlan::prepare(&target, &source).unwrap();
-    let mut checks = 0;
-    let error = plan
-        .apply_with_source_check(|plan| {
-            checks += 1;
-            if checks == 2 {
-                fs::write(&target, config_text(2400)).unwrap();
-            }
-            plan.source_unchanged()
-        })
-        .unwrap_err();
-    assert!(matches!(error, ConfigError::Conflict { .. }));
-    assert_eq!(fs::read_to_string(&target).unwrap(), config_text(2400));
+    RecoveryPlan::read_import_target(&target).unwrap();
 }

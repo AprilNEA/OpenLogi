@@ -1,0 +1,14 @@
+# Owner: app::bundle_identifier resolves bundle metadata for core consumers.
+id: core-app-bundle-identity-owner
+language: rust
+severity: error
+message: Use openlogi_core::app::bundle_identifier; bundle identity parsing belongs to core app.rs.
+files:
+  - crates/openlogi-core/src/**/*.rs
+ignores:
+  - crates/openlogi-core/src/app.rs
+  - crates/openlogi-core/src/optionsplus/tests.rs
+rule:
+  all:
+    - kind: string_literal
+    - regex: '^"CFBundleIdentifier"$'

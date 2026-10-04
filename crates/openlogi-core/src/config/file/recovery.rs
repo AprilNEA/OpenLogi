@@ -14,6 +14,19 @@ use super::{
 };
 use crate::config::{Config, SCHEMA_VERSION};
 use crate::file_input::FileInput;
+use crate::optionsplus::ImportNotice;
+#[cfg(target_os = "macos")]
+use crate::optionsplus::{OptionsSettings, read_database};
+
+#[derive(Debug)]
+enum CandidateSource {
+    Toml(String),
+    #[cfg(target_os = "macos")]
+    OptionsPlus {
+        bytes: Vec<u8>,
+        applications: std::collections::BTreeMap<PathBuf, Option<String>>,
+    },
+}
 
 /// A changed setting in a recovery preview, after schema migration.
 #[derive(Debug)]
@@ -36,11 +49,13 @@ pub struct RecoveryPlan {
     target: PathBuf,
     source: PathBuf,
     original: Option<Vec<u8>>,
-    candidate: String,
+    candidate: CandidateSource,
     body: String,
     changes: Vec<ConfigChange>,
     device_names: std::collections::BTreeMap<String, String>,
     current_error: Option<String>,
+    notices: Vec<ImportNotice>,
+    import_devices: Option<(String, String)>,
 }
 
 impl RecoveryPlan {
@@ -73,12 +88,94 @@ impl RecoveryPlan {
             target: target.to_path_buf(),
             source: source.to_path_buf(),
             original,
-            candidate,
+            candidate: CandidateSource::Toml(candidate),
             body,
             changes,
             device_names: device_names(current.as_ref(), &config),
             current_error,
+            notices: Vec::new(),
+            import_devices: None,
         })
+    }
+
+    /// Read the existing import target under the recovery file policy, including
+    /// regular-file, symlink and size checks. A missing target is never defaulted.
+    #[cfg(target_os = "macos")]
+    pub fn read_import_target(target: &Path) -> Result<Config, ConfigError> {
+        read_import_target(target).map(|(_, config)| config)
+    }
+
+    /// Preview supported macOS Options+ assignments for an explicit device pair.
+    /// Requires a valid existing target; malformed files must be recovered first.
+    #[cfg(target_os = "macos")]
+    pub fn prepare_options(
+        target: &Path,
+        source: &Path,
+        source_device: &str,
+        target_device: &str,
+    ) -> Result<Self, ConfigError> {
+        let bytes = read_database(source)?;
+        let options = OptionsSettings::parse(&bytes)?;
+        let (original, current) = read_import_target(target)?;
+        let text = std::str::from_utf8(&original).map_err(|error| {
+            read_error(target, io::Error::new(io::ErrorKind::InvalidData, error))
+        })?;
+        let applications = std::cell::RefCell::new(std::collections::BTreeMap::new());
+        let merged = options.merge(&current, source_device, target_device, |path| {
+            let path = Path::new(path);
+            let identity = crate::app::bundle_identifier(path);
+            applications
+                .borrow_mut()
+                .insert(path.to_path_buf(), identity.clone());
+            identity
+        })?;
+        let mut changes = Vec::new();
+        collect_changes(
+            &[],
+            Some(&comparable_values(&current)?),
+            Some(&comparable_values(merged.config())?),
+            &mut changes,
+        );
+        let body = render_config(merged.config(), Some(text), target)?;
+        Ok(Self {
+            target: target.to_path_buf(),
+            source: source.to_path_buf(),
+            original: Some(original),
+            candidate: CandidateSource::OptionsPlus {
+                bytes,
+                applications: applications.into_inner(),
+            },
+            body,
+            changes,
+            device_names: device_names(Some(&current), merged.config()),
+            current_error: None,
+            notices: merged.notices().to_vec(),
+            import_devices: Some((source_device.to_owned(), target_device.to_owned())),
+        })
+    }
+
+    /// Whether this plan imports supported assignments rather than a full backup.
+    #[must_use]
+    pub fn is_options_import(&self) -> bool {
+        match self.candidate {
+            CandidateSource::Toml(_) => false,
+            #[cfg(target_os = "macos")]
+            CandidateSource::OptionsPlus { .. } => true,
+        }
+    }
+
+    /// Explicit source and destination identities retained through confirmation.
+    #[must_use]
+    pub fn import_devices(&self) -> Option<(&str, &str)> {
+        self.import_devices
+            .as_ref()
+            .map(|(source, target)| (source.as_str(), target.as_str()))
+    }
+
+    /// Unsupported assignments and behavior differences, never silently discarded.
+    #[must_use]
+    pub fn notices(&self) -> &[ImportNotice] {
+        &self.notices
     }
 
     /// Settings that will differ from the current, migrated configuration.
@@ -152,7 +249,21 @@ impl RecoveryPlan {
     }
 
     fn source_unchanged(&self) -> Result<bool, ConfigError> {
-        Ok(read_candidate(&self.source)? == self.candidate)
+        match &self.candidate {
+            CandidateSource::Toml(candidate) => Ok(read_candidate(&self.source)? == *candidate),
+            #[cfg(target_os = "macos")]
+            CandidateSource::OptionsPlus {
+                bytes,
+                applications,
+            } => {
+                if read_database(&self.source)? != *bytes {
+                    return Ok(false);
+                }
+                Ok(applications
+                    .iter()
+                    .all(|(path, expected)| crate::app::bundle_identifier(path) == *expected))
+            }
+        }
     }
 }
 
@@ -295,6 +406,16 @@ fn read_recovery_file(path: &Path, role: FileInput) -> io::Result<Vec<u8>> {
         return Err(too_large());
     }
     Ok(bytes)
+}
+
+#[cfg(target_os = "macos")]
+fn read_import_target(target: &Path) -> Result<(Vec<u8>, Config), ConfigError> {
+    let original = read_recovery_file(target, FileInput::ReplacementTarget)
+        .map_err(|error| read_error(target, error))?;
+    let text = std::str::from_utf8(&original)
+        .map_err(|error| read_error(target, io::Error::new(io::ErrorKind::InvalidData, error)))?;
+    let (config, _) = parse_config(target, text)?;
+    Ok((original, config))
 }
 
 fn read_error(path: &Path, source: io::Error) -> ConfigError {

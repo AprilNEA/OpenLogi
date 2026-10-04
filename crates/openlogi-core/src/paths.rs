@@ -149,18 +149,9 @@ fn current_bundle_identifier() -> Option<String> {
             continue;
         }
 
-        let info = ancestor.join("Contents/Info.plist");
-        let Ok(plist) = plist::Value::from_file(info) else {
-            continue;
-        };
-        let Some(identifier) = plist
-            .as_dictionary()
-            .and_then(|dictionary| dictionary.get("CFBundleIdentifier"))
-            .and_then(plist::Value::as_string)
-        else {
-            continue;
-        };
-        return Some(identifier.to_owned());
+        if let Some(identifier) = crate::app::bundle_identifier(ancestor) {
+            return Some(identifier);
+        }
     }
 
     None

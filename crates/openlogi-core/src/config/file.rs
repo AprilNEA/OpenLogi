@@ -26,6 +26,9 @@ static BACKED_UP_CONFIGS: LazyLock<Mutex<HashSet<PathBuf>>> =
 /// Failure loading or persisting `config.toml`.
 #[derive(Debug, Error)]
 pub enum ConfigError {
+    /// Options+ settings could not be read or converted safely.
+    #[error(transparent)]
+    Import(#[from] crate::optionsplus::ImportError),
     /// The platform config directory could not be resolved.
     #[error("could not resolve config path: {0}")]
     Path(#[from] PathsError),
