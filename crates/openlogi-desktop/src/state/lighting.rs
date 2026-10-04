@@ -41,6 +41,9 @@ impl AppState {
     /// Persist a new lighting config for the active device and push it to the
     /// hardware (best-effort). No-op when no device is selected.
     pub fn commit_lighting(&mut self, lighting: Lighting) -> StateEvents {
+        if self.config.recovery_freezes_writes() {
+            return StateEvents::none();
+        }
         let events = self.for_current_device(StateEvent::LightingChanged);
         let Some(record) = self.current_record() else {
             debug!("no active device — lighting change ignored");

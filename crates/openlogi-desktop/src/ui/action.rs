@@ -13,9 +13,9 @@ pub(crate) fn localized_action_label(action: &Action) -> SharedString {
         Action::SetDpiPreset(index) => {
             tr!("pointer.dpi_preset", index => (index + 1).to_string())
         }
-        Action::CustomShortcut(combo) => combo.rendered_label().into(),
+        Action::CustomShortcut(combo) => shortcut_label(combo).into(),
         Action::HoldShortcut(combo) => {
-            tr!("actions.hold_shortcut", chord => combo.rendered_label())
+            tr!("actions.hold_shortcut", chord => shortcut_label(combo))
         }
         Action::TypeText(text) => tr!("actions.type_text_action", text => text.clone()),
         Action::RunAppleScript(_) => tr!("actions.run_applescript_heading"),
@@ -33,4 +33,22 @@ pub(crate) fn localized_action_label(action: &Action) -> SharedString {
             .translation_key()
             .expect("every payload-free action has a translation key")),
     }
+}
+
+/// Platform spelling only; persisted modifier semantics remain unchanged.
+fn shortcut_label(combo: &openlogi_core::binding::KeyCombo) -> String {
+    let label = combo.rendered_label();
+    let mut parts = Vec::new();
+    for part in label.split('+') {
+        let part = match part {
+            "Super" if cfg!(target_os = "macos") => "Cmd",
+            "Alt" if cfg!(target_os = "macos") => "Option",
+            "Cmd" if !cfg!(target_os = "macos") => "Ctrl",
+            _ => part,
+        };
+        if !parts.contains(&part) {
+            parts.push(part);
+        }
+    }
+    parts.join("+")
 }

@@ -40,6 +40,12 @@ fn window_options(cx: &mut App) -> WindowOptions {
 
 /// Open the main window — or focus the one already open.
 pub fn open(cx: &mut App) {
+    // macOS can deliver a reopen event before asynchronous startup installs
+    // AppState. The runtime opens this window once initialization completes.
+    if crate::state::AppState::try_global(cx).is_none() {
+        return;
+    }
+
     let existing = cx.default_global::<WindowRegistry>().main;
     if let Some(handle) = existing
         && handle
@@ -81,5 +87,36 @@ pub fn open(cx: &mut App) {
 pub fn ensure(cx: &mut App) {
     if cx.windows().is_empty() {
         open(cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[gpui::test]
+    fn reopen_waits_for_application_state(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            open(cx);
+            assert!(cx.windows().is_empty());
+            gpui_component::init(cx);
+            theme::register_builtin_themes(cx);
+            open(cx);
+            assert!(cx.windows().is_empty());
+
+            let (commands, _) = tokio::sync::mpsc::unbounded_channel();
+            let state = cx.new(|_| {
+                let resolver = crate::services::assets::AssetResolver::new();
+                crate::state::AppState::new(crate::state::Sources::in_memory(
+                    openlogi_core::config::Config::default(),
+                    &resolver,
+                    commands,
+                ))
+            });
+            crate::state::AppState::set_global(state, cx);
+            open(cx);
+            open(cx);
+            assert_eq!(cx.windows().len(), 1);
+        });
     }
 }

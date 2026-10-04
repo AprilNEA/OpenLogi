@@ -216,3 +216,44 @@ fn historical_transient_lighting_is_not_exposed_without_a_live_record() {
     assert!(state.devices().is_empty());
     assert!(state.lighting_for(transient_key, transient_key).is_none());
 }
+
+#[test]
+fn recovery_freezes_transient_dpi_before_memory_or_ipc_changes() {
+    let directory = tempfile::tempdir().unwrap();
+    for persistence in [
+        ConfigPersistence::Restored,
+        ConfigPersistence::Recovering(directory.path().join(openlogi_core::paths::CONFIG_FILE)),
+        ConfigPersistence::RecoveryPaused(directory.path().join(openlogi_core::paths::CONFIG_FILE)),
+    ] {
+        let resolver = AssetResolver::new();
+        let (commands, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = AppState::new(Sources {
+            inventories: &[direct_inventory([0; 4])],
+            persistence,
+            ..Sources::in_memory(Config::ephemeral(), &resolver, commands)
+        });
+        assert!(
+            state
+                .current_record()
+                .unwrap()
+                .persistent_config_key()
+                .is_none()
+        );
+        let previous = state.dpi();
+        let _ = state.commit_dpi(Dpi::new(2400));
+        let _ = state.commit_lighting(Lighting::default());
+        let _ = state.commit_fn_lock(true);
+        let _ = state.commit_smartshift(SmartShiftStatus {
+            mode: SmartShiftMode::Ratchet,
+            auto_disengage: SmartShiftAutoDisengage::Threshold(SmartShiftThreshold::from_rounded(
+                12.0,
+            )),
+            tunable_torque: None,
+        });
+        assert_eq!(state.dpi(), previous);
+        assert!(
+            received.try_recv().is_err(),
+            "recovery must block even non-persistent DPI writes"
+        );
+    }
+}

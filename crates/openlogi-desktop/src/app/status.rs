@@ -108,6 +108,16 @@ pub(super) fn config_issue_body(message: SharedString, cx: &App) -> Div {
             h_flex()
                 .gap_2()
                 .child(
+                    Button::new("recover-config")
+                        .label(tr!("recovery.title"))
+                        .on_click(|_, _, cx| {
+                            crate::windows::settings::open_at(
+                                crate::windows::settings::SettingsPage::Recovery,
+                                cx,
+                            );
+                        }),
+                )
+                .child(
                     Button::new("open-config-folder")
                         .label(tr!("app.open_configuration_folder"))
                         .on_click(|_, _, cx| cx.dispatch_action(&OpenConfigFolder)),
