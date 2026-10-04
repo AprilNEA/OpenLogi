@@ -1,0 +1,13 @@
+# Owner: file_input opens regular source and replacement-target files safely.
+id: core-regular-file-input-owner
+language: rust
+severity: error
+message: Use FileInput::open; non-blocking regular-file validation belongs to file_input.
+files:
+  - crates/openlogi-core/src/**/*.rs
+ignores:
+  - crates/openlogi-core/src/file_input.rs
+  - crates/openlogi-core/src/**/tests.rs
+  - crates/openlogi-core/src/**/tests/**/*.rs
+rule:
+  pattern: libc::O_NONBLOCK

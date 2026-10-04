@@ -1,0 +1,11 @@
+# Owner: RecoveryPlan reads candidate and target files through bounded, typed handles.
+id: core-config-recovery-read-owner
+language: rust
+severity: error
+message: Use read_candidate or read_recovery_file; recovery reads must reject special files and enforce the byte limit.
+files:
+  - crates/openlogi-core/src/config/file/recovery.rs
+rule:
+  any:
+    - pattern: fs::read($PATH)
+    - pattern: fs::read_to_string($PATH)

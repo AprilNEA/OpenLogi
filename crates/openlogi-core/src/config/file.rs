@@ -16,6 +16,9 @@ use toml_edit::{DocumentMut, Item, Table};
 use super::{Config, SCHEMA_VERSION};
 use crate::paths::{self, PathsError};
 
+mod recovery;
+pub use recovery::{ConfigChange, RecoveryPlan, recovery_backups};
+
 const CONFIG_BACKUP_GENERATIONS: usize = 5;
 static BACKED_UP_CONFIGS: LazyLock<Mutex<HashSet<PathBuf>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
@@ -91,6 +94,36 @@ pub enum ConfigError {
     },
 }
 
+// Both routine saves and recovery hold the same sidecar through validation,
+// backups and atomic replacement. Dropping the handle releases the lock.
+fn lock_config_writer(path: &Path) -> Result<fs::File, ConfigError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|source| ConfigError::Write {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    }
+    // Lock a stable inode, not the config that atomic replacement swaps out.
+    // Keep the sidecar on disk: unlinking it would let writers lock different
+    // inodes. The handle holds the lock through the check, backups and commit.
+    let lock_path = path.with_added_extension("lock");
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|source| ConfigError::Write {
+            path: lock_path.clone(),
+            source,
+        })?;
+    lock.try_lock().map_err(|source| ConfigError::Write {
+        path: lock_path,
+        source: source.into(),
+    })?;
+    Ok(lock)
+}
+
 /// A loaded config file plus the exact source revision it came from.
 ///
 /// Saving compares that source with the current file before writing and locks
@@ -114,6 +147,12 @@ struct ConfigHeader {
 }
 
 impl ConfigFile {
+    /// The file tracked by this persistence owner.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     /// Load the default user config, returning a writable default when the
     /// file does not exist yet.
     pub fn load_or_default() -> Result<(Config, Self), ConfigError> {
@@ -155,30 +194,7 @@ impl ConfigFile {
     /// Returns a [`ConfigError::Write`] with [`io::ErrorKind::WouldBlock`] if
     /// another writer holds the lock, rather than blocking the caller.
     pub fn save(&mut self, config: &Config) -> Result<(), ConfigError> {
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent).map_err(|source| ConfigError::Write {
-                path: self.path.clone(),
-                source,
-            })?;
-        }
-        // Lock a stable inode, not the config that atomic replacement swaps out.
-        // Keep the sidecar on disk: unlinking it would let writers lock different
-        // inodes. The handle holds the lock through the check, backups and commit.
-        let lock_path = self.path.with_added_extension("lock");
-        let lock = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&lock_path)
-            .map_err(|source| ConfigError::Write {
-                path: lock_path.clone(),
-                source,
-            })?;
-        lock.try_lock().map_err(|source| ConfigError::Write {
-            path: lock_path,
-            source: source.into(),
-        })?;
+        let _writer = lock_config_writer(&self.path)?;
         let current = match fs::read_to_string(&self.path) {
             Ok(source) => Some(source),
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,

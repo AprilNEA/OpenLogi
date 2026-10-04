@@ -32,7 +32,7 @@ mod tests;
 
 pub use device::{DeviceConfig, DeviceIdentity, LinkConfig, LinkOverrides};
 #[cfg(feature = "fs")]
-pub use file::{ConfigError, ConfigFile};
+pub use file::{ConfigChange, ConfigError, ConfigFile, RecoveryPlan, recovery_backups};
 #[cfg(all(test, feature = "fs"))]
 use file::{backup_existing_config, config_backup_path};
 pub use function_key::FunctionKey;

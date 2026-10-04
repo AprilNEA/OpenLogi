@@ -25,6 +25,8 @@ pub mod device;
 pub mod device_order;
 pub mod diagnostics;
 pub mod env;
+#[cfg(feature = "fs")]
+mod file_input;
 pub mod hid;
 #[cfg(feature = "locale")]
 pub mod locale;
