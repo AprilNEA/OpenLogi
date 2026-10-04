@@ -9,8 +9,6 @@ use super::app_services_symbol;
 const SCREENSHOT_TO_FILE: u32 = 28;
 /// "Copy picture of selected area to the clipboard", ⌃⌘⇧4 by default.
 const SELECTED_AREA_TO_CLIPBOARD: u32 = 31;
-const SPACE_LEFT: u32 = 79;
-const SPACE_RIGHT: u32 = 81;
 
 /// Save a picture of the screen to the screenshot folder.
 pub(super) fn screenshot() {
@@ -20,16 +18,6 @@ pub(super) fn screenshot() {
 /// Copy a picture of an area the user selects to the clipboard.
 pub(super) fn capture_region() {
     post_symbolic_hotkey(SELECTED_AREA_TO_CLIPBOARD);
-}
-
-/// Switch to the previous desktop / Space.
-pub(super) fn previous_desktop() {
-    post_symbolic_hotkey(SPACE_LEFT);
-}
-
-/// Switch to the next desktop / Space.
-pub(super) fn next_desktop() {
-    post_symbolic_hotkey(SPACE_RIGHT);
 }
 
 fn post_symbolic_hotkey(hotkey: u32) {
@@ -175,13 +163,16 @@ mod tests {
         RESTORED_HOTKEY.store(0, Ordering::Relaxed);
         let result = catch_unwind(AssertUnwindSafe(|| {
             let _restore = HotkeyRestore {
-                hotkey: super::SPACE_LEFT,
+                hotkey: super::SCREENSHOT_TO_FILE,
                 set_enabled: record_restore,
             };
             panic!("exercise unwind cleanup");
         }));
 
         assert!(result.is_err());
-        assert_eq!(RESTORED_HOTKEY.load(Ordering::Relaxed), super::SPACE_LEFT);
+        assert_eq!(
+            RESTORED_HOTKEY.load(Ordering::Relaxed),
+            super::SCREENSHOT_TO_FILE
+        );
     }
 }

@@ -137,9 +137,10 @@ impl ActionExecutor {
                 return;
             }
             // Browser navigation uses Safari's captured Accessibility target
-            // or the platform shortcut, not a native mouse click. Preserve the
-            // press-time target through queued dispatch and debounce duplicate
-            // capture paths before either output.
+            // or, elsewhere, the platform shortcut (on macOS pressed as the
+            // frontmost app's menu item), not a native mouse click. Preserve
+            // the press-time target through queued dispatch and debounce
+            // duplicate capture paths before either output.
             Action::BrowserBack | Action::BrowserForward => {
                 if let Some(reservation) = browser_nav_debounce_begin(action) {
                     if dispatch_browser_navigation(

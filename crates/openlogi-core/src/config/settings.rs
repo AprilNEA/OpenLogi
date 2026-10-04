@@ -699,15 +699,13 @@ where
     D: serde::Deserializer<'de>,
 {
     let value = SmartShiftAutoDisengage::deserialize(deserializer)?;
-    match value {
-        SmartShiftAutoDisengage::Threshold(threshold)
-            if threshold < SMARTSHIFT_MIN_AUTO_DISENGAGE =>
-        {
-            Err(serde::de::Error::custom(format_args!(
-                "SmartShift auto_disengage must be between {SMARTSHIFT_MIN_AUTO_DISENGAGE} and 255, got {threshold}"
-            )))
-        }
-        _ => Ok(value),
+    if SmartShift::accepts_auto_disengage(value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format_args!(
+            "SmartShift auto_disengage must be between {SMARTSHIFT_MIN_AUTO_DISENGAGE} and 255, got {}",
+            u8::from(value)
+        )))
     }
 }
 
@@ -733,6 +731,15 @@ pub struct SmartShift {
     /// expose tunable torque. HID++ defines the full non-zero byte range.
     #[serde(with = "crate::hid::smartshift::optional_tunable_torque")]
     pub tunable_torque: Option<TunableTorque>,
+}
+
+impl SmartShift {
+    /// Whether a firmware auto-disengage value is safe to persist and reapply.
+    /// The config parser and interactive writers share this policy.
+    #[must_use]
+    pub fn accepts_auto_disengage(value: SmartShiftAutoDisengage) -> bool {
+        !matches!(value, SmartShiftAutoDisengage::Threshold(threshold) if threshold < SMARTSHIFT_MIN_AUTO_DISENGAGE)
+    }
 }
 
 /// The v3-and-older owner-lock choice: which control owned a device's single
