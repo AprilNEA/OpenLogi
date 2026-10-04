@@ -20,6 +20,9 @@ use crate::ui::{
     theme::{self, Typography as _},
 };
 
+#[cfg(target_os = "macos")]
+mod options;
+
 const PREVIEW_PAGE_SIZE: usize = 8;
 
 mod accessibility;
@@ -32,10 +35,14 @@ enum RecoveryStage {
     Preview(RecoveryPlan),
     Confirm(RecoveryPlan),
     Loading,
+    #[cfg(target_os = "macos")]
+    Options(options::DeviceSelection),
 }
 
 enum RecoveryFailure {
     Preview(String),
+    #[cfg(target_os = "macos")]
+    Target(String),
     Restore(String),
 }
 
@@ -50,6 +57,7 @@ pub(super) struct RecoveryView {
     stage: RecoveryStage,
     error: Option<RecoveryFailure>,
     details_open: bool,
+    notice_page: usize,
     change_page: usize,
     request: u64,
     task: Option<gpui::Task<()>>,
@@ -62,6 +70,7 @@ impl RecoveryView {
             stage: RecoveryStage::Choose,
             error: None,
             details_open: false,
+            notice_page: 0,
             change_page: 0,
             request: 0,
             task: None,
@@ -76,6 +85,7 @@ impl RecoveryView {
         work: impl std::future::Future<Output = Result<T, RecoveryFailure>> + Send + 'static,
         publish: impl FnOnce(&mut Self, T) + 'static,
     ) {
+        self.notice_page = 0;
         self.change_page = 0;
         self.request += 1;
         let request = self.request;
@@ -309,6 +319,8 @@ impl RecoveryView {
             ))
             .child(backups);
         let content = v_flex().gap_6().w_full();
+        #[cfg(target_os = "macos")]
+        let content = content.child(Self::options_entry(cx));
         content.child(recovery)
     }
 
@@ -329,7 +341,11 @@ impl RecoveryView {
         let device_context = presentation::context(plan, change);
         let title = presentation::title(change);
         let before = tr!("recovery.before", value => before);
-        let after = tr!("recovery.after", value => after);
+        let after = if plan.is_options_import() {
+            tr!("options_import.after", value => after)
+        } else {
+            tr!("recovery.after", value => after)
+        };
         let row = v_flex()
             .debug_selector(move || format!("recovery-change-{index}"))
             .id(SharedString::from(change.path.clone()))
@@ -377,7 +393,7 @@ impl RecoveryView {
         let mut content = v_flex().gap_3().child(
             text(
                 "recovery-change-count",
-                tr!("recovery.changes", count => plan.changes().len()),
+                tr!("options_import.changes", count => plan.changes().len()),
             )
             .text_subheading(),
         );
@@ -422,6 +438,74 @@ impl RecoveryView {
         ))
     }
 
+    fn import_notices(&self, plan: &RecoveryPlan, cx: &mut Context<Self>) -> Div {
+        let mut content = v_flex()
+            .gap_2()
+            .child(
+                text(
+                    "recovery-notice-count",
+                    tr!("options_import.notes", count => plan.notices().len()),
+                )
+                .text_subheading(),
+            )
+            .child(
+                text(
+                    "recovery-profile-policy",
+                    tr!("options_import.profile_policy"),
+                )
+                .text_body()
+                .text_color(theme::palette(cx).text_muted),
+            );
+        for (index, notice) in plan
+            .notices()
+            .iter()
+            .enumerate()
+            .skip(self.notice_page * PREVIEW_PAGE_SIZE)
+            .take(PREVIEW_PAGE_SIZE)
+        {
+            content = content.child(
+                v_flex()
+                    .debug_selector(move || format!("recovery-note-{index}"))
+                    .id(SharedString::from(format!("notice-{index}")))
+                    .role(gpui::accesskit::Role::Group)
+                    .aria_label(format!(
+                        "{}: {}. {}",
+                        notice.profile(),
+                        notice.slot(),
+                        notice_text(notice.kind())
+                    ))
+                    .gap_1()
+                    .py_2()
+                    .child(div().text_body().child(notice_text(notice.kind())))
+                    .child(
+                        div()
+                            .text_caption()
+                            .text_color(theme::palette(cx).text_muted)
+                            .child(format!("{} · {}", notice.profile(), notice.slot())),
+                    ),
+            );
+        }
+        if plan.notices().len() > PREVIEW_PAGE_SIZE {
+            content = content.child(FocusScroll::new(
+                "recovery-notice-page-focus",
+                h_flex().child(
+                    div()
+                        .debug_selector(|| "recovery-notice-pages".into())
+                        .child(
+                            Pagination::new("recovery-notice-pages")
+                                .current_page(self.notice_page + 1)
+                                .total_pages(plan.notices().len().div_ceil(PREVIEW_PAGE_SIZE))
+                                .on_click(cx.listener(|this, page, _, cx| {
+                                    this.notice_page = page - 1;
+                                    cx.notify();
+                                })),
+                        ),
+                ),
+            ));
+        }
+        content
+    }
+
     fn technical_details(&self, message: &str, cx: &mut Context<Self>) -> Div {
         div().child(
             Collapsible::new()
@@ -458,9 +542,38 @@ impl RecoveryView {
         )
     }
 
+    fn import_pair(plan: &RecoveryPlan, source: &str, target: &str, cx: &App) -> Div {
+        let pal = theme::palette(cx);
+        v_flex()
+            .gap_1()
+            .p_3()
+            .border_1()
+            .border_color(pal.border)
+            .rounded(pal.control_radius)
+            .child(
+                text("import-target-name", plan.device_name(target).to_owned()).text_subheading(),
+            )
+            .child(
+                text(
+                    "import-device-pair",
+                    tr!("options_import.device_pair", source => source, target => target),
+                )
+                .text_body(),
+            )
+            .child(
+                text("import-match-warning", tr!("options_import.match_warning"))
+                    .text_caption()
+                    .text_color(pal.text_muted),
+            )
+    }
+
     fn preview_body(&self, plan: &RecoveryPlan, cx: &mut Context<Self>) -> Div {
         let pal = theme::palette(cx);
-        let description = tr!("recovery.preview_description");
+        let description = if plan.is_options_import() {
+            tr!("options_import.preview_description")
+        } else {
+            tr!("recovery.preview_description")
+        };
         let source_name = plan
             .source()
             .file_name()
@@ -483,6 +596,9 @@ impl RecoveryView {
                 .text_caption()
                 .text_color(pal.text_muted),
             );
+        if let Some((source, target)) = plan.import_devices() {
+            content = content.child(Self::import_pair(plan, source, target, cx));
+        }
         if let Some(error) = plan.current_error() {
             content = content
                 .child(alert(
@@ -497,6 +613,9 @@ impl RecoveryView {
             content = content.child(text("recovery-no-changes", tr!("recovery.no_changes")));
         }
         content = content.child(self.preview_changes(plan, cx));
+        if plan.is_options_import() {
+            content = content.child(self.import_notices(plan, cx));
+        }
         content.child(self.preview_footer(plan, cx))
     }
 
@@ -510,7 +629,11 @@ impl RecoveryView {
                     footer.child(alert(
                         "recovery-confirmation",
                         None,
-                        tr!("recovery.confirm_description"),
+                        if plan.is_options_import() {
+                            tr!("options_import.confirm_description")
+                        } else {
+                            tr!("recovery.confirm_description")
+                        },
                         AlertVariant::Info,
                     ))
                 })
@@ -529,7 +652,11 @@ impl RecoveryView {
                             if confirming {
                                 control_button("confirm-recovery")
                                     .primary()
-                                    .label(tr!("recovery.restore"))
+                                    .label(if plan.is_options_import() {
+                                        tr!("options_import.import")
+                                    } else {
+                                        tr!("recovery.restore")
+                                    })
                                     .on_click(cx.listener(|this, _, _, cx| this.restore(cx)))
                             } else {
                                 control_button("continue-recovery")
@@ -566,12 +693,20 @@ impl Render for RecoveryView {
                         cx.notify();
                     })),
             ),
+            #[cfg(target_os = "macos")]
+            RecoveryStage::Options(selection) => Self::options_devices(selection, cx),
         };
         if let Some(error) = &self.error {
             let (title, caption, message) = match error {
                 RecoveryFailure::Preview(message) => (
                     tr!("recovery.preview_failed_title"),
                     tr!("recovery.preview_failed"),
+                    message,
+                ),
+                #[cfg(target_os = "macos")]
+                RecoveryFailure::Target(message) => (
+                    tr!("options_import.target_failed_title"),
+                    tr!("options_import.target_failed"),
                     message,
                 ),
                 RecoveryFailure::Restore(message) => (
@@ -600,6 +735,21 @@ impl Render for RecoveryView {
             .min_w_0()
             .text_body()
             .text_color(theme::palette(cx).text_primary)
+    }
+}
+
+fn notice_text(kind: openlogi_core::optionsplus::NoticeKind) -> SharedString {
+    use openlogi_core::optionsplus::NoticeKind;
+    match kind {
+        NoticeKind::UnsupportedAction => tr!("options_import.unsupported_action"),
+        NoticeKind::Wheel => tr!("options_import.wheel"),
+        NoticeKind::DeviceSetting => tr!("options_import.device_setting"),
+        NoticeKind::VirtualDevice => tr!("options_import.virtual_device"),
+        NoticeKind::Application => tr!("options_import.application"),
+        NoticeKind::AppGesture => tr!("options_import.app_gesture"),
+        NoticeKind::GestureTiming => tr!("options_import.gesture_timing"),
+        NoticeKind::Navigation => tr!("options_import.navigation"),
+        NoticeKind::InactiveProfile => tr!("options_import.inactive_profile"),
     }
 }
 
