@@ -15,6 +15,11 @@ pub const PROFILE: &str = "OPENLOGI_PROFILE";
 /// syntax (`hidpp=trace`, `openlogi_agent=debug,info`, …).
 pub const LOG: &str = "OPENLOGI_LOG";
 
+/// Raw-XY travel that drags a live macOS Space transition across one full
+/// desktop while a desktop-bound gesture is held; `0` turns live transitions
+/// off in favour of the one-shot desktop switch.
+pub const SPACE_SWIPE_TRAVEL: &str = "OPENLOGI_SPACE_SWIPE_TRAVEL";
+
 /// What every process logs when [`LOG`] is unset.
 pub const LOG_DEFAULT: &str = "info";
 
