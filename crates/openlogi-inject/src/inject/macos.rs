@@ -84,6 +84,7 @@ use menu_shortcut::{MenuPress, MenuShortcut};
 use scroll::dispatch_scroll;
 pub(super) use scroll::{post_scroll, post_smooth_scroll};
 use spaces::{next_desktop, previous_desktop};
+pub(super) use spaces::{post_space_swipe, space_change_count, space_neighbors};
 use symbolic_hotkey::{capture_region, screenshot};
 
 // NX_KEYTYPE_* constants from <IOKit/hidsystem/ev_keymap.h>.
