@@ -706,3 +706,79 @@ async fn a_pointer_only_plan_refresh_keeps_a_held_gesture() {
     scroll.shutdown();
     actions.shutdown();
 }
+
+#[tokio::test]
+async fn a_desktop_swipe_drives_one_live_transition_until_release() {
+    use std::cell::RefCell;
+
+    use crate::runtime::scroll::{ScrollPreferences, ScrollRuntime};
+    use openlogi_inject::SpaceSwipePhase;
+
+    thread_local! {
+        static POSTED: RefCell<Vec<SpaceSwipePhase>> = const { RefCell::new(Vec::new()) };
+    }
+    fn record(_progress: f64, phase: SpaceSwipePhase) -> bool {
+        POSTED.with_borrow_mut(|posted| posted.push(phase));
+        true
+    }
+
+    let (_signal, device_io) = openlogi_hid::device_io_channel();
+    let (ring, _ring_rx) = mpsc::unbounded_channel();
+    let device_access = DeviceAccess {
+        channel: CaptureChannelSlot::default(),
+        registry: openlogi_hid::ChannelRegistry::default(),
+        receiver_access: ReceiverAccess::default(),
+        device_io,
+    };
+    let mut actions =
+        crate::runtime::ActionRuntime::new(Arc::default(), device_access, ring).unwrap();
+    let mut scroll = ScrollRuntime::spawn(Arc::new(ScrollPreferences::new(
+        false,
+        VerticalScrollSensitivity::default(),
+    )))
+    .unwrap();
+    let mut dispatcher = InputDispatcher::new(GestureOutputs::new(
+        actions.dispatcher(),
+        scroll.input(),
+        Arc::default(),
+    ))
+    .with_space_output(800.0, record);
+
+    let mut held = plan();
+    held.dispatch.gesture_bindings.insert(
+        ButtonId::GestureButton,
+        [
+            (GestureDirection::Left, Action::PreviousDesktop),
+            (GestureDirection::Right, Action::NextDesktop),
+        ]
+        .into(),
+    );
+    let session = live_session_from_plan(7, held);
+    let id = session.id().clone();
+    let button = ButtonId::GestureButton;
+    for input in [
+        CapturedInput::ButtonDown(button),
+        CapturedInput::Gesture(button, GestureDirection::Right),
+        CapturedInput::GestureMotion {
+            button,
+            dx: 400,
+            dy: 0,
+        },
+        // A later commit in the same hold is motion for the transition.
+        CapturedInput::Gesture(button, GestureDirection::Left),
+        CapturedInput::ButtonUp(button),
+    ] {
+        dispatcher.dispatch(&id, session.dispatch(), input);
+    }
+    assert_eq!(
+        POSTED.with_borrow(Clone::clone),
+        vec![
+            SpaceSwipePhase::Began,
+            SpaceSwipePhase::Changed,
+            SpaceSwipePhase::Ended
+        ]
+    );
+
+    scroll.shutdown();
+    actions.shutdown();
+}
