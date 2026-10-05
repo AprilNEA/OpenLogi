@@ -46,6 +46,34 @@ fn next_gesture(
 }
 
 #[test]
+fn motion_streams_only_after_the_hold_commits() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    handle_reprog(&mut acc, press(), GESTURE, &[], &[], &tx);
+    acc.backdate_hold_for_test();
+    let xy = |dx| RawControlEvent::RawXy { dx, dy: 0 };
+
+    handle_reprog(&mut acc, xy(20), GESTURE, &[], &[], &tx);
+    handle_reprog(&mut acc, xy(40), GESTURE, &[], &[], &tx);
+    handle_reprog(&mut acc, xy(7), GESTURE, &[], &[], &tx);
+    let inputs: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+        .filter(|input| !matches!(input, CapturedInput::ButtonDown(_)))
+        .collect();
+    assert_eq!(
+        inputs,
+        vec![
+            CapturedInput::Gesture(ButtonId::GestureButton, GestureDirection::Right),
+            CapturedInput::GestureMotion {
+                button: ButtonId::GestureButton,
+                dx: 7,
+                dy: 0,
+            },
+        ],
+        "pre-commit travel stays inside the accumulator; later travel streams"
+    );
+}
+
+#[test]
 fn a_still_held_second_source_takes_over_when_the_holder_releases() {
     // Both sources diverted: press the gesture button, add the panel, release
     // the gesture button (click — no swipe committed), and the still-held

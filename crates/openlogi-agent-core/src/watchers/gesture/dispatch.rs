@@ -177,6 +177,8 @@ impl InputDispatcher {
                     debug!(key, %button, ?direction, "gesture with no binding — ignored");
                 }
             }
+            // Nothing here follows the hand yet: one-shot swipes resolve on commit.
+            CapturedInput::GestureMotion { .. } => {}
             CapturedInput::ButtonDown(button) => {
                 // A raw-XY gesture source owns its click/swipe map; its physical
                 // lifecycle is still tracked, but it must not also fire the

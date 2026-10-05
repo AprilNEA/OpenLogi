@@ -237,6 +237,13 @@ impl SwipeAccumulator {
         None
     }
 
+    /// Whether the current hold has committed a swipe. Capture paths stream
+    /// the hold's later motion to interactive consumers from then on.
+    #[must_use]
+    pub fn has_committed(&self) -> bool {
+        self.held_since.is_some() && self.fired
+    }
+
     /// End the current hold. Returns `true` when an in-progress hold ended
     /// without committing a swipe — the caller should fire the plain `Click`
     /// action — and `false` when a swipe already fired mid-motion, or when there
