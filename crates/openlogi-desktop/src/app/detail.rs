@@ -768,8 +768,13 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
             h_flex()
                 .justify_between()
                 .items_center()
+                .gap_4()
                 .child(
+                    // Shrinkable so a long translated caption wraps instead
+                    // of pushing the switch out of the card.
                     v_flex()
+                        .flex_1()
+                        .min_w_0()
                         .child(div().text_body().child(tr!("device.manage_this_device")))
                         .child(
                             div()
@@ -779,19 +784,21 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
                         ),
                 )
                 .child(
-                    Switch::new("device-enabled")
-                        .checked(device_enabled)
-                        .on_click(|checked, _window, cx| {
-                            let enabled = *checked;
-                            AppState::apply(cx, |state| {
-                                state
-                                    .current_record()
-                                    .map(DeviceRecord::device_key)
-                                    .map_or_else(StateEvents::none, |key| {
-                                        state.commit_device_enabled(&key, enabled)
-                                    })
-                            });
-                        }),
+                    div().flex_shrink_0().child(
+                        Switch::new("device-enabled")
+                            .checked(device_enabled)
+                            .on_click(|checked, _window, cx| {
+                                let enabled = *checked;
+                                AppState::apply(cx, |state| {
+                                    state
+                                        .current_record()
+                                        .map(DeviceRecord::device_key)
+                                        .map_or_else(StateEvents::none, |key| {
+                                            state.commit_device_enabled(&key, enabled)
+                                        })
+                                });
+                            }),
+                    ),
                 ),
         )
         .child(
