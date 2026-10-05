@@ -15,6 +15,11 @@ pub const PROFILE: &str = "OPENLOGI_PROFILE";
 /// syntax (`hidpp=trace`, `openlogi_agent=debug,info`, …).
 pub const LOG: &str = "OPENLOGI_LOG";
 
+/// Overrides the swipe repeat distance (raw-XY units of further travel that
+/// repeat a committed swipe within one stroke); `0` disables repeating. See
+/// [`GESTURE_REPEAT_DISTANCE`](crate::binding::GESTURE_REPEAT_DISTANCE).
+pub const SWIPE_REPEAT: &str = "OPENLOGI_SWIPE_REPEAT";
+
 /// What every process logs when [`LOG`] is unset.
 pub const LOG_DEFAULT: &str = "info";
 
