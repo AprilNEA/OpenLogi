@@ -160,30 +160,54 @@ impl SwipeAccumulator {
         }
         self.moved_at = Some(now);
         if let Some(dir) = self.last {
-            // Motion still heading the committed way before any reversal is the
-            // same stroke: only its net along-axis travel counts (drift is
-            // dropped), and it fires the direction again every
-            // GESTURE_REPEAT_DISTANCE so a continuous motion keeps stepping.
-            if continues(dir, dx, dy) && reversal(dir, self.dx, self.dy) == 0 {
-                self.repeat = self.repeat.saturating_add(along(dir, dx, dy));
-                self.repeat_cross = self.repeat_cross.saturating_add(across(dir, dx, dy));
+            // Net travel continuing the committed way fires it again every
+            // GESTURE_REPEAT_DISTANCE, so a continuous motion keeps stepping.
+            // Backtracking takes back that progress and its drift alike, so a
+            // wobble never repeats and a corrected stroke isn't held to drift
+            // it has undone.
+            let (a, c) = (along(dir, dx, dy), across(dir, dx, dy));
+            let earlier = self.repeat;
+            let total = earlier.saturating_add(a);
+            self.repeat_cross = if total > 0 {
+                self.repeat_cross.saturating_add(c)
+            } else {
+                0
+            };
+            self.repeat = total.max(0);
+            if continues(dir, dx, dy) {
                 // The same straightness rule as a fresh swipe, seen in the
                 // committed direction's frame (`Right` = along it).
                 let straight =
                     detect_swipe(self.repeat, self.repeat_cross) == Some(GestureDirection::Right);
                 if self.repeat >= GESTURE_REPEAT_DISTANCE && straight {
-                    // Carry any excess, so a report spanning two repeat
-                    // distances fires again on the next report.
-                    self.repeat -= GESTURE_REPEAT_DISTANCE;
-                    self.repeat_cross = 0;
+                    // Carry the excess, so a report spanning two repeat
+                    // distances fires again on the next report. The excess is
+                    // the stroke's tail, so it keeps the tail's drift: this
+                    // report's share first, then earlier travel's.
+                    let excess = self.repeat - GESTURE_REPEAT_DISTANCE;
+                    let tail = excess.min(a);
+                    let mut carried = i64::from(c) * i64::from(tail) / i64::from(a);
+                    if excess > a && earlier > 0 {
+                        carried += i64::from(self.repeat_cross.saturating_sub(c))
+                            * i64::from(excess - a)
+                            / i64::from(earlier);
+                    }
+                    self.repeat = excess;
+                    self.repeat_cross = i32::try_from(carried).unwrap_or(if carried < 0 {
+                        i32::MIN
+                    } else {
+                        i32::MAX
+                    });
+                    // The stroke went back past any partial reversal.
+                    self.dx = 0;
+                    self.dy = 0;
                     return Some(dir);
                 }
-                return None;
-            }
-            // Backtracking takes back repeat progress, so a wobble never repeats.
-            self.repeat = self.repeat.saturating_add(along(dir, dx, dy)).max(0);
-            if self.repeat == 0 {
-                self.repeat_cross = 0;
+                // Before any reversal this is the same stroke: drop it from
+                // the reversal travel below.
+                if reversal(dir, self.dx, self.dy) == 0 {
+                    return None;
+                }
             }
         }
         self.dx = self.dx.saturating_add(dx);
@@ -427,6 +451,40 @@ mod tests {
             Some(GestureDirection::Right)
         );
         assert_eq!(acc.accumulate(1, 0), Some(GestureDirection::Right));
+    }
+
+    #[test]
+    fn accumulator_carried_travel_keeps_its_drift() {
+        let mut acc = SwipeAccumulator::default();
+        acc.begin();
+        acc.backdate_hold_for_test();
+        assert_eq!(
+            acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+            Some(GestureDirection::Right)
+        );
+        assert_eq!(acc.accumulate(140, 0), None);
+        // Straight enough overall to repeat, but the carried tail is this
+        // diagonal report, so it must not fire again on a nudge.
+        assert_eq!(acc.accumulate(160, 100), Some(GestureDirection::Right));
+        assert_eq!(acc.accumulate(1, 0), None);
+    }
+
+    #[test]
+    fn accumulator_backtracking_takes_back_drift() {
+        let mut acc = SwipeAccumulator::default();
+        acc.begin();
+        acc.backdate_hold_for_test();
+        assert_eq!(
+            acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+            Some(GestureDirection::Right)
+        );
+        // 150 along with 75 drift: too diagonal to repeat yet.
+        for _ in 0..15 {
+            assert_eq!(acc.accumulate(10, -5), None);
+        }
+        // Backing up undoes drift too, so the corrected stroke repeats.
+        assert_eq!(acc.accumulate(-20, 30), None);
+        assert_eq!(acc.accumulate(20, 0), Some(GestureDirection::Right));
     }
 
     #[test]
