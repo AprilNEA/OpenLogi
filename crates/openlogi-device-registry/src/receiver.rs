@@ -76,6 +76,12 @@ pub const RECEIVERS: &[ReceiverDescriptor] = &[
         ReceiverBrand::Lightspeed,
         ReceiverProtocol::Unifying,
     ),
+    // Lightspeed receiver, verified with a G915 (WPID 0x407c).
+    ReceiverDescriptor::logitech(
+        0xc541,
+        ReceiverBrand::Lightspeed,
+        ReceiverProtocol::Unifying,
+    ),
     // Lightspeed receiver, verified with a G915 (WPID 0x407c) and G502 X.
     ReceiverDescriptor::logitech(
         0xc547,
@@ -116,6 +122,14 @@ mod tests {
                 receiver.product_id
             );
         }
+    }
+
+    #[test]
+    fn g915_receiver_is_lightspeed_over_unifying_protocol() {
+        let receiver = find_receiver(LOGITECH_VENDOR_ID, 0xc541).expect("c541 receiver");
+
+        assert_eq!(receiver.brand, ReceiverBrand::Lightspeed);
+        assert_eq!(receiver.protocol, ReceiverProtocol::Unifying);
     }
 
     #[test]
