@@ -108,6 +108,9 @@ pub struct SwipeAccumulator {
     /// Net travel continuing `last` since it committed; fires `last` again at
     /// [`GESTURE_REPEAT_DISTANCE`].
     repeat: i32,
+    /// Signed sideways drift accompanying `repeat`, held to the same
+    /// straightness rule as a fresh swipe so a diagonal can't repeat.
+    repeat_cross: i32,
     /// When the last motion arrived, to detect the pause that ends a stroke.
     moved_at: Option<Instant>,
 }
@@ -121,6 +124,7 @@ impl SwipeAccumulator {
         self.fired = false;
         self.last = None;
         self.repeat = 0;
+        self.repeat_cross = 0;
         self.moved_at = None;
     }
 
@@ -152,6 +156,7 @@ impl SwipeAccumulator {
             }
             self.last = None;
             self.repeat = 0;
+            self.repeat_cross = 0;
         }
         self.moved_at = Some(now);
         if let Some(dir) = self.last {
@@ -161,14 +166,25 @@ impl SwipeAccumulator {
             // GESTURE_REPEAT_DISTANCE so a continuous motion keeps stepping.
             if continues(dir, dx, dy) && reversal(dir, self.dx, self.dy) == 0 {
                 self.repeat = self.repeat.saturating_add(along(dir, dx, dy));
-                if self.repeat >= GESTURE_REPEAT_DISTANCE {
-                    self.repeat = 0;
+                self.repeat_cross = self.repeat_cross.saturating_add(across(dir, dx, dy));
+                // The same straightness rule as a fresh swipe, seen in the
+                // committed direction's frame (`Right` = along it).
+                let straight =
+                    detect_swipe(self.repeat, self.repeat_cross) == Some(GestureDirection::Right);
+                if self.repeat >= GESTURE_REPEAT_DISTANCE && straight {
+                    // Carry any excess, so a report spanning two repeat
+                    // distances fires again on the next report.
+                    self.repeat -= GESTURE_REPEAT_DISTANCE;
+                    self.repeat_cross = 0;
                     return Some(dir);
                 }
                 return None;
             }
             // Backtracking takes back repeat progress, so a wobble never repeats.
             self.repeat = self.repeat.saturating_add(along(dir, dx, dy)).max(0);
+            if self.repeat == 0 {
+                self.repeat_cross = 0;
+            }
         }
         self.dx = self.dx.saturating_add(dx);
         self.dy = self.dy.saturating_add(dy);
@@ -189,6 +205,7 @@ impl SwipeAccumulator {
             self.fired = true;
             self.last = Some(dir);
             self.repeat = 0;
+            self.repeat_cross = 0;
             self.dx = 0;
             self.dy = 0;
             return Some(dir);
@@ -234,6 +251,15 @@ fn along(direction: GestureDirection, dx: i32, dy: i32) -> i32 {
         GestureDirection::Right => dx,
         GestureDirection::Up => dy.saturating_neg(),
         GestureDirection::Down => dy,
+        GestureDirection::Click => 0,
+    }
+}
+
+/// The signed component of one report across `direction` (its sideways drift).
+fn across(direction: GestureDirection, dx: i32, dy: i32) -> i32 {
+    match direction {
+        GestureDirection::Left | GestureDirection::Right => dy,
+        GestureDirection::Up | GestureDirection::Down => dx,
         GestureDirection::Click => 0,
     }
 }
@@ -367,6 +393,40 @@ mod tests {
             fired.extend(acc.accumulate(10, -3));
         }
         assert_eq!(fired, [GestureDirection::Right, GestureDirection::Right]);
+    }
+
+    #[test]
+    fn accumulator_diagonal_motion_does_not_repeat() {
+        let mut acc = SwipeAccumulator::default();
+        acc.begin();
+        acc.backdate_hold_for_test();
+        assert_eq!(
+            acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+            Some(GestureDirection::Right)
+        );
+        // Each report leans right, but together they are too diagonal to be
+        // a swipe, so they must not repeat Right.
+        for _ in 0..15 {
+            assert_eq!(acc.accumulate(10, 9), None);
+        }
+    }
+
+    #[test]
+    fn accumulator_large_report_carries_into_the_next_repeat() {
+        let mut acc = SwipeAccumulator::default();
+        acc.begin();
+        acc.backdate_hold_for_test();
+        assert_eq!(
+            acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+            Some(GestureDirection::Right)
+        );
+        // One report spanning two repeat distances: one Right now, and the
+        // carried excess fires the second on the next report.
+        assert_eq!(
+            acc.accumulate(2 * GESTURE_REPEAT_DISTANCE, 0),
+            Some(GestureDirection::Right)
+        );
+        assert_eq!(acc.accumulate(1, 0), Some(GestureDirection::Right));
     }
 
     #[test]
