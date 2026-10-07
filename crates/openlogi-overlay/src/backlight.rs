@@ -4,6 +4,7 @@ use gpui::{
     App, Bounds, Context, IntoElement, ParentElement, Render, Size, Styled, Window,
     WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div, px,
 };
+use openlogi_core::hid::backlight::max_backlight_level;
 use openlogi_ipc::BacklightObservation;
 
 pub(crate) struct BacklightView {
@@ -18,9 +19,10 @@ impl BacklightView {
 
 impl Render for BacklightView {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let max_level = max_backlight_level(self.observation.levels);
         let level = format!(
             "Backlight {} / {}",
-            self.observation.current_level, self.observation.levels
+            self.observation.current_level, max_level
         );
         div()
             .flex()
@@ -46,7 +48,7 @@ impl Render for BacklightView {
                             .w(px(220.0
                                 * relative_level(
                                     self.observation.current_level,
-                                    self.observation.levels,
+                                    max_level,
                                 )))
                             .rounded(px(4.0))
                             .bg(gpui::hsla(0.58, 0.75, 0.62, 1.0)),
@@ -55,11 +57,11 @@ impl Render for BacklightView {
     }
 }
 
-fn relative_level(level: u8, levels: u8) -> f32 {
-    if levels == 0 {
+fn relative_level(level: u8, max_level: u8) -> f32 {
+    if max_level == 0 {
         0.0
     } else {
-        f32::from(level.min(levels)) / f32::from(levels)
+        f32::from(level.min(max_level)) / f32::from(max_level)
     }
 }
 
@@ -77,5 +79,16 @@ pub(crate) fn window_options(cx: &mut App) -> WindowOptions {
         app_id: Some("openlogi-backlight-osd".to_string()),
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         ..WindowOptions::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn highest_reported_level_fills_the_bar() {
+        assert_eq!(relative_level(7, max_backlight_level(8)), 1.0);
+        assert_eq!(relative_level(0, max_backlight_level(8)), 0.0);
     }
 }
