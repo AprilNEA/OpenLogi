@@ -336,6 +336,30 @@ fn a_single_event_never_fires_more_than_the_repeat_cap() {
 }
 
 #[test]
+fn a_capped_event_discards_its_excess_distance_instead_of_carrying_it_over() {
+    // The cap alone isn't enough: subtracting only what was actually fired
+    // (`repeats * threshold`) left the rest of a malformed report's distance
+    // sitting in the accumulator, so the very next increment within the
+    // decay window re-triggered another capped burst — repeating for as
+    // long as small input kept arriving instead of firing once and settling.
+    let mut direction = WheelDirection::default();
+    let now = Instant::now();
+    let scale = unscaled(ThumbwheelSensitivity::MAX);
+    assert_eq!(ThumbwheelSensitivity::MAX.action_threshold(), 1);
+
+    assert_eq!(
+        direction.advance(&Action::VolumeUp, i32::from(i16::MAX), scale, now),
+        WheelOutput::FireAction(MAX_REPEATS_PER_EVENT.cast_unsigned())
+    );
+    assert_eq!(
+        direction.advance(&Action::VolumeUp, 1, scale, now),
+        WheelOutput::FireAction(1),
+        "one more small nudge must fire once, not re-trigger another capped burst \
+         from the previous report's leftover distance"
+    );
+}
+
+#[test]
 fn repeatable_action_progress_below_threshold_carries_over() {
     let mut direction = WheelDirection::default();
     let now = Instant::now();

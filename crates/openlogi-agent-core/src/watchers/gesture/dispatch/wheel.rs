@@ -183,7 +183,17 @@ impl WheelDirection {
             // the input callback. A real swipe never legitimately needs more
             // than a handful of fires per report.
             let repeats = (increments / threshold).min(MAX_REPEATS_PER_EVENT);
-            increments -= repeats * threshold;
+            // The modulus, not `repeats * threshold`: capping `repeats`
+            // without also discarding the distance above the cap left a
+            // malformed report's full excess sitting in the accumulator
+            // (32767 increments at threshold 1 capped to 20 fires, but
+            // subtracting only `20 * 1` left 32747 behind) — the very next
+            // increment within the decay window re-triggered another capped
+            // burst, repeating for as long as input kept arriving. The
+            // modulus discards everything above a whole multiple of
+            // `threshold` uniformly, capped or not, while still preserving
+            // genuine fractional progress below one threshold step.
+            increments %= threshold;
             if repeats > 0 {
                 (WheelOutput::FireAction(repeats.cast_unsigned()), Some(now))
             } else {
