@@ -385,8 +385,10 @@ impl ScrollEngine {
     }
 
     fn cancel_source(&mut self, source: &ScrollSource, emit: &mut impl FnMut(ScrollFrame)) {
-        let removed = self.active.remove(source).is_some() | self.phased.remove(source).is_some();
-        if removed && self.active.is_empty() && self.phased.is_empty() {
+        // Both removals must run, so neither may short-circuit the other.
+        let was_smooth = self.active.remove(source).is_some();
+        let was_phased = self.phased.remove(source).is_some();
+        if (was_smooth || was_phased) && self.active.is_empty() && self.phased.is_empty() {
             self.output.cancel(emit);
         }
     }
@@ -399,7 +401,9 @@ impl ScrollEngine {
 
     fn emit_update(&mut self, update: MotionUpdate, emit: &mut impl FnMut(ScrollFrame)) {
         match update {
-            MotionUpdate::Finished(delta) if self.active.is_empty() => {
+            // A phased gesture still open (after a smoothing toggle) owns the
+            // stream's end, so a motion finishing under it only progresses it.
+            MotionUpdate::Finished(delta) if self.active.is_empty() && self.phased.is_empty() => {
                 self.output.finish(delta, emit);
             }
             MotionUpdate::Active(delta) | MotionUpdate::Finished(delta) => {

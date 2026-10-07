@@ -415,7 +415,7 @@ fn run_worker(
     emit_direct: &mut impl FnMut(WheelDelta),
 ) {
     let mut engine = ScrollEngine::default();
-    let mut smooth_scroll = preferences.smooth_scroll_enabled();
+    let mut observed_smoothing = preferences.smooth_scroll_enabled();
     // An overflow-cancelled incarnation stays tombstoned so accepted input that
     // was already queued when control overtook the saturated queue is ignored.
     let mut cancellations = OverflowCancellations::new(shared_generation.load(Ordering::Acquire));
@@ -438,17 +438,20 @@ fn run_worker(
             }
         }
 
-        let current_generation = shared_generation.load(Ordering::Acquire);
-        if cancellations.advance_to(current_generation) {
-            engine.cancel_all(emit_smooth);
+        // Smooth motion and phased gestures belong to opposite settings, so a
+        // toggle ends whichever one is in flight. Observe the setting once per
+        // pass: both triggers below must see the same value, and a generation
+        // change in the same pass must not leave the observation stale.
+        let smoothing = preferences.smooth_scroll_enabled();
+        let toggled = smoothing != observed_smoothing;
+        observed_smoothing = smoothing;
+        if cancellations.advance_to(shared_generation.load(Ordering::Acquire)) {
             // Every accepted command from before the transition carries the
             // old generation and is rejected below, so its source tombstone
             // can no longer protect anything. A delayed old-generation control
             // is also ignored above instead of recreating it.
-        } else if smooth_scroll != preferences.smooth_scroll_enabled() {
-            // Smooth motion and phased gestures belong to opposite settings, so
-            // a toggle ends whichever one is in flight.
-            smooth_scroll = !smooth_scroll;
+            engine.cancel_all(emit_smooth);
+        } else if toggled {
             engine.cancel_all(emit_smooth);
         }
 
@@ -638,6 +641,43 @@ mod tests {
             "gesture ends once"
         );
         runtime.shutdown();
+    }
+
+    #[test]
+    fn shutdown_cancels_an_open_phased_gesture() {
+        let (frames, received) = mpsc::channel();
+        let mut runtime = ScrollRuntime::spawn_with(
+            preferences(false, 14),
+            move |frame| {
+                frames
+                    .send(frame)
+                    .expect("test frame receiver remains open");
+            },
+            |_| {},
+        )
+        .expect("spawn scroll worker");
+        let session = HidppSessionId::with_epoch("mouse-a", 1);
+        assert!(
+            runtime
+                .input()
+                .try_hidpp_scroll(&session, ScrollDelta::wheel_ticks(1.0, 0.0))
+        );
+        assert_eq!(
+            received
+                .recv_timeout(Duration::from_secs(1))
+                .expect("gesture begins")
+                .phase,
+            openlogi_inject::SmoothScrollPhase::Began
+        );
+
+        runtime.shutdown();
+        assert_eq!(
+            received
+                .recv_timeout(Duration::from_secs(1))
+                .expect("shutdown terminates the gesture")
+                .phase,
+            openlogi_inject::SmoothScrollPhase::Cancelled
+        );
     }
 
     #[test]

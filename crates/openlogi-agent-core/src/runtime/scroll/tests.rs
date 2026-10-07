@@ -431,3 +431,46 @@ fn cancelling_a_phased_gesture_emits_one_terminal_phase_and_clears_state() {
     assert!(engine.phased.is_empty());
     assert_eq!(engine.next_deadline(), None);
 }
+
+#[test]
+fn a_smooth_motion_finishing_inside_a_phased_gesture_does_not_end_the_stream() {
+    let base = Instant::now();
+    let mut engine = ScrollEngine::default();
+    let mut frames = Vec::new();
+    engine.phased_impulse(
+        hidpp_source("mouse-a", 1),
+        wheel(1.0, 0.0),
+        base,
+        &mut |f| frames.push(f),
+    );
+    engine.impulse(
+        hidpp_source("mouse-b", 1),
+        wheel(1.0, 0.0),
+        base,
+        &mut |f| {
+            frames.push(f);
+        },
+    );
+
+    // The smooth motion completes first (100 ms) while the phased gesture is
+    // still inside its idle window (120 ms), so the stream must stay open.
+    engine.advance_due(base + ANIMATION_DURATION, &mut |f| frames.push(f));
+    assert!(
+        frames.iter().all(|f| f.phase != SmoothScrollPhase::Ended),
+        "the phased source still owns the end of the stream"
+    );
+
+    engine.advance_due(base + PHASED_IDLE, &mut |f| frames.push(f));
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|f| f.phase == SmoothScrollPhase::Ended)
+            .count(),
+        1
+    );
+    assert_eq!(
+        frames.last().map(|f| f.phase),
+        Some(SmoothScrollPhase::Ended)
+    );
+    assert_delta(cumulative(&frames), wheel(2.0, 0.0));
+}
