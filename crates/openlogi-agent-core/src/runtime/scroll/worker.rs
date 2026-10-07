@@ -88,7 +88,14 @@ impl ScrollPreferences {
 
 #[derive(Clone, Copy)]
 enum ScrollOutputMode {
-    Smooth { at: Instant },
+    Smooth {
+        at: Instant,
+    },
+    /// Smoothing is off and the impulse is a diverted horizontal wheel tick,
+    /// emitted at once inside a phased gesture.
+    Phased {
+        at: Instant,
+    },
     Direct,
 }
 
@@ -212,21 +219,29 @@ impl ScrollInputHandle {
 
     /// Queue one diverted thumb-wheel impulse from an active HID++ session.
     ///
-    /// Rejection tells the already-diverted caller to inject the distance
-    /// directly; unlike an OS hook, there is no physical event to pass through.
+    /// With smoothing on the impulse is eased. With it off, a horizontal-only
+    /// impulse becomes a phased gesture, because AppKit's swipe recognizers
+    /// (e.g. Messages revealing timestamps) ignore horizontal scrolls that
+    /// carry no scroll phase. Anything else is rejected, which tells the
+    /// already-diverted caller to inject the distance directly; unlike an OS
+    /// hook, there is no physical event to pass through.
     #[must_use]
     pub(crate) fn try_hidpp_scroll(&self, session: &HidppSessionId, delta: ScrollDelta) -> bool {
-        if !self.accepting.load(Ordering::Acquire) || !self.preferences.smooth_scroll_enabled() {
+        if !self.accepting.load(Ordering::Acquire) {
             return false;
         }
         let Ok(impulse) = WheelDelta::try_from(delta) else {
             return false;
         };
-        self.try_enqueue(
-            ScrollSource::Hidpp(session.clone()),
-            impulse,
-            ScrollOutputMode::Smooth { at: Instant::now() },
-        )
+        let at = Instant::now();
+        let output = if self.preferences.smooth_scroll_enabled() {
+            ScrollOutputMode::Smooth { at }
+        } else if impulse.y == 0.0 {
+            ScrollOutputMode::Phased { at }
+        } else {
+            return false;
+        };
+        self.try_enqueue(ScrollSource::Hidpp(session.clone()), impulse, output)
     }
 
     fn try_enqueue(
@@ -400,6 +415,7 @@ fn run_worker(
     emit_direct: &mut impl FnMut(WheelDelta),
 ) {
     let mut engine = ScrollEngine::default();
+    let mut smooth_scroll = preferences.smooth_scroll_enabled();
     // An overflow-cancelled incarnation stays tombstoned so accepted input that
     // was already queued when control overtook the saturated queue is ignored.
     let mut cancellations = OverflowCancellations::new(shared_generation.load(Ordering::Acquire));
@@ -429,7 +445,10 @@ fn run_worker(
             // old generation and is rejected below, so its source tombstone
             // can no longer protect anything. A delayed old-generation control
             // is also ignored above instead of recreating it.
-        } else if !preferences.smooth_scroll_enabled() {
+        } else if smooth_scroll != preferences.smooth_scroll_enabled() {
+            // Smooth motion and phased gestures belong to opposite settings, so
+            // a toggle ends whichever one is in flight.
+            smooth_scroll = !smooth_scroll;
             engine.cancel_all(emit_smooth);
         }
 
@@ -447,11 +466,14 @@ fn run_worker(
                     ScrollOutputMode::Smooth { at } if preferences.smooth_scroll_enabled() => {
                         engine.impulse(input.source, input.impulse, at, emit_smooth);
                     }
+                    ScrollOutputMode::Phased { at } if !preferences.smooth_scroll_enabled() => {
+                        engine.phased_impulse(input.source, input.impulse, at, emit_smooth);
+                    }
                     ScrollOutputMode::Direct => {
                         engine.cancel_source(&input.source, emit_smooth);
                         emit_direct(input.impulse);
                     }
-                    ScrollOutputMode::Smooth { .. } => {}
+                    ScrollOutputMode::Smooth { .. } | ScrollOutputMode::Phased { .. } => {}
                 }
             }
             Ok(ScrollCommand::CancelSource(source)) => {
@@ -471,6 +493,7 @@ fn run_worker(
 
 #[cfg(test)]
 mod tests {
+    use super::super::PHASED_IDLE;
     use super::*;
 
     fn sensitivity(raw: u8) -> VerticalScrollSensitivity {
@@ -561,6 +584,97 @@ mod tests {
         let queued = queued_input(&receiver);
         assert_eq!(queued.impulse, WheelDelta { x: 0.0, y: 2.0 });
         assert!(matches!(queued.output, ScrollOutputMode::Smooth { .. }));
+    }
+
+    #[test]
+    fn hidpp_without_smoothing_phases_only_horizontal_ticks() {
+        let (input, receiver, _controls) = standalone_input(3, preferences(false, 14));
+        let session = HidppSessionId::with_epoch("mouse-a", 7);
+        assert!(input.try_hidpp_scroll(&session, ScrollDelta::wheel_ticks(2.0, 0.0)));
+        assert!(
+            !input.try_hidpp_scroll(&session, ScrollDelta::wheel_ticks(0.0, 2.0)),
+            "a vertical tick keeps the caller's direct, unphased wheel output"
+        );
+        assert!(
+            !input.try_hidpp_scroll(&session, ScrollDelta::wheel_ticks(2.0, 1.0)),
+            "a mixed tick is not a horizontal wheel"
+        );
+
+        let queued = queued_input(&receiver);
+        assert_eq!(queued.impulse, WheelDelta { x: 2.0, y: 0.0 });
+        assert!(matches!(queued.output, ScrollOutputMode::Phased { .. }));
+    }
+
+    #[test]
+    fn phased_horizontal_ticks_begin_and_end_through_the_worker() {
+        let (frames, received) = mpsc::channel();
+        let mut runtime = ScrollRuntime::spawn_with(
+            preferences(false, 14),
+            move |frame| {
+                frames
+                    .send(frame)
+                    .expect("test frame receiver remains open");
+            },
+            |_| {},
+        )
+        .expect("spawn scroll worker");
+        let input = runtime.input();
+        let session = HidppSessionId::with_epoch("mouse-a", 1);
+        assert!(input.try_hidpp_scroll(&session, ScrollDelta::wheel_ticks(1.0, 0.0)));
+        assert!(input.try_hidpp_scroll(&session, ScrollDelta::wheel_ticks(1.0, 0.0)));
+
+        let wait = PHASED_IDLE * 20;
+        let first = received.recv_timeout(wait).expect("first tick");
+        let second = received.recv_timeout(wait).expect("second tick");
+        assert_eq!(first.phase, openlogi_inject::SmoothScrollPhase::Began);
+        assert_eq!(second.phase, openlogi_inject::SmoothScrollPhase::Changed);
+        assert_eq!(first.delta, WheelDelta { x: 1.0, y: 0.0 });
+
+        let end = received.recv_timeout(wait).expect("idle end");
+        assert_eq!(end.phase, openlogi_inject::SmoothScrollPhase::Ended);
+        assert!(end.delta.is_zero());
+        assert!(
+            received.recv_timeout(PHASED_IDLE * 2).is_err(),
+            "gesture ends once"
+        );
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn toggling_smoothing_cancels_an_open_phased_gesture() {
+        let preferences = preferences(false, 14);
+        let (frames, received) = mpsc::channel();
+        let mut runtime = ScrollRuntime::spawn_with(
+            Arc::clone(&preferences),
+            move |frame| {
+                frames
+                    .send(frame)
+                    .expect("test frame receiver remains open");
+            },
+            |_| {},
+        )
+        .expect("spawn scroll worker");
+        let input = runtime.input();
+        let session = HidppSessionId::with_epoch("mouse-a", 1);
+        assert!(input.try_hidpp_scroll(&session, ScrollDelta::wheel_ticks(1.0, 0.0)));
+        assert_eq!(
+            received
+                .recv_timeout(Duration::from_secs(1))
+                .expect("gesture begins")
+                .phase,
+            openlogi_inject::SmoothScrollPhase::Began
+        );
+
+        preferences.publish(true, sensitivity(14));
+        input.wake();
+        assert_eq!(
+            received
+                .recv_timeout(Duration::from_secs(1))
+                .expect("toggle terminates the gesture")
+                .phase,
+            openlogi_inject::SmoothScrollPhase::Cancelled
+        );
+        runtime.shutdown();
     }
 
     #[test]

@@ -45,7 +45,10 @@ optional physical device key.
 - `asset_source`: `automatic`, `openlogi`, `cloudflare`, or `fastly`
 - `language`, `appearance`, `device_view_mode` (`grid`, `list`, or `carousel`),
   optional theme names, and optional UI radius
-- `smooth_scroll` toggles finite animation for traditional mouse-wheel input
+- `smooth_scroll` toggles finite animation for traditional mouse-wheel input. With it
+  off, a diverted horizontal thumb wheel still scrolls as a phased gesture (ended after
+  120 ms idle) so apps that reveal content on horizontal swipes, like Messages, react;
+  vertical wheel output stays a plain wheel
 - `vertical_scroll_sensitivity`, from `1` through `100` (`14` is 1×);
   continuous trackpad input remains native
 - `thumbwheel_sensitivity`, from `1` through `100` (`14` is 1×)
