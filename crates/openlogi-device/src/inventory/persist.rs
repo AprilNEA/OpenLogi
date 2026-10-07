@@ -35,7 +35,8 @@ use super::features::{BatteryProbe, ProbedFeatures};
 /// (the cache is a warm-start optimization, not data anyone must keep).
 /// v2 dropped the `UnifyingSlot` key (slot-keyed, so not re-pair-safe).
 /// v3 adds event-capable feature indexes discovered by the immutable walk.
-const SCHEMA_VERSION: u32 = 3;
+/// v4 includes the backlight event index, so older Bolt snapshots need a fresh walk.
+const SCHEMA_VERSION: u32 = 4;
 
 impl ProbeCacheError {
     /// Report why a store could not keep a snapshot.
@@ -304,9 +305,32 @@ mod tests {
     /// not read. Re-probing is always correct; guessing is not.
     #[test]
     fn a_foreign_schema_yields_a_cold_start() {
-        let mut snapshot = ProbeCacheSnapshot::of(&HashMap::new());
-        snapshot.version = SCHEMA_VERSION + 1;
+        let cache = HashMap::from([(
+            CacheKey::Bolt {
+                unit_id: [0xaa, 0xbb, 0xcc, 0xdd],
+            },
+            Cached {
+                probe: ProbedFeatures::default(),
+                battery: None,
+                events: EventFeatureIndices::default(),
+                probed_at: Instant::now(),
+            },
+        )]);
+        assert_eq!(ProbeCacheSnapshot::of(&cache).into_entries().len(), 1);
 
+        let mut old_file = serde_json::to_value(ProbeCacheSnapshot::of(&cache))
+            .expect("cache snapshot serializes");
+        old_file["version"] = serde_json::json!(3);
+        old_file["entries"][0]["events"]
+            .as_object_mut()
+            .expect("event index object")
+            .remove("backlight");
+        let old_snapshot: ProbeCacheSnapshot =
+            serde_json::from_value(old_file).expect("old schema deserializes");
+        assert!(old_snapshot.into_entries().is_empty());
+
+        let mut snapshot = ProbeCacheSnapshot::of(&cache);
+        snapshot.version = SCHEMA_VERSION + 1;
         assert!(snapshot.into_entries().is_empty());
     }
 }

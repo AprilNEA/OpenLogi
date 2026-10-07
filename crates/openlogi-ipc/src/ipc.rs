@@ -422,7 +422,7 @@ pub struct BacklightObservation {
     pub generation: Generation,
     /// Current level, where zero is off.
     pub current_level: u8,
-    /// Number of levels reported by the keyboard.
+    /// Number of levels reported by the keyboard, including level zero.
     pub levels: u8,
     /// Whether the firmware reports a visible backlight state.
     pub visible: bool,
@@ -575,8 +575,6 @@ pub trait Agent {
     /// then return it. Same contract as [`Agent::observe`] — whole state, hold
     /// window, `0` for "seen nothing" — over the ring's own cell.
     async fn observe_action_ring(since: Generation) -> RingObservation;
-    /// Block until the transient keyboard-backlight indicator changes.
-    async fn observe_backlight(since: Generation) -> BacklightObservation;
     /// Declare what kind of client this connection is. Informational for an
     /// armed agent, load-bearing for a dormant one: the macOS dormancy gate
     /// arms only on [`ClientKind::Gui`]. The takeover probe never declares —
@@ -599,4 +597,6 @@ pub trait Agent {
     /// receiver, and with [`PairingFailure::ReceiverNotFound`] for a route
     /// that names no receiver slot or a receiver that is not connected.
     async fn unpair_device(route: DeviceRoute) -> Result<(), PairingFailure>;
+    /// Block until the transient keyboard-backlight indicator changes.
+    async fn observe_backlight(since: Generation) -> BacklightObservation;
 }

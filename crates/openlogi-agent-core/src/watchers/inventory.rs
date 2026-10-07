@@ -13,9 +13,9 @@ use std::time::{Instant, SystemTime};
 
 use futures_lite::StreamExt as _;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
-use openlogi_hid::inventory::events::HidppEventSource;
+use openlogi_hid::inventory::events::{BacklightUpdate, HidppEventSource};
 use openlogi_hid::{ChannelRegistry, DeviceIoGate};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
 
 use schedule::{
@@ -312,8 +312,10 @@ async fn run_watcher(
     hardware: HardwareContext,
 ) {
     // The listener is attached to each inventory-owned channel before its
-    // first probe, and its bounded queue is subscribed before every snapshot.
+    // first probe. Lifecycle hints use a bounded queue; backlight readings
+    // retain the latest value independently of slow inventory scans.
     let (event_notifier, hid_events) = openlogi_hid::inventory::events::event_channel();
+    let backlight_events = hid_events.backlights();
     let mut enumerator = hardware.enumerator().with_event_notifier(event_notifier);
     if let Some(registry) = registry {
         enumerator = enumerator.with_registry(registry);
@@ -329,7 +331,10 @@ async fn run_watcher(
         }
     };
     let now = Instant::now();
-    InventoryWorker {
+    let device_io = hardware.device_io();
+    let backlight_io = device_io.clone();
+    let backlight_tx = events.clone();
+    let mut worker = InventoryWorker {
         events,
         refresh_requests,
         rescans,
@@ -339,13 +344,46 @@ async fn run_watcher(
         hid_events,
         schedule: Schedule::new(now),
         wake_detector: WakeDetector::new(SystemTime::now(), now),
-        device_io: hardware.device_io(),
+        device_io,
         hardware,
         refresh_open: true,
         rescans_open: true,
+    };
+    tokio::select! {
+        () = worker.run() => {}
+        () = forward_backlights(backlight_events, backlight_tx, backlight_io) => {}
     }
-    .run()
-    .await;
+}
+
+async fn forward_backlights(
+    mut backlights: watch::Receiver<Option<BacklightUpdate>>,
+    events: mpsc::UnboundedSender<InventoryEvent>,
+    device_io: DeviceIoGate,
+) {
+    while backlights.changed().await.is_ok() {
+        let Some(update) = *backlights.borrow_and_update() else {
+            continue;
+        };
+        if !device_io.allows_io() {
+            continue;
+        }
+        if events
+            .send(InventoryEvent::BacklightChanged {
+                device_index: update.device_index,
+                current_level: update.current_level,
+                levels: update.levels,
+                visible: update.visible,
+            })
+            .is_err()
+        {
+            return;
+        }
+        debug!(
+            device_index = update.device_index,
+            current_level = update.current_level,
+            "backlight event forwarded"
+        );
+    }
 }
 
 struct InventoryWorker {
@@ -419,27 +457,6 @@ impl InventoryWorker {
     }
 
     async fn reconcile(&mut self, trigger: ReconcileTrigger) -> bool {
-        // Backlight notifications already carry the complete user-visible
-        // value. Publish them before the authoritative inventory scan so the
-        // transient OSD is not held behind unrelated HID enumeration.
-        if let ReconcileTrigger::HidEvent(HidppEventSource::BacklightChanged {
-            device_index,
-            current_level,
-            levels,
-            visible,
-        }) = &trigger
-            && self
-                .events
-                .send(InventoryEvent::BacklightChanged {
-                    device_index: *device_index,
-                    current_level: *current_level,
-                    levels: *levels,
-                    visible: *visible,
-                })
-                .is_err()
-        {
-            return false;
-        }
         let (event, needs_repair) = match self.enumerator.enumerate().await {
             Ok(inventories) => {
                 let standalone = self.hardware.enumerate_standalone().await;

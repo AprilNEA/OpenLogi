@@ -190,24 +190,23 @@ fn request_variant_order() {
     assert_wire(&AgentRequest::Identity {}, "16");
     assert_wire(&AgentRequest::Observe { since: 7 }, "1707");
     assert_wire(&AgentRequest::ObserveActionRing { since: 7 }, "1807");
-    assert_wire(&AgentRequest::ObserveBacklight { since: 7 }, "1907");
     assert_wire(
         &AgentRequest::DeclareClient {
             kind: ClientKind::Gui,
         },
-        "1a00",
+        "1900",
     );
     assert_wire(
         &AgentRequest::DeclareClient {
             kind: ClientKind::Cli,
         },
-        "1a01",
+        "1901",
     );
     assert_wire(
         &AgentRequest::DeclareClient {
             kind: ClientKind::Overlay,
         },
-        "1a02",
+        "1902",
     );
 }
 
@@ -220,7 +219,7 @@ fn semantic_read_requests() {
                 slot: 1,
             },
         },
-        "1b0008463030444341464501",
+        "1a0008463030444341464501",
     );
     assert_wire(
         &AgentRequest::ReadBacklight {
@@ -229,7 +228,7 @@ fn semantic_read_requests() {
                 slot: 1,
             },
         },
-        "1c0008463030444341464501",
+        "1b0008463030444341464501",
     );
     assert_wire(
         &AgentRequest::ReadFnLock {
@@ -238,7 +237,7 @@ fn semantic_read_requests() {
                 slot: 1,
             },
         },
-        "1d0008463030444341464501",
+        "1c0008463030444341464501",
     );
     assert_wire(
         &AgentRequest::SetFnLock {
@@ -248,7 +247,7 @@ fn semantic_read_requests() {
             },
             fn_lock: true,
         },
-        "1e000846303044434146450101",
+        "1d000846303044434146450101",
     );
     assert_wire(
         &AgentRequest::UnpairDevice {
@@ -257,8 +256,9 @@ fn semantic_read_requests() {
                 slot: 1,
             },
         },
-        "1f0008463030444341464501",
+        "1e0008463030444341464501",
     );
+    assert_wire(&AgentRequest::ObserveBacklight { since: 7 }, "1f07");
 }
 
 /// A chord crosses the wire as its modifier bits and the key's HID usage.

@@ -92,15 +92,18 @@ async fn observe_backlights(tx: mpsc::UnboundedSender<BacklightObservation>) {
             continue;
         };
         let mut observer = Observer::backlight(client);
-        match observer.next().await {
-            Ok(Some(observation)) => {
-                if tx.send(observation).is_err() {
-                    return;
+        loop {
+            match observer.next().await {
+                Ok(Some(observation)) => {
+                    if tx.send(observation).is_err() {
+                        return;
+                    }
                 }
-            }
-            Ok(_) => {}
-            Err(error) => {
-                debug!(?error, "backlight observation channel disconnected");
+                Ok(None) => {}
+                Err(error) => {
+                    debug!(?error, "backlight observation channel disconnected");
+                    break;
+                }
             }
         }
     }
