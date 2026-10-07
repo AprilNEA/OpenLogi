@@ -142,7 +142,8 @@ fn main() -> Result<()> {
                         .iter()
                         .all(|handle| handle.downcast::<BacklightView>().is_none())
                     {
-                        let _ = cx.open_window(backlight::window_options(), |_, cx| {
+                        let options = backlight::window_options(cx);
+                        let _ = cx.open_window(options, |_, cx| {
                             cx.new(|_| BacklightView::new(observation.clone()))
                         });
                     }

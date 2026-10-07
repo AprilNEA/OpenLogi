@@ -1,8 +1,8 @@
 //! Compact transient keyboard-backlight indicator.
 
 use gpui::{
-    Context, IntoElement, ParentElement, Render, Styled, Window, WindowBackgroundAppearance,
-    WindowKind, WindowOptions, div, px,
+    App, Bounds, Context, IntoElement, ParentElement, Render, Size, Styled, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div, px,
 };
 use openlogi_ipc::BacklightObservation;
 
@@ -63,7 +63,8 @@ fn relative_level(level: u8, levels: u8) -> f32 {
     }
 }
 
-pub(crate) fn window_options() -> WindowOptions {
+pub(crate) fn window_options(cx: &mut App) -> WindowOptions {
+    let bounds = Bounds::centered(None, Size::new(px(280.0), px(88.0)), cx);
     WindowOptions {
         titlebar: None,
         focus: false,
@@ -74,6 +75,7 @@ pub(crate) fn window_options() -> WindowOptions {
         is_minimizable: false,
         window_background: WindowBackgroundAppearance::Transparent,
         app_id: Some("openlogi-backlight-osd".to_string()),
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
         ..WindowOptions::default()
     }
 }

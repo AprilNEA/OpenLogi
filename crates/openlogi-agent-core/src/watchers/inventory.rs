@@ -419,6 +419,27 @@ impl InventoryWorker {
     }
 
     async fn reconcile(&mut self, trigger: ReconcileTrigger) -> bool {
+        // Backlight notifications already carry the complete user-visible
+        // value. Publish them before the authoritative inventory scan so the
+        // transient OSD is not held behind unrelated HID enumeration.
+        if let ReconcileTrigger::HidEvent(HidppEventSource::BacklightChanged {
+            device_index,
+            current_level,
+            levels,
+            visible,
+        }) = &trigger
+            && self
+                .events
+                .send(InventoryEvent::BacklightChanged {
+                    device_index: *device_index,
+                    current_level: *current_level,
+                    levels: *levels,
+                    visible: *visible,
+                })
+                .is_err()
+        {
+            return false;
+        }
         let (event, needs_repair) = match self.enumerator.enumerate().await {
             Ok(inventories) => {
                 let standalone = self.hardware.enumerate_standalone().await;
@@ -445,26 +466,6 @@ impl InventoryWorker {
             && self.events.send(event).is_err()
         {
             debug!("inventory watcher receiver dropped — exiting");
-            return false;
-        }
-        if let ReconcileTrigger::HidEvent(
-            openlogi_hid::inventory::events::HidppEventSource::BacklightChanged {
-                device_index,
-                current_level,
-                levels,
-                visible,
-            },
-        ) = &trigger
-            && self
-                .events
-                .send(InventoryEvent::BacklightChanged {
-                    device_index: *device_index,
-                    current_level: *current_level,
-                    levels: *levels,
-                    visible: *visible,
-                })
-                .is_err()
-        {
             return false;
         }
         self.schedule
