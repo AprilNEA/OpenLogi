@@ -240,6 +240,7 @@ mod tests {
                 events: EventFeatureIndices {
                     wireless_status: Some(7),
                     unified_battery: Some(9),
+                    backlight: None,
                 },
                 probed_at: Instant::now(),
             },
@@ -277,6 +278,7 @@ mod tests {
             EventFeatureIndices {
                 wireless_status: Some(7),
                 unified_battery: Some(9),
+                backlight: None,
             },
             "event feature indexes are immutable and kept"
         );

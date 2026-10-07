@@ -14,6 +14,7 @@
 // crate this one already depends on for locale negotiation.
 rust_i18n::i18n!("../openlogi-ui/locales", fallback = "en");
 
+mod backlight;
 mod ipc;
 mod platform;
 mod ring;
@@ -27,11 +28,16 @@ use tracing::warn;
 
 use openlogi_core::action_ring::DISPLAY_LIFETIME;
 
+use crate::backlight::BacklightView;
 use crate::ipc::OverlayCommand;
 use crate::platform::RingPlacement;
 use crate::ring::RingView;
 use crate::session::{ClickAwaySession, claim_the_role, spawn_click_away_dismissal};
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the overlay bootstraps two independent IPC observation tasks"
+)]
 fn main() -> Result<()> {
     openlogi_core::logging::init_stderr();
 
@@ -40,6 +46,7 @@ fn main() -> Result<()> {
     let _tenancy = claim_the_role()?;
     let ipc::Handle {
         mut invocations,
+        mut backlights,
         commands,
     } = ipc::spawn();
 
@@ -107,6 +114,37 @@ fn main() -> Result<()> {
                             .detach();
                         }
                         Err(error) => warn!(%error, "could not open Actions Ring window"),
+                    }
+                });
+            }
+        })
+        .detach();
+        cx.spawn(async move |cx| {
+            while let Some(observation) = backlights.recv().await {
+                cx.update(|cx| {
+                    for handle in cx.windows() {
+                        if let Some(view) = handle.downcast::<BacklightView>() {
+                            let _ = view.update(cx, |view, _, _| {
+                                view.observation = observation.clone();
+                            });
+                        }
+                    }
+                    if !observation.visible {
+                        for handle in cx.windows() {
+                            if handle.downcast::<BacklightView>().is_some() {
+                                let _ = handle.update(cx, |_, window, _| window.remove_window());
+                            }
+                        }
+                        return;
+                    }
+                    if cx
+                        .windows()
+                        .iter()
+                        .all(|handle| handle.downcast::<BacklightView>().is_none())
+                    {
+                        let _ = cx.open_window(backlight::window_options(), |_, cx| {
+                            cx.new(|_| BacklightView::new(observation.clone()))
+                        });
                     }
                 });
             }

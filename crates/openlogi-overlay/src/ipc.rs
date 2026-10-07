@@ -17,7 +17,9 @@ use std::{
 use openlogi_core::action_ring::DISPLAY_LIFETIME;
 use openlogi_core::binding::ActionRingSlot;
 use openlogi_ipc::client::{self, ConnectError, Observer};
-use openlogi_ipc::{ActionRingInvocation, AgentClient, ClientKind, RingObservation};
+use openlogi_ipc::{
+    ActionRingInvocation, AgentClient, BacklightObservation, ClientKind, RingObservation,
+};
 use succession::Standing;
 use tarpc::context;
 use tokio::sync::mpsc;
@@ -52,6 +54,8 @@ pub(crate) struct Handle {
     /// `None` is no ring — including a dismissal, which is why there is no
     /// separate "close" message to recognise.
     pub(crate) invocations: mpsc::UnboundedReceiver<Option<ActionRingInvocation>>,
+    /// Transient keyboard-backlight indicator state.
+    pub(crate) backlights: mpsc::UnboundedReceiver<BacklightObservation>,
     /// Where the view reports hover, activation, and cancellation.
     pub(crate) commands: mpsc::UnboundedSender<OverlayCommand>,
 }
@@ -60,11 +64,13 @@ pub(crate) struct Handle {
 /// reconnects) on its own.
 pub(crate) fn spawn() -> Handle {
     let (invocation_tx, invocations) = mpsc::unbounded_channel();
+    let (backlight_tx, backlights) = mpsc::unbounded_channel();
     let (commands, mut command_rx) = mpsc::unbounded_channel();
     let started = openlogi_core::worker::spawn("openlogi-overlay-ipc", move |runtime| {
         runtime.block_on(async {
             tokio::join!(
                 observe_invocations(invocation_tx),
+                observe_backlights(backlight_tx),
                 send_commands(&mut command_rx)
             );
         });
@@ -74,7 +80,29 @@ pub(crate) fn spawn() -> Handle {
     }
     Handle {
         invocations,
+        backlights,
         commands,
+    }
+}
+
+async fn observe_backlights(tx: mpsc::UnboundedSender<BacklightObservation>) {
+    loop {
+        let Some(client) = connect().await else {
+            tokio::time::sleep(RETRY_PERIOD).await;
+            continue;
+        };
+        let mut observer = Observer::backlight(client);
+        match observer.next().await {
+            Ok(Some(observation)) => {
+                if tx.send(observation).is_err() {
+                    return;
+                }
+            }
+            Ok(_) => {}
+            Err(error) => {
+                debug!(?error, "backlight observation channel disconnected");
+            }
+        }
     }
 }
 

@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, PoisonError, RwLock};
 
 use hidpp::channel::{HidppChannel, HidppMessage, MessageListenerGuard};
+use hidpp::feature::backlight::BacklightEvent;
 use hidpp::feature::unified_battery::BatteryEvent;
 use hidpp::feature::wireless_device_status::WirelessDeviceStatusEvent;
 use hidpp::protocol::{v10, v20};
@@ -31,6 +32,17 @@ pub enum HidppEventSource {
     WirelessDeviceStatus,
     /// A device's event-capable `UnifiedBattery` feature reported a change.
     UnifiedBattery,
+    /// A keyboard reported a changed backlight level.
+    BacklightChanged {
+        /// HID++ device index that emitted the event.
+        device_index: u8,
+        /// Current backlight level.
+        current_level: u8,
+        /// Number of selectable backlight levels.
+        levels: u8,
+        /// Whether the backlight is available for display.
+        visible: bool,
+    },
 }
 
 /// The sending half of the bounded HID++ reconciliation-request channel.
@@ -125,6 +137,7 @@ pub(crate) fn observed_event_channel() -> (EventNotifier, EventReceiver, EventOb
 pub(super) struct EventFeatureIndices {
     pub(super) wireless_status: Option<u8>,
     pub(super) unified_battery: Option<u8>,
+    pub(super) backlight: Option<u8>,
 }
 
 impl EventFeatureIndices {
@@ -137,6 +150,7 @@ impl EventFeatureIndices {
             match id {
                 0x1d4b => indices.wireless_status = Some(index),
                 0x1004 => indices.unified_battery = Some(index),
+                0x1982 => indices.backlight = Some(index),
                 _ => {}
             }
         }
@@ -159,6 +173,22 @@ impl EventFeatureIndices {
             && BatteryEvent::decode(function_id, &payload).is_some()
         {
             return Some(HidppEventSource::UnifiedBattery);
+        }
+        if self.backlight == Some(header.feature_index)
+            && let Some(BacklightEvent::InfoChanged(update)) =
+                BacklightEvent::decode(function_id, &payload)
+        {
+            return Some(HidppEventSource::BacklightChanged {
+                device_index: header.device_index,
+                current_level: update.current_level,
+                levels: update.nb_levels,
+                visible: !matches!(
+                    update.status,
+                    hidpp::feature::backlight::BacklightStatus::DisabledBySoftware
+                        | hidpp::feature::backlight::BacklightStatus::DisabledByCriticalBattery
+                        | hidpp::feature::backlight::BacklightStatus::AlsSaturated
+                ),
+            });
         }
         None
     }
@@ -327,6 +357,7 @@ mod tests {
             EventFeatureIndices {
                 wireless_status: Some(2),
                 unified_battery: Some(3),
+                backlight: None,
             }
         );
     }
@@ -359,6 +390,7 @@ mod tests {
             features: EventFeatureIndices {
                 wireless_status: Some(5),
                 unified_battery: None,
+                backlight: None,
             },
         });
         state.receiver_snapshot_depth.store(1, Ordering::Release);
@@ -387,6 +419,7 @@ mod tests {
             features: EventFeatureIndices {
                 wireless_status: Some(5),
                 unified_battery: Some(7),
+                backlight: None,
             },
         });
 

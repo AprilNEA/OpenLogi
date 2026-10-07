@@ -67,7 +67,8 @@ pub use succession::Identity;
 ///      `HidppOperation::ReadFnLock` appended.
 /// v33: `Agent::unpair_device` appended.
 /// v34: `KeyCombo` gains the Super modifier bit (`Super`, `Win`, `Meta`).
-pub const PROTOCOL_VERSION: u32 = 34;
+/// v35: transient keyboard backlight observations appended.
+pub const PROTOCOL_VERSION: u32 = 35;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -414,6 +415,19 @@ pub struct RingObservation {
     pub invocation: Option<ActionRingInvocation>,
 }
 
+/// A transient keyboard backlight level indicator.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BacklightObservation {
+    /// Generation of this observation on the backlight channel.
+    pub generation: Generation,
+    /// Current level, where zero is off.
+    pub current_level: u8,
+    /// Number of levels reported by the keyboard.
+    pub levels: u8,
+    /// Whether the firmware reports a visible backlight state.
+    pub visible: bool,
+}
+
 /// Why an Actions Ring interaction command was rejected.
 ///
 /// Variants are append-only because this enum crosses bincode IPC.
@@ -561,6 +575,8 @@ pub trait Agent {
     /// then return it. Same contract as [`Agent::observe`] — whole state, hold
     /// window, `0` for "seen nothing" — over the ring's own cell.
     async fn observe_action_ring(since: Generation) -> RingObservation;
+    /// Block until the transient keyboard-backlight indicator changes.
+    async fn observe_backlight(since: Generation) -> BacklightObservation;
     /// Declare what kind of client this connection is. Informational for an
     /// armed agent, load-bearing for a dormant one: the macOS dormancy gate
     /// arms only on [`ClientKind::Gui`]. The takeover probe never declares —

@@ -65,6 +65,13 @@ pub enum InventoryEvent {
     /// set/route/online state looks unchanged across the gap, so the agent
     /// re-applies volatile settings on the next snapshot (#189).
     SystemWake,
+    /// A keyboard firmware event carrying the latest backlight level.
+    BacklightChanged {
+        device_index: u8,
+        current_level: u8,
+        levels: u8,
+        visible: bool,
+    },
 }
 
 /// The watcher's cross-pass memory, factored out of the I/O loop so the
@@ -438,6 +445,26 @@ impl InventoryWorker {
             && self.events.send(event).is_err()
         {
             debug!("inventory watcher receiver dropped — exiting");
+            return false;
+        }
+        if let ReconcileTrigger::HidEvent(
+            openlogi_hid::inventory::events::HidppEventSource::BacklightChanged {
+                device_index,
+                current_level,
+                levels,
+                visible,
+            },
+        ) = &trigger
+            && self
+                .events
+                .send(InventoryEvent::BacklightChanged {
+                    device_index: *device_index,
+                    current_level: *current_level,
+                    levels: *levels,
+                    visible: *visible,
+                })
+                .is_err()
+        {
             return false;
         }
         self.schedule

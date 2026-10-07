@@ -46,9 +46,10 @@ use openlogi_core::hid::{
 };
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
-    AgentSnapshot, AgentStatus, ClientKind, ConfigReloadError, ForegroundApps, FoundDevice,
-    Identity, InventoryHealth, MonitorEvent, Observation, PROTOCOL_VERSION, PairingCommandError,
-    PairingFailure, PairingPhase, PairingUpdate, RingObservation,
+    AgentSnapshot, AgentStatus, BacklightObservation, ClientKind, ConfigReloadError,
+    ForegroundApps, FoundDevice, Identity, InventoryHealth, MonitorEvent, Observation,
+    PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase, PairingUpdate,
+    RingObservation,
 };
 use succession::{Compat, Run};
 
@@ -102,7 +103,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 34);
+    assert_eq!(PROTOCOL_VERSION, 35);
 }
 
 #[test]
@@ -189,23 +190,24 @@ fn request_variant_order() {
     assert_wire(&AgentRequest::Identity {}, "16");
     assert_wire(&AgentRequest::Observe { since: 7 }, "1707");
     assert_wire(&AgentRequest::ObserveActionRing { since: 7 }, "1807");
+    assert_wire(&AgentRequest::ObserveBacklight { since: 7 }, "1907");
     assert_wire(
         &AgentRequest::DeclareClient {
             kind: ClientKind::Gui,
         },
-        "1900",
+        "1a00",
     );
     assert_wire(
         &AgentRequest::DeclareClient {
             kind: ClientKind::Cli,
         },
-        "1901",
+        "1a01",
     );
     assert_wire(
         &AgentRequest::DeclareClient {
             kind: ClientKind::Overlay,
         },
-        "1902",
+        "1a02",
     );
 }
 
@@ -218,7 +220,7 @@ fn semantic_read_requests() {
                 slot: 1,
             },
         },
-        "1a0008463030444341464501",
+        "1b0008463030444341464501",
     );
     assert_wire(
         &AgentRequest::ReadBacklight {
@@ -227,7 +229,7 @@ fn semantic_read_requests() {
                 slot: 1,
             },
         },
-        "1b0008463030444341464501",
+        "1c0008463030444341464501",
     );
     assert_wire(
         &AgentRequest::ReadFnLock {
@@ -236,7 +238,7 @@ fn semantic_read_requests() {
                 slot: 1,
             },
         },
-        "1c0008463030444341464501",
+        "1d0008463030444341464501",
     );
     assert_wire(
         &AgentRequest::SetFnLock {
@@ -246,7 +248,7 @@ fn semantic_read_requests() {
             },
             fn_lock: true,
         },
-        "1d000846303044434146450101",
+        "1e000846303044434146450101",
     );
     assert_wire(
         &AgentRequest::UnpairDevice {
@@ -255,7 +257,7 @@ fn semantic_read_requests() {
                 slot: 1,
             },
         },
-        "1e0008463030444341464501",
+        "1f0008463030444341464501",
     );
 }
 
@@ -312,6 +314,15 @@ fn action_ring_types() {
             invocation: None,
         },
         "0500",
+    );
+    assert_wire(
+        &BacklightObservation {
+            generation: 7,
+            current_level: 3,
+            levels: 8,
+            visible: true,
+        },
+        "07030801",
     );
     assert_wire(&ActionRingCommandError::SessionNotFound, "00");
     assert_wire(&ActionRingCommandError::SlotEmpty, "01");

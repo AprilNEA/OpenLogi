@@ -33,8 +33,8 @@ use tarpc::client::{self, RpcError};
 use tarpc::context::{self, Context};
 
 use crate::{
-    AgentClient, ClientKind, Generation, OBSERVE_HOLD, Observation, PROTOCOL_VERSION,
-    RingObservation, transport,
+    AgentClient, BacklightObservation, ClientKind, Generation, OBSERVE_HOLD, Observation,
+    PROTOCOL_VERSION, RingObservation, transport,
 };
 
 /// Why a client could not be established.
@@ -215,6 +215,12 @@ impl Stamped for RingObservation {
     }
 }
 
+impl Stamped for BacklightObservation {
+    fn generation(&self) -> Generation {
+        self.generation
+    }
+}
+
 /// One connection's view of the agent's generation counter.
 ///
 /// Starts at 0 — "I have seen nothing" — so the first answer is the agent's
@@ -306,6 +312,17 @@ impl Observer<RingObservation> {
         Self::new(client, |client, since| {
             let client = client.clone();
             Box::pin(async move { client.observe_action_ring(observe_context(), since).await })
+        })
+    }
+}
+
+impl Observer<BacklightObservation> {
+    /// Observe transient keyboard-backlight indicators over `client`.
+    #[must_use]
+    pub fn backlight(client: AgentClient) -> Self {
+        Self::new(client, |client, since| {
+            let client = client.clone();
+            Box::pin(async move { client.observe_backlight(observe_context(), since).await })
         })
     }
 }
