@@ -167,12 +167,10 @@ fn dispatch_native(action: &Action, native: NativeAction) {
 /// (-1/0/1) scaled by the fixed relative-axis magnitude the four
 /// `Scroll*`/`HorizontalScroll*` actions have always used.
 fn dispatch_scroll(dx: i8, dy: i8) {
-    if dy != 0 {
-        scroll(RelativeAxisCode::REL_WHEEL, i32::from(dy) * 3);
-    }
-    if dx != 0 {
-        scroll(RelativeAxisCode::REL_HWHEEL, i32::from(dx) * 3);
-    }
+    post_scroll(ScrollDelta::wheel_ticks(
+        f64::from(dx) * 3.0,
+        f64::from(dy) * 3.0,
+    ));
 }
 
 /// Not implemented yet: unicode text has no uinput encoding without a keymap.
@@ -338,11 +336,6 @@ fn held_key_events(keys: &[KeyCode], phase: KeyPhase) -> Vec<InputEvent> {
 fn click(button: KeyCode) {
     emit(&[key_ev(button, 1), syn()]);
     emit(&[key_ev(button, 0), syn()]);
-}
-
-/// Inject a single relative-axis delta followed by `SYN_REPORT`.
-fn scroll(axis: RelativeAxisCode, value: i32) {
-    emit(&[rel_ev(axis, value), syn()]);
 }
 
 pub(super) fn post_scroll(delta: ScrollDelta) {
