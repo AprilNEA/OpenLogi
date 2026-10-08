@@ -26,6 +26,7 @@
 mod accum;
 mod arm;
 pub(super) mod main_wheel;
+mod spy;
 
 use std::num::NonZeroU8;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -45,6 +46,9 @@ use accum::CaptureAccum;
 pub(crate) use arm::enumerate_controls;
 use arm::{ArmedControls, ArmedThumbwheel, arm_controls};
 pub use main_wheel::MainWheelDivert;
+pub(crate) use spy::SpyRestore;
+use spy::{ArmedOnboard, SpyEdges};
+pub use spy::{HostMode, OnboardTarget};
 
 use super::capture_restore::ArmedReporting;
 pub use super::capture_restore::{
@@ -189,6 +193,8 @@ pub struct CaptureSpec {
     /// mode along with the divert; `None` leaves the wheel native. Inert on a
     /// device without the feature.
     pub divert_main_wheel: Option<MainWheelDivert>,
+    /// G-series host mode or onboard profile.
+    pub onboard: Option<OnboardTarget>,
 }
 
 /// Capture the controls selected by `spec` on `route` until `host.shutdown`
@@ -234,6 +240,7 @@ struct GestureCapture {
     /// The status of the last thumb-wheel report, for [`thumbwheel_input`].
     /// Behind a `Mutex` for the same reason as `accum`.
     thumb_status: Arc<Mutex<RotationStatus>>,
+    spy_edges: Arc<Mutex<SpyEdges>>,
 }
 
 impl GestureCapture {
@@ -242,6 +249,7 @@ impl GestureCapture {
             armed,
             accum: Arc::default(),
             thumb_status: Arc::new(Mutex::new(RotationStatus::Inactive)),
+            spy_edges: Arc::default(),
         }
     }
 }
@@ -261,6 +269,10 @@ impl ArmedCapture for GestureCapture {
             wheel_buttons = armed.wheel_button_cids.len(),
             thumbwheel = armed.thumb.is_some(),
             main_wheel = armed.main_wheel.is_some(),
+            spy_buttons = armed
+                .onboard
+                .as_ref()
+                .map_or(0, ArmedOnboard::captured_count),
             wake_rearm,
             "control capture active"
         );
@@ -300,7 +312,18 @@ impl ArmedCapture for GestureCapture {
             .main_wheel
             .as_ref()
             .map(|wheel| (wheel.feature_index, wheel.per_notch));
+        let spy = armed.onboard.as_ref().and_then(ArmedOnboard::spy);
+        let spy_edges = Arc::clone(&self.spy_edges);
         move |msg| {
+            if let Some((spy_index, captured)) = &spy
+                && let Some(mask) = spy::decode_mask(msg, device_index, *spy_index)
+            {
+                spy_edges
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .on_mask(mask, captured, &sink);
+                return;
+            }
             if let Some(idx) = reprog_index
                 && let Some(event) = reprog_controls::decode_event(msg, device_index, idx)
             {
@@ -361,6 +384,10 @@ impl ArmedCapture for GestureCapture {
             .thumb_status
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = RotationStatus::Inactive;
+        *self
+            .spy_edges
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = SpyEdges::default();
     }
 
     async fn rearm(&self) {

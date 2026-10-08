@@ -208,6 +208,12 @@ pub struct Capabilities {
     /// `force_sensing`: crosses the IPC and the persisted identity.
     #[serde(default)]
     pub disable_keys: bool,
+    /// HID++ `0x8100` onboard profiles.
+    #[serde(default)]
+    pub onboard_profiles: bool,
+    /// HID++ `0x8110` button spy.
+    #[serde(default)]
+    pub button_spy: bool,
 }
 
 impl Capabilities {
@@ -215,7 +221,7 @@ impl Capabilities {
     /// Membership of a driving feature ID flips the corresponding flag.
     #[must_use]
     pub fn from_feature_ids(ids: &[u16]) -> Self {
-        const BUTTONS: [u16; 5] = [0x1b00, 0x1b01, 0x1b02, 0x1b03, 0x1b04];
+        const BUTTONS: [u16; 6] = [0x1b00, 0x1b01, 0x1b02, 0x1b03, 0x1b04, 0x8110];
         const POINTER: [u16; 2] = [0x2201, 0x2202];
         // Every family here is driven by `set_keyboard_color`, which tries
         // effect engines before per-zone paths. The 0x198x backlight is not
@@ -248,6 +254,8 @@ impl Capabilities {
             // force; the feature table alone cannot say.
             force_sensing: ids.contains(&0x19c0),
             disable_keys: ids.contains(&0x4521),
+            onboard_profiles: ids.contains(&0x8100),
+            button_spy: ids.contains(&0x8110),
         }
     }
 
@@ -765,6 +773,8 @@ mod tests {
                     pointer_scaling: false,
                     force_sensing: false,
                     disable_keys: false,
+                    onboard_profiles: false,
+                    button_spy: false,
                 }),
                 settings_revision: 0,
             }],
@@ -886,6 +896,8 @@ mod tests {
                 pointer_scaling: false,
                 force_sensing: false,
                 disable_keys: false,
+                onboard_profiles: false,
+                button_spy: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
@@ -912,6 +924,8 @@ mod tests {
                 pointer_scaling: false,
                 force_sensing: false,
                 disable_keys: false,
+                onboard_profiles: false,
+                button_spy: false,
             }
         );
         // No driving features → nothing offered.

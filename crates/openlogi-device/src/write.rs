@@ -32,9 +32,10 @@ mod haptic;
 mod hires_wheel;
 mod lighting;
 mod litra;
+mod onboard;
 mod os_layout;
 mod pointer_scaling;
-mod report_rate;
+pub(crate) mod report_rate;
 mod smartshift;
 
 pub use backlight::{get_backlight, get_backlight_on, update_backlight, update_backlight_on};
@@ -81,6 +82,7 @@ pub use litra::{
     encode_command as encode_litra_command, find_litra, litra_model_for_route, matches_litra,
     read_state as read_litra_state, watch as watch_litra,
 };
+pub use onboard::{get_onboard, get_onboard_on};
 pub use openlogi_core::hid::{DisableKeysMask, DisableKeysState};
 pub use openlogi_core::hid::{
     EasySwitchHosts, EasySwitchSlot, HostConnection, HostOsInfo, HostOsKind,

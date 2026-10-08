@@ -27,6 +27,7 @@ use crate::hardware::{
 };
 use crate::pointer_speed::{PrecisionPress, SpeedWrite};
 use crate::{DpiCycleState, DpiCycles, PointerSpeeds};
+use openlogi_hid::{DeviceRoute, Dpi};
 
 /// Wait for a runtime worker's next command, or until its earliest deadline.
 ///
@@ -161,6 +162,17 @@ impl ActionExecutor {
         });
     }
 
+    /// Step `device_key`'s DPI presets one up or down, without wrapping.
+    fn step_dpi(&self, device_key: Option<&str>, up: bool) -> Option<(Dpi, Option<DeviceRoute>)> {
+        match self.dpi_cycle.write() {
+            Ok(mut guard) => guard.state_for(device_key).and_then(|state| state.step(up)),
+            Err(e) => {
+                warn!(error = %e, "dpi_cycle lock poisoned — step skipped");
+                None
+            }
+        }
+    }
+
     fn dispatch_to(&self, action: &Action, device_key: Option<&str>, target: ActionDispatchTarget) {
         // The ring is drawn by OpenLogi at the cursor and acts on no window, so
         // no pointer target gates it. It must not: while the ring is showing,
@@ -201,6 +213,9 @@ impl ActionExecutor {
                         None
                     }
                 }
+            }
+            Action::NextDpiPreset | Action::PreviousDpiPreset => {
+                self.step_dpi(device_key, matches!(action, Action::NextDpiPreset))
             }
             Action::SetDpiPreset(i) => match self.dpi_cycle.write() {
                 Ok(mut guard) => guard
@@ -269,7 +284,13 @@ impl ActionExecutor {
             } else {
                 debug!(%dpi, "no target device — DPI write skipped");
             }
-        } else if matches!(action, Action::CycleDpiPresets | Action::SetDpiPreset(_)) {
+        } else if matches!(
+            action,
+            Action::CycleDpiPresets
+                | Action::SetDpiPreset(_)
+                | Action::NextDpiPreset
+                | Action::PreviousDpiPreset
+        ) {
             info!(
                 action = %action.label(),
                 "no DPI presets configured for active device — press ignored"
@@ -278,9 +299,38 @@ impl ActionExecutor {
     }
 }
 
+#[derive(Default)]
+struct HeldDpiShifts {
+    by_press: HashMap<PressToken, (DeviceRoute, Dpi)>,
+}
+
+impl HeldDpiShifts {
+    fn start(&mut self, executor: &ActionExecutor, press: &PressToken, device_key: Option<&str>) {
+        let shift = executor
+            .dpi_cycle
+            .read()
+            .ok()
+            .and_then(|cycles| cycles.target_for_shift(device_key));
+        let Some((low, restore, route)) = shift else {
+            debug!("no DPI presets or target — DPI shift ignored");
+            return;
+        };
+        info!(%low, "DPI shift held");
+        executor.write_speed(executor.pointer_speeds.preset_write(&route, low));
+        self.by_press.insert(press.clone(), (route, restore));
+    }
+
+    fn end(&mut self, executor: &ActionExecutor, press: &PressToken) {
+        if let Some((route, restore)) = self.by_press.remove(press) {
+            executor.write_speed(executor.pointer_speeds.preset_write(&route, restore));
+        }
+    }
+}
+
 struct ButtonEventHandler {
     executor: ActionExecutor,
     held: HeldShortcuts,
+    held_dpi: HeldDpiShifts,
 }
 
 impl ButtonEventHandler {
@@ -288,6 +338,7 @@ impl ButtonEventHandler {
         Self {
             executor,
             held: HeldShortcuts::default(),
+            held_dpi: HeldDpiShifts::default(),
         }
     }
 
@@ -303,6 +354,7 @@ impl ButtonEventHandler {
             }
             ButtonRuntimeEvent::Ended { press, reason } => {
                 self.held.end(press.token());
+                self.held_dpi.end(&self.executor, press.token());
                 if let EndReason::Canceled(reason) = reason {
                     match press.control() {
                         PressControl::Button(button) => {
@@ -325,6 +377,10 @@ impl ButtonEventHandler {
         target: ActionDispatchTarget,
     ) {
         if action.held_chord().is_some() && target.resolve(action).is_none() {
+            return;
+        }
+        if matches!(action, Action::DpiShift) {
+            self.held_dpi.start(&self.executor, press, device_key);
             return;
         }
         if !self.held.start(press, action) {

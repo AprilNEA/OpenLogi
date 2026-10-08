@@ -232,6 +232,7 @@ impl ArmedCapture for ArmedKeys {
             ReprogRestore::new(feature_index, self.reporting),
             None,
             None,
+            None,
         )
     }
 }

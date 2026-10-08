@@ -418,3 +418,79 @@ fn a_saved_report_rate_survives_route_adoption() {
         Some(ReportRate::new(500))
     );
 }
+
+#[test]
+fn onboard_memory_and_report_rate_roundtrip() {
+    let mut cfg = Config::default();
+    cfg.set_onboard_memory("unit:1", Some(OnboardMemory::Profile(5)));
+    cfg.set_report_rate("unit:1", ReportRate::new(1000));
+    cfg.set_onboard_memory("unit:2", Some(OnboardMemory::Off));
+    let restored = write_and_read(&cfg);
+    assert_eq!(
+        restored.onboard_memory("unit:1"),
+        Some(OnboardMemory::Profile(5))
+    );
+    assert_eq!(restored.onboard_memory("unit:2"), Some(OnboardMemory::Off));
+    assert_eq!(restored.report_rate("unit:1"), Some(ReportRate::new(1000)));
+}
+
+#[test]
+fn host_mode_is_implied_only_by_host_only_buttons_or_report_rate() {
+    let layout = Some(&G502_LIGHTSPEED);
+    let mut cfg = Config::default();
+    assert_eq!(cfg.effective_onboard_memory("g502", layout), None);
+
+    cfg.set_binding("g502", ButtonId::Back, Binding::Single(Action::Copy));
+    assert_eq!(cfg.effective_onboard_memory("g502", layout), None);
+
+    cfg.set_binding(
+        "g502",
+        ButtonId::G7,
+        Binding::Single(Action::PreviousDpiPreset),
+    );
+    assert_eq!(cfg.effective_onboard_memory("g502", layout), None);
+
+    cfg.set_binding("g502", ButtonId::G7, Binding::Single(Action::Copy));
+    assert_eq!(
+        cfg.effective_onboard_memory("g502", layout),
+        Some(OnboardMemory::Off)
+    );
+    assert_eq!(cfg.effective_onboard_memory("g502", None), None);
+
+    cfg.set_onboard_memory("g502", Some(OnboardMemory::Profile(1)));
+    assert_eq!(
+        cfg.effective_onboard_memory("g502", layout),
+        Some(OnboardMemory::Profile(1))
+    );
+
+    let mut rate_only = Config::default();
+    rate_only.set_report_rate("g502", ReportRate::new(500));
+    assert_eq!(
+        rate_only.effective_onboard_memory("g502", layout),
+        Some(OnboardMemory::Off)
+    );
+}
+
+#[test]
+fn gshift_layer_roundtrips_and_needs_host_mode() {
+    let layout = Some(&G502_LIGHTSPEED);
+    let mut cfg = Config::default();
+    cfg.set_binding("g502", ButtonId::Forward, Binding::Single(Action::GShift));
+    assert!(cfg.uses_gshift("g502"));
+    assert_eq!(
+        cfg.effective_onboard_memory("g502", layout),
+        Some(OnboardMemory::Off)
+    );
+
+    cfg.set_gshift_binding("g502", ButtonId::G8, Some(Action::VolumeUp));
+    let restored = write_and_read(&cfg);
+    assert_eq!(
+        restored
+            .gshift_overrides("g502")
+            .and_then(|layer| layer.get(&ButtonId::G8)),
+        Some(&Action::VolumeUp)
+    );
+
+    cfg.set_gshift_binding("g502", ButtonId::G8, None);
+    assert_eq!(cfg.gshift_overrides("g502"), None);
+}
