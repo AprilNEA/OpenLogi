@@ -19,8 +19,8 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use openlogi_core::binding::{Action, ButtonId, GESTURE_SWIPE_THRESHOLD, GestureDirection};
-use openlogi_inject::SpaceSwipePhase;
+use openlogi_core::binding::{Action, ButtonId, GestureDirection};
+use openlogi_inject::{SpacePosition, SpaceSwipePhase};
 
 use crate::runtime::HidppSessionId;
 
@@ -39,6 +39,9 @@ const FLICK_MIN: f64 = 0.1;
 const FLICK_FINISH: f64 = 0.55;
 /// A motion gap this long means the hand stopped: the release carries no speed.
 const STALE_MOTION: Duration = Duration::from_millis(100);
+/// Reports closer together than this (the commit's own travel arriving with
+/// the commit) move the transition but are no speed sample.
+const MIN_SPEED_SAMPLE: Duration = Duration::from_millis(2);
 /// Longest wait for a completed switch to land before the next transition
 /// starts anyway (the Dock may not report a change it did not make).
 const SETTLE_TIMEOUT: Duration = Duration::from_millis(500);
@@ -55,11 +58,12 @@ pub(super) fn configured_travel() -> Option<f64> {
 /// What the transition asks of the desktop it runs on.
 #[derive(Clone, Copy)]
 pub(super) struct SpaceProbe {
-    /// Whether a desktop exists before and after the current one; `None`
-    /// when unknown (then both are assumed).
-    pub(super) neighbors: fn() -> Option<(bool, bool)>,
-    /// A count that ticks when the active desktop changes; `None` when the
-    /// platform does not report it (then settling waits out the timeout).
+    /// Where the display under the cursor is in its row of desktops; `None`
+    /// when unknown (then both neighbours are assumed and a landing is read
+    /// from `changes` alone).
+    pub(super) position: fn() -> Option<SpacePosition>,
+    /// A count that ticks when any display's active desktop changes; `None`
+    /// when the platform does not report it.
     pub(super) changes: fn() -> Option<u64>,
 }
 
@@ -67,7 +71,7 @@ impl SpaceProbe {
     /// The live desktop.
     #[cfg_attr(test, expect(dead_code, reason = "unit tests read a fake desktop"))]
     pub(super) const NATIVE: Self = Self {
-        neighbors: openlogi_inject::space_neighbors,
+        position: openlogi_inject::space_position,
         changes: openlogi_inject::space_change_count,
     };
 }
@@ -113,8 +117,16 @@ struct Bounds {
 
 impl Bounds {
     fn read(probe: SpaceProbe) -> Self {
-        let (previous, next) = (probe.neighbors)().unwrap_or((true, true));
-        Self { previous, next }
+        (probe.position)().map_or(
+            Self {
+                previous: true,
+                next: true,
+            },
+            |position| Self {
+                previous: position.has_previous,
+                next: position.has_next,
+            },
+        )
     }
 
     /// Whether a desktop exists toward progress of `sign`.
@@ -129,7 +141,11 @@ enum Stage {
     /// A switch just completed; motion is dropped until it lands.
     Settling {
         since: Instant,
+        /// The change count when the switch completed.
         changes: Option<u64>,
+        /// This display's desktop when the switch completed, so a change on
+        /// another display is not mistaken for this one landing.
+        space: Option<u64>,
     },
 }
 
@@ -174,7 +190,8 @@ impl SpaceSwipes {
 
     /// Open a live transition for a committed swipe bound to a desktop action,
     /// returning its first frame; `None` (nothing opened) for anything else.
-    /// `opposite` is the action bound to the reverse swipe.
+    /// `opposite` is the action bound to the reverse swipe. It opens at zero:
+    /// the commit's own travel follows as the hold's first motion.
     pub(super) fn begin(
         &mut self,
         session: &HidppSessionId,
@@ -184,33 +201,43 @@ impl SpaceSwipes {
         opposite: Option<&Action>,
         now: Instant,
     ) -> Option<Frame> {
-        let travel = self.travel?;
+        // Live transitions are off without a travel per desktop.
+        self.travel?;
         let source = horizontal_sign(direction)?;
         let target = desktop_sign(action)?;
         let swings_both_ways = opposite.and_then(desktop_sign) == Some(-target);
         // Subscribe to Space changes before the first switch can land.
         let _ = (self.probe.changes)();
-        // The commit already travelled the swipe threshold.
-        let progress = target * f64::from(GESTURE_SWIPE_THRESHOLD) / travel;
         self.active.insert(
             (session.clone(), button),
             Transition {
                 polarity: target * source,
                 keep_sign: (!swings_both_ways).then_some(target),
                 stage: Stage::InFlight {
-                    progress,
+                    progress: 0.0,
                     bounds: Bounds::read(self.probe),
                 },
                 velocity: 0.0,
                 moved_at: now,
             },
         );
-        Some(Frame::new(progress, SpaceSwipePhase::Began))
+        Some(Frame::new(0.0, SpaceSwipePhase::Began))
     }
 
     /// Forget a transition whose first frame could not be posted.
     pub(super) fn abandon(&mut self, session: &HidppSessionId, button: ButtonId) {
         self.active.remove(&(session.clone(), button));
+    }
+
+    /// Spring back the transition `button`'s hold is driving, if any.
+    pub(super) fn cancel(&mut self, session: &HidppSessionId, button: ButtonId) -> Vec<Frame> {
+        match self.active.remove(&(session.clone(), button)) {
+            Some(Transition {
+                stage: Stage::InFlight { progress, .. },
+                ..
+            }) => vec![Frame::new(progress, SpaceSwipePhase::Cancelled)],
+            _ => Vec::new(),
+        }
     }
 
     /// Follow one raw-XY report of the hold, returning the frames to post.
@@ -232,7 +259,7 @@ impl SpaceSwipes {
         if elapsed >= STALE_MOTION {
             t.velocity = 0.0;
         }
-        if !elapsed.is_zero() {
+        if elapsed >= MIN_SPEED_SAMPLE {
             t.velocity = 0.5 * t.velocity + 0.5 * delta / elapsed.as_secs_f64();
         }
         t.moved_at = now;
@@ -243,10 +270,25 @@ impl SpaceSwipes {
         };
 
         match &mut t.stage {
-            Stage::Settling { since, changes } => {
-                let landed = (probe.changes)()
+            Stage::Settling {
+                since,
+                changes,
+                space,
+            } => {
+                // Landed once a change was reported and this display's own
+                // desktop moved on; either signal alone is not enough on a
+                // multi-display desktop.
+                let ticked = (probe.changes)()
                     .zip(*changes)
-                    .is_some_and(|(current, at_end)| current != at_end);
+                    .map(|(current, at_end)| current != at_end);
+                let moved = (probe.position)()
+                    .map(|position| position.current)
+                    .zip(*space)
+                    .map(|(current, at_end)| current != at_end);
+                let landed = match (ticked, moved) {
+                    (None, None) => false,
+                    (ticked, moved) => ticked.unwrap_or(true) && moved.unwrap_or(true),
+                };
                 if !landed && now.saturating_duration_since(*since) < SETTLE_TIMEOUT {
                     return Vec::new();
                 }
@@ -275,6 +317,7 @@ impl SpaceSwipes {
                 t.stage = Stage::Settling {
                     since: now,
                     changes: (probe.changes)(),
+                    space: (probe.position)().map(|position| position.current),
                 };
                 vec![Frame::new(sign, SpaceSwipePhase::Ended)]
             }

@@ -85,7 +85,7 @@ use scroll::dispatch_scroll;
 pub(super) use scroll::{post_phased_scroll, post_scroll, post_smooth_scroll};
 pub(super) use spaces::natural_scrolling;
 use spaces::{next_desktop, previous_desktop};
-pub(super) use spaces::{post_space_swipe, space_change_count, space_neighbors};
+pub(super) use spaces::{post_space_swipe, space_change_count, space_position};
 use symbolic_hotkey::{capture_region, screenshot};
 
 // NX_KEYTYPE_* constants from <IOKit/hidsystem/ev_keymap.h>.
