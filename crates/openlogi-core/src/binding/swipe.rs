@@ -113,6 +113,8 @@ pub struct SwipeAccumulator {
     repeat_cross: i32,
     /// When the last motion arrived, to detect the pause that ends a stroke.
     moved_at: Option<Instant>,
+    /// The travel behind the latest fresh commit, before it restarted.
+    committed: (i32, i32),
 }
 
 impl SwipeAccumulator {
@@ -126,6 +128,7 @@ impl SwipeAccumulator {
         self.repeat = 0;
         self.repeat_cross = 0;
         self.moved_at = None;
+        self.committed = (0, 0);
     }
 
     /// Whether a hold is in progress (between [`Self::begin`] and [`Self::end`]),
@@ -228,6 +231,7 @@ impl SwipeAccumulator {
         if held_long_enough && let Some(dir) = detect_swipe(self.dx, self.dy) {
             self.fired = true;
             self.last = Some(dir);
+            self.committed = (self.dx, self.dy);
             self.repeat = 0;
             self.repeat_cross = 0;
             self.dx = 0;
@@ -235,6 +239,13 @@ impl SwipeAccumulator {
             return Some(dir);
         }
         None
+    }
+
+    /// The travel behind the hold's latest fresh (non-repeat) commit, so a
+    /// live consumer opened at that commit starts where the hand already is.
+    #[must_use]
+    pub fn committed_travel(&self) -> (i32, i32) {
+        self.committed
     }
 
     /// Whether the current hold has committed a swipe. Capture paths stream

@@ -46,7 +46,7 @@ fn next_gesture(
 }
 
 #[test]
-fn motion_streams_only_after_the_hold_commits() {
+fn motion_streams_from_the_commit_on() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut acc = CaptureAccum::default();
     handle_reprog(&mut acc, press(), GESTURE, &[], &[], &tx);
@@ -65,11 +65,16 @@ fn motion_streams_only_after_the_hold_commits() {
             CapturedInput::Gesture(ButtonId::GestureButton, GestureDirection::Right),
             CapturedInput::GestureMotion {
                 button: ButtonId::GestureButton,
+                dx: 60,
+                dy: 0,
+            },
+            CapturedInput::GestureMotion {
+                button: ButtonId::GestureButton,
                 dx: 7,
                 dy: 0,
             },
         ],
-        "pre-commit travel stays inside the accumulator; later travel streams"
+        "the commit streams the whole committing travel once, then each later report"
     );
 }
 
@@ -575,6 +580,15 @@ fn a_side_gesture_button_uses_its_hidpp_raw_xy() {
     );
     assert_eq!(
         rx.try_recv(),
+        Ok(CapturedInput::GestureMotion {
+            button: ButtonId::Forward,
+            dx: -120,
+            dy: 5,
+        }),
+        "the commit's travel streams for a live consumer"
+    );
+    assert_eq!(
+        rx.try_recv(),
         Ok(CapturedInput::ButtonUp(ButtonId::Forward))
     );
     assert!(
@@ -642,6 +656,15 @@ fn a_dpi_gesture_button_uses_the_shared_raw_xy_path() {
             ButtonId::DpiToggle,
             GestureDirection::Up
         ))
+    );
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::GestureMotion {
+            button: ButtonId::DpiToggle,
+            dx: 5,
+            dy: -120,
+        }),
+        "the commit's travel streams for a live consumer"
     );
     assert_eq!(
         rx.try_recv(),
