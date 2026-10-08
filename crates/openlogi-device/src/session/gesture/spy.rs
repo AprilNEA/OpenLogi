@@ -159,13 +159,11 @@ impl ArmedOnboard {
         spy.start_spy().await?;
         if let (Some(index), Some(rate)) = (rate_index, host.report_rate) {
             let feature = ReportRateFeature::new(Arc::clone(&self.chan), self.device_index, index);
-            if let Some(ms) = legacy_interval(rate) {
-                if let Err(error) = feature.set_report_rate(ms).await {
-                    warn!(%rate, ?error, "report rate write failed");
-                }
-            } else {
-                warn!(%rate, "report rate has no 0x8060 interval");
-            }
+            // A rate `0x8060` has no interval for is refused like one the mouse
+            // does not list.
+            let ms = legacy_interval(rate)
+                .ok_or(Hidpp20Error::Feature(v20::ErrorType::InvalidArgument))?;
+            feature.set_report_rate(ms).await?;
         }
         Ok(())
     }
@@ -232,11 +230,7 @@ pub(super) async fn arm_onboard(
                 .await?;
             info!(captured = captured.len(), "G-series host mode active");
         }
-        ArmedMode::Profile(index) => {
-            if let Err(error) = apply_profile(&onboard, *index).await {
-                warn!(profile = index, ?error, "onboard profile switch failed");
-            }
-        }
+        ArmedMode::Profile(index) => apply_profile(&onboard, *index).await?,
     }
     Ok(())
 }
