@@ -124,6 +124,10 @@ To install the CLI binary on `PATH`:
 cargo install --path crates/openlogi
 ```
 
+### macOS input-hook safety
+
+The agent's input-hook watchdog gives CoreGraphics permission probes a 10-second budget. After a probe returns, tap servicing and teardown use a fresh 1.5-second budget. Teardown keeps that short budget when Accessibility is revoked or the re-arm limit is reached. The watchdog exits the agent if cleanup stalls, so macOS releases the process-owned tap.
+
 ## Developing the GUI without hardware
 
 `openlogi-agent-mock` serves the real agent IPC contract from a scripted

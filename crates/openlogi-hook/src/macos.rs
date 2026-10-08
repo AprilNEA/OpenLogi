@@ -568,14 +568,7 @@ fn service_tap(
         // Enabling is idempotent while the tap is already live. Only reached
         // while the live capability probe above still succeeds.
         tap.enable();
-        // Back to servicing the tap: the short stall budget applies again, so
-        // the fresh mark must be visible before `Armed` is — the watchdog would
-        // otherwise judge a slow probe that already returned against the
-        // pre-probe mark. The break paths above deliberately leave `Probing`
-        // published: the thread is still inside CoreGraphics for the
-        // synchronous teardown.
-        signals.mark_tap_progress();
-        signals.set_phase(TapPhase::Armed);
+        signals.mark_armed();
     }
 }
 
@@ -658,8 +651,7 @@ fn thread_main(
     }
     signals.mark_tap_progress();
     tap.enable();
-    signals.mark_tap_progress();
-    signals.set_phase(TapPhase::Armed);
+    signals.mark_armed();
 
     if rl_tx.send(run_loop.clone()).is_err() {
         debug!("hook parent dropped before run loop was ready; stopping");
@@ -676,6 +668,9 @@ fn thread_main(
     // observers go away when the tap does.
     let probe = ProbeCue::arm();
     service_tap(&tap, &signals, &tap_disabled, &probe);
+    // Every exit uses the short teardown budget, including a revoked grant
+    // or exhausted re-arm budget that leaves the loop in `Probing`.
+    signals.mark_armed();
 
     // Detach the tap from the event stream synchronously before unwinding,
     // so input recovers immediately rather than whenever CF happens to
