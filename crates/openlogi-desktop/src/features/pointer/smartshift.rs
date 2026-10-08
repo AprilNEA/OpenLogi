@@ -20,7 +20,7 @@ use gpui::{
 use gpui_component::{
     Disableable as _, Selectable as _, button::Button, h_flex, slider::Slider, v_flex,
 };
-use openlogi_core::config::{
+use openlogi_core::config::{GestureAxisBias, GestureSensitivity, 
     SMARTSHIFT_AUTO_DISENGAGE_DEFAULT, SMARTSHIFT_MIN_AUTO_DISENGAGE, ThumbwheelSensitivity,
 };
 use openlogi_core::hid::{
@@ -59,6 +59,8 @@ pub struct SmartShiftPanel {
     /// The per-device thumb-wheel sensitivity slider (device override; devices
     /// without one follow the app-wide default from Settings → General).
     wheel_sensitivity: CommitSlider<ThumbwheelSensitivity>,
+    gesture_sensitivity: CommitSlider<GestureSensitivity>,
+    gesture_axis_bias: CommitSlider<GestureAxisBias>,
     _state_obs: Subscription,
 }
 
@@ -99,6 +101,36 @@ impl SmartShiftPanel {
                 });
             },
         );
+        let gesture_sensitivity = CommitSlider::new(
+            SliderRange::new(GestureSensitivity::MIN, GestureSensitivity::MAX),
+            GestureSensitivity::DEFAULT,
+            cx,
+            |_, sensitivity, cx| {
+                AppState::apply(cx, |state| {
+                    state
+                        .current_record()
+                        .map(DeviceRecord::device_key)
+                        .map_or_else(StateEvents::none, |key| {
+                            state.commit_device_gesture_sensitivity(&key, sensitivity)
+                        })
+                });
+            },
+        );
+        let gesture_axis_bias = CommitSlider::new(
+            SliderRange::new(GestureAxisBias::MIN, GestureAxisBias::MAX),
+            GestureAxisBias::DEFAULT,
+            cx,
+            |_, bias, cx| {
+                AppState::apply(cx, |state| {
+                    state
+                        .current_record()
+                        .map(DeviceRecord::device_key)
+                        .map_or_else(StateEvents::none, |key| {
+                            state.commit_device_gesture_axis_bias(&key, bias)
+                        })
+                });
+            },
+        );
         let state_obs = AppState::repaint_on(cx, |event| {
             matches!(
                 event,
@@ -108,6 +140,8 @@ impl SmartShiftPanel {
         Self {
             threshold,
             wheel_sensitivity,
+            gesture_sensitivity,
+            gesture_axis_bias,
             _state_obs: state_obs,
         }
     }
@@ -202,6 +236,8 @@ impl SmartShiftPanel {
             );
 
         let wheel_row = self.wheel_sensitivity_row(window, cx);
+        let gesture_row = self.gesture_sensitivity_row(window, cx);
+        let gesture_bias_row = self.gesture_axis_bias_row(window, cx);
 
         let permanent_row = permanent_row(permanent, ratchet, restore_threshold, status, pal);
 
@@ -212,6 +248,8 @@ impl SmartShiftPanel {
             .child(sensitivity_row)
             .child(permanent_row)
             .child(wheel_row)
+            .child(gesture_row)
+            .child(gesture_bias_row)
     }
 }
 
@@ -245,6 +283,74 @@ impl SmartShiftPanel {
                     ),
             )
             .child(Slider::new(self.wheel_sensitivity.slider()).horizontal())
+    }
+
+    fn gesture_sensitivity_row(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
+        let pal = theme::palette(cx);
+        let committed = AppState::try_read(cx)
+            .and_then(|state| {
+                state
+                    .current_record()
+                    .map(|r| state.device_gesture_sensitivity(&r.config_key))
+            })
+            .unwrap_or(GestureSensitivity::DEFAULT);
+        self.gesture_sensitivity.sync(committed, window, cx);
+        let display = self.gesture_sensitivity.shown(committed);
+        v_flex()
+            .gap_2()
+            .child(
+                h_flex()
+                    .justify_between()
+                    .items_baseline()
+                    .child(section_label(tr!("pointer.gesture_sensitivity"), pal))
+                    .child(
+                        div()
+                            .text_body()
+                            .text_color(rgb(ACCENT_BLUE))
+                            .child(format!("{display}")),
+                    ),
+            )
+            .child(Slider::new(self.gesture_sensitivity.slider()).horizontal())
+            .child(
+                div()
+                    .text_caption()
+                    .text_color(pal.text_muted)
+                    .child(tr!("pointer.gesture_sensitivity_description")),
+            )
+    }
+
+    fn gesture_axis_bias_row(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
+        let pal = theme::palette(cx);
+        let committed = AppState::try_read(cx)
+            .and_then(|state| {
+                state
+                    .current_record()
+                    .map(|r| state.device_gesture_axis_bias(&r.config_key))
+            })
+            .unwrap_or(GestureAxisBias::DEFAULT);
+        self.gesture_axis_bias.sync(committed, window, cx);
+        let display = self.gesture_axis_bias.shown(committed);
+        v_flex()
+            .gap_2()
+            .child(
+                h_flex()
+                    .justify_between()
+                    .items_baseline()
+                    .child(section_label(tr!("pointer.gesture_axis_bias"), pal))
+                    .child(
+                        div()
+                            .text_body()
+                            .text_color(rgb(ACCENT_BLUE))
+                            .child(format!("{display}")),
+                    ),
+            )
+            .child(Slider::new(self.gesture_axis_bias.slider()).horizontal())
+            .child(
+                div()
+                    .text_caption()
+                    .text_color(pal.text_muted)
+                    .child(tr!("pointer.gesture_axis_bias_description")),
+            )
     }
 }
 
