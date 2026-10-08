@@ -18,6 +18,9 @@ use super::smartshift::SmartShiftDeviceState;
 pub(super) struct DeviceSession {
     /// Consecutive inventory snapshots that omitted this device.
     pub(super) inventory_misses: u8,
+    /// Last model with battery evidence; a reused receiver slot must not inherit it.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    pub(super) battery_model: Option<String>,
     pub(super) smartshift: SmartShiftDeviceState,
     pub(super) light: LightDeviceState,
 }

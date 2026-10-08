@@ -30,6 +30,11 @@ thumbwheel_sensitivity = 20
 invert_scroll = false
 scroll_resolution = "high"
 
+# macOS/Windows only. Independent; hiding the row does not disable warnings.
+[devices."receiver:aabbccdd:slot:1".battery]
+show_in_menu = true
+warn_low = true
+
 [devices."receiver:aabbccdd:slot:1".bindings]
 Back = "BrowserBack"
 Forward = "BrowserForward"

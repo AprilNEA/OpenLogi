@@ -50,6 +50,7 @@ fn snapshot() -> AgentSnapshot {
         }],
         standalone: Vec::new(),
         camera_active: false,
+        device_selection: None,
         pairing: None,
         foreground: ForegroundApps {
             current: None,
@@ -169,6 +170,7 @@ async fn inventory_projects_mixed_devices_without_unrelated_private_state() {
         devices[0]["battery"],
         json!({
             "percentage": 80, "level": "good", "status": "discharging",
+            "freshness": "current",
         })
     );
     assert_eq!(devices[0]["capabilities"]["pointer"], true);

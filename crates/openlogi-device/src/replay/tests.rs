@@ -358,6 +358,7 @@ fn profile_validator_rejects_duplicate_identities_and_invalid_ranges() {
 
     let mut invalid_battery = direct_probe_fixture().profile;
     invalid_battery.inventories[0].paired[0].battery = Some(BatteryInfo {
+        freshness: openlogi_core::device::BatteryFreshness::Current,
         percentage: 101,
         level: BatteryLevel::Full,
         status: BatteryStatus::Full,
