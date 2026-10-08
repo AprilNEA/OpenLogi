@@ -108,6 +108,19 @@ impl ActionExecutor {
     }
 
     fn dispatch_to(&self, action: &Action, device_key: Option<&str>, target: ActionDispatchTarget) {
+        self.dispatch_batch(action, device_key, 1, || target.resolve(action));
+    }
+
+    fn dispatch_batch(
+        &self,
+        action: &Action,
+        device_key: Option<&str>,
+        steps: u32,
+        resolve_target: impl FnOnce() -> Option<ActionDispatchTarget>,
+    ) {
+        if steps == 0 {
+            return;
+        }
         // The ring is drawn by OpenLogi at the cursor and acts on no window, so
         // no pointer target gates it. It must not: while the ring is showing,
         // the pointer is over the ring's own floating window, which classifies
@@ -123,11 +136,17 @@ impl ActionExecutor {
             }
             return;
         }
-        let Some(target) = target.resolve(action) else {
-            debug!(action = %action.label(), "mouse action target unavailable or no longer matches — skipped");
-            return;
-        };
+        dispatch_resolved_batch(steps, resolve_target, |target| {
+            self.dispatch_resolved(action, device_key, target);
+        });
+    }
 
+    fn dispatch_resolved(
+        &self,
+        action: &Action,
+        device_key: Option<&str>,
+        target: ActionDispatchTarget,
+    ) {
         let next = match action {
             Action::CycleDpiPresets => match self.dpi_cycle.write() {
                 Ok(mut guard) => guard.state_for(device_key).and_then(DpiCycleState::cycle),
@@ -200,6 +219,25 @@ impl ActionExecutor {
                 "no DPI presets configured for active device — press ignored"
             );
         }
+    }
+}
+
+/// One physical wheel report has one admission decision. WheelAccumulators owns
+/// repeat eligibility and the per-report cap; this layer preserves that batch.
+fn dispatch_resolved_batch(
+    steps: u32,
+    resolve_target: impl FnOnce() -> Option<ActionDispatchTarget>,
+    mut dispatch: impl FnMut(ActionDispatchTarget),
+) {
+    if steps == 0 {
+        return;
+    }
+    let Some(target) = resolve_target() else {
+        debug!("mouse action target unavailable or no longer matches — batch skipped");
+        return;
+    };
+    for _ in 0..steps {
+        dispatch(target);
     }
 }
 
@@ -317,17 +355,19 @@ impl ActionDispatcher {
         self.executor.dispatch(action, device_key);
     }
 
-    pub(crate) fn dispatch_pointer_action(
+    pub(crate) fn dispatch_pointer_action_batch(
         &self,
         action: &Action,
         device_key: Option<&str>,
         target: Option<openlogi_hook::PointerTarget>,
+        steps: u32,
     ) {
-        self.executor.dispatch_to(
-            action,
-            device_key,
-            ActionDispatchTarget::for_pointer(target, openlogi_hook::frontmost_safari_pid),
-        );
+        if steps == 0 {
+            return;
+        }
+        let target = ActionDispatchTarget::for_pointer(target, openlogi_hook::frontmost_safari_pid);
+        self.executor
+            .dispatch_batch(action, device_key, steps, || target.resolve(action));
     }
 
     /// Queue one OS-hook down edge without blocking the callback. The returned

@@ -442,3 +442,94 @@ fn stale_custom_progress_decays() {
         WheelOutput::FireAction(1)
     );
 }
+
+#[test]
+fn volume_reports_do_not_wait_for_the_discrete_action_cooldown() {
+    let scale = unscaled(ThumbwheelSensitivity::DEFAULT);
+    let threshold = ThumbwheelSensitivity::DEFAULT.action_threshold();
+    let now = Instant::now();
+    for action in [Action::VolumeUp, Action::VolumeDown] {
+        let mut direction = WheelDirection::default();
+        for _ in 0..3 {
+            assert_eq!(
+                direction.advance(&action, threshold, scale, now),
+                WheelOutput::FireAction(1),
+                "every complete volume step should be delivered"
+            );
+        }
+    }
+}
+
+#[test]
+fn volume_bursts_keep_fractional_progress_without_a_cooldown() {
+    let scale = unscaled(ThumbwheelSensitivity::DEFAULT);
+    let threshold = ThumbwheelSensitivity::DEFAULT.action_threshold();
+    let now = Instant::now();
+    for action in [Action::VolumeUp, Action::VolumeDown] {
+        let mut direction = WheelDirection::default();
+        assert_eq!(
+            direction.advance(&action, threshold * 3 + threshold - 1, scale, now),
+            WheelOutput::FireAction(3)
+        );
+        assert_eq!(
+            direction.advance(&action, 1, scale, now),
+            WheelOutput::FireAction(1)
+        );
+    }
+}
+
+#[test]
+fn capped_volume_reports_keep_only_fractional_progress() {
+    let scale = unscaled(ThumbwheelSensitivity::DEFAULT);
+    let threshold = ThumbwheelSensitivity::DEFAULT.action_threshold();
+    let now = Instant::now();
+    for increments in [i16::MIN, i16::MAX] {
+        let mut wheel = WheelAccumulators::default();
+        let rotation = WheelRotation::from_increments(increments).unwrap();
+        let action = if increments < 0 {
+            Action::VolumeDown
+        } else {
+            Action::VolumeUp
+        };
+        assert_eq!(
+            wheel.advance(rotation, &action, scale, now),
+            WheelOutput::FireAction(MAX_REPEATS_PER_EVENT.cast_unsigned())
+        );
+        let nudge = WheelRotation {
+            magnitude: 1,
+            ..rotation
+        };
+        // Whole steps above the cap are discarded, but the incomplete final
+        // step still counts toward the next nudge, just as for an uncapped report.
+        let remaining = threshold - rotation.magnitude % threshold;
+        for _ in 1..remaining {
+            assert_eq!(wheel.advance(nudge, &action, scale, now), WheelOutput::Idle);
+        }
+        assert_eq!(
+            wheel.advance(nudge, &action, scale, now),
+            WheelOutput::FireAction(1)
+        );
+        for _ in 1..threshold {
+            assert_eq!(wheel.advance(nudge, &action, scale, now), WheelOutput::Idle);
+        }
+        assert_eq!(
+            wheel.advance(nudge, &action, scale, now),
+            WheelOutput::FireAction(1)
+        );
+    }
+}
+
+#[test]
+fn discrete_actions_never_repeat_a_burst() {
+    let scale = unscaled(ThumbwheelSensitivity::MAX);
+    let now = Instant::now();
+    let mut direction = WheelDirection::default();
+    assert_eq!(
+        direction.advance(&Action::NextTab, i32::from(i16::MAX), scale, now),
+        WheelOutput::FireAction(1)
+    );
+    assert_eq!(
+        direction.advance(&Action::NextTab, 1, scale, now),
+        WheelOutput::Idle
+    );
+}
