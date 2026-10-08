@@ -387,10 +387,7 @@ fn pointer_tab(
                     .flex_1()
                     .child(scrolling_card(pal, cx)),
             )
-            .children(
-                onboard_card(pal, cx)
-                    .map(|card| div().min_w(POINTER_CARD_MIN_W).flex_1().child(card)),
-            ),
+            .children(onboard_card(pal, cx).map(pointer_grid_card)),
     )
 }
 
@@ -433,7 +430,7 @@ fn onboard_card(pal: Palette, cx: &mut Context<AppView>) -> Option<impl IntoElem
             tr!("pointer.onboard_memory"),
             Icon::empty().path("action-icons/mouse.svg"),
             v_flex().gap_4().child(setting_row(
-                tr!("pointer.onboard_memory"),
+                tr!("pointer.onboard_active"),
                 memory_description,
                 onboard_memory_control(memory, profiles),
                 pal,
@@ -589,6 +586,8 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
         .gap_4()
         .child(
             v_flex()
+                .flex_1()
+                .min_w_0()
                 .child(
                     div()
                         .text_body()
