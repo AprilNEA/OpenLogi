@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{Action, Binding, ButtonId};
+use openlogi_core::binding::{Action, Binding, ButtonId, GamingLayout};
 use openlogi_core::bindings::{button_bindings_for, oshook_gestures_for};
 use openlogi_core::config::{Config, LightSettings, MouseProfileTarget, canonical_device_key};
 use openlogi_core::device::{
@@ -23,7 +23,7 @@ use openlogi_core::device::{
 };
 use openlogi_core::device_order::{DeviceIdentity, PhysicalDeviceKey};
 use openlogi_hid::{
-    CaptureChannelSlot, ChannelPool, ChannelRegistry, DeviceIoGate, DeviceRoute, FnLockState,
+    CaptureChannelSlot, ChannelPool, ChannelRegistry, DeviceIoGate, DeviceRoute, Dpi, FnLockState,
     HidppOperation, WriteError, is_reserved_keyboard_control,
 };
 use openlogi_ipc::InventoryHealth;
@@ -564,15 +564,29 @@ impl Orchestrator {
             let Some(route) = dev.route.clone() else {
                 continue;
             };
-            let presets = self.config.dpi_presets(&dev.config_key);
+            let mut presets = self.config.dpi_presets(&dev.config_key);
+            if presets.is_empty()
+                && let Some(layout) = GamingLayout::for_model_key(&dev.model_key)
+            {
+                presets = layout
+                    .stock_dpi_presets
+                    .iter()
+                    .copied()
+                    .map(Dpi::new)
+                    .collect();
+            }
             let previous = guard
                 .by_key
                 .get(&dev.config_key)
                 .filter(|state| state.presets == presets);
+            let nearest = self.config.dpi(&dev.config_key).and_then(|dpi| {
+                (0..presets.len())
+                    .min_by_key(|&i| presets[i].into_inner().abs_diff(dpi.into_inner()))
+            });
             by_key.insert(
                 dev.config_key.clone(),
                 DpiCycleState {
-                    index: previous.map_or(0, |state| state.index),
+                    index: previous.map_or_else(|| nearest.unwrap_or(0), |state| state.index),
                     capabilities: previous.and_then(|state| state.capabilities.clone()),
                     presets,
                     target: Some(route),
@@ -617,6 +631,8 @@ impl Orchestrator {
                     self.os_mouse_hook_available,
                 );
                 plan.dispatch.pointer_target = pointer_target;
+                let mut plan =
+                    plan.with_onboard(&self.config, GamingLayout::for_model_key(&dev.model_key));
                 if let Some(keyboard) = keyboard
                     .as_ref()
                     .filter(|keyboard| keyboard.route == plan.target.route)

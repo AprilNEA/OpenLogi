@@ -11,14 +11,16 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use openlogi_core::binding::{Action, Binding, ButtonId, GestureDirection, default_binding};
+use openlogi_core::binding::{
+    Action, Binding, ButtonId, GamingLayout, GestureDirection, default_binding,
+};
 use openlogi_core::bindings::{button_bindings_for, hidpp_gesture_maps_for, oshook_gestures_for};
-use openlogi_core::config::{Config, ThumbwheelSensitivity};
+use openlogi_core::config::{Config, OnboardMemory, ThumbwheelSensitivity};
 use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_hid::DeviceRoute;
 use openlogi_hid::reprog_controls::DPI_MODE_SHIFT_CIDS;
 use openlogi_hid::session::gesture::{
-    CaptureSpec, DIVERTABLE_STANDARD_BUTTONS, GESTURE_SOURCE_BUTTONS,
+    CaptureSpec, DIVERTABLE_STANDARD_BUTTONS, GESTURE_SOURCE_BUTTONS, HostMode, OnboardTarget,
 };
 use tokio::sync::watch;
 
@@ -68,6 +70,8 @@ pub struct DispatchPlan {
     /// Pointer identity used to select these mouse bindings; absent for the
     /// explicitly focused policy and keyboard input.
     pub pointer_target: Option<openlogi_hook::PointerTarget>,
+    /// Bindings used while G-Shift is held.
+    pub shift_bindings: BTreeMap<ButtonId, Binding>,
 }
 
 /// One device's independently versioned hardware target and dispatch plan.
@@ -80,6 +84,33 @@ pub struct DeviceCapturePlan {
 }
 
 impl DeviceCapturePlan {
+    #[must_use]
+    pub fn with_onboard(mut self, config: &Config, layout: Option<&GamingLayout>) -> Self {
+        let key = &self.dispatch.config_key;
+        let shift = config.uses_gshift(key);
+        self.target.spec.onboard = match config.effective_onboard_memory(key, layout) {
+            None => None,
+            Some(OnboardMemory::Profile(index)) => Some(OnboardTarget::Profile(index)),
+            Some(OnboardMemory::Off) => layout.map(|layout| {
+                let diverted = &self.target.spec.divert_buttons;
+                OnboardTarget::Host(HostMode {
+                    slots: layout
+                        .slots
+                        .iter()
+                        .map(|&button| {
+                            let captured = layout.needs_host_mode(button)
+                                || (shift && layout.remappable().any(|b| b == button))
+                                || diverted.iter().any(|&(_, b)| b == button);
+                            (button, captured)
+                        })
+                        .collect(),
+                    report_rate: config.report_rate(key),
+                })
+            }),
+        };
+        self
+    }
+
     /// Hand the `0x1b04` controls in `owned` to another session on the same
     /// device: they leave every divert set of this plan, and the dispatch map
     /// keeps resolving them so a press the other session forwards still finds
@@ -229,6 +260,7 @@ pub fn plan_for_device(
                     .collect(),
                 divert_gesture_buttons,
                 divert_buttons,
+                onboard: None,
             },
             rearm_generation,
         },
@@ -239,6 +271,12 @@ pub fn plan_for_device(
             side_gesture_bindings,
             thumbwheel_sensitivity,
             pointer_target: None,
+            shift_bindings: config
+                .gshift_overrides(config_key)
+                .into_iter()
+                .flatten()
+                .map(|(button, action)| (*button, Binding::Single(action.clone())))
+                .collect(),
         },
     }
 }
@@ -287,6 +325,67 @@ mod tests {
             .divert_buttons
             .iter()
             .any(|&(_, diverted)| diverted == button)
+    }
+
+    fn host_slots(plan: &DeviceCapturePlan) -> Option<Vec<(ButtonId, bool)>> {
+        match &plan.target.spec.onboard {
+            Some(OnboardTarget::Host(host)) => Some(host.slots.clone()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn g502_stays_onboard_until_a_host_only_button_is_rebound() {
+        let layout = Some(&openlogi_core::binding::G502_LIGHTSPEED);
+        let mut cfg = Config::default();
+        let plan = plan_for_device(&cfg, "g502", route(), None, 0, true).with_onboard(&cfg, layout);
+        assert_eq!(plan.target.spec.onboard, None);
+
+        cfg.set_binding("g502", ButtonId::G9, Binding::Single(Action::Copy));
+        let plan = plan_for_device(&cfg, "g502", route(), None, 0, true).with_onboard(&cfg, layout);
+        let slots = host_slots(&plan).expect("host mode");
+        let captured: Vec<_> = slots.iter().filter(|(_, c)| *c).map(|(b, _)| *b).collect();
+        assert_eq!(
+            captured,
+            [
+                ButtonId::G6,
+                ButtonId::G7,
+                ButtonId::G8,
+                ButtonId::G9,
+                ButtonId::WheelTiltRight,
+                ButtonId::WheelTiltLeft,
+            ],
+            "unbound standard buttons keep their native report"
+        );
+
+        cfg.set_binding("g502", ButtonId::Back, Binding::Single(Action::Copy));
+        let plan = plan_for_device(&cfg, "g502", route(), None, 0, true).with_onboard(&cfg, layout);
+        assert!(host_slots(&plan).unwrap().contains(&(ButtonId::Back, true)));
+    }
+
+    #[test]
+    fn gshift_captures_every_remappable_button() {
+        let layout = Some(&openlogi_core::binding::G502_LIGHTSPEED);
+        let mut cfg = Config::default();
+        cfg.set_binding("g502", ButtonId::Forward, Binding::Single(Action::GShift));
+        let plan = plan_for_device(&cfg, "g502", route(), None, 0, true).with_onboard(&cfg, layout);
+        let slots = host_slots(&plan).expect("host mode");
+        assert!(slots.contains(&(ButtonId::MiddleClick, true)));
+        assert!(slots.contains(&(ButtonId::Back, true)));
+        assert!(slots.contains(&(ButtonId::LeftClick, false)));
+    }
+
+    #[test]
+    fn a_chosen_profile_wins_over_host_bindings() {
+        let layout = Some(&openlogi_core::binding::G502_LIGHTSPEED);
+        let mut cfg = Config::default();
+        cfg.set_binding("g502", ButtonId::G9, Binding::Single(Action::Copy));
+        cfg.set_onboard_memory("g502", Some(OnboardMemory::Profile(5)));
+        let plan = plan_for_device(&cfg, "g502", route(), None, 0, true).with_onboard(&cfg, layout);
+        assert_eq!(plan.target.spec.onboard, Some(OnboardTarget::Profile(5)));
+        cfg.set_onboard_memory("g502", Some(OnboardMemory::Off));
+        let plan = plan_for_device(&cfg, "g502", route(), None, 0, true).with_onboard(&cfg, None);
+        assert_eq!(plan.target.spec.onboard, None);
     }
 
     #[test]

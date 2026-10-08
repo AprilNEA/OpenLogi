@@ -100,6 +100,7 @@ pub(super) struct InputDispatcher {
     outputs: GestureOutputs,
     wheels: SessionWheels,
     gesture_presses: GesturePresses,
+    shift_held: HashMap<HidppSessionId, ButtonId>,
 }
 
 impl InputDispatcher {
@@ -110,6 +111,7 @@ impl InputDispatcher {
             outputs,
             wheels: SessionWheels::default(),
             gesture_presses: GesturePresses::default(),
+            shift_held: HashMap::new(),
         }
     }
 
@@ -133,6 +135,7 @@ impl InputDispatcher {
         self.outputs.cancel_session(session);
         self.wheels.cancel_session(session);
         self.gesture_presses.cancel_session(session);
+        self.shift_held.remove(session);
     }
 
     /// Route one captured input from `session` to its bound action or
@@ -172,12 +175,24 @@ impl InputDispatcher {
                 }
             }
             CapturedInput::ButtonDown(button) => {
+                if plan
+                    .bindings
+                    .get(&button)
+                    .is_some_and(|binding| binding.click_action() == Action::GShift)
+                {
+                    debug!(key, ?button, "G-Shift held");
+                    self.shift_held.insert(session.clone(), button);
+                    return;
+                }
                 // A raw-XY gesture source owns its click/swipe map; its physical
                 // lifecycle is still tracked, but it must not also fire the
                 // single-action projection on down.
                 let is_gesture = plan.gesture_bindings.contains_key(&button)
                     || plan.side_gesture_bindings.contains_key(&button);
-                let binding = (!is_gesture).then(|| plan.bindings.get(&button)).flatten();
+                let shifted = self.shift_held.contains_key(session);
+                let binding = (!is_gesture)
+                    .then(|| press_binding(plan, button, shifted))
+                    .flatten();
                 if let Some(binding) = binding {
                     debug!(key, ?button, action = %binding.click_action().label(), "HID++ button → binding");
                 } else {
@@ -198,6 +213,10 @@ impl InputDispatcher {
                 }
             }
             CapturedInput::ButtonUp(button) => {
+                if self.shift_held.get(session) == Some(&button) {
+                    self.shift_held.remove(session);
+                    return;
+                }
                 self.outputs.actions.try_hidpp_button_up(session, button);
                 self.gesture_presses.end(session, button);
             }
@@ -260,6 +279,13 @@ impl InputDispatcher {
             }
         }
     }
+}
+
+fn press_binding(plan: &DispatchPlan, button: ButtonId, shifted: bool) -> Option<&Binding> {
+    shifted
+        .then(|| plan.shift_bindings.get(&button))
+        .flatten()
+        .or_else(|| plan.bindings.get(&button))
 }
 
 #[cfg(test)]

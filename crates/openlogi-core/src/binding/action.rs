@@ -187,6 +187,14 @@ pub enum Action {
     /// cancellation and shutdown. Dispatchers without a release context must
     /// degrade this action to a balanced tap rather than leave keys held.
     HoldShortcut(KeyCombo),
+    /// Next DPI preset, without wrapping.
+    NextDpiPreset,
+    /// Previous DPI preset, without wrapping.
+    PreviousDpiPreset,
+    /// Lowest DPI preset while held.
+    DpiShift,
+    /// G-Shift bindings for the other buttons while held.
+    GShift,
 }
 
 /// One step in a [`Action::Workflow`]. A workflow is a `Vec<WorkflowStep>`
@@ -238,6 +246,7 @@ macro_rules! for_each_unit_action {
             MiddleClick "Middle Click" "actions.middle_click" Mouse Mouse,
             MouseBack "Back (Button 4)" "actions.back_button_4" Mouse MouseBack,
             MouseForward "Forward (Button 5)" "actions.forward_button_5" Mouse MouseForward,
+            GShift "G-Shift (Hold)" "actions.g_shift_hold" Mouse Layers not_pickable,
             // Editing
             Copy "Copy" "common.copy" Editing Copy,
             Paste "Paste" "common.paste" Editing Paste,
@@ -279,6 +288,9 @@ macro_rules! for_each_unit_action {
             MuteVolume "Mute" "actions.mute" Media Mute,
             // DPI
             CycleDpiPresets "Cycle DPI Presets" "pointer.cycle_dpi_presets" Dpi Gauge,
+            NextDpiPreset "Next DPI Preset" "pointer.next_dpi_preset" Dpi ArrowUp,
+            PreviousDpiPreset "Previous DPI Preset" "pointer.previous_dpi_preset" Dpi ArrowDown,
+            DpiShift "DPI Shift (Hold)" "pointer.dpi_shift" Dpi Gauge,
             ToggleSmartShift "Toggle SmartShift" "pointer.toggle_smartshift" Dpi Refresh,
             // Scroll
             ScrollUp "Scroll Up" "actions.scroll_up" Scroll ArrowUp,
