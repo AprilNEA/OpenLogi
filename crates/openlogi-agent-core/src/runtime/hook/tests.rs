@@ -52,6 +52,7 @@ fn test_dispatcher() -> (
                 transport_turns: crate::hardware::TransportTurns::default(),
             },
             action_ring,
+            dpi_order: crate::hardware::WriteOrder::default(),
         },
         buttons: owner.input(),
     };

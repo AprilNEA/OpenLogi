@@ -1004,16 +1004,33 @@ fn log_wheel_result(
     });
 }
 
-/// Spawn an OS thread that writes `dpi` to `op`'s device via its current
-/// shared channel. Returns immediately; failures are logged.
-pub fn write_dpi_in_background(op: DeviceOp, dpi: Dpi) {
+/// Spawn an OS thread that writes `dpi` to `op`'s device once its earlier
+/// DPI writes have finished, unless a newer one was requested by then.
+/// Failures are logged.
+pub(crate) fn write_dpi_in_background(op: DeviceOp, ticket: WriteTicket, dpi: Dpi) {
     let index = op.route.device_index();
-    op.spawn_write(
+    let turn = op.access.transport_turns.turn_for(&op.route);
+    op.spawn_timed_write(
         "DPI write",
-        move |c| async move { openlogi_hid::set_dpi_on(&c, dpi).await },
+        move |op| async move {
+            within_turn(
+                &ticket,
+                &turn,
+                || async {
+                    let shared = op.resolve()?;
+                    openlogi_hid::set_dpi_on(&shared, dpi).await.map(|()| true)
+                },
+                || async { Ok(false) },
+            )
+            .await
+        },
         move |result| {
-            log_outcome(index, "DPI write", result, |()| {
-                debug!(index, %dpi, "DPI written to device");
+            log_outcome(index, "DPI write", result, |written| {
+                if written {
+                    debug!(index, %dpi, "DPI written to device");
+                } else {
+                    debug!(index, %dpi, "DPI write superseded by a newer one");
+                }
             });
         },
     );
