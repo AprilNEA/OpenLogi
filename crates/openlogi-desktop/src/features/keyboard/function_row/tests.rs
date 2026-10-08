@@ -354,6 +354,7 @@ fn legacy_asset(
         },
         png_width: png.0,
         png_height: png.1,
+        side_view: None,
     }
 }
 
@@ -391,6 +392,7 @@ fn asset_with_controls(controls: &[(u16, f32, f32)]) -> ResolvedAsset {
         },
         png_width: 1872,
         png_height: 728,
+        side_view: None,
     }
 }
 

@@ -273,6 +273,8 @@ pub enum HidppOperation {
     /// Light or darken the `0x1300` DPI LED. Appended last — variant order
     /// is wire format.
     WriteLed,
+    /// Read onboard memory. Appended last — variant order is wire format.
+    ReadOnboard,
 }
 
 /// HID++ feature error kind in a serializable wire-safe form.

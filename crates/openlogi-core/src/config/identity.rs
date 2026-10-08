@@ -318,6 +318,7 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
     fold_option_field!(thumbwheel_sensitivity);
     fold_option_field!(fn_lock);
     fold_option_field!(keep_os_layout);
+    fold_option_field!(onboard_memory);
     fold_option_field!(report_rate);
     fold_option_field!(pointer_speed);
     // The user-assigned alias. Without this a legacy entry carrying a name
@@ -349,6 +350,7 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
     }
     fold_if_empty!(dpi_presets);
     fold_if_empty!(host_switch_targets);
+    fold_if_empty!(gshift_bindings);
 
     // `ActionRingConfig` has its own notion of "unset". Two configured rings
     // cannot be merged — the slots are positional — so the canonical one wins
