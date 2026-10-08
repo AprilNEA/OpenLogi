@@ -21,6 +21,23 @@ config from loading instead of silently selecting a default or disappearing on
 the next save. The GUI then opens in read-only mode and shows the exact TOML
 error. Fix the file and relaunch OpenLogi.
 
+You can also open **Settings → Restore configuration**, or use **Restore
+configuration** on the error screen. Select an automatic backup or another
+OpenLogi configuration file, review the changed values, then confirm the
+replacement. This restores the whole configuration, including all devices,
+application profiles, and app-wide settings. It does not import Options+ files.
+
+Before replacement, the current file is preserved as
+`config.toml.before-restore.<number>.bak`. These recovery copies are listed
+before automatic backups and are never rotated away. The selected backup also
+stays unchanged. Invalid sources and files changed since the preview stop the
+restore. Recovery uses the same non-blocking writer lock as ordinary saves. If
+another writer owns it, retry from a fresh preview after that save finishes.
+Both files are checked again after the recovery copy is preserved.
+
+After success, restart OpenLogi to reload both the GUI and agent;
+configuration editing is paused until then.
+
 If the file changes in an editor while the GUI is open, the next GUI save is
 refused rather than overwriting the external edit. Relaunch to load that
 revision. Opening the GUI also tells the resident agent to reload the current

@@ -222,6 +222,9 @@ impl AppState {
     /// cycle (#189), so the agent re-applies them when the device reconnects.
     /// No-op when no device is selected.
     pub fn commit_smartshift(&mut self, status: SmartShiftStatus) -> StateEvents {
+        if self.config.recovery_freezes_writes() {
+            return StateEvents::none();
+        }
         let events = self.for_current_device(StateEvent::SmartShiftChanged);
         let Some(record) = self.current_record() else {
             debug!("no active device — SmartShift change ignored");

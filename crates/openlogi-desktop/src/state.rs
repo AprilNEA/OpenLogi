@@ -346,6 +346,41 @@ impl AppState {
         self.config.issue()
     }
 
+    /// Whether a restored configuration is awaiting a fresh process.
+    pub(crate) fn config_restored(&self) -> bool {
+        self.config.restored()
+    }
+
+    /// Resolve the tracked configuration, without enabling writes in test sessions.
+    pub(crate) fn recovery_path(
+        &self,
+    ) -> Result<std::path::PathBuf, openlogi_core::config::ConfigError> {
+        self.config.recovery_path()
+    }
+
+    pub(crate) fn config_recovering(&self) -> bool {
+        self.config.recovering()
+    }
+
+    /// Close the persistence boundary before dispatching the background writer.
+    pub(crate) fn begin_config_recovery(
+        &mut self,
+        plan: &openlogi_core::config::RecoveryPlan,
+    ) -> Result<(), openlogi_core::config::ConfigError> {
+        self.config.begin_recovery(plan)
+    }
+
+    pub(crate) fn finish_config_recovery(
+        &mut self,
+        result: &Result<(), openlogi_core::config::ConfigError>,
+    ) -> StateEvents {
+        self.config.finish_recovery(result);
+        if let Err(error) = result {
+            warn!(%error, "configuration recovery did not complete");
+        }
+        StateEvent::SettingsChanged.into()
+    }
+
     /// Record whether the agent adopted the last saved config.
     pub fn apply_config_reload_result(
         &mut self,

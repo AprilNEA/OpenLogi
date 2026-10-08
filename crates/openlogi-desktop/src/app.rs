@@ -294,8 +294,11 @@ impl AppView {
                 // fail-closed configuration-error screen.
                 StateEvent::SettingsChanged => {
                     view.config_issue_visible
-                        || AppState::try_read(cx)
-                            .is_some_and(|state| state.config_issue().is_some())
+                        || AppState::try_read(cx).is_some_and(|state| {
+                            state.config_issue().is_some()
+                                || state.config_restored()
+                                || state.config_recovering()
+                        })
                 }
             };
             if relevant {
@@ -523,6 +526,20 @@ impl AppView {
                 this.child(app_title_bar(cx))
             });
         let root = Self::with_back_navigation(root, cx);
+
+        if AppState::try_read(cx).is_some_and(AppState::config_recovering) {
+            self.config_issue_visible = true;
+            return root
+                .child(crate::windows::settings::recovery::loading_body())
+                .into_any_element();
+        }
+
+        if AppState::try_read(cx).is_some_and(AppState::config_restored) {
+            self.config_issue_visible = true;
+            return root
+                .child(crate::windows::settings::recovery::restored_body(cx))
+                .into_any_element();
+        }
 
         let config_issue = AppState::try_global(cx)
             .map(|state| state.read(cx))

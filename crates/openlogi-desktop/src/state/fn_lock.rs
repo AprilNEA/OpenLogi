@@ -67,6 +67,9 @@ impl AppState {
     /// echo arrives as [`Self::apply_fn_lock_written`]. No-op when no device
     /// is selected or it reports no Fn-lock control.
     pub fn commit_fn_lock(&mut self, fn_lock: bool) -> StateEvents {
+        if self.config.recovery_freezes_writes() {
+            return StateEvents::none();
+        }
         let events = self.for_current_device(StateEvent::FnLockChanged);
         if !self.current_fn_lock_supported() {
             return events;

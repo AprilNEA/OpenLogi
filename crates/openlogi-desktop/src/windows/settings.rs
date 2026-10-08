@@ -63,6 +63,7 @@ mod language;
 // where it has content. `SettingsPage::index` tracks the shift.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod permissions;
+pub(crate) mod recovery;
 mod updates;
 
 /// Which sidebar page the window opens to. Maps to the page order in
@@ -73,6 +74,7 @@ pub enum SettingsPage {
     General,
     Updates,
     About,
+    Recovery,
 }
 
 impl SettingsPage {
@@ -81,6 +83,7 @@ impl SettingsPage {
         match self {
             Self::General => 0,
             Self::Updates => 1,
+            Self::Recovery => Self::About.index() + 1 + usize::from(cfg!(target_os = "macos")),
             // One lower on Windows: the Permissions page isn't registered
             // there (see the `mod permissions` cfg).
             Self::About => {
@@ -116,10 +119,12 @@ pub struct SettingsView {
     theme_filter: ThemeFilter,
     /// Free-text filter for the Appearance theme grid (search 50+ themes by name).
     theme_search: Entity<InputState>,
-    /// Page selected when the window first opens. Consumed once by the Settings
-    /// widget's keyed state, so it only steers a fresh open (an already-open
-    /// window is just focused).
+    /// Page selected when the Settings widget's navigation state is created.
     initial_page: SettingsPage,
+    /// The component keeps page selection and search private. A recovery
+    /// deep link resets that navigation state without replacing this view.
+    navigation_revision: usize,
+    recovery: Entity<recovery::RecoveryView>,
     language_select: Entity<SelectState<Vec<language::LanguageOption>>>,
     asset_source_select: Entity<SelectState<Vec<assets::AssetSourceOption>>>,
     thumbwheel_sensitivity: CommitSlider<ThumbwheelSensitivity>,
@@ -258,6 +263,8 @@ impl SettingsView {
             theme_filter: ThemeFilter::All,
             theme_search,
             initial_page,
+            navigation_revision: 0,
+            recovery: cx.new(recovery::RecoveryView::new),
             language_select,
             asset_source_select,
             thumbwheel_sensitivity,
@@ -385,16 +392,29 @@ pub fn open(cx: &mut App) {
     open_at(SettingsPage::General, cx);
 }
 
-/// Open the Settings window on a specific page, or focus it if it's already
-/// open. The page only steers a *fresh* open — an already-open window is just
-/// focused on whatever page it last showed (the Settings widget owns selection).
 /// The window's native title — one definition for open and the live-language
 /// retitle ([`windows::retitle_open`]), so the two cannot drift.
 pub(crate) fn window_title() -> SharedString {
     tr!("app.settings")
 }
 
+/// Open Settings, preserving an existing window's navigation except when the
+/// recovery entry point explicitly requests its page and an unfiltered search.
 pub fn open_at(page: SettingsPage, cx: &mut App) {
+    if matches!(page, SettingsPage::Recovery)
+        && let Some(handle) = cx.default_global::<windows::WindowRegistry>().settings
+    {
+        let _ = handle.update(cx, |root, window, cx| {
+            if let Ok(view) = root.view().clone().downcast::<SettingsView>() {
+                view.update(cx, |view, cx| {
+                    view.initial_page = page;
+                    view.navigation_revision += 1;
+                    view.focus_handle.focus(window, cx);
+                    cx.notify();
+                });
+            }
+        });
+    }
     windows::open_or_focus(
         |reg| &mut reg.settings,
         window_title(),
@@ -440,7 +460,7 @@ impl Render for SettingsView {
         // Filled group boxes use the theme's content-surface token, keeping
         // settings groups distinct from the page without borrowing a control
         // colour for a large card.
-        let settings = Settings::new("settings")
+        let settings = Settings::new(("settings", self.navigation_revision))
             .with_group_variant(GroupBoxVariant::Fill)
             .sidebar_width(px(210.))
             .default_selected_index(SelectIndex {
@@ -477,6 +497,7 @@ impl Render for SettingsView {
         // About so [`SettingsPage::index`] stays platform-independent.
         #[cfg(target_os = "macos")]
         let settings = settings.page(diagnostics::diagnostics_page());
+        let settings = settings.page(recovery::recovery_page(self.recovery.clone()));
 
         div()
             .size_full()
@@ -501,6 +522,100 @@ impl Render for SettingsView {
                         .child(windows::aux_title_bar(tr!("app.settings"), cx)),
                 )
             })
-            .child(settings)
+            .child(if AppState::try_read(cx).is_some_and(AppState::config_restored) {
+                recovery::restored_body(cx).into_any_element()
+            } else if AppState::try_read(cx).is_some_and(AppState::config_recovering) {
+                recovery::loading_body().into_any_element()
+            } else {
+                settings.into_any_element()
+            })
+            .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{TestAppContext, VisualTestContext};
+    use gpui_component::WindowExt as _;
+    use openlogi_core::config::{Config, ConfigFile};
+
+    #[gpui::test]
+    fn recovery_entry_navigates_an_open_settings_window_and_clears_search(cx: &mut TestAppContext) {
+        let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(openlogi_core::paths::CONFIG_FILE);
+        let mut config = Config::default();
+        config.app_settings.launch_at_login = false;
+        std::fs::write(
+            &path,
+            format!(
+                "schema_version = {}\n[app_settings]\nlaunch_at_login = false\n",
+                openlogi_core::config::SCHEMA_VERSION
+            ),
+        )
+        .unwrap();
+        let (_, mut file) = ConfigFile::load_from_path(&path).unwrap();
+        config.app_settings.launch_at_login = true;
+        file.save(&config).unwrap();
+        assert_eq!(
+            openlogi_core::config::recovery_backups(&path)
+                .unwrap()
+                .len(),
+            1
+        );
+        let handle = cx.update(|cx| {
+            gpui_component::init(cx);
+            theme::register_builtin_themes(cx);
+            let (commands, _) = tokio::sync::mpsc::unbounded_channel();
+            let state = cx.new(|_| {
+                let resolver = crate::services::assets::AssetResolver::new();
+                let mut sources = crate::state::Sources::in_memory(config, &resolver, commands);
+                sources.persistence = crate::state::ConfigPersistence::UserFile(file);
+                AppState::new(sources)
+            });
+            AppState::set_global(state, cx);
+            open(cx);
+            cx.default_global::<windows::WindowRegistry>()
+                .settings
+                .unwrap()
+        });
+        let mut visual = VisualTestContext::from_window(handle.into(), cx);
+        draw(&mut visual);
+        visual.update(|window, cx| {
+            window.blur(cx);
+            window.focus_next(cx);
+        });
+        visual.simulate_input("no-matching-setting");
+        draw(&mut visual);
+        let search = visual.update(|window, cx| window.focused_input(cx).unwrap());
+        assert_eq!(visual.read(|cx| search.value(cx)), "no-matching-setting");
+        assert!(visual.debug_bounds("recovery-backup-0").is_none());
+
+        // Ordinary Settings activation preserves the user's current navigation.
+        cx.update(open);
+        draw(&mut visual);
+        let search = visual.update(|window, cx| window.focused_input(cx).unwrap());
+        assert_eq!(visual.read(|cx| search.value(cx)), "no-matching-setting");
+
+        cx.update(|cx| open_at(SettingsPage::Recovery, cx));
+        draw(&mut visual);
+        assert_eq!(visual.windows().len(), 1);
+        visual.update(|window, cx| {
+            window.blur(cx);
+            window.focus_next(cx);
+        });
+        let search = visual.update(|window, cx| window.focused_input(cx).unwrap());
+        assert_eq!(visual.read(|cx| search.value(cx)), "");
+        assert!(visual.debug_bounds("recovery-backup-0").is_some());
+        cx.update(open);
+        draw(&mut visual);
+        assert!(visual.debug_bounds("recovery-backup-0").is_some());
+    }
+
+    fn draw(visual: &mut VisualTestContext) {
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
     }
 }

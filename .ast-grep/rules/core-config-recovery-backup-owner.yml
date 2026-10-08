@@ -1,0 +1,15 @@
+# Owner: config::file::recovery owns discovery and creation of recovery copies.
+id: core-config-recovery-backup-owner
+language: rust
+severity: error
+message: Use openlogi_core::config::RecoveryPlan and recovery_backups; recovery-copy naming belongs to config::file::recovery.
+files:
+  - crates/**/*.rs
+  - xtask/**/*.rs
+ignores:
+  - crates/openlogi-core/src/config/file/recovery.rs
+  - crates/openlogi-core/src/config/file/recovery/**
+rule:
+  all:
+    - kind: string_literal
+    - regex: '\.before-restore\.'

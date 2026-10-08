@@ -1,0 +1,13 @@
+# Owner: file_input::tests creates FIFO fixtures without inheriting writer locks.
+id: core-fifo-fixture-owner
+language: rust
+severity: error
+message: Use file_input::tests::create_fifo; spawning mkfifo can inherit another test's file lock.
+files:
+  - crates/openlogi-core/src/**/*.rs
+ignores:
+  - crates/openlogi-core/src/file_input.rs
+rule:
+  any:
+    - pattern: libc::mkfifo($$$ARGS)
+    - pattern: std::process::Command::new("mkfifo")
