@@ -1,10 +1,10 @@
 //! Updates settings page.
 
 use super::{
-    App, AppState, Button, Disableable, Entity, FontWeight, IconName, InteractiveElement as _,
-    ParentElement, RELEASES_URL, SettingField, SettingGroup, SettingItem, SettingPage, Sizable,
-    StatefulInteractiveElement as _, Styled, Tag, UpdateStatus, Updater, div, h_flex, img, px,
-    v_flex,
+    App, AppState, Button, ButtonVariants, Disableable, Entity, FontWeight, IconName,
+    InteractiveElement as _, ParentElement, RELEASES_URL, SettingField, SettingGroup, SettingItem,
+    SettingPage, Sizable, StatefulInteractiveElement as _, Styled, Tag, UpdateStatus, Updater, div,
+    h_flex, img, px, v_flex,
 };
 use crate::platform::installation::{HomebrewCask, Installation, InstallationSource, LinuxPackage};
 use crate::ui::theme::Typography as _;
@@ -15,6 +15,10 @@ use gpui_component::ActiveTheme as _;
 /// the contextual check / install / restart action; the opt-in auto-check and
 /// auto-install switches; installation ownership and where updates come from.
 pub(super) fn updates_page(updater: Entity<Updater>) -> SettingPage {
+    if !crate::platform::updater::IN_APP_UPDATES {
+        return unmanaged_updates_page();
+    }
+
     let hero = SettingGroup::new().item(SettingItem::render(move |_, _, cx| {
         update_hero(&updater, cx)
     }));
@@ -72,6 +76,104 @@ pub(super) fn updates_page(updater: Entity<Updater>) -> SettingPage {
         .group(hero)
         .group(toggles)
         .group(source)
+}
+
+/// The Updates page for a build with no in-place-updatable artifact.
+///
+/// Linux releases ship distro packages only, so the check can never resolve to
+/// anything but "no release asset matched the current platform". Showing the
+/// check button and the auto-install switches there offers the user a control
+/// whose only possible outcome is a red "Update failed" pill; this page states
+/// the running version and where updates actually come from instead.
+fn unmanaged_updates_page() -> SettingPage {
+    let hero = SettingGroup::new().item(SettingItem::render(move |_, _, cx| {
+        let pal = crate::ui::theme::palette(cx);
+        h_flex()
+            .w_full()
+            .items_center()
+            .gap_3()
+            .child(img(crate::app_assets::LOGO).w(px(52.)).h(px(52.)))
+            .child(
+                v_flex()
+                    .gap_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(concat!("OpenLogi ", env!("CARGO_PKG_VERSION"))),
+                    )
+                    .child(
+                        div()
+                            .text_caption()
+                            .text_color(pal.text_muted)
+                            .child(tr!("updates.unavailable_platform_note")),
+                    ),
+            )
+    }));
+
+    SettingPage::new(tr!("updates.updates"))
+        .icon(IconName::ArrowDown)
+        .resettable(false)
+        .group(hero)
+        .group(
+            SettingGroup::new().item(SettingItem::render(move |_, _, cx| {
+                unmanaged_update_source(cx)
+            })),
+        )
+}
+
+/// The "where releases live" row for a build with no in-app updater.
+///
+/// Deliberately not [`update_source`]: that one calls GitHub Releases the
+/// *update source* and explains when OpenLogi connects to it, both of which
+/// describe controls this page does not have. Here the link is somewhere to
+/// read the changelog, and the page says plainly that nothing reaches out on
+/// its own.
+fn unmanaged_update_source(cx: &App) -> gpui::Div {
+    let pal = crate::ui::theme::palette(cx);
+    v_flex()
+        .w_full()
+        .gap_3()
+        .child(
+            h_flex()
+                .w_full()
+                .items_center()
+                .justify_between()
+                .gap_3()
+                .child(
+                    v_flex()
+                        .gap_1()
+                        .flex_1()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(tr!("about.releases")),
+                        )
+                        .child(
+                            div()
+                                .text_caption()
+                                .text_color(pal.text_muted)
+                                .truncate()
+                                .child("github.com/AprilNEA/OpenLogi/releases"),
+                        ),
+                )
+                .child(
+                    div().flex_shrink_0().child(
+                        Button::new("update-changelog")
+                            .ghost()
+                            .icon(IconName::ExternalLink)
+                            .label(tr!("updates.view_changelog"))
+                            .on_click(|_, _, cx| cx.open_url(RELEASES_URL)),
+                    ),
+                ),
+        )
+        .child(
+            div()
+                .text_caption()
+                .text_color(pal.text_muted)
+                .child(tr!("updates.no_update_requests_note")),
+        )
 }
 
 /// The Updates hero row: logo, name + version, a status pill, the live status
@@ -242,17 +344,24 @@ fn release_link(cx: &App) -> Link {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     use std::{cell::Cell, rc::Rc};
 
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     use gpui::{
         AppContext as _, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, ScrollDelta,
         ScrollWheelEvent, TestAppContext, VisualTestContext, point,
     };
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     use openlogi_core::config::{Config, UiScale};
 
     use super::*;
-    use crate::services::{assets::AssetResolver, i18n::LOCALE_LOCK};
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    use crate::services::assets::AssetResolver;
+    use crate::services::i18n::LOCALE_LOCK;
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     use crate::state::Sources;
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     use crate::windows::settings::{SettingsPage, SettingsView};
 
     #[test]
@@ -299,6 +408,11 @@ mod tests {
         rust_i18n::set_locale("en");
     }
 
+    // Exercises the managed-updates page, which only renders where
+    // `IN_APP_UPDATES` is true (macOS, Windows) — on Linux `updates_page`
+    // always returns `unmanaged_updates_page`, and `update-source-link`
+    // never renders.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[gpui::test]
     fn installation_completion_refreshes_open_settings(cx: &mut TestAppContext) {
         let _locale = LOCALE_LOCK.lock().unwrap();
@@ -375,6 +489,7 @@ mod tests {
         rust_i18n::set_locale("en");
     }
 
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn assert_source_geometry(visual: &mut VisualTestContext) {
         let value = visual.debug_bounds("installation-source-value").unwrap();
         let link = visual.debug_bounds("update-source-link").unwrap();
@@ -416,6 +531,7 @@ mod tests {
         });
     }
 
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn assert_release_link_activation(visual: &mut VisualTestContext) {
         let link = visual.debug_bounds("update-source-link").unwrap();
         assert_eq!(visual.opened_url(), None);
