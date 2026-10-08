@@ -139,6 +139,20 @@ impl InputDispatcher {
         self.wheels.cancel_session(session);
         self.held_presses.cancel_session(session);
         self.shift_held.0.remove(session);
+        self.publish_shift(session);
+    }
+
+    /// Tell the OS hook whether `session`'s device has G-Shift held, so its
+    /// gesture buttons resolve the shifted layer too.
+    fn publish_shift(&self, session: &HidppSessionId) {
+        let key = session.device_key();
+        if let Ok(mut maps) = self.hook_maps.write() {
+            if self.shift_held.active(session) {
+                maps.shift_held.insert(key.to_owned());
+            } else {
+                maps.shift_held.remove(key);
+            }
+        }
     }
 
     /// Hold G-Shift if `button` is bound to it; `true` when it was.
@@ -155,13 +169,18 @@ impl InputDispatcher {
         if is_shift {
             debug!(key = session.device_key(), ?button, "G-Shift held");
             self.shift_held.press(session, button);
+            self.publish_shift(session);
         }
         is_shift
     }
 
     /// Release `button` if it is a held G-Shift button; `true` when it was.
     fn end_gshift(&mut self, session: &HidppSessionId, button: ButtonId) -> bool {
-        self.shift_held.release(session, button)
+        let released = self.shift_held.release(session, button);
+        if released {
+            self.publish_shift(session);
+        }
+        released
     }
 
     /// `button`'s binding, from the G-Shift layer while G-Shift is held.
