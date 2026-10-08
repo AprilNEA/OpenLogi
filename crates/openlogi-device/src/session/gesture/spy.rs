@@ -158,9 +158,7 @@ impl ArmedOnboard {
         spy.start_spy().await?;
         if let (Some(index), Some(rate)) = (rate_index, host.report_rate) {
             let feature = ReportRateFeature::new(Arc::clone(&self.chan), self.device_index, index);
-            if let Err(error) = feature.set_report_rate(rate.ms()).await {
-                warn!(%rate, ?error, "report rate write failed");
-            }
+            feature.set_report_rate(rate.ms()).await?;
         }
         Ok(())
     }
@@ -227,11 +225,7 @@ pub(super) async fn arm_onboard(
                 .await?;
             info!(captured = captured.len(), "G-series host mode active");
         }
-        ArmedMode::Profile(index) => {
-            if let Err(error) = apply_profile(&onboard, *index).await {
-                warn!(profile = index, ?error, "onboard profile switch failed");
-            }
-        }
+        ArmedMode::Profile(index) => apply_profile(&onboard, *index).await?,
     }
     Ok(())
 }
