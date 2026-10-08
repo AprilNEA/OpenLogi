@@ -31,10 +31,12 @@ mod settings;
 mod tests;
 
 pub use device::{DeviceConfig, DeviceIdentity, LinkConfig, LinkOverrides};
+#[cfg(all(test, feature = "fs", unix))]
+use file::resolve_symlinks;
 #[cfg(feature = "fs")]
 pub use file::{ConfigError, ConfigFile};
 #[cfg(all(test, feature = "fs"))]
-use file::{backup_existing_config, config_backup_path, resolve_symlinks};
+use file::{backup_existing_config, config_backup_path};
 pub use function_key::FunctionKey;
 pub use identity::canonical_device_key;
 pub use key_trigger::{KeyModifiers, KeyTrigger, KeyboardConfig, ParseTriggerError};
