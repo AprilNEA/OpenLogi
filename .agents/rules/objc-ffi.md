@@ -6,6 +6,7 @@ paths:
   - "crates/openlogi-camera/**"
   - "crates/openlogi-agent/src/activity_macos.rs"
   - "crates/openlogi-agent/src/tray.rs"
+  - "crates/openlogi-agent/src/power_source/**"
   - "crates/openlogi-agent/src/status_item.rs"
   - "crates/openlogi-agent/src/lifecycle/armed_session.rs"
   - "crates/openlogi-agent-core/src/watchers/camera.rs"
@@ -27,6 +28,7 @@ files; **keep this table in sync when you add or move one**:
 | File | What it carries |
 |---|---|
 | `openlogi-agent/src/activity_macos.rs` | the device-I/O gate's levels: the `IOPMConnection` powerd subscription (hand-declared SPI, see below) and the `CGSessionCopyCurrentDictionary` console read |
+| `openlogi-agent/src/power_source/macos/iokit.rs` | opt-in Batteries-widget publisher: `dlopen`/`dlsym` of private `IOPSCreatePowerSource` / `IOPSSetPowerSourceDetails` / `IOPSReleasePowerSource` |
 | `openlogi-agent/src/status_item.rs` | safe `objc2` wrappers over `NSStatusItem` / `NSMenu` / `NSMenuItem` |
 | `openlogi-agent/src/tray.rs` | the menu-bar semantics, `MenuTarget` + `SessionTarget` (`define_class!`), the Accessory `NSApplication` loop, the `NSWorkspace` session (fast-user-switch) notifications |
 | `openlogi-agent-core/src/watchers/camera.rs` | the CoreMediaIO "camera is running" property read |
@@ -232,6 +234,8 @@ its single user. The current set, all deliberate:
   `UCKeyTranslate` — `objc2-carbon` skips HIToolbox and `objc2-core-services`
   skips CarbonCore. `UCKeyTranslate`'s lengths are `UniCharCount`, an
   `unsigned long`: `usize`, not `u32`.
+- `openlogi-agent/src/power_source/macos/iokit.rs`: private `IOPS*` power-source SPI
+  (experimental Batteries-widget integration).
 - the `disclaim` crate: `responsibility_spawnattrs_setdisclaim` (private SPI).
 
 `openlogi-camera`'s `AVAuthorizationStatus` integers remain on the
@@ -256,6 +260,9 @@ under a `SAFETY` comment. Where it currently lives on macOS:
 - `agent/lifecycle/armed_session.rs` — `SessionGetInfo` (`objc2-security`,
   `AuthSession`) and `sysctlbyname("kern.bootsessionuuid")`: two out-pointer reads
   that identify the login session, so the dormancy gate can re-arm a crash respawn.
+- `agent/power_source/macos/iokit.rs`: `dlopen`/`dlsym` of the private `IOPS*`
+  power-source functions and the three calls through them. A source's release
+  consumes it, so a handle cannot be released twice.
 - `hook/macos.rs` — the whole tap (Core Graphics / Core Foundation C APIs),
   `AXIsProcessTrusted[WithOptions]` with the two extern statics they need
   (`kAXTrustedCheckOptionPrompt`, `kCFBooleanTrue`), and the `kern.sleeptime` /
