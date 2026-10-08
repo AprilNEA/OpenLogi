@@ -341,6 +341,13 @@ impl ActionDispatcher {
         self.buttons.try_hook_key_up(keycode)
     }
 
+    /// Whether a gesture press survives every all-press invalidation so far,
+    /// for output that follows a hold without dispatching an action through
+    /// the button runtime (a live Space transition).
+    pub(crate) fn is_press_current(&self, press: &PressToken) -> bool {
+        self.buttons.is_current(press)
+    }
+
     /// Execute a semantic gesture action only if its exact press is still live.
     pub(crate) fn try_dispatch_while_pressed(&self, press: &PressToken, action: &Action) -> bool {
         self.buttons.try_trigger_while_pressed(press, action)

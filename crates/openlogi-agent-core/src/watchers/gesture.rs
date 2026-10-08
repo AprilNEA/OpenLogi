@@ -203,13 +203,37 @@ fn wanted_sessions(
     Arc::clone(&capture_plans.borrow())
 }
 
+/// Whether two dispatch plans resolve every input to the same action, differing
+/// at most in the hovered window they were selected for.
+fn same_bindings(a: &DispatchPlan, b: &DispatchPlan) -> bool {
+    let DispatchPlan {
+        config_key,
+        bindings,
+        gesture_bindings,
+        side_gesture_bindings,
+        thumbwheel_sensitivity,
+        pointer_target: _,
+    } = a;
+    *config_key == b.config_key
+        && *bindings == b.bindings
+        && *gesture_bindings == b.gesture_bindings
+        && *side_gesture_bindings == b.side_gesture_bindings
+        && *thumbwheel_sensitivity == b.thumbwheel_sensitivity
+}
+
 fn reconcile_session(
     session: &mut RunningSession,
     wanted: Option<(&CaptureTarget, &DispatchPlan)>,
     dispatcher: &mut InputDispatcher,
 ) {
+    // A swipe that switches desktops moves the pointer onto another window,
+    // republishing an otherwise identical plan. Keep the hold so the same
+    // press can chain further swipes (#1634).
+    let pointer_only = wanted.is_some_and(|(_, plan)| same_bindings(session.dispatch(), plan));
     if session.reconcile(wanted) == ReconcileAction::DispatchChanged {
-        dispatcher.cancel_session(session.id());
+        if !pointer_only {
+            dispatcher.cancel_session(session.id());
+        }
         let config_key = session.dispatch().config_key.clone();
         session.rekey(&config_key);
     }

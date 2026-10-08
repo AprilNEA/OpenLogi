@@ -6,8 +6,8 @@
 
 use std::ffi::{c_int, c_void};
 use std::ptr::NonNull;
-use std::sync::atomic::AtomicBool;
-use std::sync::{LazyLock, mpsc};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{LazyLock, Mutex, Once, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
 use block2::RcBlock;
@@ -23,6 +23,7 @@ use objc2_core_graphics::{
 use objc2_foundation::{NSNotification, NSNotificationCenter, NSObjectProtocol};
 
 use super::super::space_switch::{self, Backend, Direction, Failure, Lease, PostGate, SpaceState};
+use super::super::{SpacePosition, SpaceSwipePhase};
 use super::{app_services, app_services_symbol};
 
 static BUSY: AtomicBool = AtomicBool::new(false);
@@ -66,6 +67,57 @@ fn start(direction: Direction) {
     if let Err(error) = result {
         tracing::warn!(?error, "Space switch preparation failed — no retry");
     }
+}
+
+/// The SkyLight display identifier of `display`.
+fn display_uuid(api: &Api, display: u32) -> Option<String> {
+    // SAFETY: dynamically resolved CGDisplayCreateUUIDFromDisplayID accepts
+    // a public CGDirectDisplayID and returns a Create-rule CFUUID or null.
+    let uuid = NonNull::new(unsafe { (api.display_uuid)(display) })?;
+    // SAFETY: adopt the Create-rule result once; release via CFRetained.
+    let uuid = unsafe { CFRetained::from_raw(uuid) };
+    Some(CFUUID::new_string(None, Some(&uuid))?.to_string())
+}
+
+/// Where the display under the cursor is in its row of Spaces, read-only;
+/// `None` when the Space list is unavailable.
+pub(in crate::inject) fn space_position() -> Option<SpacePosition> {
+    let api = API.as_ref()?;
+    let uuid = display_uuid(api, cursor_display()?)?;
+    let state = api.state(&uuid)?;
+    Some(SpacePosition {
+        current: state.current,
+        has_previous: state.target(Direction::Previous).ok()?.is_some(),
+        has_next: state.target(Direction::Next).ok()?.is_some(),
+    })
+}
+
+static SPACE_CHANGES: AtomicU64 = AtomicU64::new(0);
+static SPACE_CHANGE_WATCH: Once = Once::new();
+
+/// A count of active-Space changes since the first call, which subscribes to
+/// them for the rest of the process.
+pub(in crate::inject) fn space_change_count() -> u64 {
+    SPACE_CHANGE_WATCH.call_once(|| {
+        let block: RcBlock<dyn Fn(NonNull<NSNotification>)> = RcBlock::new(|_| {
+            SPACE_CHANGES.fetch_add(1, Ordering::Relaxed);
+        });
+        let workspace = NSWorkspace::sharedWorkspace();
+        let center = workspace.notificationCenter();
+        // SAFETY: the notification name and object are valid AppKit objects;
+        // the block is copied by AppKit and only touches a static atomic.
+        let token = unsafe {
+            center.addObserverForName_object_queue_usingBlock(
+                Some(NSWorkspaceActiveSpaceDidChangeNotification),
+                Some(&workspace),
+                None,
+                &block,
+            )
+        };
+        // Observed for the life of the process.
+        std::mem::forget(token);
+    });
+    SPACE_CHANGES.load(Ordering::Relaxed)
 }
 
 fn cursor_display() -> Option<u32> {
@@ -127,15 +179,7 @@ struct Native {
 impl Native {
     fn new(display: u32) -> Result<Self, Failure> {
         let api = API.as_ref().ok_or(Failure::Unavailable)?;
-        // SAFETY: dynamically resolved CGDisplayCreateUUIDFromDisplayID accepts
-        // a public CGDirectDisplayID and returns a Create-rule CFUUID or null.
-        let uuid =
-            NonNull::new(unsafe { (api.display_uuid)(display) }).ok_or(Failure::Unavailable)?;
-        // SAFETY: adopt the Create-rule result once; release via CFRetained.
-        let uuid = unsafe { CFRetained::from_raw(uuid) };
-        let uuid = CFUUID::new_string(None, Some(&uuid))
-            .ok_or(Failure::Unavailable)?
-            .to_string();
+        let uuid = display_uuid(api, display).ok_or(Failure::Unavailable)?;
         // Subscribe before the first state query and before any output event.
         let (observer, changed) = Observer::new();
         Ok(Self {
@@ -205,6 +249,105 @@ fn swipe_events(direction: Direction) -> Option<[CFRetained<CGEvent>; 2]> {
     // Prepare both phases before posting either: allocation failure cannot
     // leave an unterminated gesture. Send exactly one adjacent-Space swipe.
     Some([make(1)?, make(4)?])
+}
+
+/// Live Dock swipes use the type-30 field layout verified interactively
+/// through macOS 26 (OpenLogi PR #1389, Mac Mouse Fix). Later releases keep
+/// the one-shot switch until a live layout is verified there.
+static LIVE_SWIPE_SUPPORTED: LazyLock<bool> = LazyLock::new(|| {
+    objc2_foundation::NSProcessInfo::processInfo()
+        .operatingSystemVersion()
+        .majorVersion
+        < 27
+});
+
+/// Post one frame of a live Space transition; see
+/// [`crate::post_space_swipe`].
+/// The one-shot switch's lease, held by a live transition from its Began
+/// frame to its Ended or Cancelled one, so a one-shot switch and a live swipe
+/// never drive the Dock at once.
+static LIVE_LEASE: Mutex<Option<Lease<'static>>> = Mutex::new(None);
+
+pub(in crate::inject) fn post_space_swipe(progress: f64, phase: SpaceSwipePhase) -> bool {
+    if !*LIVE_SWIPE_SUPPORTED {
+        return false;
+    }
+    let mut lease = LIVE_LEASE.lock().unwrap_or_else(PoisonError::into_inner);
+    if phase == SpaceSwipePhase::Began && lease.is_none() {
+        let Some(acquired) = Lease::acquire(&BUSY) else {
+            tracing::debug!("Space switch pending — live swipe not started");
+            return false;
+        };
+        *lease = Some(acquired);
+    }
+    let posted = if let Some(event) = live_swipe_event(progress, phase) {
+        CGEvent::post(CGEventTapLocation::SessionEventTap, Some(&event));
+        true
+    } else {
+        tracing::warn!(?phase, "could not build a live Space swipe event");
+        false
+    };
+    // A terminal frame, or a Began that never reached the Dock, releases the
+    // lease even when its event could not be built, so a failed live swipe
+    // never locks one-shot switches out.
+    let finished = matches!(phase, SpaceSwipePhase::Ended | SpaceSwipePhase::Cancelled);
+    if finished || (phase == SpaceSwipePhase::Began && !posted) {
+        *lease = None;
+    }
+    posted
+}
+
+fn live_swipe_event(progress: f64, phase: SpaceSwipePhase) -> Option<CFRetained<CGEvent>> {
+    let event = CGEvent::new(None)?;
+    CGEvent::set_type(Some(&event), CGEventType(30));
+    let phase = live_swipe_phase(phase);
+    // Dock swipe subtype, horizontal motion, and the phase in both slots the
+    // trackpad path fills.
+    for (field, value) in [(110, 23), (123, 1), (165, 1), (132, phase), (134, phase)] {
+        CGEvent::set_integer_value_field(Some(&event), CGEventField(field), value);
+    }
+    CGEvent::set_double_value_field(Some(&event), CGEventField(41), 33_231.0);
+    CGEvent::set_double_value_field(Some(&event), CGEventField(124), progress);
+    // The Dock also reads the progress as raw IEEE-754 f32 bits.
+    CGEvent::set_integer_value_field(
+        Some(&event),
+        CGEventField(135),
+        i64::from(live_swipe_progress_bits(progress)),
+    );
+    let horizontal = f64::from(f32::from_bits(1));
+    CGEvent::set_double_value_field(Some(&event), CGEventField(119), horizontal);
+    CGEvent::set_double_value_field(Some(&event), CGEventField(139), horizontal);
+    CGEvent::set_integer_value_field(Some(&event), CGEventField(136), 1);
+    if phase == live_swipe_phase(SpaceSwipePhase::Ended) {
+        // An emphatic exit velocity toward the progress sign asks the Dock to
+        // finish the switch rather than spring back, as the one-shot path does.
+        let velocity = progress.signum() * 9999.0;
+        CGEvent::set_double_value_field(Some(&event), CGEventField(129), velocity);
+        CGEvent::set_double_value_field(Some(&event), CGEventField(130), velocity);
+    }
+    CGEvent::set_integer_value_field(
+        Some(&event),
+        CGEventField::EventSourceUserData,
+        super::super::SYNTHETIC_EVENT_USER_DATA,
+    );
+    Some(event)
+}
+
+const fn live_swipe_phase(phase: SpaceSwipePhase) -> i64 {
+    match phase {
+        SpaceSwipePhase::Began => 1,
+        SpaceSwipePhase::Changed => 2,
+        SpaceSwipePhase::Ended => 4,
+        SpaceSwipePhase::Cancelled => 8,
+    }
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the Dock swipe field stores its progress as IEEE-754 f32 bits"
+)]
+fn live_swipe_progress_bits(progress: f64) -> u32 {
+    (progress as f32).to_bits()
 }
 
 type Dictionary = CFDictionary<CFString, CFType>;

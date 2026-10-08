@@ -46,6 +46,39 @@ fn next_gesture(
 }
 
 #[test]
+fn motion_streams_from_the_commit_on() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    handle_reprog(&mut acc, press(), GESTURE, &[], &[], &tx);
+    acc.backdate_hold_for_test();
+    let xy = |dx| RawControlEvent::RawXy { dx, dy: 0 };
+
+    handle_reprog(&mut acc, xy(20), GESTURE, &[], &[], &tx);
+    handle_reprog(&mut acc, xy(40), GESTURE, &[], &[], &tx);
+    handle_reprog(&mut acc, xy(7), GESTURE, &[], &[], &tx);
+    let inputs: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+        .filter(|input| !matches!(input, CapturedInput::ButtonDown(_)))
+        .collect();
+    assert_eq!(
+        inputs,
+        vec![
+            CapturedInput::Gesture(ButtonId::GestureButton, GestureDirection::Right),
+            CapturedInput::GestureMotion {
+                button: ButtonId::GestureButton,
+                dx: 60,
+                dy: 0,
+            },
+            CapturedInput::GestureMotion {
+                button: ButtonId::GestureButton,
+                dx: 7,
+                dy: 0,
+            },
+        ],
+        "the commit streams the whole committing travel once, then each later report"
+    );
+}
+
+#[test]
 fn a_still_held_second_source_takes_over_when_the_holder_releases() {
     // Both sources diverted: press the gesture button, add the panel, release
     // the gesture button (click — no swipe committed), and the still-held
@@ -547,6 +580,15 @@ fn a_side_gesture_button_uses_its_hidpp_raw_xy() {
     );
     assert_eq!(
         rx.try_recv(),
+        Ok(CapturedInput::GestureMotion {
+            button: ButtonId::Forward,
+            dx: -120,
+            dy: 5,
+        }),
+        "the commit's travel streams for a live consumer"
+    );
+    assert_eq!(
+        rx.try_recv(),
         Ok(CapturedInput::ButtonUp(ButtonId::Forward))
     );
     assert!(
@@ -614,6 +656,15 @@ fn a_dpi_gesture_button_uses_the_shared_raw_xy_path() {
             ButtonId::DpiToggle,
             GestureDirection::Up
         ))
+    );
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::GestureMotion {
+            button: ButtonId::DpiToggle,
+            dx: 5,
+            dy: -120,
+        }),
+        "the commit's travel streams for a live consumer"
     );
     assert_eq!(
         rx.try_recv(),

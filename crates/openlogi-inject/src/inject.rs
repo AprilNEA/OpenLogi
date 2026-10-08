@@ -526,6 +526,80 @@ pub fn post_smooth_scroll(delta: ScrollDelta, phase: SmoothScrollPhase) {
     }
 }
 
+/// Lifecycle phase of one frame of a live, follow-the-hand Space transition.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpaceSwipePhase {
+    /// First frame: the Dock starts dragging the neighbouring Space in.
+    Began,
+    /// The hand moved: the Dock follows to the frame's progress.
+    Changed,
+    /// Finish the switch the frame's progress points toward.
+    Ended,
+    /// Spring back to the Space the transition started on.
+    Cancelled,
+}
+
+/// Post one frame of a live, follow-the-hand Space transition.
+///
+/// `progress` is the cumulative travel since the transition began, in desktop
+/// widths, positive toward the next desktop. Returns `false` when nothing was
+/// posted (no such transition on this platform, a macOS whose Dock swipe event
+/// layout is unverified, or non-finite progress), so the caller can fall back
+/// to the one-shot desktop action.
+#[must_use]
+pub fn post_space_swipe(progress: f64, phase: SpaceSwipePhase) -> bool {
+    if !progress.is_finite() {
+        return false;
+    }
+    cfg_select! {
+        target_os = "macos" => {
+            macos::post_space_swipe(progress, phase)
+        }
+        _ => {
+            let _ = phase;
+            false
+        }
+    }
+}
+
+/// Where the display under the cursor is in its row of desktops.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SpacePosition {
+    /// The current desktop's identifier; it changes when a switch lands.
+    pub current: u64,
+    /// Whether a desktop exists before the current one.
+    pub has_previous: bool,
+    /// Whether a desktop exists after the current one.
+    pub has_next: bool,
+}
+
+/// Where the display under the cursor is in its row of desktops, read-only,
+/// so a live transition can stop at the ends instead of asking the Dock for a
+/// switch it cannot make, and can tell its own switch landing from a change
+/// on another display. `None` when unknown.
+#[must_use]
+pub fn space_position() -> Option<SpacePosition> {
+    cfg_select! {
+        target_os = "macos" => {
+            macos::space_position()
+        }
+        _ => None
+    }
+}
+
+/// A count of active-desktop changes, ticking when a switch lands, so a live
+/// transition can wait for the Dock before starting the next one. `None`
+/// where the platform does not report them.
+#[must_use]
+pub fn space_change_count() -> Option<u64> {
+    cfg_select! {
+        target_os = "macos" => {
+            Some(macos::space_change_count())
+        }
+        _ => None
+    }
+}
+
 /// Return the `/dev/input/eventN` node for the action-injector uinput device,
 /// initialising it if needed.
 ///
