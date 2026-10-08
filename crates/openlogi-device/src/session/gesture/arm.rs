@@ -12,6 +12,7 @@ use openlogi_core::binding::ButtonId;
 use tracing::{debug, warn};
 
 use super::main_wheel::{self, ArmedMainWheel, MainWheelDivert};
+use super::spy::{self, ArmedOnboard};
 use super::{CaptureSpec, CapturedInput};
 use crate::reprog_controls::{self, ReprogControlsV4};
 use crate::session::capture::open_device;
@@ -57,6 +58,7 @@ pub(super) struct ArmedControls {
     pub(super) thumb: Option<ArmedThumbwheel>,
     /// `0x2121` main wheel, present when its movement reports are diverted.
     pub(super) main_wheel: Option<ArmedMainWheel>,
+    pub(super) onboard: Option<ArmedOnboard>,
 }
 
 pub(super) struct ArmedThumbwheel {
@@ -102,6 +104,7 @@ impl ArmedControls {
             reporting,
             thumb,
             main_wheel,
+            onboard,
             ..
         } = self;
         let reprog =
@@ -113,6 +116,7 @@ impl ArmedControls {
             main_wheel
                 .as_ref()
                 .map(|wheel| HiResWheelRestore::new(wheel.feature_index)),
+            onboard.as_ref().and_then(ArmedOnboard::restore),
         )
     }
 
@@ -141,6 +145,9 @@ impl ArmedControls {
             && let Err(error) = wheel.divert().await
         {
             warn!(?error, "main-wheel re-divert after wake failed");
+        }
+        if let Some(onboard) = self.onboard.as_ref() {
+            onboard.rearm().await;
         }
     }
 }
@@ -174,6 +181,7 @@ pub(super) async fn arm_controls(
         && armed.wheel_button_cids.is_empty()
         && armed.thumb.is_none()
         && armed.main_wheel.is_none()
+        && armed.onboard.is_none()
     {
         debug!(slot, "no capturable controls — idle session");
     }
@@ -304,6 +312,9 @@ pub(super) async fn arm_controls_into(
         && let Some(info) = device.root().get_feature(HiResWheelFeature::ID).await?
     {
         arm_main_wheel(chan, slot, info.index, requested, armed).await?;
+    }
+    if let Some(target) = &spec.onboard {
+        spy::arm_onboard(device, chan, slot, target, &mut armed.onboard).await?;
     }
     Ok(())
 }

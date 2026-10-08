@@ -17,6 +17,7 @@ mod category;
 mod control;
 mod defaults;
 mod effect;
+mod gaming;
 mod gesture;
 mod key_combo;
 mod swipe;
@@ -36,6 +37,7 @@ pub use category::Category;
 pub use control::{Cid, KNOWN_CONTROLS, KnownControl, UNKNOWN_CONTROL_TRANSLATION_KEY};
 pub use defaults::{default_binding, default_binding_for, default_gesture_binding};
 pub use effect::{Effect, MediaKey, MouseButton, NativeAction, Script, Shortcut};
+pub use gaming::{G502_LIGHTSPEED, GamingLayout};
 pub use gesture::GestureDirection;
 pub use key_combo::{KeyCombo, KeyComboParseError, KeyboardUsage, KeyboardUsageError};
 pub use swipe::{

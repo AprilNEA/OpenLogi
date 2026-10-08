@@ -103,6 +103,7 @@ pub(super) struct InputDispatcher {
     outputs: GestureOutputs,
     wheels: SessionWheels,
     held_presses: HeldPresses,
+    shift_held: HashMap<HidppSessionId, ButtonId>,
 }
 
 impl InputDispatcher {
@@ -113,6 +114,7 @@ impl InputDispatcher {
             outputs,
             wheels: SessionWheels::default(),
             held_presses: HeldPresses::default(),
+            shift_held: HashMap::new(),
         }
     }
 
@@ -136,6 +138,44 @@ impl InputDispatcher {
         self.outputs.cancel_session(session);
         self.wheels.cancel_session(session);
         self.held_presses.cancel_session(session);
+        self.shift_held.remove(session);
+    }
+
+    /// Hold G-Shift if `button` is bound to it; `true` when it was.
+    fn start_gshift(
+        &mut self,
+        session: &HidppSessionId,
+        plan: &DispatchPlan,
+        button: ButtonId,
+    ) -> bool {
+        let is_shift = plan
+            .bindings
+            .get(&button)
+            .is_some_and(|binding| binding.click_action() == Action::GShift);
+        if is_shift {
+            debug!(key = session.device_key(), ?button, "G-Shift held");
+            self.shift_held.insert(session.clone(), button);
+        }
+        is_shift
+    }
+
+    /// Release G-Shift if `button` holds it; `true` when it did.
+    fn end_gshift(&mut self, session: &HidppSessionId, button: ButtonId) -> bool {
+        let held = self.shift_held.get(session) == Some(&button);
+        if held {
+            self.shift_held.remove(session);
+        }
+        held
+    }
+
+    /// `button`'s binding, from the G-Shift layer while G-Shift is held.
+    fn binding_for<'p>(
+        &self,
+        session: &HidppSessionId,
+        plan: &'p DispatchPlan,
+        button: ButtonId,
+    ) -> Option<&'p Binding> {
+        press_binding(plan, button, self.shift_held.contains_key(session))
     }
 
     /// Route one captured input from `session` to its bound action or
@@ -175,12 +215,17 @@ impl InputDispatcher {
                 }
             }
             CapturedInput::ButtonDown(button) => {
+                if self.start_gshift(session, plan, button) {
+                    return;
+                }
                 // A raw-XY gesture source owns its click/swipe map; its physical
                 // lifecycle is still tracked, but it must not also fire the
                 // single-action projection on down.
                 let is_gesture = plan.gesture_bindings.contains_key(&button)
                     || plan.side_gesture_bindings.contains_key(&button);
-                let binding = (!is_gesture).then(|| plan.bindings.get(&button)).flatten();
+                let binding = (!is_gesture)
+                    .then(|| self.binding_for(session, plan, button))
+                    .flatten();
                 let tracks_hold = is_gesture || binding.is_some_and(Binding::is_wheel_hold);
                 if let Some(binding) = binding {
                     debug!(key, ?button, action = %binding.click_action().label(), "HID++ button → binding");
@@ -202,6 +247,9 @@ impl InputDispatcher {
                 }
             }
             CapturedInput::ButtonUp(button) => {
+                if self.end_gshift(session, button) {
+                    return;
+                }
                 self.outputs.actions.try_hidpp_button_up(session, button);
                 self.held_presses.end(session, button);
             }
@@ -344,6 +392,13 @@ fn main_wheel_scroll(
         -notches
     };
     ScrollDelta::wheel_ticks(0.0, upward)
+}
+
+fn press_binding(plan: &DispatchPlan, button: ButtonId, shifted: bool) -> Option<&Binding> {
+    shifted
+        .then(|| plan.shift_bindings.get(&button))
+        .flatten()
+        .or_else(|| plan.bindings.get(&button))
 }
 
 #[cfg(test)]
