@@ -77,8 +77,8 @@ pub fn detect_swipe(dx: i32, dy: i32) -> Option<GestureDirection> {
 }
 
 /// The mid-swipe state machine shared by both gesture-capture paths: the HID++
-/// dedicated gesture button (`openlogi-hid`'s `0x1b04` raw-XY divert) and the OS-hook
-/// Middle/Back/Forward buttons (`openlogi-agent-core`'s CGEventTap). A gesture
+/// HID++ gesture sources (`openlogi-hid`'s `0x1b04` raw-XY divert) and the
+/// OS-hook Back/Forward buttons (`openlogi-agent-core`'s CGEventTap). A gesture
 /// button's hold accumulates travel; the instant the dominant axis commits a
 /// direction — after the button has been held [`GESTURE_HOLD_FOR_SWIPE`], so a
 /// quick click whose cursor drifted doesn't count — [`Self::accumulate`] returns

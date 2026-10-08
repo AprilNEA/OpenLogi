@@ -40,7 +40,7 @@
   job skips where is data a test reads. It is also the only place the Windows
   cross-lint crate list lives — `devenv.nix`'s `openlogi:check-windows` calls it
   rather than repeating the `-p` flags. Adding a job to `ci.yml` means a `Job`
-  variant + `Spec` row, its steps, and a row in `.claude/rules/ci.md`; `--list`
+  variant + `Spec` row, its steps, and a row in `.agents/rules/ci.md`; `--list`
   renders itself from the rows. It does not repeat the commands — `--dry-run`
   prints the real argv, and a hand-copied third version of what `ci.yml` says
   is a version that can be wrong.

@@ -1,7 +1,7 @@
 > [!WARNING]
 > **OpenLogi 仍在积极开发中**，尚未稳定 —— 功能与配置仍可能变动。点个 **Star** ⭐ 并 **Watch** 👀 本仓库，在新版本发布时获得通知。
 
-<h4 align="right"><a href="../README.md">English</a> | <strong>简体中文</strong> | <a href="README.ja.md">日本語</a> | <a href="README.de.md">Deutsch</a> | <a href="README.fr.md">Français</a> | <a href="README.ko.md">한국어</a></h4>
+<h4 align="right"><a href="../README.md">English</a> | <strong>简体中文</strong> | <a href="README.ja.md">日本語</a> | <a href="README.de.md">Deutsch</a> | <a href="README.fr.md">Français</a> | <a href="README.ko.md">한국어</a> | <a href="README.ru.md">Русский</a></h4>
 
 <p align="center">
     <img src="https://assets.openlogi.org/brand/openlogi-icon.png" width="138" alt="OpenLogi"/>
@@ -40,7 +40,7 @@ OpenLogi 能做、而 Options+ 做不到的事：
 
 - **轻量化** 原生 Rust + GPUI。
 - **支持 Linux** Linux 是 OpenLogi 的一等公民。
-- **自定义手势键** 可自由指定任一物理按键承担手势角色，也可以彻底关闭手势。
+- **在受支持的按键上使用手势** 可为受支持的控件分配手势操作，也可以彻底关闭手势。
 - **纯文本配置** 通过一个 TOML 文件完成，可通过多种方法在多台机器之间同步。
 - **可脚本化** 除了 GUI 以外还支持 CLI。
 
@@ -54,7 +54,9 @@ OpenLogi 能做、而 Options+ 做不到的事：
 **鼠标**
 
 - 中键、模式切换键、拇指滚轮等按键的捕获与重映射（中键全平台可用，其余取决于设备能力）
-- 按方向的手势绑定与实时捕获，可放在任意支持的按键上
+- 按方向的手势绑定与实时捕获，适用于受支持的后退／前进键、DPI／模式切换键、专用手势键和触觉面板
+  - DPI／模式切换键手势要求设备报告支持事件转发（diversion）和原始 XY 位移（raw-XY）。
+  - 左右主键和滚轮相关控件不能新启用手势；已有的中键手势绑定仍会保留。
 - Actions Ring：以光标为中心的八槽位动作环（`ShowActionsRing`），支持按应用的布局
 - DPI 控制：预设 + 循环 / 按预设设置动作（`0x2201`）
 - SmartShift 滚轮：模式切换、灵敏度和永久棘轮面板（`0x2111`）
@@ -102,28 +104,30 @@ brew install --cask aprilnea/tap/openlogi@latest
 
 ### Linux
 
-从[最新 release](https://github.com/AprilNEA/OpenLogi/releases/latest) 下载适用于你的发行版的安装包：
+通过 HTTPS 将安装脚本下载到文件，检查后再运行；不要直接通过管道交给 shell：
 
 ```sh
-# Debian / Ubuntu
-sudo dpkg -i openlogi_*.deb
-
-# Fedora / RHEL
-sudo rpm -i openlogi-*.rpm
-
-# Arch Linux
-sudo pacman -U openlogi-*.pkg.tar.zst
+curl --proto '=https' --proto-redir '=https' --tlsv1.2 \
+  --fail --location --silent --show-error \
+  --retry 3 --retry-connrefused \
+  --output openlogi-install.sh \
+  https://raw.githubusercontent.com/AprilNEA/OpenLogi/master/packaging/linux/install.sh
+less openlogi-install.sh
+sh openlogi-install.sh
+rm openlogi-install.sh
 ```
 
-安装包同时提供 `x86_64`/`amd64` 与 `arm64`/`aarch64` 两种架构。
+脚本会检测 apt、dnf、yum、zypper、rpm 或 pacman，精确选择当前机器所需的 `.deb`、`.rpm` 或 `.pkg.tar.zst`，使用内嵌的 OpenLogi minisign 公钥验证其分离签名，并在使用 `sudo` 调用包管理器前根据 release 的 `SHA256SUMS` 验证该文件。请先通过发行版安装 `minisign`，并以普通用户运行脚本，不要用 `sudo` 启动整个脚本。默认安装最新版本；需要时可使用 `--version`、`--package-manager`、`--no-start` 或 `--dry-run`。
 
-安装包会写入 udev 规则，让你的用户无需 `sudo` 即可访问 `/dev/hidraw*` 和 `/dev/uinput`。装完后为当前用户启用后台 agent：
+安装包同时提供 `x86_64`/`amd64` 与 `arm64`/`aarch64` 两种架构，要求 GLIBC 2.35 或更高版本（以 Ubuntu 22.04 为基线）。
+
+安装包会写入 udev 规则，让你的用户无需 `sudo` 即可访问 `/dev/hidraw*`、`/dev/uinput` 以及 Logitech 鼠标的 `/dev/input/event*` 节点。安装脚本会尽力为当前用户启用并启动后台 agent；手动安装包后可运行：
 
 ```sh
 systemctl --user enable --now openlogi-agent.service
 ```
 
-手动 / 源码安装以及无 systemd 的发行版，见 [INSTALL-linux.md](INSTALL-linux.md)。
+固定版本、源码安装、完整 NixOS 选项以及无 systemd 的发行版，见 [INSTALL-linux.md](INSTALL-linux.md)。
 
 ### Windows
 

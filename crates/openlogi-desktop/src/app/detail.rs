@@ -26,7 +26,7 @@ use crate::features::action_ring::ActionRingPanel;
 use crate::features::camera::controls::CameraControlsPanel;
 use crate::features::camera::preview::CameraPreview;
 use crate::features::keyboard::function_row::FunctionRowView;
-use crate::features::lighting::device::LightingPanel;
+use crate::features::lighting::keyboard_rgb::LightingPanel;
 use crate::features::lighting::standalone::LightPanel;
 use crate::features::lighting::visual as light_visual;
 use crate::features::mouse::view::MouseModelView;
@@ -35,7 +35,7 @@ use crate::features::pointer::smartshift::SmartShiftPanel;
 use crate::features::profiles::{
     AppCatalogPicker, ProfileIconCache, action_ring_profile_scope_bar, button_profile_scope_bar,
 };
-use crate::state::{AppState, DeviceRecord, StateEvent};
+use crate::state::{AppState, DeviceRecord, StateEvents};
 use crate::ui::battery::BatteryIndicator;
 use crate::ui::components::{PanelCard, Toggle};
 use crate::ui::theme::{
@@ -196,6 +196,7 @@ fn detail_navigation(
                 .w_full()
                 .flex()
                 .items_center()
+                .justify_start()
                 .gap_2p5()
                 .px_3()
                 .py_2()
@@ -433,13 +434,7 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
                 .disabled(!inversion_supported)
                 .label((!inversion_supported).then(|| tr!("common.unavailable")))
                 .on_change(|inverted, _window, cx| {
-                    AppState::update(cx, |state, cx| {
-                        let key = state.current_record().map(DeviceRecord::device_key);
-                        state.commit_invert_scroll(*inverted);
-                        if let Some(key) = key {
-                            cx.emit(StateEvent::DeviceConfigChanged(key));
-                        }
-                    });
+                    AppState::apply(cx, |state| state.commit_invert_scroll(*inverted));
                 }),
         );
     let resolution_description = match hires {
@@ -515,13 +510,7 @@ fn wheel_resolution_control(selected: Option<ScrollResolution>, enabled: bool) -
             let Some(value) = indices.first().and_then(|index| values.get(*index)) else {
                 return;
             };
-            AppState::update(cx, |state, cx| {
-                let key = state.current_record().map(DeviceRecord::device_key);
-                state.commit_scroll_resolution(*value);
-                if let Some(key) = key {
-                    cx.emit(StateEvent::DeviceConfigChanged(key));
-                }
-            });
+            AppState::apply(cx, |state| state.commit_scroll_resolution(*value));
         })
 }
 
@@ -543,7 +532,8 @@ fn lighting_tab(lighting_panel: &gpui::Entity<LightingPanel>) -> impl IntoElemen
 /// each in a titled card. Side by side at the default window width so every
 /// control is visible without scrolling; the cards wrap to a stacked column
 /// when the window is too narrow. The preview drives the capture session via
-/// [`CameraPreview::set_target`] (called from [`AppView::render`]); the controls
+/// [`CameraPreview::set_target`] (called from `AppView`'s [`Render::render`](gpui::Render::render));
+/// the controls
 /// panel reads/writes UVC settings directly on the device.
 fn camera_tab(
     camera_preview: &gpui::Entity<CameraPreview>,
@@ -634,13 +624,74 @@ fn light_tab(
 /// Device tab: device details and configuration cards stacked.
 fn device_tab(cx: &mut Context<AppView>) -> impl IntoElement {
     let pal = theme::palette(cx);
+    let keyboard = AppState::try_read(cx)
+        .and_then(AppState::current_record)
+        .is_some_and(|record| record.kind == DeviceKind::Keyboard);
     tab_body(
         ContentWidth::Small,
         v_flex()
             .w_full()
             .gap_3()
             .child(device_details_card(pal, cx))
+            .when(keyboard, |column| column.child(keyboard_card(pal, cx)))
             .child(configuration_card(pal, cx)),
+    )
+}
+
+/// What the Fn-lock row knows: whether the keyboard has the control and
+/// which state to show (the keyboard's own reading once it lands, else the
+/// persisted preference — see `AppState::current_fn_lock_shown`).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct FnLockFacts {
+    supported: bool,
+    fn_lock: bool,
+}
+
+/// Keyboard card: the Fn-lock toggle. Written to `config.toml` and pushed to
+/// the keyboard by the agent; the state shown is the keyboard's own reading
+/// once it lands, so a change made on the keyboard (Fn+Esc) is visible too.
+fn keyboard_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
+    let facts = AppState::try_read(cx).map_or_else(FnLockFacts::default, |state| FnLockFacts {
+        supported: state.current_fn_lock_supported(),
+        fn_lock: state.current_fn_lock_shown(),
+    });
+    let description = if facts.supported {
+        tr!("device.fn_lock_description")
+    } else {
+        tr!("device.fn_lock_unsupported")
+    };
+    let row = h_flex()
+        .justify_between()
+        .items_center()
+        .gap_4()
+        .child(
+            v_flex()
+                .child(
+                    div()
+                        .text_body()
+                        .text_color(pal.text_primary)
+                        .child(tr!("device.fn_lock")),
+                )
+                .child(
+                    div()
+                        .text_caption()
+                        .text_color(pal.text_muted)
+                        .child(description),
+                ),
+        )
+        .child(
+            Toggle::new("fn-lock-toggle")
+                .selected(facts.fn_lock)
+                .disabled(!facts.supported)
+                .label((!facts.supported).then(|| tr!("common.unavailable")))
+                .on_change(|fn_lock, _window, cx| {
+                    AppState::apply(cx, |state| state.commit_fn_lock(*fn_lock));
+                }),
+        );
+    PanelCard::new(
+        tr!("device.keys"),
+        Icon::empty().path("action-icons/keyboard.svg"),
+        row,
     )
 }
 
@@ -732,14 +783,13 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
                         .checked(device_enabled)
                         .on_click(|checked, _window, cx| {
                             let enabled = *checked;
-                            AppState::update(cx, |state, cx| {
-                                let record = state
+                            AppState::apply(cx, |state| {
+                                state
                                     .current_record()
-                                    .map(|record| (record.config_key.clone(), record.device_key()));
-                                if let Some((config_key, event_key)) = record {
-                                    state.set_device_enabled(&config_key, enabled);
-                                    cx.emit(StateEvent::DeviceConfigChanged(event_key));
-                                }
+                                    .map(DeviceRecord::device_key)
+                                    .map_or_else(StateEvents::none, |key| {
+                                        state.commit_device_enabled(&key, enabled)
+                                    })
                             });
                         }),
                 ),

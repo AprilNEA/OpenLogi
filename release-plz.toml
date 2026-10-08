@@ -32,9 +32,16 @@ git_tag_enable = false
 git_release_enable = false
 # Version bumps only — root CHANGELOG.md is written by git-cliff (`.config/cliff.toml`).
 changelog_update = false
-# Only publish/tag when the release PR merges (branch prefix above). A later
-# master tip after a failed crates.io publish must not cut v{version} — re-run
-# the failed release job on that same SHA once credentials are fixed.
+# Only publish/tag when the merged PR's branch carries the prefix above. release-plz
+# looks up the PRs GitHub associates with the current commit and skips any other
+# master tip ("current commit is not from a release PR"), so a tip newer than the
+# version-bump commit never cuts v{version}. Recovering a failed crates.io publish:
+# - credentials or network failed: re-run the failed release job on that same SHA.
+# - the tree itself cannot publish (a new stable rustc turned `-D warnings` red):
+#   fix master, then open a PR from a `release-plz/` branch and squash-merge it
+#   with the subject `chore: release v{version}` so the release job runs on a tree
+#   that passes. release-plz skips the crates already on the registry and tags the
+#   merge commit, as #874 did for v0.7.10.
 release_always = false
 
 [[package]]
@@ -51,6 +58,10 @@ version_group = "openlogi"
 
 [[package]]
 name = "openlogi-core"
+version_group = "openlogi"
+
+[[package]]
+name = "openlogi-fixture"
 version_group = "openlogi"
 
 # The published CLI uses this contract to read the running agent's inventory,

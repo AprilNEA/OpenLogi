@@ -6,6 +6,9 @@
 //! the wire. That last one makes this a wire type — see
 //! `crates/openlogi-ipc/AGENTS.md`.
 
+use std::collections::BTreeMap;
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
 
 /// One application, named the way a per-app profile names it.
@@ -38,6 +41,92 @@ impl ForegroundApp {
         Self {
             display_name: id.clone(),
             id,
+        }
+    }
+}
+
+/// Resolve the most specific per-app entry for a foreground identifier — the
+/// one matcher every per-app map uses, so a selector cannot mean one thing for
+/// button overrides and another for Actions Ring layouts.
+///
+/// The exact key wins. On Windows the identifier is a lower-cased executable
+/// path, so `exe:<filename>` is the stable fallback for Store and self-updating
+/// applications whose install directory changes between versions; both path
+/// separators are recognized so hand-authored Windows config stays inspectable
+/// on every platform. An identifier with no path separator is a macOS bundle
+/// identifier or a Linux application class, never an executable, so a name
+/// that merely ends in `.exe` is not reinterpreted as one.
+#[must_use]
+pub fn overlay_for<'a, T>(overlays: &'a BTreeMap<String, T>, app: &str) -> Option<&'a T> {
+    overlays.get(app).or_else(|| {
+        let (_, executable_name) = app.rsplit_once(['\\', '/'])?;
+        if !Path::new(executable_name)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+        {
+            return None;
+        }
+        overlays.get(&format!("exe:{}", executable_name.to_ascii_lowercase()))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn overlays(keys: &[&str]) -> BTreeMap<String, &'static str> {
+        keys.iter()
+            .map(|key| ((*key).to_string(), "overlay"))
+            .collect()
+    }
+
+    #[test]
+    fn the_exact_key_wins_over_the_executable_fallback() {
+        let mut map = BTreeMap::new();
+        map.insert(
+            r"c:\program files\windowsapps\sharex_16.0_x64\sharex.exe".to_string(),
+            "exact",
+        );
+        map.insert("exe:sharex.exe".to_string(), "fallback");
+        assert_eq!(
+            overlay_for(
+                &map,
+                r"c:\program files\windowsapps\sharex_16.0_x64\sharex.exe"
+            ),
+            Some(&"exact")
+        );
+    }
+
+    #[test]
+    fn a_versioned_path_falls_back_to_the_executable_name() {
+        let map = overlays(&["exe:sharex.exe"]);
+        // The install directory carries the version, so only the basename is
+        // stable across updates.
+        for path in [
+            r"c:\program files\windowsapps\sharex_16.0_x64\sharex.exe",
+            r"c:\program files\windowsapps\sharex_17.1_x64\sharex.exe",
+            r"C:\Program Files\ShareX\ShareX.EXE",
+            "/c/program files/sharex/sharex.exe",
+        ] {
+            assert_eq!(overlay_for(&map, path), Some(&"overlay"), "{path}");
+        }
+    }
+
+    #[test]
+    fn identifiers_that_name_no_executable_never_fall_back() {
+        let map = overlays(&["exe:code.exe", "exe:com.example.exe", "exe:.exe"]);
+        // macOS bundle ids and Linux classes are not paths, even when they end
+        // in `.exe`; a path with no executable name has nothing stable to match.
+        for app in [
+            "com.microsoft.VSCode",
+            "com.example.exe",
+            "Firefox",
+            "code.exe",
+            r"c:\program files\microsoft vs code\code.exe.bak",
+            r"c:\program files\microsoft vs code\",
+            "",
+        ] {
+            assert_eq!(overlay_for(&map, app), None, "{app}");
         }
     }
 }

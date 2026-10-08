@@ -134,6 +134,17 @@ pub enum AssetSourcePreference {
     Fastly,
 }
 
+/// Which application supplies per-app mouse button bindings.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MouseProfileTarget {
+    /// Use the application under the pointer, where the platform supports it.
+    #[default]
+    Pointer,
+    /// Use the application with keyboard focus.
+    Focused,
+}
+
 /// App-wide preferences not tied to any particular device.
 ///
 /// All fields are `#[serde(default)]` so adding a new one is backward
@@ -217,11 +228,6 @@ pub struct AppSettings {
     /// Defaults to the icon the app is signed with.
     #[serde(default)]
     pub app_icon: AppIcon,
-    /// Whether the GUI automatically downloads device images from
-    /// `assets.openlogi.org` when a device appears. `true` (default) keeps
-    /// the current behavior; `false` makes no asset network requests at all
-    /// (the app falls back to bundled art and the synthetic silhouette). A
-    /// manual "Refresh assets" in Settings still fetches on demand regardless.
     /// Whether the GUI automatically downloads device images from the selected
     /// source when a device appears. `true` (default) keeps the current behavior;
     /// `false` makes no asset network requests at all (the app falls back to
@@ -270,6 +276,10 @@ pub struct AppSettings {
     /// `0` / `6` / `12`). `None` keeps each theme's own radius.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui_radius: Option<u8>,
+    /// Application used to select per-app mouse button bindings. Defaults to
+    /// the application under the pointer; unsupported platforms use focus.
+    #[serde(default)]
+    pub mouse_profile_target: MouseProfileTarget,
 }
 
 const SENSITIVITY_MIN: u8 = 1;
@@ -471,6 +481,7 @@ impl Default for AppSettings {
             theme_light: None,
             theme_dark: None,
             ui_radius: None,
+            mouse_profile_target: MouseProfileTarget::Pointer,
         }
     }
 }
@@ -688,15 +699,13 @@ where
     D: serde::Deserializer<'de>,
 {
     let value = SmartShiftAutoDisengage::deserialize(deserializer)?;
-    match value {
-        SmartShiftAutoDisengage::Threshold(threshold)
-            if threshold < SMARTSHIFT_MIN_AUTO_DISENGAGE =>
-        {
-            Err(serde::de::Error::custom(format_args!(
-                "SmartShift auto_disengage must be between {SMARTSHIFT_MIN_AUTO_DISENGAGE} and 255, got {threshold}"
-            )))
-        }
-        _ => Ok(value),
+    if SmartShift::accepts_auto_disengage(value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format_args!(
+            "SmartShift auto_disengage must be between {SMARTSHIFT_MIN_AUTO_DISENGAGE} and 255, got {}",
+            u8::from(value)
+        )))
     }
 }
 
@@ -722,6 +731,15 @@ pub struct SmartShift {
     /// expose tunable torque. HID++ defines the full non-zero byte range.
     #[serde(with = "crate::hid::smartshift::optional_tunable_torque")]
     pub tunable_torque: Option<TunableTorque>,
+}
+
+impl SmartShift {
+    /// Whether a firmware auto-disengage value is safe to persist and reapply.
+    /// The config parser and interactive writers share this policy.
+    #[must_use]
+    pub fn accepts_auto_disengage(value: SmartShiftAutoDisengage) -> bool {
+        !matches!(value, SmartShiftAutoDisengage::Threshold(threshold) if threshold < SMARTSHIFT_MIN_AUTO_DISENGAGE)
+    }
 }
 
 /// The v3-and-older owner-lock choice: which control owned a device's single

@@ -1,7 +1,7 @@
 > [!WARNING]
 > **OpenLogi は現在活発に開発中**であり、まだ安定していません —— 機能や設定は今後も変わる可能性があります。リポジトリに **Star** ⭐ と **Watch** 👀 を付けて、新しいリリースの通知を受け取りましょう。
 
-<h4 align="right"><a href="../README.md">English</a> | <a href="README.zh-CN.md">简体中文</a> | <strong>日本語</strong> | <a href="README.de.md">Deutsch</a> | <a href="README.fr.md">Français</a> | <a href="README.ko.md">한국어</a></h4>
+<h4 align="right"><a href="../README.md">English</a> | <a href="README.zh-CN.md">简体中文</a> | <strong>日本語</strong> | <a href="README.de.md">Deutsch</a> | <a href="README.fr.md">Français</a> | <a href="README.ko.md">한국어</a> | <a href="README.ru.md">Русский</a></h4>
 
 <p align="center">
     <img src="https://assets.openlogi.org/brand/openlogi-icon.png" width="138" alt="OpenLogi"/>
@@ -40,7 +40,7 @@ OpenLogi にできて Options+ にできないこと：
 
 - **軽量なまま。** ネイティブ Rust + GPUI。
 - **Linux で動く。** Linux は OpenLogi のファーストクラスプラットフォームです。
-- **ジェスチャーボタンを自由に。** どの物理ボタンにでもジェスチャー役を割り当てられ、ジェスチャーを完全にオフにもできます。
+- **対応ボタンでジェスチャー。** 対応するコントロールにジェスチャー操作を割り当てられ、ジェスチャーを完全にオフにもできます。
 - **設定がプレーンテキスト。** すべてが 1 つの TOML ファイルに収まり、好きな方法でマシン間を同期できます。
 - **スクリプトで叩ける。** GUI に加えて本物の CLI も。
 
@@ -54,7 +54,9 @@ OpenLogi にできて Options+ にできないこと：
 **マウス**
 
 - ミドル、モードシフト、サムホイールなどのボタンのキャプチャと再マッピング（ミドルは全プラットフォーム対応、その他はデバイス機能に依存）
-- 方向別ジェスチャーバインディングとライブキャプチャ（対応する任意のボタンに設定可能）
+- 対応する戻る／進むボタン、DPI／モードシフトボタン、専用ジェスチャーボタン、触覚パネルでの方向別ジェスチャーバインディングとライブキャプチャ
+  - DPI／モードシフトのジェスチャーには、デバイスがイベント転送（diversion）と raw-XY のサポートを報告する必要があります。
+  - 左右の主ボタンとホイール関連のコントロールには新たにジェスチャーを割り当てられません。既存のミドルクリックのジェスチャーバインディングは保持されます。
 - Actions Ring：カーソル中心の 8 スロットアクションオーバーレイ（`ShowActionsRing`）、アプリごとのレイアウトに対応
 - DPI 制御：プリセット + サイクル / プリセット指定アクション（`0x2201`）
 - SmartShift ホイール：モード切替、感度、永続ラチェットパネル（`0x2111`）
@@ -106,7 +108,7 @@ brew install --cask aprilnea/tap/openlogi@latest
 
 ```sh
 # Debian / Ubuntu
-sudo dpkg -i openlogi_*.deb
+sudo dpkg -i openlogi-*.deb
 
 # Fedora / RHEL
 sudo rpm -i openlogi-*.rpm

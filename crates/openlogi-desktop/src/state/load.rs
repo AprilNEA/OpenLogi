@@ -2,13 +2,15 @@
 
 use std::sync::Arc;
 
-use openlogi_core::hid::{DpiInfo, SmartShiftStatus};
+use openlogi_core::hid::{DpiInfo, FnLockState, SmartShiftStatus};
 
 /// State projected from an swr-backed device query: unqueried, in flight,
 /// resolved, transiently failed, or permanently unsupported.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum Load<T> {
-    /// The selected device has not been queried yet.
+    /// The selected device has not been queried yet. Also what a device
+    /// nobody has asked about reads as.
+    #[default]
     Unknown,
     /// A background HID++ read is in flight.
     Loading,
@@ -23,10 +25,15 @@ pub enum Load<T> {
 }
 
 /// Per-device DPI capability load state. See [`Load`].
-pub type DpiStatus = Load<Arc<DpiInfo>>;
+pub type DpiLoad = Load<Arc<DpiInfo>>;
 
 /// Per-device SmartShift (`0x2111`) config load state. See [`Load`]. Unlike DPI
 /// presets, the resolved config is *not* persisted to `config.toml` — the device
 /// stores wheel mode / threshold / torque in its own non-volatile memory, so the
 /// GUI only ever reads and writes the device.
 pub type SmartShiftLoad = Load<Arc<SmartShiftStatus>>;
+
+/// Per-keyboard Fn-lock (`0x40a2` / `0x40a3`) load state. See [`Load`]. The
+/// read shows what the keyboard holds right now — it can differ from the
+/// persisted `fn_lock` after the user pressed Fn+Esc on the keyboard.
+pub type FnLockLoad = Load<Arc<FnLockState>>;
