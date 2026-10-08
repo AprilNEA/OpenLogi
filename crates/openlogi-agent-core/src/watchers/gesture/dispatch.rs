@@ -2,7 +2,7 @@
 
 mod wheel;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU8;
 use std::time::Instant;
 
@@ -103,7 +103,7 @@ pub(super) struct InputDispatcher {
     outputs: GestureOutputs,
     wheels: SessionWheels,
     held_presses: HeldPresses,
-    shift_held: HashMap<HidppSessionId, ButtonId>,
+    shift_held: HeldShift,
 }
 
 impl InputDispatcher {
@@ -114,7 +114,7 @@ impl InputDispatcher {
             outputs,
             wheels: SessionWheels::default(),
             held_presses: HeldPresses::default(),
-            shift_held: HashMap::new(),
+            shift_held: HeldShift::default(),
         }
     }
 
@@ -138,7 +138,7 @@ impl InputDispatcher {
         self.outputs.cancel_session(session);
         self.wheels.cancel_session(session);
         self.held_presses.cancel_session(session);
-        self.shift_held.remove(session);
+        self.shift_held.0.remove(session);
     }
 
     /// Hold G-Shift if `button` is bound to it; `true` when it was.
@@ -154,18 +154,14 @@ impl InputDispatcher {
             .is_some_and(|binding| binding.click_action() == Action::GShift);
         if is_shift {
             debug!(key = session.device_key(), ?button, "G-Shift held");
-            self.shift_held.insert(session.clone(), button);
+            self.shift_held.press(session, button);
         }
         is_shift
     }
 
-    /// Release G-Shift if `button` holds it; `true` when it did.
+    /// Release `button` if it is a held G-Shift button; `true` when it was.
     fn end_gshift(&mut self, session: &HidppSessionId, button: ButtonId) -> bool {
-        let held = self.shift_held.get(session) == Some(&button);
-        if held {
-            self.shift_held.remove(session);
-        }
-        held
+        self.shift_held.release(session, button)
     }
 
     /// `button`'s binding, from the G-Shift layer while G-Shift is held.
@@ -175,7 +171,7 @@ impl InputDispatcher {
         plan: &'p DispatchPlan,
         button: ButtonId,
     ) -> Option<&'p Binding> {
-        press_binding(plan, button, self.shift_held.contains_key(session))
+        press_binding(plan, button, self.shift_held.active(session))
     }
 
     /// Route one captured input from `session` to its bound action or
@@ -392,6 +388,27 @@ fn main_wheel_scroll(
         -notches
     };
     ScrollDelta::wheel_ticks(0.0, upward)
+}
+
+/// G-Shift buttons held per session; the layer stays on until all are released.
+#[derive(Default)]
+struct HeldShift(HashMap<HidppSessionId, HashSet<ButtonId>>);
+
+impl HeldShift {
+    fn press(&mut self, session: &HidppSessionId, button: ButtonId) {
+        self.0.entry(session.clone()).or_default().insert(button);
+    }
+
+    /// Whether `button` was a held G-Shift button.
+    fn release(&mut self, session: &HidppSessionId, button: ButtonId) -> bool {
+        self.0
+            .get_mut(session)
+            .is_some_and(|held| held.remove(&button))
+    }
+
+    fn active(&self, session: &HidppSessionId) -> bool {
+        self.0.get(session).is_some_and(|held| !held.is_empty())
+    }
 }
 
 fn press_binding(plan: &DispatchPlan, button: ButtonId, shifted: bool) -> Option<&Binding> {
