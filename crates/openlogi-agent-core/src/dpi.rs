@@ -53,6 +53,10 @@ pub struct DpiCycleState {
     pub index: usize,
     pub target: Option<DeviceRoute>,
     pub capabilities: Option<DpiCapabilities>,
+    /// The sensor DPI last set through config or an action, when known.
+    pub current: Option<Dpi>,
+    /// The configured DPI this state was built from.
+    pub committed: Option<Dpi>,
 }
 
 impl DpiCycleState {
@@ -64,10 +68,7 @@ impl DpiCycleState {
             return None;
         }
         self.index = (self.index + 1) % self.presets.len();
-        Some((
-            self.normalize(self.presets[self.index]),
-            self.target.clone(),
-        ))
+        Some(self.select())
     }
 
     /// Jump to preset `i`, clamping to the list length. Returns the DPI +
@@ -76,9 +77,8 @@ impl DpiCycleState {
         if self.presets.is_empty() {
             return None;
         }
-        let clamped = i.min(self.presets.len() - 1);
-        self.index = clamped;
-        Some((self.normalize(self.presets[clamped]), self.target.clone()))
+        self.index = i.min(self.presets.len() - 1);
+        Some(self.select())
     }
 
     /// Steps one preset without wrapping.
@@ -89,22 +89,23 @@ impl DpiCycleState {
         } else {
             self.index.saturating_sub(1)
         };
-        Some((
-            self.normalize(self.presets[self.index]),
-            self.target.clone(),
-        ))
+        Some(self.select())
     }
 
-    /// The lowest preset, and the current one to return to.
+    /// The lowest preset, and the DPI to return to.
     #[must_use]
     pub fn shift(&self) -> Option<(Dpi, Dpi, Option<DeviceRoute>)> {
         let low = self.presets.iter().copied().min()?;
-        let current = *self.presets.get(self.index)?;
-        Some((
-            self.normalize(low),
-            self.normalize(current),
-            self.target.clone(),
-        ))
+        let back = self
+            .current
+            .or_else(|| self.presets.get(self.index).copied())?;
+        Some((self.normalize(low), back, self.target.clone()))
+    }
+
+    fn select(&mut self) -> (Dpi, Option<DeviceRoute>) {
+        let dpi = self.normalize(self.presets[self.index]);
+        self.current = Some(dpi);
+        (dpi, self.target.clone())
     }
 
     fn normalize(&self, dpi: Dpi) -> Dpi {
@@ -130,6 +131,8 @@ mod tests {
                     slot,
                 }),
                 capabilities: None,
+                current: None,
+                committed: None,
             },
         );
         cycles
@@ -144,6 +147,14 @@ mod tests {
         assert_eq!(state.step(true).unwrap().0, Dpi::new(1600));
         let (low, back, _) = state.shift().unwrap();
         assert_eq!((low, back), (Dpi::new(800), Dpi::new(1600)));
+    }
+
+    #[test]
+    fn shift_returns_to_a_dpi_between_presets() {
+        let mut cycles = cycles_with("a", 1);
+        let state = cycles.state_for(Some("a")).unwrap();
+        state.current = Some(Dpi::new(1200));
+        assert_eq!(state.shift().unwrap().1, Dpi::new(1200));
     }
 
     #[test]
