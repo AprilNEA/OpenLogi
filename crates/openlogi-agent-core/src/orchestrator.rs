@@ -34,9 +34,7 @@ use crate::action_ring::ActionRingSessionSpec;
 use crate::capture_plan::{
     DeviceCapturePlan, SharedCapturePlans, hidpp_side_gesture_maps_for, plan_for_device,
 };
-use crate::hardware::{
-    DeviceAccess, DeviceOp, FnLockOrder, HardwareContext, VolatileMouseSettings,
-};
+use crate::hardware::{DeviceAccess, DeviceOp, HardwareContext, VolatileMouseSettings, WriteOrder};
 use crate::observable::ObservableState;
 use crate::receiver_access::ReceiverAccess;
 use crate::runtime::hook::{HookMaps, SharedHookMaps};
@@ -124,7 +122,7 @@ pub struct SharedHandles {
     /// Keyboard → pointing-device routes resolved from `config.toml`.
     pub host_switch_links: HostSwitchLinks,
     /// Orders every path's Fn-lock writes per keyboard.
-    fn_lock_order: FnLockOrder,
+    fn_lock_order: WriteOrder,
     /// The running inventory watcher's refresh handle, published at arming;
     /// `None` while no watcher runs.
     inventory_refresh: Arc<RwLock<Option<InventoryRefresh>>>,
@@ -329,7 +327,7 @@ impl Orchestrator {
             capture_rearm_generation: Arc::new(AtomicU64::new(0)),
             receiver_access: ReceiverAccess::default(),
             host_switch_links,
-            fn_lock_order: FnLockOrder::default(),
+            fn_lock_order: WriteOrder::default(),
             inventory_refresh: Arc::new(RwLock::new(None)),
         };
         let orch = Self {

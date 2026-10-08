@@ -22,7 +22,9 @@ use self::button::{
     ButtonInputHandle, ButtonRuntimeEvent, ButtonRuntimeOwner, EndReason, PressControl,
 };
 pub(crate) use self::button::{HidppSessionId, PressToken};
-use crate::hardware::{DeviceAccess, toggle_smartshift_in_background, write_dpi_in_background};
+use crate::hardware::{
+    DeviceAccess, WriteOrder, toggle_smartshift_in_background, write_dpi_in_background,
+};
 use crate::{DpiCycleState, DpiCycles};
 use openlogi_hid::{DeviceRoute, Dpi};
 
@@ -101,9 +103,14 @@ struct ActionExecutor {
     dpi_cycle: Arc<RwLock<DpiCycles>>,
     access: DeviceAccess,
     action_ring: tokio::sync::mpsc::UnboundedSender<Option<String>>,
+    dpi_order: WriteOrder,
 }
 
 impl ActionExecutor {
+    fn write_dpi(&self, route: &DeviceRoute, dpi: Dpi) {
+        write_dpi_in_background(self.access.op(route), self.dpi_order.request(route), dpi);
+    }
+
     fn dispatch(&self, action: &Action, device_key: Option<&str>) {
         self.dispatch_to(action, device_key, ActionDispatchTarget::capture());
     }
@@ -200,7 +207,7 @@ impl ActionExecutor {
             // No target: a dev environment without a real device.
             if let Some(target) = target {
                 info!(%dpi, "DPI action → writing to device");
-                write_dpi_in_background(self.access.op(&target), dpi);
+                self.write_dpi(&target, dpi);
             } else {
                 debug!(%dpi, "no target device — DPI write skipped");
             }
@@ -236,13 +243,13 @@ impl HeldDpiShifts {
             return;
         };
         info!(%low, "DPI shift held");
-        write_dpi_in_background(executor.access.op(&route), low);
+        executor.write_dpi(&route, low);
         self.by_press.insert(press.clone(), (route, restore));
     }
 
     fn end(&mut self, executor: &ActionExecutor, press: &PressToken) {
         if let Some((route, restore)) = self.by_press.remove(press) {
-            write_dpi_in_background(executor.access.op(&route), restore);
+            executor.write_dpi(&route, restore);
         }
     }
 }
@@ -337,6 +344,7 @@ impl ActionRuntime {
             dpi_cycle,
             access,
             action_ring,
+            dpi_order: WriteOrder::default(),
         };
         let mut button_handler = ButtonEventHandler::new(executor.clone());
         let buttons = ButtonRuntimeOwner::spawn(move |event| button_handler.handle(event))?;
@@ -605,6 +613,7 @@ mod tests {
                 device_io,
             },
             action_ring,
+            dpi_order: WriteOrder::default(),
         };
 
         executor.dispatch_to(
