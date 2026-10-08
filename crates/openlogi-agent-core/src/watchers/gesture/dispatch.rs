@@ -2,7 +2,7 @@
 
 mod wheel;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use openlogi_core::binding::{Action, Binding, ButtonId, default_binding};
@@ -100,7 +100,7 @@ pub(super) struct InputDispatcher {
     outputs: GestureOutputs,
     wheels: SessionWheels,
     gesture_presses: GesturePresses,
-    shift_held: HashMap<HidppSessionId, ButtonId>,
+    shift_held: HeldShift,
 }
 
 impl InputDispatcher {
@@ -111,7 +111,7 @@ impl InputDispatcher {
             outputs,
             wheels: SessionWheels::default(),
             gesture_presses: GesturePresses::default(),
-            shift_held: HashMap::new(),
+            shift_held: HeldShift::default(),
         }
     }
 
@@ -135,7 +135,7 @@ impl InputDispatcher {
         self.outputs.cancel_session(session);
         self.wheels.cancel_session(session);
         self.gesture_presses.cancel_session(session);
-        self.shift_held.remove(session);
+        self.shift_held.0.remove(session);
     }
 
     /// Route one captured input from `session` to its bound action or
@@ -181,7 +181,7 @@ impl InputDispatcher {
                     .is_some_and(|binding| binding.click_action() == Action::GShift)
                 {
                     debug!(key, ?button, "G-Shift held");
-                    self.shift_held.insert(session.clone(), button);
+                    self.shift_held.press(session, button);
                     return;
                 }
                 // A raw-XY gesture source owns its click/swipe map; its physical
@@ -189,7 +189,7 @@ impl InputDispatcher {
                 // single-action projection on down.
                 let is_gesture = plan.gesture_bindings.contains_key(&button)
                     || plan.side_gesture_bindings.contains_key(&button);
-                let shifted = self.shift_held.contains_key(session);
+                let shifted = self.shift_held.active(session);
                 let binding = (!is_gesture)
                     .then(|| press_binding(plan, button, shifted))
                     .flatten();
@@ -213,8 +213,7 @@ impl InputDispatcher {
                 }
             }
             CapturedInput::ButtonUp(button) => {
-                if self.shift_held.get(session) == Some(&button) {
-                    self.shift_held.remove(session);
+                if self.shift_held.release(session, button) {
                     return;
                 }
                 self.outputs.actions.try_hidpp_button_up(session, button);
@@ -278,6 +277,27 @@ impl InputDispatcher {
                 }
             }
         }
+    }
+}
+
+/// G-Shift buttons held per session; the layer stays on until all are released.
+#[derive(Default)]
+struct HeldShift(HashMap<HidppSessionId, HashSet<ButtonId>>);
+
+impl HeldShift {
+    fn press(&mut self, session: &HidppSessionId, button: ButtonId) {
+        self.0.entry(session.clone()).or_default().insert(button);
+    }
+
+    /// Whether `button` was a held G-Shift button.
+    fn release(&mut self, session: &HidppSessionId, button: ButtonId) -> bool {
+        self.0
+            .get_mut(session)
+            .is_some_and(|held| held.remove(&button))
+    }
+
+    fn active(&self, session: &HidppSessionId) -> bool {
+        self.0.get(session).is_some_and(|held| !held.is_empty())
     }
 }
 
