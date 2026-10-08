@@ -5,10 +5,10 @@ mod inject;
 pub mod uinput;
 
 pub use inject::{
-    DesktopSwitch, HeldChord, SYNTHETIC_EVENT_USER_DATA, SmoothScrollPhase, SpaceSwipePhase,
-    ax_navigate_browser, execute, natural_scrolling, post_phased_scroll, post_scroll,
-    post_smooth_scroll, post_space_swipe, press_hold, set_desktop_switch, space_change_count,
-    space_neighbors,
+    DesktopSwitch, HeldChord, SYNTHETIC_EVENT_USER_DATA, SmoothScrollPhase, SpacePosition,
+    SpaceSwipePhase, ax_navigate_browser, execute, natural_scrolling, post_phased_scroll,
+    post_scroll, post_smooth_scroll, post_space_swipe, press_hold, set_desktop_switch,
+    space_change_count, space_position,
 };
 
 #[cfg(target_os = "linux")]
