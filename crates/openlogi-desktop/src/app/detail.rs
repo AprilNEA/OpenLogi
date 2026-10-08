@@ -408,10 +408,10 @@ fn onboard_card(pal: Palette, cx: &mut Context<AppView>) -> Option<impl IntoElem
     });
     let host = memory == Some(OnboardMemory::Off);
     let rate_info = reading.as_ref().and_then(|r| r.report_rate.as_ref());
-    let rate = state
-        .current_report_rate_setting()
-        .filter(|_| host)
-        .or_else(|| rate_info.map(|r| r.current));
+    // The mouse's own reading, so a rejected write never looks applied.
+    let rate = rate_info
+        .map(|r| r.current)
+        .or_else(|| state.current_report_rate_setting().filter(|_| host));
     let rates = rate_info.map(|r| r.supported.clone()).unwrap_or_default();
     let profiles = reading.as_ref().map_or_else(Vec::new, |r| {
         r.profiles
@@ -513,6 +513,7 @@ fn onboard_memory_control(
         .on_click(move |indices, _window, cx| {
             if let Some(value) = indices.first().and_then(|i| values.get(*i)) {
                 AppState::apply(cx, |state| state.commit_onboard_memory(*value));
+                AppState::refresh_onboard_later(cx);
             }
         })
 }
@@ -542,6 +543,7 @@ fn report_rate_control(
         .on_click(move |indices, _window, cx| {
             if let Some(value) = indices.first().and_then(|i| rates.get(*i)) {
                 AppState::apply(cx, |state| state.commit_report_rate(*value));
+                AppState::refresh_onboard_later(cx);
             }
         })
 }
