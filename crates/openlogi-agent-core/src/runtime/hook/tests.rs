@@ -75,7 +75,7 @@ fn accumulate_tags_a_committed_swipe_with_the_held_press() {
     assert_eq!(
         hold.accumulate(50, 0),
         None,
-        "commits at most once per hold"
+        "continuing the same swipe does not repeat"
     );
     assert_eq!(hold.end(ButtonId::Back), Some((press, false)));
 }
