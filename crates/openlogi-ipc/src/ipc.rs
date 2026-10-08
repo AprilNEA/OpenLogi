@@ -67,7 +67,7 @@ pub use succession::Identity;
 ///      `HidppOperation::ReadFnLock` appended.
 /// v33: `Agent::unpair_device` appended.
 /// v34: `KeyCombo` gains the Super modifier bit (`Super`, `Win`, `Meta`).
-pub const PROTOCOL_VERSION: u32 = 34;
+pub const PROTOCOL_VERSION: u32 = 35;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -583,4 +583,9 @@ pub trait Agent {
     /// receiver, and with [`PairingFailure::ReceiverNotFound`] for a route
     /// that names no receiver slot or a receiver that is not connected.
     async fn unpair_device(route: DeviceRoute) -> Result<(), PairingFailure>;
+    /// Read or edit onboard profiles through the owning agent.
+    async fn gaming(
+        route: DeviceRoute,
+        command: crate::gaming::GamingCommand,
+    ) -> Result<crate::gaming::GamingSnapshot, String>;
 }

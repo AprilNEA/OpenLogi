@@ -30,6 +30,7 @@ openlogi-hid = { path = "../openlogi-hid" }
 openlogi-hook = { path = "../openlogi-hook" }
 openlogi-ipc = { path = "../openlogi-ipc" }
 serde_json.workspace = true
+serde.workspace = true
 tarpc = { workspace = true }
 interprocess = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util", "signal"] }

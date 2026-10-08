@@ -22,6 +22,13 @@ use std::process::Command;
 use std::{env, fs};
 
 fn main() {
+    // GPUI's unoptimized startup exceeds the default Windows main-thread stack.
+    // Reserve virtual address space, not 16 MiB of committed physical memory.
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
+    {
+        println!("cargo:rustc-link-arg-bin=openlogi-desktop=/STACK:16777216");
+    }
     println!("cargo:rerun-if-env-changed=OPENLOGI_UPDATE_MANIFEST_URL");
     println!("cargo:rerun-if-env-changed=OPENLOGI_THEMES_DIR");
 

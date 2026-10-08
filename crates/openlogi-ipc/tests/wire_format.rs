@@ -102,7 +102,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 34);
+    assert_eq!(PROTOCOL_VERSION, 35);
 }
 
 #[test]
@@ -688,4 +688,84 @@ fn standalone_light_dtos_commands_and_errors() {
         "0c05636f6c6f72",
     );
     assert_wire(&WriteError::AmbiguousRawDevice, "0d");
+}
+
+#[test]
+fn gaming_wire_messages() {
+    use openlogi_ipc::gaming::*;
+    assert_wire(
+        &AgentRequest::Gaming {
+            route: DeviceRoute::Direct {
+                vendor_id: 0x046d,
+                product_id: 0xc098,
+            },
+            command: GamingCommand::Read,
+        },
+        "1f02fb6d04fb98c000",
+    );
+    assert_wire(&GamingAction::Mouse(1), "0001");
+    assert_wire(
+        &GamingAction::Key {
+            usage: 75,
+            modifiers: 1,
+        },
+        "014b01",
+    );
+    assert_wire(&GamingAction::Consumer(0xcd), "02cd");
+    assert_wire(&GamingAction::Special(11), "030b");
+    assert_wire(&GamingAction::Disabled, "04");
+    assert_wire(&GamingCommand::Export, "01");
+    assert_wire(&GamingCommand::SetMode(1), "0401");
+    assert_wire(&GamingCommand::Select(2), "0502");
+    let draft = GamingDraft {
+        sector: 1,
+        name: "A".into(),
+        report_rate_hz: 500,
+        dpi: [800, 1200, 1600, 0, 0],
+        default_dpi_slot: 0,
+        shift_dpi_slot: 1,
+        buttons: vec![GamingAssignment {
+            index: 4,
+            shifted: true,
+            action: GamingAction::Key {
+                usage: 75,
+                modifiers: 0,
+            },
+        }],
+    };
+    assert_wire(
+        &GamingCommand::Prepare {
+            backup_json: "{}".into(),
+            draft: draft.clone(),
+        },
+        "02027b7d010141fbf401fb2003fbb004fb400600000001010401014b00",
+    );
+    assert_wire(
+        &GamingCommand::Apply {
+            backup_json: "{}".into(),
+            draft,
+        },
+        "03027b7d010141fbf401fb2003fbb004fb400600000001010401014b00",
+    );
+    assert_wire(
+        &GamingSnapshot {
+            backup_json: "{}".into(),
+            mode: 1,
+            active_profile: 1,
+            profiles: vec![GamingProfile {
+                sector: 1,
+                enabled: true,
+                checksum_valid: true,
+                name: "A".into(),
+                report_interval_ms: 1,
+                dpi: [800, 1200, 1600, 0, 0],
+                default_dpi_slot: 0,
+                shift_dpi_slot: 1,
+                buttons: vec!["left".into()],
+                shifted_buttons: vec!["off".into()],
+            }],
+            saved_path: Some("x".into()),
+        },
+        "027b7d010101010101014101fb2003fbb004fb40060000000101046c65667401036f6666010178",
+    );
 }

@@ -61,7 +61,7 @@ use request::LinkLost;
 #[cfg(all(target_os = "macos", debug_assertions))]
 pub use request::PollEventMonitor;
 pub use request::{
-    CancelPairing, Command, PairDevice, ReadDpi, ReadFnLock, ReadSmartShift, ReloadConfig,
+    CancelPairing, Command, Gaming, PairDevice, ReadDpi, ReadFnLock, ReadSmartShift, ReloadConfig,
     RequestAccessibilityPrompt, SetDpi, SetFnLock, SetLight, SetLightManualPower, SetLighting,
     SetSmartShift, StartPairing, UnpairDevice,
 };

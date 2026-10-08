@@ -521,7 +521,30 @@ macro_rules! commands {
     };
 }
 
+/// Onboard editor request with an explicit result and an extended read deadline.
+pub struct Gaming {
+    pub route: DeviceRoute,
+    pub command: openlogi_ipc::gaming::GamingCommand,
+    pub reply: oneshot::Sender<Result<openlogi_ipc::gaming::GamingSnapshot, String>>,
+}
+impl Request for Gaming {
+    type Answer = Result<openlogi_ipc::gaming::GamingSnapshot, String>;
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        let mut ctx = context::current();
+        ctx.deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+        client
+            .gaming(ctx, self.route.clone(), self.command.clone())
+            .await
+    }
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
+        let _ = self.reply.send(outcome.unwrap_or_else(|_| {
+            Err("Agent unavailable; refresh before retrying any write".into())
+        }));
+    }
+}
+
 commands! {
+    Gaming,
     SetDpi,
     SetLighting,
     SetLight,

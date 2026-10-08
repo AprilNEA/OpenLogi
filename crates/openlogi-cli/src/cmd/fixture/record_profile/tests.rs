@@ -106,6 +106,14 @@ impl TestAgent {
     reason = "the in-process IPC service intentionally returns immediate scripted values"
 )]
 impl Agent for TestAgent {
+    async fn gaming(
+        self,
+        _: TarpcContext,
+        _: DeviceRoute,
+        _: openlogi_ipc::gaming::GamingCommand,
+    ) -> Result<openlogi_ipc::gaming::GamingSnapshot, String> {
+        unreachable!("fixture capture must not access gaming memory")
+    }
     async fn protocol_version(self, _: TarpcContext) -> u32 {
         PROTOCOL_VERSION
     }

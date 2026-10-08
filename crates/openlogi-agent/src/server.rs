@@ -96,6 +96,29 @@ impl AgentServer {
               future off a dozen of them with `std::future::ready`"
 )]
 impl Agent for AgentServer {
+    async fn gaming(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        command: openlogi_ipc::gaming::GamingCommand,
+    ) -> Result<openlogi_ipc::gaming::GamingSnapshot, String> {
+        let device = self.shared.device(&route);
+        // An accepted transaction outlives a GUI disconnect; do not abort flash
+        // halfway through merely because its requester stopped waiting.
+        tokio::spawn(async move {
+            device
+                .gaming_transaction(|channel| async move {
+                    crate::gaming::execute(&channel, command)
+                        .await
+                        .map_err(WriteError::Hidpp)
+                })
+                .await
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| error.to_string())?
+    }
+
     async fn protocol_version(self, _: Context) -> u32 {
         PROTOCOL_VERSION
     }

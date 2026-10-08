@@ -9,6 +9,7 @@ pub mod backlight;
 pub mod camera;
 pub mod diag;
 pub mod fixture;
+pub mod gaming;
 pub mod light;
 pub mod list;
 pub mod snapshot;
@@ -19,6 +20,8 @@ pub enum Command {
     Api(api::ApiArgs),
     /// List connected Logitech HID++ devices.
     List(list::ListArgs),
+    /// Inspect and back up gaming mouse onboard memory without changing it.
+    Gaming(gaming::GamingArgs),
     /// Read or persistently set the keyboard backlight (HID++ 0x1982).
     Backlight(backlight::BacklightArgs),
     /// Capture one frame from a Logitech webcam to a PNG.
@@ -48,6 +51,7 @@ impl Command {
         match self {
             Self::Api(command) => return api::run(command).await,
             Self::List(args) => return list::run(args).await,
+            Self::Gaming(args) => gaming::run(args).await?,
             Self::Backlight(args) => backlight::run(args).await?,
             // Camera capture is blocking AVFoundation — no need for the async runtime.
             Self::Snapshot(args) => snapshot::run(args)?,

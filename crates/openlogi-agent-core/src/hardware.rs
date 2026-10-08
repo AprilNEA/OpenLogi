@@ -180,6 +180,22 @@ impl DeviceOp {
         timed(op, f(shared)).await
     }
 
+    /// Hold the device lease for a complete onboard-memory transaction. The
+    /// caller must spawn this in an owned task so IPC cancellation cannot drop
+    /// a partially programmed sector; individual HID requests retain deadlines.
+    pub async fn gaming_transaction<F, Fut, T>(self, f: F) -> Result<T, WriteError>
+    where
+        F: FnOnce(SharedChannel) -> Fut,
+        Fut: Future<Output = Result<T, WriteError>>,
+    {
+        let _lease = self.access.receiver_access.acquire_for_io().await;
+        if !self.access.device_io.allows_io() {
+            return Err(WriteError::DeviceNotFound);
+        }
+        let shared = self.resolve()?;
+        f(shared).await
+    }
+
     /// Own the whole lighting transaction outside the requester runtime. The
     /// worker leases and resolves AFTER obtaining its lighting route lock and
     /// retains that lease through any RGB rollback after requester cancellation.

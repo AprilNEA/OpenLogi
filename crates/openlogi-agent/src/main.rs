@@ -8,12 +8,8 @@
 
 // Without this Windows runs the exe as a console app and pops a terminal
 // window whenever the GUI's sibling spawn or the Run-key autostart starts the
-// agent — "headless" must mean no window of any kind. Debug builds keep the
-// console so logs stay visible (matching the GUI's arrangement).
-#![cfg_attr(
-    all(target_os = "windows", not(debug_assertions)),
-    windows_subsystem = "windows"
-)]
+// agent — "headless" must mean no window of any kind, including this local build.
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 #[cfg(target_os = "macos")]
 mod activity_macos;
@@ -32,6 +28,7 @@ mod resume_windows;
 // generates itself, hence the relative path — see
 // `tests::the_shared_catalog_is_wired_up` for why a wrong path is silent.
 rust_i18n::i18n!("../openlogi-ui/locales", fallback = "en");
+mod gaming;
 mod server;
 mod shutdown;
 mod startup;

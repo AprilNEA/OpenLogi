@@ -16,6 +16,7 @@
 
 mod transport;
 
+pub mod gaming_guard;
 pub mod host;
 pub mod lighting;
 pub mod permissions;

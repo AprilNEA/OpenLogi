@@ -30,6 +30,7 @@ openlogi-device = { version = "0.8.11", path = "../openlogi-device" }
 # write path on Windows, plus the composite short/long endpoint handling in
 # transport.rs.
 [target.'cfg(target_os = "windows")'.dependencies]
+sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
 windows-sys = { workspace = true, features = [
     "Win32_Devices_HumanInterfaceDevice",
     "Win32_Foundation",
