@@ -51,6 +51,7 @@ fn test_dispatcher() -> (
                 device_io: openlogi_hid::device_io_channel().1,
             },
             action_ring,
+            dpi_order: crate::hardware::WriteOrder::default(),
         },
         buttons: owner.input(),
     };

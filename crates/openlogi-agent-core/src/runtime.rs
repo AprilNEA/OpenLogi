@@ -22,7 +22,9 @@ use self::button::{
     ButtonInputHandle, ButtonRuntimeEvent, ButtonRuntimeOwner, EndReason, PressControl,
 };
 pub(crate) use self::button::{HidppSessionId, PressToken};
-use crate::hardware::{DeviceAccess, toggle_smartshift_in_background, write_dpi_in_background};
+use crate::hardware::{
+    DeviceAccess, WriteOrder, toggle_smartshift_in_background, write_dpi_in_background,
+};
 use crate::{DpiCycleState, DpiCycles};
 use openlogi_hid::{DeviceRoute, Dpi};
 
@@ -101,9 +103,14 @@ struct ActionExecutor {
     dpi_cycle: Arc<RwLock<DpiCycles>>,
     access: DeviceAccess,
     action_ring: tokio::sync::mpsc::UnboundedSender<Option<String>>,
+    dpi_order: WriteOrder,
 }
 
 impl ActionExecutor {
+    fn write_dpi(&self, route: &DeviceRoute, dpi: Dpi) {
+        write_dpi_in_background(self.access.op(route), self.dpi_order.request(route), dpi);
+    }
+
     fn dispatch(&self, action: &Action, device_key: Option<&str>) {
         self.dispatch_to(action, device_key, ActionDispatchTarget::capture());
     }
@@ -200,7 +207,7 @@ impl ActionExecutor {
             // No target: a dev environment without a real device.
             if let Some(target) = target {
                 info!(%dpi, "DPI action → writing to device");
-                write_dpi_in_background(self.access.op(&target), dpi);
+                self.write_dpi(&target, dpi);
             } else {
                 debug!(%dpi, "no target device — DPI write skipped");
             }
@@ -219,13 +226,19 @@ impl ActionExecutor {
     }
 }
 
+/// Held DPI-shift presses per device, and the DPI to return to once the last
+/// one ends.
 #[derive(Default)]
 struct HeldDpiShifts {
-    by_press: HashMap<PressToken, (DeviceRoute, Dpi)>,
+    by_press: HashMap<PressToken, String>,
+    by_device: HashMap<String, (usize, DeviceRoute, Dpi)>,
 }
 
 impl HeldDpiShifts {
     fn start(&mut self, executor: &ActionExecutor, press: &PressToken, device_key: Option<&str>) {
+        if self.by_press.contains_key(press) {
+            return;
+        }
         let shift = executor
             .dpi_cycle
             .read()
@@ -235,14 +248,29 @@ impl HeldDpiShifts {
             debug!("no DPI presets or target — DPI shift ignored");
             return;
         };
+        let device = route.to_string();
+        self.by_press.insert(press.clone(), device.clone());
+        if let Some((held, ..)) = self.by_device.get_mut(&device) {
+            *held += 1;
+            return;
+        }
         info!(%low, "DPI shift held");
-        write_dpi_in_background(executor.access.op(&route), low);
-        self.by_press.insert(press.clone(), (route, restore));
+        executor.write_dpi(&route, low);
+        self.by_device.insert(device, (1, route, restore));
     }
 
     fn end(&mut self, executor: &ActionExecutor, press: &PressToken) {
-        if let Some((route, restore)) = self.by_press.remove(press) {
-            write_dpi_in_background(executor.access.op(&route), restore);
+        let Some(device) = self.by_press.remove(press) else {
+            return;
+        };
+        let Some((held, ..)) = self.by_device.get_mut(&device) else {
+            return;
+        };
+        *held -= 1;
+        if *held == 0
+            && let Some((_, route, restore)) = self.by_device.remove(&device)
+        {
+            executor.write_dpi(&route, restore);
         }
     }
 }
@@ -337,6 +365,7 @@ impl ActionRuntime {
             dpi_cycle,
             access,
             action_ring,
+            dpi_order: WriteOrder::default(),
         };
         let mut button_handler = ButtonEventHandler::new(executor.clone());
         let buttons = ButtonRuntimeOwner::spawn(move |event| button_handler.handle(event))?;
@@ -625,6 +654,47 @@ mod tests {
 
         assert!(!held.start(&press, &Action::Copy));
         held.end(&press);
+    }
+
+    #[test]
+    fn dpi_shift_ends_only_with_the_last_held_press() {
+        let route = DeviceRoute::Bolt {
+            receiver_uid: "AA00".into(),
+            slot: 1,
+        };
+        let mut cycles = DpiCycles::default();
+        cycles.by_key.insert(
+            "mouse".into(),
+            DpiCycleState {
+                presets: vec![Dpi::new(400), Dpi::new(1600)],
+                target: Some(route),
+                current: Some(Dpi::new(1200)),
+                ..DpiCycleState::default()
+            },
+        );
+        let (action_ring, _ring) = tokio::sync::mpsc::unbounded_channel();
+        let executor = ActionExecutor {
+            dpi_cycle: Arc::new(RwLock::new(cycles)),
+            access: DeviceAccess {
+                channel: Arc::new(RwLock::new(None)),
+                registry: openlogi_hid::ChannelRegistry::default(),
+                receiver_access: crate::receiver_access::ReceiverAccess::default(),
+                device_io: openlogi_hid::device_io_channel().1,
+            },
+            action_ring,
+            dpi_order: WriteOrder::default(),
+        };
+        let (first, second) = (
+            PressToken::hook_for_test(1, ButtonId::G6),
+            PressToken::hook_for_test(2, ButtonId::G7),
+        );
+        let mut held = HeldDpiShifts::default();
+        held.start(&executor, &first, Some("mouse"));
+        held.start(&executor, &second, Some("mouse"));
+        held.end(&executor, &first);
+        assert_eq!(held.by_device.values().next().map(|(n, ..)| *n), Some(1));
+        held.end(&executor, &second);
+        assert!(held.by_device.is_empty() && held.by_press.is_empty());
     }
 
     #[test]

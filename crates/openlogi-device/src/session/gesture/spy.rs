@@ -227,11 +227,7 @@ pub(super) async fn arm_onboard(
                 .await?;
             info!(captured = captured.len(), "G-series host mode active");
         }
-        ArmedMode::Profile(index) => {
-            if let Err(error) = apply_profile(&onboard, *index).await {
-                warn!(profile = index, ?error, "onboard profile switch failed");
-            }
-        }
+        ArmedMode::Profile(index) => apply_profile(&onboard, *index).await?,
     }
     Ok(())
 }

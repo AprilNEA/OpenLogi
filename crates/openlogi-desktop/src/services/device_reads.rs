@@ -336,6 +336,12 @@ impl DeviceReads {
         );
     }
 
+    pub(crate) fn refresh_onboard(&mut self, key: &DeviceKey) {
+        if let Some(read) = self.onboard.get_mut(key) {
+            read.query.revalidate();
+        }
+    }
+
     #[must_use]
     pub(crate) fn onboard_load(&self, key: &DeviceKey) -> Option<&OnboardLoad> {
         self.onboard.get(key).map(|read| &read.load)

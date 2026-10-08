@@ -32,11 +32,11 @@ use tracing::{debug, warn};
 use crate::receiver_access::ReceiverAccess;
 
 mod context;
-mod fn_lock;
 mod light;
+mod write_order;
 
 pub use context::HardwareContext;
-pub(crate) use fn_lock::{FnLockOrder, FnLockTicket};
+pub(crate) use write_order::{WriteOrder, WriteTicket};
 
 /// Upper bound on a single HID++ write. `hidpp` has no request timeout of its
 /// own, so without this an asleep / unresponsive device would hang (and leak)
@@ -348,7 +348,7 @@ pub fn toggle_smartshift_in_background(op: DeviceOp) {
 /// keyboard was requested after `ticket`. Returns immediately; failures (incl.
 /// keyboards that expose neither `0x40a3` nor `0x40a2` fn inversion, and a
 /// keyboard whose read-back disagrees with the write) are logged.
-pub(crate) fn write_fn_lock_in_background(op: DeviceOp, ticket: FnLockTicket, on: bool) {
+pub(crate) fn write_fn_lock_in_background(op: DeviceOp, ticket: WriteTicket, on: bool) {
     let index = op.route.device_index();
     op.spawn_write(
         "Fn-lock write",
@@ -545,15 +545,24 @@ fn log_wheel_result(
 }
 
 /// Spawn an OS thread that writes `dpi` to `op`'s device via its current
-/// shared channel. Returns immediately; failures are logged.
-pub fn write_dpi_in_background(op: DeviceOp, dpi: Dpi) {
+/// shared channel, unless a newer write was requested. Failures are logged.
+pub(crate) fn write_dpi_in_background(op: DeviceOp, ticket: WriteTicket, dpi: Dpi) {
     let index = op.route.device_index();
     op.spawn_write(
         "DPI write",
-        move |c| async move { openlogi_hid::set_dpi_on(&c, dpi).await },
+        move |c| async move {
+            let Some(_turn) = ticket.turn().await else {
+                return Ok(false);
+            };
+            openlogi_hid::set_dpi_on(&c, dpi).await.map(|()| true)
+        },
         move |result| {
-            log_outcome(index, "DPI write", result, |()| {
-                debug!(index, %dpi, "DPI written to device");
+            log_outcome(index, "DPI write", result, |written| {
+                if written {
+                    debug!(index, %dpi, "DPI written to device");
+                } else {
+                    debug!(index, %dpi, "DPI write superseded by a newer one");
+                }
             });
         },
     );

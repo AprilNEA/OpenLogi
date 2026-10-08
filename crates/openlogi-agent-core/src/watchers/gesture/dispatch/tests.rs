@@ -92,3 +92,16 @@ fn shifted_presses_use_the_gshift_layer_and_fall_back_to_normal() {
     assert_eq!(action(ButtonId::G8, true), Some(Action::Paste));
     assert_eq!(action(ButtonId::G7, true), Some(Action::PreviousDpiPreset));
 }
+
+#[test]
+fn shift_layer_stays_on_until_every_shift_button_is_released() {
+    let session = HidppSessionId::with_epoch("mouse-a", 1);
+    let mut held = HeldShift::default();
+    held.press(&session, ButtonId::Forward);
+    held.press(&session, ButtonId::G9);
+    assert!(held.release(&session, ButtonId::G9));
+    assert!(held.active(&session));
+    assert!(!held.release(&session, ButtonId::G7));
+    assert!(held.release(&session, ButtonId::Forward));
+    assert!(!held.active(&session));
+}

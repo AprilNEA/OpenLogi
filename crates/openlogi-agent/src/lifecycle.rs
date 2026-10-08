@@ -390,9 +390,16 @@ impl Running {
 
         match event {
             WatcherEvent::Inventory(event) => {
+                #[cfg(target_os = "linux")]
+                let has_devices = matches!(
+                    &event,
+                    InventoryEvent::Snapshot { inventories, .. } if !inventories.is_empty()
+                );
                 self.apply_inventory(event, inventory_refresh).await;
                 #[cfg(target_os = "linux")]
-                self.reinstall_hook().await;
+                if has_devices {
+                    self.reinstall_hook().await;
+                }
             }
             WatcherEvent::Camera(active) => {
                 self.orchestrator.lock().await.set_camera_active(active);
