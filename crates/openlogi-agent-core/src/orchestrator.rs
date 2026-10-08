@@ -573,21 +573,26 @@ impl Orchestrator {
                     .map(Dpi::new)
                     .collect();
             }
+            let committed = self.config.dpi(&dev.config_key);
             let previous = guard
                 .by_key
                 .get(&dev.config_key)
-                .filter(|state| state.presets == presets);
-            let nearest = self.config.dpi(&dev.config_key).and_then(|dpi| {
+                .filter(|state| state.committed == committed);
+            let current = previous.map_or(committed, |state| state.current);
+            let nearest = current.and_then(|dpi| {
                 (0..presets.len())
                     .min_by_key(|&i| presets[i].into_inner().abs_diff(dpi.into_inner()))
             });
+            let same_presets = previous.filter(|state| state.presets == presets);
             by_key.insert(
                 dev.config_key.clone(),
                 DpiCycleState {
-                    index: previous.map_or_else(|| nearest.unwrap_or(0), |state| state.index),
-                    capabilities: previous.and_then(|state| state.capabilities.clone()),
+                    index: same_presets.map_or_else(|| nearest.unwrap_or(0), |state| state.index),
+                    capabilities: same_presets.and_then(|state| state.capabilities.clone()),
                     presets,
                     target: Some(route),
+                    current,
+                    committed,
                 },
             );
         }
