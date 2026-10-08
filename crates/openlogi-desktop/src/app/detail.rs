@@ -501,6 +501,7 @@ fn onboard_memory_control(
         .on_click(move |indices, _window, cx| {
             if let Some(value) = indices.first().and_then(|i| values.get(*i)) {
                 AppState::apply(cx, |state| state.commit_onboard_memory(*value));
+                AppState::refresh_onboard_later(cx);
             }
         })
 }
