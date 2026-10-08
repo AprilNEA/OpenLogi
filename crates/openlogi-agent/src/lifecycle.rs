@@ -398,7 +398,7 @@ impl Running {
                 warn!("camera watcher channel closed — disabling camera automation updates");
             }
             WatcherEvent::Lost(Watcher::Pointer) if openlogi_hook::pointer_context_supported() => {
-                warn!("pointer watcher channel closed — mouse profiles follow the focused app");
+                warn!("pointer watcher channel closed — using an unidentified pointer context");
                 self.apply_pointer_context(openlogi_hook::PointerContext {
                     app: None,
                     target: openlogi_hook::PointerTarget::Unavailable,

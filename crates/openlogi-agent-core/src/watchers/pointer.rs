@@ -40,7 +40,7 @@ pub fn spawn() -> watch::Receiver<PointerContext> {
             }
         });
     if let Err(error) = spawned {
-        warn!(%error, "could not start pointer context watcher — mouse profiles follow the focused app");
+        warn!(%error, "could not start pointer context watcher — pointer context remains unidentified");
     }
     rx
 }

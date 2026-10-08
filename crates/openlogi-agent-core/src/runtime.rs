@@ -35,18 +35,34 @@ pub(crate) enum ActionDispatchTarget {
     Keyboard,
     /// The pointer context that selected the binding. Validated off the tap
     /// before output. An identified window or desktop is never substituted
-    /// with an unrelated foreground window; an unidentified target selected
-    /// the focused profile, so it dispatches to focus.
-    Pointer(openlogi_hook::PointerTarget),
+    /// with an unrelated foreground window; an unidentified target retains
+    /// the focused fallback captured with the press.
+    Pointer {
+        target: openlogi_hook::PointerTarget,
+        fallback_safari_pid: Option<i32>,
+    },
 }
 
 impl ActionDispatchTarget {
     fn capture() -> Self {
-        openlogi_hook::frontmost_safari_pid().map_or(Self::Keyboard, Self::SafariProcess)
+        Self::for_pointer(None, openlogi_hook::frontmost_safari_pid)
     }
 
-    fn for_pointer(target: Option<openlogi_hook::PointerTarget>) -> Self {
-        target.map_or_else(Self::capture, Self::Pointer)
+    fn for_pointer(
+        target: Option<openlogi_hook::PointerTarget>,
+        capture_safari_pid: impl FnOnce() -> Option<i32>,
+    ) -> Self {
+        let safari_pid = match target {
+            None | Some(openlogi_hook::PointerTarget::Unavailable) => capture_safari_pid(),
+            Some(_) => None,
+        };
+        match target {
+            Some(target) => Self::Pointer {
+                target,
+                fallback_safari_pid: safari_pid,
+            },
+            None => safari_pid.map_or(Self::Keyboard, Self::SafariProcess),
+        }
     }
 }
 /// Held output owned by accepted press capabilities rather than by a capture
@@ -310,7 +326,7 @@ impl ActionDispatcher {
         self.executor.dispatch_to(
             action,
             device_key,
-            ActionDispatchTarget::for_pointer(target),
+            ActionDispatchTarget::for_pointer(target, openlogi_hook::frontmost_safari_pid),
         );
     }
 
@@ -378,7 +394,7 @@ impl ActionDispatcher {
             session,
             button,
             binding,
-            ActionDispatchTarget::for_pointer(pointer_target),
+            ActionDispatchTarget::for_pointer(pointer_target, openlogi_hook::frontmost_safari_pid),
         )
     }
 
@@ -400,7 +416,7 @@ impl ActionDispatcher {
             session,
             button,
             binding,
-            ActionDispatchTarget::for_pointer(pointer_target),
+            ActionDispatchTarget::for_pointer(pointer_target, openlogi_hook::frontmost_safari_pid),
         );
     }
 
@@ -510,7 +526,7 @@ fn dispatch_browser_navigation(
             keyboard();
             true
         }
-        ActionDispatchTarget::Pointer(_) => {
+        ActionDispatchTarget::Pointer { .. } => {
             unreachable!("pointer targets resolve before navigation")
         }
     }
@@ -543,7 +559,10 @@ mod tests {
         executor.dispatch_to(
             &Action::ShowActionsRing,
             Some("mouse"),
-            ActionDispatchTarget::Pointer(openlogi_hook::PointerTarget::Unavailable),
+            ActionDispatchTarget::for_pointer(
+                Some(openlogi_hook::PointerTarget::Unavailable),
+                || None,
+            ),
         );
 
         assert_eq!(ring_rx.try_recv(), Ok(Some("mouse".to_owned())));
