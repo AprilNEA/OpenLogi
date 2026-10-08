@@ -32,7 +32,7 @@ pub enum StopOutcome {
 
 /// How a manager loop returned before its runtime was destroyed.
 #[derive(Debug)]
-pub(super) enum ManagerCompletion {
+pub(crate) enum ManagerCompletion {
     /// The process stop request drove the manager's teardown.
     Graceful,
     /// Another control-plane source closed first.
@@ -65,7 +65,7 @@ impl WatcherHandle {
     /// A worker that cannot start owns no such task, but it did not stop
     /// gracefully either, so its handle reports [`StopOutcome::Unclean`].
     #[must_use]
-    pub(super) fn spawn<F>(
+    pub(crate) fn spawn<F>(
         name: &'static str,
         manage: impl FnOnce(oneshot::Receiver<()>) -> F + Send + 'static,
     ) -> Self

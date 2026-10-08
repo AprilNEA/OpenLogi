@@ -106,6 +106,27 @@ impl TestAgent {
     reason = "the in-process IPC service intentionally returns immediate scripted values"
 )]
 impl Agent for TestAgent {
+    async fn plugin_command(
+        self,
+        _: TarpcContext,
+        _: openlogi_core::peripheral::PluginCommand,
+    ) -> Result<(), openlogi_core::peripheral::PeripheralError> {
+        unreachable!("profile capture must not change plugins")
+    }
+    async fn resolve_peripheral(
+        self,
+        _: TarpcContext,
+        _: String,
+    ) -> Result<(), openlogi_core::peripheral::PeripheralError> {
+        unreachable!("profile capture must not change mappings")
+    }
+    async fn retry_peripheral(
+        self,
+        _: TarpcContext,
+        _: openlogi_core::peripheral::SessionId,
+    ) -> Result<(), openlogi_core::peripheral::PeripheralError> {
+        unreachable!("profile capture must not start driver sessions")
+    }
     async fn protocol_version(self, _: TarpcContext) -> u32 {
         PROTOCOL_VERSION
     }
@@ -370,6 +391,7 @@ fn fixture_agent() -> TestAgent {
     profile.standalone[0].serial_number = Some("RAW-LIGHT-SERIAL".to_string());
 
     let snapshot = AgentSnapshot {
+        peripherals: openlogi_core::peripheral::PeripheralSnapshot::default(),
         status: AgentStatus {
             accessibility_granted: false,
             hook_installed: false,

@@ -18,10 +18,10 @@ use std::time::{Duration, Instant};
 use openlogi_core::binding::{Action, Binding, ButtonId};
 use tracing::{debug, info, warn};
 
+pub(crate) use self::button::{ButtonDrain, HidppSessionId, PeripheralInput, PressToken};
 use self::button::{
     ButtonInputHandle, ButtonRuntimeEvent, ButtonRuntimeOwner, EndReason, PressControl,
 };
-pub(crate) use self::button::{HidppSessionId, PressToken};
 use crate::hardware::{DeviceAccess, toggle_smartshift_in_background, write_dpi_in_background};
 use crate::{DpiCycleState, DpiCycles};
 
@@ -195,6 +195,9 @@ impl ButtonEventHandler {
 
     fn handle(&mut self, event: ButtonRuntimeEvent) {
         match event {
+            ButtonRuntimeEvent::Drained(done) => {
+                let _ = done.send(());
+            }
             ButtonRuntimeEvent::Started(press) => {
                 if let Some(action) = press.start_action() {
                     self.start_action(press.token(), action, press.device_key(), press.target());
@@ -212,6 +215,9 @@ impl ButtonEventHandler {
                         }
                         PressControl::Key(keycode) => {
                             info!(keycode, ?reason, "key lifecycle canceled");
+                        }
+                        PressControl::Peripheral(capability, control) => {
+                            info!(%capability, %control, ?reason, "peripheral lifecycle canceled");
                         }
                     }
                 }
@@ -289,6 +295,18 @@ impl ActionRuntime {
 }
 
 impl ActionDispatcher {
+    pub(crate) async fn drain_buttons(&self, scope: ButtonDrain) -> io::Result<()> {
+        self.buttons.drain(scope).await
+    }
+
+    /// Bind input cancellation to one plugin attachment or configuration incarnation.
+    pub(crate) fn peripheral_session(
+        &self,
+        session: &openlogi_core::peripheral::SessionId,
+    ) -> PeripheralInput {
+        self.buttons.peripheral_session(session)
+    }
+
     /// Route one action without blocking the input callback.
     pub fn dispatch(&self, action: &Action, device_key: Option<&str>) {
         self.executor.dispatch(action, device_key);

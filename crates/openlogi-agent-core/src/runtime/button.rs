@@ -9,20 +9,23 @@
 use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle, ThreadId};
 use std::time::{Duration, Instant};
 
 use openlogi_core::binding::{Action, Binding, ButtonId, LONG_PRESS_THRESHOLD};
+use openlogi_core::peripheral::{CapabilityId, ControlId, SessionId};
 use tracing::warn;
 
 use super::ActionDispatchTarget;
 
 /// OS-hook callbacks must fail open rather than block.
 const EVENT_QUEUE_CAPACITY: usize = 128;
-/// Bounds how long graceful process exit waits for terminal handlers.
-const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
+/// Plugins cannot consume the queue slots reserved for native capture callbacks.
+const PERIPHERAL_QUEUE_CAPACITY: usize = EVENT_QUEUE_CAPACITY / 2;
+/// Bounds shutdown and driver-handoff waits for terminal handlers.
+const TERMINAL_HANDLER_TIMEOUT: Duration = Duration::from_secs(1);
 /// Lets the worker observe the out-of-band shutdown channel even while idle.
 const SHUTDOWN_POLL_PERIOD: Duration = Duration::from_millis(10);
 
@@ -30,7 +33,10 @@ const SHUTDOWN_POLL_PERIOD: Duration = Duration::from_millis(10);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct CaptureEpoch(u64);
 
+mod peripheral;
 mod worker;
+pub(crate) use peripheral::PeripheralInput;
+use peripheral::{Permit, Validity};
 use worker::run_worker;
 #[cfg(test)]
 use worker::{emit_canceled, emit_selected_long_presses, process_input, settle_due_long_presses};
@@ -98,6 +104,7 @@ enum ButtonSource {
     /// expose one global callback thread.
     OsHook(ThreadId),
     Hidpp(HidppSessionId),
+    Peripheral(SessionId),
 }
 
 impl ButtonSource {
@@ -107,7 +114,7 @@ impl ButtonSource {
 
     fn device_key(&self) -> Option<&str> {
         match self {
-            Self::OsHook(_) => None,
+            Self::OsHook(_) | Self::Peripheral(_) => None,
             Self::Hidpp(session) => Some(session.device_key()),
         }
     }
@@ -120,6 +127,8 @@ pub(crate) enum PressControl {
     Button(ButtonId),
     /// A function key represented by its platform-neutral macOS keycode.
     Key(u16),
+    /// Driver-defined control, without reinterpreting a HID++ CID.
+    Peripheral(CapabilityId, ControlId),
 }
 
 /// Correlation key shared by consecutive edges from one physical control.
@@ -176,6 +185,7 @@ pub(crate) struct ActivePress {
     token: PressToken,
     behavior: PressBehavior,
     target: ActionDispatchTarget,
+    validity: Option<Validity>,
 }
 
 /// Runtime-only state of the action semantics attached to one active press.
@@ -310,6 +320,13 @@ pub(crate) enum ButtonRuntimeEvent {
         press: ActivePress,
         action: Action,
     },
+    /// All earlier commands have reached their terminal handlers.
+    Drained(tokio::sync::oneshot::Sender<()>),
+}
+
+pub(crate) enum ButtonDrain {
+    Queued,
+    HookButtons,
 }
 
 /// Inputs cannot represent `Up + action` or a source-authored `Cancel`.
@@ -321,11 +338,21 @@ enum ButtonInput {
 }
 
 enum ButtonCommand {
-    Input { generation: u64, input: ButtonInput },
+    Input {
+        generation: u64,
+        input: ButtonInput,
+    },
+    Peripheral {
+        generation: u64,
+        input: ButtonInput,
+        validity: Validity,
+        permit: Permit,
+    },
     CancelStalePress(PressToken),
     CancelSource(ButtonSource),
     CancelHooks,
     CancelPointerExcept(openlogi_hook::PointerTarget),
+    Drain(ButtonDrain, tokio::sync::oneshot::Sender<()>),
     Wake,
 }
 
@@ -434,9 +461,25 @@ pub(crate) struct ButtonInputHandle {
     generation: Arc<AtomicU64>,
     accepting: Arc<AtomicBool>,
     next_press: Arc<AtomicU64>,
+    peripheral_inflight: Arc<AtomicUsize>,
 }
 
 impl ButtonInputHandle {
+    pub(crate) async fn drain(&self, scope: ButtonDrain) -> io::Result<()> {
+        let (done, received) = tokio::sync::oneshot::channel();
+        self.events
+            .try_send(ButtonCommand::Drain(scope, done))
+            .map_err(io::Error::other)?;
+        tokio::time::timeout(TERMINAL_HANDLER_TIMEOUT, received)
+            .await
+            .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error))?
+            .map_err(io::Error::other)
+    }
+
+    pub(crate) fn peripheral_session(&self, session: &SessionId) -> PeripheralInput {
+        PeripheralInput::new(self.clone(), session.clone())
+    }
+
     #[cfg(test)]
     pub(crate) fn try_hook_down(
         &self,
@@ -611,6 +654,7 @@ impl ButtonInputHandle {
             },
             behavior,
             target,
+            validity: None,
         }
     }
 
@@ -660,6 +704,7 @@ impl ButtonRuntimeOwner {
             generation: Arc::clone(&generation),
             accepting: Arc::new(AtomicBool::new(true)),
             next_press: Arc::new(AtomicU64::new(1)),
+            peripheral_inflight: Arc::new(AtomicUsize::new(0)),
         };
         let worker = thread::Builder::new()
             .name("openlogi-buttons".into())
@@ -676,7 +721,7 @@ impl ButtonRuntimeOwner {
     }
 
     pub(crate) fn shutdown(&mut self) -> bool {
-        self.shutdown_with_timeout(SHUTDOWN_TIMEOUT)
+        self.shutdown_with_timeout(TERMINAL_HANDLER_TIMEOUT)
     }
 
     fn shutdown_with_timeout(&mut self, timeout: Duration) -> bool {
@@ -709,5 +754,7 @@ impl Drop for ButtonRuntimeOwner {
     }
 }
 
+#[cfg(test)]
+mod handoff_tests;
 #[cfg(test)]
 mod tests;

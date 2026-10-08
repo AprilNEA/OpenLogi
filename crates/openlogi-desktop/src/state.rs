@@ -75,6 +75,7 @@ mod inventory;
 mod light;
 mod lighting;
 mod load;
+mod peripherals;
 mod pointer;
 mod scroll;
 mod settings;
@@ -97,7 +98,7 @@ pub struct Sources<'a> {
     pub standalone: &'a [StandaloneDevice],
     /// Resolves each device's art.
     pub resolver: &'a AssetResolver,
-    /// The webcams this process enumerated itself; they never come over IPC.
+    /// Camera metadata from the agent snapshot; empty before the first snapshot.
     pub cameras: &'a [openlogi_camera::Camera],
     /// Where changes to `config` may be written.
     pub persistence: ConfigPersistence,
@@ -164,6 +165,7 @@ pub struct AppState {
     config: ConfigState,
     /// Agent-owned observations accepted by this GUI session.
     agent: AgentSession,
+    peripherals: peripherals::PeripheralUi,
     /// Merged device catalog, valid active selection, and per-device sessions.
     devices: DeviceStore,
     /// Binding-editor scope and projections derived from config.
@@ -269,6 +271,7 @@ impl AppState {
         let mut state = Self {
             config,
             agent: AgentSession::default(),
+            peripherals: peripherals::PeripheralUi::default(),
             devices: DeviceStore::new(device_list, current_device),
             bindings,
             action_ring_editing_apps: BTreeMap::new(),

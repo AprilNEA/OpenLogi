@@ -20,6 +20,14 @@ openlogi-ipc = { path = "../openlogi-ipc" }
 futures-lite = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+openlogi-plugin = { version = "0.8.11", path = "../openlogi-plugin", features = ["packages", "runner"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+atomic-write-file.workspace = true
+openlogi-device-registry = { version = "0.8.11", path = "../openlogi-device-registry" }
+openlogi-camera = { version = "0.8.11", path = "../openlogi-camera" }
 
 [lints]
 workspace = true
@@ -28,4 +36,5 @@ workspace = true
 # Only to advance virtual time in the DeviceOp/timed timeout test without a
 # real multi-second sleep.
 openlogi-fixture = { workspace = true }
+tempfile = "3.27.0"
 tokio = { workspace = true, features = ["test-util"] }

@@ -61,3 +61,40 @@ pub(crate) async fn snapshot(client: &AgentClient) -> Result<AgentSnapshot> {
             }
         })
 }
+
+/// Execute an explicitly requested lifecycle operation under the shared IPC deadline.
+pub(crate) async fn plugin(
+    client: &AgentClient,
+    command: openlogi_core::peripheral::PluginCommand,
+) -> Result<()> {
+    openlogi_ipc::client::plugin_command(client, command).await??;
+    Ok(())
+}
+
+/// Reload the existing configuration and descriptor sources after a guarded save.
+pub(crate) async fn reload(client: &AgentClient) -> Result<()> {
+    call(client.reload_config(context::current()))
+        .await
+        .map_err(|error| anyhow!("agent reload: {error:?}"))?
+        .map_err(|error| anyhow!(error.message))?;
+    Ok(())
+}
+
+/// Explicitly release a mapping conflict or retry a current peripheral attachment.
+pub(crate) async fn retry_peripheral(
+    client: &AgentClient,
+    session: openlogi_core::peripheral::SessionId,
+) -> Result<()> {
+    call(client.retry_peripheral(context::current(), session))
+        .await
+        .map_err(|error| anyhow!("agent retry: {error:?}"))??;
+    Ok(())
+}
+
+/// Resolve only the recovery entries owned by a selected saved rule.
+pub(crate) async fn resolve_peripheral(client: &AgentClient, rule: String) -> Result<()> {
+    call(client.resolve_peripheral(context::current(), rule))
+        .await
+        .map_err(|error| anyhow!("agent resolution: {error:?}"))??;
+    Ok(())
+}

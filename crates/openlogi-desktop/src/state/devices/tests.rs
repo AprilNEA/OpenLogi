@@ -139,6 +139,37 @@ fn records_from(config: &Config, inventories: &[DeviceInventory]) -> Vec<DeviceR
 }
 
 #[test]
+fn normalized_records_enrich_existing_rows_and_keep_unattached_driver_errors_visible() {
+    use openlogi_core::peripheral::{EndpointId, PeripheralError, PeripheralSnapshot, builtin};
+    let inventories = vec![cabled_inventory()];
+    let mut records = records_from(&Config::ephemeral(), &inventories);
+    let mut snapshot = PeripheralSnapshot {
+        devices: builtin::inventory(&inventories, &[], &[], 1, None),
+        ..PeripheralSnapshot::default()
+    };
+    super::append_peripherals(&mut records, &snapshot);
+    assert_eq!(
+        records.len(),
+        1,
+        "a protocol projection must enrich its existing row"
+    );
+    assert!(records[0].peripheral.is_some());
+    assert!(records[0].extension().is_none());
+    let failed = &mut snapshot.devices[0];
+    failed.session.endpoint = EndpointId("unattached-collection".into());
+    failed.capabilities.clear();
+    failed.driver_error = Some(PeripheralError::DriverConflict("two descriptors".into()));
+    records.clear();
+    super::append_peripherals(&mut records, &snapshot);
+    assert_eq!(
+        records.len(),
+        1,
+        "driver failure before a protocol probe must remain visible"
+    );
+    assert_eq!(records[0].extension(), Some(&snapshot.devices[0]));
+}
+
+#[test]
 fn one_mouse_on_two_routes_is_one_record() {
     // The user-visible symptom: the same mouse listed twice, once offline
     // on its receiver and once live on the cable.
@@ -150,6 +181,7 @@ fn one_mouse_on_two_routes_is_one_record() {
 
 fn online_record(key: &str) -> DeviceRecord {
     DeviceRecord {
+        peripheral: None,
         config_key: key.to_string(),
         canonical_key: None,
         persistent: true,

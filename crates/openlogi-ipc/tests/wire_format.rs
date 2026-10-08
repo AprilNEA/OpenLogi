@@ -102,7 +102,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 34);
+    assert_eq!(PROTOCOL_VERSION, 35);
 }
 
 #[test]
@@ -363,6 +363,7 @@ fn agent_status() {
 #[test]
 fn agent_snapshot() {
     let snapshot = AgentSnapshot {
+        peripherals: openlogi_core::peripheral::PeripheralSnapshot::default(),
         status: AgentStatus {
             accessibility_granted: true,
             hook_installed: false,
@@ -381,14 +382,182 @@ fn agent_snapshot() {
         // pairing fields.
         foreground: ForegroundApps::default(),
     };
-    assert_wire(&snapshot, "010001010705302e362e360100000000000000");
+    assert_wire(&snapshot, "010001010705302e362e360100000000000000000000");
 
     // The observation is the snapshot with its generation in front.
     let observed = Observation {
         generation: 3,
         snapshot,
     };
-    assert_wire(&observed, "03010001010705302e362e360100000000000000");
+    assert_wire(&observed, "03010001010705302e362e360100000000000000000000");
+}
+
+#[test]
+fn peripheral_requests_and_grants() {
+    use openlogi_core::peripheral::*;
+    let requests = [
+        AgentRequest::PluginCommand {
+            command: PluginCommand::Enable {
+                digest: "digest".into(),
+                descriptors: BTreeMap::from([(
+                    DescriptorId::try_new("demo.button").unwrap(),
+                    "fingerprint".into(),
+                )]),
+            },
+        },
+        AgentRequest::ResolvePeripheral { rule: "mic".into() },
+        AgentRequest::RetryPeripheral {
+            session: SessionId {
+                endpoint: EndpointId("usb".into()),
+                generation: 4,
+            },
+        },
+    ];
+    assert_wire(
+        &requests,
+        "1f0106646967657374010b64656d6f2e627574746f6e0b66696e6765727072696e7420036d6963210375736204",
+    );
+}
+
+#[test]
+fn peripheral_capabilities_and_evidence() {
+    use openlogi_core::peripheral::*;
+    let record = PeripheralRecord {
+        model: ModelId::try_new("demo.mic").unwrap(),
+        physical: None,
+        session: SessionId {
+            endpoint: EndpointId("usb".into()),
+            generation: 4,
+        },
+        endpoints: vec![Endpoint {
+            id: EndpointId("usb".into()),
+            parent: Some(EndpointId("hub".into())),
+            transport: Some(Transport::UsbHid),
+            vendor_id: 11427,
+            product_id: 16405,
+            collection: Some(HidUsage { page: 12, usage: 1 }),
+            interface: Some(2),
+            report_ids: vec![1],
+            max_report_bytes: Some(3),
+            max_output_report_bytes: None,
+            max_feature_report_bytes: None,
+        }],
+        name: "Mic".into(),
+        kind: DeviceKind::Unknown,
+        driver: DriverSelection {
+            descriptor: DescriptorId::try_new("demo.mic.usb").unwrap(),
+            driver: DriverId::try_new("demo.native").unwrap(),
+            digest: None,
+            source: DriverSource::Builtin,
+        },
+        driver_error: None,
+        connection: ConnectionStatus::Online,
+        capabilities: vec![CapabilityRecord {
+            id: CapabilityId::try_new("input-remap/main").unwrap(),
+            version: 1,
+            capability: Capability::InputRemap(InputRemapCapability {
+                controls: vec![InputControl {
+                    id: ControlId::try_new("linking").unwrap(),
+                    labels: BTreeMap::from([("en".into(), "Linking button".into())]),
+                    source: InputSource::HidUsage(HidUsage {
+                        page: 12,
+                        usage: 233,
+                    }),
+                    trigger: Trigger::ShortPress,
+                    recommended_key: Some("F18".parse().unwrap()),
+                }],
+                targets: TargetKind::KeyboardKey,
+                per_app: false,
+            }),
+            scopes: vec![ScopeKind::Model],
+            unavailable: None,
+            evidence: CapabilityEvidence::Declared,
+            values: BTreeMap::new(),
+        }],
+        scopes: vec![ScopeKind::Model],
+        operations: vec![OperationStatus {
+            capability: CapabilityId::try_new("input-remap/main").unwrap(),
+            revision: 8,
+            application: ApplicationStatus::Applied,
+            verification: VerificationStatus::WaitingForPress,
+        }],
+    };
+    let snapshot = PeripheralSnapshot {
+        devices: vec![record],
+        diagnostics: vec![CatalogDiagnostic {
+            source: "demo.device.toml".into(),
+            retained: true,
+            error: PeripheralError::ExternalModification,
+        }],
+        plugins: vec![PluginPackageRecord {
+            driver: DriverId::try_new("demo.counter").unwrap(),
+            version: "1.0.0".into(),
+            digest: "abc".into(),
+            descriptors: BTreeMap::from([(
+                DescriptorId::try_new("demo.button").unwrap(),
+                DescriptorDisclosure {
+                    fingerprint: "fp".into(),
+                    matching: "USB input".into(),
+                    granted: true,
+                },
+            )]),
+            permissions: vec!["input reports".into()],
+            selection: PluginSelectionStatus::Disabled,
+            active: false,
+            rollback_available: true,
+        }],
+    };
+    assert_wire(
+        &snapshot,
+        "010864656d6f2e6d6963000375736204010375736201036875620100fba32cfb1540010c010102010101030000034d69630c0c64656d6f2e6d69632e7573620b64656d6f2e6e6174697665000000000110696e7075742d72656d61702f6d61696e010001076c696e6b696e670102656e0e4c696e6b696e6720627574746f6e000ce90001006d0000010000000001000110696e7075742d72656d61702f6d61696e080201011064656d6f2e6465766963652e746f6d6c010a010c64656d6f2e636f756e74657205312e302e3003616263010b64656d6f2e627574746f6e0266700955534220696e70757401010d696e707574207265706f727473010001",
+    );
+}
+
+#[test]
+fn camera_and_extension_capabilities() {
+    use openlogi_core::{camera::*, peripheral::*};
+    let capabilities = [
+        Capability::Camera(CameraCapability {
+            camera: Camera {
+                unique_id: "capture".into(),
+                name: "Camera".into(),
+                vendor_id: 1133,
+                product_id: 1,
+                serial_number: None,
+                max_resolution: Some((1920, 1080)),
+                max_fps: Some(30),
+            },
+            state: Some(CameraState {
+                controls: vec![(
+                    CameraControl::Brightness,
+                    ControlRange {
+                        min: -10,
+                        max: 10,
+                        default: 0,
+                        current: 3,
+                        value_mask: None,
+                    },
+                )],
+                autos: Vec::new(),
+            }),
+        }),
+        Capability::Extension(BTreeMap::from([(
+            "threshold".into(),
+            SettingField {
+                value_type: SettingType::Integer {
+                    minimum: 1,
+                    maximum: 100,
+                },
+                labels: BTreeMap::from([("en".into(), "Threshold".into())]),
+                default: Some(SettingValue::Integer(10)),
+                access: SettingAccess::ReadWrite,
+            },
+        )])),
+    ];
+    assert_wire(
+        &capabilities,
+        "070643616d657261076361707475726500fb6d040101fb8007fb3804011e0101051314000600000801097468726573686f6c640102c80102656e095468726573686f6c6401011401",
+    );
 }
 
 /// The foreground application rides the snapshot, so both halves are pinned:

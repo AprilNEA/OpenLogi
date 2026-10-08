@@ -17,10 +17,10 @@
 use v4l::Device;
 use v4l::control::{Control, Description, Flags, Value};
 
-use crate::controls::{
+use crate::linux;
+use openlogi_core::camera::{
     AutoState, AutoToggle, CameraControl, CameraState, ControlError, ControlRange,
 };
-use crate::linux;
 
 /// `V4L2_CID_BRIGHTNESS` — the User control class base.
 const CID_BRIGHTNESS: u32 = 0x0098_0900;

@@ -188,6 +188,7 @@ async fn recovery_manager_waits_for_control_events_and_shutdown_between_retries(
         let (_signal, device_io) = openlogi_hid::device_io_channel();
         let (ring, _ring_rx) = mpsc::unbounded_channel();
         let device_access = DeviceAccess {
+            ownership: crate::peripherals::ownership::Ownership::default(),
             channel: capture,
             registry,
             receiver_access: access.clone(),

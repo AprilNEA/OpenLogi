@@ -61,9 +61,9 @@ use request::LinkLost;
 #[cfg(all(target_os = "macos", debug_assertions))]
 pub use request::PollEventMonitor;
 pub use request::{
-    CancelPairing, Command, PairDevice, ReadDpi, ReadFnLock, ReadSmartShift, ReloadConfig,
-    RequestAccessibilityPrompt, SetDpi, SetFnLock, SetLight, SetLightManualPower, SetLighting,
-    SetSmartShift, StartPairing, UnpairDevice,
+    CancelPairing, Command, ManagePeripheral, PairDevice, PeripheralOperation, ReadDpi, ReadFnLock,
+    ReadSmartShift, ReloadConfig, RequestAccessibilityPrompt, SetDpi, SetFnLock, SetLight,
+    SetLightManualPower, SetLighting, SetSmartShift, StartPairing, UnpairDevice,
 };
 
 /// How long to wait before retrying a connect that failed. This is a retry
@@ -73,6 +73,11 @@ const RECONNECT_DELAY: Duration = Duration::from_millis(250);
 
 /// What the client thread tells the GPUI loop.
 pub enum GuiUpdate {
+    /// Result of the one pending package or peripheral lifecycle operation.
+    PeripheralCommandResult {
+        id: u64,
+        result: Result<(), openlogi_core::peripheral::PeripheralError>,
+    },
     /// The agent's state, as of a generation this client had not seen.
     Snapshot(AgentSnapshot),
     /// No usable connection for `link::UNREACHABLE_AFTER`: the agent is
@@ -516,6 +521,7 @@ mod tests {
     /// A snapshot the tests can tell apart by its camera flag.
     fn snapshot(camera_active: bool) -> AgentSnapshot {
         AgentSnapshot {
+            peripherals: openlogi_core::peripheral::PeripheralSnapshot::default(),
             status: AgentStatus {
                 accessibility_granted: true,
                 hook_installed: true,

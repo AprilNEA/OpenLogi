@@ -98,6 +98,7 @@ pub(super) struct DetailPanels<'a> {
     pub camera_preview: &'a gpui::Entity<CameraPreview>,
     pub camera_controls: &'a gpui::Entity<CameraControlsPanel>,
     pub light_panel: &'a gpui::Entity<LightPanel>,
+    pub peripheral_panel: &'a gpui::Entity<crate::features::peripheral::PeripheralPanel>,
 }
 
 /// The device-detail workspace below the identity bar: stable navigation rail
@@ -132,6 +133,12 @@ pub(super) fn detail_content(
         }
         DetailTab::Light => light_tab(panels.light_panel, cx).into_any_element(),
         DetailTab::Device => device_tab(cx).into_any_element(),
+        DetailTab::Controls => div()
+            .id("peripheral-controls-scroll")
+            .flex_1()
+            .overflow_y_scroll()
+            .child(panels.peripheral_panel.clone())
+            .into_any_element(),
     };
     let navigation = detail_navigation(tabs, active, cx);
     v_flex()
@@ -241,7 +248,7 @@ fn detail_tab_icon(tab: DetailTab) -> &'static str {
     match tab {
         DetailTab::Buttons => "action-icons/mouse-pointer-click.svg",
         DetailTab::ActionsRing => "action-icons/layout-grid.svg",
-        DetailTab::Keys => "action-icons/keyboard.svg",
+        DetailTab::Keys | DetailTab::Controls => "action-icons/keyboard.svg",
         DetailTab::Pointer => "action-icons/gauge.svg",
         DetailTab::Lighting | DetailTab::Light => "action-icons/palette.svg",
         DetailTab::Camera => "action-icons/camera.svg",

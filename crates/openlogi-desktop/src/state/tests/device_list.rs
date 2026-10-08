@@ -45,6 +45,7 @@ fn canonical_device_profile() -> DeviceProfile {
 fn snapshot_candidate(profile: &DeviceProfile) -> AgentSnapshot {
     let editor = app("org.openlogi.synthetic-editor", "Synthetic Editor");
     AgentSnapshot {
+        peripherals: openlogi_core::peripheral::PeripheralSnapshot::default(),
         status: AgentStatus {
             accessibility_granted: true,
             hook_installed: true,

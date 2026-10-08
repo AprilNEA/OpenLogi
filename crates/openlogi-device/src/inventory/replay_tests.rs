@@ -15,6 +15,82 @@ use crate::replay::{ChannelConnection, NodePresence, OpenOutcome, ReplayBackend,
 use crate::{ChannelRegistry, get_dpi};
 
 #[tokio::test]
+async fn catalog_handoff_preserves_restoration_then_releases_the_native_channel() {
+    use std::collections::HashSet;
+    // Reopening the channel reuses the immutable probe cache.
+    let fixture = direct_fixture(OpenOutcome::Hidpp, 1);
+    let expected = fixture.inventory.clone();
+    let node = fixture.node_id.clone();
+    let route = crate::DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xb35b,
+    };
+    let backend = Arc::new(
+        ReplayBackend::new(
+            ReplayTopology {
+                nodes: vec![fixture.node],
+                channels: vec![fixture.channel],
+            },
+            vec![fixture.cassette],
+        )
+        .unwrap(),
+    );
+    let registry = ChannelRegistry::default();
+    let mut enumerator = Enumerator::with_backend(backend.clone()).with_registry(registry.clone());
+    enumerator.select_driver_nodes(HashSet::new());
+    assert!(enumerator.enumerate().await.unwrap().is_empty());
+    assert_eq!(
+        backend.open_count(&node).unwrap(),
+        0,
+        "conflicted or externally selected devices are never probed first"
+    );
+    enumerator.select_driver_nodes(HashSet::from([node.clone()]));
+    assert_eq!(
+        enumerator.enumerate().await.unwrap(),
+        std::slice::from_ref(&expected)
+    );
+    let restoring = registry.lookup(&route).unwrap();
+    let written = backend
+        .channel_completion(DIRECT_CHANNEL)
+        .unwrap()
+        .written_reports
+        .len();
+    enumerator.select_driver_nodes(HashSet::new());
+    enumerator.enumerate().await.unwrap();
+    assert!(
+        registry.is_current(&restoring),
+        "pending firmware restoration retains the shared channel"
+    );
+    assert_eq!(
+        backend
+            .channel_completion(DIRECT_CHANNEL)
+            .unwrap()
+            .written_reports
+            .len(),
+        written,
+        "the old driver cannot probe after catalog admission is withdrawn"
+    );
+    enumerator.exclude_driver_nodes(HashSet::from([node.clone()]));
+    assert!(registry.lookup(&route).is_none());
+    assert!(enumerator.enumerate().await.unwrap().is_empty());
+    assert_eq!(
+        backend.open_count(&node).unwrap(),
+        1,
+        "a live excluded channel cannot be revived"
+    );
+    assert!(enumerator.owned_nodes().contains(&node));
+    drop(restoring);
+    enumerator.exclude_driver_nodes(HashSet::from([node.clone()]));
+    assert!(enumerator.owned_nodes().is_empty());
+    assert_eq!(backend.channel_lifetime_count(DIRECT_CHANNEL).unwrap(), 0);
+    enumerator.exclude_driver_nodes(HashSet::new());
+    enumerator.select_driver_nodes(HashSet::from([node.clone()]));
+    assert_eq!(enumerator.enumerate().await.unwrap(), [expected]);
+    assert_eq!(backend.open_count(&node).unwrap(), 2);
+    backend.require_complete().unwrap();
+}
+
+#[tokio::test]
 async fn receiver_slots_interleave_on_one_channel_and_lifecycle_events_coalesce() {
     let slots = [
         BoltSlot {

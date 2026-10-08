@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 mod button_map;
 mod device;
+mod device_capabilities;
 #[cfg(feature = "fs")]
 mod file;
 mod function_key;
@@ -22,6 +23,7 @@ mod key_trigger;
 mod migrate;
 mod per_app;
 mod per_device;
+mod peripheral;
 mod settings;
 
 // Stacked, not `all(test, …)`: clippy reads the combined form as a test
@@ -95,7 +97,7 @@ use crate::binding::{Binding, ButtonId, GestureDirection};
 /// next save; [`Config::load_from_path`] accepts supported versions `1` through
 /// [`SCHEMA_VERSION`] so an invalid or forward file fails loudly instead of
 /// silently losing bindings.
-pub const SCHEMA_VERSION: u32 = 7;
+pub const SCHEMA_VERSION: u32 = 8;
 
 /// Top-level config document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,13 +132,19 @@ pub struct Config {
     /// identifier (e.g. `"receiver:abc123:slot:2"`). A serial-less camera's
     /// custom name instead uses its OS capture id so same-model cameras remain
     /// distinguishable.
-    #[serde(default)]
+    #[serde(default, with = "device_capabilities")]
     pub devices: BTreeMap<String, DeviceConfig>,
     /// Keyboard remappings, independent of device. The function-key remapper
     /// (M1) reads this; `#[serde(default)]` keeps older configs without a
     /// `[keyboard]` section loading unchanged.
     #[serde(default)]
     pub keyboard: KeyboardConfig,
+    /// Capability-scoped peripheral rules, including explicit model-wide mappings.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub peripherals: Vec<crate::peripheral::PeripheralConfig>,
+    /// Exact selected plugin content. Installation alone does not enable a package.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub plugins: BTreeMap<crate::peripheral::DriverId, crate::peripheral::PluginSelection>,
 }
 
 impl Default for Config {
@@ -148,6 +156,8 @@ impl Default for Config {
             devices: BTreeMap::new(),
             ephemeral: false,
             keyboard: KeyboardConfig::default(),
+            peripherals: Vec::new(),
+            plugins: BTreeMap::new(),
         }
     }
 }

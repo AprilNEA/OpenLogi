@@ -1,0 +1,26 @@
+id: registry-hidpp-collection-owner
+language: rust
+severity: error
+message: Use openlogi_device_registry::driver::HidppReports for HID++ collection classification and framing.
+note: The registry owns collection identity; host code additionally excludes virtual receiver children.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-device-registry/src/driver.rs
+  - '**/tests.rs'
+  - '**/tests/**'
+rule:
+  all:
+    - any:
+        - pattern: 'const HIDPP_LONG_COLLECTIONS: $TYPE = $VALUE;'
+        - pattern: 'static HIDPP_LONG_COLLECTIONS: $TYPE = $VALUE;'
+        - pattern: '(0xff00, 0x0002)'
+        - pattern: '(0xff43, 0x0202)'
+        - pattern: '(0xff43, 0x0602)'
+    - not:
+        inside:
+          kind: mod_item
+          stopBy: end
+          has:
+            field: name
+            regex: '^tests$'

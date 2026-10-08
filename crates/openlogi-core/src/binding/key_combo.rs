@@ -188,6 +188,12 @@ impl<'de> Deserialize<'de> for KeyCombo {
 }
 
 impl KeyCombo {
+    /// Whether this shortcut is one keyboard key with no modifiers.
+    #[must_use]
+    pub const fn is_single_key(&self) -> bool {
+        self.modifiers == 0
+    }
+
     /// USB HID keyboard usage for the ordinary key.
     #[must_use]
     pub const fn key(&self) -> KeyboardUsage {

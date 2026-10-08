@@ -50,12 +50,17 @@ fn transient_probe_folds_into_its_known_card() {
     let stable_key = "unit:a393cae0";
     assert_eq!(state.devices()[0].config_key, stable_key);
 
-    let transient_list = build_device_list(
-        &[direct_inventory([0; 4])],
-        &[],
-        &resolver,
-        &state.config,
-        &[],
+    let transient_inventory = [direct_inventory([0; 4])];
+    let mut transient_list =
+        build_device_list(&transient_inventory, &[], &resolver, &state.config, &[]);
+    let projection =
+        openlogi_core::peripheral::builtin::inventory(&transient_inventory, &[], &[], 2, None);
+    crate::state::devices::append_peripherals(
+        &mut transient_list,
+        &openlogi_core::peripheral::PeripheralSnapshot {
+            devices: projection.clone(),
+            ..openlogi_core::peripheral::PeripheralSnapshot::default()
+        },
     );
     let merged = state.merge_inventory_snapshot(transient_list);
 
@@ -64,6 +69,11 @@ fn transient_probe_folds_into_its_known_card() {
     assert!(merged[0].is_persistent());
     assert!(merged[0].online, "the live probe supplies volatile state");
     assert!(merged[0].route.is_some(), "the live route is kept usable");
+    assert_eq!(
+        merged[0].capability_records(),
+        projection[0].capabilities,
+        "route adoption must retain the agent's current capability scopes"
+    );
 }
 
 #[test]

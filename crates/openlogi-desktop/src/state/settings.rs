@@ -172,6 +172,16 @@ impl AppState {
     /// Whether OpenLogi manages `key` (capture + volatile re-apply).
     #[must_use]
     pub fn device_enabled(&self, key: &str) -> bool {
+        if let Some(record) = self
+            .devices()
+            .iter()
+            .find(|r| r.config_key == key)
+            .and_then(|r| r.extension())
+        {
+            return self
+                .peripheral_rule(record)
+                .is_ok_and(|rule| rule.is_some_and(|rule| rule.enabled));
+        }
         self.config.device_enabled(key)
     }
 
@@ -213,6 +223,15 @@ impl AppState {
     /// Enable or disable OpenLogi's management of `key` and persist it. The
     /// agent tears down or re-arms the device's capture session on reload.
     pub fn commit_device_enabled(&mut self, key: &DeviceKey, enabled: bool) -> StateEvents {
+        if let Some(record) = self
+            .devices()
+            .iter()
+            .find(|r| r.config_key == key.as_str())
+            .and_then(|r| r.extension())
+            .cloned()
+        {
+            return self.commit_peripheral_enabled(&record, enabled);
+        }
         let events = StateEvent::DeviceConfigChanged(key.clone()).into();
         let key = key.as_str();
         if self.config.device_enabled(key) == enabled {

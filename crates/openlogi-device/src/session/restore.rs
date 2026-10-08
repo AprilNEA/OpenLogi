@@ -64,6 +64,12 @@ impl<P: fmt::Debug> fmt::Debug for PendingRestore<P> {
 }
 
 impl<P> PendingRestore<P> {
+    /// Exact route whose firmware still owes restoration.
+    #[must_use]
+    pub fn route(&self) -> &DeviceRoute {
+        &self.route
+    }
+
     /// Record that `plan` is owed to the device behind `retired`.
     pub(crate) fn owing(retired: &SharedChannel, plan: P) -> Self {
         Self {

@@ -60,6 +60,7 @@ impl ObservableState {
                 camera_active: false,
                 pairing: None,
                 foreground: ForegroundApps::default(),
+                peripherals: openlogi_core::peripheral::PeripheralSnapshot::default(),
             },
         });
         Self { tx }
@@ -150,6 +151,17 @@ impl ObservableState {
                 return false;
             }
             snapshot.camera_active = active;
+            true
+        });
+    }
+
+    /// Publish the peripheral owner's accepted generation without recapturing hardware.
+    pub fn set_peripherals(&self, peripherals: openlogi_core::peripheral::PeripheralSnapshot) {
+        self.update(|snapshot| {
+            if snapshot.peripherals == peripherals {
+                return false;
+            }
+            snapshot.peripherals = peripherals;
             true
         });
     }

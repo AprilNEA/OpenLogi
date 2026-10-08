@@ -41,7 +41,10 @@ Click = \"Paste\"
         body.contains(&format!("schema_version = {SCHEMA_VERSION}")),
         "got: {body}"
     );
-    assert!(body.contains("[devices.2b042.bindings]"), "got: {body}");
+    assert!(
+        body.contains("[devices.2b042.capabilities.\"input-remap/main\".bindings]"),
+        "got: {body}"
+    );
     assert!(!body.contains("button_bindings"), "got: {body}");
     assert!(!body.contains("gesture_bindings"), "got: {body}");
 }

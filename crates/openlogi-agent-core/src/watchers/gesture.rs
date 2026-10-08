@@ -550,10 +550,39 @@ impl CaptureManager for GestureManager {
     type Published = Arc<Vec<DeviceCapturePlan>>;
     type Event = SessionEvent;
 
-    async fn reconcile(&mut self, requests: ReceiverRequestState, published: &Self::Published) {
+    async fn reconcile(
+        &mut self,
+        requests: ReceiverRequestState,
+        published: &Self::Published,
+        ownership: &crate::peripherals::ownership::Requests,
+    ) {
+        let published = Arc::new(
+            published
+                .iter()
+                .filter(|plan| ownership.allows(&plan.target.route))
+                .cloned()
+                .collect(),
+        );
         self.state
-            .reconcile(requests, true, published, &self.channels)
+            .reconcile(requests, true, &published, &self.channels)
             .await;
+    }
+
+    fn owned_routes(&self) -> Vec<openlogi_hid::DeviceRoute> {
+        self.state
+            .slots
+            .values()
+            .filter_map(|slot| {
+                slot.session()
+                    .map(|s| s.target().route.clone())
+                    .or_else(|| {
+                        slot.recovery()?
+                            .pending_restore
+                            .as_ref()
+                            .map(|r| r.token.route().clone())
+                    })
+            })
+            .collect()
     }
 
     fn handle_session_event(
@@ -610,6 +639,10 @@ async fn manage(context: GestureManagerContext) -> ManagerCompletion {
     let (events, event_rx) = mpsc::unbounded_channel::<SessionEvent>();
     let registry_changes = access.registry.subscribe();
     let device_io = access.device_io.clone();
+    let ownership = access.ownership.subscribe();
+    let reporter = access
+        .ownership
+        .owner(crate::peripherals::ownership::Owner::Gesture);
     // Capture sessions run as detached tasks, so an unexpected exit (a transient
     // HID++ read error, a sleep-wake glitch, brief radio loss) would otherwise go
     // unnoticed. Each session reports its completion here, tagged with its device
@@ -624,6 +657,8 @@ async fn manage(context: GestureManagerContext) -> ManagerCompletion {
             channels,
         },
         ManagerInputs {
+            ownership,
+            reporter,
             published: capture_plans,
             receiver_requests,
             registry_changes,

@@ -1,0 +1,28 @@
+# Synthetic example. Replace the model and verified HID facts for your device.
+schema = 1
+id = "example.media-button-usb"
+revision = "1.0.0"
+model = "example.media-button"
+name = "Media button"
+driver = { id = "org.openlogi.native-hid-remap", parameters = 1 }
+platforms = ["macos"]
+identity = { strategy = "unverified", default_scope = "model" }
+
+[[matches]]
+role = "controls"
+transport = "usb-hid"
+vendor_id = 65535
+product_id = 1
+usage_page = 12
+usage = 1
+
+[parameters]
+endpoint = "controls"
+write_scope = "vid-pid"
+
+[[parameters.controls]]
+id = "media"
+labels = { en = "Media button", zh-CN = "媒体键" }
+source = { kind = "hid-usage", page = 12, usage = 233 }
+trigger = "short-press"
+recommended_key = "F18"

@@ -30,6 +30,8 @@ use crate::services::assets::{AssetResolver, ResolvedAsset};
 /// active selection in [`super::device_store::DeviceStore`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeviceRecord {
+    /// Agent-owned normalized capabilities and operation status.
+    pub peripheral: Option<openlogi_core::peripheral::PeripheralRecord>,
     /// Key used for persisted hardware settings. A serial-less camera uses a
     /// model-scoped key here, so use [`Self::record_key`] when one user-facing
     /// record must be distinguished from another.
@@ -111,6 +113,9 @@ impl DeviceRecord {
     /// config key (two serial-less units of the same model), so they reconcile
     /// on the OS capture id instead — settings still persist under `config_key`.
     pub(super) fn inventory_key(&self) -> String {
+        if let Some(record) = self.extension() {
+            return record.session.endpoint.0.clone();
+        }
         if self.kind == DeviceKind::Camera
             && let Some(id) = self.capture_id.as_deref().filter(|s| !s.is_empty())
         {
@@ -126,6 +131,9 @@ impl DeviceRecord {
     /// user-facing state follows the OS capture id instead of conflating both
     /// live records.
     pub(crate) fn record_key(&self) -> String {
+        if self.extension().is_some() {
+            return self.inventory_key();
+        }
         if self.kind == DeviceKind::Camera
             && self
                 .serial_number
@@ -135,6 +143,83 @@ impl DeviceRecord {
             return self.inventory_key();
         }
         self.config_key.clone()
+    }
+
+    /// Records without a protocol route use their explicit peripheral rule.
+    pub(crate) fn extension(&self) -> Option<&openlogi_core::peripheral::PeripheralRecord> {
+        self.peripheral
+            .as_ref()
+            .filter(|_| self.route.is_none() && self.capture_id.is_none())
+    }
+
+    /// Shared capability projection also preserves known offline protocol panels.
+    pub(crate) fn capability_records(&self) -> Vec<openlogi_core::peripheral::CapabilityRecord> {
+        self.peripheral.as_ref().map_or_else(
+            || {
+                openlogi_core::peripheral::builtin::capabilities(
+                    self.kind,
+                    self.capabilities,
+                    self.light_capabilities,
+                )
+            },
+            |record| record.capabilities.clone(),
+        )
+    }
+}
+
+pub(super) fn append_peripherals(
+    list: &mut Vec<DeviceRecord>,
+    snapshot: &openlogi_core::peripheral::PeripheralSnapshot,
+) {
+    use openlogi_core::peripheral::{ConnectionStatus, builtin};
+    for record in list.iter_mut() {
+        let stable = DeviceStableId::from_parts(
+            record.route.as_ref(),
+            record.slot,
+            record.serial_number.as_deref(),
+            record.unit_id,
+        );
+        let endpoint = builtin::endpoint_id(&stable);
+        if let Some(peripheral) = snapshot.devices.iter().find(|p| p.session.endpoint == endpoint || record.capture_id.as_deref().is_some_and(|id|
+            p.capabilities.iter().any(|c| matches!(&c.capability, openlogi_core::peripheral::Capability::Camera(camera) if camera.camera.unique_id == id)))) {
+            record.online = peripheral.connection == ConnectionStatus::Online;
+            record.peripheral = Some(peripheral.clone());
+        }
+    }
+    for peripheral in &snapshot.devices {
+        if list.iter().any(|record| {
+            record
+                .peripheral
+                .as_ref()
+                .is_some_and(|existing| existing.session == peripheral.session)
+        }) {
+            continue;
+        }
+        list.push(DeviceRecord {
+            peripheral: Some(peripheral.clone()),
+            config_key: format!("peripheral:{}", peripheral.model),
+            canonical_key: None,
+            persistent: false,
+            route_key: peripheral.session.endpoint.0.clone(),
+            model_key: peripheral.model.to_string(),
+            model_name: peripheral.name.clone(),
+            display_name: peripheral.name.clone(),
+            asset: None,
+            model_info: None,
+            codename: None,
+            serial_number: None,
+            unit_id: [0; 4],
+            driver_id: Some(peripheral.driver.driver.to_string()),
+            registry_model_id: None,
+            route: None,
+            capture_id: None,
+            kind: peripheral.kind,
+            capabilities: None,
+            light_capabilities: None,
+            slot: 0,
+            online: peripheral.connection == ConnectionStatus::Online,
+            battery: None,
+        });
     }
 }
 
@@ -213,6 +298,7 @@ pub(super) fn build_device_list(
                 });
             let kind = effective_kind(paired.kind, asset.as_ref().and_then(|a| a.kind));
             list.push(DeviceRecord {
+                peripheral: None,
                 config_key,
                 canonical_key,
                 persistent,
@@ -299,6 +385,10 @@ fn camera_record(camera: &Camera, resolver: &AssetResolver) -> DeviceRecord {
     let model_info = camera_model_info(camera);
     let asset = resolver.resolve(&model_info, Some(&camera.name));
     DeviceRecord {
+        peripheral: Some(openlogi_core::peripheral::builtin::camera(
+            camera.clone(),
+            0,
+        )),
         model_key: format!("{:04x}", camera.product_id),
         config_key,
         // A camera is UVC, not HID++: it never resolves through
@@ -377,6 +467,7 @@ fn append_standalone(
                 |asset| asset.display_name.clone(),
             );
         list.push(DeviceRecord {
+            peripheral: None,
             config_key,
             canonical_key,
             persistent,
@@ -574,6 +665,7 @@ fn offline_record(
             |asset| asset.display_name.clone(),
         );
     DeviceRecord {
+        peripheral: None,
         config_key: config_key.to_string(),
         // Nothing was probed this session: the persisted key is all there is.
         canonical_key: None,
@@ -632,6 +724,7 @@ pub(super) fn direct_key_prefix(key: &str) -> Option<&str> {
 /// keeps its persisted identity while the live record supplies volatile state.
 pub(super) fn adopt_transient_record(known: &DeviceRecord, live: DeviceRecord) -> DeviceRecord {
     DeviceRecord {
+        peripheral: live.peripheral,
         config_key: known.config_key.clone(),
         canonical_key: live.canonical_key.or_else(|| known.canonical_key.clone()),
         persistent: true,
@@ -727,6 +820,7 @@ fn device_order_key(record: &DeviceRecord) -> (DeviceStableId, String, String) {
 #[cfg(debug_assertions)]
 fn demo_keyboard() -> DeviceRecord {
     DeviceRecord {
+        peripheral: None,
         config_key: "demo-g513".to_string(),
         canonical_key: None,
         persistent: true,

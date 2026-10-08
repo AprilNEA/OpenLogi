@@ -52,7 +52,7 @@ pub(crate) fn run() {
         };
         let opened = cx.open_window(options, |window, cx| {
             theme::apply_scale(window, UiScale::Normal);
-            let view = cx.new(ComponentGallery::new);
+            let view = cx.new(|cx| ComponentGallery::new(window, cx));
             cx.new(|cx| Root::new(view, window, cx).bg(cx.theme().background))
         });
 
@@ -98,10 +98,12 @@ struct ComponentGallery {
     carousel_selected: usize,
     slider: CommitSlider<u8>,
     slider_committed: u8,
+    shortcut: gpui::Entity<gpui_component::input::InputState>,
+    shortcut_committed: String,
 }
 
 impl ComponentGallery {
-    fn new(cx: &mut Context<Self>) -> Self {
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let slider_committed = 40;
         let slider = CommitSlider::new(
             SliderRange::new(0, 100),
@@ -120,6 +122,9 @@ impl ComponentGallery {
             carousel_selected: 1,
             slider,
             slider_committed,
+            shortcut: cx
+                .new(|cx| gpui_component::input::InputState::new(window, cx).default_value("F18")),
+            shortcut_committed: String::new(),
         }
     }
 
@@ -200,7 +205,33 @@ impl ComponentGallery {
             .child(self.profile_panel(pal, cx))
             .child(self.preset_panel(pal, cx))
             .child(self.slider_panel(pal))
+            .child(self.shortcut_panel(pal, cx))
             .child(Self::battery_panel(pal))
+    }
+
+    fn shortcut_panel(&self, pal: Palette, cx: &mut Context<Self>) -> gpui::Div {
+        let view = cx.weak_entity();
+        gallery_panel(
+            "Shortcut picker",
+            IconName::Settings,
+            v_flex()
+                .gap_2()
+                .child(crate::features::binding_editor::shortcut_picker(
+                    &self.shortcut,
+                    move |text, _, cx| {
+                        let _ = view.update(cx, |view, cx| {
+                            view.shortcut_committed = text;
+                            cx.notify();
+                        });
+                    },
+                ))
+                .child(
+                    div()
+                        .text_body()
+                        .child(format!("Saved: {}", self.shortcut_committed)),
+                ),
+            pal,
+        )
     }
 
     fn choice_panel(&self, pal: Palette, cx: &mut Context<Self>) -> gpui::Div {
@@ -548,7 +579,7 @@ mod tests {
         cx.update(gpui_component::init);
         cx.update(theme::register_builtin_themes);
         cx.update(install_openlogi_themes);
-        let (view, cx) = cx.add_window_view(|_, cx| ComponentGallery::new(cx));
+        let (view, cx) = cx.add_window_view(ComponentGallery::new);
 
         cx.update(|window, cx| window.draw(cx).clear(cx));
         view.update(cx, |gallery, cx| {

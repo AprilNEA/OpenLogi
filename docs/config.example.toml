@@ -1,6 +1,17 @@
 # OpenLogi configuration example. Copy only the sections you need.
-schema_version = 7
+schema_version = 8
 selected_device = "receiver:aabbccdd:slot:1"
+
+# The linking button is a short-press trigger. Enable this rule after review.
+[[peripherals]]
+id = "dji-linking-button"
+enabled = false
+scope = { kind = "model", model = "dji.mic3.rx" }
+descriptor = "org.openlogi.dji-mic3-usb"
+
+[peripherals.capabilities."input-remap/main"]
+version = 1
+bindings = { linking = { CustomShortcut = "F18" } }
 
 [app_settings]
 launch_at_login = true
@@ -24,13 +35,22 @@ app_icon = "openlogi"
 
 [devices."receiver:aabbccdd:slot:1"]
 custom_name = "Office mouse"
+
+[devices."receiver:aabbccdd:slot:1".capabilities."pointer/main"]
+version = 1
 dpi = 1600
 dpi_presets = [800, 1600, 3200]
+
+[devices."receiver:aabbccdd:slot:1".capabilities."wheel/main"]
+version = 1
 thumbwheel_sensitivity = 20
 invert_scroll = false
 scroll_resolution = "high"
 
-[devices."receiver:aabbccdd:slot:1".bindings]
+[devices."receiver:aabbccdd:slot:1".capabilities."input-remap/main"]
+version = 1
+
+[devices."receiver:aabbccdd:slot:1".capabilities."input-remap/main".bindings]
 Back = "BrowserBack"
 Forward = "BrowserForward"
 # Hold the chord for exactly as long as the physical button is held.
@@ -41,47 +61,57 @@ DpiToggle = { short = "ShowDesktop", long = "MissionControl" }
 # reports taps from incidental thumb contact.
 Thumbwheel = "AppExpose"
 
-[devices."receiver:aabbccdd:slot:1".bindings.GestureButton]
+[devices."receiver:aabbccdd:slot:1".capabilities."input-remap/main".bindings.GestureButton]
 Click = "MissionControl"
 Up = "MissionControl"
 Down = "AppExpose"
 Left = "PreviousDesktop"
 Right = "NextDesktop"
 
-[devices."receiver:aabbccdd:slot:1".per_app_bindings."com.microsoft.VSCode"]
+[devices."receiver:aabbccdd:slot:1".capabilities."input-remap/main".per_app_bindings."com.microsoft.VSCode"]
 Back = "Undo"
 
-[devices."receiver:aabbccdd:slot:1".per_app_bindings."exe:sharex.exe"]
+[devices."receiver:aabbccdd:slot:1".capabilities."input-remap/main".per_app_bindings."exe:sharex.exe"]
 MiddleClick = { CustomShortcut = "F1" }
 
-[devices."receiver:aabbccdd:slot:1".action_ring]
+[devices."receiver:aabbccdd:slot:1".capabilities."input-remap/main".action_ring]
 enabled = true
 haptics = true
 
-[devices."receiver:aabbccdd:slot:1".action_ring.default.slots]
+[devices."receiver:aabbccdd:slot:1".capabilities."input-remap/main".action_ring.default.slots]
 Top = { action = "Copy", icon = "Keyboard" }
 Right = { action = { OpenApplication = { path = "/Applications/Safari.app", display_name = "Safari" } }, icon = "Applications" }
 Bottom = { action = "ShowDesktop", label = "Desktop" }
 
-[devices."receiver:aabbccdd:slot:1".lighting]
+[devices."receiver:aabbccdd:slot:1".capabilities."keyboard-lighting/main"]
+version = 1
+
+[devices."receiver:aabbccdd:slot:1".capabilities."keyboard-lighting/main".lighting]
 enabled = true
 color = "ff0000"
 brightness = 80
 
-[devices."receiver:aabbccdd:slot:1".smartshift]
+[devices."receiver:aabbccdd:slot:1".capabilities."wheel/main".smartshift]
 mode = "ratchet"
 auto_disengage = 16
 tunable_torque = 50
 
 # Put host-switch links on the keyboard's physical entry.
-[devices."receiver:aabbccdd:slot:2"]
+[devices."receiver:aabbccdd:slot:2".capabilities."host-switch/main"]
+version = 1
 host_switch_targets = ["receiver:aabbccdd:slot:1"]
+
+[devices."receiver:aabbccdd:slot:2".capabilities."fn-lock/main"]
+version = 1
 fn_lock = false
 
 # Keyboard keys are named by their HID++ control: a catalog name such as
 # `KeyScreenCapture`, or `control:0x<cid>` for any control `openlogi diag
 # controls` lists as divertable. An unlisted key keeps its firmware function.
-[devices."receiver:aabbccdd:slot:2".bindings]
+[devices."receiver:aabbccdd:slot:2".capabilities."input-remap/main"]
+version = 1
+
+[devices."receiver:aabbccdd:slot:2".capabilities."input-remap/main".bindings]
 KeySearch = "MissionControl"
 KeyScreenCapture = "Sleep"
 KeyCalculator = { OpenApplication = { path = "/System/Applications/Calculator.app", display_name = "Calculator" } }
@@ -92,7 +122,8 @@ KeyCalculator = { OpenApplication = { path = "/System/Applications/Calculator.ap
 # follow it between its receiver and a cable instead of splitting into two
 # entries. `receiver:…` entries above are the pre-5 shape; they are folded onto
 # an identity key the first time the device is seen online with the GUI running.
-[devices."unit:6be9d300"]
+[devices."unit:6be9d300".capabilities."pointer/main"]
+version = 1
 dpi = 1600
 
 # Every route this device has been seen on. The set of keys is also the index

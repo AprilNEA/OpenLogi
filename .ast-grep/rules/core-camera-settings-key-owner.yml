@@ -1,0 +1,15 @@
+id: core-camera-settings-key-owner
+language: rust
+severity: error
+message: Use Config::legacy_camera_key to select legacy camera settings before migration.
+note: The agent and GUI must restore the same settings when the GUI has not persisted the camera key migration.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-core/src/config/per_device.rs
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  all:
+    - kind: macro_invocation
+    - regex: '^(?s)format!\(\s*"camera-\{'

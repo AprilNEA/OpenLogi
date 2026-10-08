@@ -4,6 +4,8 @@ use super::*;
 use openlogi_core::binding::{GESTURE_SWIPE_THRESHOLD, LongPressBinding};
 use openlogi_core::config::KeyModifiers;
 
+mod latency;
+
 fn token(id: u64, button: ButtonId) -> PressToken {
     PressToken::hook_for_test(id, button)
 }
@@ -45,6 +47,7 @@ fn test_dispatcher() -> (
         executor: super::super::ActionExecutor {
             dpi_cycle: Arc::new(RwLock::new(crate::DpiCycles::default())),
             access: crate::hardware::DeviceAccess {
+                ownership: crate::peripherals::ownership::Ownership::default(),
                 channel: Arc::new(RwLock::new(None)),
                 registry: openlogi_hid::ChannelRegistry::default(),
                 receiver_access: crate::receiver_access::ReceiverAccess::default(),

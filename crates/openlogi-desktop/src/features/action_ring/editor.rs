@@ -161,31 +161,17 @@ fn shortcut_editor(
     input: &Entity<InputState>,
     pal: Palette,
 ) -> impl IntoElement {
-    let submit_input = input.clone();
     v_flex()
         .gap_1()
         .child(editor_section(tr!("action_ring.custom_shortcut"), pal))
-        .child(
-            h_flex()
-                .gap_2()
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(control_input(input).cleanable(true)),
-                )
-                .child(
-                    Button::new("ring-add-shortcut")
-                        .compact()
-                        .label(tr!("common.add"))
-                        .on_click(move |_, _, cx| {
-                            let shortcut = submit_input.read(cx).value().to_string();
-                            if let Ok(combo) = shortcut.parse::<KeyCombo>() {
-                                commit_action(slot, Action::CustomShortcut(combo), cx);
-                            }
-                        }),
-                ),
-        )
+        .child(crate::features::binding_editor::shortcut_picker(
+            input,
+            move |shortcut, _, cx| {
+                if let Ok(combo) = shortcut.parse::<KeyCombo>() {
+                    commit_action(slot, Action::CustomShortcut(combo), cx);
+                }
+            },
+        ))
 }
 
 fn path_editor(slot: ActionRingSlot, input: &Entity<InputState>, pal: Palette) -> impl IntoElement {

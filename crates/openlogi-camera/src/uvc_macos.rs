@@ -34,7 +34,7 @@ enum Unit {
     Processing,
 }
 
-pub use crate::controls::{
+pub use openlogi_core::camera::{
     AutoState, AutoToggle, CameraControl, CameraState, ControlError, ControlRange,
 };
 
@@ -73,10 +73,16 @@ struct ControlSpec {
     payload: Payload,
 }
 
-impl CameraControl {
+trait UvcSpec {
+    type Spec;
+    fn spec(self) -> Self::Spec;
+}
+
+impl UvcSpec for CameraControl {
+    type Spec = ControlSpec;
     /// UVC entity, control selector (Camera Terminal §A.9.4, Processing Unit
     /// §A.9.5), and wire payload type for this control.
-    const fn spec(self) -> ControlSpec {
+    fn spec(self) -> ControlSpec {
         use Payload::{I16, U8, U16, U32};
         use Unit::{CameraTerminal, Processing};
         let (unit, selector, payload) = match self {
@@ -107,10 +113,11 @@ struct ToggleSpec {
     selector: u16,
 }
 
-impl AutoToggle {
+impl UvcSpec for AutoToggle {
+    type Spec = ToggleSpec;
     /// UVC entity and control selector (Camera Terminal §A.9.4, Processing
     /// Unit §A.9.5) for this auto toggle.
-    const fn spec(self) -> ToggleSpec {
+    fn spec(self) -> ToggleSpec {
         use Unit::{CameraTerminal, Processing};
         let (unit, selector) = match self {
             Self::Focus => (CameraTerminal, 0x08), // CT_FOCUS_AUTO_CONTROL
@@ -637,7 +644,8 @@ fn scan_descriptors(blob: &[u8]) -> Option<VcTopology> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CameraControl, ITT_CAMERA, Payload, Unit, VcTopology, location_hint, scan_descriptors,
+        CameraControl, ITT_CAMERA, Payload, Unit, UvcSpec, VcTopology, location_hint,
+        scan_descriptors,
     };
 
     #[test]

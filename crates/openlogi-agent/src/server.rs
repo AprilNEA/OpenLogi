@@ -96,6 +96,42 @@ impl AgentServer {
               future off a dozen of them with `std::future::ready`"
 )]
 impl Agent for AgentServer {
+    async fn plugin_command(
+        self,
+        _: Context,
+        command: openlogi_core::peripheral::PluginCommand,
+    ) -> Result<(), openlogi_core::peripheral::PeripheralError> {
+        match self.shared.peripherals.plugin(command).await {
+            Ok(Some(config)) => self.orchestrator.lock().await.reload_config(config),
+            Ok(None) => {}
+            Err(error) => {
+                // A removal can fail after disablement committed. Publish the persisted selection.
+                let config = Config::load_or_default().map_err(|e| {
+                    openlogi_core::peripheral::PeripheralError::ConfigWriteFailed(e.to_string())
+                })?;
+                self.orchestrator.lock().await.reload_config(config);
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    async fn resolve_peripheral(
+        self,
+        _: Context,
+        rule: String,
+    ) -> Result<(), openlogi_core::peripheral::PeripheralError> {
+        self.shared.peripherals.resolve(rule).await
+    }
+
+    async fn retry_peripheral(
+        self,
+        _: Context,
+        session: openlogi_core::peripheral::SessionId,
+    ) -> Result<(), openlogi_core::peripheral::PeripheralError> {
+        self.shared.peripherals.retry(session).await
+    }
+
     async fn protocol_version(self, _: Context) -> u32 {
         PROTOCOL_VERSION
     }

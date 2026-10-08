@@ -89,6 +89,9 @@ pub enum ConfigError {
         /// The schema version the file declared.
         found: u32,
     },
+    /// Capability-scoped settings violate their persistence contract.
+    #[error("invalid peripheral configuration: {0}")]
+    Peripheral(#[from] crate::peripheral::PeripheralError),
 }
 
 /// A loaded config file plus the exact source revision it came from.
@@ -114,6 +117,11 @@ struct ConfigHeader {
 }
 
 impl ConfigFile {
+    /// Read the current disk revision after another authorized application process saved it.
+    pub fn reload(&self) -> Result<(Config, Self), ConfigError> {
+        Self::load_from_path(&self.path)
+    }
+
     /// Load the default user config, returning a writable default when the
     /// file does not exist yet.
     pub fn load_or_default() -> Result<(Config, Self), ConfigError> {
@@ -155,6 +163,7 @@ impl ConfigFile {
     /// Returns a [`ConfigError::Write`] with [`io::ErrorKind::WouldBlock`] if
     /// another writer holds the lock, rather than blocking the caller.
     pub fn save(&mut self, config: &Config) -> Result<(), ConfigError> {
+        config.validate_peripherals()?;
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent).map_err(|source| ConfigError::Write {
                 path: self.path.clone(),
@@ -300,6 +309,7 @@ fn parse_config(path: &Path, source: &str) -> Result<(Config, u32), ConfigError>
         config.migrate_thumbwheel_native_direction();
     }
     config.repair_duplicate_routes();
+    config.validate_peripherals()?;
     config.schema_version = SCHEMA_VERSION;
     Ok((config, header.schema_version))
 }

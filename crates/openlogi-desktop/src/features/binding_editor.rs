@@ -20,6 +20,31 @@ pub(crate) const EDITOR_LIST_MAX_H: f32 = 360.;
 /// Commit callback invoked when an action row is clicked.
 pub(crate) type PickFn = Rc<dyn Fn(Action, &mut Window, &mut App)>;
 
+/// Existing shortcut entry shared by the ring and device capability editors.
+pub(crate) fn shortcut_picker(
+    input: &gpui::Entity<gpui_component::input::InputState>,
+    on_submit: impl Fn(String, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let input = input.clone();
+    gpui_component::h_flex()
+        .gap_2()
+        .items_center()
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(crate::ui::components::control_input(&input).cleanable(true)),
+        )
+        .child(
+            crate::ui::components::control_button("shortcut-submit")
+                .debug_selector(|| "shortcut-submit".into())
+                .label(tr!("common.save"))
+                .on_click(move |_, window, cx| {
+                    on_submit(input.read(cx).value().to_string(), window, cx);
+                }),
+        )
+}
+
 /// The action catalog grouped by [`Category`], preserving catalog order within
 /// each group and first-seen order across groups.
 pub(crate) fn grouped_catalog() -> Vec<(Category, Vec<Action>)> {

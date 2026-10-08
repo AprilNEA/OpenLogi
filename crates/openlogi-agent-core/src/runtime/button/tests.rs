@@ -3,6 +3,7 @@
 use std::time::Instant;
 
 use openlogi_core::binding::LongPressBinding;
+use openlogi_core::peripheral::InputTransition;
 
 use super::*;
 
@@ -11,6 +12,7 @@ fn hook_press(id: u64, button: ButtonId) -> ActivePress {
         token: PressToken::hook_for_test(id, button),
         behavior: PressBehavior::Immediate(Action::Copy),
         target: ActionDispatchTarget::Keyboard,
+        validity: None,
     }
 }
 
@@ -22,6 +24,127 @@ fn recv_event(receiver: &mpsc::Receiver<ButtonRuntimeEvent>) -> ButtonRuntimeEve
     receiver
         .recv_timeout(Duration::from_secs(1))
         .expect("button worker should emit an event")
+}
+
+#[test]
+fn peripheral_queue_overflow_does_not_cancel_a_hook_press() {
+    let session = SessionId {
+        endpoint: openlogi_core::peripheral::EndpointId("flooding-plugin".into()),
+        generation: 1,
+    };
+    let source = ButtonSource::Peripheral(session.clone());
+    let blocked_source = source.clone();
+    let (sender, events) = mpsc::channel();
+    let (resume, blocked) = mpsc::sync_channel(0);
+    let mut block_once = true;
+    let mut runtime = ButtonRuntimeOwner::spawn(move |event| {
+        let block = block_once && matches!(&event, ButtonRuntimeEvent::Started(press) if press.token.key.source == blocked_source);
+        sender.send(event).unwrap();
+        if block { block_once = false; blocked.recv().unwrap(); }
+    }).unwrap();
+    let input = runtime.input();
+    let hook = input.try_hook_down(ButtonId::Back, None).unwrap();
+    let _ = recv_event(&events);
+    let capability = CapabilityId::try_new("input-remap/main").unwrap();
+    let control = ControlId::try_new("button").unwrap();
+    let plugin = input.peripheral_session(&session);
+    assert!(plugin.send(&capability, &control, InputTransition::Press, &Action::None));
+    let _ = recv_event(&events);
+    for _ in 0..PERIPHERAL_QUEUE_CAPACITY {
+        assert!(plugin.send(
+            &capability,
+            &control,
+            InputTransition::Trigger,
+            &Action::None
+        ));
+    }
+    assert!(!plugin.send(
+        &capability,
+        &control,
+        InputTransition::Trigger,
+        &Action::None
+    ));
+    assert!(
+        input.try_hook_up(ButtonId::Back),
+        "plugin traffic must leave room for native capture"
+    );
+    resume.send(()).unwrap();
+    let mut ended = Vec::new();
+    loop {
+        if let ButtonRuntimeEvent::Ended { press, reason } = recv_event(&events) {
+            ended.push((press, reason));
+            if ended
+                .iter()
+                .any(|(press, _)| press.token.key.source == source)
+                && ended.iter().any(|(press, _)| press.token == hook)
+            {
+                break;
+            }
+        }
+    }
+    assert!(runtime.shutdown());
+    ended.extend(events.try_iter().filter_map(|event| match event {
+        ButtonRuntimeEvent::Ended { press, reason } => Some((press, reason)),
+        _ => None,
+    }));
+    assert_eq!(
+        ended
+            .iter()
+            .find(|(press, _)| press.token == hook)
+            .map(|(_, reason)| reason),
+        Some(&EndReason::Released)
+    );
+}
+
+#[test]
+fn peripheral_cleanup_releases_only_the_exact_attachment() {
+    let (sender, events) = mpsc::channel();
+    let mut runtime = ButtonRuntimeOwner::spawn(move |event| {
+        sender.send(event).unwrap();
+    })
+    .unwrap();
+    let input = runtime.input();
+    let first = SessionId {
+        endpoint: openlogi_core::peripheral::EndpointId("same-endpoint".into()),
+        generation: 1,
+    };
+    let successor = SessionId {
+        generation: 2,
+        ..first.clone()
+    };
+    let first_input = input.peripheral_session(&first);
+    let successor_input = input.peripheral_session(&successor);
+    let capability = CapabilityId::try_new("input-remap/main").unwrap();
+    let control = ControlId::try_new("button").unwrap();
+    let action = Action::HoldShortcut("F18".parse().unwrap());
+    for session in [&first_input, &successor_input] {
+        assert!(session.send(&capability, &control, InputTransition::Press, &action));
+        assert!(matches!(
+            recv_event(&events),
+            ButtonRuntimeEvent::Started(_)
+        ));
+    }
+    first_input.cancel();
+    let ButtonRuntimeEvent::Ended { press, reason } = recv_event(&events) else {
+        panic!("cleanup must release the first press")
+    };
+    assert_eq!(
+        press.token.key.source,
+        ButtonSource::Peripheral(first.clone())
+    );
+    assert_eq!(reason, EndReason::Canceled(CancelReason::SourceEnded));
+    first_input.cancel();
+    assert!(successor_input.send(&capability, &control, InputTransition::Release, &action));
+    let ButtonRuntimeEvent::Ended { press, reason } = recv_event(&events) else {
+        panic!("the successor must keep its physical release")
+    };
+    assert_eq!(press.token.key.source, ButtonSource::Peripheral(successor));
+    assert_eq!(reason, EndReason::Released);
+    assert!(runtime.shutdown());
+    assert!(
+        events.try_recv().is_err(),
+        "no press receives a duplicate terminal event"
+    );
 }
 
 fn emit_due_long_presses(
@@ -67,6 +190,7 @@ fn cancellation_is_scoped_to_one_session() {
         },
         behavior: PressBehavior::LifecycleOnly,
         target: ActionDispatchTarget::Keyboard,
+        validity: None,
     };
     let second = ActivePress {
         token: PressToken {
@@ -76,6 +200,7 @@ fn cancellation_is_scoped_to_one_session() {
         },
         behavior: PressBehavior::LifecycleOnly,
         target: ActionDispatchTarget::Keyboard,
+        validity: None,
     };
     state.press(first.clone());
     state.press(second.clone());
@@ -99,6 +224,7 @@ fn hook_cancellation_leaves_hidpp_presses_active() {
         },
         behavior: PressBehavior::LifecycleOnly,
         target: ActionDispatchTarget::Keyboard,
+        validity: None,
     };
     state.press(hook.clone());
     state.press(hidpp.clone());
@@ -174,6 +300,7 @@ fn hook_actions_retain_the_press_time_target_across_focus_changes() {
         recv_event(&received),
         ButtonRuntimeEvent::Started(ActivePress {
             target: ActionDispatchTarget::Keyboard,
+            validity: None,
             ..
         })
     ));
@@ -444,6 +571,7 @@ fn release_before_long_press_threshold_fires_only_the_short_action() {
         token: PressToken::hook_for_test(1, ButtonId::Back),
         behavior: PressBehavior::new(Some(&binding), pressed_at),
         target: ActionDispatchTarget::Keyboard,
+        validity: None,
     };
     state.press(press.clone());
     let mut events = Vec::new();
@@ -483,6 +611,7 @@ fn threshold_fires_long_once_and_suppresses_short_on_release() {
         token: PressToken::hook_for_test(1, ButtonId::Back),
         behavior: PressBehavior::new(Some(&binding), pressed_at),
         target: ActionDispatchTarget::Keyboard,
+        validity: None,
     };
     state.press(press.clone());
     let mut events = Vec::new();
@@ -532,6 +661,7 @@ fn cancellation_never_fires_a_pending_short_or_long_action() {
         token: PressToken::hook_for_test(1, ButtonId::Back),
         behavior: PressBehavior::new(Some(&binding), pressed_at),
         target: ActionDispatchTarget::Keyboard,
+        validity: None,
     };
     state.press(press);
     let mut events = Vec::new();
@@ -646,6 +776,7 @@ fn overdue_long_press_precedes_unrelated_queued_actions() {
         token: PressToken::hook_for_test(1, ButtonId::Back),
         behavior: PressBehavior::new(Some(&binding), pressed_at),
         target: ActionDispatchTarget::Keyboard,
+        validity: None,
     };
     state.press(press.clone());
     commands
@@ -708,6 +839,7 @@ fn continuous_commands_cannot_starve_a_long_press_deadline() {
                 token: PressToken::hook_for_test(1, ButtonId::Back),
                 behavior: PressBehavior::new(Some(&binding), pressed_at),
                 target: ActionDispatchTarget::Keyboard,
+                validity: None,
             }),
         })
         .expect("test queue should accept the press");

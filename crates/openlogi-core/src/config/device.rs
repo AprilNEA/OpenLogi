@@ -273,6 +273,9 @@ pub struct DeviceConfig {
     /// means "never set — leave the keyboard alone".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fn_lock: Option<bool>,
+    /// Unsupported capability documents remain inert until a compatible reader loads them.
+    #[serde(skip)]
+    pub(super) retained_capabilities: BTreeMap<String, toml::Table>,
 }
 
 impl DeviceConfig {
@@ -373,6 +376,7 @@ impl Default for DeviceConfig {
             scroll_resolution: None,
             host_switch_targets: Vec::new(),
             fn_lock: None,
+            retained_capabilities: BTreeMap::new(),
         }
     }
 }
@@ -553,6 +557,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             scroll_resolution: raw.scroll_resolution,
             host_switch_targets: raw.host_switch_targets,
             fn_lock: raw.fn_lock,
+            retained_capabilities: BTreeMap::new(),
         }
     }
 }
