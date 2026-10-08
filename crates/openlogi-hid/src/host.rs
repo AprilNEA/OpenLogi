@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
-use openlogi_core::hid::{FnLockState, LightCommand, PairingError, WriteError};
+use openlogi_core::hid::{FnLockState, LightCommand, OnboardState, PairingError, WriteError};
 
 use crate::probe_cache::FileProbeCacheStore;
 use crate::transport::native_backend;
@@ -117,6 +117,11 @@ pub async fn set_scroll_wheel_mode(
     inverted: bool,
 ) -> Result<ScrollWheelMode, WriteError> {
     device::set_scroll_wheel_mode(&*native_backend(), route, resolution, inverted).await
+}
+
+/// Read the onboard memory of the device on `route`.
+pub async fn get_onboard(route: &DeviceRoute) -> Result<OnboardState, WriteError> {
+    device::get_onboard(&*native_backend(), route).await
 }
 
 /// Read the Fn-lock state of the keyboard `route` reaches.

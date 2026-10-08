@@ -8,12 +8,12 @@ use serde::{Deserialize, Serialize};
 
 use super::button_map::{deserialize_button_map, deserialize_button_maps_by_app};
 use super::settings::{
-    CameraControls, GestureOwner, LightSettings, Lighting, ScrollResolution, SmartShift,
-    ThumbwheelSensitivity, deserialize_gesture_owner,
+    CameraControls, GestureOwner, LightSettings, Lighting, OnboardMemory, ScrollResolution,
+    SmartShift, ThumbwheelSensitivity, deserialize_gesture_owner,
 };
 use crate::binding::{Action, ActionRingConfig, Binding, ButtonId, GestureDirection};
 use crate::device::{Capabilities, DeviceKind, DeviceModelInfo, LightCapabilities};
-use crate::hid::Dpi;
+use crate::hid::{Dpi, ReportRate};
 
 /// Last-known identity of a device, captured while it was online so the UI can
 /// render its card and the *correct* config panels before any live HID++ probe
@@ -273,6 +273,15 @@ pub struct DeviceConfig {
     /// means "never set — leave the keyboard alone".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fn_lock: Option<bool>,
+    /// Gaming-mouse onboard memory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub onboard_memory: Option<OnboardMemory>,
+    /// Gaming-mouse report rate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_rate: Option<ReportRate>,
+    /// Bindings used while G-Shift is held.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub gshift_bindings: BTreeMap<ButtonId, Action>,
 }
 
 impl DeviceConfig {
@@ -373,6 +382,9 @@ impl Default for DeviceConfig {
             scroll_resolution: None,
             host_switch_targets: Vec::new(),
             fn_lock: None,
+            onboard_memory: None,
+            report_rate: None,
+            gshift_bindings: BTreeMap::new(),
         }
     }
 }
@@ -493,6 +505,12 @@ struct RawDeviceConfig {
     host_switch_targets: Vec<String>,
     #[serde(default)]
     fn_lock: Option<bool>,
+    #[serde(default)]
+    onboard_memory: Option<OnboardMemory>,
+    #[serde(default)]
+    report_rate: Option<ReportRate>,
+    #[serde(default, deserialize_with = "deserialize_button_map")]
+    gshift_bindings: BTreeMap<ButtonId, Action>,
     #[serde(default = "default_true")]
     enabled: bool,
     #[serde(default)]
@@ -553,6 +571,9 @@ impl From<RawDeviceConfig> for DeviceConfig {
             scroll_resolution: raw.scroll_resolution,
             host_switch_targets: raw.host_switch_targets,
             fn_lock: raw.fn_lock,
+            onboard_memory: raw.onboard_memory,
+            report_rate: raw.report_rate,
+            gshift_bindings: raw.gshift_bindings,
         }
     }
 }

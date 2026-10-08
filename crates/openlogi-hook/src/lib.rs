@@ -452,6 +452,7 @@ impl Hook {
     /// A Windows message-pump error is terminal: the worker clears its callback
     /// so native input passes through, and this method then returns `false`
     /// even though the [`Hook`] handle has not yet been dropped.
+    /// On Linux it returns `false` once every hooked mouse has disconnected.
     #[must_use]
     pub fn is_running(&self) -> bool {
         self.inner.as_ref().is_some_and(Backend::is_running)

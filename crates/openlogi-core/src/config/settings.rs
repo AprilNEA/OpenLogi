@@ -654,6 +654,16 @@ where
 #[serde(transparent)]
 pub struct CameraControls(pub BTreeMap<String, i32>);
 
+/// Who owns a gaming mouse's buttons, DPI levels and report rate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnboardMemory {
+    /// Host mode.
+    Off,
+    /// An onboard profile (1-based).
+    Profile(u8),
+}
+
 /// Vertical wheel reporting resolution for HID++ `0x2121 HiResWheel`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

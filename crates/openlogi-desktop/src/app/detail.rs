@@ -2,12 +2,12 @@
 //! section bodies (Buttons, Keys, Pointer, Lighting, Camera, Device).
 
 use gpui::{
-    Context, InteractiveElement, IntoElement, ParentElement, Rems, Role,
+    Context, InteractiveElement, IntoElement, ParentElement, Rems, Role, SharedString,
     StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rems,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
-    Disableable as _, Icon, IconName, Selectable as _,
+    Disableable as _, Icon, IconName, Selectable as _, Sizable as _,
     button::{Button, ButtonGroup},
     description_list::{DescriptionItem, DescriptionList},
     h_flex,
@@ -15,9 +15,9 @@ use gpui_component::{
     switch::Switch,
     v_flex,
 };
-use openlogi_core::config::ScrollResolution;
+use openlogi_core::config::{OnboardMemory, ScrollResolution};
 use openlogi_core::device::DeviceKind;
-use openlogi_core::hid::DeviceRoute;
+use openlogi_core::hid::{DeviceRoute, OnboardMode, ReportRate};
 
 use super::widgets::{back_button, kind_label, route_label, sidebar_action, status_badge};
 use super::{AppView, DetailTab};
@@ -35,7 +35,7 @@ use crate::features::pointer::smartshift::SmartShiftPanel;
 use crate::features::profiles::{
     AppCatalogPicker, ProfileIconCache, action_ring_profile_scope_bar, button_profile_scope_bar,
 };
-use crate::state::{AppState, DeviceRecord, StateEvents};
+use crate::state::{AppState, DeviceRecord, Load, StateEvents};
 use crate::ui::battery::BatteryIndicator;
 use crate::ui::components::{PanelCard, Toggle};
 use crate::ui::theme::{
@@ -262,7 +262,50 @@ fn buttons_tab(
         .w_full()
         .min_h_0()
         .children(button_profile_scope_bar(profile_icons, app_catalog, cx))
+        .children(gshift_layer_bar(cx))
         .child(mouse_model.clone())
+}
+
+fn gshift_layer_bar(cx: &mut Context<AppView>) -> Option<impl IntoElement> {
+    let pal = theme::palette(cx);
+    let state = AppState::try_read(cx)?;
+    if state.current_gaming_layout().is_none() || !state.current_device_is_persistent() {
+        return None;
+    }
+    let gshift = state.editing_gshift();
+    Some(
+        h_flex()
+            .w_full()
+            .px_5()
+            .pt_3()
+            .gap_3()
+            .items_center()
+            .child(
+                div()
+                    .text_caption()
+                    .text_color(pal.text_muted)
+                    .child(tr!("actions.g_shift_layer_description")),
+            )
+            .child(
+                ButtonGroup::new("gshift-layer")
+                    .small()
+                    .outline()
+                    .child(
+                        Button::new("gshift-layer-normal")
+                            .label(tr!("actions.g_shift_normal"))
+                            .selected(!gshift),
+                    )
+                    .child(
+                        Button::new("gshift-layer-shift")
+                            .label(tr!("actions.g_shift"))
+                            .selected(gshift),
+                    )
+                    .on_click(|indices, _window, cx| {
+                        let gshift = indices.first() == Some(&1);
+                        AppState::apply(cx, |state| state.set_editing_gshift(gshift));
+                    }),
+            ),
+    )
 }
 
 fn tab_body(
@@ -340,8 +383,167 @@ fn pointer_tab(
                     .min_w(POINTER_CARD_MIN_W)
                     .flex_1()
                     .child(scrolling_card(pal, cx)),
+            )
+            .children(
+                onboard_card(pal, cx)
+                    .map(|card| div().min_w(POINTER_CARD_MIN_W).flex_1().child(card)),
             ),
     )
+}
+
+fn onboard_card(pal: Palette, cx: &mut Context<AppView>) -> Option<impl IntoElement> {
+    let state = AppState::try_read(cx)?;
+    if !state.current_onboard_supported() {
+        return None;
+    }
+    let reading = match state.current_onboard_load() {
+        Load::Ready(reading) => Some(reading),
+        _ => None,
+    };
+    let memory = state.current_onboard_memory().or_else(|| {
+        reading.as_ref().map(|r| match (r.mode, r.active_profile) {
+            (OnboardMode::Onboard, Some(index)) => OnboardMemory::Profile(index),
+            _ => OnboardMemory::Off,
+        })
+    });
+    let host = memory == Some(OnboardMemory::Off);
+    let rate_info = reading.as_ref().and_then(|r| r.report_rate.as_ref());
+    let rate = state
+        .current_report_rate_setting()
+        .filter(|_| host)
+        .or_else(|| rate_info.map(|r| r.current));
+    let rates = rate_info.map(|r| r.supported.clone()).unwrap_or_default();
+    let profiles = reading.as_ref().map_or_else(Vec::new, |r| {
+        r.profiles
+            .iter()
+            .filter(|p| p.enabled)
+            .map(|p| {
+                let label = p.name.clone().unwrap_or_else(|| {
+                    tr!("pointer.onboard_profile_number", number => p.index.to_string()).to_string()
+                });
+                (OnboardMemory::Profile(p.index), label)
+            })
+            .collect()
+    });
+
+    let memory_description = if host {
+        tr!("pointer.onboard_host_description")
+    } else {
+        tr!("pointer.onboard_profile_description")
+    };
+    let rate_description = if host {
+        tr!("pointer.report_rate_description")
+    } else {
+        tr!("pointer.report_rate_onboard")
+    };
+    Some(
+        PanelCard::new(
+            tr!("pointer.onboard_memory"),
+            Icon::empty().path("action-icons/mouse.svg"),
+            v_flex()
+                .gap_4()
+                .child(setting_row(
+                    tr!("pointer.onboard_memory"),
+                    memory_description,
+                    onboard_memory_control(memory, profiles),
+                    pal,
+                ))
+                .child(setting_row(
+                    tr!("pointer.report_rate"),
+                    rate_description,
+                    report_rate_control(rate, rates, host),
+                    pal,
+                )),
+        )
+        .fill(),
+    )
+}
+
+fn setting_row(
+    title: impl Into<SharedString>,
+    description: impl Into<SharedString>,
+    control: impl IntoElement,
+    pal: Palette,
+) -> impl IntoElement {
+    v_flex()
+        .gap_2()
+        .child(
+            v_flex()
+                .child(
+                    div()
+                        .text_body()
+                        .text_color(pal.text_primary)
+                        .child(title.into()),
+                )
+                .child(
+                    div()
+                        .text_caption()
+                        .text_color(pal.text_muted)
+                        .child(description.into()),
+                ),
+        )
+        .child(control)
+}
+
+fn onboard_memory_control(
+    selected: Option<OnboardMemory>,
+    profiles: Vec<(OnboardMemory, String)>,
+) -> impl IntoElement {
+    let choices: Vec<(OnboardMemory, String)> = std::iter::once((
+        OnboardMemory::Off,
+        tr!("pointer.onboard_openlogi").to_string(),
+    ))
+    .chain(profiles)
+    .collect();
+    let values: Vec<OnboardMemory> = choices.iter().map(|(value, _)| *value).collect();
+    choices
+        .into_iter()
+        .enumerate()
+        .fold(
+            ButtonGroup::new("onboard-memory").w_full().outline(),
+            |group, (index, (value, label))| {
+                group.child(
+                    Button::new(("onboard-memory", index))
+                        .flex_1()
+                        .label(label)
+                        .selected(selected == Some(value)),
+                )
+            },
+        )
+        .on_click(move |indices, _window, cx| {
+            if let Some(value) = indices.first().and_then(|i| values.get(*i)) {
+                AppState::apply(cx, |state| state.commit_onboard_memory(*value));
+            }
+        })
+}
+
+fn report_rate_control(
+    selected: Option<ReportRate>,
+    rates: Vec<ReportRate>,
+    enabled: bool,
+) -> impl IntoElement {
+    rates
+        .iter()
+        .enumerate()
+        .fold(
+            ButtonGroup::new("report-rate")
+                .w_full()
+                .outline()
+                .disabled(!enabled),
+            |group, (index, value)| {
+                group.child(
+                    Button::new(("report-rate", index))
+                        .flex_1()
+                        .label(value.to_string())
+                        .selected(selected == Some(*value)),
+                )
+            },
+        )
+        .on_click(move |indices, _window, cx| {
+            if let Some(value) = indices.first().and_then(|i| rates.get(*i)) {
+                AppState::apply(cx, |state| state.commit_report_rate(*value));
+            }
+        })
 }
 
 fn pointer_grid_card(card: impl IntoElement) -> impl IntoElement {

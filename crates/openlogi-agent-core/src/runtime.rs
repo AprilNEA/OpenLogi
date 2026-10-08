@@ -24,6 +24,7 @@ use self::button::{
 pub(crate) use self::button::{HidppSessionId, PressToken};
 use crate::hardware::{DeviceAccess, toggle_smartshift_in_background, write_dpi_in_background};
 use crate::{DpiCycleState, DpiCycles};
+use openlogi_hid::{DeviceRoute, Dpi};
 
 /// Application identity captured with a physical press and retained through
 /// asynchronous button dispatch.
@@ -136,6 +137,15 @@ impl ActionExecutor {
                     None
                 }
             },
+            Action::NextDpiPreset | Action::PreviousDpiPreset => match self.dpi_cycle.write() {
+                Ok(mut guard) => guard
+                    .state_for(device_key)
+                    .and_then(|state| state.step(matches!(action, Action::NextDpiPreset))),
+                Err(e) => {
+                    warn!(error = %e, "dpi_cycle lock poisoned — step skipped");
+                    None
+                }
+            },
             Action::SetDpiPreset(i) => match self.dpi_cycle.write() {
                 Ok(mut guard) => guard
                     .state_for(device_key)
@@ -194,7 +204,13 @@ impl ActionExecutor {
             } else {
                 debug!(%dpi, "no target device — DPI write skipped");
             }
-        } else if matches!(action, Action::CycleDpiPresets | Action::SetDpiPreset(_)) {
+        } else if matches!(
+            action,
+            Action::CycleDpiPresets
+                | Action::SetDpiPreset(_)
+                | Action::NextDpiPreset
+                | Action::PreviousDpiPreset
+        ) {
             info!(
                 action = %action.label(),
                 "no DPI presets configured for active device — press ignored"
@@ -203,9 +219,38 @@ impl ActionExecutor {
     }
 }
 
+#[derive(Default)]
+struct HeldDpiShifts {
+    by_press: HashMap<PressToken, (DeviceRoute, Dpi)>,
+}
+
+impl HeldDpiShifts {
+    fn start(&mut self, executor: &ActionExecutor, press: &PressToken, device_key: Option<&str>) {
+        let shift = executor
+            .dpi_cycle
+            .read()
+            .ok()
+            .and_then(|cycles| cycles.target_for_shift(device_key));
+        let Some((low, restore, route)) = shift else {
+            debug!("no DPI presets or target — DPI shift ignored");
+            return;
+        };
+        info!(%low, "DPI shift held");
+        write_dpi_in_background(executor.access.op(&route), low);
+        self.by_press.insert(press.clone(), (route, restore));
+    }
+
+    fn end(&mut self, executor: &ActionExecutor, press: &PressToken) {
+        if let Some((route, restore)) = self.by_press.remove(press) {
+            write_dpi_in_background(executor.access.op(&route), restore);
+        }
+    }
+}
+
 struct ButtonEventHandler {
     executor: ActionExecutor,
     held: HeldShortcuts,
+    held_dpi: HeldDpiShifts,
 }
 
 impl ButtonEventHandler {
@@ -213,6 +258,7 @@ impl ButtonEventHandler {
         Self {
             executor,
             held: HeldShortcuts::default(),
+            held_dpi: HeldDpiShifts::default(),
         }
     }
 
@@ -228,6 +274,7 @@ impl ButtonEventHandler {
             }
             ButtonRuntimeEvent::Ended { press, reason } => {
                 self.held.end(press.token());
+                self.held_dpi.end(&self.executor, press.token());
                 if let EndReason::Canceled(reason) = reason {
                     match press.control() {
                         PressControl::Button(button) => {
@@ -250,6 +297,10 @@ impl ButtonEventHandler {
         target: ActionDispatchTarget,
     ) {
         if action.held_combo().is_some() && target.resolve(action).is_none() {
+            return;
+        }
+        if matches!(action, Action::DpiShift) {
+            self.held_dpi.start(&self.executor, press, device_key);
             return;
         }
         if !self.held.start(press, action) {

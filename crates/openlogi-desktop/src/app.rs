@@ -271,6 +271,9 @@ impl AppView {
                 StateEvent::DpiChanged(key) | StateEvent::FnLockChanged(key) => {
                     !on_home && view.active_tab == DetailTab::Device && is_current(key)
                 }
+                StateEvent::OnboardChanged(key) => {
+                    !on_home && view.active_tab == DetailTab::Pointer && is_current(key)
+                }
                 StateEvent::LightingChanged(key) => {
                     on_home || (view.active_tab == DetailTab::Light && is_current(key))
                 }

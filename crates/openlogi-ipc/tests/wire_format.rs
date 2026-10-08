@@ -40,9 +40,10 @@ use openlogi_core::device::{
 };
 use openlogi_core::hid::{
     BacklightMode, BacklightState, BacklightStatus, Click, DeviceRoute, Dpi, DpiCapabilities,
-    DpiInfo, FnLockState, HidppFeatureErrorKind, HidppOperation, LightCommand, PasskeyMethod,
-    ReceiverSelector, ScrollReportingTarget, ScrollWheelMode, SmartShiftAutoDisengage,
-    SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque, WriteError,
+    DpiInfo, FnLockState, HidppFeatureErrorKind, HidppOperation, LightCommand, OnboardMode,
+    OnboardProfile, OnboardState, PasskeyMethod, ReceiverSelector, ReportRate, ReportRateInfo,
+    ScrollReportingTarget, ScrollWheelMode, SmartShiftAutoDisengage, SmartShiftMode,
+    SmartShiftStatus, SmartShiftThreshold, TunableTorque, WriteError,
 };
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
@@ -102,7 +103,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 34);
+    assert_eq!(PROTOCOL_VERSION, 35);
 }
 
 #[test]
@@ -478,12 +479,37 @@ fn device_inventory() {
                 haptic_panel: true,
                 dpi_gestures: true,
                 fn_lock: false,
+                report_rate: false,
+                onboard_profiles: false,
+                button_spy: false,
             }),
         }],
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b000010150020001030106323134304c5a0102030400010100fb34b0fb8240000b0101010000010101010100",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b000010150020001030106323134304c5a0102030400010100fb34b0fb8240000b0101010000010101010100000000",
+    );
+}
+
+#[test]
+fn onboard_state() {
+    assert_wire(&HidppOperation::ReadOnboard, "10");
+    let rate = |ms| ReportRate::from_ms(ms).expect("valid rate");
+    assert_wire(
+        &OnboardState {
+            mode: OnboardMode::Onboard,
+            active_profile: Some(5),
+            profiles: vec![OnboardProfile {
+                index: 5,
+                name: Some("Stock".into()),
+                enabled: true,
+            }],
+            report_rate: Some(ReportRateInfo {
+                current: rate(1),
+                supported: vec![rate(1), rate(8)],
+            }),
+        },
+        "0001050105010553746f636b010101020108",
     );
 }
 

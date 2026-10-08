@@ -314,6 +314,8 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
     fold_option_field!(camera_profile);
     fold_option_field!(thumbwheel_sensitivity);
     fold_option_field!(fn_lock);
+    fold_option_field!(onboard_memory);
+    fold_option_field!(report_rate);
     // The user-assigned alias. Without this a legacy entry carrying a name
     // folded into a canonical entry with none would drop it silently — the
     // one field here a user typed by hand, so the loss is the most visible.
@@ -343,6 +345,7 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
     }
     fold_if_empty!(dpi_presets);
     fold_if_empty!(host_switch_targets);
+    fold_if_empty!(gshift_bindings);
 
     // `ActionRingConfig` has its own notion of "unset". Two configured rings
     // cannot be merged — the slots are positional — so the canonical one wins

@@ -124,6 +124,11 @@ impl HookBackend for Backend {
         shutdown(&inner.stop, &inner.stop_pipes, inner.threads);
     }
 
+    /// Device threads end when their mouse disconnects.
+    fn is_running(inner: &HookInner) -> bool {
+        inner.threads.iter().any(|thread| !thread.is_finished())
+    }
+
     /// Return the currently frontmost application, or `None` when unavailable.
     /// Dispatches to the backend chosen at startup.
     ///

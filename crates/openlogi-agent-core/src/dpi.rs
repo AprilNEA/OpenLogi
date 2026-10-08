@@ -25,6 +25,13 @@ impl DpiCycles {
         self.by_key.get_mut(key)
     }
 
+    #[must_use]
+    pub fn target_for_shift(&self, key: Option<&str>) -> Option<(Dpi, Dpi, DeviceRoute)> {
+        let key = key.or(self.selected.as_deref())?;
+        let (low, restore, target) = self.by_key.get(key)?.shift()?;
+        Some((low, restore, target?))
+    }
+
     /// The write target for `key` (same fallback as [`Self::state_for`])
     /// without a mutable borrow — for dispatch that only needs the route, like
     /// the SmartShift toggle.
@@ -74,6 +81,32 @@ impl DpiCycleState {
         Some((self.normalize(self.presets[clamped]), self.target.clone()))
     }
 
+    /// Steps one preset without wrapping.
+    pub fn step(&mut self, up: bool) -> Option<(Dpi, Option<DeviceRoute>)> {
+        let last = self.presets.len().checked_sub(1)?;
+        self.index = if up {
+            (self.index + 1).min(last)
+        } else {
+            self.index.saturating_sub(1)
+        };
+        Some((
+            self.normalize(self.presets[self.index]),
+            self.target.clone(),
+        ))
+    }
+
+    /// The lowest preset, and the current one to return to.
+    #[must_use]
+    pub fn shift(&self) -> Option<(Dpi, Dpi, Option<DeviceRoute>)> {
+        let low = self.presets.iter().copied().min()?;
+        let current = *self.presets.get(self.index)?;
+        Some((
+            self.normalize(low),
+            self.normalize(current),
+            self.target.clone(),
+        ))
+    }
+
     fn normalize(&self, dpi: Dpi) -> Dpi {
         self.capabilities
             .as_ref()
@@ -100,6 +133,17 @@ mod tests {
             },
         );
         cycles
+    }
+
+    #[test]
+    fn step_stops_at_both_ends_and_shift_returns_to_current() {
+        let mut cycles = cycles_with("a", 1);
+        let state = cycles.state_for(Some("a")).unwrap();
+        assert_eq!(state.step(false).unwrap().0, Dpi::new(800));
+        assert_eq!(state.step(true).unwrap().0, Dpi::new(1600));
+        assert_eq!(state.step(true).unwrap().0, Dpi::new(1600));
+        let (low, back, _) = state.shift().unwrap();
+        assert_eq!((low, back), (Dpi::new(800), Dpi::new(1600)));
     }
 
     #[test]
