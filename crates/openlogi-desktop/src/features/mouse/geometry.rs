@@ -169,7 +169,9 @@ pub fn asset_hotspots_for_png(
         })
         .collect::<Vec<_>>();
     if let Some(layout) = layout {
-        if let Some(image) = asset.metadata.image(SIDE_VIEW_KEY) {
+        if asset.side_view.is_some()
+            && let Some(image) = asset.metadata.image(SIDE_VIEW_KEY)
+        {
             hotspots.extend(gaming_hotspots(image, layout, 0., side_w, mouse_h));
         }
         if let Some(image) = asset.metadata.image(FRONT_VIEW_KEY) {
@@ -406,6 +408,19 @@ mod tests {
         assert!(asset_has_button_labels(&asset, layout));
         assert!(!asset_has_button_labels(&asset, None));
         assert!(asset_hotspots_for_png(&asset, None, w, h).is_empty());
+    }
+
+    #[test]
+    fn side_markers_need_the_side_image() {
+        let asset = ResolvedAsset {
+            side_view: None,
+            ..g502_asset()
+        };
+        let layout = GamingLayout::for_model_key("0407f");
+        let (w, h) = asset_dimensions_for_png(&asset, 540., 1000.);
+        let hotspots = asset_hotspots_for_png(&asset, layout, w, h);
+        assert!(!hotspots.iter().any(|h| h.id == ButtonId::Back.into()));
+        assert!(hotspots.iter().any(|h| h.id == ButtonId::G7.into()));
     }
 
     #[test]
