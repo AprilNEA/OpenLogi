@@ -6,27 +6,50 @@ const TRAVEL: f64 = 800.0;
 const BUTTON: ButtonId = ButtonId::GestureButton;
 
 thread_local! {
-    static CHANGES: Cell<u64> = const { Cell::new(0) };
+    static TICKS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// A counter that moves on every read: a desktop that changes at once.
+fn tick() -> u64 {
+    TICKS.set(TICKS.get() + 1);
+    TICKS.get()
+}
+
+const fn middle(current: u64) -> SpacePosition {
+    SpacePosition {
+        current,
+        has_previous: true,
+        has_next: true,
+    }
 }
 
 /// A desktop with neighbours both ways whose switches land at once.
 const PROMPT: SpaceProbe = SpaceProbe {
-    neighbors: || Some((true, true)),
-    changes: || {
-        CHANGES.set(CHANGES.get() + 1);
-        Some(CHANGES.get())
-    },
+    position: || Some(middle(tick())),
+    changes: || Some(tick()),
 };
 
 /// A desktop whose switches never report landing.
 const SILENT: SpaceProbe = SpaceProbe {
-    neighbors: || Some((true, true)),
+    position: || Some(middle(7)),
     changes: || Some(0),
+};
+
+/// Another display keeps changing Spaces; this one never does.
+const ELSEWHERE: SpaceProbe = SpaceProbe {
+    position: || Some(middle(7)),
+    changes: || Some(tick()),
 };
 
 /// The last desktop: nothing after it.
 const LAST: SpaceProbe = SpaceProbe {
-    neighbors: || Some((true, false)),
+    position: || {
+        Some(SpacePosition {
+            current: 7,
+            has_previous: true,
+            has_next: false,
+        })
+    },
     changes: || Some(0),
 };
 
@@ -98,15 +121,19 @@ fn only_horizontal_desktop_swipes_open_a_transition() {
 }
 
 #[test]
-fn the_first_frame_carries_the_commit_travel_toward_the_bound_desktop() {
+fn a_transition_opens_at_zero_and_the_commit_travel_moves_it() {
     let now = Instant::now();
-    let frame = begin_right(&mut swipes(PROMPT), now);
-    assert_eq!(frame.phase, SpaceSwipePhase::Began);
-    assert!((frame.progress - f64::from(GESTURE_SWIPE_THRESHOLD) / TRAVEL).abs() < 1e-9);
+    let mut opened = swipes(PROMPT);
+    let frame = begin_right(&mut opened, now);
+    assert_eq!(frame, Frame::new(0.0, SpaceSwipePhase::Began));
+    // The commit's own travel arrives as the hold's first motion.
+    let frames = opened.motion(&session(), BUTTON, 60, now);
+    assert_eq!(phases(&frames), vec![SpaceSwipePhase::Changed]);
+    assert!((frames[0].progress - 60.0 / TRAVEL).abs() < 1e-9);
 
     // A swapped binding (Right → Previous) drags toward the previous desktop.
     let mut swapped = swipes(PROMPT);
-    let frame = swapped
+    swapped
         .begin(
             &session(),
             BUTTON,
@@ -116,12 +143,20 @@ fn the_first_frame_carries_the_commit_travel_toward_the_bound_desktop() {
             now,
         )
         .expect("opened");
-    assert!(frame.progress < 0.0);
     let frames = swapped.motion(&session(), BUTTON, 80, now + Duration::from_millis(8));
-    assert!(
-        frames[0].progress < frame.progress,
-        "moving right keeps heading previous"
-    );
+    assert!(frames[0].progress < 0.0, "moving right heads previous");
+}
+
+#[test]
+fn the_commit_travel_is_no_speed_sample() {
+    let mut swipes = swipes(PROMPT);
+    let start = Instant::now();
+    begin_right(&mut swipes, start);
+    // The commit's travel lands in the same instant the transition opens:
+    // it moves the Space but must not read as an instant flick.
+    let _ = swipes.motion(&session(), BUTTON, 60, start);
+    let frames = swipes.end(&session(), BUTTON, start + Duration::from_millis(4));
+    assert_eq!(phases(&frames), vec![SpaceSwipePhase::Cancelled]);
 }
 
 #[test]
@@ -129,7 +164,7 @@ fn a_long_sweep_completes_one_switch_per_desktop_width_and_restarts_from_zero() 
     let mut swipes = swipes(PROMPT);
     let start = Instant::now();
     begin_right(&mut swipes, start);
-    // 50 (commit) + 25 × 100 = 2550 units.
+    // 25 × 100 = 2500 units.
     let (frames, _) = sweep(&mut swipes, start, 25, 100);
     let ended = frames
         .iter()
@@ -151,7 +186,7 @@ fn motion_waits_for_the_switch_to_land_then_restarts() {
     let mut swipes = swipes(SILENT);
     let start = Instant::now();
     begin_right(&mut swipes, start);
-    // Cross one desktop (50 + 8 × 100 > 800 units).
+    // Cross one desktop (8 × 100 = 800 units).
     let (frames, now) = sweep(&mut swipes, start, 8, 100);
     assert_eq!(
         frames.last().map(|frame| frame.phase),
@@ -168,6 +203,39 @@ fn motion_waits_for_the_switch_to_land_then_restarts() {
     // A release while settling has nothing in flight.
     let mut settling = swipes_settling(start);
     assert!(settling.end(&session(), BUTTON, start).is_empty());
+}
+
+#[test]
+fn a_space_change_on_another_display_does_not_end_the_settle() {
+    let mut swipes = swipes(ELSEWHERE);
+    let start = Instant::now();
+    begin_right(&mut swipes, start);
+    let (frames, now) = sweep(&mut swipes, start, 8, 100);
+    assert_eq!(
+        frames.last().map(|frame| frame.phase),
+        Some(SpaceSwipePhase::Ended)
+    );
+    // Changes keep being reported, but this display's desktop never moved.
+    let (frames, _) = sweep(&mut swipes, now, 10, 100);
+    assert!(frames.is_empty(), "still waiting for this display's switch");
+}
+
+#[test]
+fn canceling_one_hold_springs_back_only_a_transition_in_flight() {
+    let start = Instant::now();
+    let mut in_flight = swipes(PROMPT);
+    begin_right(&mut in_flight, start);
+    let _ = in_flight.motion(&session(), BUTTON, 200, start + Duration::from_millis(8));
+    let frames = in_flight.cancel(&session(), BUTTON);
+    assert_eq!(phases(&frames), vec![SpaceSwipePhase::Cancelled]);
+    assert!(!in_flight.is_active(&session(), BUTTON));
+
+    let mut settling = swipes_settling(start);
+    assert!(
+        settling.cancel(&session(), BUTTON).is_empty(),
+        "a completed switch has nothing left to spring back"
+    );
+    assert!(!settling.is_active(&session(), BUTTON));
 }
 
 fn swipes_settling(start: Instant) -> SpaceSwipes {
@@ -213,7 +281,7 @@ fn a_drag_past_halfway_finishes_on_release() {
     let mut swipes = swipes(PROMPT);
     let start = Instant::now();
     begin_right(&mut swipes, start);
-    let (_, now) = sweep(&mut swipes, start, 40, 10);
+    let (_, now) = sweep(&mut swipes, start, 45, 10);
     let frames = swipes.end(&session(), BUTTON, now + Duration::from_millis(300));
     assert_eq!(phases(&frames), vec![SpaceSwipePhase::Ended]);
     assert!(frames[0].progress >= COMPLETE_AT);
@@ -224,7 +292,7 @@ fn a_short_flick_finishes_on_release() {
     let mut swipes = swipes(PROMPT);
     let start = Instant::now();
     begin_right(&mut swipes, start);
-    // 50 + 5 × 30 = 200 units (0.25 desktop) in 40 ms, released at speed.
+    // 5 × 30 = 150 units (about 0.19 desktop) in 40 ms, released at speed.
     let (_, now) = sweep(&mut swipes, start, 5, 30);
     let frames = swipes.end(&session(), BUTTON, now + Duration::from_millis(4));
     assert_eq!(

@@ -562,14 +562,26 @@ pub fn post_space_swipe(progress: f64, phase: SpaceSwipePhase) -> bool {
     }
 }
 
-/// Whether the display under the cursor has a desktop before and after the
-/// current one, so a live transition can stop at the ends instead of asking
-/// the Dock for a switch it cannot make. `None` when unknown.
+/// Where the display under the cursor is in its row of desktops.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SpacePosition {
+    /// The current desktop's identifier; it changes when a switch lands.
+    pub current: u64,
+    /// Whether a desktop exists before the current one.
+    pub has_previous: bool,
+    /// Whether a desktop exists after the current one.
+    pub has_next: bool,
+}
+
+/// Where the display under the cursor is in its row of desktops, read-only,
+/// so a live transition can stop at the ends instead of asking the Dock for a
+/// switch it cannot make, and can tell its own switch landing from a change
+/// on another display. `None` when unknown.
 #[must_use]
-pub fn space_neighbors() -> Option<(bool, bool)> {
+pub fn space_position() -> Option<SpacePosition> {
     cfg_select! {
         target_os = "macos" => {
-            macos::space_neighbors()
+            macos::space_position()
         }
         _ => None
     }

@@ -546,6 +546,12 @@ impl ButtonInputHandle {
         self.try_input(generation, ButtonInput::Pulse(press))
     }
 
+    /// Whether `token`'s press has outlived every all-press invalidation so
+    /// far (a binding or profile change ends every press at once).
+    pub(crate) fn is_current(&self, token: &PressToken) -> bool {
+        token.generation == self.generation.load(Ordering::Acquire)
+    }
+
     pub(crate) fn try_trigger_while_pressed(&self, token: &PressToken, action: &Action) -> bool {
         let generation = self.generation.load(Ordering::Acquire);
         if token.generation != generation {

@@ -109,7 +109,7 @@ const POST_SPACE_SWIPE: fn(f64, SpaceSwipePhase) -> bool = |_, _| false;
 const SPACE_PROBE: SpaceProbe = SpaceProbe::NATIVE;
 #[cfg(test)]
 const SPACE_PROBE: SpaceProbe = SpaceProbe {
-    neighbors: || None,
+    position: || None,
     changes: || None,
 };
 
@@ -160,18 +160,38 @@ impl InputDispatcher {
         self
     }
 
-    /// Post live Space frames in order, stopping at the first the Dock path
-    /// refuses.
+    /// Post live Space frames in order. After a refused frame the remaining
+    /// progress frames are skipped, but an ending is still attempted, and an
+    /// ending the Dock path refuses falls back to a cancel: a Dock gesture
+    /// left open would hang mid-transition.
     fn post_space_frames(&self, key: &str, button: ButtonId, frames: &[Frame]) {
+        let mut refused = false;
         for frame in frames {
-            if frame.phase != SpaceSwipePhase::Changed {
+            let ending = frame.phase != SpaceSwipePhase::Changed;
+            if refused && !ending {
+                continue;
+            }
+            if ending {
                 debug!(key, %button, phase = ?frame.phase, progress = frame.progress, "live Space frame");
             }
-            if !(self.post_space)(frame.progress, frame.phase) {
-                debug!(key, %button, phase = ?frame.phase, "live Space frame not posted");
-                return;
+            if (self.post_space)(frame.progress, frame.phase) {
+                continue;
+            }
+            debug!(key, %button, phase = ?frame.phase, "live Space frame not posted");
+            refused = true;
+            if frame.phase == SpaceSwipePhase::Ended {
+                let _ = (self.post_space)(frame.progress, SpaceSwipePhase::Cancelled);
             }
         }
+    }
+
+    /// Whether `button`'s admitted gesture press on `session` is still live:
+    /// present here and not ended by a runtime-wide invalidation (a binding or
+    /// profile change), which this dispatcher does not otherwise hear about.
+    fn press_is_live(&self, session: &HidppSessionId, button: ButtonId) -> bool {
+        self.gesture_presses
+            .get(session, button)
+            .is_some_and(|press| self.outputs.actions.is_press_current(press))
     }
 
     /// Publish a hardware polarity observation into the OS-hook snapshot.
@@ -218,50 +238,10 @@ impl InputDispatcher {
         }
         match input {
             CapturedInput::Gesture(button, direction) => {
-                if self.gesture_presses.get(session, button).is_none() {
-                    debug!(key, %button, ?direction, "gesture from a canceled button lifecycle — ignored");
-                    return;
-                }
-                // A hold driving a live transition moves it with motion; its
-                // later swipe commits are not separate actions.
-                if self.spaces.is_active(session, button) {
-                    return;
-                }
-                let map = plan
-                    .gesture_bindings
-                    .get(&button)
-                    .or_else(|| plan.side_gesture_bindings.get(&button));
-                let Some(action) = map.and_then(|map| map.get(&direction)) else {
-                    debug!(key, %button, ?direction, "gesture with no binding — ignored");
-                    return;
-                };
-                debug!(key, %button, ?direction, action = %action.label(), "gesture → action");
-                let opposite = map.and_then(|map| map.get(&reverse(direction)));
-                if let Some(frame) =
-                    self.spaces
-                        .begin(session, button, direction, action, opposite, Instant::now())
-                {
-                    if (self.post_space)(frame.progress, frame.phase) {
-                        debug!(key, %button, ?direction, "live Space transition began");
-                        return;
-                    }
-                    // No live transition here: the one-shot switch instead.
-                    self.spaces.abandon(session, button);
-                }
-                let Some(press) = self.gesture_presses.get(session, button) else {
-                    return;
-                };
-                if !self
-                    .outputs
-                    .actions
-                    .try_dispatch_while_pressed(press, action)
-                {
-                    debug!(key, %button, ?direction, "gesture press no longer active — ignored");
-                }
+                self.dispatch_gesture(session, plan, button, direction);
             }
             CapturedInput::GestureMotion { button, dx, .. } => {
-                let frames = self.spaces.motion(session, button, dx, Instant::now());
-                self.post_space_frames(key, button, &frames);
+                self.follow_gesture_motion(session, button, dx);
             }
             CapturedInput::ButtonDown(button) => {
                 // A raw-XY gesture source owns its click/swipe map; its physical
@@ -317,6 +297,69 @@ impl InputDispatcher {
                 unreachable!("thumb-wheel direction reports return before dispatch")
             }
         }
+    }
+
+    /// Resolve one committed swipe: open a live Space transition for a
+    /// desktop-bound one, otherwise fire its action while the press lasts.
+    fn dispatch_gesture(
+        &mut self,
+        session: &HidppSessionId,
+        plan: &DispatchPlan,
+        button: ButtonId,
+        direction: GestureDirection,
+    ) {
+        let key = session.device_key();
+        if !self.press_is_live(session, button) {
+            debug!(key, %button, ?direction, "gesture from a canceled button lifecycle — ignored");
+            return;
+        }
+        // A hold driving a live transition moves it with motion; its later
+        // swipe commits are not separate actions.
+        if self.spaces.is_active(session, button) {
+            return;
+        }
+        let map = plan
+            .gesture_bindings
+            .get(&button)
+            .or_else(|| plan.side_gesture_bindings.get(&button));
+        let Some(action) = map.and_then(|map| map.get(&direction)) else {
+            debug!(key, %button, ?direction, "gesture with no binding — ignored");
+            return;
+        };
+        debug!(key, %button, ?direction, action = %action.label(), "gesture → action");
+        let opposite = map.and_then(|map| map.get(&reverse(direction)));
+        if let Some(frame) =
+            self.spaces
+                .begin(session, button, direction, action, opposite, Instant::now())
+        {
+            if (self.post_space)(frame.progress, frame.phase) {
+                debug!(key, %button, ?direction, "live Space transition began");
+                return;
+            }
+            // No live transition here: the one-shot switch instead.
+            self.spaces.abandon(session, button);
+        }
+        let Some(press) = self.gesture_presses.get(session, button) else {
+            return;
+        };
+        if !self
+            .outputs
+            .actions
+            .try_dispatch_while_pressed(press, action)
+        {
+            debug!(key, %button, ?direction, "gesture press no longer active — ignored");
+        }
+    }
+
+    /// Move the live transition `button`'s hold is driving, or spring it back
+    /// at once when the press ended without a release reaching this session.
+    fn follow_gesture_motion(&mut self, session: &HidppSessionId, button: ButtonId, dx: i32) {
+        let frames = if self.press_is_live(session, button) {
+            self.spaces.motion(session, button, dx, Instant::now())
+        } else {
+            self.spaces.cancel(session, button)
+        };
+        self.post_space_frames(session.device_key(), button, &frames);
     }
 
     fn dispatch_wheel(

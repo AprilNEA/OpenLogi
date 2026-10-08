@@ -7,7 +7,7 @@
 use std::ffi::{c_int, c_void};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{LazyLock, Once, mpsc};
+use std::sync::{LazyLock, Mutex, Once, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
 use block2::RcBlock;
@@ -22,8 +22,8 @@ use objc2_core_graphics::{
 };
 use objc2_foundation::{NSNotification, NSNotificationCenter, NSObjectProtocol};
 
-use super::super::SpaceSwipePhase;
 use super::super::space_switch::{self, Backend, Direction, Failure, Lease, PostGate, SpaceState};
+use super::super::{SpacePosition, SpaceSwipePhase};
 use super::{app_services, app_services_symbol};
 
 static BUSY: AtomicBool = AtomicBool::new(false);
@@ -79,15 +79,17 @@ fn display_uuid(api: &Api, display: u32) -> Option<String> {
     Some(CFUUID::new_string(None, Some(&uuid))?.to_string())
 }
 
-/// Whether the display under the cursor has a Space before and after the
-/// current one, read-only; `None` when the Space list is unavailable.
-pub(in crate::inject) fn space_neighbors() -> Option<(bool, bool)> {
+/// Where the display under the cursor is in its row of Spaces, read-only;
+/// `None` when the Space list is unavailable.
+pub(in crate::inject) fn space_position() -> Option<SpacePosition> {
     let api = API.as_ref()?;
     let uuid = display_uuid(api, cursor_display()?)?;
     let state = api.state(&uuid)?;
-    let previous = state.target(Direction::Previous).ok()?.is_some();
-    let next = state.target(Direction::Next).ok()?.is_some();
-    Some((previous, next))
+    Some(SpacePosition {
+        current: state.current,
+        has_previous: state.target(Direction::Previous).ok()?.is_some(),
+        has_next: state.target(Direction::Next).ok()?.is_some(),
+    })
 }
 
 static SPACE_CHANGES: AtomicU64 = AtomicU64::new(0);
@@ -261,16 +263,38 @@ static LIVE_SWIPE_SUPPORTED: LazyLock<bool> = LazyLock::new(|| {
 
 /// Post one frame of a live Space transition; see
 /// [`crate::post_space_swipe`].
+/// The one-shot switch's lease, held by a live transition from its Began
+/// frame to its Ended or Cancelled one, so a one-shot switch and a live swipe
+/// never drive the Dock at once.
+static LIVE_LEASE: Mutex<Option<Lease<'static>>> = Mutex::new(None);
+
 pub(in crate::inject) fn post_space_swipe(progress: f64, phase: SpaceSwipePhase) -> bool {
     if !*LIVE_SWIPE_SUPPORTED {
         return false;
     }
-    let Some(event) = live_swipe_event(progress, phase) else {
+    let mut lease = LIVE_LEASE.lock().unwrap_or_else(PoisonError::into_inner);
+    if phase == SpaceSwipePhase::Began && lease.is_none() {
+        let Some(acquired) = Lease::acquire(&BUSY) else {
+            tracing::debug!("Space switch pending — live swipe not started");
+            return false;
+        };
+        *lease = Some(acquired);
+    }
+    let posted = if let Some(event) = live_swipe_event(progress, phase) {
+        CGEvent::post(CGEventTapLocation::SessionEventTap, Some(&event));
+        true
+    } else {
         tracing::warn!(?phase, "could not build a live Space swipe event");
-        return false;
+        false
     };
-    CGEvent::post(CGEventTapLocation::SessionEventTap, Some(&event));
-    true
+    // A terminal frame, or a Began that never reached the Dock, releases the
+    // lease even when its event could not be built, so a failed live swipe
+    // never locks one-shot switches out.
+    let finished = matches!(phase, SpaceSwipePhase::Ended | SpaceSwipePhase::Cancelled);
+    if finished || (phase == SpaceSwipePhase::Began && !posted) {
+        *lease = None;
+    }
+    posted
 }
 
 fn live_swipe_event(progress: f64, phase: SpaceSwipePhase) -> Option<CFRetained<CGEvent>> {
