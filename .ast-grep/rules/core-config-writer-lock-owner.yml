@@ -1,0 +1,13 @@
+# Owner: config::file holds one writer lock through revision checks and commit.
+id: core-config-writer-lock-owner
+language: rust
+severity: error
+message: Use config::file::lock_config_writer; normal saves and recovery share one lock protocol.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-core/src/config/file.rs
+  - crates/**/tests.rs
+  - crates/**/tests/**/*.rs
+rule:
+  pattern: $PATH.with_added_extension("lock")

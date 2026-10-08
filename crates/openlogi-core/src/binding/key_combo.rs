@@ -188,6 +188,27 @@ impl<'de> Deserialize<'de> for KeyCombo {
 }
 
 impl KeyCombo {
+    /// Build a chord from a USB keyboard usage and left-hand modifier usages.
+    /// Right-hand modifiers are rejected because the output model cannot retain
+    /// their handedness. The USB GUI modifier stays Super, not platform-primary.
+    pub(crate) fn from_hid_usages(key: u8, modifiers: &[u8]) -> Option<Self> {
+        let key = KeyboardUsage::try_new(key).ok()?;
+        let mut bits = 0;
+        for modifier in modifiers {
+            bits |= match modifier {
+                224 => MOD_CONTROL,
+                225 => MOD_SHIFT,
+                226 => MOD_OPTION,
+                227 => MOD_SUPER,
+                _ => return None,
+            };
+        }
+        Some(Self {
+            modifiers: bits,
+            key,
+        })
+    }
+
     /// USB HID keyboard usage for the ordinary key.
     #[must_use]
     pub const fn key(&self) -> KeyboardUsage {

@@ -21,6 +21,60 @@ config from loading instead of silently selecting a default or disappearing on
 the next save. The GUI then opens in read-only mode and shows the exact TOML
 error. Fix the file and relaunch OpenLogi.
 
+You can also open **Settings → Restore or import**, or use **Restore or
+import** on the error screen. Select an automatic backup or another
+OpenLogi configuration file, review the changed values, then confirm the
+replacement. This restores the whole configuration, including all devices,
+application profiles, and app-wide settings. Options+ uses the separate import
+entry on the same page, described below.
+
+Before replacement, the current file is preserved as
+`config.toml.before-restore.<number>.bak`. These recovery copies are listed
+before automatic backups and are never rotated away. The selected backup also
+stays unchanged. Invalid sources and files changed since the preview stop the
+restore. Recovery uses the same non-blocking writer lock as ordinary saves. If
+another writer owns it, retry from a fresh preview after that save finishes.
+Both files are checked again after the recovery copy is preserved.
+
+After success, restart OpenLogi to reload both the GUI and agent;
+configuration editing is paused until then.
+
+### Importing Logi Options+ assignments (macOS)
+
+In **Settings → Restore or import**, choose **Read Options+ settings**
+or **Choose database…**. Select the source mouse and the same physical
+mouse already saved in OpenLogi, then review the preview before importing.
+The importer has been checked with Options+ 2.8.981479, schema 26, and an
+MX Master 3S. Other models, database versions, and Windows settings are not
+supported by this first implementation.
+
+The database is read-only. SQLite reads committed WAL data in one transaction;
+copying `settings.db` alone while Options+ is running may miss saved changes.
+A missing, locked, malformed, oversized, or ambiguous database produces an error.
+No account, analytics, or cloud settings are imported.
+
+Supported mouse buttons, keyboard shortcuts, selected global gesture actions,
+and single-action app overrides merge into the chosen device. Imported assignments
+replace matching entries; unrelated settings and overrides for other apps or
+buttons stay intact. App overrides are retained even when they currently equal
+the global binding. Installed app bundle identifiers
+are read from their metadata; display names are not used as identities.
+
+The preview lists skipped assignments and behavior differences. Thumbwheel
+analog controls, pointer speed/DPI, hardware settings, virtual Actions Ring
+slots, app-specific gesture maps, unsupported macros, and right-hand modifier
+shortcuts need manual setup. Gesture timing stays under OpenLogi's control.
+Back/forward gestures become application keyboard shortcuts, so behavior can
+differ by application. OpenLogi keeps its existing focused-app or under-pointer
+profile policy.
+
+Import requires a valid current OpenLogi configuration. Confirmation rechecks
+the source data, app identities, and target revision, preserves a recovery copy,
+and writes through the same atomic recovery path. Changes made while reviewing
+require a new preview. Canceling a read or preview does not change the target.
+After importing, quit Options+ before restarting OpenLogi so both apps do not
+try to control the same mouse.
+
 If the file changes in an editor while the GUI is open, the next GUI save is
 refused rather than overwriting the external edit. Relaunch to load that
 revision. Opening the GUI also tells the resident agent to reload the current

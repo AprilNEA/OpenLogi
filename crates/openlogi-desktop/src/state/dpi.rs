@@ -112,6 +112,11 @@ impl AppState {
     /// on a power cycle (#189), so the agent re-applies it on reconnect.
     /// Updates the displayed value even with no device selected.
     pub fn commit_dpi(&mut self, dpi: Dpi) -> StateEvents {
+        // Transient devices bypass persistence, but must respect the same
+        // recovery boundary as devices with a saved configuration identity.
+        if self.config.recovery_freezes_writes() {
+            return StateEvents::none();
+        }
         let events = self.for_current_device(StateEvent::DpiChanged);
         self.pointer.dpi = dpi;
         let Some(record) = self.current_record() else {

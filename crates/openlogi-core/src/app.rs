@@ -70,6 +70,45 @@ pub fn overlay_for<'a, T>(overlays: &'a BTreeMap<String, T>, app: &str) -> Optio
     })
 }
 
+/// Read the identity of an installed macOS app without launching it.
+/// Non-bundles, unreadable metadata, and missing identifiers are unresolved.
+#[cfg(all(feature = "fs", target_os = "macos"))]
+#[must_use]
+pub fn bundle_identifier(path: &Path) -> Option<String> {
+    use std::io::Read as _;
+
+    const MAX_METADATA_BYTES: u64 = 1024 * 1024;
+    if !path.is_absolute()
+        || !path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
+    {
+        return None;
+    }
+    let info = path.join("Contents/Info.plist");
+    let file = crate::file_input::FileInput::Source.open(&info).ok()?;
+    let metadata = file.metadata().ok()?;
+    if metadata.len() > MAX_METADATA_BYTES {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_METADATA_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() > usize::try_from(MAX_METADATA_BYTES).ok()? {
+        return None;
+    }
+    let value = plist::Value::from_reader(std::io::Cursor::new(bytes)).ok()?;
+    let identifier = value
+        .as_dictionary()?
+        .get("CFBundleIdentifier")?
+        .as_string()?;
+    if identifier.is_empty() || identifier.contains(['/', '\\']) {
+        return None;
+    }
+    Some(identifier.to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,3 +169,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[cfg(all(feature = "fs", target_os = "macos"))]
+mod bundle_tests;
