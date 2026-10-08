@@ -339,6 +339,7 @@ impl ScrollEngine {
         at: Instant,
         emit: &mut impl FnMut(ScrollFrame),
     ) {
+        self.end_idle_phased(at, emit);
         self.output.progress(impulse, emit);
         self.phased.insert(source, at + PHASED_IDLE);
     }

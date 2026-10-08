@@ -351,6 +351,80 @@ fn phased_ticks_are_emitted_at_once_and_end_after_the_idle_window() {
 }
 
 #[test]
+fn queued_phased_ticks_start_a_new_gesture_after_an_idle_gap() {
+    let base = Instant::now();
+    let source = hidpp_source("mouse-a", 1);
+    let mut engine = ScrollEngine::default();
+    let mut frames = Vec::new();
+    engine.phased_impulse(source.clone(), wheel(1.0, 0.0), base, &mut |f| {
+        frames.push(f);
+    });
+
+    let later = base + PHASED_IDLE + Duration::from_millis(1);
+    engine.phased_impulse(source, wheel(2.0, 0.0), later, &mut |f| frames.push(f));
+    assert_eq!(
+        phases(&frames),
+        [
+            SmoothScrollPhase::Began,
+            SmoothScrollPhase::Ended,
+            SmoothScrollPhase::Began
+        ]
+    );
+    assert_delta(cumulative(&frames), wheel(3.0, 0.0));
+
+    engine.advance_due(later + PHASED_IDLE, &mut |f| frames.push(f));
+    assert_eq!(
+        phases(&frames),
+        [
+            SmoothScrollPhase::Began,
+            SmoothScrollPhase::Ended,
+            SmoothScrollPhase::Began,
+            SmoothScrollPhase::Ended
+        ]
+    );
+    assert_delta(cumulative(&frames), wheel(3.0, 0.0));
+}
+
+#[test]
+fn queued_phased_tick_keeps_another_active_source_in_the_same_gesture() {
+    let base = Instant::now();
+    let first = hidpp_source("mouse-a", 1);
+    let second = hidpp_source("mouse-b", 1);
+    let mut engine = ScrollEngine::default();
+    let mut frames = Vec::new();
+    engine.phased_impulse(first.clone(), wheel(1.0, 0.0), base, &mut |f| {
+        frames.push(f);
+    });
+    engine.phased_impulse(second, wheel(2.0, 0.0), base + PHASED_IDLE / 2, &mut |f| {
+        frames.push(f);
+    });
+
+    let later = base + PHASED_IDLE + Duration::from_millis(1);
+    engine.phased_impulse(first, wheel(3.0, 0.0), later, &mut |f| frames.push(f));
+    assert_eq!(
+        phases(&frames),
+        [
+            SmoothScrollPhase::Began,
+            SmoothScrollPhase::Changed,
+            SmoothScrollPhase::Changed
+        ]
+    );
+    assert_delta(cumulative(&frames), wheel(6.0, 0.0));
+
+    engine.advance_due(later + PHASED_IDLE, &mut |f| frames.push(f));
+    assert_eq!(
+        phases(&frames),
+        [
+            SmoothScrollPhase::Began,
+            SmoothScrollPhase::Changed,
+            SmoothScrollPhase::Changed,
+            SmoothScrollPhase::Ended
+        ]
+    );
+    assert_delta(cumulative(&frames), wheel(6.0, 0.0));
+}
+
+#[test]
 fn a_new_phased_gesture_begins_again_after_the_previous_one_ended() {
     let base = Instant::now();
     let mut engine = ScrollEngine::default();
