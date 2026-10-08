@@ -420,11 +420,18 @@ impl Orchestrator {
                 gestures.remove(button);
             }
         }
+        let shift_bindings = key
+            .and_then(|key| self.config.gshift_overrides(key))
+            .into_iter()
+            .flatten()
+            .map(|(button, action)| (*button, Binding::Single(action.clone())))
+            .collect();
         HookMaps {
             bindings,
             gestures,
             pointer_target,
             selected_device: key.map(str::to_owned),
+            shift_bindings,
             ..HookMaps::default()
         }
     }
@@ -438,6 +445,7 @@ impl Orchestrator {
             Ok(mut current) => {
                 maps.thumbwheel_positive_is_forward =
                     std::mem::take(&mut current.thumbwheel_positive_is_forward);
+                maps.shift_held = std::mem::take(&mut current.shift_held);
                 *current = maps;
             }
             Err(error) => {

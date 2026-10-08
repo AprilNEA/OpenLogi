@@ -88,6 +88,10 @@ impl DeviceCapturePlan {
     pub fn with_onboard(mut self, config: &Config, layout: Option<&GamingLayout>) -> Self {
         let key = &self.dispatch.config_key;
         let shift = config.uses_gshift(key);
+        // Spy reports carry no motion, so gesture buttons stay with the OS hook.
+        let gestures = config.stored_bindings(key);
+        let keeps_gestures =
+            |button: ButtonId| matches!(gestures.get(&button), Some(Binding::Gesture(_)));
         self.target.spec.onboard = match config.effective_onboard_memory(key, layout) {
             None => None,
             Some(OnboardMemory::Profile(index)) => Some(OnboardTarget::Profile(index)),
@@ -99,7 +103,9 @@ impl DeviceCapturePlan {
                         .iter()
                         .map(|&button| {
                             let captured = layout.needs_host_mode(button)
-                                || (shift && layout.remappable().any(|b| b == button))
+                                || (shift
+                                    && !keeps_gestures(button)
+                                    && layout.remappable().any(|b| b == button))
                                 || diverted.iter().any(|&(_, b)| b == button);
                             (button, captured)
                         })
@@ -373,6 +379,15 @@ mod tests {
         assert!(slots.contains(&(ButtonId::MiddleClick, true)));
         assert!(slots.contains(&(ButtonId::Back, true)));
         assert!(slots.contains(&(ButtonId::LeftClick, false)));
+
+        cfg.set_gesture_mode("g502", ButtonId::Back, true);
+        let plan = plan_for_device(&cfg, "g502", route(), None, 0, true).with_onboard(&cfg, layout);
+        assert!(
+            host_slots(&plan)
+                .unwrap()
+                .contains(&(ButtonId::Back, false)),
+            "a gesture button keeps its native report for the OS hook"
+        );
     }
 
     #[test]

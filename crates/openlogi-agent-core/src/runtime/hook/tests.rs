@@ -587,3 +587,26 @@ fn resolve_gesture_click_falls_back_when_click_is_absent() {
         default_binding(ButtonId::Forward)
     );
 }
+
+#[test]
+fn held_gshift_replaces_a_gesture_button_with_its_shifted_binding() {
+    let mut maps = HookMaps {
+        selected_device: Some("g502".into()),
+        ..HookMaps::default()
+    };
+    maps.gestures.insert(ButtonId::Back, BTreeMap::new());
+    maps.shift_bindings
+        .insert(ButtonId::Back, Binding::Single(Action::Copy));
+
+    let (binding, is_gesture) = maps.press_binding(ButtonId::Back);
+    assert!(is_gesture && binding.is_none());
+
+    maps.shift_held.insert("g502".into());
+    let (binding, is_gesture) = maps.press_binding(ButtonId::Back);
+    assert!(!is_gesture);
+    assert_eq!(binding, Some(Binding::Single(Action::Copy)));
+
+    // A button with no shifted binding keeps its gestures under G-Shift.
+    maps.gestures.insert(ButtonId::Forward, BTreeMap::new());
+    assert!(maps.press_binding(ButtonId::Forward).1);
+}

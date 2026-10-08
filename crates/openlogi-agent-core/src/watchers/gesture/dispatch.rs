@@ -136,6 +136,20 @@ impl InputDispatcher {
         self.wheels.cancel_session(session);
         self.gesture_presses.cancel_session(session);
         self.shift_held.0.remove(session);
+        self.publish_shift(session);
+    }
+
+    /// Tell the OS hook whether `session`'s device has G-Shift held, so its
+    /// gesture buttons resolve the shifted layer too.
+    fn publish_shift(&self, session: &HidppSessionId) {
+        let key = session.device_key();
+        if let Ok(mut maps) = self.hook_maps.write() {
+            if self.shift_held.active(session) {
+                maps.shift_held.insert(key.to_owned());
+            } else {
+                maps.shift_held.remove(key);
+            }
+        }
     }
 
     /// Route one captured input from `session` to its bound action or
@@ -182,6 +196,7 @@ impl InputDispatcher {
                 {
                     debug!(key, ?button, "G-Shift held");
                     self.shift_held.press(session, button);
+                    self.publish_shift(session);
                     return;
                 }
                 // A raw-XY gesture source owns its click/swipe map; its physical
@@ -214,6 +229,7 @@ impl InputDispatcher {
             }
             CapturedInput::ButtonUp(button) => {
                 if self.shift_held.release(session, button) {
+                    self.publish_shift(session);
                     return;
                 }
                 self.outputs.actions.try_hidpp_button_up(session, button);
