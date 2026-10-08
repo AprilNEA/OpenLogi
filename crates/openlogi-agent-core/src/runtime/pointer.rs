@@ -95,6 +95,71 @@ mod tests {
     };
 
     #[test]
+    fn volume_batches_read_the_live_pointer_once_and_reject_all_steps_together() {
+        for action in [Action::VolumeUp, Action::VolumeDown] {
+            for steps in [0, 1, 5, 20] {
+                for (captured, current, fallback, admitted) in [
+                    (BROWSER, BROWSER, None, true),
+                    (BROWSER, OTHER_WINDOW, None, false),
+                    (
+                        PointerTarget::Unsupported,
+                        PointerTarget::Unsupported,
+                        None,
+                        false,
+                    ),
+                    (
+                        PointerTarget::Unavailable,
+                        PointerTarget::Unavailable,
+                        None,
+                        true,
+                    ),
+                    (
+                        PointerTarget::Unavailable,
+                        PointerTarget::Unavailable,
+                        Some(417),
+                        true,
+                    ),
+                    (BROWSER, PointerTarget::Unavailable, None, false),
+                ] {
+                    let reads = std::cell::Cell::new(0);
+                    let captures = std::cell::Cell::new(0);
+                    let mut dispatched = Vec::new();
+                    super::super::dispatch_resolved_batch(
+                        steps,
+                        || {
+                            ActionDispatchTarget::for_pointer(Some(captured), || {
+                                captures.set(captures.get() + 1);
+                                fallback
+                            })
+                            .resolve_with(
+                                &action,
+                                || {
+                                    reads.set(reads.get() + 1);
+                                    current
+                                },
+                                |_| panic!("volume must not require keyboard focus"),
+                                || None,
+                            )
+                        },
+                        |target| dispatched.push(target),
+                    );
+                    assert_eq!(reads.get(), u32::from(steps != 0));
+                    assert_eq!(
+                        captures.get(),
+                        u32::from(steps != 0 && captured == PointerTarget::Unavailable)
+                    );
+                    assert_eq!(dispatched.len(), if admitted { steps as usize } else { 0 });
+                    let expected = fallback.map_or(
+                        ActionDispatchTarget::Keyboard,
+                        ActionDispatchTarget::SafariProcess,
+                    );
+                    assert!(dispatched.iter().all(|target| *target == expected));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn desktop_switch_does_not_require_browser_focus_or_send_browser_navigation() {
         assert!(pointer_action_allowed(
             &Action::NextDesktop,
