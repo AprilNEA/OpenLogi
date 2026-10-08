@@ -16,6 +16,11 @@ The GUI writes atomically and keeps `config.toml.backup.1` through
 `config.toml.backup.5`. Existing comments and formatting are retained when the
 GUI updates known fields.
 
+When `config.toml` is a symbolic link, saves update its target and preserve
+the link. A missing target and its parent directories are created. Backups stay
+beside the configured `config.toml`, while a persistent `.lock` file stays beside
+the target so different links to the same file share the writer lock.
+
 The schema is strict: misspelled, obsolete, and out-of-range fields stop the
 config from loading instead of silently selecting a default or disappearing on
 the next save. The GUI then opens in read-only mode and shows the exact TOML
