@@ -90,10 +90,11 @@ impl ActionExecutor {
     }
 
     fn dispatch_to(&self, action: &Action, device_key: Option<&str>, target: ActionDispatchTarget) {
-        let Some(target) = target.resolve(action) else {
-            debug!(action = %action.label(), "mouse action target unavailable or no longer matches — skipped");
-            return;
-        };
+        // The ring is drawn by OpenLogi at the cursor and acts on no window, so
+        // no pointer target gates it. It must not: while the ring is showing,
+        // the pointer is over the ring's own floating window, which classifies
+        // as `PointerTarget::Unavailable`, and a gated second trigger press
+        // could never close the ring.
         if matches!(action, Action::ShowActionsRing) {
             if self
                 .action_ring
@@ -104,6 +105,10 @@ impl ActionExecutor {
             }
             return;
         }
+        let Some(target) = target.resolve(action) else {
+            debug!(action = %action.label(), "mouse action target unavailable or no longer matches — skipped");
+            return;
+        };
 
         let next = match action {
             Action::CycleDpiPresets => match self.dpi_cycle.write() {
@@ -514,6 +519,33 @@ mod tests {
     use super::*;
 
     static BROWSER_NAV_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn ring_trigger_reaches_the_ring_over_an_unavailable_pointer_target() {
+        // The second press that toggles the ring closed lands on the ring's
+        // own overlay window, which the pointer hit test reports as
+        // unavailable.
+        let (_signal, device_io) = openlogi_hid::device_io_channel();
+        let (action_ring, mut ring_rx) = tokio::sync::mpsc::unbounded_channel();
+        let executor = ActionExecutor {
+            dpi_cycle: Arc::default(),
+            access: DeviceAccess {
+                channel: openlogi_hid::CaptureChannelSlot::default(),
+                registry: openlogi_hid::ChannelRegistry::default(),
+                receiver_access: crate::receiver_access::ReceiverAccess::default(),
+                device_io,
+            },
+            action_ring,
+        };
+
+        executor.dispatch_to(
+            &Action::ShowActionsRing,
+            Some("mouse"),
+            ActionDispatchTarget::Pointer(openlogi_hook::PointerTarget::Unavailable),
+        );
+
+        assert_eq!(ring_rx.try_recv(), Ok(Some("mouse".to_owned())));
+    }
     #[test]
     fn instantaneous_actions_do_not_enter_held_state() {
         let press = PressToken::hook_for_test(1, ButtonId::Back);
