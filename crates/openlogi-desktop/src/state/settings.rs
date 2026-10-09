@@ -279,6 +279,54 @@ impl AppState {
         self.persist_and_reload("thumbwheel sensitivity");
         StateEvent::SettingsChanged.into()
     }
+    /// The effective zoom sensitivity for `key` (its per-device override, else
+    /// the app-wide default).
+    #[must_use]
+    pub fn device_zoom_sensitivity(&self, key: &str) -> ThumbwheelSensitivity {
+        self.config.zoom_sensitivity(key)
+    }
+
+    /// Set `key`'s per-device zoom sensitivity override and persist it, on the
+    /// same terms as [`Self::commit_device_thumbwheel_sensitivity`]: landing on
+    /// the app-wide default clears the override rather than pinning today's
+    /// value.
+    pub fn commit_device_zoom_sensitivity(
+        &mut self,
+        key: &DeviceKey,
+        sensitivity: ThumbwheelSensitivity,
+    ) -> StateEvents {
+        let events = StateEvent::DeviceConfigChanged(key.clone()).into();
+        let key = key.as_str();
+        let override_value =
+            (sensitivity != self.config.app_settings.zoom_sensitivity).then_some(sensitivity);
+        let stored = self
+            .config
+            .devices
+            .get(key)
+            .and_then(|d| d.zoom_sensitivity);
+        if stored == override_value {
+            return events;
+        }
+        self.config.edit(|config| {
+            config.set_device_zoom_sensitivity(key, override_value);
+        });
+        self.persist_and_reload("device zoom sensitivity");
+        events
+    }
+
+    /// Set the app-wide default zoom sensitivity and persist it — devices
+    /// without a per-device override follow it through the reloaded capture
+    /// plans. An already-set value writes nothing and is still reported.
+    pub fn commit_zoom_sensitivity(&mut self, sensitivity: ThumbwheelSensitivity) -> StateEvents {
+        if self.config.app_settings.zoom_sensitivity == sensitivity {
+            return StateEvent::SettingsChanged.into();
+        }
+        self.config
+            .edit(|config| config.app_settings.zoom_sensitivity = sensitivity);
+        self.persist_and_reload("zoom sensitivity");
+        StateEvent::SettingsChanged.into()
+    }
+
     /// Persist the application target for mouse button profiles and reload the
     /// agent. An unchanged value writes nothing; failed saves restore the
     /// previous selection through the shared configuration rollback boundary.
