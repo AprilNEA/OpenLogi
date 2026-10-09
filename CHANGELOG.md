@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.12] - 2026-10-09
+
+### Added
+
+- *(i18n)* add Czech locale ([#1669](https://github.com/AprilNEA/OpenLogi/pull/1669))
+- *(cli)* persist verified automation settings with save
+
+### Fixed
+
+- *(macos)* preserve pixel precision in synthetic scroll events ([#1156](https://github.com/AprilNEA/OpenLogi/pull/1156))
+- *(gui)* recognize MX Ergo precision-mode button slot ([#1391](https://github.com/AprilNEA/OpenLogi/pull/1391))
+- *(gui)* show wheel controls without adjustable dpi ([#1369](https://github.com/AprilNEA/OpenLogi/pull/1369))
+- *(cli)* show Linux udev guidance for device access failures ([#1348](https://github.com/AprilNEA/OpenLogi/pull/1348))
+- *(gui)* wrap the About page links without clipping ([#885](https://github.com/AprilNEA/OpenLogi/pull/885))
+- *(i18n)* track locale catalogs as build inputs ([#1327](https://github.com/AprilNEA/OpenLogi/pull/1327))
+- *(gui)* keep the action library scrollbar in its viewport ([#1360](https://github.com/AprilNEA/OpenLogi/pull/1360))
+- *(agent)* fall back to focus when the pointer target is unidentified ([#1648](https://github.com/AprilNEA/OpenLogi/pull/1648))
+- *(gui)* scale configuration labels with interface text ([#1627](https://github.com/AprilNEA/OpenLogi/pull/1627))
+- *(agent)* restore ring toggle and publish expired sessions ([#1665](https://github.com/AprilNEA/OpenLogi/pull/1665))
+- *(gui)* show the actual update host in the consent dialog ([#1629](https://github.com/AprilNEA/OpenLogi/pull/1629))
+- *(hook)* restore the short watchdog budget before tap teardown ([#1600](https://github.com/AprilNEA/OpenLogi/pull/1600))
+- *(core)* preserve symlinked configuration targets ([#1642](https://github.com/AprilNEA/OpenLogi/pull/1642))
+- *(agent)* phase horizontal thumb-wheel scroll when smoothing is off ([#1689](https://github.com/AprilNEA/OpenLogi/pull/1689))
+- *(hid)* exclude foreign reports from fixture captures ([#1373](https://github.com/AprilNEA/OpenLogi/pull/1373))
+- *(gui)* render pointer pairing passkey icons with theme colors ([#1640](https://github.com/AprilNEA/OpenLogi/pull/1640))
+- *(gui)* keep the device toggle visible with long captions ([#1670](https://github.com/AprilNEA/OpenLogi/pull/1670))
+- *(gui)* truncate long function-key names and retain tooltips ([#1691](https://github.com/AprilNEA/OpenLogi/pull/1691))
+- *(hid)* recognize Lightspeed receiver 046d:c541 ([#1679](https://github.com/AprilNEA/OpenLogi/pull/1679))
+- *(gui)* use configured DPI while the live read is unavailable ([#1628](https://github.com/AprilNEA/OpenLogi/pull/1628))
+- *(core)* serialize configuration saves across processes
+
 ## [0.8.11] - 2026-10-02
 
 ### Added
