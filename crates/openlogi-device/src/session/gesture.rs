@@ -1,7 +1,7 @@
 //! Live control capture for one device: divert the device's gesture sources
 //! (DPI/ModeShift, the MX dedicated gesture button and/or the MX Master 4
 //! haptic panel), and the thumb wheel over HID++ and turn their events
-//! into [`CapturedInput`] the GUI can dispatch.
+//! into [`CapturedInput`] the agent can dispatch.
 //!
 //! [`run_capture_session`] runs on the HID++ channel inventory already holds
 //! open for one device, enables diversion on whichever of those controls it
@@ -13,9 +13,9 @@
 //! what is armed (`arm`) and what its reports mean (`accum`).
 //!
 //! The session is transport-only — it has no opinion on what an input *does*.
-//! The GUI maps each [`CapturedInput`] to the user's bound action and dispatches
+//! The agent maps each [`CapturedInput`] to the user's bound action and dispatches
 //! it, mirroring how the CGEventTap hook handles the side buttons. The thumb
-//! wheel is special: diverting it stops native horizontal scroll, so the GUI
+//! wheel is special: diverting it stops native horizontal scroll, so the agent
 //! re-synthesises scroll from the [`CapturedInput::Scroll`] deltas — the wheel
 //! is therefore only diverted when the user's thumbwheel config leaves its
 //! defaults (click bound, rotation rebound, or sensitivity changed).
@@ -23,10 +23,11 @@
 mod accum;
 mod arm;
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use hidpp::protocol::v20;
-use openlogi_core::binding::{ButtonId, GestureDirection};
+use openlogi_core::binding::{ButtonId, GestureDirection, GestureResponse};
 use tokio::sync::mpsc;
 use tracing::info;
 
@@ -141,6 +142,8 @@ pub struct CaptureSpec {
     /// Standard-button CIDs requested as raw-XY gesture sources. A control is
     /// armed only when its HID++ capability flags advertise raw-XY support.
     pub divert_gesture_buttons: Vec<(u16, ButtonId)>,
+    /// Click-versus-swipe response keyed by gesture-source control.
+    pub gesture_responses: BTreeMap<ButtonId, GestureResponse>,
     /// Buttons to divert as plain presses (no raw-XY): the
     /// [`DIVERTABLE_STANDARD_BUTTONS`] and non-gesturing
     /// [`GESTURE_SOURCE_BUTTONS`] whose binding leaves the default.
@@ -177,7 +180,12 @@ pub async fn run_capture_session(
     if let Some(direction) = armed.thumbwheel_direction() {
         let _ = host.sink.send(direction);
     }
-    Ok(run_capture(shared, GestureCapture::new(armed), host).await)
+    Ok(run_capture(
+        shared,
+        GestureCapture::new(armed, spec.gesture_responses),
+        host,
+    )
+    .await)
 }
 
 /// Gesture capture as [`run_capture`] drives it: the armed controls, and the
@@ -190,10 +198,10 @@ struct GestureCapture {
 }
 
 impl GestureCapture {
-    fn new(armed: ArmedControls) -> Self {
+    fn new(armed: ArmedControls, gesture_responses: BTreeMap<ButtonId, GestureResponse>) -> Self {
         Self {
             armed,
-            accum: Arc::default(),
+            accum: Arc::new(Mutex::new(CaptureAccum::new(gesture_responses))),
         }
     }
 }
@@ -263,7 +271,10 @@ impl ArmedCapture for GestureCapture {
     }
 
     fn reset_input_state(&self) {
-        *self.accum.lock().unwrap_or_else(PoisonError::into_inner) = CaptureAccum::default();
+        self.accum
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .reset();
     }
 
     async fn rearm(&self) {
