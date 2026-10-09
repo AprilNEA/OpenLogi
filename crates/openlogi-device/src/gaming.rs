@@ -401,6 +401,20 @@ pub async fn backup_on(shared: &crate::SharedChannel) -> Result<GamingBackup, Ga
     backup_with_feature(&feature, shared.route()).await
 }
 
+/// Whether the supported gaming mouse currently owns pointer settings in firmware.
+/// Other routes retain their existing host-managed DPI behavior.
+pub async fn owns_pointer_settings_on(shared: &crate::SharedChannel) -> Result<bool, GamingError> {
+    if shared.route()
+        != &(DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc098,
+        })
+    {
+        return Ok(false);
+    }
+    Ok(open_shared(shared).await?.mode().await? == OnboardMode::Onboard)
+}
+
 /// Apply an edit on the agent-owned channel. Caller owns the complete transaction lease.
 pub async fn apply_on(
     shared: &crate::SharedChannel,

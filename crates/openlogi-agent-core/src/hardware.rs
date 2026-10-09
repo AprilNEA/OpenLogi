@@ -460,12 +460,10 @@ pub fn reapply_mouse_volatile_in_background(op: &DeviceOp, settings: VolatileMou
             }
             if let Some(dpi) = dpi {
                 let result = tokio::time::timeout(WRITE_TIMEOUT, async {
-                    openlogi_hid::set_dpi_on(&shared, dpi).await
+                    apply_host_dpi_on(&shared, dpi).await
                 })
                 .await;
-                log_outcome(index, "DPI write", result, |()| {
-                    debug!(index, %dpi, "DPI written to device");
-                });
+                log_dpi_outcome(index, dpi, result);
             }
             if let Some(ss) = smartshift {
                 let result = tokio::time::timeout(WRITE_TIMEOUT, async {
@@ -566,13 +564,41 @@ pub fn write_dpi_in_background(op: DeviceOp, dpi: Dpi) {
     let index = op.route.device_index();
     op.spawn_write(
         "DPI write",
-        move |c| async move { openlogi_hid::set_dpi_on(&c, dpi).await },
-        move |result| {
-            log_outcome(index, "DPI write", result, |()| {
-                debug!(index, %dpi, "DPI written to device");
-            });
-        },
+        move |c| async move { apply_host_dpi_on(&c, dpi).await },
+        move |result| log_dpi_outcome(index, dpi, result),
     );
+}
+
+/// Result of a host DPI request after checking firmware ownership.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostDpiWrite {
+    /// The host value was sent to the device.
+    Applied,
+    /// Onboard mode owns the value; no host DPI write was sent.
+    OnboardOwned,
+}
+
+/// Apply host DPI only when onboard firmware does not own pointer settings.
+/// Both explicit IPC writes and background reconciliation use this owner.
+pub async fn apply_host_dpi_on(
+    shared: &SharedChannel,
+    dpi: Dpi,
+) -> Result<HostDpiWrite, WriteError> {
+    if openlogi_hid::gaming::owns_pointer_settings_on(shared)
+        .await
+        .map_err(|error| WriteError::Hidpp(error.to_string()))?
+    {
+        return Ok(HostDpiWrite::OnboardOwned);
+    }
+    openlogi_hid::set_dpi_on(shared, dpi).await?;
+    Ok(HostDpiWrite::Applied)
+}
+
+fn log_dpi_outcome(index: u8, dpi: Dpi, result: Result<Result<HostDpiWrite, WriteError>, Elapsed>) {
+    log_outcome(index, "DPI write", result, |outcome| match outcome {
+        HostDpiWrite::Applied => debug!(index, %dpi, "DPI written to device"),
+        HostDpiWrite::OnboardOwned => debug!(index, "onboard profile owns DPI; host write skipped"),
+    });
 }
 
 /// Spawn an OS thread that reconciles the configured native HiResWheel mode

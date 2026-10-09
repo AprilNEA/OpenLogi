@@ -235,3 +235,49 @@ async fn failed_data_transfer_is_not_retried_or_committed() {
         .collect();
     assert_eq!(functions, [6, 7]);
 }
+
+#[tokio::test]
+async fn pointer_ownership_reads_mode_and_never_mutates_or_guesses_unknown_modes() {
+    for mode in [1, 2, 3] {
+        let (raw, handle) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+            if request.len() < 7 {
+                return None;
+            }
+            let mut response = vec![0; 7];
+            response[0] = 0x10;
+            response[1..4].copy_from_slice(&request[1..4]);
+            response[4] = match (request[2], request[3] >> 4) {
+                (0, 1) => 4,
+                (0, 0) if request[4..6] == [0x81, 0] => 9,
+                (9, 2) => mode,
+                _ => return None,
+            };
+            Some(response)
+        });
+        let channel = scripted_channel(raw).await;
+        let shared = crate::SharedChannel::new(
+            Arc::clone(&channel),
+            DeviceRoute::Direct {
+                vendor_id: 0x046d,
+                product_id: 0xc098,
+            },
+        );
+        let ownership = owns_pointer_settings_on(&shared).await;
+        if mode == 3 {
+            ownership.unwrap_err();
+        } else {
+            assert_eq!(ownership.unwrap(), mode == 1);
+        }
+        let reports = handle.written_reports();
+        assert!(reports.iter().filter(|r| r[2] == 9).all(|r| r[3] >> 4 == 2));
+        let unrelated = crate::SharedChannel::new(
+            channel,
+            DeviceRoute::Direct {
+                vendor_id: 0x046d,
+                product_id: 0xb035,
+            },
+        );
+        assert!(!owns_pointer_settings_on(&unrelated).await.unwrap());
+        assert_eq!(handle.written_reports(), reports);
+    }
+}

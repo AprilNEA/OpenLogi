@@ -1,0 +1,11 @@
+id: agent-host-dpi-owner
+language: rust
+severity: error
+message: Use hardware::apply_host_dpi_on so explicit and background writes respect onboard ownership.
+files:
+  - crates/openlogi-agent/**/*.rs
+  - crates/openlogi-agent-core/**/*.rs
+ignores:
+  - crates/openlogi-agent-core/src/hardware.rs
+rule:
+  pattern: openlogi_hid::set_dpi_on($$$ARGS)

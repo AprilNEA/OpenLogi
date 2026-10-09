@@ -47,10 +47,14 @@ pub struct GamingPanel {
     error: bool,
     layer: Layer,
     _input_observers: Vec<gpui::Subscription>,
+    _state_observer: Option<gpui::Subscription>,
 }
 
 impl GamingPanel {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let state_observer = AppState::try_read(cx)
+            .is_some()
+            .then(|| AppState::repaint_on(cx, |_| false));
         let shortcut = cx.new(|cx| InputState::new(window, cx));
         let name = cx.new(|cx| InputState::new(window, cx));
         let dpi: [Entity<InputState>; 5] =
@@ -69,6 +73,7 @@ impl GamingPanel {
             page: Page::Assignments,
             dpi,
             _input_observers: observers,
+            _state_observer: state_observer,
             busy: false,
             needs_refresh: false,
             message: String::new(),

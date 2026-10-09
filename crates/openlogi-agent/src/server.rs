@@ -175,7 +175,13 @@ impl Agent for AgentServer {
         self.shared
             .device(&route)
             .run(HidppOperation::WriteDpi, |c| async move {
-                openlogi_hid::set_dpi_on(&c, dpi).await
+                  use openlogi_agent_core::hardware::{HostDpiWrite, apply_host_dpi_on};
+                  match apply_host_dpi_on(&c, dpi).await? {
+                      HostDpiWrite::Applied => Ok(()),
+                      HostDpiWrite::OnboardOwned => Err(WriteError::Hidpp(
+                          "Onboard mode owns DPI. Edit the onboard profile, or explicitly switch to host mode.".into()
+                      )),
+                  }
             })
             .await
     }
