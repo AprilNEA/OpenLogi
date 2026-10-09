@@ -11,7 +11,9 @@ use gpui::{
     App, Context, FocusHandle, InteractiveElement, IntoElement, ParentElement as _, Render, Size,
     Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px,
 };
-use gpui_component::{button::ButtonVariants as _, h_flex, scroll::ScrollableElement as _, v_flex};
+use gpui_component::{
+    Disableable as _, button::ButtonVariants as _, h_flex, scroll::ScrollableElement as _, v_flex,
+};
 use gpui_updater::Updater;
 
 use crate::app::menu::{CloseWindow, Minimize, Zoom};
@@ -23,15 +25,21 @@ use crate::windows::{self, AuxWindow};
 /// Standalone first-run update-consent window root view.
 pub struct UpdateConsentView {
     focus_handle: FocusHandle,
+    manifest_host: Result<String, url::ParseError>,
     appearance_obs: Option<Subscription>,
 }
 
 impl UpdateConsentView {
-    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        manifest_host: Result<String, url::ParseError>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
         Self {
             focus_handle,
+            manifest_host,
             appearance_obs: None,
         }
     }
@@ -49,7 +57,7 @@ pub fn open(cx: &mut App) {
         |reg| &mut reg.update_consent,
         "OpenLogi",
         Size::new(px(380.), px(320.)),
-        UpdateConsentView::new,
+        |window, cx| UpdateConsentView::new(crate::platform::updater::manifest_host(), window, cx),
         cx,
     );
 }
@@ -67,6 +75,10 @@ impl Render for UpdateConsentView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         theme::apply_ui_scale(window, cx);
         let pal = theme::palette(cx);
+        let description = match &self.manifest_host {
+            Ok(host) => tr!("updates.update_consent_description", host => host),
+            Err(error) => tr!("updates.update_failed_message", error => error.to_string()),
+        };
 
         v_flex()
             .size_full()
@@ -108,7 +120,7 @@ impl Render for UpdateConsentView {
                                     .text_center()
                                     .text_color(pal.text_muted)
                                     .debug_selector(|| "update-consent-description".into())
-                                    .child(tr!("updates.update_consent_description")),
+                                    .child(description),
                             ),
                     ),
             )
@@ -134,6 +146,7 @@ impl Render for UpdateConsentView {
                         control_button("update-consent-accept")
                             .primary()
                             .label(tr!("common.enable"))
+                            .disabled(self.manifest_host.is_err())
                             .debug_selector(|| "update-consent-accept".into())
                             .on_click(|_, window, cx| answer(true, window, cx)),
                     ),
@@ -225,5 +238,47 @@ mod tests {
             });
         }
         rust_i18n::set_locale("en");
+    }
+
+    #[gpui::test]
+    fn invalid_manifest_disables_enable_but_allows_decline(cx: &mut TestAppContext) {
+        let _locale = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            theme::register_builtin_themes(cx);
+            let (commands, _) = tokio::sync::mpsc::unbounded_channel();
+            let state = cx.new(|_| {
+                AppState::new(Sources::in_memory(
+                    Config::ephemeral(),
+                    &AssetResolver::new(),
+                    commands,
+                ))
+            });
+            AppState::set_global(state, cx);
+        });
+        let handle = cx.open_window(size(px(380.), px(320.)), |window, cx| {
+            let consent =
+                cx.new(|cx| UpdateConsentView::new(Err(url::ParseError::EmptyHost), window, cx));
+            gpui_component::Root::new(consent, window, cx)
+        });
+        let mut visual = VisualTestContext::from_window(handle.into(), cx);
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+
+        let accept = visual.debug_bounds("update-consent-accept").unwrap();
+        visual.simulate_click(accept.center(), Modifiers::default());
+        cx.update(|cx| {
+            let state = AppState::try_read(cx).unwrap();
+            assert!(!state.app_settings().update_prompt_seen);
+            assert!(!state.app_settings().check_for_updates);
+        });
+
+        let decline = visual.debug_bounds("update-consent-decline").unwrap();
+        visual.simulate_click(decline.center(), Modifiers::default());
+        cx.update(|cx| {
+            let state = AppState::try_read(cx).unwrap();
+            assert!(state.app_settings().update_prompt_seen);
+            assert!(!state.app_settings().check_for_updates);
+        });
     }
 }

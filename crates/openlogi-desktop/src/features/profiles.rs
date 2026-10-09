@@ -384,12 +384,30 @@ impl ProfileCommand {
 /// reported that application in this session. The identifier remains the
 /// matching key; only its last human-shaped component is presented.
 pub(crate) fn friendly_app_name(identifier: &str) -> String {
-    if let Some(path) = identifier.strip_prefix("exe:") {
+    let path = identifier.strip_prefix("exe:").unwrap_or(identifier);
+    // The Windows identifier is the full executable path with no `exe:`
+    // prefix (see `openlogi-hook`'s `ForegroundApp::id`), so a path
+    // separator or a `.exe` suffix marks a path even without that prefix —
+    // otherwise the dot rule below returns "exe" for every Windows app.
+    if path.contains(['/', '\\']) || path.to_ascii_lowercase().ends_with(".exe") {
         let name = path
             .rsplit(['/', '\\'])
             .find(|part| !part.is_empty())
             .unwrap_or(path);
-        return name.trim_end_matches(".exe").to_string();
+        let windows_path = path.contains('\\')
+            || matches!(path.as_bytes(), [b'a'..=b'z' | b'A'..=b'Z', b':', b'/', ..]);
+        if windows_path {
+            // Match the Windows foreground producer when its cached display name is absent.
+            return std::path::Path::new(name).file_stem().map_or_else(
+                || name.to_string(),
+                |stem| stem.to_string_lossy().into_owned(),
+            );
+        }
+        let stem = name
+            .rsplit_once('.')
+            .filter(|(_, extension)| extension.eq_ignore_ascii_case("exe"))
+            .map_or(name, |(stem, _)| stem);
+        return stem.to_string();
     }
     identifier
         .rsplit('.')
@@ -406,5 +424,46 @@ mod tests {
     fn profile_identifiers_have_a_readable_fallback() {
         assert_eq!(friendly_app_name("com.google.Chrome"), "Chrome");
         assert_eq!(friendly_app_name("exe:C:\\Tools\\Zed.exe"), "Zed");
+    }
+
+    #[test]
+    fn a_raw_windows_path_with_no_exe_prefix_still_resolves_to_the_stem() {
+        // `ForegroundApp::id` on Windows is the lower-cased full path with no
+        // `exe:` prefix — see `openlogi-hook`'s `windows/hook.rs`.
+        assert_eq!(
+            friendly_app_name(r"c:\program files\sharex\sharex.exe"),
+            "sharex"
+        );
+        assert_eq!(friendly_app_name(r"c:\windows\notepad.exe"), "notepad");
+    }
+
+    #[test]
+    fn windows_paths_use_the_stem_for_other_executable_extensions() {
+        for (identifier, expected) in [
+            (r"c:\tools\app.com", "app"),
+            (r"c:\tools\鼠标.com", "鼠标"),
+            (r"c:\tools\editor.工具", "editor"),
+            ("C:/tools/应用.COM", "应用"),
+        ] {
+            assert_eq!(friendly_app_name(identifier), expected);
+        }
+    }
+
+    #[test]
+    fn unicode_path_components_without_exe_suffix_are_preserved() {
+        for (identifier, expected) in [
+            ("/opt/apps/鼠标", "鼠标"),
+            (r"c:\tools\鼠标", "鼠标"),
+            ("/opt/apps/editor.工具", "editor.工具"),
+        ] {
+            assert_eq!(friendly_app_name(identifier), expected);
+        }
+    }
+
+    #[test]
+    fn unicode_executable_names_keep_the_stem_with_case_insensitive_suffixes() {
+        for identifier in [r"c:\tools\鼠标.exe", r"exe:C:\Tools\鼠标.ExE", "鼠标.EXE"] {
+            assert_eq!(friendly_app_name(identifier), "鼠标");
+        }
     }
 }

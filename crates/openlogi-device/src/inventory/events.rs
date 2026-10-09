@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, PoisonError, RwLock};
 
 use hidpp::channel::{HidppChannel, HidppMessage, MessageListenerGuard};
+use hidpp::feature::adc_measurement::AdcMeasurementFeature;
 use hidpp::feature::backlight::BacklightEvent;
 use hidpp::feature::unified_battery::BatteryEvent;
 use hidpp::feature::wireless_device_status::WirelessDeviceStatusEvent;
@@ -33,6 +34,9 @@ pub enum HidppEventSource {
     UnifiedBattery,
     /// A keyboard reported a changed backlight level.
     BacklightChanged(BacklightUpdate),
+    /// A device's `AdcMeasurement` feature broadcast a reading or a link
+    /// change — a headset dongle's headset switching on or off.
+    AdcMeasurement,
 }
 
 /// Complete latest-value notification from a keyboard's backlight feature.
@@ -173,13 +177,15 @@ pub(crate) fn observed_event_channel() -> (EventNotifier, EventReceiver, EventOb
 /// Runtime feature indexes whose unsolicited events affect inventory.
 ///
 /// Stored with the immutable feature-table cache because these indexes are
-/// discovered by the same walk. Only unified battery has a battery event;
-/// legacy `0x1000` and voltage `0x1001` remain recovery-scan reads.
+/// discovered by the same walk. Unified battery and `0x1F20` ADC measurement
+/// have battery events; legacy `0x1000` and voltage `0x1001` remain
+/// recovery-scan reads.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct EventFeatureIndices {
     pub(super) wireless_status: Option<u8>,
     pub(super) unified_battery: Option<u8>,
     pub(super) backlight: Option<u8>,
+    pub(super) adc_measurement: Option<u8>,
 }
 
 impl EventFeatureIndices {
@@ -193,6 +199,7 @@ impl EventFeatureIndices {
                 0x1d4b => indices.wireless_status = Some(index),
                 0x1004 => indices.unified_battery = Some(index),
                 0x1982 => indices.backlight = Some(index),
+                0x1f20 => indices.adc_measurement = Some(index),
                 _ => {}
             }
         }
@@ -231,6 +238,13 @@ impl EventFeatureIndices {
                         | hidpp::feature::backlight::BacklightStatus::AlsSaturated
                 ),
             }));
+        }
+        // Unlike the two above, not gated on decoding the payload: an
+        // unknown flags value still announces a link change.
+        if self.adc_measurement == Some(header.feature_index)
+            && AdcMeasurementFeature::is_status_broadcast(function_id)
+        {
+            return Some(HidppEventSource::AdcMeasurement);
         }
         None
     }
@@ -400,6 +414,7 @@ mod tests {
                 wireless_status: Some(2),
                 unified_battery: Some(3),
                 backlight: None,
+                adc_measurement: None,
             }
         );
     }
@@ -433,6 +448,7 @@ mod tests {
                 wireless_status: Some(5),
                 unified_battery: None,
                 backlight: None,
+                adc_measurement: None,
             },
         });
         state.receiver_snapshot_depth.store(1, Ordering::Release);
@@ -462,6 +478,7 @@ mod tests {
                 wireless_status: Some(5),
                 unified_battery: Some(7),
                 backlight: None,
+                adc_measurement: None,
             },
         });
 
@@ -497,6 +514,67 @@ mod tests {
             state.decode(battery, false),
             Some(HidppEventSource::UnifiedBattery)
         );
+    }
+
+    #[test]
+    fn adc_measurement_index_is_its_table_position() {
+        // The G733 feature table, 0x1F20 at runtime index 8.
+        let table = [
+            0x0001, 0x0003, 0x0005, 0x8070, 0x8010, 0x8310, 0x8300, 0x1f20,
+        ];
+        assert_eq!(
+            EventFeatureIndices::from_feature_ids(&table).adc_measurement,
+            Some(8)
+        );
+    }
+
+    #[test]
+    fn adc_measurement_broadcasts_request_reconciliation() {
+        let state = state(None);
+        state.devices.write().unwrap().push(DeviceEvents {
+            device_index: 0xff,
+            features: EventFeatureIndices {
+                wireless_status: None,
+                unified_battery: None,
+                backlight: None,
+                adc_measurement: Some(8),
+            },
+        });
+        let event = |function_id: u8, software_id: u8, bytes: [u8; 3]| {
+            let mut payload = [0; 16];
+            payload[..3].copy_from_slice(&bytes);
+            v20::Message::Long(
+                v20::MessageHeader {
+                    device_index: 0xff,
+                    feature_index: 8,
+                    function_id: U4::from_lo(function_id),
+                    software_id: U4::from_lo(software_id),
+                },
+                payload,
+            )
+            .into()
+        };
+
+        // Both broadcasts captured from a G733 dongle: `11 ff 08 00 00 00 00`
+        // as the headset switched off, `11 ff 08 00 10 4a 03` as it switched
+        // back on while charging.
+        for bytes in [[0x00, 0x00, 0x00], [0x10, 0x4a, 0x03]] {
+            assert_eq!(
+                state.decode(event(0, 0, bytes), false),
+                Some(HidppEventSource::AdcMeasurement),
+                "{bytes:02x?}"
+            );
+        }
+        // A broadcast whose flags value is unknown (the kernel's `0x0F`) still
+        // announces a change; the reconciliation's read decides what it means.
+        assert_eq!(
+            state.decode(event(0, 0, [0x10, 0x4a, 0x0f]), false),
+            Some(HidppEventSource::AdcMeasurement)
+        );
+        // A reply to our own request carries a software id; not an event.
+        assert_eq!(state.decode(event(0, 0xd, [0x10, 0x4a, 0x01]), false), None);
+        // Only event `0` is the status broadcast.
+        assert_eq!(state.decode(event(1, 0, [0x10, 0x4a, 0x01]), false), None);
     }
 
     #[test]

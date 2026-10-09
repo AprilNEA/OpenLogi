@@ -128,7 +128,7 @@ impl DetailTab {
         if matches!(record.kind, DeviceKind::Keyboard) && (caps.buttons || record.asset.is_some()) {
             tabs.push(Self::Keys);
         }
-        if caps.pointer {
+        if caps.pointer || caps.scroll_inversion || caps.hires_wheel {
             tabs.push(Self::Pointer);
         }
         if caps.lighting {

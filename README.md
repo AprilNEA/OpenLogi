@@ -47,7 +47,7 @@ Things OpenLogi does that Options+ won't:
 - **Run on Linux.** Linux is a first-class platform in OpenLogi.
 - **Gestures on supported buttons.** Assign gesture actions to supported controls — or turn gestures off entirely.
 - **Plain-text config.** Everything is one TOML file you can sync between machines however you like.
-- **Script it.** A real CLI alongside the GUI.
+- **Script it.** A real CLI alongside the GUI, with [hardware diagnostics](docs/USAGE.md) for DPI, pointer scaling, and SmartShift.
 
 ## Features
 
@@ -199,11 +199,12 @@ See [USAGE.md](docs/USAGE.md)
 
 ## Configuration
 
-See [CONFIGURATION.md](docs/CONFIGURATION.md)
+Settings use plain TOML; saves preserve symlinked config files. See
+[CONFIGURATION.md](docs/CONFIGURATION.md).
 
 ## Developing
 
-See [DEVELOPMENT.md](docs/DEVELOPMENT.md)
+See [DEVELOPMENT.md](docs/DEVELOPMENT.md), including [macOS input-hook safety](docs/DEVELOPMENT.md#macos-input-hook-safety).
 
 ## Acknowledgments
 

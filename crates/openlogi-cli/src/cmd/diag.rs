@@ -16,6 +16,7 @@ pub mod controls;
 pub mod dpi;
 pub mod features;
 pub mod lighting;
+pub mod pointer_speed;
 pub mod smartshift;
 pub mod wheel;
 
@@ -25,7 +26,7 @@ pub enum DiagCmd {
     Features(features::FeaturesArgs),
     /// Dump HID++ 0x1b04 reprogrammable controls and capability flags.
     Controls(controls::ControlsArgs),
-    /// Read the raw battery report (0x1004 or 0x1000 fields).
+    /// Read the raw battery report (0x1004, 0x1000, or 0x1F20 fields).
     Battery(battery::BatteryArgs),
     /// Read DPI → write a small delta → read back → restore → report.
     Dpi(dpi::DpiArgs),
@@ -35,6 +36,8 @@ pub enum DiagCmd {
     Lighting(lighting::LightingArgs),
     /// Read or set the HID++ 0x2121 wheel reporting resolution.
     Wheel(wheel::WheelArgs),
+    /// Read 0x2205 pointer scaling → write a test value → read back → restore.
+    PointerSpeed(pointer_speed::PointerSpeedArgs),
 }
 
 impl DiagCmd {
@@ -47,6 +50,7 @@ impl DiagCmd {
             Self::Smartshift(args) => smartshift::run(args).await,
             Self::Lighting(args) => lighting::run(args).await,
             Self::Wheel(args) => wheel::run(args).await,
+            Self::PointerSpeed(args) => pointer_speed::run(args).await,
         }
     }
 }
