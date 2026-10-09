@@ -479,11 +479,15 @@ fn run_worker(
                     ScrollOutputMode::Phased { at } if !smoothing => {
                         engine.phased_impulse(input.source, input.impulse, at, emit_smooth);
                     }
-                    ScrollOutputMode::Direct => {
+                    // Input queued before a smoothing toggle no longer fits the
+                    // setting, but its physical event was already consumed, so
+                    // its distance is emitted directly instead of being dropped.
+                    ScrollOutputMode::Direct
+                    | ScrollOutputMode::Smooth { .. }
+                    | ScrollOutputMode::Phased { .. } => {
                         engine.cancel_source(&input.source, emit_smooth);
                         emit_direct(input.impulse);
                     }
-                    ScrollOutputMode::Smooth { .. } | ScrollOutputMode::Phased { .. } => {}
                 }
             }
             Ok(ScrollCommand::CancelSource(source)) => {
@@ -806,6 +810,44 @@ mod tests {
     #[test]
     fn idle_worker_keeps_first_tick_when_smoothing_is_disabled_without_wake() {
         first_horizontal_tick_after_idle_toggle(true);
+    }
+
+    fn tick_queued_before_a_smoothing_toggle(initial_smoothing: bool) {
+        let preferences = preferences(initial_smoothing, 14);
+        let (input, commands, controls) = standalone_input(1, Arc::clone(&preferences));
+        let generation = Arc::clone(&input.generation);
+        let session = HidppSessionId::with_epoch("mouse-a", 1);
+        assert!(input.try_hidpp_scroll(&session, ScrollDelta::wheel_ticks(1.0, 0.0)));
+        preferences.publish(!initial_smoothing, sensitivity(14));
+        drop(input);
+
+        let mut frames = Vec::new();
+        let mut direct = Vec::new();
+        run_worker(
+            |deadline| receive_command(&commands, deadline),
+            &controls,
+            &generation,
+            &preferences,
+            &mut |frame| frames.push(frame),
+            &mut |delta| direct.push(delta),
+        );
+
+        assert!(frames.is_empty(), "no gesture for a stale mode: {frames:?}");
+        assert_eq!(
+            direct,
+            [WheelDelta { x: 1.0, y: 0.0 }],
+            "a tick queued under the old setting must keep its distance"
+        );
+    }
+
+    #[test]
+    fn smooth_tick_queued_before_smoothing_is_disabled_is_emitted_directly() {
+        tick_queued_before_a_smoothing_toggle(true);
+    }
+
+    #[test]
+    fn phased_tick_queued_before_smoothing_is_enabled_is_emitted_directly() {
+        tick_queued_before_a_smoothing_toggle(false);
     }
 
     #[test]
