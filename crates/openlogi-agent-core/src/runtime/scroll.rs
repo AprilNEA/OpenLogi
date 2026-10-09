@@ -91,21 +91,23 @@ pub(crate) struct MotionTuning {
     pub(crate) duration: Duration,
     /// Cap on [`accel_gain`]; `1.0` disables acceleration.
     pub(crate) max_gain: f64,
-    /// Vertical multiplier already applied to the tick before it was queued
-    /// (an OS hook's traditional wheel sensitivity; `1.0` otherwise). The
-    /// rate window divides it back out, so sensitivity scales distance only
-    /// and never how fast the wheel appears to turn.
-    pub(crate) vertical_scale: f64,
+    /// Per-axis sensitivity already applied to the tick before it was queued
+    /// (an OS hook's vertical wheel sensitivity, a thumb wheel's own
+    /// sensitivity; [`WheelDelta::UNIT`] otherwise). The rate window divides
+    /// it back out, so sensitivity scales distance only and never how fast
+    /// the wheel appears to turn.
+    pub(crate) distance_scale: WheelDelta,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct WheelDelta {
+pub(crate) struct WheelDelta {
     x: f64,
     y: f64,
 }
 
 impl WheelDelta {
     const ZERO: Self = Self { x: 0.0, y: 0.0 };
+    const UNIT: Self = Self { x: 1.0, y: 1.0 };
 
     fn is_zero(self) -> bool {
         self.x == 0.0 && self.y == 0.0
@@ -304,8 +306,8 @@ impl ActiveMotion {
         self.recent_ticks.push_back((
             at,
             WheelDelta {
-                x: impulse.x.abs(),
-                y: impulse.y.abs() / tuning.vertical_scale,
+                x: impulse.x.abs() / tuning.distance_scale.x,
+                y: impulse.y.abs() / tuning.distance_scale.y,
             },
         ));
         if self.recent_ticks.len() > ACCEL_WINDOW_MAX_TICKS {

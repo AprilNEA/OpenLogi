@@ -277,6 +277,7 @@ impl InputDispatcher {
             HeldWheel::HorizontalScroll => self.outputs.post_scroll(
                 session,
                 held_wheel_scroll(delta, per_notch, plan.invert_wheel),
+                1.0,
             ),
         }
     }
@@ -305,7 +306,11 @@ impl InputDispatcher {
             WheelOutput::Idle => {}
             WheelOutput::Scroll(delta) => {
                 debug!(key, ?button, action = %action.label(), ?delta, "thumb wheel → scroll");
-                self.outputs.post_scroll(session, delta);
+                self.outputs.post_scroll(
+                    session,
+                    delta,
+                    configuration.sensitivity.scroll_multiplier(),
+                );
             }
             WheelOutput::FireAction(repeats) => {
                 debug!(key, ?button, action = %action.label(), repeats, "thumb wheel → action");
