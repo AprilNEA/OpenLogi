@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(gui)* opt-in Easy-Switch mouse-follow controls on the keyboard's Device tab.
+
+### Fixed
+
+- *(agent)* follow native MX Keys Mini Easy-Switch departure notifications so linked mice switch even after the keyboard leaves the source host.
+
 ## [0.8.12] - 2026-10-09
 
 ### Added

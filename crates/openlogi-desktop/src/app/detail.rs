@@ -633,7 +633,11 @@ fn device_tab(cx: &mut Context<AppView>) -> impl IntoElement {
             .w_full()
             .gap_3()
             .child(device_details_card(pal, cx))
-            .when(keyboard, |column| column.child(keyboard_card(pal, cx)))
+            .when(keyboard, |column| {
+                column
+                    .child(keyboard_card(pal, cx))
+                    .child(host_switch_card(pal, cx))
+            })
             .child(configuration_card(pal, cx)),
     )
 }
@@ -693,6 +697,105 @@ fn keyboard_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
         Icon::empty().path("action-icons/keyboard.svg"),
         row,
     )
+}
+
+fn host_switch_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
+    let mut rows = Vec::new();
+    if let Some(state) = AppState::try_read(cx) {
+        let targets = state.current_host_switch_targets();
+        for mouse in state.current_host_switch_candidates() {
+            let target_key = mouse.config_key.clone();
+            let selected = targets.contains(&target_key);
+            rows.push(
+                host_switch_row(
+                    &target_key,
+                    &mouse.display_name,
+                    selected,
+                    Some(mouse.online),
+                    pal,
+                )
+                .into_any_element(),
+            );
+        }
+        for key in targets {
+            if state
+                .current_host_switch_candidates()
+                .any(|mouse| mouse.config_key == *key)
+            {
+                continue;
+            }
+            let target_key = key.clone();
+            let name = state
+                .devices()
+                .iter()
+                .find(|record| record.config_key == *key)
+                .map_or_else(
+                    || tr!("common.unavailable").to_string(),
+                    |record| record.display_name.clone(),
+                );
+            rows.push(host_switch_row(&target_key, &name, true, None, pal).into_any_element());
+        }
+    }
+    let empty = rows.is_empty();
+    PanelCard::new(
+        tr!("device.easy_switch"),
+        Icon::empty().path("action-icons/keyboard.svg"),
+        v_flex()
+            .w_full()
+            .gap_3()
+            .child(
+                div()
+                    .text_caption()
+                    .text_color(pal.text_muted)
+                    .child(tr!("device.easy_switch_description")),
+            )
+            .children(rows)
+            .when(empty, |column| {
+                column.child(
+                    div()
+                        .text_body()
+                        .text_color(pal.text_muted)
+                        .child(tr!("device.easy_switch_no_targets")),
+                )
+            }),
+    )
+}
+
+fn host_switch_row(
+    key: &str,
+    name: &str,
+    selected: bool,
+    online: Option<bool>,
+    pal: Palette,
+) -> impl IntoElement {
+    let target_key = key.to_string();
+    h_flex()
+        .w_full()
+        .items_center()
+        .gap_3()
+        .child(
+            Switch::new(gpui::SharedString::from(format!(
+                "easy-switch-target:{key}"
+            )))
+            .checked(selected)
+            .accessibility_label(name.to_string())
+            .on_click(move |enabled, _window, cx| {
+                AppState::apply(cx, |state| {
+                    state.commit_host_switch_target(&target_key, *enabled)
+                });
+            }),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_body()
+                .child(name.to_string()),
+        )
+        .when_some(online, |row, online| {
+            row.child(div().flex_shrink_0().child(status_badge(online, pal)))
+        })
 }
 
 fn device_details_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {

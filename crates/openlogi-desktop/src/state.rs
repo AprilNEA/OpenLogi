@@ -71,6 +71,7 @@ mod devices;
 mod dpi;
 mod events;
 mod fn_lock;
+mod host_switch;
 mod inventory;
 mod light;
 mod lighting;

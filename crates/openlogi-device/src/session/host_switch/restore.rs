@@ -12,6 +12,8 @@ use crate::{ChannelRegistry, DeviceIoGate, SharedChannel, reprog_controls::Repro
 /// How a host-switch session released its temporary firmware reporting state.
 #[must_use = "pending firmware restoration must be retained by the session manager"]
 pub enum HostSwitchSessionOutcome {
+    /// Native departure was observed and linked targets were processed.
+    NativeDeparture,
     /// Every host control was restored before the session returned.
     Restored {
         /// Host requested by the keyboard, if the session ended on a key press.
@@ -24,20 +26,6 @@ pub enum HostSwitchSessionOutcome {
         /// Owned capability for retrying restoration on a current publication.
         restore: PendingHostSwitchRestore,
     },
-}
-
-impl HostSwitchSessionOutcome {
-    /// Split the transition intent from any retained firmware ownership.
-    #[must_use]
-    pub fn into_parts(self) -> (Option<u8>, Option<PendingHostSwitchRestore>) {
-        match self {
-            Self::Restored { requested_host } => (requested_host, None),
-            Self::RestorePending {
-                requested_host,
-                restore,
-            } => (requested_host, Some(restore)),
-        }
-    }
 }
 
 /// What a host-switch session writes to hand the keyboard's host controls
@@ -165,6 +153,9 @@ mod tests {
             };
             let node = NodeId::from("host-keyboard".to_owned());
             let registry = ChannelRegistry::default();
+            let pool = crate::ChannelPool::with_backend(
+                crate::channel::scripted::ScriptedBackend::new(Vec::new()),
+            );
             let (raw, writes) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
                 if request[2] == 0x22 && request[3] >> 4 == 3 && request[6] & 1 == 0 {
                     Some(feature_error(request, 0x08))
@@ -181,7 +172,7 @@ mod tests {
 
             let outcome = tokio::time::timeout(
                 std::time::Duration::from_secs(2),
-                run_host_switch_session(route.clone(), stopped, &registry, gate),
+                run_host_switch_session(route.clone(), stopped, &registry, gate, &[], &pool),
             )
             .await
             .expect("failed restoration must return ownership instead of looping");
@@ -201,7 +192,10 @@ mod tests {
                         .1
                         .expect("partial arm rollback must retain firmware ownership")
                 }
-                Ok(HostSwitchSessionOutcome::Restored { .. }) => {
+                Ok(
+                    HostSwitchSessionOutcome::Restored { .. }
+                    | HostSwitchSessionOutcome::NativeDeparture,
+                ) => {
                     panic!("failed writes cannot be clean")
                 }
             };
