@@ -102,10 +102,27 @@ async fn observe_backlights(tx: mpsc::UnboundedSender<BacklightObservation>) {
                 Ok(None) => {}
                 Err(error) => {
                     debug!(?error, "backlight observation channel disconnected");
+                    // The expiry timer lives in the agent, so a lost agent can
+                    // never send the hide that closes a visible indicator.
+                    if tx.send(agent_lost()).is_err() {
+                        return;
+                    }
                     break;
                 }
             }
         }
+    }
+}
+
+/// The observation that closes the indicator when the agent that was driving
+/// it is gone. The generation is meaningless to the window, which only reads
+/// `visible`.
+const fn agent_lost() -> BacklightObservation {
+    BacklightObservation {
+        generation: 0,
+        current_level: 0,
+        levels: 0,
+        visible: false,
     }
 }
 
