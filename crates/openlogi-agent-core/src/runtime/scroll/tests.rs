@@ -25,7 +25,7 @@ fn tuning(step: f64, duration_ms: u64, max_gain: f64) -> MotionTuning {
         step,
         duration: Duration::from_millis(duration_ms),
         max_gain,
-        vertical_scale: 1.0,
+        distance_scale: WheelDelta::UNIT,
     }
 }
 
@@ -998,7 +998,7 @@ fn sensitivity_scales_distance_but_not_acceleration() {
     // An OS hook at sensitivity 100 queues each notch as 100/14 lines.
     let scale = 100.0 / 14.0;
     let scaled = MotionTuning {
-        vertical_scale: scale,
+        distance_scale: wheel(1.0, scale),
         ..tuning(1.0, 100, 7.0)
     };
 
