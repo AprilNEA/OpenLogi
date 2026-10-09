@@ -304,6 +304,10 @@ struct ReversalCooldown {
     /// Whether the pending flip has crossed [`REVERSAL_COMMIT`] and `dir`
     /// now points the new way.
     committed: bool,
+    /// Arrival of this axis's most recent tick in either direction. Once it
+    /// is a full [`REVERSAL_COOLDOWN`] old the axis starts fresh, however
+    /// busy the source's other axis has been meanwhile.
+    last_tick: Option<Instant>,
 }
 
 impl ReversalCooldown {
@@ -339,6 +343,14 @@ impl ReversalCooldown {
         if value == 0.0 {
             return value;
         }
+        if self
+            .last_tick
+            .is_some_and(|last| at.saturating_duration_since(last) >= REVERSAL_COOLDOWN)
+        {
+            // Cold axis: any flip is over, so this tick starts exactly unscaled.
+            *self = Self::default();
+        }
+        self.last_tick = Some(at);
         let sign: i8 = if value > 0.0 { 1 } else { -1 };
         if self.dir == 0 {
             self.dir = sign;
@@ -394,8 +406,9 @@ impl ReversalCooldown {
 /// pulse can finish well inside [`REVERSAL_COOLDOWN`] (the 80 ms minimum
 /// and the 360 ms default both do), and an opposing tick arriving after the
 /// animation ended but while the OS curve is still hot must still be cooled.
-/// The state is dropped once no tick has arrived for a full cooldown — by
-/// then any flip is cold and starts fresh, which is exactly unscaled.
+/// Each axis starts fresh once it has gone a full cooldown without a tick —
+/// by then any flip is cold, which is exactly unscaled — and the entry is
+/// dropped once the whole source has.
 #[derive(Default)]
 struct SourceCooldown {
     x: ReversalCooldown,
