@@ -67,7 +67,10 @@ pub use succession::Identity;
 ///      `HidppOperation::ReadFnLock` appended.
 /// v33: `Agent::unpair_device` appended.
 /// v34: `KeyCombo` gains the Super modifier bit (`Super`, `Win`, `Meta`).
-pub const PROTOCOL_VERSION: u32 = 34;
+/// v35: `Capabilities::no_button_diversion` added — `buttons` widened to cover
+///      the gaming control tables, so the two are no longer the same question
+///      (see [`openlogi_core::device::Capabilities`]).
+pub const PROTOCOL_VERSION: u32 = 35;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to

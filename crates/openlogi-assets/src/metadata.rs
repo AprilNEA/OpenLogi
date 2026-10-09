@@ -66,14 +66,19 @@ pub struct Origin {
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Assignment {
-    /// Logi's per-depot slot identifier, e.g. `mx-keys-mini-2b369_c266`. On
-    /// keyboard depots the `_c<decimal>` suffix is the key's HID++ `0x1b04`
-    /// control ID — see [`Assignment::control_id`]. Empty on depots that
-    /// predate the field.
+    /// Logi's per-depot slot identifier, e.g. `mx-keys-mini-2b369_c266` or
+    /// `g502wireless_g4_m1`. On keyboard depots the `_c<decimal>` suffix is the
+    /// key's HID++ `0x1b04` control ID — see [`Assignment::control_id`]. On
+    /// gaming depots it is the *only* identity an assignment gives, so
+    /// consumers fall back to parsing its `_g<N>_` index when
+    /// [`Self::slot_name`] is empty. Empty on depots that predate the field.
     #[serde(rename = "slotId", default)]
     pub slot_id: String,
-    /// Empty on older keyboard depots whose assignments carry only `slotId`;
+    /// Empty on older keyboard depots and on gaming depots, whose assignments
+    /// carry only `slotId`;
     /// `map_slot_name`-style consumers treat unknown names as "no hotspot".
+    /// An empty name also marks the gaming marker convention — see
+    /// [`Metadata::buttons_origin`].
     #[serde(rename = "slotName", default)]
     pub slot_name: String,
     /// Camera depots ship marker-less settings-slot assignments (under the
@@ -122,13 +127,41 @@ impl Metadata {
         self.images.first().map(|i| i.origin)
     }
 
-    /// Raw assignment iterator over the `device_buttons_image` entry.
-    /// Slot-name → application-button mapping is intentionally left to
-    /// the consumer (the GUI owns the ButtonId enum).
-    pub fn assignments(&self) -> impl Iterator<Item = &Assignment> + '_ {
+    /// The image entry the buttons panel renders and calibrates markers
+    /// against: the view carrying a mouse's thumb-side controls.
+    ///
+    /// Two depot families name it differently. Options+-era depots (MX Master)
+    /// ship `device_buttons_image`; gaming depots (G502) ship `device_side`
+    /// and no `device_buttons_image` at all. They are the same role — the
+    /// side render Logi calibrates assignment markers against — so a depot
+    /// missing the first is read through the second rather than losing every
+    /// hotspot.
+    fn buttons_image(&self) -> Option<&ImageEntry> {
         self.images
             .iter()
             .find(|i| i.key == "device_buttons_image")
+            .or_else(|| self.images.iter().find(|i| i.key == "device_side"))
+    }
+
+    /// Origin of the entry [`Self::assignments`] came from.
+    ///
+    /// Distinct from [`Self::origin`]: an Options+ depot gives every entry the
+    /// same origin, but a gaming depot does not — the G502's `device_image` is
+    /// 1391 wide and its `device_side` 936. Marker translation must use the
+    /// origin of the image actually being drawn, or every hotspot lands off
+    /// its control.
+    #[must_use]
+    pub fn buttons_origin(&self) -> Option<Origin> {
+        self.buttons_image().map(|img| img.origin)
+    }
+
+    /// Raw assignment iterator over the buttons image — the depot's
+    /// `device_buttons_image` entry, or its `device_side` entry when the
+    /// first is absent (see [`Self::buttons_origin`], which reads the same
+    /// entry). Slot → application-button mapping is intentionally left to the
+    /// consumer (the GUI owns the ButtonId enum).
+    pub fn assignments(&self) -> impl Iterator<Item = &Assignment> + '_ {
+        self.buttons_image()
             .into_iter()
             .flat_map(|img| img.assignments.iter())
     }
