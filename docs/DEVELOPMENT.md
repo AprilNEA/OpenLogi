@@ -3,6 +3,9 @@
 This document covers the local development workflow for OpenLogi. For end-user
 build instructions, see the [README](../README.md).
 
+For the experimental Logitech G502 X LIGHTSPEED onboard editor, see the
+[device guide](development/g502x.md), including USB scope, recovery and hardware acceptance.
+
 ## Toolchain
 
 - Stable Rust (Edition 2024, MSRV 1.98 — the floor tracks current stable)

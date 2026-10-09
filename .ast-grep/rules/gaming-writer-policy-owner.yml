@@ -1,0 +1,13 @@
+id: gaming-writer-policy-owner
+language: rust
+severity: error
+message: Use openlogi_hid::gaming_guard::ensure_exclusive for competing gaming writers.
+note: Agent and direct CLI mutations share one vendor-process policy.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-hid/src/gaming_guard.rs
+rule:
+  any:
+    - pattern: $NAME.starts_with("lghub")
+    - pattern: $NAME.starts_with("logioptions")

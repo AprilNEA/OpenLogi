@@ -7,11 +7,8 @@
 //! event, and to [`windows`], which owns the windows themselves.
 
 // Without this Windows runs the exe as a console app and pops a terminal
-// window behind the UI. Debug builds keep the console so logs stay visible.
-#![cfg_attr(
-    all(target_os = "windows", not(debug_assertions)),
-    windows_subsystem = "windows"
-)]
+// window behind the UI. The local GUI build also uses the windowed subsystem.
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 /// Translate into a [`gpui::SharedString`]; declared here for crate-wide scope.
 macro_rules! tr {

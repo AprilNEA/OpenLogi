@@ -96,6 +96,29 @@ impl AgentServer {
               future off a dozen of them with `std::future::ready`"
 )]
 impl Agent for AgentServer {
+    async fn gaming(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        command: openlogi_ipc::gaming::GamingCommand,
+    ) -> Result<openlogi_ipc::gaming::GamingSnapshot, String> {
+        let device = self.shared.device(&route);
+        // An accepted transaction outlives a GUI disconnect; do not abort flash
+        // halfway through merely because its requester stopped waiting.
+        tokio::spawn(async move {
+            device
+                .gaming_transaction(|channel| async move {
+                    crate::gaming::execute(&channel, command)
+                        .await
+                        .map_err(WriteError::Hidpp)
+                })
+                .await
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| error.to_string())?
+    }
+
     async fn protocol_version(self, _: Context) -> u32 {
         PROTOCOL_VERSION
     }
@@ -152,7 +175,13 @@ impl Agent for AgentServer {
         self.shared
             .device(&route)
             .run(HidppOperation::WriteDpi, |c| async move {
-                openlogi_hid::set_dpi_on(&c, dpi).await
+                  use openlogi_agent_core::hardware::{HostDpiWrite, apply_host_dpi_on};
+                  match apply_host_dpi_on(&c, dpi).await? {
+                      HostDpiWrite::Applied => Ok(()),
+                      HostDpiWrite::OnboardOwned => Err(WriteError::Hidpp(
+                          "Onboard mode owns DPI. Edit the onboard profile, or explicitly switch to host mode.".into()
+                      )),
+                  }
             })
             .await
     }

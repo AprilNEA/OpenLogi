@@ -4,10 +4,7 @@
 //! haptic output, and action execution; the overlay only renders the
 //! agent-snapshotted actions and reports hover/activate/cancel interactions.
 
-#![cfg_attr(
-    all(target_os = "windows", not(debug_assertions)),
-    windows_subsystem = "windows"
-)]
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 // `t!` resolves against a backend the invoking crate must generate itself, so
 // both binaries expand `i18n!` over the one catalog in `openlogi-ui` — the same

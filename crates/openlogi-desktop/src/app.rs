@@ -69,6 +69,7 @@ enum Route {
 /// (issue #19).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DetailTab {
+    Gaming,
     /// The mouse model with clickable button hotspots.
     Buttons,
     /// Cursor-centred eight-slot action launcher.
@@ -109,6 +110,16 @@ impl DetailTab {
         // Keyboards get the Keys panel instead, even when they expose ReprogControls.
         let can_show_mouse_model = matches!(record.kind, DeviceKind::Mouse | DeviceKind::Trackball);
         let mut tabs = Vec::new();
+        // This codec has been validated only for the wired G502 X route.
+        if matches!(
+            record.route,
+            Some(openlogi_core::hid::DeviceRoute::Direct {
+                vendor_id: 0x046d,
+                product_id: 0xc098
+            })
+        ) {
+            tabs.push(Self::Gaming);
+        }
         // A webcam is a UVC device with no HID++ capabilities; its detail screen
         // leads with the live preview, then the generic info tab.
         if matches!(record.kind, DeviceKind::Camera) {
@@ -151,6 +162,7 @@ impl DetailTab {
 
     fn label(self) -> gpui::SharedString {
         match self {
+            Self::Gaming => tr!("gaming.title"),
             Self::Buttons => tr!("device.buttons"),
             Self::ActionsRing => tr!("action_ring.actions_ring"),
             Self::Keys => tr!("device.keys"),
@@ -170,6 +182,7 @@ pub struct AppView {
     action_ring_panel: Entity<ActionRingPanel>,
     keyboard_model: Entity<FunctionRowView>,
     dpi_panel: Entity<DpiPanel>,
+    gaming_panel: Entity<crate::features::gaming::GamingPanel>,
     smartshift_panel: Entity<SmartShiftPanel>,
     lighting_panel: Entity<LightingPanel>,
     camera_preview: Entity<CameraPreview>,
@@ -243,6 +256,7 @@ impl AppView {
         let action_ring_panel = cx.new(ActionRingPanel::new);
         let keyboard_model = cx.new(FunctionRowView::new);
         let dpi_panel = cx.new(DpiPanel::new);
+        let gaming_panel = cx.new(|cx| crate::features::gaming::GamingPanel::new(window, cx));
         let smartshift_panel = cx.new(SmartShiftPanel::new);
         let lighting_panel = cx.new(LightingPanel::new);
         let camera_preview = cx.new(CameraPreview::new);
@@ -310,6 +324,7 @@ impl AppView {
             action_ring_panel,
             keyboard_model,
             dpi_panel,
+            gaming_panel,
             smartshift_panel,
             lighting_panel,
             camera_preview,
@@ -627,6 +642,7 @@ impl AppView {
                         action_ring: &self.action_ring_panel,
                         keyboard_model: &self.keyboard_model,
                         dpi_panel: &self.dpi_panel,
+                        gaming_panel: &self.gaming_panel,
                         smartshift_panel: &self.smartshift_panel,
                         lighting_panel: &self.lighting_panel,
                         camera_preview: &self.camera_preview,

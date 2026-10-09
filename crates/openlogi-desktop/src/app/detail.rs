@@ -89,6 +89,7 @@ pub(super) fn detail_header(
 
 /// Long-lived child panels rendered by the device workspace.
 pub(super) struct DetailPanels<'a> {
+    pub gaming_panel: &'a gpui::Entity<crate::features::gaming::GamingPanel>,
     pub mouse_model: &'a gpui::Entity<MouseModelView>,
     pub action_ring: &'a gpui::Entity<ActionRingPanel>,
     pub keyboard_model: &'a gpui::Entity<FunctionRowView>,
@@ -116,6 +117,7 @@ pub(super) fn detail_content(
         .and_then(AppState::current_record)
         .is_some_and(|record| record.online);
     let content = match active {
+        DetailTab::Gaming => panels.gaming_panel.clone().into_any_element(),
         DetailTab::Buttons => {
             buttons_tab(panels.mouse_model, profile_icons, app_catalog, cx).into_any_element()
         }
@@ -245,7 +247,7 @@ fn detail_tab_icon(tab: DetailTab) -> &'static str {
         DetailTab::Pointer => "action-icons/gauge.svg",
         DetailTab::Lighting | DetailTab::Light => "action-icons/palette.svg",
         DetailTab::Camera => "action-icons/camera.svg",
-        DetailTab::Device => "action-icons/settings.svg",
+        DetailTab::Gaming | DetailTab::Device => "action-icons/settings.svg",
     }
 }
 

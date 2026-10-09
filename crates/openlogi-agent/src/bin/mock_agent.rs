@@ -717,6 +717,15 @@ fn snapshot_of(state: &State) -> AgentSnapshot {
               the real server impl, which is the point of the mock"
 )]
 impl Agent for MockAgent {
+    async fn gaming(
+        self,
+        _: Context,
+        _: DeviceRoute,
+        _: openlogi_ipc::gaming::GamingCommand,
+    ) -> Result<openlogi_ipc::gaming::GamingSnapshot, String> {
+        Err("The demo device has no onboard memory".into())
+    }
+
     async fn protocol_version(self, _: Context) -> u32 {
         PROTOCOL_VERSION
     }
