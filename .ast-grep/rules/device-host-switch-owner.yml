@@ -1,0 +1,14 @@
+# Owner: session::host_switch — validate host slots and switch linked targets.
+id: device-host-switch-owner
+language: rust
+severity: error
+message: Use the host-switch session owner; do not command ChangeHost directly from another consumer.
+note: Native departure follows targets without writing to the departed keyboard; diverted keys validate and switch the keyboard last.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-hidpp/src/feature/change_host.rs
+  - crates/openlogi-device/src/session/host_switch.rs
+  - crates/openlogi-device/src/session/host_switch/**
+rule:
+  pattern: $FEATURE.set_current_host($HOST)
