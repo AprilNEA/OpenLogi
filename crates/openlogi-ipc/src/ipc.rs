@@ -63,11 +63,13 @@ pub use succession::Identity;
 ///      the macOS dormancy gate.
 /// v30: `Agent::read_wheel` and `Agent::read_backlight` appended.
 /// v31: `Capabilities::dpi_gestures` appended.
-/// v32: `Agent::read_fn_lock`, `Agent::set_fn_lock` and
-///      `HidppOperation::ReadFnLock` appended.
-/// v33: `Agent::unpair_device` appended.
-/// v34: `KeyCombo` gains the Super modifier bit (`Super`, `Win`, `Meta`).
-pub const PROTOCOL_VERSION: u32 = 34;
+/// v32: Agent::read_fn_lock, Agent::set_fn_lock and
+///      HidppOperation::ReadFnLock appended.
+/// v33: Agent::unpair_device appended.
+/// v34: KeyCombo gains the Super modifier bit (Super, Win, Meta).
+/// v35: AppSettings::enforce_native_keyboard_platform and
+///      HidppOperation::WriteHostPlatform appended.
+pub const PROTOCOL_VERSION: u32 = 35;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to

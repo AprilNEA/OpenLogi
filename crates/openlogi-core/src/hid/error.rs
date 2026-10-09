@@ -136,6 +136,8 @@ pub enum HidppOperation {
     /// Read keyboard Fn-lock (fn inversion). Appended last — variant order is
     /// wire format.
     ReadFnLock,
+    /// Resolve, write, or verify the keyboard's host-platform mode. Appended last — variant order is wire format.
+    WriteHostPlatform,
 }
 
 /// HID++ feature error kind in a serializable wire-safe form.

@@ -156,3 +156,16 @@ fn config_without_asset_source_keeps_automatic_selection() {
         AssetSourcePreference::Automatic
     );
 }
+
+#[test]
+fn native_keyboard_platform_is_opt_in_and_roundtrips() {
+    let mut cfg = Config::default();
+    assert!(!cfg.app_settings.enforce_native_keyboard_platform);
+
+    cfg.app_settings.enforce_native_keyboard_platform = true;
+    let body = toml::to_string_pretty(&cfg).expect("serialize");
+    let parsed = write_and_read(&cfg);
+
+    assert!(body.contains("enforce_native_keyboard_platform = true"));
+    assert!(parsed.app_settings.enforce_native_keyboard_platform);
+}
