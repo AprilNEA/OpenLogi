@@ -21,6 +21,8 @@ use openlogi_core::device::{
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
+use crate::reprog_controls::DPI_MODE_SHIFT_CIDS;
+
 use super::events::{EventFeatureIndices, EventSubscriptionHandle};
 use super::mappings::{
     legacy_battery_level_from_percentage, map_battery_level, map_battery_status, map_device_type,
@@ -335,30 +337,25 @@ async fn probe_extra_capabilities(
     {
         caps.thumbwheel = feature.has_thumbwheel().await.unwrap_or(false);
     }
-    if probe_haptic_controls && let Some(feature) = device.get_feature::<ReprogControlsFeature>() {
-        match has_haptic_panel(&feature).await {
-            Some(found) => caps.haptic_panel = found,
-            None => return Err(()),
+    if let Some(feature) = device.get_feature::<ReprogControlsFeature>() {
+        let count = feature.get_count().await.map_err(|_| ())?;
+        let mut haptic_panel = false;
+        let mut dpi_gestures = false;
+        for index in 0..count {
+            let info = feature.get_cid_info(index).await.map_err(|_| ())?;
+            haptic_panel |= probe_haptic_controls
+                && info.cid == control_ids::HAPTIC_PANEL
+                && info.flags.is_divertable();
+            dpi_gestures |= DPI_MODE_SHIFT_CIDS.contains(&info.cid.0)
+                && info.flags.is_divertable()
+                && info.flags.supports_raw_xy();
         }
+        // Publish only a complete control walk. A lost reply must retain the
+        // cache's last-good capabilities and schedule repair, not hide support.
+        caps.haptic_panel = haptic_panel;
+        caps.dpi_gestures = dpi_gestures;
     }
     Ok(())
-}
-
-/// Whether the device exposes a divertable haptic panel, or `None` when a read
-/// failed part-way through the ~40-entry control walk.
-///
-/// The distinction matters because the answer is memoized for `REFRESH_INTERVAL`:
-/// reporting a lost reply as `false` hides the Actions Ring binding for half a
-/// minute on a device that has the panel.
-async fn has_haptic_panel(feature: &ReprogControlsFeature) -> Option<bool> {
-    let count = feature.get_count().await.ok()?;
-    for index in 0..count {
-        let info = feature.get_cid_info(index).await.ok()?;
-        if info.cid == control_ids::HAPTIC_PANEL {
-            return Some(info.flags.is_divertable());
-        }
-    }
-    Some(false)
 }
 
 #[cfg(test)]
@@ -368,7 +365,82 @@ mod tests {
         battery_voltage::BatteryVoltageFeature, unified_battery::UnifiedBatteryFeature,
     };
 
-    use super::{BatteryProbe, battery_feature_index};
+    use super::{BatteryProbe, ProbedFeatures, battery_feature_index, probe_features};
+    use crate::channel::scripted::{ScriptedRawHidChannel, feature_error, scripted_channel};
+
+    async fn control_probe(
+        features: Vec<u16>,
+        controls: Vec<(u16, u16)>,
+        fail_at: Option<u8>,
+    ) -> ProbedFeatures {
+        let (raw, _) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+            let mut response = vec![0; 20];
+            response[..4].copy_from_slice(&request[..4]);
+            response[0] = 0x11;
+            match (request[2], request[3] >> 4) {
+                (0, 1) => response[4] = 4,
+                (0, 0) => response[4] = 1,
+                (1, 0) => response[4] = u8::try_from(features.len()).unwrap(),
+                (1, 1) => response[4..6]
+                    .copy_from_slice(&features[usize::from(request[4]) - 1].to_be_bytes()),
+                (2, 0) => response[4] = u8::try_from(controls.len()).unwrap(),
+                (2, 1) => {
+                    if fail_at == Some(request[4]) {
+                        return Some(feature_error(request, 0x08));
+                    }
+                    let (cid, flags) = controls[usize::from(request[4])];
+                    response[4..6].copy_from_slice(&cid.to_be_bytes());
+                    let [low, high] = flags.to_le_bytes();
+                    response[8] = low;
+                    response[12] = high;
+                }
+                _ => panic!("unexpected capability request: {request:02x?}"),
+            }
+            Some(response)
+        });
+        let channel = scripted_channel(raw).await;
+        probe_features(&channel, 0xff, None).await.0
+    }
+
+    #[tokio::test]
+    async fn dpi_gestures_require_a_matching_divertable_raw_xy_control() {
+        // A raw-XY gesture button is a decoy: only DPI-family support counts.
+        for cid in [0x00c4, 0x00ed, 0x00fd, 0x0053] {
+            for (flags, supported) in [(0x0120, true), (0x0020, false), (0x0100, false), (0, false)]
+            {
+                let probe = control_probe(
+                    vec![0x0001, 0x1b04],
+                    vec![(0x00c3, 0x0120), (cid, flags)],
+                    None,
+                )
+                .await;
+                let caps = probe.capabilities.unwrap();
+                assert!(!probe.capabilities_incomplete);
+                assert_eq!(
+                    caps.dpi_gestures,
+                    supported && cid != 0x0053,
+                    "CID {cid:04x}, flags {flags:04x}"
+                );
+                assert!(!caps.haptic_panel);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn control_walk_publishes_both_capabilities_only_after_all_rows_succeed() {
+        for fail_at in [Some(0), Some(1), None] {
+            let probe = control_probe(
+                vec![0x0001, 0x1b04, 0x19b0],
+                vec![(0x01a0, 0x0020), (0x00ed, 0x0120)],
+                fail_at,
+            )
+            .await;
+            let caps = probe.capabilities.unwrap();
+            assert_eq!(probe.capabilities_incomplete, fail_at.is_some());
+            assert_eq!(caps.haptic_panel, fail_at.is_none());
+            assert_eq!(caps.dpi_gestures, fail_at.is_none());
+        }
+    }
 
     #[test]
     fn battery_index_is_one_based_in_the_enumerated_table() {

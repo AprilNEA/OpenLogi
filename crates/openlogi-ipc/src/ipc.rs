@@ -17,8 +17,8 @@ use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
 use openlogi_core::config::Lighting;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::hid::{
-    BacklightState, DeviceRoute, Dpi, DpiInfo, LightCommand, PairingError, PasskeyMethod,
-    ReceiverSelector, ScrollWheelMode, SmartShiftStatus, WriteError,
+    BacklightState, DeviceRoute, Dpi, DpiInfo, FnLockState, LightCommand, PairingError,
+    PasskeyMethod, ReceiverSelector, ScrollWheelMode, SmartShiftStatus, WriteError,
 };
 use serde::{Deserialize, Serialize};
 pub use succession::Identity;
@@ -62,7 +62,12 @@ pub use succession::Identity;
 /// v29: `Agent::declare_client` + [`ClientKind`] appended — typed demand for
 ///      the macOS dormancy gate.
 /// v30: `Agent::read_wheel` and `Agent::read_backlight` appended.
-pub const PROTOCOL_VERSION: u32 = 30;
+/// v31: `Capabilities::dpi_gestures` appended.
+/// v32: `Agent::read_fn_lock`, `Agent::set_fn_lock` and
+///      `HidppOperation::ReadFnLock` appended.
+/// v33: `Agent::unpair_device` appended.
+/// v34: `KeyCombo` gains the Super modifier bit (`Super`, `Win`, `Meta`).
+pub const PROTOCOL_VERSION: u32 = 34;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -565,4 +570,17 @@ pub trait Agent {
     async fn read_wheel(route: DeviceRoute) -> Result<ScrollWheelMode, WriteError>;
     /// Read the current keyboard-backlight state from `route`.
     async fn read_backlight(route: DeviceRoute) -> Result<BacklightState, WriteError>;
+    /// Read the current keyboard Fn-lock state from `route`.
+    async fn read_fn_lock(route: DeviceRoute) -> Result<FnLockState, WriteError>;
+    /// Write keyboard Fn-lock on `route` now and answer with the state the
+    /// keyboard echoes back, so the GUI shows what the keyboard took rather
+    /// than what it asked for.
+    async fn set_fn_lock(route: DeviceRoute, fn_lock: bool) -> Result<FnLockState, WriteError>;
+    /// Remove the device `route` names from the receiver it is paired to, so a
+    /// forgotten device stops coming back with the next inventory. The device
+    /// must pair again to reach this host through that receiver. Refused with
+    /// [`PairingFailure::ReceiverBusy`] while a pairing session holds the
+    /// receiver, and with [`PairingFailure::ReceiverNotFound`] for a route
+    /// that names no receiver slot or a receiver that is not connected.
+    async fn unpair_device(route: DeviceRoute) -> Result<(), PairingFailure>;
 }

@@ -107,8 +107,10 @@ pub(super) struct BoltFixture {
     pub(super) cassette: HidCassette,
 }
 
-pub(super) fn bolt_fixture(slots: &[BoltSlot], pass_count: usize) -> BoltFixture {
-    let node_id = NodeId::from("scenario-bolt-node".to_string());
+pub(super) fn bolt_fixture(tag: &str, slots: &[BoltSlot], pass_count: usize) -> BoltFixture {
+    // Register locks are host-wide. Independent replay scenarios must not
+    // contend for the same synthetic receiver, including across test processes.
+    let node_id = NodeId::from(format!("scenario-bolt-node-{}-{tag}", std::process::id()));
     let product_id = 0xc548;
     let mut exchanges = Vec::new();
     for _ in 0..pass_count {
@@ -261,6 +263,7 @@ pub(super) struct DpiFixture {
 
 pub(super) fn malformed_dpi_fixture() -> DpiFixture {
     let bolt = bolt_fixture(
+        "malformed-dpi",
         &[BoltSlot {
             slot: 1,
             online: true,

@@ -86,10 +86,10 @@ let
   # at a separate checkout. The rev must match Cargo.lock (a mismatch fails
   # the build with a hash error, so it cannot drift silently); the hash is
   # shared with outputHashes below.
-  gpuiComponentRev = "36b51819deb52c947a79f8de29e0e9175eda7464";
-  gpuiComponentHash = "sha256-JwayvCQZx67+mFQUydQB+4soA6fjxJUcNhlUVsDNI8w=";
+  gpuiComponentRev = "1ac69bd51f744f3664361d9abd609bfc16de489f";
+  gpuiComponentHash = "sha256-up6s9rM5brgtiBQq9CSQRf8vJ4vE2ZhY4d8wRE1nfDk=";
   gpuiComponentSrc = fetchgit {
-    url = "https://github.com/longbridge/gpui-kit";
+    url = "https://github.com/AprilNEA/gpui-kit";
     rev = gpuiComponentRev;
     hash = gpuiComponentHash;
   };

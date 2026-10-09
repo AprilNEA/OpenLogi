@@ -1,11 +1,57 @@
 use super::home::{connection_icon_path, ordered_device_indices};
 use super::{Capabilities, DetailTab, DeviceKind, DeviceRecord};
+use crate::services::assets::ResolvedAsset;
 use crate::ui::battery::{battery_charging_no_reading, battery_needs_attention};
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, DeviceTransports, LightCapabilities, LightValueRange,
     LightValueUnit,
 };
 use openlogi_core::hid::DeviceRoute;
+
+#[gpui::test]
+fn main_window_renders_profile_confirmation_dialogs(cx: &mut gpui::TestAppContext) {
+    use gpui::{AppContext as _, InteractiveElement as _, ParentElement as _, div};
+    use gpui_component::{Root, WindowExt as _};
+
+    use super::AppView;
+    use crate::services::assets::AssetResolver;
+    use crate::state::{AppState, Sources};
+
+    cx.update(gpui_component::init);
+    cx.update(|cx| {
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let resolver = AssetResolver::new();
+        let state = cx.new(|_| {
+            AppState::new(Sources::in_memory(
+                openlogi_core::config::Config::ephemeral(),
+                &resolver,
+                commands,
+            ))
+        });
+        AppState::set_global(state, cx);
+    });
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| AppView::new(window, cx));
+        Root::new(view, window, cx)
+    });
+    cx.update(|window, cx| {
+        window.open_alert_dialog(cx, |alert, _, _| {
+            alert.confirm().title(
+                div()
+                    .debug_selector(|| "profile-confirmation".into())
+                    .child("Remove Safari profile?"),
+            )
+        });
+        window.draw(cx).clear(cx);
+    });
+    assert!(
+        cx.debug_bounds("profile-confirmation").is_some(),
+        "the production AppView must paint the dialog, even before the agent connects"
+    );
+    cx.simulate_keystrokes("escape");
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(cx.debug_bounds("profile-confirmation").is_none());
+}
 
 /// "Charging" replaces the bogus percentage only when charging *and* the
 /// reading is still 0% (cold start, no cached pre-charge value). A non-zero
@@ -187,6 +233,8 @@ fn tabs_follow_capabilities_not_kind() {
         thumbwheel: false,
         haptic_feedback: false,
         haptic_panel: false,
+        dpi_gestures: false,
+        fn_lock: false,
     });
     // After 0x0005 kind-correction the record has kind=Mouse, not Keyboard.
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Mouse, caps));
@@ -228,6 +276,8 @@ fn keyboard_without_asset_hides_buttons_tab() {
         thumbwheel: false,
         haptic_feedback: false,
         haptic_panel: false,
+        dpi_gestures: false,
+        fn_lock: false,
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(
@@ -248,10 +298,33 @@ fn keyboard_with_buttons_shows_keys_tab() {
         thumbwheel: false,
         haptic_feedback: false,
         haptic_panel: false,
+        dpi_gestures: false,
+        fn_lock: false,
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(tabs.contains(&DetailTab::Keys));
     assert!(!tabs.contains(&DetailTab::Buttons));
+}
+
+/// A sleeping keyboard whose slot was never probed has no capability data,
+/// but a resolved depot already says which controls it has: the Keys tab
+/// shows them so bindings can be set before the keyboard wakes.
+#[test]
+fn keyboard_with_a_depot_but_no_capabilities_shows_keys_tab() {
+    let mut keyboard = record(DeviceKind::Keyboard, None);
+    keyboard.asset = Some(ResolvedAsset {
+        depot: "mx_keys_mini".to_string(),
+        display_name: "MX Keys Mini".to_string(),
+        kind: Some(DeviceKind::Keyboard),
+        image_path: std::path::PathBuf::from("/tmp/mx-keys-mini.png"),
+        hero_image_path: None,
+        glow: None,
+        metadata: openlogi_assets::Metadata::default(),
+        png_width: 1872,
+        png_height: 728,
+    });
+    assert!(DetailTab::tabs_for(&keyboard).contains(&DetailTab::Keys));
+    assert!(!DetailTab::tabs_for(&record(DeviceKind::Keyboard, None)).contains(&DetailTab::Keys));
 }
 
 /// Each panel is independent: a lighting-only device (e.g. a keyboard with

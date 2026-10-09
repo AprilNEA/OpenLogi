@@ -9,7 +9,7 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     v_flex,
 };
-use openlogi_core::device::{Capabilities, DeviceInventory, DeviceKind};
+use openlogi_core::device::{Capabilities, DeviceKind};
 use openlogi_ipc::InventoryHealth;
 use tracing::info;
 
@@ -18,14 +18,14 @@ use crate::features::action_ring::ActionRingPanel;
 use crate::features::camera::controls::CameraControlsPanel;
 use crate::features::camera::preview::CameraPreview;
 use crate::features::keyboard::function_row::FunctionRowView;
-use crate::features::lighting::device::LightingPanel;
+use crate::features::lighting::keyboard_rgb::LightingPanel;
 use crate::features::lighting::standalone::LightPanel;
 use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
 use crate::features::pointer::smartshift::SmartShiftPanel;
 use crate::features::profiles::{AppCatalogPicker, ProfileIconCache};
-use crate::services::assets::AssetResolver;
-use crate::state::{AgentLink, AppState, DeviceRecord, StateEvent};
+use crate::services::assets::user_cache_root;
+use crate::state::{AgentLink, AppState, DeviceRecord, StateEvent, StateEvents};
 use crate::ui::theme::{self, ContentWidth, Typography as _};
 
 pub(crate) mod deeplink;
@@ -44,7 +44,7 @@ pub(crate) use home::{glow_canvas, keyboard_glow};
 /// GPUI has no router, so navigation is a tiny view-local enum that selects
 /// which subtree [`AppView::render`] builds. It is deliberately *not* in
 /// [`AppState`]: the route is pure UI presentation, whereas
-/// [`AppState::current_device`] is functional (it drives the hook bindings,
+/// [`AppState::current_record`] is functional (it drives the hook bindings,
 /// DPI, and persisted selection). The detail route is keyed by the record's
 /// user-facing identity rather than an index so a hot-plug that reorders
 /// or drops the device list can't silently swap the user onto another device —
@@ -120,8 +120,12 @@ impl DetailTab {
         if caps.haptic_panel || (caps.buttons && can_show_mouse_model) {
             tabs.push(Self::ActionsRing);
         }
-        // Function-row remapper when the keyboard reports remappable buttons.
-        if matches!(record.kind, DeviceKind::Keyboard) && caps.buttons {
+        // The Keys tab needs something to bind: HID++ controls (measured, or
+        // last-good for a sleeping keyboard) or the OS-hook F-row a depot
+        // without control markers falls back to. A keyboard with neither
+        // capability data nor a depot — a receiver slot never probed — gets
+        // nothing to configure yet, so no tab.
+        if matches!(record.kind, DeviceKind::Keyboard) && (caps.buttons || record.asset.is_some()) {
             tabs.push(Self::Keys);
         }
         if caps.pointer || caps.scroll_inversion || caps.hires_wheel {
@@ -180,12 +184,28 @@ pub struct AppView {
     /// reads; feature entities subscribe to their own events directly.
     #[expect(dead_code, reason = "held to keep the AppState subscription alive")]
     state_obs: Subscription,
+    /// Explains a forget the receiver refused, which needs the window.
+    #[expect(dead_code, reason = "held to keep the AppState subscription alive")]
+    removal_obs: Subscription,
     /// Whether the last frame was the fail-closed configuration-error screen.
     /// A successful save must redraw that screen even though the error is gone.
     config_issue_visible: bool,
     accessibility_dismissed: bool,
     /// Which section of the device-detail screen is showing.
     active_tab: DetailTab,
+}
+
+/// Open the dialog that says why a device the user asked to forget stayed.
+fn explain_refused_removals(
+    state: &Entity<AppState>,
+    window: &mut Window,
+    cx: &mut Context<AppView>,
+) -> Subscription {
+    cx.subscribe_in(state, window, |_, _, event: &StateEvent, window, cx| {
+        if let StateEvent::DeviceRemovalFailed { name, failure } = event {
+            home::open_removal_failed(window, cx, name, failure);
+        }
+    })
 }
 
 impl Focusable for AppView {
@@ -196,12 +216,7 @@ impl Focusable for AppView {
 
 impl AppView {
     /// Construct the root view and its child entities.
-    pub fn new(
-        _inventories: &[DeviceInventory],
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let cache = AssetResolver::new();
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
         // `AppState` is installed as an entity by `main` (with the IPC command
@@ -218,7 +233,7 @@ impl AppView {
                 );
             } else {
                 info!(
-                    root = ?cache.cache_root(),
+                    root = ?user_cache_root(),
                     "no devices with HID++ model info — using synthetic silhouette"
                 );
             }
@@ -237,9 +252,8 @@ impl AppView {
         let app_catalog = cx.new(|cx| AppCatalogPicker::new(profile_icons.clone(), window, cx));
         let app_catalog_obs = cx.observe(&app_catalog, |_, _, cx| cx.notify());
         let state_obs = cx.subscribe(&state, |view, _, event: &StateEvent, cx| {
-            let active_key = AppState::try_read(cx)
-                .and_then(AppState::current_record)
-                .map(DeviceRecord::device_key);
+            let is_current =
+                |key| AppState::try_read(cx).is_some_and(|state| state.is_current_device(key));
             let on_home = matches!(view.route, Route::Home);
             let relevant = match event {
                 StateEvent::AgentChanged
@@ -252,27 +266,26 @@ impl AppView {
                             view.active_tab,
                             DetailTab::Buttons | DetailTab::ActionsRing | DetailTab::Device
                         )
-                        && active_key.as_ref() == Some(key)
+                        && is_current(key)
                 }
-                StateEvent::DpiChanged(key) => {
-                    !on_home
-                        && view.active_tab == DetailTab::Device
-                        && active_key.as_ref() == Some(key)
+                StateEvent::DpiChanged(key) | StateEvent::FnLockChanged(key) => {
+                    !on_home && view.active_tab == DetailTab::Device && is_current(key)
                 }
                 StateEvent::LightingChanged(key) => {
-                    on_home
-                        || (view.active_tab == DetailTab::Light && active_key.as_ref() == Some(key))
+                    on_home || (view.active_tab == DetailTab::Light && is_current(key))
                 }
                 StateEvent::DeviceConfigChanged(key) => {
                     on_home
                         || (matches!(view.active_tab, DetailTab::Pointer | DetailTab::Device)
-                            && active_key.as_ref() == Some(key))
+                            && is_current(key))
                 }
                 StateEvent::CameraChanged => on_home || view.active_tab == DetailTab::Light,
                 // Child entities own these surfaces and subscribe directly. A
                 // language switch already refreshes every window, and the root
-                // caches no localized text.
+                // caches no localized text. A refused removal is a dialog,
+                // opened through `removal_obs`.
                 StateEvent::SmartShiftChanged(_)
+                | StateEvent::DeviceRemovalFailed { .. }
                 | StateEvent::CameraPermissionChanged
                 | StateEvent::DiagnosticsChanged
                 | StateEvent::LanguageChanged => false,
@@ -289,6 +302,7 @@ impl AppView {
                 cx.notify();
             }
         });
+        let removal_obs = explain_refused_removals(&state, window, cx);
         Self {
             focus_handle,
             route: Route::Home,
@@ -306,6 +320,7 @@ impl AppView {
             _app_catalog_obs: app_catalog_obs,
             appearance_obs: None,
             state_obs,
+            removal_obs,
             config_issue_visible: false,
             accessibility_dismissed: false,
             active_tab: DetailTab::Buttons,
@@ -319,18 +334,15 @@ impl AppView {
 
     /// Drill into a device's settings from the gallery. Makes it the
     /// functionally active device too (hook bindings, DPI, and the persisted
-    /// selection follow [`AppState::set_current_device`]) and switches the
+    /// selection follow [`AppState::select_device`]) and switches the
     /// route to its detail screen.
     fn open_device(&mut self, record_key: String, cx: &mut Context<Self>) {
-        AppState::global(cx).update(cx, |state, cx| {
-            if let Some(idx) = state
+        AppState::apply(cx, |state| {
+            state
                 .devices()
                 .iter()
                 .position(|record| record.record_key() == record_key)
-                && let Some(key) = state.set_current_device(idx)
-            {
-                cx.emit(StateEvent::DeviceSelected(key));
-            }
+                .map_or_else(StateEvents::none, |idx| state.select_device(idx))
         });
         AppState::load_current_device_reads(cx);
         self.route = Route::Device { record_key };
@@ -469,11 +481,24 @@ fn app_title_bar(cx: &App) -> impl IntoElement {
 }
 
 impl Render for AppView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let content = self.render_content(window, cx);
+        // Root owns dialog state but the application must mount its layer.
+        // Keep it present across connecting, permission, and error screens too.
+        div()
+            .relative()
+            .size_full()
+            .child(content)
+            .children(gpui_component::Root::render_dialog_layer(window, cx))
+    }
+}
+
+impl AppView {
     #[expect(
         clippy::too_many_lines,
         reason = "root view assembles every screen branch inline"
     )]
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         theme::apply_ui_scale(window, cx);
         let pal = theme::palette(cx);
 

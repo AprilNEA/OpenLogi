@@ -1,0 +1,17 @@
+# Owner: openlogi_ipc::client — connect_as and probe_version are the only ways
+# to reach the agent's socket; the transport is the mechanics underneath them.
+id: ipc-transport-connect-owner
+language: rust
+severity: error
+message: The agent's socket is opened by openlogi_ipc::client (connect_as to talk to it, probe_version to judge a lock holder). Do not build a client on the raw transport here.
+note: |
+  A hand-built client skips the version check and the declaration. See
+  "Single source of truth" in AGENTS.md.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-ipc/**
+rule:
+  any:
+    - pattern: transport::connect()
+    - pattern: openlogi_ipc::transport::connect()

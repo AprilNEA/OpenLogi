@@ -67,6 +67,22 @@ pub(super) fn buttons_image_for(
         .map(str::to_string)
 }
 
+/// Like [`variant_image_for`] but returns the `image_metadata` resource —
+/// the hotspot-metadata JSON calibrated against this colour variant's
+/// renders. Depots whose variants are *handed* rather than coloured ship no
+/// well-known metadata name at all (Lift keys its metadata as
+/// `core_metadata_left.json` / `core_metadata_right.json`), so the manifest
+/// is the only place their filename appears.
+pub(super) fn metadata_for(
+    manifest: &DepotManifest,
+    base_model_id: &str,
+    ext: u8,
+) -> Option<String> {
+    manifest
+        .resource_for_variant(base_model_id, ext, "image_metadata")
+        .map(str::to_string)
+}
+
 /// Load and parse a depot's `manifest.json`, or `None` when it's missing /
 /// malformed. Read once per [`load_files`](super::AssetResolver::load_files)
 /// so the variant lookups above don't re-parse it for each candidate base.

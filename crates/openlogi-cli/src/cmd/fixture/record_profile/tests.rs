@@ -8,18 +8,21 @@ use openlogi_core::binding::ActionRingSlot;
 use openlogi_core::config::Lighting;
 use openlogi_core::device::DeviceInventory;
 use openlogi_core::hid::{
-    BacklightMode, BacklightState, BacklightStatus, Dpi, DpiInfo, LightCommand, PasskeyMethod,
-    ReceiverSelector, ScrollWheelMode, SmartShiftStatus,
+    BacklightMode, BacklightState, BacklightStatus, Dpi, DpiInfo, FnLockState, LightCommand,
+    PasskeyMethod, ReceiverSelector, ScrollWheelMode, SmartShiftStatus,
 };
 use openlogi_fixture::{
     CANONICAL_DEVICE_PROFILE_JSON, SyntheticIdentityKind, classify_synthetic_identity_bytes,
     classify_synthetic_profile_identity,
 };
+use openlogi_ipc::client::ProtocolSkew;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentStatus, ClientKind,
     ConfigReloadError, ForegroundApps, Generation, Identity, InventoryHealth, MonitorEvent,
-    Observation, PairingCommandError, PairingPhase, PairingUpdate, RingObservation,
+    Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase,
+    PairingUpdate, RingObservation,
 };
+use tarpc::client::RpcError;
 use tarpc::context::Context as TarpcContext;
 use tarpc::server::{BaseChannel, Channel as _};
 
@@ -36,6 +39,7 @@ enum ReadFamily {
     Smartshift,
     Wheel,
     Backlight,
+    FnLock,
 }
 
 #[derive(Clone)]
@@ -143,6 +147,23 @@ impl Agent for TestAgent {
         _status: SmartShiftStatus,
     ) -> Result<(), WriteError> {
         unreachable!("profile capture must never write SmartShift")
+    }
+
+    async fn set_fn_lock(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+        _fn_lock: bool,
+    ) -> Result<FnLockState, WriteError> {
+        unreachable!("profile capture must never write Fn-lock")
+    }
+
+    async fn unpair_device(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+    ) -> Result<(), PairingFailure> {
+        unreachable!("profile capture must never unpair a device")
     }
 
     async fn read_dpi(self, _: TarpcContext, route: DeviceRoute) -> Result<DpiInfo, WriteError> {
@@ -284,11 +305,25 @@ impl Agent for TestAgent {
             0x1982,
         )
     }
+
+    async fn read_fn_lock(
+        self,
+        _: TarpcContext,
+        route: DeviceRoute,
+    ) -> Result<FnLockState, WriteError> {
+        self.read(
+            ReadFamily::FnLock,
+            &route,
+            |settings| &settings.fn_lock,
+            0x40a3,
+        )
+    }
 }
 
-async fn test_connection(agent: TestAgent) -> Connection {
+/// The client end of an in-process agent, past the handshake `connect_as`
+/// would have run: what `capture_connected` receives.
+fn test_client(agent: TestAgent) -> AgentClient {
     let (client_transport, server_transport) = tarpc::transport::channel::unbounded();
-    let client = AgentClient::new(tarpc::client::Config::default(), client_transport).spawn();
     tokio::spawn(
         BaseChannel::with_defaults(server_transport)
             .execute(agent.serve())
@@ -296,11 +331,7 @@ async fn test_connection(agent: TestAgent) -> Connection {
                 tokio::spawn(response);
             }),
     );
-    let version = client
-        .protocol_version(context::current())
-        .await
-        .expect("in-process Agent handshake");
-    Connection { client, version }
+    AgentClient::new(tarpc::client::Config::default(), client_transport).spawn()
 }
 
 fn fixture_agent() -> TestAgent {
@@ -382,19 +413,18 @@ async fn receiver_capture_uses_agent_reads_and_writes_validated_profile_only() {
     let output = directory.path().join("nested/profile.json");
     let agent = fixture_agent();
     let inspection = agent.clone();
-    let connection = test_connection(agent).await;
+    let client = test_client(agent);
 
     capture_connected(
         args(output.clone(), Some("synthetic performance mouse")),
-        connection,
+        client,
     )
     .await
     .expect("semantic capture succeeds");
 
-    assert_eq!(
-        *inspection.declared.lock().expect("declaration lock"),
-        [ClientKind::Cli]
-    );
+    // Declaring is the handshake's job in `openlogi_ipc::client`, tested there.
+    let declared = inspection.declared.lock().expect("declaration lock");
+    assert!(declared.is_empty(), "capture must not grow its own declare");
     assert_eq!(*inspection.snapshots.lock().expect("snapshot lock"), 1);
     let calls = inspection.calls.lock().expect("calls lock").clone();
     assert_eq!(
@@ -493,7 +523,7 @@ async fn standalone_capture_retains_only_the_selected_semantic_device() {
 
     capture_connected(
         args(output.clone(), Some("synthetic studio light")),
-        test_connection(agent).await,
+        test_client(agent),
     )
     .await
     .expect("standalone capture succeeds");
@@ -540,7 +570,7 @@ async fn direct_capture_retains_only_the_selected_link() {
 
     capture_connected(
         args(output.clone(), Some("synthetic direct mouse")),
-        test_connection(agent).await,
+        test_client(agent),
     )
     .await
     .expect("direct capture succeeds");
@@ -568,13 +598,13 @@ async fn receiver_profile_is_stable_whichever_route_selects_the_receiver() {
 
     capture_connected(
         args(mouse_output.clone(), Some("synthetic performance mouse")),
-        test_connection(fixture_agent()).await,
+        test_client(fixture_agent()),
     )
     .await
     .expect("mouse route selects the receiver profile");
     capture_connected(
         args(keyboard_output.clone(), Some("synthetic rgb keyboard")),
-        test_connection(fixture_agent()).await,
+        test_client(fixture_agent()),
     )
     .await
     .expect("keyboard route selects the same receiver profile");
@@ -607,7 +637,7 @@ async fn online_transient_read_aborts_without_output_or_error_detail_leak() {
 
     let error = capture_connected(
         args(output.clone(), Some("Synthetic Performance Mouse")),
-        test_connection(agent).await,
+        test_client(agent),
     )
     .await
     .expect_err("transient read must abort")
@@ -637,7 +667,7 @@ async fn offline_unknown_support_aborts_without_reads_or_output() {
 
     let error = capture_connected(
         args(output.clone(), Some("Synthetic Direct Mouse")),
-        test_connection(agent).await,
+        test_client(agent),
     )
     .await
     .expect_err("unknown offline SmartShift support must abort")
@@ -652,28 +682,25 @@ async fn offline_unknown_support_aborts_without_reads_or_output() {
     assert!(!output.exists());
 }
 
-#[tokio::test]
-async fn protocol_mismatch_aborts_before_snapshot_or_output() {
-    let directory = tempfile::tempdir().expect("tempdir");
-    let output = directory.path().join("profile.json");
-    let agent = fixture_agent();
-    let inspection = agent.clone();
-    let mut connection = test_connection(agent).await;
-    connection.version = PROTOCOL_VERSION - 1;
-
-    let error = capture_connected(args(output.clone(), None), connection)
-        .await
-        .expect_err("protocol mismatch must abort")
-        .to_string();
-
-    assert!(error.contains("protocol v29"), "{error}");
-    assert!(error.contains("requires v30"), "{error}");
-    assert_eq!(*inspection.snapshots.lock().expect("snapshot lock"), 0);
-    assert!(!output.exists());
+#[test]
+fn protocol_skew_is_reported_as_a_safe_agent_only_error() {
+    // The version check itself is `openlogi_ipc::client`'s and tested there;
+    // what this command owns is the wording, which names both versions and
+    // the outcome and nothing about the host.
+    let skew = ConnectError::Skew(ProtocolSkew::AgentOlder {
+        agent: PROTOCOL_VERSION - 1,
+    });
+    let error = safe_connect_error(&skew).to_string();
+    assert!(
+        error.contains(&format!("protocol v{}", PROTOCOL_VERSION - 1)),
+        "{error}"
+    );
+    assert!(error.contains(&format!("v{PROTOCOL_VERSION}")), "{error}");
+    assert!(error.contains("no profile was written"), "{error}");
 }
 
 #[test]
-fn unreachable_and_handshake_failures_are_safe_and_agent_only() {
+fn unreachable_handshake_and_timeout_failures_are_safe_and_agent_only() {
     let endpoint = ConnectError::Endpoint(io::Error::other("/Users/private/agent.sock"));
     let endpoint_error = safe_connect_error(&endpoint).to_string();
     assert!(endpoint_error.contains("running OpenLogi Agent"));
@@ -684,6 +711,17 @@ fn unreachable_and_handshake_failures_are_safe_and_agent_only() {
     let handshake_error = safe_connect_error(&handshake).to_string();
     assert!(handshake_error.contains("healthy IPC handshake"));
     assert!(!handshake_error.contains("shutdown"));
+
+    let timeout_error = safe_connect_error(&ConnectError::Timeout).to_string();
+    assert!(timeout_error.contains("timed out"), "{timeout_error}");
+    assert!(
+        timeout_error.contains("restart it and retry"),
+        "{timeout_error}"
+    );
+    assert!(
+        timeout_error.contains("no profile was written"),
+        "{timeout_error}"
+    );
 }
 
 #[test]

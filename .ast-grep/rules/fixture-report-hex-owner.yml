@@ -1,0 +1,22 @@
+# Owner: openlogi_fixture::format_hex — how a HID report is spelled in a
+# cassette and in the replay diagnostics that quote one.
+id: fixture-report-hex-owner
+language: rust
+severity: error
+message: Reports are spelled by openlogi_fixture::format_hex; use it instead of a second hex table here.
+note: |
+  The replay channel once carried a byte-for-byte copy of the cassette's
+  formatter. See "Single source of truth" in AGENTS.md.
+files:
+  - crates/**/*.rs
+  - xtask/**/*.rs
+ignores:
+  - crates/openlogi-fixture/**
+rule:
+  any:
+    - kind: function_item
+      has:
+        field: name
+        regex: '^format_hex$'
+    - kind: string_literal
+      regex: '0123456789abcdef'

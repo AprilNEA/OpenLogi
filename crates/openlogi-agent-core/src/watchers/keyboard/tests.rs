@@ -1,5 +1,10 @@
 use super::*;
+use crate::receiver_access::ReceiverAccess;
 use openlogi_core::binding::Action;
+use openlogi_hid::{CaptureChannelSlot, ChannelRegistry};
+
+/// The Search key (`0x1b04` control `0x00d4`).
+const SEARCH_KEY: ButtonId = ButtonId::control(0x00d4);
 
 fn target() -> KeyboardTarget {
     KeyboardTarget {
@@ -18,7 +23,7 @@ fn session_id(epoch: u64) -> HidppSessionId {
 fn dispatch(action: Action) -> KeyboardDispatchPlan {
     KeyboardDispatchPlan {
         config_key: "keyboard-a".to_owned(),
-        bindings: BTreeMap::from([(ButtonId::KeySearch, Binding::Single(action))]),
+        bindings: BTreeMap::from([(SEARCH_KEY, Binding::Single(action))]),
     }
 }
 
@@ -114,7 +119,7 @@ fn target_changes_freeze_dispatch_until_teardown_finishes() {
     let mut session = live_session(7);
     let old_dispatch = session.dispatch().clone();
     let mut replacement = target();
-    replacement.wanted.insert(0x00d4, ButtonId::KeySearch);
+    replacement.wanted.insert(0x00d4, SEARCH_KEY);
     let new_dispatch = dispatch(Action::ShowDesktop);
 
     assert!(
@@ -175,30 +180,27 @@ async fn recovery_manager_waits_for_control_events_and_shutdown_between_retries(
             wanted: target().wanted,
             bindings: dispatch(Action::MissionControl).bindings,
         })));
-        let capture = CaptureChannel::default();
+        let capture = CaptureChannelSlot::default();
         // A missing inventory channel makes the real session task fail without
         // opening hardware; ordered Done then drives normal restart recovery.
         let registry = ChannelRegistry::default();
         let access = ReceiverAccess::default();
         let (_signal, device_io) = openlogi_hid::device_io_channel();
         let (ring, _ring_rx) = mpsc::unbounded_channel();
-        let mut actions = crate::runtime::ActionRuntime::new(
-            Arc::default(),
-            capture.clone(),
-            registry.clone(),
-            access.clone(),
-            device_io.clone(),
-            ring,
-        )
-        .unwrap();
+        let device_access = DeviceAccess {
+            channel: capture,
+            registry,
+            receiver_access: access.clone(),
+            device_io,
+        };
+        let mut actions =
+            crate::runtime::ActionRuntime::new(Arc::default(), device_access.clone(), ring)
+                .unwrap();
         let (shutdown_tx, shutdown) = oneshot::channel();
         let mut manager = std::pin::pin!(manage(KeyboardManagerContext {
             spec,
-            keyboard_channel: capture,
             receiver_requests: access.subscribe_requests(),
-            receiver_access: access,
-            registry,
-            device_io,
+            access: device_access,
             dispatcher: actions.dispatcher(),
             shutdown,
         }));

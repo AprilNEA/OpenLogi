@@ -4,48 +4,44 @@
     reason = "the event tap uses Core Graphics / Core Foundation C APIs, and workspace observation uses typed Objective-C notification APIs"
 )]
 
+mod foreground;
+mod grant;
+pub(crate) mod pointer;
+mod sender;
+mod translate;
 mod watchdog;
 
-use std::cell::RefCell;
-use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
 
-use block2::RcBlock;
-use core_foundation::base::{CFTypeRef, TCFType as _};
-use core_foundation::number::CFNumber;
 use core_foundation::runloop::{
     CFRunLoop, CFRunLoopRunResult, kCFRunLoopCommonModes, kCFRunLoopDefaultMode,
 };
-use core_foundation::string::{CFString, CFStringRef};
 use core_graphics::event::{
-    CGEvent, CGEventField, CGEventFlags, CGEventTap, CGEventTapLocation, CGEventTapOptions,
-    CGEventTapPlacement, CGEventTapProxy, CGEventType, CallbackResult, EventField,
+    CGEvent, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
+    CGEventTapProxy, CGEventType, CallbackResult,
 };
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
-use foreign_types_shared::ForeignType as _;
-use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, ProtocolObject};
-use objc2_app_kit::{
-    NSRunningApplication, NSWorkspace, NSWorkspaceApplicationKey,
-    NSWorkspaceDidActivateApplicationNotification,
-};
+use objc2_app_kit::NSWorkspace;
 use objc2_application_services::{AXIsProcessTrusted, AXIsProcessTrustedWithOptions};
-use objc2_foundation::{NSNotification, NSNotificationCenter, NSObjectProtocol};
 use tracing::{debug, error, warn};
 
 use crate::{
-    ButtonId, CursorPosition, EventDevice, EventDisposition, EventTapInfo, ForegroundApp,
-    HookBackend, HookError, HookEvent, KeyEvent, KeyModifiers, MouseEvent, ScrollDelta,
-    TapLocation,
+    CursorPosition, EventDisposition, EventTapInfo, ForegroundApp, HookBackend, HookError,
+    HookEvent, TapLocation,
 };
+pub use foreground::ForegroundApplicationObserver;
+use foreground::observe_frontmost_application;
+pub(crate) use foreground::{frontmost_safari_pid, watch_frontmost_application_activations};
+use grant::{ProbeCue, can_filter_events};
+use translate::{translate, translate_key};
 use watchdog::{
-    CallbackActivity, LifecycleDecision, LifecycleExitReason, LifecycleObservation,
-    LifecycleWatchdog, RearmBudget, TapPhase, WatchdogSignals, stuck_callback,
+    CALLBACK_POLL_INTERVAL, CallbackActivity, CallbackWatchdog, LIFECYCLE_POLL_INTERVAL,
+    LifecycleDecision, LifecycleExitReason, LifecycleObservation, LifecycleWatchdog, PowerEpoch,
+    RearmBudget, TapPhase, WatchdogSignals,
 };
 
 /// Everything `Hook` needs to control the background thread.
@@ -67,542 +63,14 @@ pub(crate) struct HookInner {
 // threads; only CFRunLoopRun must be called on the owning thread.
 unsafe impl Send for HookInner {}
 
-/// Owner of an `NSWorkspace` activation observer.
-///
-/// The notification center retains the registration block. The returned token
-/// identifies that registration; removing it releases the center's block
-/// reference, and dropping the token releases the caller's final reference.
-#[must_use]
-pub struct ForegroundApplicationObserver {
-    center: Retained<NSNotificationCenter>,
-    token: Retained<ProtocolObject<dyn NSObjectProtocol>>,
-}
-
-const SAFARI_BUNDLE_ID: &str = "com.apple.Safari";
-const NO_SAFARI_PROCESS: i32 = 0;
-static FRONTMOST_SAFARI_PID: AtomicI32 = AtomicI32::new(NO_SAFARI_PROCESS);
-
-fn safari_process_id(bundle_id: &str, pid: i32) -> Option<i32> {
-    (bundle_id == SAFARI_BUNDLE_ID && pid > 0).then_some(pid)
-}
-
-fn observe_frontmost_application(
-    app: Option<&NSRunningApplication>,
-    pool: objc2::rc::AutoreleasePool<'_>,
-) -> Option<ForegroundApp> {
-    let foreground = app.and_then(|app| foreground_app_from_running_application(app, pool));
-    let safari_pid = app
-        .zip(foreground.as_ref())
-        .and_then(|(app, foreground)| safari_process_id(&foreground.id, app.processIdentifier()))
-        .unwrap_or(NO_SAFARI_PROCESS);
-    FRONTMOST_SAFARI_PID.store(safari_pid, Ordering::Release);
-    foreground
-}
-
-pub(crate) fn frontmost_safari_pid() -> Option<i32> {
-    let pid = FRONTMOST_SAFARI_PID.load(Ordering::Acquire);
-    (pid > 0).then_some(pid)
-}
-
-impl Drop for ForegroundApplicationObserver {
-    fn drop(&mut self) {
-        objc2::rc::autoreleasepool(|_| {
-            // SAFETY: `token` came from this center's block-observer registration
-            // and is removed exactly once, before both retained objects are dropped.
-            unsafe { self.center.removeObserver(self.token.as_ref()) };
-        });
-    }
-}
-
-/// Register for `NSWorkspaceDidActivateApplicationNotification`.
-pub(crate) fn watch_frontmost_application_activations(
-    on_activation: impl Fn(Option<ForegroundApp>) + Send + Sync + 'static,
-) -> ForegroundApplicationObserver {
-    objc2::rc::autoreleasepool(|_| {
-        let workspace = NSWorkspace::sharedWorkspace();
-        let center = workspace.notificationCenter();
-        let block: RcBlock<dyn Fn(NonNull<NSNotification>)> =
-            RcBlock::new(move |notification: NonNull<NSNotification>| {
-                // A panic must not unwind across the Objective-C block boundary.
-                let result = catch_unwind(AssertUnwindSafe(|| {
-                    let activation = objc2::rc::autoreleasepool(|pool| {
-                        // SAFETY: NotificationCenter passes a live, non-null
-                        // NSNotification to the block for the duration of this call.
-                        let notification = unsafe { notification.as_ref() };
-                        let app = notification.userInfo().and_then(|info| {
-                            // SAFETY: AppKit documents NSWorkspaceApplicationKey as this
-                            // notification's NSRunningApplication-valued user-info entry.
-                            info.objectForKey(unsafe { NSWorkspaceApplicationKey } as &AnyObject)?
-                                .downcast::<NSRunningApplication>()
-                                .ok()
-                        });
-                        observe_frontmost_application(app.as_deref(), pool)
-                    });
-                    on_activation(activation);
-                }));
-                if result.is_err() {
-                    error!("foreground-application activation callback panicked");
-                }
-            });
-        // SAFETY: AppKit exports the name as an immutable process-lifetime
-        // constant. The block captures only `Send + Sync` state and accepts the
-        // exact `NSNotification` argument required by the API. A nil queue asks
-        // the center to invoke it synchronously on the notification-posting thread.
-        let token = unsafe {
-            center.addObserverForName_object_queue_usingBlock(
-                Some(NSWorkspaceDidActivateApplicationNotification),
-                Some(&workspace),
-                None,
-                &block,
-            )
-        };
-        ForegroundApplicationObserver { center, token }
-    })
-}
-
-fn foreground_app_from_running_application(
-    app: &NSRunningApplication,
-    pool: objc2::rc::AutoreleasePool<'_>,
-) -> Option<ForegroundApp> {
-    let bundle_id = app.bundleIdentifier()?;
-    let name = app.localizedName();
-    // SAFETY: Both UTF-8 views are copied into owned Strings before `pool`
-    // drains, so no borrowed Objective-C storage escapes.
-    let (id, name) = unsafe {
-        (
-            bundle_id.to_str(pool).to_owned(),
-            name.as_ref().map(|name| name.to_str(pool).to_owned()),
-        )
-    };
-    let display_name = name.unwrap_or_else(|| id.clone());
-    Some(ForegroundApp { id, display_name })
-}
-
-/// Opaque `IOHIDEventRef` — the HID event backing a `CGEvent`.
-type IOHIDEventRef = *mut std::ffi::c_void;
-
-// Device-of-origin lookup. `CGEventCopyIOHIDEvent` (CoreGraphics) returns the
-// HID event behind a CGEvent; `IOHIDEventGetSenderID` (IOKit) yields the
-// registry id of the producing service. These are undocumented but long-stable
-// symbols (Mac Mouse Fix / Karabiner use them) — the only reliable way to tell a
-// hi-res mouse wheel from a trackpad, which carry identical CGEvent phase flags.
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
-    fn CGEventCopyIOHIDEvent(event: *const std::ffi::c_void) -> IOHIDEventRef;
     // `core-graphics` exposes only the enable-true operation, and does not
     // expose the state read used to budget re-arms.
     fn CGEventTapEnable(tap: core_foundation::mach_port::CFMachPortRef, enable: bool);
     fn CGEventTapIsEnabled(tap: core_foundation::mach_port::CFMachPortRef) -> bool;
 }
-#[link(name = "IOKit", kind = "framework")]
-unsafe extern "C" {
-    fn IOHIDEventGetSenderID(event: IOHIDEventRef) -> u64;
-}
-#[link(name = "CoreFoundation", kind = "framework")]
-unsafe extern "C" {
-    fn CFRelease(cf: *const std::ffi::c_void);
-}
 
-/// The registry id of the device that produced `event`, via its backing
-/// IOHIDEvent. `None` for events with no HID backing (e.g. synthetic ones).
-fn event_sender_id(event: &CGEvent) -> Option<u64> {
-    // SAFETY: `event.as_ptr()` is the live CGEventRef; `CGEventCopyIOHIDEvent`
-    // returns a +1-retained IOHIDEvent (or null) which we release below.
-    let hid = unsafe { CGEventCopyIOHIDEvent(event.as_ptr().cast()) };
-    if hid.is_null() {
-        return None;
-    }
-    // SAFETY: `hid` is a live IOHIDEvent for the duration of the call.
-    let sender = unsafe { IOHIDEventGetSenderID(hid) };
-    // SAFETY: balance the +1 retain from `CGEventCopyIOHIDEvent`.
-    unsafe { CFRelease(hid) };
-    Some(sender)
-}
-
-/// IOKit registry walk to read a device's HID usage page. `IORegistryEntryIDMatching`
-/// builds a matching dict for the service id; `IOServiceGetMatchingService` resolves
-/// it (and releases the dict); `IORegistryEntrySearchCFProperty` reads a property,
-/// searching parents so the usage page on the owning `IOHIDDevice` is found.
-type IoObjectT = u32;
-#[link(name = "IOKit", kind = "framework")]
-unsafe extern "C" {
-    fn IORegistryEntryIDMatching(entry_id: u64) -> *mut std::ffi::c_void;
-    fn IOServiceGetMatchingService(main_port: u32, matching: *const std::ffi::c_void) -> IoObjectT;
-    fn IORegistryEntrySearchCFProperty(
-        entry: IoObjectT,
-        plane: *const std::ffi::c_char,
-        key: CFStringRef,
-        allocator: CFTypeRef,
-        options: u32,
-    ) -> CFTypeRef;
-    fn IOObjectRelease(object: IoObjectT) -> i32;
-}
-
-const IO_REGISTRY_ITERATE_RECURSIVELY: u32 = 1;
-const IO_REGISTRY_ITERATE_PARENTS: u32 = 2;
-
-/// Resolve `sender_id` to its IO service, or `None`. Caller must
-/// `IOObjectRelease` the result.
-fn open_service(sender_id: u64) -> Option<IoObjectT> {
-    // SAFETY: returns a +1 matching dict; `IOServiceGetMatchingService` consumes it.
-    let matching = unsafe { IORegistryEntryIDMatching(sender_id) };
-    if matching.is_null() {
-        return None;
-    }
-    // SAFETY: `matching` is a valid +1 dict (consumed here); 0 = default main port.
-    let service = unsafe { IOServiceGetMatchingService(0, matching) };
-    (service != 0).then_some(service)
-}
-
-/// Read property `key` off `service` (searching parents), as a `+1` CFTypeRef the
-/// caller owns. `None` if absent.
-fn service_property(service: IoObjectT, key: &str) -> Option<CFTypeRef> {
-    let cf_key = CFString::new(key);
-    let plane = c"IOService";
-    // SAFETY: `service` is live; `cf_key` is a valid CFStringRef; null allocator is
-    // the documented default; returns a +1 CF value (or null).
-    let prop = unsafe {
-        IORegistryEntrySearchCFProperty(
-            service,
-            plane.as_ptr(),
-            cf_key.as_concrete_TypeRef(),
-            std::ptr::null(),
-            IO_REGISTRY_ITERATE_RECURSIVELY | IO_REGISTRY_ITERATE_PARENTS,
-        )
-    };
-    (!prop.is_null()).then_some(prop)
-}
-
-/// Cached device facts derived from the IOKit sender id behind a scroll event.
-#[derive(Clone, Default)]
-struct SenderDeviceInfo {
-    event_device: EventDevice,
-    is_trackpad: bool,
-}
-
-/// Device facts for the registry id `sender_id`. A trackpad presents a *mouse*
-/// HID interface for scrolling, so usage can't separate it from a real wheel;
-/// product identity stays stable across wheel modes, unlike CGEvent phase.
-/// Cached per id because the registry walk is slow and identity never changes.
-fn sender_device_info(sender_id: u64) -> SenderDeviceInfo {
-    thread_local! {
-        static CACHE: RefCell<HashMap<u64, SenderDeviceInfo>> = RefCell::new(HashMap::new());
-    }
-    CACHE.with_borrow_mut(|cache| {
-        cache
-            .entry(sender_id)
-            .or_insert_with(|| {
-                let Some(service) = open_service(sender_id) else {
-                    return SenderDeviceInfo::default();
-                };
-                let string_prop = |k| {
-                    // SAFETY: a String property is a +1 CFString; wrap takes ownership.
-                    service_property(service, k)
-                        .map(|p| unsafe { CFString::wrap_under_create_rule(p.cast()) }.to_string())
-                };
-                let num_prop = |k| {
-                    service_property(service, k)
-                        .and_then(|p| {
-                            // SAFETY: `service_property` only yields a non-null, +1 CF
-                            // value, and every key passed below is published by IOKit as
-                            // a CFNumber, so the cast keeps the type; the create rule
-                            // hands that retain to the wrapper, which releases it on drop.
-                            unsafe { CFNumber::wrap_under_create_rule(p.cast()) }.to_i64()
-                        })
-                        .and_then(|n| u32::try_from(n).ok())
-                };
-                let product_name = string_prop("Product");
-                let info = SenderDeviceInfo {
-                    is_trackpad: product_name
-                        .as_deref()
-                        .is_some_and(|p| p.to_lowercase().contains("trackpad")),
-                    event_device: EventDevice {
-                        vendor_id: num_prop("VendorID").or_else(|| num_prop("idVendor")),
-                        product_id: num_prop("ProductID").or_else(|| num_prop("idProduct")),
-                        product_name,
-                    },
-                };
-                // SAFETY: `service` is a live io_object_t we own.
-                unsafe { IOObjectRelease(service) };
-                info
-            })
-            .clone()
-    })
-}
-
-/// Can this process create an *active* (event-filtering) tap right now?
-///
-/// The probe mirrors the real tap's location, placement and options — that is
-/// the capability being tested — but subscribes to `kCGEventNull`, an event
-/// type nothing ever posts, so it cannot gate a single real event during the
-/// microseconds it exists. Dropping it invalidates the port.
-fn can_filter_events() -> bool {
-    CGEventTap::new(
-        CGEventTapLocation::HID,
-        CGEventTapPlacement::HeadInsertEventTap,
-        CGEventTapOptions::Default,
-        vec![CGEventType::Null],
-        |_proxy: CGEventTapProxy, _etype: CGEventType, _event: &CGEvent| CallbackResult::Keep,
-    )
-    .is_ok()
-}
-
-/// Translate a raw OS button number to a [`ButtonId`].
-///
-/// Logi's convention: button 0 = left, 1 = right, 2 = middle, 3 = back,
-/// 4 = forward. Numbers ≥5 don't map to a `ButtonId` we track.
-fn button_number_to_id(n: i64) -> Option<ButtonId> {
-    match n {
-        0 => Some(ButtonId::LeftClick),
-        1 => Some(ButtonId::RightClick),
-        2 => Some(ButtonId::MiddleClick),
-        3 => Some(ButtonId::Back),
-        4 => Some(ButtonId::Forward),
-        _ => None,
-    }
-}
-
-/// Best-effort device identity for a button event's HID sender.
-fn button_source(event: &CGEvent) -> Option<crate::EventDevice> {
-    event_sender_id(event).map(|id| sender_device_info(id).event_device)
-}
-
-/// Map the macOS modifier flags on a `CGEvent` to our [`KeyModifiers`].
-/// `SecondaryFn` is deliberately ignored: it is firmware-internal and
-/// unreliable as a trigger (function-key-remapper spec, Appendix A).
-fn modifiers_from_flags(flags: CGEventFlags) -> KeyModifiers {
-    KeyModifiers {
-        shift: flags.contains(CGEventFlags::CGEventFlagShift),
-        control: flags.contains(CGEventFlags::CGEventFlagControl),
-        option: flags.contains(CGEventFlags::CGEventFlagAlternate),
-        command: flags.contains(CGEventFlags::CGEventFlagCommand),
-    }
-}
-
-/// Translate a keyboard `CGEvent` into a [`KeyEvent`]. Returns `None` for
-/// non-key event types (the mouse path handles those) and for `FlagsChanged`
-/// (modifier state rides on the next key event via its flags; a standalone
-/// flags change carries no key of interest to the remapper).
-fn translate_key(etype: CGEventType, event: &CGEvent) -> Option<KeyEvent> {
-    let pressed = match etype {
-        CGEventType::KeyDown => true,
-        CGEventType::KeyUp => false,
-        // FlagsChanged: no key to remap here.
-        _ => return None,
-    };
-    let keycode = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
-    let keycode = u16::try_from(keycode).ok()?;
-    Some(KeyEvent {
-        keycode,
-        pressed,
-        modifiers: modifiers_from_flags(event.get_flags()),
-    })
-}
-
-/// Convert a `CGEvent` to our [`MouseEvent`] vocabulary. Returns `None`
-/// for event types we don't translate (e.g. move events, unknown buttons).
-fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEvent> {
-    // Skip events OpenLogi itself synthesised, so a remapped click or inverted
-    // scroll we posted doesn't re-enter the hook as real input. Gate the field
-    // read to events we synthesize — keeping the FFI call off the high-rate
-    // pointer-move stream.
-    let can_be_synthetic = matches!(
-        etype,
-        CGEventType::LeftMouseDown
-            | CGEventType::LeftMouseUp
-            | CGEventType::RightMouseDown
-            | CGEventType::RightMouseUp
-            | CGEventType::OtherMouseDown
-            | CGEventType::OtherMouseUp
-            | CGEventType::ScrollWheel
-    );
-    if can_be_synthetic
-        && event.get_integer_value_field(EventField::EVENT_SOURCE_USER_DATA)
-            == openlogi_inject::SYNTHETIC_EVENT_USER_DATA
-    {
-        return None;
-    }
-    match etype {
-        CGEventType::LeftMouseDown => Some(MouseEvent::Button {
-            id: ButtonId::LeftClick,
-            pressed: true,
-            device: button_source(event),
-        }),
-        CGEventType::LeftMouseUp => Some(MouseEvent::Button {
-            id: ButtonId::LeftClick,
-            pressed: false,
-            device: button_source(event),
-        }),
-        CGEventType::RightMouseDown => Some(MouseEvent::Button {
-            id: ButtonId::RightClick,
-            pressed: true,
-            device: button_source(event),
-        }),
-        CGEventType::RightMouseUp => Some(MouseEvent::Button {
-            id: ButtonId::RightClick,
-            pressed: false,
-            device: button_source(event),
-        }),
-        CGEventType::OtherMouseDown => {
-            let n = event.get_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER);
-            button_number_to_id(n).map(|id| MouseEvent::Button {
-                id,
-                pressed: true,
-                device: button_source(event),
-            })
-        }
-        CGEventType::OtherMouseUp => {
-            let n = event.get_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER);
-            button_number_to_id(n).map(|id| MouseEvent::Button {
-                id,
-                pressed: false,
-                device: button_source(event),
-            })
-        }
-        CGEventType::ScrollWheel => {
-            // axis 1 = vertical scroll; axis 2 = horizontal scroll. Continuous
-            // events carry pixel-precise distance; non-continuous events carry
-            // line distance, including fractional lines in the 16.16 fields.
-            // Preserve that distinction instead of handing consumers an
-            // unlabelled number that cannot be safely interpolated.
-            let continuous =
-                event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_IS_CONTINUOUS) != 0;
-            let delta = if continuous {
-                ScrollDelta::pixels(
-                    precise_scroll_delta(event, HORIZONTAL),
-                    precise_scroll_delta(event, VERTICAL),
-                )
-            } else {
-                non_continuous_scroll_delta(event)
-            };
-            // Device identity is the reliable signal: a free-spinning Logitech
-            // wheel sets the CGEvent phase, so phase alone misclassifies it as a
-            // trackpad. Fall back to the phase heuristic only for a sender-less
-            // (synthetic) event, which has no device to identify.
-            let phase = event.get_integer_value_field(SCROLL_PHASE) != 0
-                || event.get_integer_value_field(MOMENTUM_PHASE) != 0
-                || event.get_integer_value_field(SCROLL_COUNT) != 0;
-            let sender = event_sender_id(event);
-            let device_info = sender.map(sender_device_info);
-            let from_trackpad = device_info.as_ref().map_or(phase, |info| info.is_trackpad);
-            Some(MouseEvent::Scroll {
-                delta,
-                from_trackpad,
-                device: device_info.map(|info| info.event_device),
-            })
-        }
-        // Pointer movement feeds gesture-button swipe detection. While a button
-        // is physically held the OS reports *Dragged rather than MouseMoved, so
-        // a gesture button's hold-and-swipe arrives here as OtherMouseDragged.
-        CGEventType::MouseMoved
-        | CGEventType::LeftMouseDragged
-        | CGEventType::RightMouseDragged
-        | CGEventType::OtherMouseDragged => {
-            let dx = event.get_integer_value_field(EventField::MOUSE_EVENT_DELTA_X);
-            let dy = event.get_integer_value_field(EventField::MOUSE_EVENT_DELTA_Y);
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "per-event pointer deltas are small integers, far within i32"
-            )]
-            Some(MouseEvent::Moved {
-                delta_x: dx as i32,
-                delta_y: dy as i32,
-            })
-        }
-        CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput => {
-            // The run-loop slice re-enables the tap (see `thread_main`); surface
-            // the interruption so the runtime cancels any in-progress hold — a
-            // button-up dropped during the gap must not later fire a phantom
-            // swipe off ordinary cursor motion. Logged at debug, not warn:
-            // TapDisabledByUserInput fires during ordinary heavy input bursts and
-            // self-heals next slice, so it isn't worth a warning each time.
-            debug!("CGEventTap disabled by OS (type={etype:?}); re-enabling, cancelling any hold");
-            Some(MouseEvent::CaptureInterrupted)
-        }
-        _ => None,
-    }
-}
-
-/// The three delta encodings macOS attaches to one scroll axis: the coarse
-/// integer line delta, the fixed-point delta, and the pixel-precise point
-/// delta. An app reads whichever it prefers, so any transform must touch all
-/// three.
-#[derive(Clone, Copy)]
-struct ScrollAxisFields {
-    line: CGEventField,
-    fixed: CGEventField,
-    point: CGEventField,
-}
-
-const VERTICAL: ScrollAxisFields = ScrollAxisFields {
-    line: EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_1,
-    fixed: EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_1,
-    point: EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_1,
-};
-const HORIZONTAL: ScrollAxisFields = ScrollAxisFields {
-    line: EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_2,
-    fixed: EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_2,
-    point: EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_2,
-};
-
-// Phase fields aren't exposed by core-graphics 0.25; the raw ids come from
-// `CGEventTypes.h`. A trackpad sets one of these; a mouse wheel never does.
-const SCROLL_PHASE: CGEventField = 99; // kCGScrollWheelEventScrollPhase
-const SCROLL_COUNT: CGEventField = 100; // kCGScrollWheelEventScrollCount
-const MOMENTUM_PHASE: CGEventField = 123; // kCGScrollWheelEventMomentumPhase
-
-/// The pixel magnitude for continuous `axis`, preferring the point field and
-/// falling back to the fixed-point field used by older producers.
-fn precise_scroll_delta(event: &CGEvent, axis: ScrollAxisFields) -> f64 {
-    let point = event.get_double_value_field(axis.point);
-    if point != 0.0 {
-        return point;
-    }
-    let fixed = event.get_double_value_field(axis.fixed);
-    if fixed != 0.0 {
-        return fixed;
-    }
-    0.0
-}
-
-/// Preserve fractional line distance from a non-continuous high-resolution
-/// wheel. `CGEventGetDoubleValueField` decodes the signed 16.16 field for us;
-/// the integer line field is only the fallback for older event producers.
-///
-/// A producer may expose only point distance. Apple defines no universal
-/// point-to-line ratio, so retain that event as pixels instead of inventing a
-/// wheel-tick conversion or dropping it as a zero-line event.
-fn non_continuous_scroll_delta(event: &CGEvent) -> ScrollDelta {
-    let x = fractional_line_scroll_delta(event, HORIZONTAL);
-    let y = fractional_line_scroll_delta(event, VERTICAL);
-    if x != 0.0 || y != 0.0 {
-        return ScrollDelta::wheel_ticks(x, y);
-    }
-
-    ScrollDelta::pixels(
-        event.get_double_value_field(HORIZONTAL.point),
-        event.get_double_value_field(VERTICAL.point),
-    )
-}
-
-fn fractional_line_scroll_delta(event: &CGEvent, axis: ScrollAxisFields) -> f64 {
-    let fixed = event.get_double_value_field(axis.fixed);
-    if fixed != 0.0 {
-        return fixed;
-    }
-    line_scroll_delta(event, axis)
-}
-
-#[expect(
-    clippy::cast_precision_loss,
-    reason = "physical per-event line deltas are small integers, exactly represented by f64"
-)]
-fn line_scroll_delta(event: &CGEvent, axis: ScrollAxisFields) -> f64 {
-    event.get_integer_value_field(axis.line) as f64
-}
-
-const CALLBACK_WATCHDOG_POLL_INTERVAL: Duration = Duration::from_millis(20);
-const LIFECYCLE_WATCHDOG_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const FREEZE_HAZARD_EXIT_CODE: i32 = 78;
 
 /// Event types the HID tap observes. Pointer *Dragged variants are required
@@ -700,8 +168,8 @@ impl HookBackend for Backend {
     /// had been revoked, would keep re-arming a tap macOS no longer lets it
     /// service, and would wedge clicks machine-wide until reboot (#674). Only
     /// creating a filtering tap tracks the live grant, so both are consulted: the
-    /// trust read short-circuits the probe for a process that was never granted,
-    /// which keeps a denied agent from asking `WindowServer` twice a second.
+    /// trust read short-circuits the probe for a process that was never granted.
+    /// While the tap is live, [`ProbeCue`] decides when this runs at all.
     fn has_accessibility() -> bool {
         // SAFETY: takes no arguments and only reads the current trust state — the
         // non-prompting counterpart of `AXIsProcessTrustedWithOptions`.
@@ -866,28 +334,31 @@ fn spawn_callback_watchdog(
     thread::Builder::new()
         .name("openlogi-hook-watchdog".into())
         .spawn(move || {
+            let mut watchdog =
+                CallbackWatchdog::watching_since(signals.now_millis(), power_epoch());
             loop {
                 let phase = signals.phase();
                 if matches!(phase, TapPhase::TapStopped | TapPhase::ThreadExited) {
                     return;
                 }
-                thread::sleep(CALLBACK_WATCHDOG_POLL_INTERVAL);
-                let Some(entered) = callback_activity.entered_at_ms() else {
-                    continue;
-                };
-                let Some(elapsed) = stuck_callback(signals.now_millis(), entered) else {
+                thread::sleep(CALLBACK_POLL_INTERVAL);
+                let entered = callback_activity.entered_at_ms();
+                let Some(stuck) =
+                    watchdog.evaluate(signals.now_millis(), entered, power_epoch())
+                else {
                     continue;
                 };
                 // Re-sample: a fresh high-frequency event may have rewritten
                 // the complete activity state during the budget check.
-                if callback_activity.entered_at_ms() != Some(entered) {
+                if callback_activity.entered_at_ms() != entered {
                     continue;
                 }
                 if signals.phase() != TapPhase::Armed {
                     continue;
                 }
                 error!(
-                    stuck_ms = duration_millis(elapsed),
+                    stalled_ms = duration_millis(stuck.stalled),
+                    watched_ms = duration_millis(stuck.watched),
                     "OS mouse-hook callback stuck past budget — exiting agent to \
                      restore system input (HID CGEventTap freeze hazard)"
                 );
@@ -902,6 +373,44 @@ fn spawn_callback_watchdog(
             }
         })
         .map(|_| ())
+}
+
+/// The kernel's last sleep and wake instants, for [`PowerEpoch`]. A failed
+/// read yields the zero epoch, which never differs from itself, so the
+/// watchdog then charges every gap in full — the behaviour before #952.
+fn power_epoch() -> PowerEpoch {
+    PowerEpoch {
+        slept_us: kernel_instant_us(c"kern.sleeptime"),
+        woke_us: kernel_instant_us(c"kern.waketime"),
+    }
+}
+
+/// One `timeval` sysctl as microseconds since the epoch; zero when unreadable.
+fn kernel_instant_us(name: &std::ffi::CStr) -> i64 {
+    let mut value = libc::timeval {
+        tv_sec: 0,
+        tv_usec: 0,
+    };
+    let mut len = std::mem::size_of::<libc::timeval>();
+    // SAFETY: `name` is NUL-terminated; `value` and `len` describe a live,
+    // correctly sized buffer the kernel fills up to `len` before storing the
+    // byte count back into `len`. Nothing is written (null new value, 0).
+    let rc = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            (&raw mut value).cast(),
+            &raw mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 || len != std::mem::size_of::<libc::timeval>() {
+        return 0;
+    }
+    value
+        .tv_sec
+        .saturating_mul(1_000_000)
+        .saturating_add(i64::from(value.tv_usec))
 }
 
 /// Independent lifecycle watchdog for paths that never enter the Rust tap
@@ -926,19 +435,27 @@ fn spawn_lifecycle_watchdog(
                     phase: signals.phase(),
                     stop_requested: signals.stop_requested(),
                     tap_progress_at: signals.tap_progress_at(),
+                    power: power_epoch(),
                 };
                 match watchdog.evaluate(signals.now(), observation) {
                     LifecycleDecision::Continue => {
-                        thread::park_timeout(LIFECYCLE_WATCHDOG_POLL_INTERVAL);
+                        thread::park_timeout(LIFECYCLE_POLL_INTERVAL);
                     }
                     LifecycleDecision::Complete => return,
-                    LifecycleDecision::Exit { reason, elapsed } => {
+                    LifecycleDecision::Exit {
+                        reason,
+                        watched,
+                        stalled,
+                    } => {
                         // The tap thread may have completed immediately after
                         // the decision. Only a still-hazardous phase may exit.
                         let phase = signals.phase();
                         let still_hazardous = match reason {
                             LifecycleExitReason::TapThreadStalled => {
-                                matches!(phase, TapPhase::Arming | TapPhase::Armed)
+                                matches!(
+                                    phase,
+                                    TapPhase::Arming | TapPhase::Armed | TapPhase::Probing
+                                )
                             }
                             LifecycleExitReason::StopTimedOut => phase != TapPhase::ThreadExited,
                         };
@@ -949,6 +466,9 @@ fn spawn_lifecycle_watchdog(
                             LifecycleExitReason::TapThreadStalled if phase == TapPhase::Arming => {
                                 "HID tap creation or activation stopped making progress"
                             }
+                            LifecycleExitReason::TapThreadStalled if phase == TapPhase::Probing => {
+                                "HID tap capability probe stopped making progress"
+                            }
                             LifecycleExitReason::TapThreadStalled => {
                                 "HID tap thread stopped making progress while tap remained active"
                             }
@@ -956,9 +476,13 @@ fn spawn_lifecycle_watchdog(
                                 "hook stop requested but tap thread did not exit"
                             }
                         };
+                        // `stalled` is uptime since the stall began; `watched` is
+                        // the part this thread was running to see. A wide gap
+                        // between them says the process itself was frozen.
                         error!(
                             reason,
-                            elapsed_ms = duration_millis(elapsed),
+                            stalled_ms = duration_millis(stalled),
+                            watched_ms = duration_millis(watched),
                             ?phase,
                             "HID CGEventTap lifecycle did not make progress before deadline — \
                              exiting agent to restore system input"
@@ -977,10 +501,16 @@ fn spawn_lifecycle_watchdog(
 
 /// Service the tap until it has to be released: an explicit stop, a stopped run
 /// loop, a revoked permission, or a tap the OS will not keep enabled.
-fn service_tap(tap: &CGEventTap<'_>, signals: &WatchdogSignals, tap_disabled: &AtomicBool) {
+fn service_tap(
+    tap: &CGEventTap<'_>,
+    signals: &WatchdogSignals,
+    tap_disabled: &AtomicBool,
+    probe: &ProbeCue,
+) {
     // Service the tap in short slices instead of an unbounded
-    // `run_current()`. Between slices we re-check that we may still filter
-    // events: an active tap at the HID location that outlives its permission
+    // `run_current()`. Between slices, when the grant watch cues it, we
+    // re-check that we may still filter events: an active tap at the HID
+    // location that outlives its permission
     // wedges the *entire* system input stream — mouse and keyboard alike —
     // until reboot. If the user revokes access while we're live, tear the tap
     // down right here, on the tap's own thread, so input is restored even
@@ -1009,7 +539,14 @@ fn service_tap(tap: &CGEventTap<'_>, signals: &WatchdogSignals, tap_disabled: &A
             CFRunLoopRunResult::TimedOut | CFRunLoopRunResult::HandledSource => {}
         }
         signals.mark_tap_progress();
-        if !Backend::has_accessibility() {
+        // Everything below this point is a WindowServer or TCC round trip, not
+        // tap servicing. Publish that so the lifecycle watchdog judges it
+        // against `TAP_PROBE_BUDGET`: around a sleep transition these calls
+        // have been measured at ~1.6 s, and charging them to the 1.5 s stall
+        // budget force-exited a perfectly healthy agent (#952). The capability
+        // probe itself runs only when the cue says the grant may have changed.
+        signals.set_phase(TapPhase::Probing);
+        if probe.take() && !Backend::has_accessibility() {
             warn!(
                 "Accessibility revoked while the event tap was live — \
                  disabling the tap to avoid wedging system input"
@@ -1031,6 +568,7 @@ fn service_tap(tap: &CGEventTap<'_>, signals: &WatchdogSignals, tap_disabled: &A
         // Enabling is idempotent while the tap is already live. Only reached
         // while the live capability probe above still succeeds.
         tap.enable();
+        signals.mark_armed();
     }
 }
 
@@ -1113,8 +651,7 @@ fn thread_main(
     }
     signals.mark_tap_progress();
     tap.enable();
-    signals.mark_tap_progress();
-    signals.set_phase(TapPhase::Armed);
+    signals.mark_armed();
 
     if rl_tx.send(run_loop.clone()).is_err() {
         debug!("hook parent dropped before run loop was ready; stopping");
@@ -1127,7 +664,13 @@ fn thread_main(
         return;
     }
 
-    service_tap(&tap, &signals, &tap_disabled);
+    // Armed on the tap thread and dropped with it, so the grant watch's
+    // observers go away when the tap does.
+    let probe = ProbeCue::arm();
+    service_tap(&tap, &signals, &tap_disabled, &probe);
+    // Every exit uses the short teardown budget, including a revoked grant
+    // or exhausted re-arm budget that leaves the loop in `Probing`.
+    signals.mark_armed();
 
     // Detach the tap from the event stream synchronously before unwinding,
     // so input recovers immediately rather than whenever CF happens to
@@ -1250,12 +793,5 @@ mod tests {
             ),
             CallbackResult::Keep
         ));
-    }
-
-    #[test]
-    fn safari_snapshot_accepts_only_safari_with_a_positive_pid() {
-        assert_eq!(safari_process_id(SAFARI_BUNDLE_ID, 417), Some(417));
-        assert_eq!(safari_process_id("com.apple.finder", 417), None);
-        assert_eq!(safari_process_id(SAFARI_BUNDLE_ID, 0), None);
     }
 }
