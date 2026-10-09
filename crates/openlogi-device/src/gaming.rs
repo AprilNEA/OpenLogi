@@ -288,10 +288,19 @@ pub async fn restore_profile_edit(
     backend: &dyn HidBackend,
     edit: &ProfileEdit,
 ) -> Result<bool, GamingError> {
+    let feature = open_onboard(backend, &edit.original.route).await?;
+    restore_with_feature(&feature, edit).await
+}
+
+async fn restore_with_feature(
+    feature: &OnboardProfilesFeature,
+    edit: &ProfileEdit,
+) -> Result<bool, GamingError> {
     let expected = edit.render()?;
-    let mut current = backup(backend, &edit.original.route).await?;
+    let mut current = backup_with_feature(feature, &edit.original.route).await?;
     let original = &edit.original.sectors[usize::from(edit.sector)];
     if current.sectors.get(usize::from(edit.sector)) == Some(original) {
+        edit.verify_current(&current)?;
         return Ok(false);
     }
     if current.mode != 1 || current.sectors.get(usize::from(edit.sector)) != Some(&expected) {
@@ -301,7 +310,6 @@ pub async fn restore_profile_edit(
     }
     current.sectors[usize::from(edit.sector)].clone_from(original);
     edit.verify_current(&current)?;
-    let feature = open_onboard(backend, &edit.original.route).await?;
     if feature
         .read_sector(edit.sector, current.sector_size)
         .await?
@@ -427,6 +435,21 @@ pub async fn apply_on(
     }
     let feature = open_shared(shared).await?;
     apply_with_feature(&feature, edit).await
+}
+
+/// Restore an applied edit on the leased channel, rejecting subsequent memory edits.
+/// The caller must durably capture current memory and exclude competing writers.
+pub async fn restore_on(
+    shared: &crate::SharedChannel,
+    edit: &ProfileEdit,
+) -> Result<bool, GamingError> {
+    if !shared.matches(&edit.original.route) {
+        return Err(GamingError::Invalid(
+            "backup belongs to a different device".into(),
+        ));
+    }
+    let feature = open_shared(shared).await?;
+    restore_with_feature(&feature, edit).await
 }
 
 /// Explicit execution-mode change on a leased agent channel.

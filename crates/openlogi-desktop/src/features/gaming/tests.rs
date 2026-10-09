@@ -75,3 +75,68 @@ fn invalid_dpi_and_disabled_default_cannot_be_submitted(cx: &mut TestAppContext)
         assert!(panel.draft.buttons.is_empty());
     });
 }
+
+#[gpui::test]
+fn successful_write_retains_undo_until_restore_and_exports_preserve_drafts(
+    cx: &mut TestAppContext,
+) {
+    cx.update(gpui_component::init);
+    let (view, cx) = cx.add_window_view(GamingPanel::new);
+    view.update_in(cx, |panel, window, cx| {
+        let route = DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc098,
+        };
+        panel.accept_snapshot(
+            snapshot(),
+            route.clone(),
+            SnapshotUpdate::Refresh,
+            window,
+            cx,
+        );
+        let original = panel.collect_draft(cx).unwrap();
+        let write = AppliedDraft {
+            route: route.clone(),
+            backup_json: "original".into(),
+            draft: original,
+        };
+        let mut written = snapshot();
+        written.profiles[0].name = "Edited".into();
+        panel.accept_snapshot(
+            written.clone(),
+            route.clone(),
+            SnapshotUpdate::Applied(write),
+            window,
+            cx,
+        );
+        assert_eq!(panel.last_write.as_ref().unwrap().backup_json, "original");
+        assert_eq!(panel.name.read(cx).value().as_ref(), "Edited");
+        assert!(!panel.dirty(cx));
+        panel
+            .name
+            .update(cx, |input, cx| input.set_value("Unsaved", window, cx));
+        panel.accept_snapshot(
+            written.clone(),
+            route.clone(),
+            SnapshotUpdate::PreserveDraft,
+            window,
+            cx,
+        );
+        assert_eq!(panel.name.read(cx).value().as_ref(), "Unsaved");
+        assert!(panel.dirty(cx));
+        assert!(panel.last_write.is_some());
+        panel.accept_snapshot(written, route.clone(), SnapshotUpdate::Refresh, window, cx);
+        assert!(
+            panel.last_write.is_some(),
+            "refresh cannot lose a recoverable write"
+        );
+        assert!(
+            panel.restorable(cx).is_none(),
+            "offline routes cannot restore"
+        );
+        panel.accept_snapshot(snapshot(), route, SnapshotUpdate::Restored(1), window, cx);
+        assert!(panel.last_write.is_none());
+        assert_eq!(panel.name.read(cx).value().as_ref(), "Test profile");
+        assert!(!panel.dirty(cx));
+    });
+}

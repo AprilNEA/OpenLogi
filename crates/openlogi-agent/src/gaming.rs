@@ -133,6 +133,23 @@ pub async fn execute(
                 .map_err(|e| format!("{e}; backup: {path}"))?;
             saved_path = Some(path);
         }
+        GamingCommand::Restore { backup_json, draft } => {
+            openlogi_hid::gaming_guard::ensure_exclusive(
+                openlogi_hid::gaming_guard::Writer::Agent,
+            )?;
+            let edit = make_edit(&backup_json, draft)?;
+            if !channel.matches(&edit.original.route) {
+                return Err("Backup device mismatch".into());
+            }
+            let current = gaming::backup_on(channel)
+                .await
+                .map_err(|e| e.to_string())?;
+            let path = save_json(&current, "before-restore")?;
+            gaming::restore_on(channel, &edit)
+                .await
+                .map_err(|e| format!("{e}; backup: {path}"))?;
+            saved_path = Some(path);
+        }
         GamingCommand::SetMode(mode) => {
             openlogi_hid::gaming_guard::ensure_exclusive(
                 openlogi_hid::gaming_guard::Writer::Agent,
@@ -153,6 +170,10 @@ pub async fn execute(
     let backup = gaming::backup_on(channel)
         .await
         .map_err(|e| e.to_string())?;
+    snapshot(&backup, saved_path)
+}
+
+fn snapshot(backup: &GamingBackup, saved_path: Option<String>) -> Result<GamingSnapshot, String> {
     let profiles = backup
         .profiles()
         .map_err(|e| e.to_string())?
@@ -177,7 +198,7 @@ pub async fn execute(
     Ok(GamingSnapshot {
         mode: backup.mode,
         active_profile: backup.active_profile,
-        backup_json: serde_json::to_string(&backup).map_err(|e| e.to_string())?,
+        backup_json: serde_json::to_string(backup).map_err(|e| e.to_string())?,
         profiles,
         saved_path,
     })

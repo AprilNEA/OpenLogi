@@ -102,7 +102,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 35);
+    assert_eq!(PROTOCOL_VERSION, 36);
 }
 
 #[test]
@@ -743,9 +743,16 @@ fn gaming_wire_messages() {
     assert_wire(
         &GamingCommand::Apply {
             backup_json: "{}".into(),
-            draft,
+            draft: draft.clone(),
         },
         "03027b7d010141fbf401fb2003fbb004fb400600000001010401014b00",
+    );
+    assert_wire(
+        &GamingCommand::Restore {
+            backup_json: "{}".into(),
+            draft,
+        },
+        "06027b7d010141fbf401fb2003fbb004fb400600000001010401014b00",
     );
     assert_wire(
         &GamingSnapshot {

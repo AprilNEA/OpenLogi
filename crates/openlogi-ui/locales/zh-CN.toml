@@ -617,6 +617,10 @@ star_key = "星形键"
 control_key = "控件"
 
 [gaming]
+restore_last = "恢复上次写入"
+restore_profile = "恢复配置 %{number} 上次写入前的内容"
+restore_help = "可恢复本窗口内最近一次成功写入；如鼠标内存已有后续修改则拒绝恢复。请先撤销未保存的草稿。"
+restored = "已恢复原配置，请启用／重新加载该配置。恢复前备份：%{path}"
 title = "板载配置"
 subtitle = "板载 DPI 档位、回报率与按键分配。暂不支持多步骤宏与按游戏自动切换。"
 read = "读取／刷新"

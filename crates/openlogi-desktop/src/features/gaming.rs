@@ -32,9 +32,24 @@ enum Layer {
     Shifted,
 }
 
+#[derive(Clone)]
+struct AppliedDraft {
+    route: DeviceRoute,
+    backup_json: String,
+    draft: GamingDraft,
+}
+
+enum SnapshotUpdate {
+    Refresh,
+    PreserveDraft,
+    Applied(AppliedDraft),
+    Restored(u16),
+}
+
 pub struct GamingPanel {
     route: Option<DeviceRoute>,
     snapshot: Option<GamingSnapshot>,
+    last_write: Option<AppliedDraft>,
     draft: GamingDraft,
     name: Entity<InputState>,
     shortcut: Entity<InputState>,
@@ -66,6 +81,7 @@ impl GamingPanel {
         Self {
             route: None,
             snapshot: None,
+            last_write: None,
             draft: GamingDraft::default(),
             name,
             shortcut,
@@ -184,6 +200,31 @@ impl GamingPanel {
         self.request(command, window, cx);
     }
 
+    fn restorable(&self, cx: &App) -> Option<&AppliedDraft> {
+        self.last_write.as_ref().filter(|write| {
+            Self::current_route(cx).as_ref() == Some(&write.route)
+                && self.route.as_ref() == Some(&write.route)
+                && self.snapshot.as_ref().is_some_and(|s| s.mode == 1)
+                && !self.busy
+                && !self.needs_refresh
+                && !self.dirty(cx)
+        })
+    }
+
+    fn restore(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(write) = self.restorable(cx).cloned() else {
+            return;
+        };
+        self.request(
+            GamingCommand::Restore {
+                backup_json: write.backup_json,
+                draft: write.draft,
+            },
+            window,
+            cx,
+        );
+    }
+
     fn request(&mut self, command: GamingCommand, window: &mut Window, cx: &mut Context<Self>) {
         if self.busy {
             return;
@@ -197,14 +238,22 @@ impl GamingPanel {
         if !matches!(command, GamingCommand::Read) && self.route.as_ref() != Some(&route) {
             return;
         }
-        let applied = matches!(command, GamingCommand::Apply { .. });
-        let preserve = matches!(
-            command,
-            GamingCommand::Prepare { .. } | GamingCommand::Export
-        );
+        let update = match &command {
+            GamingCommand::Apply { backup_json, draft } => SnapshotUpdate::Applied(AppliedDraft {
+                route: route.clone(),
+                backup_json: backup_json.clone(),
+                draft: draft.clone(),
+            }),
+            GamingCommand::Restore { draft, .. } => SnapshotUpdate::Restored(draft.sector),
+            GamingCommand::Prepare { .. } | GamingCommand::Export => SnapshotUpdate::PreserveDraft,
+            _ => SnapshotUpdate::Refresh,
+        };
         let mutation = matches!(
             command,
-            GamingCommand::Apply { .. } | GamingCommand::SetMode(_) | GamingCommand::Select(_)
+            GamingCommand::Apply { .. }
+                | GamingCommand::Restore { .. }
+                | GamingCommand::SetMode(_)
+                | GamingCommand::Select(_)
         );
         let (reply, received) = tokio::sync::oneshot::channel();
         let sender = AppState::global(cx).read(cx).ipc_sender();
@@ -231,41 +280,7 @@ impl GamingPanel {
                     return;
                 }
                 match result {
-                    Ok(snapshot) => {
-                        this.message = snapshot.saved_path.as_ref().map_or_else(
-                            || tr!("gaming.ready").to_string(),
-                            |path| {
-                                if applied {
-                                    tr!("gaming.written", path = path).to_string()
-                                } else {
-                                    tr!("gaming.saved", path = path).to_string()
-                                }
-                            },
-                        );
-                        if !preserve {
-                            let sector = if snapshot
-                                .profiles
-                                .iter()
-                                .any(|p| p.sector == this.draft.sector)
-                            {
-                                this.draft.sector
-                            } else {
-                                snapshot
-                                    .profiles
-                                    .iter()
-                                    .find(|p| p.sector == snapshot.active_profile)
-                                    .or_else(|| snapshot.profiles.first())
-                                    .map_or(0, |p| p.sector)
-                            };
-                            this.snapshot = Some(snapshot);
-                            this.route = Some(route);
-                            this.needs_refresh = false;
-                            this.select(sector, window, cx);
-                            if applied {
-                                this.page = Page::Profiles;
-                            }
-                        }
-                    }
+                    Ok(snapshot) => this.accept_snapshot(snapshot, route, update, window, cx),
                     Err(error) => {
                         this.message = error;
                         this.error = true;
@@ -276,6 +291,55 @@ impl GamingPanel {
             });
         })
         .detach();
+    }
+
+    fn accept_snapshot(
+        &mut self,
+        snapshot: GamingSnapshot,
+        route: DeviceRoute,
+        update: SnapshotUpdate,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.message = snapshot.saved_path.as_ref().map_or_else(
+            || tr!("gaming.ready").to_string(),
+            |path| match &update {
+                SnapshotUpdate::Applied(_) => tr!("gaming.written", path = path).to_string(),
+                SnapshotUpdate::Restored(_) => tr!("gaming.restored", path = path).to_string(),
+                _ => tr!("gaming.saved", path = path).to_string(),
+            },
+        );
+        match update {
+            SnapshotUpdate::PreserveDraft => return,
+            SnapshotUpdate::Applied(write) => {
+                self.last_write = Some(write);
+                self.page = Page::Profiles;
+            }
+            SnapshotUpdate::Restored(sector) => {
+                self.last_write = None;
+                self.draft.sector = sector;
+                self.page = Page::Profiles;
+            }
+            SnapshotUpdate::Refresh => {}
+        }
+        let sector = if snapshot
+            .profiles
+            .iter()
+            .any(|p| p.sector == self.draft.sector)
+        {
+            self.draft.sector
+        } else {
+            snapshot
+                .profiles
+                .iter()
+                .find(|p| p.sector == snapshot.active_profile)
+                .or_else(|| snapshot.profiles.first())
+                .map_or(0, |p| p.sector)
+        };
+        self.snapshot = Some(snapshot);
+        self.route = Some(route);
+        self.needs_refresh = false;
+        self.select(sector, window, cx);
     }
 
     fn assign(&mut self, action: Option<GamingAction>, cx: &mut Context<Self>) {

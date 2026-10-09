@@ -67,7 +67,9 @@ pub use succession::Identity;
 ///      `HidppOperation::ReadFnLock` appended.
 /// v33: `Agent::unpair_device` appended.
 /// v34: `KeyCombo` gains the Super modifier bit (`Super`, `Win`, `Meta`).
-pub const PROTOCOL_VERSION: u32 = 35;
+/// v35: `Agent::gaming` appended for the onboard profile editor.
+/// v36: `GamingCommand::Restore` appended for guarded last-write restoration.
+pub const PROTOCOL_VERSION: u32 = 36;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to

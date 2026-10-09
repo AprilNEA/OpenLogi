@@ -523,6 +523,21 @@ impl GamingPanel {
                         div()
                             .text_caption()
                             .text_color(pal.text_muted)
+                            .child(tr!("gaming.restore_help")),
+                    )
+                    .child(
+                        control_button("gaming-restore")
+                            .label(self.last_write.as_ref().map_or_else(
+                                || tr!("gaming.restore_last"),
+                                |write| tr!("gaming.restore_profile", number = write.draft.sector),
+                            ))
+                            .disabled(self.restorable(cx).is_none())
+                            .on_click(cx.listener(|this, _, window, cx| this.restore(window, cx))),
+                    )
+                    .child(
+                        div()
+                            .text_caption()
+                            .text_color(pal.text_muted)
                             .child(tr!("gaming.backup_help")),
                     )
                     .child(

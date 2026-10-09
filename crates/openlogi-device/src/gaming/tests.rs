@@ -281,3 +281,99 @@ async fn pointer_ownership_reads_mode_and_never_mutates_or_guesses_unknown_modes
         assert_eq!(handle.written_reports(), reports);
     }
 }
+
+/// An in-memory firmware responder exercises the real transport and transaction.
+#[tokio::test]
+async fn restore_checks_full_memory_and_writes_only_the_original_profile() {
+    let edit = ProfileEdit {
+        schema_version: 1,
+        original: captured(),
+        sector: 1,
+        patch: ProfilePatch {
+            name: Some("Temporary".into()),
+            ..ProfilePatch::default()
+        },
+    };
+    for scenario in 0..6 {
+        let mut memory = edit.original.clone();
+        if scenario != 1 {
+            memory.sectors[1] = edit.render().unwrap();
+        }
+        match scenario {
+            2 => memory.sectors[0][7] ^= 1,
+            3 => memory.sectors[1][200] ^= 1,
+            4 => memory.mode = 2,
+            _ => {}
+        }
+        let memory = Arc::new(std::sync::Mutex::new(memory));
+        let shared_memory = Arc::clone(&memory);
+        let writing = std::sync::Mutex::new(Vec::new());
+        let (raw, handle) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+            if request.len() < 7 || request[2] != 9 {
+                return None;
+            }
+            let mut response = vec![0; 20];
+            response[0] = 0x11;
+            response[1..4].copy_from_slice(&request[1..4]);
+            let mut memory = shared_memory.lock().unwrap();
+            let mut writing = writing.lock().unwrap();
+            match request[3] >> 4 {
+                0 => response[4..13].copy_from_slice(&[1, 3, 1, 1, 1, 11, 2, 0, 255]),
+                2 => response[4] = memory.mode,
+                4 => response[4..6].copy_from_slice(&memory.active_profile.to_be_bytes()),
+                5 => {
+                    let sector = usize::from(u16::from_be_bytes([request[4], request[5]]));
+                    let offset = usize::from(u16::from_be_bytes([request[6], request[7]]));
+                    response[4..].copy_from_slice(&memory.sectors[sector][offset..offset + 16]);
+                }
+                6 => {
+                    assert_eq!(&request[4..10], &[0, 1, 0, 0, 0, 255]);
+                    writing.clear();
+                }
+                7 => writing.extend_from_slice(&request[4..20]),
+                8 => {
+                    memory.sectors[1].copy_from_slice(&writing[..255]);
+                    if scenario == 5 {
+                        memory.sectors[1][200] ^= 1;
+                    }
+                }
+                _ => panic!("unexpected mutation during restore"),
+            }
+            Some(response)
+        });
+        let feature = OnboardProfilesFeature::new(scripted_channel(raw).await, 255, 9);
+        let result = restore_with_feature(&feature, &edit).await;
+        let reports = handle.written_reports();
+        let writes: Vec<_> = reports
+            .iter()
+            .filter(|r| (6..=8).contains(&(r[3] >> 4)))
+            .collect();
+        match scenario {
+            0 => {
+                assert!(result.unwrap());
+                assert_eq!(writes.len(), 18);
+                let restored = memory.lock().unwrap();
+                assert_eq!(restored.sectors, edit.original.sectors);
+                assert_eq!(restored.active_profile, edit.original.active_profile);
+                assert_eq!(restored.mode, 1);
+            }
+            1 => {
+                assert!(!result.unwrap());
+                assert!(writes.is_empty());
+            }
+            5 => {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("readback mismatch")
+                );
+                assert_eq!(writes.len(), 18, "uncertain writes are never retried");
+            }
+            _ => {
+                result.unwrap_err();
+                assert!(writes.is_empty());
+            }
+        }
+    }
+}

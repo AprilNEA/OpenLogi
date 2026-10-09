@@ -78,4 +78,9 @@ pub enum GamingCommand {
     },
     SetMode(u8),
     Select(u16),
+    /// Restore the original bytes only if memory still matches this applied draft.
+    Restore {
+        backup_json: String,
+        draft: GamingDraft,
+    },
 }
