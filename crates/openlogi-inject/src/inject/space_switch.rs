@@ -40,13 +40,31 @@ impl SpaceState {
                 .enumerate()
                 .any(|(i, id)| *id == 0 || self.ordered[..i].contains(id))
         {
+            // #1086: this rejection needs no multi-display topology at all —
+            // a zero/empty id or a duplicate in `ordered` fails it on a
+            // single display too, unlike the display-match miss #1694
+            // already logs in the macOS backend.
+            tracing::debug!(
+                display = %self.display,
+                current = self.current,
+                ordered = ?self.ordered,
+                "Space target: the read Space list failed validation"
+            );
             return Err(Failure::Unavailable);
         }
-        let index = self
-            .ordered
-            .iter()
-            .position(|id| *id == self.current)
-            .ok_or(Failure::Unavailable)?;
+        let Some(index) = self.ordered.iter().position(|id| *id == self.current) else {
+            // The current Space passed validation above (nonzero, no
+            // duplicates) but isn't in `ordered` at all — e.g. a Space kind
+            // the `type` filter upstream excludes (Stage Manager, a kind
+            // other than the plain/fullscreen 0|4 it keeps).
+            tracing::debug!(
+                display = %self.display,
+                current = self.current,
+                ordered = ?self.ordered,
+                "Space target: the current Space is not in the ordered list"
+            );
+            return Err(Failure::Unavailable);
+        };
         let neighbor = match direction {
             Direction::Previous => index.checked_sub(1),
             Direction::Next => index.checked_add(1),

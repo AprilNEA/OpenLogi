@@ -16,6 +16,11 @@ The GUI writes atomically and keeps `config.toml.backup.1` through
 `config.toml.backup.5`. Existing comments and formatting are retained when the
 GUI updates known fields.
 
+When `config.toml` is a symbolic link, saves update its target and preserve
+the link. A missing target and its parent directories are created. Backups stay
+beside the configured `config.toml`, while a persistent `.lock` file stays beside
+the target so different links to the same file share the writer lock.
+
 The schema is strict: misspelled, obsolete, and out-of-range fields stop the
 config from loading instead of silently selecting a default or disappearing on
 the next save. The GUI then opens in read-only mode and shows the exact TOML
@@ -45,7 +50,10 @@ optional physical device key.
 - `asset_source`: `automatic`, `openlogi`, `cloudflare`, or `fastly`
 - `language`, `appearance`, `device_view_mode` (`grid`, `list`, or `carousel`),
   optional theme names, and optional UI radius
-- `smooth_scroll` toggles finite animation for traditional mouse-wheel input
+- `smooth_scroll` toggles finite animation for traditional mouse-wheel input. With it
+  off, a diverted horizontal thumb wheel still scrolls as a phased gesture (ended after
+  120 ms idle) so apps that reveal content on horizontal swipes, like Messages, react;
+  vertical wheel output stays a plain wheel
 - `vertical_scroll_sensitivity`, from `1` through `100` (`14` is 1×);
   continuous trackpad input remains native
 - `thumbwheel_sensitivity`, from `1` through `100` (`14` is 1×)
@@ -54,8 +62,12 @@ optional physical device key.
   under the pointer; the desktop uses the global bindings. Keyboard profiles
   continue to follow the focused application. Pointer targeting is supported
   on macOS, Windows, and X11; unsupported sessions such as Wayland use the
-  focused application. An unavailable pointer target is not treated as desktop.
-  OpenLogi never activates a background window to send a shortcut: mouse
+  focused application, and so does a pointer over a surface OpenLogi cannot
+  identify, such as a system overlay, or a lookup that fails. An unidentified
+  surface uses the focused application's profile rather than the desktop's;
+  with no focused application there is no such profile and the global bindings
+  apply, as in focused mode. OpenLogi never activates a background window to
+  send a shortcut: over an identified window or the desktop, mouse
   bindings that produce keystrokes or run workflows are skipped unless the
   hovered window is focused. Global actions such as desktop switching can run
   without changing application focus.
@@ -84,14 +96,15 @@ Common device fields are:
   diverted to OpenLogi while the agent runs; an unbound key keeps its firmware
   function, so binding `None` is the same as removing the entry. Naming one
   control under both spellings in the same table is an error, not a merge
-- `per_app_bindings`: sparse action overlays keyed by macOS bundle id, Linux
-  application id, exact lower-cased Windows executable path, or
-  `exe:<filename>.exe`. The Buttons panel edits these under its Profile
-  selector, which offers applications the agent has seen in front — the only
-  identifiers guaranteed to match, since the four platforms name applications
-  differently and a profile authored under one namespace will not match under
-  another. An overlay holds one action per button; gesture-direction maps live
-  in `bindings`
+- `per_app_bindings`: sparse action overlays keyed by macOS bundle id (or the
+  exact executable path for applications without a bundle id), Linux application
+  id, exact lower-cased Windows executable path, or `exe:<filename>.exe`. macOS
+  paths retain their original spelling and case. The Buttons panel edits these
+  under its Profile selector. After bringing an application to the foreground,
+  choose it from Recent applications to use the identifier the agent observed.
+  Identifiers differ between platforms, so a profile authored under one
+  namespace will not match under another. An overlay holds one action per
+  button; gesture-direction maps live in `bindings`
 - `action_ring`: default and complete per-application eight-slot layouts;
   `action_ring.per_app` takes the same selectors as `per_app_bindings`,
   including the Windows `exe:<filename>` fallback

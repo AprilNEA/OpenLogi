@@ -102,6 +102,8 @@ pub(super) fn outdated_gui_body(cx: &App) -> Div {
 
 /// Fail-closed frame for config load/save/conflict/reload failures.
 pub(super) fn config_issue_body(message: SharedString, cx: &App) -> Div {
+    use gpui::InteractiveElement as _;
+
     notice_body(tr!("device.configuration"), message, cx)
         .size_full()
         .child(
@@ -110,7 +112,10 @@ pub(super) fn config_issue_body(message: SharedString, cx: &App) -> Div {
                 .child(
                     Button::new("open-config-folder")
                         .label(tr!("app.open_configuration_folder"))
-                        .on_click(|_, _, cx| cx.dispatch_action(&OpenConfigFolder)),
+                        .debug_selector(|| "open-config-folder".into())
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(OpenConfigFolder), cx);
+                        }),
                 )
                 .child(
                     Button::new("restart-after-config-error")

@@ -1,7 +1,7 @@
 > [!WARNING]
 > **OpenLogi is under active development** and not yet stable — features and config may still change. Give the repo a **Star** ⭐ and **Watch** 👀 it to get notified when a new release lands.
 
-<h4 align="right"><strong>English</strong> | <a href="docs/README.zh-CN.md">简体中文</a> | <a href="docs/README.ja.md">日本語</a> | <a href="docs/README.de.md">Deutsch</a> | <a href="docs/README.fr.md">Français</a> | <a href="docs/README.ko.md">한국어</a> | <a href="docs/README.ru.md">Русский</a></h4>
+<h4 align="right"><strong>English</strong> | <a href="docs/README.zh-CN.md">简体中文</a> | <a href="docs/README.ja.md">日本語</a> | <a href="docs/README.de.md">Deutsch</a> | <a href="docs/README.fr.md">Français</a> | <a href="docs/README.ko.md">한국어</a> | <a href="docs/README.ru.md">Русский</a> | <a href="docs/README.es.md">Español</a></h4>
 
 <p align="center">
     <img src="https://assets.openlogi.org/brand/openlogi-icon.png" width="138" alt="OpenLogi"/>
@@ -47,7 +47,7 @@ Things OpenLogi does that Options+ won't:
 - **Run on Linux.** Linux is a first-class platform in OpenLogi.
 - **Gestures on supported buttons.** Assign gesture actions to supported controls — or turn gestures off entirely.
 - **Plain-text config.** Everything is one TOML file you can sync between machines however you like.
-- **Script it.** A real CLI alongside the GUI.
+- **Script it.** A real CLI alongside the GUI, with [hardware diagnostics](docs/USAGE.md) for DPI, pointer scaling, and SmartShift.
 
 ## Features
 
@@ -199,11 +199,12 @@ See [USAGE.md](docs/USAGE.md)
 
 ## Configuration
 
-See [CONFIGURATION.md](docs/CONFIGURATION.md)
+Settings use plain TOML; saves preserve symlinked config files. See
+[CONFIGURATION.md](docs/CONFIGURATION.md).
 
 ## Developing
 
-See [DEVELOPMENT.md](docs/DEVELOPMENT.md)
+See [DEVELOPMENT.md](docs/DEVELOPMENT.md), including [macOS input-hook safety](docs/DEVELOPMENT.md#macos-input-hook-safety).
 
 ## Acknowledgments
 

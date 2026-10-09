@@ -443,7 +443,7 @@ view_changelog = "Посмотреть список изменений"
 update_connection_policy = "OpenLogi проверяет обновления только при включённой автоматической проверке или по вашей команде."
 stable_channel = "Стабильный канал"
 check_for_updates_consent_title = "Проверять обновления?"
-update_consent_description = "OpenLogi может раз при запуске проверять наличие новой версии на GitHub. Обновления не загружаются автоматически, телеметрия не отправляется. Это можно изменить в настройках."
+update_consent_description = "OpenLogi может раз при запуске проверять наличие новой версии на %{host}. Обновления не загружаются автоматически, телеметрия не отправляется. Это можно изменить в настройках."
 
 [assets]
 assets = "Ресурсы"
@@ -566,6 +566,7 @@ custom_shortcut = "Пользовательское сочетание клав�
 shortcut_e_g_cmd_plus_shift_plus_p = "Сочетание, например Cmd+Shift+P"
 application_folder_path_or_url = "Приложение, путь к папке или URL"
 open_application_or_folder = "Открыть приложение или папку"
+custom_action_invalid_input = "Couldn't recognize that input."
 
 [keyboard]
 editor_unavailable = "Редактор недоступен"

@@ -443,7 +443,7 @@ view_changelog = "변경 내역 보기"
 update_connection_policy = "자동 확인을 켰거나 업데이트 확인을 선택한 경우에만 업데이트를 확인하기 위해 연결합니다."
 stable_channel = "안정 채널"
 check_for_updates_consent_title = "업데이트를 확인할까요?"
-update_consent_description = "실행할 때마다 GitHub에서 새 버전을 한 번 확인할 수 있습니다. 업데이트를 자동으로 다운로드하거나 원격 측정 데이터를 보내지 않습니다. 설정에서 변경할 수 있습니다."
+update_consent_description = "실행할 때마다 %{host}에서 새 버전을 한 번 확인할 수 있습니다. 업데이트를 자동으로 다운로드하거나 원격 측정 데이터를 보내지 않습니다. 설정에서 변경할 수 있습니다."
 
 [assets]
 assets = "리소스"
@@ -566,6 +566,7 @@ custom_shortcut = "사용자 지정 단축키"
 shortcut_e_g_cmd_plus_shift_plus_p = "단축키(예: Cmd+Shift+P)"
 application_folder_path_or_url = "앱, 폴더 경로 또는 URL"
 open_application_or_folder = "앱 또는 폴더 열기"
+custom_action_invalid_input = "Couldn't recognize that input."
 
 [keyboard]
 editor_unavailable = "편집기를 사용할 수 없음"

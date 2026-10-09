@@ -443,7 +443,7 @@ view_changelog = "Переглянути список змін"
 update_connection_policy = "Фоновий оновлювач відсутній. OpenLogi підключається лише тоді, коли ви вмикаєте автоматичну перевірку або натискаєте «Перевірити наявність оновлень»."
 stable_channel = "Стабільний канал"
 check_for_updates_consent_title = "Перевіряти наявність оновлень?"
-update_consent_description = "OpenLogi може раз під час запуску перевіряти на GitHub наявність нової версії. Оновлення не завантажуються автоматично, телеметрія не надсилається. Це можна змінити в налаштуваннях."
+update_consent_description = "OpenLogi може раз під час запуску перевіряти на %{host} наявність нової версії. Оновлення не завантажуються автоматично, телеметрія не надсилається. Це можна змінити в налаштуваннях."
 
 [assets]
 assets = "Ресурси"
@@ -566,6 +566,7 @@ custom_shortcut = "Власне сполучення клавіш"
 shortcut_e_g_cmd_plus_shift_plus_p = "Сполучення клавіш, напр. Cmd+Shift+P"
 application_folder_path_or_url = "Програма, шлях до папки або URL"
 open_application_or_folder = "Відкрити програму або папку"
+custom_action_invalid_input = "Couldn't recognize that input."
 
 [keyboard]
 editor_unavailable = "Редактор недоступний"

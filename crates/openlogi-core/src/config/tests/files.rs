@@ -92,11 +92,8 @@ fn migrated_load_backs_up_the_pre_migration_source_exactly_once() {
 fn config_backups_rotate_between_generations() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("config.toml");
-    fs::write(&path, b"first").expect("write first generation");
-    super::backup_existing_config(&path).expect("back up first generation");
-
-    fs::write(&path, b"second").expect("write second generation");
-    super::backup_existing_config(&path).expect("back up second generation");
+    super::backup_existing_config(&path, b"first").expect("back up first generation");
+    super::backup_existing_config(&path, b"second").expect("back up second generation");
 
     assert_eq!(
         fs::read(super::config_backup_path(&path, 1).expect("backup path"))
@@ -286,5 +283,188 @@ fn a_failed_backup_write_leaves_the_migration_backup_still_owed() {
         fs::read(&backup).expect("read migration backup"),
         original,
         "the retried save still has the pre-migration source to write"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn saving_through_a_symlink_writes_the_target_and_keeps_the_link() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let dotfiles = dir.path().join("dotfiles/openlogi");
+    let config_dir = dir.path().join("config/openlogi");
+    fs::create_dir_all(&dotfiles).expect("create dotfiles dir");
+    fs::create_dir_all(&config_dir).expect("create config dir");
+    let target = dotfiles.join("config.toml");
+    let link = config_dir.join("config.toml");
+    let original = "# dotfiles config\nschema_version = 6\nselected_device = \"one\"\n";
+    fs::write(&target, original).expect("write target");
+    std::os::unix::fs::symlink("../../dotfiles/openlogi/config.toml", &link).expect("symlink");
+
+    let (mut config, mut file) = ConfigFile::load_from_path(&link).expect("load through link");
+    config.set_selected_device(Some("two".into()));
+    file.save(&config).expect("save through link");
+    assert!(
+        fs::symlink_metadata(&link).expect("stat link").is_symlink(),
+        "saving must preserve the symlink"
+    );
+    assert_eq!(
+        Config::load_from_path(&target)
+            .expect("read target")
+            .selected_device(),
+        Some("two")
+    );
+    let backup = config_dir.join("config.toml.backup.1");
+    assert_eq!(fs::read_to_string(&backup).expect("read backup"), original);
+    assert_eq!(
+        fs::read_to_string(config_dir.join("config.toml.v6.bak")).expect("read migration backup"),
+        original
+    );
+    assert!(!dotfiles.join("config.toml.backup.1").exists());
+    assert!(!dotfiles.join("config.toml.v6.bak").exists());
+
+    config.set_selected_device(Some("three".into()));
+    file.save(&config).expect("second save through link");
+    assert_eq!(
+        Config::load_from_path(&target)
+            .expect("read second save")
+            .selected_device(),
+        Some("three")
+    );
+    assert_eq!(
+        fs::read_to_string(&backup).expect("read original backup"),
+        original
+    );
+
+    let external = format!(
+        "{}# external edit\n",
+        fs::read_to_string(&target).expect("read target")
+    );
+    fs::write(&target, &external).expect("edit target externally");
+    assert_matches!(file.save(&config), Err(ConfigError::Conflict { .. }));
+    assert_eq!(
+        fs::read_to_string(&target).expect("read external edit"),
+        external
+    );
+    assert!(
+        fs::symlink_metadata(&link)
+            .expect("stat link after conflict")
+            .is_symlink()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_aliases_share_the_target_writer_lock() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let target = dir.path().join("target.toml");
+    let first = dir.path().join("first.toml");
+    let second = dir.path().join("second.toml");
+    let original = "schema_version = 6\nselected_device = \"original\"\n";
+    fs::write(&target, original).expect("write target");
+    std::os::unix::fs::symlink("target.toml", &first).expect("first alias");
+    std::os::unix::fs::symlink(&target, &second).expect("second alias");
+    let (mut config, mut first_file) =
+        ConfigFile::load_from_path(&first).expect("load first alias");
+    let (stale_config, mut second_file) =
+        ConfigFile::load_from_path(&second).expect("load second alias");
+    config.set_selected_device(Some("replacement".into()));
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(target.with_added_extension("lock"))
+        .expect("open target lock");
+    lock.try_lock().expect("hold target lock");
+
+    for file in [&mut first_file, &mut second_file] {
+        let error = file
+            .save(&config)
+            .expect_err("the target already has a writer");
+        assert_matches!(error, ConfigError::Write { source, .. }
+            if source.kind() == std::io::ErrorKind::WouldBlock);
+    }
+    assert_eq!(
+        fs::read_to_string(&target).expect("read unchanged target"),
+        original
+    );
+    for alias in [&first, &second] {
+        assert!(
+            fs::symlink_metadata(alias)
+                .expect("stat alias")
+                .is_symlink()
+        );
+        assert!(
+            !super::config_backup_path(alias, 1)
+                .expect("backup path")
+                .exists()
+        );
+        assert!(!alias.with_added_extension("v6.bak").exists());
+    }
+    drop(lock);
+
+    first_file
+        .save(&config)
+        .expect("retry after releasing target lock");
+    assert_matches!(
+        second_file.save(&stale_config),
+        Err(ConfigError::Conflict { .. })
+    );
+    assert_eq!(
+        Config::load_from_path(&target)
+            .expect("read saved target")
+            .selected_device(),
+        Some("replacement")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn saving_through_a_dangling_symlink_chain_creates_the_target() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config_dir = dir.path().join("config/openlogi");
+    fs::create_dir_all(&config_dir).expect("create config dir");
+    let target = dir.path().join("dotfiles/openlogi/config.toml");
+    let intermediate = config_dir.join("target.toml");
+    let link = config_dir.join("config.toml");
+    std::os::unix::fs::symlink("../../dotfiles/openlogi/config.toml", &intermediate)
+        .expect("target link");
+    std::os::unix::fs::symlink("target.toml", &link).expect("config link");
+    let (mut config, mut file) = ConfigFile::load_from_path(&link).expect("load dangling link");
+    config.set_selected_device(Some("new".into()));
+
+    file.save(&config).expect("create target through links");
+    for path in [&link, &intermediate] {
+        assert!(fs::symlink_metadata(path).expect("stat link").is_symlink());
+    }
+    assert_eq!(
+        Config::load_from_path(&target)
+            .expect("read created target")
+            .selected_device(),
+        Some("new")
+    );
+    assert!(!config_dir.join("config.toml.backup.1").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_resolution_follows_the_full_hop_limit() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let target = dir.path().join("config.toml");
+    fs::write(&target, "").expect("write target");
+    let link = |hop: usize| dir.path().join(format!("link{hop}"));
+    let mut previous = target.clone();
+    for hop in 1..=41 {
+        std::os::unix::fs::symlink(&previous, link(hop)).expect("symlink");
+        previous = link(hop);
+    }
+
+    assert_eq!(
+        super::resolve_symlinks(&link(40)).expect("40 hops is within the limit"),
+        target
+    );
+    assert!(
+        super::resolve_symlinks(&link(41)).is_err(),
+        "41 hops exceeds the limit"
     );
 }
