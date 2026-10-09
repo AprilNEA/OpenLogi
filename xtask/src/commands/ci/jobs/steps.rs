@@ -183,8 +183,8 @@ fn typos(job: Job) -> Plan {
     )
 }
 
-/// The single-source-of-truth guards under `.ast-grep/rules`, over the whole
-/// tree; `sgconfig.yml` at the root names the rule directory.
+/// Scan the whole tree with the single-source-of-truth guards stored with their owners.
+/// Root `sgconfig.yml` registers the rule directories.
 fn ast_grep(job: Job) -> Plan {
     if !command_exists("ast-grep") {
         return Plan::skip(job, "needs ast-grep (included in the devenv shell)");

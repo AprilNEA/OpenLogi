@@ -243,7 +243,7 @@ fn handle_button(
     device: Option<&EventDevice>,
     hooks: &SharedHookMaps,
     dispatcher: &ActionDispatcher,
-    capture_target: impl FnOnce() -> ActionDispatchTarget,
+    capture_safari_pid: impl FnOnce() -> Option<i32>,
 ) -> EventDisposition {
     // Primary L/R always pass through (suppressing them would brick the mouse).
     if !id.is_os_hook_button() || !button_source_may_remap(device) {
@@ -260,7 +260,7 @@ fn handle_button(
             )
         });
     let action_target = if pressed {
-        pointer_target.map_or_else(capture_target, ActionDispatchTarget::Pointer)
+        ActionDispatchTarget::for_pointer(pointer_target, capture_safari_pid)
     } else {
         ActionDispatchTarget::Keyboard
     };
@@ -469,7 +469,7 @@ pub fn start(
                     device.as_ref(),
                     &hooks,
                     &dispatcher,
-                    ActionDispatchTarget::capture,
+                    openlogi_hook::frontmost_safari_pid,
                 ),
                 MouseEvent::Moved { delta_x, delta_y } => {
                     handle_moved(delta_x, delta_y, &hooks, &dispatcher)
@@ -498,7 +498,10 @@ pub fn start(
                         return queued_event_disposition(try_queue_action(
                             &action_tx,
                             action,
-                            ActionDispatchTarget::for_pointer(target),
+                            ActionDispatchTarget::for_pointer(
+                                target,
+                                openlogi_hook::frontmost_safari_pid,
+                            ),
                         ));
                     }
                     if scroll_source_may_intercept(from_trackpad, device.as_ref()) {

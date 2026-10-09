@@ -443,7 +443,7 @@ view_changelog = "Zobacz dziennik zmian"
 update_connection_policy = "Aktualizator nie działa w tle. OpenLogi łączy się tylko po włączeniu automatycznych sprawdzeń lub kliknięciu Sprawdź dostępność aktualizacji."
 stable_channel = "Kanał stabilny"
 check_for_updates_consent_title = "Sprawdzić dostępność aktualizacji?"
-update_consent_description = "OpenLogi może raz przy każdym uruchomieniu sprawdzać w serwisie GitHub dostępność nowej wersji. Nie pobiera automatycznie aktualizacji ani nie wysyła telemetrii. Możesz to zmienić w Ustawieniach."
+update_consent_description = "OpenLogi może raz przy każdym uruchomieniu sprawdzać w serwisie %{host} dostępność nowej wersji. Nie pobiera automatycznie aktualizacji ani nie wysyła telemetrii. Możesz to zmienić w Ustawieniach."
 
 [assets]
 assets = "Zasoby"
@@ -566,6 +566,7 @@ custom_shortcut = "Własny skrót"
 shortcut_e_g_cmd_plus_shift_plus_p = "Skrót, np. Cmd+Shift+P"
 application_folder_path_or_url = "Aplikacja, ścieżka folderu lub URL"
 open_application_or_folder = "Otwórz aplikację lub folder"
+custom_action_invalid_input = "Couldn't recognize that input."
 
 [keyboard]
 editor_unavailable = "Edytor niedostępny"

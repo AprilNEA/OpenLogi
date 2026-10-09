@@ -107,7 +107,15 @@ impl DetailTab {
             .unwrap_or_else(|| Capabilities::presumed_from_kind(record.kind));
         // Buttons panel is a mouse-model silhouette — only for pointer devices.
         // Keyboards get the Keys panel instead, even when they expose ReprogControls.
-        let can_show_mouse_model = matches!(record.kind, DeviceKind::Mouse | DeviceKind::Trackball);
+        // `caps.pointer` (a measured HID++ DPI feature) settles it on its own
+        // when kind resolution itself is wrong (#1699: a Bluetooth-direct MX
+        // Master 3S measured buttons+pointer capabilities but still carried
+        // kind=Keyboard, so this function picked Keys over Buttons despite
+        // its own stated "gated on Capabilities, not DeviceKind" design) — a
+        // real keyboard never reports a pointer sensor, so trusting a
+        // positive measured reading here can't misfire the other way.
+        let can_show_mouse_model =
+            caps.pointer || matches!(record.kind, DeviceKind::Mouse | DeviceKind::Trackball);
         let mut tabs = Vec::new();
         // A webcam is a UVC device with no HID++ capabilities; its detail screen
         // leads with the live preview, then the generic info tab.
@@ -124,11 +132,17 @@ impl DetailTab {
         // last-good for a sleeping keyboard) or the OS-hook F-row a depot
         // without control markers falls back to. A keyboard with neither
         // capability data nor a depot — a receiver slot never probed — gets
-        // nothing to configure yet, so no tab.
-        if matches!(record.kind, DeviceKind::Keyboard) && (caps.buttons || record.asset.is_some()) {
+        // nothing to configure yet, so no tab. A measured pointer capability
+        // rules out Keys even for a kind=Keyboard record — see
+        // `can_show_mouse_model` above — so a misclassified mouse gets only
+        // the Buttons panel, not both.
+        if matches!(record.kind, DeviceKind::Keyboard)
+            && !caps.pointer
+            && (caps.buttons || record.asset.is_some())
+        {
             tabs.push(Self::Keys);
         }
-        if caps.pointer {
+        if caps.pointer || caps.scroll_inversion || caps.hires_wheel {
             tabs.push(Self::Pointer);
         }
         if caps.lighting {
@@ -515,11 +529,12 @@ impl AppView {
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .on_action(|_: &Minimize, window, _| window.minimize_window())
             .on_action(|_: &Zoom, window, _| window.zoom_window())
-            // Linux only: a client-side titlebar (window controls + drag region)
-            // as the first row of every frame — including the pre-connection and
-            // error frames — so the chrome is present from the first frame on.
-            // macOS / Windows keep their native titlebar.
-            .when(cfg!(target_os = "linux"), |this| {
+            // Drawn only where the compositor left the chrome to us — as the
+            // first row of every frame, including the pre-connection and error
+            // frames, so it is present from the first frame on. A compositor
+            // that decorates the window itself (KWin, and macOS / Windows)
+            // reports `Server` and this stays out of the way.
+            .when(crate::windows::needs_client_titlebar(window), |this| {
                 this.child(app_title_bar(cx))
             });
         let root = Self::with_back_navigation(root, cx);

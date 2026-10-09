@@ -138,7 +138,8 @@ pub enum AssetSourcePreference {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MouseProfileTarget {
-    /// Use the application under the pointer, where the platform supports it.
+    /// Use the application under the pointer wherever it can be identified,
+    /// and the focused one elsewhere.
     #[default]
     Pointer,
     /// Use the application with keyboard focus.
@@ -277,7 +278,8 @@ pub struct AppSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui_radius: Option<u8>,
     /// Application used to select per-app mouse button bindings. Defaults to
-    /// the application under the pointer; unsupported platforms use focus.
+    /// the application under the pointer; unsupported platforms and
+    /// unidentified pointer targets use focus.
     #[serde(default)]
     pub mouse_profile_target: MouseProfileTarget,
 }
@@ -699,15 +701,13 @@ where
     D: serde::Deserializer<'de>,
 {
     let value = SmartShiftAutoDisengage::deserialize(deserializer)?;
-    match value {
-        SmartShiftAutoDisengage::Threshold(threshold)
-            if threshold < SMARTSHIFT_MIN_AUTO_DISENGAGE =>
-        {
-            Err(serde::de::Error::custom(format_args!(
-                "SmartShift auto_disengage must be between {SMARTSHIFT_MIN_AUTO_DISENGAGE} and 255, got {threshold}"
-            )))
-        }
-        _ => Ok(value),
+    if SmartShift::accepts_auto_disengage(value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format_args!(
+            "SmartShift auto_disengage must be between {SMARTSHIFT_MIN_AUTO_DISENGAGE} and 255, got {}",
+            u8::from(value)
+        )))
     }
 }
 
@@ -733,6 +733,15 @@ pub struct SmartShift {
     /// expose tunable torque. HID++ defines the full non-zero byte range.
     #[serde(with = "crate::hid::smartshift::optional_tunable_torque")]
     pub tunable_torque: Option<TunableTorque>,
+}
+
+impl SmartShift {
+    /// Whether a firmware auto-disengage value is safe to persist and reapply.
+    /// The config parser and interactive writers share this policy.
+    #[must_use]
+    pub fn accepts_auto_disengage(value: SmartShiftAutoDisengage) -> bool {
+        !matches!(value, SmartShiftAutoDisengage::Threshold(threshold) if threshold < SMARTSHIFT_MIN_AUTO_DISENGAGE)
+    }
 }
 
 /// The v3-and-older owner-lock choice: which control owned a device's single

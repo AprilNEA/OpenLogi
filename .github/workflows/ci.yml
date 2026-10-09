@@ -52,7 +52,7 @@ jobs:
         with:
           config: .config/typos.toml
 
-  # The single-source-of-truth guards in .ast-grep/rules: each names the module
+  # Single-source-of-truth guards stored with their owners: each names the module
   # that owns a decision and fails on its ingredients anywhere else.
   ast-grep:
     name: ast-grep
