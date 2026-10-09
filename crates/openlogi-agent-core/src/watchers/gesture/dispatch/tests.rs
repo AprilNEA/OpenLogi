@@ -23,17 +23,24 @@ fn replacement_session_does_not_inherit_progress_or_cooldown() {
     assert_eq!(
         wheels
             .for_session(&old)
-            .advance(rotation(threshold), &Action::VolumeUp, scale(), now,),
-        WheelOutput::FireAction
+            .advance(rotation(threshold), &Action::NextTab, scale(), now,),
+        WheelOutput::FireAction(1)
+    );
+    assert_eq!(
+        wheels
+            .for_session(&old)
+            .advance(rotation(threshold), &Action::NextTab, scale(), now),
+        WheelOutput::Idle,
+        "the old session must actually be cooling down"
     );
     assert_eq!(
         wheels.for_session(&replacement).advance(
             rotation(threshold),
-            &Action::VolumeUp,
+            &Action::NextTab,
             scale(),
             now,
         ),
-        WheelOutput::FireAction,
+        WheelOutput::FireAction(1),
         "a new session must not inherit the old session's cooldown"
     );
 

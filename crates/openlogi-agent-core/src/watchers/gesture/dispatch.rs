@@ -248,12 +248,13 @@ impl InputDispatcher {
         ) {
             WheelOutput::Idle => {}
             WheelOutput::Scroll(delta) => self.outputs.post_scroll(session, delta),
-            WheelOutput::FireAction => {
-                debug!(key, ?button, action = %action.label(), "thumb wheel → action");
-                self.outputs.actions.dispatch_pointer_action(
+            WheelOutput::FireAction(repeats) => {
+                debug!(key, ?button, action = %action.label(), repeats, "thumb wheel → action");
+                self.outputs.actions.dispatch_pointer_action_batch(
                     action,
                     Some(key),
                     plan.pointer_target,
+                    repeats,
                 );
             }
         }

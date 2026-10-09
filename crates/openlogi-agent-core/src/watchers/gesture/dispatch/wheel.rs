@@ -21,6 +21,13 @@ const ACTION_DECAY: Duration = Duration::from_millis(300);
 /// flick triggers once instead of repeating across a fast spin.
 const ACTION_COOLDOWN: Duration = Duration::from_millis(200);
 
+/// Most times a single captured event may fire a repeatable action. A real
+/// swipe never legitimately needs more than a handful; this only bounds a
+/// pathological or corrupt report (a raw rotation increment is a signed
+/// `i16`) from synchronously flooding the OS with thousands of presses from
+/// one input callback.
+const MAX_REPEATS_PER_EVENT: i32 = 20;
+
 /// Per-direction wheel state. Reversing the physical wheel must not cancel
 /// progress already earned in the other direction.
 #[derive(Default)]
@@ -158,17 +165,53 @@ impl WheelDirection {
             increments = 0;
         }
 
-        let cooling_down =
-            last_fired.is_some_and(|time| now.saturating_duration_since(time) < ACTION_COOLDOWN);
-        let (output, last_fired) = if cooling_down {
-            (WheelOutput::Idle, last_fired)
-        } else {
+        let threshold = next_binding.sensitivity.action_threshold();
+        let (output, last_fired) = if is_repeatable(action) {
+            // Volume-style actions are meant to track swipe distance like a
+            // physical volume wheel: one long or fast swipe should be able to
+            // fire several times, scaled by sensitivity, not just once. The
+            // cooldown below exists to stop a single flick from repeating a
+            // one-shot action (e.g. MissionControl); applying it here would
+            // silently discard every increment earned beyond the first
+            // threshold crossing, capping a swipe to one step regardless of
+            // sensitivity — exactly the reported symptom.
             increments += magnitude;
-            if increments >= next_binding.sensitivity.action_threshold() {
-                increments = 0;
-                (WheelOutput::FireAction, Some(now))
+            // Cap how many times one event can fire: a captured rotation
+            // increment is a signed `i16`, so a single malformed or corrupt
+            // report could otherwise claim a magnitude of thousands and
+            // synchronously flood the OS with that many volume presses from
+            // the input callback. A real swipe never legitimately needs more
+            // than a handful of fires per report.
+            let repeats = (increments / threshold).min(MAX_REPEATS_PER_EVENT);
+            // The modulus, not `repeats * threshold`: capping `repeats`
+            // without also discarding the distance above the cap left a
+            // malformed report's full excess sitting in the accumulator
+            // (32767 increments at threshold 1 capped to 20 fires, but
+            // subtracting only `20 * 1` left 32747 behind) — the very next
+            // increment within the decay window re-triggered another capped
+            // burst, repeating for as long as input kept arriving. The
+            // modulus discards everything above a whole multiple of
+            // `threshold` uniformly, capped or not, while still preserving
+            // genuine fractional progress below one threshold step.
+            increments %= threshold;
+            if repeats > 0 {
+                (WheelOutput::FireAction(repeats.cast_unsigned()), Some(now))
             } else {
                 (WheelOutput::Idle, last_fired)
+            }
+        } else {
+            let cooling_down = last_fired
+                .is_some_and(|time| now.saturating_duration_since(time) < ACTION_COOLDOWN);
+            if cooling_down {
+                (WheelOutput::Idle, last_fired)
+            } else {
+                increments += magnitude;
+                if increments >= threshold {
+                    increments = 0;
+                    (WheelOutput::FireAction(1), Some(now))
+                } else {
+                    (WheelOutput::Idle, last_fired)
+                }
             }
         };
         self.state = WheelState::Action {
@@ -179,6 +222,15 @@ impl WheelDirection {
         };
         output
     }
+}
+
+/// Whether `action` should fire more than once from a single swipe, scaled by
+/// how far the swipe travels — a physical-volume-knob feel — rather than
+/// being cooldown-limited to firing at most once per flick like an ordinary
+/// discrete action (e.g. `MissionControl`, where repeating on a fast spin
+/// would be wrong).
+fn is_repeatable(action: &Action) -> bool {
+    matches!(action, Action::VolumeUp | Action::VolumeDown)
 }
 
 /// Mutually exclusive state for one physical wheel direction.
@@ -251,8 +303,10 @@ pub(super) enum WheelOutput {
     Idle,
     /// Typed fractional distance for the smooth-scroll runtime or injector.
     Scroll(ScrollDelta),
-    /// Fire the direction's bound discrete action.
-    FireAction,
+    /// Fire the direction's bound discrete action this many times (more than
+    /// one only for a [`is_repeatable`] action whose accumulated swipe
+    /// distance crossed the sensitivity threshold more than once at once).
+    FireAction(u32),
 }
 
 /// Device-native scroll scale combined with the user's sensitivity.

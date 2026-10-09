@@ -187,7 +187,7 @@ fn physical_directions_accumulate_independently() {
             scale,
             now,
         ),
-        WheelOutput::FireAction
+        WheelOutput::FireAction(1)
     );
     assert_eq!(
         wheel.advance(
@@ -199,7 +199,7 @@ fn physical_directions_accumulate_independently() {
             scale,
             now,
         ),
-        WheelOutput::FireAction
+        WheelOutput::FireAction(1)
     );
 }
 
@@ -211,16 +211,16 @@ fn custom_action_fires_on_threshold_then_respects_its_cooldown() {
     let threshold = ThumbwheelSensitivity::DEFAULT.action_threshold();
 
     assert_eq!(
-        direction.advance(&Action::VolumeUp, threshold, scale, now),
-        WheelOutput::FireAction
+        direction.advance(&Action::NextTab, threshold, scale, now),
+        WheelOutput::FireAction(1)
     );
     assert_eq!(
-        direction.advance(&Action::VolumeUp, threshold, scale, now),
+        direction.advance(&Action::NextTab, threshold, scale, now),
         WheelOutput::Idle
     );
     assert_eq!(
-        direction.advance(&Action::VolumeUp, threshold, scale, now + ACTION_COOLDOWN),
-        WheelOutput::FireAction,
+        direction.advance(&Action::NextTab, threshold, scale, now + ACTION_COOLDOWN),
+        WheelOutput::FireAction(1),
         "the same action may fire again at the cooldown boundary"
     );
 }
@@ -233,21 +233,21 @@ fn custom_binding_changes_discard_progress_and_cooldown() {
     let threshold = ThumbwheelSensitivity::DEFAULT.action_threshold();
 
     assert_eq!(
-        direction.advance(&Action::VolumeUp, threshold - 1, scale, now),
+        direction.advance(&Action::NextTab, threshold - 1, scale, now),
         WheelOutput::Idle
     );
     assert_eq!(
-        direction.advance(&Action::NextTab, 1, scale, now),
+        direction.advance(&Action::PrevTab, 1, scale, now),
         WheelOutput::Idle,
         "the new action must not inherit the previous action's progress"
     );
     assert_eq!(
-        direction.advance(&Action::NextTab, threshold - 1, scale, now),
-        WheelOutput::FireAction
+        direction.advance(&Action::PrevTab, threshold - 1, scale, now),
+        WheelOutput::FireAction(1)
     );
     assert_eq!(
-        direction.advance(&Action::VolumeUp, threshold, scale, now),
-        WheelOutput::FireAction,
+        direction.advance(&Action::NextTab, threshold, scale, now),
+        WheelOutput::FireAction(1),
         "the new binding must not inherit another action's cooldown"
     );
 }
@@ -260,12 +260,12 @@ fn sensitivity_changes_discard_progress_and_cooldown() {
     let threshold = ThumbwheelSensitivity::DEFAULT.action_threshold();
 
     assert_eq!(
-        direction.advance(&Action::VolumeUp, threshold - 1, default, now),
+        direction.advance(&Action::NextTab, threshold - 1, default, now),
         WheelOutput::Idle
     );
     assert_eq!(
         direction.advance(
-            &Action::VolumeUp,
+            &Action::NextTab,
             1,
             unscaled(ThumbwheelSensitivity::MIN),
             now,
@@ -276,22 +276,104 @@ fn sensitivity_changes_discard_progress_and_cooldown() {
 
     assert_eq!(
         direction.advance(
-            &Action::VolumeUp,
+            &Action::NextTab,
             ThumbwheelSensitivity::MIN.action_threshold(),
             unscaled(ThumbwheelSensitivity::MIN),
             now,
         ),
-        WheelOutput::FireAction
+        WheelOutput::FireAction(1)
     );
     assert_eq!(
         direction.advance(
-            &Action::VolumeUp,
+            &Action::NextTab,
             ThumbwheelSensitivity::MAX.action_threshold(),
             unscaled(ThumbwheelSensitivity::MAX),
             now,
         ),
-        WheelOutput::FireAction,
+        WheelOutput::FireAction(1),
         "a sensitivity change must not inherit the old threshold's cooldown"
+    );
+}
+
+#[test]
+fn a_repeatable_action_fires_once_per_threshold_crossed_in_one_swipe() {
+    // The whole point of #887: a fast/long swipe on a Volume binding must be
+    // able to fire several times in one go, scaled by sensitivity — not be
+    // capped to one step per swipe by the cooldown that ordinary discrete
+    // actions use.
+    let mut direction = WheelDirection::default();
+    let now = Instant::now();
+    let scale = unscaled(ThumbwheelSensitivity::DEFAULT);
+    let threshold = ThumbwheelSensitivity::DEFAULT.action_threshold();
+
+    assert_eq!(
+        direction.advance(&Action::VolumeUp, threshold * 3, scale, now),
+        WheelOutput::FireAction(3),
+        "a swipe spanning three thresholds at once must fire three times"
+    );
+    // The very next event, an instant later, still fires — no cooldown gate.
+    assert_eq!(
+        direction.advance(&Action::VolumeUp, threshold, scale, now),
+        WheelOutput::FireAction(1),
+        "a repeatable action must not be cooldown-gated like an ordinary one"
+    );
+}
+
+#[test]
+fn a_single_event_never_fires_more_than_the_repeat_cap() {
+    // A raw rotation increment is a signed i16; a corrupt or malformed report
+    // could claim a huge magnitude at max sensitivity (threshold == 1). One
+    // event must never synchronously dispatch thousands of actions.
+    let mut direction = WheelDirection::default();
+    let now = Instant::now();
+    let scale = unscaled(ThumbwheelSensitivity::MAX);
+    assert_eq!(ThumbwheelSensitivity::MAX.action_threshold(), 1);
+
+    assert_eq!(
+        direction.advance(&Action::VolumeUp, i32::from(i16::MAX), scale, now),
+        WheelOutput::FireAction(MAX_REPEATS_PER_EVENT.cast_unsigned())
+    );
+}
+
+#[test]
+fn a_capped_event_discards_its_excess_distance_instead_of_carrying_it_over() {
+    // The cap alone isn't enough: subtracting only what was actually fired
+    // (`repeats * threshold`) left the rest of a malformed report's distance
+    // sitting in the accumulator, so the very next increment within the
+    // decay window re-triggered another capped burst — repeating for as
+    // long as small input kept arriving instead of firing once and settling.
+    let mut direction = WheelDirection::default();
+    let now = Instant::now();
+    let scale = unscaled(ThumbwheelSensitivity::MAX);
+    assert_eq!(ThumbwheelSensitivity::MAX.action_threshold(), 1);
+
+    assert_eq!(
+        direction.advance(&Action::VolumeUp, i32::from(i16::MAX), scale, now),
+        WheelOutput::FireAction(MAX_REPEATS_PER_EVENT.cast_unsigned())
+    );
+    assert_eq!(
+        direction.advance(&Action::VolumeUp, 1, scale, now),
+        WheelOutput::FireAction(1),
+        "one more small nudge must fire once, not re-trigger another capped burst \
+         from the previous report's leftover distance"
+    );
+}
+
+#[test]
+fn repeatable_action_progress_below_threshold_carries_over() {
+    let mut direction = WheelDirection::default();
+    let now = Instant::now();
+    let scale = unscaled(ThumbwheelSensitivity::DEFAULT);
+    let threshold = ThumbwheelSensitivity::DEFAULT.action_threshold();
+
+    assert_eq!(
+        direction.advance(&Action::VolumeUp, threshold - 1, scale, now),
+        WheelOutput::Idle
+    );
+    assert_eq!(
+        direction.advance(&Action::VolumeUp, 1, scale, now),
+        WheelOutput::FireAction(1),
+        "the carried-over increment plus one more must cross the threshold"
     );
 }
 
@@ -357,6 +439,97 @@ fn stale_custom_progress_decays() {
     );
     assert_eq!(
         direction.advance(&Action::VolumeUp, threshold - 1, scale, after_decay),
-        WheelOutput::FireAction
+        WheelOutput::FireAction(1)
+    );
+}
+
+#[test]
+fn volume_reports_do_not_wait_for_the_discrete_action_cooldown() {
+    let scale = unscaled(ThumbwheelSensitivity::DEFAULT);
+    let threshold = ThumbwheelSensitivity::DEFAULT.action_threshold();
+    let now = Instant::now();
+    for action in [Action::VolumeUp, Action::VolumeDown] {
+        let mut direction = WheelDirection::default();
+        for _ in 0..3 {
+            assert_eq!(
+                direction.advance(&action, threshold, scale, now),
+                WheelOutput::FireAction(1),
+                "every complete volume step should be delivered"
+            );
+        }
+    }
+}
+
+#[test]
+fn volume_bursts_keep_fractional_progress_without_a_cooldown() {
+    let scale = unscaled(ThumbwheelSensitivity::DEFAULT);
+    let threshold = ThumbwheelSensitivity::DEFAULT.action_threshold();
+    let now = Instant::now();
+    for action in [Action::VolumeUp, Action::VolumeDown] {
+        let mut direction = WheelDirection::default();
+        assert_eq!(
+            direction.advance(&action, threshold * 3 + threshold - 1, scale, now),
+            WheelOutput::FireAction(3)
+        );
+        assert_eq!(
+            direction.advance(&action, 1, scale, now),
+            WheelOutput::FireAction(1)
+        );
+    }
+}
+
+#[test]
+fn capped_volume_reports_keep_only_fractional_progress() {
+    let scale = unscaled(ThumbwheelSensitivity::DEFAULT);
+    let threshold = ThumbwheelSensitivity::DEFAULT.action_threshold();
+    let now = Instant::now();
+    for increments in [i16::MIN, i16::MAX] {
+        let mut wheel = WheelAccumulators::default();
+        let rotation = WheelRotation::from_increments(increments).unwrap();
+        let action = if increments < 0 {
+            Action::VolumeDown
+        } else {
+            Action::VolumeUp
+        };
+        assert_eq!(
+            wheel.advance(rotation, &action, scale, now),
+            WheelOutput::FireAction(MAX_REPEATS_PER_EVENT.cast_unsigned())
+        );
+        let nudge = WheelRotation {
+            magnitude: 1,
+            ..rotation
+        };
+        // Whole steps above the cap are discarded, but the incomplete final
+        // step still counts toward the next nudge, just as for an uncapped report.
+        let remaining = threshold - rotation.magnitude % threshold;
+        for _ in 1..remaining {
+            assert_eq!(wheel.advance(nudge, &action, scale, now), WheelOutput::Idle);
+        }
+        assert_eq!(
+            wheel.advance(nudge, &action, scale, now),
+            WheelOutput::FireAction(1)
+        );
+        for _ in 1..threshold {
+            assert_eq!(wheel.advance(nudge, &action, scale, now), WheelOutput::Idle);
+        }
+        assert_eq!(
+            wheel.advance(nudge, &action, scale, now),
+            WheelOutput::FireAction(1)
+        );
+    }
+}
+
+#[test]
+fn discrete_actions_never_repeat_a_burst() {
+    let scale = unscaled(ThumbwheelSensitivity::MAX);
+    let now = Instant::now();
+    let mut direction = WheelDirection::default();
+    assert_eq!(
+        direction.advance(&Action::NextTab, i32::from(i16::MAX), scale, now),
+        WheelOutput::FireAction(1)
+    );
+    assert_eq!(
+        direction.advance(&Action::NextTab, 1, scale, now),
+        WheelOutput::Idle
     );
 }
