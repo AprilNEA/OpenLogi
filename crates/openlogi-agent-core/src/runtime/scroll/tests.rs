@@ -25,6 +25,7 @@ fn tuning(step: f64, duration_ms: u64, max_gain: f64) -> MotionTuning {
         step,
         duration: Duration::from_millis(duration_ms),
         max_gain,
+        vertical_scale: 1.0,
     }
 }
 
@@ -989,5 +990,46 @@ fn acceleration_windows_are_kept_per_axis() {
         frames.push(frame);
     });
     assert_delta(cumulative(&frames), wheel(1.0, 169.0 / 14.0));
+    assert!(engine.active.is_empty());
+}
+
+#[test]
+fn sensitivity_scales_distance_but_not_acceleration() {
+    // An OS hook at sensitivity 100 queues each notch as 100/14 lines.
+    let scale = 100.0 / 14.0;
+    let scaled = MotionTuning {
+        vertical_scale: scale,
+        ..tuning(1.0, 100, 7.0)
+    };
+
+    // One isolated notch is still one notch of wheel rate: no gain.
+    let base = Instant::now();
+    let mut engine = ScrollEngine::default();
+    let mut frames = Vec::new();
+    engine.impulse(source(), wheel(0.0, scale), base, scaled, &mut |frame| {
+        frames.push(frame);
+    });
+    engine.advance_due(base + Duration::from_millis(300), &mut |frame| {
+        frames.push(frame);
+    });
+    assert_delta(cumulative(&frames), wheel(0.0, scale));
+
+    // The fast ramp from `synthetic_fast_ticks_gain_amplitude_deterministically`
+    // gains exactly as it does at the default sensitivity, scaled by it.
+    let mut engine = ScrollEngine::default();
+    let mut frames = Vec::new();
+    for millis in (0..=70).step_by(10) {
+        engine.impulse(
+            source(),
+            wheel(0.0, scale),
+            base + Duration::from_millis(millis),
+            scaled,
+            &mut |frame| frames.push(frame),
+        );
+    }
+    engine.advance_due(base + Duration::from_millis(300), &mut |frame| {
+        frames.push(frame);
+    });
+    assert_delta(cumulative(&frames), wheel(0.0, scale * 169.0 / 14.0));
     assert!(engine.active.is_empty());
 }
