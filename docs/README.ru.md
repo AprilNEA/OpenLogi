@@ -1,7 +1,7 @@
 > [!WARNING]
 > **OpenLogi активно разрабатывается** и ещё не стабилен — функции и конфигурация могут меняться. Поставьте репозиторию **Star** ⭐ и **Watch** 👀, чтобы узнать о новом релизе.
 
-<h4 align="right"><a href="../README.md">English</a> | <a href="README.zh-CN.md">简体中文</a> | <a href="README.ja.md">日本語</a> | <a href="README.de.md">Deutsch</a> | <a href="README.fr.md">Français</a> | <a href="README.ko.md">한국어</a> | <strong>Русский</strong></h4>
+<h4 align="right"><a href="../README.md">English</a> | <a href="README.zh-CN.md">简体中文</a> | <a href="README.ja.md">日本語</a> | <a href="README.de.md">Deutsch</a> | <a href="README.fr.md">Français</a> | <a href="README.ko.md">한국어</a> | <strong>Русский</strong> | <a href="README.es.md">Español</a></h4>
 
 <p align="center">
     <img src="https://assets.openlogi.org/brand/openlogi-icon.png" width="138" alt="OpenLogi"/>

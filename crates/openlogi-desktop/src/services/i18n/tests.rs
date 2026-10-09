@@ -54,3 +54,24 @@ fn typed_translation_keys_resolve() {
         );
     }
 }
+
+/// Czech must resolve in the actual desktop backend, including the pairing
+/// entry point and the authentication instructions.
+#[test]
+fn czech_pairing_translations_resolve() {
+    assert_eq!(
+        rust_i18n::t!("pairing.add_device", locale = "cs"),
+        "Přidat zařízení"
+    );
+    assert_eq!(
+        rust_i18n::t!(
+            "pairing.keyboard_pairing_passkey_instructions",
+            locale = "cs"
+        ),
+        "Na nové klávesnici napište tento kód a stiskněte Enter."
+    );
+    assert_eq!(
+        rust_i18n::t!("pairing.paired_receiver_slot", locale = "cs", slot = 2),
+        "Spárováno na pozici 2."
+    );
+}

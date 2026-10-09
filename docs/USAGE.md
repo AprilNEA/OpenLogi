@@ -9,12 +9,15 @@ openlogi assets sync          # pre-fetch device renders from the fastest availa
 openlogi diag features        # dump every HID++ feature the active device reports
 openlogi diag controls        # dump reprogrammable controls and capability flags
 openlogi diag dpi             # read → write → read-back → restore DPI (smoke test)
+openlogi diag pointer-speed   # test 0x2205 pointer scaling and attempt to restore it
 openlogi diag smartshift      # toggle SmartShift and restore (smoke test)
 openlogi diag lighting ff0000 # solid colour for a wired RGB keyboard (any RRGGBB hex)
 ```
 
 Running `openlogi` with no subcommand defaults to `list`. Set
 `OPENLOGI_LOG=debug` for verbose tracing in the CLI, GUI, or agent.
+
+`openlogi diag pointer-speed` temporarily changes the selected device's pointer scaling. The command attempts to restore and verify the original scaling even when the test write fails. `--device NAME` selects a device; `--target RAW` sets the temporary 8.8 fixed-point value (`256` is 1×). By default, the command halves the current value, or doubles it when the raw value is `1`. Firmware may accept extreme values without clipping. A restoration error means the original speed could not be confirmed.
 
 ## Automation API
 

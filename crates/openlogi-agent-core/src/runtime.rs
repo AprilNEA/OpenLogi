@@ -34,17 +34,35 @@ pub(crate) enum ActionDispatchTarget {
     /// The ordinary browser-navigation shortcut target captured outside Safari.
     Keyboard,
     /// The pointer context that selected the binding. Validated off the tap
-    /// before output, never substituted with an unrelated foreground window.
-    Pointer(openlogi_hook::PointerTarget),
+    /// before output. An identified window or desktop is never substituted
+    /// with an unrelated foreground window; an unidentified target retains
+    /// the focused fallback captured with the press.
+    Pointer {
+        target: openlogi_hook::PointerTarget,
+        fallback_safari_pid: Option<i32>,
+    },
 }
 
 impl ActionDispatchTarget {
     fn capture() -> Self {
-        openlogi_hook::frontmost_safari_pid().map_or(Self::Keyboard, Self::SafariProcess)
+        Self::for_pointer(None, openlogi_hook::frontmost_safari_pid)
     }
 
-    fn for_pointer(target: Option<openlogi_hook::PointerTarget>) -> Self {
-        target.map_or_else(Self::capture, Self::Pointer)
+    fn for_pointer(
+        target: Option<openlogi_hook::PointerTarget>,
+        capture_safari_pid: impl FnOnce() -> Option<i32>,
+    ) -> Self {
+        let safari_pid = match target {
+            None | Some(openlogi_hook::PointerTarget::Unavailable) => capture_safari_pid(),
+            Some(_) => None,
+        };
+        match target {
+            Some(target) => Self::Pointer {
+                target,
+                fallback_safari_pid: safari_pid,
+            },
+            None => safari_pid.map_or(Self::Keyboard, Self::SafariProcess),
+        }
     }
 }
 /// Held output owned by accepted press capabilities rather than by a capture
@@ -90,10 +108,11 @@ impl ActionExecutor {
     }
 
     fn dispatch_to(&self, action: &Action, device_key: Option<&str>, target: ActionDispatchTarget) {
-        let Some(target) = target.resolve(action) else {
-            debug!(action = %action.label(), "mouse action target unavailable or no longer matches — skipped");
-            return;
-        };
+        // The ring is drawn by OpenLogi at the cursor and acts on no window, so
+        // no pointer target gates it. It must not: while the ring is showing,
+        // the pointer is over the ring's own floating window, which classifies
+        // as `PointerTarget::Unavailable`, and a gated second trigger press
+        // could never close the ring.
         if matches!(action, Action::ShowActionsRing) {
             if self
                 .action_ring
@@ -104,6 +123,10 @@ impl ActionExecutor {
             }
             return;
         }
+        let Some(target) = target.resolve(action) else {
+            debug!(action = %action.label(), "mouse action target unavailable or no longer matches — skipped");
+            return;
+        };
 
         let next = match action {
             Action::CycleDpiPresets => match self.dpi_cycle.write() {
@@ -303,7 +326,7 @@ impl ActionDispatcher {
         self.executor.dispatch_to(
             action,
             device_key,
-            ActionDispatchTarget::for_pointer(target),
+            ActionDispatchTarget::for_pointer(target, openlogi_hook::frontmost_safari_pid),
         );
     }
 
@@ -371,7 +394,7 @@ impl ActionDispatcher {
             session,
             button,
             binding,
-            ActionDispatchTarget::for_pointer(pointer_target),
+            ActionDispatchTarget::for_pointer(pointer_target, openlogi_hook::frontmost_safari_pid),
         )
     }
 
@@ -393,7 +416,7 @@ impl ActionDispatcher {
             session,
             button,
             binding,
-            ActionDispatchTarget::for_pointer(pointer_target),
+            ActionDispatchTarget::for_pointer(pointer_target, openlogi_hook::frontmost_safari_pid),
         );
     }
 
@@ -503,7 +526,7 @@ fn dispatch_browser_navigation(
             keyboard();
             true
         }
-        ActionDispatchTarget::Pointer(_) => {
+        ActionDispatchTarget::Pointer { .. } => {
             unreachable!("pointer targets resolve before navigation")
         }
     }
@@ -514,6 +537,36 @@ mod tests {
     use super::*;
 
     static BROWSER_NAV_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn ring_trigger_reaches_the_ring_over_an_unavailable_pointer_target() {
+        // The second press that toggles the ring closed lands on the ring's
+        // own overlay window, which the pointer hit test reports as
+        // unavailable.
+        let (_signal, device_io) = openlogi_hid::device_io_channel();
+        let (action_ring, mut ring_rx) = tokio::sync::mpsc::unbounded_channel();
+        let executor = ActionExecutor {
+            dpi_cycle: Arc::default(),
+            access: DeviceAccess {
+                channel: openlogi_hid::CaptureChannelSlot::default(),
+                registry: openlogi_hid::ChannelRegistry::default(),
+                receiver_access: crate::receiver_access::ReceiverAccess::default(),
+                device_io,
+            },
+            action_ring,
+        };
+
+        executor.dispatch_to(
+            &Action::ShowActionsRing,
+            Some("mouse"),
+            ActionDispatchTarget::for_pointer(
+                Some(openlogi_hook::PointerTarget::Unavailable),
+                || None,
+            ),
+        );
+
+        assert_eq!(ring_rx.try_recv(), Ok(Some("mouse".to_owned())));
+    }
     #[test]
     fn instantaneous_actions_do_not_enter_held_state() {
         let press = PressToken::hook_for_test(1, ButtonId::Back);

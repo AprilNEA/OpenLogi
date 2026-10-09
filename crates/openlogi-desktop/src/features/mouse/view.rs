@@ -20,7 +20,7 @@ use super::geometry::{
     default_labels, labels_from_hotspots,
 };
 use super::hotspots::{Hotspot, MOUSE_MODEL_SIZE, MouseControlId, default_hotspots};
-use super::inspector::{BindingInspectorData, binding_inspector};
+use super::inspector::{ActionPickerContext, BindingInspectorData, binding_inspector};
 use super::leader_lines::{Geometry as LeaderGeometry, Label, paint as paint_leader_lines};
 use crate::app::{glow_canvas, keyboard_glow};
 use crate::features::profiles::{friendly_app_name, profile_canvas_status};
@@ -130,6 +130,12 @@ pub struct MouseModelView {
     gesture_active_dir: Option<GestureDirection>,
     action_picker_open: bool,
     action_search: Entity<InputState>,
+    pub(super) custom_shortcut_input: Entity<InputState>,
+    pub(super) custom_application_input: Entity<InputState>,
+    /// Whether the last "Add" attempt on the corresponding custom editor
+    /// failed to parse, so its caption can show an inline error.
+    pub(super) custom_shortcut_invalid: bool,
+    pub(super) custom_application_invalid: bool,
     _state_obs: Subscription,
 }
 
@@ -143,6 +149,31 @@ impl MouseModelView {
                 cx.notify();
             }
         })
+        .detach();
+        let custom_shortcut_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(tr!("action_ring.shortcut_e_g_cmd_plus_shift_plus_p"))
+        });
+        cx.subscribe(&custom_shortcut_input, |view, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                view.custom_shortcut_invalid = false;
+                cx.notify();
+            }
+        })
+        .detach();
+        let custom_application_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(tr!("action_ring.application_folder_path_or_url"))
+        });
+        cx.subscribe(
+            &custom_application_input,
+            |view, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    view.custom_application_invalid = false;
+                    cx.notify();
+                }
+            },
+        )
         .detach();
         let state_obs = AppState::repaint_on(cx, |event| {
             matches!(
@@ -160,8 +191,28 @@ impl MouseModelView {
             gesture_active_dir: None,
             action_picker_open: false,
             action_search,
+            custom_shortcut_input,
+            custom_application_input,
+            custom_shortcut_invalid: false,
+            custom_application_invalid: false,
             _state_obs: state_obs,
         }
+    }
+
+    /// Clear both custom-action drafts (text and any invalid state) — called
+    /// whenever the picker opens for a new target, so a shortcut or
+    /// application typed for one button doesn't reappear for another.
+    pub(super) fn clear_custom_action_drafts(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.custom_shortcut_input
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.custom_application_input
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.custom_shortcut_invalid = false;
+        self.custom_application_invalid = false;
     }
 
     /// Set (or clear, with `None`) the activated gesture direction. Callers must
@@ -221,14 +272,34 @@ fn set_control_hovered(
     });
 }
 
-impl Render for MouseModelView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+impl MouseModelView {
+    /// Re-stamp every action-picker input's placeholder after a language
+    /// switch, split out of `render` to keep it under clippy's line budget.
+    fn localize_action_picker_inputs(&self, window: &mut Window, cx: &mut Context<Self>) {
         crate::ui::components::localize_placeholder(
             &self.action_search,
             tr!("actions.search_actions"),
             window,
             cx,
         );
+        crate::ui::components::localize_placeholder(
+            &self.custom_shortcut_input,
+            tr!("action_ring.shortcut_e_g_cmd_plus_shift_plus_p"),
+            window,
+            cx,
+        );
+        crate::ui::components::localize_placeholder(
+            &self.custom_application_input,
+            tr!("action_ring.application_folder_path_or_url"),
+            window,
+            cx,
+        );
+    }
+}
+
+impl Render for MouseModelView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.localize_action_picker_inputs(window, cx);
         let (empty_bindings, empty_gesture_maps) = (BTreeMap::new(), BTreeMap::new());
         let MouseWorkspaceData {
             device_key,
@@ -313,15 +384,21 @@ impl Render for MouseModelView {
             BindingInspectorData {
                 selected: self.selected,
                 gesture_direction: self.gesture_active_dir,
-                action_picker_open: self.action_picker_open,
                 bindings,
                 gesture_maps,
                 dpi_gestures,
                 editing_app: editing_app.as_deref(),
                 overridden,
             },
-            &self.action_search,
-            &view,
+            ActionPickerContext {
+                open: self.action_picker_open,
+                search: &self.action_search,
+                shortcut_input: &self.custom_shortcut_input,
+                application_input: &self.custom_application_input,
+                shortcut_invalid: self.custom_shortcut_invalid,
+                application_invalid: self.custom_application_invalid,
+                view: &view,
+            },
             cx,
         );
         workspace_layout(canvas, profile_status, inspector, &self.focus_handle)

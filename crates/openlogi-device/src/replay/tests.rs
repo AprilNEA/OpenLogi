@@ -528,6 +528,55 @@ async fn receiver_backed_dpi_read_runs_through_production_route() {
 }
 
 #[tokio::test]
+async fn pointer_scaling_write_returns_readback_instead_of_request_echo() {
+    use crate::write::{PointerScaling, set_pointer_scaling};
+
+    let node_id = NodeId::from("synthetic-scaling-node".to_string());
+    let route = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xb35b,
+    };
+    let exchanges = vec![
+        h20(
+            short(0xff, 0x00, 0x10, [0, 0, 0]),
+            short(0xff, 0x00, 0x10, [4, 0, 0]),
+        ),
+        h20(
+            short(0xff, 0x00, 0x00, [0x22, 0x05, 0]),
+            short(0xff, 0x00, 0x00, [0x05, 0, 0]),
+        ),
+        h20(
+            short(0xff, 0x05, 0x10, [0x40, 0, 0]),
+            short(0xff, 0x05, 0x10, [0x40, 0, 0]),
+        ),
+        h20(
+            short(0xff, 0x05, 0x00, [0, 0, 0]),
+            short(0xff, 0x05, 0x00, [0x10, 0, 0]),
+        ),
+    ];
+    let backend = ReplayBackend::new(
+        topology(
+            node_info(node_id, 0xb35b, "Synthetic Scaling Mouse"),
+            DIRECT_CHANNEL,
+            Vec::new(),
+        ),
+        vec![cassette(
+            "pointer-scaling-clipped",
+            DIRECT_CHANNEL,
+            exchanges,
+        )],
+    )
+    .unwrap();
+
+    let applied = set_pointer_scaling(&backend, &route, PointerScaling::from_raw(0x4000).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(applied.raw(), 0x1000);
+    backend.require_complete().unwrap();
+}
+
+#[tokio::test]
 async fn topology_controls_presence_open_connection_slots_and_hotplug_separately() {
     let fixture = receiver_dpi_fixture();
     let backend = ReplayBackend::new(fixture.topology, vec![fixture.cassette])
