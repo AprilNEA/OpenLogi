@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.13] - 2026-10-09
+
+### Added
+
+- *(hidpp)* implement pointer motion scaling ([#1347](https://github.com/AprilNEA/OpenLogi/pull/1347))
+- *(gui)* add custom actions to the mouse picker ([#1452](https://github.com/AprilNEA/OpenLogi/pull/1452))
+- *(hid)* add G733 battery and power-state support ([#1601](https://github.com/AprilNEA/OpenLogi/pull/1601))
+- *(hid)* recognize POWERPLAY receiver ([#1267](https://github.com/AprilNEA/OpenLogi/pull/1267))
+
+### Fixed
+
+- *(hook)* identify unbundled macos applications ([#1469](https://github.com/AprilNEA/OpenLogi/pull/1469))
+- *(inject)* restore macos 27 space swipes ([#1703](https://github.com/AprilNEA/OpenLogi/pull/1703))
+- *(gui)* show friendly names for Windows app profiles ([#1463](https://github.com/AprilNEA/OpenLogi/pull/1463))
+- *(core)* resolve connection transport from live routes ([#1367](https://github.com/AprilNEA/OpenLogi/pull/1367))
+- *(gui)* restore the config-error folder action ([#1458](https://github.com/AprilNEA/OpenLogi/pull/1458))
+- *(macos)* respect the selected Apple developer directory ([#1457](https://github.com/AprilNEA/OpenLogi/pull/1457))
+- *(i18n)* improve Turkish catalog wording ([#1415](https://github.com/AprilNEA/OpenLogi/pull/1415))
+- *(agent)* repeat thumb-wheel volume actions with swipe distance ([#1455](https://github.com/AprilNEA/OpenLogi/pull/1455))
+- *(linux)* localize desktop entry comment in Spanish ([#1468](https://github.com/AprilNEA/OpenLogi/pull/1468))
+
 ## [0.8.12] - 2026-10-09
 
 ### Added
