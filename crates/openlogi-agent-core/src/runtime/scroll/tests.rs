@@ -1155,6 +1155,63 @@ fn free_spin_jitter_never_scales_the_resumed_direction() {
     assert!(engine.active.is_empty());
 }
 
+/// Pre-accelerated OS-hook input at vertical sensitivity 28: each line is
+/// queued as two.
+fn preaccelerated_at_double_sensitivity() -> MotionTuning {
+    MotionTuning {
+        distance_scale: wheel(1.0, 2.0),
+        ..preaccelerated()
+    }
+}
+
+#[test]
+fn sensitivity_never_turns_jitter_into_a_reversal() {
+    let base = Instant::now();
+    let mut engine = ScrollEngine::default();
+    let mut frames = Vec::new();
+    // A 0.3-line backward jitter arrives as 0.6 at double sensitivity. It is
+    // still below the commit floor in the wheel's own lines, so the resumed
+    // main direction passes whole instead of cooling to 40/400 of itself.
+    for (millis, delta) in [(0, -10.0), (50, -10.0), (80, 0.6), (120, -10.0)] {
+        engine.impulse(
+            source(),
+            wheel(0.0, delta),
+            base + Duration::from_millis(millis),
+            preaccelerated_at_double_sensitivity(),
+            &mut |frame| frames.push(frame),
+        );
+    }
+    engine.advance_due(base + Duration::from_millis(400), &mut |frame| {
+        frames.push(frame);
+    });
+    assert_delta(cumulative(&frames), wheel(0.0, -30.0 + 0.6 * 0.075));
+    assert!(engine.active.is_empty());
+}
+
+#[test]
+fn reversal_knee_compresses_the_same_motion_at_any_sensitivity() {
+    let base = Instant::now();
+    let mut engine = ScrollEngine::default();
+    let mut frames = Vec::new();
+    // The flip from `reversal_compression_tames_the_corrective_burst_and_fades`
+    // at double sensitivity: 8 lines × 3/4 ramp = 6 → 3.75 at the knee, then
+    // doubled, rather than knee-compressing the doubled 12 to 5.25.
+    for (millis, delta) in [(0, -10.0), (100, -10.0), (400, 16.0)] {
+        engine.impulse(
+            source(),
+            wheel(0.0, delta),
+            base + Duration::from_millis(millis),
+            preaccelerated_at_double_sensitivity(),
+            &mut |frame| frames.push(frame),
+        );
+    }
+    engine.advance_due(base + Duration::from_millis(700), &mut |frame| {
+        frames.push(frame);
+    });
+    assert_delta(cumulative(&frames), wheel(0.0, -20.0 + 3.75 * 2.0));
+    assert!(engine.active.is_empty());
+}
+
 #[test]
 fn raw_input_reverses_without_attenuation() {
     let base = Instant::now();
