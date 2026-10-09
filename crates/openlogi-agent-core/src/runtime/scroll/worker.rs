@@ -440,6 +440,14 @@ fn run_worker(
                     session,
                     generation: cancelled_generation,
                 } => {
+                    // A control from a generation this worker has not observed
+                    // yet is not stale: catch up first, or it is dropped and
+                    // the cancelled session's queued input is accepted below.
+                    if cancelled_generation > cancellations.generation
+                        && cancellations.advance_to(shared_generation.load(Ordering::Acquire))
+                    {
+                        engine.cancel_all(emit_smooth);
+                    }
                     if cancellations.cancel(&session, cancelled_generation) {
                         engine.cancel_source(&ScrollSource::Hidpp(session), emit_smooth);
                     }
@@ -1013,6 +1021,62 @@ mod tests {
         drop(commands);
         drop(controls);
         worker.join().expect("worker exits cleanly");
+    }
+
+    #[test]
+    fn overflow_control_from_an_unobserved_generation_still_cancels_its_session() {
+        let cancelled = HidppSessionId::with_epoch("mouse-a", 7);
+        let survivor = HidppSessionId::with_epoch("mouse-b", 3);
+        let direct = |session: &HidppSessionId, generation, y| {
+            Ok(ScrollCommand::Input(ScrollInput {
+                generation,
+                source: ScrollSource::Hidpp(session.clone()),
+                impulse: WheelDelta { x: 0.0, y },
+                output: ScrollOutputMode::Direct,
+            }))
+        };
+        let mut script = [
+            direct(&survivor, 0, 1.0),
+            direct(&cancelled, 1, 2.0),
+            direct(&survivor, 1, 3.0),
+        ]
+        .into_iter();
+        let (controls, control_rx) = mpsc::channel();
+        let generation = AtomicU64::new(0);
+        let mut emitted = Vec::new();
+
+        run_worker(
+            |_| {
+                script
+                    .next()
+                    .unwrap_or(Err(mpsc::RecvTimeoutError::Disconnected))
+            },
+            &control_rx,
+            &generation,
+            &preferences(false, 14),
+            &mut |_| {},
+            &mut |delta| {
+                if emitted.is_empty() {
+                    // While the worker is still inside a generation-0 output
+                    // callback, hooks are cancelled and new-generation input
+                    // from `cancelled` saturates the queue.
+                    generation.fetch_add(1, Ordering::AcqRel);
+                    controls
+                        .send(ScrollControl::CancelOverflowSession {
+                            session: cancelled.clone(),
+                            generation: 1,
+                        })
+                        .expect("worker control channel remains open");
+                }
+                emitted.push(delta);
+            },
+        );
+
+        assert_eq!(
+            emitted,
+            [WheelDelta { x: 0.0, y: 1.0 }, WheelDelta { x: 0.0, y: 3.0 }],
+            "the cancelled session must not emit, and other sources must"
+        );
     }
 
     #[test]
