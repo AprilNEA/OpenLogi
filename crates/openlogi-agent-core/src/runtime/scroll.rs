@@ -79,8 +79,10 @@ fn accel_gain(window_ticks: f64, max_gain: f64) -> f64 {
     f64::midpoint(1.0, ACCEL_RATE_MS * rate_per_ms).clamp(1.0, max_gain)
 }
 
-/// Motion settings captured per accepted tick, so a live settings change
-/// affects only ticks after it.
+/// Motion settings resolved when the worker takes a tick off its queue and
+/// kept with that tick's pulse, so a live settings change never re-times or
+/// rescales motion already under way. A tick still queued when a setting
+/// changes takes the new value, exactly as the smoothing toggle does.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct MotionTuning {
     /// Amplitude multiplier per wheel tick, in native lines.
