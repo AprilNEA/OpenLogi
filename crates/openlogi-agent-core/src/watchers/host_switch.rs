@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use openlogi_hid::{
     ChannelPool, ChannelRegistry, DeviceIoGate, DeviceRoute, HostSwitchRestoreOutcome,
-    HostSwitchStopReason, PendingHostSwitchRestore, run_host_switch_session, switch_linked_hosts,
+    HostSwitchSessionOutcome, HostSwitchStopReason, PendingHostSwitchRestore,
+    run_host_switch_session, switch_linked_hosts,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
@@ -163,6 +164,7 @@ enum ManagerEvent {
 }
 
 struct SessionServices {
+    links: HostSwitchLinks,
     channel_pool: ChannelPool,
     registry: ChannelRegistry,
     receiver_access: ReceiverAccess,
@@ -441,6 +443,7 @@ async fn manage(context: HostSwitchManagerContext) -> ManagerCompletion {
     let (events, mut event_rx) = mpsc::unbounded_channel();
     let mut registry_changes = registry.subscribe();
     let services = SessionServices {
+        links: links.clone(),
         channel_pool,
         registry,
         receiver_access,
@@ -547,20 +550,36 @@ fn spawn_session(
     let session_link = link.clone();
     let registry = services.registry.clone();
     let device_io = services.device_io.clone();
+    let channel_pool = services.channel_pool.clone();
+    let mut links = services.links.clone();
     let events = services.events.clone();
     tokio::spawn(async move {
         let task = tokio::spawn(async move {
-            let _receiver_lease = receiver_lease;
             match run_host_switch_session(
                 session_link.keyboard.clone(),
                 stop_rx,
                 &registry,
                 device_io,
+                &session_link.targets,
+                &channel_pool,
             )
             .await
             {
                 Ok(outcome) => {
-                    let (requested_host, pending_restore) = outcome.into_parts();
+                    let (requested_host, pending_restore) = match outcome {
+                        HostSwitchSessionOutcome::NativeDeparture => {
+                            drop(receiver_lease);
+                            wait_for_departure(&mut links, &session_link.keyboard).await;
+                            (None, None)
+                        }
+                        HostSwitchSessionOutcome::Restored { requested_host } => {
+                            (requested_host, None)
+                        }
+                        HostSwitchSessionOutcome::RestorePending {
+                            requested_host,
+                            restore,
+                        } => (requested_host, Some(restore)),
+                    };
                     SessionResult {
                         requested_host,
                         pending_restore,
@@ -832,7 +851,9 @@ mod tests {
         let registry = ChannelRegistry::default();
         let (_signal, gate) = openlogi_hid::device_io_channel();
         let (events, mut received) = mpsc::unbounded_channel();
+        let (_links_tx, links) = watch::channel(std::sync::Arc::new(vec![link(2)]));
         let services = SessionServices {
+            links,
             channel_pool: openlogi_hid::channel_pool(),
             registry,
             receiver_access: access.clone(),

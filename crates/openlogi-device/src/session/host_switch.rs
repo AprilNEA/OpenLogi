@@ -1,10 +1,9 @@
 //! Keyboard-initiated host-switch synchronization.
 //!
-//! A session temporarily diverts the keyboard's three host controls, observes
-//! which channel was pressed, switches the linked pointing devices, and then
-//! switches the keyboard itself. Ordering matters: once the keyboard leaves
-//! this host its HID++ channel can no longer command a mouse sharing the same
-//! receiver.
+//! Native host-departure notifications move linked pointing devices without
+//! touching the keyboard's controls or waiting for it to remain reachable.
+//! Older devices use temporarily diverted host controls and switch the keyboard
+//! last, while its channel can still command mice sharing the receiver.
 
 use std::{future::Future, sync::Arc, time::Duration};
 
@@ -13,7 +12,7 @@ use hidpp::{
     device::Device,
     feature::{
         CreatableFeature,
-        change_host::ChangeHostFeature,
+        change_host::{ChangeHostFeature, ChangeHostInfo},
         hosts_info::{HostIndex, HostSlotStatus, HostsInfoFeature},
     },
     protocol::v20,
@@ -113,16 +112,18 @@ impl From<IoSuspended> for HostSwitchError {
     }
 }
 
-/// Capture host switch keys until a press, shutdown, or channel retirement.
+/// Follow native host departure, or capture diverted host keys until shutdown.
 ///
-/// Returns any requested host together with the restoration outcome. The caller
-/// must retain pending restoration and finish it before switching hosts or
-/// starting a successor session.
+/// Native departure switches `targets` before completing and requests no further
+/// keyboard write. Diverted controls return the requested host with their
+/// restoration outcome; the caller must finish restoration before switching.
 pub async fn run_host_switch_session(
     keyboard: DeviceRoute,
     shutdown: oneshot::Receiver<HostSwitchStopReason>,
     registry: &ChannelRegistry,
     device_io: DeviceIoGate,
+    targets: &[DeviceRoute],
+    channel_pool: &ChannelPool,
 ) -> Result<HostSwitchSessionOutcome, HostSwitchSessionFailure> {
     device_io.ensure_allowed().map_err(HostSwitchError::from)?;
     let shared = registry
@@ -130,11 +131,63 @@ pub async fn run_host_switch_session(
         .ok_or(HostSwitchError::KeyboardNotFound)?;
     let channel = Arc::clone(shared.channel());
     let keyboard_index = shared.device_index();
-    let device = timed_hidpp(
+    let mut device = timed_hidpp(
         "opening keyboard device",
         Device::new(Arc::clone(&channel), keyboard_index),
     )
     .await?;
+    if let Some(feature) = timed_hidpp(
+        "locating native host-switch feature",
+        device.root().get_feature(ChangeHostFeature::ID),
+    )
+    .await?
+    .filter(|feature| feature.version >= 2)
+    {
+        let mut shutdown = Some(shutdown);
+        let (departure_tx, mut departures) = mpsc::unbounded_channel();
+        let listener = channel.add_msg_listener_guarded(move |raw, matched| {
+            if !matched {
+                let message = v20::Message::from(raw);
+                if let Some(hosts) = native_departure(&message, keyboard_index, feature.index) {
+                    let _ = departure_tx.send(hosts);
+                }
+            }
+        });
+        let change_host = device.add_feature::<ChangeHostFeature>(feature.index);
+        let state = timed_hidpp("reading keyboard host", change_host.get_host_info()).await?;
+        info!(route = %keyboard, "native host switch link active");
+        if let Some(host) = monitor_native_departure(
+            &mut shutdown,
+            &mut departures,
+            registry,
+            &shared,
+            device_io.clone(),
+            state,
+        )
+        .await
+        {
+            // Departure already moved the keyboard. Only target routes may be
+            // queried or written, even if inventory retired the keyboard.
+            if !native_shutdown_requested(&mut shutdown) {
+                device_io.ensure_allowed().map_err(HostSwitchError::from)?;
+                switch_target_hosts(
+                    &keyboard,
+                    targets,
+                    host,
+                    &channel,
+                    channel_pool,
+                    Some(registry),
+                )
+                .await;
+                drop(listener);
+                return Ok(HostSwitchSessionOutcome::NativeDeparture);
+            }
+        }
+        drop(listener);
+        return Ok(HostSwitchSessionOutcome::Restored {
+            requested_host: None,
+        });
+    }
     let feature = timed_hidpp(
         "locating host controls",
         device.root().get_feature(reprog_controls::FEATURE_ID),
@@ -142,10 +195,23 @@ pub async fn run_host_switch_session(
     .await?
     .ok_or(HostSwitchError::UnsupportedKeyboard)?;
     let controls = ReprogControlsV4::new(Arc::clone(&channel), keyboard_index, feature.index);
+    run_diverted_host_switch(&keyboard, shutdown, &shared, controls, registry, device_io).await
+}
+
+async fn run_diverted_host_switch(
+    keyboard: &DeviceRoute,
+    shutdown: oneshot::Receiver<HostSwitchStopReason>,
+    shared: &SharedChannel,
+    controls: ReprogControlsV4,
+    registry: &ChannelRegistry,
+    device_io: DeviceIoGate,
+) -> Result<HostSwitchSessionOutcome, HostSwitchSessionFailure> {
+    let channel = Arc::clone(shared.channel());
+    let keyboard_index = shared.device_index();
 
     let mut armed = Vec::new();
     if let Err(error) = arm_host_controls_inner(&controls, &mut armed).await {
-        let pending = PendingHostSwitchRestore::new(&shared, controls.feature_index(), armed);
+        let pending = PendingHostSwitchRestore::new(shared, controls.feature_index(), armed);
         return Err(rollback_host_switch_start(error, pending, registry, &device_io).await);
     }
     if armed.is_empty() {
@@ -175,25 +241,19 @@ pub async fn run_host_switch_session(
         controls = armed.len(),
         "host switch link active"
     );
-    let stop = monitor_host_switch(
-        shutdown,
-        &mut press_rx,
-        registry,
-        &shared,
-        device_io.clone(),
-    )
-    .await;
+    let stop =
+        monitor_host_switch(shutdown, &mut press_rx, registry, shared, device_io.clone()).await;
 
     drop(listener);
     let requested_host = stop.requested_host();
-    let Some(mut pending) = PendingHostSwitchRestore::new(&shared, controls.feature_index(), armed)
+    let Some(mut pending) = PendingHostSwitchRestore::new(shared, controls.feature_index(), armed)
     else {
         return Ok(HostSwitchSessionOutcome::Restored { requested_host });
     };
     let reuse_armed_channel = match stop {
         // A press does not retire the channel: teardown may write through it
         // for as long as inventory still publishes it.
-        HostSwitchStop::Pressed(_) => registry.is_current(&shared),
+        HostSwitchStop::Pressed(_) => registry.is_current(shared),
         HostSwitchStop::Shutdown => true,
         HostSwitchStop::ChannelChanged => false,
     };
@@ -215,6 +275,108 @@ pub async fn run_host_switch_session(
             }
         }
     })
+}
+
+fn native_departure(
+    message: &v20::Message,
+    device_index: u8,
+    feature_index: u8,
+) -> Option<[u8; 2]> {
+    let header = message.header();
+    if header.device_index != device_index
+        || header.feature_index != feature_index
+        || header.function_id.to_lo() != 0
+        || header.software_id.to_lo() != 0
+    {
+        return None;
+    }
+    // REVERSE-ENGINEERED: MX Keys Mini over Bolt, ChangeHost v2, emits
+    // [source_host, target_host] before leaving. Captured slot 2 -> 1 as [1, 0];
+    // reconnect arrived 12 s later. Public x1814 v0 specifies no events.
+    // Corroboration: https://github.com/flyth/boltflow (undocumented event).
+    let payload = message.extend_payload();
+    Some([payload[0], payload[1]])
+}
+
+fn native_departure_host(hosts: [u8; 2], state: ChangeHostInfo) -> Option<u8> {
+    let [source, target] = hosts;
+    (source < state.host_count
+        && target < state.host_count
+        && source == state.current_host
+        && target != source)
+        .then_some(target)
+}
+
+fn native_shutdown_requested(
+    shutdown: &mut Option<oneshot::Receiver<HostSwitchStopReason>>,
+) -> bool {
+    match shutdown.as_mut().map(oneshot::Receiver::try_recv) {
+        Some(Ok(HostSwitchStopReason::Graceful) | Err(oneshot::error::TryRecvError::Closed)) => {
+            true
+        }
+        Some(Ok(HostSwitchStopReason::DeviceLost)) => {
+            // Device loss cannot cancel a queued native departure. Consuming
+            // this reason must not later look like an abandoned owner.
+            *shutdown = None;
+            false
+        }
+        Some(Err(oneshot::error::TryRecvError::Empty)) | None => false,
+    }
+}
+
+async fn monitor_native_departure(
+    shutdown: &mut Option<oneshot::Receiver<HostSwitchStopReason>>,
+    departures: &mut mpsc::UnboundedReceiver<[u8; 2]>,
+    registry: &ChannelRegistry,
+    shared: &SharedChannel,
+    mut device_io: DeviceIoGate,
+    state: ChangeHostInfo,
+) -> Option<u8> {
+    let mut registry_changes = registry.subscribe();
+    loop {
+        if native_shutdown_requested(shutdown) {
+            return None;
+        }
+        // Device loss and inventory removal can accompany departure; only
+        // graceful cancellation takes precedence over its queued notification.
+        while let Ok(hosts) = departures.try_recv() {
+            if let Some(host) = native_departure_host(hosts, state) {
+                return Some(host);
+            }
+        }
+        if !registry.is_current(shared) || !device_io.allows_io() {
+            return None;
+        }
+        tokio::select! {
+            biased;
+
+            hosts = departures.recv() => {
+                let hosts = hosts?;
+                if let Some(host) = native_departure_host(hosts, state) {
+                    return Some(host);
+                }
+            }
+            changed = registry_changes.changed() => {
+                if changed.is_err() {
+                    return None;
+                }
+            }
+            reason = async {
+                match shutdown.as_mut() {
+                    Some(receiver) => receiver.await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                match reason {
+                    Ok(HostSwitchStopReason::DeviceLost) => *shutdown = None,
+                    Ok(HostSwitchStopReason::Graceful) | Err(_) => return None,
+                }
+            }
+            allowed = device_io.changed() => {
+                allowed?;
+            }
+        }
+    }
 }
 
 /// Why monitoring an armed host-switch session stopped.
@@ -313,8 +475,33 @@ pub async fn switch_linked_hosts(
     // the keyboard leaves this host its channel can no longer command a mouse
     // sharing the same receiver.
     let keyboard_change = prepare_host_change_on(&channel, keyboard.device_index(), host).await?;
+    switch_target_hosts(keyboard, targets, host, &channel, channel_pool, None).await;
+    let changed = apply_host_change(keyboard_change).await?;
+    if changed {
+        debug!(host, route = %keyboard, "keyboard host switched");
+    }
+    Ok(changed)
+}
+
+async fn switch_target_hosts(
+    keyboard: &DeviceRoute,
+    targets: &[DeviceRoute],
+    host: u8,
+    keyboard_channel: &Arc<HidppChannel>,
+    channel_pool: &ChannelPool,
+    registry: Option<&ChannelRegistry>,
+) {
     for target in targets {
-        match prepare_host_change(target, host, keyboard, &channel, channel_pool).await {
+        match prepare_host_change(
+            target,
+            host,
+            keyboard,
+            keyboard_channel,
+            channel_pool,
+            registry,
+        )
+        .await
+        {
             Ok(change) => {
                 if let Err(error) = apply_host_change(change).await {
                     debug!(%error, route = %target, host, "linked device host switch failed");
@@ -325,11 +512,6 @@ pub async fn switch_linked_hosts(
             }
         }
     }
-    let changed = apply_host_change(keyboard_change).await?;
-    if changed {
-        debug!(host, route = %keyboard, "keyboard host switched");
-    }
-    Ok(changed)
 }
 
 async fn arm_host_controls_inner(
@@ -457,9 +639,12 @@ async fn prepare_host_change(
     keyboard: &DeviceRoute,
     keyboard_channel: &Arc<HidppChannel>,
     channel_pool: &ChannelPool,
+    registry: Option<&ChannelRegistry>,
 ) -> Result<PreparedHostChange, HostSwitchError> {
     if shares_channel(target, keyboard) {
         prepare_host_change_on(keyboard_channel, target.device_index(), host).await
+    } else if let Some(current) = registry.and_then(|registry| registry.lookup(target)) {
+        prepare_host_change_on(current.channel(), current.device_index(), host).await
     } else {
         let channel = open_channel(channel_pool, target, "opening linked device channel")
             .await?
