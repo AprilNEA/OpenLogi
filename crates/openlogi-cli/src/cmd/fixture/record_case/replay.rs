@@ -164,7 +164,11 @@ fn unique_replacement(audit: &HidCassetteAudit, kind: SanitizedIdentityKind) -> 
 
 #[cfg(test)]
 mod tests {
-    use openlogi_device::write::FeatureEntry;
+    use std::path::Path;
+
+    use openlogi_device::reprog_controls::CidFlags;
+    use openlogi_device::write::{FeatureEntry, ReprogControlEntry};
+    use openlogi_device::{Dpi, DpiCapabilities, DpiInfo};
     use openlogi_fixture::{
         CassetteExchange, FIXTURE_SCHEMA_VERSION, HidCassette, ReportSupport, RequestMatch,
     };
@@ -272,6 +276,93 @@ mod tests {
         };
         require_single_passing_candidate(vec![candidate.clone(), candidate])
             .expect_err("multiple passing candidates fail closed");
+    }
+
+    #[tokio::test]
+    async fn mx_master_4_dpi_read_expands_the_recorded_sensor_range() {
+        let Some((backend, route)) = mx_master_4_replay("dpi-info") else {
+            return;
+        };
+
+        let observed = FixtureOperation::DpiInfo.observe(&backend, &route).await;
+
+        // The recorded 0x00c8, 0xe032, 0x1f40 list encodes 200..=8000 in 50-DPI steps.
+        assert_eq!(
+            observed,
+            SemanticObservation::DpiInfo(Ok(DpiInfo {
+                current: Dpi::new(2000),
+                capabilities: DpiCapabilities::new((200..=8000).step_by(50).collect())
+                    .expect("reviewed sensor range is valid"),
+            }))
+        );
+        backend.require_complete().expect("DPI cassette consumed");
+    }
+
+    #[tokio::test]
+    async fn mx_master_4_control_read_preserves_separate_gesture_and_haptic_inputs() {
+        let Some((backend, route)) = mx_master_4_replay("reprogrammable-controls") else {
+            return;
+        };
+
+        let observed = FixtureOperation::ReprogrammableControls
+            .observe(&backend, &route)
+            .await;
+        let SemanticObservation::ReprogrammableControls(controls) = observed else {
+            panic!("expected a control-table observation, got {observed:?}");
+        };
+        let controls = controls.expect("recorded control table is readable");
+
+        assert_eq!(controls.len(), 9);
+        // Both recorded controls carry primary flags 0x31 and additional flags 0x05.
+        let flags = CidFlags::MOUSE
+            | CidFlags::REPROGRAMMABLE
+            | CidFlags::DIVERTABLE
+            | CidFlags::RAW_XY
+            | CidFlags::ANALYTICS_KEY_EVENTS;
+        for (cid, task_id) in [(0x00c3, 0x009c), (0x01a0, 0x0109)] {
+            assert_eq!(
+                controls.iter().find(|control| control.cid == cid).copied(),
+                Some(ReprogControlEntry {
+                    cid,
+                    task_id,
+                    flags,
+                })
+            );
+        }
+        backend
+            .require_complete()
+            .expect("control-table cassette consumed");
+    }
+
+    fn mx_master_4_replay(case: &str) -> Option<(ReplayBackend, DeviceRoute)> {
+        let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/devices");
+        match std::fs::symlink_metadata(&corpus) {
+            // Published crates do not contain the repository fixture corpus.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!("skipping MX Master 4 replay: repository fixture corpus is absent");
+                return None;
+            }
+            result => {
+                result.expect("repository fixture corpus is accessible");
+            }
+        }
+        let path = corpus
+            .join("mx-master-4-001/cases")
+            .join(format!("{case}.json"));
+        let cassette: HidCassette =
+            serde_json::from_slice(&std::fs::read(path).expect("MX Master 4 cassette is present"))
+                .expect("MX Master 4 cassette parses");
+        let target = target(
+            DeviceRoute::Bolt {
+                receiver_uid: "OL-BOLT-UID-0001".to_string(),
+                slot: 2,
+            },
+            0xc548,
+        );
+        let topology = replay_topology(&target, &target.route, &cassette);
+        let backend = ReplayBackend::new(topology, vec![cassette])
+            .expect("MX Master 4 replay topology is valid");
+        Some((backend, target.route))
     }
 
     #[tokio::test]
