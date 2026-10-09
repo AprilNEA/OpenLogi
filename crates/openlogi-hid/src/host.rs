@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
-use openlogi_core::hid::{LightCommand, PairingError, WriteError};
+use openlogi_core::hid::{FnLockState, LightCommand, PairingError, WriteError};
 
 use crate::probe_cache::FileProbeCacheStore;
 use crate::transport::native_backend;
@@ -119,8 +119,13 @@ pub async fn set_scroll_wheel_mode(
     device::set_scroll_wheel_mode(&*native_backend(), route, resolution, inverted).await
 }
 
-/// Set the Fn-key inversion of the keyboard `route` reaches.
-pub async fn set_fn_lock(route: &DeviceRoute, on: bool) -> Result<(), WriteError> {
+/// Read the Fn-lock state of the keyboard `route` reaches.
+pub async fn get_fn_lock(route: &DeviceRoute) -> Result<FnLockState, WriteError> {
+    device::get_fn_lock(&*native_backend(), route).await
+}
+
+/// Set the Fn-lock of the keyboard `route` reaches and read it back.
+pub async fn set_fn_lock(route: &DeviceRoute, on: bool) -> Result<FnLockState, WriteError> {
     device::set_fn_lock(&*native_backend(), route, on).await
 }
 

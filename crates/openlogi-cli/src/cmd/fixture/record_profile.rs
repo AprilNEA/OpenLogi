@@ -296,12 +296,24 @@ async fn capture_hidpp_settings(
         return Err(unknown_offline_support("backlight"));
     };
 
+    let fn_lock = match capability_setting(device.online, capabilities.fn_lock) {
+        Some(setting) => setting,
+        None => {
+            semantic_read(
+                "fn-lock",
+                agent::call(client.read_fn_lock(context::current(), source_route.clone())),
+            )
+            .await?
+        }
+    };
+
     Ok(ProfileDeviceSettings {
         route: profile_route,
         dpi,
         smartshift,
         wheel,
         backlight,
+        fn_lock,
         lighting: profile_support(capabilities.lighting),
         light: ProfileSupport::Unsupported,
     })
@@ -359,6 +371,7 @@ fn capture_standalone(source: &StandaloneDevice) -> Result<ProfileCaptureParts> 
         smartshift: ProfileSetting::Unsupported,
         wheel: ProfileSetting::Unsupported,
         backlight: ProfileSetting::Unsupported,
+        fn_lock: ProfileSetting::Unsupported,
         lighting: ProfileSupport::Unsupported,
         light: profile_support(light_supported),
     };

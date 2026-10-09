@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.11] - 2026-10-02
+
+### Added
+
+- *(linux)* add verified release installer ([#1109](https://github.com/AprilNEA/OpenLogi/pull/1109))
+
+### Fixed
+
+- clear the lints rustc 1.99 raises on untouched code ([#1638](https://github.com/AprilNEA/OpenLogi/pull/1638))
+- *(core)* match Actions Ring layouts with the per-app selector ([#643](https://github.com/AprilNEA/OpenLogi/pull/643))
+- *(macos)* drive the device-I/O gate from powerd instead of workspace notifications ([#1323](https://github.com/AprilNEA/OpenLogi/pull/1323))
+- *(macos)* confirm desktop switches with private space APIs ([#1586](https://github.com/AprilNEA/OpenLogi/pull/1586))
+- *(agent)* recognize an overlay tenant by any image we ever shipped ([#871](https://github.com/AprilNEA/OpenLogi/pull/871))
+- *(macos)* press Back and Forward as the frontmost app's menu item ([#1622](https://github.com/AprilNEA/OpenLogi/pull/1622))
+
+## [0.8.10] - 2026-09-30
+
+### Added
+
+- *(agent)* read privacy grants on notification instead of a 1.2 s poll
+- *(hook)* probe the Accessibility grant on cue, with a heartbeat backstop
+- *(core)* add a Super modifier and make Win/Meta name it ([#1387](https://github.com/AprilNEA/OpenLogi/pull/1387))
+- *(keyboard)* key controls by HID++ control ID, fix Keys tab and Fn-lock ([#1604](https://github.com/AprilNEA/OpenLogi/pull/1604))
+
+### Fixed
+
+- *(hook)* charge the callback watchdog's first poll from its spawn
+- *(hook)* give the callback watchdog the same watched-time rule
+- *(hook)* discount only the watchdog gaps that spanned a kernel sleep or wake
+- *(hook)* do not charge the tap thread for time the watchdog was not running
+- *(hook)* give the macOS tap's capability probes their own watchdog budget
+- *(agent)* keep the armed-session record whole and clear it on the Quit fallback
+- *(agent)* re-arm a crash respawn instead of going dormant
+- *(macos)* press shortcut keys where the active layout types them ([#948](https://github.com/AprilNEA/OpenLogi/pull/948))
+- *(gui)* unpair a forgotten receiver device so it stays deleted ([#1617](https://github.com/AprilNEA/OpenLogi/pull/1617))
+- *(macos)* keep the hook from hearing the keys OpenLogi posts ([#1618](https://github.com/AprilNEA/OpenLogi/pull/1618))
+
+## [0.8.9] - 2026-09-27
+
+### Fixed
+
+- *(hook)* use AppKit for macOS pointer hit testing ([#1568](https://github.com/AprilNEA/OpenLogi/pull/1568))
+- *(gui)* repair missing launchd agent jobs ([#1303](https://github.com/AprilNEA/OpenLogi/pull/1303))
+- *(hook)* stop leaking GNOME observer sockets ([#1418](https://github.com/AprilNEA/OpenLogi/pull/1418))
+- *(gui)* correct thumb-wheel volume preset labels ([#1436](https://github.com/AprilNEA/OpenLogi/pull/1436))
+
 ## [0.8.8] - 2026-09-25
 
 ### Added

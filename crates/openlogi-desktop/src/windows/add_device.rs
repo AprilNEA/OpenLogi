@@ -113,7 +113,7 @@ pub fn apply_undeliverable(cx: &mut App, failure: PairingFailure) {
     cx.set_global(PairingUi::Failed(failure));
 }
 
-fn pairing_failure_text(failure: &PairingFailure) -> String {
+pub(crate) fn pairing_failure_text(failure: &PairingFailure) -> String {
     match failure {
         PairingFailure::Hid { message } => {
             tr!("pairing.hid_transport_error", message => message.clone()).to_string()
@@ -364,6 +364,7 @@ fn passkey_panel(method: &PasskeyMethod, pal: Palette) -> impl IntoElement {
                 .child(
                     h_flex()
                         .id("passkey-sequence")
+                        .debug_selector(|| "passkey-sequence".into())
                         // The icons carry no text of their own, so the order is
                         // spelled out once here rather than left to assistive
                         // tech as a row of unlabelled images.
@@ -373,7 +374,7 @@ fn passkey_panel(method: &PasskeyMethod, pal: Palette) -> impl IntoElement {
                             v_flex()
                                 .items_center()
                                 .gap_0p5()
-                                .child(svg().path(click_icon(*click)).size_6().flex_none())
+                                .child(click_icon_svg(*click, pal))
                                 .child(
                                     div()
                                         .text_caption()
@@ -385,6 +386,15 @@ fn passkey_panel(method: &PasskeyMethod, pal: Palette) -> impl IntoElement {
         }
     }
     col
+}
+
+/// Click glyph with explicit text color so GPUI's SVG renderer paints its path.
+fn click_icon_svg(click: Click, pal: Palette) -> gpui::Svg {
+    svg()
+        .path(click_icon(click))
+        .size_6()
+        .flex_none()
+        .text_color(pal.text_primary)
 }
 
 /// The mouse body with the button this step wants filled in.
@@ -435,4 +445,92 @@ fn action_button(id: &'static str, label: impl Into<SharedString>, primary: bool
 fn cancel_button() -> impl IntoElement {
     action_button("ad-cancel", tr!("common.cancel"), false)
         .on_click(|_, _, cx| send(cx, CancelPairing))
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{AssetSource, TestAppContext};
+    use openlogi_ui::action_icons::ActionIcons;
+
+    use super::*;
+
+    #[test]
+    fn mouse_pairing_click_icons_are_embedded() {
+        for click in [Click::Left, Click::Right] {
+            let path = click_icon(click);
+            let loaded = ActionIcons.load(path);
+            assert!(
+                matches!(loaded, Ok(Some(_))),
+                "missing embedded asset for {path}"
+            );
+            let bytes = loaded.unwrap().unwrap();
+            let content = std::str::from_utf8(&bytes).expect("valid utf-8 svg");
+            assert!(content.contains("<svg"), "asset {path} should be an SVG");
+        }
+    }
+
+    #[test]
+    fn mouse_pairing_click_icon_resolves_text_color() {
+        let text_primary = gpui::hsla(0.5, 0.5, 0.5, 1.0);
+        let pal = Palette {
+            page: gpui::hsla(0., 0., 0., 1.),
+            panel: gpui::hsla(0., 0., 0., 1.),
+            control: gpui::hsla(0., 0., 0., 1.),
+            control_hover: gpui::hsla(0., 0., 0., 1.),
+            muted: gpui::hsla(0., 0., 0., 1.),
+            border: gpui::hsla(0., 0., 0., 1.),
+            text_primary,
+            text_muted: gpui::hsla(0., 0., 0., 1.),
+            card_radius: gpui::px(8.),
+            control_radius: gpui::px(4.),
+        };
+        for click in [Click::Left, Click::Right] {
+            let mut icon = click_icon_svg(click, pal);
+            assert_eq!(
+                icon.style().text.color,
+                Some(text_primary),
+                "click icon SVG must resolve text color so GPUI paints its path"
+            );
+        }
+    }
+
+    #[test]
+    fn spoken_click_sequence_formats_correctly() {
+        let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+        let clicks = [Click::Left, Click::Right, Click::Left];
+        let spoken = spoken_click_sequence(&clicks);
+        assert_eq!(spoken, "1. Left Click, 2. Right Click, 3. Left Click");
+    }
+
+    struct PointerPasskeyHarness {
+        method: PasskeyMethod,
+        pal: Palette,
+    }
+
+    impl Render for PointerPasskeyHarness {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            passkey_panel(&self.method, self.pal)
+        }
+    }
+
+    #[gpui::test]
+    fn pointer_passkey_panel_renders(cx: &mut TestAppContext) {
+        let pal = cx.update(|cx| {
+            gpui_component::init(cx);
+            theme::register_builtin_themes(cx);
+            theme::palette(cx)
+        });
+        let method = PasskeyMethod::Pointer {
+            passkey: "123".into(),
+            clicks: vec![Click::Left, Click::Right, Click::Left],
+        };
+        let (_view, cx) = cx.add_window_view(|_, _| PointerPasskeyHarness { method, pal });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let bounds = cx
+            .debug_bounds("passkey-sequence")
+            .expect("passkey sequence must be laid out and painted");
+        assert!(bounds.size.width > gpui::px(0.));
+        assert!(bounds.size.height > gpui::px(0.));
+    }
 }

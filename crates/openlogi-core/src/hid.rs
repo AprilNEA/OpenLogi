@@ -11,6 +11,7 @@
 pub mod backlight;
 pub mod dpi;
 pub mod error;
+pub mod fn_lock;
 pub mod light;
 pub mod pairing;
 pub mod route;
@@ -20,6 +21,7 @@ pub mod smartshift;
 pub use backlight::{BacklightMode, BacklightState, BacklightStatus};
 pub use dpi::{Dpi, DpiCapabilities, DpiInfo};
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
+pub use fn_lock::FnLockState;
 pub use light::{LightCommand, commands_for_light_settings};
 pub use pairing::{Click, PairingError, PasskeyMethod, ReceiverSelector};
 pub use route::{

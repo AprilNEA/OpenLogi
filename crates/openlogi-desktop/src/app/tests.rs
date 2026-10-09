@@ -1,5 +1,6 @@
 use super::home::{connection_icon_path, ordered_device_indices};
 use super::{Capabilities, DetailTab, DeviceKind, DeviceRecord};
+use crate::services::assets::ResolvedAsset;
 use crate::ui::battery::{battery_charging_no_reading, battery_needs_attention};
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, DeviceTransports, LightCapabilities, LightValueRange,
@@ -233,12 +234,32 @@ fn tabs_follow_capabilities_not_kind() {
         haptic_feedback: false,
         haptic_panel: false,
         dpi_gestures: false,
+        fn_lock: false,
     });
     // After 0x0005 kind-correction the record has kind=Mouse, not Keyboard.
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Mouse, caps));
     assert!(tabs.contains(&DetailTab::Buttons));
     assert!(tabs.contains(&DetailTab::Pointer));
     assert!(!tabs.contains(&DetailTab::Lighting));
+}
+
+#[test]
+fn wheel_controls_show_pointer_tab_without_adjustable_dpi() {
+    for caps in [
+        Capabilities {
+            scroll_inversion: true,
+            ..Capabilities::default()
+        },
+        Capabilities {
+            hires_wheel: true,
+            ..Capabilities::default()
+        },
+    ] {
+        assert!(
+            DetailTab::tabs_for(&record(DeviceKind::Mouse, Some(caps)))
+                .contains(&DetailTab::Pointer)
+        );
+    }
 }
 
 /// A keyboard that exposes ReprogControls (buttons=true) but has no resolved
@@ -256,6 +277,7 @@ fn keyboard_without_asset_hides_buttons_tab() {
         haptic_feedback: false,
         haptic_panel: false,
         dpi_gestures: false,
+        fn_lock: false,
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(
@@ -277,10 +299,32 @@ fn keyboard_with_buttons_shows_keys_tab() {
         haptic_feedback: false,
         haptic_panel: false,
         dpi_gestures: false,
+        fn_lock: false,
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(tabs.contains(&DetailTab::Keys));
     assert!(!tabs.contains(&DetailTab::Buttons));
+}
+
+/// A sleeping keyboard whose slot was never probed has no capability data,
+/// but a resolved depot already says which controls it has: the Keys tab
+/// shows them so bindings can be set before the keyboard wakes.
+#[test]
+fn keyboard_with_a_depot_but_no_capabilities_shows_keys_tab() {
+    let mut keyboard = record(DeviceKind::Keyboard, None);
+    keyboard.asset = Some(ResolvedAsset {
+        depot: "mx_keys_mini".to_string(),
+        display_name: "MX Keys Mini".to_string(),
+        kind: Some(DeviceKind::Keyboard),
+        image_path: std::path::PathBuf::from("/tmp/mx-keys-mini.png"),
+        hero_image_path: None,
+        glow: None,
+        metadata: openlogi_assets::Metadata::default(),
+        png_width: 1872,
+        png_height: 728,
+    });
+    assert!(DetailTab::tabs_for(&keyboard).contains(&DetailTab::Keys));
+    assert!(!DetailTab::tabs_for(&record(DeviceKind::Keyboard, None)).contains(&DetailTab::Keys));
 }
 
 /// Each panel is independent: a lighting-only device (e.g. a keyboard with
