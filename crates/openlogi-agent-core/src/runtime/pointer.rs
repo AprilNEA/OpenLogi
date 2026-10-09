@@ -7,22 +7,43 @@ use super::ActionDispatchTarget;
 
 impl ActionDispatchTarget {
     pub(super) fn resolve(self, action: &Action) -> Option<Self> {
-        let Self::Pointer(target) = self else {
+        self.resolve_with(
+            action,
+            || openlogi_hook::pointer_context().target,
+            openlogi_hook::pointer_target_is_focused,
+            openlogi_hook::frontmost_safari_pid,
+        )
+    }
+
+    pub(super) fn resolve_with(
+        self,
+        action: &Action,
+        current: impl FnOnce() -> PointerTarget,
+        is_focused: impl FnOnce(PointerTarget) -> bool,
+        frontmost_safari_pid: impl FnOnce() -> Option<i32>,
+    ) -> Option<Self> {
+        let Self::Pointer {
+            target,
+            fallback_safari_pid,
+        } = self
+        else {
             return Some(self);
         };
-        let current = openlogi_hook::pointer_context();
-        if !pointer_action_allowed(action, target, current.target, || {
-            openlogi_hook::pointer_target_is_focused(target)
-        }) {
+        if !pointer_action_allowed(action, target, current(), || is_focused(target)) {
             return None;
         }
         // Safari's existing AX implementation uses AXFocusedWindow. It is
         // admitted only after the exact hovered window passed the focus check.
         Some(match target {
-            PointerTarget::Window { process_id, .. }
-                if openlogi_hook::frontmost_safari_pid() == Some(process_id) =>
-            {
-                Self::SafariProcess(process_id)
+            PointerTarget::Window { process_id, .. } => {
+                if frontmost_safari_pid() == Some(process_id) {
+                    Self::SafariProcess(process_id)
+                } else {
+                    Self::Keyboard
+                }
+            }
+            PointerTarget::Unavailable => {
+                fallback_safari_pid.map_or(Self::Keyboard, Self::SafariProcess)
             }
             _ => Self::Keyboard,
         })
@@ -35,13 +56,13 @@ fn pointer_action_allowed(
     current: PointerTarget,
     is_focused: impl FnOnce() -> bool,
 ) -> bool {
-    if captured != current
-        || matches!(
-            captured,
-            PointerTarget::Unavailable | PointerTarget::Unsupported
-        )
-    {
+    if captured != current || captured == PointerTarget::Unsupported {
         return false;
+    }
+    // Still unidentified: the binding came from the focused profile, so it
+    // runs as focus would run it, keyboard effects included.
+    if captured == PointerTarget::Unavailable {
+        return true;
     }
     let needs_focus = match action.effect() {
         Effect::Shortcut(_)
@@ -110,11 +131,17 @@ mod tests {
     }
 
     #[test]
-    fn stale_or_unknown_context_never_becomes_a_desktop_action() {
+    fn stale_context_drops_even_target_independent_actions() {
         for (captured, current) in [
             (BROWSER, PointerTarget::Desktop),
             (PointerTarget::Desktop, BROWSER),
-            (PointerTarget::Unavailable, PointerTarget::Unavailable),
+            // The pointer crossed between an overlay and an identified
+            // target after the binding was chosen for the other one.
+            (PointerTarget::Desktop, PointerTarget::Unavailable),
+            (BROWSER, PointerTarget::Unavailable),
+            (PointerTarget::Unavailable, PointerTarget::Desktop),
+            (PointerTarget::Unavailable, BROWSER),
+            // Never captured: unsupported sessions dispatch through focus.
             (PointerTarget::Unsupported, PointerTarget::Unsupported),
         ] {
             assert!(!pointer_action_allowed(
@@ -130,5 +157,31 @@ mod tests {
             BROWSER,
             || false
         ));
+    }
+
+    #[test]
+    fn unidentified_context_runs_every_effect_as_focus_would() {
+        let shortcut = "Ctrl+Tab".parse().expect("valid shortcut");
+        for action in [
+            Action::MissionControl,
+            Action::CaptureRegion,
+            Action::NextDesktop,
+            Action::VolumeUp,
+            Action::AppExpose,
+            Action::BrowserBack,
+            Action::Copy,
+            Action::CustomShortcut(shortcut),
+            Action::TypeText("hello".into()),
+        ] {
+            assert!(
+                pointer_action_allowed(
+                    &action,
+                    PointerTarget::Unavailable,
+                    PointerTarget::Unavailable,
+                    || panic!("an unidentified target has no window to check")
+                ),
+                "{action:?}"
+            );
+        }
     }
 }

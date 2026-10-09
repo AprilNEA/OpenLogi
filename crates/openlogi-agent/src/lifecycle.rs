@@ -18,6 +18,8 @@
 //! sunk launch-at-login switch makes an unwanted login start possible; Windows
 //! and Linux only ever start wanted, so their gate passes unconditionally.
 
+#[cfg(target_os = "macos")]
+pub(crate) mod armed_session;
 mod transition;
 
 use std::sync::Arc;
@@ -129,9 +131,19 @@ impl Booted {
     /// respawn. Demand is a [`ClientKind::Gui`] declaration, not a mere
     /// connection: other clients are served without waking anything, and the
     /// takeover probe never declares at all.
+    ///
+    /// The same trigger also fires after a crash, and that start was wanted:
+    /// an agent armed earlier in this login session that did not leave
+    /// through a final exit re-arms at once (see [`armed_session`]).
     #[cfg(target_os = "macos")]
     async fn gate(mut self) -> Option<Wanted> {
         if self.launch_at_login {
+            return Some(Wanted(self));
+        }
+        if armed_session::rearm() {
+            info!(
+                "launch_at_login is off, but this login armed an agent that did not quit — re-arming"
+            );
             return Some(Wanted(self));
         }
         info!("launch_at_login is off — dormant until a client demands arming");
@@ -208,6 +220,8 @@ impl Wanted {
         } = self.0;
         #[cfg(target_os = "macos")]
         let _ = armed_tx.send(());
+        #[cfg(target_os = "macos")]
+        armed_session::record();
         overlay::spawn();
         prompt_missing_accessibility(capture_mouse_events);
 
@@ -236,6 +250,7 @@ impl Wanted {
                 hidpp_watchers: WatcherFleet::Inactive,
                 hook: None,
                 capture_mouse_events,
+                held_pointer: None,
             },
         }
     }
@@ -263,6 +278,10 @@ struct Running {
     /// revoke (dropping the handle stops its thread).
     hook: Option<Hook>,
     capture_mouse_events: bool,
+    /// The pointer context held back while the ring was showing, applied when
+    /// it closes. The watcher publishes only transitions, so a pointer that
+    /// left the ring for another unidentifiable surface sends nothing more.
+    held_pointer: Option<openlogi_hook::PointerContext>,
 }
 
 impl Armed {
@@ -273,19 +292,24 @@ impl Armed {
         #[cfg(target_os = "macos")]
         if request_input_monitoring_and_schedule_relaunch().await {
             running
-                .shut_down("Input Monitoring permission relaunch", None)
+                .hand_over("Input Monitoring permission relaunch")
                 .await;
         }
 
         // HID++ watchers need no Accessibility — start them up front.
         running.restart_hidpp_watchers();
         let (mut watchers, inventory_refresh) = startup::spawn_state_watchers(&running.shared);
+        let mut ring = running.inputs.ring.subscribe();
 
         info!("openlogi-agent started");
         loop {
             tokio::select! {
                 biased;
 
+                // Logout, a developer, or the stale-agent takeover — each
+                // means "stop". The takeover's successor would rather find
+                // the armed session, but it is GUI-started and armed by that
+                // GUI's declaration, so nothing is lost by treating it alike.
                 () = running.signals.recv() => {
                     running.shut_down("shutdown signal", None).await;
                 }
@@ -300,6 +324,9 @@ impl Armed {
                 }
                 Some(device_key) = running.inputs.triggers.recv() => {
                     running.begin_action_ring(device_key.as_deref()).await;
+                }
+                Ok(()) = ring.changed() => {
+                    running.apply_held_pointer().await;
                 }
                 else => break,
             }
@@ -351,6 +378,10 @@ impl Running {
                 self.orchestrator.lock().await.set_camera_active(active);
             }
             WatcherEvent::App(app) => self.apply_foreground(app).await,
+            WatcherEvent::Pointer(context) if self.pointer_is_over_the_ring(context.target) => {
+                debug!("pointer is over the Actions Ring — keeping the profile that opened it");
+                self.held_pointer = Some(context);
+            }
             WatcherEvent::Pointer(context) => self.apply_pointer_context(context).await,
             WatcherEvent::Accessibility(granted) => self.apply_accessibility(granted).await,
             WatcherEvent::InputMonitoring(granted) => {
@@ -367,7 +398,7 @@ impl Running {
                 warn!("camera watcher channel closed — disabling camera automation updates");
             }
             WatcherEvent::Lost(Watcher::Pointer) if openlogi_hook::pointer_context_supported() => {
-                warn!("pointer watcher channel closed — disabling pointer-scoped remaps");
+                warn!("pointer watcher channel closed — using an unidentified pointer context");
                 self.apply_pointer_context(openlogi_hook::PointerContext {
                     app: None,
                     target: openlogi_hook::PointerTarget::Unavailable,
@@ -416,7 +447,33 @@ impl Running {
         }
     }
 
-    async fn apply_pointer_context(&self, context: openlogi_hook::PointerContext) {
+    /// While the ring is showing, the pointer is over the ring's own floating
+    /// window, which classifies as `PointerTarget::Unavailable`. Publishing
+    /// that context would rebuild the bindings without the per-app profile, so
+    /// a ring bound only in that app's profile would hear its second trigger
+    /// press as the button's global action and never close. The ring belongs
+    /// to the app it was opened over; its window is not a profile change.
+    fn pointer_is_over_the_ring(&self, target: openlogi_hook::PointerTarget) -> bool {
+        target == openlogi_hook::PointerTarget::Unavailable && self.inputs.ring.is_showing()
+    }
+
+    /// Once the ring has closed, apply the pointer context held back while it
+    /// showed. An `Unavailable` surface is not always the ring: the pointer may
+    /// have moved onto another floating window and stayed there, and without
+    /// this the opening app's bindings would outlive the ring.
+    async fn apply_held_pointer(&mut self) {
+        if self.held_pointer.is_none() || self.inputs.ring.is_showing() {
+            return;
+        }
+        if let Some(context) = self.held_pointer.take() {
+            debug!("Actions Ring closed — applying the pointer context held while it showed");
+            self.apply_pointer_context(context).await;
+        }
+    }
+
+    async fn apply_pointer_context(&mut self, context: openlogi_hook::PointerContext) {
+        // Anything newer supersedes what the ring held back.
+        self.held_pointer = None;
         let current = context.target;
         if self.orchestrator.lock().await.set_pointer_context(context) {
             self.inputs
@@ -547,7 +604,27 @@ impl Running {
         self.exit_after_replacement_teardown("binary update");
     }
 
+    /// Leave for good: nobody wants the agent until asked again, so the next
+    /// start in this login is a GUI demand, never a respawn to re-arm.
     async fn shut_down(
+        &mut self,
+        reason: &str,
+        tray_guard: Option<tokio::sync::oneshot::Sender<()>>,
+    ) -> ! {
+        #[cfg(target_os = "macos")]
+        armed_session::clear();
+        self.leave(reason, tray_guard).await
+    }
+
+    /// Leave for a successor that is already scheduled and must start armed:
+    /// the armed-session record stays for it to find.
+    #[cfg(target_os = "macos")]
+    async fn hand_over(&mut self, reason: &str) -> ! {
+        self.leave(reason, None).await
+    }
+
+    /// Drain the HID++ fleet, release the hook, and end the process.
+    async fn leave(
         &mut self,
         reason: &str,
         tray_guard: Option<tokio::sync::oneshot::Sender<()>>,
@@ -559,7 +636,8 @@ impl Running {
     }
 
     /// End after [`Self::complete_replacement`] resolved firmware
-    /// ownership, so a successor starts from native device state.
+    /// ownership, so a successor starts from native device state. A handover
+    /// like [`Self::hand_over`]: the successor finds the armed session.
     #[cfg(any(target_os = "macos", not(unix)))]
     fn exit_after_replacement_teardown(&mut self, reason: &str) -> ! {
         shutdown::release_hook_and_exit(self.hook.take(), &mut self.inputs, reason, None)

@@ -107,7 +107,15 @@ impl DetailTab {
             .unwrap_or_else(|| Capabilities::presumed_from_kind(record.kind));
         // Buttons panel is a mouse-model silhouette — only for pointer devices.
         // Keyboards get the Keys panel instead, even when they expose ReprogControls.
-        let can_show_mouse_model = matches!(record.kind, DeviceKind::Mouse | DeviceKind::Trackball);
+        // `caps.pointer` (a measured HID++ DPI feature) settles it on its own
+        // when kind resolution itself is wrong (#1699: a Bluetooth-direct MX
+        // Master 3S measured buttons+pointer capabilities but still carried
+        // kind=Keyboard, so this function picked Keys over Buttons despite
+        // its own stated "gated on Capabilities, not DeviceKind" design) — a
+        // real keyboard never reports a pointer sensor, so trusting a
+        // positive measured reading here can't misfire the other way.
+        let can_show_mouse_model =
+            caps.pointer || matches!(record.kind, DeviceKind::Mouse | DeviceKind::Trackball);
         let mut tabs = Vec::new();
         // A webcam is a UVC device with no HID++ capabilities; its detail screen
         // leads with the live preview, then the generic info tab.
@@ -120,11 +128,21 @@ impl DetailTab {
         if caps.haptic_panel || (caps.buttons && can_show_mouse_model) {
             tabs.push(Self::ActionsRing);
         }
-        // Function-row remapper when the keyboard reports remappable buttons.
-        if matches!(record.kind, DeviceKind::Keyboard) && caps.buttons {
+        // The Keys tab needs something to bind: HID++ controls (measured, or
+        // last-good for a sleeping keyboard) or the OS-hook F-row a depot
+        // without control markers falls back to. A keyboard with neither
+        // capability data nor a depot — a receiver slot never probed — gets
+        // nothing to configure yet, so no tab. A measured pointer capability
+        // rules out Keys even for a kind=Keyboard record — see
+        // `can_show_mouse_model` above — so a misclassified mouse gets only
+        // the Buttons panel, not both.
+        if matches!(record.kind, DeviceKind::Keyboard)
+            && !caps.pointer
+            && (caps.buttons || record.asset.is_some())
+        {
             tabs.push(Self::Keys);
         }
-        if caps.pointer {
+        if caps.pointer || caps.scroll_inversion || caps.hires_wheel {
             tabs.push(Self::Pointer);
         }
         if caps.lighting {
@@ -180,12 +198,28 @@ pub struct AppView {
     /// reads; feature entities subscribe to their own events directly.
     #[expect(dead_code, reason = "held to keep the AppState subscription alive")]
     state_obs: Subscription,
+    /// Explains a forget the receiver refused, which needs the window.
+    #[expect(dead_code, reason = "held to keep the AppState subscription alive")]
+    removal_obs: Subscription,
     /// Whether the last frame was the fail-closed configuration-error screen.
     /// A successful save must redraw that screen even though the error is gone.
     config_issue_visible: bool,
     accessibility_dismissed: bool,
     /// Which section of the device-detail screen is showing.
     active_tab: DetailTab,
+}
+
+/// Open the dialog that says why a device the user asked to forget stayed.
+fn explain_refused_removals(
+    state: &Entity<AppState>,
+    window: &mut Window,
+    cx: &mut Context<AppView>,
+) -> Subscription {
+    cx.subscribe_in(state, window, |_, _, event: &StateEvent, window, cx| {
+        if let StateEvent::DeviceRemovalFailed { name, failure } = event {
+            home::open_removal_failed(window, cx, name, failure);
+        }
+    })
 }
 
 impl Focusable for AppView {
@@ -248,7 +282,7 @@ impl AppView {
                         )
                         && is_current(key)
                 }
-                StateEvent::DpiChanged(key) => {
+                StateEvent::DpiChanged(key) | StateEvent::FnLockChanged(key) => {
                     !on_home && view.active_tab == DetailTab::Device && is_current(key)
                 }
                 StateEvent::LightingChanged(key) => {
@@ -262,8 +296,10 @@ impl AppView {
                 StateEvent::CameraChanged => on_home || view.active_tab == DetailTab::Light,
                 // Child entities own these surfaces and subscribe directly. A
                 // language switch already refreshes every window, and the root
-                // caches no localized text.
+                // caches no localized text. A refused removal is a dialog,
+                // opened through `removal_obs`.
                 StateEvent::SmartShiftChanged(_)
+                | StateEvent::DeviceRemovalFailed { .. }
                 | StateEvent::CameraPermissionChanged
                 | StateEvent::DiagnosticsChanged
                 | StateEvent::LanguageChanged => false,
@@ -280,6 +316,7 @@ impl AppView {
                 cx.notify();
             }
         });
+        let removal_obs = explain_refused_removals(&state, window, cx);
         Self {
             focus_handle,
             route: Route::Home,
@@ -297,6 +334,7 @@ impl AppView {
             _app_catalog_obs: app_catalog_obs,
             appearance_obs: None,
             state_obs,
+            removal_obs,
             config_issue_visible: false,
             accessibility_dismissed: false,
             active_tab: DetailTab::Buttons,
@@ -457,11 +495,24 @@ fn app_title_bar(cx: &App) -> impl IntoElement {
 }
 
 impl Render for AppView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let content = self.render_content(window, cx);
+        // Root owns dialog state but the application must mount its layer.
+        // Keep it present across connecting, permission, and error screens too.
+        div()
+            .relative()
+            .size_full()
+            .child(content)
+            .children(gpui_component::Root::render_dialog_layer(window, cx))
+    }
+}
+
+impl AppView {
     #[expect(
         clippy::too_many_lines,
         reason = "root view assembles every screen branch inline"
     )]
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         theme::apply_ui_scale(window, cx);
         let pal = theme::palette(cx);
 
@@ -478,11 +529,12 @@ impl Render for AppView {
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .on_action(|_: &Minimize, window, _| window.minimize_window())
             .on_action(|_: &Zoom, window, _| window.zoom_window())
-            // Linux only: a client-side titlebar (window controls + drag region)
-            // as the first row of every frame — including the pre-connection and
-            // error frames — so the chrome is present from the first frame on.
-            // macOS / Windows keep their native titlebar.
-            .when(cfg!(target_os = "linux"), |this| {
+            // Drawn only where the compositor left the chrome to us — as the
+            // first row of every frame, including the pre-connection and error
+            // frames, so it is present from the first frame on. A compositor
+            // that decorates the window itself (KWin, and macOS / Windows)
+            // reports `Server` and this stays out of the way.
+            .when(crate::windows::needs_client_titlebar(window), |this| {
                 this.child(app_title_bar(cx))
             });
         let root = Self::with_back_navigation(root, cx);

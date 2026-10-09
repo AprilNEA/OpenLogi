@@ -13,6 +13,7 @@ use std::time::{Instant, SystemTime};
 
 use futures_lite::StreamExt as _;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
+use openlogi_hid::inventory::events::HidppEventSource;
 use openlogi_hid::{ChannelRegistry, DeviceIoGate};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -218,6 +219,9 @@ impl WatchState {
 #[derive(Clone)]
 pub struct InventoryRefresh {
     sender: mpsc::Sender<RefreshRequest>,
+    /// Receiver rescans have their own one-slot channel, so a queued settings
+    /// confirmation never crowds one out; a full slot means one is pending.
+    rescan: mpsc::Sender<()>,
 }
 
 impl InventoryRefresh {
@@ -225,6 +229,13 @@ impl InventoryRefresh {
     /// Repeated requests coalesce into the bounded one-slot channel.
     pub fn request_settings_confirmation(&self) {
         let _ = self.sender.try_send(RefreshRequest::SettingsConfirmation);
+    }
+
+    /// Rescan after the agent changed a receiver's pairing table. A receiver
+    /// announces a new pairing with a connection notification, which already
+    /// triggers a scan, but removing one sends none the watcher listens to.
+    pub fn request_receiver_rescan(&self) {
+        let _ = self.rescan.try_send(());
     }
 }
 
@@ -263,8 +274,11 @@ fn spawn_inner(registry: Option<ChannelRegistry>, hardware: HardwareContext) -> 
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let worker_tx = event_tx.clone();
     let (refresh_tx, refresh_rx) = mpsc::channel(1);
+    let (rescan_tx, rescan_rx) = mpsc::channel(1);
     let started = openlogi_core::worker::spawn("openlogi-inventory-watcher", move |runtime| {
-        runtime.block_on(run_watcher(worker_tx, refresh_rx, registry, hardware));
+        runtime.block_on(run_watcher(
+            worker_tx, refresh_rx, rescan_rx, registry, hardware,
+        ));
     });
     if let Err(error) = started {
         // OS thread / fork / runtime limits are non-fatal for the agent as a
@@ -276,13 +290,17 @@ fn spawn_inner(registry: Option<ChannelRegistry>, hardware: HardwareContext) -> 
     }
     InventoryWatcher {
         events: event_rx,
-        refresh: InventoryRefresh { sender: refresh_tx },
+        refresh: InventoryRefresh {
+            sender: refresh_tx,
+            rescan: rescan_tx,
+        },
     }
 }
 
 async fn run_watcher(
     events: mpsc::UnboundedSender<InventoryEvent>,
     refresh_requests: mpsc::Receiver<RefreshRequest>,
+    rescans: mpsc::Receiver<()>,
     registry: Option<ChannelRegistry>,
     hardware: HardwareContext,
 ) {
@@ -307,6 +325,7 @@ async fn run_watcher(
     InventoryWorker {
         events,
         refresh_requests,
+        rescans,
         enumerator,
         state: WatchState::default(),
         hotplug,
@@ -316,6 +335,7 @@ async fn run_watcher(
         device_io: hardware.device_io(),
         hardware,
         refresh_open: true,
+        rescans_open: true,
     }
     .run()
     .await;
@@ -324,6 +344,7 @@ async fn run_watcher(
 struct InventoryWorker {
     events: mpsc::UnboundedSender<InventoryEvent>,
     refresh_requests: mpsc::Receiver<RefreshRequest>,
+    rescans: mpsc::Receiver<()>,
     enumerator: openlogi_hid::inventory::Enumerator,
     hardware: HardwareContext,
     state: WatchState,
@@ -333,6 +354,7 @@ struct InventoryWorker {
     wake_detector: WakeDetector,
     device_io: DeviceIoGate,
     refresh_open: bool,
+    rescans_open: bool,
 }
 
 impl InventoryWorker {
@@ -463,6 +485,18 @@ impl InventoryWorker {
                         self.schedule.request_settings_confirmation(Instant::now());
                     }
                     None => self.refresh_open = false,
+                },
+                rescan = async {
+                    if self.rescans_open {
+                        self.rescans.recv().await
+                    } else {
+                        pending().await
+                    }
+                } => match rescan {
+                    Some(()) => {
+                        break ReconcileTrigger::HidEvent(HidppEventSource::ReceiverConnection);
+                    }
+                    None => self.rescans_open = false,
                 },
                 () = &mut sleep => {
                     match purpose {

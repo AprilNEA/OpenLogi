@@ -29,6 +29,8 @@ devenv.local.yaml
 !/.agents/skills/verifying-openlogi-changes/
 !/.agents/skills/contributing-device-fixtures/
 !/.agents/skills/LICENSE-APACHE
+!/.agents/skills/ast-grep/
+!/.agents/skills/LICENSE-MIT-ast-grep
 
 # Local planning docs — kept on disk, never committed.
 /UI.md
@@ -52,6 +54,7 @@ devenv.local.yaml
 !/.claude/skills/diagnosing-openlogi-devices
 !/.claude/skills/verifying-openlogi-changes
 !/.claude/skills/contributing-device-fixtures
+!/.claude/skills/ast-grep
 
 # Node dependencies for the JS helper scripts under .github/scripts/.
 node_modules/

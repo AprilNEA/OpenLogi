@@ -5,6 +5,7 @@
 )]
 
 mod foreground;
+mod grant;
 pub(crate) mod pointer;
 mod sender;
 mod translate;
@@ -35,10 +36,12 @@ use crate::{
 pub use foreground::ForegroundApplicationObserver;
 use foreground::observe_frontmost_application;
 pub(crate) use foreground::{frontmost_safari_pid, watch_frontmost_application_activations};
+use grant::{ProbeCue, can_filter_events};
 use translate::{translate, translate_key};
 use watchdog::{
-    CallbackActivity, LifecycleDecision, LifecycleExitReason, LifecycleObservation,
-    LifecycleWatchdog, RearmBudget, TapPhase, WatchdogSignals, stuck_callback,
+    CALLBACK_POLL_INTERVAL, CallbackActivity, CallbackWatchdog, LIFECYCLE_POLL_INTERVAL,
+    LifecycleDecision, LifecycleExitReason, LifecycleObservation, LifecycleWatchdog, PowerEpoch,
+    RearmBudget, TapPhase, WatchdogSignals,
 };
 
 /// Everything `Hook` needs to control the background thread.
@@ -68,25 +71,6 @@ unsafe extern "C" {
     fn CGEventTapIsEnabled(tap: core_foundation::mach_port::CFMachPortRef) -> bool;
 }
 
-/// Can this process create an *active* (event-filtering) tap right now?
-///
-/// The probe mirrors the real tap's location, placement and options — that is
-/// the capability being tested — but subscribes to `kCGEventNull`, an event
-/// type nothing ever posts, so it cannot gate a single real event during the
-/// microseconds it exists. Dropping it invalidates the port.
-fn can_filter_events() -> bool {
-    CGEventTap::new(
-        CGEventTapLocation::HID,
-        CGEventTapPlacement::HeadInsertEventTap,
-        CGEventTapOptions::Default,
-        vec![CGEventType::Null],
-        |_proxy: CGEventTapProxy, _etype: CGEventType, _event: &CGEvent| CallbackResult::Keep,
-    )
-    .is_ok()
-}
-
-const CALLBACK_WATCHDOG_POLL_INTERVAL: Duration = Duration::from_millis(20);
-const LIFECYCLE_WATCHDOG_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const FREEZE_HAZARD_EXIT_CODE: i32 = 78;
 
 /// Event types the HID tap observes. Pointer *Dragged variants are required
@@ -184,8 +168,8 @@ impl HookBackend for Backend {
     /// had been revoked, would keep re-arming a tap macOS no longer lets it
     /// service, and would wedge clicks machine-wide until reboot (#674). Only
     /// creating a filtering tap tracks the live grant, so both are consulted: the
-    /// trust read short-circuits the probe for a process that was never granted,
-    /// which keeps a denied agent from asking `WindowServer` twice a second.
+    /// trust read short-circuits the probe for a process that was never granted.
+    /// While the tap is live, [`ProbeCue`] decides when this runs at all.
     fn has_accessibility() -> bool {
         // SAFETY: takes no arguments and only reads the current trust state — the
         // non-prompting counterpart of `AXIsProcessTrustedWithOptions`.
@@ -259,9 +243,10 @@ impl HookBackend for Backend {
             .collect()
     }
 
-    /// Read the frontmost application via `NSWorkspace`: its bundle identifier
-    /// (the profile-matching key) and its localized name (for the UI). Returns
-    /// `None` when no app is frontmost or it has no bundle identifier.
+    /// Read the frontmost application via `NSWorkspace`. Use its bundle
+    /// identifier for profile matching, or its executable path when no bundle
+    /// identifier is available. Use its localized name for the UI. Return `None`
+    /// when no app is frontmost or neither identifier is available.
     ///
     /// `NSWorkspace` is `AnyThread`, so this is sound on the watcher thread. The
     /// reads return owned `Retained` values (no leak by construction), but the
@@ -350,28 +335,31 @@ fn spawn_callback_watchdog(
     thread::Builder::new()
         .name("openlogi-hook-watchdog".into())
         .spawn(move || {
+            let mut watchdog =
+                CallbackWatchdog::watching_since(signals.now_millis(), power_epoch());
             loop {
                 let phase = signals.phase();
                 if matches!(phase, TapPhase::TapStopped | TapPhase::ThreadExited) {
                     return;
                 }
-                thread::sleep(CALLBACK_WATCHDOG_POLL_INTERVAL);
-                let Some(entered) = callback_activity.entered_at_ms() else {
-                    continue;
-                };
-                let Some(elapsed) = stuck_callback(signals.now_millis(), entered) else {
+                thread::sleep(CALLBACK_POLL_INTERVAL);
+                let entered = callback_activity.entered_at_ms();
+                let Some(stuck) =
+                    watchdog.evaluate(signals.now_millis(), entered, power_epoch())
+                else {
                     continue;
                 };
                 // Re-sample: a fresh high-frequency event may have rewritten
                 // the complete activity state during the budget check.
-                if callback_activity.entered_at_ms() != Some(entered) {
+                if callback_activity.entered_at_ms() != entered {
                     continue;
                 }
                 if signals.phase() != TapPhase::Armed {
                     continue;
                 }
                 error!(
-                    stuck_ms = duration_millis(elapsed),
+                    stalled_ms = duration_millis(stuck.stalled),
+                    watched_ms = duration_millis(stuck.watched),
                     "OS mouse-hook callback stuck past budget — exiting agent to \
                      restore system input (HID CGEventTap freeze hazard)"
                 );
@@ -386,6 +374,44 @@ fn spawn_callback_watchdog(
             }
         })
         .map(|_| ())
+}
+
+/// The kernel's last sleep and wake instants, for [`PowerEpoch`]. A failed
+/// read yields the zero epoch, which never differs from itself, so the
+/// watchdog then charges every gap in full — the behaviour before #952.
+fn power_epoch() -> PowerEpoch {
+    PowerEpoch {
+        slept_us: kernel_instant_us(c"kern.sleeptime"),
+        woke_us: kernel_instant_us(c"kern.waketime"),
+    }
+}
+
+/// One `timeval` sysctl as microseconds since the epoch; zero when unreadable.
+fn kernel_instant_us(name: &std::ffi::CStr) -> i64 {
+    let mut value = libc::timeval {
+        tv_sec: 0,
+        tv_usec: 0,
+    };
+    let mut len = std::mem::size_of::<libc::timeval>();
+    // SAFETY: `name` is NUL-terminated; `value` and `len` describe a live,
+    // correctly sized buffer the kernel fills up to `len` before storing the
+    // byte count back into `len`. Nothing is written (null new value, 0).
+    let rc = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            (&raw mut value).cast(),
+            &raw mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 || len != std::mem::size_of::<libc::timeval>() {
+        return 0;
+    }
+    value
+        .tv_sec
+        .saturating_mul(1_000_000)
+        .saturating_add(i64::from(value.tv_usec))
 }
 
 /// Independent lifecycle watchdog for paths that never enter the Rust tap
@@ -410,19 +436,27 @@ fn spawn_lifecycle_watchdog(
                     phase: signals.phase(),
                     stop_requested: signals.stop_requested(),
                     tap_progress_at: signals.tap_progress_at(),
+                    power: power_epoch(),
                 };
                 match watchdog.evaluate(signals.now(), observation) {
                     LifecycleDecision::Continue => {
-                        thread::park_timeout(LIFECYCLE_WATCHDOG_POLL_INTERVAL);
+                        thread::park_timeout(LIFECYCLE_POLL_INTERVAL);
                     }
                     LifecycleDecision::Complete => return,
-                    LifecycleDecision::Exit { reason, elapsed } => {
+                    LifecycleDecision::Exit {
+                        reason,
+                        watched,
+                        stalled,
+                    } => {
                         // The tap thread may have completed immediately after
                         // the decision. Only a still-hazardous phase may exit.
                         let phase = signals.phase();
                         let still_hazardous = match reason {
                             LifecycleExitReason::TapThreadStalled => {
-                                matches!(phase, TapPhase::Arming | TapPhase::Armed)
+                                matches!(
+                                    phase,
+                                    TapPhase::Arming | TapPhase::Armed | TapPhase::Probing
+                                )
                             }
                             LifecycleExitReason::StopTimedOut => phase != TapPhase::ThreadExited,
                         };
@@ -433,6 +467,9 @@ fn spawn_lifecycle_watchdog(
                             LifecycleExitReason::TapThreadStalled if phase == TapPhase::Arming => {
                                 "HID tap creation or activation stopped making progress"
                             }
+                            LifecycleExitReason::TapThreadStalled if phase == TapPhase::Probing => {
+                                "HID tap capability probe stopped making progress"
+                            }
                             LifecycleExitReason::TapThreadStalled => {
                                 "HID tap thread stopped making progress while tap remained active"
                             }
@@ -440,9 +477,13 @@ fn spawn_lifecycle_watchdog(
                                 "hook stop requested but tap thread did not exit"
                             }
                         };
+                        // `stalled` is uptime since the stall began; `watched` is
+                        // the part this thread was running to see. A wide gap
+                        // between them says the process itself was frozen.
                         error!(
                             reason,
-                            elapsed_ms = duration_millis(elapsed),
+                            stalled_ms = duration_millis(stalled),
+                            watched_ms = duration_millis(watched),
                             ?phase,
                             "HID CGEventTap lifecycle did not make progress before deadline — \
                              exiting agent to restore system input"
@@ -461,10 +502,16 @@ fn spawn_lifecycle_watchdog(
 
 /// Service the tap until it has to be released: an explicit stop, a stopped run
 /// loop, a revoked permission, or a tap the OS will not keep enabled.
-fn service_tap(tap: &CGEventTap<'_>, signals: &WatchdogSignals, tap_disabled: &AtomicBool) {
+fn service_tap(
+    tap: &CGEventTap<'_>,
+    signals: &WatchdogSignals,
+    tap_disabled: &AtomicBool,
+    probe: &ProbeCue,
+) {
     // Service the tap in short slices instead of an unbounded
-    // `run_current()`. Between slices we re-check that we may still filter
-    // events: an active tap at the HID location that outlives its permission
+    // `run_current()`. Between slices, when the grant watch cues it, we
+    // re-check that we may still filter events: an active tap at the HID
+    // location that outlives its permission
     // wedges the *entire* system input stream — mouse and keyboard alike —
     // until reboot. If the user revokes access while we're live, tear the tap
     // down right here, on the tap's own thread, so input is restored even
@@ -493,7 +540,14 @@ fn service_tap(tap: &CGEventTap<'_>, signals: &WatchdogSignals, tap_disabled: &A
             CFRunLoopRunResult::TimedOut | CFRunLoopRunResult::HandledSource => {}
         }
         signals.mark_tap_progress();
-        if !Backend::has_accessibility() {
+        // Everything below this point is a WindowServer or TCC round trip, not
+        // tap servicing. Publish that so the lifecycle watchdog judges it
+        // against `TAP_PROBE_BUDGET`: around a sleep transition these calls
+        // have been measured at ~1.6 s, and charging them to the 1.5 s stall
+        // budget force-exited a perfectly healthy agent (#952). The capability
+        // probe itself runs only when the cue says the grant may have changed.
+        signals.set_phase(TapPhase::Probing);
+        if probe.take() && !Backend::has_accessibility() {
             warn!(
                 "Accessibility revoked while the event tap was live — \
                  disabling the tap to avoid wedging system input"
@@ -515,6 +569,7 @@ fn service_tap(tap: &CGEventTap<'_>, signals: &WatchdogSignals, tap_disabled: &A
         // Enabling is idempotent while the tap is already live. Only reached
         // while the live capability probe above still succeeds.
         tap.enable();
+        signals.mark_armed();
     }
 }
 
@@ -597,8 +652,7 @@ fn thread_main(
     }
     signals.mark_tap_progress();
     tap.enable();
-    signals.mark_tap_progress();
-    signals.set_phase(TapPhase::Armed);
+    signals.mark_armed();
 
     if rl_tx.send(run_loop.clone()).is_err() {
         debug!("hook parent dropped before run loop was ready; stopping");
@@ -611,7 +665,13 @@ fn thread_main(
         return;
     }
 
-    service_tap(&tap, &signals, &tap_disabled);
+    // Armed on the tap thread and dropped with it, so the grant watch's
+    // observers go away when the tap does.
+    let probe = ProbeCue::arm();
+    service_tap(&tap, &signals, &tap_disabled, &probe);
+    // Every exit uses the short teardown budget, including a revoked grant
+    // or exhausted re-arm budget that leaves the loop in `Probing`.
+    signals.mark_armed();
 
     // Detach the tap from the event stream synchronously before unwinding,
     // so input recovers immediately rather than whenever CF happens to

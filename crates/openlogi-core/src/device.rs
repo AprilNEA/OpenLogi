@@ -134,6 +134,10 @@ pub struct Capabilities {
     /// both diversion and raw-XY reporting for hold-and-swipe gestures.
     #[serde(default)]
     pub dpi_gestures: bool,
+    /// Keyboard Fn-lock can be read and written — HID++ `0x40a2` or `0x40a3`
+    /// fn inversion. Appended: crosses the IPC and the persisted identity.
+    #[serde(default)]
+    pub fn_lock: bool,
 }
 
 impl Capabilities {
@@ -157,6 +161,7 @@ impl Capabilities {
             haptic_feedback: ids.contains(&0x19b0),
             haptic_panel: false,
             dpi_gestures: false,
+            fn_lock: ids.contains(&0x40a2) || ids.contains(&0x40a3),
         }
     }
 
@@ -171,13 +176,7 @@ impl Capabilities {
             DeviceKind::Mouse | DeviceKind::Trackball => Self {
                 buttons: true,
                 pointer: true,
-                lighting: false,
-                scroll_inversion: false,
-                hires_wheel: false,
-                thumbwheel: false,
-                haptic_feedback: false,
-                haptic_panel: false,
-                dpi_gestures: false,
+                ..Self::default()
             },
             DeviceKind::Keyboard => Self {
                 lighting: true,
@@ -302,6 +301,46 @@ impl DeviceModelInfo {
     pub fn model_key(&self) -> String {
         format!("{:x}{:04x}", self.extended_model_id, self.model_ids[0])
     }
+
+    /// Identifies which transport `product_id` belongs to, by matching it
+    /// against the packed per-transport [`Self::model_ids`] slots.
+    ///
+    /// A `Direct` route only ever carries one vendor/product id — the HID
+    /// node this session actually enumerated — so on a multi-transport
+    /// device this pinpoints the transport that's *live right now*, as
+    /// opposed to [`Self::transports`], which is the static set the firmware
+    /// merely claims to support. Returns `None` when `product_id` matches
+    /// none of the enabled slots (unknown model info, or a PID this device
+    /// doesn't report).
+    #[must_use]
+    pub fn transport_for_product_id(&self, product_id: u16) -> Option<ModelTransport> {
+        let t = self.transports;
+        [
+            (t.bluetooth, ModelTransport::Bluetooth),
+            (t.btle, ModelTransport::Btle),
+            (t.equad, ModelTransport::Equad),
+            (t.usb, ModelTransport::Usb),
+        ]
+        .into_iter()
+        .filter_map(|(enabled, kind)| enabled.then_some(kind))
+        .zip(self.model_ids)
+        .find(|(_, pid)| *pid == product_id)
+        .map(|(kind, _)| kind)
+    }
+}
+
+/// One of the individual transports packed into [`DeviceModelInfo::model_ids`],
+/// as resolved by [`DeviceModelInfo::transport_for_product_id`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelTransport {
+    /// Classic Bluetooth.
+    Bluetooth,
+    /// Bluetooth Low Energy.
+    Btle,
+    /// Logitech eQuad (Unifying/Bolt receiver RF protocol).
+    Equad,
+    /// Wired USB.
+    Usb,
 }
 
 /// Mirror of hidpp's `DeviceTransport` bitfield — one bool per protocol the
@@ -445,8 +484,8 @@ pub struct DeviceInventory {
 mod tests {
     use super::{
         BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
-        DeviceModelInfo, DeviceTransports, LightValueRange, LightValueUnit, PairedDevice,
-        ReceiverInfo,
+        DeviceModelInfo, DeviceTransports, LightValueRange, LightValueUnit, ModelTransport,
+        PairedDevice, ReceiverInfo,
     };
 
     fn inventory(slot: u8, wpid: Option<u16>, battery_percentage: u8) -> DeviceInventory {
@@ -491,6 +530,7 @@ mod tests {
                     haptic_feedback: false,
                     haptic_panel: false,
                     dpi_gestures: false,
+                    fn_lock: false,
                 }),
             }],
         }
@@ -515,6 +555,46 @@ mod tests {
             base,
             inventory(1, Some(0xb023), 87),
             "nested battery changes must affect inventory equality"
+        );
+    }
+
+    #[test]
+    fn transport_for_product_id_resolves_the_live_slot() {
+        // G915 X LS from issue #1218: usb + equad + btle all supported,
+        // model_ids packed BTLE/eQuad/USB per the ascending-bit-order
+        // contract documented on `DeviceModelInfo::model_ids`.
+        let model = DeviceModelInfo {
+            entity_count: 3,
+            serial_number: None,
+            unit_id: [0, 0, 0, 0],
+            transports: DeviceTransports {
+                usb: true,
+                equad: true,
+                btle: true,
+                bluetooth: false,
+            },
+            model_ids: [0xb38a, 0x40b5, 0xc356],
+            extended_model_id: 0x01,
+        };
+
+        assert_eq!(
+            model.transport_for_product_id(0xc356),
+            Some(ModelTransport::Usb),
+            "the USB-slot pid must resolve to Usb even though the device \
+             also supports BTLE"
+        );
+        assert_eq!(
+            model.transport_for_product_id(0xb38a),
+            Some(ModelTransport::Btle)
+        );
+        assert_eq!(
+            model.transport_for_product_id(0x40b5),
+            Some(ModelTransport::Equad)
+        );
+        assert_eq!(
+            model.transport_for_product_id(0xdead),
+            None,
+            "an unrecognized pid must not silently match a slot"
         );
     }
 
@@ -562,6 +642,7 @@ mod tests {
                 haptic_feedback: false,
                 haptic_panel: false,
                 dpi_gestures: false,
+                fn_lock: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
@@ -579,6 +660,7 @@ mod tests {
                 haptic_feedback: false,
                 haptic_panel: false,
                 dpi_gestures: false,
+                fn_lock: false,
             }
         );
         // No driving features → nothing offered.
@@ -599,6 +681,10 @@ mod tests {
         }
         // Backlight (0x198x) stays out — the panel cannot drive it.
         assert!(!Capabilities::from_feature_ids(&[0x0001, 0x1982]).lighting);
+        // Either fn-inversion feature gives the keyboard an Fn-lock control.
+        assert!(Capabilities::from_feature_ids(&[0x0001, 0x40a3]).fn_lock);
+        assert!(Capabilities::from_feature_ids(&[0x0001, 0x40a2]).fn_lock);
+        assert!(!Capabilities::from_feature_ids(&[0x0001, 0x1982]).fn_lock);
     }
 
     #[test]

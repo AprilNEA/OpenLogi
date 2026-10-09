@@ -5,7 +5,7 @@ use openlogi_core::binding::{
 };
 
 use super::events::StateEvents;
-use super::{AppState, DeviceRecord, StateEvent};
+use super::{AppState, DeviceKey, DeviceRecord, StateEvent};
 
 impl AppState {
     /// Actions Ring settings for the active device, including its implicit
@@ -106,28 +106,41 @@ impl AppState {
         events
     }
 
-    /// Delete the open application-specific Actions Ring layout and return to
-    /// the default layout. Button bindings for the application are untouched.
-    pub fn remove_editing_action_ring_profile(&mut self) -> StateEvents {
-        let events = self.for_current_device(StateEvent::BindingsChanged);
-        let Some(key) = self
-            .current_record()
-            .and_then(DeviceRecord::persistent_config_key)
-            .map(str::to_string)
-        else {
-            return events;
-        };
-        let Some(app) = self.editing_action_ring_app().map(str::to_string) else {
-            return events;
-        };
+    /// Restore live default inheritance while keeping the application's editor open.
+    pub fn reset_action_ring_profile(&mut self, key: &DeviceKey, app: &str) -> StateEvents {
+        self.clear_action_ring_profile(key.as_str(), app);
+        StateEvent::BindingsChanged(key.clone()).into()
+    }
+
+    /// Remove the named ring profile without touching button bindings or a
+    /// different editor selection. Failed saves preserve the open editor.
+    pub fn remove_action_ring_profile(&mut self, key: &DeviceKey, app: &str) -> StateEvents {
+        if self.clear_action_ring_profile(key.as_str(), app)
+            && self
+                .action_ring_editing_apps
+                .get(key.as_str())
+                .is_some_and(|selected| selected == app)
+        {
+            self.action_ring_editing_apps.remove(key.as_str());
+        }
+        StateEvent::BindingsChanged(key.clone()).into()
+    }
+
+    fn clear_action_ring_profile(&mut self, key: &str, app: &str) -> bool {
+        if !self
+            .config
+            .devices
+            .get(key)
+            .is_some_and(|device| device.action_ring.per_app.contains_key(app))
+        {
+            return true;
+        }
         self.config.edit(|config| {
-            if let Some(device) = config.devices.get_mut(&key) {
-                device.action_ring.per_app.remove(&app);
+            if let Some(device) = config.devices.get_mut(key) {
+                device.action_ring.per_app.remove(app);
             }
         });
-        self.action_ring_editing_apps.remove(&key);
-        self.persist_and_reload("Actions Ring application profile");
-        events
+        self.persist_and_reload("Actions Ring application profile")
     }
 
     /// Enable or disable the active device's Actions Ring.

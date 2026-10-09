@@ -134,7 +134,7 @@ fn removing_an_action_ring_profile_leaves_button_overrides_untouched() {
     let _ = state.set_editing_action_ring_app(Some("com.apple.Safari".into()));
     let _ = state.commit_action_ring_slot(ActionRingSlot::Top, Some(ring_action(Action::NewTab)));
 
-    let _ = state.remove_editing_action_ring_profile();
+    let _ = state.remove_action_ring_profile(&DeviceKey::from(KNOWN_MOUSE_KEY), "com.apple.Safari");
 
     assert_eq!(state.editing_action_ring_app(), None);
     assert!(state.current_action_ring().per_app.is_empty());

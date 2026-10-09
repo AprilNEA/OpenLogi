@@ -548,3 +548,19 @@ async fn terminal_cleanup_is_exactly_once_and_releases_receiver_lease() {
     assert!(is_idle(&manager));
     assert!(!manager.shared.receiver_access.exclusive_requested());
 }
+
+#[tokio::test(start_paused = true)]
+async fn unpair_is_refused_while_a_pairing_session_holds_the_receiver() {
+    let (ctrl_tx, mut ctrl_rx) = mpsc::unbounded_channel();
+    let manager = manager_with_ctrl(ctrl_tx);
+    start_session(&manager, &mut ctrl_rx).await;
+
+    let route = DeviceRoute::Bolt {
+        receiver_uid: "F00DCAFE".into(),
+        slot: 2,
+    };
+    assert_eq!(
+        manager.unpair(&route).await,
+        Err(PairingFailure::ReceiverBusy)
+    );
+}

@@ -93,6 +93,74 @@ fn direct_probe_exchanges() -> Vec<CassetteExchange> {
     ]
 }
 
+pub(super) const HEADSET_CHANNEL: &str = "scenario-headset";
+
+pub(super) struct HeadsetFixture {
+    pub(super) node: ReplayNode,
+    pub(super) channel: ReplayChannel,
+    pub(super) cassette: HidCassette,
+}
+
+/// A G733-style headset dongle: its feature table is `FeatureSet` plus
+/// `0x1F20` at index 2 and nothing else, so the battery feature is the only
+/// evidence that a device sits behind the node. `adc_answers` scripts each
+/// successive `getAdcMeasurement` answer (see [`adc_reading`] /
+/// [`adc_error`]): the first rides the full probe, each later one a cache-hit
+/// battery re-read.
+pub(super) fn headset_fixture(adc_answers: &[Vec<u8>]) -> HeadsetFixture {
+    let node_id = NodeId::from("scenario-headset-node".to_string());
+    let mut exchanges = vec![
+        h20(
+            short(0xff, 0x00, 0x10, [0, 0, 0]),
+            short(0xff, 0x00, 0x10, [4, 0, 0]),
+        ),
+        h20(
+            short(0xff, 0x00, 0x00, [0x00, 0x01, 0]),
+            short(0xff, 0x00, 0x00, [0x01, 0, 0]),
+        ),
+        h20(
+            short(0xff, 0x01, 0x00, [0, 0, 0]),
+            short(0xff, 0x01, 0x00, [2, 0, 0]),
+        ),
+        h20(
+            short(0xff, 0x01, 0x10, [1, 0, 0]),
+            short(0xff, 0x01, 0x10, [0x00, 0x01, 0]),
+        ),
+        h20(
+            short(0xff, 0x01, 0x10, [2, 0, 0]),
+            short(0xff, 0x01, 0x10, [0x1f, 0x20, 0]),
+        ),
+    ];
+    exchanges.extend(
+        adc_answers
+            .iter()
+            .map(|answer| h20(short(0xff, 0x02, 0x00, [0, 0, 0]), answer.clone())),
+    );
+    HeadsetFixture {
+        node: ReplayNode {
+            info: node_info(node_id, 0x0ab5, "G733 Gaming Headset"),
+            presence: NodePresence::Present,
+            open_outcome: OpenOutcome::Hidpp,
+            channel: Some(HEADSET_CHANNEL.to_string()),
+            raw_writer: RawWriterAvailability::Unavailable,
+            receiver_slots: Vec::new(),
+        },
+        channel: replay_channel(HEADSET_CHANNEL),
+        cassette: cassette("scenario-headset-probes", HEADSET_CHANNEL, exchanges),
+    }
+}
+
+/// A linked `getAdcMeasurement` answer.
+pub(super) fn adc_reading(voltage_mv: u16, flags: u8) -> Vec<u8> {
+    let [high, low] = voltage_mv.to_be_bytes();
+    short(0xff, 0x02, 0x00, [high, low, flags])
+}
+
+/// A HID++ 2.0 error answer to `getAdcMeasurement`.
+pub(super) fn adc_error(code: u8) -> Vec<u8> {
+    vec![0x10, 0xff, 0xff, 0x02, 0x00, code, 0]
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct BoltSlot {
     pub(super) slot: u8,
