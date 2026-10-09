@@ -168,10 +168,12 @@ impl SwipeAccumulator {
             let (a, c) = (along(dir, dx, dy), across(dir, dx, dy));
             let earlier = self.repeat;
             let total = earlier.saturating_add(a);
-            self.repeat_cross = if total > 0 {
-                self.repeat_cross.saturating_add(c)
-            } else {
+            // Only backtracking to the start clears drift: a purely
+            // sideways report at zero progress is still part of the stroke.
+            self.repeat_cross = if a < 0 && total <= 0 {
                 0
+            } else {
+                self.repeat_cross.saturating_add(c)
             };
             self.repeat = total.max(0);
             if continues(dir, dx, dy) {
@@ -485,6 +487,21 @@ mod tests {
         // Backing up undoes drift too, so the corrected stroke repeats.
         assert_eq!(acc.accumulate(-20, 30), None);
         assert_eq!(acc.accumulate(20, 0), Some(GestureDirection::Right));
+    }
+
+    #[test]
+    fn accumulator_keeps_sideways_drift_at_zero_progress() {
+        let mut acc = SwipeAccumulator::default();
+        acc.begin();
+        acc.backdate_hold_for_test();
+        assert_eq!(
+            acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+            Some(GestureDirection::Right)
+        );
+        // 180 along with 70 drift overall: too diagonal to repeat.
+        assert_eq!(acc.accumulate(0, -40), None);
+        assert_eq!(acc.accumulate(90, 0), None);
+        assert_eq!(acc.accumulate(90, -30), None);
     }
 
     #[test]
