@@ -757,6 +757,11 @@ impl ScrollEngine {
     /// Attenuate quick direction reversals of pre-accelerated input; raw
     /// sources pass through untouched. Expired state is dropped on the way
     /// so the map only ever holds sources that ticked within one cooldown.
+    ///
+    /// The cooldown's thresholds are in the OS's own line units, so any
+    /// queue-side sensitivity is divided out before it sees the tick and
+    /// re-applied to the result: a jitter commits, and a burst is
+    /// compressed, at the same physical motion whatever the sensitivity.
     fn cooled(
         &mut self,
         source: &ScrollSource,
@@ -769,10 +774,21 @@ impl ScrollEngine {
         if !tuning.preaccelerated {
             return impulse;
         }
-        self.cooldowns
+        let scale = tuning.distance_scale;
+        let native = WheelDelta {
+            x: impulse.x / scale.x,
+            y: impulse.y / scale.y,
+        };
+        let cooled = self
+            .cooldowns
             .entry(source.clone())
             .or_default()
-            .attenuate(impulse, at)
+            .attenuate(native, at);
+        if cooled == native {
+            impulse
+        } else {
+            cooled.scale_axes(scale)
+        }
     }
 
     fn advance_due(&mut self, at: Instant, emit: &mut impl FnMut(ScrollFrame)) {
