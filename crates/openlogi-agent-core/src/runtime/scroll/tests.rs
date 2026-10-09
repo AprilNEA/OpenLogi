@@ -1031,13 +1031,21 @@ fn reversal_compression_tames_the_corrective_burst_and_fades() {
     let at = |millis| base + Duration::from_millis(millis);
     let mut cooldown = ReversalCooldown::default();
     assert!((cooldown.attenuate(-5.0, at(0)) + 5.0).abs() < EPSILON);
-    // A cold flip (past the ramp) is still compressed above the knee:
-    // 8 lines → 3 + 5/4 at the burst's start.
-    assert!((cooldown.attenuate(8.0, at(500)) - 4.25).abs() < EPSILON);
-    // Halfway through recovery the compression has faded halfway.
-    assert!((cooldown.attenuate(8.0, at(1500)) - (4.25 + 3.75 * 0.5)).abs() < EPSILON);
+    // A flip 300 ms later is still on the ramp (3/4) and fully compressed:
+    // 8 × 0.75 = 6 lines → 3 + 3/4 at the burst's start.
+    assert!((cooldown.attenuate(8.0, at(300)) - 3.75).abs() < EPSILON);
+    // The burst keeps the axis warm. Past the ramp it is still compressed
+    // above the knee (8 → 3 + 5/4), and halfway through recovery the
+    // compression has faded halfway.
+    for millis in (400..1300).step_by(100) {
+        cooldown.attenuate(8.0, at(millis));
+    }
+    assert!((cooldown.attenuate(8.0, at(1300)) - (4.25 + 3.75 * 0.5)).abs() < EPSILON);
     // Past recovery the burst runs at full magnitude again.
-    assert!((cooldown.attenuate(8.0, at(2500)) - 8.0).abs() < EPSILON);
+    for millis in (1400..2300).step_by(100) {
+        cooldown.attenuate(8.0, at(millis));
+    }
+    assert!((cooldown.attenuate(8.0, at(2300)) - 8.0).abs() < EPSILON);
 }
 
 #[test]
@@ -1208,5 +1216,38 @@ fn sensitivity_scales_distance_but_not_acceleration() {
         frames.push(frame);
     });
     assert_delta(cumulative(&frames), wheel(0.0, scale * 169.0 / 14.0));
+    assert!(engine.active.is_empty());
+}
+
+#[test]
+fn another_axis_never_keeps_a_cold_reversal_hot() {
+    let base = Instant::now();
+    let mut engine = ScrollEngine::default();
+    let mut frames = Vec::new();
+    // Scroll down, then sideways for longer than a cooldown, then flip the
+    // vertical direction with a big tick. The horizontal ticks keep the
+    // source alive, but the vertical axis has been quiet for 550 ms, so the
+    // flip is cold and must pass whole rather than knee-compressed to 4.25.
+    let ticks = [
+        (0, wheel(0.0, -5.0)),
+        (50, wheel(0.0, -5.0)),
+        (150, wheel(1.0, 0.0)),
+        (300, wheel(1.0, 0.0)),
+        (450, wheel(1.0, 0.0)),
+        (600, wheel(0.0, 8.0)),
+    ];
+    for (millis, delta) in ticks {
+        engine.impulse(
+            source(),
+            delta,
+            base + Duration::from_millis(millis),
+            preaccelerated(),
+            &mut |frame| frames.push(frame),
+        );
+    }
+    engine.advance_due(base + Duration::from_millis(900), &mut |frame| {
+        frames.push(frame);
+    });
+    assert_delta(cumulative(&frames), wheel(3.0, -5.0 - 5.0 + 8.0));
     assert!(engine.active.is_empty());
 }
