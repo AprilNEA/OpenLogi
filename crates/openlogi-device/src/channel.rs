@@ -56,4 +56,11 @@ impl SharedChannel {
     pub(crate) fn device_index(&self) -> u8 {
         self.route.device_index()
     }
+
+    /// The physical route this channel addresses, used to serialize complete
+    /// native lighting transactions rather than just individual HID reports.
+    #[must_use]
+    pub fn route(&self) -> &DeviceRoute {
+        &self.route
+    }
 }

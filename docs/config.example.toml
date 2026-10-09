@@ -1,5 +1,5 @@
 # OpenLogi configuration example. Copy only the sections you need.
-schema_version = 6
+schema_version = 7
 selected_device = "receiver:aabbccdd:slot:1"
 
 [app_settings]
@@ -8,6 +8,8 @@ check_for_updates = false
 auto_install_updates = false
 show_in_menu_bar = true
 capture_mouse_events = true
+# Mouse button profiles: "pointer" (default) or "focused".
+mouse_profile_target = "pointer"
 smooth_scroll = false
 vertical_scroll_sensitivity = 14
 auto_download_assets = true
@@ -76,9 +78,14 @@ tunable_torque = 50
 host_switch_targets = ["receiver:aabbccdd:slot:1"]
 fn_lock = false
 
+# Keyboard keys are named by their HID++ control: a catalog name such as
+# `KeyScreenCapture`, or `control:0x<cid>` for any control `openlogi diag
+# controls` lists as divertable. An unlisted key keeps its firmware function.
 [devices."receiver:aabbccdd:slot:2".bindings]
 KeySearch = "MissionControl"
 KeyScreenCapture = "Sleep"
+KeyCalculator = { OpenApplication = { path = "/System/Applications/Calculator.app", display_name = "Calculator" } }
+"control:0x01f3" = { CustomShortcut = "Cmd+Shift+4" }
 
 # Since schema 5 a device is keyed by what it *is* — `unit:<hex>` or
 # `serial:<s>` — rather than by the route it was reached on, so its settings

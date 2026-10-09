@@ -6,12 +6,18 @@
 //!    packaging time by `openlogi assets sync` and shipped with every
 //!    release. Zero network at end-user runtime.
 //! 2. The per-user cache at `~/.local/share/openlogi/assets/` —
-//!    populated by [`sync::sync`] when it runs (debug builds and the
-//!    bundle-missing safety net).
+//!    populated by [`sync::load_registry`] and [`sync::sync_target`] when
+//!    they run (debug builds and the bundle-missing safety net).
 //!
 //! Either tier missing the requested files falls through to the next, and
-//! ultimately to the synthetic silhouette. The write side ([`sync::sync`])
-//! always targets the user cache — the bundle is read-only.
+//! ultimately to the synthetic silhouette. The write side ([`sync`]) always
+//! targets the user cache — the bundle is read-only.
+//!
+//! A resolver reads each asset from disk once and answers from memory after
+//! that, because the device list is rebuilt on every agent snapshot and the
+//! files behind it only change when a download lands or the cache is cleared.
+//! Both of those replace the resolver (see `runtime.rs`), and that is the only
+//! invalidation there is.
 
 mod glow;
 mod images;
@@ -21,19 +27,25 @@ pub mod sync;
 
 pub(crate) use self::glow::GlowGeometry;
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use openlogi_assets::http::safe_component_path;
 use openlogi_assets::{
-    BUTTONS_RENDER_FILES, DeviceEntry, FRONT_RENDER_FILES, Index, METADATA_FILES, Metadata,
+    BUTTONS_RENDER_FILES, DepotManifest, DeviceEntry, FRONT_RENDER_FILES, Index, METADATA_FILES,
+    Metadata,
 };
 use openlogi_core::device::{DeviceKind, DeviceModelInfo};
 use tracing::{debug, warn};
 use walkdir::WalkDir;
 
-use self::images::{buttons_image_for, load_manifest, read_png_dimensions, variant_image_for};
-use self::paths::{bundle_assets_root, load_index, user_cache_root};
+use self::images::{
+    buttons_image_for, load_manifest, metadata_for, read_png_dimensions, variant_image_for,
+};
+pub(crate) use self::paths::user_cache_root;
+use self::paths::{bundle_assets_root, load_index};
 
 /// Total bytes of the per-user asset cache — the tier [`sync`] writes and
 /// [`clear_cache`] removes. The read-only app bundle (release builds) is a
@@ -133,18 +145,43 @@ pub struct ResolvedAsset {
     pub png_height: u32,
 }
 
+/// Everything a resolved asset is a function of, besides the files on disk.
+///
+/// The depot stands for its index entry, and the index is fixed for the life
+/// of a resolver. The two lookups are keyed apart because they read different
+/// manifest resources of the same depot.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum AssetKey {
+    /// A HID++ model: its depot, and the byte that picks the colour (or hand)
+    /// variant inside it.
+    Variant {
+        depot: String,
+        extended_model_id: u8,
+    },
+    /// A standalone device: its depot, and the registry id the manifest keys
+    /// its render on.
+    Standalone {
+        depot: String,
+        registry_model_id: String,
+    },
+}
+
 pub struct AssetResolver {
     /// Read-time search order. Bundle root (if present) comes first so
     /// release builds never touch the user cache; the user cache comes
-    /// second so `sync::sync` writes are immediately visible.
+    /// second so what [`sync`] writes is visible to the next resolver.
     read_roots: Vec<PathBuf>,
-    /// Where [`sync::sync`] is allowed to write. Always the per-user dir
-    /// — the bundle is read-only inside the signed `.app`.
+    /// Where [`sync`] is allowed to write. Always the per-user dir — the
+    /// bundle is read-only inside the signed `.app`.
     write_root: PathBuf,
     /// `true` when a populated bundle root was discovered; release builds
     /// skip the network sync in that case.
     has_bundle: bool,
     index: Option<Index>,
+    /// Every asset this resolver has found on disk. Never evicted: what is on
+    /// disk changes only through a download or a cleared cache, and the
+    /// runtime answers both by building a new resolver.
+    resolved: RefCell<HashMap<AssetKey, ResolvedAsset>>,
 }
 
 impl AssetResolver {
@@ -164,11 +201,11 @@ impl AssetResolver {
             write_root,
             has_bundle,
             index,
+            resolved: RefCell::default(),
         }
     }
 
-    /// Where [`sync::sync`] writes. Public so the sync module can build
-    /// destination paths.
+    /// The per-user cache root, where [`sync`] writes.
     pub fn cache_root(&self) -> &Path {
         &self.write_root
     }
@@ -188,6 +225,8 @@ impl AssetResolver {
         self.index.as_ref().map(|index| index.devices.len())
     }
 
+    /// The asset for a HID++ model, read from disk the first time this
+    /// resolver is asked for it and from memory after that.
     pub fn resolve(
         &self,
         model: &DeviceModelInfo,
@@ -195,7 +234,20 @@ impl AssetResolver {
     ) -> Option<ResolvedAsset> {
         let index = self.index.as_ref()?;
         let (depot, entry) = resolve_in_index(index, model, codename)?;
-        self.load_files(depot, entry, model)
+        let extended_model_id = model.extended_model_id;
+        let mut asset = self.remembered(
+            AssetKey::Variant {
+                depot: depot.to_owned(),
+                extended_model_id,
+            },
+            || self.load_files(depot, entry, extended_model_id),
+        )?;
+        // Assets are shared by model variant; the firmware name belongs to
+        // this device and must never overwrite another device's cached name.
+        if let Some(name) = variant_display_name_override(&asset.display_name, codename) {
+            asset.display_name = name;
+        }
+        Some(asset)
     }
 
     /// Resolve a standalone device directly by its registry model id.
@@ -208,14 +260,41 @@ impl AssetResolver {
     pub fn resolve_registry_model(&self, registry_model_id: &str) -> Option<ResolvedAsset> {
         let index = self.index.as_ref()?;
         let (depot, entry) = index.find_by_model_id(registry_model_id)?;
-        self.load_standalone_files(depot, entry, registry_model_id)
+        self.remembered(
+            AssetKey::Standalone {
+                depot: depot.to_owned(),
+                registry_model_id: registry_model_id.to_owned(),
+            },
+            || self.load_standalone_files(depot, entry, registry_model_id),
+        )
     }
 
+    /// `load`'s asset for `key`, from memory once it has been found.
+    ///
+    /// Only finds are remembered. A miss costs a few `stat` calls, and asking
+    /// again is what lets a depot that lands on disk later show up without
+    /// anyone having to say so.
+    fn remembered(
+        &self,
+        key: AssetKey,
+        load: impl FnOnce() -> Option<ResolvedAsset>,
+    ) -> Option<ResolvedAsset> {
+        if let Some(asset) = self.resolved.borrow().get(&key) {
+            return Some(asset.clone());
+        }
+        let asset = load()?;
+        self.resolved.borrow_mut().insert(key, asset.clone());
+        Some(asset)
+    }
+
+    /// Read one colour variant of a depot from disk. Everything it reads is
+    /// named by its arguments, which is what makes [`AssetKey::Variant`] a
+    /// complete key.
     fn load_files(
         &self,
         depot: &str,
         entry: &DeviceEntry,
-        model: &DeviceModelInfo,
+        extended_model_id: u8,
     ) -> Option<ResolvedAsset> {
         for root in &self.read_roots {
             let Ok(dir) = safe_component_path(root, depot, "asset depot") else {
@@ -225,13 +304,6 @@ impl AssetResolver {
                 );
                 continue;
             };
-            // Hotspot metadata in whichever schema this depot cached:
-            // `core_metadata.json` (newer) or `metadata.json` (older).
-            let Some(&meta_name) = METADATA_FILES.iter().find(|n| dir.join(n).exists()) else {
-                continue;
-            };
-            let meta_path = dir.join(meta_name);
-
             // Pick the colour variant matching this device's HID++
             // extended_model_id byte. Logi calibrates the assignment
             // markers against the *buttons* image (typically
@@ -246,15 +318,22 @@ impl AssetResolver {
             // colour render resolves regardless of which pid Logi keyed on.
             // Parse the manifest once and consult it for every candidate.
             let manifest = load_manifest(&dir);
+
+            let Some((meta_name, meta_path)) =
+                resolve_metadata(&dir, entry, manifest.as_ref(), extended_model_id)
+            else {
+                continue;
+            };
+
             let buttons_name = manifest.as_ref().and_then(|m| {
                 entry
                     .model_id_candidates()
-                    .find_map(|base| buttons_image_for(m, base, model.extended_model_id))
+                    .find_map(|base| buttons_image_for(m, base, extended_model_id))
             });
             let variant_front_name = manifest.as_ref().and_then(|m| {
                 entry
                     .model_id_candidates()
-                    .find_map(|base| variant_image_for(m, base, model.extended_model_id))
+                    .find_map(|base| variant_image_for(m, base, extended_model_id))
             });
             // Front/hero render for the gallery: the colour variant's
             // `device_image`, falling back to the generic front renders. Resolved
@@ -289,7 +368,7 @@ impl AssetResolver {
             let metadata = match Metadata::load_from(&meta_path) {
                 Ok(m) => m,
                 Err(e) => {
-                    warn!(depot, root = %root.display(), file = meta_name, error = ?e, "device metadata unparseable — rendering image without hotspots");
+                    warn!(depot, root = %root.display(), file = meta_name.as_str(), error = ?e, "device metadata unparseable — rendering image without hotspots");
                     Metadata::default()
                 }
             };
@@ -312,7 +391,7 @@ impl AssetResolver {
                 depot,
                 root = %root.display(),
                 image = %image_name,
-                ext = model.extended_model_id,
+                ext = extended_model_id,
                 png_width,
                 png_height,
                 "asset hit"
@@ -399,6 +478,36 @@ impl Default for AssetResolver {
     }
 }
 
+/// Resolve a depot's hotspot-metadata file inside `dir`, as `(filename, path)`.
+///
+/// The manifest's `image_metadata` for this colour variant comes first, then
+/// the well-known schema names ([`METADATA_FILES`]). Depots whose variants are
+/// *handed* rather than coloured ship none of the well-known names — the Lift
+/// keys its metadata `core_metadata_left.json` / `core_metadata_right.json` —
+/// so a name-only lookup skips the depot outright and the GUI falls back to the
+/// generic silhouette. Manifest-sourced names are attacker-influenced, so they
+/// pass the same component check as every other asset file.
+fn resolve_metadata(
+    dir: &Path,
+    entry: &DeviceEntry,
+    manifest: Option<&DepotManifest>,
+    ext: u8,
+) -> Option<(String, PathBuf)> {
+    let mut candidates: Vec<String> = manifest
+        .and_then(|m| {
+            entry
+                .model_id_candidates()
+                .find_map(|base| metadata_for(m, base, ext))
+        })
+        .into_iter()
+        .collect();
+    candidates.extend(METADATA_FILES.map(str::to_string));
+    candidates.into_iter().find_map(|name| {
+        let path = safe_component_path(dir, &name, "asset file").ok()?;
+        path.exists().then_some((name, path))
+    })
+}
+
 /// Match a connected device's HID++ model info against a loaded index,
 /// returning the depot name + entry without touching the filesystem.
 ///
@@ -420,7 +529,7 @@ pub(crate) fn resolve_in_index<'a>(
     model: &DeviceModelInfo,
     codename: Option<&str>,
 ) -> Option<(&'a str, &'a DeviceEntry)> {
-    if let Ok(forced) = std::env::var("OPENLOGI_FORCE_DEPOT")
+    if let Ok(forced) = std::env::var(openlogi_core::env::FORCE_DEPOT)
         && let Some((depot, entry)) = index
             .devices
             .iter()
@@ -451,6 +560,57 @@ pub(crate) fn resolve_in_index<'a>(
     Some(hit)
 }
 
+/// Firmware type words ignored when matching model names, wherever they occur.
+const GENERIC_CODENAME_WORDS: [&str; 3] = ["mouse", "keyboard", "trackball"];
+
+/// Size/hand qualifiers, not model-generation words such as `3S` or `X`.
+const VARIANT_QUALIFIER_SUFFIXES: [&str; 2] = ["l", "left"];
+
+/// Correct a shared depot's variant name (M650 vs. M650 L, #1332).
+///
+/// Return an override only when the firmware name matches a nonempty catalog
+/// prefix and every remaining word is a recognized qualifier. Keep catalog
+/// spelling, joining matched words with single spaces. `None` leaves the
+/// caller's existing name untouched; only a correction allocates a string.
+fn variant_display_name_override(catalog_name: &str, codename: Option<&str>) -> Option<String> {
+    let codename_words = codename?.split_whitespace().filter(|word| {
+        !GENERIC_CODENAME_WORDS.iter().any(|generic| {
+            word.chars()
+                .flat_map(char::to_lowercase)
+                .eq(generic.chars())
+        })
+    });
+    let mut catalog_words = catalog_name.split_whitespace();
+    let mut matched_words = 0;
+    for word in codename_words {
+        if !catalog_words.next()?.eq_ignore_ascii_case(word) {
+            return None;
+        }
+        matched_words += 1;
+    }
+
+    let mut qualifiers = catalog_words.peekable();
+    if matched_words == 0
+        || qualifiers.peek().is_none()
+        || !qualifiers.all(|word| {
+            VARIANT_QUALIFIER_SUFFIXES
+                .iter()
+                .any(|qualifier| word.eq_ignore_ascii_case(qualifier))
+        })
+    {
+        return None;
+    }
+
+    let mut name = String::with_capacity(catalog_name.len());
+    for word in catalog_name.split_whitespace().take(matched_words) {
+        if !name.is_empty() {
+            name.push(' ');
+        }
+        name.push_str(word);
+    }
+    Some(name)
+}
+
 fn strict_candidates(model: &DeviceModelInfo) -> Vec<String> {
     model
         .model_ids
@@ -470,353 +630,4 @@ fn suffix_candidates(model: &DeviceModelInfo) -> Vec<String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use openlogi_assets::DeviceEntry;
-    use openlogi_core::device::DeviceTransports;
-    use std::collections::HashMap;
-
-    fn mx_master_3s_entry(model_ids: Vec<String>) -> DeviceEntry {
-        DeviceEntry {
-            model_id: "2b043".to_string(),
-            model_ids,
-            display_name: "MX Master 3S".to_string(),
-            kind: "mouse".to_string(),
-            asset_path: "assets/mx_master_3s/".to_string(),
-            files: Vec::new(),
-        }
-    }
-
-    fn index_of(depot: &str, entry: DeviceEntry) -> Index {
-        let mut devices = HashMap::new();
-        devices.insert(depot.to_string(), entry);
-        Index {
-            schema_version: 1,
-            devices,
-        }
-    }
-
-    /// The current registry: the 3S depot lists both bolt pids Logi ships for
-    /// it (`b043` via a Bolt receiver, `b034` over BTLE).
-    fn mx_master_3s_index() -> Index {
-        index_of(
-            "mx_master_3s",
-            mx_master_3s_entry(vec!["2b043".into(), "2b034".into()]),
-        )
-    }
-
-    /// A legacy index generated before `modelIds` existed: only the primary
-    /// pid `2b043` is listed, so the BTLE pid `b034` matches nothing.
-    fn legacy_mx_master_3s_index() -> Index {
-        index_of("mx_master_3s", mx_master_3s_entry(Vec::new()))
-    }
-
-    /// An MX Master 3S connected over BTLE reports bolt pid `b034` / ext 1.
-    /// The strict `{ext}{pid}` key (`1b034`) matches no registry entry — the
-    /// depot lists `2b034`/`2b043` (ext 2) — so the suffix `b034` is what
-    /// bridges it.
-    fn btle_3s_model() -> DeviceModelInfo {
-        DeviceModelInfo {
-            entity_count: 0,
-            serial_number: None,
-            unit_id: [0; 4],
-            transports: DeviceTransports {
-                btle: true,
-                ..Default::default()
-            },
-            model_ids: [0xb034, 0, 0],
-            extended_model_id: 0x01,
-        }
-    }
-
-    #[test]
-    fn secondary_pid_resolves_btle_3s_without_codename() {
-        // The fix: the depot lists `2b034` alongside `2b043`, so the suffix
-        // match on `b034` resolves the BTLE 3S by pid — no codename needed.
-        let index = mx_master_3s_index();
-        let hit = resolve_in_index(&index, &btle_3s_model(), None);
-        assert_eq!(hit.map(|(depot, _)| depot), Some("mx_master_3s"));
-    }
-
-    #[test]
-    fn legacy_index_misses_btle_3s_by_pid() {
-        // Before `modelIds`: only `2b043` is listed, so neither strict nor
-        // suffix pid matching finds the BTLE 3S (`b034`).
-        let index = legacy_mx_master_3s_index();
-        assert!(resolve_in_index(&index, &btle_3s_model(), None).is_none());
-    }
-
-    #[test]
-    fn codename_bridges_btle_3s_on_legacy_index() {
-        // Back-compat: on a legacy index the firmware codename still bridges
-        // to the depot via displayName.
-        let index = legacy_mx_master_3s_index();
-        let hit = resolve_in_index(&index, &btle_3s_model(), Some("MX Master 3S"));
-        assert_eq!(hit.map(|(depot, _)| depot), Some("mx_master_3s"));
-    }
-
-    fn bare_model() -> DeviceModelInfo {
-        DeviceModelInfo {
-            entity_count: 0,
-            serial_number: None,
-            unit_id: [0; 4],
-            transports: DeviceTransports::default(),
-            model_ids: [0; 3],
-            extended_model_id: 0,
-        }
-    }
-
-    /// A 24-byte PNG: signature + an `IHDR` chunk header carrying only the
-    /// width/height — all `read_png_dimensions` actually reads.
-    fn png_header(width: u32, height: u32) -> Vec<u8> {
-        let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
-        bytes.extend_from_slice(&13u32.to_be_bytes());
-        bytes.extend_from_slice(b"IHDR");
-        bytes.extend_from_slice(&width.to_be_bytes());
-        bytes.extend_from_slice(&height.to_be_bytes());
-        bytes
-    }
-
-    /// An old-schema depot (`metadata.json` + `front.png`, no `*_core`
-    /// names, no manifest) must still resolve — this is what makes the
-    /// MX Vertical and the older mice render.
-    #[test]
-    fn resolves_old_schema_depot_on_disk() {
-        let root = tempfile::tempdir().expect("create temp dir");
-        let depot = "mx_vertical";
-        let dir = root.path().join(depot);
-        std::fs::create_dir_all(&dir).expect("create depot dir");
-        std::fs::write(
-            dir.join("metadata.json"),
-            r#"{"images":[
-                {"key":"device_image","origin":{"width":100,"height":200}},
-                {"key":"device_buttons_image","origin":{"width":100,"height":200},
-                 "assignments":[{"slotName":"SLOT_NAME_MIDDLE_BUTTON",
-                                 "marker":{"x":50,"y":50},"label":{"x":0,"y":0}}]}
-            ]}"#,
-        )
-        .expect("write metadata.json");
-        std::fs::write(dir.join("front.png"), png_header(100, 200)).expect("write front.png");
-
-        let resolver = AssetResolver {
-            read_roots: vec![root.path().to_path_buf()],
-            write_root: root.path().to_path_buf(),
-            has_bundle: false,
-            index: None,
-        };
-        let entry = DeviceEntry {
-            model_id: "eb020".to_string(),
-            model_ids: Vec::new(),
-            display_name: "MX Vertical".to_string(),
-            kind: "MOUSE".to_string(),
-            asset_path: format!("v1/devices/{depot}/"),
-            files: Vec::new(),
-        };
-
-        let asset = resolver
-            .load_files(depot, &entry, &bare_model())
-            .expect("old-schema depot should resolve");
-        assert_eq!(
-            asset.image_path.file_name().expect("image has a file name"),
-            "front.png"
-        );
-        assert_eq!((asset.png_width, asset.png_height), (100, 200));
-        assert_eq!(asset.metadata.assignments().count(), 1);
-    }
-
-    #[test]
-    fn resolves_standalone_registry_model_without_synthetic_hidpp_info() {
-        let root = tempfile::tempdir().expect("create temp dir");
-        let depot = root.path().join("litra_glow");
-        std::fs::create_dir_all(&depot).expect("create depot dir");
-        std::fs::write(
-            depot.join("manifest.json"),
-            r#"{"devices":[{"modelId":"8c900","resources":[{"key":"device_image","src":"front.png"}]}],"resources":[]}"#,
-        )
-        .expect("write manifest");
-        std::fs::write(depot.join("front.png"), png_header(396, 396)).expect("write front");
-
-        let index = index_of(
-            "litra_glow",
-            DeviceEntry {
-                model_id: "8c900".into(),
-                model_ids: vec![],
-                display_name: "Litra Glow".into(),
-                kind: "ILLUMINATION_LIGHT".into(),
-                asset_path: "v1/devices/litra_glow/".into(),
-                files: vec![],
-            },
-        );
-        let resolver = AssetResolver {
-            read_roots: vec![root.path().to_path_buf()],
-            write_root: root.path().to_path_buf(),
-            has_bundle: false,
-            index: Some(index),
-        };
-
-        let asset = resolver
-            .resolve_registry_model("8c900")
-            .expect("standalone registry model should resolve");
-        assert_eq!(asset.display_name, "Litra Glow");
-        assert_eq!(asset.kind, Some(DeviceKind::Light));
-        assert_eq!(asset.image_path, depot.join("front.png"));
-        assert_eq!((asset.png_width, asset.png_height), (396, 396));
-    }
-
-    #[test]
-    fn standalone_registry_lookup_does_not_cross_model_depots() {
-        let root = tempfile::tempdir().expect("create temp dir");
-        let depot = root.path().join("litra_beam");
-        std::fs::create_dir_all(&depot).expect("create depot dir");
-        std::fs::write(
-            depot.join("manifest.json"),
-            r#"{"devices":[{"modelId":"8c901","resources":[{"key":"device_image","src":"front.png"}]}],"resources":[]}"#,
-        )
-        .expect("write manifest");
-        std::fs::write(depot.join("front.png"), png_header(120, 240)).expect("write front");
-        let index = Index {
-            schema_version: 1,
-            devices: HashMap::from([
-                (
-                    "litra_glow".into(),
-                    DeviceEntry {
-                        model_id: "8c900".into(),
-                        model_ids: vec![],
-                        display_name: "Litra Glow".into(),
-                        kind: "ILLUMINATION_LIGHT".into(),
-                        asset_path: "v1/devices/litra_glow/".into(),
-                        files: vec![],
-                    },
-                ),
-                (
-                    "litra_beam".into(),
-                    DeviceEntry {
-                        model_id: "8c901".into(),
-                        model_ids: vec![],
-                        display_name: "Litra Beam".into(),
-                        kind: "ILLUMINATION_LIGHT".into(),
-                        asset_path: "v1/devices/litra_beam/".into(),
-                        files: vec![],
-                    },
-                ),
-            ]),
-        };
-        let resolver = AssetResolver {
-            read_roots: vec![root.path().to_path_buf()],
-            write_root: root.path().to_path_buf(),
-            has_bundle: false,
-            index: Some(index),
-        };
-
-        assert!(resolver.resolve_registry_model("8c900").is_none());
-        assert_eq!(
-            resolver
-                .resolve_registry_model("8c901")
-                .expect("beam should resolve")
-                .display_name,
-            "Litra Beam"
-        );
-    }
-
-    #[test]
-    fn unsafe_standalone_manifest_filename_is_rejected() {
-        let root = tempfile::tempdir().expect("create temp dir");
-        let depot = root.path().join("litra_glow");
-        std::fs::create_dir_all(&depot).expect("create depot dir");
-        std::fs::write(
-            depot.join("manifest.json"),
-            r#"{"devices":[{"modelId":"8c900","resources":[{"key":"device_image","src":"../front.png"}]}],"resources":[]}"#,
-        )
-        .expect("write manifest");
-        std::fs::write(root.path().join("front.png"), png_header(1, 1)).expect("write escape");
-        let resolver = AssetResolver {
-            read_roots: vec![root.path().to_path_buf()],
-            write_root: root.path().to_path_buf(),
-            has_bundle: false,
-            index: Some(index_of(
-                "litra_glow",
-                DeviceEntry {
-                    model_id: "8c900".into(),
-                    model_ids: vec![],
-                    display_name: "Litra Glow".into(),
-                    kind: "ILLUMINATION_LIGHT".into(),
-                    asset_path: "v1/devices/litra_glow/".into(),
-                    files: vec![openlogi_assets::FileEntry {
-                        name: "front.png".into(),
-                        sha256: String::new(),
-                        bytes: 0,
-                    }],
-                },
-            )),
-        };
-        assert!(resolver.resolve_registry_model("8c900").is_none());
-    }
-
-    #[test]
-    fn standalone_resolution_prefers_the_first_read_root() {
-        let roots = [
-            tempfile::tempdir().expect("create bundle root"),
-            tempfile::tempdir().expect("create cache root"),
-        ];
-        for (root, dimensions) in roots.iter().zip([(10, 10), (20, 20)]) {
-            let depot = root.path().join("litra_glow");
-            std::fs::create_dir_all(&depot).expect("create depot dir");
-            std::fs::write(
-                depot.join("front.png"),
-                png_header(dimensions.0, dimensions.1),
-            )
-            .expect("write front");
-        }
-        let resolver = AssetResolver {
-            read_roots: roots.iter().map(|root| root.path().to_path_buf()).collect(),
-            write_root: roots[1].path().to_path_buf(),
-            has_bundle: true,
-            index: Some(index_of(
-                "litra_glow",
-                DeviceEntry {
-                    model_id: "8c900".into(),
-                    model_ids: vec![],
-                    display_name: "Litra Glow".into(),
-                    kind: "ILLUMINATION_LIGHT".into(),
-                    asset_path: "v1/devices/litra_glow/".into(),
-                    files: vec![openlogi_assets::FileEntry {
-                        name: "front.png".into(),
-                        sha256: String::new(),
-                        bytes: 0,
-                    }],
-                },
-            )),
-        };
-
-        let asset = resolver
-            .resolve_registry_model("8c900")
-            .expect("bundle asset should resolve");
-        assert_eq!((asset.png_width, asset.png_height), (10, 10));
-        assert_eq!(
-            asset.image_path,
-            roots[0].path().join("litra_glow/front.png")
-        );
-    }
-
-    #[test]
-    fn cleanup_removes_only_legacy_glow_pngs() {
-        let root = tempfile::tempdir().expect("create temp dir");
-        let depot = root.path().join("g513");
-        std::fs::create_dir_all(&depot).expect("create depot dir");
-        std::fs::write(depot.join("glow-ff9500.png"), b"x").expect("write glow png");
-        std::fs::write(depot.join("glow-af52de.png.tmp"), b"x").expect("write glow tmp");
-        std::fs::write(depot.join("front.png"), b"x").expect("write front render");
-        std::fs::write(depot.join("metadata.json"), b"{}").expect("write metadata");
-
-        cleanup_glow_pngs_in(root.path());
-
-        assert!(
-            !depot.join("glow-ff9500.png").exists() && !depot.join("glow-af52de.png.tmp").exists(),
-            "legacy glow files must be deleted"
-        );
-        assert!(
-            depot.join("front.png").exists() && depot.join("metadata.json").exists(),
-            "real assets must be left untouched"
-        );
-    }
-}
+mod tests;

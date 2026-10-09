@@ -13,7 +13,7 @@ use evdev::{AttributeSet, EventType, InputEvent, KeyCode, RelativeAxisCode};
 use zbus::blocking::Connection as DbusConn;
 
 use openlogi_core::binding::{
-    Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Script, Shortcut, WorkflowStep,
+    Action, Effect, KeyCombo, MediaKey, MouseButton, NativeAction, Shortcut,
 };
 use openlogi_core::scroll::ScrollDelta;
 
@@ -43,13 +43,8 @@ pub(super) fn execute(action: &Action) {
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
         Effect::Media(key) => dispatch_media(key),
         Effect::Native(native) => dispatch_native(action, native),
-        Effect::Script(script) => dispatch_script(script),
-        Effect::Text(text) => {
-            tracing::warn!(
-                chars = text.chars().count(),
-                "TypeText injection is not implemented on Linux yet"
-            );
-        }
+        Effect::Script(script) => super::dispatch_script(script),
+        Effect::Text(text) => type_text(text),
         Effect::AgentSide => {
             tracing::debug!(
                 action = action.label(),
@@ -96,17 +91,12 @@ fn combo(shortcut: Shortcut) -> KeyCombo {
         Shortcut::PrevTab => "Ctrl+Shift+Tab",
         Shortcut::ReloadPage => "Ctrl+R",
     };
-    parse_shortcut(text)
-}
-
-fn parse_shortcut(text: &str) -> KeyCombo {
-    text.parse()
-        .unwrap_or_else(|error| unreachable!("hardcoded shortcut table entry {text:?}: {error}"))
+    super::parse_shortcut(text)
 }
 
 /// Press an already-resolved chord: a table lookup from [`combo`] or a
 /// user-recorded [`Action::CustomShortcut`]/`WorkflowStep::PressKey`.
-fn press_combo(combo: &KeyCombo) {
+pub(super) fn press_combo(combo: &KeyCombo) {
     let Some(key) = hid_usage_to_linux(combo.key().code()) else {
         tracing::warn!(
             usage = combo.key().code(),
@@ -169,23 +159,17 @@ fn dispatch_native(action: &Action, native: NativeAction) {
         }
         // logind LockSession() via the system bus; falls back to Super+L.
         NativeAction::LockScreen => lock_screen(),
-        // Region vs full-screen capture depends on the desktop environment's
-        // screenshot handler for Print Screen, so both map to the same key.
-        NativeAction::Screenshot | NativeAction::CaptureRegion => {
-            press_key(&[], KeyCode::KEY_SYSRQ);
+        NativeAction::Screenshot => press_key(&[], KeyCode::KEY_SYSRQ),
+        // Print alone only opens the region selector on GNOME >= 42; other
+        // desktops need an extra chord (see `capture_region_mods`).
+        NativeAction::CaptureRegion => {
+            press_key(
+                &capture_region_mods(current_desktop().as_deref()),
+                KeyCode::KEY_SYSRQ,
+            );
         }
         // logind Suspend() via the system bus.
         NativeAction::Sleep => sleep_system(),
-    }
-}
-
-fn dispatch_script(script: Script<'_>) {
-    match script {
-        Script::AppleScript(_) => {
-            tracing::warn!("RunAppleScript is only supported on macOS");
-        }
-        Script::ShellCommand(cmd) => run_shell_command_async(cmd.to_string()),
-        Script::Workflow(steps) => run_workflow_async(steps.to_vec()),
     }
 }
 
@@ -201,45 +185,19 @@ fn dispatch_scroll(dx: i8, dy: i8) {
     }
 }
 
-fn run_shell_command_async(cmd: String) {
-    std::thread::spawn(move || run_shell_command(&cmd));
+/// Not implemented yet: unicode text has no uinput encoding without a keymap.
+pub(super) fn type_text(text: &str) {
+    tracing::warn!(
+        chars = text.chars().count(),
+        "TypeText injection is not implemented on Linux yet"
+    );
 }
 
-fn run_workflow_async(steps: Vec<WorkflowStep>) {
-    std::thread::spawn(move || run_workflow(&steps));
+pub(super) fn run_apple_script(_src: &str) {
+    tracing::warn!("RunAppleScript is only supported on macOS");
 }
 
-fn run_workflow(steps: &[WorkflowStep]) {
-    for step in steps {
-        match step {
-            WorkflowStep::TypeText(text) => {
-                tracing::warn!(
-                    chars = text.chars().count(),
-                    "workflow TypeText injection is not implemented on Linux yet"
-                );
-            }
-            WorkflowStep::PressKey(combo) => {
-                let Some(key) = hid_usage_to_linux(combo.key().code()) else {
-                    tracing::warn!(
-                        usage = combo.key().code(),
-                        "workflow PressKey usage has no Linux mapping; step ignored"
-                    );
-                    continue;
-                };
-                press_key(&modifiers_to_keycodes(combo), key);
-            }
-            WorkflowStep::Delay { millis } => {
-                std::thread::sleep(std::time::Duration::from_millis(*millis));
-            }
-            WorkflowStep::RunAppleScript(_) => {
-                tracing::warn!("workflow RunAppleScript is only supported on macOS");
-            }
-            WorkflowStep::RunShellCommand(cmd) => run_shell_command(cmd),
-        }
-    }
-}
-
-fn run_shell_command(cmd: &str) {
+pub(super) fn run_shell_command(cmd: &str) {
     let _ = std::process::Command::new("/bin/sh")
         .args(["-c", cmd])
         .output();
@@ -284,6 +242,8 @@ const KEY_CAPABILITIES: &[KeyCode] = &[
     KeyCode::KEY_F1,  KeyCode::KEY_F2,  KeyCode::KEY_F3,  KeyCode::KEY_F4,
     KeyCode::KEY_F5,  KeyCode::KEY_F6,  KeyCode::KEY_F7,  KeyCode::KEY_F8,
     KeyCode::KEY_F9,  KeyCode::KEY_F10, KeyCode::KEY_F11, KeyCode::KEY_F12,
+    KeyCode::KEY_F13, KeyCode::KEY_F14, KeyCode::KEY_F15, KeyCode::KEY_F16,
+    KeyCode::KEY_F17, KeyCode::KEY_F18, KeyCode::KEY_F19, KeyCode::KEY_F20,
     // System
     KeyCode::KEY_SYSRQ,
     // Multimedia
@@ -480,6 +440,9 @@ fn modifiers_to_keycodes(combo: &openlogi_core::binding::KeyCombo) -> Vec<KeyCod
     if combo.has_option() {
         modifiers.push(KeyCode::KEY_LEFTALT);
     }
+    if combo.has_super() {
+        modifiers.push(KeyCode::KEY_LEFTMETA);
+    }
     modifiers
 }
 
@@ -488,6 +451,7 @@ fn held_keycode(key: HeldKey) -> Option<KeyCode> {
         HeldKey::Control => Some(KeyCode::KEY_LEFTCTRL),
         HeldKey::Shift => Some(KeyCode::KEY_LEFTSHIFT),
         HeldKey::Alt => Some(KeyCode::KEY_LEFTALT),
+        HeldKey::Super => Some(KeyCode::KEY_LEFTMETA),
         HeldKey::Key(usage) => {
             let key = hid_usage_to_linux(usage.code());
             if key.is_none() {
@@ -639,6 +603,35 @@ fn lock_screen() {
     // Super+L is the standard lock shortcut on GNOME and KDE.
     tracing::debug!("LockScreen via Super+L key combo");
     press_key(&[KeyCode::KEY_LEFTMETA], KeyCode::KEY_L);
+}
+
+/// `$XDG_CURRENT_DESKTOP`, lowercased, or `None` if unset.
+fn current_desktop() -> Option<String> {
+    std::env::var("XDG_CURRENT_DESKTOP")
+        .ok()
+        .map(|d| d.to_lowercase())
+}
+
+/// The extra modifiers Print needs to open the region selector instead of
+/// taking a full-screen shot, chosen from the (colon-separated)
+/// `$XDG_CURRENT_DESKTOP` value.
+///
+/// GNOME >= 42 already opens the interactive selector on a bare Print, and
+/// that is what an unset or unrecognised desktop keeps. Cinnamon, MATE and
+/// XFCE bind region capture to Shift+Print; KDE Plasma binds it to
+/// Meta+Shift+Print.
+fn capture_region_mods(desktop: Option<&str>) -> Vec<KeyCode> {
+    let Some(desktop) = desktop else {
+        return Vec::new();
+    };
+    let mut desktops = desktop.split(':');
+    if desktops.clone().any(|d| d == "kde") {
+        vec![KeyCode::KEY_LEFTMETA, KeyCode::KEY_LEFTSHIFT]
+    } else if desktops.any(|d| matches!(d, "x-cinnamon" | "cinnamon" | "mate" | "xfce")) {
+        vec![KeyCode::KEY_LEFTSHIFT]
+    } else {
+        Vec::new()
+    }
 }
 
 /// Suspend the system via logind's `Suspend()` on the system bus. The
@@ -830,7 +823,10 @@ mod tests {
     use evdev::KeyCode;
     use openlogi_core::binding::{KeyCombo, Shortcut};
 
-    use super::{combo, hid_usage_to_linux, key_ev, key_phase_events, modifiers_to_keycodes, syn};
+    use super::{
+        capture_region_mods, combo, hid_usage_to_linux, key_ev, key_phase_events,
+        modifiers_to_keycodes, syn,
+    };
     use crate::inject::KeyPhase;
 
     #[test]
@@ -903,5 +899,31 @@ mod tests {
                 "{shortcut:?} table entry has no Linux keycode mapping"
             );
         }
+    }
+
+    #[test]
+    fn capture_region_mods_picks_the_desktops_chord() {
+        assert_eq!(capture_region_mods(None), vec![]);
+        assert_eq!(capture_region_mods(Some("gnome")), vec![]);
+        assert_eq!(capture_region_mods(Some("unity")), vec![]);
+        assert_eq!(
+            capture_region_mods(Some("x-cinnamon")),
+            vec![KeyCode::KEY_LEFTSHIFT]
+        );
+        assert_eq!(
+            capture_region_mods(Some("mate")),
+            vec![KeyCode::KEY_LEFTSHIFT]
+        );
+        assert_eq!(
+            capture_region_mods(Some("xfce")),
+            vec![KeyCode::KEY_LEFTSHIFT]
+        );
+        assert_eq!(
+            capture_region_mods(Some("kde")),
+            vec![KeyCode::KEY_LEFTMETA, KeyCode::KEY_LEFTSHIFT]
+        );
+        // GNOME-on-Ubuntu reports "ubuntu:gnome" — the compound string must
+        // still resolve to the GNOME (no-op) branch, not fall through.
+        assert_eq!(capture_region_mods(Some("ubuntu:gnome")), vec![]);
     }
 }

@@ -4,11 +4,12 @@
 //! not the GUI). This window is a thin state machine that talks to the agent
 //! over IPC:
 //!
-//! - The buttons send [`Command::StartPairing`] / [`Command::PairDevice`] /
-//!   [`Command::CancelPairing`] through the agent IPC client.
-//! - [`PairingUi`] — the latest session state, updated from the agent's pairing
-//!   long-poll ([`crate::services::ipc::IpcClient::pairing`]) in [`crate::main`]'s
-//!   loop via [`apply_update`]. The view observes it and repaints on change.
+//! - The buttons send [`StartPairing`] / [`PairDevice`] / [`CancelPairing`]
+//!   through the agent IPC client.
+//! - [`PairingUi`] — the latest session state, taken from the agent's observed
+//!   state by the runtime via [`apply_state`], or a refusal the agent never
+//!   turned into a session via [`apply_undeliverable`]. The view observes it
+//!   and repaints on change.
 //!
 //! Bolt is interactive (discover → pick → enter a passkey on the device);
 //! Unifying just opens a lock and waits for the next device to link, so it
@@ -28,7 +29,7 @@ use openlogi_core::hid::{Click, PasskeyMethod, ReceiverSelector};
 use openlogi_ipc::{FoundDevice, PairingFailure, PairingPhase};
 
 use crate::app::menu::{CloseWindow, Minimize, Zoom};
-use crate::services::ipc::Command;
+use crate::services::ipc::{CancelPairing, Command, PairDevice, StartPairing};
 use crate::state::AppState;
 use crate::ui::theme::{self, Palette, Typography as _};
 use crate::windows::{self, AuxWindow};
@@ -80,7 +81,7 @@ pub fn open(cx: &mut App) {
 /// The window's native title — one definition for open and the live-language
 /// retitle ([`windows::retitle_open`]), so the two cannot drift.
 pub(crate) fn window_title() -> SharedString {
-    tr!("Add Device")
+    tr!("pairing.add_device")
 }
 
 /// Show the agent's pairing session. `None` is no session — including after a
@@ -112,51 +113,53 @@ pub fn apply_undeliverable(cx: &mut App, failure: PairingFailure) {
     cx.set_global(PairingUi::Failed(failure));
 }
 
-fn pairing_failure_text(failure: &PairingFailure) -> String {
+pub(crate) fn pairing_failure_text(failure: &PairingFailure) -> String {
     match failure {
         PairingFailure::Hid { message } => {
-            tr!("HID transport error: %{message}", message => message.clone()).to_string()
+            tr!("pairing.hid_transport_error", message => message.clone()).to_string()
         }
-        PairingFailure::ReceiverNotFound => {
-            tr!("No supported pairing-capable receiver was found.").to_string()
-        }
+        PairingFailure::ReceiverNotFound => tr!("pairing.pairing_receiver_not_found").to_string(),
         PairingFailure::Register { message } => {
-            tr!("Receiver register access failed: %{message}", message => message.clone())
-                .to_string()
+            tr!("pairing.receiver_register_error", message => message.clone()).to_string()
         }
-        PairingFailure::Timeout => tr!("Pairing timed out.").to_string(),
+        PairingFailure::Timeout => tr!("pairing.pairing_timed_out").to_string(),
         PairingFailure::Device { code } => tr!(
-            "The receiver reported pairing error %{code}.",
+            "pairing.receiver_pairing_error",
             code => format!("0x{code:02x}"),
         )
         .to_string(),
-        PairingFailure::Cancelled => tr!("Pairing was cancelled.").to_string(),
-        PairingFailure::ReceiverBusy => tr!("The receiver is busy. Try pairing again.").to_string(),
-        PairingFailure::WatcherUnavailable => {
-            tr!("Pairing is unavailable because the background service is not ready.").to_string()
+        PairingFailure::Cancelled => tr!("pairing.pairing_was_cancelled").to_string(),
+        PairingFailure::ReceiverBusy => {
+            tr!("pairing.the_receiver_is_busy_try_pairing_again").to_string()
         }
-        PairingFailure::AgentRestarted => {
-            tr!("The background service restarted — try pairing again.").to_string()
-        }
+        PairingFailure::WatcherUnavailable => tr!("pairing.pairing_agent_not_ready").to_string(),
+        PairingFailure::AgentRestarted => tr!("agent.agent_restarted_during_pairing").to_string(),
         PairingFailure::ReceiverAccessUnavailable => {
-            tr!("Pairing is unavailable because receiver access could not be recorded.").to_string()
+            tr!("pairing.pairing_receiver_access_unrecorded").to_string()
         }
-        PairingFailure::AlreadyActive => tr!("A pairing session is already active.").to_string(),
+        PairingFailure::AlreadyActive => {
+            tr!("pairing.a_pairing_session_is_already_active").to_string()
+        }
         PairingFailure::UnknownDevice => {
-            tr!("That device is no longer available. Search again and retry pairing.").to_string()
+            tr!("pairing.pairing_device_no_longer_available").to_string()
         }
-        PairingFailure::NoActiveSession => tr!("No pairing session is active.").to_string(),
+        PairingFailure::NoActiveSession => tr!("pairing.no_pairing_session_is_active").to_string(),
     }
 }
 
-fn send(cx: &App, command: Command) {
+fn send(cx: &App, command: impl Into<Command>) {
     if let Some(state) = AppState::try_global(cx) {
-        let _ = state.read(cx).ipc_sender().send(command);
+        let _ = state.read(cx).ipc_sender().send(command.into());
     }
 }
 
 fn start_search(cx: &mut App) {
-    send(cx, Command::StartPairing(ReceiverSelector::First));
+    send(
+        cx,
+        StartPairing {
+            selector: ReceiverSelector::First,
+        },
+    );
 }
 
 /// Standalone Add Device window root view.
@@ -200,11 +203,10 @@ impl Render for AddDeviceView {
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .on_action(|_: &Minimize, window, _| window.minimize_window())
             .on_action(|_: &Zoom, window, _| window.zoom_window())
-            // Linux only: a client-side titlebar at the top of the window; the
-            // padded content sits in the flex-column below it. macOS / Windows
-            // keep their native titlebar.
-            .when(cfg!(target_os = "linux"), |this| {
-                this.child(windows::aux_title_bar(tr!("Add Device"), cx))
+            // Only where the compositor left the chrome to us; the padded
+            // content sits in the flex-column below it.
+            .when(windows::needs_client_titlebar(window), |this| {
+                this.child(windows::aux_title_bar(tr!("pairing.add_device"), cx))
             })
             .child(
                 v_flex()
@@ -215,7 +217,7 @@ impl Render for AddDeviceView {
                     .child(
                         div()
                             .text_heading()
-                            .child(tr!("Add Device")),
+                            .child(tr!("pairing.add_device")),
                     )
                     .child(AddDeviceBody { state }),
             )
@@ -240,30 +242,24 @@ fn pairing_body(state: PairingUi, pal: Palette) -> impl IntoElement {
     match state {
         PairingUi::Idle => {
             col = col
-                .child(hint(
-                    tr!("Put the device in pairing mode, then start searching."),
-                    pal,
-                ))
+                .child(hint(tr!("pairing.pairing_mode_description"), pal))
                 .child(
-                    action_button("ad-search", tr!("Search for devices"), true)
+                    action_button("ad-search", tr!("pairing.search_for_devices"), true)
                         .on_click(|_, _, cx| start_search(cx)),
                 );
         }
         PairingUi::Searching => {
             col = col
-                .child(status_line(tr!("Searching for devices…")))
-                .child(hint(
-                    tr!("Make sure the device is on and in pairing mode."),
-                    pal,
-                ))
+                .child(status_line(tr!("pairing.searching_for_devices")))
+                .child(hint(tr!("pairing.pairing_search_hint"), pal))
                 .child(cancel_button());
         }
         PairingUi::Found(devices) => {
-            col = col.child(status_line(tr!("Searching for devices…")));
+            col = col.child(status_line(tr!("pairing.searching_for_devices")));
             if devices.is_empty() {
-                col = col.child(hint(tr!("No devices found yet…"), pal));
+                col = col.child(hint(tr!("pairing.no_devices_found_yet"), pal));
             } else {
-                col = col.child(hint(tr!("Select a device to pair:"), pal));
+                col = col.child(hint(tr!("pairing.select_a_device_to_pair"), pal));
                 for device in &devices {
                     col = col.child(device_row(device, pal));
                 }
@@ -272,8 +268,11 @@ fn pairing_body(state: PairingUi, pal: Palette) -> impl IntoElement {
         }
         PairingUi::Pairing => {
             col = col
-                .child(status_line(tr!("Pairing…")))
-                .child(hint(tr!("Follow the instructions on your device."), pal))
+                .child(status_line(tr!("pairing.pairing")))
+                .child(hint(
+                    tr!("pairing.follow_the_instructions_on_your_device"),
+                    pal,
+                ))
                 .child(cancel_button());
         }
         PairingUi::Passkey(method) => {
@@ -286,15 +285,15 @@ fn pairing_body(state: PairingUi, pal: Palette) -> impl IntoElement {
                     div()
                         .text_color(pal.text_primary)
                         .font_weight(FontWeight::MEDIUM)
-                        .child(tr!("Device paired")),
+                        .child(tr!("pairing.device_paired")),
                 )
                 .child(hint(
-                    tr!("Paired to slot %{slot}.", slot => slot.to_string()),
+                    tr!("pairing.paired_receiver_slot", slot => slot.to_string()),
                     pal,
                 ))
                 .child(
-                    action_button("ad-done", tr!("Done"), false)
-                        .on_click(|_, _, cx| send(cx, Command::CancelPairing)),
+                    action_button("ad-done", tr!("common.done"), false)
+                        .on_click(|_, _, cx| send(cx, CancelPairing)),
                 );
         }
         PairingUi::Failed(failure) => {
@@ -303,24 +302,15 @@ fn pairing_body(state: PairingUi, pal: Palette) -> impl IntoElement {
                     div()
                         .text_color(pal.text_primary)
                         .font_weight(FontWeight::MEDIUM)
-                        .child(tr!("Pairing failed")),
+                        .child(tr!("pairing.pairing_failed")),
                 )
                 .child(hint(pairing_failure_text(&failure), pal))
                 .when(
                     matches!(failure, PairingFailure::ReceiverNotFound),
-                    |this| {
-                        this.child(hint(
-                            tr!(
-                                "Plug in or pair a supported Logitech device — it'll show up here \
-                                 automatically. For direct Bluetooth connections, pair in your \
-                                 computer's bluetooth settings."
-                            ),
-                            pal,
-                        ))
-                    },
+                    |this| this.child(hint(tr!("device.device_connection_help"), pal)),
                 )
                 .child(
-                    action_button("ad-retry", tr!("Try again"), true)
+                    action_button("ad-retry", tr!("common.try_again"), true)
                         .on_click(|_, _, cx| start_search(cx)),
                 );
         }
@@ -338,6 +328,9 @@ fn device_row(device: &FoundDevice, pal: Palette) -> impl IntoElement {
     BaseButton::new(("found-device", address_id))
         .accessibility_label(name.clone())
         .w_full()
+        .flex()
+        .items_center()
+        .justify_start()
         .px_4()
         .py_3()
         .rounded(pal.control_radius)
@@ -348,7 +341,7 @@ fn device_row(device: &FoundDevice, pal: Palette) -> impl IntoElement {
         .hover(|s| s.bg(pal.control_hover))
         .focus_visible(|s| s.bg(pal.control_hover))
         .child(div().text_body().child(name))
-        .on_click(move |_, _, cx| send(cx, Command::PairDevice(address)))
+        .on_click(move |_, _, cx| send(cx, PairDevice { address }))
 }
 
 /// The passkey-entry instructions panel.
@@ -358,18 +351,19 @@ fn passkey_panel(method: &PasskeyMethod, pal: Palette) -> impl IntoElement {
         PasskeyMethod::Keyboard(digits) => {
             col = col
                 .child(status_line(tr!(
-                    "Type this passkey on the new keyboard, then press Enter:"
+                    "pairing.keyboard_pairing_passkey_instructions"
                 )))
                 .child(div().text_title().child(SharedString::from(digits.clone())));
         }
         PasskeyMethod::Pointer { clicks, .. } => {
             col = col
                 .child(status_line(tr!(
-                    "On the new mouse, click in this order, then press both buttons together:"
+                    "pairing.mouse_pairing_passkey_instructions"
                 )))
                 .child(
                     h_flex()
                         .id("passkey-sequence")
+                        .debug_selector(|| "passkey-sequence".into())
                         // The icons carry no text of their own, so the order is
                         // spelled out once here rather than left to assistive
                         // tech as a row of unlabelled images.
@@ -379,7 +373,7 @@ fn passkey_panel(method: &PasskeyMethod, pal: Palette) -> impl IntoElement {
                             v_flex()
                                 .items_center()
                                 .gap_0p5()
-                                .child(svg().path(click_icon(*click)).size_6().flex_none())
+                                .child(click_icon_svg(*click, pal))
                                 .child(
                                     div()
                                         .text_caption()
@@ -391,6 +385,15 @@ fn passkey_panel(method: &PasskeyMethod, pal: Palette) -> impl IntoElement {
         }
     }
     col
+}
+
+/// Click glyph with explicit text color so GPUI's SVG renderer paints its path.
+fn click_icon_svg(click: Click, pal: Palette) -> gpui::Svg {
+    svg()
+        .path(click_icon(click))
+        .size_6()
+        .flex_none()
+        .text_color(pal.text_primary)
 }
 
 /// The mouse body with the button this step wants filled in.
@@ -408,8 +411,8 @@ fn spoken_click_sequence(clicks: &[Click]) -> String {
         .enumerate()
         .map(|(step, click)| {
             let label = match click {
-                Click::Left => tr!("Left Click"),
-                Click::Right => tr!("Right Click"),
+                Click::Left => tr!("actions.left_click"),
+                Click::Right => tr!("actions.right_click"),
             };
             format!("{}. {label}", step + 1)
         })
@@ -439,6 +442,94 @@ fn action_button(id: &'static str, label: impl Into<SharedString>, primary: bool
 }
 
 fn cancel_button() -> impl IntoElement {
-    action_button("ad-cancel", tr!("Cancel"), false)
-        .on_click(|_, _, cx| send(cx, Command::CancelPairing))
+    action_button("ad-cancel", tr!("common.cancel"), false)
+        .on_click(|_, _, cx| send(cx, CancelPairing))
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{AssetSource, TestAppContext};
+    use openlogi_ui::action_icons::ActionIcons;
+
+    use super::*;
+
+    #[test]
+    fn mouse_pairing_click_icons_are_embedded() {
+        for click in [Click::Left, Click::Right] {
+            let path = click_icon(click);
+            let loaded = ActionIcons.load(path);
+            assert!(
+                matches!(loaded, Ok(Some(_))),
+                "missing embedded asset for {path}"
+            );
+            let bytes = loaded.unwrap().unwrap();
+            let content = std::str::from_utf8(&bytes).expect("valid utf-8 svg");
+            assert!(content.contains("<svg"), "asset {path} should be an SVG");
+        }
+    }
+
+    #[test]
+    fn mouse_pairing_click_icon_resolves_text_color() {
+        let text_primary = gpui::hsla(0.5, 0.5, 0.5, 1.0);
+        let pal = Palette {
+            page: gpui::hsla(0., 0., 0., 1.),
+            panel: gpui::hsla(0., 0., 0., 1.),
+            control: gpui::hsla(0., 0., 0., 1.),
+            control_hover: gpui::hsla(0., 0., 0., 1.),
+            muted: gpui::hsla(0., 0., 0., 1.),
+            border: gpui::hsla(0., 0., 0., 1.),
+            text_primary,
+            text_muted: gpui::hsla(0., 0., 0., 1.),
+            card_radius: gpui::px(8.),
+            control_radius: gpui::px(4.),
+        };
+        for click in [Click::Left, Click::Right] {
+            let mut icon = click_icon_svg(click, pal);
+            assert_eq!(
+                icon.style().text.color,
+                Some(text_primary),
+                "click icon SVG must resolve text color so GPUI paints its path"
+            );
+        }
+    }
+
+    #[test]
+    fn spoken_click_sequence_formats_correctly() {
+        let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+        let clicks = [Click::Left, Click::Right, Click::Left];
+        let spoken = spoken_click_sequence(&clicks);
+        assert_eq!(spoken, "1. Left Click, 2. Right Click, 3. Left Click");
+    }
+
+    struct PointerPasskeyHarness {
+        method: PasskeyMethod,
+        pal: Palette,
+    }
+
+    impl Render for PointerPasskeyHarness {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            passkey_panel(&self.method, self.pal)
+        }
+    }
+
+    #[gpui::test]
+    fn pointer_passkey_panel_renders(cx: &mut TestAppContext) {
+        let pal = cx.update(|cx| {
+            gpui_component::init(cx);
+            theme::register_builtin_themes(cx);
+            theme::palette(cx)
+        });
+        let method = PasskeyMethod::Pointer {
+            passkey: "123".into(),
+            clicks: vec![Click::Left, Click::Right, Click::Left],
+        };
+        let (_view, cx) = cx.add_window_view(|_, _| PointerPasskeyHarness { method, pal });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let bounds = cx
+            .debug_bounds("passkey-sequence")
+            .expect("passkey sequence must be laid out and painted");
+        assert!(bounds.size.width > gpui::px(0.));
+        assert!(bounds.size.height > gpui::px(0.));
+    }
 }

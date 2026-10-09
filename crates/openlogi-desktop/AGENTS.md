@@ -4,12 +4,10 @@ The GPUI + gpui-component window users actually open: device gallery, per-device
 panels, Settings, pairing. It is one of three processes in the bundle and the
 only one with a settings UI.
 
-This file is the crate's own contract and map. The cross-cutting rules for
-writing GPUI code — components, theming, element IDs, icons, task ownership —
-live in [`.claude/rules/gui.md`](../../.claude/rules/gui.md) and are **not**
-restated here; read that file before editing any `.rs` in this crate. Workspace
-standards (lints, module layout, commits, the local gate) are in the root
-[`AGENTS.md`](../../AGENTS.md).
+This file is the crate's contract and map. Read
+[`.agents/rules/gui.md`](../../.agents/rules/gui.md) before GUI work: it loads the
+upstream GPUI skills and lists OpenLogi integration constraints. Workspace
+standards and checks are in the root [`AGENTS.md`](../../AGENTS.md).
 
 ## The hard contract: this crate never touches a device
 
@@ -27,11 +25,10 @@ Two more things this crate is not:
 
 - **Not the overlay's parent.** `openlogi-overlay` is a *sibling* process. It
   links `openlogi-ui`, never this crate. Anything both frontends need moves into
-  `openlogi-ui` — and every dependency added there is added to the overlay too,
-  which is why `gpui-component` is not one of them.
-- **Not a home for shared presentation.** Ring geometry, the shared asset
-  source, locale negotiation: those are `openlogi-ui`'s. What only the settings
-  app draws stays here.
+  `openlogi-ui`; evaluate dependencies there against both consumers.
+- **Not a home for shared presentation.** Shared icons, colors, and locale
+  catalogs live in `openlogi-ui`. Pure ring geometry and locale negotiation live
+  in `openlogi-core`. What only the settings app draws stays here.
 
 ## Map of `src/`
 
@@ -41,16 +38,14 @@ Two more things this crate is not:
 | `runtime.rs` | Everything the app does that isn't a render: one task, one `select!` arm per source that can change long-lived state (agent updates, camera scan, asset commands, finished downloads, `openlogi://` deeplinks). |
 | `app.rs`, `app/` | The main window's shell — home gallery, device detail, menu bar, status line, deeplink handling. |
 | `windows.rs`, `windows/` | The windows themselves plus the registry that keeps each a singleton. About and Updates are **pages inside Settings**, not windows of their own. |
-| `features/` | One module per device-feature panel: `mouse`, `pointer`, `keyboard`, `lighting`, `camera`, `action_ring`, `profile_scope`. |
+| `features/` | One module per device-feature panel: `mouse`, `pointer`, `keyboard`, `lighting`, `camera`, `action_ring`, `profiles` — plus `binding_editor`, the binding-editor chrome the mouse, keyboard, profile and Actions Ring editors share. |
 | `state.rs`, `state/` | `AppState`, the GPUI global every view reads. Anything two views share belongs here; per-component scratch (hover index, open popover) stays in the owning entity. |
 | `services/` | Infrastructure, not UI: the IPC client, asset resolution and download, device reads, diagnostics, i18n. |
 | `ui/` | Shared components and the hand-painted `Palette` (`theme.rs`). |
 | `platform/` | OS integration — app icon, OS facts, updater. |
 | `app_assets.rs` | The GPUI asset source, composed in order: embedded logo → `openlogi-ui`'s `action-icons/` → gpui-component's bundled lucide set. A new icon path that resolves nowhere renders blank rather than failing to build. |
 
-Panels gate on `Capabilities`, never on device `kind`; commits go through
-`AppState`, never straight to `Config`. Both rules are spelled out in
-`.claude/rules/gui.md`.
+Panel selection and settings writes follow `.agents/rules/gui.md`.
 
 ## Running and verifying
 
@@ -88,8 +83,8 @@ Panels gate on `Capabilities`, never on device `kind`; commits go through
 
 | When you touch | Read |
 |---|---|
-| any `.rs` here (GPUI house style) | [`.claude/rules/gui.md`](../../.claude/rules/gui.md) |
-| `services/i18n.rs`, any user-facing string | [`.claude/rules/i18n.md`](../../.claude/rules/i18n.md) |
+| any `.rs` here (GPUI house style) | [`.agents/rules/gui.md`](../../.agents/rules/gui.md) |
+| `services/i18n.rs`, any user-facing string | [`.agents/rules/i18n.md`](../../.agents/rules/i18n.md) |
 | anything crossing the agent boundary | [`crates/openlogi-ipc/AGENTS.md`](../openlogi-ipc/AGENTS.md) |
-| `platform/**` or any macOS FFI | [`.claude/rules/objc-ffi.md`](../../.claude/rules/objc-ffi.md) |
+| `platform/**` or any macOS FFI | [`.agents/rules/objc-ffi.md`](../../.agents/rules/objc-ffi.md) |
 | a permission symptom or the bundle identity | [`.claude/skills/openlogi-macos-permissions/SKILL.md`](../../.claude/skills/openlogi-macos-permissions/SKILL.md) |

@@ -3,45 +3,46 @@
 //! Every process start walks the same ladder, and each state is a type:
 //!
 //! ```text
-//! startup::bootstrap ──► Booted ──gate──► Wanted ──arm──► Armed ──run──► exit
-//!         │                 │                                    │
-//!         └─ init failed    └─ dormant start nobody wanted       └─ signal / uninstall
+//! startup::bootstrap ──► Booted ──gate──► Wanted ──arm──► Armed ──► Running ──► exit
+//!         │                 │                                         │
+//!         └─ init failed    └─ dormant start nobody wanted            └─ signal / process request
 //! ```
 //!
-//! The moves are the type protection for three contracts: the uninstall
-//! receiver travels inside the states (gate consumes it first, then the run
-//! loop — no third consumer can exist), the demand channel dies at
+//! The moves are the type protection for these lifecycle contracts: the
+//! shutdown-request receiver travels inside the states (gate consumes it first,
+//! then the run loop — no third consumer can exist), the demand channel dies at
 //! [`Wanted::arm`], and arming without settling the dormancy question is
-//! unrepresentable — `arm` exists only on [`Wanted`], whose sole producer is
-//! the gate. The gate *waits* only on macOS, where the sunk launch-at-login
-//! switch makes an unwanted login start possible; Windows and Linux only ever
-//! start wanted, so their gate passes unconditionally.
+//! unrepresentable — `arm` exists only on [`Wanted`], whose sole producer is the
+//! gate. Moving `Armed` into `Running` also hands the single-consumer resume
+//! stream to inventory exactly once. The gate *waits* only on macOS, where the
+//! sunk launch-at-login switch makes an unwanted login start possible; Windows
+//! and Linux only ever start wanted, so their gate passes unconditionally.
+
+#[cfg(target_os = "macos")]
+pub(crate) mod armed_session;
+mod transition;
 
 use std::sync::Arc;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(target_os = "macos")]
 use std::time::Duration;
 
 use futures::StreamExt as _;
 use openlogi_agent_core::event_monitor::EventMonitor;
 use openlogi_agent_core::observable::ObservableState;
-use openlogi_agent_core::orchestrator::{Orchestrator, SharedRuntime};
+use openlogi_agent_core::orchestrator::{Orchestrator, SharedHandles};
 use openlogi_agent_core::runtime::hook;
 use openlogi_agent_core::watchers::foreground_app::ForegroundUpdate;
-use openlogi_agent_core::watchers::inventory::InventoryEvent;
+use openlogi_agent_core::watchers::inventory::{InventoryEvent, InventoryRefresh};
 use openlogi_core::config::Config;
 use openlogi_hook::Hook;
 use tokio::sync::Mutex;
-use tokio::sync::mpsc::UnboundedReceiver;
 use tracing::{debug, info, warn};
 
 #[cfg(target_os = "macos")]
 use openlogi_ipc::ClientKind;
 
-#[cfg(target_os = "macos")]
-use crate::binary_watch;
-use crate::shutdown::{self, ShutdownSignals};
+use self::transition::{Replacement, WatcherFleet};
+use crate::shutdown::{self, ShutdownRequest, ShutdownRequests, ShutdownSignals};
 use crate::startup::{self, Core, InputServices};
 use crate::{autostart, overlay, server};
 
@@ -49,14 +50,13 @@ use crate::{autostart, overlay, server};
 /// seconds a kickstarting GUI needs, and the window costs only an idle
 /// process that has opened no device and prompted for nothing.
 #[cfg(target_os = "macos")]
-const DORMANT_DEADLINE: Duration = Duration::from_secs(60);
+const DORMANT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Walk the whole lifecycle: bootstrap, gate, arm, run. This is the async
 /// core's entry point; `main` only decides which thread it runs on.
 pub(crate) async fn run(
     config: Config,
-    #[cfg(any(target_os = "macos", target_os = "windows"))] resume_pending: Arc<AtomicBool>,
-    uninstalled: UnboundedReceiver<()>,
+    shutdown_requests: ShutdownRequests,
     #[cfg(target_os = "macos")] armed_tx: std::sync::mpsc::Sender<()>,
 ) {
     // Reconcile the agent's launch-at-login autostart and clear the legacy GUI
@@ -65,9 +65,7 @@ pub(crate) async fn run(
 
     let Some(booted) = Booted::bootstrap(
         config,
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
-        resume_pending,
-        uninstalled,
+        shutdown_requests,
         #[cfg(target_os = "macos")]
         armed_tx,
     )
@@ -90,7 +88,9 @@ pub(crate) async fn run(
 struct Booted {
     core: Core,
     signals: ShutdownSignals,
-    uninstalled: UnboundedReceiver<()>,
+    /// The sole receiver for tray, uninstall, and replacement requests. It
+    /// moves through the typestates with process-resource ownership.
+    shutdown_requests: ShutdownRequests,
     /// The hook kill-switch, startup-only on purpose: flipping it requires
     /// an agent restart, which the config docs state.
     capture_mouse_events: bool,
@@ -99,15 +99,12 @@ struct Booted {
     /// Releases the main thread's tray loop once the agent arms.
     #[cfg(target_os = "macos")]
     armed_tx: std::sync::mpsc::Sender<()>,
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    resume_pending: Arc<AtomicBool>,
 }
 
 impl Booted {
     async fn bootstrap(
         config: Config,
-        #[cfg(any(target_os = "macos", target_os = "windows"))] resume_pending: Arc<AtomicBool>,
-        uninstalled: UnboundedReceiver<()>,
+        shutdown_requests: ShutdownRequests,
         #[cfg(target_os = "macos")] armed_tx: std::sync::mpsc::Sender<()>,
     ) -> Option<Self> {
         // Read before `config` moves into the orchestrator.
@@ -118,14 +115,12 @@ impl Booted {
         Some(Self {
             core,
             signals: ShutdownSignals::install(),
-            uninstalled,
+            shutdown_requests,
             capture_mouse_events,
             #[cfg(target_os = "macos")]
             launch_at_login,
             #[cfg(target_os = "macos")]
             armed_tx,
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
-            resume_pending,
         })
     }
 
@@ -136,15 +131,25 @@ impl Booted {
     /// respawn. Demand is a [`ClientKind::Gui`] declaration, not a mere
     /// connection: other clients are served without waking anything, and the
     /// takeover probe never declares at all.
+    ///
+    /// The same trigger also fires after a crash, and that start was wanted:
+    /// an agent armed earlier in this login session that did not leave
+    /// through a final exit re-arms at once (see [`armed_session`]).
     #[cfg(target_os = "macos")]
     async fn gate(mut self) -> Option<Wanted> {
         if self.launch_at_login {
             return Some(Wanted(self));
         }
+        if armed_session::rearm() {
+            info!(
+                "launch_at_login is off, but this login armed an agent that did not quit — re-arming"
+            );
+            return Some(Wanted(self));
+        }
         info!("launch_at_login is off — dormant until a client demands arming");
         // The deadline is absolute: a served-but-not-arming client does not
         // buy the dormant agent more time.
-        let deadline = tokio::time::sleep(DORMANT_DEADLINE);
+        let deadline = tokio::time::sleep(DORMANT_TIMEOUT);
         tokio::pin!(deadline);
         loop {
             tokio::select! {
@@ -163,9 +168,25 @@ impl Booted {
                     info!("shutdown signal while dormant — exiting");
                     return None;
                 }
-                Some(()) = self.uninstalled.recv() => {
-                    info!("uninstalled while dormant — exiting");
-                    return None;
+                Some(request) = self.shutdown_requests.recv() => match request {
+                    ShutdownRequest::TrayQuit { core_guard } => {
+                        let _core_guard = core_guard;
+                        info!("tray quit while dormant — exiting");
+                        return None;
+                    }
+                    ShutdownRequest::Uninstalled => {
+                        info!("uninstalled while dormant — exiting");
+                        return None;
+                    }
+                    ShutdownRequest::Restart { path, retry } => {
+                        info!(path = %path.display(), "executable changed while dormant — scheduling relaunch");
+                        if let Err(error) = crate::binary_watch::schedule(&path) {
+                            warn!(%error, "could not schedule updated agent relaunch — keeping the current image and retrying");
+                            let _ = retry.send(());
+                        } else {
+                            return None;
+                        }
+                    }
                 }
             }
         }
@@ -191,16 +212,16 @@ impl Wanted {
         let Booted {
             core,
             signals,
-            uninstalled,
+            shutdown_requests,
             capture_mouse_events,
             #[cfg(target_os = "macos")]
             armed_tx,
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
-            resume_pending,
             ..
         } = self.0;
         #[cfg(target_os = "macos")]
         let _ = armed_tx.send(());
+        #[cfg(target_os = "macos")]
+        armed_session::record();
         overlay::spawn();
         prompt_missing_accessibility(capture_mouse_events);
 
@@ -217,77 +238,152 @@ impl Wanted {
         // the server's `declare_client` handler.
         drop(demand);
         Armed {
-            orchestrator,
-            shared,
-            observable,
-            event_monitor,
-            inputs,
-            ring_haptics,
-            signals,
-            uninstalled,
-            hook: None,
-            capture_mouse_events,
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
-            resume_pending,
+            running: Running {
+                orchestrator,
+                shared,
+                observable,
+                event_monitor,
+                inputs,
+                ring_haptics,
+                signals,
+                shutdown_requests,
+                hidpp_watchers: WatcherFleet::Inactive,
+                hook: None,
+                capture_mouse_events,
+                held_pointer: None,
+            },
         }
     }
 }
 
-/// The armed agent — everything the select loop folds events into.
+/// An armed agent ready to start its watcher fleets.
 struct Armed {
+    running: Running,
+}
+
+/// The live agent state into which the select loop folds events.
+/// Separate from [`Armed`] so watcher startup and the steady-state event loop
+/// remain distinct lifecycle phases.
+struct Running {
     orchestrator: Arc<Mutex<Orchestrator>>,
-    shared: SharedRuntime,
+    shared: SharedHandles,
     observable: Arc<ObservableState>,
     event_monitor: Arc<EventMonitor>,
     inputs: InputServices,
     ring_haptics: server::RingHapticPlayer,
     signals: ShutdownSignals,
-    uninstalled: UnboundedReceiver<()>,
+    shutdown_requests: ShutdownRequests,
+    hidpp_watchers: WatcherFleet,
     /// The OS hook, installed once Accessibility is granted and dropped on
     /// revoke (dropping the handle stops its thread).
     hook: Option<Hook>,
     capture_mouse_events: bool,
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    resume_pending: Arc<AtomicBool>,
+    /// The pointer context held back while the ring was showing, applied when
+    /// it closes. The watcher publishes only transitions, so a pointer that
+    /// left the ring for another unidentifiable surface sends nothing more.
+    held_pointer: Option<openlogi_hook::PointerContext>,
 }
 
 impl Armed {
     /// Start the watcher fleets, then drain every control-plane source until
     /// told to leave (low-frequency by contract — [`startup::WatcherEvent`]).
-    async fn run(mut self) {
+    async fn run(self) {
+        let Self { mut running } = self;
         #[cfg(target_os = "macos")]
-        request_input_monitoring().await;
+        if request_input_monitoring_and_schedule_relaunch().await {
+            running
+                .hand_over("Input Monitoring permission relaunch")
+                .await;
+        }
 
         // HID++ watchers need no Accessibility — start them up front.
-        startup::spawn_hidpp_watchers(&self.shared, &self.inputs);
-        let mut watchers = startup::spawn_state_watchers(&self.shared);
+        running.restart_hidpp_watchers();
+        let (mut watchers, inventory_refresh) = startup::spawn_state_watchers(&running.shared);
+        let mut ring = running.inputs.ring.subscribe();
 
         info!("openlogi-agent started");
         loop {
             tokio::select! {
-                Some(event) = watchers.next() => self.apply_watcher(event).await,
-                Some(device_key) = self.inputs.triggers.recv() => {
-                    self.begin_action_ring(device_key.as_deref()).await;
+                biased;
+
+                // Logout, a developer, or the stale-agent takeover — each
+                // means "stop". The takeover's successor would rather find
+                // the armed session, but it is GUI-started and armed by that
+                // GUI's declaration, so nothing is lost by treating it alike.
+                () = running.signals.recv() => {
+                    running.shut_down("shutdown signal", None).await;
                 }
-                () = self.signals.recv() => self.shut_down("shutdown signal"),
-                // Uninstalled while running — leave through the same door so
-                // the event tap goes with us (#807).
-                Some(()) = self.uninstalled.recv() => self.shut_down("the app was uninstalled"),
+                Some(request) = running.shutdown_requests.recv() => {
+                    running.handle_shutdown_request(request).await;
+                }
+                (request, stopped) = running.hidpp_watchers.replacement_ready() => {
+                    running.complete_replacement(request, stopped);
+                }
+                Some(event) = watchers.next() => {
+                    running.apply_watcher(event, &inventory_refresh).await;
+                }
+                Some(device_key) = running.inputs.triggers.recv() => {
+                    running.begin_action_ring(device_key.as_deref()).await;
+                }
+                Ok(()) = ring.changed() => {
+                    running.apply_held_pointer().await;
+                }
                 else => break,
             }
         }
     }
+}
+
+impl Running {
+    /// Retire a terminal Windows hook worker and publish that input capture is
+    /// no longer installed. The native callbacks have already been cleared,
+    /// so the interval before this check remains pass-through rather than
+    /// suppressing input without a consumer.
+    #[cfg(target_os = "windows")]
+    async fn apply_hook_health(&mut self) {
+        let Some(hook) = self.hook.as_ref() else {
+            return;
+        };
+        if hook.is_running() {
+            return;
+        }
+        warn!("Windows hook worker exited — marking input capture unavailable");
+        self.stop_hook();
+        self.orchestrator
+            .lock()
+            .await
+            .set_os_mouse_hook_available(false);
+        self.observable
+            .set_accessibility_and_hook(Hook::has_accessibility(), false);
+    }
 
     /// Fold one watcher event into the agent's state.
-    async fn apply_watcher(&mut self, event: startup::WatcherEvent) {
+    async fn apply_watcher(
+        &mut self,
+        event: startup::WatcherEvent,
+        inventory_refresh: &InventoryRefresh,
+    ) {
         use startup::{Watcher, WatcherEvent};
+
+        // Inventory and foreground-app samples make this a health
+        // reconciliation without another timer in the control-plane loop.
+        #[cfg(target_os = "windows")]
+        self.apply_hook_health().await;
+
         match event {
-            WatcherEvent::Inventory(event) => self.apply_inventory(event).await,
+            WatcherEvent::Inventory(event) => {
+                self.apply_inventory(event, inventory_refresh).await;
+            }
             WatcherEvent::Camera(active) => {
                 self.orchestrator.lock().await.set_camera_active(active);
             }
             WatcherEvent::App(app) => self.apply_foreground(app).await,
-            WatcherEvent::Accessibility(granted) => self.apply_accessibility(granted),
+            WatcherEvent::Pointer(context) if self.pointer_is_over_the_ring(context.target) => {
+                debug!("pointer is over the Actions Ring — keeping the profile that opened it");
+                self.held_pointer = Some(context);
+            }
+            WatcherEvent::Pointer(context) => self.apply_pointer_context(context).await,
+            WatcherEvent::Accessibility(granted) => self.apply_accessibility(granted).await,
             WatcherEvent::InputMonitoring(granted) => {
                 self.observable.set_input_monitoring_granted(granted);
             }
@@ -301,12 +397,20 @@ impl Armed {
                 #[cfg(target_os = "macos")]
                 warn!("camera watcher channel closed — disabling camera automation updates");
             }
+            WatcherEvent::Lost(Watcher::Pointer) if openlogi_hook::pointer_context_supported() => {
+                warn!("pointer watcher channel closed — using an unidentified pointer context");
+                self.apply_pointer_context(openlogi_hook::PointerContext {
+                    app: None,
+                    target: openlogi_hook::PointerTarget::Unavailable,
+                })
+                .await;
+            }
             WatcherEvent::Lost(source) => debug!(?source, "state watcher channel closed"),
         }
     }
 
     /// Fold one inventory-watcher event into the orchestrator.
-    async fn apply_inventory(&self, event: InventoryEvent) {
+    async fn apply_inventory(&self, event: InventoryEvent, refresh: &InventoryRefresh) {
         match event {
             InventoryEvent::Snapshot {
                 inventories,
@@ -314,15 +418,12 @@ impl Armed {
                 hid_open_failures,
             } => {
                 let mut orchestrator = self.orchestrator.lock().await;
-                // Native suspend/resume notifications cover the sleeps the
-                // polling gap misses; consume the coalesced signal at the
-                // point that can replay it.
-                #[cfg(any(target_os = "macos", target_os = "windows"))]
-                if self.resume_pending.swap(false, Ordering::Relaxed) {
-                    info!("native resume notification — replaying volatile settings");
-                    orchestrator.reapply_volatile_on_next_refresh();
-                }
                 orchestrator.refresh_inventory(&inventories, &standalone, hid_open_failures);
+                let confirm_settings = orchestrator.needs_reapply_confirmation();
+                drop(orchestrator);
+                if confirm_settings {
+                    refresh.request_settings_confirmation();
+                }
             }
             InventoryEvent::Unavailable => {
                 self.orchestrator.lock().await.mark_inventory_unavailable();
@@ -343,6 +444,41 @@ impl Armed {
     async fn apply_foreground(&self, app: ForegroundUpdate) {
         if self.orchestrator.lock().await.set_current_app(app) {
             self.inputs.dispatcher.cancel_all_buttons();
+        }
+    }
+
+    /// While the ring is showing, the pointer is over the ring's own floating
+    /// window, which classifies as `PointerTarget::Unavailable`. Publishing
+    /// that context would rebuild the bindings without the per-app profile, so
+    /// a ring bound only in that app's profile would hear its second trigger
+    /// press as the button's global action and never close. The ring belongs
+    /// to the app it was opened over; its window is not a profile change.
+    fn pointer_is_over_the_ring(&self, target: openlogi_hook::PointerTarget) -> bool {
+        target == openlogi_hook::PointerTarget::Unavailable && self.inputs.ring.is_showing()
+    }
+
+    /// Once the ring has closed, apply the pointer context held back while it
+    /// showed. An `Unavailable` surface is not always the ring: the pointer may
+    /// have moved onto another floating window and stayed there, and without
+    /// this the opening app's bindings would outlive the ring.
+    async fn apply_held_pointer(&mut self) {
+        if self.held_pointer.is_none() || self.inputs.ring.is_showing() {
+            return;
+        }
+        if let Some(context) = self.held_pointer.take() {
+            debug!("Actions Ring closed — applying the pointer context held while it showed");
+            self.apply_pointer_context(context).await;
+        }
+    }
+
+    async fn apply_pointer_context(&mut self, context: openlogi_hook::PointerContext) {
+        // Anything newer supersedes what the ring held back.
+        self.held_pointer = None;
+        let current = context.target;
+        if self.orchestrator.lock().await.set_pointer_context(context) {
+            self.inputs
+                .dispatcher
+                .cancel_pointer_buttons_except(current);
         }
     }
 
@@ -368,13 +504,17 @@ impl Armed {
     /// permission and the hook state it produced as one generation — no
     /// observation can claim the hook is installed without the permission it
     /// requires.
-    fn apply_accessibility(&mut self, granted: bool) {
+    async fn apply_accessibility(&mut self, granted: bool) {
         if !granted {
             self.stop_hook();
         }
         if granted && self.hook.is_none() {
             self.hook = self.start_hook();
         }
+        self.orchestrator
+            .lock()
+            .await
+            .set_os_mouse_hook_available(self.hook.is_some());
         self.observable
             .set_accessibility_and_hook(granted, self.hook.is_some());
     }
@@ -405,8 +545,102 @@ impl Armed {
         self.inputs.scroll_input.cancel_hooks();
     }
 
-    fn shut_down(&mut self, reason: &str) -> ! {
-        shutdown::release_hook_and_exit(self.hook.take(), &mut self.inputs, reason)
+    async fn handle_shutdown_request(&mut self, request: ShutdownRequest) {
+        match request {
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            ShutdownRequest::TrayQuit { core_guard } => {
+                self.shut_down("tray quit", Some(core_guard)).await;
+            }
+            // Uninstalled while running — leave through the same door so the
+            // event tap and firmware diversions go with us (#807, #1097).
+            ShutdownRequest::Uninstalled => {
+                self.shut_down("the app was uninstalled", None).await;
+            }
+            ShutdownRequest::Restart { path, retry } => {
+                self.hidpp_watchers
+                    .begin_replacement(Replacement { path, retry });
+            }
+        }
+    }
+
+    /// Called only after the old fleet has acknowledged teardown. Failed
+    /// teardown resumes the current image instead of replacing it.
+    fn complete_replacement(&mut self, request: Replacement, stopped: bool) {
+        if !stopped {
+            warn!("HID++ teardown was unclean — refusing replacement and retrying");
+            self.restart_hidpp_watchers();
+            let _ = request.retry.send(());
+            return;
+        }
+        self.restart(request);
+    }
+
+    fn restart_hidpp_watchers(&mut self) {
+        self.hidpp_watchers =
+            WatcherFleet::Running(startup::spawn_hidpp_watchers(&self.shared, &self.inputs));
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn restart(&mut self, Replacement { path, retry }: Replacement) {
+        let error = crate::binary_watch::replace_process(&path);
+        warn!(%error, path = %path.display(), "exec of the updated agent failed — restoring the current image and retrying");
+        self.restart_hidpp_watchers();
+        let _ = retry.send(());
+    }
+
+    #[cfg(target_os = "macos")]
+    fn restart(&mut self, Replacement { path, retry }: Replacement) {
+        if let Err(error) = crate::binary_watch::schedule(&path) {
+            warn!(%error, "could not schedule updated agent relaunch — keeping the current image and retrying");
+            self.restart_hidpp_watchers();
+            let _ = retry.send(());
+            return;
+        }
+        self.exit_after_replacement_teardown("binary update");
+    }
+
+    #[cfg(not(unix))]
+    fn restart(&mut self, _request: Replacement) {
+        self.exit_after_replacement_teardown("binary update");
+    }
+
+    /// Leave for good: nobody wants the agent until asked again, so the next
+    /// start in this login is a GUI demand, never a respawn to re-arm.
+    async fn shut_down(
+        &mut self,
+        reason: &str,
+        tray_guard: Option<tokio::sync::oneshot::Sender<()>>,
+    ) -> ! {
+        #[cfg(target_os = "macos")]
+        armed_session::clear();
+        self.leave(reason, tray_guard).await
+    }
+
+    /// Leave for a successor that is already scheduled and must start armed:
+    /// the armed-session record stays for it to find.
+    #[cfg(target_os = "macos")]
+    async fn hand_over(&mut self, reason: &str) -> ! {
+        self.leave(reason, None).await
+    }
+
+    /// Drain the HID++ fleet, release the hook, and end the process.
+    async fn leave(
+        &mut self,
+        reason: &str,
+        tray_guard: Option<tokio::sync::oneshot::Sender<()>>,
+    ) -> ! {
+        std::mem::replace(&mut self.hidpp_watchers, WatcherFleet::Inactive)
+            .stop_for_exit()
+            .await;
+        shutdown::release_hook_and_exit(self.hook.take(), &mut self.inputs, reason, tray_guard)
+    }
+
+    /// End after [`Self::complete_replacement`] resolved firmware
+    /// ownership, so a successor starts from native device state. A handover
+    /// like [`Self::hand_over`]: the successor finds the armed session.
+    #[cfg(any(target_os = "macos", not(unix)))]
+    fn exit_after_replacement_teardown(&mut self, reason: &str) -> ! {
+        shutdown::release_hook_and_exit(self.hook.take(), &mut self.inputs, reason, None)
     }
 }
 
@@ -425,7 +659,7 @@ fn prompt_missing_accessibility(capture_mouse_events: bool) {
 /// binary the user authorizes. A newly granted permission requires a process
 /// relaunch before macOS lets the agent open HID devices.
 #[cfg(target_os = "macos")]
-async fn request_input_monitoring() {
+async fn request_input_monitoring_and_schedule_relaunch() -> bool {
     // Without this, macOS never registers a decision at all:
     // `IOHIDDeviceOpen` is silently denied, the permission never appears in
     // System Settings for the user to grant, and no HID++ device is ever
@@ -438,11 +672,12 @@ async fn request_input_monitoring() {
         })
         .await;
         match access_after_prompt {
-            Ok(true) => binary_watch::relaunch_after_input_monitoring_grant(),
+            Ok(true) => return crate::binary_watch::schedule_after_input_monitoring_grant(),
             Ok(false) => {}
             Err(e) => {
                 warn!(error = %e, "Input Monitoring permission request task failed");
             }
         }
     }
+    false
 }

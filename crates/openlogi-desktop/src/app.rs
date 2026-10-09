@@ -9,7 +9,7 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     v_flex,
 };
-use openlogi_core::device::{Capabilities, DeviceInventory, DeviceKind};
+use openlogi_core::device::{Capabilities, DeviceKind};
 use openlogi_ipc::InventoryHealth;
 use tracing::info;
 
@@ -18,14 +18,14 @@ use crate::features::action_ring::ActionRingPanel;
 use crate::features::camera::controls::CameraControlsPanel;
 use crate::features::camera::preview::CameraPreview;
 use crate::features::keyboard::function_row::FunctionRowView;
-use crate::features::lighting::device::LightingPanel;
+use crate::features::lighting::keyboard_rgb::LightingPanel;
 use crate::features::lighting::standalone::LightPanel;
 use crate::features::mouse::view::MouseModelView;
 use crate::features::pointer::dpi::DpiPanel;
 use crate::features::pointer::smartshift::SmartShiftPanel;
-use crate::features::profile_scope::{AppCatalogPicker, ProfileIconCache};
-use crate::services::assets::AssetResolver;
-use crate::state::{AgentLink, AppState, DeviceRecord, StateEvent};
+use crate::features::profiles::{AppCatalogPicker, ProfileIconCache};
+use crate::services::assets::user_cache_root;
+use crate::state::{AgentLink, AppState, DeviceRecord, StateEvent, StateEvents};
 use crate::ui::theme::{self, ContentWidth, Typography as _};
 
 pub(crate) mod deeplink;
@@ -44,7 +44,7 @@ pub(crate) use home::{glow_canvas, keyboard_glow};
 /// GPUI has no router, so navigation is a tiny view-local enum that selects
 /// which subtree [`AppView::render`] builds. It is deliberately *not* in
 /// [`AppState`]: the route is pure UI presentation, whereas
-/// [`AppState::current_device`] is functional (it drives the hook bindings,
+/// [`AppState::current_record`] is functional (it drives the hook bindings,
 /// DPI, and persisted selection). The detail route is keyed by the record's
 /// user-facing identity rather than an index so a hot-plug that reorders
 /// or drops the device list can't silently swap the user onto another device —
@@ -107,7 +107,15 @@ impl DetailTab {
             .unwrap_or_else(|| Capabilities::presumed_from_kind(record.kind));
         // Buttons panel is a mouse-model silhouette — only for pointer devices.
         // Keyboards get the Keys panel instead, even when they expose ReprogControls.
-        let can_show_mouse_model = matches!(record.kind, DeviceKind::Mouse | DeviceKind::Trackball);
+        // `caps.pointer` (a measured HID++ DPI feature) settles it on its own
+        // when kind resolution itself is wrong (#1699: a Bluetooth-direct MX
+        // Master 3S measured buttons+pointer capabilities but still carried
+        // kind=Keyboard, so this function picked Keys over Buttons despite
+        // its own stated "gated on Capabilities, not DeviceKind" design) — a
+        // real keyboard never reports a pointer sensor, so trusting a
+        // positive measured reading here can't misfire the other way.
+        let can_show_mouse_model =
+            caps.pointer || matches!(record.kind, DeviceKind::Mouse | DeviceKind::Trackball);
         let mut tabs = Vec::new();
         // A webcam is a UVC device with no HID++ capabilities; its detail screen
         // leads with the live preview, then the generic info tab.
@@ -120,11 +128,21 @@ impl DetailTab {
         if caps.haptic_panel || (caps.buttons && can_show_mouse_model) {
             tabs.push(Self::ActionsRing);
         }
-        // Function-row remapper when the keyboard reports remappable buttons.
-        if matches!(record.kind, DeviceKind::Keyboard) && caps.buttons {
+        // The Keys tab needs something to bind: HID++ controls (measured, or
+        // last-good for a sleeping keyboard) or the OS-hook F-row a depot
+        // without control markers falls back to. A keyboard with neither
+        // capability data nor a depot — a receiver slot never probed — gets
+        // nothing to configure yet, so no tab. A measured pointer capability
+        // rules out Keys even for a kind=Keyboard record — see
+        // `can_show_mouse_model` above — so a misclassified mouse gets only
+        // the Buttons panel, not both.
+        if matches!(record.kind, DeviceKind::Keyboard)
+            && !caps.pointer
+            && (caps.buttons || record.asset.is_some())
+        {
             tabs.push(Self::Keys);
         }
-        if caps.pointer {
+        if caps.pointer || caps.scroll_inversion || caps.hires_wheel {
             tabs.push(Self::Pointer);
         }
         if caps.lighting {
@@ -147,13 +165,13 @@ impl DetailTab {
 
     fn label(self) -> gpui::SharedString {
         match self {
-            Self::Buttons => tr!("Buttons"),
-            Self::ActionsRing => tr!("Actions Ring"),
-            Self::Keys => tr!("Keys"),
-            Self::Pointer => tr!("Pointer"),
-            Self::Lighting | Self::Light => tr!("Lighting"),
-            Self::Camera => tr!("Camera"),
-            Self::Device => tr!("Device"),
+            Self::Buttons => tr!("device.buttons"),
+            Self::ActionsRing => tr!("action_ring.actions_ring"),
+            Self::Keys => tr!("device.keys"),
+            Self::Pointer => tr!("device.pointer"),
+            Self::Lighting | Self::Light => tr!("device.lighting"),
+            Self::Camera => tr!("camera.camera"),
+            Self::Device => tr!("device.device"),
         }
     }
 }
@@ -180,12 +198,28 @@ pub struct AppView {
     /// reads; feature entities subscribe to their own events directly.
     #[expect(dead_code, reason = "held to keep the AppState subscription alive")]
     state_obs: Subscription,
+    /// Explains a forget the receiver refused, which needs the window.
+    #[expect(dead_code, reason = "held to keep the AppState subscription alive")]
+    removal_obs: Subscription,
     /// Whether the last frame was the fail-closed configuration-error screen.
     /// A successful save must redraw that screen even though the error is gone.
     config_issue_visible: bool,
     accessibility_dismissed: bool,
     /// Which section of the device-detail screen is showing.
     active_tab: DetailTab,
+}
+
+/// Open the dialog that says why a device the user asked to forget stayed.
+fn explain_refused_removals(
+    state: &Entity<AppState>,
+    window: &mut Window,
+    cx: &mut Context<AppView>,
+) -> Subscription {
+    cx.subscribe_in(state, window, |_, _, event: &StateEvent, window, cx| {
+        if let StateEvent::DeviceRemovalFailed { name, failure } = event {
+            home::open_removal_failed(window, cx, name, failure);
+        }
+    })
 }
 
 impl Focusable for AppView {
@@ -196,12 +230,7 @@ impl Focusable for AppView {
 
 impl AppView {
     /// Construct the root view and its child entities.
-    pub fn new(
-        _inventories: &[DeviceInventory],
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let cache = AssetResolver::new();
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
         // `AppState` is installed as an entity by `main` (with the IPC command
@@ -218,7 +247,7 @@ impl AppView {
                 );
             } else {
                 info!(
-                    root = ?cache.cache_root(),
+                    root = ?user_cache_root(),
                     "no devices with HID++ model info — using synthetic silhouette"
                 );
             }
@@ -237,34 +266,40 @@ impl AppView {
         let app_catalog = cx.new(|cx| AppCatalogPicker::new(profile_icons.clone(), window, cx));
         let app_catalog_obs = cx.observe(&app_catalog, |_, _, cx| cx.notify());
         let state_obs = cx.subscribe(&state, |view, _, event: &StateEvent, cx| {
-            let active_key = AppState::try_read(cx)
-                .and_then(AppState::current_record)
-                .map(DeviceRecord::device_key);
+            let is_current =
+                |key| AppState::try_read(cx).is_some_and(|state| state.is_current_device(key));
             let on_home = matches!(view.route, Route::Home);
             let relevant = match event {
                 StateEvent::AgentChanged
                 | StateEvent::InventoryChanged
                 | StateEvent::DeviceSelected(_) => true,
                 StateEvent::ForegroundChanged => !on_home,
-                StateEvent::BindingsChanged(key) | StateEvent::DpiChanged(key) => {
+                StateEvent::BindingsChanged(key) => {
                     !on_home
-                        && view.active_tab == DetailTab::Device
-                        && active_key.as_ref() == Some(key)
+                        && matches!(
+                            view.active_tab,
+                            DetailTab::Buttons | DetailTab::ActionsRing | DetailTab::Device
+                        )
+                        && is_current(key)
+                }
+                StateEvent::DpiChanged(key) | StateEvent::FnLockChanged(key) => {
+                    !on_home && view.active_tab == DetailTab::Device && is_current(key)
                 }
                 StateEvent::LightingChanged(key) => {
-                    on_home
-                        || (view.active_tab == DetailTab::Light && active_key.as_ref() == Some(key))
+                    on_home || (view.active_tab == DetailTab::Light && is_current(key))
                 }
                 StateEvent::DeviceConfigChanged(key) => {
                     on_home
                         || (matches!(view.active_tab, DetailTab::Pointer | DetailTab::Device)
-                            && active_key.as_ref() == Some(key))
+                            && is_current(key))
                 }
                 StateEvent::CameraChanged => on_home || view.active_tab == DetailTab::Light,
                 // Child entities own these surfaces and subscribe directly. A
                 // language switch already refreshes every window, and the root
-                // caches no localized text.
+                // caches no localized text. A refused removal is a dialog,
+                // opened through `removal_obs`.
                 StateEvent::SmartShiftChanged(_)
+                | StateEvent::DeviceRemovalFailed { .. }
                 | StateEvent::CameraPermissionChanged
                 | StateEvent::DiagnosticsChanged
                 | StateEvent::LanguageChanged => false,
@@ -281,6 +316,7 @@ impl AppView {
                 cx.notify();
             }
         });
+        let removal_obs = explain_refused_removals(&state, window, cx);
         Self {
             focus_handle,
             route: Route::Home,
@@ -298,6 +334,7 @@ impl AppView {
             _app_catalog_obs: app_catalog_obs,
             appearance_obs: None,
             state_obs,
+            removal_obs,
             config_issue_visible: false,
             accessibility_dismissed: false,
             active_tab: DetailTab::Buttons,
@@ -311,18 +348,15 @@ impl AppView {
 
     /// Drill into a device's settings from the gallery. Makes it the
     /// functionally active device too (hook bindings, DPI, and the persisted
-    /// selection follow [`AppState::set_current_device`]) and switches the
+    /// selection follow [`AppState::select_device`]) and switches the
     /// route to its detail screen.
     fn open_device(&mut self, record_key: String, cx: &mut Context<Self>) {
-        AppState::global(cx).update(cx, |state, cx| {
-            if let Some(idx) = state
+        AppState::apply(cx, |state| {
+            state
                 .devices()
                 .iter()
                 .position(|record| record.record_key() == record_key)
-                && let Some(key) = state.set_current_device(idx)
-            {
-                cx.emit(StateEvent::DeviceSelected(key));
-            }
+                .map_or_else(StateEvents::none, |idx| state.select_device(idx))
         });
         AppState::load_current_device_reads(cx);
         self.route = Route::Device { record_key };
@@ -382,51 +416,44 @@ impl AppView {
             .child(
                 div()
                     .text_title()
-                    .child(tr!("Accessibility permission required")),
+                    .child(tr!("permissions.accessibility_permission_required")),
             )
             .child(
                 div()
                     .max_w(ContentWidth::Narrow.rems())
                     .text_body()
                     .text_color(pal.text_muted)
-                    .child(tr!(
-                        "OpenLogi captures mouse buttons (Back / Forward / gesture button) \
-                         through the system Accessibility permission and runs the actions you \
-                         bind. Features that talk to the device directly — DPI, SmartShift — \
-                         are unaffected."
-                    )),
+                    .child(tr!("permissions.accessibility_permission_description")),
             )
             .child(
                 div()
                     .max_w(ContentWidth::Narrow.rems())
                     .text_body()
                     .text_color(pal.text_muted)
-                    .child(tr!(
-                        "Enable “OpenLogi Agent” in the Accessibility list — the \
-                         background agent owns the mouse hook, not the OpenLogi app. \
-                         If it already shows as enabled, remove the stale entry with \
-                         the − button and add it back."
-                    )),
+                    .child(tr!("permissions.accessibility_agent_instructions")),
             )
             .child(
                 Button::new("open-accessibility")
                     .primary()
                     .icon(IconName::Settings)
-                    .label(tr!("Open System Settings to grant access"))
+                    .label(tr!("permissions.open_system_settings_to_grant_access"))
                     .on_click(|_, _, cx| request_accessibility(cx)),
             )
-            .child(div().text_caption().text_color(pal.text_muted).child(tr!(
-                "Takes effect automatically once granted — no restart needed."
-            )))
+            .child(
+                div()
+                    .text_caption()
+                    .text_color(pal.text_muted)
+                    .child(tr!("permissions.permission_applies_without_restart")),
+            )
             .child(
                 BaseButton::new("skip-accessibility")
-                    .accessibility_label(tr!("Not now (use DPI and other features only)"))
+                    .accessibility_label(tr!("permissions.not_now_use_dpi_and_other_features_only"))
                     .text_caption()
                     .text_color(pal.text_muted)
                     .cursor_pointer()
                     .hover(|s| s.text_color(pal.text_primary))
                     .focus_visible(|s| s.text_color(pal.text_primary))
-                    .child(tr!("Not now (use DPI and other features only)"))
+                    .child(tr!("permissions.not_now_use_dpi_and_other_features_only"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.accessibility_dismissed = true;
                         cx.notify();
@@ -468,11 +495,24 @@ fn app_title_bar(cx: &App) -> impl IntoElement {
 }
 
 impl Render for AppView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let content = self.render_content(window, cx);
+        // Root owns dialog state but the application must mount its layer.
+        // Keep it present across connecting, permission, and error screens too.
+        div()
+            .relative()
+            .size_full()
+            .child(content)
+            .children(gpui_component::Root::render_dialog_layer(window, cx))
+    }
+}
+
+impl AppView {
     #[expect(
         clippy::too_many_lines,
         reason = "root view assembles every screen branch inline"
     )]
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         theme::apply_ui_scale(window, cx);
         let pal = theme::palette(cx);
 
@@ -489,11 +529,12 @@ impl Render for AppView {
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .on_action(|_: &Minimize, window, _| window.minimize_window())
             .on_action(|_: &Zoom, window, _| window.zoom_window())
-            // Linux only: a client-side titlebar (window controls + drag region)
-            // as the first row of every frame — including the pre-connection and
-            // error frames — so the chrome is present from the first frame on.
-            // macOS / Windows keep their native titlebar.
-            .when(cfg!(target_os = "linux"), |this| {
+            // Drawn only where the compositor left the chrome to us — as the
+            // first row of every frame, including the pre-connection and error
+            // frames, so it is present from the first frame on. A compositor
+            // that decorates the window itself (KWin, and macOS / Windows)
+            // reports `Server` and this stays out of the way.
+            .when(crate::windows::needs_client_titlebar(window), |this| {
                 this.child(app_title_bar(cx))
             });
         let root = Self::with_back_navigation(root, cx);
@@ -641,288 +682,4 @@ impl Render for AppView {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::home::{connection_icon_path, ordered_device_indices};
-    use super::{Capabilities, DetailTab, DeviceKind, DeviceRecord};
-    use crate::ui::battery::{battery_charging_no_reading, battery_needs_attention};
-    use openlogi_core::device::{
-        BatteryInfo, BatteryLevel, BatteryStatus, DeviceTransports, LightCapabilities,
-        LightValueRange, LightValueUnit,
-    };
-    use openlogi_core::hid::DeviceRoute;
-
-    /// "Charging" replaces the bogus percentage only when charging *and* the
-    /// reading is still 0% (cold start, no cached pre-charge value). A non-zero
-    /// charge or a real 0% while discharging keeps the number.
-    #[test]
-    fn charging_without_reading_suppresses_percentage() {
-        let b = |percentage, status| BatteryInfo {
-            percentage,
-            level: BatteryLevel::Good,
-            status,
-        };
-        assert!(battery_charging_no_reading(&b(0, BatteryStatus::Charging)));
-        assert!(battery_charging_no_reading(&b(
-            0,
-            BatteryStatus::ChargingSlow
-        )));
-        assert!(!battery_charging_no_reading(&b(
-            40,
-            BatteryStatus::Charging
-        )));
-        assert!(!battery_charging_no_reading(&b(
-            0,
-            BatteryStatus::Discharging
-        )));
-    }
-
-    #[test]
-    fn low_discharging_battery_needs_attention() {
-        let battery = |percentage, status| BatteryInfo {
-            percentage,
-            level: BatteryLevel::Low,
-            status,
-        };
-
-        assert!(battery_needs_attention(&battery(
-            20,
-            BatteryStatus::Discharging
-        )));
-        assert!(!battery_needs_attention(&battery(
-            21,
-            BatteryStatus::Discharging
-        )));
-        assert!(!battery_needs_attention(&battery(
-            20,
-            BatteryStatus::Charging
-        )));
-    }
-
-    #[test]
-    fn connection_icon_matches_route() {
-        let bolt = DeviceRoute::Bolt {
-            receiver_uid: "r".into(),
-            slot: 1,
-        };
-        let uni = DeviceRoute::Unifying {
-            receiver_uid: "r".into(),
-            slot: 1,
-        };
-        let direct = DeviceRoute::Direct {
-            vendor_id: 0x046d,
-            product_id: 0xb019,
-        };
-        // Firmware transport tables (HID++ 0x0003): a wired-only device (G513),
-        // a Bluetooth-capable one (MX Master on a cable or BT), and BLE-direct.
-        let wired = DeviceTransports {
-            usb: true,
-            ..DeviceTransports::default()
-        };
-        let bt = DeviceTransports {
-            usb: true,
-            bluetooth: true,
-            ..DeviceTransports::default()
-        };
-        let btle = DeviceTransports {
-            btle: true,
-            ..DeviceTransports::default()
-        };
-        assert_eq!(
-            connection_icon_path(Some(&bolt), None),
-            "action-icons/bolt.svg"
-        );
-        assert_eq!(
-            connection_icon_path(Some(&uni), None),
-            "action-icons/unifying.svg"
-        );
-        // Direct + radio-less firmware = the cable is the only possible link.
-        assert_eq!(
-            connection_icon_path(Some(&direct), Some(&wired)),
-            "action-icons/usb.svg"
-        );
-        // eQuad is receiver-only, so an equad-only table on a *direct* route
-        // still means a cable — not Bluetooth.
-        let equad_only = DeviceTransports {
-            equad: true,
-            ..DeviceTransports::default()
-        };
-        assert_eq!(
-            connection_icon_path(Some(&direct), Some(&equad_only)),
-            "action-icons/usb.svg"
-        );
-        // An all-false table is "unknown", not "wired".
-        assert_eq!(
-            connection_icon_path(Some(&direct), Some(&DeviceTransports::default())),
-            "action-icons/bluetooth.svg"
-        );
-        // Direct + any radio keeps the Bluetooth mark.
-        assert_eq!(
-            connection_icon_path(Some(&direct), Some(&bt)),
-            "action-icons/bluetooth.svg"
-        );
-        assert_eq!(
-            connection_icon_path(Some(&direct), Some(&btle)),
-            "action-icons/bluetooth.svg"
-        );
-        // Unknown transports (no 0x0003 snapshot) keep the old default.
-        assert_eq!(
-            connection_icon_path(Some(&direct), None),
-            "action-icons/bluetooth.svg"
-        );
-        // No route (e.g. a synthetic/placeholder card) falls back to Bluetooth.
-        assert_eq!(
-            connection_icon_path(None, None),
-            "action-icons/bluetooth.svg"
-        );
-    }
-
-    fn record(kind: DeviceKind, capabilities: Option<Capabilities>) -> DeviceRecord {
-        DeviceRecord {
-            config_key: "test".to_string(),
-            canonical_key: None,
-            persistent: true,
-            route_key: "test".to_string(),
-            model_key: "test".to_string(),
-            model_name: "Test".to_string(),
-            display_name: "Test".to_string(),
-            asset: None,
-            model_info: None,
-            codename: None,
-            serial_number: None,
-            unit_id: [0; 4],
-            driver_id: None,
-            registry_model_id: None,
-            route: None,
-            capture_id: None,
-            kind,
-            capabilities,
-            light_capabilities: None,
-            slot: 1,
-            online: true,
-            battery: None,
-        }
-    }
-
-    #[test]
-    fn gallery_order_moves_connected_devices_first_stably() {
-        let mut records = vec![
-            record(DeviceKind::Mouse, None),
-            record(DeviceKind::Keyboard, None),
-            record(DeviceKind::Trackball, None),
-            record(DeviceKind::Light, None),
-        ];
-        records[0].online = false;
-        records[2].online = false;
-
-        assert_eq!(ordered_device_indices(&records), vec![1, 3, 0, 2]);
-    }
-
-    /// Tabs follow measured capabilities, not kind — the core of the #127 fix.
-    /// A device the Bolt register mislabels as Keyboard but whose 0x0005 probe
-    /// returns Mouse ends up with kind=Mouse; measured caps drive the tabs.
-    #[test]
-    fn tabs_follow_capabilities_not_kind() {
-        let caps = Some(Capabilities {
-            buttons: true,
-            pointer: true,
-            lighting: false,
-            scroll_inversion: false,
-            hires_wheel: false,
-            thumbwheel: false,
-            haptic_feedback: false,
-            haptic_panel: false,
-        });
-        // After 0x0005 kind-correction the record has kind=Mouse, not Keyboard.
-        let tabs = DetailTab::tabs_for(&record(DeviceKind::Mouse, caps));
-        assert!(tabs.contains(&DetailTab::Buttons));
-        assert!(tabs.contains(&DetailTab::Pointer));
-        assert!(!tabs.contains(&DetailTab::Lighting));
-    }
-
-    /// A keyboard that exposes ReprogControls (buttons=true) but has no resolved
-    /// asset should not get the mouse-model Buttons panel — the generic mouse
-    /// hotspot layout (Middle Click, DPI Toggle, …) is wrong for a keyboard.
-    #[test]
-    fn keyboard_without_asset_hides_buttons_tab() {
-        let caps = Some(Capabilities {
-            buttons: true,
-            pointer: false,
-            lighting: true,
-            scroll_inversion: false,
-            hires_wheel: false,
-            thumbwheel: false,
-            haptic_feedback: false,
-            haptic_panel: false,
-        });
-        let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
-        assert!(
-            !tabs.contains(&DetailTab::Buttons),
-            "mouse model shown for keyboard"
-        );
-        assert!(tabs.contains(&DetailTab::Lighting));
-    }
-
-    #[test]
-    fn keyboard_with_buttons_shows_keys_tab() {
-        let caps = Some(Capabilities {
-            buttons: true,
-            pointer: false,
-            lighting: true,
-            scroll_inversion: false,
-            hires_wheel: false,
-            thumbwheel: false,
-            haptic_feedback: false,
-            haptic_panel: false,
-        });
-        let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
-        assert!(tabs.contains(&DetailTab::Keys));
-        assert!(!tabs.contains(&DetailTab::Buttons));
-    }
-
-    /// Each panel is independent: a lighting-only device (e.g. a keyboard with
-    /// RGB but no remappable keys yet) shows only Lighting + Device.
-    #[test]
-    fn lighting_only_device_shows_only_lighting() {
-        let caps = Some(Capabilities {
-            lighting: true,
-            ..Capabilities::default()
-        });
-        let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
-        assert_eq!(tabs, vec![DetailTab::Lighting, DetailTab::Device]);
-    }
-
-    #[test]
-    fn light_tab_follows_light_capabilities() {
-        let mut device = record(DeviceKind::Light, None);
-        device.light_capabilities = Some(LightCapabilities {
-            power: true,
-            brightness: Some(
-                LightValueRange::new(20, 250, 1, LightValueUnit::Lumens)
-                    .expect("demo light range is valid"),
-            ),
-            ..LightCapabilities::default()
-        });
-        assert_eq!(
-            DetailTab::tabs_for(&device),
-            vec![DetailTab::Light, DetailTab::Device]
-        );
-    }
-
-    /// An unprobed (offline) device has no measured capabilities and falls back
-    /// to a kind presumption, so a sleeping mouse keeps its button/pointer tabs.
-    #[test]
-    fn unprobed_mouse_falls_back_to_presumed_capabilities() {
-        let tabs = DetailTab::tabs_for(&record(DeviceKind::Mouse, None));
-        assert!(tabs.contains(&DetailTab::Buttons));
-        assert!(tabs.contains(&DetailTab::Pointer));
-        assert!(!tabs.contains(&DetailTab::Lighting));
-    }
-
-    /// An unprobed, unidentified device presumes nothing — only the info tab,
-    /// rather than guessing wrong panels (the old Unknown+Direct→lighting bug).
-    #[test]
-    fn unprobed_unknown_device_shows_only_device_tab() {
-        let tabs = DetailTab::tabs_for(&record(DeviceKind::Unknown, None));
-        assert_eq!(tabs, vec![DetailTab::Device]);
-    }
-}
+mod tests;

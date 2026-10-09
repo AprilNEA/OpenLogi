@@ -5,6 +5,8 @@ base_path: ".."
 preserve_hierarchy: true
 
 export_languages:
+  - be
+  - cs
   - da
   - de
   - es-ES
@@ -28,12 +30,14 @@ export_languages:
   - ko
 
 files:
-  - source: "/crates/openlogi-ui/locales/en.yml"
-    translation: "/crates/openlogi-ui/locales/%locale%.yml"
-    type: "yaml"
+  - source: "/crates/openlogi-ui/locales/en.toml"
+    translation: "/crates/openlogi-ui/locales/%locale%.toml"
+    type: "toml"
     update_option: "update_as_unapproved"
     languages_mapping:
       locale:
+        be: "be"
+        cs: "cs"
         da: "da"
         de: "de"
         es-ES: "es"

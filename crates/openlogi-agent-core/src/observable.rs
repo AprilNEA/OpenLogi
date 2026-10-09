@@ -115,11 +115,11 @@ impl ObservableState {
     }
 
     /// Publish where enumeration stands together with the device set it
-    /// produced — and whether that tick failed to open HID++ nodes — so none
+    /// produced — and whether that pass failed to open HID++ nodes — so none
     /// of the three can be read from different generations.
     ///
-    /// The inventory watcher re-enumerates on a timer, so most calls carry the
-    /// same devices as the last one; those notify nobody.
+    /// Reconciliations often carry the same devices as the last one; those
+    /// notify nobody.
     pub fn set_inventory(
         &self,
         health: InventoryHealth,
