@@ -89,6 +89,11 @@ pub(crate) struct MotionTuning {
     pub(crate) duration: Duration,
     /// Cap on [`accel_gain`]; `1.0` disables acceleration.
     pub(crate) max_gain: f64,
+    /// Vertical multiplier already applied to the tick before it was queued
+    /// (an OS hook's traditional wheel sensitivity; `1.0` otherwise). The
+    /// rate window divides it back out, so sensitivity scales distance only
+    /// and never how fast the wheel appears to turn.
+    pub(crate) vertical_scale: f64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -268,7 +273,7 @@ impl ActiveMotion {
             next_frame: at + FRAME_PERIOD,
             recent_ticks: VecDeque::new(),
         };
-        let gain = motion.windowed_gain(impulse, at, tuning.max_gain);
+        let gain = motion.windowed_gain(impulse, at, tuning);
         motion.pulses.push(Pulse {
             amplitude: impulse.scale(tuning.step).scale_axes(gain),
             started_at: at,
@@ -279,8 +284,14 @@ impl ActiveMotion {
     }
 
     /// Record one tick in the rate window and return each axis's amplitude
-    /// gain.
-    fn windowed_gain(&mut self, impulse: WheelDelta, at: Instant, max_gain: f64) -> WheelDelta {
+    /// gain. The window holds the wheel's own distance, with any queue-side
+    /// sensitivity divided back out.
+    fn windowed_gain(
+        &mut self,
+        impulse: WheelDelta,
+        at: Instant,
+        tuning: MotionTuning,
+    ) -> WheelDelta {
         while self
             .recent_ticks
             .front()
@@ -292,7 +303,7 @@ impl ActiveMotion {
             at,
             WheelDelta {
                 x: impulse.x.abs(),
-                y: impulse.y.abs(),
+                y: impulse.y.abs() / tuning.vertical_scale,
             },
         ));
         if self.recent_ticks.len() > ACCEL_WINDOW_MAX_TICKS {
@@ -303,8 +314,8 @@ impl ActiveMotion {
             .iter()
             .fold(WheelDelta::ZERO, |sum, (_, ticks)| sum.plus(*ticks));
         WheelDelta {
-            x: accel_gain(window_ticks.x, max_gain),
-            y: accel_gain(window_ticks.y, max_gain),
+            x: accel_gain(window_ticks.x, tuning.max_gain),
+            y: accel_gain(window_ticks.y, tuning.max_gain),
         }
     }
 
@@ -322,7 +333,7 @@ impl ActiveMotion {
     /// unconditionally; that is the one place the model approximates, and it
     /// still conserves distance and continuity.
     fn add_tick(&mut self, impulse: WheelDelta, at: Instant, tuning: MotionTuning) -> MotionUpdate {
-        let gain = self.windowed_gain(impulse, at, tuning.max_gain);
+        let gain = self.windowed_gain(impulse, at, tuning);
         let amplitude = impulse.scale(tuning.step).scale_axes(gain);
         let merge = self.pulses.len() >= MAX_PULSES
             || self.pulses.last().is_some_and(|pulse| {
