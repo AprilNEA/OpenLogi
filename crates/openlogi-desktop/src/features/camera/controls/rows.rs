@@ -151,7 +151,7 @@ pub(super) fn control_row(
                 } else {
                     rgb(ACCENT_BLUE).into()
                 })
-                .accessibility_label(format!("Set {} value", slider.label))
+                .accessibility_label(tr!("camera.set_value_label", label => slider.label.clone()))
                 .child(format!("{value}"))
                 .on_click(cx.listener(move |panel, _: &ClickEvent, window, cx| {
                     panel.open_value_dialog(ix, window, cx);

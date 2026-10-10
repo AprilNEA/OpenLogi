@@ -396,13 +396,17 @@ impl CameraControlsPanel {
             input.update(cx, |input, cx| input.focus(window, cx));
             dialog
                 .w(px(320.))
-                .title(format!("Set {label}"))
+                .title(tr!("camera.set_value_title", label => label.clone()))
                 .child(
                     v_flex().gap_2().child(control_input(&input)).child(
                         div()
                             .text_caption()
                             .text_color(theme::palette(cx).text_muted)
-                            .child(format!("Supported range: {}–{}", range.min, range.max)),
+                            .child(tr!(
+                                "camera.supported_range",
+                                min => range.min.to_string(),
+                                max => range.max.to_string()
+                            )),
                     ),
                 )
                 .button_props(
