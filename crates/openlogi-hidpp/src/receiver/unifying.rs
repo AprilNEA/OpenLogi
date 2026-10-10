@@ -62,7 +62,7 @@ pub enum InfoSubRegister {
     ///
     /// NOTE: `0x60` is the *Bolt* base. Wire-verified Unifying receivers store
     /// names at base `0x40 + (n-1)` instead, so name reads go directly through
-    /// `read_codename_unifying` in `inventory.rs` rather than this constant —
+    /// `inventory::probe::unifying::read_codename` rather than this constant —
     /// don't reuse `DeviceCodename` for Unifying name reads.
     DeviceCodename = 0x60,
 }
@@ -385,7 +385,7 @@ mod tests {
         DeviceConnection, DeviceKind, DevicePairingInformation, Event, InfoSubRegister, Receiver,
         Register, decode_notification, update_wireless_notification_flag,
     };
-    use crate::channel::tests::{MockRawHidChannel, channel_with_reader};
+    use crate::channel::mock::{MockRawHidChannel, channel_with_reader};
     use crate::protocol::v10::{Message, MessageHeader, MessageType};
 
     /// Builds the long notification the receiver broadcasts, with `payload`

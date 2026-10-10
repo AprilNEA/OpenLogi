@@ -1,0 +1,15 @@
+# Owner: xtask's `macos::bundle::signing::SIGN_IDENTITY_ENV` — the variable a
+# release's Developer ID identity is read from.
+id: xtask-sign-identity-owner
+language: rust
+severity: error
+message: The signing-identity variable is xtask's SIGN_IDENTITY_ENV (macos::bundle); use the constant instead of the literal here.
+note: |
+  The bundle step and `macos dmg` each spelled it. See "Single source of
+  truth" in AGENTS.md.
+files:
+  - xtask/**/*.rs
+ignores:
+  - xtask/src/commands/macos/bundle/signing.rs
+rule:
+  pattern: '"OPENLOGI_SIGN_IDENTITY"'

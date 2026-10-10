@@ -7,6 +7,157 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.13] - 2026-10-09
+
+### Added
+
+- *(hidpp)* implement pointer motion scaling ([#1347](https://github.com/AprilNEA/OpenLogi/pull/1347))
+- *(gui)* add custom actions to the mouse picker ([#1452](https://github.com/AprilNEA/OpenLogi/pull/1452))
+- *(hid)* add G733 battery and power-state support ([#1601](https://github.com/AprilNEA/OpenLogi/pull/1601))
+- *(hid)* recognize POWERPLAY receiver ([#1267](https://github.com/AprilNEA/OpenLogi/pull/1267))
+
+### Fixed
+
+- *(hook)* identify unbundled macos applications ([#1469](https://github.com/AprilNEA/OpenLogi/pull/1469))
+- *(inject)* restore macos 27 space swipes ([#1703](https://github.com/AprilNEA/OpenLogi/pull/1703))
+- *(gui)* show friendly names for Windows app profiles ([#1463](https://github.com/AprilNEA/OpenLogi/pull/1463))
+- *(core)* resolve connection transport from live routes ([#1367](https://github.com/AprilNEA/OpenLogi/pull/1367))
+- *(gui)* restore the config-error folder action ([#1458](https://github.com/AprilNEA/OpenLogi/pull/1458))
+- *(macos)* respect the selected Apple developer directory ([#1457](https://github.com/AprilNEA/OpenLogi/pull/1457))
+- *(i18n)* improve Turkish catalog wording ([#1415](https://github.com/AprilNEA/OpenLogi/pull/1415))
+- *(agent)* repeat thumb-wheel volume actions with swipe distance ([#1455](https://github.com/AprilNEA/OpenLogi/pull/1455))
+- *(linux)* localize desktop entry comment in Spanish ([#1468](https://github.com/AprilNEA/OpenLogi/pull/1468))
+
+## [0.8.12] - 2026-10-09
+
+### Added
+
+- *(i18n)* add Czech locale ([#1669](https://github.com/AprilNEA/OpenLogi/pull/1669))
+- *(cli)* persist verified automation settings with save
+
+### Fixed
+
+- *(macos)* preserve pixel precision in synthetic scroll events ([#1156](https://github.com/AprilNEA/OpenLogi/pull/1156))
+- *(gui)* recognize MX Ergo precision-mode button slot ([#1391](https://github.com/AprilNEA/OpenLogi/pull/1391))
+- *(gui)* show wheel controls without adjustable dpi ([#1369](https://github.com/AprilNEA/OpenLogi/pull/1369))
+- *(cli)* show Linux udev guidance for device access failures ([#1348](https://github.com/AprilNEA/OpenLogi/pull/1348))
+- *(gui)* wrap the About page links without clipping ([#885](https://github.com/AprilNEA/OpenLogi/pull/885))
+- *(i18n)* track locale catalogs as build inputs ([#1327](https://github.com/AprilNEA/OpenLogi/pull/1327))
+- *(gui)* keep the action library scrollbar in its viewport ([#1360](https://github.com/AprilNEA/OpenLogi/pull/1360))
+- *(agent)* fall back to focus when the pointer target is unidentified ([#1648](https://github.com/AprilNEA/OpenLogi/pull/1648))
+- *(gui)* scale configuration labels with interface text ([#1627](https://github.com/AprilNEA/OpenLogi/pull/1627))
+- *(agent)* restore ring toggle and publish expired sessions ([#1665](https://github.com/AprilNEA/OpenLogi/pull/1665))
+- *(gui)* show the actual update host in the consent dialog ([#1629](https://github.com/AprilNEA/OpenLogi/pull/1629))
+- *(hook)* restore the short watchdog budget before tap teardown ([#1600](https://github.com/AprilNEA/OpenLogi/pull/1600))
+- *(core)* preserve symlinked configuration targets ([#1642](https://github.com/AprilNEA/OpenLogi/pull/1642))
+- *(agent)* phase horizontal thumb-wheel scroll when smoothing is off ([#1689](https://github.com/AprilNEA/OpenLogi/pull/1689))
+- *(hid)* exclude foreign reports from fixture captures ([#1373](https://github.com/AprilNEA/OpenLogi/pull/1373))
+- *(gui)* render pointer pairing passkey icons with theme colors ([#1640](https://github.com/AprilNEA/OpenLogi/pull/1640))
+- *(gui)* keep the device toggle visible with long captions ([#1670](https://github.com/AprilNEA/OpenLogi/pull/1670))
+- *(gui)* truncate long function-key names and retain tooltips ([#1691](https://github.com/AprilNEA/OpenLogi/pull/1691))
+- *(hid)* recognize Lightspeed receiver 046d:c541 ([#1679](https://github.com/AprilNEA/OpenLogi/pull/1679))
+- *(gui)* use configured DPI while the live read is unavailable ([#1628](https://github.com/AprilNEA/OpenLogi/pull/1628))
+- *(core)* serialize configuration saves across processes
+
+## [0.8.11] - 2026-10-02
+
+### Added
+
+- *(linux)* add verified release installer ([#1109](https://github.com/AprilNEA/OpenLogi/pull/1109))
+
+### Fixed
+
+- clear the lints rustc 1.99 raises on untouched code ([#1638](https://github.com/AprilNEA/OpenLogi/pull/1638))
+- *(core)* match Actions Ring layouts with the per-app selector ([#643](https://github.com/AprilNEA/OpenLogi/pull/643))
+- *(macos)* drive the device-I/O gate from powerd instead of workspace notifications ([#1323](https://github.com/AprilNEA/OpenLogi/pull/1323))
+- *(macos)* confirm desktop switches with private space APIs ([#1586](https://github.com/AprilNEA/OpenLogi/pull/1586))
+- *(agent)* recognize an overlay tenant by any image we ever shipped ([#871](https://github.com/AprilNEA/OpenLogi/pull/871))
+- *(macos)* press Back and Forward as the frontmost app's menu item ([#1622](https://github.com/AprilNEA/OpenLogi/pull/1622))
+
+## [0.8.10] - 2026-09-30
+
+### Added
+
+- *(agent)* read privacy grants on notification instead of a 1.2 s poll
+- *(hook)* probe the Accessibility grant on cue, with a heartbeat backstop
+- *(core)* add a Super modifier and make Win/Meta name it ([#1387](https://github.com/AprilNEA/OpenLogi/pull/1387))
+- *(keyboard)* key controls by HID++ control ID, fix Keys tab and Fn-lock ([#1604](https://github.com/AprilNEA/OpenLogi/pull/1604))
+
+### Fixed
+
+- *(hook)* charge the callback watchdog's first poll from its spawn
+- *(hook)* give the callback watchdog the same watched-time rule
+- *(hook)* discount only the watchdog gaps that spanned a kernel sleep or wake
+- *(hook)* do not charge the tap thread for time the watchdog was not running
+- *(hook)* give the macOS tap's capability probes their own watchdog budget
+- *(agent)* keep the armed-session record whole and clear it on the Quit fallback
+- *(agent)* re-arm a crash respawn instead of going dormant
+- *(macos)* press shortcut keys where the active layout types them ([#948](https://github.com/AprilNEA/OpenLogi/pull/948))
+- *(gui)* unpair a forgotten receiver device so it stays deleted ([#1617](https://github.com/AprilNEA/OpenLogi/pull/1617))
+- *(macos)* keep the hook from hearing the keys OpenLogi posts ([#1618](https://github.com/AprilNEA/OpenLogi/pull/1618))
+
+## [0.8.9] - 2026-09-27
+
+### Fixed
+
+- *(hook)* use AppKit for macOS pointer hit testing ([#1568](https://github.com/AprilNEA/OpenLogi/pull/1568))
+- *(gui)* repair missing launchd agent jobs ([#1303](https://github.com/AprilNEA/OpenLogi/pull/1303))
+- *(hook)* stop leaking GNOME observer sockets ([#1418](https://github.com/AprilNEA/OpenLogi/pull/1418))
+- *(gui)* correct thumb-wheel volume preset labels ([#1436](https://github.com/AprilNEA/OpenLogi/pull/1436))
+
+## [0.8.8] - 2026-09-25
+
+### Added
+
+- *(gui)* add safe per-app profile reset and complete removal
+- *(hid)* recognise Nano receiver 046d:c534 (MK270, MK295) ([#1456](https://github.com/AprilNEA/OpenLogi/pull/1456))
+
+### Fixed
+
+- *(gui)* prefer firmware codename over catalog name for M650 variants ([#1366](https://github.com/AprilNEA/OpenLogi/pull/1366))
+- *(i18n)* clarify which app editors close after deletion
+- *(gui)* render profile confirmation dialogs in the main window
+- *(agent)* divert a single-bound gesture button ([#1569](https://github.com/AprilNEA/OpenLogi/pull/1569))
+
+## [0.8.7] - 2026-09-23
+
+### Added
+
+- *(agent)* default mouse profiles to pointer context
+- *(hook)* expose native pointer window context
+
+## [0.8.6] - 2026-09-19
+
+### Added
+
+- *(gui)* show installation source in update settings
+- *(gui)* detect installation ownership across platforms
+- *(xtask)* model the Windows test job in the local CI runner
+- *(core)* own the function-row vocabulary in one FunctionKey
+
+### Changed
+
+- *(gui)* resolve each device's assets once per asset generation
+- *(gui)* build the asset resolver once at startup
+
+### Fixed
+
+- *(agent)* log a DPI or SmartShift write only once one is scheduled
+- *(agent)* say why a background write was skipped
+- *(agent)* start the HID++ watchers through one named worker shell
+- *(xtask)* read ci.yml's wrapped commands under either line ending
+- *(gui)* replace the asset resolver after a failed sync too
+- *(gui)* keep a snapped sync off a slider mid-drag
+- *(gui)* show the dragged value beside a lighting slider
+- *(gui)* clamp camera control values through the ordered range
+- *(gui)* re-seat the thumb-wheel sensitivity slider after a rolled-back save
+- *(cli)* stop telling users Unifying receivers are not surfaced
+- *(cli)* tell a timed-out profile capture what to do next
+- *(ipc)* start the handshake deadline before the socket is reached
+- *(cli)* stop naming the agent lock file outside its owner
+- *(gui)* keep the relaunch notice ahead of the unreachable one
+- *(gui)* hold a config reload until the agent connects
+
 ## [0.8.5] - 2026-09-16
 
 ### Added

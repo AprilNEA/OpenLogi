@@ -6,12 +6,18 @@
 //!    packaging time by `openlogi assets sync` and shipped with every
 //!    release. Zero network at end-user runtime.
 //! 2. The per-user cache at `~/.local/share/openlogi/assets/` —
-//!    populated by [`sync::sync`] when it runs (debug builds and the
-//!    bundle-missing safety net).
+//!    populated by [`sync::load_registry`] and [`sync::sync_target`] when
+//!    they run (debug builds and the bundle-missing safety net).
 //!
 //! Either tier missing the requested files falls through to the next, and
-//! ultimately to the synthetic silhouette. The write side ([`sync::sync`])
-//! always targets the user cache — the bundle is read-only.
+//! ultimately to the synthetic silhouette. The write side ([`sync`]) always
+//! targets the user cache — the bundle is read-only.
+//!
+//! A resolver reads each asset from disk once and answers from memory after
+//! that, because the device list is rebuilt on every agent snapshot and the
+//! files behind it only change when a download lands or the cache is cleared.
+//! Both of those replace the resolver (see `runtime.rs`), and that is the only
+//! invalidation there is.
 
 mod glow;
 mod images;
@@ -21,6 +27,8 @@ pub mod sync;
 
 pub(crate) use self::glow::GlowGeometry;
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -34,9 +42,11 @@ use tracing::{debug, warn};
 use walkdir::WalkDir;
 
 use self::images::{
-    buttons_image_for, load_manifest, metadata_for, read_png_dimensions, variant_image_for,
+    buttons_image_for, find_variant_in_manifest, load_manifest, metadata_for, read_png_dimensions,
+    variant_image_for,
 };
-use self::paths::{bundle_assets_root, load_index, user_cache_root};
+pub(crate) use self::paths::user_cache_root;
+use self::paths::{bundle_assets_root, load_index};
 
 /// Total bytes of the per-user asset cache — the tier [`sync`] writes and
 /// [`clear_cache`] removes. The read-only app bundle (release builds) is a
@@ -136,18 +146,43 @@ pub struct ResolvedAsset {
     pub png_height: u32,
 }
 
+/// Everything a resolved asset is a function of, besides the files on disk.
+///
+/// The depot stands for its index entry, and the index is fixed for the life
+/// of a resolver. The two lookups are keyed apart because they read different
+/// manifest resources of the same depot.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum AssetKey {
+    /// A HID++ model: its depot, and the byte that picks the colour (or hand)
+    /// variant inside it.
+    Variant {
+        depot: String,
+        extended_model_id: u8,
+    },
+    /// A standalone device: its depot, and the registry id the manifest keys
+    /// its render on.
+    Standalone {
+        depot: String,
+        registry_model_id: String,
+    },
+}
+
 pub struct AssetResolver {
     /// Read-time search order. Bundle root (if present) comes first so
     /// release builds never touch the user cache; the user cache comes
-    /// second so `sync::sync` writes are immediately visible.
+    /// second so what [`sync`] writes is visible to the next resolver.
     read_roots: Vec<PathBuf>,
-    /// Where [`sync::sync`] is allowed to write. Always the per-user dir
-    /// — the bundle is read-only inside the signed `.app`.
+    /// Where [`sync`] is allowed to write. Always the per-user dir — the
+    /// bundle is read-only inside the signed `.app`.
     write_root: PathBuf,
     /// `true` when a populated bundle root was discovered; release builds
     /// skip the network sync in that case.
     has_bundle: bool,
     index: Option<Index>,
+    /// Every asset this resolver has found on disk. Never evicted: what is on
+    /// disk changes only through a download or a cleared cache, and the
+    /// runtime answers both by building a new resolver.
+    resolved: RefCell<HashMap<AssetKey, ResolvedAsset>>,
 }
 
 impl AssetResolver {
@@ -167,11 +202,11 @@ impl AssetResolver {
             write_root,
             has_bundle,
             index,
+            resolved: RefCell::default(),
         }
     }
 
-    /// Where [`sync::sync`] writes. Public so the sync module can build
-    /// destination paths.
+    /// The per-user cache root, where [`sync`] writes.
     pub fn cache_root(&self) -> &Path {
         &self.write_root
     }
@@ -191,6 +226,8 @@ impl AssetResolver {
         self.index.as_ref().map(|index| index.devices.len())
     }
 
+    /// The asset for a HID++ model, read from disk the first time this
+    /// resolver is asked for it and from memory after that.
     pub fn resolve(
         &self,
         model: &DeviceModelInfo,
@@ -198,7 +235,20 @@ impl AssetResolver {
     ) -> Option<ResolvedAsset> {
         let index = self.index.as_ref()?;
         let (depot, entry) = resolve_in_index(index, model, codename)?;
-        self.load_files(depot, entry, model)
+        let extended_model_id = model.extended_model_id;
+        let mut asset = self.remembered(
+            AssetKey::Variant {
+                depot: depot.to_owned(),
+                extended_model_id,
+            },
+            || self.load_files(depot, entry, extended_model_id),
+        )?;
+        // Assets are shared by model variant; the firmware name belongs to
+        // this device and must never overwrite another device's cached name.
+        if let Some(name) = variant_display_name_override(&asset.display_name, codename) {
+            asset.display_name = name;
+        }
+        Some(asset)
     }
 
     /// Resolve a standalone device directly by its registry model id.
@@ -211,14 +261,41 @@ impl AssetResolver {
     pub fn resolve_registry_model(&self, registry_model_id: &str) -> Option<ResolvedAsset> {
         let index = self.index.as_ref()?;
         let (depot, entry) = index.find_by_model_id(registry_model_id)?;
-        self.load_standalone_files(depot, entry, registry_model_id)
+        self.remembered(
+            AssetKey::Standalone {
+                depot: depot.to_owned(),
+                registry_model_id: registry_model_id.to_owned(),
+            },
+            || self.load_standalone_files(depot, entry, registry_model_id),
+        )
     }
 
+    /// `load`'s asset for `key`, from memory once it has been found.
+    ///
+    /// Only finds are remembered. A miss costs a few `stat` calls, and asking
+    /// again is what lets a depot that lands on disk later show up without
+    /// anyone having to say so.
+    fn remembered(
+        &self,
+        key: AssetKey,
+        load: impl FnOnce() -> Option<ResolvedAsset>,
+    ) -> Option<ResolvedAsset> {
+        if let Some(asset) = self.resolved.borrow().get(&key) {
+            return Some(asset.clone());
+        }
+        let asset = load()?;
+        self.resolved.borrow_mut().insert(key, asset.clone());
+        Some(asset)
+    }
+
+    /// Read one colour variant of a depot from disk. Everything it reads is
+    /// named by its arguments, which is what makes [`AssetKey::Variant`] a
+    /// complete key.
     fn load_files(
         &self,
         depot: &str,
         entry: &DeviceEntry,
-        model: &DeviceModelInfo,
+        extended_model_id: u8,
     ) -> Option<ResolvedAsset> {
         for root in &self.read_roots {
             let Ok(dir) = safe_component_path(root, depot, "asset depot") else {
@@ -243,21 +320,26 @@ impl AssetResolver {
             // Parse the manifest once and consult it for every candidate.
             let manifest = load_manifest(&dir);
 
-            let Some((meta_name, meta_path)) =
-                resolve_metadata(&dir, entry, manifest.as_ref(), model.extended_model_id)
-            else {
+            // Hotspot metadata: the variant's manifest `image_metadata`, else
+            // `core_metadata.json` (newer) or `metadata.json` (older).
+            //
+            // Two different situations look the same on disk, and only the
+            // registry tells them apart. A depot that *publishes* hotspot
+            // metadata but has none in this root is a stale or half-synced
+            // cache: skip the root so the next one (or the synthetic fallback)
+            // serves the device, rather than a render with no hotspots. A depot
+            // that publishes none at all (cameras) legitimately resolves from
+            // its render alone.
+            let meta = resolve_metadata(&dir, entry, depot, manifest.as_ref(), extended_model_id);
+            if meta.is_none() && entry.preferred_file(&METADATA_FILES).is_some() {
                 continue;
-            };
+            }
 
             let buttons_name = manifest.as_ref().and_then(|m| {
-                entry
-                    .model_id_candidates()
-                    .find_map(|base| buttons_image_for(m, base, model.extended_model_id))
+                find_variant_in_manifest(m, entry, depot, extended_model_id, buttons_image_for)
             });
             let variant_front_name = manifest.as_ref().and_then(|m| {
-                entry
-                    .model_id_candidates()
-                    .find_map(|base| variant_image_for(m, base, model.extended_model_id))
+                find_variant_in_manifest(m, entry, depot, extended_model_id, variant_image_for)
             });
             // Front/hero render for the gallery: the colour variant's
             // `device_image`, falling back to the generic front renders. Resolved
@@ -289,12 +371,14 @@ impl AssetResolver {
                 continue;
             };
 
-            let metadata = match Metadata::load_from(&meta_path) {
-                Ok(m) => m,
-                Err(e) => {
+            let metadata = if let Some((meta_name, meta_path)) = &meta {
+                Metadata::load_from(meta_path).unwrap_or_else(|e| {
                     warn!(depot, root = %root.display(), file = meta_name.as_str(), error = ?e, "device metadata unparseable — rendering image without hotspots");
                     Metadata::default()
-                }
+                })
+            } else {
+                debug!(depot, root = %root.display(), "depot ships no hotspot metadata — rendering image without hotspots");
+                Metadata::default()
             };
             let (png_width, png_height) = match read_png_dimensions(&image_path) {
                 Ok(dims) => dims,
@@ -315,7 +399,7 @@ impl AssetResolver {
                 depot,
                 root = %root.display(),
                 image = %image_name,
-                ext = model.extended_model_id,
+                ext = extended_model_id,
                 png_width,
                 png_height,
                 "asset hit"
@@ -414,15 +498,12 @@ impl Default for AssetResolver {
 fn resolve_metadata(
     dir: &Path,
     entry: &DeviceEntry,
+    depot: &str,
     manifest: Option<&DepotManifest>,
     ext: u8,
 ) -> Option<(String, PathBuf)> {
     let mut candidates: Vec<String> = manifest
-        .and_then(|m| {
-            entry
-                .model_id_candidates()
-                .find_map(|base| metadata_for(m, base, ext))
-        })
+        .and_then(|m| find_variant_in_manifest(m, entry, depot, ext, metadata_for))
         .into_iter()
         .collect();
     candidates.extend(METADATA_FILES.map(str::to_string));
@@ -453,7 +534,7 @@ pub(crate) fn resolve_in_index<'a>(
     model: &DeviceModelInfo,
     codename: Option<&str>,
 ) -> Option<(&'a str, &'a DeviceEntry)> {
-    if let Ok(forced) = std::env::var("OPENLOGI_FORCE_DEPOT")
+    if let Ok(forced) = std::env::var(openlogi_core::env::FORCE_DEPOT)
         && let Some((depot, entry)) = index
             .devices
             .iter()
@@ -482,6 +563,57 @@ pub(crate) fn resolve_in_index<'a>(
         "asset matched via codename↔displayName fallback"
     );
     Some(hit)
+}
+
+/// Firmware type words ignored when matching model names, wherever they occur.
+const GENERIC_CODENAME_WORDS: [&str; 3] = ["mouse", "keyboard", "trackball"];
+
+/// Size/hand qualifiers, not model-generation words such as `3S` or `X`.
+const VARIANT_QUALIFIER_SUFFIXES: [&str; 2] = ["l", "left"];
+
+/// Correct a shared depot's variant name (M650 vs. M650 L, #1332).
+///
+/// Return an override only when the firmware name matches a nonempty catalog
+/// prefix and every remaining word is a recognized qualifier. Keep catalog
+/// spelling, joining matched words with single spaces. `None` leaves the
+/// caller's existing name untouched; only a correction allocates a string.
+fn variant_display_name_override(catalog_name: &str, codename: Option<&str>) -> Option<String> {
+    let codename_words = codename?.split_whitespace().filter(|word| {
+        !GENERIC_CODENAME_WORDS.iter().any(|generic| {
+            word.chars()
+                .flat_map(char::to_lowercase)
+                .eq(generic.chars())
+        })
+    });
+    let mut catalog_words = catalog_name.split_whitespace();
+    let mut matched_words = 0;
+    for word in codename_words {
+        if !catalog_words.next()?.eq_ignore_ascii_case(word) {
+            return None;
+        }
+        matched_words += 1;
+    }
+
+    let mut qualifiers = catalog_words.peekable();
+    if matched_words == 0
+        || qualifiers.peek().is_none()
+        || !qualifiers.all(|word| {
+            VARIANT_QUALIFIER_SUFFIXES
+                .iter()
+                .any(|qualifier| word.eq_ignore_ascii_case(qualifier))
+        })
+    {
+        return None;
+    }
+
+    let mut name = String::with_capacity(catalog_name.len());
+    for word in catalog_name.split_whitespace().take(matched_words) {
+        if !name.is_empty() {
+            name.push(' ');
+        }
+        name.push_str(word);
+    }
+    Some(name)
 }
 
 fn strict_candidates(model: &DeviceModelInfo) -> Vec<String> {

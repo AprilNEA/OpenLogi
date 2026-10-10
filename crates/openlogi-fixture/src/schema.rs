@@ -4,8 +4,8 @@ use std::collections::HashSet;
 
 use openlogi_core::device::{Capabilities, DeviceInventory, LightCapabilities, StandaloneDevice};
 use openlogi_core::hid::{
-    BacklightState, BacklightStatus, DIRECT_DEVICE_INDEX, DeviceRoute, DpiInfo, ScrollWheelMode,
-    SmartShiftStatus,
+    BacklightState, BacklightStatus, DIRECT_DEVICE_INDEX, DeviceRoute, DpiInfo, FnLockState,
+    ScrollWheelMode, SmartShiftStatus,
 };
 use serde::{Deserialize, Deserializer, Serialize, de};
 use thiserror::Error;
@@ -139,6 +139,13 @@ pub enum ProfileSetting<T> {
 }
 
 impl<T> ProfileSetting<T> {
+    /// The absent-feature behavior; the serde default for settings appended
+    /// after schema v1 so older profiles keep loading.
+    #[must_use]
+    pub const fn unsupported() -> Self {
+        Self::Unsupported
+    }
+
     /// Whether the feature is present, independently of value availability.
     #[must_use]
     pub const fn supports_feature(&self) -> bool {
@@ -178,6 +185,10 @@ pub struct ProfileDeviceSettings {
     pub wheel: ProfileSetting<ScrollWheelMode>,
     /// Keyboard-backlight read state.
     pub backlight: ProfileSetting<BacklightState>,
+    /// Keyboard Fn-lock read state. Defaults to unsupported so profiles
+    /// recorded before it existed keep loading.
+    #[serde(default = "ProfileSetting::unsupported")]
+    pub fn_lock: ProfileSetting<FnLockState>,
     /// RGB keyboard-lighting write support.
     pub lighting: ProfileSupport,
     /// Standalone-light command support.
@@ -234,7 +245,7 @@ impl ProfileValidation {
         self.validate_paired_devices(inventory)?;
         self.validate_inventory_identity(inventory)?;
         for device in &inventory.paired {
-            let Some(route) = DeviceRoute::device_route_for(inventory, device.slot) else {
+            let Some(route) = DeviceRoute::for_slot(inventory, device.slot) else {
                 return Err(FixtureError::invalid(
                     "device profile",
                     format!(
@@ -358,13 +369,7 @@ impl ProfileValidation {
         let owner = format!("standalone device {}", device.display_name);
         validate_unit_id(&mut self.unit_ids, device.unit_id, &owner)?;
         self.push_route(ProfileRouteFacts {
-            route: DeviceRoute::RawHid {
-                vendor_id: device.address.vendor_id,
-                product_id: device.address.product_id,
-                usage_page: device.address.usage_page,
-                usage_id: device.address.usage_id,
-                identity: device.address.identity.clone(),
-            },
+            route: device.route(),
             capabilities: device.capabilities,
             standalone: true,
             light_capabilities: device.light_capabilities,
@@ -850,7 +855,11 @@ fn normalize_hidpp20(request: &[u8]) -> Vec<u8> {
     normalized
 }
 
-fn format_hex(report: &[u8]) -> String {
+/// A report as a cassette spells it: lowercase hex, two digits per byte, no
+/// separators. Replay diagnostics quote reports the same way, so a mismatch
+/// message can be pasted back against the cassette.
+#[must_use]
+pub fn format_hex(report: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut formatted = String::with_capacity(report.len() * 2);
     for &byte in report {

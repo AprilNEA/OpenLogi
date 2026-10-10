@@ -2,10 +2,9 @@ use hidpp::protocol::v20::{ErrorType, Hidpp20Error};
 
 // WriteError, HidppOperation, and HidppFeatureErrorKind are pure IPC wire
 // data with no HID++/backend I/O, so they live in
-// `openlogi_core::hid::error`; re-exported here unchanged so this module's
-// own API surface doesn't churn. The conversions below stay here because
-// they name `hidpp` and backend types, which `openlogi-core` must never
-// depend on.
+// `openlogi_core::hid::error`; the write path names them through here. The
+// conversions below stay here because they name `hidpp` and backend types,
+// which `openlogi-core` must never depend on.
 pub use openlogi_core::hid::{HidppFeatureErrorKind, HidppOperation, WriteError};
 
 fn hidpp_feature_error_kind(kind: ErrorType) -> HidppFeatureErrorKind {

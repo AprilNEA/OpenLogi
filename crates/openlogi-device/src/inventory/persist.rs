@@ -5,7 +5,7 @@
 //! but the in-memory cache dies with the process, forcing every agent restart
 //! to re-interview every device. Persisting the cache means a device that was
 //! fully probed once keeps its identity across restarts, even on transports
-//! where a fresh walk is slow or failing (see `BOLT_SLOT_PROBE`).
+//! where a fresh walk is slow or failing (see `BOLT_SLOT_PROBE_TIMEOUT`).
 //!
 //! Only Bolt identities are persisted, because only they are keyed on the
 //! device's *own* identity (the pairing-register unit id), which no re-pairing
@@ -35,7 +35,8 @@ use super::features::{BatteryProbe, ProbedFeatures};
 /// (the cache is a warm-start optimization, not data anyone must keep).
 /// v2 dropped the `UnifyingSlot` key (slot-keyed, so not re-pair-safe).
 /// v3 adds event-capable feature indexes discovered by the immutable walk.
-const SCHEMA_VERSION: u32 = 3;
+/// v4 adds the `0x1F20` ADC-measurement event index.
+const SCHEMA_VERSION: u32 = 4;
 
 impl ProbeCacheError {
     /// Report why a store could not keep a snapshot.
@@ -240,6 +241,7 @@ mod tests {
                 events: EventFeatureIndices {
                     wireless_status: Some(7),
                     unified_battery: Some(9),
+                    adc_measurement: Some(11),
                 },
                 probed_at: Instant::now(),
             },
@@ -277,6 +279,7 @@ mod tests {
             EventFeatureIndices {
                 wireless_status: Some(7),
                 unified_battery: Some(9),
+                adc_measurement: Some(11),
             },
             "event feature indexes are immutable and kept"
         );

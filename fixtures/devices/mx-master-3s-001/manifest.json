@@ -1,0 +1,109 @@
+{
+  "schema_version": 1,
+  "id": "mx-master-3s-001",
+  "profile_id": "mx-master-3s-001-profile",
+  "cases": [
+    {
+      "name": "feature-table",
+      "channel": "target",
+      "relationship": {
+        "kind": "device",
+        "device": "device-1"
+      }
+    },
+    {
+      "name": "reprogrammable-controls",
+      "channel": "target",
+      "relationship": {
+        "kind": "device",
+        "device": "device-1"
+      }
+    },
+    {
+      "name": "raw-battery",
+      "channel": "target",
+      "relationship": {
+        "kind": "device",
+        "device": "device-1"
+      }
+    },
+    {
+      "name": "dpi-info",
+      "channel": "target",
+      "relationship": {
+        "kind": "device",
+        "device": "device-1"
+      }
+    },
+    {
+      "name": "smartshift-status",
+      "channel": "target",
+      "relationship": {
+        "kind": "device",
+        "device": "device-1"
+      }
+    },
+    {
+      "name": "wheel-mode",
+      "channel": "target",
+      "relationship": {
+        "kind": "device",
+        "device": "device-1"
+      }
+    },
+    {
+      "name": "backlight-state",
+      "channel": "target",
+      "relationship": {
+        "kind": "device",
+        "device": "device-1"
+      }
+    }
+  ],
+  "identity_ledger": [
+    {
+      "principal": {
+        "kind": "device",
+        "id": "device-1",
+        "route": {
+          "kind": "direct",
+          "vendor_id": 1133,
+          "product_id": 45108
+        }
+      },
+      "representations": [
+        {
+          "kind": "device_unit_id",
+          "value": [
+            79,
+            76,
+            68,
+            1
+          ],
+          "occurrences": [
+            {
+              "location": {
+                "asset": "profile",
+                "field": "device_unit_id"
+              },
+              "count": 1
+            }
+          ]
+        },
+        {
+          "kind": "device_serial_number",
+          "value": "OL-SER-00001",
+          "occurrences": [
+            {
+              "location": {
+                "asset": "profile",
+                "field": "device_serial_number"
+              },
+              "count": 1
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

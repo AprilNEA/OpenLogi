@@ -14,7 +14,7 @@ use openlogi_hid::{
     NodeId, NodeInfo, PairingError, PairingEvent, ReceiverSelector, device_io_channel,
 };
 
-use super::{Control, SessionId, spawn_with_hardware};
+use super::{PairingControl, PairingSessionId, spawn_with_hardware};
 use crate::hardware::HardwareContext;
 
 const CHANNEL: &str = "agent-bolt-pairing";
@@ -40,10 +40,10 @@ async fn injected_pairing_waits_for_receiver_cleanup_before_terminal_failure() {
     let (_device_io_signal, device_io) = device_io_channel();
     let hardware = HardwareContext::injected(backend.clone(), device_io);
     let (control, mut events) = spawn_with_hardware(hardware);
-    let session = SessionId::new(7);
+    let session = PairingSessionId::new(7);
 
     control
-        .send(Control::Start {
+        .send(PairingControl::Start {
             session,
             selector: ReceiverSelector::First,
         })
@@ -56,7 +56,7 @@ async fn injected_pairing_waits_for_receiver_cleanup_before_terminal_failure() {
     assert!(matches!(searching.event, PairingEvent::Searching));
 
     control
-        .send(Control::Cancel { session })
+        .send(PairingControl::Cancel { session })
         .expect("searching pairing session accepts cancellation");
     tokio::time::timeout(Duration::from_secs(2), cleanup.request_written())
         .await

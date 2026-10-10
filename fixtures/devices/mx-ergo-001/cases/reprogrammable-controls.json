@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "name": "reprogrammable-controls",
+  "channel": "target",
+  "report_support": "short_and_long",
+  "exchanges": [
+    {
+      "request_match": "exact",
+      "request": "10ff83b5030000",
+      "response": "11ff83b5034f4c52011706070000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "10010010000000",
+      "response": "1101001004050000000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "100100001b0400",
+      "response": "110100000a000300000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "10010a00000000",
+      "response": "11010a0009000000000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11010a1000000000000000000000000000000000",
+      "response": "11010a1000500038110001010000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11010a1001000000000000000000000000000000",
+      "response": "11010a1000510039110001010000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11010a1002000000000000000000000000000000",
+      "response": "11010a100052003a710002030100000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11010a1003000000000000000000000000000000",
+      "response": "11010a100053003c710002030100000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11010a1004000000000000000000000000000000",
+      "response": "11010a100056003e710002030100000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11010a1005000000000000000000000000000000",
+      "response": "11010a1000ed00c4710002030100000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11010a1006000000000000000000000000000000",
+      "response": "11010a10005b003f710002030100000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11010a1007000000000000000000000000000000",
+      "response": "11010a10005d0040710002030100000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11010a1008000000000000000000000000000000",
+      "response": "11010a1000d700b4a00003000300000000000000",
+      "required": true
+    }
+  ]
+}

@@ -189,44 +189,102 @@ fn hook_actions_retain_the_press_time_target_across_focus_changes() {
 
 #[test]
 fn hidpp_edges_and_pulses_retain_their_press_time_targets() {
-    let (sent, received) = mpsc::channel();
-    let mut owner = ButtonRuntimeOwner::spawn(move |event| {
-        sent.send(event)
-            .expect("test receiver should stay connected");
-    })
-    .expect("button worker should start");
-    let input = owner.input();
-    let session = HidppSessionId::with_epoch("mouse-a", 7);
-    let safari = ActionDispatchTarget::SafariProcess(417);
+    for pointer in [None, Some(openlogi_hook::PointerTarget::Unavailable)] {
+        let (sent, received) = mpsc::channel();
+        let mut owner = ButtonRuntimeOwner::spawn(move |event| {
+            sent.send(event)
+                .expect("test receiver should stay connected");
+        })
+        .expect("button worker should start");
+        let input = owner.input();
+        let session = HidppSessionId::with_epoch("mouse-a", 7);
+        let safari = ActionDispatchTarget::for_pointer(pointer, || Some(417));
+        let keyboard = ActionDispatchTarget::for_pointer(pointer, || None);
 
-    input
-        .try_hidpp_down(&session, ButtonId::Back, None, safari)
-        .expect("HID++ down should be queued");
-    let ButtonRuntimeEvent::Started(started) = recv_event(&received) else {
-        panic!("HID++ down should start a lifecycle");
-    };
-    assert_eq!(started.target(), safari);
-    assert!(input.try_hidpp_up(&session, ButtonId::Back));
-    assert!(matches!(
-        recv_event(&received),
-        ButtonRuntimeEvent::Ended { .. }
-    ));
+        input
+            .try_hidpp_down(&session, ButtonId::Back, None, safari)
+            .expect("HID++ down should be queued");
+        let ButtonRuntimeEvent::Started(started) = recv_event(&received) else {
+            panic!("HID++ down should start a lifecycle");
+        };
+        assert_eq!(started.target(), safari);
+        assert!(input.try_hidpp_up(&session, ButtonId::Back));
+        assert!(matches!(
+            recv_event(&received),
+            ButtonRuntimeEvent::Ended { .. }
+        ));
 
-    assert!(input.try_hidpp_pulse(
-        &session,
-        ButtonId::Forward,
-        None,
-        ActionDispatchTarget::Keyboard,
-    ));
-    let ButtonRuntimeEvent::Started(started) = recv_event(&received) else {
-        panic!("HID++ pulse should start a lifecycle");
-    };
-    assert_eq!(started.target(), ActionDispatchTarget::Keyboard);
-    assert!(matches!(
-        recv_event(&received),
-        ButtonRuntimeEvent::Ended { .. }
-    ));
-    assert!(owner.shutdown());
+        assert!(input.try_hidpp_pulse(&session, ButtonId::Forward, None, keyboard));
+        let ButtonRuntimeEvent::Started(started) = recv_event(&received) else {
+            panic!("HID++ pulse should start a lifecycle");
+        };
+        assert_eq!(started.target(), keyboard);
+        assert!(matches!(
+            recv_event(&received),
+            ButtonRuntimeEvent::Ended { .. }
+        ));
+        assert!(owner.shutdown());
+    }
+}
+
+#[test]
+fn pointer_change_cancels_old_target_but_preserves_keyboard_and_new_target() {
+    use openlogi_hook::PointerTarget;
+    for old in [
+        PointerTarget::Window {
+            process_id: 41,
+            window_id: 7,
+        },
+        PointerTarget::Unavailable,
+    ] {
+        let (sent, received) = mpsc::channel();
+        let mut owner = ButtonRuntimeOwner::spawn(move |event| sent.send(event).expect("receiver"))
+            .expect("worker");
+        let input = owner.input();
+        let current = PointerTarget::Desktop;
+        let old_press = input
+            .try_hook_down_with_target(
+                ButtonId::Back,
+                None,
+                ActionDispatchTarget::for_pointer(Some(old), || Some(417)),
+            )
+            .expect("old down");
+        let new_press = input
+            .try_hook_down_with_target(
+                ButtonId::Forward,
+                None,
+                ActionDispatchTarget::for_pointer(Some(current), || {
+                    panic!("identified target must not capture focus")
+                }),
+            )
+            .expect("new down");
+        let keyboard = input
+            .try_hook_key_down(42, &Action::Copy, ActionDispatchTarget::Keyboard)
+            .expect("key down");
+        for _ in 0..3 {
+            assert!(matches!(
+                recv_event(&received),
+                ButtonRuntimeEvent::Started(_)
+            ));
+        }
+        input.cancel_pointer_except(current);
+        let ButtonRuntimeEvent::Ended { press, reason } = recv_event(&received) else {
+            panic!("old target must end");
+        };
+        assert_eq!(press.token(), &old_press);
+        assert_eq!(reason, EndReason::Canceled(CancelReason::Invalidated));
+        assert!(input.try_hook_up(ButtonId::Forward));
+        let ButtonRuntimeEvent::Ended { press, .. } = recv_event(&received) else {
+            panic!("new target must survive");
+        };
+        assert_eq!(press.token(), &new_press);
+        assert!(input.try_hook_key_up(42));
+        let ButtonRuntimeEvent::Ended { press, .. } = recv_event(&received) else {
+            panic!("keyboard must survive");
+        };
+        assert_eq!(press.token(), &keyboard);
+        assert!(owner.shutdown());
+    }
 }
 
 #[test]

@@ -46,9 +46,19 @@ fn about_hero(view: &Entity<SettingsView>, copied: bool, cx: &mut App) -> gpui::
         .w_full()
         .items_start()
         .gap_3()
-        .child(img(crate::app_assets::LOGO).w(px(56.)).h(px(56.)))
+        .child(
+            img(crate::app_assets::LOGO)
+                .w(px(56.))
+                .h(px(56.))
+                .flex_shrink_0(),
+        )
         .child(
             v_flex()
+                // Without `min_w_0` a flex child refuses to shrink below its
+                // content width, so the link row below overflows the card
+                // instead of wrapping inside it.
+                .min_w_0()
+                .flex_1()
                 .gap_2()
                 .child(
                     h_flex()
@@ -64,6 +74,11 @@ fn about_hero(view: &Entity<SettingsView>, copied: bool, cx: &mut App) -> gpui::
                 )
                 .child(
                     h_flex()
+                        // These buttons are label-width, so their total varies
+                        // with locale, font and DPI. Wrapping keeps the last
+                        // one reachable at any width rather than relying on the
+                        // window being wide enough to fit them on one line.
+                        .flex_wrap()
                         .items_center()
                         .gap_1()
                         .pt_1()
@@ -148,7 +163,11 @@ fn about_config(cx: &App) -> gpui::Div {
                 .gap_1()
                 .flex_1()
                 .min_w_0()
-                .child(div().font_weight(FontWeight::MEDIUM).child("config.toml"))
+                .child(
+                    div()
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(openlogi_core::paths::CONFIG_FILE),
+                )
                 .child(
                     div()
                         .text_caption()

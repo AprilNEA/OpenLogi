@@ -29,7 +29,7 @@ members = [
 default-members = ["crates/openlogi"]
 
 [workspace.package]
-version = "0.8.5"
+version = "0.8.13"
 edition = "2024"
 # Tracks current stable rather than trailing it. OpenLogi ships as an app —
 # prebuilt installers, and no crate here has an external reverse dependency —
@@ -43,9 +43,9 @@ authors = ["AprilNEA <dev@aprilnea.me>"]
 description = "Lightweight, local-first alternative to Logitech Options+ for HID++ devices"
 
 [workspace.dependencies]
-hidpp = { package = "openlogi-hidpp", path = "crates/openlogi-hidpp", version = "0.8.5" }
-openlogi-device-registry = { path = "crates/openlogi-device-registry", version = "0.8.5" }
-openlogi-fixture = { path = "crates/openlogi-fixture", version = "0.8.5" }
+hidpp = { package = "openlogi-hidpp", path = "crates/openlogi-hidpp", version = "0.8.13" }
+openlogi-device-registry = { path = "crates/openlogi-device-registry", version = "0.8.13" }
+openlogi-fixture = { path = "crates/openlogi-fixture", version = "0.8.13" }
 async-hid = { package = "openlogi-async-hid", version = "=0.5.3-openlogi.1" }
 interprocess = { version = "2", features = ["tokio"] }
 # The agent <-> GUI RPC layer itself, over the `interprocess` transport above.
@@ -84,7 +84,12 @@ objc2-application-services = { version = "0.3.2", default-features = false }
 objc2-core-graphics = { version = "0.3.2", default-features = false }
 objc2-io-kit = { version = "0.3.2", default-features = false }
 objc2-service-management = { version = "0.3.2", default-features = false }
+objc2-security = { version = "0.3.2", default-features = false }
 block2 = "0.6.2"
+dispatch2 = "0.3.1"
+# The macOS privacy-grant notifications the hook's probe cue and the agent's
+# grant watchers wake on; compiles to a heartbeat-only watch elsewhere.
+axwatch = "0.1"
 
 # Version-aligned GPUI snapshots. Keep the core and platform on one release so
 # the desktop, overlay, and their integrations share the same GPUI types.
@@ -103,6 +108,15 @@ gpui-kit-assets = { git = "https://github.com/longbridge/gpui-kit", tag = "v0.6.
 swr-core = "0.1"
 swr-gpui = { package = "swr-gpui-pre", version = "0.1" }
 
+# Backport GroupBox/SettingGroup::footer to v0.6.1 without upgrading GPUI.
+# Remove when adopting an upstream release with the footer API. Keep all Kit
+# crates on this revision, including the theme source in packaging/linux/package.nix.
+[patch."https://github.com/longbridge/gpui-kit"]
+gpui-component = { git = "https://github.com/AprilNEA/gpui-kit", rev = "1ac69bd51f744f3664361d9abd609bfc16de489f" }
+gpui-base = { git = "https://github.com/AprilNEA/gpui-kit", rev = "1ac69bd51f744f3664361d9abd609bfc16de489f" }
+gpui-kit-assets = { git = "https://github.com/AprilNEA/gpui-kit", rev = "1ac69bd51f744f3664361d9abd609bfc16de489f" }
+gpui-component-macros = { git = "https://github.com/AprilNEA/gpui-kit", rev = "1ac69bd51f744f3664361d9abd609bfc16de489f" }
+
 [workspace.lints.rust]
 # Denied workspace-wide, but `deny` (not `forbid`) so a crate that genuinely
 # needs FFI can opt in locally with `#[expect(unsafe_code, reason = "…")]`.
@@ -114,6 +128,10 @@ unwrap_used = "warn"
 expect_used = "warn"
 missing_errors_doc = "allow"
 doc_markdown = "allow"
+# Pedantic since clippy 1.99. Its rewrite, `assert_eq!(v, [] as [T; 0])`, prints
+# the leftover on failure, but the cast and the `Debug + PartialEq` bound on every
+# element type cost the tests more than that message is worth.
+assert_is_empty = "allow"
 # Machine-checks the suppression policy in .claude/rules/rust.md: every
 # suppression states a reason, and reaches for `expect` unless it cannot work.
 # Blind spot worth knowing: `allow_attributes` only sees outer `#[allow]`, so a

@@ -360,7 +360,7 @@ async fn profile_backed_support_and_route_errors_remain_typed() {
 
     let light_route = {
         let state = agent.state.lock().await;
-        standalone_route(&state.profile.standalone[0])
+        state.profile.standalone[0].route()
     };
     agent
         .clone()
@@ -506,3 +506,29 @@ fn cancel_and_device_selection_are_atomic_in_either_order() {
         Some(PairingUpdate::Failed(PairingFailure::Cancelled))
     ));
 }
+
+#[test]
+fn unpairing_drops_the_slot_from_the_rendered_inventory() {
+    let mut state = test_state();
+    let slots = |state: &State| -> Vec<u8> {
+        state
+            .render_inventory()
+            .iter()
+            .filter(|inventory| inventory.receiver.unique_id.as_deref() == Some(RECEIVER_UID))
+            .flat_map(|inventory| inventory.paired.iter().map(|device| device.slot))
+            .collect()
+    };
+    assert!(slots(&state).contains(&MOUSE_SLOT));
+
+    assert_eq!(state.unpair(&mouse_route()), Ok(()));
+    assert!(!slots(&state).contains(&MOUSE_SLOT));
+
+    let direct = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xb034,
+    };
+    assert_eq!(state.unpair(&direct), Err(PairingFailure::ReceiverNotFound));
+}
+
+#[path = "tests/corpus.rs"]
+mod corpus;

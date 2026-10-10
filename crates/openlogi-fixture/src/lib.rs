@@ -1,13 +1,18 @@
 //! Host-free fixture schemas, synthetic identity policy, and verification.
 //!
 //! A semantic [`DeviceProfile`] and raw [`HidCassette`] are deliberately
-//! separate assets. This crate validates both without file I/O, host access,
-//! or async work. Replay transport and mutable topology live in
+//! separate assets. Default features validate both without file I/O, host access,
+//! or async work. The optional `fs` feature loads verified corpus assets.
+//! Replay transport and mutable topology live in
 //! `openlogi-device`.
 
 #![deny(missing_docs)]
 #![deny(rustdoc::bare_urls)]
 #![deny(rustdoc::broken_intra_doc_links)]
+
+/// Strict filesystem loading, available only with the `fs` feature.
+#[cfg(feature = "fs")]
+pub mod fs;
 
 mod generate;
 mod identity;
@@ -48,7 +53,7 @@ pub use protocol_identity::{
 pub use schema::{
     CassetteExchange, DeviceProfile, FIXTURE_SCHEMA_VERSION, FixtureError, HidCassette,
     ProfileDeviceSettings, ProfileSetting, ProfileSupport, ReportSupport, ReportValidationError,
-    RequestMatch,
+    RequestMatch, format_hex,
 };
 pub use verify::{FixtureVerificationError, FixtureVerificationStage};
 

@@ -3,6 +3,18 @@ use openlogi_assets::DeviceEntry;
 use openlogi_core::device::DeviceTransports;
 use std::collections::HashMap;
 
+/// A resolver over `roots` — the bundle first when there are two, as in
+/// production — with `index` already in memory instead of read from them.
+fn resolver_over(roots: &[&Path], index: Option<Index>) -> AssetResolver {
+    AssetResolver {
+        read_roots: roots.iter().map(|root| root.to_path_buf()).collect(),
+        write_root: roots[roots.len() - 1].to_path_buf(),
+        has_bundle: roots.len() > 1,
+        index,
+        resolved: RefCell::default(),
+    }
+}
+
 fn mx_master_3s_entry(model_ids: Vec<String>) -> DeviceEntry {
     DeviceEntry {
         model_id: "2b043".to_string(),
@@ -93,6 +105,19 @@ fn bare_model() -> DeviceModelInfo {
     }
 }
 
+/// Registry `files` entries for `names`; the hashes and sizes are irrelevant to
+/// resolution, which only asks which names the depot publishes.
+fn registry_files(names: &[&str]) -> Vec<openlogi_assets::FileEntry> {
+    names
+        .iter()
+        .map(|name| openlogi_assets::FileEntry {
+            name: (*name).to_string(),
+            sha256: String::new(),
+            bytes: 0,
+        })
+        .collect()
+}
+
 /// A 24-byte PNG: signature + an `IHDR` chunk header carrying only the
 /// width/height — all `read_png_dimensions` actually reads.
 fn png_header(width: u32, height: u32) -> Vec<u8> {
@@ -125,12 +150,7 @@ fn resolves_old_schema_depot_on_disk() {
     .expect("write metadata.json");
     std::fs::write(dir.join("front.png"), png_header(100, 200)).expect("write front.png");
 
-    let resolver = AssetResolver {
-        read_roots: vec![root.path().to_path_buf()],
-        write_root: root.path().to_path_buf(),
-        has_bundle: false,
-        index: None,
-    };
+    let resolver = resolver_over(&[root.path()], None);
     let entry = DeviceEntry {
         model_id: "eb020".to_string(),
         model_ids: Vec::new(),
@@ -141,7 +161,7 @@ fn resolves_old_schema_depot_on_disk() {
     };
 
     let asset = resolver
-        .load_files(depot, &entry, &bare_model())
+        .load_files(depot, &entry, bare_model().extended_model_id)
         .expect("old-schema depot should resolve");
     assert_eq!(
         asset.image_path.file_name().expect("image has a file name"),
@@ -182,12 +202,7 @@ fn resolves_depot_whose_metadata_is_only_named_by_the_manifest() {
     std::fs::write(dir.join("front_ext_2.png"), png_header(860, 1256))
         .expect("write variant render");
 
-    let resolver = AssetResolver {
-        read_roots: vec![root.path().to_path_buf()],
-        write_root: root.path().to_path_buf(),
-        has_bundle: false,
-        index: None,
-    };
+    let resolver = resolver_over(&[root.path()], None);
     let entry = DeviceEntry {
         model_id: "b031".to_string(),
         model_ids: Vec::new(),
@@ -202,7 +217,7 @@ fn resolves_depot_whose_metadata_is_only_named_by_the_manifest() {
     };
 
     let asset = resolver
-        .load_files(depot, &entry, &model)
+        .load_files(depot, &entry, model.extended_model_id)
         .expect("manifest-named metadata should resolve the depot");
     assert_eq!(
         asset.image_path.file_name().expect("image has a file name"),
@@ -261,12 +276,7 @@ fn resolves_left_handed_lift_for_business_b033_ext6() {
         asset_path: format!("v1/devices/{depot}/"),
         files: Vec::new(),
     };
-    let resolver = AssetResolver {
-        read_roots: vec![root.path().to_path_buf()],
-        write_root: root.path().to_path_buf(),
-        has_bundle: false,
-        index: Some(index_of(depot, entry)),
-    };
+    let resolver = resolver_over(&[root.path()], Some(index_of(depot, entry)));
     let model = DeviceModelInfo {
         transports: DeviceTransports {
             btle: true,
@@ -317,12 +327,7 @@ fn resolves_standalone_registry_model_without_synthetic_hidpp_info() {
             files: vec![],
         },
     );
-    let resolver = AssetResolver {
-        read_roots: vec![root.path().to_path_buf()],
-        write_root: root.path().to_path_buf(),
-        has_bundle: false,
-        index: Some(index),
-    };
+    let resolver = resolver_over(&[root.path()], Some(index));
 
     let asset = resolver
         .resolve_registry_model("8c900")
@@ -371,12 +376,7 @@ fn standalone_registry_lookup_does_not_cross_model_depots() {
             ),
         ]),
     };
-    let resolver = AssetResolver {
-        read_roots: vec![root.path().to_path_buf()],
-        write_root: root.path().to_path_buf(),
-        has_bundle: false,
-        index: Some(index),
-    };
+    let resolver = resolver_over(&[root.path()], Some(index));
 
     assert!(resolver.resolve_registry_model("8c900").is_none());
     assert_eq!(
@@ -385,6 +385,65 @@ fn standalone_registry_lookup_does_not_cross_model_depots() {
             .expect("beam should resolve")
             .display_name,
         "Litra Beam"
+    );
+}
+
+#[test]
+fn resolves_depot_with_named_manifest_and_non_standard_render() {
+    let root = tempfile::tempdir().expect("create temp dir");
+    let depot = "pro_keyboard_ext1";
+    let dir = root.path().join(depot);
+    std::fs::create_dir_all(&dir).expect("create depot dir");
+    std::fs::write(
+        dir.join("manifest.json"),
+        r#"{"devices":[
+            {"modelId":"pro_keyboard_ext1","resources":[{"key":"device_image","src":"front_mx.png"}]},
+            {"modelId":"pro_keyboard_ext7","resources":[{"key":"device_image","src":"front_kda.png"}]}
+        ],"resources":[]}"#,
+    )
+    .expect("write manifest");
+    std::fs::write(
+        dir.join("metadata.json"),
+        r#"{"images":[{"key":"device_image","origin":{"width":500,"height":300}}]}"#,
+    )
+    .expect("write metadata");
+    std::fs::write(dir.join("front_mx.png"), png_header(500, 300)).expect("write front_mx.png");
+    std::fs::write(dir.join("front_kda.png"), png_header(500, 300)).expect("write front_kda.png");
+
+    let resolver = AssetResolver {
+        read_roots: vec![root.path().to_path_buf()],
+        write_root: root.path().to_path_buf(),
+        has_bundle: false,
+        index: None,
+        resolved: RefCell::default(),
+    };
+    let entry = DeviceEntry {
+        model_id: "c339".to_string(),
+        model_ids: vec!["c339".to_string()],
+        display_name: "PRO".to_string(),
+        kind: "KEYBOARD".to_string(),
+        asset_path: format!("v1/devices/{depot}/"),
+        files: Vec::new(),
+    };
+
+    // Base model (ext == 0) resolves front_mx.png via pro_keyboard_ext1
+    let asset = resolver
+        .load_files(depot, &entry, bare_model().extended_model_id)
+        .expect("pro keyboard base variant should resolve");
+    assert_eq!(
+        asset.image_path.file_name().expect("filename"),
+        "front_mx.png"
+    );
+
+    // KDA variant (ext == 7) resolves front_kda.png via pro_keyboard stem + _ext7
+    let mut kda_model = bare_model();
+    kda_model.extended_model_id = 7;
+    let kda_asset = resolver
+        .load_files(depot, &entry, kda_model.extended_model_id)
+        .expect("pro keyboard KDA variant should resolve");
+    assert_eq!(
+        kda_asset.image_path.file_name().expect("filename"),
+        "front_kda.png"
     );
 }
 
@@ -399,11 +458,9 @@ fn unsafe_standalone_manifest_filename_is_rejected() {
     )
     .expect("write manifest");
     std::fs::write(root.path().join("front.png"), png_header(1, 1)).expect("write escape");
-    let resolver = AssetResolver {
-        read_roots: vec![root.path().to_path_buf()],
-        write_root: root.path().to_path_buf(),
-        has_bundle: false,
-        index: Some(index_of(
+    let resolver = resolver_over(
+        &[root.path()],
+        Some(index_of(
             "litra_glow",
             DeviceEntry {
                 model_id: "8c900".into(),
@@ -418,7 +475,7 @@ fn unsafe_standalone_manifest_filename_is_rejected() {
                 }],
             },
         )),
-    };
+    );
     assert!(resolver.resolve_registry_model("8c900").is_none());
 }
 
@@ -437,11 +494,9 @@ fn standalone_resolution_prefers_the_first_read_root() {
         )
         .expect("write front");
     }
-    let resolver = AssetResolver {
-        read_roots: roots.iter().map(|root| root.path().to_path_buf()).collect(),
-        write_root: roots[1].path().to_path_buf(),
-        has_bundle: true,
-        index: Some(index_of(
+    let resolver = resolver_over(
+        &[roots[0].path(), roots[1].path()],
+        Some(index_of(
             "litra_glow",
             DeviceEntry {
                 model_id: "8c900".into(),
@@ -456,7 +511,7 @@ fn standalone_resolution_prefers_the_first_read_root() {
                 }],
             },
         )),
-    };
+    );
 
     let asset = resolver
         .resolve_registry_model("8c900")
@@ -466,6 +521,121 @@ fn standalone_resolution_prefers_the_first_read_root() {
         asset.image_path,
         roots[0].path().join("litra_glow/front.png")
     );
+}
+
+/// A Signature M650 (plain) model, matching the config.toml quoted in
+/// issue #1332: `model_ids = [0xb02a, 0, 0]`, `extended_model_id = 8`.
+fn m650_plain_model() -> DeviceModelInfo {
+    DeviceModelInfo {
+        entity_count: 0,
+        serial_number: None,
+        unit_id: [0; 4],
+        transports: DeviceTransports {
+            btle: true,
+            ..Default::default()
+        },
+        model_ids: [0xb02a, 0, 0],
+        extended_model_id: 8,
+    }
+}
+
+/// The catalog's single entry for `2b02a`: the Signature M650 *L* depot,
+/// whose one `displayName` covers every extended-model-id variant.
+fn m650_l_depot_entry() -> DeviceEntry {
+    DeviceEntry {
+        model_id: "2b02a".to_string(),
+        model_ids: Vec::new(),
+        display_name: "Signature M650 L".to_string(),
+        kind: "mouse".to_string(),
+        asset_path: "assets/signature_m650/".to_string(),
+        files: Vec::new(),
+    }
+}
+
+fn m650_index() -> Index {
+    index_of("signature_m650", m650_l_depot_entry())
+}
+
+#[test]
+fn cached_m650_assets_keep_each_devices_firmware_name() {
+    let root = tempfile::tempdir().expect("create asset root");
+    let depot = root.path().join("signature_m650");
+    std::fs::create_dir_all(&depot).unwrap();
+    std::fs::write(
+        depot.join("metadata.json"),
+        r#"{"images":[{"key":"device_image","origin":{"width":100,"height":200}}]}"#,
+    )
+    .unwrap();
+    std::fs::write(depot.join("front.png"), png_header(100, 200)).unwrap();
+    let resolver = resolver_over(&[root.path()], Some(m650_index()));
+    let model = m650_plain_model();
+
+    // Resolve without a firmware name first, then reuse the same cached
+    // artwork for both names. Neither a cache hit nor a previous device may
+    // decide the next device's display name.
+    for (codename, expected) in [
+        (None, "Signature M650 L"),
+        (Some("Signature M650 Mouse"), "Signature M650"),
+        (Some("Signature M650 L"), "Signature M650 L"),
+        (Some("Signature M650 Mouse"), "Signature M650"),
+    ] {
+        let asset = resolver.resolve(&model, codename).expect("resolve M650");
+        assert_eq!(asset.display_name, expected);
+        assert_eq!(asset.image_path, depot.join("front.png"));
+    }
+    assert_eq!(resolver.resolved.borrow().len(), 1, "artwork stays shared");
+}
+
+#[test]
+fn variant_display_name_preserves_matching_and_whitespace_rules() {
+    // None means leave the catalog name untouched, including its whitespace.
+    for (catalog, codename, correction) in [
+        (
+            "Signature M650 L",
+            Some("Signature M650 Mouse"),
+            Some("Signature M650"),
+        ),
+        ("Signature M650 L", Some("Signature M650 L"), None),
+        ("Signature M650 L", None, None),
+        ("MX Master 3S", Some("M3S"), None),
+        ("MX Master 3S", Some("MX Master"), None),
+        ("MX Master X", Some("MX Master"), None),
+        (
+            "Signature M650 L LEFT",
+            Some("signature m650"),
+            Some("Signature M650"),
+        ),
+        ("Signature M650 L Pro", Some("Signature M650"), None),
+        ("Signature M650", Some("Signature M650 L"), None),
+        ("Other M650 L", Some("Signature M650"), None),
+        ("Signature M650 L", Some(" \t"), None),
+        ("Signature M650 L", Some("Mouse Keyboard Trackball"), None),
+        ("", Some("Signature M650"), None),
+        (
+            " \tSignature\u{2003}M650  l \n",
+            Some("signature\tM650 mouse"),
+            Some("Signature M650"),
+        ),
+        (" MX\tMaster 3S ", Some("MX Master"), None),
+        ("Élan L", Some("Élan Mouse"), Some("Élan")),
+        // Characterize existing behavior, not a new tail-only removal policy.
+        (
+            "Signature M650 L",
+            Some("Signature Mouse M650"),
+            Some("Signature M650"),
+        ),
+        (
+            "Signature M650 L",
+            Some("Signature M650 \u{212a}eyboard"),
+            Some("Signature M650"),
+        ),
+    ] {
+        assert_eq!(
+            variant_display_name_override(catalog, codename).as_deref(),
+            correction,
+            "catalog={catalog:?}, codename={codename:?}"
+        );
+    }
 }
 
 #[test]
@@ -487,5 +657,259 @@ fn cleanup_removes_only_legacy_glow_pngs() {
     assert!(
         depot.join("front.png").exists() && depot.join("metadata.json").exists(),
         "real assets must be left untouched"
+    );
+}
+
+/// The depot [`mx_master_3s_index`] maps the MX Master 3S to, with one render
+/// of its own width per colour variant. Returns the depot directory.
+fn write_variant_depot(root: &Path, variants: &[(u8, u32)]) -> PathBuf {
+    let depot = "mx_master_3s";
+    let dir = root.join(depot);
+    std::fs::create_dir_all(&dir).expect("create depot dir");
+    let devices: Vec<String> = variants
+        .iter()
+        .map(|(ext, _)| {
+            format!(
+                r#"{{"modelId":"2b034_ext{ext}","resources":[
+                    {{"key":"device_buttons_image","src":"side_ext_{ext}.png"}}]}}"#
+            )
+        })
+        .collect();
+    std::fs::write(
+        dir.join("manifest.json"),
+        format!(r#"{{"devices":[{}]}}"#, devices.join(",")),
+    )
+    .expect("write manifest");
+    std::fs::write(dir.join("core_metadata.json"), r#"{"images":[]}"#).expect("write metadata");
+    for (ext, width) in variants {
+        std::fs::write(
+            dir.join(format!("side_ext_{ext}.png")),
+            png_header(*width, 10),
+        )
+        .expect("write render");
+    }
+    dir
+}
+
+fn mx_master_3s(extended_model_id: u8) -> DeviceModelInfo {
+    DeviceModelInfo {
+        model_ids: [0xb034, 0, 0],
+        extended_model_id,
+        ..bare_model()
+    }
+}
+
+/// The device list is rebuilt on every agent snapshot, so a resolver must not
+/// go back to disk for an asset it has already found. Deleting the depot
+/// between two resolves is the proof: the second answer can only come from
+/// memory. A new resolver is the one way to see the change, which is what the
+/// runtime builds when a download lands or the cache is cleared.
+#[test]
+fn a_found_asset_is_answered_from_memory_until_the_resolver_is_replaced() {
+    let root = tempfile::tempdir().expect("create temp dir");
+    let dir = write_variant_depot(root.path(), &[(2, 100)]);
+    let resolver = resolver_over(&[root.path()], Some(mx_master_3s_index()));
+
+    let found = resolver
+        .resolve(&mx_master_3s(2), None)
+        .expect("the depot is on disk");
+    std::fs::remove_dir_all(&dir).expect("remove the depot");
+
+    assert_eq!(resolver.resolve(&mx_master_3s(2), None), Some(found));
+    assert_eq!(
+        resolver_over(&[root.path()], Some(mx_master_3s_index())).resolve(&mx_master_3s(2), None),
+        None,
+        "a replacement resolver reads the disk again"
+    );
+}
+
+#[test]
+fn a_found_standalone_asset_is_answered_from_memory_too() {
+    let root = tempfile::tempdir().expect("create temp dir");
+    let depot = root.path().join("litra_glow");
+    std::fs::create_dir_all(&depot).expect("create depot dir");
+    std::fs::write(depot.join("front.png"), png_header(396, 396)).expect("write front");
+    let index = index_of(
+        "litra_glow",
+        DeviceEntry {
+            model_id: "8c900".into(),
+            model_ids: vec![],
+            display_name: "Litra Glow".into(),
+            kind: "ILLUMINATION_LIGHT".into(),
+            asset_path: "v1/devices/litra_glow/".into(),
+            files: vec![openlogi_assets::FileEntry {
+                name: "front.png".into(),
+                sha256: String::new(),
+                bytes: 0,
+            }],
+        },
+    );
+    let resolver = resolver_over(&[root.path()], Some(index));
+
+    let found = resolver
+        .resolve_registry_model("8c900")
+        .expect("the depot is on disk");
+    std::fs::remove_dir_all(&depot).expect("remove the depot");
+
+    assert_eq!(resolver.resolve_registry_model("8c900"), Some(found));
+}
+
+/// Only finds are remembered. A depot that is not on disk yet is downloaded in
+/// the background, and partial writes can land before the download that
+/// replaces the resolver settles; the next resolve has to see them.
+#[test]
+fn a_depot_that_lands_after_a_miss_is_found_by_the_same_resolver() {
+    let root = tempfile::tempdir().expect("create temp dir");
+    let resolver = resolver_over(&[root.path()], Some(mx_master_3s_index()));
+    assert_eq!(resolver.resolve(&mx_master_3s(2), None), None);
+
+    write_variant_depot(root.path(), &[(2, 100)]);
+
+    assert!(resolver.resolve(&mx_master_3s(2), None).is_some());
+}
+
+/// Two colours of one model share a depot and nothing else: the second must
+/// not be handed the render remembered for the first.
+#[test]
+fn colour_variants_of_one_depot_are_remembered_apart() {
+    let root = tempfile::tempdir().expect("create temp dir");
+    let dir = write_variant_depot(root.path(), &[(2, 100), (12, 200)]);
+    let resolver = resolver_over(&[root.path()], Some(mx_master_3s_index()));
+
+    let graphite = resolver
+        .resolve(&mx_master_3s(2), None)
+        .expect("graphite resolves");
+    let pale_grey = resolver
+        .resolve(&mx_master_3s(12), None)
+        .expect("pale grey resolves");
+
+    assert_eq!(graphite.image_path, dir.join("side_ext_2.png"));
+    assert_eq!(pale_grey.image_path, dir.join("side_ext_12.png"));
+    assert_eq!((graphite.png_width, pale_grey.png_width), (100, 200));
+}
+
+/// A camera depot (the C922 / StreamCam family) ships `front.png` and a
+/// manifest but none of the hotspot metadata files — its `image_metadata` is a
+/// per-PID `metadata_<pid>.json` nobody reads. The render alone must resolve,
+/// or every webcam falls back to the gallery glyph.
+#[test]
+fn resolves_camera_depot_without_hotspot_metadata() {
+    let root = tempfile::tempdir().expect("create temp dir");
+    let depot = "c922";
+    let dir = root.path().join(depot);
+    std::fs::create_dir_all(&dir).expect("create depot dir");
+    std::fs::write(
+        dir.join("manifest.json"),
+        r#"{"devices":[{"modelId":"085c","resources":[
+            {"key":"device_camera_image","src":"front.png"},
+            {"key":"image_metadata","src":"metadata_085c.json"}]}],
+          "resources":[]}"#,
+    )
+    .expect("write manifest.json");
+    std::fs::write(dir.join("front.png"), png_header(300, 150)).expect("write front.png");
+
+    let resolver = AssetResolver {
+        read_roots: vec![root.path().to_path_buf()],
+        write_root: root.path().to_path_buf(),
+        has_bundle: false,
+        index: None,
+        resolved: RefCell::default(),
+    };
+    let entry = DeviceEntry {
+        model_id: "085c".to_string(),
+        model_ids: vec!["0883".to_string(), "0894".to_string(), "085c".to_string()],
+        display_name: "C922".to_string(),
+        kind: "CAMERA".to_string(),
+        asset_path: format!("v1/devices/{depot}/"),
+        files: registry_files(&["front.png", "manifest.json", "metadata_085c.json"]),
+    };
+    let mut model = bare_model();
+    model.model_ids = [0x085c, 0, 0];
+
+    let asset = resolver
+        .load_files(depot, &entry, model.extended_model_id)
+        .expect("render-only camera depot should resolve");
+    assert_eq!(
+        asset.image_path.file_name().expect("image has a file name"),
+        "front.png"
+    );
+    assert_eq!(
+        asset.hero_image_path.as_deref(),
+        Some(asset.image_path.as_path())
+    );
+    assert_eq!((asset.png_width, asset.png_height), (300, 150));
+    assert_eq!(asset.kind, Some(DeviceKind::Camera));
+    assert_eq!(asset.metadata.assignments().count(), 0);
+}
+
+/// A depot that *publishes* hotspot metadata (every mouse and keyboard) but has
+/// none in this root is a stale or half-synced cache, not a metadata-free
+/// device. It must keep missing so the next root or the synthetic fallback
+/// serves the device instead of a render with no hotspots.
+#[test]
+fn metadata_publishing_depot_without_cached_metadata_still_misses() {
+    let root = tempfile::tempdir().expect("create temp dir");
+    let depot = "mx_master_4";
+    let dir = root.path().join(depot);
+    std::fs::create_dir_all(&dir).expect("create depot dir");
+    std::fs::write(dir.join("front_core.png"), png_header(100, 200)).expect("write render");
+    std::fs::write(dir.join("side_core.png"), png_header(100, 200)).expect("write render");
+
+    let resolver = AssetResolver {
+        read_roots: vec![root.path().to_path_buf()],
+        write_root: root.path().to_path_buf(),
+        has_bundle: false,
+        index: None,
+        resolved: RefCell::default(),
+    };
+    let entry = DeviceEntry {
+        model_id: "2b042".to_string(),
+        model_ids: Vec::new(),
+        display_name: "MX Master 4".to_string(),
+        kind: "MOUSE".to_string(),
+        asset_path: format!("v1/devices/{depot}/"),
+        files: registry_files(&[
+            "core_metadata.json",
+            "front_core.png",
+            "manifest.json",
+            "side_core.png",
+        ]),
+    };
+    assert!(
+        resolver
+            .load_files(depot, &entry, bare_model().extended_model_id)
+            .is_none()
+    );
+}
+
+/// An unsynced depot directory — no render at all — must still miss, so the
+/// metadata relaxation above doesn't turn an empty cache into a broken image.
+#[test]
+fn depot_without_any_render_still_misses() {
+    let root = tempfile::tempdir().expect("create temp dir");
+    let depot = "c922";
+    let dir = root.path().join(depot);
+    std::fs::create_dir_all(&dir).expect("create depot dir");
+    std::fs::write(dir.join("manifest.json"), b"{}").expect("write manifest.json");
+
+    let resolver = AssetResolver {
+        read_roots: vec![root.path().to_path_buf()],
+        write_root: root.path().to_path_buf(),
+        has_bundle: false,
+        index: None,
+        resolved: RefCell::default(),
+    };
+    let entry = DeviceEntry {
+        model_id: "085c".to_string(),
+        model_ids: Vec::new(),
+        display_name: "C922".to_string(),
+        kind: "CAMERA".to_string(),
+        asset_path: format!("v1/devices/{depot}/"),
+        files: Vec::new(),
+    };
+    assert!(
+        resolver
+            .load_files(depot, &entry, bare_model().extended_model_id)
+            .is_none()
     );
 }
