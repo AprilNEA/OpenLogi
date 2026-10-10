@@ -366,7 +366,9 @@ impl ChannelRegistry {
             PublicationState::Current
         } else if matches!(
             shared.route(),
-            DeviceRoute::Bolt { .. } | DeviceRoute::Unifying { .. }
+            DeviceRoute::Bolt { .. }
+                | DeviceRoute::Unifying { .. }
+                | DeviceRoute::Hidpp20Receiver { .. }
         ) && self.inner.lookup(shared.route()).is_none()
             && self.inner.contains_channel(shared.channel())
         {
