@@ -1,7 +1,7 @@
 //! Enumerate connected HID++ receivers and their paired devices.
 
 use std::{
-    collections::{HashMap, HashSet, hash_map::Entry},
+    collections::{HashMap, HashSet},
     hash::Hash,
     sync::Arc,
     time::{Duration, Instant},
@@ -16,10 +16,10 @@ use tracing::{debug, warn};
 use crate::ChannelRegistry;
 use crate::backend::{BackendError, HidBackend, NodeId, NodeInfo};
 use crate::channel::route::{DeviceRoute, find_receiver};
-use crate::host_lock;
 use ledger::{NodeLedger, SettledNode};
 
 mod cache;
+mod channel_cache;
 pub mod events;
 mod features;
 pub mod hotplug;
@@ -30,165 +30,12 @@ mod probe;
 pub mod standalone;
 
 use cache::{CACHE_MISS_GRACE, CacheKey, CacheOutcome, Cached};
+use channel_cache::ChannelCache;
 use events::{ChannelEventSubscriptions, EventNotifier, EventSubscriptionHandle};
 use persist::{ProbeCacheSnapshot, ProbeCacheStore};
-use probe::{NodeProbe, PassContext, ProbeVerdict, probe_one};
-
-/// How long to wait for device-arrival event bursts before assuming the
-/// receiver has finished reporting. MX Master 4 (and other devices that may
-/// be asleep) need a generous window to wake and respond to the arrival
-/// ping; we err on the side of waiting.
-const ARRIVAL_DRAIN: Duration = Duration::from_millis(1500);
-
-/// A Unifying receiver can transiently stall the first arrival-trigger write
-/// while its previous scan settles. Retry once inside the same probe instead
-/// of making the inventory ledger treat that single write as a dead channel.
-const UNIFYING_TRIGGER_RETRY_DELAY: Duration = Duration::from_millis(300);
-
-/// One device-arrival trigger addresses the receiver itself and should ACK
-/// immediately. Keep each attempt well inside the enclosing receiver probe
-/// budget so a slow write still retains its liveness-aware probe verdict.
-const UNIFYING_TRIGGER_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(750);
-
-/// Receiver register operations are normally answered in a few milliseconds.
-/// Keep a stalled liveness/notification request from consuming the enclosing
-/// receiver probe budget, so a responsive channel can still report an
-/// `AliveButIncomplete` arrival replay instead of becoming an ordinary probe
-/// timeout.
-const RECEIVER_OPERATION_TIMEOUT: Duration = Duration::from_millis(750);
-
-/// A receiver UID is cache metadata rather than a liveness gate. Give it a
-/// shorter window so a delayed serial-number read cannot crowd out the arrival
-/// replay and feature-walk budgets.
-const RECEIVER_UID_TIMEOUT: Duration = Duration::from_millis(500);
-
-/// Maximum number of pairing slots a Bolt receiver supports. We iterate this
-/// range to surface paired-but-offline devices that won't fire arrival events.
-const MAX_BOLT_SLOTS: u8 = 6;
-
-/// Upper bound on probing one HID node's I/O. `hidpp`'s request/response has
-/// no timeout of its own, so without this a single unresponsive (e.g. asleep)
-/// device wedges the whole enumeration, so a permanent hang would stall every
-/// later event or recovery reconciliation. Time spent waiting for the node's
-/// register phase is not I/O and sits outside it — see [`ProbeDeadlines`].
-///
-/// A timed-out node is skipped and re-probed by the bounded two-second repair
-/// deadline, and the first probe usually wakes the device so the retry succeeds
-/// fast.
-/// Slots are probed concurrently on both receiver paths, so a receiver's worst
-/// case is the 1.5 s arrival drain plus a single slot's [`BOLT_SLOT_PROBE`] /
-/// [`UNIFYING_SLOT_PROBE`] — not their sum — plus, on Bolt only, the
-/// sequential pairing-register pass that precedes the slot walk. This stays
-/// comfortably above that, so awake devices never trip it.
-///
-/// Sized for the Bluetooth-direct feature walk, the long pole: a ~35-entry
-/// table over a link that drops individual reports, which `hidpp::device`
-/// re-asks for per entry. At 6 s one lost report consumed the whole budget and
-/// the walk was abandoned mid-table, surfacing as a mouse that never appeared.
-const PROBE_BUDGET: Duration = Duration::from_secs(25);
-
-/// Probe budget for receiver nodes (Bolt/Unifying/Lightspeed dongles).
-///
-/// The 25 s [`PROBE_BUDGET`] is sized for Bluetooth-direct feature walks that
-/// receivers never perform. Keeping the receiver budget tighter matters
-/// because a full-budget timeout is also the detection path for a channel
-/// whose input-report delivery died (observed on macOS with concurrent opens
-/// of the same node: requests keep being written and answered, but the
-/// replies are delivered only to the other open handle). Until the channel is
-/// replaced every write on it stalls — DPI, SmartShift, ring haptics — so
-/// this budget bounds that outage.
-///
-/// It must still fit a receiver probe's real worst case, which is NOT the
-/// millisecond register reads but a paired device's full HID++ 2.0 feature
-/// walk: 1.5 s arrival drain + the sequential pairing-register pass + one
-/// slot's [`BOLT_SLOT_PROBE`] (10 s). 6 s proved too tight — a legitimate
-/// deep walk tripped the dead-delivery eviction, the surfaced-empty inventory
-/// tore down capture plans, and a pinned stale channel Arc then deadlocked
-/// recovery (dead buttons until restart). 13 s clears the honest worst case
-/// — and only that: the wait for the receiver's register phase, up to
-/// [`host_lock::RECEIVER_REGISTER_WAIT`] on its own, is taken before this
-/// budget starts (see [`ProbeDeadlines`]), or the two together would trip
-/// it on a working receiver.
-const RECEIVER_PROBE_BUDGET: Duration = Duration::from_secs(13);
-
-/// Per-slot budget for the HID++ 2.0 feature walk on a Unifying paired device.
-///
-/// Unifying wireless round-trips are slower than Bolt BTLE: some devices (e.g.
-/// K540) take ~3 s for the version ping to return. Running multiple slow slots
-/// concurrently can still consume the full PROBE_BUDGET and get cancelled
-/// mid-walk — the probe returns nothing rather than partial features.  A
-/// per-slot cap ensures each slot's feature walk is bounded independently of
-/// how many other slots are being probed at the same time.  A timed-out slot
-/// still surfaces in the inventory (kind + wpid from the arrival event) — it
-/// just lacks capabilities / battery until the next reconciliation.
-const UNIFYING_SLOT_PROBE: Duration = Duration::from_millis(3500);
-
-/// Per-slot budget when a Unifying device already has a fresh immutable probe.
-///
-/// This path normally performs just one battery read. Some Lightspeed devices
-/// occasionally omit that reply even though their receiver has just emitted a
-/// live device-arrival event. Do not let that optional refresh consume the
-/// full first-sight feature-walk budget or delay publication of a known-online
-/// mouse on every reconciliation.
-const UNIFYING_CACHED_SLOT_PROBE: Duration = Duration::from_millis(750);
-
-/// Per-slot budget for the HID++ 2.0 feature walk on a Bolt paired device.
-///
-/// Bounds a single device that stops answering its feature-walk reads (seen on
-/// a recent macOS IOHID stack with a new MX Master 4) so it falls back to its
-/// cached / identity-only data instead of pinning its slot future forever
-/// (#218). Slots walk *concurrently* (mirroring the Unifying path), so this
-/// budget covers the slowest single slot rather than dividing [`PROBE_BUDGET`]
-/// across the slot count. A healthy walk is not always fast either: a
-/// feature-rich device enumerates a large table one round-trip per feature
-/// (the MX Master 4's 45 features take ~1–1.6 s over Bolt even awake), and on
-/// high-latency USB paths (a Bolt receiver behind a KVM's USB emulation) it
-/// takes several seconds — the previous 3 s cap starved every slot there, so a
-/// newly paired device could never acquire model info at all. 10 s is generous
-/// headroom for degraded-but-alive paths while still fitting [`PROBE_BUDGET`]
-/// after the 1.5 s arrival drain and Bolt's sequential pairing-register pass.
-const BOLT_SLOT_PROBE: Duration = Duration::from_secs(10);
-
-/// The deadlines one probe pass runs under, kept together so their
-/// composition — which waits sit inside which budget — is one place to read,
-/// and one value for a test to shrink.
-///
-/// The composition: a receiver probe waits for the node's register phase for
-/// up to `register_lock_wait` *before* its `receiver_budget` starts, and
-/// under that budget runs an `arrival_drain` and slot walks each bounded by
-/// their own slot probe. A direct device runs under `direct_budget` alone.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct ProbeDeadlines {
-    /// How long a receiver probe waits for another OpenLogi process to
-    /// release the node's register phase before settling as deferred
-    /// ([`probe::ProbeVerdict::Deferred`]). Outside the I/O budget.
-    pub(crate) register_lock_wait: Duration,
-    /// [`RECEIVER_PROBE_BUDGET`].
-    pub(crate) receiver_budget: Duration,
-    /// [`PROBE_BUDGET`].
-    pub(crate) direct_budget: Duration,
-    /// [`ARRIVAL_DRAIN`].
-    pub(crate) arrival_drain: Duration,
-    /// [`BOLT_SLOT_PROBE`].
-    pub(crate) bolt_slot_probe: Duration,
-    /// [`UNIFYING_SLOT_PROBE`].
-    pub(crate) unifying_slot_probe: Duration,
-    /// [`UNIFYING_CACHED_SLOT_PROBE`].
-    pub(crate) unifying_cached_slot_probe: Duration,
-}
-
-impl ProbeDeadlines {
-    /// The production deadlines.
-    pub(crate) const DEFAULT: Self = Self {
-        register_lock_wait: host_lock::RECEIVER_REGISTER_WAIT,
-        receiver_budget: RECEIVER_PROBE_BUDGET,
-        direct_budget: PROBE_BUDGET,
-        arrival_drain: ARRIVAL_DRAIN,
-        bolt_slot_probe: BOLT_SLOT_PROBE,
-        unifying_slot_probe: UNIFYING_SLOT_PROBE,
-        unifying_cached_slot_probe: UNIFYING_CACHED_SLOT_PROBE,
-    };
-}
+use probe::{NodeProbe, PassContext, ProbeTimeouts, ProbeVerdict, probe_one};
+#[cfg(test)]
+use probe::{UNIFYING_CACHED_SLOT_PROBE_TIMEOUT, UNIFYING_SLOT_PROBE_TIMEOUT};
 
 /// Errors raised while enumerating HID++ devices.
 #[derive(Debug, Error)]
@@ -243,8 +90,8 @@ pub struct Enumerator {
     retry_needed_last_tick: bool,
     /// Coalesced lifecycle-event sink installed on newly opened channels.
     event_notifier: Option<EventNotifier>,
-    /// The deadlines every pass's probes run under.
-    deadlines: ProbeDeadlines,
+    /// The timeouts every pass's probes run under.
+    timeouts: ProbeTimeouts,
 }
 
 /// An open channel to a receiver / direct-device HID node, held across
@@ -265,129 +112,6 @@ struct PreparedNodes {
     retiring: Vec<NodeId>,
 }
 
-/// One channel's place in its lifecycle: serving, or retired and draining
-/// toward quiescence so its node may reopen.
-enum ChannelState<Channel> {
-    Active(Channel),
-    Retiring(Channel),
-}
-
-/// Per-node channel lifecycle, generic so ownership transitions can be tested
-/// without constructing a platform HID node. One map on purpose: a node
-/// holding an active *and* a retiring channel — two live opens of one OS
-/// node, the state the macOS dead-delivery hazard rides on — used to be
-/// representable across two maps and guarded only by a release-silent
-/// `debug_assert`; keyed by node in a single map, it cannot exist.
-struct ChannelCache<Node, Channel> {
-    channels: HashMap<Node, ChannelState<Channel>>,
-}
-
-impl<Node, Channel> Default for ChannelCache<Node, Channel> {
-    fn default() -> Self {
-        Self {
-            channels: HashMap::new(),
-        }
-    }
-}
-
-impl<Node: Eq + Hash + Clone, Channel> ChannelCache<Node, Channel> {
-    fn get(&self, node: &Node) -> Option<&Channel> {
-        match self.channels.get(node)? {
-            ChannelState::Active(channel) => Some(channel),
-            ChannelState::Retiring(_) => None,
-        }
-    }
-
-    /// The active channels, for callers that sweep what is currently serving.
-    fn active_iter(&self) -> impl Iterator<Item = (&Node, &Channel)> {
-        self.channels
-            .iter()
-            .filter_map(|(node, state)| match state {
-                ChannelState::Active(channel) => Some((node, channel)),
-                ChannelState::Retiring(_) => None,
-            })
-    }
-
-    fn insert(&mut self, node: Node, channel: Channel) {
-        match self.channels.entry(node) {
-            Entry::Occupied(mut entry) => match entry.get_mut() {
-                state @ ChannelState::Active(_) => *state = ChannelState::Active(channel),
-                // A retiring channel is still draining toward quiescence, and
-                // `prepare_open` refuses the node until it has — so this arm
-                // is unreachable through current callers. Keeping the
-                // draining channel (and dropping the newcomer, which closes
-                // its OS handle promptly) preserves the one-channel-per-node
-                // invariant either way.
-                ChannelState::Retiring(_) => {
-                    warn!("refusing to replace a retiring channel — dropping the fresh open");
-                    drop(channel);
-                }
-            },
-            Entry::Vacant(entry) => {
-                entry.insert(ChannelState::Active(channel));
-            }
-        }
-    }
-
-    /// Move an active channel into the retiring state. `false` when the node
-    /// is unknown or already retiring (the original retirement keeps its
-    /// place — and its drain clock).
-    fn retire_node(&mut self, node: &Node) -> bool {
-        let Some(state) = self.channels.get_mut(node) else {
-            return false;
-        };
-        if matches!(state, ChannelState::Retiring(_)) {
-            return false;
-        }
-        let Some(ChannelState::Active(channel) | ChannelState::Retiring(channel)) =
-            self.channels.remove(node)
-        else {
-            return false;
-        };
-        self.channels
-            .insert(node.clone(), ChannelState::Retiring(channel));
-        true
-    }
-
-    /// Whether this node may be opened during the current tick. A quiescent
-    /// retirement is dropped here, but opening remains deferred to a later tick.
-    fn prepare_open(&mut self, node: &Node, is_quiescent: impl FnOnce(&Channel) -> bool) -> bool {
-        let Some(ChannelState::Retiring(channel)) = self.channels.get(node) else {
-            return true;
-        };
-        if is_quiescent(channel) {
-            self.channels.remove(node);
-        }
-        false
-    }
-
-    /// Retire every active node not in `seen`; returns how many retired.
-    fn retire_absent(&mut self, seen: &HashSet<Node>) -> usize {
-        let absent = self
-            .active_iter()
-            .map(|(node, _)| node)
-            .filter(|node| !seen.contains(*node))
-            .cloned()
-            .collect::<Vec<_>>();
-        absent
-            .into_iter()
-            .filter(|node| self.retire_node(node))
-            .count()
-    }
-
-    fn reap_absent(&mut self, seen: &HashSet<Node>, is_quiescent: impl Fn(&Channel) -> bool) {
-        self.channels.retain(|node, state| match state {
-            ChannelState::Active(_) => true,
-            ChannelState::Retiring(channel) => seen.contains(node) || !is_quiescent(channel),
-        });
-    }
-
-    #[cfg(test)]
-    fn is_retiring(&self, node: &Node) -> bool {
-        matches!(self.channels.get(node), Some(ChannelState::Retiring(_)))
-    }
-}
-
 fn routes_for_inventories(inventories: &[DeviceInventory]) -> Vec<DeviceRoute> {
     inventories
         .iter()
@@ -395,7 +119,7 @@ fn routes_for_inventories(inventories: &[DeviceInventory]) -> Vec<DeviceRoute> {
             inventory
                 .paired
                 .iter()
-                .filter_map(|paired| DeviceRoute::device_route_for(inventory, paired.slot))
+                .filter_map(|paired| DeviceRoute::for_slot(inventory, paired.slot))
         })
         .collect()
 }
@@ -627,7 +351,7 @@ impl Enumerator {
             open_failures_last_tick: false,
             retry_needed_last_tick: false,
             event_notifier: None,
-            deadlines: ProbeDeadlines::DEFAULT,
+            timeouts: ProbeTimeouts::DEFAULT,
         }
     }
 
@@ -767,7 +491,7 @@ impl Enumerator {
 
     /// One enumeration pass, reusing the cache from prior passes. Probes every
     /// HID candidate concurrently (so one asleep node that burns the whole
-    /// `PROBE_BUDGET` can't stall the others), reusing each device's cached
+    /// `PROBE_TIMEOUT` can't stall the others), reusing each device's cached
     /// immutable data when it's present and fresh.
     ///
     /// A node the OS still lists but whose probe fails (receiver registers
@@ -808,10 +532,10 @@ impl Enumerator {
 
         // Probe each open channel concurrently, sharing `&cache` read-only;
         // updates are collected and applied afterwards (no `RefCell`). Each
-        // probe bounds its own I/O by the pass's deadlines (`probe_one`).
+        // probe bounds its own I/O by the pass's timeouts (`probe_one`).
         let results = {
             let cache = &self.cache;
-            let deadlines = &self.deadlines;
+            let timeouts = &self.timeouts;
             active
                 .into_iter()
                 .map(|(info, channel, events)| async move {
@@ -820,7 +544,7 @@ impl Enumerator {
                         cache,
                         now,
                         subscriptions: events.as_ref(),
-                        deadlines,
+                        timeouts,
                     };
                     let probe = probe_one(info, Arc::clone(&channel), pass).await;
                     (node, channel, probe)
@@ -847,7 +571,7 @@ impl Enumerator {
             let settled = settle_probe(&mut self.ledger, &node, probe.verdict, probe.inventory);
             // Every node waits for the ledger's consecutive-failure threshold,
             // receivers included. One full-budget timeout is not evidence of
-            // dead delivery: [`RECEIVER_PROBE_BUDGET`] leaves barely a second
+            // dead delivery: [`RECEIVER_PROBE_TIMEOUT`] leaves barely a second
             // over its own documented worst case, so a legitimate deep walk
             // plus a single lost reply (5 s `SEND_RESPONSE_TIMEOUT`) already
             // exceeds it. Evicting on that unpublishes *every* device behind

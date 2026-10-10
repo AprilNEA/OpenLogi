@@ -1,15 +1,14 @@
 use std::{
     fmt::{self, Write as _},
     process::ExitCode,
-    time::Duration,
 };
 
 use anyhow::{Context, Result};
 use clap::Args;
 use openlogi_camera::Camera;
 use openlogi_core::device::{BatteryInfo, DeviceInventory, DeviceModelInfo, PairedDevice};
-use openlogi_ipc::{AgentSnapshot, AgentStatus, ClientKind, PROTOCOL_VERSION, client};
-use tarpc::context;
+use openlogi_ipc::client::ConnectError;
+use openlogi_ipc::{AgentSnapshot, AgentStatus};
 
 #[derive(Debug, Args)]
 pub struct ListArgs {}
@@ -74,35 +73,15 @@ pub async fn run(_args: ListArgs) -> Result<ExitCode> {
 /// no agent listening, a hung handshake, a protocol mismatch, or a stalled
 /// snapshot call.
 async fn agent_snapshot() -> Option<AgentSnapshot> {
-    let conn = tokio::time::timeout(Duration::from_secs(2), client::connect())
-        .await
-        .ok()?
-        .ok()?;
-    if conn.version != PROTOCOL_VERSION {
-        eprintln!(
-            "note: the agent speaks protocol v{}, this CLI expects v{PROTOCOL_VERSION} — \
-             reading hardware directly",
-            conn.version
-        );
-        return None;
-    }
-    // Identify as a CLI so a dormant agent (launch-at-login off, started at
-    // login) serves this query without arming its whole input stack.
-    tokio::time::timeout(
-        Duration::from_secs(2),
-        conn.client
-            .declare_client(context::current(), ClientKind::Cli),
-    )
-    .await
-    .ok()?
-    .ok()?;
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        conn.client.snapshot(context::current()),
-    )
-    .await
-    .ok()?
-    .ok()
+    let client = match crate::agent::connect().await {
+        Ok(client) => client,
+        Err(ConnectError::Skew(skew)) => {
+            eprintln!("note: {skew} — reading hardware directly");
+            return None;
+        }
+        Err(_) => return None,
+    };
+    crate::agent::snapshot(&client).await.ok()
 }
 
 /// Why the list is empty. With an agent status in hand the reason is known;
@@ -115,6 +94,16 @@ fn print_empty_notes(status: Option<&AgentStatus>) {
                 "  - The agent does not hold Input Monitoring. Grant it to OpenLogi Agent: \
                  System Settings → Privacy & Security → Input Monitoring (the + picker \
                  cannot browse into the app bundle — use Go to Folder)."
+            );
+        }
+        // Off macOS there is no Input Monitoring gate, so a failed open on
+        // Linux is almost always missing hidraw access, not a stale session.
+        Some(status) if status.hid_open_failures && cfg!(target_os = "linux") => {
+            println!("Notes:");
+            println!(
+                "  - The agent's device opens keep failing. On Linux, HID++ access needs \
+                 OpenLogi's udev rules (shipped by the packages; for a source build see \
+                 docs/INSTALL-linux.md)."
             );
         }
         Some(status) if status.hid_open_failures => {
@@ -133,8 +122,8 @@ fn print_empty_notes(status: Option<&AgentStatus>) {
                  permission: System Settings → Privacy & Security → Input Monitoring."
             );
             println!(
-                "  - hidpp 0.2 only recognises Logi Bolt receivers (PID 0xC548); other \
-                 receivers (Unifying) aren't surfaced yet."
+                "  - On Linux, HID++ access needs OpenLogi's udev rules (shipped by the \
+                 packages; for a source build see docs/INSTALL-linux.md)."
             );
         }
     }

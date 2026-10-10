@@ -1,0 +1,13 @@
+# Keep one project root so rules beside their owners retain repository-wide path selectors.
+# Placement and verification: .agents/rules/ci.md, "ast-grep rules".
+ruleDirs:
+  - crates/openlogi-agent-core/.ast-grep/rules
+  - crates/openlogi-cli/.ast-grep/rules
+  - crates/openlogi-core/.ast-grep/rules
+  - crates/openlogi-desktop/.ast-grep/rules
+  - crates/openlogi-device/.ast-grep/rules
+  - crates/openlogi-fixture/.ast-grep/rules
+  - crates/openlogi-hook/.ast-grep/rules
+  - crates/openlogi-inject/.ast-grep/rules
+  - crates/openlogi-ipc/.ast-grep/rules
+  - xtask/.ast-grep/rules

@@ -99,7 +99,7 @@ pub fn load_registry(source: Option<AssetSource>) -> Result<AssetRegistry> {
     // `OPENLOGI_FORCE_DEPOT` names a depot with no device behind it, so it has
     // no target to ride in on. It belongs to whoever loads the registry — and
     // `ext = 0` gets its base PNG.
-    if let Ok(forced) = std::env::var("OPENLOGI_FORCE_DEPOT")
+    if let Ok(forced) = std::env::var(openlogi_core::env::FORCE_DEPOT)
         && let Some(entry) = registry.index().devices.get(&forced).cloned()
         && let Err(e) = sync_depot(registry.client(), &cache_root, &forced, &entry, 0)
     {
@@ -279,7 +279,7 @@ impl gpui::Global for AssetControl {}
 /// The source one sync session should use: an `OPENLOGI_ASSETS` override wins,
 /// otherwise the user's saved preference.
 pub(crate) fn selected_source(preference: AssetSourcePreference) -> Option<AssetSource> {
-    let server = std::env::var("OPENLOGI_ASSETS").ok();
+    let server = std::env::var(openlogi_core::env::ASSETS).ok();
     source_for_sync(preference, server.as_deref())
 }
 

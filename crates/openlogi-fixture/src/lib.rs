@@ -48,7 +48,7 @@ pub use protocol_identity::{
 pub use schema::{
     CassetteExchange, DeviceProfile, FIXTURE_SCHEMA_VERSION, FixtureError, HidCassette,
     ProfileDeviceSettings, ProfileSetting, ProfileSupport, ReportSupport, ReportValidationError,
-    RequestMatch,
+    RequestMatch, format_hex,
 };
 pub use verify::{FixtureVerificationError, FixtureVerificationStage};
 

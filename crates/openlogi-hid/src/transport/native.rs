@@ -21,7 +21,7 @@ use crate::recording::{
 };
 
 use super::{
-    device_io_gate, device_io_suspended, enumerate_devices, is_hidpp_node, open_hidpp_channel,
+    device_io_gate, enumerate_devices, is_hidpp_node, open_hidpp_channel,
     open_hidpp_channel_with_observer, watch_nodes,
 };
 
@@ -114,17 +114,13 @@ impl NativeBackend {
 
     /// Enumerate the host's HID nodes and refresh the handle cache.
     async fn refresh(&self) -> Result<Vec<Arc<Device>>, BackendError> {
-        if !self.device_io.allows_io() {
-            return Err(device_io_suspended());
-        }
+        self.device_io.ensure_allowed()?;
         let devices: Vec<Arc<Device>> = enumerate_devices()
             .await?
             .into_iter()
             .map(Arc::new)
             .collect();
-        if !self.device_io.allows_io() {
-            return Err(device_io_suspended());
-        }
+        self.device_io.ensure_allowed()?;
         let handles = devices
             .iter()
             .map(|device| (HandleKey::for_device(device), Arc::clone(device)))
@@ -147,17 +143,13 @@ impl NativeBackend {
         &self,
         node: &NodeInfo,
     ) -> Result<NativeRawWriter, BackendError> {
-        if !self.device_io.allows_io() {
-            return Err(device_io_suspended());
-        }
+        self.device_io.ensure_allowed()?;
         let (_reader, writer) = self
             .handle(node)?
             .open()
             .await
             .map_err(super::backend_error)?;
-        if !self.device_io.allows_io() {
-            return Err(device_io_suspended());
-        }
+        self.device_io.ensure_allowed()?;
         Ok(NativeRawWriter {
             writer,
             device_io: self.device_io.clone(),
@@ -188,9 +180,7 @@ impl HidBackend for NativeBackend {
 
     async fn open_hidpp(&self, node: &NodeInfo) -> Result<Option<Arc<HidppChannel>>, BackendError> {
         let Some(recording) = &self.recording else {
-            if !self.device_io.allows_io() {
-                return Err(device_io_suspended());
-            }
+            self.device_io.ensure_allowed()?;
             let device = self.handle(node)?;
             return open_hidpp_channel(&device, self.device_io.clone()).await;
         };
@@ -199,16 +189,15 @@ impl HidBackend for NativeBackend {
             .begin_channel(node.clone())
             .map_err(|error| BackendError::Backend(error.to_string()))?;
         let observer = capture.observer();
-        let result = if self.device_io.allows_io() {
-            match self.handle(node) {
+        let result = match self.device_io.ensure_allowed() {
+            Ok(()) => match self.handle(node) {
                 Ok(device) => {
                     open_hidpp_channel_with_observer(&device, self.device_io.clone(), observer)
                         .await
                 }
                 Err(error) => Err(error),
-            }
-        } else {
-            Err(device_io_suspended())
+            },
+            Err(suspended) => Err(suspended.into()),
         };
         let outcome = match &result {
             Ok(Some(channel)) => RecordedChannelOpenOutcome::Opened {
@@ -256,9 +245,7 @@ struct NativeRawWriter {
 #[async_trait]
 impl RawWriter for NativeRawWriter {
     async fn write_output_report(&mut self, report: &[u8]) -> Result<(), BackendError> {
-        if !self.device_io.allows_io() {
-            return Err(device_io_suspended());
-        }
+        self.device_io.ensure_allowed()?;
         self.writer
             .write_output_report(report)
             .await
@@ -311,6 +298,10 @@ mod tests {
         let recorder = NativeRecorder::new(8).unwrap();
         let (signal, device_io) = device_io_channel();
         assert!(signal.suspend());
+        let suspended = device_io
+            .ensure_allowed()
+            .expect_err("a suspended gate refuses device I/O")
+            .to_string();
         let backend = NativeBackend {
             nodes: Mutex::new(HashMap::new()),
             device_io,
@@ -330,15 +321,14 @@ mod tests {
         let Err(error) = backend.open_hidpp(&node).await else {
             panic!("suspended channel open unexpectedly succeeded");
         };
-        assert_eq!(error.to_string(), device_io_suspended().to_string());
+        assert_eq!(error.to_string(), suspended);
         drop(backend);
 
         let recording = recorder.finish().unwrap();
         assert_eq!(recording.channels.len(), 1);
         assert!(matches!(
             &recording.channels[0].open_outcome,
-            RecordedChannelOpenOutcome::Failed(message)
-                if message == &device_io_suspended().to_string()
+            RecordedChannelOpenOutcome::Failed(message) if message == &suspended
         ));
         assert!(recording.channels[0].closed_at.is_some());
     }

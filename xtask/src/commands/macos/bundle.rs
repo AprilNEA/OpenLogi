@@ -21,8 +21,8 @@ use identity::{Channel, Component};
 
 // The rest of the macOS domain reaches these through `bundle::`, which is the
 // module that owns them conceptually even now that the code sits deeper.
-pub(super) use embed::{HELPERS, Helper, agent_service_label, write_agent_launch_plist};
-pub(super) use signing::quoted_identity;
+pub(super) use embed::{EmbeddedHelper, HELPERS, agent_service_label, write_agent_launch_plist};
+pub(super) use signing::{SIGN_IDENTITY_ENV, quoted_identity};
 
 #[derive(Clone, Copy, ValueEnum)]
 pub(crate) enum DistributionTarget {
@@ -44,7 +44,7 @@ impl DistributionTarget {
 /// Build `OpenLogi.app` wearing `channel`'s identity, signing it with whatever
 /// local identity is available (dev) or leaving it unsigned (production).
 pub(crate) fn run(channel: Channel) -> Result<()> {
-    run_with_channel(channel, None, None)
+    build_bundle(channel, None, None)
 }
 
 /// Build the bundle that ships: always the production identity, signed with the
@@ -53,10 +53,10 @@ pub(crate) fn run_for_distribution(
     sign_identity: Option<&str>,
     target: Option<DistributionTarget>,
 ) -> Result<()> {
-    run_with_channel(Channel::Production, sign_identity, target)
+    build_bundle(Channel::Production, sign_identity, target)
 }
 
-fn run_with_channel(
+fn build_bundle(
     channel: Channel,
     sign_identity: Option<&str>,
     target: Option<DistributionTarget>,
@@ -129,7 +129,7 @@ fn run_with_channel(
             signing::sign_app_with_timestamp(identity, signing::TimestampMode::Secure, channel)?;
         }
         (Channel::Production, None) => {
-            println!("==> codesign: skipped (unsigned — set OPENLOGI_SIGN_IDENTITY to sign)");
+            println!("==> codesign: skipped (unsigned — set {SIGN_IDENTITY_ENV} to sign)");
         }
         (Channel::Dev, _) => signing::local_sign_app_if_available(channel)?,
     }

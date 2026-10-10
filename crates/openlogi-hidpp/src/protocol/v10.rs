@@ -440,7 +440,7 @@ mod tests {
     use super::MessageType;
     use crate::channel::{
         HidppMessage,
-        tests::{MockRawHidChannel, channel_with_reader},
+        mock::{MockRawHidChannel, channel_with_reader},
     };
 
     /// A long RAP reply from the receiver for register `address` whose first

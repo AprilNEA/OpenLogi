@@ -12,7 +12,7 @@ fn restoring_control_rejects_late_claim_and_different_notification_flags() {
     use std::sync::Arc;
 
     use super::{EventsNotificationFlags, RgbEffectsFeature, SwControlFlags};
-    use crate::channel::tests::{MockRawHidChannel, channel_with_reader};
+    use crate::channel::mock::{MockRawHidChannel, channel_with_reader};
     use crate::feature::CreatableFeature;
     use crate::nibble::U4;
     use crate::protocol::v20::{Message, MessageHeader};

@@ -7,6 +7,7 @@
 
 mod button;
 pub mod hook;
+mod pointer;
 pub mod scroll;
 
 use std::collections::HashMap;
@@ -15,15 +16,13 @@ use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
 use openlogi_core::binding::{Action, Binding, ButtonId};
-use openlogi_hid::{CaptureChannel, ChannelRegistry, DeviceIoGate};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use self::button::{
     ButtonInputHandle, ButtonRuntimeEvent, ButtonRuntimeOwner, EndReason, PressControl,
 };
 pub(crate) use self::button::{HidppSessionId, PressToken};
-use crate::hardware::{toggle_smartshift_in_background, write_dpi_in_background};
-use crate::receiver_access::ReceiverAccess;
+use crate::hardware::{DeviceAccess, toggle_smartshift_in_background, write_dpi_in_background};
 use crate::{DpiCycleState, DpiCycles};
 
 /// Application identity captured with a physical press and retained through
@@ -34,11 +33,36 @@ pub(crate) enum ActionDispatchTarget {
     SafariProcess(i32),
     /// The ordinary browser-navigation shortcut target captured outside Safari.
     Keyboard,
+    /// The pointer context that selected the binding. Validated off the tap
+    /// before output. An identified window or desktop is never substituted
+    /// with an unrelated foreground window; an unidentified target retains
+    /// the focused fallback captured with the press.
+    Pointer {
+        target: openlogi_hook::PointerTarget,
+        fallback_safari_pid: Option<i32>,
+    },
 }
 
 impl ActionDispatchTarget {
     fn capture() -> Self {
-        openlogi_hook::frontmost_safari_pid().map_or(Self::Keyboard, Self::SafariProcess)
+        Self::for_pointer(None, openlogi_hook::frontmost_safari_pid)
+    }
+
+    fn for_pointer(
+        target: Option<openlogi_hook::PointerTarget>,
+        capture_safari_pid: impl FnOnce() -> Option<i32>,
+    ) -> Self {
+        let safari_pid = match target {
+            None | Some(openlogi_hook::PointerTarget::Unavailable) => capture_safari_pid(),
+            Some(_) => None,
+        };
+        match target {
+            Some(target) => Self::Pointer {
+                target,
+                fallback_safari_pid: safari_pid,
+            },
+            None => safari_pid.map_or(Self::Keyboard, Self::SafariProcess),
+        }
     }
 }
 /// Held output owned by accepted press capabilities rather than by a capture
@@ -74,10 +98,7 @@ impl HeldShortcuts {
 #[derive(Clone)]
 struct ActionExecutor {
     dpi_cycle: Arc<RwLock<DpiCycles>>,
-    capture: CaptureChannel,
-    registry: ChannelRegistry,
-    receiver_access: ReceiverAccess,
-    device_io: DeviceIoGate,
+    access: DeviceAccess,
     action_ring: tokio::sync::mpsc::UnboundedSender<Option<String>>,
 }
 
@@ -87,6 +108,11 @@ impl ActionExecutor {
     }
 
     fn dispatch_to(&self, action: &Action, device_key: Option<&str>, target: ActionDispatchTarget) {
+        // The ring is drawn by OpenLogi at the cursor and acts on no window, so
+        // no pointer target gates it. It must not: while the ring is showing,
+        // the pointer is over the ring's own floating window, which classifies
+        // as `PointerTarget::Unavailable`, and a gated second trigger press
+        // could never close the ring.
         if matches!(action, Action::ShowActionsRing) {
             if self
                 .action_ring
@@ -97,6 +123,10 @@ impl ActionExecutor {
             }
             return;
         }
+        let Some(target) = target.resolve(action) else {
+            debug!(action = %action.label(), "mouse action target unavailable or no longer matches — skipped");
+            return;
+        };
 
         let next = match action {
             Action::CycleDpiPresets => match self.dpi_cycle.write() {
@@ -121,20 +151,19 @@ impl ActionExecutor {
                     .read()
                     .ok()
                     .and_then(|cycles| cycles.target_for(device_key));
-                info!("SmartShift toggle → flipping wheel mode");
-                toggle_smartshift_in_background(
-                    &self.capture,
-                    &self.registry,
-                    &self.receiver_access,
-                    &self.device_io,
-                    target,
-                );
+                if let Some(target) = target {
+                    info!("SmartShift toggle → flipping wheel mode");
+                    toggle_smartshift_in_background(self.access.op(&target));
+                } else {
+                    debug!("no target device — SmartShift toggle skipped");
+                }
                 return;
             }
             // Browser navigation uses Safari's captured Accessibility target
-            // or the platform shortcut, not a native mouse click. Preserve the
-            // press-time target through queued dispatch and debounce duplicate
-            // capture paths before either output.
+            // or, elsewhere, the platform shortcut (on macOS pressed as the
+            // frontmost app's menu item), not a native mouse click. Preserve
+            // the press-time target through queued dispatch and debounce
+            // duplicate capture paths before either output.
             Action::BrowserBack | Action::BrowserForward => {
                 if let Some(reservation) = browser_nav_debounce_begin(action) {
                     if dispatch_browser_navigation(
@@ -158,15 +187,13 @@ impl ActionExecutor {
             }
         };
         if let Some((dpi, target)) = next {
-            info!(%dpi, "DPI action → writing to device");
-            write_dpi_in_background(
-                &self.capture,
-                &self.registry,
-                &self.receiver_access,
-                &self.device_io,
-                target,
-                dpi,
-            );
+            // No target: a dev environment without a real device.
+            if let Some(target) = target {
+                info!(%dpi, "DPI action → writing to device");
+                write_dpi_in_background(self.access.op(&target), dpi);
+            } else {
+                debug!(%dpi, "no target device — DPI write skipped");
+            }
         } else if matches!(action, Action::CycleDpiPresets | Action::SetDpiPreset(_)) {
             info!(
                 action = %action.label(),
@@ -222,6 +249,9 @@ impl ButtonEventHandler {
         device_key: Option<&str>,
         target: ActionDispatchTarget,
     ) {
+        if action.held_combo().is_some() && target.resolve(action).is_none() {
+            return;
+        }
         if !self.held.start(press, action) {
             self.executor.dispatch_to(action, device_key, target);
         }
@@ -249,18 +279,12 @@ impl ActionRuntime {
     /// Build the action executor and its source-independent button worker.
     pub fn new(
         dpi_cycle: Arc<RwLock<DpiCycles>>,
-        capture: CaptureChannel,
-        registry: ChannelRegistry,
-        receiver_access: ReceiverAccess,
-        device_io: DeviceIoGate,
+        access: DeviceAccess,
         action_ring: tokio::sync::mpsc::UnboundedSender<Option<String>>,
     ) -> io::Result<Self> {
         let executor = ActionExecutor {
             dpi_cycle,
-            capture,
-            registry,
-            receiver_access,
-            device_io,
+            access,
             action_ring,
         };
         let mut button_handler = ButtonEventHandler::new(executor.clone());
@@ -291,6 +315,19 @@ impl ActionDispatcher {
     /// Route one action without blocking the input callback.
     pub fn dispatch(&self, action: &Action, device_key: Option<&str>) {
         self.executor.dispatch(action, device_key);
+    }
+
+    pub(crate) fn dispatch_pointer_action(
+        &self,
+        action: &Action,
+        device_key: Option<&str>,
+        target: Option<openlogi_hook::PointerTarget>,
+    ) {
+        self.executor.dispatch_to(
+            action,
+            device_key,
+            ActionDispatchTarget::for_pointer(target, openlogi_hook::frontmost_safari_pid),
+        );
     }
 
     /// Queue one OS-hook down edge without blocking the callback. The returned
@@ -351,9 +388,14 @@ impl ActionDispatcher {
         session: &HidppSessionId,
         button: ButtonId,
         binding: Option<&Binding>,
+        pointer_target: Option<openlogi_hook::PointerTarget>,
     ) -> Option<PressToken> {
-        self.buttons
-            .try_hidpp_down(session, button, binding, ActionDispatchTarget::capture())
+        self.buttons.try_hidpp_down(
+            session,
+            button,
+            binding,
+            ActionDispatchTarget::for_pointer(pointer_target, openlogi_hook::frontmost_safari_pid),
+        )
     }
 
     /// Queue one HID++ up edge for a specific capture session.
@@ -368,9 +410,14 @@ impl ActionDispatcher {
         session: &HidppSessionId,
         button: ButtonId,
         binding: Option<&Binding>,
+        pointer_target: Option<openlogi_hook::PointerTarget>,
     ) {
-        self.buttons
-            .try_hidpp_pulse(session, button, binding, ActionDispatchTarget::capture());
+        self.buttons.try_hidpp_pulse(
+            session,
+            button,
+            binding,
+            ActionDispatchTarget::for_pointer(pointer_target, openlogi_hook::frontmost_safari_pid),
+        );
     }
 
     /// Cancel presses from a HID++ session that is stopping or has died.
@@ -383,6 +430,13 @@ impl ActionDispatcher {
     /// generation are ignored even if they arrive after this call's wake-up.
     pub fn cancel_all_buttons(&self) {
         self.buttons.invalidate_all();
+    }
+
+    /// End only pointer-scoped presses when the hovered window changes.
+    /// Keyboard and explicitly focus-scoped holds keep their own lifecycles.
+    /// Preserve presses already admitted against the newly published target.
+    pub fn cancel_pointer_buttons_except(&self, current: openlogi_hook::PointerTarget) {
+        self.buttons.cancel_pointer_except(current);
     }
 
     /// Cancel only presses owned by an OS-hook callback. HID++ capture does not
@@ -472,6 +526,9 @@ fn dispatch_browser_navigation(
             keyboard();
             true
         }
+        ActionDispatchTarget::Pointer { .. } => {
+            unreachable!("pointer targets resolve before navigation")
+        }
     }
 }
 
@@ -480,6 +537,36 @@ mod tests {
     use super::*;
 
     static BROWSER_NAV_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn ring_trigger_reaches_the_ring_over_an_unavailable_pointer_target() {
+        // The second press that toggles the ring closed lands on the ring's
+        // own overlay window, which the pointer hit test reports as
+        // unavailable.
+        let (_signal, device_io) = openlogi_hid::device_io_channel();
+        let (action_ring, mut ring_rx) = tokio::sync::mpsc::unbounded_channel();
+        let executor = ActionExecutor {
+            dpi_cycle: Arc::default(),
+            access: DeviceAccess {
+                channel: openlogi_hid::CaptureChannelSlot::default(),
+                registry: openlogi_hid::ChannelRegistry::default(),
+                receiver_access: crate::receiver_access::ReceiverAccess::default(),
+                device_io,
+            },
+            action_ring,
+        };
+
+        executor.dispatch_to(
+            &Action::ShowActionsRing,
+            Some("mouse"),
+            ActionDispatchTarget::for_pointer(
+                Some(openlogi_hook::PointerTarget::Unavailable),
+                || None,
+            ),
+        );
+
+        assert_eq!(ring_rx.try_recv(), Ok(Some("mouse".to_owned())));
+    }
     #[test]
     fn instantaneous_actions_do_not_enter_held_state() {
         let press = PressToken::hook_for_test(1, ButtonId::Back);

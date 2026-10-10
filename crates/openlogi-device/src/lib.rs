@@ -40,10 +40,11 @@ pub use channel::route::{
     speaks_unifying_protocol,
 };
 pub use channel::{ChannelPool, ChannelRegistry, SharedChannel};
-pub use device_io::{DeviceIoGate, DeviceIoSignal, device_io_channel};
+pub use device_io::{DeviceIoGate, DeviceIoSignal, IoSuspended, device_io_channel};
 pub use inventory::hotplug::watch_hotplug;
 pub use inventory::standalone::enumerate_standalone;
 pub use inventory::{Enumerator, InventoryError, enumerate};
+pub use openlogi_core::hid::FnLockState;
 pub use openlogi_core::hid::smartshift;
 pub use openlogi_core::hid::smartshift::{
     SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque,
@@ -53,15 +54,15 @@ pub use pairing::{
     PasskeyMethod, ReceiverFamily, ReceiverSelector, list_pairing_receivers, run_pairing, unpair,
 };
 pub use session::gesture::{
-    CaptureChannel, CaptureSessionFailure, CaptureSessionOutcome, CapturedInput, GestureError,
-    PendingCaptureRestore, run_capture_session, run_capture_session_with_registry_spec,
+    CaptureChannelSlot, CaptureError, CaptureHost, CaptureSessionFailure, CaptureSessionOutcome,
+    CapturedInput, PendingCaptureRestore, run_capture_session,
 };
 pub use session::host_switch::{
     HostSwitchError, HostSwitchRestoreOutcome, HostSwitchSessionFailure, HostSwitchSessionOutcome,
     HostSwitchStopReason, PendingHostSwitchRestore, run_host_switch_session, switch_linked_hosts,
 };
 pub use session::keyboard::{
-    KEYBOARD_KEY_CIDS, run_keyboard_capture_session, run_keyboard_capture_session_with_registry,
+    RESERVED_KEYBOARD_CONTROLS, is_reserved_keyboard_control, run_keyboard_capture_session,
 };
 pub use write::{
     Dpi, DpiCapabilities, DpiInfo, FeatureEntry, FirmwareEntity, FirmwareEntityInfo,
@@ -70,11 +71,11 @@ pub use write::{
     ReprogControlEntry, ScrollReportingTarget, ScrollResolution, ScrollWheelMode, WriteError,
     apply_litra, commands_for_light_settings, dump_features, dump_firmware_entities,
     dump_reprog_controls, encode_litra_command, ensure_haptics_armed_on, find_litra, get_backlight,
-    get_backlight_on, get_dpi, get_dpi_info, get_dpi_info_on, get_scroll_wheel_mode,
-    get_scroll_wheel_mode_on, get_smartshift_status, get_smartshift_status_on,
-    litra_model_for_route, matches_litra, play_haptic, play_haptic_on, read_battery_raw,
-    set_backlight_enabled, set_dpi, set_dpi_on, set_fn_lock, set_fn_lock_on, set_keyboard_color,
-    set_keyboard_color_on, set_keyboard_color_with, set_keyboard_color_with_on,
+    get_backlight_on, get_dpi, get_dpi_info, get_dpi_info_on, get_fn_lock, get_fn_lock_on,
+    get_scroll_wheel_mode, get_scroll_wheel_mode_on, get_smartshift_status,
+    get_smartshift_status_on, litra_model_for_route, matches_litra, play_haptic, play_haptic_on,
+    read_battery_raw, set_backlight_enabled, set_dpi, set_dpi_on, set_fn_lock, set_fn_lock_on,
+    set_keyboard_color, set_keyboard_color_on, set_keyboard_color_with, set_keyboard_color_with_on,
     set_scroll_inversion, set_scroll_inversion_on, set_scroll_resolution, set_scroll_resolution_on,
     set_scroll_wheel_mode, set_scroll_wheel_mode_on, set_smartshift, set_smartshift_on,
     set_smartshift_sensitivity, toggle_smartshift, toggle_smartshift_on,

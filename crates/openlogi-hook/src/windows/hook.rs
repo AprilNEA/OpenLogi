@@ -29,6 +29,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_XBUTTONDOWN, WM_XBUTTONUP, XBUTTON1, XBUTTON2,
 };
 
+use openlogi_core::config::FunctionKey;
+
 use super::cursor::{MonitorDpi, PhysicalCursorPosition};
 use super::worker::{WorkerEvent, WorkerPhase, WorkerStatus};
 use crate::{
@@ -37,6 +39,32 @@ use crate::{
 };
 
 const WHEEL_DELTA: f64 = 120.0;
+
+/// Shared profile identity for both foreground and pointer-owned processes.
+pub(super) fn application_for_process(pid: u32) -> Option<ForegroundApp> {
+    // SAFETY: OpenProcess accepts a PID by value; a successful handle is owned here.
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if process.is_null() {
+        return None;
+    }
+    let mut buf = vec![0u16; 32_768];
+    let mut len = 32_768;
+    // SAFETY: the owned handle is live and buf has len writable UTF-16 units.
+    let ok = unsafe { QueryFullProcessImageNameW(process, 0, buf.as_mut_ptr(), &raw mut len) };
+    // SAFETY: this locally owned handle is closed exactly once after the query.
+    unsafe { CloseHandle(process) };
+    if ok == 0 || len == 0 {
+        return None;
+    }
+    let path = String::from_utf16_lossy(&buf[..len as usize]);
+    let display_name = std::path::Path::new(&path)
+        .file_stem()
+        .map_or_else(|| path.clone(), |stem| stem.to_string_lossy().into_owned());
+    Some(ForegroundApp {
+        id: path.to_lowercase(),
+        display_name,
+    })
+}
 
 thread_local! {
     /// Cursor position carried by the previous mouse message of any kind,
@@ -120,10 +148,6 @@ impl HookBackend for Backend {
         inner.worker.phase().is_running()
     }
 
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "the path buffer is a fixed 32768 u16s"
-    )]
     fn frontmost_app() -> Option<ForegroundApp> {
         // SAFETY: GetForegroundWindow takes no arguments and returns a window handle
         // or null; no preconditions.
@@ -142,40 +166,7 @@ impl HookBackend for Backend {
             return None;
         }
 
-        // SAFETY: OpenProcess takes the access mask and pid by value and returns a
-        // handle or null (checked); on success we own the handle and close it below.
-        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-        if process.is_null() {
-            return None;
-        }
-
-        let mut buf = vec![0u16; 32_768];
-        let mut len = buf.len() as u32;
-        // SAFETY: `process` is the valid handle from OpenProcess; `buf` is a live
-        // 32768-u16 buffer and `len` holds its length, so the call writes at most
-        // `len` code units and updates `len` with the count written.
-        let ok = unsafe { QueryFullProcessImageNameW(process, 0, buf.as_mut_ptr(), &raw mut len) };
-        // SAFETY: `process` is the handle from OpenProcess, owned here and closed
-        // exactly once now that the query has returned.
-        unsafe {
-            CloseHandle(process);
-        }
-        if ok == 0 || len == 0 {
-            return None;
-        }
-
-        // The lower-cased full path is the identifier profiles key on (it is
-        // what `Config::effective_bindings` compares, alongside its
-        // `exe:<filename>` fallback); the file name is all there is to show a
-        // human, so the display name is the stem with its original casing.
-        let path = String::from_utf16_lossy(&buf[..len as usize]);
-        let display_name = std::path::Path::new(&path)
-            .file_stem()
-            .map_or_else(|| path.clone(), |stem| stem.to_string_lossy().into_owned());
-        Some(ForegroundApp {
-            id: path.to_lowercase(),
-            display_name,
-        })
+        application_for_process(pid)
     }
 
     fn cursor_position() -> Option<CursorPosition> {
@@ -597,24 +588,17 @@ fn translate_key(
     })
 }
 
-/// macOS `kVK_*` keycodes for F1–F19 in order — [`KeyEvent`] carries macOS
-/// virtual keycodes on every platform, matching the `KeyTrigger` config
-/// vocabulary.
-const FKEY_MAC_KEYCODES: [u16; 19] = [
-    0x7A, 0x78, 0x63, 0x76, 0x60, 0x61, 0x62, 0x64, 0x65, 0x6D, 0x67, 0x6F, 0x69, 0x6B, 0x71, 0x6A,
-    0x40, 0x4F, 0x50,
-];
-
-/// Map a Windows virtual-key code to the macOS keycode [`KeyEvent`] carries,
-/// or `None` for keys outside the Esc/F1–F19 set.
+/// Map a Windows virtual-key code to the macOS keycode [`KeyEvent`] carries
+/// on every platform — [`FunctionKey`]'s — or `None` for keys outside the
+/// Esc/F1–F19 set. Windows numbers `VK_F1`.. consecutively.
 fn mac_keycode(vk: u32) -> Option<u16> {
     let vk = u16::try_from(vk).ok()?;
-    if vk == VK_ESCAPE {
-        return Some(0x35);
-    }
-    FKEY_MAC_KEYCODES
-        .get(usize::from(vk.checked_sub(VK_F1)?))
-        .copied()
+    let key = if vk == VK_ESCAPE {
+        FunctionKey::Esc
+    } else {
+        FunctionKey::nth_f(vk.checked_sub(VK_F1)?.checked_add(1)?)?
+    };
+    Some(key.keycode())
 }
 
 /// Snapshot the modifier state via `GetAsyncKeyState` — `WH_KEYBOARD_LL`
@@ -696,22 +680,28 @@ mod tests {
         }
     }
 
-    /// The hook emits macOS `kVK_*` keycodes; a drift from the `KeyTrigger`
-    /// parse table in openlogi-core would make every saved binding miss.
+    /// The keycodes themselves are `FunctionKey`'s; what this module owns is
+    /// which Windows virtual key is which function key.
     #[test]
-    fn emitted_keycodes_match_the_key_trigger_vocabulary() {
-        use openlogi_core::config::KeyTrigger;
-
-        let esc: KeyTrigger = "esc".parse().expect("parse key trigger");
-        assert_eq!(mac_keycode(u32::from(VK_ESCAPE)), Some(esc.keycode));
-        for n in 1..=19u16 {
-            let trigger: KeyTrigger = format!("f{n}").parse().expect("parse key trigger");
-            assert_eq!(
-                mac_keycode(u32::from(VK_F1 + n - 1)),
-                Some(trigger.keycode),
-                "f{n}"
-            );
-        }
+    fn virtual_keys_map_onto_the_function_row() {
+        assert_eq!(
+            mac_keycode(u32::from(VK_ESCAPE)),
+            Some(FunctionKey::Esc.keycode())
+        );
+        assert_eq!(
+            mac_keycode(u32::from(VK_F1)),
+            Some(FunctionKey::F1.keycode())
+        );
+        assert_eq!(
+            mac_keycode(u32::from(VK_F1 + 18)),
+            Some(FunctionKey::F19.keycode())
+        );
+        assert_eq!(
+            mac_keycode(u32::from(VK_F1 + 19)),
+            None,
+            "F20 is off the row"
+        );
+        assert_eq!(mac_keycode(u32::from(VK_F1 - 1)), None);
     }
 
     #[test]

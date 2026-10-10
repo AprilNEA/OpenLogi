@@ -52,7 +52,7 @@ pub(crate) fn replace_process(path: &Path) -> std::io::Error {
 pub(crate) fn schedule(path: &Path) -> std::io::Result<()> {
     let mut command = std::process::Command::new("/bin/sh");
     let pid = std::process::id().to_string();
-    if let Some(bundle) = helper_bundle(path) {
+    if let Some(bundle) = openlogi_core::brand::helper_bundle_root(path) {
         command
             .arg("-c")
             .arg(
@@ -98,30 +98,5 @@ pub(crate) fn schedule_after_input_monitoring_grant() -> bool {
             warn!(error = %e, "could not schedule agent relaunch after Input Monitoring was granted — restart the agent manually");
             false
         }
-    }
-}
-
-/// The `.app` root of a packaged helper binary, `None` for a bare dev binary.
-#[cfg(target_os = "macos")]
-fn helper_bundle(path: &Path) -> Option<&Path> {
-    let bundle = path.ancestors().nth(3)?;
-    (bundle.extension()? == "app").then_some(bundle)
-}
-
-#[cfg(target_os = "macos")]
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn macos_helper_bundle_is_detected_from_packaged_binary_path() {
-        use super::helper_bundle;
-        use std::path::Path;
-
-        let binary = Path::new(
-            "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app/Contents/MacOS/openlogi-agent",
-        );
-        let bundle =
-            Path::new("/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app");
-        assert_eq!(helper_bundle(binary), Some(bundle));
-        assert_eq!(helper_bundle(Path::new("/tmp/openlogi-agent")), None);
     }
 }

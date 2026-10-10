@@ -59,5 +59,6 @@ unknown-git = "deny"
 # that appears as `git+…` in Cargo.lock must be listed here.
 allow-git = [
     "https://github.com/AprilNEA/appicon",
+    "https://github.com/AprilNEA/gpui-kit",
     "https://github.com/longbridge/gpui-kit",
 ]
