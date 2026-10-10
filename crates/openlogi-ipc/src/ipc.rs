@@ -120,7 +120,9 @@ pub use succession::Identity;
 ///      battery. `Agent::observe_lock_keys`, [`LockKeyObservation`] and
 ///      [`LockKeyChange`] appended — the lock key a keyboard turned on or
 ///      off over HID++ `0x4220`, for the overlay's transient indicator;
-///      `DeviceRoute::Hidpp20Receiver` appended.
+///      `DeviceRoute::Hidpp20Receiver` appended; `Capabilities::onboard_profiles`,
+///      `HidppOperation::{ReadOnboardMode, WriteOnboardMode}` and
+///      `Agent::{read_onboard_profiles, set_onboard_profiles}` appended.
 pub const PROTOCOL_VERSION: u32 = 37;
 
 /// Environment variable through which the agent hands a supervised helper the
@@ -828,4 +830,13 @@ pub trait Agent {
     /// generation `since`, or with the unchanged indicator after
     /// [`OBSERVE_HOLD`]. Pass `0` to read the current indicator at once.
     async fn observe_lock_keys(since: Generation) -> LockKeyObservation;
+    /// Read whether the onboard profiles (`0x8100`) of the device on `route`
+    /// are active: `true` in onboard mode, `false` under host control.
+    async fn read_onboard_profiles(route: DeviceRoute) -> Result<bool, WriteError>;
+    /// Switch the device on `route` between its onboard profiles (`true`) and
+    /// host control (`false`), answering with the mode it reports afterwards.
+    async fn set_onboard_profiles(
+        route: DeviceRoute,
+        onboard_profiles: bool,
+    ) -> Result<bool, WriteError>;
 }

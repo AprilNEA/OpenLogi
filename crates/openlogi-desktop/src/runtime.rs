@@ -313,6 +313,13 @@ impl Runtime {
                     });
                 });
             }
+            ipc::GuiUpdate::OnboardProfilesWritten { key, result } => {
+                cx.update(|cx| {
+                    AppState::apply(cx, |state| {
+                        state.apply_onboard_profiles_written(&key, result)
+                    });
+                });
+            }
             ipc::GuiUpdate::EasySwitchHostRenamed {
                 key,
                 route,

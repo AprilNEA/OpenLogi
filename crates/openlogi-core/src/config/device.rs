@@ -305,6 +305,13 @@ pub struct DeviceConfig {
     /// leave the device's rate alone".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report_rate: Option<ReportRate>,
+    /// Whether the device's onboard profiles (HID++ `0x8100`) stay active:
+    /// `false` hands DPI, report rate and buttons to the host. The PRO X3
+    /// SUPERSTRIKE falls back to onboard mode on every power cycle, so the
+    /// agent re-applies this when the device reconnects, before its DPI.
+    /// `None` means "never set — leave the device alone".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub onboard_profiles: Option<bool>,
 }
 
 impl DeviceConfig {
@@ -408,6 +415,7 @@ impl Default for DeviceConfig {
             fn_lock: None,
             keep_os_layout: None,
             report_rate: None,
+            onboard_profiles: None,
         }
     }
 }
@@ -534,6 +542,8 @@ struct RawDeviceConfig {
     keep_os_layout: Option<bool>,
     #[serde(default)]
     report_rate: Option<ReportRate>,
+    #[serde(default)]
+    onboard_profiles: Option<bool>,
     #[serde(default = "default_true")]
     enabled: bool,
     #[serde(default)]
@@ -597,6 +607,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             fn_lock: raw.fn_lock,
             keep_os_layout: raw.keep_os_layout,
             report_rate: raw.report_rate,
+            onboard_profiles: raw.onboard_profiles,
         }
     }
 }

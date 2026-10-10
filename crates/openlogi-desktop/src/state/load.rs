@@ -54,3 +54,7 @@ pub type BacklightLoad = Load<Arc<BacklightState>>;
 /// stores each slot's host name and OS itself — the computer on the slot
 /// writes them — so the read is the only record.
 pub type EasySwitchLoad = Load<Arc<EasySwitchHosts>>;
+
+/// What is known of whether a device's onboard profiles are active (`0x8100`):
+/// `true` in onboard mode, `false` under host control.
+pub type OnboardProfilesLoad = Load<Arc<bool>>;

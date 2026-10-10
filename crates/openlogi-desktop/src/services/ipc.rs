@@ -67,9 +67,10 @@ use request::LinkLost;
 pub use request::PollEventMonitor;
 pub use request::{
     CancelPairing, Command, LoadConfig, PairDevice, ReadBacklight, ReadDpi, ReadEasySwitchHosts,
-    ReadFnLock, ReadReportRate, ReadSmartShift, ReloadConfig, RenameEasySwitchHost,
-    RequestAccessibilityPrompt, SetBacklight, SetDpi, SetFnLock, SetLight, SetLightManualPower,
-    SetLighting, SetReportRate, SetSmartShift, StartPairing, UnpairDevice,
+    ReadFnLock, ReadOnboardProfiles, ReadReportRate, ReadSmartShift, ReloadConfig,
+    RenameEasySwitchHost, RequestAccessibilityPrompt, SetBacklight, SetDpi, SetFnLock, SetLight,
+    SetLightManualPower, SetLighting, SetOnboardProfiles, SetReportRate, SetSmartShift,
+    StartPairing, UnpairDevice,
 };
 
 /// How long to wait before retrying a connect that failed. This is a retry
@@ -150,6 +151,15 @@ pub enum GuiUpdate {
         write: u64,
         /// The read-back, or why the rename did not land.
         result: Result<EasySwitchHosts, WriteError>,
+    },
+    /// What a device reports after an onboard-mode switch the GUI asked for:
+    /// whether its onboard profiles are now active, or the typed refusal.
+    /// Answers [`SetOnboardProfiles`].
+    OnboardProfilesWritten {
+        /// The device that was written.
+        key: DeviceKey,
+        /// `true` in onboard mode, or why the write did not land.
+        result: Result<bool, WriteError>,
     },
     /// A pairing command could not be delivered, so no session will ever appear
     /// in the observed state to explain the silence. Reported locally rather

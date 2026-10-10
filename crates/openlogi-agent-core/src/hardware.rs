@@ -779,6 +779,83 @@ pub(crate) fn keep_os_layout_in_background(
     );
 }
 
+/// Switch `shared`'s device between its onboard profiles (`true`) and host
+/// control (`false`) and, when handing control to the host, write `host_dpi`
+/// — the user's own DPI, which the onboard profile had overridden and which
+/// the device rejects until the switch lands. Returns the mode the device
+/// reports. A DPI write that fails after a landed switch is logged rather
+/// than returned: the switch is what was asked, and it took.
+///
+/// The DPI carries its own [`WriteTicket`], taken from the device's DPI
+/// [`WriteOrder`] when the switch was requested: a DPI write the user asked
+/// for after that is newer, and the restore yields to it instead of
+/// overwriting it with the value captured before.
+pub(crate) async fn switch_onboard_profiles_on(
+    shared: &SharedChannel,
+    onboard_profiles: bool,
+    host_dpi: Option<(Dpi, WriteTicket)>,
+) -> Result<bool, WriteError> {
+    let reported = openlogi_hid::set_onboard_profiles_on(shared, onboard_profiles).await?;
+    if !reported && let Some((dpi, ticket)) = host_dpi {
+        ticket
+            .write_or(
+                || async {
+                    match openlogi_hid::set_dpi_on(shared, dpi).await {
+                        Ok(()) => debug!(%dpi, "DPI restored under host control"),
+                        Err(error) => {
+                            warn!(%dpi, ?error, "DPI write after host-control switch failed");
+                        }
+                    }
+                },
+                || async { debug!(%dpi, "DPI restore superseded by a newer DPI write") },
+            )
+            .await;
+    }
+    Ok(reported)
+}
+
+/// Spawn an OS thread that runs [`switch_onboard_profiles_on`] on `op`'s
+/// device, unless a newer onboard-mode write for the device was requested
+/// after `ticket`. Returns immediately; the outcome is logged.
+pub(crate) fn write_onboard_profiles_in_background(
+    op: DeviceOp,
+    ticket: WriteTicket,
+    onboard_profiles: bool,
+    host_dpi: Option<(Dpi, WriteTicket)>,
+) {
+    let index = op.route.device_index();
+    let turn = op.access.transport_turns.turn_for(&op.route);
+    op.spawn_timed_write(
+        "onboard-mode write",
+        move |op| async move {
+            within_turn(
+                &ticket,
+                &turn,
+                || async {
+                    let shared = op.resolve()?;
+                    switch_onboard_profiles_on(&shared, onboard_profiles, host_dpi)
+                        .await
+                        .map(Some)
+                },
+                || async { Ok(None) },
+            )
+            .await
+        },
+        move |result| {
+            log_outcome(index, "onboard-mode write", result, |reported| {
+                if reported.is_some() {
+                    debug!(index, onboard_profiles, "onboard mode written");
+                } else {
+                    debug!(
+                        index,
+                        onboard_profiles, "onboard-mode write superseded by a newer one"
+                    );
+                }
+            });
+        },
+    );
+}
+
 /// The settings a mouse forgets when it power-cycles, as one reapply pushes
 /// them. `None` leaves that setting alone.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

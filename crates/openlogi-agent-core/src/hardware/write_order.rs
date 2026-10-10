@@ -1,14 +1,15 @@
 //! Per-device ordering for the writes of one setting.
 //!
-//! A keyboard's Fn-lock is written from three places: the GUI toggle's RPC, a
-//! config reload that changed the value, and the reconnect reapply. A mouse's
-//! report rate is written from two: the GUI pick's RPC and the reconnect
-//! reapply. The writers share the receiver lease, which orders nothing, so
-//! the older value could reach the device last — after two quick toggles, or
-//! when a reapply scheduled with the configured rate lands after the user's
-//! newer pick. Each write takes a [`WriteTicket`] when it is requested and
-//! writes only if it is still the newest request once the device's earlier
-//! writes have finished.
+//! A keyboard's Fn-lock, or a mouse's onboard mode, is written from three
+//! places: the GUI toggle's RPC, a config reload that changed the value, and
+//! the reconnect reapply. A mouse's report rate is written from two: the GUI
+//! pick's RPC and the reconnect reapply; its DPI from the GUI and from the
+//! restore that follows a switch to host control. The writers share the
+//! receiver lease, which orders nothing, so the older value could reach the
+//! device last — after two quick toggles, or when a reapply scheduled with
+//! the configured rate lands after the user's newer pick. Each write takes a
+//! [`WriteTicket`] when it is requested and writes only if it is still the
+//! newest request once the device's earlier writes have finished.
 //!
 //! A keyboard's backlight needs every write, not just the newest: each change
 //! is a read-modify-write of its own field, so a battery-saving click followed

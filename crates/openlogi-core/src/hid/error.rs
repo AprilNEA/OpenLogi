@@ -270,6 +270,12 @@ pub enum HidppOperation {
     /// Write an Easy-Switch slot's `0x1815` host name. Appended last —
     /// variant order is wire format.
     RenameHost,
+    /// Read the `0x8100` onboard mode. Appended last — variant order is wire
+    /// format.
+    ReadOnboardMode,
+    /// Write the `0x8100` onboard mode. Appended last — variant order is wire
+    /// format.
+    WriteOnboardMode,
 }
 
 /// HID++ feature error kind in a serializable wire-safe form.
