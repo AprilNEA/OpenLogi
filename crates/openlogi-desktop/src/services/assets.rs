@@ -42,7 +42,8 @@ use tracing::{debug, warn};
 use walkdir::WalkDir;
 
 use self::images::{
-    buttons_image_for, load_manifest, metadata_for, read_png_dimensions, variant_image_for,
+    buttons_image_for, find_variant_in_manifest, load_manifest, metadata_for, read_png_dimensions,
+    variant_image_for,
 };
 pub(crate) use self::paths::user_cache_root;
 use self::paths::{bundle_assets_root, load_index};
@@ -329,20 +330,16 @@ impl AssetResolver {
             // serves the device, rather than a render with no hotspots. A depot
             // that publishes none at all (cameras) legitimately resolves from
             // its render alone.
-            let meta = resolve_metadata(&dir, entry, manifest.as_ref(), extended_model_id);
+            let meta = resolve_metadata(&dir, entry, depot, manifest.as_ref(), extended_model_id);
             if meta.is_none() && entry.preferred_file(&METADATA_FILES).is_some() {
                 continue;
             }
 
             let buttons_name = manifest.as_ref().and_then(|m| {
-                entry
-                    .model_id_candidates()
-                    .find_map(|base| buttons_image_for(m, base, extended_model_id))
+                find_variant_in_manifest(m, entry, depot, extended_model_id, buttons_image_for)
             });
             let variant_front_name = manifest.as_ref().and_then(|m| {
-                entry
-                    .model_id_candidates()
-                    .find_map(|base| variant_image_for(m, base, extended_model_id))
+                find_variant_in_manifest(m, entry, depot, extended_model_id, variant_image_for)
             });
             // Front/hero render for the gallery: the colour variant's
             // `device_image`, falling back to the generic front renders. Resolved
@@ -501,15 +498,12 @@ impl Default for AssetResolver {
 fn resolve_metadata(
     dir: &Path,
     entry: &DeviceEntry,
+    depot: &str,
     manifest: Option<&DepotManifest>,
     ext: u8,
 ) -> Option<(String, PathBuf)> {
     let mut candidates: Vec<String> = manifest
-        .and_then(|m| {
-            entry
-                .model_id_candidates()
-                .find_map(|base| metadata_for(m, base, ext))
-        })
+        .and_then(|m| find_variant_in_manifest(m, entry, depot, ext, metadata_for))
         .into_iter()
         .collect();
     candidates.extend(METADATA_FILES.map(str::to_string));

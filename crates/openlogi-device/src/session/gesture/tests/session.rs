@@ -168,10 +168,10 @@ async fn pending_restore_waits_for_a_replacement_then_undiverts_through_it() {
         &retired,
         ReprogRestore::new(
             0x22,
-            vec![ArmedReporting {
-                cid: reprog_controls::GESTURE_BUTTON_CID,
-                original: reporting(false, None),
-            }],
+            vec![ArmedReporting::pointer(
+                reprog_controls::GESTURE_BUTTON_CID,
+                reporting(false, None),
+            )],
         ),
         None,
     )
@@ -221,10 +221,10 @@ async fn restore_retries_when_inventory_changes_during_an_awaited_write() {
         &retired,
         ReprogRestore::new(
             0x22,
-            vec![ArmedReporting {
-                cid: reprog_controls::GESTURE_BUTTON_CID,
-                original: reporting(false, None),
-            }],
+            vec![ArmedReporting::pointer(
+                reprog_controls::GESTURE_BUTTON_CID,
+                reporting(false, None),
+            )],
         ),
         None,
     )
@@ -283,10 +283,10 @@ async fn failed_setup_rollback_returns_its_restore_capability() {
         &shared,
         ReprogRestore::new(
             0x22,
-            vec![ArmedReporting {
-                cid: reprog_controls::GESTURE_BUTTON_CID,
-                original: reporting(false, None),
-            }],
+            vec![ArmedReporting::pointer(
+                reprog_controls::GESTURE_BUTTON_CID,
+                reporting(false, None),
+            )],
         ),
         None,
     );
