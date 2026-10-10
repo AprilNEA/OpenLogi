@@ -21,7 +21,7 @@ use openlogi_core::hid::DeviceRoute;
 
 use super::widgets::{back_button, kind_label, route_label, sidebar_action, status_badge};
 use super::{AppView, DetailTab};
-use crate::app::menu::file_url;
+use crate::app::menu::open_config_folder;
 use crate::features::action_ring::ActionRingPanel;
 use crate::features::camera::controls::CameraControlsPanel;
 use crate::features::camera::preview::CameraPreview;
@@ -732,10 +732,6 @@ fn device_details_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElem
     )
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "the configuration card is clearest as one declarative UI tree"
-)]
 fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
     let device_enabled = AppState::try_read(cx)
         .and_then(|state| {
@@ -764,40 +760,12 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
 
     let content = v_flex()
         .gap_3()
-        .child(
-            h_flex()
-                .justify_between()
-                .items_center()
-                .child(
-                    v_flex()
-                        .child(div().text_body().child(tr!("device.manage_this_device")))
-                        .child(
-                            div()
-                                .text_caption()
-                                .text_color(pal.text_muted)
-                                .child(tr!("actions.native_controls_when_disabled")),
-                        ),
-                )
-                .child(
-                    Switch::new("device-enabled")
-                        .checked(device_enabled)
-                        .on_click(|checked, _window, cx| {
-                            let enabled = *checked;
-                            AppState::apply(cx, |state| {
-                                state
-                                    .current_record()
-                                    .map(DeviceRecord::device_key)
-                                    .map_or_else(StateEvents::none, |key| {
-                                        state.commit_device_enabled(&key, enabled)
-                                    })
-                            });
-                        }),
-                ),
-        )
+        .child(device_enabled_row(device_enabled, pal))
         .child(
             DescriptionList::new()
                 .columns(1)
-                .label_width(px(118.))
+                // Keep long translated labels intact as the interface scale increases.
+                .label_width(rems(12.))
                 .bordered(false)
                 .child(DescriptionItem::new(tr!("profiles.active_profile")).value(app_profile))
                 .child(
@@ -827,13 +795,7 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
                     "right-panel-config-folder",
                     IconName::Folder,
                     tr!("profiles.config_folder"),
-                    |_event, _window, cx| {
-                        if let Ok(path) = openlogi_core::paths::config_dir()
-                            && let Some(url) = file_url(&path)
-                        {
-                            cx.open_url(&url);
-                        }
-                    },
+                    |_event, _window, cx| open_config_folder(cx),
                 )),
         );
 
@@ -842,6 +804,48 @@ fn configuration_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoEleme
         Icon::new(IconName::Folder),
         content,
     )
+}
+
+/// "Manage this device" label, caption, and switch. The caption column shrinks
+/// so a long translation wraps instead of pushing the switch out of the card.
+fn device_enabled_row(device_enabled: bool, pal: Palette) -> impl IntoElement {
+    h_flex()
+        .debug_selector(|| "device-enabled-row".into())
+        .justify_between()
+        .items_center()
+        .gap_4()
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .child(div().text_body().child(tr!("device.manage_this_device")))
+                .child(
+                    div()
+                        .text_caption()
+                        .text_color(pal.text_muted)
+                        .child(tr!("actions.native_controls_when_disabled")),
+                ),
+        )
+        .child(
+            div()
+                .debug_selector(|| "device-enabled-switch".into())
+                .flex_shrink_0()
+                .child(
+                    Switch::new("device-enabled")
+                        .checked(device_enabled)
+                        .on_click(|checked, _window, cx| {
+                            let enabled = *checked;
+                            AppState::apply(cx, |state| {
+                                state
+                                    .current_record()
+                                    .map(DeviceRecord::device_key)
+                                    .map_or_else(StateEvents::none, |key| {
+                                        state.commit_device_enabled(&key, enabled)
+                                    })
+                            });
+                        }),
+                ),
+        )
 }
 
 fn device_summary(
@@ -921,7 +925,53 @@ fn elided_key(key: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::elided_key;
+    use gpui::{
+        Context, IntoElement, ParentElement as _, Render, Styled as _, TestAppContext, Window, div,
+        px, size,
+    };
+
+    use super::{device_enabled_row, elided_key};
+    use crate::services::i18n::LOCALE_LOCK;
+    use crate::ui::theme;
+
+    /// Hosts the row at a card-like width so a long caption has to wrap.
+    struct DeviceEnabledRowHost;
+
+    impl Render for DeviceEnabledRowHost {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .w(px(360.))
+                .child(device_enabled_row(true, theme::palette(cx)))
+        }
+    }
+
+    #[gpui::test]
+    fn a_long_device_enabled_caption_keeps_the_switch_in_the_row(cx: &mut TestAppContext) {
+        // French carries the longest `native_controls_when_disabled` caption.
+        // Without a shrinkable caption column the switch is pushed past the
+        // row's right edge, out of the Configuration card.
+        let _locale = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("fr");
+        cx.update(gpui_component::init);
+        let (_view, cx) = cx.add_window_view(|_, _| DeviceEnabledRowHost);
+        cx.simulate_resize(size(px(800.), px(600.)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        let row = cx
+            .debug_bounds("device-enabled-row")
+            .expect("the row renders");
+        let switch = cx
+            .debug_bounds("device-enabled-switch")
+            .expect("the row renders its switch");
+        assert!(
+            row.size.width <= px(360.),
+            "row {row:?} must fit its 360px host"
+        );
+        assert!(
+            switch.left() >= row.left() && switch.right() <= row.right(),
+            "switch {switch:?} must sit inside its row {row:?}"
+        );
+    }
 
     #[test]
     fn short_hid_keys_pass_through_whole() {

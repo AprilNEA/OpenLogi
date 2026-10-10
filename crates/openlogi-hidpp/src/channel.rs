@@ -46,6 +46,7 @@ mod tests;
 pub use error::ChannelError;
 pub use message::{
     HidppMessage, LONG_REPORT_ID, LONG_REPORT_LENGTH, SHORT_REPORT_ID, SHORT_REPORT_LENGTH,
+    is_hidpp_report_id,
 };
 pub use observation::{ChannelObservation, ChannelObserver, ObservedReport, RequestOutcome};
 pub use raw::RawHidChannel;
@@ -370,18 +371,13 @@ impl HidppChannel {
         match &self.sw_id_policy {
             SwIdPolicy::Fixed(id) | SwIdPolicy::Leased { id, .. } => id.get(),
             SwIdPolicy::Rotating(counter) => {
-                // The closure always returns `Some`, so `fetch_update` never
-                // reports `Err`; both arms carry the same pre-update value.
-                let previous =
-                    match counter.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |old| {
-                        Some(if old & 0x0f == 0x0f {
-                            0x01
-                        } else {
-                            old.wrapping_add(1)
-                        })
-                    }) {
-                        Ok(previous) | Err(previous) => previous,
-                    };
+                let previous = counter.update(Ordering::SeqCst, Ordering::SeqCst, |old| {
+                    if old & 0x0f == 0x0f {
+                        0x01
+                    } else {
+                        old.wrapping_add(1)
+                    }
+                });
                 U4::from_lo(previous)
             }
         }
@@ -711,10 +707,20 @@ async fn read_loop(
         };
 
         let Some(msg) = HidppMessage::read_raw(&buf[..len]) else {
+            // Only a HID++ report ID can be malformed here: any other ID
+            // belongs to a protocol sharing this node — Logitech DJ on a
+            // Unifying receiver — and is foreign traffic, not broken HID++.
+            let foreign = buf[..len]
+                .first()
+                .is_some_and(|id| !is_hidpp_report_id(*id));
             emit_report(observer, &buf[..len], |report| {
-                ChannelObservation::MalformedIncomingReport { report }
+                if foreign {
+                    ChannelObservation::ForeignIncomingReport { report }
+                } else {
+                    ChannelObservation::MalformedIncomingReport { report }
+                }
             });
-            trace!(len, "report not HID++ — dropped");
+            trace!(len, foreign, "report not HID++ — dropped");
             continue;
         };
 

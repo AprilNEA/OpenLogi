@@ -326,10 +326,9 @@ impl Render for AddDeviceView {
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .on_action(|_: &Minimize, window, _| window.minimize_window())
             .on_action(|_: &Zoom, window, _| window.zoom_window())
-            // Linux only: a client-side titlebar at the top of the window; the
-            // padded content sits in the flex-column below it. macOS / Windows
-            // keep their native titlebar.
-            .when(cfg!(target_os = "linux"), |this| {
+            // Only where the compositor left the chrome to us; the padded
+            // content sits in the flex-column below it.
+            .when(windows::needs_client_titlebar(window), |this| {
                 this.child(windows::aux_title_bar(tr!("pairing.add_device"), cx))
             })
             .child(
@@ -483,6 +482,7 @@ fn passkey_panel(method: &PasskeyMethod, pal: Palette) -> impl IntoElement {
                 .child(
                     h_flex()
                         .id("passkey-sequence")
+                        .debug_selector(|| "passkey-sequence".into())
                         // The icons carry no text of their own, so the order is
                         // spelled out once here rather than left to assistive
                         // tech as a row of unlabelled images.
@@ -492,7 +492,7 @@ fn passkey_panel(method: &PasskeyMethod, pal: Palette) -> impl IntoElement {
                             v_flex()
                                 .items_center()
                                 .gap_0p5()
-                                .child(svg().path(click_icon(*click)).size_6().flex_none())
+                                .child(click_icon_svg(*click, pal))
                                 .child(
                                     div()
                                         .text_caption()
@@ -504,6 +504,15 @@ fn passkey_panel(method: &PasskeyMethod, pal: Palette) -> impl IntoElement {
         }
     }
     col
+}
+
+/// Click glyph with explicit text color so GPUI's SVG renderer paints its path.
+fn click_icon_svg(click: Click, pal: Palette) -> gpui::Svg {
+    svg()
+        .path(click_icon(click))
+        .size_6()
+        .flex_none()
+        .text_color(pal.text_primary)
 }
 
 /// The mouse body with the button this step wants filled in.

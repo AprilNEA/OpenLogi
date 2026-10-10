@@ -152,3 +152,7 @@ impl HardwareContext {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "context/corpus_tests.rs"]
+mod corpus_tests;

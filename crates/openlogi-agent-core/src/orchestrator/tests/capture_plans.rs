@@ -131,30 +131,118 @@ fn pointer_profiles_switch_to_desktop_without_changing_keyboard_focus() {
 }
 
 #[test]
-fn unavailable_pointer_context_does_not_fall_back_to_browser_profile() {
+fn unidentified_pointer_context_uses_the_focused_profile_never_the_desktop() {
     use openlogi_hook::{PointerContext, PointerTarget};
     let mut config = Config::default();
+    config.set_binding(
+        "a",
+        ButtonId::Back,
+        Binding::Single(Action::PreviousDesktop),
+    );
     config.set_per_app_binding("a", "browser", ButtonId::Back, Some(Action::BrowserBack));
     let mut orch = orchestrator(config);
     orch.devices = vec![dev("a", 1, true)];
     orch.set_current_app(Some(ForegroundApp::unnamed("browser".into())));
-    orch.set_pointer_context(PointerContext {
+    let published_pointer_target = |orch: &Orchestrator| {
+        let hook = orch.shared.hook_maps.read().expect("maps").pointer_target;
+        let plan = orch
+            .shared
+            .capture_plans
+            .borrow()
+            .first()
+            .expect("mouse plan")
+            .dispatch
+            .pointer_target;
+        assert_eq!(hook, plan, "OS hook and HID++ share one mouse context");
+        hook
+    };
+    assert!(orch.set_pointer_context(PointerContext {
         app: None,
-        target: PointerTarget::Unavailable,
-    });
-    assert_ne!(published_back_binding(&orch), Some(Action::BrowserBack));
+        target: PointerTarget::Desktop,
+    }));
+    assert_eq!(published_back_binding(&orch), Some(Action::PreviousDesktop));
+
+    // An overlay or a failed lookup leaves the target unidentified, possibly
+    // for the whole session. The mouse then uses the focused application's
+    // profile, as `mouse_profile_target = "focused"` would, never the
+    // desktop's, and every press stays revalidated against the pointer.
+    assert!(
+        orch.set_pointer_context(PointerContext {
+            app: None,
+            target: PointerTarget::Unavailable,
+        }),
+        "presses resolved against the desktop's profile must end"
+    );
+    assert_eq!(published_back_binding(&orch), Some(Action::BrowserBack));
     assert_eq!(
-        orch.shared.hook_maps.read().expect("maps").pointer_target,
+        published_pointer_target(&orch),
         Some(PointerTarget::Unavailable)
     );
 
-    // Unsupported compositors explicitly retain focused profiles; a transient
-    // lookup failure on a supported platform never takes this branch.
+    // Reaching an identified target ends presses resolved against the
+    // focused profile, exactly as moving between two windows does.
+    assert!(orch.set_pointer_context(PointerContext {
+        app: None,
+        target: PointerTarget::Desktop,
+    }));
+    assert_eq!(published_back_binding(&orch), Some(Action::PreviousDesktop));
+    assert_eq!(
+        published_pointer_target(&orch),
+        Some(PointerTarget::Desktop)
+    );
+
+    // Unsupported compositors follow focus outright: nothing to revalidate.
     orch.set_pointer_context(PointerContext {
         app: None,
         target: PointerTarget::Unsupported,
     });
     assert_eq!(published_back_binding(&orch), Some(Action::BrowserBack));
+    assert_eq!(published_pointer_target(&orch), None);
+}
+
+#[test]
+fn unidentified_pointer_context_without_a_focused_app_uses_the_global_bindings() {
+    use openlogi_hook::{PointerContext, PointerTarget};
+    // Before the foreground watcher publishes an app there is no focused
+    // profile to fall back on. The global bindings then apply, exactly as
+    // `mouse_profile_target = "focused"` applies them in the same state, and
+    // the press stays pointer-scoped so it ends once a target is identified.
+    let bindings = |config: &mut Config| {
+        config.set_binding(
+            "a",
+            ButtonId::Back,
+            Binding::Single(Action::PreviousDesktop),
+        );
+        config.set_per_app_binding("a", "browser", ButtonId::Back, Some(Action::BrowserBack));
+    };
+    let mut config = Config::default();
+    bindings(&mut config);
+    let mut orch = orchestrator(config);
+    orch.devices = vec![dev("a", 1, true)];
+    orch.set_current_app(None);
+    orch.rebuild();
+    orch.set_pointer_context(PointerContext {
+        app: None,
+        target: PointerTarget::Unavailable,
+    });
+    assert_eq!(published_back_binding(&orch), Some(Action::PreviousDesktop));
+    assert_eq!(
+        orch.shared.hook_maps.read().expect("maps").pointer_target,
+        Some(PointerTarget::Unavailable)
+    );
+
+    let mut config = Config::default();
+    config.app_settings.mouse_profile_target = openlogi_core::config::MouseProfileTarget::Focused;
+    bindings(&mut config);
+    let mut orch = orchestrator(config);
+    orch.devices = vec![dev("a", 1, true)];
+    orch.set_current_app(None);
+    orch.rebuild();
+    assert_eq!(published_back_binding(&orch), Some(Action::PreviousDesktop));
+    assert_eq!(
+        orch.shared.hook_maps.read().expect("maps").pointer_target,
+        None
+    );
 }
 
 #[test]
@@ -179,7 +267,7 @@ fn hook_maps_publish_selection_and_preserve_learned_thumbwheel_polarity() {
 }
 
 #[test]
-fn macos_side_gesture_capture_follows_mouse_hook_availability() {
+fn side_gesture_capture_follows_platform_ownership_and_hook_availability() {
     let mut config = Config::default();
     config.set_gesture_mode("a", ButtonId::Forward, true);
     let mut orch = orchestrator(config);
@@ -188,7 +276,7 @@ fn macos_side_gesture_capture_follows_mouse_hook_availability() {
     let mut capture_plans = orch.shared.capture_plans.clone();
     let _ = capture_plans.borrow_and_update();
 
-    let side_gesture_is_armed = |orch: &Orchestrator| {
+    let side_gesture_is_requested = |orch: &Orchestrator| {
         orch.shared.capture_plans.borrow()[0]
             .target
             .spec
@@ -197,7 +285,7 @@ fn macos_side_gesture_capture_follows_mouse_hook_availability() {
             .any(|&(_, button)| button == ButtonId::Forward)
     };
     assert!(
-        !side_gesture_is_armed(&orch),
+        !side_gesture_is_requested(&orch),
         "HID++ diversion must wait for the movement hook"
     );
 
@@ -206,39 +294,41 @@ fn macos_side_gesture_capture_follows_mouse_hook_availability() {
         capture_plans
             .has_changed()
             .expect("publication remains open"),
-        cfg!(target_os = "macos"),
+        cfg!(any(target_os = "macos", target_os = "windows")),
         "only a semantic capture-plan change should wake reconciliation"
     );
     let _ = capture_plans.borrow_and_update();
+    let hook_maps = orch
+        .shared
+        .hook_maps
+        .read()
+        .expect("hook maps should not be poisoned");
     if cfg!(target_os = "macos") {
-        let hook_maps = orch
-            .shared
-            .hook_maps
-            .read()
-            .expect("hook maps should not be poisoned");
         assert!(!hook_maps.bindings.contains_key(&ButtonId::Forward));
         assert!(!hook_maps.gestures.contains_key(&ButtonId::Forward));
-        assert!(side_gesture_is_armed(&orch));
-    } else {
-        let hook_maps = orch
-            .shared
-            .hook_maps
-            .read()
-            .expect("hook maps should not be poisoned");
+        assert!(side_gesture_is_requested(&orch));
+    } else if cfg!(target_os = "windows") {
         assert!(hook_maps.gestures.contains_key(&ButtonId::Forward));
-        assert!(!side_gesture_is_armed(&orch));
+        assert!(
+            side_gesture_is_requested(&orch),
+            "Windows must request HID++ raw XY while retaining the passive hook fallback"
+        );
+    } else {
+        assert!(hook_maps.gestures.contains_key(&ButtonId::Forward));
+        assert!(!side_gesture_is_requested(&orch));
     }
+    drop(hook_maps);
 
     orch.set_os_mouse_hook_available(false);
     assert_eq!(
         capture_plans
             .has_changed()
             .expect("publication remains open"),
-        cfg!(target_os = "macos"),
+        cfg!(any(target_os = "macos", target_os = "windows")),
         "only a semantic capture-plan change should wake reconciliation"
     );
     assert!(
-        !side_gesture_is_armed(&orch),
+        !side_gesture_is_requested(&orch),
         "revoking the movement hook must restore native HID++ controls"
     );
 }
@@ -358,4 +448,44 @@ fn a_back_binding_alone_keeps_its_whole_family_on_a_keyboard() {
     for cid in BACK_CIDS {
         assert!(diverted.contains(&cid), "{cid:#06x}");
     }
+}
+#[cfg(target_os = "windows")]
+#[test]
+fn two_mouse_hidpp_plans_are_device_scoped_while_hook_fallback_is_selected_device_global() {
+    let mut config = Config::default();
+    config.set_gesture_mode("selected", ButtonId::Forward, true);
+    let mut orch = orchestrator(config);
+    orch.devices = vec![dev("selected", 1, true), dev("other", 2, true)];
+    orch.rebuild();
+    orch.set_os_mouse_hook_available(true);
+
+    let plans = orch.shared.capture_plans.borrow();
+    let selected = plans
+        .iter()
+        .find(|plan| plan.dispatch.config_key == "selected")
+        .expect("selected device plan");
+    let other = plans
+        .iter()
+        .find(|plan| plan.dispatch.config_key == "other")
+        .expect("other device plan");
+    assert!(
+        selected
+            .dispatch
+            .side_gesture_bindings
+            .contains_key(&ButtonId::Forward),
+        "HID++ input keeps the selected device's dispatch plan"
+    );
+    assert!(other.dispatch.side_gesture_bindings.is_empty());
+    drop(plans);
+
+    let hook_maps = orch
+        .shared
+        .hook_maps
+        .read()
+        .expect("hook maps should not be poisoned");
+    assert_eq!(hook_maps.selected_device.as_deref(), Some("selected"));
+    assert!(
+        hook_maps.gestures.contains_key(&ButtonId::Forward),
+        "the passive Windows fallback is one selected-device map, not a per-source map"
+    );
 }

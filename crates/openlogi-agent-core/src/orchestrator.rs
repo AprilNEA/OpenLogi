@@ -373,17 +373,28 @@ impl Orchestrator {
             .map(|d| d.config_key.as_str())
     }
 
+    /// The app whose mouse profile applies, and the pointer target dispatch
+    /// revalidates (`None`: dispatch follows focus, unrevalidated).
+    ///
+    /// An unidentified target (an overlay, a failed lookup) can last a whole
+    /// session. It selects the focused profile, never the desktop's, yet stays
+    /// pointer-scoped: its presses still end when the pointer reaches an
+    /// identified target, whose profile they were not resolved against. With
+    /// no focused application there is no such profile and the global bindings
+    /// apply, as focused mode applies them in the same state.
     fn mouse_context(&self) -> (Option<&str>, Option<openlogi_hook::PointerTarget>) {
+        let target = self.pointer_context.target;
         if self.config.app_settings.mouse_profile_target == MouseProfileTarget::Focused
-            || self.pointer_context.target == openlogi_hook::PointerTarget::Unsupported
+            || target == openlogi_hook::PointerTarget::Unsupported
         {
-            (self.current_app.as_deref(), None)
-        } else {
-            (
-                self.pointer_context.app.as_ref().map(|app| app.id.as_str()),
-                Some(self.pointer_context.target),
-            )
+            return (self.current_app.as_deref(), None);
         }
+        let app = if target == openlogi_hook::PointerTarget::Unavailable {
+            self.current_app.as_deref()
+        } else {
+            self.pointer_context.app.as_ref().map(|app| app.id.as_str())
+        };
+        (app, Some(target))
     }
 
     /// Build the OS-hook callback's maps for `key` and its mouse context. Both hook
@@ -400,11 +411,13 @@ impl Orchestrator {
         let (app, pointer_target) = self.mouse_context();
         let mut bindings = button_bindings_for(&self.config, key, app);
         let mut gestures = oshook_gestures_for(&self.config, key, app);
-        if let Some(key) = key {
+        if cfg!(target_os = "macos")
+            && let Some(key) = key
+        {
             for button in hidpp_side_gesture_maps_for(&self.config, key, app).keys() {
-                // HID++ owns both edges for these controls. Keeping their
-                // projected click or gesture map in the global hook would
-                // reintroduce a second, unattributed dispatch path.
+                // macOS gives HID++ exclusive ownership of both edges.
+                // Windows deliberately keeps this global map as a passive
+                // fallback when the physical control cannot arm raw XY.
                 bindings.remove(button);
                 gestures.remove(button);
             }
@@ -745,10 +758,10 @@ impl Orchestrator {
                 settings,
             );
         }
-        if let Some(lighting) = device
-            .and_then(|d| d.effective_lighting(&route_key))
-            .filter(|l| l.enabled)
-        {
+        // A disabled entry is re-applied too: it writes black, and a device
+        // whose firmware powers its lighting back on would otherwise ignore the
+        // user's "off" after every reconnect.
+        if let Some(lighting) = device.and_then(|d| d.effective_lighting(&route_key)) {
             crate::hardware::set_lighting_in_background(self.shared.device(&route), lighting);
         }
         if let Some(fn_lock) = self.config.fn_lock(key) {

@@ -288,7 +288,17 @@ fn is_hookable_mouse(
 }
 
 fn build_virtual_device(device: &Device) -> io::Result<evdev::uinput::VirtualDevice> {
-    let builder = VirtualDevice::builder()?.name(VIRTUAL_DEVICE_NAME);
+    // Mirror the physical device's bus/vendor/product/version rather than
+    // uinput's default sample ID (0x1234/0x5678): libinput and desktop
+    // environments key per-device settings — pointer acceleration, scroll
+    // behavior, GNOME's remembered mouse speed — off the reported vendor and
+    // product ID. Leaving the sample ID in place made every re-injected mouse
+    // look identical and unrecognized, so those settings silently fell back
+    // to their defaults instead of the ones configured for this hardware
+    // (issue #1075).
+    let builder = VirtualDevice::builder()?
+        .name(VIRTUAL_DEVICE_NAME)
+        .input_id(device.input_id());
 
     let builder = if let Some(keys) = device.supported_keys() {
         builder.with_keys(keys)?
@@ -430,6 +440,61 @@ fn key_to_button(key: KeyCode) -> Option<ButtonId> {
     }
 }
 
+/// Low-res wheel events (`REL_WHEEL`/`REL_HWHEEL`) held back for one report.
+///
+/// A hi-res device emits both a hi-res and a low-res event per notch. libinput
+/// ignores the low-res one when the hi-res one is present, but desktops that
+/// read the *discrete* axis value (mutter 42) derive it from the low-res count,
+/// so a pass-through that drops it scrolls nothing. The low-res event is
+/// therefore forwarded exactly when the hi-res event on the same axis was; when
+/// the hi-res one was suppressed, the action injector re-emits both and a
+/// forwarded companion would double the scroll distance.
+#[derive(Default)]
+struct LowResCompanions {
+    held: Vec<evdev::InputEvent>,
+    vertical_forwarded: bool,
+    horizontal_forwarded: bool,
+}
+
+impl LowResCompanions {
+    fn is_low_res(axis: RelativeAxisCode) -> bool {
+        matches!(
+            axis,
+            RelativeAxisCode::REL_WHEEL | RelativeAxisCode::REL_HWHEEL
+        )
+    }
+
+    fn hold(&mut self, event: evdev::InputEvent) {
+        self.held.push(event);
+    }
+
+    /// Record that the hi-res event for `axis` is being passed through.
+    fn hires_forwarded(&mut self, axis: RelativeAxisCode) {
+        match axis {
+            RelativeAxisCode::REL_WHEEL_HI_RES => self.vertical_forwarded = true,
+            RelativeAxisCode::REL_HWHEEL_HI_RES => self.horizontal_forwarded = true,
+            _ => {}
+        }
+    }
+
+    /// Move the companions whose hi-res event was forwarded into `pending` and
+    /// reset for the next report.
+    fn release_into(&mut self, pending: &mut Vec<evdev::InputEvent>) {
+        for event in self.held.drain(..) {
+            let forwarded = match RelativeAxisCode(event.code()) {
+                RelativeAxisCode::REL_WHEEL => self.vertical_forwarded,
+                RelativeAxisCode::REL_HWHEEL => self.horizontal_forwarded,
+                _ => false,
+            };
+            if forwarded {
+                pending.push(event);
+            }
+        }
+        self.vertical_forwarded = false;
+        self.horizontal_forwarded = false;
+    }
+}
+
 #[expect(
     clippy::needless_pass_by_value,
     reason = "path/cb/stop/stop_rx are moved into the spawned thread and must not be refs"
@@ -461,6 +526,7 @@ fn device_thread(
     let stop_fd = stop_rx.as_raw_fd();
     // Events that will be re-injected at the next SYN_REPORT.
     let mut pending: Vec<evdev::InputEvent> = Vec::new();
+    let mut companions = LowResCompanions::default();
 
     debug!("hook started on {}", path.display());
 
@@ -485,6 +551,7 @@ fn device_thread(
                 // Flush the report. `emit()` appends its own SYN_REPORT, so the
                 // incoming sync event is dropped rather than re-emitted — pushing
                 // it would send a redundant second SYN_REPORT.
+                companions.release_into(&mut pending);
                 if !pending.is_empty() {
                     if let Err(e) = virtual_device.emit(&pending) {
                         // The physical device is grabbed, so these pass-through
@@ -501,24 +568,22 @@ fn device_thread(
                     pending.clear();
                 }
             } else {
-                let disposition = match translate(&event, hires_scroll) {
-                    Some(me) => cb(HookEvent::Mouse(me)),
-                    // Low-res companions (REL_WHEEL/REL_HWHEEL) must be suppressed when hi-res
-                    // is active — passing them through would double the scroll distance.
-                    None if hires_scroll
-                        && matches!(
-                            event.destructure(),
-                            EventSummary::RelativeAxis(
-                                _,
-                                RelativeAxisCode::REL_WHEEL | RelativeAxisCode::REL_HWHEEL,
-                                _
-                            )
-                        ) =>
-                    {
-                        EventDisposition::Suppress
-                    }
-                    None => EventDisposition::PassThrough,
-                };
+                if hires_scroll
+                    && let EventSummary::RelativeAxis(_, axis, _) = event.destructure()
+                    && LowResCompanions::is_low_res(axis)
+                {
+                    // Redundant for the callback; whether it reaches the desktop
+                    // depends on what happens to the hi-res event in this report.
+                    companions.hold(event);
+                    continue;
+                }
+                let disposition = translate(&event, hires_scroll)
+                    .map_or(EventDisposition::PassThrough, |me| cb(HookEvent::Mouse(me)));
+                if disposition == EventDisposition::PassThrough
+                    && let EventSummary::RelativeAxis(_, axis, _) = event.destructure()
+                {
+                    companions.hires_forwarded(axis);
+                }
                 match disposition {
                     EventDisposition::PassThrough => pending.push(event),
                     EventDisposition::Suppress => {}
@@ -728,6 +793,57 @@ mod tests {
     fn translate_low_res_hwheel_skipped_when_hires_active() {
         let event = InputEvent::new(EventType::RELATIVE.0, RelativeAxisCode::REL_HWHEEL.0, 1);
         assert!(translate(&event, true).is_none());
+    }
+
+    // ── LowResCompanions ─────────────────────────────────────────────────────
+
+    fn rel(axis: RelativeAxisCode, value: i32) -> InputEvent {
+        InputEvent::new(EventType::RELATIVE.0, axis.0, value)
+    }
+
+    fn pending_codes(pending: &[InputEvent]) -> Vec<u16> {
+        pending.iter().map(InputEvent::code).collect()
+    }
+
+    #[test]
+    fn low_res_wheel_forwarded_when_hires_forwarded() {
+        let mut companions = LowResCompanions::default();
+        let mut pending = Vec::new();
+        companions.hold(rel(RelativeAxisCode::REL_WHEEL, -1));
+        companions.hires_forwarded(RelativeAxisCode::REL_WHEEL_HI_RES);
+        companions.release_into(&mut pending);
+        assert_eq!(pending_codes(&pending), [RelativeAxisCode::REL_WHEEL.0]);
+    }
+
+    #[test]
+    fn low_res_wheel_dropped_when_hires_suppressed() {
+        let mut companions = LowResCompanions::default();
+        let mut pending = Vec::new();
+        companions.hold(rel(RelativeAxisCode::REL_WHEEL, -1));
+        companions.release_into(&mut pending);
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn low_res_axes_are_matched_independently() {
+        let mut companions = LowResCompanions::default();
+        let mut pending = Vec::new();
+        companions.hold(rel(RelativeAxisCode::REL_WHEEL, 1));
+        companions.hold(rel(RelativeAxisCode::REL_HWHEEL, 1));
+        companions.hires_forwarded(RelativeAxisCode::REL_HWHEEL_HI_RES);
+        companions.release_into(&mut pending);
+        assert_eq!(pending_codes(&pending), [RelativeAxisCode::REL_HWHEEL.0]);
+    }
+
+    #[test]
+    fn forwarded_state_does_not_leak_into_next_report() {
+        let mut companions = LowResCompanions::default();
+        let mut pending = Vec::new();
+        companions.hires_forwarded(RelativeAxisCode::REL_WHEEL_HI_RES);
+        companions.release_into(&mut pending);
+        companions.hold(rel(RelativeAxisCode::REL_WHEEL, 1));
+        companions.release_into(&mut pending);
+        assert!(pending.is_empty());
     }
 
     #[test]

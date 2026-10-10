@@ -16,13 +16,17 @@ use openlogi_core::config::FunctionKey;
 
 use super::{HeldKey, HeldModifiers, KeyPhase};
 
-/// Shared resolver for private ApplicationServices SPI used by the Dock and
-/// symbolic-hotkey helpers.
+/// Shared resolver for private ApplicationServices and SkyLight SPI.
 #[expect(
     unsafe_code,
     reason = "private ApplicationServices SPI symbols are resolved via dlopen/dlsym FFI"
 )]
 mod app_services;
+#[expect(
+    unsafe_code,
+    reason = "AX attribute copies use an out-pointer and AXChildren's element type is unchecked"
+)]
+mod ax;
 mod browser;
 /// WindowServer window/space actions (Mission Control, App Exposé, Show
 /// Desktop, Launchpad).
@@ -46,9 +50,20 @@ mod dock;
     reason = "Text Input Source Services and UCKeyTranslate have no objc2 bindings"
 )]
 mod keyboard_layout;
+mod main_thread;
+#[expect(
+    unsafe_code,
+    reason = "Accessibility element creation and actions are unsafe FFI calls"
+)]
+mod menu_shortcut;
 mod scroll;
-/// Space switching and screenshots, posted through their system symbolic
-/// hotkey records ("Move left/right a space", the screenshot shortcuts).
+/// DockSwipe events with read-only, per-display Space confirmation.
+#[expect(
+    unsafe_code,
+    reason = "read-only SkyLight SPI and AppKit notification registration require FFI"
+)]
+mod spaces;
+/// Screenshots, posted through their system symbolic hotkey records.
 ///
 /// That respects the user's configured shortcut instead of assuming one, is
 /// independent of the keyboard layout because each record names a physical
@@ -65,9 +80,11 @@ use app_services::symbol as app_services_symbol;
 pub(super) use browser::ax_browser_navigate;
 use dock::{app_expose, launchpad, mission_control, show_desktop};
 use keyboard_layout::layout_key;
+use menu_shortcut::{MenuPress, MenuShortcut};
 use scroll::dispatch_scroll;
 pub(super) use scroll::{post_scroll, post_smooth_scroll};
-use symbolic_hotkey::{capture_region, next_desktop, previous_desktop, screenshot};
+use spaces::{next_desktop, previous_desktop};
+use symbolic_hotkey::{capture_region, screenshot};
 
 // NX_KEYTYPE_* constants from <IOKit/hidsystem/ev_keymap.h>.
 const NX_KEYTYPE_SOUND_UP: i32 = 0;
@@ -87,6 +104,9 @@ pub(super) fn execute(action: &Action) {
         // MiddleClick). A button left on its own native click never reaches
         // this — the hook passes it straight through to the OS.
         Effect::Click(button) => dispatch_click(button),
+        Effect::Shortcut(shortcut) if MENU_SHORTCUTS.contains(&shortcut) => {
+            press_menu_shortcut(&combo(shortcut));
+        }
         Effect::Shortcut(shortcut) => press_combo(&combo(shortcut)),
         Effect::Key(combo) | Effect::HeldKey(combo) => press_combo(combo),
         Effect::Scroll { dx, dy } => dispatch_scroll(dx, dy),
@@ -119,6 +139,80 @@ fn dispatch_click(button: MouseButton) {
         MouseButton::Back => post_other_button(3),
         MouseButton::Forward => post_other_button(4),
     }
+}
+
+/// Shortcuts pressed as the frontmost app's menu item, so AppKit's remapping
+/// of a shortcut the layout cannot reach finds them (see [`menu_shortcut`]).
+const MENU_SHORTCUTS: [Shortcut; 2] = [Shortcut::BrowserBack, Shortcut::BrowserForward];
+
+/// Install the probes [`menu_shortcut`] reads. Must run on the main thread
+/// before the run loop starts.
+pub(super) fn prepare_menu_shortcuts(mtm: objc2::MainThreadMarker) {
+    menu_shortcut::prepare(mtm, MENU_SHORTCUTS.map(combo));
+}
+
+/// Press `combo` as the frontmost app's menu item. Without one, press the
+/// keys the menus show it as under the current layout, as the user would.
+fn press_menu_shortcut(combo: &KeyCombo) {
+    let localized = menu_shortcut::localized(combo);
+    match menu_shortcut::press_menu_item(combo, localized.as_ref()) {
+        MenuPress::Pressed => {
+            tracing::debug!(
+                ?localized,
+                "shortcut pressed as the frontmost app's menu item"
+            );
+            return;
+        }
+        MenuPress::TargetChanged => {
+            tracing::debug!(
+                ?localized,
+                "frontmost app changed during the menu search — shortcut dropped"
+            );
+            return;
+        }
+        MenuPress::NotPressed => {}
+    }
+    let Some(shortcut) =
+        localized.filter(|shortcut| MenuShortcut::written(combo).as_ref() != Some(shortcut))
+    else {
+        // Outside the agent, or a layout that keeps the shortcut as written.
+        press_combo(combo);
+        return;
+    };
+    // The layout remaps the shortcut, so its written keys are another
+    // shortcut here: press the remapped one, or nothing.
+    let mut chars = shortcut.key.chars();
+    let Some(vk) = chars
+        .next()
+        .filter(|_| chars.next().is_none())
+        .and_then(|key| layout_key(key, shortcut.modifiers.command))
+    else {
+        tracing::debug!(
+            ?shortcut,
+            "no key types the remapped shortcut — nothing pressed"
+        );
+        return;
+    };
+    tracing::debug!(
+        ?shortcut,
+        "no menu item shows the shortcut — pressing its remapped keys"
+    );
+    post_key(vk, modifier_flags(shortcut.modifiers));
+}
+
+fn modifier_flags(modifiers: menu_shortcut::Modifiers) -> CGEventFlags {
+    let mut flags = CGEventFlags::CGEventFlagNull;
+    for (held, flag) in [
+        (modifiers.command, CGEventFlags::CGEventFlagCommand),
+        (modifiers.shift, CGEventFlags::CGEventFlagShift),
+        (modifiers.option, CGEventFlags::CGEventFlagAlternate),
+        (modifiers.control, CGEventFlags::CGEventFlagControl),
+    ] {
+        if held {
+            flags |= flag;
+        }
+    }
+    flags
 }
 
 /// The macOS chord for each named [`Shortcut`].

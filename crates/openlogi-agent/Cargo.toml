@@ -52,9 +52,12 @@ dispatch2 = { workspace = true }
 libc = "0.2"
 objc2 = { workspace = true }
 objc2-app-kit = { workspace = true, features = ["NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSResponder", "NSView", "NSMenu", "NSMenuItem", "NSImage", "NSApplication", "NSRunningApplication", "NSWorkspace"] }
-objc2-core-graphics = { workspace = true, features = ["CGDirectDisplay", "CGDisplayConfiguration", "libc"] }
+objc2-core-foundation = { workspace = true, features = ["CFBase", "CFDictionary", "CFNumber", "CFString"] }
+objc2-core-graphics = { workspace = true, features = ["CGSession"] }
 objc2-foundation = { workspace = true, features = ["NSString", "NSData", "NSArray", "NSNotification"] }
+objc2-io-kit = { workspace = true }
 objc2-security = { workspace = true, features = ["AuthSession"] }
+openlogi-inject = { path = "../openlogi-inject" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = "5"
@@ -74,5 +77,6 @@ windows-sys = { workspace = true, features = [
 workspace = true
 
 [dev-dependencies]
+openlogi-fixture = { workspace = true, features = ["fs"] }
 tempfile = "3.27.0"
 tokio = { workspace = true, features = ["test-util"] }

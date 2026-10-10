@@ -4,6 +4,7 @@ paths:
   - "crates/openlogi-overlay/src/platform.rs"
   - "crates/openlogi-permissions/**"
   - "crates/openlogi-camera/**"
+  - "crates/openlogi-agent/src/activity_macos.rs"
   - "crates/openlogi-agent/src/tray.rs"
   - "crates/openlogi-agent/src/status_item.rs"
   - "crates/openlogi-agent/src/lifecycle/armed_session.rs"
@@ -25,8 +26,9 @@ files; **keep this table in sync when you add or move one**:
 
 | File | What it carries |
 |---|---|
+| `openlogi-agent/src/activity_macos.rs` | the device-I/O gate's levels: the `IOPMConnection` powerd subscription (hand-declared SPI, see below) and the `CGSessionCopyCurrentDictionary` console read |
 | `openlogi-agent/src/status_item.rs` | safe `objc2` wrappers over `NSStatusItem` / `NSMenu` / `NSMenuItem` |
-| `openlogi-agent/src/tray.rs` | the menu-bar semantics, `MenuTarget` + `ResumeTarget` (`define_class!`), the Accessory `NSApplication` loop, `NSWorkspace` resume notifications |
+| `openlogi-agent/src/tray.rs` | the menu-bar semantics, `MenuTarget` + `SessionTarget` (`define_class!`), the Accessory `NSApplication` loop, the `NSWorkspace` session (fast-user-switch) notifications |
 | `openlogi-agent-core/src/watchers/camera.rs` | the CoreMediaIO "camera is running" property read |
 | `openlogi-camera/src/capture_macos.rs` | `AVCaptureSession` capture + the `define_class!` frame delegate, and the Camera TCC prompt |
 | `openlogi-camera/src/macos.rs` | `AVCaptureDevice` enumeration (`class!` + `msg_send!`) |
@@ -39,9 +41,12 @@ files; **keep this table in sync when you add or move one**:
 | `openlogi-hook/src/macos/sender.rs` | the HID sender-id lookup and the IOKit registry walk that resolves it to a device |
 | `openlogi-inject/src/inject/macos.rs` | CGEvent key and click synthesis, media-key `NSEvent`s |
 | `openlogi-inject/src/inject/macos/scroll.rs` | CGEvent scroll synthesis, including the continuous-scroll phase fields |
-| `openlogi-inject/src/inject/macos/browser.rs` | typed `AXUIElement` navigation with `CFRetained` ownership, and the off-thread `NSWorkspace` Safari validation |
+| `openlogi-inject/src/inject/macos/ax.rs` | the shared `AXUIElement` attribute reads (`CFRetained` adoption of the Copy-rule out-pointer) and `AXChildren` iteration |
+| `openlogi-inject/src/inject/macos/browser.rs` | Safari's toolbar-button navigation over `ax.rs`, and the off-thread `NSWorkspace` Safari validation |
+| `openlogi-inject/src/inject/macos/menu_shortcut.rs` | the hidden probe `NSMenu` AppKit remaps for the keyboard layout, and pressing the frontmost app's matching menu item through AX |
 | `openlogi-inject/src/inject/macos/{app_services,dock,symbolic_hotkey}.rs` | the `dlopen`'d private SPIs: `CoreDockSendNotification` and the CGS symbolic-hotkey trio |
 | `openlogi-inject/src/inject/macos/keyboard_layout.rs` | the active keyboard layout's `uchr` data (Text Input Source Services, read on the main thread) and `UCKeyTranslate` over it |
+| `openlogi-inject/src/inject/macos/main_thread.rs` | the bounded hand-off of main-thread work from the action worker to the main queue (`dispatch2`) |
 | `openlogi-overlay/src/platform.rs` | the Actions Ring helper's window policy: accessory activation, non-activating panel, the `NSEvent` global click-away monitor (`block2`), and `CGGetActiveDisplayList` / `CGDisplayBounds` |
 | `openlogi-permissions/src/macos.rs` | non-prompting permission reads + System-Settings deep links; `+[CBManager authorization]` via an `AnyClass` lookup |
 
@@ -104,9 +109,11 @@ every 2 s tray refresh under the old `cocoa`/`objc` 0.x path).
   there. Do **not** copy gpui's own `NSThread.isMainThread` + `dispatch2`
   runtime-check idiom; we use the compile-time `MainThreadMarker` guarantee.
 - The tray needs no `static` and no `thread_local`: `run_app_loop` is `-> !`, so
-  the status item, its `MenuTarget` and the `ResumeTarget` are bound as locals
-  that outlive `NSApplication::run()`. They must stay bound — menu items
-  reference their target *weakly*, and the notification center does the same.
+  the status item, its `MenuTarget`, the `SessionTarget` and the powerd
+  `PowerConnection` are bound as locals that outlive `NSApplication::run()`.
+  They must stay bound — menu items reference their target *weakly*, the
+  notification center does the same, and the power callback's `param` points
+  into the connection's own `Arc`.
 - `openlogi-camera`'s frame delegate is deliberately the opposite: an
   `NSObject` subclass with no `thread_kind`, because AVFoundation drives it on
   a background dispatch queue. Its one ivar is the owning session's
@@ -205,6 +212,13 @@ its single user. The current set, all deliberate:
 
 - `openlogi-hook`: `CGEventCopyIOHIDEvent` / `IOHIDEventGetSenderID` —
   undocumented, no bindings anywhere.
+- `openlogi-agent/src/activity_macos.rs`: the `IOPMConnection` SPI
+  (`IOPMConnectionCreate` / `SetNotification` / `SetDispatchQueue` /
+  `AcknowledgeEvent` / `Release` / `GetSystemCapabilities`) — exported by IOKit
+  since 10.6 and what `pmset` is built on, but declared only in Apple's
+  open-source `IOKitUser/pwr_mgt.subproj/IOPMLibPrivate.h`, so `objc2-io-kit`
+  cannot generate it. It is the only API that reports a DarkWake → FullWake
+  transition, which is why the gate needs it (see `docs/DECISIONS.md`).
 - `openlogi-camera`: the AVFoundation / CoreMedia / CoreVideo / CoreFoundation
   statics and functions its capture and enumeration paths need
   (`AVMediaTypeVideo`, `CMSampleBufferGetImageBuffer`, the `CVPixelBuffer`
@@ -233,9 +247,12 @@ under a `SAFETY` comment. Where it currently lives on macOS:
 - `agent/status_item.rs` — `NSMenuItem::initWithTitle_action_keyEquivalent` +
   `setTarget:` (raw selector; the target is a *weak* reference, which is why the
   tray keeps `MenuTarget` alive for the app's lifetime).
+- `agent/activity_macos.rs` — the `IOPMConnection` calls, its C callback (the
+  `param` is the gate the `PowerConnection` keeps alive, and `Drop` drains the
+  delivery queue before that `Arc` goes), and the `CGSession` dictionary cast.
 - `agent/tray.rs` — `msg_send![super(this), init]`, the notification-center
-  `addObserver:selector:name:object:`, and the `NSWorkspace*Notification` name
-  statics.
+  `addObserver:selector:name:object:`, and the `NSWorkspaceSession*Notification`
+  name statics.
 - `agent/lifecycle/armed_session.rs` — `SessionGetInfo` (`objc2-security`,
   `AuthSession`) and `sysctlbyname("kern.bootsessionuuid")`: two out-pointer reads
   that identify the login session, so the dormancy gate can re-arm a crash respawn.
@@ -250,8 +267,15 @@ under a `SAFETY` comment. Where it currently lives on macOS:
   (the borrow is tied to the pool).
 - `hook/macos/sender.rs` — the sender-id `extern` calls and the IOKit registry
   walk, including the Create-rule `CFString` / `CFNumber` wraps.
-- `inject/macos/browser.rs` — typed AX creation, attribute-copy out-pointers, CF array
-  element typing, `AXPress`, and `NSString::to_str(pool)` for Safari validation.
+- `inject/macos/ax.rs` — AX attribute-copy out-pointers and the unchecked
+  `AXChildren` element type; each child is downcast before use.
+- `inject/macos/browser.rs` — typed AX creation, `AXPress`, and
+  `NSString::to_str(pool)` for Safari validation.
+- `inject/macos/menu_shortcut.rs` — AX application creation and `AXPress` on the
+  frontmost app's menu item. The probe menu itself is safe `objc2-app-kit` on
+  the main thread: AppKit remaps an item for the keyboard layout only once the
+  run loop has turned with it in the main menu, so the agent installs the probes
+  before `NSApplication::run`, and workers read them through `main_thread.rs`.
 - `inject/macos/keyboard_layout.rs` — the input-source copy and property read,
   `LMGetKbdType`, and `UCKeyTranslate` over the copied `uchr` bytes. Text Input
   Source Services must run on the main thread (HIToolbox crashes when another
@@ -298,6 +322,8 @@ temporaries. The call sites that keep an explicit
 - `openlogi-inject`'s `ax_browser_navigate` — the action worker, where `to_str`
   borrows the current frontmost app's bundle id while validating the captured
   Safari process.
+- `openlogi-inject`'s menu-shortcut press — the action worker, where the
+  `NSWorkspace` frontmost-app reads autorelease temporaries.
 - `openlogi-camera`'s device enumeration — every `AVCaptureDevice` string is
   copied out before the pool drains, so no `Retained<T>` escapes it.
 
