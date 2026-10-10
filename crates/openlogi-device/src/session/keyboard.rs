@@ -28,7 +28,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use super::capture::{ArmedCapture, CaptureHost, Liveness, open_device, run_capture};
-use super::capture_restore::{ArmedReporting, ReprogRestore, divert_change};
+use super::capture_restore::{ArmedReporting, ReprogRestore, divert_keyboard_key};
 use super::gesture::{
     CaptureError, CaptureSessionFailure, CaptureSessionOutcome, CapturedInput,
     PendingCaptureRestore, enumerate_controls,
@@ -194,7 +194,7 @@ impl ArmedCapture for ArmedKeys {
         for &reporting in &self.reporting {
             if let Err(e) = self
                 .controls
-                .set_cid_reporting_full(reporting.cid, divert_change(reporting.original, false))
+                .set_cid_reporting_full(reporting.cid, divert_keyboard_key(reporting.original))
                 .await
             {
                 warn!(
@@ -236,10 +236,12 @@ async fn arm_keys(
             let original = armed.controls.get_cid_reporting(cid).await?;
             // A transport failure does not prove the firmware rejected the
             // command, so include this CID in rollback before writing.
-            armed.reporting.push(ArmedReporting { cid, original });
+            armed
+                .reporting
+                .push(ArmedReporting::keyboard(cid, original));
             armed
                 .controls
-                .set_cid_reporting_full(cid, divert_change(original, false))
+                .set_cid_reporting_full(cid, divert_keyboard_key(original))
                 .await?;
             armed.diverted.insert(cid, button);
         } else {

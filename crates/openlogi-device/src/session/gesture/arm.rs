@@ -276,7 +276,7 @@ async fn arm_reprog_control(
     let change = divert_change(original, raw_xy);
     // Record ownership before the write: a transport error does not prove the
     // firmware rejected the command, so rollback must cover this CID too.
-    reporting.push(ArmedReporting { cid, original });
+    reporting.push(ArmedReporting::pointer(cid, original));
     rc.set_cid_reporting_full(cid, change).await?;
     Ok(())
 }
