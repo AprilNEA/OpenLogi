@@ -112,7 +112,9 @@ pub(super) fn sidebar_action(
 pub(super) fn route_label(route: Option<&DeviceRoute>) -> String {
     match route {
         Some(DeviceRoute::Bolt { .. }) => tr!("device.bolt_receiver").to_string(),
-        Some(DeviceRoute::Unifying { .. }) => tr!("device.unifying_receiver").to_string(),
+        Some(DeviceRoute::Unifying { .. } | DeviceRoute::Hidpp20Receiver { .. }) => {
+            tr!("device.unifying_receiver").to_string()
+        }
         Some(DeviceRoute::Direct { .. } | DeviceRoute::RawHid { .. }) => {
             tr!("device.direct_connection").to_string()
         }

@@ -152,7 +152,9 @@ pub use succession::Identity;
 ///      offers, and `BacklightState::duration` and
 ///      `BacklightChange::Duration` appended — the `0x1982` backlight
 ///      timer, five-second steps up to two hours.
-pub const PROTOCOL_VERSION: u32 = 41;
+/// v42: `DeviceRoute::Hidpp20Receiver` appended — a device paired to a
+///      receiver that speaks HID++ 2.0, such as the PRO X3's `c54f`.
+pub const PROTOCOL_VERSION: u32 = 42;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
