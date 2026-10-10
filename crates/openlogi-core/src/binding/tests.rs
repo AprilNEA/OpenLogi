@@ -397,7 +397,12 @@ fn persisted_variant_name(action: Action) -> String {
 #[test]
 fn persisted_action_variant_names_are_stable() {
     let mut actions = Action::catalog();
+    // The brightness actions are absent from the Windows catalog but remain
+    // part of the persisted schema there.
+    actions.retain(|action| !matches!(action, Action::BrightnessUp | Action::BrightnessDown));
     actions.extend([
+        Action::BrightnessUp,
+        Action::BrightnessDown,
         Action::SetDpiPreset(0),
         Action::CustomShortcut(
             "F1".parse()
@@ -544,9 +549,11 @@ fn category_media_variants() {
 
 #[test]
 fn brightness_actions_are_pickable_and_lower_to_media_keys() {
+    // Windows has no brightness backend, so the picker must not offer them.
+    let offered = !cfg!(target_os = "windows");
     let catalog = Action::catalog();
-    assert!(catalog.contains(&Action::BrightnessUp));
-    assert!(catalog.contains(&Action::BrightnessDown));
+    assert_eq!(catalog.contains(&Action::BrightnessUp), offered);
+    assert_eq!(catalog.contains(&Action::BrightnessDown), offered);
     assert_eq!(
         Action::BrightnessUp.effect(),
         Effect::Media(MediaKey::BrightnessUp)
