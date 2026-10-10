@@ -169,6 +169,10 @@ pub enum MediaKey {
     VolumeDown,
     /// Toggle system mute.
     Mute,
+    /// Increase display brightness.
+    BrightnessUp,
+    /// Decrease display brightness.
+    BrightnessDown,
 }
 
 /// A window-manager or power action with no shared cross-platform chord.
@@ -265,6 +269,8 @@ impl Action {
             Action::VolumeUp => Effect::Media(MediaKey::VolumeUp),
             Action::VolumeDown => Effect::Media(MediaKey::VolumeDown),
             Action::MuteVolume => Effect::Media(MediaKey::Mute),
+            Action::BrightnessUp => Effect::Media(MediaKey::BrightnessUp),
+            Action::BrightnessDown => Effect::Media(MediaKey::BrightnessDown),
 
             // DPI/SmartShift/precision mode/the Actions Ring/OpenApplication
             // are all handled above (or beside) the injector — see

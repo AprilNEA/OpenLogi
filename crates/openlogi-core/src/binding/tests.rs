@@ -381,6 +381,19 @@ fn all_catalog_variants_roundtrip_toml() {
     }
 }
 
+/// The variant name an action is saved under in the TOML config.
+fn persisted_variant_name(action: Action) -> String {
+    match toml::Value::try_from(action).expect("serialize action") {
+        toml::Value::String(name) => name,
+        toml::Value::Table(table) if table.len() == 1 => table
+            .into_iter()
+            .next()
+            .map(|(key, _)| key)
+            .expect("one variant key"),
+        value => panic!("unexpected action shape: {value:?}"),
+    }
+}
+
 #[test]
 fn persisted_action_variant_names_are_stable() {
     let mut actions = Action::catalog();
@@ -408,23 +421,12 @@ fn persisted_action_variant_names_are_stable() {
                 .unwrap_or_else(|error| panic!("valid shortcut failed: {error}")),
         ),
     ]);
-    let mut actual: Vec<String> = actions
-        .into_iter()
-        .map(
-            |action| match toml::Value::try_from(action).expect("serialize action") {
-                toml::Value::String(name) => name,
-                toml::Value::Table(table) if table.len() == 1 => table
-                    .into_iter()
-                    .next()
-                    .map(|(key, _)| key)
-                    .expect("one variant key"),
-                value => panic!("unexpected action shape: {value:?}"),
-            },
-        )
-        .collect();
+    let mut actual: Vec<String> = actions.into_iter().map(persisted_variant_name).collect();
     actual.sort();
     let mut expected = [
         "AppExpose",
+        "BrightnessDown",
+        "BrightnessUp",
         "BrowserBack",
         "BrowserForward",
         "CaptureRegion",
@@ -536,6 +538,46 @@ fn category_media_variants() {
     assert_eq!(Action::VolumeUp.category(), Category::Media);
     assert_eq!(Action::VolumeDown.category(), Category::Media);
     assert_eq!(Action::MuteVolume.category(), Category::Media);
+    assert_eq!(Action::BrightnessUp.category(), Category::Media);
+    assert_eq!(Action::BrightnessDown.category(), Category::Media);
+}
+
+#[test]
+fn brightness_actions_are_pickable_and_lower_to_media_keys() {
+    let catalog = Action::catalog();
+    assert!(catalog.contains(&Action::BrightnessUp));
+    assert!(catalog.contains(&Action::BrightnessDown));
+    assert_eq!(
+        Action::BrightnessUp.effect(),
+        Effect::Media(MediaKey::BrightnessUp)
+    );
+    assert_eq!(
+        Action::BrightnessDown.effect(),
+        Effect::Media(MediaKey::BrightnessDown)
+    );
+    assert_eq!(
+        Action::BrightnessUp.translation_key(),
+        Some("actions.brightness_up")
+    );
+    assert_eq!(
+        Action::BrightnessDown.translation_key(),
+        Some("actions.brightness_down")
+    );
+}
+
+#[test]
+fn brightness_actions_can_bind_to_a_function_key_and_roundtrip() {
+    let bindings = BTreeMap::from([
+        (
+            ButtonId::control(0x00c3),
+            Binding::Single(Action::BrightnessDown),
+        ),
+        (
+            ButtonId::control(0x00c4),
+            Binding::Single(Action::BrightnessUp),
+        ),
+    ]);
+    assert_eq!(binding_roundtrip(bindings.clone()), bindings);
 }
 
 #[test]

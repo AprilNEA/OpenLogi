@@ -152,6 +152,8 @@ pub use succession::Identity;
 ///      offers, and `BacklightState::duration` and
 ///      `BacklightChange::Duration` appended — the `0x1982` backlight
 ///      timer, five-second steps up to two hours.
+///      `Action::{BrightnessUp, BrightnessDown}` appended, the display
+///      brightness keys bound to a button.
 pub const PROTOCOL_VERSION: u32 = 41;
 
 /// Environment variable through which the agent hands a supervised helper the

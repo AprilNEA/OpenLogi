@@ -116,6 +116,10 @@ pub enum ActionRingIcon {
     Book,
     /// Prohibited action glyph.
     Ban,
+    /// Brightness-up (sun) glyph.
+    BrightnessUp,
+    /// Brightness-down (dim sun) glyph.
+    BrightnessDown,
 }
 
 impl ActionRingIcon {
@@ -180,11 +184,13 @@ impl ActionRingIcon {
             Self::Palette => "action-icons/palette.svg",
             Self::Book => "action-icons/book-open.svg",
             Self::Ban => "action-icons/ban.svg",
+            Self::BrightnessUp => "action-icons/sun.svg",
+            Self::BrightnessDown => "action-icons/sun-dim.svg",
         }
     }
 
     /// Every icon offered by the Actions Ring editor.
-    pub const ALL: [Self; 54] = [
+    pub const ALL: [Self; 56] = [
         Self::Pointer,
         Self::Mouse,
         Self::Copy,
@@ -239,6 +245,8 @@ impl ActionRingIcon {
         Self::Palette,
         Self::Book,
         Self::Ban,
+        Self::BrightnessUp,
+        Self::BrightnessDown,
     ];
 
     /// Stable catalog key used as this icon's accessible label.
@@ -297,6 +305,8 @@ impl ActionRingIcon {
             Self::Palette => "action_ring.palette",
             Self::Book => "action_ring.book",
             Self::Ban => "pointer.do_nothing",
+            Self::BrightnessUp => "actions.brightness_up",
+            Self::BrightnessDown => "actions.brightness_down",
         }
     }
 }
