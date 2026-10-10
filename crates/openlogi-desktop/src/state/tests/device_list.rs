@@ -42,7 +42,7 @@ fn canonical_device_profile() -> DeviceProfile {
     profile
 }
 
-fn snapshot_candidate(profile: &DeviceProfile) -> AgentSnapshot {
+pub(crate) fn snapshot_candidate(profile: &DeviceProfile) -> AgentSnapshot {
     let editor = app("org.openlogi.synthetic-editor", "Synthetic Editor");
     AgentSnapshot {
         status: AgentStatus {

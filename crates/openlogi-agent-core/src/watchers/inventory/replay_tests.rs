@@ -60,6 +60,7 @@ async fn replay_inventory_and_authoritative_read_share_one_injected_backend() {
         } => (inventories, standalone, hid_open_failures),
         InventoryEvent::Unavailable
         | InventoryEvent::SystemWake
+        | InventoryEvent::DeviceWake
         | InventoryEvent::BacklightChanged { .. } => {
             panic!("initial replay reconciliation must publish a snapshot")
         }
@@ -290,6 +291,7 @@ async fn published_within(
                 Some(
                     InventoryEvent::Snapshot { .. }
                     | InventoryEvent::SystemWake
+                    | InventoryEvent::DeviceWake
                     | InventoryEvent::BacklightChanged { .. },
                 ) => {}
                 Some(InventoryEvent::Unavailable) => {

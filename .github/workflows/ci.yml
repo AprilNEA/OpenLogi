@@ -36,8 +36,46 @@ jobs:
   fmt:
     name: rustfmt
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tests: ${{ steps.changes.outputs.tests }}
     steps:
       - uses: actions/checkout@v7
+      # Reuse this runner to select test jobs without another build or runner.
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: changes
+        with:
+          # PRs compare against their base; pushes compare the entire pushed range.
+          token: ""
+          base: ${{ github.event.pull_request.base.sha || github.ref }}
+          predicate-quantifier: some-with-excludes
+          filters: |
+            tests:
+              - '**/*.rs'
+              - '**/Cargo.toml'
+              - 'Cargo.lock'
+              - 'crates/**'
+              - 'xtask/**'
+              - 'tests/**'
+              - 'fixtures/devices/**'
+              - 'docs/config.example.toml'
+              - 'design/icon/openlogi.png'
+              - 'design/icon/openlogi.ico'
+              - 'packaging/**'
+              - '.cargo/**'
+              - '.github/workflows/ci.yml'
+              - 'rust-toolchain.toml'
+              - 'rustfmt.toml'
+              - '.rustfmt.toml'
+              - 'clippy.toml'
+              - 'prek.toml'
+              - 'sgconfig.yml'
+              - 'release-plz.toml'
+              - 'devenv.*'
+              - '.envrc'
+              - 'flake.*'
+              - '!**/*.md'
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -216,6 +254,9 @@ jobs:
   # the clippy job installs is sufficient. Test workspace there as well so the
   # config-roundtrip and binding suites run on a non-macOS host.
   test-linux:
+    needs: fmt
+    # A formatting failure must not suppress tests after successful path detection.
+    if: ${{ !cancelled() && needs.fmt.outputs.tests == 'true' }}
     name: tests (linux)
     runs-on: ubuntu-latest
     steps:
@@ -240,6 +281,9 @@ jobs:
       - run: cargo test --workspace --exclude openlogi-desktop
 
   test-macos:
+    needs: fmt
+    # A formatting failure must not suppress tests after successful path detection.
+    if: ${{ !cancelled() && needs.fmt.outputs.tests == 'true' }}
     name: tests (macos, ${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -271,6 +315,9 @@ jobs:
   # which `clippy (windows)` only compiles and no other host can execute. The
   # same shape as the Linux job: everything but the desktop crate.
   test-windows:
+    needs: fmt
+    # A formatting failure must not suppress tests after successful path detection.
+    if: ${{ !cancelled() && needs.fmt.outputs.tests == 'true' }}
     name: tests (windows)
     runs-on: windows-latest
     steps:

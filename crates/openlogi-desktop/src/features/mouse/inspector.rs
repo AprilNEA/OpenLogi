@@ -46,8 +46,25 @@ pub(super) struct ActionPickerContext<'a> {
     pub shortcut_input: &'a Entity<InputState>,
     pub application_input: &'a Entity<InputState>,
     pub shortcut_invalid: bool,
+    pub shortcut_mode: ShortcutMode,
     pub application_invalid: bool,
     pub view: &'a Entity<MouseModelView>,
+}
+
+/// Whether the custom shortcut editor records a tapped or a held chord.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ShortcutMode {
+    Tap,
+    Hold,
+}
+
+impl ShortcutMode {
+    fn action(self, combo: openlogi_core::binding::KeyCombo) -> Action {
+        match self {
+            Self::Tap => Action::CustomShortcut(combo),
+            Self::Hold => Action::HoldShortcut(combo),
+        }
+    }
 }
 
 pub(super) fn binding_inspector(
@@ -360,9 +377,15 @@ fn gesture_directions(
                     let selected = direction == active;
                     let action = gesture_action(gesture_map, button, direction);
                     let view = view.clone();
+                    let aria_label = format!(
+                        "{}: {}",
+                        tr!(direction.translation_key()),
+                        localized_action_label(&action)
+                    );
                     MenuRow::new(("inspector-direction", index))
                         .selected(selected)
                         .role(Role::Button)
+                        .aria_label(aria_label)
                         .child(
                             h_flex()
                                 .min_w_0()
@@ -438,10 +461,7 @@ fn thumbwheel_inspector(
         (Some(_), false) => tr!("profiles.inherited_from_default"),
         (None, _) => tr!("profiles.default_profile"),
     };
-    let current_label = current.map_or_else(
-        || tr!("common.custom"),
-        |preset| tr!(preset.translation_key()),
-    );
+    let current_label = current.map_or_else(|| tr!("common.custom"), |p| tr!(p.translation_key()));
     let current_icon = current.map_or("action-icons/chevrons-right.svg", ThumbwheelPreset::icon);
     let observer = picker.view.clone();
 
@@ -472,6 +492,7 @@ fn thumbwheel_inspector(
                             MenuRow::new(("inspector-thumbwheel", index))
                                 .selected(selected)
                                 .role(Role::Button)
+                                .aria_label(tr!(preset.translation_key()))
                                 .child(
                                     h_flex()
                                         .items_center()
@@ -661,6 +682,7 @@ fn action_library(
             id_prefix,
             picker.shortcut_input,
             picker.shortcut_invalid,
+            picker.shortcut_mode,
             picker.view,
             on_pick,
             pal,
@@ -698,16 +720,37 @@ fn custom_shortcut_editor(
     id_prefix: &'static str,
     input: &Entity<InputState>,
     invalid: bool,
+    mode: ShortcutMode,
     view: &Entity<MouseModelView>,
     on_pick: &PickFn,
     pal: Palette,
 ) -> impl IntoElement {
     let submit_input = input.clone();
     let on_pick = on_pick.clone();
+    let mode_button = |option: ShortcutMode| {
+        let (id, label) = match option {
+            ShortcutMode::Tap => ("tap", tr!("actions.shortcut_tap")),
+            ShortcutMode::Hold => ("hold", tr!("actions.shortcut_hold")),
+        };
+        let view = view.clone();
+        control_button(format!("{id_prefix}-shortcut-{id}"))
+            .debug_selector(move || format!("{id_prefix}-shortcut-{id}"))
+            .selected(mode == option)
+            .label(label)
+            .on_click(move |_, _, cx| {
+                view.update(cx, |view, cx| {
+                    view.shortcut_mode = option;
+                    cx.notify();
+                });
+            })
+    };
+    let tap_button = mode_button(ShortcutMode::Tap);
+    let hold_button = mode_button(ShortcutMode::Hold);
     let view = view.clone();
     v_flex()
         .gap_1()
         .child(editor_section(tr!("action_ring.custom_shortcut"), pal))
+        .child(h_flex().gap_2().child(tap_button).child(hold_button))
         .child(
             h_flex()
                 .gap_2()
@@ -726,7 +769,7 @@ fn custom_shortcut_editor(
                         .on_click(move |_, window, cx| {
                             let shortcut = submit_input.read(cx).value().to_string();
                             match shortcut.parse::<openlogi_core::binding::KeyCombo>() {
-                                Ok(combo) => (on_pick)(Action::CustomShortcut(combo), window, cx),
+                                Ok(combo) => (on_pick)(mode.action(combo), window, cx),
                                 Err(_) => view.update(cx, |view, cx| {
                                     view.custom_shortcut_invalid = true;
                                     cx.notify();

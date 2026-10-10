@@ -99,11 +99,49 @@ enum ScrollOutputMode {
     Direct,
 }
 
+impl ScrollOutputMode {
+    /// Output for a diverted HID++ impulse under the given smoothing setting.
+    /// `None` leaves the distance to direct, unphased wheel output.
+    fn hidpp(smoothing: bool, impulse: WheelDelta, at: Instant) -> Option<Self> {
+        if smoothing {
+            Some(Self::Smooth { at })
+        } else if impulse.y == 0.0 {
+            Some(Self::Phased { at })
+        } else {
+            None
+        }
+    }
+}
+
 struct ScrollInput {
     generation: u64,
     source: ScrollSource,
     impulse: WheelDelta,
     output: ScrollOutputMode,
+}
+
+impl ScrollInput {
+    /// The output this input gets under the current smoothing setting.
+    ///
+    /// A toggle can land between enqueue and dequeue. The physical event was
+    /// already consumed by then, so input queued under the other setting is
+    /// reclassified as if it were submitted now rather than dropped; a
+    /// horizontal HID++ tick thereby keeps the scroll phases AppKit's swipe
+    /// recognizers need.
+    fn output_under(&self, smoothing: bool) -> ScrollOutputMode {
+        match (self.output, &self.source) {
+            (
+                ScrollOutputMode::Smooth { at } | ScrollOutputMode::Phased { at },
+                ScrollSource::Hidpp(_),
+            ) => ScrollOutputMode::hidpp(smoothing, self.impulse, at)
+                .unwrap_or(ScrollOutputMode::Direct),
+            (
+                ScrollOutputMode::Smooth { at } | ScrollOutputMode::Phased { at },
+                ScrollSource::OsHook(_),
+            ) if smoothing => ScrollOutputMode::Smooth { at },
+            _ => ScrollOutputMode::Direct,
+        }
+    }
 }
 
 enum ScrollCommand {
@@ -233,12 +271,11 @@ impl ScrollInputHandle {
         let Ok(impulse) = WheelDelta::try_from(delta) else {
             return false;
         };
-        let at = Instant::now();
-        let output = if self.preferences.smooth_scroll_enabled() {
-            ScrollOutputMode::Smooth { at }
-        } else if impulse.y == 0.0 {
-            ScrollOutputMode::Phased { at }
-        } else {
+        let Some(output) = ScrollOutputMode::hidpp(
+            self.preferences.smooth_scroll_enabled(),
+            impulse,
+            Instant::now(),
+        ) else {
             return false;
         };
         self.try_enqueue(ScrollSource::Hidpp(session.clone()), impulse, output)
@@ -440,6 +477,14 @@ fn run_worker(
                     session,
                     generation: cancelled_generation,
                 } => {
+                    // A control from a generation this worker has not observed
+                    // yet is not stale: catch up first, or it is dropped and
+                    // the cancelled session's queued input is accepted below.
+                    if cancelled_generation > cancellations.generation
+                        && cancellations.advance_to(shared_generation.load(Ordering::Acquire))
+                    {
+                        engine.cancel_all(emit_smooth);
+                    }
                     if cancellations.cancel(&session, cancelled_generation) {
                         engine.cancel_source(&ScrollSource::Hidpp(session), emit_smooth);
                     }
@@ -472,18 +517,17 @@ fn run_worker(
 
         match command {
             Ok(ScrollCommand::Input(input)) if cancellations.accepts(&input) => {
-                match input.output {
-                    ScrollOutputMode::Smooth { at } if smoothing => {
+                match input.output_under(smoothing) {
+                    ScrollOutputMode::Smooth { at } => {
                         engine.impulse(input.source, input.impulse, at, emit_smooth);
                     }
-                    ScrollOutputMode::Phased { at } if !smoothing => {
+                    ScrollOutputMode::Phased { at } => {
                         engine.phased_impulse(input.source, input.impulse, at, emit_smooth);
                     }
                     ScrollOutputMode::Direct => {
                         engine.cancel_source(&input.source, emit_smooth);
                         emit_direct(input.impulse);
                     }
-                    ScrollOutputMode::Smooth { .. } | ScrollOutputMode::Phased { .. } => {}
                 }
             }
             Ok(ScrollCommand::CancelSource(source)) => {
@@ -808,6 +852,161 @@ mod tests {
         first_horizontal_tick_after_idle_toggle(true);
     }
 
+    fn horizontal_tick_queued_before_a_smoothing_toggle(initial_smoothing: bool) {
+        let preferences = preferences(initial_smoothing, 14);
+        let (input, commands, controls) = standalone_input(1, Arc::clone(&preferences));
+        let generation = Arc::clone(&input.generation);
+        let session = HidppSessionId::with_epoch("mouse-a", 1);
+        assert!(input.try_hidpp_scroll(&session, ScrollDelta::wheel_ticks(1.0, 0.0)));
+        preferences.publish(!initial_smoothing, sensitivity(14));
+
+        let (frames, received) = mpsc::channel();
+        let worker_preferences = Arc::clone(&preferences);
+        let worker = thread::spawn(move || {
+            run_worker(
+                |deadline| receive_command(&commands, deadline),
+                &controls,
+                &generation,
+                &worker_preferences,
+                &mut |frame| {
+                    frames
+                        .send(frame)
+                        .expect("test frame receiver remains open");
+                },
+                &mut |_| panic!("a horizontal HID++ tick must keep its scroll phases"),
+            );
+        });
+
+        let mut output = Vec::new();
+        while let Ok(frame) = received.recv_timeout(Duration::from_secs(1)) {
+            let terminal = matches!(
+                frame.phase,
+                openlogi_inject::SmoothScrollPhase::Ended
+                    | openlogi_inject::SmoothScrollPhase::Cancelled
+            );
+            output.push(frame);
+            if terminal {
+                break;
+            }
+        }
+        drop(input);
+        worker.join().expect("worker exits after input disconnects");
+
+        assert_eq!(
+            output.first().map(|frame| frame.phase),
+            Some(openlogi_inject::SmoothScrollPhase::Began),
+            "a tick queued under the old setting must start a gesture"
+        );
+        assert_eq!(
+            output.last().map(|frame| frame.phase),
+            Some(openlogi_inject::SmoothScrollPhase::Ended),
+            "the gesture must finish rather than be dropped or cancelled"
+        );
+        let distance = output
+            .iter()
+            .fold(WheelDelta::ZERO, |sum, frame| sum.plus(frame.delta));
+        assert!(
+            (distance.x - 1.0).abs() < 1.0e-12 && distance.y.abs() < 1.0e-12,
+            "the tick must keep its full distance: {distance:?}"
+        );
+    }
+
+    #[test]
+    fn horizontal_tick_queued_before_smoothing_is_disabled_becomes_a_phased_gesture() {
+        horizontal_tick_queued_before_a_smoothing_toggle(true);
+    }
+
+    #[test]
+    fn horizontal_tick_queued_before_smoothing_is_enabled_is_smoothed() {
+        horizontal_tick_queued_before_a_smoothing_toggle(false);
+    }
+
+    #[test]
+    fn stale_input_is_reclassified_as_if_submitted_now() {
+        let at = Instant::now();
+        let hidpp = ScrollSource::Hidpp(HidppSessionId::with_epoch("mouse-a", 1));
+        let hook = ScrollSource::current_hook();
+        let input = |source: &ScrollSource, x, y, output| ScrollInput {
+            generation: 0,
+            source: source.clone(),
+            impulse: WheelDelta { x, y },
+            output,
+        };
+
+        // Queued with smoothing on, dequeued with it off.
+        assert!(matches!(
+            input(&hidpp, 1.0, 0.0, ScrollOutputMode::Smooth { at }).output_under(false),
+            ScrollOutputMode::Phased { at: kept } if kept == at
+        ));
+        assert!(matches!(
+            input(&hidpp, 0.0, 1.0, ScrollOutputMode::Smooth { at }).output_under(false),
+            ScrollOutputMode::Direct
+        ));
+        assert!(matches!(
+            input(&hook, 0.0, 1.0, ScrollOutputMode::Smooth { at }).output_under(false),
+            ScrollOutputMode::Direct
+        ));
+        // Queued with smoothing off, dequeued with it on.
+        assert!(matches!(
+            input(&hidpp, 1.0, 0.0, ScrollOutputMode::Phased { at }).output_under(true),
+            ScrollOutputMode::Smooth { at: kept } if kept == at
+        ));
+        assert!(matches!(
+            input(&hook, 0.0, 1.0, ScrollOutputMode::Direct).output_under(true),
+            ScrollOutputMode::Direct
+        ));
+        // Input that still fits the setting is unchanged.
+        assert!(matches!(
+            input(&hidpp, 1.0, 0.0, ScrollOutputMode::Phased { at }).output_under(false),
+            ScrollOutputMode::Phased { at: kept } if kept == at
+        ));
+        assert!(matches!(
+            input(&hidpp, 0.0, 1.0, ScrollOutputMode::Smooth { at }).output_under(true),
+            ScrollOutputMode::Smooth { at: kept } if kept == at
+        ));
+        assert!(matches!(
+            input(&hook, 0.0, 1.0, ScrollOutputMode::Smooth { at }).output_under(true),
+            ScrollOutputMode::Smooth { at: kept } if kept == at
+        ));
+        assert!(matches!(
+            input(&hook, 0.0, 1.0, ScrollOutputMode::Direct).output_under(false),
+            ScrollOutputMode::Direct
+        ));
+    }
+
+    #[test]
+    fn unphased_ticks_queued_before_smoothing_is_disabled_are_emitted_directly() {
+        let preferences = preferences(true, 14);
+        let (input, commands, controls) = standalone_input(2, Arc::clone(&preferences));
+        let generation = Arc::clone(&input.generation);
+        let session = HidppSessionId::with_epoch("mouse-a", 1);
+        assert!(input.try_hook_scroll(ScrollDelta::wheel_ticks(0.0, 1.0)));
+        assert!(input.try_hidpp_scroll(&session, ScrollDelta::wheel_ticks(0.0, 2.0)));
+        preferences.publish(false, sensitivity(14));
+        drop(input);
+
+        let mut frames = Vec::new();
+        let mut direct = Vec::new();
+        run_worker(
+            |deadline| receive_command(&commands, deadline),
+            &controls,
+            &generation,
+            &preferences,
+            &mut |frame| frames.push(frame),
+            &mut |delta| direct.push(delta),
+        );
+
+        assert!(
+            frames.is_empty(),
+            "no gesture for unphased output: {frames:?}"
+        );
+        assert_eq!(
+            direct,
+            [WheelDelta { x: 0.0, y: 1.0 }, WheelDelta { x: 0.0, y: 2.0 }],
+            "hook and vertical HID++ ticks keep their distance as direct output"
+        );
+    }
+
     #[test]
     fn live_preferences_change_hook_admission_and_output_mode() {
         let preferences = preferences(false, u8::from(VerticalScrollSensitivity::DEFAULT));
@@ -1013,6 +1212,62 @@ mod tests {
         drop(commands);
         drop(controls);
         worker.join().expect("worker exits cleanly");
+    }
+
+    #[test]
+    fn overflow_control_from_an_unobserved_generation_still_cancels_its_session() {
+        let cancelled = HidppSessionId::with_epoch("mouse-a", 7);
+        let survivor = HidppSessionId::with_epoch("mouse-b", 3);
+        let direct = |session: &HidppSessionId, generation, y| {
+            Ok(ScrollCommand::Input(ScrollInput {
+                generation,
+                source: ScrollSource::Hidpp(session.clone()),
+                impulse: WheelDelta { x: 0.0, y },
+                output: ScrollOutputMode::Direct,
+            }))
+        };
+        let mut script = [
+            direct(&survivor, 0, 1.0),
+            direct(&cancelled, 1, 2.0),
+            direct(&survivor, 1, 3.0),
+        ]
+        .into_iter();
+        let (controls, control_rx) = mpsc::channel();
+        let generation = AtomicU64::new(0);
+        let mut emitted = Vec::new();
+
+        run_worker(
+            |_| {
+                script
+                    .next()
+                    .unwrap_or(Err(mpsc::RecvTimeoutError::Disconnected))
+            },
+            &control_rx,
+            &generation,
+            &preferences(false, 14),
+            &mut |_| {},
+            &mut |delta| {
+                if emitted.is_empty() {
+                    // While the worker is still inside a generation-0 output
+                    // callback, hooks are cancelled and new-generation input
+                    // from `cancelled` saturates the queue.
+                    generation.fetch_add(1, Ordering::AcqRel);
+                    controls
+                        .send(ScrollControl::CancelOverflowSession {
+                            session: cancelled.clone(),
+                            generation: 1,
+                        })
+                        .expect("worker control channel remains open");
+                }
+                emitted.push(delta);
+            },
+        );
+
+        assert_eq!(
+            emitted,
+            [WheelDelta { x: 0.0, y: 1.0 }, WheelDelta { x: 0.0, y: 3.0 }],
+            "the cancelled session must not emit, and other sources must"
+        );
     }
 
     #[test]

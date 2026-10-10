@@ -1,7 +1,7 @@
 > [!WARNING]
 > **OpenLogi is under active development** and not yet stable — features and config may still change. Give the repo a **Star** ⭐ and **Watch** 👀 it to get notified when a new release lands.
 
-<h4 align="right"><strong>English</strong> | <a href="docs/README.zh-CN.md">简体中文</a> | <a href="docs/README.ja.md">日本語</a> | <a href="docs/README.de.md">Deutsch</a> | <a href="docs/README.fr.md">Français</a> | <a href="docs/README.ko.md">한국어</a> | <a href="docs/README.ru.md">Русский</a></h4>
+<h4 align="right"><strong>English</strong> | <a href="docs/README.zh-CN.md">简体中文</a> | <a href="docs/README.ja.md">日本語</a> | <a href="docs/README.de.md">Deutsch</a> | <a href="docs/README.fr.md">Français</a> | <a href="docs/README.ko.md">한국어</a> | <a href="docs/README.ru.md">Русский</a> | <a href="docs/README.es.md">Español</a> | <a href="docs/README.pt-BR.md">Português</a> | <a href="docs/README.tr.md">Türkçe</a></h4>
 
 <p align="center">
     <img src="https://assets.openlogi.org/brand/openlogi-icon.png" width="138" alt="OpenLogi"/>
@@ -76,7 +76,7 @@ Things OpenLogi does that Options+ won't:
 
 - Any Logitech UVC webcam (Brio, StreamCam, the C920 series, …), plug and play
 - Live preview that opens the camera only while you watch — leaving it releases the camera entirely and the LED goes off
-- Image controls written straight to the UVC hardware — zoom, focus, exposure, brightness, contrast, saturation, sharpness, white balance, tint, anti-flicker, and low-light compensation, with auto-mode toggles for focus / exposure / white balance — so changes apply in Meet / Zoom / OBS and every other app using the camera
+- Image controls written straight to the UVC hardware — zoom, pan, tilt, focus, exposure, brightness, contrast, saturation, sharpness, gain, backlight compensation, white balance, tint, anti-flicker, and low-light compensation, with auto-mode toggles for focus / exposure / white balance — so changes apply in Meet / Zoom / OBS and every other app using the camera
 - One-click profiles: built-in Default / Streaming / Video call plus custom snapshots; settings persist per camera and are written back to the hardware on the next view
 
 ¹ Media key actions use D-Bus MPRIS on Linux; a handful of macOS-specific actions have no universal Linux equivalent and are no-ops. Windows maps platform actions to native equivalents where available.

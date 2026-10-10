@@ -391,6 +391,37 @@ fn gallery_order_moves_connected_devices_first_stably() {
     assert_eq!(ordered_device_indices(&records), vec![1, 3, 0, 2]);
 }
 
+/// #1699: unlike the #127 scenario below, kind resolution itself can stay
+/// wrong (a Bluetooth-direct MX Master 3S kept kind=Keyboard despite
+/// measuring real buttons+pointer capabilities) — the panel choice has to
+/// tolerate that directly, not just rely on kind having been corrected
+/// upstream. A measured pointer capability must win Buttons over Keys even
+/// then, and Keys must not also show for the same record.
+#[test]
+fn tabs_prefer_buttons_when_a_keyboard_kind_measures_a_pointer() {
+    let caps = Some(Capabilities {
+        buttons: true,
+        pointer: true,
+        lighting: false,
+        scroll_inversion: false,
+        hires_wheel: false,
+        thumbwheel: false,
+        haptic_feedback: false,
+        haptic_panel: false,
+        dpi_gestures: false,
+        fn_lock: false,
+    });
+    let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
+    assert!(
+        tabs.contains(&DetailTab::Buttons),
+        "a measured pointer capability must win Buttons even with kind=Keyboard"
+    );
+    assert!(
+        !tabs.contains(&DetailTab::Keys),
+        "the same record must not also show Keys"
+    );
+}
+
 /// Tabs follow measured capabilities, not kind — the core of the #127 fix.
 /// A device the Bolt register mislabels as Keyboard but whose 0x0005 probe
 /// returns Mouse ends up with kind=Mouse; measured caps drive the tabs.
@@ -545,3 +576,5 @@ fn unprobed_unknown_device_shows_only_device_tab() {
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Unknown, None));
     assert_eq!(tabs, vec![DetailTab::Device]);
 }
+
+mod corpus;

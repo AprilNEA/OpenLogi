@@ -105,6 +105,19 @@ fn bare_model() -> DeviceModelInfo {
     }
 }
 
+/// Registry `files` entries for `names`; the hashes and sizes are irrelevant to
+/// resolution, which only asks which names the depot publishes.
+fn registry_files(names: &[&str]) -> Vec<openlogi_assets::FileEntry> {
+    names
+        .iter()
+        .map(|name| openlogi_assets::FileEntry {
+            name: (*name).to_string(),
+            sha256: String::new(),
+            bytes: 0,
+        })
+        .collect()
+}
+
 /// A 24-byte PNG: signature + an `IHDR` chunk header carrying only the
 /// width/height — all `read_png_dimensions` actually reads.
 fn png_header(width: u32, height: u32) -> Vec<u8> {
@@ -372,6 +385,65 @@ fn standalone_registry_lookup_does_not_cross_model_depots() {
             .expect("beam should resolve")
             .display_name,
         "Litra Beam"
+    );
+}
+
+#[test]
+fn resolves_depot_with_named_manifest_and_non_standard_render() {
+    let root = tempfile::tempdir().expect("create temp dir");
+    let depot = "pro_keyboard_ext1";
+    let dir = root.path().join(depot);
+    std::fs::create_dir_all(&dir).expect("create depot dir");
+    std::fs::write(
+        dir.join("manifest.json"),
+        r#"{"devices":[
+            {"modelId":"pro_keyboard_ext1","resources":[{"key":"device_image","src":"front_mx.png"}]},
+            {"modelId":"pro_keyboard_ext7","resources":[{"key":"device_image","src":"front_kda.png"}]}
+        ],"resources":[]}"#,
+    )
+    .expect("write manifest");
+    std::fs::write(
+        dir.join("metadata.json"),
+        r#"{"images":[{"key":"device_image","origin":{"width":500,"height":300}}]}"#,
+    )
+    .expect("write metadata");
+    std::fs::write(dir.join("front_mx.png"), png_header(500, 300)).expect("write front_mx.png");
+    std::fs::write(dir.join("front_kda.png"), png_header(500, 300)).expect("write front_kda.png");
+
+    let resolver = AssetResolver {
+        read_roots: vec![root.path().to_path_buf()],
+        write_root: root.path().to_path_buf(),
+        has_bundle: false,
+        index: None,
+        resolved: RefCell::default(),
+    };
+    let entry = DeviceEntry {
+        model_id: "c339".to_string(),
+        model_ids: vec!["c339".to_string()],
+        display_name: "PRO".to_string(),
+        kind: "KEYBOARD".to_string(),
+        asset_path: format!("v1/devices/{depot}/"),
+        files: Vec::new(),
+    };
+
+    // Base model (ext == 0) resolves front_mx.png via pro_keyboard_ext1
+    let asset = resolver
+        .load_files(depot, &entry, bare_model().extended_model_id)
+        .expect("pro keyboard base variant should resolve");
+    assert_eq!(
+        asset.image_path.file_name().expect("filename"),
+        "front_mx.png"
+    );
+
+    // KDA variant (ext == 7) resolves front_kda.png via pro_keyboard stem + _ext7
+    let mut kda_model = bare_model();
+    kda_model.extended_model_id = 7;
+    let kda_asset = resolver
+        .load_files(depot, &entry, kda_model.extended_model_id)
+        .expect("pro keyboard KDA variant should resolve");
+    assert_eq!(
+        kda_asset.image_path.file_name().expect("filename"),
+        "front_kda.png"
     );
 }
 
@@ -714,4 +786,130 @@ fn colour_variants_of_one_depot_are_remembered_apart() {
     assert_eq!(graphite.image_path, dir.join("side_ext_2.png"));
     assert_eq!(pale_grey.image_path, dir.join("side_ext_12.png"));
     assert_eq!((graphite.png_width, pale_grey.png_width), (100, 200));
+}
+
+/// A camera depot (the C922 / StreamCam family) ships `front.png` and a
+/// manifest but none of the hotspot metadata files — its `image_metadata` is a
+/// per-PID `metadata_<pid>.json` nobody reads. The render alone must resolve,
+/// or every webcam falls back to the gallery glyph.
+#[test]
+fn resolves_camera_depot_without_hotspot_metadata() {
+    let root = tempfile::tempdir().expect("create temp dir");
+    let depot = "c922";
+    let dir = root.path().join(depot);
+    std::fs::create_dir_all(&dir).expect("create depot dir");
+    std::fs::write(
+        dir.join("manifest.json"),
+        r#"{"devices":[{"modelId":"085c","resources":[
+            {"key":"device_camera_image","src":"front.png"},
+            {"key":"image_metadata","src":"metadata_085c.json"}]}],
+          "resources":[]}"#,
+    )
+    .expect("write manifest.json");
+    std::fs::write(dir.join("front.png"), png_header(300, 150)).expect("write front.png");
+
+    let resolver = AssetResolver {
+        read_roots: vec![root.path().to_path_buf()],
+        write_root: root.path().to_path_buf(),
+        has_bundle: false,
+        index: None,
+        resolved: RefCell::default(),
+    };
+    let entry = DeviceEntry {
+        model_id: "085c".to_string(),
+        model_ids: vec!["0883".to_string(), "0894".to_string(), "085c".to_string()],
+        display_name: "C922".to_string(),
+        kind: "CAMERA".to_string(),
+        asset_path: format!("v1/devices/{depot}/"),
+        files: registry_files(&["front.png", "manifest.json", "metadata_085c.json"]),
+    };
+    let mut model = bare_model();
+    model.model_ids = [0x085c, 0, 0];
+
+    let asset = resolver
+        .load_files(depot, &entry, model.extended_model_id)
+        .expect("render-only camera depot should resolve");
+    assert_eq!(
+        asset.image_path.file_name().expect("image has a file name"),
+        "front.png"
+    );
+    assert_eq!(
+        asset.hero_image_path.as_deref(),
+        Some(asset.image_path.as_path())
+    );
+    assert_eq!((asset.png_width, asset.png_height), (300, 150));
+    assert_eq!(asset.kind, Some(DeviceKind::Camera));
+    assert_eq!(asset.metadata.assignments().count(), 0);
+}
+
+/// A depot that *publishes* hotspot metadata (every mouse and keyboard) but has
+/// none in this root is a stale or half-synced cache, not a metadata-free
+/// device. It must keep missing so the next root or the synthetic fallback
+/// serves the device instead of a render with no hotspots.
+#[test]
+fn metadata_publishing_depot_without_cached_metadata_still_misses() {
+    let root = tempfile::tempdir().expect("create temp dir");
+    let depot = "mx_master_4";
+    let dir = root.path().join(depot);
+    std::fs::create_dir_all(&dir).expect("create depot dir");
+    std::fs::write(dir.join("front_core.png"), png_header(100, 200)).expect("write render");
+    std::fs::write(dir.join("side_core.png"), png_header(100, 200)).expect("write render");
+
+    let resolver = AssetResolver {
+        read_roots: vec![root.path().to_path_buf()],
+        write_root: root.path().to_path_buf(),
+        has_bundle: false,
+        index: None,
+        resolved: RefCell::default(),
+    };
+    let entry = DeviceEntry {
+        model_id: "2b042".to_string(),
+        model_ids: Vec::new(),
+        display_name: "MX Master 4".to_string(),
+        kind: "MOUSE".to_string(),
+        asset_path: format!("v1/devices/{depot}/"),
+        files: registry_files(&[
+            "core_metadata.json",
+            "front_core.png",
+            "manifest.json",
+            "side_core.png",
+        ]),
+    };
+    assert!(
+        resolver
+            .load_files(depot, &entry, bare_model().extended_model_id)
+            .is_none()
+    );
+}
+
+/// An unsynced depot directory — no render at all — must still miss, so the
+/// metadata relaxation above doesn't turn an empty cache into a broken image.
+#[test]
+fn depot_without_any_render_still_misses() {
+    let root = tempfile::tempdir().expect("create temp dir");
+    let depot = "c922";
+    let dir = root.path().join(depot);
+    std::fs::create_dir_all(&dir).expect("create depot dir");
+    std::fs::write(dir.join("manifest.json"), b"{}").expect("write manifest.json");
+
+    let resolver = AssetResolver {
+        read_roots: vec![root.path().to_path_buf()],
+        write_root: root.path().to_path_buf(),
+        has_bundle: false,
+        index: None,
+        resolved: RefCell::default(),
+    };
+    let entry = DeviceEntry {
+        model_id: "085c".to_string(),
+        model_ids: Vec::new(),
+        display_name: "C922".to_string(),
+        kind: "CAMERA".to_string(),
+        asset_path: format!("v1/devices/{depot}/"),
+        files: Vec::new(),
+    };
+    assert!(
+        resolver
+            .load_files(depot, &entry, bare_model().extended_model_id)
+            .is_none()
+    );
 }

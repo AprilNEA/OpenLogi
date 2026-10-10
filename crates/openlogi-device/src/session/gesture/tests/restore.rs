@@ -40,3 +40,36 @@ fn wake_rearm_restores_diversion_mode_and_remap_target() {
     assert_eq!(change.raw_xy, Some(true));
     assert_eq!(change.remap, Some(remap));
 }
+
+#[test]
+fn plain_diversion_clears_raw_xy() {
+    let remap = reprog_controls::ControlId(0x0053);
+
+    let change = divert_change(reporting(false, Some(remap)), false);
+
+    assert_eq!(change.diverted, Some(true));
+    assert_eq!(change.raw_xy, Some(false));
+    assert_eq!(change.remap, Some(remap));
+}
+
+#[test]
+fn keyboard_diversion_leaves_raw_xy_unset() {
+    let remap = reprog_controls::ControlId(0x0053);
+
+    let change = divert_keyboard_key(reporting(false, Some(remap)));
+
+    assert_eq!(change.diverted, Some(true));
+    assert_eq!(change.raw_xy, None);
+    assert_eq!(change.remap, Some(remap));
+}
+
+#[test]
+fn keyboard_restore_leaves_raw_xy_unset() {
+    let remap = reprog_controls::ControlId(0x0053);
+
+    let change = undivert_keyboard_key(reporting(false, Some(remap)));
+
+    assert_eq!(change.diverted, Some(false));
+    assert_eq!(change.raw_xy, None);
+    assert_eq!(change.remap, Some(remap));
+}

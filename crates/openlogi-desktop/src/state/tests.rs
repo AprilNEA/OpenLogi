@@ -48,7 +48,7 @@ use super::{
 mod asset_targets;
 mod bindings;
 mod camera;
-mod device_list;
+pub(crate) mod device_list;
 mod device_names;
 mod dpi;
 mod fn_lock;

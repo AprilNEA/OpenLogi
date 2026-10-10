@@ -167,6 +167,8 @@ job deliberately skips sccache setup. `rust-cache` stores only Cargo registry/gi
 inputs (`cache-targets: false`); sccache owns compiler outputs. PRs read the
 default branch's sccache objects but do not write their isolated merge-ref cache.
 
+The `fmt` job selects all workspace test jobs with the path filter in `ci.yml`. Source, fixture, test-resource, dependency, toolchain, and CI changes run those jobs; pure Markdown and unrelated design assets skip them. The workflow still reports each skipped job, so required checks do not remain pending. PRs use the full PR diff; pushes use the full pushed range. Local test commands always run, regardless of changed paths.
+
 ### ast-grep rules
 
 Load the [ast-grep skill](../skills/ast-grep/SKILL.md) for structural searches, rewrites, and rule authoring. The following constraints govern OpenLogi guards:
