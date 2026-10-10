@@ -29,7 +29,7 @@ pub use devices::DeviceRecord;
 pub(crate) use events::{StateEvent, StateEvents};
 pub use light::LightCommandStatus;
 pub(crate) use load::Load;
-pub use load::{DpiLoad, SmartShiftLoad};
+pub use load::{DpiLoad, FnLockLoad, SmartShiftLoad};
 
 /// Result of confirming a SmartShift write by reading the value back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +70,7 @@ mod device_store;
 mod devices;
 mod dpi;
 mod events;
+mod fn_lock;
 mod inventory;
 mod light;
 mod lighting;
@@ -80,7 +81,7 @@ mod settings;
 mod smartshift;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 /// Default DPI value applied to a fresh AppState. Matches a common Logitech
 /// mid-range mouse and keeps the dot-preview visually obvious from frame one.
@@ -216,6 +217,7 @@ impl AppState {
             state.load_current_dpi(cx);
             state.load_current_smartshift(cx);
             state.confirm_current_smartshift(cx);
+            state.load_current_fn_lock(cx);
         });
     }
 

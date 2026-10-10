@@ -5,6 +5,7 @@ use super::{
     ParentElement, RELEASES_URL, REPO_URL, SettingGroup, SettingItem, SettingPage, SettingsView,
     SharedString, Sizable, Styled, div, h_flex, img, px, v_flex,
 };
+use crate::app::menu::open_config_folder;
 use crate::ui::theme::Typography as _;
 
 /// The About page: a hero card with the build identity and outbound links, the
@@ -45,9 +46,19 @@ fn about_hero(view: &Entity<SettingsView>, copied: bool, cx: &mut App) -> gpui::
         .w_full()
         .items_start()
         .gap_3()
-        .child(img(crate::app_assets::LOGO).w(px(56.)).h(px(56.)))
+        .child(
+            img(crate::app_assets::LOGO)
+                .w(px(56.))
+                .h(px(56.))
+                .flex_shrink_0(),
+        )
         .child(
             v_flex()
+                // Without `min_w_0` a flex child refuses to shrink below its
+                // content width, so the link row below overflows the card
+                // instead of wrapping inside it.
+                .min_w_0()
+                .flex_1()
                 .gap_2()
                 .child(
                     h_flex()
@@ -63,6 +74,11 @@ fn about_hero(view: &Entity<SettingsView>, copied: bool, cx: &mut App) -> gpui::
                 )
                 .child(
                     h_flex()
+                        // These buttons are label-width, so their total varies
+                        // with locale, font and DPI. Wrapping keeps the last
+                        // one reachable at any width rather than relying on the
+                        // window being wide enough to fit them on one line.
+                        .flex_wrap()
                         .items_center()
                         .gap_1()
                         .pt_1()
@@ -165,13 +181,7 @@ fn about_config(cx: &App) -> gpui::Div {
                 Button::new("about-reveal-config")
                     .outline()
                     .label(tr!("about.show_in_file_manager"))
-                    .on_click(|_, _, cx| {
-                        if let Ok(dir) = openlogi_core::paths::config_dir()
-                            && let Ok(url) = url::Url::from_file_path(&dir)
-                        {
-                            cx.open_url(url.as_str());
-                        }
-                    }),
+                    .on_click(|_, _, cx| open_config_folder(cx)),
             ),
         )
 }

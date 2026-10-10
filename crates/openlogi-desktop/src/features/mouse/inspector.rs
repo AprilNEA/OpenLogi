@@ -12,7 +12,7 @@ use gpui_component::{
     Disableable as _, Icon, IconName, Selectable as _, Sizable as _, button::Button, h_flex,
     input::InputState, scroll::ScrollableElement as _, v_flex,
 };
-use openlogi_core::binding::{Action, ButtonId, GestureDirection, KeyCombo, default_binding};
+use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
 
 use super::hotspots::MouseControlId;
 use super::thumbwheel::ThumbwheelPreset;
@@ -32,7 +32,6 @@ pub(super) const INSPECTOR_W: f32 = 328.;
 pub(super) struct BindingInspectorData<'a> {
     pub selected: Option<MouseControlId>,
     pub gesture_direction: Option<GestureDirection>,
-    pub action_picker_open: bool,
     pub bindings: &'a BTreeMap<ButtonId, Action>,
     pub gesture_maps: &'a BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
     pub dpi_gestures: bool,
@@ -41,30 +40,23 @@ pub(super) struct BindingInspectorData<'a> {
 }
 
 #[derive(Clone, Copy)]
-struct ActionPickerContext<'a> {
-    open: bool,
-    search: &'a Entity<InputState>,
-    shortcut_input: &'a Entity<InputState>,
-    shortcut_hold: bool,
-    view: &'a Entity<MouseModelView>,
+pub(super) struct ActionPickerContext<'a> {
+    pub open: bool,
+    pub search: &'a Entity<InputState>,
+    pub shortcut_input: &'a Entity<InputState>,
+    pub application_input: &'a Entity<InputState>,
+    pub shortcut_invalid: bool,
+    pub shortcut_hold: bool,
+    pub application_invalid: bool,
+    pub view: &'a Entity<MouseModelView>,
 }
 
 pub(super) fn binding_inspector(
     data: BindingInspectorData<'_>,
-    action_search: &Entity<InputState>,
-    shortcut_input: &Entity<InputState>,
-    shortcut_hold: bool,
-    view: &Entity<MouseModelView>,
+    picker: ActionPickerContext<'_>,
     cx: &Context<MouseModelView>,
 ) -> gpui::Div {
     let pal = theme::palette(cx);
-    let picker = ActionPickerContext {
-        open: data.action_picker_open,
-        search: action_search,
-        shortcut_input,
-        shortcut_hold,
-        view,
-    };
     let body = match data.selected {
         None => empty_inspector(
             data.editing_app,
@@ -369,9 +361,15 @@ fn gesture_directions(
                     let selected = direction == active;
                     let action = gesture_action(gesture_map, button, direction);
                     let view = view.clone();
+                    let aria_label = format!(
+                        "{}: {}",
+                        tr!(direction.translation_key()),
+                        localized_action_label(&action)
+                    );
                     MenuRow::new(("inspector-direction", index))
                         .selected(selected)
                         .role(Role::Button)
+                        .aria_label(aria_label)
                         .child(
                             h_flex()
                                 .min_w_0()
@@ -447,10 +445,7 @@ fn thumbwheel_inspector(
         (Some(_), false) => tr!("profiles.inherited_from_default"),
         (None, _) => tr!("profiles.default_profile"),
     };
-    let current_label = current.map_or_else(
-        || tr!("common.custom"),
-        |preset| tr!(preset.translation_key()),
-    );
+    let current_label = current.map_or_else(|| tr!("common.custom"), |p| tr!(p.translation_key()));
     let current_icon = current.map_or("action-icons/chevrons-right.svg", ThumbwheelPreset::icon);
     let observer = picker.view.clone();
 
@@ -481,6 +476,7 @@ fn thumbwheel_inspector(
                             MenuRow::new(("inspector-thumbwheel", index))
                                 .selected(selected)
                                 .role(Role::Button)
+                                .aria_label(tr!(preset.translation_key()))
                                 .child(
                                     h_flex()
                                         .items_center()
@@ -584,10 +580,10 @@ fn selection_card(
 ) -> impl IntoElement {
     let toggle = picker.view.clone();
     let search = picker.search.clone();
-    let shortcut_input = picker.shortcut_input.clone();
     let opening = !picker.open;
     let accessible_label = value.clone();
     BaseButton::new(id)
+        .debug_selector(move || id.to_string())
         .accessibility_label(accessible_label)
         .aria_expanded(picker.open)
         .flex()
@@ -642,11 +638,10 @@ fn selection_card(
         .on_click(move |_, window, cx| {
             if opening {
                 search.update(cx, |search, cx| search.set_value("", window, cx));
-                shortcut_input.update(cx, |input, cx| input.set_value("", window, cx));
             }
             toggle.update(cx, |view, cx| {
                 if opening {
-                    view.set_shortcut_hold(false);
+                    view.clear_custom_action_drafts(window, cx);
                 }
                 view.toggle_action_picker();
                 cx.notify();
@@ -667,6 +662,23 @@ fn action_library(
     v_flex()
         .gap_2()
         .pt_1()
+        .child(custom_shortcut_editor(
+            id_prefix,
+            picker.shortcut_input,
+            picker.shortcut_invalid,
+            picker.shortcut_hold,
+            picker.view,
+            on_pick,
+            pal,
+        ))
+        .child(custom_application_editor(
+            id_prefix,
+            picker.application_input,
+            picker.application_invalid,
+            picker.view,
+            on_pick,
+            pal,
+        ))
         .child(editor_section(tr!("actions.actions"), pal))
         .child(control_input(picker.search).cleanable(true))
         .child(
@@ -683,54 +695,49 @@ fn action_library(
                 })
                 .children(rows),
         )
-        .child(custom_shortcut_editor(picker, on_pick, pal, cx))
 }
 
-/// Free-text `KeyCombo` recorder shared by every `action_library` call site.
-/// Mirrors `action_ring/editor.rs::shortcut_editor`, plus a Hold/Tap choice a
-/// ring wedge (selected by releasing over it) has no physical use for.
+/// A single-field "Custom Shortcut" editor, matching the Action Ring editor's
+/// `shortcut_editor` (`features/action_ring/editor.rs`) so the same custom
+/// action is reachable from the plain per-button picker, not just the ring.
 fn custom_shortcut_editor(
-    picker: ActionPickerContext<'_>,
+    id_prefix: &'static str,
+    input: &Entity<InputState>,
+    invalid: bool,
+    hold: bool,
+    view: &Entity<MouseModelView>,
     on_pick: &PickFn,
     pal: Palette,
-    cx: &Context<MouseModelView>,
 ) -> impl IntoElement {
-    let hold = picker.shortcut_hold;
-    let view_tap = picker.view.clone();
-    let view_hold = picker.view.clone();
-    let submit_input = picker.shortcut_input.clone();
+    let submit_input = input.clone();
     let on_pick = on_pick.clone();
-    let is_valid = picker
-        .shortcut_input
-        .read(cx)
-        .value()
-        .parse::<KeyCombo>()
-        .is_ok();
-
+    let view_tap = view.clone();
+    let view_hold = view.clone();
+    let view = view.clone();
     v_flex()
         .gap_1()
-        .child(editor_section(tr!("actions.custom_shortcut"), pal))
+        .child(editor_section(tr!("action_ring.custom_shortcut"), pal))
         .child(
             h_flex()
                 .gap_2()
                 .child(
-                    control_button("shortcut-tap")
+                    control_button(format!("{id_prefix}-shortcut-tap"))
                         .selected(!hold)
                         .label(tr!("actions.shortcut_tap"))
                         .on_click(move |_, _, cx| {
-                            view_tap.update(cx, |v, cx| {
-                                v.set_shortcut_hold(false);
+                            view_tap.update(cx, |view, cx| {
+                                view.set_shortcut_hold(false);
                                 cx.notify();
                             });
                         }),
                 )
                 .child(
-                    control_button("shortcut-hold")
+                    control_button(format!("{id_prefix}-shortcut-hold"))
                         .selected(hold)
                         .label(tr!("actions.shortcut_hold"))
                         .on_click(move |_, _, cx| {
-                            view_hold.update(cx, |v, cx| {
-                                v.set_shortcut_hold(true);
+                            view_hold.update(cx, |view, cx| {
+                                view.set_shortcut_hold(true);
                                 cx.notify();
                             });
                         }),
@@ -743,26 +750,101 @@ fn custom_shortcut_editor(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .child(control_input(picker.shortcut_input).cleanable(true)),
+                        .debug_selector(move || format!("{id_prefix}-custom-shortcut-input"))
+                        .child(control_input(input).cleanable(true)),
                 )
                 .child(
-                    Button::new("shortcut-add")
+                    Button::new(format!("{id_prefix}-custom-shortcut-add"))
+                        .debug_selector(move || format!("{id_prefix}-custom-shortcut-add"))
                         .compact()
                         .label(tr!("common.add"))
-                        .disabled(!is_valid)
                         .on_click(move |_, window, cx| {
-                            let text = submit_input.read(cx).value().to_string();
-                            if let Ok(combo) = text.parse::<KeyCombo>() {
-                                let action = if hold {
-                                    Action::HoldShortcut(combo)
-                                } else {
-                                    Action::CustomShortcut(combo)
-                                };
-                                (on_pick)(action, window, cx);
+                            let shortcut = submit_input.read(cx).value().to_string();
+                            match shortcut.parse::<openlogi_core::binding::KeyCombo>() {
+                                Ok(combo) => {
+                                    let action = if hold {
+                                        Action::HoldShortcut(combo)
+                                    } else {
+                                        Action::CustomShortcut(combo)
+                                    };
+                                    (on_pick)(action, window, cx);
+                                }
+                                Err(_) => view.update(cx, |view, cx| {
+                                    view.custom_shortcut_invalid = true;
+                                    cx.notify();
+                                }),
                             }
                         }),
                 ),
         )
+        .when(invalid, |editor| {
+            editor.child(
+                div()
+                    .debug_selector(move || format!("{id_prefix}-custom-shortcut-error"))
+                    .text_caption()
+                    .text_color(rgb(0x00ef_4444))
+                    .child(tr!("action_ring.custom_action_invalid_input")),
+            )
+        })
+}
+
+/// A single-field "Open Application or Folder" editor, matching the Action
+/// Ring editor's `path_editor`.
+fn custom_application_editor(
+    id_prefix: &'static str,
+    input: &Entity<InputState>,
+    invalid: bool,
+    view: &Entity<MouseModelView>,
+    on_pick: &PickFn,
+    pal: Palette,
+) -> impl IntoElement {
+    let submit_input = input.clone();
+    let on_pick = on_pick.clone();
+    let view = view.clone();
+    v_flex()
+        .gap_1()
+        .child(editor_section(
+            tr!("action_ring.open_application_or_folder"),
+            pal,
+        ))
+        .child(
+            h_flex()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .debug_selector(move || format!("{id_prefix}-custom-application-input"))
+                        .child(control_input(input).cleanable(true)),
+                )
+                .child(
+                    Button::new(format!("{id_prefix}-custom-application-add"))
+                        .debug_selector(move || format!("{id_prefix}-custom-application-add"))
+                        .compact()
+                        .label(tr!("common.add"))
+                        .on_click(move |_, window, cx| {
+                            let path = submit_input.read(cx).value().to_string();
+                            match openlogi_core::binding::ApplicationTarget::new(path, "") {
+                                Ok(target) => {
+                                    (on_pick)(Action::OpenApplication(target), window, cx);
+                                }
+                                Err(_) => view.update(cx, |view, cx| {
+                                    view.custom_application_invalid = true;
+                                    cx.notify();
+                                }),
+                            }
+                        }),
+                ),
+        )
+        .when(invalid, |editor| {
+            editor.child(
+                div()
+                    .debug_selector(move || format!("{id_prefix}-custom-application-error"))
+                    .text_caption()
+                    .text_color(rgb(0x00ef_4444))
+                    .child(tr!("action_ring.custom_action_invalid_input")),
+            )
+        })
 }
 
 fn gesture_action(

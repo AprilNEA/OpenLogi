@@ -23,10 +23,10 @@ use openlogi_agent_core::receiver_access::{ExclusiveAccessReason, ExclusiveRecei
 use openlogi_agent_core::watchers::pairing::{
     self, PairingControl, PairingSessionEvent, PairingSessionId,
 };
-use openlogi_hid::{DiscoveredDevice, PairingEvent, ReceiverSelector};
+use openlogi_hid::{DeviceRoute, DiscoveredDevice, PairingEvent, ReceiverSelector};
 use openlogi_ipc::{FoundDevice, PairingCommandError, PairingFailure, PairingPhase, PairingUpdate};
 use tokio::sync::{Mutex, mpsc};
-use tracing::warn;
+use tracing::{info, warn};
 
 /// How long the agent holds a `next_pairing` long-poll before returning `None`.
 /// Comfortably under the client's request deadline so the agent answers first.
@@ -189,6 +189,40 @@ impl PairingManager {
             return Err(PairingCommandError::ReceiverBusy);
         };
         admission.accept(receiver_lease, selector, &self.ctrl, &self.observable)
+    }
+
+    /// Remove the device `route` names from its receiver, then have inventory
+    /// rescan so the freed slot leaves the snapshot. Takes the receiver the
+    /// way a pairing session does, so it waits out capture and is refused
+    /// while a session holds the receiver.
+    pub async fn unpair(&self, route: &DeviceRoute) -> Result<(), PairingFailure> {
+        if !self.shared.device_io.allows_io() {
+            return Err(PairingFailure::ReceiverBusy);
+        }
+        let Ok(receiver_lease) = tokio::time::timeout(
+            RECEIVER_LEASE_TIMEOUT,
+            self.shared
+                .receiver_access
+                .acquire_exclusive(ExclusiveAccessReason::Pairing),
+        )
+        .await
+        else {
+            warn!(%route, "timed out waiting for the receiver; device not unpaired");
+            return Err(PairingFailure::ReceiverBusy);
+        };
+        let result = self.shared.hardware().unpair(route).await;
+        drop(receiver_lease);
+        match result {
+            Ok(()) => {
+                info!(%route, "device unpaired");
+                self.shared.request_receiver_rescan();
+                Ok(())
+            }
+            Err(error) => {
+                warn!(%route, %error, "unpair failed");
+                Err(error.into())
+            }
+        }
     }
 
     /// Pair with a previously discovered device by address.

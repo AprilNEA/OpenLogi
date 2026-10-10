@@ -26,7 +26,7 @@ const DIRECT_PRODUCT_ID: u16 = 0xb35b;
 const BOLT_PRODUCT_ID: u16 = 0xc548;
 const REPROG_FEATURE_INDEX: u8 = 0x02;
 const GESTURE_CID: u16 = reprog_controls::GESTURE_BUTTON_CID;
-/// The Mute key, one of [`crate::KEYBOARD_KEY_CIDS`].
+/// The Mute key (`0x1b04` control `0x00e7`).
 const KEYBOARD_CID: u16 = 0x00e7;
 const ORIGINAL_REMAP_CID: u16 = 0x0053;
 /// A `getCidInfo` capability pair (bytes 4 and 8): a mouse control that is
@@ -38,11 +38,13 @@ const KEYBOARD_CONTROL_FLAGS: (u8, u8) = (0x32, 0x00);
 /// marked valid.
 const GESTURE_ARMED_FLAGS: u8 = 0x33;
 /// `setCidReporting` flags that arm keyboard capture: divert marked valid, raw
-/// XY marked valid but off.
-const KEYBOARD_ARMED_FLAGS: u8 = 0x23;
-/// `setCidReporting` flags that hand a control back: divert and raw XY both
+/// XY untouched since keyboard controls do not support raw XY.
+const KEYBOARD_ARMED_FLAGS: u8 = 0x03;
+/// `setCidReporting` flags that hand a mouse control back: divert and raw XY both
 /// marked valid and off.
-const RESTORED_FLAGS: u8 = 0x22;
+const GESTURE_RESTORED_FLAGS: u8 = 0x22;
+/// `setCidReporting` flags that hand a keyboard control back: divert marked valid and off.
+const KEYBOARD_RESTORED_FLAGS: u8 = 0x02;
 
 #[tokio::test]
 async fn gesture_capture_replay_restores_original_reporting_on_normal_shutdown() {
@@ -51,6 +53,7 @@ async fn gesture_capture_replay_restores_original_reporting_on_normal_shutdown()
         GESTURE_CID,
         GESTURE_CONTROL_FLAGS,
         GESTURE_ARMED_FLAGS,
+        GESTURE_RESTORED_FLAGS,
     ))
     .await;
     let (sink, _captured) = mpsc::unbounded_channel();
@@ -66,7 +69,12 @@ async fn gesture_capture_replay_restores_original_reporting_on_normal_shutdown()
 
     let (outcome, ()) = tokio::join!(capture, replay.stop_after_arm(shutdown));
 
-    replay.assert_restored(outcome, GESTURE_CID, GESTURE_ARMED_FLAGS);
+    replay.assert_restored(
+        outcome,
+        GESTURE_CID,
+        GESTURE_ARMED_FLAGS,
+        GESTURE_RESTORED_FLAGS,
+    );
 }
 
 /// Keyboard capture arms its own way — `0x1b04` diversion on the wanted
@@ -80,19 +88,25 @@ async fn keyboard_capture_replay_restores_original_reporting_on_normal_shutdown(
         KEYBOARD_CID,
         KEYBOARD_CONTROL_FLAGS,
         KEYBOARD_ARMED_FLAGS,
+        KEYBOARD_RESTORED_FLAGS,
     ))
     .await;
     let (sink, _captured) = mpsc::unbounded_channel();
     let (shutdown, host) = replay.host(sink);
     let capture = run_keyboard_capture_session(
         replay.route.clone(),
-        BTreeMap::from([(KEYBOARD_CID, ButtonId::KeyMute)]),
+        BTreeMap::from([(KEYBOARD_CID, ButtonId::control(KEYBOARD_CID))]),
         host,
     );
 
     let (outcome, ()) = tokio::join!(capture, replay.stop_after_arm(shutdown));
 
-    replay.assert_restored(outcome, KEYBOARD_CID, KEYBOARD_ARMED_FLAGS);
+    replay.assert_restored(
+        outcome,
+        KEYBOARD_CID,
+        KEYBOARD_ARMED_FLAGS,
+        KEYBOARD_RESTORED_FLAGS,
+    );
 }
 
 /// One replayed direct device, enumerated the production way, whose `0x1d4b`
@@ -207,6 +221,7 @@ impl ArmedReplay {
         outcome: Result<CaptureSessionOutcome, CaptureSessionFailure>,
         cid: u16,
         armed_flags: u8,
+        restored_flags: u8,
     ) {
         assert!(matches!(
             outcome.expect("capture session shuts down cleanly"),
@@ -256,8 +271,8 @@ impl ArmedReplay {
         );
         assert_eq!(
             &reporting_writes[1][4..],
-            &reprog_reporting_change_payload(cid, RESTORED_FLAGS),
-            "shutdown clears only diversion and raw-XY while preserving the original remap"
+            &reprog_reporting_change_payload(cid, restored_flags),
+            "shutdown clears only diversion while preserving the original remap"
         );
         assert_eq!(completion.channel_open_count, 1);
         self.backend
@@ -374,7 +389,13 @@ fn replay_topology(node: ReplayNode, channel: &str) -> ReplayTopology {
 
 /// The exchanges one capture session over `cid` costs, from the production
 /// probe through arming, the held `0x1d4b` lookup, and the restore on shutdown.
-fn capture_cassette(name: &str, cid: u16, control_flags: (u8, u8), armed_flags: u8) -> HidCassette {
+fn capture_cassette(
+    name: &str,
+    cid: u16,
+    control_flags: (u8, u8),
+    armed_flags: u8,
+    restored_flags: u8,
+) -> HidCassette {
     cassette(
         name,
         CAPTURE_CHANNEL,
@@ -393,7 +414,7 @@ fn capture_cassette(name: &str, cid: u16, control_flags: (u8, u8), armed_flags: 
             reprog_reporting_state_exchange(cid),
             reprog_reporting_change_exchange(cid, armed_flags),
             root_feature_lookup_exchange(0x1d4b, 0, 0),
-            reprog_reporting_change_exchange(cid, RESTORED_FLAGS),
+            reprog_reporting_change_exchange(cid, restored_flags),
         ],
     )
 }

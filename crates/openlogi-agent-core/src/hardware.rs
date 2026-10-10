@@ -32,9 +32,11 @@ use tracing::{debug, warn};
 use crate::receiver_access::ReceiverAccess;
 
 mod context;
+mod fn_lock;
 mod light;
 
 pub use context::HardwareContext;
+pub(crate) use fn_lock::{FnLockOrder, FnLockTicket};
 
 /// Upper bound on a single HID++ write. `hidpp` has no request timeout of its
 /// own, so without this an asleep / unresponsive device would hang (and leak)
@@ -342,17 +344,32 @@ pub fn toggle_smartshift_in_background(op: DeviceOp) {
 }
 
 /// Spawn an OS thread that writes the keyboard Fn-lock state to `op`'s device
-/// via [`openlogi_hid::set_fn_lock_on`]. Returns immediately; failures (incl.
-/// keyboards that expose neither `0x40a3` nor `0x40a2` fn inversion) are
-/// logged.
-pub fn write_fn_lock_in_background(op: DeviceOp, on: bool) {
+/// via [`openlogi_hid::set_fn_lock_on`], unless a newer Fn-lock write for the
+/// keyboard was requested after `ticket`. Returns immediately; failures (incl.
+/// keyboards that expose neither `0x40a3` nor `0x40a2` fn inversion, and a
+/// keyboard whose read-back disagrees with the write) are logged.
+pub(crate) fn write_fn_lock_in_background(op: DeviceOp, ticket: FnLockTicket, on: bool) {
     let index = op.route.device_index();
     op.spawn_write(
         "Fn-lock write",
-        move |c| async move { openlogi_hid::set_fn_lock_on(&c, on).await },
+        move |c| async move {
+            let Some(_turn) = ticket.turn().await else {
+                return Ok(None);
+            };
+            openlogi_hid::set_fn_lock_on(&c, on).await.map(Some)
+        },
         move |result| {
-            log_outcome(index, "Fn-lock write", result, |()| {
-                debug!(index, on, "Fn-lock written");
+            log_outcome(index, "Fn-lock write", result, |state| {
+                if let Some(state) = state {
+                    debug!(
+                        index,
+                        on,
+                        default = state.default_fn_lock,
+                        "Fn-lock written"
+                    );
+                } else {
+                    debug!(index, on, "Fn-lock write superseded by a newer one");
+                }
             });
         },
     );

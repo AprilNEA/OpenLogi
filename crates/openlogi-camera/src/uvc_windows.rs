@@ -49,6 +49,10 @@ const VPA_SHARPNESS: i32 = 4;
 // contiguous, so WhiteBalance is 7 and not the next id after Sharpness. Counting
 // on from the last mapped value is how this read ColorEnable instead.
 const VPA_WHITE_BALANCE: i32 = 7;
+const VPA_BACKLIGHT_COMPENSATION: i32 = 8;
+const VPA_GAIN: i32 = 9;
+const CC_PAN: i32 = 0;
+const CC_TILT: i32 = 1;
 const CC_ZOOM: i32 = 3;
 const CC_EXPOSURE: i32 = 4;
 const CC_FOCUS: i32 = 6;
@@ -68,6 +72,8 @@ impl CameraControl {
     fn prop(self) -> Prop {
         match self {
             Self::Zoom => Prop::CameraControl(CC_ZOOM),
+            Self::Pan => Prop::CameraControl(CC_PAN),
+            Self::Tilt => Prop::CameraControl(CC_TILT),
             Self::Focus => Prop::CameraControl(CC_FOCUS),
             Self::Exposure => Prop::CameraControl(CC_EXPOSURE),
             Self::PowerLineFrequency | Self::LowLightCompensation => Prop::Unsupported,
@@ -75,6 +81,8 @@ impl CameraControl {
             Self::Contrast => Prop::VideoProcAmp(VPA_CONTRAST),
             Self::Saturation => Prop::VideoProcAmp(VPA_SATURATION),
             Self::Sharpness => Prop::VideoProcAmp(VPA_SHARPNESS),
+            Self::Gain => Prop::VideoProcAmp(VPA_GAIN),
+            Self::BacklightCompensation => Prop::VideoProcAmp(VPA_BACKLIGHT_COMPENSATION),
             Self::WhiteBalance => Prop::VideoProcAmp(VPA_WHITE_BALANCE),
             Self::Tint => Prop::VideoProcAmp(VPA_HUE),
         }

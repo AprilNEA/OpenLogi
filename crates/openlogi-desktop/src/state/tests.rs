@@ -17,8 +17,8 @@ use openlogi_core::device::{
     PairedDevice, RawDeviceAddress, ReceiverInfo, StandaloneDevice,
 };
 use openlogi_core::hid::{
-    DeviceRoute, Dpi, SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus,
-    SmartShiftThreshold, WriteError,
+    DeviceRoute, Dpi, DpiCapabilities, DpiInfo, SmartShiftAutoDisengage, SmartShiftMode,
+    SmartShiftStatus, SmartShiftThreshold, WriteError,
 };
 
 use gpui::AppContext as _;
@@ -34,6 +34,7 @@ use crate::services::ipc::SetLightManualPower;
 
 use super::bindings::apply_thumbwheel_pair;
 use super::devices::build_device_list;
+use super::dpi::resolve_dpi;
 use super::scroll::set_scroll_resolution_if_supported;
 use super::smartshift::{
     ConfirmationOutcome, SmartShiftDeviceState, smartshift_read_is_current,
@@ -47,8 +48,10 @@ use super::{
 mod asset_targets;
 mod bindings;
 mod camera;
-mod device_list;
+pub(crate) mod device_list;
 mod device_names;
+mod dpi;
+mod fn_lock;
 mod lighting;
 mod profile_scope;
 mod reload;
