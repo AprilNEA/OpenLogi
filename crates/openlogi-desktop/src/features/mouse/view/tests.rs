@@ -162,6 +162,20 @@ fn action_picker_renders_after_opening_through_the_inspector(cx: &mut TestAppCon
     });
 
     click_picker_control(cx, "inspector-current-action");
+    click_picker_control(cx, "inspector-action-shortcut-hold");
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.shortcut_mode, ShortcutMode::Hold);
+    });
+    click_picker_control(cx, "inspector-action-custom-shortcut-input");
+    cx.simulate_input("Cmd+K");
+    click_picker_control(cx, "inspector-action-custom-shortcut-add");
+    view.read_with(cx, |view, _| assert!(!view.action_picker_open));
+    assert_forward_binding(cx, &Action::HoldShortcut("Cmd+K".parse().unwrap()));
+
+    click_picker_control(cx, "inspector-current-action");
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.shortcut_mode, ShortcutMode::Tap);
+    });
     cx.update(|window, cx| {
         view.read(cx)
             .action_search
@@ -214,7 +228,7 @@ fn a_selected_gesture_can_render_in_the_binding_inspector(cx: &mut TestAppContex
                 shortcut_input: &view.custom_shortcut_input,
                 application_input: &view.custom_application_input,
                 shortcut_invalid: view.custom_shortcut_invalid,
-                shortcut_hold: view.shortcut_hold,
+                shortcut_mode: view.shortcut_mode,
                 application_invalid: view.custom_application_invalid,
                 view: &entity,
             },
@@ -262,6 +276,7 @@ fn clearing_custom_action_drafts_resets_text_and_invalid_state(cx: &mut TestAppC
                 .update(cx, |input, cx| input.set_value("/bin/true", window, cx));
             view.custom_shortcut_invalid = true;
             view.custom_application_invalid = true;
+            view.shortcut_mode = ShortcutMode::Hold;
 
             view.clear_custom_action_drafts(window, cx);
         });
@@ -272,6 +287,7 @@ fn clearing_custom_action_drafts_resets_text_and_invalid_state(cx: &mut TestAppC
         assert_eq!(view.custom_application_input.read(cx).value(), "");
         assert!(!view.custom_shortcut_invalid);
         assert!(!view.custom_application_invalid);
+        assert_eq!(view.shortcut_mode, ShortcutMode::Tap);
     });
     drop(view);
     cx.update(|window, _| window.remove_window());

@@ -20,7 +20,9 @@ use super::geometry::{
     default_labels, labels_from_hotspots,
 };
 use super::hotspots::{Hotspot, MOUSE_MODEL_SIZE, MouseControlId, default_hotspots};
-use super::inspector::{ActionPickerContext, BindingInspectorData, binding_inspector};
+use super::inspector::{
+    ActionPickerContext, BindingInspectorData, ShortcutMode, binding_inspector,
+};
 use super::leader_lines::{Geometry as LeaderGeometry, Label, paint as paint_leader_lines};
 use crate::app::{glow_canvas, keyboard_glow};
 use crate::features::profiles::{friendly_app_name, profile_canvas_status};
@@ -135,9 +137,7 @@ pub struct MouseModelView {
     /// Whether the last "Add" attempt on the corresponding custom editor
     /// failed to parse, so its caption can show an inline error.
     pub(super) custom_shortcut_invalid: bool,
-    /// Whether the custom shortcut editor records a held chord (Hold) rather
-    /// than a tapped one (Tap).
-    pub(super) shortcut_hold: bool,
+    pub(super) shortcut_mode: ShortcutMode,
     pub(super) custom_application_invalid: bool,
     _state_obs: Subscription,
 }
@@ -197,7 +197,7 @@ impl MouseModelView {
             custom_shortcut_input,
             custom_application_input,
             custom_shortcut_invalid: false,
-            shortcut_hold: false,
+            shortcut_mode: ShortcutMode::Tap,
             custom_application_invalid: false,
             _state_obs: state_obs,
         }
@@ -217,11 +217,7 @@ impl MouseModelView {
             .update(cx, |input, cx| input.set_value("", window, cx));
         self.custom_shortcut_invalid = false;
         self.custom_application_invalid = false;
-        self.shortcut_hold = false;
-    }
-
-    pub(super) fn set_shortcut_hold(&mut self, hold: bool) {
-        self.shortcut_hold = hold;
+        self.shortcut_mode = ShortcutMode::Tap;
     }
 
     /// Set (or clear, with `None`) the activated gesture direction. Callers must
@@ -405,7 +401,7 @@ impl Render for MouseModelView {
                 shortcut_input: &self.custom_shortcut_input,
                 application_input: &self.custom_application_input,
                 shortcut_invalid: self.custom_shortcut_invalid,
-                shortcut_hold: self.shortcut_hold,
+                shortcut_mode: self.shortcut_mode,
                 application_invalid: self.custom_application_invalid,
                 view: &view,
             },

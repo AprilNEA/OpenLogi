@@ -46,9 +46,25 @@ pub(super) struct ActionPickerContext<'a> {
     pub shortcut_input: &'a Entity<InputState>,
     pub application_input: &'a Entity<InputState>,
     pub shortcut_invalid: bool,
-    pub shortcut_hold: bool,
+    pub shortcut_mode: ShortcutMode,
     pub application_invalid: bool,
     pub view: &'a Entity<MouseModelView>,
+}
+
+/// Whether the custom shortcut editor records a tapped or a held chord.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ShortcutMode {
+    Tap,
+    Hold,
+}
+
+impl ShortcutMode {
+    fn action(self, combo: openlogi_core::binding::KeyCombo) -> Action {
+        match self {
+            Self::Tap => Action::CustomShortcut(combo),
+            Self::Hold => Action::HoldShortcut(combo),
+        }
+    }
 }
 
 pub(super) fn binding_inspector(
@@ -666,7 +682,7 @@ fn action_library(
             id_prefix,
             picker.shortcut_input,
             picker.shortcut_invalid,
-            picker.shortcut_hold,
+            picker.shortcut_mode,
             picker.view,
             on_pick,
             pal,
@@ -704,45 +720,37 @@ fn custom_shortcut_editor(
     id_prefix: &'static str,
     input: &Entity<InputState>,
     invalid: bool,
-    hold: bool,
+    mode: ShortcutMode,
     view: &Entity<MouseModelView>,
     on_pick: &PickFn,
     pal: Palette,
 ) -> impl IntoElement {
     let submit_input = input.clone();
     let on_pick = on_pick.clone();
-    let view_tap = view.clone();
-    let view_hold = view.clone();
+    let mode_button = |option: ShortcutMode| {
+        let (id, label) = match option {
+            ShortcutMode::Tap => ("tap", tr!("actions.shortcut_tap")),
+            ShortcutMode::Hold => ("hold", tr!("actions.shortcut_hold")),
+        };
+        let view = view.clone();
+        control_button(format!("{id_prefix}-shortcut-{id}"))
+            .debug_selector(move || format!("{id_prefix}-shortcut-{id}"))
+            .selected(mode == option)
+            .label(label)
+            .on_click(move |_, _, cx| {
+                view.update(cx, |view, cx| {
+                    view.shortcut_mode = option;
+                    cx.notify();
+                });
+            })
+    };
+    let tap_button = mode_button(ShortcutMode::Tap);
+    let hold_button = mode_button(ShortcutMode::Hold);
     let view = view.clone();
     v_flex()
         .gap_1()
         .child(editor_section(tr!("action_ring.custom_shortcut"), pal))
-        .child(
-            h_flex()
-                .gap_2()
-                .child(
-                    control_button(format!("{id_prefix}-shortcut-tap"))
-                        .selected(!hold)
-                        .label(tr!("actions.shortcut_tap"))
-                        .on_click(move |_, _, cx| {
-                            view_tap.update(cx, |view, cx| {
-                                view.set_shortcut_hold(false);
-                                cx.notify();
-                            });
-                        }),
-                )
-                .child(
-                    control_button(format!("{id_prefix}-shortcut-hold"))
-                        .selected(hold)
-                        .label(tr!("actions.shortcut_hold"))
-                        .on_click(move |_, _, cx| {
-                            view_hold.update(cx, |view, cx| {
-                                view.set_shortcut_hold(true);
-                                cx.notify();
-                            });
-                        }),
-                ),
-        )
+        .child(h_flex().gap_2().child(tap_button).child(hold_button))
         .child(
             h_flex()
                 .gap_2()
@@ -761,14 +769,7 @@ fn custom_shortcut_editor(
                         .on_click(move |_, window, cx| {
                             let shortcut = submit_input.read(cx).value().to_string();
                             match shortcut.parse::<openlogi_core::binding::KeyCombo>() {
-                                Ok(combo) => {
-                                    let action = if hold {
-                                        Action::HoldShortcut(combo)
-                                    } else {
-                                        Action::CustomShortcut(combo)
-                                    };
-                                    (on_pick)(action, window, cx);
-                                }
+                                Ok(combo) => (on_pick)(mode.action(combo), window, cx),
                                 Err(_) => view.update(cx, |view, cx| {
                                     view.custom_shortcut_invalid = true;
                                     cx.notify();
