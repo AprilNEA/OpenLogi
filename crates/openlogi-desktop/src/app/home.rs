@@ -737,7 +737,10 @@ pub(super) fn connection_glyph(
             Some(ObservedConnection::Receiver(_)) | None => None,
         },
         Some(
-            DeviceRoute::Bolt { .. } | DeviceRoute::Unifying { .. } | DeviceRoute::RawHid { .. },
+            DeviceRoute::Bolt { .. }
+            | DeviceRoute::Unifying { .. }
+            | DeviceRoute::Hidpp20Receiver { .. }
+            | DeviceRoute::RawHid { .. },
         ) => None,
     };
     if let Some(transport) = direct_transport {
@@ -760,6 +763,12 @@ pub(super) fn connection_glyph(
         },
         (None, Some(ObservedConnection::Receiver(ReceiverProtocol::Unifying))) => {
             ConnectionGlyph::Unifying
+        }
+        // A HID++ 2.0 receiver, such as the PRO X3's Lightspeed `c54f`, has
+        // no logo of its own either.
+        (Some(DeviceRoute::Hidpp20Receiver { .. }), _)
+        | (None, Some(ObservedConnection::Receiver(ReceiverProtocol::Hidpp20))) => {
+            ConnectionGlyph::Dongle
         }
         // An offline model's radio capabilities do not identify a connection.
         // Preserve the wired-only fallback; ambiguous offline links stay neutral.
