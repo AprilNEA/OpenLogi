@@ -748,6 +748,25 @@ async fn failed_setup_rollback_returns_its_restore_capability() {
 }
 
 #[tokio::test]
+async fn an_offline_hidpp20_slot_still_owns_its_usb_channel() {
+    let route = DeviceRoute::Hidpp20Receiver {
+        receiver_uid: "receiver-a".into(),
+        slot: 1,
+    };
+    let (raw, _handle) =
+        ScriptedRawHidChannel::with_dynamic_responder(|request| Some(request.to_vec()));
+    let channel = scripted_channel(raw).await;
+    let registry = ChannelRegistry::default();
+    let node = NodeId::from("receiver-node".to_owned());
+    registry.replace_node(node.clone(), [route.clone()], channel.clone());
+    let shared = SharedChannel::new(channel.clone(), route);
+
+    registry.replace_node(node, [], channel);
+
+    assert_eq!(registry.publication(&shared), PublicationState::SlotOffline);
+}
+
+#[tokio::test]
 async fn an_offline_receiver_slot_restores_on_return_to_the_same_usb_channel() {
     let route = DeviceRoute::Bolt {
         receiver_uid: "receiver-a".into(),

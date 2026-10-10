@@ -158,7 +158,9 @@ pub use succession::Identity;
 ///      `PreviousDpiPreset`, `DpiShift` and `GShift` actions,
 ///      `Agent::read_onboard`, `HidppOperation::ReadOnboard` and
 ///      `PairingFailure::ReceiverFull` appended — G-series onboard memory,
-///      host mode and G-Shift.
+///      host mode and G-Shift. `DeviceRoute::Hidpp20Receiver` appended — a
+///      device paired to a receiver that speaks HID++ 2.0, such as the PRO
+///      X3's `c54f`.
 pub const PROTOCOL_VERSION: u32 = 43;
 
 /// Environment variable through which the agent hands a supervised helper the
