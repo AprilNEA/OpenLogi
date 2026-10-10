@@ -1,6 +1,7 @@
 //! DPI-cycle state shared with background action dispatch.
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use openlogi_hid::{DeviceRoute, Dpi, DpiCapabilities};
 
@@ -47,6 +48,28 @@ impl DpiCycles {
     pub fn target_for(&self, key: Option<&str>) -> Option<DeviceRoute> {
         let key = key.or(self.selected.as_deref())?;
         self.by_key.get(key).and_then(|state| state.target.clone())
+    }
+}
+
+/// The DPI a mouse had before a held DPI shift, read from its sensor when
+/// config or an action never set one.
+///
+/// It is kept until a restore is written. A hold that supersedes a pending
+/// restore then reuses it, where a fresh reading would be the shifted DPI.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DpiBeforeShift(Arc<Mutex<Option<Dpi>>>);
+
+impl DpiBeforeShift {
+    pub(crate) fn get(&self) -> Option<Dpi> {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub(crate) fn set(&self, dpi: Dpi) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Some(dpi);
+    }
+
+    pub(crate) fn clear(&self) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = None;
     }
 }
 
