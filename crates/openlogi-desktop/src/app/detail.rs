@@ -232,6 +232,9 @@ fn detail_navigation(
                 .child(tab.label())
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.active_tab = tab;
+                    if tab == DetailTab::Pointer {
+                        AppState::refresh_onboard(cx);
+                    }
                     cx.notify();
                 }))
         }))

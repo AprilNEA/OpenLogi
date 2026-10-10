@@ -81,6 +81,23 @@ impl AppState {
         events
     }
 
+    /// Re-read the active G-series mouse now and once more after the agent has
+    /// settled, for a change made outside the Pointer tab: a binding edit can
+    /// move the mouse in or out of host mode.
+    pub(crate) fn refresh_onboard(cx: &mut App) {
+        let supported = Self::update(cx, |state, _| {
+            let key = state
+                .current_record()
+                .filter(|_| state.current_onboard_supported())
+                .map(DeviceRecord::device_key)?;
+            state.pointer.reads.refresh_onboard(&key);
+            Some(())
+        });
+        if supported.is_some() {
+            Self::refresh_onboard_later(cx);
+        }
+    }
+
     /// Re-read the active mouse once the agent has had time to apply a change.
     pub(crate) fn refresh_onboard_later(cx: &mut App) {
         const SETTLE: Duration = Duration::from_secs(2);
