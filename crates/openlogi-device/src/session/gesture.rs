@@ -390,8 +390,8 @@ impl ArmedCapture for GestureCapture {
             .unwrap_or_else(PoisonError::into_inner) = SpyEdges::default();
     }
 
-    async fn rearm(&self) {
-        self.armed.rearm().await;
+    async fn rearm(&self) -> bool {
+        self.armed.rearm().await
     }
 
     fn armed_reporting(&self) -> Option<(&ReprogControlsV4, &[ArmedReporting])> {
