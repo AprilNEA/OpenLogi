@@ -213,3 +213,54 @@ fn a_control_named_under_two_spellings_is_rejected() {
     let config: Config = toml::from_str(&mixed).expect("distinct controls load");
     assert_eq!(config.stored_bindings("unit:1").len(), 2);
 }
+
+#[test]
+fn configured_invert_scroll_is_none_when_never_touched() {
+    // A device-level `false` is indistinguishable from never-set (#1205):
+    // it must not be reported as configured, or the reapply path would
+    // force every capable device's native invert bit off on every
+    // reconnect/reboot.
+    let device = DeviceConfig::default();
+    assert_eq!(device.configured_invert_scroll("direct:046d:c08d"), None);
+}
+
+#[test]
+fn configured_invert_scroll_is_some_when_device_level_is_true() {
+    let device = DeviceConfig {
+        invert_scroll: true,
+        ..DeviceConfig::default()
+    };
+    assert_eq!(
+        device.configured_invert_scroll("direct:046d:c08d"),
+        Some(true)
+    );
+}
+
+#[test]
+fn configured_invert_scroll_link_override_wins_even_when_false() {
+    // Unlike the device-level bool, a link override is an `Option<bool>` and
+    // so can carry a genuine "user chose false here" signal.
+    let mut device = DeviceConfig {
+        invert_scroll: true,
+        ..DeviceConfig::default()
+    };
+    device.links.insert(
+        "receiver:82839805:slot:1".to_string(),
+        LinkConfig {
+            capabilities: None,
+            overrides: LinkOverrides {
+                invert_scroll: Some(false),
+                ..LinkOverrides::default()
+            },
+        },
+    );
+
+    assert_eq!(
+        device.configured_invert_scroll("receiver:82839805:slot:1"),
+        Some(false)
+    );
+    assert_eq!(
+        device.configured_invert_scroll("direct:046d:c08d"),
+        Some(true)
+    );
+}
