@@ -19,7 +19,6 @@
 
 use std::fmt;
 use std::future::Future;
-use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use openlogi_core::config::Lighting;
@@ -30,6 +29,7 @@ use openlogi_hid::{
 use tokio::time::error::Elapsed;
 use tracing::{debug, warn};
 
+use crate::dpi::DpiBeforeShift;
 use crate::receiver_access::ReceiverAccess;
 
 mod context;
@@ -586,22 +586,24 @@ pub(crate) fn write_dpi_in_background(op: DeviceOp, ticket: WriteTicket, dpi: Dp
 }
 
 /// [`write_dpi_in_background`] for a held DPI shift. With `before`, the sensor
-/// DPI is read into it first. If that read fails nothing is written: the
-/// release would have nothing to return to.
+/// DPI is read into it first unless an earlier hold's reading is still owed a
+/// restore. If that read fails nothing is written: the release would have
+/// nothing to return to.
 pub(crate) fn hold_dpi_in_background(
     op: DeviceOp,
     ticket: WriteTicket,
     dpi: Dpi,
-    before: Option<Arc<OnceLock<Dpi>>>,
+    before: Option<DpiBeforeShift>,
 ) {
     let index = op.route.device_index();
     op.spawn_ordered_write(
         "DPI shift",
         ticket,
         move |c| async move {
-            if let Some(before) = before {
-                let read = openlogi_hid::get_dpi_info_on(&c).await?.current;
-                let _ = before.set(read);
+            if let Some(before) = before
+                && before.get().is_none()
+            {
+                before.set(openlogi_hid::get_dpi_info_on(&c).await?.current);
             }
             openlogi_hid::set_dpi_on(&c, dpi).await
         },
@@ -613,10 +615,12 @@ pub(crate) fn hold_dpi_in_background(
     );
 }
 
-/// Write the DPI `restore` yields once this write's turn comes, if any.
+/// Write the DPI `restore` yields once this write's turn comes, if any, and
+/// forget `before` once it is written.
 pub(crate) fn restore_dpi_in_background(
     op: DeviceOp,
     ticket: WriteTicket,
+    before: DpiBeforeShift,
     restore: impl FnOnce() -> Option<Dpi> + Send + 'static,
 ) {
     let index = op.route.device_index();
@@ -627,7 +631,9 @@ pub(crate) fn restore_dpi_in_background(
             let Some(dpi) = restore() else {
                 return Ok(None);
             };
-            openlogi_hid::set_dpi_on(&c, dpi).await.map(|()| Some(dpi))
+            openlogi_hid::set_dpi_on(&c, dpi).await?;
+            before.clear();
+            Ok(Some(dpi))
         },
         move |result| {
             log_outcome(index, "DPI restore", result, |dpi| {
