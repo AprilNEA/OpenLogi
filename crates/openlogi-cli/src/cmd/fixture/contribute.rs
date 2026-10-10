@@ -323,6 +323,9 @@ fn identity_plan(
 ) -> Result<HidCassetteIdentityPlan> {
     let mut plan = HidCassetteIdentityPlan::default();
     let model = match selected_route {
+        DeviceRoute::Hidpp20Receiver { .. } => {
+            bail!("HID++ 2.0 receiver routes have no fixture representation yet")
+        }
         DeviceRoute::Bolt { receiver_uid, slot } => {
             plan.insert(
                 SanitizedIdentityKind::ReceiverUniqueId,

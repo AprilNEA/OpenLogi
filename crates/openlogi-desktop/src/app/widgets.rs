@@ -135,13 +135,15 @@ pub(super) fn route_label(
 ) -> String {
     match route {
         Some(DeviceRoute::Bolt { .. }) => tr!("device.bolt_receiver").to_string(),
-        Some(DeviceRoute::Unifying { .. }) => match receiver_brand {
-            Some(ReceiverBrand::Nano) => tr!("device.nano_receiver").to_string(),
-            Some(ReceiverBrand::Lightspeed) => tr!("device.lightspeed_receiver").to_string(),
-            Some(ReceiverBrand::Bolt | ReceiverBrand::Unifying) | None => {
-                tr!("device.unifying_receiver").to_string()
+        Some(DeviceRoute::Unifying { .. } | DeviceRoute::Hidpp20Receiver { .. }) => {
+            match receiver_brand {
+                Some(ReceiverBrand::Nano) => tr!("device.nano_receiver").to_string(),
+                Some(ReceiverBrand::Lightspeed) => tr!("device.lightspeed_receiver").to_string(),
+                Some(ReceiverBrand::Bolt | ReceiverBrand::Unifying) | None => {
+                    tr!("device.unifying_receiver").to_string()
+                }
             }
-        },
+        }
         Some(DeviceRoute::Direct { .. } | DeviceRoute::RawHid { .. }) => {
             tr!("device.direct_connection").to_string()
         }
@@ -157,7 +159,11 @@ pub(super) fn route_label(
 pub(super) fn receiver_slot_label(record: &DeviceRecord) -> Option<SharedString> {
     matches!(
         record.route,
-        Some(DeviceRoute::Bolt { .. } | DeviceRoute::Unifying { .. })
+        Some(
+            DeviceRoute::Bolt { .. }
+                | DeviceRoute::Unifying { .. }
+                | DeviceRoute::Hidpp20Receiver { .. }
+        )
     )
     .then(|| tr!("device.receiver_slot_number", number => record.slot.to_string()))
 }
