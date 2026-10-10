@@ -6,13 +6,14 @@
 //! exposes exact device-supported values once the list is known.
 
 use gpui::{
-    AnyElement, Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription,
-    WeakEntity, Window, div, prelude::FluentBuilder as _, px,
+    AnyElement, AppContext as _, Context, Entity, Focusable as _, IntoElement, ParentElement,
+    Render, Styled, Subscription, WeakEntity, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     Icon, IconName, Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
+    input::{InputEvent, InputState},
     slider::{Slider, SliderState},
     v_flex,
 };
@@ -21,7 +22,7 @@ use tracing::debug;
 
 use crate::state::{AppState, DeviceKey, DpiLoad, StateEvent};
 use crate::ui::commit_slider::{CommitSlider, SliderRange};
-use crate::ui::components::PresetChip;
+use crate::ui::components::{PresetChip, control_input};
 use crate::ui::status::{retry_line, status_line};
 use crate::ui::theme::{self, Palette, Typography as _};
 
@@ -29,6 +30,9 @@ pub struct DpiPanel {
     /// Rebuilt whenever the selected device or its reported range changes,
     /// because a slider's range is fixed when it is built.
     slider: Option<DpiSlider>,
+    /// Numeric entry beside the slider, built on first render (it needs a
+    /// window) and rebuilt for every device, like the slider.
+    input: Option<DpiInput>,
     /// A preset was clicked while the onboard profile owns the DPI: show why
     /// nothing happened until onboard profiles are turned off.
     preset_blocked: bool,
@@ -40,6 +44,15 @@ struct DpiSlider {
     key: DeviceKey,
     shape: SliderShape,
     slider: CommitSlider<Dpi>,
+}
+
+/// The numeric entry together with the device it edits. It commits on Enter
+/// or when it loses focus — only while that device is still selected, so a
+/// selection change mid-edit cannot write the text to another device.
+struct DpiInput {
+    key: DeviceKey,
+    input: Entity<InputState>,
+    _subscription: Subscription,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,9 +93,56 @@ impl DpiPanel {
 
         Self {
             slider: None,
+            input: None,
             preset_blocked: false,
             _state_obs: state_obs,
         }
+    }
+
+    /// The numeric DPI entry for `key`, rebuilt when the selected device
+    /// changes. While it is not being edited it mirrors `dpi`, so slider drags
+    /// and device reads show up in it too.
+    fn ensure_input(
+        &mut self,
+        key: &DeviceKey,
+        dpi: Dpi,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<InputState> {
+        let input = if let Some(current) = self.input.as_ref().filter(|current| current.key == *key)
+        {
+            current.input.clone()
+        } else {
+            let input = cx.new(|cx| InputState::new(window, cx));
+            let edited = key.clone();
+            let subscription = cx.subscribe(&input, move |_, input, event: &InputEvent, cx| {
+                if !matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                    return;
+                }
+                if !AppState::try_read(cx).is_some_and(|state| state.is_current_device(&edited)) {
+                    return;
+                }
+                let Some(dpi) = parse_dpi(&input.read(cx).value()) else {
+                    cx.notify();
+                    return;
+                };
+                let dpi =
+                    AppState::try_read(cx).map_or(dpi, |state| state.normalize_active_dpi(dpi));
+                AppState::apply(cx, |state| state.commit_dpi(dpi));
+            });
+            self.input = Some(DpiInput {
+                key: key.clone(),
+                input: input.clone(),
+                _subscription: subscription,
+            });
+            input
+        };
+        let editing = input.read(cx).focus_handle(cx).is_focused(window);
+        let shown = dpi.to_string();
+        if !editing && input.read(cx).value() != shown.as_str() {
+            input.update(cx, |input, cx| input.set_value(shown, window, cx));
+        }
+        input
     }
 
     fn ensure_slider(
@@ -150,19 +210,40 @@ impl DpiPanel {
 }
 
 impl DpiPanel {
-    /// The slider, or the onboard-profile hint in its place while the
-    /// device's own profile owns the DPI.
-    fn slider_row(&self, snapshot: &DpiPanelSnapshot, pal: Palette) -> AnyElement {
+    /// The slider with its numeric entry, or the onboard-profile hint in their
+    /// place while the device's own profile owns the DPI.
+    fn slider_row(
+        &mut self,
+        snapshot: &DpiPanelSnapshot,
+        pal: Palette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         if snapshot.onboard_profile {
             return status_line(tr!("pointer.dpi_set_by_onboard_profile"), pal).into_any_element();
         }
-        slider_element(
+        let slider = slider_element(
             &snapshot.status,
             self.slider.as_ref().map(|current| current.slider.slider()),
             snapshot.reachable,
             snapshot.device_key.clone(),
             pal,
-        )
+        );
+        let Some(key) = self.slider.as_ref().map(|current| current.key.clone()) else {
+            return slider;
+        };
+        let input = self.ensure_input(&key, snapshot.dpi, window, cx);
+        h_flex()
+            .gap_3()
+            .items_center()
+            .child(div().flex_1().min_w_0().child(slider))
+            .child(
+                div()
+                    .w(px(96.))
+                    .flex_shrink_0()
+                    .child(control_input(&input)),
+            )
+            .into_any_element()
     }
 
     /// The preset chips. While the onboard profile owns the DPI a click shows
@@ -237,7 +318,7 @@ impl Render for DpiPanel {
         }
 
         let range_label = dpi_range_label(&snapshot.status, snapshot.reachable);
-        let slider = self.slider_row(&snapshot, pal);
+        let slider = self.slider_row(&snapshot, pal, window, cx);
         let presets = self.presets_section(&snapshot, pal, cx);
 
         v_flex()
@@ -269,6 +350,13 @@ impl Render for DpiPanel {
             )
             .child(presets)
     }
+}
+
+/// A typed DPI value: digits only, surrounding whitespace ignored. `None`
+/// for anything else, which leaves the device untouched.
+fn parse_dpi(typed: &str) -> Option<Dpi> {
+    let value: u32 = typed.trim().parse().ok()?;
+    Dpi::try_from(value).ok().filter(|dpi| u32::from(*dpi) > 0)
 }
 
 fn dpi_panel_snapshot(cx: &mut Context<DpiPanel>) -> DpiPanelSnapshot {
@@ -447,4 +535,26 @@ fn add_preset_chip() -> impl IntoElement {
                 state.commit_dpi_presets(presets)
             });
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use openlogi_core::hid::Dpi;
+
+    use super::parse_dpi;
+
+    #[test]
+    fn typed_digits_parse_with_surrounding_whitespace() {
+        assert_eq!(parse_dpi("1600"), Some(Dpi::new(1600)));
+        assert_eq!(parse_dpi("  4780 \n"), Some(Dpi::new(4780)));
+    }
+
+    #[test]
+    fn anything_but_a_positive_dpi_leaves_the_device_alone() {
+        for typed in [
+            "", " ", "abc", "16 00", "-800", "1600dpi", "0", "65536", "1.5",
+        ] {
+            assert_eq!(parse_dpi(typed), None, "{typed:?}");
+        }
+    }
 }
