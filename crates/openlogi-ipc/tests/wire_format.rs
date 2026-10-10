@@ -453,6 +453,31 @@ fn lock_keys() {
     );
 }
 
+/// Onboard-profiles RPCs are appended after the lock-key observer, so their
+/// variant indices (0x28/0x29) sit past every method above.
+#[test]
+fn onboard_profiles_requests() {
+    assert_wire(
+        &AgentRequest::ReadOnboardProfiles {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+        },
+        "280008463030444341464501",
+    );
+    assert_wire(
+        &AgentRequest::SetOnboardProfiles {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+            onboard_profiles: false,
+        },
+        "29000846303044434146450100",
+    );
+}
+
 /// A chord crosses the wire as its modifier bits and the key's HID usage.
 #[test]
 fn key_combo_modifier_bits() {
@@ -719,6 +744,7 @@ fn device_inventory() {
                 pointer_scaling: true,
                 force_sensing: true,
                 disable_keys: false,
+                onboard_profiles: true,
             }),
             settings_revision: 7,
         }],

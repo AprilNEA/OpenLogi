@@ -65,6 +65,8 @@ pub(crate) enum StateEvent {
     EasySwitchChanged(DeviceKey),
     /// Disable Keys data, write, or persistence recovery changed.
     DisableKeysChanged(DeviceKey),
+    /// The device's onboard-mode read landed or changed.
+    OnboardProfilesChanged(DeviceKey),
     /// Device or standalone-light settings changed.
     LightingChanged(DeviceKey),
     /// Camera settings or activity changed.
@@ -103,6 +105,7 @@ impl StateEvent {
             | Self::BacklightChanged(key)
             | Self::EasySwitchChanged(key)
             | Self::DisableKeysChanged(key)
+            | Self::OnboardProfilesChanged(key)
             | Self::LightingChanged(key)
             | Self::DeviceConfigChanged(key) => Some(key),
             Self::AgentChanged
@@ -255,6 +258,7 @@ impl AppState {
             | StateEvent::BacklightChanged(_)
             | StateEvent::EasySwitchChanged(_)
             | StateEvent::DisableKeysChanged(_)
+            | StateEvent::OnboardProfilesChanged(_)
             | StateEvent::LightingChanged(_)
             | StateEvent::CameraChanged
             | StateEvent::CameraPermissionChanged

@@ -27,9 +27,7 @@ use openlogi_core::device::{
 use openlogi_core::device_order::{DeviceIdentity, DeviceStableId, PhysicalDeviceKey};
 use openlogi_hid::{
     BacklightChange, BacklightState, CaptureChannelSlot, ChannelPool, ChannelRegistry,
-    DeviceIoGate, DeviceRoute, DisableKeysMask, Dpi, EasySwitchHosts, FnLockState,
-    ForceSensingInfo, HidppOperation, HostOs, PointerSpeed, ReportRate, ReportRateInfo, WriteError,
-    commands_for_light_settings, is_reserved_keyboard_control,
+    DeviceIoGate, DeviceRoute, DisableKeysMask, Dpi, EasySwitchHosts, FnLockState, ForceSensingInfo, HidppOperation, HostOs, PointerSpeed, ReportRate, ReportRateInfo, WriteError, commands_for_light_settings, is_reserved_keyboard_control,
 };
 #[cfg(test)]
 use openlogi_ipc::ChosenLight;
@@ -64,14 +62,7 @@ pub use lights::{ConfigSource, LightWriteClaim, TakenLightChange, write_light};
 
 use devices::reapply_targets;
 use devices::{
-    FollowerCookieState, FollowerCookieWrite, RECONNECT_REAPPLY_CONFIRM_RETRIES,
-    VOLATILE_REAPPLY_CONFIRM_RETRIES, assignments_changed, build_devices, bump_settings_epoch,
-    carry_lifecycle_budgets, changed_follower_cookies, changed_force_sensing,
-    config_keeps_os_layout, configured_dpi, configured_force_sensing, configured_report_rate,
-    configured_wheel_mode, host_switch_links, is_hidpp_device, keeps_os_layout, main_wheel_divert,
-    newly_kept_os_layouts, os_layout_appeared, pick_current, plan_disabled_keys_recovery,
-    plan_reapply, published_inventories, reconnect_follower_cookies, same_device_lifecycle,
-    saved_speed, settings_moved, stable_id, wheel_inverted,
+    FollowerCookieState, FollowerCookieWrite, RECONNECT_REAPPLY_CONFIRM_RETRIES, VOLATILE_REAPPLY_CONFIRM_RETRIES, assignments_changed, build_devices, bump_settings_epoch, carry_lifecycle_budgets, changed_follower_cookies, changed_force_sensing, config_keeps_os_layout, configured_dpi, configured_force_sensing, configured_report_rate, configured_wheel_mode, host_switch_links, is_hidpp_device, keeps_os_layout, main_wheel_divert, newly_kept_os_layouts, os_layout_appeared, pick_current, plan_disabled_keys_recovery, plan_reapply, published_inventories, reconnect_follower_cookies, same_device_lifecycle, saved_speed, settings_moved, stable_id, wheel_inverted, hidpp20_slot_targets, host_dpi, onboard_switch, reconnect_dpi,
 };
 
 /// The minimal per-device facts the agent needs: the config key (binding /
@@ -184,6 +175,9 @@ pub struct SharedHandles {
     follower_cookie_order: WriteOrder,
     /// Saved policy and manual writes share intent identity, not retry order.
     disabled_keys_order: WriteOrder<Option<DisableKeysMask>>,
+    /// Orders the GUI's onboard-mode switches and the reconnect reapply's
+    /// per mouse.
+    onboard_profiles_order: WriteOrder,
     /// The running inventory watcher's refresh handle, published at arming;
     /// `None` while no watcher runs.
     inventory_refresh: Arc<RwLock<Option<InventoryRefresh>>>,
@@ -470,6 +464,62 @@ impl SharedHandles {
         )
     }
 
+    /// Switch the device at `route` between its onboard profiles and host
+    /// control — writing `host_dpi` after a switch to the host — and return
+    /// the mode it reports. Ordered per device like [`Self::set_fn_lock`]:
+    /// when a newer onboard-mode write is requested before this one gets its
+    /// turn, this one reads the device instead.
+    pub async fn set_onboard_profiles(
+        &self,
+        route: &DeviceRoute,
+        onboard_profiles: bool,
+        host_dpi: Option<Dpi>,
+    ) -> Result<bool, WriteError> {
+        let ticket = self.onboard_profiles_order.request(route);
+        let host_dpi = host_dpi.map(|dpi| self.host_dpi_write(route, dpi));
+        self.device(route)
+            .run_in_turn(
+                HidppOperation::WriteOnboardMode,
+                &ticket,
+                |c| async move {
+                    crate::hardware::switch_onboard_profiles_on(&c, onboard_profiles, host_dpi)
+                        .await
+                },
+                |c| async move { openlogi_hid::get_onboard_profiles_on(&c).await },
+            )
+            .await
+    }
+
+    /// [`Self::set_onboard_profiles`] without waiting, for the config-reload
+    /// and reconnect paths; the outcome is logged.
+    fn write_onboard_profiles_in_background(
+        &self,
+        route: &DeviceRoute,
+        onboard_profiles: bool,
+        host_dpi: Option<Dpi>,
+    ) {
+        crate::hardware::write_onboard_profiles_in_background(
+            self.device(route),
+            self.onboard_profiles_order.request(route),
+            onboard_profiles,
+            host_dpi.map(|dpi| self.host_dpi_write(route, dpi)),
+        );
+    }
+
+    /// The DPI restore that follows a switch of the mouse at `route` to host
+    /// control, numbered with its pointer-speed writes like
+    /// [`Self::set_dpi`]: a DPI the user asks for after the switch lands
+    /// last, and the restore ends precision mode as that write would.
+    fn host_dpi_write(&self, route: &DeviceRoute, dpi: Dpi) -> crate::hardware::HostDpi {
+        crate::hardware::HostDpi {
+            dpi,
+            write: self
+                .pointer_speeds
+                .app_write(route, SavedSpeed::Dpi(Some(dpi))),
+            speeds: Arc::clone(&self.pointer_speeds),
+        }
+    }
+
     /// Hand requests to the inventory watcher started at arming.
     pub fn publish_inventory_refresh(&self, refresh: InventoryRefresh) {
         write_value(&self.inventory_refresh, Some(refresh), "inventory refresh");
@@ -509,6 +559,24 @@ impl SharedHandles {
     }
 }
 
+/// Which devices the next inventory refresh re-applies volatile settings to
+/// although its snapshot shows no transition for them. Ordered: a wider
+/// request subsumes a narrower one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+enum ForcedReapply {
+    /// Only the transitions the snapshot itself shows.
+    #[default]
+    None,
+    /// Also the online devices behind HID++ 2.0 receivers: one of them
+    /// reported a reconnect, which such a receiver never shows as an
+    /// offline→online transition.
+    Hidpp20Slots,
+    /// Every online device: the system woke, and devices may have
+    /// power-cycled while their set/route/online state looks identical across
+    /// the sleep gap.
+    All,
+}
+
 /// Owns the config + device selection and keeps [`SharedHandles`] in sync.
 pub struct Orchestrator {
     config: Config,
@@ -523,12 +591,11 @@ pub struct Orchestrator {
     /// the distinction (as [`InventoryHealth`]) so the GUI can tell them
     /// apart.
     inventory: InventoryState,
-    /// Set after a system wake or a device's own reconnect broadcast: devices
-    /// may have power-cycled while their set/route/online state looks
-    /// identical across the gap, so the next refresh re-applies volatile
-    /// settings to every online device. The value is the confirming re-apply
-    /// budget the forced targets are queued with — a system wake keeps the
-    /// boot-race ladder, a device reconnect needs only a link-race confirm.
+    /// Set after a system wake: devices may have power-cycled while their
+    /// set/route/online state looks identical across the gap, so the next
+    /// refresh re-applies volatile settings to every online device. The
+    /// value is the confirming re-apply budget the forced targets are
+    /// queued with.
     forced_reapply_budget: Option<u8>,
     /// System resume must rearm every online capture; an identity-free device
     /// wake only reapplies settings, since each armed listener owns its wake.
@@ -536,6 +603,9 @@ pub struct Orchestrator {
     /// Rearm epochs belong to exact routes. Discovery or wake on one link
     /// must not retire a still-running capture on another link.
     capture_route_generations: HashMap<DeviceRoute, u64>,
+    /// Devices the next refresh re-applies volatile settings to although the
+    /// snapshot shows no transition for them — see [`ForcedReapply`].
+    forced_reapply: ForcedReapply,
     /// Whether the last enumeration pass failed to open HID++ nodes; published
     /// atomically with the inventory so no observation pairs a fresh device
     /// set with a stale flag.
@@ -672,6 +742,7 @@ impl Orchestrator {
             host_name_order: WriteOrder::default(),
             follower_cookie_order: WriteOrder::default(),
             disabled_keys_order: WriteOrder::default(),
+            onboard_profiles_order: WriteOrder::default(),
             inventory_refresh: Arc::new(RwLock::new(None)),
         };
         let orch = Self {
@@ -687,6 +758,7 @@ impl Orchestrator {
             forced_reapply_budget: None,
             forced_capture_rearm: false,
             capture_route_generations: HashMap::new(),
+            forced_reapply: ForcedReapply::None,
             hid_open_failures: false,
             reapply_followup: BTreeMap::new(),
             disabled_keys_recovery: BTreeMap::new(),
@@ -1147,11 +1219,12 @@ impl Orchestrator {
         // wheel mode) live in device RAM and reset on a power cycle. Every
         // reconnect shape re-applies the persisted values (#189): a first
         // sighting, a replug (new route), a wake from device sleep
-        // (offline→online), or — via the forced budget — a system wake, a
-        // device's own `0x1d4b` reconnect broadcast, or a channel the
+        // (offline→online), or — via the forced budget/flag — a system wake,
+        // a device's own `0x1d4b` reconnect broadcast, or a channel the
         // enumerator replaced after retiring it, where none of those
         // transitions are observable.
         let forced = self.forced_reapply_budget.take();
+        let forced_reapply = std::mem::take(&mut self.forced_reapply);
         let next_current = pick_current(&devices, self.config.selected_device());
         self.rearm_capture_routes(&devices);
         // Manual cancellation can happen long after the boot/reconnect ladder
@@ -1175,9 +1248,16 @@ impl Orchestrator {
             plan_disabled_keys_recovery(&devices, &disabled_keys_recovery, confirm_reapply);
         self.disabled_keys_recovery = next_disabled_keys_recovery;
         let followup = std::mem::take(&mut self.reapply_followup);
-        let (targets, next_followup) =
+        let (mut targets, next_followup) =
             plan_reapply(&self.devices, &devices, &followup, forced, confirm_reapply);
         self.reapply_followup = next_followup;
+        if forced_reapply == ForcedReapply::Hidpp20Slots {
+            for idx in hidpp20_slot_targets(&devices) {
+                if !targets.contains(&idx) {
+                    targets.push(idx);
+                }
+            }
+        }
         // A keyboard switched to another platform on the device (a platform
         // key combination) is put back, as Logi Options+ does on its
         // platform-change report. So is one whose `0x4531` support shows up
@@ -1365,6 +1445,17 @@ impl Orchestrator {
     fn force_reapply(&mut self, confirm_retries: u8) {
         self.forced_reapply_budget =
             Some(self.forced_reapply_budget.unwrap_or(0).max(confirm_retries));
+        self.forced_reapply = self.forced_reapply.max(ForcedReapply::All);
+    }
+
+    /// Re-apply volatile settings to the online devices behind HID++ 2.0
+    /// receivers on the next inventory refresh. Called when one of them
+    /// reported a reconnect: such a receiver sends no connection notification,
+    /// so the device's power cycle shows no offline→online transition. Capture
+    /// is not re-armed — the device's own capture session already re-arms on
+    /// that report.
+    pub fn reapply_hidpp20_slots_on_next_refresh(&mut self) {
+        self.forced_reapply = self.forced_reapply.max(ForcedReapply::Hidpp20Slots);
     }
 
     /// Push the persisted volatile settings (lighting, sensor DPI, SmartShift,
@@ -1388,7 +1479,12 @@ impl Orchestrator {
         let key = &dev.config_key;
         let route_key = stable_id(dev).route_key();
         let device = self.config.devices.get(key.as_str());
-        let saved = saved_speed(&self.config, dev);
+        // A mouse with an onboard-profiles choice gets its DPI from the
+        // ordered onboard write below, after the mode; an active onboard
+        // profile rejects it anyway.
+        let onboard_owns_dpi = self.config.onboard_profiles(key).is_some();
+        let saved = saved_speed(&self.config, dev)
+            .filter(|saved| !(onboard_owns_dpi && matches!(saved, SavedSpeed::Dpi(_))));
         let speed_write =
             saved.and_then(|saved| self.shared.pointer_speeds.reapply(key, &route, saved));
         // A DPI mouse gets its DPI from `speed_write`, numbered with the
@@ -1397,9 +1493,7 @@ impl Orchestrator {
         let dpi_overridden = matches!(saved, Some(SavedSpeed::Dpi(_))) && speed_write.is_some();
         let settings = VolatileMouseSettings {
             wheel: self.wheel_mode_change(dev),
-            dpi: device
-                .and_then(|d| d.effective_dpi(&route_key))
-                .filter(|_| !dpi_overridden),
+            dpi: reconnect_dpi(&self.config, dev).filter(|_| !dpi_overridden),
             report_rate: configured_report_rate(&self.config, dev),
             smartshift: device
                 .and_then(|d| d.effective_smartshift(&route_key))
@@ -1430,6 +1524,10 @@ impl Orchestrator {
         }
         self.keep_os_layout(dev);
         let _ = self.shared.reapply_disabled_keys(&route);
+        if let Some((onboard_profiles, host_dpi)) = onboard_switch(&self.config, dev) {
+            self.shared
+                .write_onboard_profiles_in_background(&route, onboard_profiles, host_dpi);
+        }
         if let Some(capabilities) = dev.light_capabilities
             && let Some(light) = self.effective_light_settings(key)
         {
@@ -1877,6 +1975,7 @@ impl Orchestrator {
         }
 
         self.apply_changed_pointer_speeds(&previous);
+        self.apply_changed_onboard_profiles(&previous);
         self.apply_enabled_os_layouts(&previous);
         let writes = changed_follower_cookies(
             &previous,
@@ -1998,6 +2097,42 @@ impl Orchestrator {
                 Some((dev.config_key.clone(), light))
             })
             .collect()
+    }
+
+    /// Push a changed onboard-profiles setting to the online device it belongs
+    /// to. Only values that differ from `previous` are written. The GUI toggle
+    /// also writes directly through [`SharedHandles::set_onboard_profiles`];
+    /// both are ordered per device, so the newest request is the one that
+    /// stays. The reconnect path is [`Self::reapply_volatile_settings`].
+    fn apply_changed_onboard_profiles(&self, previous: &Config) {
+        for dev in self.devices.iter().filter(|dev| dev.online) {
+            let Some(route) = dev.route.clone() else {
+                continue;
+            };
+            if self.config.onboard_profiles(&dev.config_key)
+                == previous.onboard_profiles(&dev.config_key)
+            {
+                continue;
+            }
+            if let Some((onboard_profiles, host_dpi)) = onboard_switch(&self.config, dev) {
+                self.shared.write_onboard_profiles_in_background(
+                    &route,
+                    onboard_profiles,
+                    host_dpi,
+                );
+            }
+        }
+    }
+
+    /// The DPI a switch of the device at `route` to `onboard_profiles` must
+    /// write after the mode — see [`SharedHandles::set_onboard_profiles`].
+    #[must_use]
+    pub fn onboard_switch_dpi(&self, route: &DeviceRoute, onboard_profiles: bool) -> Option<Dpi> {
+        let dev = self
+            .devices
+            .iter()
+            .find(|dev| dev.route.as_ref() == Some(route))?;
+        host_dpi(&self.config, dev, onboard_profiles)
     }
 
     /// The online lights a config reload has to write: those whose effective

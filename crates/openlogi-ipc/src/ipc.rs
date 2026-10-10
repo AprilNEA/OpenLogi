@@ -153,7 +153,10 @@ pub use succession::Identity;
 ///      `BacklightChange::Duration` appended — the `0x1982` backlight
 ///      timer, five-second steps up to two hours.
 /// v42: `DeviceRoute::Hidpp20Receiver` appended — a device paired to a
-///      receiver that speaks HID++ 2.0, such as the PRO X3's `c54f`.
+///      receiver that speaks HID++ 2.0, such as the PRO X3's `c54f`;
+///      `Capabilities::onboard_profiles`,
+///      `HidppOperation::{ReadOnboardMode, WriteOnboardMode}` and
+///      `Agent::{read_onboard_profiles, set_onboard_profiles}` appended.
 pub const PROTOCOL_VERSION: u32 = 42;
 
 /// Environment variable through which the agent hands a supervised helper the
@@ -955,4 +958,13 @@ pub trait Agent {
     async fn reload_saved_config_with_verdict(
         saved: SavedConfig,
     ) -> Result<SavedConfigVerdict, ConfigReloadError>;
+    /// Read whether the onboard profiles (`0x8100`) of the device on `route`
+    /// are active: `true` in onboard mode, `false` under host control.
+    async fn read_onboard_profiles(route: DeviceRoute) -> Result<bool, WriteError>;
+    /// Switch the device on `route` between its onboard profiles (`true`) and
+    /// host control (`false`), answering with the mode it reports afterwards.
+    async fn set_onboard_profiles(
+        route: DeviceRoute,
+        onboard_profiles: bool,
+    ) -> Result<bool, WriteError>;
 }

@@ -525,6 +525,14 @@ impl Running {
                     .await
                     .reapply_reconnected_on_next_refresh();
             }
+            // A device behind a HID++ 2.0 receiver power-cycled without ever
+            // looking offline; only those devices re-apply.
+            InventoryEvent::Hidpp20SlotReconnected => {
+                self.orchestrator
+                    .lock()
+                    .await
+                    .reapply_hidpp20_slots_on_next_refresh();
+            }
         }
     }
 

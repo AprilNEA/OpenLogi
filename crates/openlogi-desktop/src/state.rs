@@ -33,8 +33,7 @@ pub(crate) use events::{StateEvent, StateEvents};
 pub use light::LightCommandStatus;
 pub(crate) use load::Load;
 pub use load::{
-    BacklightLoad, DisableKeysLoad, DpiLoad, EasySwitchLoad, FnLockLoad, ForceSensingLoad,
-    PointerSpeedLoad, ReportRateLoad, SmartShiftLoad,
+    BacklightLoad, DisableKeysLoad, DpiLoad, EasySwitchLoad, FnLockLoad, ForceSensingLoad, PointerSpeedLoad, ReportRateLoad, SmartShiftLoad, OnboardProfilesLoad,
 };
 
 /// Result of confirming a SmartShift write by reading the value back.
@@ -88,6 +87,7 @@ mod inventory;
 mod light;
 mod lighting;
 mod load;
+mod onboard_profiles;
 mod os_layout;
 mod pointer;
 mod pointer_speed;
@@ -249,6 +249,9 @@ impl AppState {
             state.load_current_backlight(cx);
             state.load_current_easy_switch(cx);
             state.load_current_disable_keys(cx);
+            state.load_current_onboard_profiles(cx);
+            state.refresh_current_onboard_profiles();
+            state.refresh_onboard_dpi();
         });
     }
 

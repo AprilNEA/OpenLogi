@@ -322,6 +322,7 @@ pub(super) fn fold(device: &mut DeviceConfig, mut legacy: DeviceConfig, route_ke
     fold_option_field!(pointer_speed);
     fold_option_field!(force_sensing);
     fold_option_field!(disabled_keys);
+    fold_option_field!(onboard_profiles);
     // The user-assigned alias. Without this a legacy entry carrying a name
     // folded into a canonical entry with none would drop it silently — the
     // one field here a user typed by hand, so the loss is the most visible.

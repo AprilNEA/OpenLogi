@@ -208,6 +208,11 @@ pub struct Capabilities {
     /// `force_sensing`: crosses the IPC and the persisted identity.
     #[serde(default)]
     pub disable_keys: bool,
+    /// The device stores onboard profiles and can be switched between them
+    /// and host control — HID++ `0x8100`. Appended: crosses the IPC and the
+    /// persisted identity.
+    #[serde(default)]
+    pub onboard_profiles: bool,
 }
 
 impl Capabilities {
@@ -248,6 +253,7 @@ impl Capabilities {
             // force; the feature table alone cannot say.
             force_sensing: ids.contains(&0x19c0),
             disable_keys: ids.contains(&0x4521),
+            onboard_profiles: ids.contains(&0x8100),
         }
     }
 
@@ -765,6 +771,7 @@ mod tests {
                     pointer_scaling: false,
                     force_sensing: false,
                     disable_keys: false,
+                    onboard_profiles: false,
                 }),
                 settings_revision: 0,
             }],
@@ -886,6 +893,7 @@ mod tests {
                 pointer_scaling: false,
                 force_sensing: false,
                 disable_keys: false,
+                onboard_profiles: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
@@ -912,6 +920,7 @@ mod tests {
                 pointer_scaling: false,
                 force_sensing: false,
                 disable_keys: false,
+                onboard_profiles: false,
             }
         );
         // No driving features → nothing offered.
@@ -961,6 +970,8 @@ mod tests {
         assert!(Capabilities::from_feature_ids(&[0x0001, 0x40a2]).fn_lock);
         assert!(Capabilities::from_feature_ids(&[0x0001, 0x40a0]).fn_lock);
         assert!(!Capabilities::from_feature_ids(&[0x0001, 0x1982]).fn_lock);
+        assert!(Capabilities::from_feature_ids(&[0x0001, 0x8100]).onboard_profiles);
+        assert!(!Capabilities::from_feature_ids(&[0x0001, 0x2202]).onboard_profiles);
     }
 
     #[test]

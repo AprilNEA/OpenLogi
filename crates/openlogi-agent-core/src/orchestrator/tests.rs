@@ -1,13 +1,14 @@
 //! Orchestrator tests: the shared fixtures, and one module per area.
 
 use super::{
-    AgentDevice, FollowerCookieState, FollowerCookieWrite, InventoryHealth, Orchestrator,
-    RECONNECT_REAPPLY_CONFIRM_RETRIES, VOLATILE_REAPPLY_CONFIRM_RETRIES, build_devices,
-    changed_follower_cookies, changed_force_sensing, configured_disabled_keys,
+    AgentDevice, FollowerCookieState, FollowerCookieWrite, ForcedReapply, InventoryHealth,
+    Orchestrator, RECONNECT_REAPPLY_CONFIRM_RETRIES, VOLATILE_REAPPLY_CONFIRM_RETRIES,
+    build_devices, changed_follower_cookies, changed_force_sensing, configured_disabled_keys,
     configured_force_sensing, configured_report_rate, configured_wheel_mode, desktop_switch,
-    host_switch_links, keeps_os_layout, main_wheel_divert, newly_kept_os_layouts,
-    os_layout_appeared, pick_current, plan_reapply, reapply_targets, reconnect_follower_cookies,
-    settings_moved, stable_id, wheel_inverted,
+    hidpp20_slot_targets, host_dpi, host_switch_links, keeps_os_layout, main_wheel_divert,
+    newly_kept_os_layouts, onboard_switch, os_layout_appeared, pick_current, plan_reapply,
+    reapply_targets, reconnect_follower_cookies, reconnect_dpi, settings_moved,
+    stable_id, wheel_inverted,
 };
 use crate::hardware::WheelModeChange;
 use openlogi_core::app::ForegroundApp;

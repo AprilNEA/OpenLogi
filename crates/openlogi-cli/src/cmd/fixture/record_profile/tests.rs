@@ -226,6 +226,23 @@ impl Agent for TestAgent {
         unreachable!("profile capture must never write the backlight")
     }
 
+    async fn read_onboard_profiles(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+    ) -> Result<bool, WriteError> {
+        unreachable!("profile capture does not record the onboard mode")
+    }
+
+    async fn set_onboard_profiles(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+        _onboard_profiles: bool,
+    ) -> Result<bool, WriteError> {
+        unreachable!("profile capture must never switch the onboard mode")
+    }
+
     async fn read_dpi(self, _: TarpcContext, route: DeviceRoute) -> Result<DpiInfo, WriteError> {
         self.read(ReadFamily::Dpi, &route, |settings| &settings.dpi, 0x2201)
     }

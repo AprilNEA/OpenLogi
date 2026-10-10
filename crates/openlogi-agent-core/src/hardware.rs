@@ -36,7 +36,7 @@ use tokio::time::error::Elapsed;
 use tracing::{debug, info, warn};
 
 use crate::capture_plan::SharedCapturePlans;
-use crate::pointer_speed::SpeedTarget;
+use crate::pointer_speed::{AppWrite, PointerSpeeds, SpeedTarget};
 use crate::receiver_access::ReceiverAccess;
 
 mod context;
@@ -1131,6 +1131,100 @@ fn log_cookie_outcome(index: u8, outcome: CookieOutcome) {
             warn!(index, cookie = lead.get(), %error, "linked device cookie write failed");
         }
     }
+}
+
+/// The DPI restore that follows a switch to host control: the user's own
+/// DPI, numbered with the mouse's pointer-speed writes when the switch was
+/// requested.
+pub(crate) struct HostDpi {
+    /// The DPI to write.
+    pub(crate) dpi: Dpi,
+    /// Its place among the mouse's pointer-speed writes, and the precision
+    /// restore it settles.
+    pub(crate) write: AppWrite,
+    /// Where a landed restore is recorded.
+    pub(crate) speeds: Arc<PointerSpeeds>,
+}
+
+/// Switch `shared`'s device between its onboard profiles (`true`) and host
+/// control (`false`) and, when handing control to the host, write `host_dpi`
+/// — the user's own DPI, which the onboard profile had overridden and which
+/// the device rejects until the switch lands. Returns the mode the device
+/// reports. A DPI write that fails after a landed switch is logged rather
+/// than returned: the switch is what was asked, and it took.
+///
+/// The restore runs inside the switch's transport turn, so it does not wait
+/// for its own pointer-speed turn: it writes only while it is still the
+/// newest pointer-speed write, and yields to a DPI the user asked for after
+/// the switch instead of overwriting it with the value captured before.
+pub(crate) async fn switch_onboard_profiles_on(
+    shared: &SharedChannel,
+    onboard_profiles: bool,
+    host_dpi: Option<HostDpi>,
+) -> Result<bool, WriteError> {
+    let reported = openlogi_hid::set_onboard_profiles_on(shared, onboard_profiles).await?;
+    if !reported && let Some(HostDpi { dpi, write, speeds }) = host_dpi {
+        if !write.ticket.is_current() {
+            debug!(%dpi, "DPI restore superseded by a newer DPI write");
+            return Ok(reported);
+        }
+        let started = tokio::time::Instant::now();
+        match openlogi_hid::set_dpi_on(shared, dpi).await {
+            Ok(()) => {
+                debug!(%dpi, "DPI restored under host control");
+                if let Some(restore) = write.restore {
+                    show_precision_led(shared, false, started).await;
+                    speeds.restored(&restore);
+                }
+            }
+            Err(error) => {
+                warn!(%dpi, ?error, "DPI write after host-control switch failed");
+            }
+        }
+    }
+    Ok(reported)
+}
+
+/// Spawn an OS thread that runs [`switch_onboard_profiles_on`] on `op`'s
+/// device, unless a newer onboard-mode write for the device was requested
+/// after `ticket`. Returns immediately; the outcome is logged.
+pub(crate) fn write_onboard_profiles_in_background(
+    op: DeviceOp,
+    ticket: WriteTicket,
+    onboard_profiles: bool,
+    host_dpi: Option<HostDpi>,
+) {
+    let index = op.route.device_index();
+    let turn = op.access.transport_turns.turn_for(&op.route);
+    op.spawn_timed_write(
+        "onboard-mode write",
+        move |op| async move {
+            within_turn(
+                &ticket,
+                &turn,
+                || async {
+                    let shared = op.resolve()?;
+                    switch_onboard_profiles_on(&shared, onboard_profiles, host_dpi)
+                        .await
+                        .map(Some)
+                },
+                || async { Ok(None) },
+            )
+            .await
+        },
+        move |result| {
+            log_outcome(index, "onboard-mode write", result, |reported| {
+                if reported.is_some() {
+                    debug!(index, onboard_profiles, "onboard mode written");
+                } else {
+                    debug!(
+                        index,
+                        onboard_profiles, "onboard-mode write superseded by a newer one"
+                    );
+                }
+            });
+        },
+    );
 }
 
 /// The settings a mouse forgets when it power-cycles, as one reapply pushes

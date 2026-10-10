@@ -66,3 +66,7 @@ pub type EasySwitchLoad = Load<Arc<EasySwitchHosts>>;
 
 /// Per-device Disable Keys capability/current-state load.
 pub type DisableKeysLoad = Load<Arc<DisableKeysState>>;
+
+/// What is known of whether a device's onboard profiles are active (`0x8100`):
+/// `true` in onboard mode, `false` under host control.
+pub type OnboardProfilesLoad = Load<Arc<bool>>;

@@ -365,6 +365,13 @@ pub struct DeviceConfig {
     /// firmware unmanaged; an explicit empty set re-enables every known key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disabled_keys: Option<BTreeSet<DisableKey>>,
+    /// Whether the device's onboard profiles (HID++ `0x8100`) stay active:
+    /// `false` hands DPI, report rate and buttons to the host. The PRO X3
+    /// SUPERSTRIKE falls back to onboard mode on every power cycle, so the
+    /// agent re-applies this when the device reconnects, before its DPI.
+    /// `None` means "never set — leave the device alone".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub onboard_profiles: Option<bool>,
 }
 
 impl DeviceConfig {
@@ -471,6 +478,7 @@ impl Default for DeviceConfig {
             pointer_speed: None,
             force_sensing: None,
             disabled_keys: None,
+            onboard_profiles: None,
         }
     }
 }
@@ -602,6 +610,8 @@ struct RawDeviceConfig {
     #[serde(default)]
     force_sensing: Option<u16>,
     disabled_keys: Option<BTreeSet<DisableKey>>,
+    #[serde(default)]
+    onboard_profiles: Option<bool>,
     #[serde(default = "default_true")]
     enabled: bool,
     #[serde(default)]
@@ -668,6 +678,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             pointer_speed: raw.pointer_speed,
             force_sensing: raw.force_sensing,
             disabled_keys: raw.disabled_keys,
+            onboard_profiles: raw.onboard_profiles,
         }
     }
 }

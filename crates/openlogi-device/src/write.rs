@@ -32,6 +32,7 @@ mod haptic;
 mod hires_wheel;
 mod lighting;
 mod litra;
+mod onboard_mode;
 mod os_layout;
 mod pointer_scaling;
 mod report_rate;
@@ -82,6 +83,9 @@ pub use litra::{
     read_state as read_litra_state, watch as watch_litra,
 };
 pub use openlogi_core::hid::{DisableKeysMask, DisableKeysState};
+pub use onboard_mode::{
+    get_onboard_profiles, get_onboard_profiles_on, set_onboard_profiles, set_onboard_profiles_on,
+};
 pub use openlogi_core::hid::{
     EasySwitchHosts, EasySwitchSlot, HostConnection, HostOsInfo, HostOsKind,
 };
