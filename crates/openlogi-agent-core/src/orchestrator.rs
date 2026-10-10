@@ -1701,6 +1701,7 @@ impl Orchestrator {
             ticket,
             target,
             led,
+            None,
             move || {
                 if let Some(restore) = restore {
                     speeds.restored(&restore);
