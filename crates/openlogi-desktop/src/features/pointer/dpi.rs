@@ -337,16 +337,14 @@ impl DpiPanel {
         // Highlight at most one chip: when several presets snap to the same
         // supported value as the current DPI, only the first is "active".
         let mut already_highlighted = false;
-        let preset_chips: Vec<_> = snapshot
-            .presets
-            .iter()
-            .enumerate()
+        let preset_chips: Vec<_> = presets_by_size(&snapshot.presets)
+            .into_iter()
             .map(|(idx, value)| {
-                let normalized = AppState::try_read(cx)
-                    .map_or(*value, |state| state.normalize_active_dpi(*value));
+                let normalized =
+                    AppState::try_read(cx).map_or(value, |state| state.normalize_active_dpi(value));
                 let active = !already_highlighted && normalized == snapshot.dpi;
                 already_highlighted |= active;
-                preset_chip(idx, *value, active, &snapshot.presets)
+                preset_chip(idx, value, active, &snapshot.presets)
             })
             .collect();
 
@@ -415,6 +413,15 @@ impl DpiPanel {
             )
             .into_any_element()
     }
+}
+
+/// The presets in ascending order for display, each with its position in the
+/// stored list. The stored order is the DPI-button cycle order and stays as
+/// the user built it; removing a chip addresses it by that position.
+fn presets_by_size(presets: &[Dpi]) -> Vec<(usize, Dpi)> {
+    let mut sorted: Vec<_> = presets.iter().copied().enumerate().collect();
+    sorted.sort_by_key(|&(_, dpi)| dpi);
+    sorted
 }
 
 fn dpi_panel_snapshot(cx: &mut Context<DpiPanel>) -> DpiPanelSnapshot {
@@ -616,6 +623,17 @@ mod tests {
     #[test]
     fn parses_a_plain_digit_string() {
         assert_eq!(parse_dpi_input("1600"), Some(Dpi::new(1600)));
+    }
+
+    #[test]
+    fn presets_show_smallest_first_and_keep_their_stored_position() {
+        let stored = [1600, 400, 3200, 800, 1600].map(Dpi::new);
+
+        assert_eq!(
+            presets_by_size(&stored),
+            [(1, 400), (3, 800), (0, 1600), (4, 1600), (2, 3200)]
+                .map(|(idx, dpi)| (idx, Dpi::new(dpi)))
+        );
     }
 
     #[test]
