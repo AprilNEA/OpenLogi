@@ -118,7 +118,7 @@ impl ArmedOnboard {
         self.spy().map_or(0, |(_, captured)| captured.len())
     }
 
-    pub(super) async fn rearm(&self) {
+    pub(super) async fn rearm(&self) -> bool {
         let onboard = self.onboard();
         let result = match &self.mode {
             ArmedMode::Host {
@@ -132,9 +132,10 @@ impl ArmedOnboard {
             }
             ArmedMode::Profile(index) => apply_profile(&onboard, *index).await,
         };
-        if let Err(error) = result {
+        if let Err(error) = &result {
             warn!(?error, "onboard re-arm after wake failed");
         }
+        result.is_ok()
     }
 
     fn onboard(&self) -> OnboardProfilesFeature {

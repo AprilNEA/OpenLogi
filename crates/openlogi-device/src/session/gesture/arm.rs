@@ -100,7 +100,7 @@ impl ArmedControls {
     }
 
     /// Reapply volatile diversion after a wireless reconnect broadcast.
-    pub(super) async fn rearm(&self) {
+    pub(super) async fn rearm(&self) -> bool {
         if let Some(rc) = self.reprog.as_ref() {
             for &reporting in &self.reporting {
                 let raw_xy = self.gesture_cids.contains(&reporting.cid)
@@ -123,8 +123,10 @@ impl ArmedControls {
         {
             warn!(?error, "thumb-wheel re-divert after wake failed");
         }
-        if let Some(onboard) = self.onboard.as_ref() {
-            onboard.rearm().await;
+        // A half-applied host mode mutes buttons with no spy to replace them.
+        match self.onboard.as_ref() {
+            Some(onboard) => onboard.rearm().await,
+            None => true,
         }
     }
 }
