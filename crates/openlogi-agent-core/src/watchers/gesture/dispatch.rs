@@ -256,6 +256,7 @@ impl InputDispatcher {
             CapturedInput::ThumbwheelDirection { .. } => {
                 unreachable!("thumb-wheel direction reports return before dispatch")
             }
+            CapturedInput::Interrupted => self.cancel_session(session),
         }
     }
 

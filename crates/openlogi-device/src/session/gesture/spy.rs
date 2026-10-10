@@ -276,16 +276,19 @@ pub(super) struct SpyEdges {
 }
 
 impl SpyEdges {
-    /// Where [`Self::release_all`] sends its releases.
+    /// Where [`Self::interrupt`] reports.
     pub(super) fn attach(&mut self, sink: mpsc::UnboundedSender<CapturedInput>) {
         self.sink = Some(sink);
     }
 
-    /// Release every held button. A mouse that power-cycled reports them up
-    /// only as an unchanged mask, which is no edge.
-    pub(super) fn release_all(&mut self, captured: &[(u8, ButtonId)]) {
-        if let Some(sink) = self.sink.clone() {
-            self.on_mask(0, captured, &sink);
+    /// Forget the held buttons. A mouse that power-cycled reports them up
+    /// only as an unchanged mask, which is no edge, so say their presses
+    /// ended. That is not a release: a waiting click must not run.
+    pub(super) fn interrupt(&mut self) {
+        if self.held != 0
+            && let Some(sink) = &self.sink
+        {
+            let _ = sink.send(CapturedInput::Interrupted);
         }
         self.held = 0;
     }
@@ -364,15 +367,17 @@ mod tests {
     }
 
     /// A mouse that power-cycles with G-Shift or DPI shift held never reports
-    /// the release, so the reconnect has to end the press.
+    /// the release, so the reconnect has to end the press. It must not look
+    /// like a release, or a long-press button would run its click.
     #[test]
-    fn a_reconnect_releases_the_buttons_still_held() {
+    fn a_reconnect_interrupts_the_buttons_still_held() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let captured = host().captured().collect::<Vec<_>>();
         let mut edges = SpyEdges::default();
         edges.attach(tx.clone());
+        edges.interrupt(); // nothing held: nothing to say
         edges.on_mask(0b10_1000, &captured, &tx); // Back, G6 down
-        edges.release_all(&captured);
+        edges.interrupt();
         edges.on_mask(0, &captured, &tx); // the woken mouse's all-up report
         let got: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
         assert_eq!(
@@ -380,8 +385,7 @@ mod tests {
             [
                 CapturedInput::ButtonDown(ButtonId::Back),
                 CapturedInput::ButtonDown(ButtonId::G6),
-                CapturedInput::ButtonUp(ButtonId::Back),
-                CapturedInput::ButtonUp(ButtonId::G6),
+                CapturedInput::Interrupted,
             ]
         );
     }

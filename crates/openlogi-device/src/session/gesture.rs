@@ -86,6 +86,9 @@ pub enum CapturedInput {
     /// An instantaneous firmware-reported tap with no observable hold
     /// duration, such as the thumb-wheel touch sensor.
     ButtonPulse(ButtonId),
+    /// The device power-cycled with buttons held. Their presses are over, but
+    /// nobody let go: they end without the action a release would run.
+    Interrupted,
 }
 
 /// HID++-divertable standard buttons: the `0x1b04` control ID and the
@@ -291,12 +294,10 @@ impl ArmedCapture for GestureCapture {
 
     fn reset_input_state(&self) {
         *self.accum.lock().unwrap_or_else(PoisonError::into_inner) = CaptureAccum::default();
-        if let Some((_, captured)) = self.armed.onboard.as_ref().and_then(ArmedOnboard::spy) {
-            self.spy_edges
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .release_all(&captured);
-        }
+        self.spy_edges
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .interrupt();
     }
 
     async fn rearm(&self) -> bool {
