@@ -11,6 +11,11 @@
     };
   };
 
+  nixConfig = {
+    extra-substituters = [ "https://yangkx.cachix.org" ];
+    extra-trusted-public-keys = [ "yangkx.cachix.org-1:Pj7xCU2U9D/4cahR+7K/ILyGgpITtMINuvDxd3dUNQc=" ];
+  };
+
   # The dev shell lives in devenv.nix (devenv.yaml). This flake owns the Linux
   # package, its NixOS integration, checks, and formatter.
   outputs =
