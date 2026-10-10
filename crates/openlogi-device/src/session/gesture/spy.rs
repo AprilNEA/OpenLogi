@@ -272,9 +272,24 @@ pub(super) fn decode_mask(msg: &v20::Message, device_index: u8, spy_index: u8) -
 #[derive(Default)]
 pub(super) struct SpyEdges {
     held: u16,
+    sink: Option<mpsc::UnboundedSender<CapturedInput>>,
 }
 
 impl SpyEdges {
+    /// Where [`Self::release_all`] sends its releases.
+    pub(super) fn attach(&mut self, sink: mpsc::UnboundedSender<CapturedInput>) {
+        self.sink = Some(sink);
+    }
+
+    /// Release every held button. A mouse that power-cycled reports them up
+    /// only as an unchanged mask, which is no edge.
+    pub(super) fn release_all(&mut self, captured: &[(u8, ButtonId)]) {
+        if let Some(sink) = self.sink.clone() {
+            self.on_mask(0, captured, &sink);
+        }
+        self.held = 0;
+    }
+
     pub(super) fn on_mask(
         &mut self,
         mask: u16,
@@ -336,6 +351,29 @@ mod tests {
         edges.on_mask(0b10_1001, &captured, &tx); // left, Back, G6 down
         edges.on_mask(0b10_0001, &captured, &tx); // Back up
         edges.on_mask(0, &captured, &tx); // G6 up
+        let got: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert_eq!(
+            got,
+            [
+                CapturedInput::ButtonDown(ButtonId::Back),
+                CapturedInput::ButtonDown(ButtonId::G6),
+                CapturedInput::ButtonUp(ButtonId::Back),
+                CapturedInput::ButtonUp(ButtonId::G6),
+            ]
+        );
+    }
+
+    /// A mouse that power-cycles with G-Shift or DPI shift held never reports
+    /// the release, so the reconnect has to end the press.
+    #[test]
+    fn a_reconnect_releases_the_buttons_still_held() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let captured = host().captured().collect::<Vec<_>>();
+        let mut edges = SpyEdges::default();
+        edges.attach(tx.clone());
+        edges.on_mask(0b10_1000, &captured, &tx); // Back, G6 down
+        edges.release_all(&captured);
+        edges.on_mask(0, &captured, &tx); // the woken mouse's all-up report
         let got: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
         assert_eq!(
             got,
