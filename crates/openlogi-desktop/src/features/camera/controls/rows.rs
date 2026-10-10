@@ -141,17 +141,21 @@ pub(super) fn control_row(
                 .child(Slider::new(slider.slider.slider()).horizontal()),
         )
         .child(
-            div()
+            BaseButton::new(("camera-control-value", ix))
                 .w(px(36.))
                 .flex_shrink_0()
-                .text_right()
+                .justify_end()
                 .text_body()
                 .text_color(if dimmed {
                     pal.text_muted
                 } else {
                     rgb(ACCENT_BLUE).into()
                 })
-                .child(format!("{value}")),
+                .accessibility_label(tr!("camera.set_value_label", label => slider.label.clone()))
+                .child(format!("{value}"))
+                .on_click(cx.listener(move |panel, _: &ClickEvent, window, cx| {
+                    panel.open_value_dialog(ix, window, cx);
+                })),
         );
 
     // Every row carries the trailing Auto column — empty for controls without
