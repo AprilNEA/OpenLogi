@@ -7,27 +7,35 @@ use std::time::Instant;
 
 use super::GestureDirection;
 
-/// Minimum dominant-axis travel (raw-XY units) before a held gesture commits to
-/// a direction. Tuned to match Logitech Options+'s responsiveness.
-pub const GESTURE_SWIPE_THRESHOLD: i32 = 50;
+/// Minimum horizontal-axis travel (raw-XY units) before a held gesture commits
+/// to a left or right swipe. Lower than [`GESTURE_SWIPE_THRESHOLD_V`] because
+/// ergonomic wrist movements are more constrained along the horizontal axis.
+pub const GESTURE_SWIPE_THRESHOLD_H: i32 = 20;
+/// Minimum vertical-axis travel (raw-XY units) before a held gesture commits
+/// to an up or down swipe.
+pub const GESTURE_SWIPE_THRESHOLD_V: i32 = 100;
 /// Maximum cross-axis travel allowed at the threshold, so only a reasonably
 /// straight swipe commits. Grows with the dominant axis (`max(deadzone, 35%)`).
 pub const GESTURE_SWIPE_DEADZONE: i32 = 40;
 /// Minimum time a gesture button must be held before its travel can commit to a
 /// swipe. Distinguishes a deliberate hold-and-swipe from a quick click whose
 /// cursor happened to be moving. Shared by both gesture paths (the HID++ thumb
-/// pad and the OS-hook Back/Forward buttons).
-pub const GESTURE_HOLD_FOR_SWIPE: std::time::Duration = std::time::Duration::from_millis(160);
+/// pad and the OS-hook Middle/Back/Forward).
+pub const GESTURE_HOLD_FOR_SWIPE: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Classify the *running* raw-XY travel of a held gesture button into a
 /// directional swipe, the instant it commits — or `None` while it's still too
 /// short or too diagonal.
 ///
-/// The dominant axis must pass [`GESTURE_SWIPE_THRESHOLD`] while the cross axis
-/// stays within `max(`[`GESTURE_SWIPE_DEADZONE`]`, 35% of dominant)`. Callers
-/// fire the bound action the moment this returns `Some` — mid-swipe, like
-/// Options+ — rather than waiting for the button release; a press that never
-/// commits a direction is treated as [`GestureDirection::Click`] on release.
+/// The dominant axis must pass its threshold ([`GESTURE_SWIPE_THRESHOLD_H`] for
+/// left/right, [`GESTURE_SWIPE_THRESHOLD_V`] for up/down) while the cross axis
+/// stays within `max(`[`GESTURE_SWIPE_DEADZONE`]`, 35% of dominant)`. Horizontal
+/// gestures use a wider acceptance cone (≤ ~63° from horizontal, a 2:1 ratio)
+/// rather than strict dominance (45°) to accommodate the natural downward arc
+/// of a left/right wrist swipe. Callers fire the bound action the moment this
+/// returns `Some` — mid-swipe, like Options+ — rather than waiting for the
+/// button release; a press that never commits a direction is treated as
+/// [`GestureDirection::Click`] on release.
 ///
 /// Coordinates follow the device's raw-XY convention (`+x` = right, `+y` =
 /// down), so an upward swipe (negative `dy`) maps to [`GestureDirection::Up`].
@@ -39,30 +47,33 @@ pub fn detect_swipe(dx: i32, dy: i32) -> Option<GestureDirection> {
     // overflow — and a panic in the input-hook callback is exactly the freeze
     // hazard we must never hit. The clamp is inert in the normal range.
     let (abs_x, abs_y) = (dx.saturating_abs(), dy.saturating_abs());
-    let dominant = abs_x.max(abs_y);
-    if dominant < GESTURE_SWIPE_THRESHOLD {
-        return None;
-    }
-    let cross_limit = GESTURE_SWIPE_DEADZONE.max(dominant.saturating_mul(35) / 100);
-    if abs_x > abs_y {
+    // Horizontal candidate: threshold met and the motion is within ~63° of
+    // horizontal (2:1 ratio). Wider than strict dominance (45°) to accommodate
+    // the natural downward arc of a left/right wrist swipe.
+    if abs_x >= GESTURE_SWIPE_THRESHOLD_H && abs_x.saturating_mul(2) > abs_y {
+        let cross_limit = GESTURE_SWIPE_DEADZONE.max(abs_x.saturating_mul(35) / 100);
         if abs_y > cross_limit {
             return None;
         }
-        Some(if dx > 0 {
+        return Some(if dx > 0 {
             GestureDirection::Right
         } else {
             GestureDirection::Left
-        })
-    } else {
-        if abs_x > cross_limit {
-            return None;
-        }
-        Some(if dy > 0 {
-            GestureDirection::Down
-        } else {
-            GestureDirection::Up
-        })
+        });
     }
+    // Vertical candidate — up or down.
+    if abs_y < GESTURE_SWIPE_THRESHOLD_V {
+        return None;
+    }
+    let cross_limit = GESTURE_SWIPE_DEADZONE.max(abs_y.saturating_mul(35) / 100);
+    if abs_x > cross_limit {
+        return None;
+    }
+    Some(if dy > 0 {
+        GestureDirection::Down
+    } else {
+        GestureDirection::Up
+    })
 }
 
 /// The mid-swipe state machine shared by both gesture-capture paths: the HID++
@@ -84,13 +95,18 @@ pub struct SwipeAccumulator {
     /// When the current hold began, or `None` when not holding. Gates a
     /// deliberate swipe against a quick click whose cursor happened to move.
     held_since: Option<Instant>,
-    /// Accumulated raw-XY travel since the hold began (saturating, so an
-    /// arbitrarily long hold can never overflow).
+    /// Accumulated raw-XY travel since the hold gate opened (saturating). Reset
+    /// to zero the first time the hold gate is satisfied so that button-press
+    /// jitter accumulated before the gate does not influence the committed
+    /// direction.
     dx: i32,
     dy: i32,
     /// Set once a direction has committed this hold, so it fires exactly once
     /// and the release isn't then also read as a click.
     fired: bool,
+    /// Set the first time the hold gate is satisfied; latches the gate-open
+    /// reset so it only happens once per hold.
+    gate_opened: bool,
 }
 
 impl SwipeAccumulator {
@@ -100,6 +116,7 @@ impl SwipeAccumulator {
         self.dx = 0;
         self.dy = 0;
         self.fired = false;
+        self.gate_opened = false;
     }
 
     /// Whether a hold is in progress (between [`Self::begin`] and [`Self::end`]),
@@ -117,11 +134,18 @@ impl SwipeAccumulator {
         if self.fired || self.held_since.is_none() {
             return None;
         }
-        self.dx = self.dx.saturating_add(dx);
-        self.dy = self.dy.saturating_add(dy);
         let held_long_enough = self
             .held_since
             .is_some_and(|t| t.elapsed() >= GESTURE_HOLD_FOR_SWIPE);
+        if held_long_enough && !self.gate_opened {
+            // Gate just opened: discard all pre-gate drift so button-press
+            // jitter cannot commit the wrong direction.
+            self.gate_opened = true;
+            self.dx = 0;
+            self.dy = 0;
+        }
+        self.dx = self.dx.saturating_add(dx);
+        self.dy = self.dy.saturating_add(dy);
         if held_long_enough && let Some(dir) = detect_swipe(self.dx, self.dy) {
             self.fired = true;
             return Some(dir);
@@ -160,7 +184,8 @@ mod tests {
     #[test]
     fn detect_swipe_below_threshold_keeps_accumulating() {
         // Too little travel to commit — caller keeps summing raw-XY.
-        assert_eq!(detect_swipe(40, 5), None);
+        assert_eq!(detect_swipe(15, 5), None); // horizontal, below GESTURE_SWIPE_THRESHOLD_H
+        assert_eq!(detect_swipe(5, 90), None); // vertical, below GESTURE_SWIPE_THRESHOLD_V
         assert_eq!(detect_swipe(0, 0), None);
     }
 
@@ -173,6 +198,16 @@ mod tests {
     }
 
     #[test]
+    fn detect_swipe_horizontal_accepts_natural_wrist_arc() {
+        // A leftward swipe with slight downward drift (abs_y just above abs_x)
+        // still commits — the 2:1 cone covers the natural bottom-left arc.
+        assert_eq!(detect_swipe(-35, 38), Some(GestureDirection::Left));
+        assert_eq!(detect_swipe(35, 38), Some(GestureDirection::Right));
+        // Cross axis beyond the deadzone is still rejected even within the cone.
+        assert_eq!(detect_swipe(35, 42), None);
+    }
+
+    #[test]
     fn detect_swipe_rejects_diagonal() {
         // Past the threshold but too diagonal (cross axis beyond the band).
         assert_eq!(detect_swipe(60, 60), None);
@@ -181,13 +216,18 @@ mod tests {
 
     #[test]
     fn detect_swipe_threshold_and_cross_band_boundaries() {
-        // The threshold bound is inclusive (`< THRESHOLD` rejects), so exactly at
-        // it commits and one below does not.
+        // Each axis has its own threshold; the bound is inclusive (`< THRESHOLD`
+        // rejects), so exactly at it commits and one below does not.
         assert_eq!(
-            detect_swipe(GESTURE_SWIPE_THRESHOLD, 0),
+            detect_swipe(GESTURE_SWIPE_THRESHOLD_H, 0),
             Some(GestureDirection::Right)
         );
-        assert_eq!(detect_swipe(GESTURE_SWIPE_THRESHOLD - 1, 0), None);
+        assert_eq!(detect_swipe(GESTURE_SWIPE_THRESHOLD_H - 1, 0), None);
+        assert_eq!(
+            detect_swipe(0, GESTURE_SWIPE_THRESHOLD_V),
+            Some(GestureDirection::Down)
+        );
+        assert_eq!(detect_swipe(0, GESTURE_SWIPE_THRESHOLD_V - 1), None);
 
         // The cross-axis band is max(deadzone, 35% of dominant). For a large
         // dominant the 35% term wins (200 → 70): 69 commits, 71 is too diagonal.
@@ -219,7 +259,7 @@ mod tests {
         acc.backdate_hold_for_test();
         // A clear rightward swipe commits exactly once, mid-motion.
         assert_eq!(
-            acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+            acc.accumulate(GESTURE_SWIPE_THRESHOLD_H + 10, 0),
             Some(GestureDirection::Right)
         );
         // Further travel in the same hold must not re-fire.
@@ -232,10 +272,28 @@ mod tests {
         acc.begin(); // held_since = now, so the gate is not yet satisfied
         // A big delta arriving immediately (a quick click whose cursor drifted)
         // must not commit.
-        assert_eq!(acc.accumulate(GESTURE_SWIPE_THRESHOLD + 100, 0), None);
+        assert_eq!(acc.accumulate(GESTURE_SWIPE_THRESHOLD_H + 100, 0), None);
         // Once held long enough, the next delta commits.
         acc.backdate_hold_for_test();
-        assert!(acc.accumulate(GESTURE_SWIPE_THRESHOLD + 100, 0).is_some());
+        assert!(acc.accumulate(GESTURE_SWIPE_THRESHOLD_H + 100, 0).is_some());
+    }
+
+    #[test]
+    fn accumulator_discards_pre_gate_drift_on_gate_open() {
+        // Button-press jitter can accumulate in the wrong direction before the
+        // hold gate opens. The gate-open reset must discard it so that only
+        // post-gate movement determines the committed direction.
+        let mut acc = SwipeAccumulator::default();
+        acc.begin();
+        // Large rightward drift BEFORE the gate (simulates button-press jitter).
+        assert_eq!(acc.accumulate(GESTURE_SWIPE_THRESHOLD_H + 50, 0), None);
+        // Gate opens — drift is discarded. Now only leftward movement counts.
+        acc.backdate_hold_for_test();
+        assert_eq!(
+            acc.accumulate(-(GESTURE_SWIPE_THRESHOLD_H + 10), 0),
+            Some(GestureDirection::Left),
+            "pre-gate rightward drift must not flip the post-gate leftward swipe"
+        );
     }
 
     #[test]
@@ -250,7 +308,7 @@ mod tests {
         // A hold that committed a swipe → end() is not a click.
         acc.begin();
         acc.backdate_hold_for_test();
-        assert!(acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0).is_some());
+        assert!(acc.accumulate(GESTURE_SWIPE_THRESHOLD_H + 10, 0).is_some());
         assert!(!acc.end(), "a committed swipe must not also click");
     }
 
@@ -259,7 +317,7 @@ mod tests {
         let mut acc = SwipeAccumulator::default();
         assert!(!acc.is_holding());
         // Travel outside a hold is dropped, never committing a stray swipe.
-        assert_eq!(acc.accumulate(GESTURE_SWIPE_THRESHOLD + 100, 0), None);
+        assert_eq!(acc.accumulate(GESTURE_SWIPE_THRESHOLD_H + 100, 0), None);
     }
 
     #[test]
@@ -271,7 +329,7 @@ mod tests {
         acc.begin();
         acc.backdate_hold_for_test();
         // Just under half the threshold: one or two steps never reach it, three do.
-        let step = GESTURE_SWIPE_THRESHOLD / 2 - 1;
+        let step = GESTURE_SWIPE_THRESHOLD_H / 2 - 1;
         assert_eq!(acc.accumulate(step, 0), None, "one step is sub-threshold");
         assert_eq!(acc.accumulate(step, 0), None, "two steps still under");
         assert_eq!(
@@ -317,7 +375,7 @@ mod tests {
         acc.backdate_hold_for_test();
         // Stale hold commits LEFT (negative dx) and latches `fired`.
         assert_eq!(
-            acc.accumulate(-(GESTURE_SWIPE_THRESHOLD + 10), 0),
+            acc.accumulate(-(GESTURE_SWIPE_THRESHOLD_H + 10), 0),
             Some(GestureDirection::Left)
         );
         // No end() — a dropped release, then a fresh press.
@@ -326,7 +384,7 @@ mod tests {
         // Had `fired` leaked this would be None; had the negative travel leaked it
         // would commit Left. Committing Right proves begin() reset both.
         assert_eq!(
-            acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0),
+            acc.accumulate(GESTURE_SWIPE_THRESHOLD_H + 10, 0),
             Some(GestureDirection::Right)
         );
     }
