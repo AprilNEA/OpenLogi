@@ -270,8 +270,9 @@ pub enum WorkflowStep {
 /// X-macro table of every payload-free [`Action`] variant.
 ///
 /// Each row is `Variant "Label" "i18n.key" Category Icon`, optionally followed
-/// by `not_pickable` for a row [`Action::catalog`] must omit. This is the single
-/// place a plain action is declared; payload-carrying variants (`SetDpiPreset`,
+/// by `not_pickable` for a row [`Action::catalog`] must omit, or by
+/// `not_pickable_on_windows` for a row it omits only when built for Windows.
+/// This is the single place a plain action is declared; payload-carrying variants (`SetDpiPreset`,
 /// `CustomShortcut`, …) build their label/category/icon from their payload and
 /// keep hand-written arms alongside the generated ones instead.
 ///
@@ -331,8 +332,10 @@ macro_rules! for_each_unit_action {
             VolumeUp "Volume Up" "actions.volume_up" Media Volume,
             VolumeDown "Volume Down" "actions.volume_down" Media VolumeDown,
             MuteVolume "Mute" "actions.mute" Media Mute,
-            BrightnessUp "Brightness Up" "actions.brightness_up" Media BrightnessUp,
-            BrightnessDown "Brightness Down" "actions.brightness_down" Media BrightnessDown,
+            // Windows has no brightness backend yet (`dispatch_media` in
+            // `openlogi-inject` only logs), so the picker hides these there.
+            BrightnessUp "Brightness Up" "actions.brightness_up" Media BrightnessUp not_pickable_on_windows,
+            BrightnessDown "Brightness Down" "actions.brightness_down" Media BrightnessDown not_pickable_on_windows,
             // DPI
             CycleDpiPresets "Cycle DPI Presets" "pointer.cycle_dpi_presets" Dpi Gauge,
             ToggleSmartShift "Toggle SmartShift" "pointer.toggle_smartshift" Dpi Refresh,
@@ -437,7 +440,8 @@ macro_rules! derive_action_core {
             ///
             /// [`Action::CustomShortcut`] is intentionally excluded — it is opened via
             /// "Record shortcut…" (P1.3), not selected from the catalog. Table rows
-            /// tagged `not_pickable` are excluded from the catalog the same way.
+            /// tagged `not_pickable` are excluded from the catalog the same way, and
+            /// rows tagged `not_pickable_on_windows` are excluded on Windows builds only.
             #[must_use]
             pub fn catalog() -> Vec<Action> {
                 [ $( derive_action_core!(@item $variant $( $tag )?) ),* ]
@@ -452,6 +456,15 @@ macro_rules! derive_action_core {
     };
     (@item $variant:ident not_pickable) => {
         None
+    };
+    // For an action whose Windows backend does not exist yet: drop the tag
+    // from the row once it does.
+    (@item $variant:ident not_pickable_on_windows) => {
+        if cfg!(target_os = "windows") {
+            None
+        } else {
+            Some(Action::$variant)
+        }
     };
 }
 
