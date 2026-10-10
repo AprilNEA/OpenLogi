@@ -33,7 +33,12 @@ fn parses_cid_info_flags_and_metadata() {
 
 #[test]
 fn builds_temporary_diversion_payload() {
-    let payload = CidReportingChange::temporary_diversion(true, true).to_payload(ControlId(0x00c3));
+    let payload = CidReportingChange {
+        diverted: Some(true),
+        raw_xy: Some(true),
+        ..Default::default()
+    }
+    .to_payload(ControlId(0x00c3));
 
     assert_eq!(&payload[0..=1], &0x00c3u16.to_be_bytes());
     assert_eq!(payload[2], 0x33);

@@ -19,16 +19,12 @@ pub(super) fn about_page(view: Entity<SettingsView>, copied: bool) -> SettingPag
         div()
             .text_caption()
             .text_color(pal.text_muted)
-            .child(tr!(
-                "Not affiliated with Logitech. \"Logitech\", \"MX Master\", and \"Options+\" are trademarks of Logitech International S.A."
-            ))
+            .child(tr!("about.trademark_notice"))
     }));
-    SettingPage::new(tr!("About"))
+    SettingPage::new(tr!("about.about"))
         .icon(IconName::Info)
         .resettable(false)
-        .description(tr!(
-            "A native, local-first alternative to Logitech Options+."
-        ))
+        .description(tr!("about.about_tagline"))
         .group(hero)
         .group(config)
         .group(footer)
@@ -39,9 +35,9 @@ pub(super) fn about_page(view: Entity<SettingsView>, copied: bool) -> SettingPag
 fn about_hero(view: &Entity<SettingsView>, copied: bool, cx: &mut App) -> gpui::Div {
     let pal = crate::ui::theme::palette(cx);
     let diag_label = if copied {
-        tr!("Copied!")
+        tr!("common.copied")
     } else {
-        tr!("Copy Diagnostics")
+        tr!("about.copy_diagnostics")
     };
     let view = view.clone();
 
@@ -49,9 +45,19 @@ fn about_hero(view: &Entity<SettingsView>, copied: bool, cx: &mut App) -> gpui::
         .w_full()
         .items_start()
         .gap_3()
-        .child(img(crate::app_assets::LOGO).w(px(56.)).h(px(56.)))
+        .child(
+            img(crate::app_assets::LOGO)
+                .w(px(56.))
+                .h(px(56.))
+                .flex_shrink_0(),
+        )
         .child(
             v_flex()
+                // Without `min_w_0` a flex child refuses to shrink below its
+                // content width, so the link row below overflows the card
+                // instead of wrapping inside it.
+                .min_w_0()
+                .flex_1()
                 .gap_2()
                 .child(
                     h_flex()
@@ -67,31 +73,36 @@ fn about_hero(view: &Entity<SettingsView>, copied: bool, cx: &mut App) -> gpui::
                 )
                 .child(
                     h_flex()
+                        // These buttons are label-width, so their total varies
+                        // with locale, font and DPI. Wrapping keeps the last
+                        // one reachable at any width rather than relying on the
+                        // window being wide enough to fit them on one line.
+                        .flex_wrap()
                         .items_center()
                         .gap_1()
                         .pt_1()
                         .child(link_button(
                             "about-repo",
                             Icon::new(IconName::Github),
-                            tr!("GitHub"),
+                            tr!("about.github"),
                             REPO_URL,
                         ))
                         .child(link_button(
                             "about-changelog",
                             Icon::empty().path("action-icons/scroll-text.svg"),
-                            tr!("Changelog"),
+                            tr!("about.changelog"),
                             RELEASES_URL,
                         ))
                         .child(link_button(
                             "about-docs",
                             Icon::new(IconName::BookOpen),
-                            tr!("Documentation"),
+                            tr!("about.documentation"),
                             HELP_URL,
                         ))
                         .child(link_button(
                             "about-issue",
                             Icon::empty().path("action-icons/bug.svg"),
-                            tr!("Report an issue"),
+                            tr!("about.report_an_issue"),
                             format!("{REPO_URL}/issues"),
                         ))
                         .child(div().w(px(1.)).h(px(16.)).mx_1().bg(pal.border))
@@ -151,7 +162,11 @@ fn about_config(cx: &App) -> gpui::Div {
                 .gap_1()
                 .flex_1()
                 .min_w_0()
-                .child(div().font_weight(FontWeight::MEDIUM).child("config.toml"))
+                .child(
+                    div()
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(openlogi_core::paths::CONFIG_FILE),
+                )
                 .child(
                     div()
                         .text_caption()
@@ -164,7 +179,7 @@ fn about_config(cx: &App) -> gpui::Div {
             div().flex_shrink_0().child(
                 Button::new("about-reveal-config")
                     .outline()
-                    .label(tr!("Show in file manager"))
+                    .label(tr!("about.show_in_file_manager"))
                     .on_click(|_, _, cx| {
                         if let Ok(dir) = openlogi_core::paths::config_dir()
                             && let Ok(url) = url::Url::from_file_path(&dir)

@@ -201,7 +201,7 @@ impl SmartShift {
             Self::Legacy(feature) => feature
                 .set_ratchet_control_mode(
                     Some(smartshift_to_wheel(mode)),
-                    Some(auto_disengage.get()),
+                    Some(auto_disengage),
                     None,
                 )
                 .await

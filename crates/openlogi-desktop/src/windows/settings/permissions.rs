@@ -22,7 +22,7 @@ use openlogi_permissions as permissions;
     )
 )]
 pub(super) fn permissions_page(has_camera: bool) -> SettingPage {
-    let page = SettingPage::new(tr!("Permissions"))
+    let page = SettingPage::new(tr!("permissions.permissions"))
         .icon(IconName::Info)
         .resettable(false);
 
@@ -31,8 +31,8 @@ pub(super) fn permissions_page(has_camera: bool) -> SettingPage {
         let mut group = SettingGroup::new()
             .item(permission_item(
                 "perm-accessibility",
-                tr!("Accessibility"),
-                tr!("Needed for gesture and button remapping (event tap)."),
+                tr!("permissions.accessibility"),
+                tr!("permissions.accessibility_permission_requirement"),
                 Permission::Accessibility,
                 |cx| {
                     // The agent owns the hook, so this is *its* grant,
@@ -51,8 +51,8 @@ pub(super) fn permissions_page(has_camera: bool) -> SettingPage {
             .item(input_monitoring_item())
             .item(permission_item(
                 "perm-bluetooth",
-                tr!("Bluetooth"),
-                tr!("Allows OpenLogi to use CoreBluetooth (not required for HID access)."),
+                tr!("permissions.bluetooth"),
+                tr!("permissions.bluetooth_permission_description"),
                 Permission::Bluetooth,
                 |_| permissions::bluetooth(),
             ));
@@ -62,10 +62,8 @@ pub(super) fn permissions_page(has_camera: bool) -> SettingPage {
         if has_camera {
             group = group.item(permission_item(
                 "perm-camera",
-                tr!("Camera"),
-                tr!(
-                    "Your Logitech webcam shows up on the main page. Grant access to see its live preview — video never leaves your Mac."
-                ),
+                tr!("camera.camera"),
+                tr!("permissions.camera_permission_description"),
                 Permission::Camera,
                 |_| permissions::camera(),
             ));
@@ -81,7 +79,7 @@ pub(super) fn permissions_page(has_camera: bool) -> SettingPage {
         // Description is only shown when access is not yet granted — no noise
         // when everything is already working.
         SettingItem::new(
-            tr!("Input device access"),
+            tr!("permissions.input_device_access"),
             SettingField::render(move |_, _, cx| {
                 let pal = theme::palette(cx);
                 let status = permissions::input_device_access();
@@ -89,16 +87,12 @@ pub(super) fn permissions_page(has_camera: bool) -> SettingPage {
                     .gap_1()
                     .child(status_badge(status, pal));
                 let hint = match status {
-                    PermissionStatus::Denied => Some(tr!(
-                        "OpenLogi needs write access to /dev/uinput (for button \
-                         remapping) and read/write access to /dev/hidraw* (for HID++ \
-                         communication). Install the OpenLogi udev rules to grant \
-                         access — see the Linux install guide."
-                    )),
-                    PermissionStatus::Unknown => Some(tr!(
-                        "No Logitech device detected. Connect your device or verify \
-                         the hidraw udev rules are installed."
-                    )),
+                    PermissionStatus::Denied => {
+                        Some(tr!("permissions.linux_input_access_denied_description"))
+                    }
+                    PermissionStatus::Unknown => {
+                        Some(tr!("permissions.linux_input_access_unknown_description"))
+                    }
                     PermissionStatus::Granted => None,
                 };
                 if let Some(text) = hint {
@@ -116,44 +110,43 @@ pub(super) fn permissions_page(has_camera: bool) -> SettingPage {
 #[cfg(target_os = "macos")]
 fn input_monitoring_item() -> SettingItem {
     SettingItem::new(
-                tr!("Input Monitoring"),
-                SettingField::render(move |_, _, cx| {
-                    let status = AppState::try_global(cx)
-                        .map(|state| state.read(cx))
-                        .and_then(AppState::agent_status);
-                    // Granted-but-still-failing is the one state the badge
-                    // alone cannot express: the grant exists, yet every
-                    // open is refused — an exclusive open elsewhere, or a
-                    // TCC session only a re-login refreshes (#704).
-                    let stalled = status
-                        .as_ref()
-                        .is_some_and(|s| s.input_monitoring_granted && s.hid_open_failures);
-                    let badge = match status {
-                        Some(s) if s.input_monitoring_granted => PermissionStatus::Granted,
-                        Some(_) => PermissionStatus::Denied,
-                        None => PermissionStatus::Unknown,
-                    };
-                    let field = gpui_component::v_flex().gap_1().child(permission_field(
-                        "perm-input-monitoring",
-                        badge,
-                        Permission::InputMonitoring,
-                        cx,
-                    ));
-                    let pal = theme::palette(cx);
-                    if stalled {
-                        field.child(div().text_caption().text_color(pal.text_muted).child(
-                            tr!(
-                                "Granted, but devices still fail to open — another app may hold them exclusively, or macOS needs a log out and back in."
-                            ),
-                        ))
-                    } else {
-                        field
-                    }
-                }),
-            )
-            .description(tr!(
-                "Needed to read HID++ data, including Bluetooth-direct mice."
-            ))
+        tr!("permissions.input_monitoring"),
+        SettingField::render(move |_, _, cx| {
+            let status = AppState::try_global(cx)
+                .map(|state| state.read(cx))
+                .and_then(AppState::agent_status);
+            // Granted-but-still-failing is the one state the badge
+            // alone cannot express: the grant exists, yet every
+            // open is refused — an exclusive open elsewhere, or a
+            // TCC session only a re-login refreshes (#704).
+            let stalled = status
+                .as_ref()
+                .is_some_and(|s| s.input_monitoring_granted && s.hid_open_failures);
+            let badge = match status {
+                Some(s) if s.input_monitoring_granted => PermissionStatus::Granted,
+                Some(_) => PermissionStatus::Denied,
+                None => PermissionStatus::Unknown,
+            };
+            let field = gpui_component::v_flex().gap_1().child(permission_field(
+                "perm-input-monitoring",
+                badge,
+                Permission::InputMonitoring,
+                cx,
+            ));
+            let pal = theme::palette(cx);
+            if stalled {
+                field.child(
+                    div()
+                        .text_caption()
+                        .text_color(pal.text_muted)
+                        .child(tr!("permissions.input_monitoring_granted_but_unavailable")),
+                )
+            } else {
+                field
+            }
+        }),
+    )
+    .description(tr!("permissions.input_monitoring_permission_description"))
 }
 
 #[cfg(target_os = "macos")]
@@ -175,9 +168,9 @@ fn permission_item(
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn status_badge(status: PermissionStatus, pal: Palette) -> gpui::Div {
     let (label, color) = match status {
-        PermissionStatus::Granted => (tr!("Granted"), theme::STATUS_CONNECTED),
-        PermissionStatus::Denied => (tr!("Not granted"), theme::STATUS_CONNECTING),
-        PermissionStatus::Unknown => (tr!("Unknown"), theme::STATUS_OFFLINE),
+        PermissionStatus::Granted => (tr!("permissions.granted"), theme::STATUS_CONNECTED),
+        PermissionStatus::Denied => (tr!("permissions.not_granted"), theme::STATUS_CONNECTING),
+        PermissionStatus::Unknown => (tr!("permissions.unknown"), theme::STATUS_OFFLINE),
     };
     badge(label, color, pal)
 }
@@ -207,15 +200,15 @@ fn permission_field(
     let never_requested = matches!(status, PermissionStatus::Unknown)
         && matches!(permission, Permission::Bluetooth | Permission::Camera);
     let status_el = if never_requested {
-        badge(tr!("Not requested"), theme::STATUS_OFFLINE, pal)
+        badge(tr!("permissions.not_requested"), theme::STATUS_OFFLINE, pal)
     } else {
         status_badge(status, pal)
     };
     let prompts_here = never_requested && matches!(permission, Permission::Camera);
     let action_label = if prompts_here {
-        tr!("Grant")
+        tr!("permissions.grant")
     } else {
-        tr!("Open")
+        tr!("common.open")
     };
 
     h_flex()

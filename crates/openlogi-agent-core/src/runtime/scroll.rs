@@ -1,10 +1,11 @@
 //! Traditional wheel output owned by one dedicated worker.
 //!
 //! Hook callbacks submit typed wheel impulses through [`ScrollInputHandle`]
-//! without blocking. The worker either scales and emits them directly or
-//! evaluates finite smooth motion from absolute timestamps. Pixel-precise input
-//! never enters this runtime, so native trackpad and continuous wheel streams
-//! cannot be mixed with wheel ticks.
+//! without blocking. The worker either scales and emits them directly,
+//! evaluates finite smooth motion from absolute timestamps, or, with smoothing
+//! off, wraps a diverted horizontal wheel in a phased gesture. Pixel-precise
+//! input never enters this runtime, so native trackpad and continuous wheel
+//! streams cannot be mixed with wheel ticks.
 
 mod worker;
 
@@ -24,7 +25,12 @@ use crate::runtime::HidppSessionId;
 const ANIMATION_DURATION: Duration = Duration::from_millis(100);
 /// Output cadence. Position is evaluated from absolute time, so delayed wakes
 /// do not slow or lengthen the animation.
-const FRAME_INTERVAL: Duration = Duration::from_millis(8);
+const FRAME_PERIOD: Duration = Duration::from_millis(8);
+/// Quiet time after the last phased tick that ends the gesture. A wheel has no
+/// release event, so idleness is the only end-of-gesture signal; the value sits
+/// above the gap between ratchet ticks of a continuous spin and far below the
+/// pause between separate spins.
+const PHASED_IDLE: Duration = Duration::from_millis(120);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct WheelDelta {
@@ -166,7 +172,7 @@ impl ActiveMotion {
                 started_at: at,
             },
             emitted: WheelDelta::ZERO,
-            next_frame: at + FRAME_INTERVAL,
+            next_frame: at + FRAME_PERIOD,
         }
     }
 
@@ -185,7 +191,7 @@ impl ActiveMotion {
             target,
             started_at: at,
         };
-        self.next_frame = at + FRAME_INTERVAL;
+        self.next_frame = at + FRAME_PERIOD;
         MotionUpdate::Active(delta)
     }
 
@@ -199,7 +205,7 @@ impl ActiveMotion {
             MotionUpdate::Finished(delta)
         } else {
             while self.next_frame <= at {
-                self.next_frame += FRAME_INTERVAL;
+                self.next_frame += FRAME_PERIOD;
             }
             self.next_frame = self.next_frame.min(self.segment.ends_at());
             MotionUpdate::Active(delta)
@@ -281,6 +287,10 @@ impl OutputStream {
 #[derive(Default)]
 struct ScrollEngine {
     active: HashMap<ScrollSource, ActiveMotion>,
+    /// Sources inside an unsmoothed phased gesture, each with the instant its
+    /// idle window closes. Disjoint from `active`: smoothing on or off decides
+    /// which map a source can enter, and a preference change cancels both.
+    phased: HashMap<ScrollSource, Instant>,
     output: OutputStream,
 }
 
@@ -320,7 +330,22 @@ impl ScrollEngine {
         }
     }
 
+    /// Emit one tick immediately inside a phased gesture and push back the
+    /// idle deadline that ends it. The first tick of a gesture is `Began`.
+    fn phased_impulse(
+        &mut self,
+        source: ScrollSource,
+        impulse: WheelDelta,
+        at: Instant,
+        emit: &mut impl FnMut(ScrollFrame),
+    ) {
+        self.end_idle_phased(at, emit);
+        self.output.progress(impulse, emit);
+        self.phased.insert(source, at + PHASED_IDLE);
+    }
+
     fn advance_due(&mut self, at: Instant, emit: &mut impl FnMut(ScrollFrame)) {
+        self.end_idle_phased(at, emit);
         let due: Vec<ScrollSource> = self
             .active
             .iter()
@@ -342,24 +367,44 @@ impl ScrollEngine {
         }
     }
 
+    /// Close the gesture once every phased source has been idle past its
+    /// deadline. Sources still inside their window keep the gesture open.
+    fn end_idle_phased(&mut self, at: Instant, emit: &mut impl FnMut(ScrollFrame)) {
+        let before = self.phased.len();
+        self.phased.retain(|_, deadline| *deadline > at);
+        if self.phased.len() != before && self.phased.is_empty() && self.active.is_empty() {
+            self.output.finish(WheelDelta::ZERO, emit);
+        }
+    }
+
     fn next_deadline(&self) -> Option<Instant> {
-        self.active.values().map(|motion| motion.next_frame).min()
+        self.active
+            .values()
+            .map(|motion| motion.next_frame)
+            .chain(self.phased.values().copied())
+            .min()
     }
 
     fn cancel_source(&mut self, source: &ScrollSource, emit: &mut impl FnMut(ScrollFrame)) {
-        if self.active.remove(source).is_some() && self.active.is_empty() {
+        // Both removals must run, so neither may short-circuit the other.
+        let was_smooth = self.active.remove(source).is_some();
+        let was_phased = self.phased.remove(source).is_some();
+        if (was_smooth || was_phased) && self.active.is_empty() && self.phased.is_empty() {
             self.output.cancel(emit);
         }
     }
 
     fn cancel_all(&mut self, emit: &mut impl FnMut(ScrollFrame)) {
         self.active.clear();
+        self.phased.clear();
         self.output.cancel(emit);
     }
 
     fn emit_update(&mut self, update: MotionUpdate, emit: &mut impl FnMut(ScrollFrame)) {
         match update {
-            MotionUpdate::Finished(delta) if self.active.is_empty() => {
+            // A phased gesture still open (after a smoothing toggle) owns the
+            // stream's end, so a motion finishing under it only progresses it.
+            MotionUpdate::Finished(delta) if self.active.is_empty() && self.phased.is_empty() => {
                 self.output.finish(delta, emit);
             }
             MotionUpdate::Active(delta) | MotionUpdate::Finished(delta) => {

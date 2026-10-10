@@ -1,170 +1,111 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 
 use hidpp::{
     channel::HidppChannel,
     device::Device,
     feature::{
-        CreatableFeature as _,
+        CreatableFeature,
         haptic_feedback::{HapticFeedbackFeature, HapticIntensity, HapticWaveform},
     },
 };
 
+use crate::SharedChannel;
 use crate::backend::HidBackend;
 use crate::channel::route::DeviceRoute;
-use crate::{ChannelRegistry, SharedChannel};
 
-use super::{HidppOperation, WriteError, classify_hidpp_error, open_feature, with_route};
+use super::{HidppOperation, WriteError, classify_hidpp_error, with_route};
 
+/// Resolve the haptic feature on `channel`, returning the accessor and the
+/// feature index it was found at (the part worth caching — see
+/// [`FeatureLocation`]).
 async fn feature_on_channel(
     channel: &Arc<HidppChannel>,
     device_index: u8,
-) -> Result<Arc<HapticFeedbackFeature>, WriteError> {
+) -> Result<(Arc<HapticFeedbackFeature>, u8), WriteError> {
     let mut device = Device::new(Arc::clone(channel), device_index)
         .await
         .map_err(|_| WriteError::DeviceUnreachable {
             index: device_index,
         })?;
-    open_feature::<HapticFeedbackFeature>(&mut device).await
+    let info = device
+        .root()
+        .get_feature(HapticFeedbackFeature::ID)
+        .await
+        .map_err(|e| {
+            classify_hidpp_error(e, HidppOperation::ResolveFeature, HapticFeedbackFeature::ID)
+        })?
+        .ok_or(WriteError::FeatureUnsupported {
+            feature_hex: HapticFeedbackFeature::ID,
+        })?;
+    Ok((
+        device.add_feature::<HapticFeedbackFeature>(info.index),
+        info.index,
+    ))
 }
 
-/// Last successfully-opened haptic feature, keyed by channel identity and
-/// device index. Haptic plays are fired per ring hover, and the open sequence
-/// (device ping + feature lookup) costs two extra HID++ round-trips per play —
+/// Where the haptic feature lives: enough to rebuild the accessor without
+/// I/O. Haptic plays are fired per ring hover, and resolving the feature
+/// (device ping + root lookup) costs two extra HID++ round-trips per play —
 /// on a busy receiver each round-trip is a fresh chance to lose the reply
 /// under concurrent pointer traffic. One entry suffices: haptics come from
 /// one pointing device at a time.
 ///
-/// Stores are guarded twice, because a retire can land on either side of an
-/// open and both leave the same wreckage: an entry pinning a channel's `Arc`
-/// after the retire-time clear ran, which recreates the exact reopen deadlock
-/// that clear exists to break.
-///
-/// - A retire *during* the open is caught by the epoch: every clear bumps it,
-///   and a store whose snapshot predates the clear is discarded.
-/// - A retire *before* the open is invisible to the epoch — the snapshot is
-///   already post-clear — so the store additionally asks the registry whether
-///   it still publishes the channel.
-struct EpochGuarded<T> {
-    epoch: u64,
-    entry: Option<(usize, u8, T)>,
+/// The channel is held **weakly** on purpose. A strong `Arc` here once pinned
+/// a retired channel past the enumerator's reopen gate
+/// (`Arc::strong_count == 1`), wedging the node forever — the Actions Ring
+/// trigger died with capture, so no later haptic call arrived to invalidate
+/// the entry, and every retire path had to remember a manual cache clear. A
+/// `Weak` cannot pin, so that deadlock class is unrepresentable rather than
+/// re-checked: a stale entry simply fails its identity check on the next play
+/// (the `Weak` keeps the allocation alive, so the address cannot be recycled
+/// into a false match) and the feature is re-resolved.
+struct FeatureLocation {
+    channel: Weak<HidppChannel>,
+    device_index: u8,
+    feature_index: u8,
 }
 
-impl<T: Clone> EpochGuarded<T> {
-    const fn new() -> Self {
-        Self {
-            epoch: 0,
-            entry: None,
-        }
-    }
+static CACHED_LOCATION: Mutex<Option<FeatureLocation>> = Mutex::new(None);
 
-    fn get(&self, ptr: usize, index: u8) -> Option<T> {
-        let (entry_ptr, entry_index, value) = self.entry.as_ref()?;
-        (*entry_ptr == ptr && *entry_index == index).then(|| value.clone())
-    }
-
-    /// Store `value`, unless a clear ran since `epoch` was snapshotted or
-    /// `still_current` reports the channel is no longer published.
-    ///
-    /// The epoch alone only sees a clear that lands *during* the open. A
-    /// channel retired *before* it began leaves nothing to violate: the
-    /// snapshot is already post-clear, so the store would land and re-pin a
-    /// dead channel. `still_current` is what closes that half, and it is
-    /// evaluated here — under the caller's lock — on purpose: checked earlier,
-    /// it could be overtaken by a retire that both unpublishes the channel and
-    /// clears this cache, leaving the entry pinning it forever.
-    fn store(
-        &mut self,
-        epoch: u64,
-        ptr: usize,
-        index: u8,
-        value: T,
-        still_current: impl FnOnce() -> bool,
-    ) {
-        if self.epoch == epoch && still_current() {
-            self.entry = Some((ptr, index, value));
-        }
-    }
-
-    fn clear(&mut self) {
-        self.epoch = self.epoch.wrapping_add(1);
-        self.entry = None;
-    }
-
-    /// Drop the entry if it belongs to `ptr`. Always bumps the epoch: the
-    /// caller is retiring that channel, so a store racing this clear must be
-    /// discarded even when nothing (or another channel's entry) is cached yet.
-    fn clear_for(&mut self, ptr: usize) {
-        self.epoch = self.epoch.wrapping_add(1);
-        if self
-            .entry
-            .as_ref()
-            .is_some_and(|(entry_ptr, _, _)| *entry_ptr == ptr)
-        {
-            self.entry = None;
-        }
-    }
-}
-
-static CACHED_FEATURE: std::sync::Mutex<EpochGuarded<Arc<HapticFeedbackFeature>>> =
-    std::sync::Mutex::new(EpochGuarded::new());
-
-/// Snapshot the cache epoch before starting a feature open; pass the result to
-/// [`store_cached_feature`] so a clear that lands mid-open wins over the store.
-fn cache_epoch() -> u64 {
-    CACHED_FEATURE.lock().map_or(0, |guard| guard.epoch)
-}
-
+/// Rebuild the cached accessor for exactly `channel`, without I/O. `None`
+/// when nothing is cached, the entry belongs to another (or a dead) channel,
+/// or the device index differs.
 fn cached_feature(channel: &Arc<HidppChannel>, index: u8) -> Option<Arc<HapticFeedbackFeature>> {
-    let guard = CACHED_FEATURE.lock().ok()?;
-    guard.get(Arc::as_ptr(channel) as usize, index)
+    let guard = CACHED_LOCATION.lock().ok()?;
+    let location = guard.as_ref()?;
+    (location.device_index == index
+        && location
+            .channel
+            .upgrade()
+            .is_some_and(|live| Arc::ptr_eq(&live, channel)))
+    .then(|| {
+        Arc::new(<HapticFeedbackFeature as CreatableFeature>::new(
+            Arc::clone(channel),
+            index,
+            location.feature_index,
+        ))
+    })
 }
 
-/// Cache the freshly-opened feature, unless the enumerator retired its channel
-/// while the open was under way — in either direction, see [`EpochGuarded`].
-fn store_cached_feature(
-    epoch: u64,
-    registry: &ChannelRegistry,
-    shared: &SharedChannel,
-    feature: &Arc<HapticFeedbackFeature>,
-) {
-    if let Ok(mut guard) = CACHED_FEATURE.lock() {
-        guard.store(
-            epoch,
-            Arc::as_ptr(shared.channel()) as usize,
-            shared.device_index(),
-            Arc::clone(feature),
-            || registry.is_current(shared),
-        );
+/// Remember where a successful open found the feature. Unconditional: an
+/// entry for a channel the enumerator retires later holds nothing alive and
+/// can never match another channel, so no store/retire ordering can produce
+/// wreckage.
+fn store_cached_location(channel: &Arc<HidppChannel>, device_index: u8, feature_index: u8) {
+    if let Ok(mut guard) = CACHED_LOCATION.lock() {
+        *guard = Some(FeatureLocation {
+            channel: Arc::downgrade(channel),
+            device_index,
+            feature_index,
+        });
     }
 }
 
-fn clear_cached_feature() {
-    if let Ok(mut guard) = CACHED_FEATURE.lock() {
-        guard.clear();
-    }
-}
-
-/// Drop the cached haptic feature handle (and with it the `Arc<HidppChannel>`
-/// it pins). MUST be called whenever route resolution fails: the inventory
-/// enumerator only reopens a retired node once every clone of its channel has
-/// dropped (`Arc::strong_count == 1`), and a stale cache entry otherwise
-/// deadlocks recovery — the node can't reopen because the cache pins the old
-/// channel, and the cache is never invalidated because route lookups fail
-/// before any haptic I/O touches it.
-pub fn clear_haptic_feature_cache() {
-    clear_cached_feature();
-}
-
-/// Drop the cached haptic feature handle if it belongs to `channel`.
-///
-/// The enumerator calls this the moment it retires a channel. Clearing only on
-/// route-miss (above) is not enough: a route miss requires a haptic attempt,
-/// and once capture has died no haptic attempt can happen — the Actions Ring
-/// trigger is itself a diverted control that died with capture. The cache
-/// entry then pins the retired channel forever and the node never reopens.
-pub(crate) fn clear_haptic_feature_cache_for(channel: &Arc<HidppChannel>) {
-    if let Ok(mut guard) = CACHED_FEATURE.lock() {
-        guard.clear_for(Arc::as_ptr(channel) as usize);
+/// Forget the cached location — called when I/O through it fails, so the next
+/// play re-resolves instead of replaying a location the device disowned.
+fn clear_cached_location() {
+    if let Ok(mut guard) = CACHED_LOCATION.lock() {
+        *guard = None;
     }
 }
 
@@ -174,23 +115,19 @@ pub(crate) fn clear_haptic_feature_cache_for(channel: &Arc<HidppChannel>) {
 /// Nothing else in the stack ever asserts this state — devices historically
 /// inherited it from Logi Options+, and some power transitions clear it, after
 /// which `play` calls are accepted but produce no physical feedback. Callers
-/// arm once per Actions Ring session, before the first hover.
-pub async fn ensure_haptics_armed_on(
-    registry: &ChannelRegistry,
-    shared: &SharedChannel,
-) -> Result<bool, WriteError> {
+/// arm once per Actions Ring session, before the first hover — which is why
+/// this deliberately bypasses the cached location and re-resolves the
+/// feature: the cache key (channel identity + device index) cannot see a
+/// *different device* re-paired into the same receiver slot, so each session
+/// starts by overwriting the entry with a freshly-proven location, and the
+/// per-hover plays then reuse it for the session's lifetime.
+pub async fn ensure_haptics_armed_on(shared: &SharedChannel) -> Result<bool, WriteError> {
     let channel = shared.channel();
     let index = shared.device_index();
-    let feature = if let Some(feature) = cached_feature(channel, index) {
-        feature
-    } else {
-        let epoch = cache_epoch();
-        let feature = feature_on_channel(channel, index).await?;
-        store_cached_feature(epoch, registry, shared, &feature);
-        feature
-    };
+    let (feature, feature_index) = feature_on_channel(channel, index).await?;
+    store_cached_location(channel, index, feature_index);
     let config = feature.get_configuration().await.map_err(|error| {
-        clear_cached_feature();
+        clear_cached_location();
         classify_hidpp_error(error, HidppOperation::PlayHaptic, HapticFeedbackFeature::ID)
     })?;
     let intensity = if config.intensity.get() == 0 {
@@ -205,7 +142,7 @@ pub async fn ensure_haptics_armed_on(
         .set_configuration(true, intensity)
         .await
         .map_err(|error| {
-            clear_cached_feature();
+            clear_cached_location();
             classify_hidpp_error(error, HidppOperation::PlayHaptic, HapticFeedbackFeature::ID)
         })?;
     Ok(true)
@@ -217,7 +154,6 @@ pub async fn ensure_haptics_armed_on(
 /// round-trip); any error invalidates the cache and the play is retried once
 /// through a fresh open, so a rebuilt channel or stale index self-heals.
 pub async fn play_haptic_on(
-    registry: &ChannelRegistry,
     shared: &SharedChannel,
     waveform: HapticWaveform,
 ) -> Result<(), WriteError> {
@@ -227,15 +163,14 @@ pub async fn play_haptic_on(
         if feature.play(waveform).await.is_ok() {
             return Ok(());
         }
-        clear_cached_feature();
+        clear_cached_location();
     }
-    let epoch = cache_epoch();
-    let feature = feature_on_channel(channel, index).await?;
+    let (feature, feature_index) = feature_on_channel(channel, index).await?;
     let result = feature.play(waveform).await.map_err(|error| {
         classify_hidpp_error(error, HidppOperation::PlayHaptic, HapticFeedbackFeature::ID)
     });
     if result.is_ok() {
-        store_cached_feature(epoch, registry, shared, &feature);
+        store_cached_location(channel, index, feature_index);
     }
     result
 }
@@ -248,7 +183,7 @@ pub async fn play_haptic(
 ) -> Result<(), WriteError> {
     let index = route.device_index();
     with_route(backend, route, move |channel| async move {
-        let feature = feature_on_channel(&channel, index).await?;
+        let (feature, _) = feature_on_channel(&channel, index).await?;
         feature.play(waveform).await.map_err(|error| {
             classify_hidpp_error(error, HidppOperation::PlayHaptic, HapticFeedbackFeature::ID)
         })
@@ -258,81 +193,51 @@ pub async fn play_haptic(
 
 #[cfg(test)]
 mod tests {
-    use super::EpochGuarded;
+    use super::*;
+    use crate::channel::scripted::ScriptedRawHidChannel;
 
-    /// The registry still publishes the channel the open resolved.
-    const CURRENT: fn() -> bool = || true;
-    /// The registry has dropped it — the enumerator retired the node.
-    const RETIRED: fn() -> bool = || false;
-
-    #[test]
-    fn a_store_started_before_a_clear_is_discarded() {
-        let mut cache = EpochGuarded::new();
-        let epoch = cache.epoch;
-        // The channel retires while the feature open is in flight…
-        cache.clear_for(0xA);
-        // …so the open's belated success must not re-pin the channel.
-        cache.store(epoch, 0xA, 2, "stale", CURRENT);
-        assert_eq!(cache.get(0xA, 2), None);
+    async fn scripted_channel() -> Arc<HidppChannel> {
+        let (raw, _reports) = ScriptedRawHidChannel::with_responder(|_| None);
+        Arc::new(
+            HidppChannel::from_raw_channel(raw)
+                .await
+                .expect("the scripted channel must support HID++"),
+        )
     }
 
-    /// The mirror of the case above, and the one an epoch alone cannot see:
-    /// the retire lands *before* the open begins rather than during it.
-    ///
-    /// `hardware::play_haptic` resolves the channel from the registry and then
-    /// awaits its I/O lease. A retire during that wait already ran
-    /// `clear_for`, so by the time `play_haptic_on` snapshots the epoch there
-    /// is nothing left to violate: the play succeeds on the still-writable
-    /// handle and the store would re-pin the retired channel. The enumerator
-    /// reopens a node only once every clone of its channel is gone
-    /// (`Arc::strong_count == 1`), so that entry wedges the node for good —
-    /// the Actions Ring trigger died with capture, so no later haptic can come
-    /// along to invalidate it. Only the registry can still tell.
-    #[test]
-    fn a_store_for_a_channel_retired_before_the_open_is_discarded() {
-        let mut cache = EpochGuarded::new();
-        // The enumerator retires the channel while the play waits for its lease…
-        cache.clear_for(0xA);
-        // …so the open that follows snapshots an epoch that is already current.
-        let epoch = cache.epoch;
-
-        cache.store(epoch, 0xA, 2, "retired", RETIRED);
-
-        assert_eq!(
-            cache.get(0xA, 2),
-            None,
-            "a channel the enumerator has retired must never be cached again"
+    /// These tests share the one process-wide cache slot, so they must not run
+    /// concurrently with each other; a single test keeps them serialized.
+    #[tokio::test]
+    async fn the_cache_matches_exactly_the_channel_it_was_stored_for() {
+        let channel = scripted_channel().await;
+        store_cached_location(&channel, 2, 7);
+        assert!(
+            cached_feature(&channel, 2).is_some(),
+            "the stored channel at the stored index is a hit"
         );
-    }
+        assert!(
+            cached_feature(&channel, 3).is_none(),
+            "another device index is a miss"
+        );
 
-    #[test]
-    fn a_store_with_a_current_epoch_lands() {
-        let mut cache = EpochGuarded::new();
-        cache.store(cache.epoch, 0xA, 2, "fresh", CURRENT);
-        assert_eq!(cache.get(0xA, 2), Some("fresh"));
-        assert_eq!(cache.get(0xB, 2), None);
-        assert_eq!(cache.get(0xA, 3), None);
-    }
+        let other = scripted_channel().await;
+        assert!(
+            cached_feature(&other, 2).is_none(),
+            "another channel is a miss — identity, not address, decides"
+        );
 
-    #[test]
-    fn retiring_one_channel_keeps_another_entry_but_blocks_stale_stores() {
-        let mut cache = EpochGuarded::new();
-        cache.store(cache.epoch, 0xA, 2, "kept", CURRENT);
-        let epoch = cache.epoch;
-        cache.clear_for(0xB);
-        assert_eq!(cache.get(0xA, 2), Some("kept"));
-        cache.store(epoch, 0xB, 1, "stale", CURRENT);
-        assert_eq!(cache.get(0xB, 1), None);
-    }
+        // The enumerator retires the stored channel: nothing pins it (the
+        // whole point of the Weak), and the entry can never match again —
+        // including a fresh channel that might reuse the allocation, which
+        // the surviving Weak makes impossible.
+        drop(channel);
+        let replacement = scripted_channel().await;
+        assert!(
+            cached_feature(&replacement, 2).is_none(),
+            "a dead entry must not match any later channel"
+        );
 
-    #[test]
-    fn a_full_clear_empties_the_entry_and_blocks_stale_stores() {
-        let mut cache = EpochGuarded::new();
-        let epoch = cache.epoch;
-        cache.store(epoch, 0xA, 2, "cached", CURRENT);
-        cache.clear();
-        assert_eq!(cache.get(0xA, 2), None);
-        cache.store(epoch, 0xA, 2, "stale", CURRENT);
-        assert_eq!(cache.get(0xA, 2), None);
+        clear_cached_location();
+        assert!(cached_feature(&replacement, 2).is_none());
     }
 }

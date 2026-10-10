@@ -5,6 +5,7 @@ use hidpp::{
     device::Device,
     feature::CreatableFeature,
     feature::FeatureType,
+    feature::adc_measurement::AdcMeasurementFeature,
     feature::battery_status::BatteryStatusFeature,
     feature::device_information::{
         DeviceEntityFirmwareInfo, DeviceEntityType, DeviceInformationFeature,
@@ -21,7 +22,7 @@ use crate::write::{HidppOperation, WriteError, classify_hidpp_error, open_featur
 
 /// Snapshot of one HID++ feature exposed by a device: protocol ID +
 /// version. Returned by [`dump_features`] for diagnostics.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FeatureEntry {
     /// HID++ feature ID.
     pub id: u16,
@@ -35,7 +36,7 @@ pub struct FeatureEntry {
 /// Snapshot of one HID++ `0x1b04` reprogrammable control. Returned by
 /// [`dump_reprog_controls`] for diagnostics so new device controls can be
 /// identified before OpenLogi maps them to a first-class button.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReprogControlEntry {
     /// HID++ control ID.
     pub cid: u16,
@@ -143,7 +144,8 @@ pub async fn dump_reprog_controls(
 }
 
 /// Diagnostic read of the device's raw battery report — the unified `0x1004`
-/// fields, or the legacy `0x1000` `discharge_level`/`next_level`/`status`. For
+/// fields, the legacy `0x1000` `discharge_level`/`next_level`/`status`, or the
+/// `0x1F20` ADC voltage and charging state. For
 /// `openlogi diag battery`: surfaces exactly what the firmware reports so a
 /// claim like "MX2S shows 0% while charging" can be confirmed against the wire
 /// instead of guessed (the GUI only ever shows the mapped value).
@@ -187,8 +189,20 @@ pub async fn read_battery_raw(
             Err(e) => return Err(e),
         }
 
-        // Reached only when neither 0x1004 nor 0x1000 is present; report the
-        // preferred feature rather than implying 0x1000 was specifically absent.
+        match open_feature::<AdcMeasurementFeature>(&mut device).await {
+            Ok(feature) => {
+                let measurement = feature
+                    .get_adc_measurement()
+                    .await
+                    .map_err(|e| WriteError::Hidpp(format!("{e:?}")))?;
+                return Ok(format!("0x1F20 AdcMeasurement: {measurement:?}"));
+            }
+            Err(WriteError::FeatureUnsupported { .. }) => {}
+            Err(e) => return Err(e),
+        }
+
+        // Reached only when none of the read features is present; report the
+        // preferred feature rather than implying 0x1F20 was specifically absent.
         Err(WriteError::FeatureUnsupported {
             feature_hex: 0x1004,
         })
@@ -252,7 +266,7 @@ impl From<DeviceEntityFirmwareInfo> for FirmwareEntityInfo {
 /// There are two states and only two: the device answered with a record that
 /// decoded, or it did not. An enum makes "a version with no kind" and "an
 /// error alongside a version" unrepresentable rather than merely unreachable.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FirmwareEntity {
     /// The entity's record was read and decoded.
     Readable {

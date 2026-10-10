@@ -48,8 +48,11 @@ pub fn default_binding(button: ButtonId) -> Action {
             reason = "see the left tilt above — same control pair, mirrored direction"
         )]
         ButtonId::WheelTiltRight => Action::HorizontalScrollRight,
-        ButtonId::Back => Action::BrowserBack,
-        ButtonId::Forward => Action::BrowserForward,
+        // Preserve native side-button events unless explicitly rebound.
+        // BrowserBack/BrowserForward are dispatched navigation actions: using
+        // them as seeds would make the capture plan skip their HID++ diversion.
+        ButtonId::Back => Action::MouseBack,
+        ButtonId::Forward => Action::MouseForward,
         ButtonId::DpiToggle => Action::CycleDpiPresets,
         #[expect(
             clippy::match_same_arms,
@@ -57,27 +60,21 @@ pub fn default_binding(button: ButtonId) -> Action {
                       not because the control stays native like the keyboard arm below"
         )]
         ButtonId::Thumbwheel => Action::None,
-        // The thumb wheel scrolls horizontally by default: rotating it produces
-        // continuous horizontal scroll, with "up" → right and "down" → left.
-        // The wheel watcher renders these two actions as smooth, sensitivity-
-        // scaled scrolling rather than the discrete per-press burst a button
-        // would get (see `watchers::gesture`).
-        ButtonId::ThumbwheelScrollUp => Action::HorizontalScrollRight,
-        ButtonId::ThumbwheelScrollDown => Action::HorizontalScrollLeft,
+        // The thumb wheel scrolls horizontally in firmware: "up" (forward)
+        // scrolls left and "down" scrolls right. The device capture boundary
+        // normalises model-specific `0x2150 default_dir` polarity before these
+        // bindings are resolved, so the same physical direction reaches the
+        // same default on every model. The wheel watcher renders these actions
+        // as smooth, sensitivity-scaled scrolling rather than the discrete
+        // per-press burst a button would get (see `watchers::gesture`).
+        ButtonId::ThumbwheelScrollUp => Action::HorizontalScrollLeft,
+        ButtonId::ThumbwheelScrollDown => Action::HorizontalScrollRight,
         ButtonId::GestureButton => Action::MissionControl,
         ButtonId::HapticPanel => Action::ShowActionsRing,
         // Keyboard keys stay on their native firmware function until the user
         // explicitly binds them; an unbound key is never diverted, so a
         // `None` default keeps the projection total without capturing anything.
-        ButtonId::KeySearch
-        | ButtonId::KeyDictation
-        | ButtonId::KeyEmoji
-        | ButtonId::KeyScreenCapture
-        | ButtonId::KeyMicMute
-        | ButtonId::KeyPlayPause
-        | ButtonId::KeyMute
-        | ButtonId::KeyVolumeDown
-        | ButtonId::KeyVolumeUp => Action::None,
+        ButtonId::Control(_) => Action::None,
     }
 }
 

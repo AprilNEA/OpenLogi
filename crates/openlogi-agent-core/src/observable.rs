@@ -115,11 +115,11 @@ impl ObservableState {
     }
 
     /// Publish where enumeration stands together with the device set it
-    /// produced — and whether that tick failed to open HID++ nodes — so none
+    /// produced — and whether that pass failed to open HID++ nodes — so none
     /// of the three can be read from different generations.
     ///
-    /// The inventory watcher re-enumerates on a timer, so most calls carry the
-    /// same devices as the last one; those notify nobody.
+    /// Reconciliations often carry the same devices as the last one; those
+    /// notify nobody.
     pub fn set_inventory(
         &self,
         health: InventoryHealth,
@@ -165,14 +165,20 @@ impl ObservableState {
         });
     }
 
-    /// Publish an Accessibility trust change, as observed by
-    /// [`watchers::accessibility`](crate::watchers::accessibility).
-    pub fn set_accessibility_granted(&self, granted: bool) {
+    /// Publish an Accessibility trust change (as observed by
+    /// [`watchers::accessibility`](crate::watchers::accessibility)) together
+    /// with the hook state it produced. One generation on purpose: published
+    /// separately, a revoke would briefly serve a state claiming the hook is
+    /// installed without the permission it requires.
+    pub fn set_accessibility_and_hook(&self, granted: bool, hook_installed: bool) {
         self.update(|snapshot| {
-            if snapshot.status.accessibility_granted == granted {
+            if snapshot.status.accessibility_granted == granted
+                && snapshot.status.hook_installed == hook_installed
+            {
                 return false;
             }
             snapshot.status.accessibility_granted = granted;
+            snapshot.status.hook_installed = hook_installed;
             true
         });
     }
@@ -244,17 +250,6 @@ impl ObservableState {
                 recent.truncate(RECENT_APPS);
             }
             snapshot.foreground.current = app;
-            true
-        });
-    }
-
-    /// Publish whether the OS input hook is currently installed.
-    pub fn set_hook_installed(&self, installed: bool) {
-        self.update(|snapshot| {
-            if snapshot.status.hook_installed == installed {
-                return false;
-            }
-            snapshot.status.hook_installed = installed;
             true
         });
     }
@@ -420,14 +415,29 @@ mod tests {
         let state = state();
         state.set_inventory(InventoryHealth::Ready, &[inventory(true)], &[], false);
 
-        state.set_hook_installed(true);
-        state.set_accessibility_granted(true);
+        state.set_accessibility_and_hook(true, true);
 
         let snapshot = state.snapshot();
         assert!(snapshot.status.hook_installed);
         assert!(snapshot.status.accessibility_granted);
         assert_eq!(snapshot.inventory.len(), 1);
         assert_eq!(snapshot.status.inventory, InventoryHealth::Ready);
+    }
+
+    #[test]
+    fn a_revoke_retires_the_hook_in_the_same_generation() {
+        let state = state();
+        state.set_accessibility_and_hook(true, true);
+        let before = state.subscribe().borrow().generation;
+
+        state.set_accessibility_and_hook(false, false);
+
+        let after = state.subscribe().borrow().generation;
+        assert_eq!(
+            after,
+            before + 1,
+            "no intermediate generation may claim the hook without its permission"
+        );
     }
 
     #[tokio::test]
@@ -457,7 +467,7 @@ mod tests {
         let writer = Arc::clone(&state);
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(1)).await;
-            writer.set_hook_installed(true);
+            writer.set_accessibility_and_hook(true, true);
         });
 
         let observed = state.observe(1).await;
@@ -477,12 +487,12 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_silent_write_does_not_end_the_hold() {
         let state = Arc::new(state());
-        state.set_hook_installed(true);
+        state.set_accessibility_and_hook(true, true);
         let writer = Arc::clone(&state);
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(1)).await;
-            // Same value: this must not be mistaken for news.
-            writer.set_hook_installed(true);
+            // Same values: this must not be mistaken for news.
+            writer.set_accessibility_and_hook(true, true);
         });
 
         let observed = state.observe(2).await;
@@ -492,13 +502,13 @@ mod tests {
     #[test]
     fn an_unchanged_flag_notifies_nobody() {
         let state = state();
-        state.set_hook_installed(true);
+        state.set_accessibility_and_hook(true, true);
         let rx = state.subscribe();
 
-        state.set_hook_installed(true);
+        state.set_accessibility_and_hook(true, true);
         assert!(!rx.has_changed().unwrap());
 
-        state.set_hook_installed(false);
+        state.set_accessibility_and_hook(true, false);
         assert!(rx.has_changed().unwrap());
     }
 }

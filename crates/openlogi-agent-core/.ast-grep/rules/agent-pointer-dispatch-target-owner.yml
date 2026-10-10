@@ -1,0 +1,48 @@
+# Owner: runtime::ActionDispatchTarget::for_pointer captures pointer scope and
+# the focused fallback together before asynchronous dispatch.
+id: agent-pointer-dispatch-target-owner
+language: rust
+severity: error
+message: Construct pointer dispatch targets with ActionDispatchTarget::for_pointer to retain the press-time fallback.
+note: |
+  The OS hook and HID++ capture paths must use the same capture policy.
+  Direct Pointer construction loses the focused fallback for an unidentified target.
+files:
+  - crates/openlogi-agent-core/src/**/*.rs
+ignores:
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  all:
+    - any:
+        - kind: scoped_identifier
+        - kind: scoped_type_identifier
+    - any:
+        - regex: '^ActionDispatchTarget::Pointer$'
+        - all:
+            - regex: '^Self::Pointer$'
+            - inside:
+                kind: impl_item
+                has:
+                  field: type
+                  regex: '^ActionDispatchTarget$'
+                stopBy: end
+    - not:
+        inside:
+          any:
+            - kind: struct_pattern
+            - kind: tuple_struct_pattern
+          stopBy: end
+    - not:
+        inside:
+          kind: function_item
+          has:
+            field: name
+            regex: '^for_pointer$'
+          inside:
+            kind: impl_item
+            has:
+              field: type
+              regex: '^ActionDispatchTarget$'
+            stopBy: end
+          stopBy: end

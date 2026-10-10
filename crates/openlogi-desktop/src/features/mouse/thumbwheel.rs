@@ -28,10 +28,11 @@ pub(crate) enum ThumbwheelPreset {
     VerticalScroll,
     VerticalScrollReversed,
     HorizontalScroll,
+    HorizontalScrollReversed,
 }
 
 impl ThumbwheelPreset {
-    pub(crate) const ALL: [Self; 12] = [
+    pub(crate) const ALL: [Self; 13] = [
         Self::BackForward,
         Self::UndoRedo,
         Self::BrowserHistory,
@@ -44,6 +45,7 @@ impl ThumbwheelPreset {
         Self::VerticalScroll,
         Self::VerticalScrollReversed,
         Self::HorizontalScroll,
+        Self::HorizontalScrollReversed,
     ];
 
     #[must_use]
@@ -60,7 +62,13 @@ impl ThumbwheelPreset {
             Self::CycleDpi => (Action::CycleDpiPresets, Action::CycleDpiPresets),
             Self::VerticalScroll => (Action::ScrollDown, Action::ScrollUp),
             Self::VerticalScrollReversed => (Action::ScrollUp, Action::ScrollDown),
-            Self::HorizontalScroll => (Action::HorizontalScrollLeft, Action::HorizontalScrollRight),
+            // The plain pair must equal the native-direction defaults so
+            // picking it never diverts the wheel; the reversed pair is the
+            // swap, which diverts and injects the opposite direction.
+            Self::HorizontalScroll => (Action::HorizontalScrollRight, Action::HorizontalScrollLeft),
+            Self::HorizontalScrollReversed => {
+                (Action::HorizontalScrollLeft, Action::HorizontalScrollRight)
+            }
         };
         ThumbwheelPair { backward, forward }
     }
@@ -76,20 +84,26 @@ impl ThumbwheelPreset {
     }
 
     #[must_use]
-    pub(crate) const fn label(self) -> &'static str {
+    pub(crate) const fn translation_key(self) -> &'static str {
         match self {
-            Self::BackForward => "Back / Forward",
-            Self::UndoRedo => "Undo / Redo",
-            Self::BrowserHistory => "Browser Back / Forward",
-            Self::Tabs => "Previous / Next Tab",
-            Self::Desktops => "Previous / Next Desktop",
-            Self::Tracks => "Previous / Next Track",
-            Self::Volume => "Volume Down / Up",
-            Self::VolumeReversed => "Volume Up / Down",
-            Self::CycleDpi => "Cycle DPI Presets",
-            Self::VerticalScroll => "Vertical Scroll",
-            Self::VerticalScrollReversed => "Vertical Scroll (Reversed)",
-            Self::HorizontalScroll => "Horizontal Scroll",
+            Self::BackForward => "pointer.back_forward",
+            Self::UndoRedo => "pointer.undo_redo",
+            Self::BrowserHistory => "pointer.browser_back_forward",
+            Self::Tabs => "pointer.previous_next_tab",
+            Self::Desktops => "pointer.previous_next_desktop",
+            Self::Tracks => "pointer.previous_next_track",
+            // `Self::Volume` is the intuitive pairing (rolling the wheel up
+            // raises the volume — see `pair()` above), so it takes the label a
+            // user reads that way, "Volume Up / Down"; `VolumeReversed` gets
+            // the other wording, matching the actual inverted direction it
+            // configures.
+            Self::Volume => "pointer.volume_up_down",
+            Self::VolumeReversed => "pointer.volume_down_up",
+            Self::CycleDpi => "pointer.cycle_dpi_presets",
+            Self::VerticalScroll => "pointer.vertical_scroll",
+            Self::VerticalScrollReversed => "pointer.vertical_scroll_reversed",
+            Self::HorizontalScroll => "pointer.horizontal_scroll",
+            Self::HorizontalScrollReversed => "pointer.horizontal_scroll_reversed",
         }
     }
 
@@ -105,7 +119,9 @@ impl ThumbwheelPreset {
             Self::Volume | Self::VolumeReversed => "action-icons/volume-2.svg",
             Self::CycleDpi => "action-icons/gauge.svg",
             Self::VerticalScroll | Self::VerticalScrollReversed => "action-icons/chevrons-up.svg",
-            Self::HorizontalScroll => "action-icons/chevrons-right.svg",
+            Self::HorizontalScroll | Self::HorizontalScrollReversed => {
+                "action-icons/chevrons-right.svg"
+            }
         }
     }
 }
@@ -128,11 +144,28 @@ mod tests {
             (Action::CycleDpiPresets, Action::CycleDpiPresets),
             (Action::ScrollDown, Action::ScrollUp),
             (Action::ScrollUp, Action::ScrollDown),
+            (Action::HorizontalScrollRight, Action::HorizontalScrollLeft),
             (Action::HorizontalScrollLeft, Action::HorizontalScrollRight),
         ];
 
         for (preset, (backward, forward)) in ThumbwheelPreset::ALL.into_iter().zip(expected) {
             assert_eq!(preset.pair(), ThumbwheelPair { backward, forward });
+        }
+    }
+
+    #[test]
+    fn volume_preset_labels_match_the_direction_they_actually_configure() {
+        // The label must read the way the wheel actually behaves — whichever
+        // preset's `forward` (rolling the wheel up) raises the volume is the
+        // one a user expects "Up" to come first for.
+        for preset in [ThumbwheelPreset::Volume, ThumbwheelPreset::VolumeReversed] {
+            let pair = preset.pair();
+            let reads_up_first = preset.translation_key() == "pointer.volume_up_down";
+            assert_eq!(
+                pair.forward == Action::VolumeUp,
+                reads_up_first,
+                "{preset:?}: label must say \"Up\" first exactly when rolling up raises the volume"
+            );
         }
     }
 

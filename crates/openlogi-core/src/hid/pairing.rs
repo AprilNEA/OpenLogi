@@ -74,6 +74,9 @@ pub enum PairingError {
     /// Pairing flow was cancelled by the caller.
     #[error("pairing was cancelled")]
     Cancelled,
+    /// The command is not valid for the active receiver family.
+    #[error("pairing command is not supported by the active receiver")]
+    UnsupportedCommand,
     /// A receiver notification failed to decode; authentication cannot
     /// proceed safely, so the flow fails instead of presenting bogus data.
     #[error("malformed pairing notification ({0})")]

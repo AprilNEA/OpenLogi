@@ -14,11 +14,16 @@ use crate::windows;
 pub fn dispatch(command: DeeplinkCommand, cx: &mut gpui::App) {
     use DeeplinkCommand as Cmd;
     match command {
-        Cmd::Quit => cx.quit(),
+        // Flag the IPC client before quitting, or its unreachable→spawn
+        // reflex can resurrect the agent mid-teardown (observed live).
+        Cmd::Quit => {
+            crate::services::ipc::mark_suite_quitting();
+            cx.quit();
+        }
         // Always route Show through `main_window::open`: it re-focuses (and
         // deminiaturizes) an existing window or opens a fresh one, so the tray's
         // "Show Main Window" works whether or not a window is already up.
-        Cmd::Show => windows::main_window::open(&[], cx),
+        Cmd::Show => windows::main_window::open(cx),
         // The aux windows are standalone; open the main window first as the
         // session anchor (no-op when one is already open) so closing the aux
         // window doesn't leave the app windowless — and quitting — by surprise.

@@ -6,6 +6,7 @@ use std::sync::{Arc, PoisonError, RwLock};
 
 use crate::backend::NodeId;
 use hidpp::channel::HidppChannel;
+use tokio::sync::watch;
 
 use crate::{DeviceRoute, SharedChannel};
 
@@ -36,16 +37,27 @@ impl<Node: Eq, Channel> NodeRegistry<Node, Channel> {
         node: Node,
         routes: impl IntoIterator<Item = DeviceRoute>,
         channel: Channel,
-    ) {
-        let routes = routes.into_iter().collect();
+        same_channel: fn(&Channel, &Channel) -> bool,
+    ) -> bool {
+        let routes: Vec<_> = routes.into_iter().collect();
         if let Some(publication) = self
             .publications
             .iter_mut()
             .find(|publication| publication.node == node)
         {
+            let same_routes = publication
+                .routes
+                .iter()
+                .all(|route| routes.contains(route))
+                && routes
+                    .iter()
+                    .all(|route| publication.routes.contains(route));
+            if same_routes && same_channel(&publication.channel, &channel) {
+                return false;
+            }
             publication.routes = routes;
             publication.channel = channel;
-            return;
+            return true;
         }
 
         let sequence = self.next_sequence;
@@ -56,11 +68,14 @@ impl<Node: Eq, Channel> NodeRegistry<Node, Channel> {
             routes,
             channel,
         });
+        true
     }
 
-    fn remove_node(&mut self, node: &Node) {
+    fn remove_node(&mut self, node: &Node) -> bool {
+        let previous_len = self.publications.len();
         self.publications
             .retain(|publication| publication.node != *node);
+        self.publications.len() != previous_len
     }
 
     fn lookup(&self, route: &DeviceRoute) -> Option<&Channel> {
@@ -84,29 +99,54 @@ impl<Node: Eq, Channel> NodeRegistry<Node, Channel> {
 }
 
 impl<Node: Eq + Hash, Channel> NodeRegistry<Node, Channel> {
-    fn retain_nodes(&mut self, nodes: &HashSet<Node>) {
+    fn retain_nodes(&mut self, nodes: &HashSet<Node>) -> bool {
+        let previous_len = self.publications.len();
         self.publications
             .retain(|publication| nodes.contains(&publication.node));
+        self.publications.len() != previous_len
     }
 }
 
 struct Registry<Node, Channel> {
     state: Arc<RwLock<NodeRegistry<Node, Channel>>>,
+    changes: watch::Sender<()>,
+    same_channel: fn(&Channel, &Channel) -> bool,
 }
 
 impl<Node, Channel> Clone for Registry<Node, Channel> {
     fn clone(&self) -> Self {
         Self {
             state: Arc::clone(&self.state),
+            changes: self.changes.clone(),
+            same_channel: self.same_channel,
         }
     }
 }
 
-impl<Node, Channel> Default for Registry<Node, Channel> {
+impl<Node, Channel: PartialEq> Default for Registry<Node, Channel> {
     fn default() -> Self {
+        Self::new(PartialEq::eq)
+    }
+}
+
+impl<Node, Channel> Registry<Node, Channel> {
+    fn new(same_channel: fn(&Channel, &Channel) -> bool) -> Self {
+        let (changes, _) = watch::channel(());
         Self {
             state: Arc::new(RwLock::new(NodeRegistry::default())),
+            changes,
+            same_channel,
         }
+    }
+
+    fn subscribe(&self) -> watch::Receiver<()> {
+        self.changes.subscribe()
+    }
+
+    fn notify_change(&self) {
+        // `watch` versions each send internally; the unit payload deliberately
+        // carries no registry state and means only "read the SSOT again".
+        self.changes.send_modify(|()| {});
     }
 }
 
@@ -117,26 +157,38 @@ impl<Node: Eq, Channel> Registry<Node, Channel> {
         routes: impl IntoIterator<Item = DeviceRoute>,
         channel: Channel,
     ) {
-        self.state
+        let changed = self
+            .state
             .write()
             .unwrap_or_else(PoisonError::into_inner)
-            .replace_node(node, routes, channel);
+            .replace_node(node, routes, channel, self.same_channel);
+        if changed {
+            self.notify_change();
+        }
     }
 
     fn remove_node(&self, node: &Node) {
-        self.state
+        let changed = self
+            .state
             .write()
             .unwrap_or_else(PoisonError::into_inner)
             .remove_node(node);
+        if changed {
+            self.notify_change();
+        }
     }
 }
 
 impl<Node: Eq + Hash, Channel> Registry<Node, Channel> {
     fn retain_nodes(&self, nodes: &HashSet<Node>) {
-        self.state
+        let changed = self
+            .state
             .write()
             .unwrap_or_else(PoisonError::into_inner)
             .retain_nodes(nodes);
+        if changed {
+            self.notify_change();
+        }
     }
 }
 
@@ -159,9 +211,17 @@ impl<Node: Eq, Channel> Registry<Node, Channel> {
 /// Publications are keyed by OS HID node internally and selected by exact
 /// [`DeviceRoute`]. When identical direct devices publish the same route, the
 /// oldest live node wins until it is removed.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct ChannelRegistry {
     inner: Registry<NodeId, Arc<HidppChannel>>,
+}
+
+impl Default for ChannelRegistry {
+    fn default() -> Self {
+        Self {
+            inner: Registry::new(Arc::ptr_eq),
+        }
+    }
 }
 
 impl ChannelRegistry {
@@ -184,6 +244,17 @@ impl ChannelRegistry {
     /// Remove publications for nodes absent from the current OS enumeration.
     pub(crate) fn retain_nodes(&self, nodes: &HashSet<NodeId>) {
         self.inner.retain_nodes(nodes);
+    }
+
+    /// Subscribe to semantic publication changes.
+    ///
+    /// The receiver coalesces changes and carries no route data: after it
+    /// changes, read this registry again with [`Self::lookup`] or
+    /// [`Self::is_current`]. Re-publishing the same node, route set, and channel
+    /// does not wake subscribers.
+    #[must_use]
+    pub fn subscribe(&self) -> watch::Receiver<()> {
+        self.inner.subscribe()
     }
 
     /// Clone the current exact-route winner.
@@ -209,6 +280,7 @@ mod tests {
     use std::collections::HashSet;
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::sync::Arc;
+    use std::time::Duration;
 
     use crate::DeviceRoute;
 
@@ -312,6 +384,85 @@ mod tests {
 
         registry.remove_node(&1);
         assert_eq!(registry.lookup(&route), Some("b"));
+    }
+
+    #[test]
+    fn replacement_and_removal_wake_every_subscriber() {
+        let route = direct(0xb35b);
+        let first_channel = Arc::new(());
+        let replacement = Arc::new(());
+        let registry = Registry::<u8, Arc<()>>::new(Arc::ptr_eq);
+        registry.replace_node(1, [route.clone()], Arc::clone(&first_channel));
+        let mut first = registry.subscribe();
+        let mut second = registry.subscribe();
+
+        registry.replace_node(1, [route.clone()], Arc::clone(&replacement));
+
+        assert!(first.has_changed().expect("registry sender remains alive"));
+        assert!(second.has_changed().expect("registry sender remains alive"));
+        first.borrow_and_update();
+        second.borrow_and_update();
+        assert!(!registry.any_current(|candidate, channel| {
+            candidate == &route && Arc::ptr_eq(channel, &first_channel)
+        }));
+        assert!(registry.any_current(|candidate, channel| {
+            candidate == &route && Arc::ptr_eq(channel, &replacement)
+        }));
+
+        registry.remove_node(&1);
+
+        assert!(first.has_changed().expect("registry sender remains alive"));
+        assert!(second.has_changed().expect("registry sender remains alive"));
+        assert_eq!(registry.lookup(&route), None);
+    }
+
+    #[test]
+    fn no_op_publications_do_not_wake_subscribers() {
+        let first_route = bolt("AABB", 1);
+        let second_route = bolt("AABB", 2);
+        let channel = Arc::new(());
+        let registry = Registry::<u8, Arc<()>>::new(Arc::ptr_eq);
+        registry.replace_node(
+            1,
+            [first_route.clone(), second_route.clone()],
+            Arc::clone(&channel),
+        );
+        let changes = registry.subscribe();
+
+        registry.replace_node(1, [second_route, first_route], Arc::clone(&channel));
+        registry.remove_node(&2);
+        registry.retain_nodes(&HashSet::from([1]));
+
+        assert!(
+            !changes
+                .has_changed()
+                .expect("registry sender remains alive")
+        );
+    }
+
+    #[tokio::test]
+    async fn change_between_current_check_and_wait_is_not_missed() {
+        let route = direct(0xb35b);
+        let first_channel = Arc::new(());
+        let replacement = Arc::new(());
+        let registry = Registry::<u8, Arc<()>>::new(Arc::ptr_eq);
+        registry.replace_node(1, [route.clone()], Arc::clone(&first_channel));
+
+        // This is the ordering used by capture restore: subscribe, check the
+        // SSOT, then wait. Publishing in that final gap must remain visible.
+        let mut changes = registry.subscribe();
+        assert!(registry.any_current(|candidate, channel| {
+            candidate == &route && Arc::ptr_eq(channel, &first_channel)
+        }));
+        registry.replace_node(1, [route.clone()], Arc::clone(&replacement));
+
+        tokio::time::timeout(Duration::from_millis(100), changes.changed())
+            .await
+            .expect("a pre-wait publication must be observed")
+            .expect("registry sender remains alive");
+        assert!(registry.any_current(|candidate, channel| {
+            candidate == &route && Arc::ptr_eq(channel, &replacement)
+        }));
     }
 
     #[test]

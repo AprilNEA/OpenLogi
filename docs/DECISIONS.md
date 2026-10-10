@@ -4,6 +4,150 @@ Durable "why we did it this way" records that are not obvious from the code.
 Add a dated entry when a non-obvious architectural or dependency decision is
 made or revisited.
 
+## 2026-09: Grant probes run on notification, with a heartbeat backstop
+
+The hook re-checked the Accessibility grant between every 500 ms run-loop
+slice — `AXIsProcessTrusted` plus a throwaway `CGEventTapCreate` — and the
+agent polled both privacy grants every 1.2 s for the GUI. Each probe is a
+WindowServer round trip that takes seconds around a sleep transition, which is
+where the probe-budget work (#952, #1282) came from. macOS posts two
+undocumented notifications when the list is edited, and the
+[`axwatch`](https://crates.io/crates/axwatch) crate observes both. Measured
+against tccd's event log on macOS 26: adding a row, switching it off and
+switching it on post both; removing the row posts only the Darwin one.
+
+- **Probe on cue.** `grant::ProbeCue` raises a flag from the watch's handler,
+  and the tap thread probes only on a raised flag; the two agent-core grant
+  watchers read on the same wakes. Detection latency for an announced edit is
+  unchanged (one slice); an unannounced one is bounded by the heartbeat.
+- **Keep the heartbeat and the probe.** The notifications are undocumented, and
+  a missing run loop, a code-signing rule or a future macOS can swallow them;
+  the reconciled probe remains the authority, at 5 s instead of 500 ms. A watch
+  that cannot start falls back to the old cadence with a warning, never
+  silently.
+- **Rejected: `AXIsProcessTrusted` alone on wake.** It stays `true` after the
+  row is removed — the very edit only the Darwin notification announces — so
+  the read cannot replace the probe.
+- **Not changed: `TAP_PROBE_BUDGET`.** Rarer probes make a collision with a
+  sleep transition rarer, not impossible; shrinking the budget waits for a
+  measured revoke→teardown on hardware.
+
+## 2026-09: A crash respawn re-arms by login session, not by exit code
+
+With `launch_at_login` off, the macOS dormancy gate read every launchd start as
+a login the user opted out of, and left 60 s later with the `exit(0)` launchd
+never respawns. A crash respawn takes the same path — the plist has one trigger
+(`SuccessfulExit` implies `RunAtLoad`) — so one hook-watchdog `exit(78)` on a
+lid close silently ended remapping until the user opened the GUI (#952).
+
+- **The gate asks the session, not launchd.** Arming records the login session
+  (kernel boot session UUID + audit session id) in the runtime dir; every final
+  `exit(0)` — tray Quit, uninstall, SIGTERM — erases it; a handover to a
+  scheduled successor (binary update, Input Monitoring relaunch) keeps it. A
+  start that finds its own session recorded re-arms at once; a login finds a
+  stale session and stays dormant. The boot half is required: audit ids repeat
+  across boots.
+- **Rejected: a second, crash-only plist** (`KeepAlive = {Crashed: true}`, no
+  `RunAtLoad`). `Crashed` does not cover `exit(78)` or a panic's `exit(101)`,
+  which are exactly the exits that need recovery, and it would reintroduce the
+  two-label registration the 2026-08 lifecycle work removed.
+- **SIGTERM is final.** launchd's logout and dev tooling mean "stop". The
+  stale-agent takeover (`takeover.rs`) sends it too, and there the successor
+  would rather find the record; it makes no difference, because the only
+  starts that reach the takeover are GUI kickstarts, and that GUI's
+  declaration arms the successor anyway.
+
+## 2026-09: The macOS device-I/O gate follows powerd, through an SPI, and fails open
+
+The gate that keeps HID access off while the Mac is dark (#656) was first built
+on `NSWorkspace` notifications (#1142): `WillSleep` / `ScreensDidSleep` /
+`SessionDidResignActive` closed it, `ScreensDidWake` / `SessionDidBecomeActive`
+reopened it. Those are edges, and macOS does not guarantee the wake edge —
+Apple DTS (developer forums thread 796109) confirms `ScreensDidWake` is skipped
+on some MacBooks for a lid-close/open cycle and that the system may not even
+run the app's run loop to deliver it. One dropped edge paused device I/O until
+the agent was restarted (#1281). The screen-sleep source was never a
+requirement in its own right: it stood in for "not a DarkWake", the state
+AppKit cannot name (`NSWorkspaceDidWakeNotification` fires for both).
+
+The gate now reads the thing it is actually about. `activity_macos` subscribes
+to powerd through `IOPMConnection`, which reports every Sleep / DarkWake /
+FullWake transition as the complete capability set of the new state and reads
+the current set on demand, so every input is a level: nothing pairs, a missed
+event is corrected by the next, no reconciler timer exists. The console level
+(fast user switching) comes from `CGSessionCopyCurrentDictionary`, with the
+AppKit session edges forwarded as hints and the level re-read on every power
+transition. A launch reads both levels before releasing its hold, so a
+watchdog relaunch during a sleep transition no longer guesses "awake" (#952).
+
+Three things decided the API:
+
+- **Only `IOPMConnection` names a DarkWake.** DTS states plainly that the
+  public API does not expose DarkWake at all: `IORegisterForSystemPower`
+  delivers `kIOMessageSystemHasPoweredOn` for a DarkWake as for a full wake,
+  so a gate on it cannot tell the one-second DarkWake blip #1281 was reported
+  with from the full wake that followed it. The undocumented `IOPMrootDomain`
+  "System Capabilities" registry key carries the same level but no events,
+  which is what forced #1283 into polling.
+- **It is an SPI, and that is accepted.** The functions are exported by IOKit
+  since 10.6 and prototyped only in Apple's open-source `IOKitUser`; the
+  shipping `pmset` is built on them. The hand-written `extern` is confined to
+  `activity_macos.rs` and inventoried in `.agents/rules/objc-ffi.md`. OpenLogi
+  is not App Store distributed.
+- **Losing the SPI fails open.** If the subscription cannot be made the gate
+  is told "permanent full wake" and follows the console alone, at error level.
+  That is pre-0.8.2 behaviour (hardware usable, #656 unprotected); failing
+  closed would leave an agent that can never touch hardware, which is the
+  outage #1281 describes.
+
+## 2026-08: The agent stays one process; a crossing edge gets a wire, not an event layer
+
+The 2026-06 daemon split (#165) put the resident input machinery in
+`openlogi-agent` and left the GUI an on-demand IPC client. Its two
+cross-process abstractions have been production infrastructure since:
+`openlogi-ipc` is the versioned, append-only wire, and `succession` owns the
+one-process-per-role lifetime pattern (the agent negotiates as a peer, the
+overlay serves one run as a subordinate, the GUI only reports mismatches).
+This entry records the deliberate end of that road: the agent itself does not
+split further, and no transport-agnostic event abstraction is built inside it.
+
+Two facts decide it:
+
+- **Every candidate cut crosses the hot path.** The agent's two
+  permission-bearing roles — the CGEventTap hook (Accessibility) and HID++
+  device I/O (Input Monitoring) — are not adjacent subsystems but two ends of
+  one input loop: the hook feeds the action dispatcher, which performs HID++
+  writes (DPI cycle) and OS injection, and HID++ gesture capture feeds the
+  same dispatcher in the other direction. A hook/device process boundary puts
+  IPC latency and a new failure mode inside button-press handling — the path
+  the product exists to keep fast. The GUI/agent split worked precisely
+  because its crossing edges are cold (config saves, snapshots, long-polls);
+  no cold cut of the agent exists.
+- **The isolation benefits already arrived by other means.** Crash recovery is
+  launchd supervision (`KeepAlive = {SuccessfulExit: false}`); prompt
+  containment is the dormancy gate (nothing user-visible before arming);
+  orphan lifetime is `succession`. What a split would still add — the event
+  tap surviving the seconds of a device-stack respawn — does not pay for a
+  second TCC identity: bundle identity is the TCC primary key, so a new
+  helper process is a new identity with zero existing grants, a mass
+  re-grant event of the 0.6.24 class.
+
+The standing doctrine for any edge that does someday cross a process boundary:
+give it the treatment the overlay got — a versioned method on the
+`openlogi-ipc` contract (append-only, golden-tested, `PROTOCOL_VERSION`
+bumped) plus a `succession` role for the new process's lifetime — and cut
+along the named seams (`startup::StateWatchers` is the message list of a
+watcher-side wire, `lifecycle::Armed` is the consumer-side state list). What
+is deliberately not built is an in-process event bus or transport-agnostic
+event-source layer: it would tax every in-process edge with serialization
+bounds, fallibility, and reconnection semantics that shared memory does not
+have, in preparation for a boundary this analysis says should not exist.
+
+Revisit if a platform forces a privilege split (a packaging world where
+uinput access requires a system service), if sandboxing the device stack
+becomes a requirement, or if a genuinely cold cut appears. The first move is
+still a wire, not an abstraction.
+
 ## 2026-08: Device settings are keyed by identity, not by transport
 
 A device's config key was derived from how it was reached, so the same mouse
@@ -155,7 +299,10 @@ mature crates (`tempfile`, `which`, `plist`, `walkdir`, `xshell`, `sysinfo`,
   guarantee process spawn.
 - GUI helper launch keeps `/usr/bin/open -g -n` intentionally: it needs
   LaunchServices-specific flags to start the packaged agent under its own TCC
-  identity, which generic opener crates do not expose.
+  identity, which generic opener crates do not expose. (Since 2026-08 it is
+  the *fallback*: a registered login item is kickstarted through `launchctl`
+  instead, which supervises the agent as well — `open` remains for
+  unregistered installs and stays custom for the same reason.)
 - Agent autostart install keeps direct `systemctl` calls because it is managing
   systemd user units, not merely opening or spawning an arbitrary program.
 - Self-restart and `disclaim` launches stay custom because they are process

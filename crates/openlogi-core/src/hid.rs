@@ -8,15 +8,20 @@
 //! I/O of its own) depends on this module directly instead of linking the
 //! HID stack.
 
+pub mod backlight;
 pub mod dpi;
 pub mod error;
+pub mod fn_lock;
 pub mod light;
 pub mod pairing;
 pub mod route;
+pub mod scroll;
 pub mod smartshift;
 
+pub use backlight::{BacklightMode, BacklightState, BacklightStatus};
 pub use dpi::{Dpi, DpiCapabilities, DpiInfo};
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
+pub use fn_lock::FnLockState;
 pub use light::{LightCommand, commands_for_light_settings};
 pub use pairing::{Click, PairingError, PasskeyMethod, ReceiverSelector};
 pub use route::{
@@ -24,6 +29,7 @@ pub use route::{
     ReceiverDescriptor, ReceiverProtocol, find_receiver, is_receiver_pid, receiver_display_name,
     speaks_unifying_protocol,
 };
+pub use scroll::{ScrollReportingTarget, ScrollWheelMode};
 pub use smartshift::{
     SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque,
 };

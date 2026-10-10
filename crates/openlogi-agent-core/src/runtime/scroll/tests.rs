@@ -8,7 +8,7 @@ fn source() -> ScrollSource {
 }
 
 fn hidpp_source(device_key: &str, epoch: u64) -> ScrollSource {
-    ScrollSource::Hidpp(HidppSessionId::new(device_key, epoch))
+    ScrollSource::Hidpp(HidppSessionId::with_epoch(device_key, epoch))
 }
 
 fn wheel(x: f64, y: f64) -> WheelDelta {
@@ -305,4 +305,246 @@ fn source_cancellation_does_not_interrupt_another_source() {
         1,
         "the other device completes normally"
     );
+}
+
+fn phases(frames: &[ScrollFrame]) -> Vec<SmoothScrollPhase> {
+    frames.iter().map(|frame| frame.phase).collect()
+}
+
+#[test]
+fn phased_ticks_are_emitted_at_once_and_end_after_the_idle_window() {
+    let base = Instant::now();
+    let mut engine = ScrollEngine::default();
+    let mut frames = Vec::new();
+    for (millis, x) in [(0, 1.0), (30, 2.0), (60, -1.0)] {
+        let at = base + Duration::from_millis(millis);
+        engine.phased_impulse(source(), wheel(x, 0.0), at, &mut |frame| frames.push(frame));
+    }
+    assert_eq!(
+        phases(&frames),
+        [
+            SmoothScrollPhase::Began,
+            SmoothScrollPhase::Changed,
+            SmoothScrollPhase::Changed
+        ]
+    );
+    assert_delta(cumulative(&frames), wheel(2.0, 0.0));
+
+    // Each tick pushes the deadline out, so the gesture is still open just
+    // before the window after the last tick closes.
+    let last = base + Duration::from_millis(60);
+    assert_eq!(engine.next_deadline(), Some(last + PHASED_IDLE));
+    let almost = (last + PHASED_IDLE)
+        .checked_sub(Duration::from_millis(1))
+        .expect("instant stays representable");
+    engine.advance_due(almost, &mut |frame| frames.push(frame));
+    assert_eq!(frames.len(), 3);
+
+    engine.advance_due(last + PHASED_IDLE, &mut |frame| frames.push(frame));
+    assert_eq!(
+        frames.last().map(|f| f.phase),
+        Some(SmoothScrollPhase::Ended)
+    );
+    assert_delta(cumulative(&frames), wheel(2.0, 0.0));
+    assert_eq!(engine.next_deadline(), None);
+    assert!(engine.phased.is_empty());
+}
+
+#[test]
+fn queued_phased_ticks_start_a_new_gesture_after_an_idle_gap() {
+    let base = Instant::now();
+    let source = hidpp_source("mouse-a", 1);
+    let mut engine = ScrollEngine::default();
+    let mut frames = Vec::new();
+    engine.phased_impulse(source.clone(), wheel(1.0, 0.0), base, &mut |f| {
+        frames.push(f);
+    });
+
+    let later = base + PHASED_IDLE + Duration::from_millis(1);
+    engine.phased_impulse(source, wheel(2.0, 0.0), later, &mut |f| frames.push(f));
+    assert_eq!(
+        phases(&frames),
+        [
+            SmoothScrollPhase::Began,
+            SmoothScrollPhase::Ended,
+            SmoothScrollPhase::Began
+        ]
+    );
+    assert_delta(cumulative(&frames), wheel(3.0, 0.0));
+
+    engine.advance_due(later + PHASED_IDLE, &mut |f| frames.push(f));
+    assert_eq!(
+        phases(&frames),
+        [
+            SmoothScrollPhase::Began,
+            SmoothScrollPhase::Ended,
+            SmoothScrollPhase::Began,
+            SmoothScrollPhase::Ended
+        ]
+    );
+    assert_delta(cumulative(&frames), wheel(3.0, 0.0));
+}
+
+#[test]
+fn queued_phased_tick_keeps_another_active_source_in_the_same_gesture() {
+    let base = Instant::now();
+    let first = hidpp_source("mouse-a", 1);
+    let second = hidpp_source("mouse-b", 1);
+    let mut engine = ScrollEngine::default();
+    let mut frames = Vec::new();
+    engine.phased_impulse(first.clone(), wheel(1.0, 0.0), base, &mut |f| {
+        frames.push(f);
+    });
+    engine.phased_impulse(second, wheel(2.0, 0.0), base + PHASED_IDLE / 2, &mut |f| {
+        frames.push(f);
+    });
+
+    let later = base + PHASED_IDLE + Duration::from_millis(1);
+    engine.phased_impulse(first, wheel(3.0, 0.0), later, &mut |f| frames.push(f));
+    assert_eq!(
+        phases(&frames),
+        [
+            SmoothScrollPhase::Began,
+            SmoothScrollPhase::Changed,
+            SmoothScrollPhase::Changed
+        ]
+    );
+    assert_delta(cumulative(&frames), wheel(6.0, 0.0));
+
+    engine.advance_due(later + PHASED_IDLE, &mut |f| frames.push(f));
+    assert_eq!(
+        phases(&frames),
+        [
+            SmoothScrollPhase::Began,
+            SmoothScrollPhase::Changed,
+            SmoothScrollPhase::Changed,
+            SmoothScrollPhase::Ended
+        ]
+    );
+    assert_delta(cumulative(&frames), wheel(6.0, 0.0));
+}
+
+#[test]
+fn a_new_phased_gesture_begins_again_after_the_previous_one_ended() {
+    let base = Instant::now();
+    let mut engine = ScrollEngine::default();
+    let mut frames = Vec::new();
+    engine.phased_impulse(source(), wheel(1.0, 0.0), base, &mut |f| frames.push(f));
+    engine.advance_due(base + PHASED_IDLE, &mut |f| frames.push(f));
+    let later = base + PHASED_IDLE * 5;
+    engine.phased_impulse(source(), wheel(1.0, 0.0), later, &mut |f| frames.push(f));
+    engine.advance_due(later + PHASED_IDLE, &mut |f| frames.push(f));
+    assert_eq!(
+        phases(&frames),
+        [
+            SmoothScrollPhase::Began,
+            SmoothScrollPhase::Ended,
+            SmoothScrollPhase::Began,
+            SmoothScrollPhase::Ended
+        ]
+    );
+}
+
+#[test]
+fn concurrent_phased_sources_share_one_gesture_until_all_are_idle() {
+    let base = Instant::now();
+    let first = hidpp_source("mouse-a", 1);
+    let second = hidpp_source("mouse-b", 1);
+    let mut engine = ScrollEngine::default();
+    let mut frames = Vec::new();
+    engine.phased_impulse(first, wheel(1.0, 0.0), base, &mut |f| frames.push(f));
+    let later = base + Duration::from_millis(100);
+    engine.phased_impulse(second, wheel(1.0, 0.0), later, &mut |f| frames.push(f));
+
+    // The first source is idle here, but the second is not.
+    engine.advance_due(base + PHASED_IDLE, &mut |f| frames.push(f));
+    assert_eq!(
+        phases(&frames),
+        [SmoothScrollPhase::Began, SmoothScrollPhase::Changed]
+    );
+
+    engine.advance_due(later + PHASED_IDLE, &mut |f| frames.push(f));
+    assert_eq!(
+        frames.last().map(|f| f.phase),
+        Some(SmoothScrollPhase::Ended)
+    );
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|f| f.phase == SmoothScrollPhase::Ended)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn cancelling_a_phased_gesture_emits_one_terminal_phase_and_clears_state() {
+    let base = Instant::now();
+    let first = hidpp_source("mouse-a", 1);
+    let second = hidpp_source("mouse-b", 1);
+    let mut engine = ScrollEngine::default();
+    let mut frames = Vec::new();
+    engine.phased_impulse(first.clone(), wheel(1.0, 0.0), base, &mut |f| {
+        frames.push(f);
+    });
+    engine.phased_impulse(second, wheel(1.0, 0.0), base, &mut |f| frames.push(f));
+
+    engine.cancel_source(&first, &mut |f| frames.push(f));
+    assert!(
+        frames
+            .iter()
+            .all(|f| f.phase != SmoothScrollPhase::Cancelled),
+        "another source is still inside the gesture"
+    );
+
+    engine.cancel_all(&mut |f| frames.push(f));
+    assert_eq!(
+        frames.last().map(|f| f.phase),
+        Some(SmoothScrollPhase::Cancelled)
+    );
+    assert!(engine.phased.is_empty());
+    assert_eq!(engine.next_deadline(), None);
+}
+
+#[test]
+fn a_smooth_motion_finishing_inside_a_phased_gesture_does_not_end_the_stream() {
+    let base = Instant::now();
+    let mut engine = ScrollEngine::default();
+    let mut frames = Vec::new();
+    engine.phased_impulse(
+        hidpp_source("mouse-a", 1),
+        wheel(1.0, 0.0),
+        base,
+        &mut |f| frames.push(f),
+    );
+    engine.impulse(
+        hidpp_source("mouse-b", 1),
+        wheel(1.0, 0.0),
+        base,
+        &mut |f| {
+            frames.push(f);
+        },
+    );
+
+    // The smooth motion completes first (100 ms) while the phased gesture is
+    // still inside its idle window (120 ms), so the stream must stay open.
+    engine.advance_due(base + ANIMATION_DURATION, &mut |f| frames.push(f));
+    assert!(
+        frames.iter().all(|f| f.phase != SmoothScrollPhase::Ended),
+        "the phased source still owns the end of the stream"
+    );
+
+    engine.advance_due(base + PHASED_IDLE, &mut |f| frames.push(f));
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|f| f.phase == SmoothScrollPhase::Ended)
+            .count(),
+        1
+    );
+    assert_eq!(
+        frames.last().map(|f| f.phase),
+        Some(SmoothScrollPhase::Ended)
+    );
+    assert_delta(cumulative(&frames), wheel(2.0, 0.0));
 }
