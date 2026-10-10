@@ -220,6 +220,20 @@ impl DeviceIdentity {
         }
     }
 
+    /// Identity to feed [`crate::config::Config::resolve_device_key`] and
+    /// [`crate::config::canonical_device_key`] for one inventory sighting.
+    ///
+    /// Always returns `Some(self)`. Offline Easy-Switch sibling slots on a
+    /// Bolt receiver often retain a cached serial or unit id; offering that
+    /// identity lets them share one config key with an online sibling so the
+    /// gallery and agent fold to a single device (#1560). A non-physical
+    /// identity still yields `None` from [`Self::config_key`], so resolution
+    /// falls back to the route key.
+    #[must_use]
+    pub const fn resolve_hint(&self) -> Option<&Self> {
+        Some(self)
+    }
+
     /// This identity formatted as a bare `serial:`/`unit:` fragment, with no
     /// route information. Callers that only want a key for a physical
     /// identity should gate this behind [`Self::is_physical`] first.
