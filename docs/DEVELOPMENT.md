@@ -497,13 +497,14 @@ translations land in git.
 Each run:
 
 1. Snapshots every `locales/*.toml`.
-2. Uploads `en.toml` **sources**.
-3. Uploads **per-language translations** already in git (`import_eq_suggestions`
+2. Deletes a leftover `en.yml` source and adds any `export_languages` id the project lacks.
+3. Uploads `en.toml` **sources**.
+4. Uploads **per-language translations** already in git (`import_eq_suggestions`
    off so `value == English` is not stored as a finished translation).
-4. Downloads Crowdin’s export (`skip_untranslated_strings`; sparse is fine).
-5. Merges the export into the snapshot (English fill-in ignored; omitted keys
+5. Downloads Crowdin’s export (`skip_untranslated_strings`; sparse is fine).
+6. Merges the export into the snapshot (English fill-in ignored; omitted keys
    kept; headers / `_version` preserved).
-6. Opens/updates `crowdin/i18n` only when the working tree still differs.
+7. Opens/updates `crowdin/i18n` only when the working tree still differs.
 
 Like the release workflow, the job reads its credentials from one 1Password
 item referenced by the GitHub secret `OP_CROWDIN_SECRET_ITEM`. The item must
@@ -515,7 +516,7 @@ contain:
 Grant the token only these scopes and restrict its granular access to the
 OpenLogi project:
 
-- Projects (List, Get, Create, Edit) — Read.
+- Projects (List, Get, Create) — Read. Projects (Edit) — Read and Write.
 - Translation Status — Read Only.
 - Source files & strings — Read and Write.
 - Translations — Read and Write.
@@ -534,4 +535,5 @@ Local helpers (with Crowdin credentials configured):
 devenv tasks run openlogi:i18n-upload    # en.toml sources + per-language translations
 devenv tasks run openlogi:i18n-download  # download + merge + i18n tests
 python3 .github/scripts/i18n/merge_crowdin_download.py --self-test
+python3 .github/scripts/i18n/prepare_crowdin_upload.py --self-test
 ```
