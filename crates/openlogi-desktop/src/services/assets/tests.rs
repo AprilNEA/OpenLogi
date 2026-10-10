@@ -402,6 +402,7 @@ fn resolves_depot_with_named_manifest_and_non_standard_render() {
         write_root: root.path().to_path_buf(),
         has_bundle: false,
         index: None,
+        resolved: RefCell::default(),
     };
     let entry = DeviceEntry {
         model_id: "c339".to_string(),
