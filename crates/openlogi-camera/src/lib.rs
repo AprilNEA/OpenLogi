@@ -24,9 +24,9 @@ pub use capture_types::{CaptureError, Frame};
 mod macos;
 
 #[cfg(target_os = "macos")]
-mod capture;
+mod capture_macos;
 #[cfg(target_os = "macos")]
-pub use capture::{
+pub use capture_macos::{
     CameraStream, camera_access_granted, camera_authorization, capture_frame,
     request_camera_access, start_stream,
 };
@@ -43,9 +43,9 @@ pub use capture_windows::{
 };
 
 #[cfg(target_os = "macos")]
-mod uvc;
+mod uvc_macos;
 #[cfg(target_os = "macos")]
-pub use uvc::{
+pub use uvc_macos::{
     apply_settings, control_range, control_ranges, read_camera_state, set_auto, set_control,
 };
 
@@ -289,7 +289,7 @@ fn enumerate_all() -> Vec<Camera> {
     let _quiesce = USB_QUIESCE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let serials = uvc::usb_serials_by_location();
+    let serials = uvc_macos::usb_serials_by_location();
     macos::enumerate()
         .iter()
         .filter_map(|raw| {
@@ -300,7 +300,7 @@ fn enumerate_all() -> Vec<Camera> {
             if raw.max_fps > 0 {
                 camera.max_fps = Some(raw.max_fps);
             }
-            if let Some(location) = uvc::location_hint(&raw.unique_id) {
+            if let Some(location) = uvc_macos::location_hint(&raw.unique_id) {
                 camera.serial_number = serials.get(&location).cloned();
             }
             Some(camera)

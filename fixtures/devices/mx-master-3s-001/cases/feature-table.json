@@ -1,0 +1,242 @@
+{
+  "schema_version": 1,
+  "name": "feature-table",
+  "channel": "target",
+  "report_support": "long_only",
+  "exchanges": [
+    {
+      "request_match": "hidpp20",
+      "request": "11ff001000000000000000000000000000000000",
+      "response": "11ff001004050000000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff000000010000000000000000000000000000",
+      "response": "11ff000001000200000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff010000000000000000000000000000000000",
+      "response": "11ff010023000000000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff011000000000000000000000000000000000",
+      "response": "11ff011000000002000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff011001000000000000000000000000000000",
+      "response": "11ff011000010002000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff011002000000000000000000000000000000",
+      "response": "11ff011000030004000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff011003000000000000000000000000000000",
+      "response": "11ff011000050000000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff011004000000000000000000000000000000",
+      "response": "11ff01101d4b0000000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff011005000000000000000000000000000000",
+      "response": "11ff011000200000000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff011006000000000000000000000000000000",
+      "response": "11ff011000210001000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff011007000000000000000000000000000000",
+      "response": "11ff011000070000000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff011008000000000000000000000000000000",
+      "response": "11ff011010040003000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff011009000000000000000000000000000000",
+      "response": "11ff01101b040005000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff01100a000000000000000000000000000000",
+      "response": "11ff011018140001000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff01100b000000000000000000000000000000",
+      "response": "11ff011018150002000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff01100c000000000000000000000000000000",
+      "response": "11ff011022500001000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff01100d000000000000000000000000000000",
+      "response": "11ff011022010002000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff01100e000000000000000000000000000000",
+      "response": "11ff011021100000000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff01100f000000000000000000000000000000",
+      "response": "11ff011021210001000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff011010000000000000000000000000000000",
+      "response": "11ff011021500000000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff011011000000000000000000000000000000",
+      "response": "11ff011022510000000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff011012000000000000000000000000000000",
+      "response": "11ff011000c30000000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff011013000000000000000000000000000000",
+      "response": "11ff011018027000000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff011014000000000000000000000000000000",
+      "response": "11ff011018037000000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff011015000000000000000000000000000000",
+      "response": "11ff011018067008000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff011016000000000000000000000000000000",
+      "response": "11ff011018167000000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff011017000000000000000000000000000000",
+      "response": "11ff011018056000000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff011018000000000000000000000000000000",
+      "response": "11ff011018307000000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff011019000000000000000000000000000000",
+      "response": "11ff011018916807000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff01101a000000000000000000000000000000",
+      "response": "11ff011018a17000000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff01101b000000000000000000000000000000",
+      "response": "11ff01101e004000000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff01101c000000000000000000000000000000",
+      "response": "11ff01101e026000000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff01101d000000000000000000000000000000",
+      "response": "11ff011016020000000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff01101e000000000000000000000000000000",
+      "response": "11ff01101eb07000000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff01101f000000000000000000000000000000",
+      "response": "11ff011018617001000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff011020000000000000000000000000000000",
+      "response": "11ff011093007000000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff011021000000000000000000000000000000",
+      "response": "11ff011090017000000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff011022000000000000000000000000000000",
+      "response": "11ff01101e227000000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff011023000000000000000000000000000000",
+      "response": "11ff011092057000000000000000000000000000",
+      "required": true
+    }
+  ]
+}

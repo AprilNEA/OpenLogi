@@ -18,8 +18,8 @@ use crate::channel::route::DeviceRoute;
 use super::{HidppOperation, WriteError, classify_hidpp_error, with_route};
 
 // DpiCapabilities and DpiInfo are pure IPC wire data with no HID++ I/O, so
-// they live in `openlogi_core::hid::dpi`; re-exported here unchanged so this
-// module's own API surface doesn't churn.
+// they live in `openlogi_core::hid::dpi`; the DPI writes name them through
+// here.
 pub use openlogi_core::hid::dpi::{Dpi, DpiCapabilities, DpiInfo};
 
 /// Sensor 0 is the only sensor OpenLogi drives: the UI exposes one DPI value

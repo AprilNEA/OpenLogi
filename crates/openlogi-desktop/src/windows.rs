@@ -16,9 +16,9 @@ pub mod update_consent;
 
 use crate::ui::theme::Typography as _;
 use gpui::{
-    App, AppContext as _, Bounds, Context, Global, IntoElement, ParentElement as _, Pixels, Render,
-    SharedString, Size, Styled as _, Subscription, TitlebarOptions, WindowBounds, WindowHandle,
-    WindowOptions, div,
+    App, AppContext as _, Bounds, Context, Decorations, Global, IntoElement, ParentElement as _,
+    Pixels, Render, SharedString, Size, Styled as _, Subscription, TitlebarOptions, Window,
+    WindowBounds, WindowHandle, WindowOptions, div,
 };
 use gpui_component::{ActiveTheme as _, Root, TitleBar};
 use openlogi_core::brand::APP_ID;
@@ -39,13 +39,30 @@ pub struct WindowRegistry {
 
 impl Global for WindowRegistry {}
 
+/// Whether this window has to draw its own titlebar.
+///
+/// Only when the compositor actually declined server-side decorations. GNOME's
+/// Mutter does not implement `xdg-decoration`, so gpui falls back to
+/// client-side and nothing paints the chrome unless we do — which is why the
+/// titlebar used to be drawn on Linux unconditionally. KWin *does* implement
+/// it and hands back a real server-side titlebar, so that blanket rule put a
+/// second one underneath it (#890).
+///
+/// macOS and Windows always report `Server` here, so the single check covers
+/// every platform without a `cfg`.
+#[must_use]
+pub fn needs_client_titlebar(window: &Window) -> bool {
+    matches!(window.window_decorations(), Decorations::Client { .. })
+}
+
 /// Titlebar options for an app window.
 ///
-/// On Linux this returns transparent options so the view can draw a client-side
-/// [`TitleBar`] (see [`aux_title_bar`]); the compositor declines server-side
-/// decorations there and gpui's client-side fallback is otherwise unpainted,
-/// leaving the window with no titlebar or controls. On macOS / Windows it keeps
-/// the native titlebar carrying `title`, unchanged.
+/// On Linux this returns transparent options so the view *can* draw a
+/// client-side [`TitleBar`] (see [`aux_title_bar`]) on the compositors that
+/// leave it to the app. Whether it actually does is
+/// [`needs_client_titlebar`]'s call, made per window from what the compositor
+/// negotiated. On macOS / Windows this keeps the native titlebar carrying
+/// `title`, unchanged.
 pub fn titlebar_options(title: impl Into<SharedString>) -> TitlebarOptions {
     if cfg!(target_os = "linux") {
         TitleBar::title_bar_options()

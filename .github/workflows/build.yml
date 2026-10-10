@@ -590,6 +590,9 @@ jobs:
             Write-Error "expected 4 staged files, found $staged — a name collision dropped one"
             exit 1
           }
+          # The MSI extracts this ZIP but only installs its explicitly listed
+          # executables, so the portable marker never enters an MSI install.
+          Copy-Item packaging\windows\openlogi-installation.json stage\openlogi-installation.json
           # Zipping after signing is safe: Authenticode lives in the PE files.
           $ref = $env:GITHUB_REF_NAME -replace '/', '-'
           Compress-Archive -Path stage\* -DestinationPath "dist\OpenLogi-$ref-windows-${{ matrix.arch }}.zip"

@@ -4,6 +4,7 @@
 
 pub mod accessibility;
 pub mod camera;
+mod capture_manager;
 mod capture_session;
 pub mod foreground_app;
 pub mod gesture;
@@ -12,4 +13,7 @@ pub mod input_monitoring;
 pub mod inventory;
 pub mod keyboard;
 pub mod pairing;
+pub mod pointer;
 mod poll;
+mod retry;
+pub mod shutdown;

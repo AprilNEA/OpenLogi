@@ -29,6 +29,7 @@ use fluent_langneg::{LanguageIdentifier, NegotiationStrategy, negotiate_language
 /// native-name alphabetical within each script.
 pub const SUPPORTED: &[(&str, &str)] = &[
     ("be", "Беларуская"),
+    ("cs", "Čeština"),
     ("da", "Dansk"),
     ("de", "Deutsch"),
     ("en", "English"),
@@ -159,6 +160,9 @@ mod tests {
         assert_eq!(match_supported("zh-Hant"), Some("zh-TW"));
         assert_eq!(match_supported("zh-HK"), Some("zh-HK"));
         assert_eq!(match_supported("zh-Hant-HK"), Some("zh-HK"));
+        assert_eq!(match_supported("cs"), Some("cs"));
+        assert_eq!(match_supported("cs-CZ"), Some("cs"));
+        assert_eq!(match_supported("cs_CZ"), Some("cs"));
         assert_eq!(match_supported("ja"), Some("ja"));
         assert_eq!(match_supported("ja-JP"), Some("ja"));
         assert_eq!(match_supported("ru"), Some("ru"));
@@ -187,6 +191,7 @@ mod tests {
     #[test]
     fn explicit_setting_wins_over_system() {
         assert_eq!(resolve(Some("zh-CN")), "zh-CN");
+        assert_eq!(resolve(Some("cs")), "cs");
         // An unknown stored code falls through to system/`en`, never panics.
         assert!(
             SUPPORTED

@@ -82,17 +82,25 @@ pub(super) fn candidate_manifest_bases(
 ) -> Vec<String> {
     let mut candidates = Vec::new();
     for id in entry.model_id_candidates() {
-        if !candidates.iter().any(|c: &String| c.eq_ignore_ascii_case(id)) {
+        if !candidates
+            .iter()
+            .any(|c: &String| c.eq_ignore_ascii_case(id))
+        {
             candidates.push(id.to_string());
         }
     }
-    if !candidates.iter().any(|c: &String| c.eq_ignore_ascii_case(depot)) {
+    if !candidates
+        .iter()
+        .any(|c: &String| c.eq_ignore_ascii_case(depot))
+    {
         candidates.push(depot.to_string());
     }
     if let Some((stem, suffix)) = depot.rsplit_once("_ext")
         && !suffix.is_empty()
         && suffix.chars().all(|c| c.is_ascii_digit())
-        && !candidates.iter().any(|c: &String| c.eq_ignore_ascii_case(stem))
+        && !candidates
+            .iter()
+            .any(|c: &String| c.eq_ignore_ascii_case(stem))
     {
         candidates.push(stem.to_string());
     }
@@ -109,6 +117,22 @@ pub(super) fn buttons_image_for(
 ) -> Option<String> {
     manifest
         .resource_for_variant(base_model_id, ext, "device_buttons_image")
+        .map(str::to_string)
+}
+
+/// Like [`variant_image_for`] but returns the `image_metadata` resource —
+/// the hotspot-metadata JSON calibrated against this colour variant's
+/// renders. Depots whose variants are *handed* rather than coloured ship no
+/// well-known metadata name at all (Lift keys its metadata as
+/// `core_metadata_left.json` / `core_metadata_right.json`), so the manifest
+/// is the only place their filename appears.
+pub(super) fn metadata_for(
+    manifest: &DepotManifest,
+    base_model_id: &str,
+    ext: u8,
+) -> Option<String> {
+    manifest
+        .resource_for_variant(base_model_id, ext, "image_metadata")
         .map(str::to_string)
 }
 
