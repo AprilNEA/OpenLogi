@@ -16,6 +16,7 @@ use openlogi_core::bindings::{button_bindings_for, hidpp_gesture_maps_for, oshoo
 use openlogi_core::config::{Config, ThumbwheelSensitivity};
 use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_hid::DeviceRoute;
+use openlogi_hid::reprog_controls::DPI_MODE_SHIFT_CIDS;
 use openlogi_hid::session::gesture::{
     CaptureSpec, DIVERTABLE_STANDARD_BUTTONS, GESTURE_SOURCE_BUTTONS,
 };
@@ -63,6 +64,9 @@ pub struct DispatchPlan {
     /// This device's effective thumb-wheel sensitivity (device override or the
     /// app-wide default).
     pub thumbwheel_sensitivity: ThumbwheelSensitivity,
+    /// Pointer identity used to select these mouse bindings; absent for the
+    /// explicitly focused policy and keyboard input.
+    pub pointer_target: Option<openlogi_hook::PointerTarget>,
 }
 
 /// One device's independently versioned hardware target and dispatch plan.
@@ -72,6 +76,36 @@ pub struct DeviceCapturePlan {
     pub target: CaptureTarget,
     /// Hot-replaceable action resolution for input from that target.
     pub dispatch: DispatchPlan,
+}
+
+impl DeviceCapturePlan {
+    /// Hand the `0x1b04` controls in `owned` to another session on the same
+    /// device: they leave every divert set of this plan, and the dispatch map
+    /// keeps resolving them so a press the other session forwards still finds
+    /// its action.
+    pub(crate) fn release_controls(&mut self, owned: &BTreeMap<u16, ButtonId>) {
+        let spec = &mut self.target.spec;
+        let before = spec.divert_buttons.len()
+            + spec.divert_gesture_buttons.len()
+            + spec.divert_gesture_sources.len();
+        spec.divert_buttons
+            .retain(|(cid, _)| !owned.contains_key(cid));
+        spec.divert_gesture_buttons
+            .retain(|(cid, _)| !owned.contains_key(cid));
+        spec.divert_gesture_sources
+            .retain(|cid| !owned.contains_key(cid));
+        let released = before
+            - spec.divert_buttons.len()
+            - spec.divert_gesture_buttons.len()
+            - spec.divert_gesture_sources.len();
+        if released > 0 {
+            tracing::debug!(
+                released,
+                route = %self.target.route,
+                "controls left to the keyboard session"
+            );
+        }
+    }
 }
 
 /// Read-only, lossless, coalescing view of the latest capture-plan snapshot.
@@ -115,15 +149,22 @@ pub fn plan_for_device(
     // One direction map per HID++ source in gesture mode — several may
     // gesture at once, each armed with its own raw-XY divert (the capture
     // target below derives the CIDs to divert from this map's keys).
-    let gesture_bindings = hidpp_gesture_maps_for(config, Some(config_key));
-    let divert_gesture_buttons = if os_mouse_hook_available {
-        DIVERTABLE_STANDARD_BUTTONS
-            .into_iter()
-            .filter(|(_, button)| side_gesture_bindings.contains_key(button))
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
+    let gesture_bindings = hidpp_gesture_maps_for(config, Some(config_key), app);
+    let mut divert_gesture_buttons = Vec::new();
+    if os_mouse_hook_available {
+        divert_gesture_buttons.extend(
+            DIVERTABLE_STANDARD_BUTTONS
+                .into_iter()
+                .filter(|(_, button)| side_gesture_bindings.contains_key(button)),
+        );
+    }
+    if gesture_bindings.contains_key(&ButtonId::DpiToggle) {
+        divert_gesture_buttons.extend(
+            DPI_MODE_SHIFT_CIDS
+                .into_iter()
+                .map(|cid| (cid, ButtonId::DpiToggle)),
+        );
+    }
     // The HID++ gesture sources never reach the OS hook, so a non-default
     // single binding on one is deliverable only via a plain HID++ divert — but
     // only while the source is NOT in gesture mode (the raw-XY gesture divert
@@ -147,10 +188,9 @@ pub fn plan_for_device(
                     return true;
                 }
                 let action = binding.click_action();
-                // The panel's default is ShowActionsRing, which must be
-                // diverted to open the ring. Action::None means "leave native
-                // firmware haptics alone", so treat None as the only non-divert.
-                if *button == ButtonId::HapticPanel {
+                // Gesture sources have no host-visible firmware action, so any
+                // single binding needs the divert. `None` leaves them native.
+                if GESTURE_SOURCE_BUTTONS.iter().any(|(_, source)| source == button) {
                     action != Action::None
                 } else {
                     action != default_binding(*button)
@@ -193,6 +233,7 @@ pub fn plan_for_device(
             gesture_bindings,
             side_gesture_bindings,
             thumbwheel_sensitivity,
+            pointer_target: None,
         },
     }
 }
@@ -229,6 +270,18 @@ mod tests {
             rearm_generation,
             os_mouse_hook_available,
         )
+    }
+
+    /// Whether `plan` diverts `button` at all. The plan filters the divert
+    /// list per button, so every CID a button maps to is in or out together;
+    /// which CIDs those are is the device layer's table, not this crate's
+    /// concern.
+    fn diverts(plan: &DeviceCapturePlan, button: ButtonId) -> bool {
+        plan.target
+            .spec
+            .divert_buttons
+            .iter()
+            .any(|&(_, diverted)| diverted == button)
     }
 
     #[test]
@@ -320,35 +373,97 @@ mod tests {
     }
 
     #[test]
-    fn thumb_button_bound_to_a_browser_action_is_diverted() {
-        // BrowserBack used to be the default action for Back, so choosing it
-        // in the GUI matched the default and the button was never diverted.
-        let mut cfg = Config::default();
-        cfg.set_binding(
-            "2b023",
-            ButtonId::Back,
-            Binding::Single(Action::BrowserBack),
-        );
+    fn thumb_button_capture_distinguishes_native_and_browser_actions() {
+        for (button, native, browser) in [
+            (ButtonId::Back, Action::MouseBack, Action::BrowserBack),
+            (
+                ButtonId::Forward,
+                Action::MouseForward,
+                Action::BrowserForward,
+            ),
+        ] {
+            for (stored, expected_action, diverted) in [
+                (None, native.clone(), false),
+                (Some(native.clone()), native, false),
+                (Some(browser.clone()), browser, true),
+            ] {
+                let mut cfg = Config::default();
+                if let Some(action) = stored {
+                    cfg.set_binding("2b023", button, Binding::Single(action));
+                }
 
-        let plan = plan_for_device(&cfg, "2b023", route(), None, 0, true);
-        assert!(
-            plan.target
-                .spec
-                .divert_buttons
-                .iter()
-                .any(|&(_, button)| button == ButtonId::Back),
-            "a thumb button bound to a browser action must be diverted: {:?}",
-            plan.target.spec.divert_buttons
-        );
-        assert!(
-            !plan
-                .target
-                .spec
-                .divert_buttons
-                .iter()
-                .any(|&(_, button)| button == ButtonId::Forward),
-            "the untouched forward button must keep its native button 5"
-        );
+                let plan = plan_for_device(&cfg, "2b023", route(), None, 0, true);
+                assert_eq!(
+                    plan.dispatch.bindings.get(&button),
+                    Some(&Binding::Single(expected_action)),
+                    "{button:?} must resolve unset bindings to native clicks"
+                );
+                for side in [ButtonId::Back, ButtonId::Forward] {
+                    assert_eq!(
+                        diverts(&plan, side),
+                        diverted && side == button,
+                        "only an explicitly browser-bound {button:?} should be diverted"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn thumb_button_capture_follows_per_app_overrides_and_inheritance() {
+        for (button, native, browser) in [
+            (ButtonId::Back, Action::MouseBack, Action::BrowserBack),
+            (
+                ButtonId::Forward,
+                Action::MouseForward,
+                Action::BrowserForward,
+            ),
+        ] {
+            for (global, overridden, global_diverted) in [
+                (native.clone(), browser.clone(), false),
+                (browser, native, true),
+            ] {
+                let mut cfg = Config::default();
+                cfg.set_binding("2b023", button, Binding::Single(global.clone()));
+                cfg.set_per_app_binding(
+                    "2b023",
+                    "com.apple.Safari",
+                    button,
+                    Some(overridden.clone()),
+                );
+
+                for (app, expected_action, diverted) in [
+                    (None, &global, global_diverted),
+                    (Some("com.apple.Safari"), &overridden, !global_diverted),
+                    (Some("com.example.Other"), &global, global_diverted),
+                ] {
+                    let plan = plan_for_device(&cfg, "2b023", route(), app, 0, true);
+                    assert_eq!(
+                        plan.dispatch.bindings.get(&button),
+                        Some(&Binding::Single(expected_action.clone())),
+                        "{button:?} dispatch must resolve the profile for {app:?}"
+                    );
+                    assert_eq!(
+                        diverts(&plan, button),
+                        diverted,
+                        "{button:?} capture must follow its effective binding for {app:?}"
+                    );
+                }
+
+                cfg.set_per_app_binding("2b023", "com.apple.Safari", button, None);
+                let inherited =
+                    plan_for_device(&cfg, "2b023", route(), Some("com.apple.Safari"), 0, true);
+                assert_eq!(
+                    inherited.dispatch.bindings.get(&button),
+                    Some(&Binding::Single(global))
+                );
+                assert_eq!(
+                    diverts(&inherited, button),
+                    global_diverted,
+                    "clearing {button:?}'s app override must restore global capture"
+                );
+            }
+        }
     }
 
     #[test]
@@ -488,11 +603,30 @@ mod tests {
     }
 
     #[test]
-    fn gestures_off_default_gesture_button_stays_native() {
-        // With gestures off and no explicit binding, the gesture button keeps
-        // its native HID behavior — same contract as the standard buttons.
+    fn gestures_off_gesture_button_is_diverted_for_its_single_action() {
+        // Turning gestures off leaves `Single(MissionControl)`. The firmware
+        // gives the gesture button no host action, so that must be diverted.
         let mut cfg = Config::default();
         cfg.set_gesture_mode("2b042", ButtonId::GestureButton, false);
+
+        let plan = plan_for_device(&cfg, "2b042", route(), None, 0, true);
+        assert!(
+            plan.target
+                .spec
+                .divert_buttons
+                .contains(&(GESTURE_BUTTON_CID, ButtonId::GestureButton)),
+            "a gestures-off Mission Control binding must reach the agent"
+        );
+    }
+
+    #[test]
+    fn gesture_button_bound_to_none_stays_native() {
+        let mut cfg = Config::default();
+        cfg.set_binding(
+            "2b042",
+            ButtonId::GestureButton,
+            Binding::Single(Action::None),
+        );
 
         let plan = plan_for_device(&cfg, "2b042", route(), None, 0, true);
         assert!(
@@ -502,28 +636,35 @@ mod tests {
                 .divert_buttons
                 .iter()
                 .any(|&(cid, _)| cid == GESTURE_BUTTON_CID),
-            "an unbound gesture button must not be captured"
+            "an explicitly unbound gesture button must not be captured"
         );
     }
 
     #[test]
-    fn macos_side_gesture_requests_hidpp_raw_xy_capture() {
+    fn macos_side_gestures_request_hidpp_raw_xy_capture() {
         let mut cfg = Config::default();
+        cfg.set_gesture_mode("2b042", ButtonId::Back, true);
         cfg.set_gesture_mode("2b042", ButtonId::Forward, true);
+        cfg.set_gesture_mode("2b042", ButtonId::MiddleClick, true);
 
         let plan = plan_for_device(&cfg, "2b042", route(), None, 0, true);
         if cfg!(target_os = "macos") {
-            assert!(
+            assert_eq!(
                 plan.dispatch
                     .side_gesture_bindings
-                    .contains_key(&ButtonId::Forward)
+                    .keys()
+                    .copied()
+                    .collect::<Vec<_>>(),
+                vec![ButtonId::Back, ButtonId::Forward],
+                "only the senderless side buttons use device-owned gesture dispatch"
             );
-            assert!(
-                plan.target
-                    .spec
-                    .divert_gesture_buttons
-                    .contains(&(0x0056, ButtonId::Forward)),
-                "Forward must be requested as a HID++ raw-XY gesture source"
+            let expected: Vec<_> = DIVERTABLE_STANDARD_BUTTONS
+                .into_iter()
+                .filter(|(_, button)| matches!(button, ButtonId::Back | ButtonId::Forward))
+                .collect();
+            assert_eq!(
+                plan.target.spec.divert_gesture_buttons, expected,
+                "every known Back/Forward CID must be requested as a HID++ raw-XY gesture source"
             );
             assert!(
                 !plan
@@ -531,13 +672,92 @@ mod tests {
                     .spec
                     .divert_buttons
                     .iter()
-                    .any(|&(_, button)| button == ButtonId::Forward),
-                "a gesture hold must not also be a plain divert"
+                    .any(|&(_, button)| matches!(button, ButtonId::Back | ButtonId::Forward)),
+                "a side-button gesture hold must not also be a plain divert"
+            );
+            assert!(
+                !plan
+                    .target
+                    .spec
+                    .divert_gesture_buttons
+                    .iter()
+                    .any(|&(_, button)| button == ButtonId::MiddleClick)
             );
         } else {
             assert!(plan.dispatch.side_gesture_bindings.is_empty());
             assert!(plan.target.spec.divert_gesture_buttons.is_empty());
         }
+    }
+
+    #[test]
+    fn dpi_gesture_requests_every_modeshift_cid_without_the_os_hook() {
+        let mut cfg = Config::default();
+        cfg.set_gesture_mode("2b042", ButtonId::DpiToggle, true);
+
+        let plan = plan_for_device(&cfg, "2b042", route(), None, 0, false);
+        assert!(
+            plan.dispatch
+                .gesture_bindings
+                .contains_key(&ButtonId::DpiToggle)
+        );
+        assert_eq!(
+            plan.target.spec.divert_gesture_buttons,
+            DPI_MODE_SHIFT_CIDS
+                .into_iter()
+                .map(|cid| (cid, ButtonId::DpiToggle))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn dpi_gesture_capture_follows_the_app_override() {
+        let mut cfg = Config::default();
+        cfg.set_gesture_mode("2b042", ButtonId::DpiToggle, true);
+        for action in [Action::Paste, Action::None] {
+            cfg.set_per_app_binding(
+                "2b042",
+                "com.example.Editor",
+                ButtonId::DpiToggle,
+                Some(action.clone()),
+            );
+            for app in [None, Some("com.example.Editor"), Some("com.example.Other")] {
+                let overridden = app == Some("com.example.Editor");
+                let plan = plan_for_device(&cfg, "2b042", route(), app, 0, false);
+                assert_eq!(
+                    plan.dispatch
+                        .gesture_bindings
+                        .contains_key(&ButtonId::DpiToggle),
+                    !overridden
+                );
+                assert_eq!(
+                    plan.target
+                        .spec
+                        .divert_gesture_buttons
+                        .iter()
+                        .any(|&(_, button)| button == ButtonId::DpiToggle),
+                    !overridden
+                );
+                if overridden {
+                    assert_eq!(
+                        plan.dispatch.bindings.get(&ButtonId::DpiToggle),
+                        Some(&Binding::Single(action.clone()))
+                    );
+                }
+            }
+        }
+        cfg.set_per_app_binding("2b042", "com.example.Editor", ButtonId::DpiToggle, None);
+        let restored =
+            plan_for_device(&cfg, "2b042", route(), Some("com.example.Editor"), 0, false);
+        assert!(
+            restored
+                .dispatch
+                .gesture_bindings
+                .contains_key(&ButtonId::DpiToggle)
+        );
+        assert_eq!(
+            restored.target.spec.divert_gesture_buttons.len(),
+            DPI_MODE_SHIFT_CIDS.len()
+        );
     }
 
     #[test]

@@ -12,4 +12,7 @@ pub(crate) mod foreground;
 mod hook;
 
 #[cfg(target_os = "windows")]
+pub(crate) mod pointer;
+
+#[cfg(target_os = "windows")]
 pub(crate) use hook::Backend;

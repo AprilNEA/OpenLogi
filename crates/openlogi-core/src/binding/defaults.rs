@@ -48,9 +48,9 @@ pub fn default_binding(button: ButtonId) -> Action {
             reason = "see the left tilt above — same control pair, mirrored direction"
         )]
         ButtonId::WheelTiltRight => Action::HorizontalScrollRight,
-        // Seeding this as BrowserBack made it unreachable: picking BrowserBack
-        // in the GUI matched the default, so capture_plan never diverted the
-        // button and the action never fired.
+        // Preserve native side-button events unless explicitly rebound.
+        // BrowserBack/BrowserForward are dispatched navigation actions: using
+        // them as seeds would make the capture plan skip their HID++ diversion.
         ButtonId::Back => Action::MouseBack,
         ButtonId::Forward => Action::MouseForward,
         ButtonId::DpiToggle => Action::CycleDpiPresets,
@@ -74,15 +74,7 @@ pub fn default_binding(button: ButtonId) -> Action {
         // Keyboard keys stay on their native firmware function until the user
         // explicitly binds them; an unbound key is never diverted, so a
         // `None` default keeps the projection total without capturing anything.
-        ButtonId::KeySearch
-        | ButtonId::KeyDictation
-        | ButtonId::KeyEmoji
-        | ButtonId::KeyScreenCapture
-        | ButtonId::KeyMicMute
-        | ButtonId::KeyPlayPause
-        | ButtonId::KeyMute
-        | ButtonId::KeyVolumeDown
-        | ButtonId::KeyVolumeUp => Action::None,
+        ButtonId::Control(_) => Action::None,
     }
 }
 

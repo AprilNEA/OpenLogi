@@ -4,7 +4,7 @@ use openlogi_fixture::{
     ProfileSupport,
 };
 
-use super::{State, standalone_route};
+use super::State;
 
 pub(super) fn built_in_profile() -> Result<DeviceProfile, String> {
     parse_profile(
@@ -29,6 +29,7 @@ pub(super) fn unsupported_settings(route: DeviceRoute) -> ProfileDeviceSettings 
         smartshift: ProfileSetting::Unsupported,
         wheel: ProfileSetting::Unsupported,
         backlight: ProfileSetting::Unsupported,
+        fn_lock: ProfileSetting::Unsupported,
         lighting: ProfileSupport::Unsupported,
         light: ProfileSupport::Unsupported,
     }
@@ -47,7 +48,7 @@ pub(super) fn validate_light_command(
         .profile
         .standalone
         .iter()
-        .find(|device| standalone_route(device) == *route)
+        .find(|device| device.route() == *route)
         .and_then(|device| device.light_capabilities)
         .ok_or(WriteError::DeviceNotFound)?;
     match command {

@@ -19,8 +19,7 @@ use crate::channel::route::{DeviceRoute, open_route_writer};
 use super::WriteError;
 
 // LightCommand is pure IPC wire data with no HID++ I/O, so it lives in
-// `openlogi_core::hid::light`; re-exported here unchanged so this module's
-// own API surface doesn't churn.
+// `openlogi_core::hid::light`; the Litra writes name it through here.
 pub use openlogi_core::hid::light::LightCommand;
 pub use openlogi_device_registry::litra::{
     LITRA_BEAM_PRODUCT_ID, LITRA_GLOW_PRODUCT_ID, LitraDescriptor, LitraModel, find_litra,

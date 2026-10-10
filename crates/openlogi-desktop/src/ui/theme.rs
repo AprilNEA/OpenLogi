@@ -366,7 +366,7 @@ pub fn apply_from_settings(window: Option<&mut Window>, cx: &mut App) {
 /// Faint accent fill marking a *selected* row / chip — tinted, not painted, so
 /// it reads on both palettes while the label stays in `text_primary` (a blue
 /// label fails AA contrast on the light surface). Hand-matched to [`accent`]
-/// (hue 0.6 / sat 0.9 / light 0.6); [`tests::accent_tint_matches_accent`] pins
+/// (hue 0.6 / sat 0.9 / light 0.6); the `accent_tint_matches_accent` test pins
 /// that it stays derived from the brand colour.
 #[must_use]
 pub fn accent_tint() -> Hsla {
@@ -463,6 +463,23 @@ impl<E: Styled> Typography for E {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn bundled_theme_picker_keeps_upstream_and_openlogi_themes(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            register_builtin_themes(cx);
+            let themes = ThemeRegistry::global(cx).themes();
+            for name in [
+                OPENLOGI_LIGHT,
+                OPENLOGI_DARK,
+                "Catppuccin Latte",
+                "Catppuccin Mocha",
+            ] {
+                assert!(themes.contains_key(name), "missing bundled theme: {name}");
+            }
+        });
+    }
 
     #[test]
     fn content_width_scale_preserves_the_standard_layout() {

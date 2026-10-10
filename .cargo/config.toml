@@ -19,12 +19,9 @@ linker = "/usr/bin/cc"
 # holding this config file — the repo root — so it works from any cwd.
 runner = ".cargo/run-macos.sh"
 
-# Belt-and-suspenders DEVELOPER_DIR for contributors who run cargo outside
-# the devenv shell and have xcode-select pointing at the Command Line Tools
-# only (no Metal toolchain). `force = false` means a real DEVELOPER_DIR
-# already exported in the shell (devenv users, CI runners) wins.
-[env]
-DEVELOPER_DIR = { value = "/Applications/Xcode.app/Contents/Developer", force = false }
+# Let xcode-select or an exported DEVELOPER_DIR select the Apple toolchain.
+# A fixed Xcode.app path breaks non-GUI builds with only Command Line Tools.
+# GUI builds require full Xcode with the Metal Toolchain.
 
 [alias]
 xtask = "run -p xtask --"

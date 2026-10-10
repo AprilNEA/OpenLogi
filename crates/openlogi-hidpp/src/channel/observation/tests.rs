@@ -6,7 +6,7 @@ use std::{
 use super::{ChannelObservation, ChannelObserver, RequestOutcome};
 use crate::channel::{
     ChannelError, HidppChannel, HidppMessage, LONG_REPORT_LENGTH,
-    tests::{MockRawHidChannel, MockRawHidHandle},
+    mock::{MockRawHidChannel, MockRawHidHandle},
 };
 
 #[test]

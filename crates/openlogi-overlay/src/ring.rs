@@ -18,7 +18,7 @@ use openlogi_ui::color;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use crate::agent::OverlayCommand;
+use crate::ipc::OverlayCommand;
 use crate::session::{ClickAwaySession, ShowingRing};
 
 pub(crate) const WINDOW_SIZE: f32 = 360.0;

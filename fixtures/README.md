@@ -1,6 +1,6 @@
 # OpenLogi fixture corpus
 
-This directory is the repository-level home for future reviewed, sanitized
+This directory is the repository-level home for reviewed, sanitized
 captures produced by `openlogi fixture record`. One physical specimen owns one
 directory:
 
@@ -59,3 +59,11 @@ corpus. It stays under
 `crates/openlogi-fixture/fixtures/devices/openlogi-canonical-synthetic-001/` so
 the published `openlogi-fixture` crate and mock agent remain self-contained.
 It intentionally declares no recorded cases or hardware provenance.
+
+## MX Master 4 capture
+
+`devices/mx-master-4-001` was captured on macOS on 2026-10-10 through a Bolt receiver (`046d:c548`, slot 2). The mouse reports model ID `0xb042`. The semantic profile came from CLI and Agent 0.8.11; the HID++ cassettes came from the repository CLI 0.8.13. Receiver and device identities are synthetic.
+
+The fixture contains seven cases: feature table, reprogrammable controls, raw battery, DPI, SmartShift, wheel mode, and unsupported backlight state. The DPI capture reports 2000 DPI with a supported range of 200–8000 in steps of 50. The control table has nine entries, including separate gesture (`0x00c3`) and haptic panel (`0x01a0`) controls. Regression tests replay DPI and control reads through the production operations and require complete cassette consumption.
+
+The firmware-entities case is excluded because nonzero `extra_version` bytes and entity flags beyond the active bit remain unclassified. The generated manifest retains the seven accepted cases and their existing identity occurrences. This capture does not verify setting writes, haptic output, gestures, or physical wheel behavior. The Agent and Overlay were restored after capture.
