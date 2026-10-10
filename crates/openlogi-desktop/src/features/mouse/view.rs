@@ -36,7 +36,16 @@ const TWO_SIDED_LABEL_MIN_W: f32 = 700.;
 const CARD_EDGE_INSET: f32 = SIDE_GAP;
 
 const HOTSPOT_DOT: f32 = 12.;
-const GSHIFT: [Action; 1] = [Action::GShift];
+/// The held actions, which only a button press can run.
+fn held_actions(offer_gshift: bool) -> &'static [Action] {
+    const ACTIONS: [Action; 2] = [Action::DpiShift, Action::GShift];
+    if offer_gshift {
+        &ACTIONS
+    } else {
+        &ACTIONS[..1]
+    }
+}
+
 /// Vertical space occupied by the device bar, profile context, and canvas
 /// padding. Normal operation no longer reserves a footer.
 const MODEL_VERTICAL_RESERVE: f32 = 154.;
@@ -404,7 +413,7 @@ impl Render for MouseModelView {
                 dpi_gestures,
                 editing_app: editing_app.as_deref(),
                 overridden,
-                extra_actions: if offer_gshift { &GSHIFT } else { &[] },
+                extra_actions: held_actions(offer_gshift),
             },
             ActionPickerContext {
                 open: self.action_picker_open,

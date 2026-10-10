@@ -290,7 +290,7 @@ macro_rules! for_each_unit_action {
             CycleDpiPresets "Cycle DPI Presets" "pointer.cycle_dpi_presets" Dpi Gauge,
             NextDpiPreset "Next DPI Preset" "pointer.next_dpi_preset" Dpi ArrowUp,
             PreviousDpiPreset "Previous DPI Preset" "pointer.previous_dpi_preset" Dpi ArrowDown,
-            DpiShift "DPI Shift (Hold)" "pointer.dpi_shift" Dpi Gauge,
+            DpiShift "DPI Shift (Hold)" "pointer.dpi_shift" Dpi Gauge not_pickable,
             ToggleSmartShift "Toggle SmartShift" "pointer.toggle_smartshift" Dpi Refresh,
             // Scroll
             ScrollUp "Scroll Up" "actions.scroll_up" Scroll ArrowUp,
@@ -413,5 +413,12 @@ impl Action {
             Self::HoldShortcut(combo) => Some(combo),
             _ => None,
         }
+    }
+
+    /// Whether the action lasts as long as its press. Only a source that
+    /// delivers both edges can run it, so the catalog leaves these out.
+    #[must_use]
+    pub fn is_held(&self) -> bool {
+        matches!(self, Self::HoldShortcut(_) | Self::DpiShift | Self::GShift)
     }
 }
