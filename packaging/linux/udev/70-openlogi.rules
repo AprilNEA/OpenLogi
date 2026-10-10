@@ -5,7 +5,7 @@
 # on systems running systemd-logind (uaccess tag).
 #
 # Install:
-#   sudo cp 70-openlogi.rules /etc/udev/rules.d/
+#   sudo cp 70-openlogi.rules /usr/lib/udev/rules.d/
 #   sudo udevadm control --reload-rules
 #   sudo udevadm trigger
 #
