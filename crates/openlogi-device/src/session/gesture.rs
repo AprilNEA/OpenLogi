@@ -314,6 +314,10 @@ impl ArmedCapture for GestureCapture {
             .map(|wheel| (wheel.feature_index, wheel.per_notch));
         let spy = armed.onboard.as_ref().and_then(ArmedOnboard::spy);
         let spy_edges = Arc::clone(&self.spy_edges);
+        spy_edges
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .attach(sink.clone());
         move |msg| {
             if let Some((spy_index, captured)) = &spy
                 && let Some(mask) = spy::decode_mask(msg, device_index, *spy_index)
@@ -384,10 +388,12 @@ impl ArmedCapture for GestureCapture {
             .thumb_status
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = RotationStatus::Inactive;
-        *self
-            .spy_edges
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = SpyEdges::default();
+        if let Some((_, captured)) = self.armed.onboard.as_ref().and_then(ArmedOnboard::spy) {
+            self.spy_edges
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .release_all(&captured);
+        }
     }
 
     async fn rearm(&self) -> bool {
