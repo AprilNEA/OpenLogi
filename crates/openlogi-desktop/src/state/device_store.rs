@@ -70,6 +70,9 @@ impl DeviceStore {
                 Some(DeviceRoute::Unifying { .. }) => {
                     Some(ObservedConnection::Receiver(ReceiverProtocol::Unifying))
                 }
+                Some(DeviceRoute::Hidpp20Receiver { .. }) => {
+                    Some(ObservedConnection::Receiver(ReceiverProtocol::Hidpp20))
+                }
                 _ => None,
             };
             // An incomplete probe is not evidence of a connection-mode change.
