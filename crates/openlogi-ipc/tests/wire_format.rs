@@ -102,7 +102,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 35);
+    assert_eq!(PROTOCOL_VERSION, 36);
 }
 
 #[test]
@@ -594,6 +594,14 @@ fn device_settings_payloads() {
     assert_wire(
         &ReceiverSelector::BoltUid("F00DCAFE".into()),
         "01084630304443414645",
+    );
+    assert_wire(&ReceiverSelector::First, "00");
+    assert_wire(
+        &ReceiverSelector::ReceiverUid {
+            product_id: 0xc548,
+            uid: "F00DCAFE".into(),
+        },
+        "02fb48c5084630304443414645",
     );
 }
 

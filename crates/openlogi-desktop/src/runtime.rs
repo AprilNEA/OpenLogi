@@ -284,6 +284,9 @@ impl Runtime {
             ipc::GuiUpdate::PairingUndeliverable(failure) => {
                 cx.update(|cx| windows::add_device::apply_undeliverable(cx, failure));
             }
+            ipc::GuiUpdate::PairingCancelled => {
+                cx.update(windows::add_device::apply_cancelled);
+            }
             ipc::GuiUpdate::ConfigReloadResult(result) => {
                 cx.update(|cx| {
                     AppState::apply(cx, |state| state.apply_config_reload_result(result));

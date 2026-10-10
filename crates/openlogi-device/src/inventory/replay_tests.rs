@@ -16,6 +16,124 @@ use crate::replay::{ChannelConnection, NodePresence, OpenOutcome, ReplayBackend,
 use crate::{ChannelRegistry, get_dpi};
 
 #[tokio::test]
+async fn empty_receiver_inventory_preserves_its_selected_open_error_after_channels_close() {
+    let fixture = bolt_fixture("pairing-open-error", &[], 1);
+    let node_id = fixture.node_id.clone();
+    let backend = Arc::new(
+        ReplayBackend::new(
+            ReplayTopology {
+                nodes: vec![fixture.node],
+                channels: vec![fixture.channel],
+            },
+            vec![fixture.cassette],
+        )
+        .unwrap(),
+    );
+    let identities = crate::pairing::ReceiverIdentityCache::default();
+    let mut enumerator =
+        Enumerator::with_backend(backend.clone()).with_receiver_identity_cache(identities.clone());
+    enumerator.timeouts.arrival_drain = Duration::ZERO;
+    let inventory = enumerator.enumerate().await.unwrap();
+    assert_eq!(inventory.len(), 1);
+    assert!(inventory[0].paired.is_empty());
+    assert_eq!(inventory[0].receiver.unique_id.as_deref(), Some(BOLT_UID));
+    // Pairing retains identity evidence after exclusive ownership closes the
+    // inventory channels. It must not need a paired-device route to do so.
+    drop(enumerator);
+    backend
+        .set_open_outcome(&node_id, OpenOutcome::Denied)
+        .unwrap();
+    let (_commands, command_rx) = mpsc::unbounded_channel();
+    let (events, mut event_rx) = mpsc::unbounded_channel();
+    let result = crate::pairing::run_pairing_with_inventory(
+        &*backend,
+        crate::pairing::ReceiverSelector::ReceiverUid {
+            product_id: 0xc548,
+            uid: BOLT_UID.to_ascii_lowercase(),
+        },
+        command_rx,
+        events,
+        Some(&identities),
+    )
+    .await;
+    assert!(matches!(result, Err(crate::pairing::PairingError::Hid(_))));
+    assert!(matches!(
+        event_rx.recv().await,
+        Some(crate::pairing::PairingEvent::Failed(
+            crate::pairing::PairingError::Hid(_)
+        ))
+    ));
+    assert_eq!(backend.open_count(&node_id).unwrap(), 2);
+    backend.require_complete().unwrap();
+}
+
+#[tokio::test]
+async fn receiver_identity_evidence_is_removed_on_confirmed_disconnect() {
+    let fixture = bolt_fixture("pairing-identity-disconnect", &[], 1);
+    let node_id = fixture.node_id.clone();
+    let backend = Arc::new(
+        ReplayBackend::new(
+            ReplayTopology {
+                nodes: vec![fixture.node],
+                channels: vec![fixture.channel],
+            },
+            vec![fixture.cassette],
+        )
+        .unwrap(),
+    );
+    let identities = crate::pairing::ReceiverIdentityCache::default();
+    let mut enumerator =
+        Enumerator::with_backend(backend.clone()).with_receiver_identity_cache(identities.clone());
+    enumerator.timeouts.arrival_drain = Duration::ZERO;
+    assert_eq!(enumerator.enumerate().await.unwrap().len(), 1);
+    assert_eq!(
+        identities.identity(&node_id),
+        Some((0xc548, BOLT_UID.into()))
+    );
+    backend
+        .set_node_presence(&node_id, NodePresence::Absent)
+        .unwrap();
+    backend
+        .set_channel_connection(BOLT_CHANNEL, ChannelConnection::Disconnected)
+        .unwrap();
+    assert!(enumerator.enumerate().await.unwrap().is_empty());
+    assert!(identities.identity(&node_id).is_none());
+    backend.require_complete().unwrap();
+}
+
+#[tokio::test]
+async fn a_missing_receiver_uid_requests_repair_without_retiring_a_healthy_channel() {
+    let mut fixture = bolt_fixture("uid-repair", &[], 2);
+    fixture.cassette.exchanges[1].response = Some(vec![0x10, 0xff, 0x8f, 0x83, 0xfb, 0x02, 0]);
+    let node_id = fixture.node_id.clone();
+    let backend = Arc::new(
+        ReplayBackend::new(
+            ReplayTopology {
+                nodes: vec![fixture.node],
+                channels: vec![fixture.channel],
+            },
+            vec![fixture.cassette],
+        )
+        .unwrap(),
+    );
+    let mut enumerator = Enumerator::with_backend(backend.clone());
+    let (first, _, healthy) = enumerator.enumerate_reporting_completeness().await.unwrap();
+    assert!(healthy, "a missing UID must not suspend healthy devices");
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].receiver.unique_id, None);
+    assert!(
+        enumerator.retry_needed_last_tick(),
+        "identity needs a bounded repair pass"
+    );
+    let (second, _, healthy) = enumerator.enumerate_reporting_completeness().await.unwrap();
+    assert!(healthy);
+    assert_eq!(second[0].receiver.unique_id.as_deref(), Some(BOLT_UID));
+    assert!(!enumerator.retry_needed_last_tick());
+    assert_eq!(backend.open_count(&node_id).unwrap(), 1);
+    backend.require_complete().unwrap();
+}
+
+#[tokio::test]
 async fn receiver_slots_interleave_on_one_channel_and_lifecycle_events_coalesce() {
     let slots = [
         BoltSlot {

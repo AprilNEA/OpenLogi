@@ -6,6 +6,7 @@ use openlogi_core::device::StandaloneDevice;
 use openlogi_core::hid::{LightCommand, PairingError, WriteError};
 use openlogi_hid::backend::{HidBackend, HotplugStream};
 use openlogi_hid::inventory::persist::ProbeCacheStore;
+use openlogi_hid::pairing::ReceiverIdentityCache;
 use openlogi_hid::{
     ChannelPool, DeviceIoGate, DeviceRoute, Enumerator, FileProbeCacheStore, InventoryError,
     LitraModel, PairingCommand, PairingEvent, ReceiverSelector,
@@ -23,6 +24,7 @@ pub struct HardwareContext {
     device_io: DeviceIoGate,
     channel_pool: ChannelPool,
     probe_cache: Option<Arc<dyn ProbeCacheStore>>,
+    receiver_identities: ReceiverIdentityCache,
 }
 
 impl HardwareContext {
@@ -87,7 +89,8 @@ impl HardwareContext {
     }
 
     pub(crate) fn enumerator(&self) -> Enumerator {
-        let enumerator = Enumerator::with_backend(Arc::clone(&self.backend));
+        let enumerator = Enumerator::with_backend(Arc::clone(&self.backend))
+            .with_receiver_identity_cache(self.receiver_identities.clone());
         match &self.probe_cache {
             Some(store) => enumerator.with_probe_cache(Arc::clone(store)),
             None => enumerator,
@@ -110,7 +113,14 @@ impl HardwareContext {
         commands: mpsc::UnboundedReceiver<PairingCommand>,
         events: mpsc::UnboundedSender<PairingEvent>,
     ) -> Result<(), PairingError> {
-        openlogi_hid::pairing::run_pairing(&*self.backend, target, commands, events).await
+        openlogi_hid::pairing::run_pairing_with_inventory(
+            &*self.backend,
+            target,
+            commands,
+            events,
+            Some(&self.receiver_identities),
+        )
+        .await
     }
 
     /// Remove the device `route` reaches from its receiver's pairing table.
@@ -138,6 +148,7 @@ impl HardwareContext {
             device_io,
             channel_pool,
             probe_cache,
+            receiver_identities: ReceiverIdentityCache::default(),
         }
     }
 }

@@ -345,6 +345,12 @@ workflow_step_count_plural = "Posloupnost akcí (počet kroků: %{count})"
 open_named_target = "Otevřít %{name}"
 
 [pairing]
+choose_receiver = "Choose a receiver"
+choose_receiver_hint = "Put the device in pairing mode, then choose its Bolt or Unifying receiver to start searching."
+connect_receiver = "Connect a Bolt or Unifying receiver to pair a device."
+receiver_unavailable = "%{name} could not be identified yet. OpenLogi will retry automatically."
+change_receiver = "Change receiver"
+cancelling = "Finishing pairing cancellation..."
 add_device = "Přidat zařízení"
 add_device_dialog = "Přidat zařízení…"
 pairing_mode_description = "Přepněte zařízení do režimu párování a spusťte hledání."

@@ -345,6 +345,12 @@ workflow_step_count_plural = "워크플로(%{count}단계)"
 open_named_target = "%{name} 열기"
 
 [pairing]
+choose_receiver = "Choose a receiver"
+choose_receiver_hint = "Put the device in pairing mode, then choose its Bolt or Unifying receiver to start searching."
+connect_receiver = "Connect a Bolt or Unifying receiver to pair a device."
+receiver_unavailable = "%{name} could not be identified yet. OpenLogi will retry automatically."
+change_receiver = "Change receiver"
+cancelling = "Finishing pairing cancellation..."
 add_device = "기기 추가"
 add_device_dialog = "기기 추가…"
 pairing_mode_description = "기기를 페어링 모드로 설정한 다음 검색을 시작하세요."
