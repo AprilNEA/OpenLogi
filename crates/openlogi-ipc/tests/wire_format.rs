@@ -140,6 +140,16 @@ fn request_variant_order() {
         "040008463030444341464501fb4006",
     );
     assert_wire(
+        &AgentRequest::SetDpi {
+            route: DeviceRoute::Hidpp20Receiver {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+            dpi: Dpi::new(1600),
+        },
+        "040408463030444341464501fb4006",
+    );
+    assert_wire(
         &AgentRequest::SetSmartshift {
             route: DeviceRoute::Bolt {
                 receiver_uid: "F00DCAFE".into(),

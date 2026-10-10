@@ -690,7 +690,10 @@ pub(super) fn connection_icon_path(
             Some(ObservedConnection::Receiver(_)) | None => None,
         },
         Some(
-            DeviceRoute::Bolt { .. } | DeviceRoute::Unifying { .. } | DeviceRoute::RawHid { .. },
+            DeviceRoute::Bolt { .. }
+            | DeviceRoute::Unifying { .. }
+            | DeviceRoute::Hidpp20Receiver { .. }
+            | DeviceRoute::RawHid { .. },
         ) => None,
     };
     if let Some(transport) = direct_transport {
@@ -705,10 +708,13 @@ pub(super) fn connection_icon_path(
         | (None, Some(ObservedConnection::Receiver(ReceiverProtocol::Bolt))) => {
             "action-icons/bolt.svg"
         }
-        (Some(DeviceRoute::Unifying { .. }), _)
-        | (None, Some(ObservedConnection::Receiver(ReceiverProtocol::Unifying))) => {
-            "action-icons/unifying.svg"
-        }
+        (Some(DeviceRoute::Unifying { .. } | DeviceRoute::Hidpp20Receiver { .. }), _)
+        | (
+            None,
+            Some(ObservedConnection::Receiver(
+                ReceiverProtocol::Unifying | ReceiverProtocol::Hidpp20,
+            )),
+        ) => "action-icons/unifying.svg",
         // An offline model's radio capabilities do not identify a connection.
         // Preserve the wired-only fallback; ambiguous offline links stay neutral.
         (Some(DeviceRoute::Direct { .. }) | None, _) => match model.map(|m| m.transports) {

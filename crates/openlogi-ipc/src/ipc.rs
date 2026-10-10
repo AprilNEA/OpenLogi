@@ -119,7 +119,8 @@ pub use succession::Identity;
 ///      the notices the overlay shows, first among them a device's low
 ///      battery. `Agent::observe_lock_keys`, [`LockKeyObservation`] and
 ///      [`LockKeyChange`] appended — the lock key a keyboard turned on or
-///      off over HID++ `0x4220`, for the overlay's transient indicator.
+///      off over HID++ `0x4220`, for the overlay's transient indicator;
+///      `DeviceRoute::Hidpp20Receiver` appended.
 pub const PROTOCOL_VERSION: u32 = 37;
 
 /// Environment variable through which the agent hands a supervised helper the

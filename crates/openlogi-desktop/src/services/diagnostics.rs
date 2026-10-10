@@ -166,7 +166,9 @@ fn find_paired<'a>(
 fn connection_for(route: Option<&DeviceRoute>, model: Option<&DeviceModelInfo>) -> ConnectionKind {
     match route {
         Some(DeviceRoute::Bolt { .. }) => ConnectionKind::BoltReceiver,
-        Some(DeviceRoute::Unifying { .. }) => ConnectionKind::UnifyingReceiver,
+        Some(DeviceRoute::Unifying { .. } | DeviceRoute::Hidpp20Receiver { .. }) => {
+            ConnectionKind::UnifyingReceiver
+        }
         Some(DeviceRoute::Direct { product_id, .. }) => {
             match model.and_then(|m| m.transport_for_product_id(*product_id)) {
                 Some(ModelTransport::Bluetooth | ModelTransport::Btle) => {
