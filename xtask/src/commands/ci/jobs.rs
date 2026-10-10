@@ -183,7 +183,7 @@ impl Job {
                 // cross-lint proxy.
                 hosts: Host::ANY,
                 in_default_run: true,
-                caveat: "CI lints the whole workspace natively on windows-latest. Anywhere else this is the ring-free cross lint over the crates that carry Windows code — a proxy, not that job.",
+                caveat: "CI lints and documents the whole workspace natively on windows-latest. Anywhere else this is the ring-free cross lint over the crates that carry Windows code — a proxy, not that job.",
             },
             Self::Wasm => default_spec(
                 "wasm (portable crates)",
