@@ -20,7 +20,7 @@
 use std::collections::HashSet;
 use std::fmt;
 use std::future::Future;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 use std::time::Duration;
 
 use openlogi_core::config::Lighting;
@@ -1031,6 +1031,83 @@ pub(crate) fn write_dpi_in_background(op: DeviceOp, ticket: WriteTicket, dpi: Dp
                 } else {
                     debug!(index, %dpi, "DPI write superseded by a newer one");
                 }
+            });
+        },
+    );
+}
+
+/// [`write_dpi_in_background`] for a held DPI shift. With `before`, the sensor
+/// DPI is read into it first. If that read fails nothing is written: the
+/// release would have nothing to return to.
+pub(crate) fn hold_dpi_in_background(
+    op: DeviceOp,
+    ticket: WriteTicket,
+    dpi: Dpi,
+    before: Option<Arc<OnceLock<Dpi>>>,
+) {
+    let index = op.route.device_index();
+    let turn = op.access.transport_turns.turn_for(&op.route);
+    op.spawn_timed_write(
+        "DPI shift",
+        move |op| async move {
+            within_turn(
+                &ticket,
+                &turn,
+                || async move {
+                    let shared = op.resolve()?;
+                    if let Some(before) = before {
+                        let read = openlogi_hid::get_dpi_info_on(&shared).await?.current;
+                        let _ = before.set(read);
+                    }
+                    openlogi_hid::set_dpi_on(&shared, dpi).await.map(|()| true)
+                },
+                || async { Ok(false) },
+            )
+            .await
+        },
+        move |result| {
+            log_outcome(index, "DPI shift", result, |written| {
+                if written {
+                    debug!(index, %dpi, "DPI shift written to device");
+                } else {
+                    debug!(index, %dpi, "DPI shift superseded by a newer write");
+                }
+            });
+        },
+    );
+}
+
+/// Write the DPI `restore` yields once this write's turn comes, if any.
+pub(crate) fn restore_dpi_in_background(
+    op: DeviceOp,
+    ticket: WriteTicket,
+    restore: impl FnOnce() -> Option<Dpi> + Send + 'static,
+) {
+    let index = op.route.device_index();
+    let turn = op.access.transport_turns.turn_for(&op.route);
+    op.spawn_timed_write(
+        "DPI restore",
+        move |op| async move {
+            within_turn(
+                &ticket,
+                &turn,
+                || async move {
+                    let Some(dpi) = restore() else {
+                        return Ok(Some(None));
+                    };
+                    let shared = op.resolve()?;
+                    openlogi_hid::set_dpi_on(&shared, dpi).await?;
+                    Ok(Some(Some(dpi)))
+                },
+                || async { Ok(None) },
+            )
+            .await
+        },
+        move |result| {
+            log_outcome(index, "DPI restore", result, |restored| match restored {
+                Some(Some(dpi)) => debug!(index, %dpi, "DPI restored"),
+                Some(None) => debug!(index, "no DPI to restore"),
+                None => debug!(index, "DPI restore superseded by a newer write"),
             });
         },
     );
