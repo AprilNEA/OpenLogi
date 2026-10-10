@@ -118,11 +118,6 @@ fn registry_files(names: &[&str]) -> Vec<openlogi_assets::FileEntry> {
         .collect()
 }
 
-/// A camera depot (the C922 / StreamCam family) ships `front.png` and a
-/// manifest but none of the hotspot metadata files — its `image_metadata` is a
-/// per-PID `metadata_<pid>.json` nobody reads. The render alone must resolve,
-/// or every webcam falls back to the gallery glyph.
-
 /// A 24-byte PNG: signature + an `IHDR` chunk header carrying only the
 /// width/height — all `read_png_dimensions` actually reads.
 fn png_header(width: u32, height: u32) -> Vec<u8> {
@@ -734,6 +729,10 @@ fn colour_variants_of_one_depot_are_remembered_apart() {
     assert_eq!((graphite.png_width, pale_grey.png_width), (100, 200));
 }
 
+/// A camera depot (the C922 / StreamCam family) ships `front.png` and a
+/// manifest but none of the hotspot metadata files — its `image_metadata` is a
+/// per-PID `metadata_<pid>.json` nobody reads. The render alone must resolve,
+/// or every webcam falls back to the gallery glyph.
 #[test]
 fn resolves_camera_depot_without_hotspot_metadata() {
     let root = tempfile::tempdir().expect("create temp dir");
@@ -755,6 +754,7 @@ fn resolves_camera_depot_without_hotspot_metadata() {
         write_root: root.path().to_path_buf(),
         has_bundle: false,
         index: None,
+        resolved: RefCell::default(),
     };
     let entry = DeviceEntry {
         model_id: "085c".to_string(),
@@ -801,6 +801,7 @@ fn metadata_publishing_depot_without_cached_metadata_still_misses() {
         write_root: root.path().to_path_buf(),
         has_bundle: false,
         index: None,
+        resolved: RefCell::default(),
     };
     let entry = DeviceEntry {
         model_id: "2b042".to_string(),
@@ -837,6 +838,7 @@ fn depot_without_any_render_still_misses() {
         write_root: root.path().to_path_buf(),
         has_bundle: false,
         index: None,
+        resolved: RefCell::default(),
     };
     let entry = DeviceEntry {
         model_id: "085c".to_string(),
