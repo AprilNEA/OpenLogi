@@ -627,6 +627,8 @@ fn device_tab(cx: &mut Context<AppView>) -> impl IntoElement {
     let keyboard = AppState::try_read(cx)
         .and_then(AppState::current_record)
         .is_some_and(|record| record.kind == DeviceKind::Keyboard);
+    let onboard_profiles =
+        AppState::try_read(cx).is_some_and(AppState::current_onboard_profiles_supported);
     tab_body(
         ContentWidth::Small,
         v_flex()
@@ -634,7 +636,57 @@ fn device_tab(cx: &mut Context<AppView>) -> impl IntoElement {
             .gap_3()
             .child(device_details_card(pal, cx))
             .when(keyboard, |column| column.child(keyboard_card(pal, cx)))
+            .when(onboard_profiles, |column| {
+                column.child(onboard_memory_card(pal, cx))
+            })
             .child(configuration_card(pal, cx)),
+    )
+}
+
+/// Onboard-memory card: switch between the profile stored on the device and
+/// host control. Shown only for a device with onboard profiles (`0x8100`);
+/// the state shown is the device's own reading, else the persisted choice —
+/// see `AppState::current_onboard_profiles_shown`.
+fn onboard_memory_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
+    let onboard_profiles =
+        AppState::try_read(cx).is_none_or(AppState::current_onboard_profiles_shown);
+    let row = h_flex()
+        .justify_between()
+        .items_center()
+        .gap_4()
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .child(
+                    div()
+                        .text_body()
+                        .text_color(pal.text_primary)
+                        .child(tr!("device.onboard_profiles")),
+                )
+                .child(
+                    div()
+                        .text_caption()
+                        .text_color(pal.text_muted)
+                        .child(tr!("device.onboard_profiles_description")),
+                ),
+        )
+        .child(
+            div().flex_shrink_0().child(
+                Switch::new("onboard-profiles")
+                    .checked(onboard_profiles)
+                    .on_click(|onboard_profiles, _window, cx| {
+                        let onboard_profiles = *onboard_profiles;
+                        AppState::apply(cx, |state| {
+                            state.commit_onboard_profiles(onboard_profiles)
+                        });
+                    }),
+            ),
+        );
+    PanelCard::new(
+        tr!("device.onboard_memory"),
+        Icon::empty().path("action-icons/layers.svg"),
+        row,
     )
 }
 

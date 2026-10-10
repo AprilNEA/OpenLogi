@@ -262,7 +262,9 @@ fn resolve_profile_route<'a>(
             SyntheticIdentityKind::UnifyingReceiverRoute,
             receiver_uid.as_bytes(),
         )),
-        DeviceRoute::Direct { .. } | DeviceRoute::RawHid { .. } => None,
+        DeviceRoute::Direct { .. }
+        | DeviceRoute::RawHid { .. }
+        | DeviceRoute::Hidpp20Receiver { .. } => None,
     };
     let receiver_id = receiver.and_then(|(kind, value)| {
         ledger.iter().find_map(|entry| {
@@ -306,6 +308,9 @@ fn resolve_profile_route<'a>(
             usage_page: *usage_page,
             usage_id: *usage_id,
         },
+        DeviceRoute::Hidpp20Receiver { .. } => {
+            return invalid("HID++ 2.0 receiver routes have no fixture representation yet");
+        }
     };
     let mut matches = ledger.iter().filter_map(|entry| match &entry.principal {
         FixturePrincipal::Device { id, route } if route == &fixture_route => Some(id.as_str()),

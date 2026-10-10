@@ -270,6 +270,7 @@ fn mouse_identity(name: &str) -> DeviceIdentity {
             haptic_panel: false,
             dpi_gestures: false,
             fn_lock: false,
+            onboard_profiles: false,
         },
         light_capabilities: None,
         model_info: None,

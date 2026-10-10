@@ -142,6 +142,12 @@ pub enum HidppOperation {
     /// Write the `0x2205` pointer-motion scaling. Appended last — variant order
     /// is wire format.
     WritePointerScaling,
+    /// Read the `0x8100` onboard mode. Appended last — variant order is wire
+    /// format.
+    ReadOnboardMode,
+    /// Write the `0x8100` onboard mode. Appended last — variant order is wire
+    /// format.
+    WriteOnboardMode,
 }
 
 /// HID++ feature error kind in a serializable wire-safe form.

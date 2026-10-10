@@ -72,7 +72,9 @@ fn replay_topology(
     cassette: &HidCassette,
 ) -> ReplayTopology {
     let receiver_slots = match route {
-        DeviceRoute::Bolt { slot, .. } | DeviceRoute::Unifying { slot, .. } => {
+        DeviceRoute::Bolt { slot, .. }
+        | DeviceRoute::Unifying { slot, .. }
+        | DeviceRoute::Hidpp20Receiver { slot, .. } => {
             vec![ReceiverSlot {
                 slot: *slot,
                 state: ReceiverSlotState::Paired(ReceiverLinkState::Online),
@@ -111,6 +113,9 @@ fn derive_replay_route(
     audit: &HidCassetteAudit,
 ) -> Result<DeviceRoute> {
     match selected_route {
+        DeviceRoute::Hidpp20Receiver { .. } => {
+            bail!("HID++ 2.0 receiver routes have no fixture representation yet")
+        }
         DeviceRoute::Bolt { slot, .. } => {
             let value = unique_replacement(audit, SanitizedIdentityKind::ReceiverUniqueId)?;
             if value.len() != 16 || !value.is_ascii() {

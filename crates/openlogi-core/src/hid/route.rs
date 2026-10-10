@@ -1,6 +1,6 @@
 //! How to reach a controllable device — addressing data only, no I/O.
 //!
-//! Four addressing modes:
+//! Five addressing modes:
 //!
 //! - [`DeviceRoute::Bolt`] — a device paired to a Logi Bolt receiver, reached
 //!   through the receiver channel at a pairing slot.
@@ -11,6 +11,8 @@
 //!   self-index [`DIRECT_DEVICE_INDEX`].
 //! - [`DeviceRoute::RawHid`] — a standalone raw-HID device such as a Litra
 //!   light, which never reaches HID++ channel code.
+//! - [`DeviceRoute::Hidpp20Receiver`] — the same addressing through a receiver
+//!   that speaks HID++ 2.0 itself (newer Lightspeed, e.g. `c54f`).
 //!
 //! Opening the channel a HID++ route names is `open_route_channel` in
 //! `openlogi-device`'s `channel::route` — the one place both the write path
@@ -78,6 +80,15 @@ pub enum DeviceRoute {
         usage_id: u16,
         /// Stable/opaque device identity selected during enumeration.
         identity: String,
+    },
+    /// Paired to a receiver that speaks HID++ 2.0 itself. Same addressing
+    /// structure as Bolt (receiver channel + pairing slot); appended last
+    /// because variant order is wire format.
+    Hidpp20Receiver {
+        /// Receiver unique ID used to select the physical receiver.
+        receiver_uid: String,
+        /// Pairing slot of the target device on that receiver.
+        slot: u8,
     },
 }
 
@@ -149,6 +160,15 @@ impl DeviceRoute {
                     receiver_uid: right,
                     ..
                 },
+            )
+            | (
+                Self::Hidpp20Receiver {
+                    receiver_uid: left, ..
+                },
+                Self::Hidpp20Receiver {
+                    receiver_uid: right,
+                    ..
+                },
             ) => left.eq_ignore_ascii_case(right),
             _ => false,
         }
@@ -159,7 +179,9 @@ impl DeviceRoute {
     #[must_use]
     pub fn device_index(&self) -> u8 {
         match self {
-            Self::Bolt { slot, .. } | Self::Unifying { slot, .. } => *slot,
+            Self::Bolt { slot, .. }
+            | Self::Unifying { slot, .. }
+            | Self::Hidpp20Receiver { slot, .. } => *slot,
             Self::Direct { .. } | Self::RawHid { .. } => DIRECT_DEVICE_INDEX,
         }
     }
@@ -168,10 +190,12 @@ impl DeviceRoute {
     ///
     /// Picks [`DeviceRoute::Unifying`] or [`DeviceRoute::Bolt`] based on the
     /// receiver's identity in [`RECEIVERS`] (Unifying proper plus
-    /// protocol-compatible Nano and Lightspeed receivers). Any receiver that
-    /// does not speak the Unifying protocol — including future Bolt variants
-    /// whose PID is not yet registered — defaults to [`DeviceRoute::Bolt`] so
-    /// writes keep working rather than silently dropping.
+    /// protocol-compatible Nano and Lightspeed receivers), or
+    /// [`DeviceRoute::Hidpp20Receiver`] for a receiver registered as
+    /// [`ReceiverProtocol::Hidpp20`]. Any other receiver — including future
+    /// Bolt variants whose PID is not yet registered — defaults to
+    /// [`DeviceRoute::Bolt`] so writes keep working rather than silently
+    /// dropping.
     /// [`DeviceRoute::Direct`] is used for directly-attached devices
     /// (slot == [`DIRECT_DEVICE_INDEX`] with no receiver UID). Returns `None`
     /// when the receiver UID is unknown (writes are skipped, not mis-routed).
@@ -180,6 +204,15 @@ impl DeviceRoute {
         match &inv.receiver.unique_id {
             Some(uid) if speaks_unifying_protocol(inv.receiver.product_id) => {
                 Some(Self::Unifying {
+                    receiver_uid: uid.clone(),
+                    slot,
+                })
+            }
+            Some(uid)
+                if find_receiver(LOGITECH_VENDOR_ID, inv.receiver.product_id)
+                    .is_some_and(|receiver| receiver.protocol == ReceiverProtocol::Hidpp20) =>
+            {
+                Some(Self::Hidpp20Receiver {
                     receiver_uid: uid.clone(),
                     slot,
                 })
@@ -214,7 +247,9 @@ impl DeviceRoute {
 impl fmt::Display for DeviceRoute {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Bolt { receiver_uid, slot } | Self::Unifying { receiver_uid, slot } => {
+            Self::Bolt { receiver_uid, slot }
+            | Self::Unifying { receiver_uid, slot }
+            | Self::Hidpp20Receiver { receiver_uid, slot } => {
                 write!(f, "slot {slot} on receiver {receiver_uid}")
             }
             Self::Direct {
@@ -270,6 +305,10 @@ mod tests {
                     route,
                     Some(DeviceRoute::Unifying { ref receiver_uid, slot: 2 }) if receiver_uid == "A1B2"
                 ),
+                ReceiverProtocol::Hidpp20 => assert_matches!(
+                    route,
+                    Some(DeviceRoute::Hidpp20Receiver { ref receiver_uid, slot: 2 }) if receiver_uid == "A1B2"
+                ),
             }
         }
     }
@@ -285,6 +324,7 @@ mod tests {
         assert_eq!(receiver_display_name(0xc53f), "Lightspeed Receiver");
         assert_eq!(receiver_display_name(0xc547), "Lightspeed Receiver");
         assert_eq!(receiver_display_name(0xc54d), "Lightspeed Receiver");
+        assert_eq!(receiver_display_name(0xc54f), "Lightspeed Receiver");
         assert_eq!(receiver_display_name(0xc52b), "Unifying Receiver");
         assert_eq!(receiver_display_name(0xc532), "Unifying Receiver");
     }
@@ -323,6 +363,25 @@ mod tests {
             slot: 4,
         };
         assert_eq!(route.device_index(), 4);
+    }
+
+    #[test]
+    fn hidpp20_receiver_route_addresses_its_slot_on_its_own_receiver() {
+        let route = DeviceRoute::Hidpp20Receiver {
+            receiver_uid: "695A8298".into(),
+            slot: 1,
+        };
+
+        assert_eq!(route.device_index(), 1);
+        assert_eq!(route.to_string(), "slot 1 on receiver 695A8298");
+        assert!(route.shares_transport(&DeviceRoute::Hidpp20Receiver {
+            receiver_uid: "695a8298".into(),
+            slot: 2,
+        }));
+        assert!(!route.shares_transport(&DeviceRoute::Unifying {
+            receiver_uid: "695A8298".into(),
+            slot: 1,
+        }));
     }
 
     #[test]

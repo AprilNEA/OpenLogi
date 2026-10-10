@@ -370,6 +370,171 @@ pub(super) fn malformed_dpi_fixture() -> DpiFixture {
     }
 }
 
+pub(super) const HIDPP20_RECEIVER_CHANNEL: &str = "scenario-hidpp20-receiver";
+pub(super) const HIDPP20_RECEIVER_UID: &str = "695A8298";
+
+pub(super) struct Hidpp20ReceiverFixture {
+    pub(super) node: ReplayNode,
+    pub(super) channel: ReplayChannel,
+    pub(super) cassette: HidCassette,
+}
+
+/// A `c54f`-style receiver that speaks HID++ 2.0 itself. `passes` lists, per
+/// enumeration pass, the slots whose device answers its ping; every other
+/// slot in `1..=6` stays silent. A slot answering for the first time gets a
+/// feature walk that exposes `0x2201`; later passes reuse the cached probe.
+pub(super) fn hidpp20_receiver_fixture(tag: &str, passes: &[&[u8]]) -> Hidpp20ReceiverFixture {
+    let node_id = NodeId::from(format!(
+        "scenario-hidpp20-node-{}-{tag}",
+        std::process::id()
+    ));
+    let mut exchanges = Vec::new();
+    let mut walked = Vec::new();
+    for online in passes {
+        exchanges.extend(hidpp20_receiver_unit_id_exchanges());
+        for slot in 1..=6 {
+            let ping = short(slot, 0x00, 0x10, [0, 0, 0x5a]);
+            if online.contains(&slot) {
+                exchanges.push(h20(ping, short(slot, 0x00, 0x10, [4, 2, 0x5a])));
+                if !walked.contains(&slot) {
+                    walked.push(slot);
+                    exchanges.extend(slot_feature_walk(slot));
+                }
+            } else {
+                exchanges.push(silent(ping));
+            }
+        }
+    }
+    Hidpp20ReceiverFixture {
+        node: ReplayNode {
+            info: node_info(node_id, 0xc54f, "Scenario HID++ 2.0 Receiver"),
+            presence: NodePresence::Present,
+            open_outcome: OpenOutcome::Hidpp,
+            channel: Some(HIDPP20_RECEIVER_CHANNEL.to_string()),
+            raw_writer: RawWriterAvailability::Unavailable,
+            receiver_slots: Vec::new(),
+        },
+        channel: replay_channel(HIDPP20_RECEIVER_CHANNEL),
+        cassette: cassette(
+            "scenario-hidpp20-receiver-probes",
+            HIDPP20_RECEIVER_CHANNEL,
+            exchanges,
+        ),
+    }
+}
+
+/// A [`hidpp20_receiver_fixture`] node scripted for one route resolution:
+/// the receiver's unit-id read, then — when `dpi_on_slot_one` — an
+/// `AdjustableDpi` read of 800 DPI from the device on slot 1.
+pub(super) fn hidpp20_receiver_route_fixture(
+    tag: &str,
+    dpi_on_slot_one: bool,
+) -> Hidpp20ReceiverFixture {
+    let mut fixture = hidpp20_receiver_fixture(tag, &[]);
+    let mut exchanges = hidpp20_receiver_unit_id_exchanges();
+    if dpi_on_slot_one {
+        exchanges.extend([
+            h20(
+                short(1, 0x00, 0x10, [0, 0, 0]),
+                short(1, 0x00, 0x10, [4, 0, 0]),
+            ),
+            h20(
+                short(1, 0x00, 0x00, [0x22, 0x01, 0]),
+                short(1, 0x00, 0x00, [0x05, 0, 0]),
+            ),
+            h20(
+                short(1, 0x05, 0x20, [0, 0, 0]),
+                short(1, 0x05, 0x20, [0, 0x03, 0x20]),
+            ),
+        ]);
+    }
+    fixture.cassette = cassette(
+        "scenario-hidpp20-receiver-route",
+        HIDPP20_RECEIVER_CHANNEL,
+        exchanges,
+    );
+    fixture
+}
+
+/// The receiver answering `getFeature(0x0003)` and `getDeviceInfo` at `0xFF`
+/// with unit id [`HIDPP20_RECEIVER_UID`].
+fn hidpp20_receiver_unit_id_exchanges() -> Vec<CassetteExchange> {
+    let mut device_info = vec![0; 20];
+    device_info[..5].copy_from_slice(&[0x11, 0xff, 0x02, 0x00, 7]);
+    device_info[5..9].copy_from_slice(&[0x69, 0x5a, 0x82, 0x98]);
+    vec![
+        h20(
+            short(0xff, 0x00, 0x00, [0x00, 0x03, 0]),
+            short(0xff, 0x00, 0x00, [0x02, 0, 0]),
+        ),
+        h20(short(0xff, 0x02, 0x00, [0, 0, 0]), device_info),
+    ]
+}
+
+/// A [`hidpp20_receiver_fixture`] node whose slot-1 device answers its ping
+/// and then falls silent: its feature walk's first request never gets a reply.
+pub(super) fn hidpp20_receiver_stalled_walk_fixture(tag: &str) -> Hidpp20ReceiverFixture {
+    let mut fixture = hidpp20_receiver_fixture(tag, &[]);
+    let mut exchanges = hidpp20_receiver_unit_id_exchanges();
+    exchanges.push(h20(
+        short(1, 0x00, 0x10, [0, 0, 0x5a]),
+        short(1, 0x00, 0x10, [4, 2, 0x5a]),
+    ));
+    exchanges.push(silent(short(1, 0x00, 0x10, [0, 0, 0])));
+    for slot in 2..=6 {
+        exchanges.push(silent(short(slot, 0x00, 0x10, [0, 0, 0x5a])));
+    }
+    fixture.cassette = cassette(
+        "scenario-hidpp20-receiver-stalled-walk",
+        HIDPP20_RECEIVER_CHANNEL,
+        exchanges,
+    );
+    fixture
+}
+
+/// The paired device a [`hidpp20_receiver_fixture`] slot reports.
+pub(super) fn hidpp20_receiver_device(slot: u8, online: bool) -> PairedDevice {
+    PairedDevice {
+        slot,
+        codename: None,
+        wpid: None,
+        kind: DeviceKind::Unknown,
+        online,
+        battery: None,
+        model_info: None,
+        capabilities: Some(Capabilities {
+            pointer: true,
+            ..Capabilities::default()
+        }),
+    }
+}
+
+/// Version ping plus a feature table of `FeatureSet` and `0x2201`.
+fn slot_feature_walk(slot: u8) -> Vec<CassetteExchange> {
+    vec![
+        h20(
+            short(slot, 0x00, 0x10, [0, 0, 0]),
+            short(slot, 0x00, 0x10, [4, 0, 0]),
+        ),
+        h20(
+            short(slot, 0x00, 0x00, [0x00, 0x01, 0]),
+            short(slot, 0x00, 0x00, [0x01, 0, 0]),
+        ),
+        h20(
+            short(slot, 0x01, 0x00, [0, 0, 0]),
+            short(slot, 0x01, 0x00, [2, 0, 0]),
+        ),
+        h20(
+            short(slot, 0x01, 0x10, [1, 0, 0]),
+            short(slot, 0x01, 0x10, [0x00, 0x01, 0]),
+        ),
+        h20(
+            short(slot, 0x01, 0x10, [2, 0, 0]),
+            short(slot, 0x01, 0x10, [0x22, 0x01, 0]),
+        ),
+    ]
+}
+
 pub(super) fn connection_notification(slot: u8) -> Vec<u8> {
     let mut report = vec![0; 20];
     report[..3].copy_from_slice(&[0x11, slot, 0x41]);
@@ -414,6 +579,16 @@ fn exact(request: Vec<u8>, response: Option<Vec<u8>>) -> CassetteExchange {
         request_match: RequestMatch::Exact,
         request,
         response,
+        required: true,
+    }
+}
+
+/// A request the device never answers: an empty or offline receiver slot.
+fn silent(request: Vec<u8>) -> CassetteExchange {
+    CassetteExchange {
+        request_match: RequestMatch::Hidpp20,
+        request,
+        response: None,
         required: true,
     }
 }

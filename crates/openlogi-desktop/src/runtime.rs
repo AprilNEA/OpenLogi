@@ -294,6 +294,13 @@ impl Runtime {
                     AppState::apply(cx, |state| state.apply_fn_lock_written(&key, result));
                 });
             }
+            ipc::GuiUpdate::OnboardProfilesWritten { key, result } => {
+                cx.update(|cx| {
+                    AppState::apply(cx, |state| {
+                        state.apply_onboard_profiles_written(&key, result)
+                    });
+                });
+            }
             ipc::GuiUpdate::DeviceUnpaired {
                 record_key,
                 route,

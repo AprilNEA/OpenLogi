@@ -870,6 +870,28 @@ impl Agent for MockAgent {
         Ok(*stored)
     }
 
+    async fn read_onboard_profiles(
+        self,
+        _: Context,
+        _route: DeviceRoute,
+    ) -> Result<bool, WriteError> {
+        // The mock's scripted devices carry no onboard profiles.
+        Err(WriteError::FeatureUnsupported {
+            feature_hex: 0x8100,
+        })
+    }
+
+    async fn set_onboard_profiles(
+        self,
+        _: Context,
+        _route: DeviceRoute,
+        _onboard_profiles: bool,
+    ) -> Result<bool, WriteError> {
+        Err(WriteError::FeatureUnsupported {
+            feature_hex: 0x8100,
+        })
+    }
+
     async fn unpair_device(self, _: Context, route: DeviceRoute) -> Result<(), PairingFailure> {
         let result = self.state.lock().await.unpair(&route);
         info!(%route, ok = result.is_ok(), "unpair_device");

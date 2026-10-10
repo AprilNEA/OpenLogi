@@ -184,6 +184,9 @@ use windows::normalize_collection_path;
 /// - `0xFF43 / 0x0602` — wired G-series gaming keyboards (e.g. the G513): a
 ///   distinct vendor collection on the same `0xFF43` page. Carries both report
 ///   widths, so it is not long-only.
+/// - `0xFF43 / 0x0302` — the PRO X3 SUPERSTRIKE, both wired (`c0a9`) and its
+///   Lightspeed receiver (`c54f`). Short (`0x0301`) and long collections share
+///   one interface, so it is not long-only.
 ///
 /// `long_only` marks a transport that exposes *only* the long report — no
 /// short-report (`0x10`) collection — so short HID++ requests must be
@@ -195,10 +198,11 @@ use windows::normalize_collection_path;
 /// Filtering on these pairs gives us one HID node per physical HID++ device on
 /// every supported OS, without reading report descriptors (`async-hid 0.4`
 /// only exposes those on Linux).
-const HIDPP_LONG_COLLECTIONS: [(u16, u16, bool); 3] = [
+const HIDPP_LONG_COLLECTIONS: [(u16, u16, bool); 4] = [
     (0xff00, 0x0002, false),
     (0xff43, 0x0202, true),
     (0xff43, 0x0602, false),
+    (0xff43, 0x0302, false),
 ];
 
 /// Whether `(usage_page, usage_id)` is one of the HID++ long-report collections.

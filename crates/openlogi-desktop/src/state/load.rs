@@ -37,3 +37,7 @@ pub type SmartShiftLoad = Load<Arc<SmartShiftStatus>>;
 /// read shows what the keyboard holds right now — it can differ from the
 /// persisted `fn_lock` after the user pressed Fn+Esc on the keyboard.
 pub type FnLockLoad = Load<Arc<FnLockState>>;
+
+/// What is known of whether a device's onboard profiles are active (`0x8100`):
+/// `true` in onboard mode, `false` under host control.
+pub type OnboardProfilesLoad = Load<Arc<bool>>;

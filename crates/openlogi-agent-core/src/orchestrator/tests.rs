@@ -1,9 +1,10 @@
 //! Orchestrator tests: the shared fixtures, and one module per area.
 
 use super::{
-    AgentDevice, InventoryHealth, Orchestrator, VOLATILE_REAPPLY_CONFIRM_RETRIES,
-    any_device_needs_capture_rearm, build_devices, configured_wheel_mode, host_switch_links,
-    pick_current, plan_reapply, reapply_targets, stable_id,
+    AgentDevice, ForcedReapply, InventoryHealth, Orchestrator, VOLATILE_REAPPLY_CONFIRM_RETRIES,
+    any_device_needs_capture_rearm, build_devices, configured_wheel_mode, hidpp20_slot_targets,
+    host_dpi, host_switch_links, onboard_switch, pick_current, plan_reapply, reapply_targets,
+    reconnect_mouse_settings, stable_id,
 };
 use crate::hardware::WheelModeChange;
 use openlogi_core::app::ForegroundApp;

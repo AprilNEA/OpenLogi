@@ -65,6 +65,13 @@ pub enum InventoryEvent {
     /// set/route/online state looks unchanged across the gap, so the agent
     /// re-applies volatile settings on the next snapshot (#189).
     SystemWake,
+    /// A device behind a HID++ 2.0 receiver (such as `c54f`) announced through
+    /// `WirelessDeviceStatus` that it reconnected. That receiver sends no
+    /// connection notification of its own, so the inventory can see the
+    /// device online on both sides of a power cycle; the agent re-applies the
+    /// volatile settings of the devices behind such receivers on the next
+    /// snapshot.
+    Hidpp20SlotReconnected,
 }
 
 /// The watcher's cross-pass memory, factored out of the I/O loop so the
@@ -378,6 +385,11 @@ impl InventoryWorker {
     }
 
     async fn settle_trigger(&mut self, trigger: ReconcileTrigger) -> bool {
+        if let Some(event) = lifecycle_event(trigger)
+            && self.events.send(event).is_err()
+        {
+            return false;
+        }
         match trigger {
             ReconcileTrigger::Hotplug => {
                 tokio::time::sleep(HOTPLUG_SETTLE).await;
@@ -398,15 +410,23 @@ impl InventoryWorker {
             }
             ReconcileTrigger::SystemResume => {
                 info!("system resume — replaying settings on a settled inventory");
-                if self.events.send(InventoryEvent::SystemWake).is_err() {
-                    return false;
-                }
                 tokio::time::sleep(SYSTEM_RESUME_SETTLE).await;
             }
             ReconcileTrigger::Initial
             | ReconcileTrigger::RepairRetry
             | ReconcileTrigger::SettingsConfirmation
             | ReconcileTrigger::RecoveryScan => {}
+        }
+        // Read after the drain above: whichever request woke this pass, a
+        // reconnect behind a HID++ 2.0 receiver that was coalesced into it
+        // must still reach the agent before the snapshot it re-applies on.
+        if self.hid_events.take_hidpp20_slot_reconnection()
+            && self
+                .events
+                .send(InventoryEvent::Hidpp20SlotReconnected)
+                .is_err()
+        {
+            return false;
         }
         true
     }
@@ -532,6 +552,30 @@ impl InventoryWorker {
     }
 }
 
+/// The lifecycle event the agent must see before the reconciliation `trigger`
+/// starts, so that its next snapshot re-applies volatile settings: a system
+/// resume. A reconnect behind a HID++ 2.0 receiver is not read off the
+/// trigger — the coalescing event queue may have folded it into another — but
+/// off the receiver's latch in `settle_trigger`. Every other reconnect shape
+/// shows up in the snapshot itself.
+fn lifecycle_event(trigger: ReconcileTrigger) -> Option<InventoryEvent> {
+    match trigger {
+        ReconcileTrigger::SystemResume => Some(InventoryEvent::SystemWake),
+        ReconcileTrigger::HidEvent(
+            HidppEventSource::ReceiverConnection
+            | HidppEventSource::WirelessDeviceStatus
+            | HidppEventSource::UnifiedBattery
+            | HidppEventSource::AdcMeasurement
+            | HidppEventSource::Hidpp20SlotReconnection,
+        )
+        | ReconcileTrigger::Initial
+        | ReconcileTrigger::RepairRetry
+        | ReconcileTrigger::Hotplug
+        | ReconcileTrigger::SettingsConfirmation
+        | ReconcileTrigger::RecoveryScan => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::assert_matches;
@@ -539,7 +583,37 @@ mod tests {
     use openlogi_core::device::{DeviceKind, RawDeviceAddress, StandaloneDevice};
     use openlogi_hid::{BackendError, InventoryError};
 
-    use super::{INITIAL_FAILURE_LIMIT, InventoryEvent, WatchState};
+    use super::{HidppEventSource, ReconcileTrigger};
+    use super::{INITIAL_FAILURE_LIMIT, InventoryEvent, WatchState, lifecycle_event};
+
+    #[test]
+    fn a_system_resume_replays_volatile_settings() {
+        assert_matches!(
+            lifecycle_event(ReconcileTrigger::SystemResume),
+            Some(InventoryEvent::SystemWake)
+        );
+    }
+
+    #[test]
+    fn other_triggers_reconcile_without_a_lifecycle_event() {
+        for trigger in [
+            ReconcileTrigger::Initial,
+            ReconcileTrigger::RepairRetry,
+            ReconcileTrigger::Hotplug,
+            ReconcileTrigger::SettingsConfirmation,
+            ReconcileTrigger::RecoveryScan,
+            ReconcileTrigger::HidEvent(HidppEventSource::ReceiverConnection),
+            // Behind Bolt or Unifying the receiver reports the reconnect, and
+            // the snapshot's offline→online transition re-applies.
+            ReconcileTrigger::HidEvent(HidppEventSource::WirelessDeviceStatus),
+            ReconcileTrigger::HidEvent(HidppEventSource::UnifiedBattery),
+            ReconcileTrigger::HidEvent(HidppEventSource::AdcMeasurement),
+            // Read off the event receiver's latch, not off the trigger.
+            ReconcileTrigger::HidEvent(HidppEventSource::Hidpp20SlotReconnection),
+        ] {
+            assert!(lifecycle_event(trigger).is_none(), "{trigger:?}");
+        }
+    }
 
     /// A transport-level enumerate failure — what the watcher's `Err` arm now
     /// sees (a partial per-node read is replayed by the hid ledger as `Ok`).
