@@ -29,6 +29,20 @@ impl CreatableFeature for WirelessDeviceStatusFeature {
 
 impl Feature for WirelessDeviceStatusFeature {}
 
+impl WirelessDeviceStatusFeature {
+    /// [`CreatableFeature::new`], for a second, distinct in-process consumer
+    /// of a channel another consumer already holds open (see
+    /// `FeatureEndpoint::new_secondary` on other features).
+    ///
+    /// This feature only listens for broadcasts — it has no `FeatureEndpoint`
+    /// and sends no outgoing requests, so there is no software id to stamp
+    /// differently, and this is identical to [`CreatableFeature::new`].
+    #[must_use]
+    pub fn new_secondary(chan: Arc<HidppChannel>, device_index: u8, feature_index: u8) -> Self {
+        <Self as CreatableFeature>::new(chan, device_index, feature_index)
+    }
+}
+
 impl EmittingFeature<WirelessDeviceStatusEvent> for WirelessDeviceStatusFeature {
     fn listen(&self) -> async_channel::Receiver<WirelessDeviceStatusEvent> {
         self.events.listen()

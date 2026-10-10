@@ -76,9 +76,17 @@ impl CaptureHost<'_> {
 
 /// Prove the device behind `shared` answers HID++ before arming anything on
 /// it.
+///
+/// `new_secondary`, not `new`: `shared`'s channel may be inventory-owned
+/// (shared per PR #522), and inventory's own probing resolves the device's
+/// version the same way. Sharing the primary software id would put this
+/// probe on the same correlation key as a concurrent inventory probe, and
+/// the two requests would queue behind each other on the wire — occasionally
+/// past either side's own timeout, read by inventory as a dead channel to
+/// retire and by capture as a session that ended unexpectedly. See #1128.
 pub(super) async fn open_device(shared: &SharedChannel) -> Result<Device, CaptureError> {
     let device_index = shared.device_index();
-    Device::new(Arc::clone(shared.channel()), device_index)
+    Device::new_secondary(Arc::clone(shared.channel()), device_index)
         .await
         .map_err(|_| CaptureError::DeviceUnreachable(device_index))
 }
@@ -189,13 +197,23 @@ pub(super) async fn run_capture<A: ArmedCapture>(
     // reconnection broadcast on `0x1d4b` is the firmware asking the host to
     // reconfigure. Re-arm on every broadcast, or the captured controls
     // silently revert to their native functions after the first nap.
-    let root = RootFeature::new(Arc::clone(&chan), device_index, 0);
+    // `new_secondary`, not `new`: this channel may be inventory-owned
+    // (shared per PR #522), and inventory's own probing resolves features
+    // through `getFeature` too. Sharing the primary software id would put
+    // this call and inventory's own probe traffic on the same correlation
+    // key, so a concurrent probe and session setup queue behind each other
+    // on the wire — occasionally past either side's own timeout, read by
+    // inventory as a dead channel to retire and by capture as a session that
+    // ended unexpectedly. See #1128.
+    let root = RootFeature::new_secondary(Arc::clone(&chan), device_index, 0);
     let wireless = root
         .get_feature(WirelessDeviceStatusFeature::ID)
         .await
         .ok()
         .flatten()
-        .map(|info| WirelessDeviceStatusFeature::new(Arc::clone(&chan), device_index, info.index));
+        .map(|info| {
+            WirelessDeviceStatusFeature::new_secondary(Arc::clone(&chan), device_index, info.index)
+        });
     armed.log_active(device_index, wireless.is_some());
     let stop = monitor(
         CaptureMonitor {
