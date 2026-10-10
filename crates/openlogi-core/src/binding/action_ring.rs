@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::Action;
+use crate::app::overlay_for;
 
 mod icon;
 
@@ -324,10 +325,14 @@ impl ActionRingConfig {
     }
 
     /// Resolve the complete layout for the foreground application.
+    ///
+    /// `per_app` takes the same selectors as `per_app_bindings` and is matched
+    /// the same way ([`overlay_for`]): the exact key, then on Windows the
+    /// `exe:<filename>` fallback a versioned install path needs.
     #[must_use]
     pub fn effective_layout(&self, app_id: Option<&str>) -> ActionRingLayout {
         app_id
-            .and_then(|app| self.per_app.get(app))
+            .and_then(|app| overlay_for(&self.per_app, app))
             .cloned()
             .unwrap_or_else(|| self.default.clone())
     }
@@ -492,5 +497,35 @@ Bottom = { action = { CustomShortcut = "Cmd+Shift+P" } }
 
         assert_eq!(config.effective_layout(Some("com.apple.Safari")), safari);
         assert_eq!(config.effective_layout(Some("other")), config.default);
+    }
+
+    #[test]
+    fn a_ring_layout_keyed_by_executable_survives_a_versioned_install_path() {
+        let mut config = ActionRingConfig::default();
+        let sharex = ActionRingLayout {
+            slots: BTreeMap::from([(
+                ActionRingSlot::Top,
+                ActionRingEntry::new(
+                    RingAction::new(Action::Copy).expect("copy must be a valid ring action"),
+                ),
+            )]),
+        };
+        config
+            .per_app
+            .insert("exe:sharex.exe".to_string(), sharex.clone());
+
+        // The same selector `per_app_bindings` honours: a Store app's path
+        // changes with every update, its executable name does not.
+        assert_eq!(
+            config.effective_layout(Some(
+                r"c:\program files\windowsapps\sharex_17.1_x64\sharex.exe"
+            )),
+            sharex
+        );
+        assert_eq!(
+            config.effective_layout(Some("com.getsharex.exe")),
+            config.default,
+            "a bundle id is never reinterpreted as an executable"
+        );
     }
 }

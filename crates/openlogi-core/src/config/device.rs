@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use super::button_map::{deserialize_button_map, deserialize_button_maps_by_app};
 use super::settings::{
     CameraControls, GestureOwner, LightSettings, Lighting, ScrollResolution, SmartShift,
     ThumbwheelSensitivity, deserialize_gesture_owner,
@@ -61,7 +62,21 @@ pub struct DeviceIdentity {
 }
 
 impl DeviceIdentity {
-    /// Remove per-unit identifiers before this model snapshot is persisted.
+    /// Drop the serial number and unit id from this model snapshot before it
+    /// is persisted, leaving the identity body with model-level fields only.
+    ///
+    /// This does **not** make the saved file free of per-unit identifiers.
+    /// Settings are keyed by what a device *is*, so [`canonical_device_key`]
+    /// makes the entry key itself a `serial:` or `unit:` fragment whenever the
+    /// device reported one, whatever transport it was reached by. Only a
+    /// device with no usable identity falls back to a route-derived key such
+    /// as `receiver:{uid}:slot:{n}`. The entry's `links` table, keyed by
+    /// [`route_key`], also persists receiver UIDs. `raw:` routes retain an
+    /// OS-node- or serial-derived identity; `unknown:` routes retain the
+    /// device's serial number or unit id.
+    ///
+    /// [`canonical_device_key`]: crate::config::canonical_device_key
+    /// [`route_key`]: crate::device_order::DeviceStableId::route_key
     #[must_use]
     pub fn without_unit_identifiers(mut self) -> Self {
         if let Some(model) = &mut self.model_info {
@@ -187,11 +202,11 @@ pub struct DeviceConfig {
     /// button is a [`Binding::Single`] of its former `Click`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub disabled_gestures: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
-    /// Per-application binding overlays (P1.4). Keyed by bundle identifier
-    /// (e.g. `"com.microsoft.VSCode"` on macOS). When the foreground app's
-    /// id matches a key here, those bindings take precedence; anything not
-    /// listed falls through to `bindings`. Deliberately `Action`-valued (not
-    /// `Binding`): a per-app override replaces the whole button with one
+    /// Per-application binding overlays (P1.4). Keyed by the application
+    /// identifier defined by [`ForegroundApp::id`](crate::app::ForegroundApp::id).
+    /// When the foreground app's id matches a key here, these bindings take
+    /// precedence. Other buttons use `bindings`. Deliberately `Action`-valued
+    /// (not `Binding`): a per-app override replaces the whole button with one
     /// action, never a per-direction gesture overlay.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub per_app_bindings: BTreeMap<String, BTreeMap<ButtonId, Action>>,
@@ -265,9 +280,11 @@ pub struct DeviceConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub host_switch_targets: Vec<String>,
     /// Keyboard Fn-lock state (HID++ fn inversion, `0x40a2`/`0x40a3`): `true`
-    /// means the F-row sends F1–F12 without holding Fn. The state lives in
-    /// device RAM per host, so the agent re-applies it on reconnect like
-    /// [`Self::dpi`]. `None` means "never set — leave the keyboard alone".
+    /// means the F-row sends F1–F12 without holding Fn. Multi-host keyboards
+    /// store it per Easy-Switch slot and the user can flip it from the
+    /// keyboard (Fn+Esc), so the agent writes it on config reload and
+    /// re-applies it when the keyboard reconnects, like [`Self::dpi`]. `None`
+    /// means "never set — leave the keyboard alone".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fn_lock: Option<bool>,
 }
@@ -449,18 +466,18 @@ struct RawDeviceConfig {
     #[serde(default)]
     links: BTreeMap<String, LinkConfig>,
     /// v2 shape — present on already-migrated files; wins on any key collision.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_button_map")]
     bindings: BTreeMap<ButtonId, Binding>,
     /// v4 stash of turned-off gesture maps (see [`DeviceConfig::disabled_gestures`]).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_button_map")]
     disabled_gestures: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
     /// Legacy v1 per-button single bindings.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_button_map")]
     button_bindings: BTreeMap<ButtonId, Action>,
     /// Legacy v1 flat gesture map (implicitly the gesture button's directions).
     #[serde(default)]
     gesture_bindings: BTreeMap<GestureDirection, Action>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_button_maps_by_app")]
     per_app_bindings: BTreeMap<String, BTreeMap<ButtonId, Action>>,
     #[serde(default)]
     action_ring: ActionRingConfig,

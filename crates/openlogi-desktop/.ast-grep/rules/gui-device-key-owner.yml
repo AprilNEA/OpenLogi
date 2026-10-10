@@ -1,0 +1,33 @@
+# Owner: openlogi-desktop's DeviceRecord::device_key() — which string
+# identifies a device in the GUI's per-device state. DeviceKey has no
+# conversion from a string; state/device_key.rs defines the one constructor and
+# state/devices.rs is its one caller. Tests may name devices no record stands
+# for.
+id: gui-device-key-owner
+language: rust
+severity: error
+message: A DeviceKey comes from DeviceRecord::device_key(). Take the key from the record (or carry the DeviceKey you were given) instead of building one here.
+note: |
+  DeviceKey once converted from any string, and it was built from an inventory
+  key, from a key echoed back over a channel as a String, and as an empty
+  default standing for "no device". See "Single source of truth" in AGENTS.md.
+files:
+  - crates/openlogi-desktop/src/**/*.rs
+ignores:
+  - crates/openlogi-desktop/src/state/device_key.rs
+  - crates/openlogi-desktop/src/state/devices.rs
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  all:
+    - any:
+        # Every associated function of DeviceKey is a constructor.
+        - pattern: DeviceKey::$CONSTRUCTOR($$$ARGS)
+        - pattern: $PATH::DeviceKey::$CONSTRUCTOR($$$ARGS)
+    - not:
+        inside:
+          kind: mod_item
+          stopBy: end
+          has:
+            field: name
+            regex: '^tests$'
