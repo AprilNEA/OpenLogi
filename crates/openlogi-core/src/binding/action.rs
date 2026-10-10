@@ -219,6 +219,13 @@ pub enum Action {
     /// returns to the sensor's default DPI. A DPI LED (HID++ `0x1300`) is
     /// lit while the mode is on. Does nothing on other devices.
     TogglePrecisionMode,
+
+    // ── Media (appended) ─────────────────────────────────────────────────────
+    /// Increase display brightness. Appended at the end (not beside the other
+    /// media actions) because the serde variant index is the wire format.
+    BrightnessUp,
+    /// Decrease display brightness.
+    BrightnessDown,
 }
 
 /// Which of a held chord's keys stay down for the lifetime of the press.
@@ -324,6 +331,8 @@ macro_rules! for_each_unit_action {
             VolumeUp "Volume Up" "actions.volume_up" Media Volume,
             VolumeDown "Volume Down" "actions.volume_down" Media VolumeDown,
             MuteVolume "Mute" "actions.mute" Media Mute,
+            BrightnessUp "Brightness Up" "actions.brightness_up" Media BrightnessUp,
+            BrightnessDown "Brightness Down" "actions.brightness_down" Media BrightnessDown,
             // DPI
             CycleDpiPresets "Cycle DPI Presets" "pointer.cycle_dpi_presets" Dpi Gauge,
             ToggleSmartShift "Toggle SmartShift" "pointer.toggle_smartshift" Dpi Refresh,

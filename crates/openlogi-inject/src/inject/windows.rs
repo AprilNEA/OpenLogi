@@ -150,6 +150,10 @@ fn dispatch_media(key: MediaKey) {
         MediaKey::VolumeUp => post_key(VK_VOLUME_UP, &[]),
         MediaKey::VolumeDown => post_key(VK_VOLUME_DOWN, &[]),
         MediaKey::Mute => post_key(VK_VOLUME_MUTE, &[]),
+        // No virtual key adjusts brightness on Windows; it needs WMI or DDC.
+        MediaKey::BrightnessUp | MediaKey::BrightnessDown => {
+            tracing::debug!(?key, "brightness keys are not implemented on Windows");
+        }
     }
 }
 

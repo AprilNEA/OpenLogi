@@ -1,8 +1,19 @@
 use core_graphics::event::{CGEventFlags, EventField};
-use openlogi_core::binding::Shortcut;
+use openlogi_core::binding::{MediaKey, Shortcut};
 
-use super::{LOCK_SCREEN_CHORD, combo, held_key_event, hid_usage_to_macos, key_event};
+use super::{LOCK_SCREEN_CHORD, combo, held_key_event, hid_usage_to_macos, key_event, nx_key};
 use crate::inject::{HeldKey, HeldModifiers, KeyPhase, parse_shortcut};
+
+/// Values from `<IOKit/hidsystem/ev_keymap.h>`; a wrong number posts a
+/// different system key.
+#[test]
+fn media_keys_map_to_their_nx_keytypes() {
+    assert_eq!(nx_key(MediaKey::VolumeUp), 0);
+    assert_eq!(nx_key(MediaKey::VolumeDown), 1);
+    assert_eq!(nx_key(MediaKey::BrightnessUp), 2);
+    assert_eq!(nx_key(MediaKey::BrightnessDown), 3);
+    assert_eq!(nx_key(MediaKey::Mute), 7);
+}
 
 #[test]
 fn hid_usages_map_to_macos_virtual_keys() {
