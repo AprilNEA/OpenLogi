@@ -8,12 +8,15 @@ use super::Enumerator;
 use super::cache::{CACHE_MISS_GRACE, CacheKey, REFRESH_INTERVAL};
 use super::events::{HidppEventSource, observed_event_channel};
 use super::replay_test_support::{
-    BOLT_CHANNEL, BOLT_UID, BoltSlot, DIRECT_CHANNEL, HEADSET_CHANNEL, adc_error, adc_reading,
-    bolt_fixture, connection_notification, direct_fixture, headset_fixture, malformed_dpi_fixture,
+    BOLT_CHANNEL, BOLT_UID, BoltSlot, DIRECT_CHANNEL, HEADSET_CHANNEL, HIDPP20_RECEIVER_CHANNEL,
+    HIDPP20_RECEIVER_UID, adc_error, adc_reading, bolt_fixture, connection_notification,
+    direct_fixture, headset_fixture, hidpp20_receiver_device, hidpp20_receiver_fixture,
+    hidpp20_receiver_route_fixture, hidpp20_receiver_stalled_walk_fixture, malformed_dpi_fixture,
     short,
 };
 use crate::replay::{ChannelConnection, NodePresence, OpenOutcome, ReplayBackend, ReplayTopology};
-use crate::{ChannelRegistry, get_dpi};
+use crate::{ChannelRegistry, DeviceRoute, get_dpi};
+use openlogi_core::device::{DeviceInventory, PairedDevice, ReceiverInfo};
 
 #[tokio::test]
 async fn receiver_slots_interleave_on_one_channel_and_lifecycle_events_coalesce() {
@@ -573,4 +576,180 @@ async fn headset_switch_off_broadcast_requests_reconciliation_to_offline() {
     backend
         .require_complete()
         .expect("every scripted headset exchange consumed");
+}
+
+fn hidpp20_receiver_backend(tag: &str, passes: &[&[u8]]) -> Arc<ReplayBackend> {
+    let fixture = hidpp20_receiver_fixture(tag, passes);
+    Arc::new(
+        ReplayBackend::new(
+            ReplayTopology {
+                nodes: vec![fixture.node],
+                channels: vec![fixture.channel],
+            },
+            vec![fixture.cassette],
+        )
+        .expect("valid HID++ 2.0 receiver replay"),
+    )
+}
+
+fn hidpp20_receiver_inventory(paired: Vec<PairedDevice>) -> DeviceInventory {
+    DeviceInventory {
+        receiver: ReceiverInfo {
+            name: "Lightspeed Receiver".to_string(),
+            vendor_id: 0x046d,
+            product_id: 0xc54f,
+            unique_id: Some(HIDPP20_RECEIVER_UID.to_string()),
+        },
+        paired,
+    }
+}
+
+#[tokio::test]
+async fn hidpp20_receiver_lists_the_slots_that_answer_a_ping() {
+    let backend = hidpp20_receiver_backend("answering-slot", &[&[1]]);
+    let mut enumerator = Enumerator::with_backend(backend.clone());
+
+    let inventory = enumerator
+        .enumerate()
+        .await
+        .expect("receiver probe succeeds");
+
+    assert_eq!(
+        inventory,
+        [hidpp20_receiver_inventory(vec![hidpp20_receiver_device(
+            1, true
+        )])]
+    );
+    // An unscripted request — a walk of a silent slot — fails completion.
+    backend
+        .require_complete()
+        .expect("every slot was pinged and only slot 1 walked");
+    assert!(
+        backend
+            .channel_completion(HIDPP20_RECEIVER_CHANNEL)
+            .expect("known channel")
+            .unmatched_requests
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn hidpp20_receiver_keeps_a_known_slot_listed_offline_once_it_falls_silent() {
+    let backend = hidpp20_receiver_backend("silent-known-slot", &[&[1], &[]]);
+    let mut enumerator = Enumerator::with_backend(backend.clone());
+
+    let online = enumerator.enumerate().await.expect("first pass succeeds");
+    let silent = enumerator.enumerate().await.expect("second pass succeeds");
+
+    assert_eq!(
+        online,
+        [hidpp20_receiver_inventory(vec![hidpp20_receiver_device(
+            1, true
+        )])]
+    );
+    assert_eq!(
+        silent,
+        [hidpp20_receiver_inventory(vec![hidpp20_receiver_device(
+            1, false
+        )])]
+    );
+    backend
+        .require_complete()
+        .expect("the silent pass reuses the cached walk");
+}
+
+#[tokio::test]
+async fn hidpp20_receiver_skips_a_silent_slot_it_has_never_seen() {
+    let backend = hidpp20_receiver_backend("empty-receiver", &[&[]]);
+    let mut enumerator = Enumerator::with_backend(backend.clone());
+
+    let inventory = enumerator
+        .enumerate()
+        .await
+        .expect("receiver probe succeeds");
+
+    assert_eq!(inventory, [hidpp20_receiver_inventory(Vec::new())]);
+    backend.require_complete().expect("every slot was pinged");
+}
+
+fn hidpp20_route_backend(tag: &str, dpi_on_slot_one: bool) -> Arc<ReplayBackend> {
+    let fixture = hidpp20_receiver_route_fixture(tag, dpi_on_slot_one);
+    Arc::new(
+        ReplayBackend::new(
+            ReplayTopology {
+                nodes: vec![fixture.node],
+                channels: vec![fixture.channel],
+            },
+            vec![fixture.cassette],
+        )
+        .expect("valid HID++ 2.0 receiver route replay"),
+    )
+}
+
+#[tokio::test]
+async fn hidpp20_receiver_route_reaches_its_slot_through_the_matching_receiver() {
+    let backend = hidpp20_route_backend("matching-route", true);
+    let route = DeviceRoute::Hidpp20Receiver {
+        receiver_uid: HIDPP20_RECEIVER_UID.to_ascii_lowercase(),
+        slot: 1,
+    };
+
+    let dpi = get_dpi(&*backend, &route)
+        .await
+        .expect("DPI read on slot 1");
+
+    assert_eq!(u32::from(dpi), 800);
+    backend
+        .require_complete()
+        .expect("unit id matched, then slot 1 was read");
+}
+
+#[tokio::test]
+async fn hidpp20_receiver_route_skips_a_receiver_with_another_unit_id() {
+    let backend = hidpp20_route_backend("foreign-route", false);
+    let route = DeviceRoute::Hidpp20Receiver {
+        receiver_uid: "00000000".to_string(),
+        slot: 1,
+    };
+
+    get_dpi(&*backend, &route)
+        .await
+        .expect_err("no connected receiver carries that unit id");
+    backend
+        .require_complete()
+        .expect("only the unit id was read; slot 1 was never addressed");
+}
+
+#[tokio::test]
+async fn hidpp20_receiver_stays_healthy_when_a_slot_stalls_mid_walk() {
+    let fixture = hidpp20_receiver_stalled_walk_fixture("stalled-walk");
+    let backend = Arc::new(
+        ReplayBackend::new(
+            ReplayTopology {
+                nodes: vec![fixture.node],
+                channels: vec![fixture.channel],
+            },
+            vec![fixture.cassette],
+        )
+        .expect("valid stalled-walk replay"),
+    );
+    let mut enumerator = Enumerator::with_backend(backend.clone());
+    enumerator.timeouts.unifying_slot_probe = Duration::from_millis(200);
+    let started = Instant::now();
+
+    let inventory = enumerator
+        .enumerate()
+        .await
+        .expect("receiver probe succeeds");
+
+    // The slot answered its ping, so it is listed online; its walk timed out
+    // within the slot budget, leaving no capabilities rather than failing the
+    // receiver after the whole receiver budget.
+    let mut device = hidpp20_receiver_device(1, true);
+    device.capabilities = None;
+    assert_eq!(inventory, [hidpp20_receiver_inventory(vec![device])]);
+    assert!(started.elapsed() < Duration::from_secs(5));
+    backend
+        .require_complete()
+        .expect("the stalled walk was asked once");
 }

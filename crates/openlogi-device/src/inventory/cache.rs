@@ -31,6 +31,9 @@ pub(super) enum CacheKey {
     /// two receivers whose serials share a common prefix (e.g. "DA2699E1" and
     /// "DA2604F2" share "DA2").
     UnifyingSlot { receiver_uid: String, slot: u8 },
+    /// HID++ 2.0 receiver: receiver unit id + pairing slot. Slot-keyed like
+    /// [`Self::UnifyingSlot`], so it is not persisted either.
+    Hidpp20Slot { receiver_uid: String, slot: u8 },
     /// Direct (Bluetooth/USB): the OS-assigned HID node id (macOS registry-entry
     /// id, Linux dev path, Windows interface path). Unique *per node*, so two
     /// units of the same model never collide, and stable while connected so the

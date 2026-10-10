@@ -16,10 +16,11 @@ use hidpp::{
 fn receiver_family_follows_the_shared_protocol_registry() {
     for receiver in crate::RECEIVERS {
         let expected = match receiver.protocol {
-            crate::ReceiverProtocol::Bolt => ReceiverFamily::Bolt,
-            crate::ReceiverProtocol::Unifying => ReceiverFamily::Unifying,
+            crate::ReceiverProtocol::Bolt => Some(ReceiverFamily::Bolt),
+            crate::ReceiverProtocol::Unifying => Some(ReceiverFamily::Unifying),
+            crate::ReceiverProtocol::Hidpp20 => None,
         };
-        assert_eq!(family_for(receiver.product_id), Some(expected));
+        assert_eq!(family_for(receiver.product_id), expected);
     }
     assert_eq!(family_for(0xc5ff), None);
 }
@@ -517,4 +518,25 @@ impl RawHidChannel for EchoRawHidChannel {
 
 fn mock_error() -> Box<dyn Error + Sync + Send> {
     Box::new(io::Error::other("mock channel closed"))
+}
+
+#[tokio::test]
+async fn unpair_refuses_a_hidpp20_receiver_slot_without_touching_hardware() {
+    let backend = crate::replay::ReplayBackend::new(
+        crate::replay::ReplayTopology {
+            nodes: Vec::new(),
+            channels: Vec::new(),
+        },
+        Vec::new(),
+    )
+    .expect("empty replay");
+    let route = DeviceRoute::Hidpp20Receiver {
+        receiver_uid: "695A8298".into(),
+        slot: 1,
+    };
+
+    assert!(matches!(
+        unpair(&backend, &route).await,
+        Err(PairingError::UnsupportedCommand)
+    ));
 }

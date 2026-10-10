@@ -68,6 +68,7 @@ fn safe_route_label(route: &DeviceRoute) -> String {
     match route {
         DeviceRoute::Bolt { slot, .. } => format!("Bolt receiver slot {slot}"),
         DeviceRoute::Unifying { slot, .. } => format!("Unifying receiver slot {slot}"),
+        DeviceRoute::Hidpp20Receiver { slot, .. } => format!("HID++ 2.0 receiver slot {slot}"),
         DeviceRoute::Direct {
             vendor_id,
             product_id,

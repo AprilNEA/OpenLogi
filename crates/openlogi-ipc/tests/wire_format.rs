@@ -102,7 +102,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 35);
+    assert_eq!(PROTOCOL_VERSION, 36);
 }
 
 #[test]
@@ -130,6 +130,16 @@ fn request_variant_order() {
             dpi: Dpi::new(1600),
         },
         "040008463030444341464501fb4006",
+    );
+    assert_wire(
+        &AgentRequest::SetDpi {
+            route: DeviceRoute::Hidpp20Receiver {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+            dpi: Dpi::new(1600),
+        },
+        "040408463030444341464501fb4006",
     );
     assert_wire(
         &AgentRequest::SetSmartshift {

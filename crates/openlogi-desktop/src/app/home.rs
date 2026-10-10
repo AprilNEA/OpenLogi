@@ -613,7 +613,9 @@ pub(super) fn connection_icon_path(
 
     match route {
         Some(DeviceRoute::Bolt { .. }) => "action-icons/bolt.svg",
-        Some(DeviceRoute::Unifying { .. }) => "action-icons/unifying.svg",
+        Some(DeviceRoute::Unifying { .. } | DeviceRoute::Hidpp20Receiver { .. }) => {
+            "action-icons/unifying.svg"
+        }
         // Offline records retain model information but have no live route.
         Some(DeviceRoute::Direct { .. }) | None => match model.map(|m| m.transports) {
             Some(t) if (t.usb || t.equad) && !t.bluetooth && !t.btle => "action-icons/usb.svg",

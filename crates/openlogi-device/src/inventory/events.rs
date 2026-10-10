@@ -206,7 +206,9 @@ impl SubscriptionState {
                 unifying::decode_notification(&v10::Message::from(raw)),
                 Some(unifying::Event::DeviceConnection(_))
             ),
-            None => false,
+            // HID++ 2.0 receivers send no receiver-level connection
+            // notification; the recovery scan finds a device coming online.
+            Some(ReceiverProtocol::Hidpp20) | None => false,
         };
         if receiver_connection {
             return (self.receiver_snapshot_depth.load(Ordering::Acquire) == 0)
@@ -363,6 +365,23 @@ mod tests {
             Some(HidppEventSource::ReceiverConnection)
         );
         state.receiver_snapshot_depth.store(1, Ordering::Release);
+        assert_eq!(state.decode(raw, false), None);
+    }
+
+    #[test]
+    fn hidpp20_receiver_has_no_receiver_connection_notification() {
+        // A HID++ 2.0 receiver never sends 0x41; a report shaped like one is
+        // not taken as a slot connecting.
+        let state = state(Some(ReceiverProtocol::Hidpp20));
+        let raw = v10::Message::Short(
+            v10::MessageHeader {
+                device_index: 1,
+                sub_id: 0x41,
+            },
+            [0, 0x02, 0x34, 0x12],
+        )
+        .into();
+
         assert_eq!(state.decode(raw, false), None);
     }
 

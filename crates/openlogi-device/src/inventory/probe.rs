@@ -22,6 +22,7 @@ use super::cache::{CacheKey, CacheOutcome, Cached};
 
 mod bolt;
 mod direct;
+mod hidpp20;
 mod unifying;
 
 #[cfg(test)]
@@ -30,6 +31,7 @@ use bolt::probe_bolt_receiver;
 #[cfg(test)]
 pub(super) use direct::preferred_direct_codename;
 use direct::probe_direct;
+use hidpp20::probe_hidpp20_receiver;
 use unifying::probe_unifying_receiver;
 #[cfg(test)]
 pub(super) use unifying::{
@@ -352,6 +354,16 @@ pub(super) async fn probe_one(
                 budget,
                 receiver,
                 probe_unifying_receiver(channel, info, unifying, registers, pass),
+            )
+            .await
+        }
+        Some(Receiver::Hidpp20(hidpp20)) => {
+            // No HID++ 1.0 register phase: this receiver is only addressed
+            // with HID++ 2.0 requests.
+            within_budget(
+                budget,
+                receiver,
+                probe_hidpp20_receiver(channel, info, hidpp20, pass),
             )
             .await
         }

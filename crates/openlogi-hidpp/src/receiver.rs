@@ -16,9 +16,13 @@ use std::sync::Arc;
 use openlogi_device_registry::receiver::{ReceiverProtocol, find_receiver};
 use thiserror::Error;
 
-use crate::{channel::HidppChannel, protocol::v10::Hidpp10Error};
+use crate::{
+    channel::HidppChannel,
+    protocol::{v10::Hidpp10Error, v20::Hidpp20Error},
+};
 
 pub mod bolt;
+pub mod hidpp20;
 pub mod unifying;
 
 /// The index to use when communicating with the receiver on any HID++ channel.
@@ -29,6 +33,7 @@ pub fn detect(chan: Arc<HidppChannel>) -> Option<Receiver> {
     match find_receiver(chan.vendor_id, chan.product_id)?.protocol {
         ReceiverProtocol::Bolt => bolt::Receiver::new(chan).ok().map(Receiver::Bolt),
         ReceiverProtocol::Unifying => unifying::Receiver::new(chan).ok().map(Receiver::Unifying),
+        ReceiverProtocol::Hidpp20 => hidpp20::Receiver::new(chan).ok().map(Receiver::Hidpp20),
     }
 }
 
@@ -40,6 +45,8 @@ pub enum Receiver {
     Bolt(bolt::Receiver),
     /// Logitech Unifying receiver.
     Unifying(unifying::Receiver),
+    /// Receiver that speaks HID++ 2.0 itself (newer Lightspeed).
+    Hidpp20(hidpp20::Receiver),
 }
 
 impl Receiver {
@@ -49,6 +56,7 @@ impl Receiver {
         match self {
             Self::Bolt(_) => "Logi Bolt Receiver",
             Self::Unifying(_) => "Unifying Receiver",
+            Self::Hidpp20(_) => "Lightspeed Receiver",
         }
         .to_string()
     }
@@ -61,6 +69,7 @@ impl Receiver {
         match self {
             Self::Bolt(bolt) => bolt.get_unique_id().await,
             Self::Unifying(unifying) => unifying.get_unique_id().await,
+            Self::Hidpp20(hidpp20) => hidpp20.get_unique_id().await,
         }
     }
 }
@@ -77,4 +86,8 @@ pub enum ReceiverError {
     /// Indicates that a HID++1.0 register access resulted in an error.
     #[error("a HID++1.0 error occurred")]
     Protocol(#[from] Hidpp10Error),
+
+    /// Indicates that a HID++2.0 call to the receiver resulted in an error.
+    #[error("a HID++2.0 error occurred")]
+    Hidpp20(#[from] Hidpp20Error),
 }

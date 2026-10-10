@@ -99,7 +99,7 @@ enum PersistedKey {
 fn persistable(key: &CacheKey) -> Option<PersistedKey> {
     match key {
         CacheKey::Bolt { unit_id } => Some(PersistedKey::Bolt { unit_id: *unit_id }),
-        CacheKey::UnifyingSlot { .. } | CacheKey::Direct(_) => None,
+        CacheKey::UnifyingSlot { .. } | CacheKey::Hidpp20Slot { .. } | CacheKey::Direct(_) => None,
     }
 }
 

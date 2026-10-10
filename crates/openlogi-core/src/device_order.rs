@@ -99,7 +99,8 @@ impl DeviceStableId {
         match route {
             Some(
                 DeviceRoute::Bolt { receiver_uid, slot }
-                | DeviceRoute::Unifying { receiver_uid, slot },
+                | DeviceRoute::Unifying { receiver_uid, slot }
+                | DeviceRoute::Hidpp20Receiver { receiver_uid, slot },
             ) => Self::Bolt {
                 receiver_uid: receiver_uid.to_ascii_lowercase(),
                 slot: *slot,

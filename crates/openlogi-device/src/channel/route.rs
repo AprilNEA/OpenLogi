@@ -98,6 +98,19 @@ pub(crate) async fn open_route_channel(
                     return Ok(Some(channel));
                 }
             }
+            DeviceRoute::Hidpp20Receiver { receiver_uid, .. } => {
+                // No HID++ 1.0 register phase to take: this receiver is only
+                // ever addressed with HID++ 2.0 requests.
+                let Some(Receiver::Hidpp20(hidpp20)) = receiver::detect(Arc::clone(&channel))
+                else {
+                    continue;
+                };
+                if let Ok(uid) = hidpp20.get_unique_id().await
+                    && uid.eq_ignore_ascii_case(receiver_uid)
+                {
+                    return Ok(Some(channel));
+                }
+            }
             DeviceRoute::Direct { .. } => return Ok(Some(channel)),
             DeviceRoute::RawHid { .. } => unreachable!("raw HID route entered HID++ channel path"),
         }
@@ -162,6 +175,8 @@ fn route_matches_node(route: &DeviceRoute, node: &NodeInfo) -> bool {
                 && node.usage_id == *usage_id
                 && node.identity() == *identity
         }
-        DeviceRoute::Bolt { .. } | DeviceRoute::Unifying { .. } => false,
+        DeviceRoute::Bolt { .. }
+        | DeviceRoute::Unifying { .. }
+        | DeviceRoute::Hidpp20Receiver { .. } => false,
     }
 }
