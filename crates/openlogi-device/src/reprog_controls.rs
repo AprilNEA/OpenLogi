@@ -43,6 +43,15 @@ pub const FEATURE_ID: u16 = 0x1b04;
 /// panel is [`HAPTIC_PANEL_CID`], not this CID.
 pub const GESTURE_BUTTON_CID: u16 = 0x00c3;
 
+/// Control ID of the multiplatform mice's thumb gesture button
+/// (`Multiplatform gesture button`) — the M720 Triathlon's thumb button,
+/// which reports this CID instead of [`GESTURE_BUTTON_CID`].
+///
+/// Confirmed on real hardware (M720, Bluetooth): divertable with raw-XY, task
+/// `0x00ad`. Undiverted, the firmware runs its own host action, so every
+/// binding on the button was ignored until this CID was a gesture source.
+pub const MULTIPLATFORM_GESTURE_BUTTON_CID: u16 = control_ids::MULTIPLATFORM_GESTURE_BUTTON.0;
+
 /// Control ID of the MX Master 4 Haptic Sense Panel — the touch-sensitive
 /// thumb rest that replaces the dedicated gesture button on that model.
 ///
