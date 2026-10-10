@@ -74,8 +74,8 @@ impl GestureOutputs {
         self.scroll.cancel_hidpp_session(session);
     }
 
-    fn post_scroll(&self, session: &HidppSessionId, delta: ScrollDelta) {
-        if !self.scroll.try_hidpp_scroll(session, delta) {
+    fn post_scroll(&self, session: &HidppSessionId, delta: ScrollDelta, sensitivity: f64) {
+        if !self.scroll.try_hidpp_scroll(session, delta, sensitivity) {
             // HID++ diversion consumed the physical input already, so direct
             // synthesis is this source's fail-open path.
             openlogi_inject::post_scroll(delta);
