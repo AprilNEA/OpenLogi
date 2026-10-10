@@ -5873,7 +5873,9 @@ dependencies = [
  "shellexpand",
  "tracing",
  "tracing-subscriber",
+ "wayland-client",
  "windows-sys 0.61.2",
+ "xkbcommon",
  "zbus",
 ]
 
