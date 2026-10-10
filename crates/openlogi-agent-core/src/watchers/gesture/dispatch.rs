@@ -183,14 +183,18 @@ impl InputDispatcher {
         released
     }
 
-    /// `button`'s binding, from the G-Shift layer while G-Shift is held.
+    /// `button`'s binding, from the G-Shift layer while G-Shift is held. A
+    /// gesture source has none: its click/swipe map owns the press.
     fn binding_for<'p>(
         &self,
         session: &HidppSessionId,
         plan: &'p DispatchPlan,
         button: ButtonId,
+        is_gesture: bool,
     ) -> Option<&'p Binding> {
-        press_binding(plan, button, self.shift_held.active(session))
+        (!is_gesture)
+            .then(|| press_binding(plan, button, self.shift_held.active(session)))
+            .flatten()
     }
 
     /// Route one captured input from `session` to its bound action or
@@ -238,9 +242,7 @@ impl InputDispatcher {
                 // single-action projection on down.
                 let is_gesture = plan.gesture_bindings.contains_key(&button)
                     || plan.side_gesture_bindings.contains_key(&button);
-                let binding = (!is_gesture)
-                    .then(|| self.binding_for(session, plan, button))
-                    .flatten();
+                let binding = self.binding_for(session, plan, button, is_gesture);
                 let tracks_hold = is_gesture || binding.is_some_and(Binding::is_wheel_hold);
                 if let Some(binding) = binding {
                     debug!(key, ?button, action = %binding.click_action().label(), "HID++ button → binding");
@@ -303,6 +305,7 @@ impl InputDispatcher {
             CapturedInput::ThumbwheelDirection { .. } => {
                 unreachable!("thumb-wheel direction reports return before dispatch")
             }
+            CapturedInput::Interrupted => self.cancel_session(session),
         }
     }
 
