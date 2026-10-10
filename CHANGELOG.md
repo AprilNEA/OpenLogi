@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.14] - 2026-10-10
+
+### Added
+
+- *(gui)* add custom-shortcut Tap/Hold recorder to the button picker ([#1396](https://github.com/AprilNEA/OpenLogi/pull/1396))
+- *(hook)* reverse the wheel in software for devices without 0x2121 ([#847](https://github.com/AprilNEA/OpenLogi/pull/847))
+- *(gui)* add precise camera control entry ([#1047](https://github.com/AprilNEA/OpenLogi/pull/1047))
+- *(camera)* expose pan, tilt, gain and backlight compensation ([#1020](https://github.com/AprilNEA/OpenLogi/pull/1020))
+- *(device)* Detect Logitech G735 headset dongle ([#1040](https://github.com/AprilNEA/OpenLogi/pull/1040))
+
+### Fixed
+
+- *(agent)* reapply volatile settings on device reconnection and retry disagreeing DPI writes ([#1270](https://github.com/AprilNEA/OpenLogi/pull/1270))
+- *(camera)* collapse a Brio's IR node into one Linux camera entry ([#1234](https://github.com/AprilNEA/OpenLogi/pull/1234))
+- *(gui)* give MenuRow-based list rows an accessible name ([#1448](https://github.com/AprilNEA/OpenLogi/pull/1448))
+- *(gui)* open the config folder from the fail-closed config screen ([#942](https://github.com/AprilNEA/OpenLogi/pull/942))
+- *(inject)* give App Expose/Mission Control/Show Desktop/Launchpad a GNOME implementation ([#1446](https://github.com/AprilNEA/OpenLogi/pull/1446))
+- *(gui)* render camera depots that ship no hotspot metadata ([#1265](https://github.com/AprilNEA/OpenLogi/pull/1265))
+- *(assets)* resolve variants for depots whose manifests key on depot name or stem ([#1295](https://github.com/AprilNEA/OpenLogi/pull/1295))
+- *(inject)* send hi-res wheel events for Linux scroll actions (by @RisenID) ([#1719](https://github.com/AprilNEA/OpenLogi/pull/1719))
+- *(device)* omit raw-xy flags when diverting or restoring keyboard controls ([#1726](https://github.com/AprilNEA/OpenLogi/pull/1726))
+- *(hid)* capture alternate gesture controls ([#1561](https://github.com/AprilNEA/OpenLogi/pull/1561))
+- *(overlay)* set the macOS activation policy before gpui_platform starts ([#1692](https://github.com/AprilNEA/OpenLogi/pull/1692))
+- *(i18n)* translate the custom-action input error in Czech ([#1728](https://github.com/AprilNEA/OpenLogi/pull/1728))
+- *(linux)* retain fixture corpus in nix test source
+- *(agent)* honor an overflow cancel from a generation the scroll worker has not seen ([#1720](https://github.com/AprilNEA/OpenLogi/pull/1720))
+- *(agent)* emit scroll input queued across a smoothing toggle instead of dropping it ([#1721](https://github.com/AprilNEA/OpenLogi/pull/1721))
+- *(windows)* enable HID++ side-button gestures ([#1635](https://github.com/AprilNEA/OpenLogi/pull/1635))
+- *(i18n)* use Spain's Spanish terms in the es catalog ([#1326](https://github.com/AprilNEA/OpenLogi/pull/1326))
+- *(hook)* forward low-res wheel events when the hi-res event passes through ([#1693](https://github.com/AprilNEA/OpenLogi/pull/1693))
+- *(inject)* distinguish Linux Capture Region from Screenshot ([#1433](https://github.com/AprilNEA/OpenLogi/pull/1433))
+- *(gui)* draw the client-side titlebar only where the compositor declines one ([#945](https://github.com/AprilNEA/OpenLogi/pull/945))
+- *(cli)* let macOS prompt for Input Monitoring before diag opens a device ([#1256](https://github.com/AprilNEA/OpenLogi/pull/1256))
+- *(hook)* carry the physical mouse's vendor/product ID onto its uinput mirror ([#1453](https://github.com/AprilNEA/OpenLogi/pull/1453))
+- *(gui)* let the theme card name shrink so the badge fits ([#1435](https://github.com/AprilNEA/OpenLogi/pull/1435))
+- *(gui)* prefer the Buttons panel over Keys when kind resolution is wrong ([#1702](https://github.com/AprilNEA/OpenLogi/pull/1702))
+
 ## [0.8.13] - 2026-10-09
 
 ### Added
