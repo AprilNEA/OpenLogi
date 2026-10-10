@@ -20,7 +20,7 @@
 use std::collections::HashSet;
 use std::fmt;
 use std::future::Future;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 use std::time::Duration;
 
 use openlogi_core::config::Lighting;
@@ -800,6 +800,7 @@ pub(crate) fn write_pointer_speed_in_background(
     ticket: WriteTicket,
     target: SpeedTarget,
     led: Option<bool>,
+    before: Option<Arc<OnceLock<Dpi>>>,
     on_applied: impl FnOnce() + Send + 'static,
 ) {
     let index = op.route.device_index();
@@ -813,6 +814,10 @@ pub(crate) fn write_pointer_speed_in_background(
                 || async {
                     let started = tokio::time::Instant::now();
                     let shared = op.resolve()?;
+                    if let Some(before) = before {
+                        let read = openlogi_hid::get_dpi_info_on(&shared).await?.current;
+                        let _ = before.set(read);
+                    }
                     let landed = match target {
                         SpeedTarget::Scaled(speed) => openlogi_hid::set_pointer_speed_on(&shared, speed)
                             .await
@@ -1356,6 +1361,42 @@ fn log_wheel_result(
     log_outcome(index, "wheel mode write", result, |_written| {
         debug!(index, ?change, "native wheel mode written");
     });
+}
+
+/// Write the DPI `restore` yields once this write's turn comes, if any.
+pub(crate) fn restore_dpi_in_background(
+    op: DeviceOp,
+    ticket: WriteTicket,
+    restore: impl FnOnce() -> Option<Dpi> + Send + 'static,
+) {
+    let index = op.route.device_index();
+    let turn = op.access.transport_turns.turn_for(&op.route);
+    op.spawn_timed_write(
+        "DPI restore",
+        move |op| async move {
+            within_turn(
+                &ticket,
+                &turn,
+                || async move {
+                    let Some(dpi) = restore() else {
+                        return Ok(Some(None));
+                    };
+                    let shared = op.resolve()?;
+                    openlogi_hid::set_dpi_on(&shared, dpi).await?;
+                    Ok(Some(Some(dpi)))
+                },
+                || async { Ok(None) },
+            )
+            .await
+        },
+        move |result| {
+            log_outcome(index, "DPI restore", result, |restored| match restored {
+                Some(Some(dpi)) => debug!(index, %dpi, "DPI restored"),
+                Some(None) => debug!(index, "no DPI to restore"),
+                None => debug!(index, "DPI restore superseded by a newer write"),
+            });
+        },
+    );
 }
 
 /// Spawn an OS thread that reconciles the configured native HiResWheel mode

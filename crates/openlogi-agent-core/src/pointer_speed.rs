@@ -353,6 +353,12 @@ impl PointerSpeeds {
         }
     }
 
+    /// A place among the pointer-speed writes of the mouse at `route`, for
+    /// a DPI write made outside them, such as a DPI shift's restore.
+    pub(crate) fn ticket(&self, route: &DeviceRoute) -> WriteTicket {
+        self.order.request(route)
+    }
+
     /// A DPI preset action writes `dpi` to the mouse at `route`. Ends the
     /// precision mode of a DPI mouse there and numbers the write. The write
     /// settles the restore that mouse is owed, as a write of its own speed
