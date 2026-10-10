@@ -19,6 +19,7 @@
 
 use std::fmt;
 use std::future::Future;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use openlogi_core::config::Lighting;
@@ -579,6 +580,62 @@ pub(crate) fn write_dpi_in_background(op: DeviceOp, ticket: WriteTicket, dpi: Dp
         move |result| {
             log_outcome(index, "DPI write", result, |()| {
                 debug!(index, %dpi, "DPI written to device");
+            });
+        },
+    );
+}
+
+/// [`write_dpi_in_background`] for a held DPI shift. With `before`, the sensor
+/// DPI is read into it first. If that read fails nothing is written: the
+/// release would have nothing to return to.
+pub(crate) fn hold_dpi_in_background(
+    op: DeviceOp,
+    ticket: WriteTicket,
+    dpi: Dpi,
+    before: Option<Arc<OnceLock<Dpi>>>,
+) {
+    let index = op.route.device_index();
+    op.spawn_ordered_write(
+        "DPI shift",
+        ticket,
+        move |c| async move {
+            if let Some(before) = before {
+                let read = openlogi_hid::get_dpi_info_on(&c).await?.current;
+                let _ = before.set(read);
+            }
+            openlogi_hid::set_dpi_on(&c, dpi).await
+        },
+        move |result| {
+            log_outcome(index, "DPI shift", result, |()| {
+                debug!(index, %dpi, "DPI shift written to device");
+            });
+        },
+    );
+}
+
+/// Write the DPI `restore` yields once this write's turn comes, if any.
+pub(crate) fn restore_dpi_in_background(
+    op: DeviceOp,
+    ticket: WriteTicket,
+    restore: impl FnOnce() -> Option<Dpi> + Send + 'static,
+) {
+    let index = op.route.device_index();
+    op.spawn_ordered_write(
+        "DPI restore",
+        ticket,
+        move |c| async move {
+            let Some(dpi) = restore() else {
+                return Ok(None);
+            };
+            openlogi_hid::set_dpi_on(&c, dpi).await.map(|()| Some(dpi))
+        },
+        move |result| {
+            log_outcome(index, "DPI restore", result, |dpi| {
+                if let Some(dpi) = dpi {
+                    debug!(index, %dpi, "DPI restored");
+                } else {
+                    debug!(index, "no DPI to restore");
+                }
             });
         },
     );

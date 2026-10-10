@@ -25,11 +25,19 @@ impl DpiCycles {
         self.by_key.get_mut(key)
     }
 
+    /// The config key, DPI and write target of a held DPI shift on `key`
+    /// (same fallback as [`Self::state_for`]).
     #[must_use]
-    pub fn target_for_shift(&self, key: Option<&str>) -> Option<(Dpi, Dpi, DeviceRoute)> {
+    pub fn target_for_shift(&self, key: Option<&str>) -> Option<(&str, Dpi, DeviceRoute)> {
         let key = key.or(self.selected.as_deref())?;
-        let (low, restore, target) = self.by_key.get(key)?.shift()?;
-        Some((low, restore, target?))
+        let (key, state) = self.by_key.get_key_value(key)?;
+        Some((key, state.lowest()?, state.target.clone()?))
+    }
+
+    /// The DPI config or an action last set on `key`'s sensor, when known.
+    #[must_use]
+    pub fn current(&self, key: &str) -> Option<Dpi> {
+        self.by_key.get(key)?.current
     }
 
     /// The write target for `key` (same fallback as [`Self::state_for`])
@@ -92,14 +100,11 @@ impl DpiCycleState {
         Some(self.select())
     }
 
-    /// The lowest preset, and the DPI to return to.
+    /// The lowest preset, which a held DPI shift drops to.
     #[must_use]
-    pub fn shift(&self) -> Option<(Dpi, Dpi, Option<DeviceRoute>)> {
+    pub fn lowest(&self) -> Option<Dpi> {
         let low = self.presets.iter().copied().min()?;
-        let back = self
-            .current
-            .or_else(|| self.presets.get(self.index).copied())?;
-        Some((self.normalize(low), back, self.target.clone()))
+        Some(self.normalize(low))
     }
 
     fn select(&mut self) -> (Dpi, Option<DeviceRoute>) {
@@ -139,22 +144,25 @@ mod tests {
     }
 
     #[test]
-    fn step_stops_at_both_ends_and_shift_returns_to_current() {
+    fn step_stops_at_both_ends_and_shift_drops_to_the_lowest_preset() {
         let mut cycles = cycles_with("a", 1);
         let state = cycles.state_for(Some("a")).unwrap();
         assert_eq!(state.step(false).unwrap().0, Dpi::new(800));
         assert_eq!(state.step(true).unwrap().0, Dpi::new(1600));
         assert_eq!(state.step(true).unwrap().0, Dpi::new(1600));
-        let (low, back, _) = state.shift().unwrap();
-        assert_eq!((low, back), (Dpi::new(800), Dpi::new(1600)));
+        assert_eq!(state.lowest(), Some(Dpi::new(800)));
     }
 
+    /// A preset is not a reading: until config or an action sets the DPI, a
+    /// shift has to ask the mouse what to return to.
     #[test]
-    fn shift_returns_to_a_dpi_between_presets() {
+    fn current_dpi_is_unknown_until_config_or_an_action_sets_it() {
         let mut cycles = cycles_with("a", 1);
-        let state = cycles.state_for(Some("a")).unwrap();
-        state.current = Some(Dpi::new(1200));
-        assert_eq!(state.shift().unwrap().1, Dpi::new(1200));
+        assert_eq!(cycles.current("a"), None);
+        let (key, low, _) = cycles.target_for_shift(Some("a")).unwrap();
+        assert_eq!((key, low), ("a", Dpi::new(800)));
+        cycles.state_for(Some("a")).unwrap().step(true);
+        assert_eq!(cycles.current("a"), Some(Dpi::new(1600)));
     }
 
     #[test]

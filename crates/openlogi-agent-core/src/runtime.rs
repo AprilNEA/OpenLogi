@@ -12,7 +12,7 @@ pub mod scroll;
 
 use std::collections::HashMap;
 use std::io;
-use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
 use openlogi_core::binding::{Action, Binding, ButtonId};
@@ -23,7 +23,8 @@ use self::button::{
 };
 pub(crate) use self::button::{HidppSessionId, PressToken};
 use crate::hardware::{
-    DeviceAccess, WriteOrder, toggle_smartshift_in_background, write_dpi_in_background,
+    DeviceAccess, WriteOrder, hold_dpi_in_background, restore_dpi_in_background,
+    toggle_smartshift_in_background, write_dpi_in_background,
 };
 use crate::{DpiCycleState, DpiCycles};
 use openlogi_hid::{DeviceRoute, Dpi};
@@ -226,12 +227,30 @@ impl ActionExecutor {
     }
 }
 
-/// Held DPI-shift presses per device, and the DPI to return to once the last
-/// one ends.
+/// Held DPI-shift presses per device.
+///
+/// Releasing the last one returns to the DPI config or an action last set, so
+/// a preset picked during the hold stays. When OpenLogi never set one, it
+/// returns to the DPI read from the mouse before the shift.
 #[derive(Default)]
 struct HeldDpiShifts {
     by_press: HashMap<PressToken, String>,
-    by_device: HashMap<String, (usize, DeviceRoute, Dpi)>,
+    by_device: HashMap<String, HeldDpiShift>,
+}
+
+struct HeldDpiShift {
+    presses: usize,
+    key: String,
+    route: DeviceRoute,
+    before: Arc<OnceLock<Dpi>>,
+}
+
+impl HeldDpiShift {
+    fn restore_to(&self, cycles: &DpiCycles) -> Option<Dpi> {
+        cycles
+            .current(&self.key)
+            .or_else(|| self.before.get().copied())
+    }
 }
 
 impl HeldDpiShifts {
@@ -239,39 +258,59 @@ impl HeldDpiShifts {
         if self.by_press.contains_key(press) {
             return;
         }
-        let shift = executor
-            .dpi_cycle
-            .read()
-            .ok()
-            .and_then(|cycles| cycles.target_for_shift(device_key));
-        let Some((low, restore, route)) = shift else {
+        let shift = executor.dpi_cycle.read().ok().and_then(|cycles| {
+            let (key, low, route) = cycles.target_for_shift(device_key)?;
+            Some((key.to_owned(), low, route, cycles.current(key)))
+        });
+        let Some((key, low, route, current)) = shift else {
             debug!("no DPI presets or target — DPI shift ignored");
             return;
         };
         let device = route.to_string();
         self.by_press.insert(press.clone(), device.clone());
-        if let Some((held, ..)) = self.by_device.get_mut(&device) {
-            *held += 1;
+        if let Some(held) = self.by_device.get_mut(&device) {
+            held.presses += 1;
             return;
         }
         info!(%low, "DPI shift held");
-        executor.write_dpi(&route, low);
-        self.by_device.insert(device, (1, route, restore));
+        let before = Arc::new(OnceLock::new());
+        hold_dpi_in_background(
+            executor.access.op(&route),
+            executor.dpi_order.request(&route),
+            low,
+            current.is_none().then(|| Arc::clone(&before)),
+        );
+        self.by_device.insert(
+            device,
+            HeldDpiShift {
+                presses: 1,
+                key,
+                route,
+                before,
+            },
+        );
     }
 
     fn end(&mut self, executor: &ActionExecutor, press: &PressToken) {
         let Some(device) = self.by_press.remove(press) else {
             return;
         };
-        let Some((held, ..)) = self.by_device.get_mut(&device) else {
+        let Some(held) = self.by_device.get_mut(&device) else {
             return;
         };
-        *held -= 1;
-        if *held == 0
-            && let Some((_, route, restore)) = self.by_device.remove(&device)
-        {
-            executor.write_dpi(&route, restore);
+        held.presses -= 1;
+        if held.presses > 0 {
+            return;
         }
+        let Some(held) = self.by_device.remove(&device) else {
+            return;
+        };
+        let cycles = Arc::clone(&executor.dpi_cycle);
+        restore_dpi_in_background(
+            executor.access.op(&held.route),
+            executor.dpi_order.request(&held.route),
+            move || held.restore_to(&*cycles.read().ok()?),
+        );
     }
 }
 
@@ -693,9 +732,37 @@ mod tests {
         held.start(&executor, &first, Some("mouse"));
         held.start(&executor, &second, Some("mouse"));
         held.end(&executor, &first);
-        assert_eq!(held.by_device.values().next().map(|(n, ..)| *n), Some(1));
+        assert_eq!(held.by_device.values().next().map(|h| h.presses), Some(1));
         held.end(&executor, &second);
         assert!(held.by_device.is_empty() && held.by_press.is_empty());
+    }
+
+    #[test]
+    fn dpi_shift_returns_to_the_dpi_last_set_or_else_the_one_it_read() {
+        let mut cycles = DpiCycles::default();
+        cycles.by_key.insert(
+            "mouse".into(),
+            DpiCycleState {
+                presets: vec![Dpi::new(400), Dpi::new(1600)],
+                ..DpiCycleState::default()
+            },
+        );
+        let held = HeldDpiShift {
+            presses: 1,
+            key: "mouse".into(),
+            route: DeviceRoute::Bolt {
+                receiver_uid: "AA00".into(),
+                slot: 1,
+            },
+            before: Arc::default(),
+        };
+        // Never set and not read yet: a preset is not the DPI to return to.
+        assert_eq!(held.restore_to(&cycles), None);
+        held.before.set(Dpi::new(1200)).unwrap();
+        assert_eq!(held.restore_to(&cycles), Some(Dpi::new(1200)));
+        // A preset picked during the hold stays after release.
+        cycles.state_for(Some("mouse")).unwrap().step(true);
+        assert_eq!(held.restore_to(&cycles), Some(Dpi::new(1600)));
     }
 
     #[test]
