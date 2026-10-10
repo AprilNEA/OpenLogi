@@ -167,6 +167,35 @@ impl Request for SetFnLock {
     }
 }
 
+/// Switch a device between its onboard profiles and host control, answered
+/// as [`GuiUpdate::OnboardProfilesWritten`] with the mode it reports after.
+pub struct SetOnboardProfiles {
+    pub route: DeviceRoute,
+    pub onboard_profiles: bool,
+    pub key: DeviceKey,
+}
+
+impl Request for SetOnboardProfiles {
+    type Answer = Result<bool, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .set_onboard_profiles(
+                context::current(),
+                self.route.clone(),
+                self.onboard_profiles,
+            )
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        let _ = updates.send(GuiUpdate::OnboardProfilesWritten {
+            key: self.key,
+            result: or_unavailable(outcome),
+        });
+    }
+}
+
 /// Apply a SmartShift configuration now.
 pub struct SetSmartShift {
     pub route: DeviceRoute,
@@ -309,6 +338,27 @@ impl Request for ReadFnLock {
     async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
         client
             .read_fn_lock(context::current(), self.route.clone())
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
+        let _ = self.reply.send(or_unavailable(outcome));
+    }
+}
+
+/// Read whether a device's onboard profiles are active; the answer goes back
+/// over `reply`.
+pub struct ReadOnboardProfiles {
+    pub route: DeviceRoute,
+    pub reply: oneshot::Sender<Result<bool, WriteError>>,
+}
+
+impl Request for ReadOnboardProfiles {
+    type Answer = Result<bool, WriteError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .read_onboard_profiles(context::current(), self.route.clone())
             .await
     }
 
@@ -528,9 +578,11 @@ commands! {
     SetLightManualPower,
     SetSmartShift,
     SetFnLock,
+    SetOnboardProfiles,
     ReadDpi,
     ReadSmartShift,
     ReadFnLock,
+    ReadOnboardProfiles,
     ReloadConfig,
     RequestAccessibilityPrompt,
     StartPairing,

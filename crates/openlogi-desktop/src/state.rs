@@ -29,7 +29,7 @@ pub use devices::DeviceRecord;
 pub(crate) use events::{StateEvent, StateEvents};
 pub use light::LightCommandStatus;
 pub(crate) use load::Load;
-pub use load::{DpiLoad, FnLockLoad, SmartShiftLoad};
+pub use load::{DpiLoad, FnLockLoad, OnboardProfilesLoad, SmartShiftLoad};
 
 /// Result of confirming a SmartShift write by reading the value back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,6 +75,7 @@ mod inventory;
 mod light;
 mod lighting;
 mod load;
+mod onboard_profiles;
 mod pointer;
 mod scroll;
 mod settings;
@@ -218,6 +219,9 @@ impl AppState {
             state.load_current_smartshift(cx);
             state.confirm_current_smartshift(cx);
             state.load_current_fn_lock(cx);
+            state.load_current_onboard_profiles(cx);
+            state.refresh_current_onboard_profiles();
+            state.refresh_onboard_dpi();
         });
     }
 

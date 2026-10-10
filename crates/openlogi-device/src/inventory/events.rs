@@ -6,7 +6,7 @@
 //! events never mutate inventory: they request another authoritative
 //! reconciliation from the enumerator.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, PoisonError, RwLock};
 
 use hidpp::channel::{HidppChannel, HidppMessage, MessageListenerGuard};
@@ -35,6 +35,11 @@ pub enum HidppEventSource {
     /// A device's `AdcMeasurement` feature broadcast a reading or a link
     /// change — a headset dongle's headset switching on or off.
     AdcMeasurement,
+    /// [`Self::WirelessDeviceStatus`] from a device behind a HID++ 2.0
+    /// receiver, which sends no connection notification of its own: a power
+    /// cycle there leaves no offline gap in the inventory, so this report is
+    /// the only sign that the device's volatile settings were reset.
+    Hidpp20SlotReconnection,
 }
 
 /// The sending half of the bounded HID++ reconciliation-request channel.
@@ -42,15 +47,22 @@ pub enum HidppEventSource {
 /// Clones are installed only on inventory-owned channels. Capacity is one:
 /// every source asks for the same full reconciliation, so a burst has no
 /// additional meaning and must not grow memory while a slow probe is running.
+/// The one source that means more than "reconcile" — a reconnect behind a
+/// HID++ 2.0 receiver — is latched besides, so coalescing cannot drop it.
 #[derive(Clone)]
 pub struct EventNotifier {
     sender: mpsc::Sender<HidppEventSource>,
+    hidpp20_slot_reconnection: Arc<AtomicBool>,
     #[cfg(test)]
     observation: Option<Arc<EventObservation>>,
 }
 
 impl EventNotifier {
     fn notify(&self, source: HidppEventSource) {
+        if source == HidppEventSource::Hidpp20SlotReconnection {
+            self.hidpp20_slot_reconnection
+                .store(true, Ordering::Release);
+        }
         let _ = self.sender.try_send(source);
         #[cfg(test)]
         if let Some(observation) = &self.observation {
@@ -61,19 +73,48 @@ impl EventNotifier {
 }
 
 /// The receiving half of the coalesced HID++ reconciliation-request channel.
-pub type EventReceiver = mpsc::Receiver<HidppEventSource>;
+pub struct EventReceiver {
+    receiver: mpsc::Receiver<HidppEventSource>,
+    hidpp20_slot_reconnection: Arc<AtomicBool>,
+}
+
+impl EventReceiver {
+    /// Wait for the next reconciliation request; `None` once every notifier
+    /// is gone.
+    pub async fn recv(&mut self) -> Option<HidppEventSource> {
+        self.receiver.recv().await
+    }
+
+    /// The next queued reconciliation request, without waiting.
+    pub fn try_recv(&mut self) -> Result<HidppEventSource, mpsc::error::TryRecvError> {
+        self.receiver.try_recv()
+    }
+
+    /// Whether a device behind a HID++ 2.0 receiver reported a reconnect
+    /// since the last call — however the requests that carried it were
+    /// coalesced or drained. Clears the latch.
+    #[must_use]
+    pub fn take_hidpp20_slot_reconnection(&self) -> bool {
+        self.hidpp20_slot_reconnection.swap(false, Ordering::AcqRel)
+    }
+}
 
 /// Build the bounded channel used by an inventory watcher and its enumerator.
 #[must_use]
 pub fn event_channel() -> (EventNotifier, EventReceiver) {
     let (sender, receiver) = mpsc::channel(1);
+    let hidpp20_slot_reconnection = Arc::new(AtomicBool::new(false));
     (
         EventNotifier {
             sender,
+            hidpp20_slot_reconnection: Arc::clone(&hidpp20_slot_reconnection),
             #[cfg(test)]
             observation: None,
         },
-        receiver,
+        EventReceiver {
+            receiver,
+            hidpp20_slot_reconnection,
+        },
     )
 }
 
@@ -105,19 +146,13 @@ impl EventObserver {
 /// Build the production capacity-one event channel plus a decode observation barrier.
 #[cfg(test)]
 pub(crate) fn observed_event_channel() -> (EventNotifier, EventReceiver, EventObserver) {
-    let (sender, receiver) = mpsc::channel(1);
+    let (mut notifier, receiver) = event_channel();
     let observation = Arc::new(EventObservation {
         count: AtomicUsize::new(0),
         changed: Notify::new(),
     });
-    (
-        EventNotifier {
-            sender,
-            observation: Some(Arc::clone(&observation)),
-        },
-        receiver,
-        EventObserver { observation },
-    )
+    notifier.observation = Some(Arc::clone(&observation));
+    (notifier, receiver, EventObserver { observation })
 }
 
 /// Runtime feature indexes whose unsolicited events affect inventory.
@@ -217,12 +252,19 @@ impl SubscriptionState {
 
         let message = v20::Message::from(raw);
         let device_index = message.header().device_index;
-        self.devices
+        let source = self
+            .devices
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .iter()
             .find(|device| device.device_index == device_index)
-            .and_then(|device| device.features.recognizes(&message))
+            .and_then(|device| device.features.recognizes(&message))?;
+        Some(match (source, self.protocol) {
+            (HidppEventSource::WirelessDeviceStatus, Some(ReceiverProtocol::Hidpp20)) => {
+                HidppEventSource::Hidpp20SlotReconnection
+            }
+            (source, _) => source,
+        })
     }
 }
 
@@ -366,6 +408,58 @@ mod tests {
         );
         state.receiver_snapshot_depth.store(1, Ordering::Release);
         assert_eq!(state.decode(raw, false), None);
+    }
+
+    #[test]
+    fn a_reconnect_behind_a_hidpp20_receiver_has_its_own_source() {
+        let reconnect = v20::Message::Long(
+            v20::MessageHeader {
+                device_index: 1,
+                feature_index: 5,
+                function_id: U4::from_lo(0),
+                software_id: U4::from_lo(0),
+            },
+            [0; 16],
+        )
+        .into();
+        let registered = |protocol| {
+            let state = state(protocol);
+            state.devices.write().unwrap().push(DeviceEvents {
+                device_index: 1,
+                features: EventFeatureIndices {
+                    wireless_status: Some(5),
+                    unified_battery: None,
+                    adc_measurement: None,
+                },
+            });
+            state
+        };
+
+        assert_eq!(
+            registered(Some(ReceiverProtocol::Hidpp20)).decode(reconnect, false),
+            Some(HidppEventSource::Hidpp20SlotReconnection)
+        );
+        // Behind Bolt the receiver's own 0x41 already reports the reconnect.
+        assert_eq!(
+            registered(Some(ReceiverProtocol::Bolt)).decode(reconnect, false),
+            Some(HidppEventSource::WirelessDeviceStatus)
+        );
+    }
+
+    #[test]
+    fn a_hidpp20_slot_reconnect_survives_a_full_queue() {
+        let (notifier, mut receiver) = event_channel();
+
+        notifier.notify(HidppEventSource::UnifiedBattery);
+        notifier.notify(HidppEventSource::Hidpp20SlotReconnection);
+
+        assert_eq!(receiver.try_recv(), Ok(HidppEventSource::UnifiedBattery));
+        assert!(receiver.try_recv().is_err(), "the queue holds one request");
+        assert!(receiver.take_hidpp20_slot_reconnection());
+        assert!(
+            !receiver.take_hidpp20_slot_reconnection(),
+            "taking clears it"
+        );
     }
 
     #[test]

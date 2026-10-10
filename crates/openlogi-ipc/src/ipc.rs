@@ -69,7 +69,10 @@ pub use succession::Identity;
 /// v34: `KeyCombo` gains the Super modifier bit (`Super`, `Win`, `Meta`).
 /// v35: `HidppOperation::{ReadPointerScaling, WritePointerScaling}` appended.
 /// v36: `DeviceRoute::Hidpp20Receiver` appended.
-pub const PROTOCOL_VERSION: u32 = 36;
+/// v37: `Capabilities::onboard_profiles`,
+///      `HidppOperation::{ReadOnboardMode, WriteOnboardMode}` and
+///      `Agent::{read_onboard_profiles, set_onboard_profiles}` appended.
+pub const PROTOCOL_VERSION: u32 = 37;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -582,4 +585,13 @@ pub trait Agent {
     /// receiver, and with [`PairingFailure::ReceiverNotFound`] for a route
     /// that names no receiver slot or a receiver that is not connected.
     async fn unpair_device(route: DeviceRoute) -> Result<(), PairingFailure>;
+    /// Read whether the onboard profiles (`0x8100`) of the device on `route`
+    /// are active: `true` in onboard mode, `false` under host control.
+    async fn read_onboard_profiles(route: DeviceRoute) -> Result<bool, WriteError>;
+    /// Switch the device on `route` between its onboard profiles (`true`) and
+    /// host control (`false`), answering with the mode it reports afterwards.
+    async fn set_onboard_profiles(
+        route: DeviceRoute,
+        onboard_profiles: bool,
+    ) -> Result<bool, WriteError>;
 }

@@ -53,6 +53,7 @@ mod device_names;
 mod dpi;
 mod fn_lock;
 mod lighting;
+mod onboard_profiles;
 mod profile_scope;
 mod reload;
 mod smartshift;

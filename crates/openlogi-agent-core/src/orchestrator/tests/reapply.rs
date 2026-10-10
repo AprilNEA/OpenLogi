@@ -182,3 +182,94 @@ fn orchestrator_exposes_only_the_bounded_confirmation_run() {
         );
     }
 }
+
+fn onboard_mouse_config(onboard_profiles: Option<bool>) -> Config {
+    let mut config = Config::default();
+    config.set_dpi("a", Dpi::new(3200));
+    if let Some(onboard_profiles) = onboard_profiles {
+        config.set_onboard_profiles("a", onboard_profiles);
+    }
+    config
+}
+
+#[test]
+fn a_host_control_choice_switches_before_restoring_the_users_dpi() {
+    let config = onboard_mouse_config(Some(false));
+
+    assert_eq!(
+        onboard_switch(&config, &dev("a", 1, true)),
+        Some((false, Some(Dpi::new(3200))))
+    );
+    // The DPI rides the ordered onboard write, not the unordered reapply.
+    assert_eq!(
+        reconnect_mouse_settings(&config, &dev("a", 1, true)).dpi,
+        None
+    );
+}
+
+#[test]
+fn an_active_onboard_profile_gets_no_host_dpi() {
+    let config = onboard_mouse_config(Some(true));
+
+    assert_eq!(
+        onboard_switch(&config, &dev("a", 1, true)),
+        Some((true, None))
+    );
+    assert_eq!(
+        reconnect_mouse_settings(&config, &dev("a", 1, true)).dpi,
+        None
+    );
+}
+
+#[test]
+fn without_an_onboard_choice_the_mode_is_left_and_the_dpi_reapplied() {
+    let config = onboard_mouse_config(None);
+
+    assert_eq!(onboard_switch(&config, &dev("a", 1, true)), None);
+    assert_eq!(
+        reconnect_mouse_settings(&config, &dev("a", 1, true)).dpi,
+        Some(Dpi::new(3200))
+    );
+}
+
+#[test]
+fn every_switch_to_host_control_restores_the_users_dpi() {
+    // Also a retry after a refused switch, when the saved choice is already
+    // host control and no config reload would write the DPI.
+    let config = onboard_mouse_config(Some(false));
+
+    assert_eq!(
+        host_dpi(&config, &dev("a", 1, true), false),
+        Some(Dpi::new(3200))
+    );
+    assert_eq!(host_dpi(&config, &dev("a", 1, true), true), None);
+}
+
+#[test]
+fn a_hidpp20_slot_reconnect_targets_only_online_devices_behind_such_receivers() {
+    let behind_hidpp20 = |slot, online| AgentDevice {
+        route: Some(DeviceRoute::Hidpp20Receiver {
+            receiver_uid: "695A8298".to_string(),
+            slot,
+        }),
+        ..dev("x3", slot, online)
+    };
+    let devices = [
+        dev("bolt-mouse", 1, true),
+        behind_hidpp20(1, true),
+        behind_hidpp20(2, false),
+    ];
+
+    assert_eq!(hidpp20_slot_targets(&devices), vec![1]);
+}
+
+#[test]
+fn a_hidpp20_slot_reconnect_never_narrows_a_pending_wake_reapply() {
+    let mut orchestrator = orchestrator(Config::default());
+    orchestrator.reapply_hidpp20_slots_on_next_refresh();
+    assert_eq!(orchestrator.forced_reapply, ForcedReapply::Hidpp20Slots);
+
+    orchestrator.reapply_volatile_on_next_refresh();
+    orchestrator.reapply_hidpp20_slots_on_next_refresh();
+    assert_eq!(orchestrator.forced_reapply, ForcedReapply::All);
+}

@@ -998,3 +998,99 @@ async fn fn_lock_write_that_the_keyboard_does_not_echo_fails() {
     assert_eq!(sets.len(), 1);
     assert_eq!(sets[0][4], 0);
 }
+
+/// A gaming mouse whose `0x8100 OnboardProfiles` sits at index `0x0b` and
+/// starts in onboard mode. `takes_writes: false` models firmware that acks a
+/// `setOnboardMode` but keeps its mode.
+fn onboard_profiles_mouse(
+    takes_writes: bool,
+) -> impl Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync + 'static {
+    let mode = std::sync::atomic::AtomicU8::new(1);
+    move |request| {
+        if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
+            return None;
+        }
+        let mut payload = [0u8; 16];
+        match (request[2], request[3] >> 4) {
+            (0x00, 0x01) => payload[0] = 4,
+            (0x00, 0x00) => {
+                let feature_id = u16::from_be_bytes([request[4], request[5]]);
+                payload[0] = if feature_id == 0x8100 { 0x0b } else { 0x00 };
+            }
+            (0x0b, 0x01) => {
+                if takes_writes {
+                    mode.store(request[4], std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+            (0x0b, 0x02) => payload[0] = mode.load(std::sync::atomic::Ordering::SeqCst),
+            _ => return None,
+        }
+        let mut response = vec![0u8; 20];
+        response[0] = 0x11;
+        response[1..4].copy_from_slice(&request[1..4]);
+        response[4..].copy_from_slice(&payload);
+        Some(response)
+    }
+}
+
+fn wired_mouse_route() -> DeviceRoute {
+    DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xc0a9,
+    }
+}
+
+#[tokio::test]
+async fn onboard_profiles_switch_to_host_control_and_back() -> Result<(), WriteError> {
+    let (raw, handle) = ScriptedRawHidChannel::with_dynamic_responder(onboard_profiles_mouse(true));
+    let shared = SharedChannel::new(scripted_channel(raw).await, wired_mouse_route());
+
+    assert!(
+        get_onboard_profiles_on(&shared).await?,
+        "factory onboard mode"
+    );
+
+    assert!(!set_onboard_profiles_on(&shared, false).await?);
+    let set = handle
+        .written_reports()
+        .into_iter()
+        .find(|report| report[2] == 0x0b && report[3] >> 4 == 0x01)
+        .expect("a setOnboardMode write");
+    assert_eq!(set[4], 2, "host mode is mode 2");
+    assert!(!get_onboard_profiles_on(&shared).await?);
+
+    assert!(set_onboard_profiles_on(&shared, true).await?);
+    assert!(get_onboard_profiles_on(&shared).await?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_onboard_mode_write_the_device_ignored_is_reported() {
+    let (raw, _handle) =
+        ScriptedRawHidChannel::with_dynamic_responder(onboard_profiles_mouse(false));
+    let shared = SharedChannel::new(scripted_channel(raw).await, wired_mouse_route());
+
+    let error = set_onboard_profiles_on(&shared, false)
+        .await
+        .expect_err("the mode read back after the write is still onboard");
+    assert_eq!(
+        error,
+        WriteError::UnsupportedResponse {
+            operation: HidppOperation::WriteOnboardMode,
+            feature_hex: 0x8100,
+        }
+    );
+}
+
+#[tokio::test]
+async fn a_device_without_onboard_profiles_reports_the_feature_missing() {
+    let (raw, _handle) = ScriptedRawHidChannel::with_responder(multi_host_keyboard_response);
+    let shared = SharedChannel::new(scripted_channel(raw).await, wired_mouse_route());
+
+    assert_eq!(
+        get_onboard_profiles_on(&shared).await,
+        Err(WriteError::FeatureUnsupported {
+            feature_hex: 0x8100
+        })
+    );
+}

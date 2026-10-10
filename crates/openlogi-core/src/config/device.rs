@@ -287,6 +287,13 @@ pub struct DeviceConfig {
     /// means "never set — leave the keyboard alone".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fn_lock: Option<bool>,
+    /// Whether the device's onboard profiles (HID++ `0x8100`) stay active:
+    /// `false` hands DPI, report rate and buttons to the host. The PRO X3
+    /// SUPERSTRIKE falls back to onboard mode on every power cycle, so the
+    /// agent re-applies this when the device reconnects, before its DPI.
+    /// `None` means "never set — leave the device alone".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub onboard_profiles: Option<bool>,
 }
 
 impl DeviceConfig {
@@ -387,6 +394,7 @@ impl Default for DeviceConfig {
             scroll_resolution: None,
             host_switch_targets: Vec::new(),
             fn_lock: None,
+            onboard_profiles: None,
         }
     }
 }
@@ -507,6 +515,8 @@ struct RawDeviceConfig {
     host_switch_targets: Vec<String>,
     #[serde(default)]
     fn_lock: Option<bool>,
+    #[serde(default)]
+    onboard_profiles: Option<bool>,
     #[serde(default = "default_true")]
     enabled: bool,
     #[serde(default)]
@@ -567,6 +577,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             scroll_resolution: raw.scroll_resolution,
             host_switch_targets: raw.host_switch_targets,
             fn_lock: raw.fn_lock,
+            onboard_profiles: raw.onboard_profiles,
         }
     }
 }

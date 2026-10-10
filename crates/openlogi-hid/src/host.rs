@@ -143,6 +143,20 @@ pub async fn set_fn_lock(route: &DeviceRoute, on: bool) -> Result<FnLockState, W
     device::set_fn_lock(&*native_backend(), route, on).await
 }
 
+/// Read whether the onboard profiles of the device `route` reaches are active.
+pub async fn get_onboard_profiles(route: &DeviceRoute) -> Result<bool, WriteError> {
+    device::get_onboard_profiles(&*native_backend(), route).await
+}
+
+/// Switch the device `route` reaches between its onboard profiles and host
+/// control, and read the mode back.
+pub async fn set_onboard_profiles(
+    route: &DeviceRoute,
+    onboard_profiles: bool,
+) -> Result<bool, WriteError> {
+    device::set_onboard_profiles(&*native_backend(), route, onboard_profiles).await
+}
+
 /// Read the backlight state of the keyboard `route` reaches.
 pub async fn get_backlight(route: &DeviceRoute) -> Result<BacklightState, WriteError> {
     device::get_backlight(&*native_backend(), route).await

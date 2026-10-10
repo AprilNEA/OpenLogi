@@ -7,10 +7,10 @@ use std::collections::HashMap;
 use openlogi_core::config::Config;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::device_order::{DeviceIdentity, DeviceStableId};
-use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute};
+use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute, Dpi};
 
 use super::AgentDevice;
-use crate::hardware::WheelModeChange;
+use crate::hardware::{VolatileMouseSettings, WheelModeChange};
 use crate::watchers::host_switch::HostSwitchLink;
 
 /// Resolve the two independently-gated HiResWheel settings for one device
@@ -29,6 +29,47 @@ pub(super) fn configured_wheel_mode(config: &Config, dev: &AgentDevice) -> Optio
         .scroll_inversion
         .then(|| device.is_some_and(|d| d.effective_invert_scroll(&route_key)));
     WheelModeChange::new(resolution, inverted)
+}
+
+/// The volatile mouse settings a reconnect re-applies to `dev`. A device with
+/// an onboard-profiles choice gets no DPI here: [`onboard_switch`] writes it
+/// in order after the mode, and an active onboard profile rejects it anyway.
+pub(super) fn reconnect_mouse_settings(
+    config: &Config,
+    dev: &AgentDevice,
+) -> VolatileMouseSettings {
+    let route_key = stable_id(dev).route_key();
+    let device = config.devices.get(dev.config_key.as_str());
+    VolatileMouseSettings {
+        wheel: configured_wheel_mode(config, dev),
+        dpi: device
+            .filter(|_| config.onboard_profiles(&dev.config_key).is_none())
+            .and_then(|d| d.effective_dpi(&route_key)),
+        smartshift: device
+            .and_then(|d| d.effective_smartshift(&route_key))
+            .map(openlogi_hid::SmartShiftStatus::from),
+    }
+}
+
+/// The onboard-mode write `dev`'s configuration asks for, or `None` when the
+/// user never chose: the mode, and — handing control to the host — the
+/// user's own DPI to write after it.
+pub(super) fn onboard_switch(config: &Config, dev: &AgentDevice) -> Option<(bool, Option<Dpi>)> {
+    let onboard_profiles = config.onboard_profiles(&dev.config_key)?;
+    Some((onboard_profiles, host_dpi(config, dev, onboard_profiles)))
+}
+
+/// The DPI a switch of `dev` to `onboard_profiles` must write after the mode:
+/// the user's own, when handing control to the host; `None` in onboard mode,
+/// where the active profile owns the sensor.
+pub(super) fn host_dpi(config: &Config, dev: &AgentDevice, onboard_profiles: bool) -> Option<Dpi> {
+    if onboard_profiles {
+        return None;
+    }
+    config
+        .devices
+        .get(dev.config_key.as_str())?
+        .effective_dpi(&stable_id(dev).route_key())
 }
 
 /// Build the agent device list from an inventory snapshot. Mirrors the GUI's
@@ -187,6 +228,19 @@ pub(super) fn reapply_targets(
                 None => true,
                 Some(p) => !p.online,
             }
+        })
+        .map(|(idx, _)| idx)
+        .collect()
+}
+
+/// Indices into `next` of the online devices behind a HID++ 2.0 receiver —
+/// the devices a reconnect report from such a receiver's slot may concern.
+/// The report carries no identity, and these receivers hold few devices.
+pub(super) fn hidpp20_slot_targets(next: &[AgentDevice]) -> Vec<usize> {
+    next.iter()
+        .enumerate()
+        .filter(|(_, dev)| {
+            dev.online && matches!(dev.route, Some(DeviceRoute::Hidpp20Receiver { .. }))
         })
         .map(|(idx, _)| idx)
         .collect()

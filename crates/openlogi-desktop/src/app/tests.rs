@@ -410,6 +410,7 @@ fn tabs_prefer_buttons_when_a_keyboard_kind_measures_a_pointer() {
         haptic_panel: false,
         dpi_gestures: false,
         fn_lock: false,
+        onboard_profiles: false,
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(
@@ -438,6 +439,7 @@ fn tabs_follow_capabilities_not_kind() {
         haptic_panel: false,
         dpi_gestures: false,
         fn_lock: false,
+        onboard_profiles: false,
     });
     // After 0x0005 kind-correction the record has kind=Mouse, not Keyboard.
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Mouse, caps));
@@ -481,6 +483,7 @@ fn keyboard_without_asset_hides_buttons_tab() {
         haptic_panel: false,
         dpi_gestures: false,
         fn_lock: false,
+        onboard_profiles: false,
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(
@@ -503,6 +506,7 @@ fn keyboard_with_buttons_shows_keys_tab() {
         haptic_panel: false,
         dpi_gestures: false,
         fn_lock: false,
+        onboard_profiles: false,
     });
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
     assert!(tabs.contains(&DetailTab::Keys));

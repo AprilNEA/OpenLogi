@@ -58,7 +58,9 @@ async fn replay_inventory_and_authoritative_read_share_one_injected_backend() {
             standalone,
             hid_open_failures,
         } => (inventories, standalone, hid_open_failures),
-        InventoryEvent::Unavailable | InventoryEvent::SystemWake => {
+        InventoryEvent::Unavailable
+        | InventoryEvent::SystemWake
+        | InventoryEvent::Hidpp20SlotReconnected => {
             panic!("initial replay reconciliation must publish a snapshot")
         }
     };
@@ -285,7 +287,11 @@ async fn published_within(
                 Some(InventoryEvent::Snapshot { inventories, .. }) if wanted(&inventories) => {
                     return inventories;
                 }
-                Some(InventoryEvent::Snapshot { .. } | InventoryEvent::SystemWake) => {}
+                Some(
+                    InventoryEvent::Snapshot { .. }
+                    | InventoryEvent::SystemWake
+                    | InventoryEvent::Hidpp20SlotReconnected,
+                ) => {}
                 Some(InventoryEvent::Unavailable) => {
                     panic!("a replay backend never makes enumeration unavailable")
                 }

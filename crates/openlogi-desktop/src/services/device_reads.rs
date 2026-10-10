@@ -12,13 +12,16 @@ use swr_core::{
 use swr_gpui::Query;
 use tokio::sync::mpsc;
 
-use super::ipc::{Command, ReadDpi, ReadFnLock, ReadSmartShift};
-use crate::state::{AppState, DeviceKey, DpiLoad, FnLockLoad, Load, SmartShiftLoad, StateEvent};
+use super::ipc::{Command, ReadDpi, ReadFnLock, ReadOnboardProfiles, ReadSmartShift};
+use crate::state::{
+    AppState, DeviceKey, DpiLoad, FnLockLoad, Load, OnboardProfilesLoad, SmartShiftLoad, StateEvent,
+};
 
 const ROOT: &str = "device-read";
 const DPI: &str = "dpi";
 const SMARTSHIFT: &str = "smartshift";
 const FN_LOCK: &str = "fn-lock";
+const ONBOARD_PROFILES: &str = "onboard-profiles";
 
 /// Preserve the old budget: one initial attempt and two retries.
 const READ_RETRY_POLICY: RetryPolicy = RetryPolicy {
@@ -53,6 +56,10 @@ pub(crate) struct DeviceReads {
     dpi: BTreeMap<DeviceKey, DeviceRead<DpiInfo>>,
     smartshift: BTreeMap<DeviceKey, DeviceRead<SmartShiftStatus>>,
     fn_lock: BTreeMap<DeviceKey, DeviceRead<FnLockState>>,
+    onboard_profiles: BTreeMap<DeviceKey, DeviceRead<bool>>,
+    /// Devices with an onboard-mode write in flight. Their reading is the
+    /// asked-for mode until the device answers; a re-read must not race it.
+    onboard_profiles_writes: BTreeSet<DeviceKey>,
 }
 
 impl DeviceReads {
@@ -307,6 +314,132 @@ impl DeviceReads {
         self.fn_lock.get(key).map(|read| &read.load)
     }
 
+    /// Start the onboard-mode query unless the same device route is already
+    /// subscribed.
+    pub(crate) fn ensure_onboard_profiles(
+        &mut self,
+        key: DeviceKey,
+        route: DeviceRoute,
+        commands: mpsc::UnboundedSender<Command>,
+        cx: &mut Context<AppState>,
+    ) {
+        if self
+            .onboard_profiles
+            .get(&key)
+            .is_some_and(|read| read.route == route)
+        {
+            return;
+        }
+        self.remove_onboard_profiles(&key);
+        let Some((client, runtime)) = self.cache() else {
+            return;
+        };
+        let flight = self.take_flight();
+        let fetch_route = route.clone();
+        let fetcher = Retry::new(
+            runtime,
+            move |_| {
+                let commands = commands.clone();
+                let route = fetch_route.clone();
+                read_ipc(
+                    move |reply| ReadOnboardProfiles { route, reply }.into(),
+                    commands,
+                )
+            },
+            READ_RETRY_POLICY,
+        )
+        .retry_if(|error| !onboard_profiles_error_is_permanent(error));
+        let handle = client.subscribe(
+            query_key(ONBOARD_PROFILES, &key),
+            fetcher,
+            QueryOptions::immutable(),
+        );
+        let query = Query::new(&client, handle, cx);
+        let load = project_load(query.read(cx), onboard_profiles_error_is_permanent);
+        let observed_key = key.clone();
+        let observer = cx.observe(query.state(), move |state, query_state, cx| {
+            let load = project_load(query_state.read(cx), onboard_profiles_error_is_permanent);
+            if state
+                .device_reads_mut()
+                .update_onboard_profiles(&observed_key, flight, load)
+            {
+                cx.emit(StateEvent::OnboardProfilesChanged(observed_key.clone()));
+            }
+        });
+        self.onboard_profiles.insert(
+            key,
+            DeviceRead {
+                route,
+                flight,
+                load,
+                query,
+                _observer: observer,
+            },
+        );
+    }
+
+    /// An onboard-mode write to `key` is on its way: show the asked-for mode
+    /// until [`Self::finish_onboard_profiles_write`] brings the device's
+    /// answer, and hold off re-reads that could land the pre-write mode.
+    pub(crate) fn begin_onboard_profiles_write(&mut self, key: &DeviceKey, onboard_profiles: bool) {
+        self.onboard_profiles_writes.insert(key.clone());
+        self.set_onboard_profiles_ready(key, onboard_profiles);
+    }
+
+    /// The device's answer to an onboard-mode write: the mode it reports, or
+    /// — when it refused or could not be reached — a re-read, so the
+    /// asked-for mode does not stand in for its own.
+    pub(crate) fn finish_onboard_profiles_write(
+        &mut self,
+        key: &DeviceKey,
+        result: Result<bool, &WriteError>,
+    ) {
+        self.onboard_profiles_writes.remove(key);
+        match result {
+            Ok(onboard_profiles) => self.set_onboard_profiles_ready(key, onboard_profiles),
+            Err(_) => self.refresh_onboard_profiles(key),
+        }
+    }
+
+    /// Whether an onboard-mode write to `key` awaits the device's answer.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn onboard_profiles_write_pending(&self, key: &DeviceKey) -> bool {
+        self.onboard_profiles_writes.contains(key)
+    }
+
+    fn set_onboard_profiles_ready(&mut self, key: &DeviceKey, onboard_profiles: bool) {
+        let value = Arc::new(onboard_profiles);
+        if let Some(client) = &self.client {
+            client.set::<_, Cached<bool>, WriteError>(
+                query_key(ONBOARD_PROFILES, key),
+                Some(value.clone()),
+            );
+        }
+        if let Some(read) = self.onboard_profiles.get_mut(key) {
+            read.load = Load::Ready(value);
+        }
+    }
+
+    /// Re-read `key`'s onboard mode from the device, keeping the last reading
+    /// on screen while it answers. Skipped while a write is in flight: the
+    /// write's own answer is the next word on the mode. The device falls back
+    /// to onboard mode on a power cycle, so a reading taken once goes stale.
+    pub(crate) fn refresh_onboard_profiles(&mut self, key: &DeviceKey) {
+        if self.onboard_profiles_writes.contains(key) {
+            return;
+        }
+        if let Some(read) = self.onboard_profiles.get_mut(key) {
+            read.query.revalidate();
+        }
+    }
+
+    /// `key`'s onboard-mode load, or `None` while nothing has subscribed to it.
+    #[must_use]
+    pub(crate) fn onboard_profiles_load(&self, key: &DeviceKey) -> Option<&OnboardProfilesLoad> {
+        self.onboard_profiles.get(key).map(|read| &read.load)
+    }
+
     /// `key`'s DPI load, or `None` while nothing has subscribed to it.
     #[must_use]
     pub(crate) fn dpi_load(&self, key: &DeviceKey) -> Option<&DpiLoad> {
@@ -317,6 +450,18 @@ impl DeviceReads {
     #[must_use]
     pub(crate) fn smartshift_load(&self, key: &DeviceKey) -> Option<&SmartShiftLoad> {
         self.smartshift.get(key).map(|read| &read.load)
+    }
+
+    /// Read `key`'s DPI from the device again and publish the answer even when
+    /// it equals the last reading. For a sensor something other than the
+    /// host changed — an onboard profile — where the displayed value may have
+    /// drifted from the last reading through local edits.
+    pub(crate) fn reread_dpi(&mut self, key: &DeviceKey) {
+        let Some(read) = self.dpi.get_mut(key) else {
+            return;
+        };
+        read.load = Load::Loading;
+        read.query.revalidate();
     }
 
     /// Retry an exhausted DPI query without changing its registered fetcher.
@@ -360,6 +505,7 @@ impl DeviceReads {
         self.remove_dpi(key);
         self.remove_smartshift(key);
         self.remove_fn_lock(key);
+        self.remove_onboard_profiles(key);
     }
 
     pub(crate) fn remove_dpi(&mut self, key: &DeviceKey) {
@@ -383,6 +529,14 @@ impl DeviceReads {
         }
     }
 
+    fn remove_onboard_profiles(&mut self, key: &DeviceKey) {
+        self.onboard_profiles_writes.remove(key);
+        if let Some(read) = self.onboard_profiles.remove(key) {
+            drop(read);
+            self.clear::<bool>(ONBOARD_PROFILES, key);
+        }
+    }
+
     /// Forget every query whose device is no longer present.
     pub(crate) fn retain_present(&mut self, present: impl Fn(&str) -> bool) {
         let removed: BTreeSet<_> = self
@@ -390,6 +544,7 @@ impl DeviceReads {
             .keys()
             .chain(self.smartshift.keys())
             .chain(self.fn_lock.keys())
+            .chain(self.onboard_profiles.keys())
             .filter(|key| !present(key.as_str()))
             .cloned()
             .collect();
@@ -438,6 +593,26 @@ impl DeviceReads {
     fn update_fn_lock(&mut self, key: &DeviceKey, flight: u64, load: FnLockLoad) -> bool {
         let Some(read) = self
             .fn_lock
+            .get_mut(key)
+            .filter(|read| read.flight == flight)
+        else {
+            return false;
+        };
+        if read.load == load {
+            return false;
+        }
+        read.load = load;
+        true
+    }
+
+    fn update_onboard_profiles(
+        &mut self,
+        key: &DeviceKey,
+        flight: u64,
+        load: OnboardProfilesLoad,
+    ) -> bool {
+        let Some(read) = self
+            .onboard_profiles
             .get_mut(key)
             .filter(|read| read.flight == flight)
         else {
@@ -519,6 +694,10 @@ fn smartshift_error_is_permanent(error: &WriteError) -> bool {
 }
 
 fn fn_lock_error_is_permanent(error: &WriteError) -> bool {
+    matches!(error, WriteError::FeatureUnsupported { .. })
+}
+
+fn onboard_profiles_error_is_permanent(error: &WriteError) -> bool {
     matches!(error, WriteError::FeatureUnsupported { .. })
 }
 

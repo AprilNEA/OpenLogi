@@ -6,8 +6,8 @@
 //! exposes exact device-supported values once the list is known.
 
 use gpui::{
-    AnyElement, Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, Window,
-    div, px,
+    AnyElement, Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription,
+    WeakEntity, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     Icon, IconName, Selectable as _, Sizable as _,
@@ -29,6 +29,9 @@ pub struct DpiPanel {
     /// Rebuilt whenever the selected device or its reported range changes,
     /// because a slider's range is fixed when it is built.
     slider: Option<DpiSlider>,
+    /// A preset was clicked while the onboard profile owns the DPI: show why
+    /// nothing happened until onboard profiles are turned off.
+    preset_blocked: bool,
     _state_obs: Subscription,
 }
 
@@ -56,19 +59,28 @@ struct DpiPanelSnapshot {
     /// device sits in `Unknown` forever (discovery can't start without a
     /// route), so the UI must say "offline" rather than "reading…".
     reachable: bool,
+    /// The device's onboard profile controls DPI (`0x8100` in onboard mode),
+    /// so a host write would be rejected.
+    onboard_profile: bool,
 }
 
 impl DpiPanel {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        // Repaint when the active device changes or DPI discovery
-        // completes. The slider entity is rebuilt in `render` whenever the
-        // selected device or reported range changes, because SliderState's
-        // range is builder-only.
-        let state_obs =
-            AppState::repaint_on(cx, |event| matches!(event, StateEvent::DpiChanged(_)));
+        // Repaint when the active device changes, DPI discovery completes, or
+        // onboard profiles switch (they decide between slider and hint). The
+        // slider entity is rebuilt in `render` whenever the selected device
+        // or reported range changes, because SliderState's range is
+        // builder-only.
+        let state_obs = AppState::repaint_on(cx, |event| {
+            matches!(
+                event,
+                StateEvent::DpiChanged(_) | StateEvent::OnboardProfilesChanged(_)
+            )
+        });
 
         Self {
             slider: None,
+            preset_blocked: false,
             _state_obs: state_obs,
         }
     }
@@ -137,17 +149,34 @@ impl DpiPanel {
     }
 }
 
-impl Render for DpiPanel {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let snapshot = dpi_panel_snapshot(cx);
-        let pal = theme::palette(cx);
-
-        if let (DpiLoad::Ready(info), Some(key)) = (&snapshot.status, &snapshot.device_key) {
-            self.ensure_slider(key, &info.capabilities, snapshot.dpi, window, cx);
-        } else {
-            self.slider = None;
+impl DpiPanel {
+    /// The slider, or the onboard-profile hint in its place while the
+    /// device's own profile owns the DPI.
+    fn slider_row(&self, snapshot: &DpiPanelSnapshot, pal: Palette) -> AnyElement {
+        if snapshot.onboard_profile {
+            return status_line(tr!("pointer.dpi_set_by_onboard_profile"), pal).into_any_element();
         }
+        slider_element(
+            &snapshot.status,
+            self.slider.as_ref().map(|current| current.slider.slider()),
+            snapshot.reachable,
+            snapshot.device_key.clone(),
+            pal,
+        )
+    }
 
+    /// The preset chips. While the onboard profile owns the DPI a click shows
+    /// why it cannot apply instead of changing the value.
+    fn presets_section(
+        &mut self,
+        snapshot: &DpiPanelSnapshot,
+        pal: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        if !snapshot.onboard_profile {
+            self.preset_blocked = false;
+        }
+        let panel = cx.entity().downgrade();
         // Highlight at most one chip: when several presets snap to the same
         // supported value as the current DPI, only the first is "active".
         let mut already_highlighted = false;
@@ -160,18 +189,56 @@ impl Render for DpiPanel {
                     .map_or(*value, |state| state.normalize_active_dpi(*value));
                 let active = !already_highlighted && normalized == snapshot.dpi;
                 already_highlighted |= active;
-                preset_chip(idx, *value, active, &snapshot.presets)
+                preset_chip(
+                    idx,
+                    *value,
+                    active,
+                    &snapshot.presets,
+                    snapshot.onboard_profile.then(|| panel.clone()),
+                )
             })
             .collect();
 
+        v_flex()
+            .gap_2()
+            .child(
+                div()
+                    .text_caption()
+                    .text_color(pal.text_muted)
+                    .child(tr!("common.presets")),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .flex_wrap()
+                    .children(preset_chips)
+                    .child(add_preset_chip()),
+            )
+            .when(self.preset_blocked, |column| {
+                column.child(
+                    div()
+                        .text_caption()
+                        .text_color(pal.text_muted)
+                        .child(tr!("pointer.presets_blocked_by_onboard_profile")),
+                )
+            })
+    }
+}
+
+impl Render for DpiPanel {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let snapshot = dpi_panel_snapshot(cx);
+        let pal = theme::palette(cx);
+
+        if let (DpiLoad::Ready(info), Some(key)) = (&snapshot.status, &snapshot.device_key) {
+            self.ensure_slider(key, &info.capabilities, snapshot.dpi, window, cx);
+        } else {
+            self.slider = None;
+        }
+
         let range_label = dpi_range_label(&snapshot.status, snapshot.reachable);
-        let slider = slider_element(
-            &snapshot.status,
-            self.slider.as_ref().map(|current| current.slider.slider()),
-            snapshot.reachable,
-            snapshot.device_key.clone(),
-            pal,
-        );
+        let slider = self.slider_row(&snapshot, pal);
+        let presets = self.presets_section(&snapshot, pal, cx);
 
         v_flex()
             .gap_3()
@@ -200,23 +267,7 @@ impl Render for DpiPanel {
                     .text_color(pal.text_muted)
                     .child(range_label),
             )
-            .child(
-                v_flex()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_caption()
-                            .text_color(pal.text_muted)
-                            .child(tr!("common.presets")),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .flex_wrap()
-                            .children(preset_chips)
-                            .child(add_preset_chip()),
-                    ),
-            )
+            .child(presets)
     }
 }
 
@@ -231,6 +282,8 @@ fn dpi_panel_snapshot(cx: &mut Context<DpiPanel>) -> DpiPanelSnapshot {
                 dpi: s.dpi(),
                 presets: s.dpi_presets(),
                 reachable: record.route.is_some(),
+                onboard_profile: s.current_onboard_profiles_supported()
+                    && s.current_onboard_profiles_shown(),
             })
         })
         .unwrap_or_else(|| DpiPanelSnapshot {
@@ -239,6 +292,7 @@ fn dpi_panel_snapshot(cx: &mut Context<DpiPanel>) -> DpiPanelSnapshot {
             presets: Vec::new(),
             status: DpiLoad::Unsupported(tr!("device.no_active_device").to_string()),
             reachable: false,
+            onboard_profile: false,
         })
 }
 
@@ -320,7 +374,15 @@ const CHIP_H: f32 = 28.;
 
 /// One DPI preset rendered as a chip. Clicking the chip writes that DPI to
 /// the device and updates `AppState.dpi`; the small × removes the preset.
-fn preset_chip(idx: usize, value: Dpi, active: bool, presets: &[Dpi]) -> impl IntoElement {
+/// While the onboard profile owns the DPI, `blocked_by` is the panel told
+/// instead, so it can say why nothing changed.
+fn preset_chip(
+    idx: usize,
+    value: Dpi,
+    active: bool,
+    presets: &[Dpi],
+    blocked_by: Option<WeakEntity<DpiPanel>>,
+) -> impl IntoElement {
     let presets_for_remove: Vec<Dpi> = presets.to_vec();
     PresetChip::new(("dpi-preset-chip", idx))
         .selected(active)
@@ -334,6 +396,13 @@ fn preset_chip(idx: usize, value: Dpi, active: bool, presets: &[Dpi]) -> impl In
                 .label(format!("{value}"))
                 .selected(active)
                 .on_click(move |_event, _window, cx| {
+                    if let Some(panel) = &blocked_by {
+                        let _ = panel.update(cx, |panel, cx| {
+                            panel.preset_blocked = true;
+                            cx.notify();
+                        });
+                        return;
+                    }
                     // Only apply once the supported DPI list is known, so the
                     // click writes a snapped, device-valid value — and can't be
                     // clobbered by a discovery result that lands afterwards.

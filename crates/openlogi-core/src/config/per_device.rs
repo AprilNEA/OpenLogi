@@ -296,6 +296,24 @@ impl Config {
             .fn_lock = Some(fn_lock);
     }
 
+    /// The persisted onboard-profiles choice for `device_key`, or `None` when
+    /// the user never set one (the device keeps its own mode).
+    #[must_use]
+    pub fn onboard_profiles(&self, device_key: &str) -> Option<bool> {
+        self.devices
+            .get(device_key)
+            .and_then(|d| d.onboard_profiles)
+    }
+
+    /// Record whether `device_key`'s onboard profiles stay active; the agent
+    /// writes it on reload and re-applies it when the device reconnects.
+    pub fn set_onboard_profiles(&mut self, device_key: &str, onboard_profiles: bool) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .onboard_profiles = Some(onboard_profiles);
+    }
+
     /// Record the SmartShift wheel config for `device_key`, so the agent can
     /// re-apply it when the device reconnects (#189).
     pub fn set_smartshift(&mut self, device_key: &str, smartshift: SmartShift) {

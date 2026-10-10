@@ -149,12 +149,7 @@ impl Agent for AgentServer {
     }
 
     async fn set_dpi(self, _: Context, route: DeviceRoute, dpi: Dpi) -> Result<(), WriteError> {
-        self.shared
-            .device(&route)
-            .run(HidppOperation::WriteDpi, |c| async move {
-                openlogi_hid::set_dpi_on(&c, dpi).await
-            })
-            .await
+        self.shared.set_dpi(&route, dpi).await
     }
 
     async fn set_lighting(
@@ -244,6 +239,38 @@ impl Agent for AgentServer {
         fn_lock: bool,
     ) -> Result<FnLockState, WriteError> {
         self.shared.set_fn_lock(&route, fn_lock).await
+    }
+
+    async fn read_onboard_profiles(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<bool, WriteError> {
+        self.shared
+            .device(&route)
+            .run(HidppOperation::ReadOnboardMode, |c| async move {
+                openlogi_hid::get_onboard_profiles_on(&c).await
+            })
+            .await
+    }
+
+    async fn set_onboard_profiles(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        onboard_profiles: bool,
+    ) -> Result<bool, WriteError> {
+        // Handing control to the host restores the user's own DPI in the same
+        // ordered write — also on a retry, when the saved choice has not
+        // changed and no config reload would write it.
+        let host_dpi = self
+            .orchestrator
+            .lock()
+            .await
+            .onboard_switch_dpi(&route, onboard_profiles);
+        self.shared
+            .set_onboard_profiles(&route, onboard_profiles, host_dpi)
+            .await
     }
 
     async fn request_accessibility_prompt(self, _: Context) {

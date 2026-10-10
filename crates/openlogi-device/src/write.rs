@@ -24,6 +24,7 @@ mod haptic;
 mod hires_wheel;
 mod lighting;
 mod litra;
+mod onboard_mode;
 mod pointer_scaling;
 mod smartshift;
 
@@ -53,6 +54,9 @@ pub use litra::{
     LITRA_BEAM_PRODUCT_ID, LITRA_GLOW_PRODUCT_ID, LightCommand, LitraDescriptor, LitraModel,
     apply as apply_litra, encode_command as encode_litra_command, find_litra,
     litra_model_for_route, matches_litra,
+};
+pub use onboard_mode::{
+    get_onboard_profiles, get_onboard_profiles_on, set_onboard_profiles, set_onboard_profiles_on,
 };
 pub use pointer_scaling::{PointerScaling, get_pointer_scaling, set_pointer_scaling};
 pub use smartshift::{
