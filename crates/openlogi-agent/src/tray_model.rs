@@ -439,7 +439,11 @@ fn devices(snapshot: &AgentSnapshot, config: &Config) -> Vec<DeviceRow> {
             };
             let slot = matches!(
                 route,
-                Some(DeviceRoute::Bolt { .. } | DeviceRoute::Unifying { .. })
+                Some(
+                    DeviceRoute::Bolt { .. }
+                        | DeviceRoute::Unifying { .. }
+                        | DeviceRoute::Hidpp20Receiver { .. }
+                )
             )
             .then_some(device.slot);
             let link = Link {

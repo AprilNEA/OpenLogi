@@ -194,6 +194,8 @@ pub use succession::Identity;
 ///      and `ActionRingIcon::{Channel1, Channel2, Channel3}` appended after
 ///      them — a device's move to another Easy-Switch channel, bound to a
 ///      button or an Actions Ring slot.
+///      `DeviceRoute::Hidpp20Receiver` appended — a device paired to a
+///      receiver that speaks HID++ 2.0, such as the PRO X3's `c54f`.
 pub const PROTOCOL_VERSION: u32 = 46;
 
 /// Environment variable through which the agent hands a supervised helper the

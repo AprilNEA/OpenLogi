@@ -63,13 +63,15 @@ impl ConnectionKind {
     ) -> Self {
         match route {
             Some(DeviceRoute::Bolt { .. }) => Self::BoltReceiver,
-            Some(DeviceRoute::Unifying { .. }) => match receiver_brand {
-                Some(ReceiverBrand::Nano) => Self::NanoReceiver,
-                Some(ReceiverBrand::Lightspeed) => Self::LightspeedReceiver,
-                Some(ReceiverBrand::Bolt | ReceiverBrand::Unifying) | None => {
-                    Self::UnifyingReceiver
+            Some(DeviceRoute::Unifying { .. } | DeviceRoute::Hidpp20Receiver { .. }) => {
+                match receiver_brand {
+                    Some(ReceiverBrand::Nano) => Self::NanoReceiver,
+                    Some(ReceiverBrand::Lightspeed) => Self::LightspeedReceiver,
+                    Some(ReceiverBrand::Bolt | ReceiverBrand::Unifying) | None => {
+                        Self::UnifyingReceiver
+                    }
                 }
-            },
+            }
             Some(DeviceRoute::Direct { product_id, .. }) => {
                 match model.and_then(|m| m.transport_for_product_id(*product_id)) {
                     Some(ModelTransport::Bluetooth | ModelTransport::Btle) => Self::BluetoothDirect,
@@ -998,5 +1000,17 @@ mod connection_kind_tests {
         ] {
             assert_eq!(ConnectionKind::of(Some(&route), brand, None), expected);
         }
+    }
+
+    #[test]
+    fn a_hidpp20_receiver_uses_the_registered_brand() {
+        let route = DeviceRoute::Hidpp20Receiver {
+            receiver_uid: "r1".to_string(),
+            slot: 1,
+        };
+        assert_eq!(
+            ConnectionKind::of(Some(&route), Some(ReceiverBrand::Lightspeed), None),
+            ConnectionKind::LightspeedReceiver
+        );
     }
 }
