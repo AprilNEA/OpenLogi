@@ -14,6 +14,7 @@
 // crate this one already depends on for locale negotiation.
 rust_i18n::i18n!("../openlogi-ui/locales", fallback = "en");
 
+mod backlight;
 mod ipc;
 mod platform;
 mod ring;
@@ -23,15 +24,20 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use gpui::AppContext as _;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use openlogi_core::action_ring::DISPLAY_LIFETIME;
 
+use crate::backlight::BacklightView;
 use crate::ipc::OverlayCommand;
 use crate::platform::RingPlacement;
 use crate::ring::RingView;
 use crate::session::{ClickAwaySession, claim_the_role, spawn_click_away_dismissal};
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the overlay bootstraps two independent IPC observation tasks"
+)]
 fn main() -> Result<()> {
     openlogi_core::logging::init_stderr();
 
@@ -48,6 +54,7 @@ fn main() -> Result<()> {
     let _tenancy = claim_the_role()?;
     let ipc::Handle {
         mut invocations,
+        mut backlights,
         commands,
     } = ipc::spawn();
 
@@ -64,7 +71,9 @@ fn main() -> Result<()> {
                 let Some(invocation) = observed else {
                     cx.update(|cx| {
                         for handle in cx.windows() {
-                            let _ = handle.update(cx, |_, window, _| window.remove_window());
+                            if handle.downcast::<RingView>().is_some() {
+                                let _ = handle.update(cx, |_, window, _| window.remove_window());
+                            }
                         }
                     });
                     continue;
@@ -72,7 +81,9 @@ fn main() -> Result<()> {
                 openlogi_core::locale::activate(invocation.language.as_deref());
                 cx.update(|cx| {
                     for handle in cx.windows() {
-                        let _ = handle.update(cx, |_, window, _| window.remove_window());
+                        if handle.downcast::<RingView>().is_some() {
+                            let _ = handle.update(cx, |_, window, _| window.remove_window());
+                        }
                     }
                     let placement = match RingPlacement::capture(cx) {
                         Ok(placement) => placement,
@@ -114,6 +125,45 @@ fn main() -> Result<()> {
                             .detach();
                         }
                         Err(error) => warn!(%error, "could not open Actions Ring window"),
+                    }
+                });
+            }
+        })
+        .detach();
+        cx.spawn(async move |cx| {
+            while let Some(observation) = backlights.recv().await {
+                debug!(
+                    level = observation.current_level,
+                    visible = observation.visible,
+                    "backlight observation received"
+                );
+                cx.update(|cx| {
+                    for handle in cx.windows() {
+                        if let Some(view) = handle.downcast::<BacklightView>() {
+                            let _ = view.update(cx, |view, _, cx| {
+                                view.observation = observation.clone();
+                                cx.notify();
+                            });
+                        }
+                    }
+                    if !observation.visible {
+                        for handle in cx.windows() {
+                            if handle.downcast::<BacklightView>().is_some() {
+                                let _ = handle.update(cx, |_, window, _| window.remove_window());
+                            }
+                        }
+                        return;
+                    }
+                    if cx
+                        .windows()
+                        .iter()
+                        .all(|handle| handle.downcast::<BacklightView>().is_none())
+                    {
+                        let options = backlight::window_options(cx);
+                        let opened = cx.open_window(options, |_, cx| {
+                            cx.new(|_| BacklightView::new(observation.clone()))
+                        });
+                        debug!(success = opened.is_ok(), "backlight window opened");
                     }
                 });
             }

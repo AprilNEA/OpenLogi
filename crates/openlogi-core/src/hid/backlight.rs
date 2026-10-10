@@ -69,6 +69,12 @@ pub struct BacklightState {
     pub nb_levels: u8,
 }
 
+/// Highest selectable level when the device reports a count including zero.
+#[must_use]
+pub const fn max_backlight_level(nb_levels: u8) -> u8 {
+    nb_levels.saturating_sub(1)
+}
+
 impl BacklightState {
     /// Whether the LEDs are dark right now, for whatever reason — software
     /// disable, critical battery, a saturated ambient-light sensor, or a zero
@@ -89,6 +95,13 @@ impl BacklightState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn level_count_includes_the_off_position() {
+        assert_eq!(max_backlight_level(8), 7);
+        assert_eq!(max_backlight_level(1), 0);
+        assert_eq!(max_backlight_level(0), 0);
+    }
 
     fn lit() -> BacklightState {
         BacklightState {

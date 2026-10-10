@@ -68,7 +68,8 @@ pub use succession::Identity;
 /// v33: `Agent::unpair_device` appended.
 /// v34: `KeyCombo` gains the Super modifier bit (`Super`, `Win`, `Meta`).
 /// v35: `HidppOperation::{ReadPointerScaling, WritePointerScaling}` appended.
-pub const PROTOCOL_VERSION: u32 = 35;
+/// v36: transient keyboard backlight observations appended.
+pub const PROTOCOL_VERSION: u32 = 36;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -412,6 +413,19 @@ pub struct RingObservation {
     pub invocation: Option<ActionRingInvocation>,
 }
 
+/// A transient keyboard backlight level indicator.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BacklightObservation {
+    /// Generation of this observation on the backlight channel.
+    pub generation: Generation,
+    /// Current level, where zero is off.
+    pub current_level: u8,
+    /// Number of levels reported by the keyboard, including level zero.
+    pub levels: u8,
+    /// Whether the firmware reports a visible backlight state.
+    pub visible: bool,
+}
+
 /// Why an Actions Ring interaction command was rejected.
 ///
 /// Variants are append-only because this enum crosses bincode IPC.
@@ -581,4 +595,6 @@ pub trait Agent {
     /// receiver, and with [`PairingFailure::ReceiverNotFound`] for a route
     /// that names no receiver slot or a receiver that is not connected.
     async fn unpair_device(route: DeviceRoute) -> Result<(), PairingFailure>;
+    /// Block until the transient keyboard-backlight indicator changes.
+    async fn observe_backlight(since: Generation) -> BacklightObservation;
 }

@@ -223,3 +223,8 @@ fn terminal_retries_last_only_until_the_session_deadline() {
     assert!(!retry_before(Some(past)));
     assert!(!retry_before(None));
 }
+
+#[test]
+fn losing_the_agent_hides_the_backlight_indicator() {
+    assert!(!agent_lost().visible);
+}

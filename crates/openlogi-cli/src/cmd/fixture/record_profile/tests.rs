@@ -17,9 +17,9 @@ use openlogi_fixture::{
 };
 use openlogi_ipc::client::ProtocolSkew;
 use openlogi_ipc::{
-    ActionRingCommandError, ActionRingInvocation, Agent, AgentStatus, ClientKind,
-    ConfigReloadError, ForegroundApps, Generation, Identity, InventoryHealth, MonitorEvent,
-    Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase,
+    ActionRingCommandError, ActionRingInvocation, Agent, AgentStatus, BacklightObservation,
+    ClientKind, ConfigReloadError, ForegroundApps, Generation, Identity, InventoryHealth,
+    MonitorEvent, Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase,
     PairingUpdate, RingObservation,
 };
 use tarpc::client::RpcError;
@@ -115,6 +115,10 @@ impl Agent for TestAgent {
     }
 
     async fn inventory(self, _: TarpcContext) -> Vec<DeviceInventory> {
+        unreachable!("profile capture must use one snapshot")
+    }
+
+    async fn observe_backlight(self, _: TarpcContext, _since: Generation) -> BacklightObservation {
         unreachable!("profile capture must use one snapshot")
     }
 
