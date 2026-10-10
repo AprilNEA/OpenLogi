@@ -67,3 +67,21 @@ It intentionally declares no recorded cases or hardware provenance.
 The fixture contains seven cases: feature table, reprogrammable controls, raw battery, DPI, SmartShift, wheel mode, and unsupported backlight state. The DPI capture reports 2000 DPI with a supported range of 200–8000 in steps of 50. The control table has nine entries, including separate gesture (`0x00c3`) and haptic panel (`0x01a0`) controls. Regression tests replay DPI and control reads through the production operations and require complete cassette consumption.
 
 The firmware-entities case is excluded because nonzero `extra_version` bytes and entity flags beyond the active bit remain unclassified. The generated manifest retains the seven accepted cases and their existing identity occurrences. This capture does not verify setting writes, haptic output, gestures, or physical wheel behavior. The Agent and Overlay were restored after capture.
+
+## MX Anywhere 3S capture
+
+`devices/mx-anywhere-3s-001` was captured on macOS 26.4 on 2026-10-10 through Bluetooth LE (`046d:b037`). The semantic profile came from CLI and Agent 0.8.11; the HID++ cassettes came from the repository CLI 0.8.13. Device identities are synthetic.
+
+The fixture contains seven cases: feature table, reprogrammable controls, raw battery, DPI, SmartShift, wheel mode, and unsupported backlight state. All 65 exchanges use 20-byte long reports. The DPI capture reports current and default values of 1000 DPI, with a supported range of 200–8000 in steps of 50. The control table has seven entries, including a physical control (`0x00c4`) with raw XY and analytics flags and a virtual control (`0x00d7`) with forced raw XY. Regression tests replay DPI and control reads through the production operations, exercise Bluetooth short-to-long request widening, and require complete cassette consumption.
+
+The firmware-entities case is excluded because nonzero `extra_version` bytes remain unclassified. The generated manifest retains the seven accepted cases and removes the excluded case's unit-ID occurrence. This capture does not verify setting writes, gestures, physical wheel behavior, or reconnects. The Agent and Overlay were restored after capture.
+
+## MX Master 3S capture
+
+`devices/mx-master-3s-001` was captured on macOS 26.7.1 (25G241) on 2026-10-10 through Bluetooth LE (`046d:b034`). The semantic profile came from CLI and Agent 0.8.11; the HID++ cassettes came from the repository CLI 0.8.13. Device identities are synthetic.
+
+The fixture contains seven cases: feature table, reprogrammable controls, raw battery, DPI, SmartShift, wheel mode, and unsupported backlight state. All 68 exchanges use 20-byte long reports. The DPI capture reports current and default values of 1000 DPI, with a supported range of 200–8000 in steps of 50. The control table has eight entries, including a gesture control (`0x00c3`, task `0x00a9`) with raw XY and analytics flags and a virtual control (`0x00d7`) with forced raw XY.
+
+This specimen exposes legacy SmartShift (`0x2110`): ratchet mode, an auto-disengage threshold of 10, and no tunable torque. Regression tests replay SmartShift and control reads through the production operations and require complete cassette consumption. The SmartShift case covers two missing-`0x2111` probes followed by the `0x2110` read.
+
+The firmware-entities case is excluded because two entities contain nonzero `extra_version` bytes that remain unclassified. The generated manifest retains the seven accepted cases and removes the excluded case's unit-ID occurrence. This capture does not verify setting writes, gestures, physical wheel behavior, reconnects, or alternate transports. The GUI, Agent, and Overlay were restored after capture.

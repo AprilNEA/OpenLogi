@@ -171,6 +171,9 @@ fn unique_replacement(audit: &HidCassetteAudit, kind: SanitizedIdentityKind) -> 
 mod tests {
     use std::path::Path;
 
+    use openlogi_core::hid::{
+        SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold,
+    };
     use openlogi_device::reprog_controls::CidFlags;
     use openlogi_device::write::{FeatureEntry, ReprogControlEntry};
     use openlogi_device::{Dpi, DpiCapabilities, DpiInfo};
@@ -339,12 +342,196 @@ mod tests {
             .expect("control-table cassette consumed");
     }
 
+    #[tokio::test]
+    async fn mx_anywhere_3s_dpi_read_replays_bluetooth_long_reports() {
+        let Some((backend, route)) = mx_anywhere_3s_replay("dpi-info") else {
+            return;
+        };
+
+        let observed = FixtureOperation::DpiInfo.observe(&backend, &route).await;
+
+        assert_eq!(
+            observed,
+            SemanticObservation::DpiInfo(Ok(DpiInfo {
+                current: Dpi::new(1000),
+                capabilities: DpiCapabilities::new((200..=8000).step_by(50).collect())
+                    .expect("reviewed sensor range is valid"),
+            }))
+        );
+        backend.require_complete().expect("DPI cassette consumed");
+    }
+
+    #[tokio::test]
+    async fn mx_anywhere_3s_control_read_preserves_physical_and_virtual_raw_xy_flags() {
+        let Some((backend, route)) = mx_anywhere_3s_replay("reprogrammable-controls") else {
+            return;
+        };
+
+        let observed = FixtureOperation::ReprogrammableControls
+            .observe(&backend, &route)
+            .await;
+        let SemanticObservation::ReprogrammableControls(controls) = observed else {
+            panic!("expected a control-table observation, got {observed:?}");
+        };
+        let controls = controls.expect("recorded control table is readable");
+
+        assert_eq!(controls.len(), 7);
+        for expected in [
+            ReprogControlEntry {
+                cid: 0x00c4,
+                task_id: 0x009d,
+                flags: CidFlags::MOUSE
+                    | CidFlags::REPROGRAMMABLE
+                    | CidFlags::DIVERTABLE
+                    | CidFlags::RAW_XY
+                    | CidFlags::ANALYTICS_KEY_EVENTS,
+            },
+            ReprogControlEntry {
+                cid: 0x00d7,
+                task_id: 0x00b4,
+                flags: CidFlags::DIVERTABLE
+                    | CidFlags::VIRTUAL_CONTROL
+                    | CidFlags::RAW_XY
+                    | CidFlags::FORCE_RAW_XY,
+            },
+        ] {
+            assert_eq!(
+                controls
+                    .iter()
+                    .find(|control| control.cid == expected.cid)
+                    .copied(),
+                Some(expected)
+            );
+        }
+        backend
+            .require_complete()
+            .expect("control-table cassette consumed");
+    }
+
+    #[tokio::test]
+    async fn mx_master_3s_smartshift_read_uses_legacy_feature_without_tunable_torque() {
+        let Some((backend, route)) = mx_master_3s_replay("smartshift-status") else {
+            return;
+        };
+
+        let observed = FixtureOperation::SmartshiftStatus
+            .observe(&backend, &route)
+            .await;
+
+        assert_eq!(
+            observed,
+            SemanticObservation::SmartshiftStatus(Ok(SmartShiftStatus {
+                mode: SmartShiftMode::Ratchet,
+                auto_disengage: SmartShiftAutoDisengage::Threshold(
+                    SmartShiftThreshold::try_new(10).expect("reviewed threshold is valid"),
+                ),
+                tunable_torque: None,
+            }))
+        );
+        backend
+            .require_complete()
+            .expect("legacy SmartShift cassette consumed");
+    }
+
+    #[tokio::test]
+    async fn mx_master_3s_control_read_preserves_gesture_and_virtual_raw_xy_flags() {
+        let Some((backend, route)) = mx_master_3s_replay("reprogrammable-controls") else {
+            return;
+        };
+
+        let observed = FixtureOperation::ReprogrammableControls
+            .observe(&backend, &route)
+            .await;
+        let SemanticObservation::ReprogrammableControls(controls) = observed else {
+            panic!("expected a control-table observation, got {observed:?}");
+        };
+        let controls = controls.expect("recorded control table is readable");
+
+        assert_eq!(controls.len(), 8);
+        for expected in [
+            ReprogControlEntry {
+                cid: 0x00c3,
+                task_id: 0x00a9,
+                flags: CidFlags::MOUSE
+                    | CidFlags::REPROGRAMMABLE
+                    | CidFlags::DIVERTABLE
+                    | CidFlags::RAW_XY
+                    | CidFlags::ANALYTICS_KEY_EVENTS,
+            },
+            ReprogControlEntry {
+                cid: 0x00d7,
+                task_id: 0x00b4,
+                flags: CidFlags::DIVERTABLE
+                    | CidFlags::VIRTUAL_CONTROL
+                    | CidFlags::RAW_XY
+                    | CidFlags::FORCE_RAW_XY,
+            },
+        ] {
+            assert_eq!(
+                controls
+                    .iter()
+                    .find(|control| control.cid == expected.cid)
+                    .copied(),
+                Some(expected)
+            );
+        }
+        backend
+            .require_complete()
+            .expect("control-table cassette consumed");
+    }
+
     fn mx_master_4_replay(case: &str) -> Option<(ReplayBackend, DeviceRoute)> {
+        corpus_replay(
+            "mx-master-4-001",
+            case,
+            target(
+                DeviceRoute::Bolt {
+                    receiver_uid: "OL-BOLT-UID-0001".to_string(),
+                    slot: 2,
+                },
+                0xc548,
+            ),
+        )
+    }
+
+    fn mx_anywhere_3s_replay(case: &str) -> Option<(ReplayBackend, DeviceRoute)> {
+        corpus_replay(
+            "mx-anywhere-3s-001",
+            case,
+            target(
+                DeviceRoute::Direct {
+                    vendor_id: 0x046d,
+                    product_id: 0xb037,
+                },
+                0xb037,
+            ),
+        )
+    }
+
+    fn mx_master_3s_replay(case: &str) -> Option<(ReplayBackend, DeviceRoute)> {
+        corpus_replay(
+            "mx-master-3s-001",
+            case,
+            target(
+                DeviceRoute::Direct {
+                    vendor_id: 0x046d,
+                    product_id: 0xb034,
+                },
+                0xb034,
+            ),
+        )
+    }
+
+    fn corpus_replay(
+        specimen: &str,
+        case: &str,
+        target: TargetCandidate,
+    ) -> Option<(ReplayBackend, DeviceRoute)> {
         let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/devices");
         match std::fs::symlink_metadata(&corpus) {
             // Published crates do not contain the repository fixture corpus.
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                eprintln!("skipping MX Master 4 replay: repository fixture corpus is absent");
+                eprintln!("skipping {specimen} replay: repository fixture corpus is absent");
                 return None;
             }
             result => {
@@ -352,21 +539,15 @@ mod tests {
             }
         }
         let path = corpus
-            .join("mx-master-4-001/cases")
+            .join(specimen)
+            .join("cases")
             .join(format!("{case}.json"));
         let cassette: HidCassette =
-            serde_json::from_slice(&std::fs::read(path).expect("MX Master 4 cassette is present"))
-                .expect("MX Master 4 cassette parses");
-        let target = target(
-            DeviceRoute::Bolt {
-                receiver_uid: "OL-BOLT-UID-0001".to_string(),
-                slot: 2,
-            },
-            0xc548,
-        );
+            serde_json::from_slice(&std::fs::read(path).expect("corpus cassette is present"))
+                .expect("corpus cassette parses");
         let topology = replay_topology(&target, &target.route, &cassette);
-        let backend = ReplayBackend::new(topology, vec![cassette])
-            .expect("MX Master 4 replay topology is valid");
+        let backend =
+            ReplayBackend::new(topology, vec![cassette]).expect("corpus replay topology is valid");
         Some((backend, target.route))
     }
 
