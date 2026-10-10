@@ -81,4 +81,7 @@ pub enum PairingError {
     /// proceed safely, so the flow fails instead of presenting bogus data.
     #[error("malformed pairing notification ({0})")]
     MalformedNotification(&'static str),
+    /// The receiver has no free slot.
+    #[error("the receiver has no free pairing slot")]
+    ReceiverFull,
 }

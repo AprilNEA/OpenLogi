@@ -48,6 +48,7 @@ pub fn button_bindings_for(
         .unwrap_or_default();
     let mut bindings: BTreeMap<ButtonId, Binding> = ButtonId::ALL
         .iter()
+        .chain(&ButtonId::G_BUTTONS)
         .copied()
         .map(|button| (button, Binding::Single(default_binding(button))))
         .collect();

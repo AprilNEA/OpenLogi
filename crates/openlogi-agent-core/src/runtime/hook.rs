@@ -4,7 +4,7 @@
 //! and converts callback-thread mouse/key input into the shared action runtime.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::mpsc;
 use std::sync::{Arc, RwLock};
 use std::thread;
@@ -38,16 +38,35 @@ pub struct HookMaps {
     /// The pointer identity that selected this snapshot, or focused policy.
     pub(crate) pointer_target: Option<openlogi_hook::PointerTarget>,
     /// Device whose binding maps this snapshot contains.
-    #[cfg_attr(
-        not(any(target_os = "windows", test)),
-        expect(dead_code, reason = "read only by the Windows native-wheel fallback")
-    )]
     pub(crate) selected_device: Option<String>,
     /// Per-device `0x2150 default_dir`, learned by HID++ capture sessions:
     /// `true` means a positive native horizontal delta is physical forward/up.
     /// Entries survive map rebuilds because they are hardware observations,
     /// not configuration.
     pub(crate) thumbwheel_positive_is_forward: BTreeMap<String, bool>,
+    /// The selected device's G-Shift bindings.
+    pub(crate) shift_bindings: BTreeMap<ButtonId, Binding>,
+    /// Devices with a G-Shift button held, set by HID++ capture. Survives map
+    /// rebuilds like the thumb-wheel polarity.
+    pub(crate) shift_held: BTreeSet<String>,
+}
+
+impl HookMaps {
+    /// The binding for `id` and whether it is a gesture button, honouring a
+    /// held G-Shift layer, which replaces gestures for the press.
+    fn press_binding(&self, id: ButtonId) -> (Option<Binding>, bool) {
+        let shifted = self
+            .selected_device
+            .as_ref()
+            .is_some_and(|device| self.shift_held.contains(device));
+        if shifted && let Some(binding) = self.shift_bindings.get(&id) {
+            return (Some(binding.clone()), false);
+        }
+        (
+            self.bindings.get(&id).cloned(),
+            self.gestures.contains_key(&id),
+        )
+    }
 }
 
 /// Shared, atomically-published [`HookMaps`], threaded between the config owner
@@ -253,11 +272,8 @@ fn handle_button(
     // event while a config rebuild holds the write lock. Fail open if unavailable.
     let (binding, is_gesture, pointer_target) =
         hooks.try_read().map_or((None, false, None), |maps| {
-            (
-                maps.bindings.get(&id).cloned(),
-                maps.gestures.contains_key(&id),
-                maps.pointer_target,
-            )
+            let (binding, is_gesture) = maps.press_binding(id);
+            (binding, is_gesture, maps.pointer_target)
         });
     let action_target = if pressed {
         ActionDispatchTarget::for_pointer(pointer_target, capture_safari_pid)
@@ -419,7 +435,7 @@ fn handle_key(
 
     info!(keycode, action = %action.label(), "key → executing bound action");
     let action_target = capture_target();
-    let queued = if action.held_combo().is_some() {
+    let queued = if action.is_held() {
         let queued = dispatcher.try_hook_key_down(keycode, &action, action_target);
         if queued {
             HELD_KEYS.with_borrow_mut(|keys| {

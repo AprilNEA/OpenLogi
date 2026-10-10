@@ -13,6 +13,7 @@ pub mod dpi;
 pub mod error;
 pub mod fn_lock;
 pub mod light;
+pub mod onboard;
 pub mod pairing;
 pub mod route;
 pub mod scroll;
@@ -23,6 +24,7 @@ pub use dpi::{Dpi, DpiCapabilities, DpiInfo};
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
 pub use fn_lock::FnLockState;
 pub use light::{LightCommand, commands_for_light_settings};
+pub use onboard::{OnboardMode, OnboardProfile, OnboardState, ReportRate, ReportRateInfo};
 pub use pairing::{Click, PairingError, PasskeyMethod, ReceiverSelector};
 pub use route::{
     DIRECT_DEVICE_INDEX, DeviceRoute, LOGITECH_VENDOR_ID, RECEIVERS, ReceiverBrand,

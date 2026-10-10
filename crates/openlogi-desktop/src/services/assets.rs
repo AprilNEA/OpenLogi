@@ -114,6 +114,8 @@ fn open_in_file_manager(path: &Path) {
     }
 }
 
+pub const SIDE_VIEW_KEY: &str = "device_side";
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedAsset {
     pub depot: String,
@@ -143,6 +145,52 @@ pub struct ResolvedAsset {
     /// real buttons.
     pub png_width: u32,
     pub png_height: u32,
+    /// G-series side render, drawn beside the main one.
+    pub side_view: Option<SideView>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SideView {
+    pub image_path: PathBuf,
+    pub png_width: u32,
+    pub png_height: u32,
+}
+
+// With a side view beside it, the main view is the front render.
+fn main_view(path: PathBuf, side: Option<&SideView>, front: Option<&PathBuf>) -> PathBuf {
+    match (side, front) {
+        (Some(_), Some(front)) => front.clone(),
+        _ => path,
+    }
+}
+
+fn resolve_side_view(
+    dir: &Path,
+    entry: &DeviceEntry,
+    manifest: Option<&DepotManifest>,
+    extended_model_id: u8,
+    metadata: &Metadata,
+) -> Option<SideView> {
+    metadata
+        .image(SIDE_VIEW_KEY)
+        .filter(|image| !image.assignments.is_empty())?;
+    let variant = manifest.and_then(|m| {
+        entry.model_id_candidates().find_map(|base| {
+            m.resource_for_variant(base, extended_model_id, SIDE_VIEW_KEY)
+                .map(str::to_string)
+        })
+    });
+    let image_path = variant
+        .into_iter()
+        .chain(["side.png".to_string()])
+        .filter_map(|n| safe_component_path(dir, &n, "asset file").ok())
+        .find(|p| p.exists())?;
+    let (png_width, png_height) = read_png_dimensions(&image_path).ok()?;
+    Some(SideView {
+        image_path,
+        png_width,
+        png_height,
+    })
 }
 
 /// Everything a resolved asset is a function of, besides the files on disk.
@@ -372,6 +420,9 @@ impl AssetResolver {
                     Metadata::default()
                 }
             };
+            let side_view =
+                resolve_side_view(&dir, entry, manifest.as_ref(), extended_model_id, &metadata);
+            let image_path = main_view(image_path, side_view.as_ref(), hero_image_path.as_ref());
             let (png_width, png_height) = match read_png_dimensions(&image_path) {
                 Ok(dims) => dims,
                 Err(e) => {
@@ -413,6 +464,7 @@ impl AssetResolver {
                 metadata,
                 png_width,
                 png_height,
+                side_view,
             });
         }
         debug!(depot, "asset cache miss across all roots");
@@ -465,6 +517,7 @@ impl AssetResolver {
                 metadata: Metadata::default(),
                 png_width,
                 png_height,
+                side_view: None,
             });
         }
         debug!(depot, "standalone asset cache miss across all roots");

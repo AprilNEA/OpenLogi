@@ -335,11 +335,11 @@ impl Armed {
 }
 
 impl Running {
-    /// Retire a terminal Windows hook worker and publish that input capture is
-    /// no longer installed. The native callbacks have already been cleared,
-    /// so the interval before this check remains pass-through rather than
+    /// Retire a terminal hook worker and publish that input capture is no
+    /// longer installed. The native callbacks have already been cleared, so
+    /// the interval before this check remains pass-through rather than
     /// suppressing input without a consumer.
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     async fn apply_hook_health(&mut self) {
         let Some(hook) = self.hook.as_ref() else {
             return;
@@ -347,14 +347,32 @@ impl Running {
         if hook.is_running() {
             return;
         }
-        warn!("Windows hook worker exited — marking input capture unavailable");
+        warn!("input hook stopped — marking input capture unavailable");
         self.stop_hook();
+        self.publish_hook().await;
+    }
+
+    /// The Linux hook only grabs mice present at start, so retry on inventory changes.
+    #[cfg(target_os = "linux")]
+    async fn reinstall_hook(&mut self) {
+        if self.hook.is_some() || !self.capture_mouse_events {
+            return;
+        }
+        self.hook = self.start_hook();
+        if self.hook.is_some() {
+            self.publish_hook().await;
+        }
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    async fn publish_hook(&self) {
+        let installed = self.hook.is_some();
         self.orchestrator
             .lock()
             .await
-            .set_os_mouse_hook_available(false);
+            .set_os_mouse_hook_available(installed);
         self.observable
-            .set_accessibility_and_hook(Hook::has_accessibility(), false);
+            .set_accessibility_and_hook(Hook::has_accessibility(), installed);
     }
 
     /// Fold one watcher event into the agent's state.
@@ -367,12 +385,21 @@ impl Running {
 
         // Inventory and foreground-app samples make this a health
         // reconciliation without another timer in the control-plane loop.
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         self.apply_hook_health().await;
 
         match event {
             WatcherEvent::Inventory(event) => {
+                #[cfg(target_os = "linux")]
+                let has_devices = matches!(
+                    &event,
+                    InventoryEvent::Snapshot { inventories, .. } if !inventories.is_empty()
+                );
                 self.apply_inventory(event, inventory_refresh).await;
+                #[cfg(target_os = "linux")]
+                if has_devices {
+                    self.reinstall_hook().await;
+                }
             }
             WatcherEvent::Camera(active) => {
                 self.orchestrator.lock().await.set_camera_active(active);

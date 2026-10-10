@@ -5,20 +5,25 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{Context, Subscription};
-use openlogi_core::hid::{DeviceRoute, DpiInfo, FnLockState, SmartShiftStatus, WriteError};
+use openlogi_core::hid::{
+    DeviceRoute, DpiInfo, FnLockState, OnboardState, SmartShiftStatus, WriteError,
+};
 use swr_core::{
     MaybeSend, MaybeSync, QueryOptions, QueryState, Retry, RetryPolicy, Runtime, SwrClient,
 };
 use swr_gpui::Query;
 use tokio::sync::mpsc;
 
-use super::ipc::{Command, ReadDpi, ReadFnLock, ReadSmartShift};
-use crate::state::{AppState, DeviceKey, DpiLoad, FnLockLoad, Load, SmartShiftLoad, StateEvent};
+use super::ipc::{Command, ReadDpi, ReadFnLock, ReadOnboard, ReadSmartShift};
+use crate::state::{
+    AppState, DeviceKey, DpiLoad, FnLockLoad, Load, OnboardLoad, SmartShiftLoad, StateEvent,
+};
 
 const ROOT: &str = "device-read";
 const DPI: &str = "dpi";
 const SMARTSHIFT: &str = "smartshift";
 const FN_LOCK: &str = "fn-lock";
+const ONBOARD: &str = "onboard";
 
 /// Preserve the old budget: one initial attempt and two retries.
 const READ_RETRY_POLICY: RetryPolicy = RetryPolicy {
@@ -53,6 +58,7 @@ pub(crate) struct DeviceReads {
     dpi: BTreeMap<DeviceKey, DeviceRead<DpiInfo>>,
     smartshift: BTreeMap<DeviceKey, DeviceRead<SmartShiftStatus>>,
     fn_lock: BTreeMap<DeviceKey, DeviceRead<FnLockState>>,
+    onboard: BTreeMap<DeviceKey, DeviceRead<OnboardState>>,
 }
 
 impl DeviceReads {
@@ -275,6 +281,72 @@ impl DeviceReads {
         );
     }
 
+    pub(crate) fn ensure_onboard(
+        &mut self,
+        key: DeviceKey,
+        route: DeviceRoute,
+        commands: mpsc::UnboundedSender<Command>,
+        cx: &mut Context<AppState>,
+    ) {
+        if self
+            .onboard
+            .get(&key)
+            .is_some_and(|read| read.route == route)
+        {
+            return;
+        }
+        self.remove_onboard(&key);
+        let Some((client, runtime)) = self.cache() else {
+            return;
+        };
+        let flight = self.take_flight();
+        let fetch_route = route.clone();
+        let fetcher = Retry::new(
+            runtime,
+            move |_| {
+                let commands = commands.clone();
+                let route = fetch_route.clone();
+                read_ipc(move |reply| ReadOnboard { route, reply }.into(), commands)
+            },
+            READ_RETRY_POLICY,
+        )
+        .retry_if(|error| !fn_lock_error_is_permanent(error));
+        let handle = client.subscribe(query_key(ONBOARD, &key), fetcher, QueryOptions::immutable());
+        let query = Query::new(&client, handle, cx);
+        let load = project_load(query.read(cx), fn_lock_error_is_permanent);
+        let observed_key = key.clone();
+        let observer = cx.observe(query.state(), move |state, query_state, cx| {
+            let load = project_load(query_state.read(cx), fn_lock_error_is_permanent);
+            if state
+                .device_reads_mut()
+                .update_onboard(&observed_key, flight, load)
+            {
+                cx.emit(StateEvent::OnboardChanged(observed_key.clone()));
+            }
+        });
+        self.onboard.insert(
+            key,
+            DeviceRead {
+                route,
+                flight,
+                load,
+                query,
+                _observer: observer,
+            },
+        );
+    }
+
+    pub(crate) fn refresh_onboard(&mut self, key: &DeviceKey) {
+        if let Some(read) = self.onboard.get_mut(key) {
+            read.query.revalidate();
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn onboard_load(&self, key: &DeviceKey) -> Option<&OnboardLoad> {
+        self.onboard.get(key).map(|read| &read.load)
+    }
+
     /// Show `state` as `key`'s Fn-lock reading now. Used for the value the
     /// GUI just asked the keyboard to take and again for the value the
     /// keyboard echoed back. A local write supersedes a fetch still in
@@ -360,6 +432,7 @@ impl DeviceReads {
         self.remove_dpi(key);
         self.remove_smartshift(key);
         self.remove_fn_lock(key);
+        self.remove_onboard(key);
     }
 
     pub(crate) fn remove_dpi(&mut self, key: &DeviceKey) {
@@ -373,6 +446,13 @@ impl DeviceReads {
         if let Some(read) = self.smartshift.remove(key) {
             drop(read);
             self.clear::<SmartShiftStatus>(SMARTSHIFT, key);
+        }
+    }
+
+    fn remove_onboard(&mut self, key: &DeviceKey) {
+        if let Some(read) = self.onboard.remove(key) {
+            drop(read);
+            self.clear::<OnboardState>(ONBOARD, key);
         }
     }
 
@@ -390,6 +470,7 @@ impl DeviceReads {
             .keys()
             .chain(self.smartshift.keys())
             .chain(self.fn_lock.keys())
+            .chain(self.onboard.keys())
             .filter(|key| !present(key.as_str()))
             .cloned()
             .collect();
@@ -438,6 +519,21 @@ impl DeviceReads {
     fn update_fn_lock(&mut self, key: &DeviceKey, flight: u64, load: FnLockLoad) -> bool {
         let Some(read) = self
             .fn_lock
+            .get_mut(key)
+            .filter(|read| read.flight == flight)
+        else {
+            return false;
+        };
+        if read.load == load {
+            return false;
+        }
+        read.load = load;
+        true
+    }
+
+    fn update_onboard(&mut self, key: &DeviceKey, flight: u64, load: OnboardLoad) -> bool {
+        let Some(read) = self
+            .onboard
             .get_mut(key)
             .filter(|read| read.flight == flight)
         else {

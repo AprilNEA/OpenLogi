@@ -39,6 +39,14 @@ fn catalog_excludes_custom_shortcut() {
     }
 }
 
+/// One-shot sources (Actions Ring slots, swipes) pick from the catalog and
+/// cannot deliver a release.
+#[test]
+fn catalog_excludes_actions_that_last_as_long_as_their_press() {
+    assert!(Action::catalog().iter().all(|action| !action.is_held()));
+    assert!(Action::DpiShift.is_held() && Action::GShift.is_held());
+}
+
 #[test]
 fn hold_shortcut_has_distinct_lifecycle_semantics() {
     let combo: KeyCombo = "Alt+Space".parse().expect("valid shortcut failed");
@@ -301,6 +309,7 @@ fn persisted_action_variant_names_are_stable() {
     let mut actions = Action::catalog();
     actions.extend([
         Action::SetDpiPreset(0),
+        Action::DpiShift,
         Action::CustomShortcut(
             "F1".parse()
                 .unwrap_or_else(|error| panic!("valid shortcut failed: {error}")),
@@ -343,6 +352,7 @@ fn persisted_action_variant_names_are_stable() {
         "CustomShortcut",
         "Cut",
         "CycleDpiPresets",
+        "DpiShift",
         "Find",
         "HorizontalScrollLeft",
         "HorizontalScrollRight",
@@ -357,6 +367,7 @@ fn persisted_action_variant_names_are_stable() {
         "MuteVolume",
         "NewTab",
         "NextDesktop",
+        "NextDpiPreset",
         "NextTab",
         "NextTrack",
         "None",
@@ -366,6 +377,7 @@ fn persisted_action_variant_names_are_stable() {
         "PrevTab",
         "PrevTrack",
         "PreviousDesktop",
+        "PreviousDpiPreset",
         "Redo",
         "ReloadPage",
         "ReopenTab",

@@ -29,14 +29,15 @@ use openlogi_hid::{
 use tokio::time::error::Elapsed;
 use tracing::{debug, warn};
 
+use crate::dpi::DpiBeforeShift;
 use crate::receiver_access::ReceiverAccess;
 
 mod context;
-mod fn_lock;
 mod light;
+mod write_order;
 
 pub use context::HardwareContext;
-pub(crate) use fn_lock::{FnLockOrder, FnLockTicket};
+pub(crate) use write_order::{WriteOrder, WriteTicket};
 
 /// Upper bound on a single HID++ write. `hidpp` has no request timeout of its
 /// own, so without this an asleep / unresponsive device would hang (and leak)
@@ -261,6 +262,35 @@ impl DeviceOp {
         F: FnOnce(SharedChannel) -> Fut + Send + 'static,
         Fut: Future<Output = Result<T, WriteError>>,
     {
+        self.spawn_write_after(label, None, f, log);
+    }
+
+    /// [`Self::spawn_write`], once `ticket`'s earlier writes have finished.
+    /// The wait does not count against the write's deadline; a write
+    /// superseded meanwhile is skipped.
+    fn spawn_ordered_write<F, Fut, T>(
+        self,
+        label: &'static str,
+        ticket: WriteTicket,
+        f: F,
+        log: impl FnOnce(Result<Result<T, WriteError>, Elapsed>) + Send + 'static,
+    ) where
+        F: FnOnce(SharedChannel) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, WriteError>>,
+    {
+        self.spawn_write_after(label, Some(ticket), f, log);
+    }
+
+    fn spawn_write_after<F, Fut, T>(
+        self,
+        label: &'static str,
+        ticket: Option<WriteTicket>,
+        f: F,
+        log: impl FnOnce(Result<Result<T, WriteError>, Elapsed>) + Send + 'static,
+    ) where
+        F: FnOnce(SharedChannel) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, WriteError>>,
+    {
         let shared = match self.resolve() {
             Ok(shared) => shared,
             Err(reason) => {
@@ -278,19 +308,22 @@ impl DeviceOp {
                 return;
             };
             let result = rt.block_on(async {
+                let _turn = match &ticket {
+                    Some(ticket) => match ticket.turn().await {
+                        Some(turn) => Some(turn),
+                        None => return Err("superseded by a newer write"),
+                    },
+                    None => None,
+                };
                 let _lease = receiver_access.acquire_for_io().await;
                 if !device_io.allows_io() {
-                    return None;
+                    return Err("host device I/O suspended");
                 }
-                Some(tokio::time::timeout(WRITE_TIMEOUT, f(shared)).await)
+                Ok(tokio::time::timeout(WRITE_TIMEOUT, f(shared)).await)
             });
-            if let Some(result) = result {
-                log(result);
-            } else {
-                debug!(
-                    label,
-                    "host device I/O suspended — background write skipped"
-                );
+            match result {
+                Ok(result) => log(result),
+                Err(reason) => debug!(label, reason, "background write skipped"),
             }
         });
     }
@@ -348,28 +381,20 @@ pub fn toggle_smartshift_in_background(op: DeviceOp) {
 /// keyboard was requested after `ticket`. Returns immediately; failures (incl.
 /// keyboards that expose neither `0x40a3` nor `0x40a2` fn inversion, and a
 /// keyboard whose read-back disagrees with the write) are logged.
-pub(crate) fn write_fn_lock_in_background(op: DeviceOp, ticket: FnLockTicket, on: bool) {
+pub(crate) fn write_fn_lock_in_background(op: DeviceOp, ticket: WriteTicket, on: bool) {
     let index = op.route.device_index();
-    op.spawn_write(
+    op.spawn_ordered_write(
         "Fn-lock write",
-        move |c| async move {
-            let Some(_turn) = ticket.turn().await else {
-                return Ok(None);
-            };
-            openlogi_hid::set_fn_lock_on(&c, on).await.map(Some)
-        },
+        ticket,
+        move |c| async move { openlogi_hid::set_fn_lock_on(&c, on).await },
         move |result| {
             log_outcome(index, "Fn-lock write", result, |state| {
-                if let Some(state) = state {
-                    debug!(
-                        index,
-                        on,
-                        default = state.default_fn_lock,
-                        "Fn-lock written"
-                    );
-                } else {
-                    debug!(index, on, "Fn-lock write superseded by a newer one");
-                }
+                debug!(
+                    index,
+                    on,
+                    default = state.default_fn_lock,
+                    "Fn-lock written"
+                );
             });
         },
     );
@@ -545,15 +570,78 @@ fn log_wheel_result(
 }
 
 /// Spawn an OS thread that writes `dpi` to `op`'s device via its current
-/// shared channel. Returns immediately; failures are logged.
-pub fn write_dpi_in_background(op: DeviceOp, dpi: Dpi) {
+/// shared channel, unless a newer write was requested. Failures are logged.
+pub(crate) fn write_dpi_in_background(op: DeviceOp, ticket: WriteTicket, dpi: Dpi) {
     let index = op.route.device_index();
-    op.spawn_write(
+    op.spawn_ordered_write(
         "DPI write",
+        ticket,
         move |c| async move { openlogi_hid::set_dpi_on(&c, dpi).await },
         move |result| {
             log_outcome(index, "DPI write", result, |()| {
                 debug!(index, %dpi, "DPI written to device");
+            });
+        },
+    );
+}
+
+/// [`write_dpi_in_background`] for a held DPI shift. With `before`, the sensor
+/// DPI is read into it first unless an earlier hold's reading is still owed a
+/// restore. If that read fails nothing is written: the release would have
+/// nothing to return to.
+pub(crate) fn hold_dpi_in_background(
+    op: DeviceOp,
+    ticket: WriteTicket,
+    dpi: Dpi,
+    before: Option<DpiBeforeShift>,
+) {
+    let index = op.route.device_index();
+    op.spawn_ordered_write(
+        "DPI shift",
+        ticket,
+        move |c| async move {
+            if let Some(before) = before
+                && before.get().is_none()
+            {
+                before.set(openlogi_hid::get_dpi_info_on(&c).await?.current);
+            }
+            openlogi_hid::set_dpi_on(&c, dpi).await
+        },
+        move |result| {
+            log_outcome(index, "DPI shift", result, |()| {
+                debug!(index, %dpi, "DPI shift written to device");
+            });
+        },
+    );
+}
+
+/// Write the DPI `restore` yields once this write's turn comes, if any, and
+/// forget `before` once it is written.
+pub(crate) fn restore_dpi_in_background(
+    op: DeviceOp,
+    ticket: WriteTicket,
+    before: DpiBeforeShift,
+    restore: impl FnOnce() -> Option<Dpi> + Send + 'static,
+) {
+    let index = op.route.device_index();
+    op.spawn_ordered_write(
+        "DPI restore",
+        ticket,
+        move |c| async move {
+            let Some(dpi) = restore() else {
+                return Ok(None);
+            };
+            openlogi_hid::set_dpi_on(&c, dpi).await?;
+            before.clear();
+            Ok(Some(dpi))
+        },
+        move |result| {
+            log_outcome(index, "DPI restore", result, |dpi| {
+                if let Some(dpi) = dpi {
+                    debug!(index, %dpi, "DPI restored");
+                } else {
+                    debug!(index, "no DPI to restore");
+                }
             });
         },
     );

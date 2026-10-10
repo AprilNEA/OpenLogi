@@ -8,6 +8,7 @@ use hidpp::{channel::HidppChannel, device::Device};
 use openlogi_core::binding::ButtonId;
 use tracing::{debug, warn};
 
+use super::spy::{self, ArmedOnboard};
 use super::{CaptureSpec, CapturedInput};
 use crate::reprog_controls::{self, ReprogControlsV4};
 use crate::session::capture::open_device;
@@ -41,6 +42,7 @@ pub(super) struct ArmedControls {
     /// `0x2150` accessor and the information read while diverting it, present
     /// when the thumb wheel is diverted.
     pub(super) thumb: Option<ArmedThumbwheel>,
+    pub(super) onboard: Option<ArmedOnboard>,
 }
 
 pub(super) struct ArmedThumbwheel {
@@ -84,6 +86,7 @@ impl ArmedControls {
             reprog,
             reporting,
             thumb,
+            onboard,
             ..
         } = self;
         let reprog =
@@ -92,11 +95,12 @@ impl ArmedControls {
             retired,
             reprog,
             thumb.as_ref().map(|thumb| thumb.wheel.feature_index()),
+            onboard.as_ref().and_then(ArmedOnboard::restore),
         )
     }
 
     /// Reapply volatile diversion after a wireless reconnect broadcast.
-    pub(super) async fn rearm(&self) {
+    pub(super) async fn rearm(&self) -> bool {
         if let Some(rc) = self.reprog.as_ref() {
             for &reporting in &self.reporting {
                 let raw_xy = self.gesture_cids.contains(&reporting.cid)
@@ -118,6 +122,11 @@ impl ArmedControls {
             && let Err(error) = thumb.wheel.divert(thumb.direction()).await
         {
             warn!(?error, "thumb-wheel re-divert after wake failed");
+        }
+        // A half-applied host mode mutes buttons with no spy to replace them.
+        match self.onboard.as_ref() {
+            Some(onboard) => onboard.rearm().await,
+            None => true,
         }
     }
 }
@@ -149,6 +158,7 @@ pub(super) async fn arm_controls(
         && armed.dpi_cids.is_empty()
         && armed.button_cids.is_empty()
         && armed.thumb.is_none()
+        && armed.onboard.is_none()
     {
         debug!(slot, "no capturable controls — idle session");
     }
@@ -256,6 +266,10 @@ pub(super) async fn arm_controls_into(
         if let Some(thumb) = armed.thumb.as_ref() {
             thumb.wheel.divert(thumb.direction()).await?;
         }
+    }
+
+    if let Some(target) = &spec.onboard {
+        spy::arm_onboard(device, chan, slot, target, &mut armed.onboard).await?;
     }
     Ok(())
 }

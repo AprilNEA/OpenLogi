@@ -13,13 +13,17 @@ use crate::state::devices::DeviceRecord;
 use super::events::StateEvents;
 use super::{AppState, DeviceKey, StateEvent};
 
-/// The per-app profile the binding panels are editing, and the device it was
-/// chosen for, by the persistent config key its profiles are stored under.
-/// Pairing them prevents a scope opened for one mouse from carrying over when
-/// selection moves to another.
+/// The per-app profile or G-Shift layer being edited, tied to the device it
+/// was opened for so it never carries over to another mouse.
 struct EditingScope {
     persistent_key: String,
-    app: String,
+    layer: Layer,
+}
+
+#[derive(PartialEq, Eq)]
+enum Layer {
+    App(String),
+    GShift,
 }
 
 /// Binding-editor state projected from the persisted configuration.
@@ -48,32 +52,44 @@ impl BindingState {
         state
     }
 
-    fn editing_app<'a>(&'a self, persistent_key: Option<&str>) -> Option<&'a str> {
+    fn layer(&self, persistent_key: Option<&str>) -> Option<&Layer> {
         let key = persistent_key?;
         self.editing_scope
             .as_ref()
             .filter(|scope| scope.persistent_key == key)
-            .map(|scope| scope.app.as_str())
+            .map(|scope| &scope.layer)
     }
 
-    fn set_editing_app(
-        &mut self,
-        config: &Config,
-        persistent_key: Option<&str>,
-        app: Option<String>,
-    ) {
+    fn editing_app<'a>(&'a self, persistent_key: Option<&str>) -> Option<&'a str> {
+        match self.layer(persistent_key)? {
+            Layer::App(app) => Some(app),
+            Layer::GShift => None,
+        }
+    }
+
+    fn editing_gshift(&self, persistent_key: Option<&str>) -> bool {
+        self.layer(persistent_key) == Some(&Layer::GShift)
+    }
+
+    fn set_layer(&mut self, config: &Config, persistent_key: Option<&str>, layer: Option<Layer>) {
         self.editing_scope =
-            app.zip(persistent_key.map(str::to_string))
-                .map(|(app, persistent_key)| EditingScope {
+            layer
+                .zip(persistent_key.map(str::to_string))
+                .map(|(layer, persistent_key)| EditingScope {
                     persistent_key,
-                    app,
+                    layer,
                 });
         self.refresh_device(config, persistent_key);
     }
 
     fn refresh_device(&mut self, config: &Config, persistent_key: Option<&str>) {
-        let button_bindings =
+        let mut button_bindings =
             bindings_for(config, persistent_key, self.editing_app(persistent_key));
+        if self.editing_gshift(persistent_key)
+            && let Some(layer) = persistent_key.and_then(|key| config.gshift_overrides(key))
+        {
+            button_bindings.extend(layer.clone());
+        }
         let gesture_bindings = gesture_maps_for(config, persistent_key);
         self.button_bindings = button_bindings;
         self.gesture_bindings = gesture_bindings;
@@ -139,12 +155,27 @@ impl AppState {
     /// `None`. Re-derives the editor projections without persisting this
     /// window-local choice.
     pub fn set_editing_app(&mut self, app: Option<String>) -> StateEvents {
+        self.set_editing_layer(app.map(Layer::App))
+    }
+
+    #[must_use]
+    pub fn editing_gshift(&self) -> bool {
+        self.bindings.editing_gshift(
+            self.current_record()
+                .and_then(DeviceRecord::persistent_config_key),
+        )
+    }
+
+    pub fn set_editing_gshift(&mut self, gshift: bool) -> StateEvents {
+        self.set_editing_layer(gshift.then_some(Layer::GShift))
+    }
+
+    fn set_editing_layer(&mut self, layer: Option<Layer>) -> StateEvents {
         let key = self
             .current_record()
             .and_then(DeviceRecord::persistent_config_key)
             .map(str::to_string);
-        self.bindings
-            .set_editing_app(&self.config, key.as_deref(), app);
+        self.bindings.set_layer(&self.config, key.as_deref(), layer);
         self.for_current_device(StateEvent::BindingsChanged)
     }
 
@@ -210,11 +241,13 @@ impl AppState {
             return events;
         };
         let app = self.editing_app().map(str::to_string);
+        let gshift = self.editing_gshift();
         self.config.edit(|config| match app {
             // A per-app entry is `Action`-valued, so an override always
             // replaces the whole button — which is exactly what picking one
             // action means, and why gesture mode is not offered in this scope.
             Some(app) => config.set_per_app_binding(&key, &app, button, Some(action)),
+            None if gshift => config.set_gshift_binding(&key, button, Some(action)),
             None => config.set_binding(&key, button, Binding::Single(action)),
         });
         // The agent owns the hook; have it rebuild its live map from config.
@@ -243,12 +276,16 @@ impl AppState {
         else {
             return events;
         };
-        let Some(app) = self.editing_app().map(str::to_string) else {
+        let app = self.editing_app().map(str::to_string);
+        if app.is_none() && !self.editing_gshift() {
             return events;
-        };
+        }
         self.config.edit(|config| {
             for button in buttons {
-                config.set_per_app_binding(&key, &app, button, None);
+                match &app {
+                    Some(app) => config.set_per_app_binding(&key, app, button, None),
+                    None => config.set_gshift_binding(&key, button, None),
+                }
             }
         });
         self.refresh_binding_projections();
@@ -288,11 +325,9 @@ impl AppState {
     /// confirmation completes. Only leave its editor after a successful save.
     pub fn remove_app_profile(&mut self, key: &DeviceKey, app: &str) -> StateEvents {
         if self.clear_app_profile(key.as_str(), app)
-            && self
-                .bindings
-                .editing_scope
-                .as_ref()
-                .is_some_and(|scope| scope.persistent_key == key.as_str() && scope.app == app)
+            && self.bindings.editing_scope.as_ref().is_some_and(|scope| {
+                scope.persistent_key == key.as_str() && scope.layer == Layer::App(app.into())
+            })
         {
             self.bindings.editing_scope = None;
             self.refresh_binding_projections();
@@ -324,6 +359,9 @@ impl AppState {
         let key = self
             .current_record()
             .and_then(DeviceRecord::persistent_config_key)?;
+        if self.editing_gshift() {
+            return self.config.gshift_overrides(key);
+        }
         self.editing_app()
             .and_then(|app| self.config.per_app_overrides(key, app))
     }

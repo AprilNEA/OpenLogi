@@ -73,3 +73,42 @@ fn replacement_session_does_not_inherit_partial_progress() {
         "a new session must start with no action progress"
     );
 }
+
+#[test]
+fn shifted_presses_use_the_gshift_layer_and_fall_back_to_normal() {
+    let mut config = openlogi_core::config::Config::default();
+    config.set_binding("g502", ButtonId::G8, Binding::Single(Action::Copy));
+    config.set_gshift_binding("g502", ButtonId::G8, Some(Action::Paste));
+    let plan = crate::capture_plan::plan_for_device(
+        &config,
+        openlogi_core::device_order::PhysicalDeviceKey::parse("receiver:cafe:slot:1")
+            .expect("physical key"),
+        "g502",
+        openlogi_hid::DeviceRoute::Bolt {
+            receiver_uid: "cafe".into(),
+            slot: 1,
+        },
+        None,
+        0,
+        true,
+    )
+    .dispatch;
+
+    let action = |button, shifted| press_binding(&plan, button, shifted).map(Binding::click_action);
+    assert_eq!(action(ButtonId::G8, false), Some(Action::Copy));
+    assert_eq!(action(ButtonId::G8, true), Some(Action::Paste));
+    assert_eq!(action(ButtonId::G7, true), Some(Action::PreviousDpiPreset));
+}
+
+#[test]
+fn shift_layer_stays_on_until_every_shift_button_is_released() {
+    let session = HidppSessionId::with_epoch("mouse-a", 1);
+    let mut held = HeldShift::default();
+    held.press(&session, ButtonId::Forward);
+    held.press(&session, ButtonId::G9);
+    assert!(held.release(&session, ButtonId::G9));
+    assert!(held.active(&session));
+    assert!(!held.release(&session, ButtonId::G7));
+    assert!(held.release(&session, ButtonId::Forward));
+    assert!(!held.active(&session));
+}
