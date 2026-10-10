@@ -576,3 +576,5 @@ fn unprobed_unknown_device_shows_only_device_tab() {
     let tabs = DetailTab::tabs_for(&record(DeviceKind::Unknown, None));
     assert_eq!(tabs, vec![DetailTab::Device]);
 }
+
+mod corpus;

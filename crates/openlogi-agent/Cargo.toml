@@ -77,5 +77,6 @@ windows-sys = { workspace = true, features = [
 workspace = true
 
 [dev-dependencies]
+openlogi-fixture = { workspace = true, features = ["fs"] }
 tempfile = "3.27.0"
 tokio = { workspace = true, features = ["test-util"] }

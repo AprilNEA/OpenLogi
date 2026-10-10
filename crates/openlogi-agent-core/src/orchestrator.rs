@@ -411,11 +411,13 @@ impl Orchestrator {
         let (app, pointer_target) = self.mouse_context();
         let mut bindings = button_bindings_for(&self.config, key, app);
         let mut gestures = oshook_gestures_for(&self.config, key, app);
-        if let Some(key) = key {
+        if cfg!(target_os = "macos")
+            && let Some(key) = key
+        {
             for button in hidpp_side_gesture_maps_for(&self.config, key, app).keys() {
-                // HID++ owns both edges for these controls. Keeping their
-                // projected click or gesture map in the global hook would
-                // reintroduce a second, unattributed dispatch path.
+                // macOS gives HID++ exclusive ownership of both edges.
+                // Windows deliberately keeps this global map as a passive
+                // fallback when the physical control cannot arm raw XY.
                 bindings.remove(button);
                 gestures.remove(button);
             }

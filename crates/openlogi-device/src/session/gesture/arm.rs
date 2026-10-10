@@ -28,8 +28,8 @@ pub(super) struct ArmedControls {
     /// The gesture-source CIDs diverted with raw-XY reporting: the
     /// `spec.divert_gesture_sources` members the device exposes.
     pub(super) gesture_cids: Vec<u16>,
-    /// Raw-XY-capable additional CIDs diverted as gesture sources (macOS side
-    /// buttons and a gesture-mode DPI/ModeShift button).
+    /// Raw-XY-capable additional CIDs diverted as gesture sources (side
+    /// buttons on supported desktops and a gesture-mode DPI/ModeShift button).
     pub(super) gesture_button_cids: Vec<(u16, ButtonId)>,
     /// DPI/ModeShift CIDs diverted as plain buttons when gesture mode is off.
     pub(super) dpi_cids: Vec<u16>,
@@ -179,7 +179,10 @@ pub(super) async fn arm_controls_into(
         // Divert each gesture-mode source; a source not listed stays native
         // (an idle HID++ control must not be captured-and-dropped).
         for &cid in &spec.divert_gesture_sources {
-            if controls.iter().any(|c| c.cid == cid && c.supports_raw_xy()) {
+            if controls
+                .iter()
+                .any(|c| c.cid == cid && c.is_divertable() && c.supports_raw_xy())
+            {
                 arm_reprog_control(&rc, cid, true, &mut armed.reporting).await?;
                 armed.gesture_cids.push(cid);
             }
