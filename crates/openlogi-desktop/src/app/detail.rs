@@ -17,7 +17,7 @@ use gpui_component::{
 };
 use openlogi_core::config::{OnboardMemory, ScrollResolution};
 use openlogi_core::device::DeviceKind;
-use openlogi_core::hid::{DeviceRoute, OnboardMode};
+use openlogi_core::hid::DeviceRoute;
 
 use super::widgets::{back_button, kind_label, route_label, sidebar_action, status_badge};
 use super::{AppView, DetailTab};
@@ -403,12 +403,7 @@ fn onboard_card(pal: Palette, cx: &mut Context<AppView>) -> Option<impl IntoElem
         Load::Ready(reading) => Some(reading),
         _ => None,
     };
-    let memory = state.current_onboard_memory().or_else(|| {
-        reading.as_ref().map(|r| match (r.mode, r.active_profile) {
-            (OnboardMode::Onboard, Some(index)) => OnboardMemory::Profile(index),
-            _ => OnboardMemory::Off,
-        })
-    });
+    let memory = state.current_onboard_active();
     let host = memory == Some(OnboardMemory::Off);
     let profiles = reading.as_ref().map_or_else(Vec::new, |r| {
         r.profiles
