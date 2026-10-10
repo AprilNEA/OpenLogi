@@ -80,7 +80,7 @@ fn standalone_device(device: &crate::backend::NodeInfo) -> Option<StandaloneDevi
             capabilities: None,
             light_capabilities: None,
             driver_id: GAMING_HEADSET_DRIVER_ID.to_owned(),
-            registry_model_id: None,
+            registry_model_id: Some(descriptor.registry_model_id.to_owned()),
         });
     }
 

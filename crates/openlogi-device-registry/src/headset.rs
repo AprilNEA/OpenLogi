@@ -27,16 +27,26 @@ pub struct GamingHeadsetDescriptor {
     pub usage_id: u16,
     /// Marketed product name.
     pub name: &'static str,
+    /// Model ID the openlogi-org/assets index lists for this headset, used to
+    /// resolve its device image.
+    pub registry_model_id: &'static str,
 }
 
 impl GamingHeadsetDescriptor {
-    const fn logitech(product_id: u16, usage_page: u16, usage_id: u16, name: &'static str) -> Self {
+    const fn logitech(
+        product_id: u16,
+        usage_page: u16,
+        usage_id: u16,
+        name: &'static str,
+        registry_model_id: &'static str,
+    ) -> Self {
         Self {
             vendor_id: LOGITECH_VENDOR_ID,
             product_id,
             usage_page,
             usage_id,
             name,
+            registry_model_id,
         }
     }
 }
@@ -47,7 +57,7 @@ pub const GAMING_HEADSETS: &[GamingHeadsetDescriptor] = &[
     // 0xff00/0x0001 and 0xff03/0x0001..0x0003; 0xff00/0x0001 is used here as
     // the stable identity node, matching the precedent of the older G533/G930
     // vendor page. Identity only — no control protocol implemented.
-    GamingHeadsetDescriptor::logitech(0x0ad8, 0xff00, 0x0001, "G735 Gaming Headset"),
+    GamingHeadsetDescriptor::logitech(0x0ad8, 0xff00, 0x0001, "G735 Gaming Headset", "0ad8"),
 ];
 
 /// Finds a gaming-headset descriptor by its complete raw-HID identity.
