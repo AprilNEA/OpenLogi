@@ -64,9 +64,6 @@ jobs:
       - name: Self-test locale merge script
         run: python3 .github/scripts/i18n/merge_crowdin_download.py --self-test
 
-      - name: Self-test Crowdin prepare script
-        run: python3 .github/scripts/i18n/prepare_crowdin_upload.py --self-test
-
       # Complete catalogs in git are the merge base. Crowdin download overwrites
       # the working tree; without a snapshot we cannot restore keys the export
       # omitted (skip_untranslated) or un-clobber English fill-in.
@@ -75,14 +72,6 @@ jobs:
           set -euo pipefail
           mkdir -p /tmp/openlogi-locales-before
           cp crates/openlogi-ui/locales/*.toml /tmp/openlogi-locales-before/
-
-      # en.toml soft-matches the old en.yml source. Drop that YAML file so
-      # upload adds a TOML source, and add any missing target language first.
-      - name: Prepare Crowdin project
-        env:
-          CROWDIN_PROJECT_ID: ${{ steps.crowdin_config.outputs.CROWDIN_PROJECT_ID }}
-          CROWDIN_PERSONAL_TOKEN: ${{ steps.crowdin_config.outputs.CROWDIN_PERSONAL_TOKEN }}
-        run: python3 .github/scripts/i18n/prepare_crowdin_upload.py
 
       # Upload sources + seed per-language translations, then download only
       # (no push/PR — we merge first so sparse/English exports never land).
