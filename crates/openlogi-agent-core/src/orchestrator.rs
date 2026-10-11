@@ -437,13 +437,19 @@ impl Orchestrator {
         }
     }
 
-    /// Whether `key` is a G-series mouse captured over the `0x8110` spy. It has
-    /// no `0x1b04` raw XY, so its gesture buttons stay with the OS hook.
+    /// Whether `key` is a G-series mouse: one with a layout, or any other
+    /// without ReprogControls. It has no `0x1b04` raw XY, so its gesture
+    /// buttons stay with the OS hook.
     fn is_spy_only(&self, key: &str) -> bool {
         self.devices
             .iter()
             .find(|dev| dev.config_key == key)
-            .is_some_and(|dev| GamingLayout::for_model_key(&dev.model_key).is_some())
+            .is_some_and(|dev| {
+                GamingLayout::for_model_key(&dev.model_key).is_some()
+                    || dev
+                        .capabilities
+                        .is_some_and(|capabilities| capabilities.no_button_diversion())
+            })
     }
 
     /// Publish hook maps while preserving thumb-wheel polarities learned from

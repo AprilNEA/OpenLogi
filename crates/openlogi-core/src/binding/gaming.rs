@@ -43,6 +43,25 @@ pub const G502_LIGHTSPEED: GamingLayout = GamingLayout {
     stock_dpi_presets: &[400, 800, 1600, 3200, 6400],
 };
 
+/// A gaming mouse whose layout nobody has dumped. Its first five slots are
+/// the standard HID buttons, which the OS input hook remaps without host
+/// mode. G6 and up differ per model and are not guessed.
+///
+/// For drawing the Buttons panel only: [`GamingLayout::for_model_key`] never
+/// returns it, so the agent captures nothing through it.
+pub const STANDARD_BUTTONS: GamingLayout = GamingLayout {
+    model_keys: &[],
+    slots: &[
+        ButtonId::LeftClick,
+        ButtonId::RightClick,
+        ButtonId::MiddleClick,
+        ButtonId::Back,
+        ButtonId::Forward,
+    ],
+    host_silent: &[],
+    stock_dpi_presets: &[],
+};
+
 const LAYOUTS: &[&GamingLayout] = &[&G502_LIGHTSPEED];
 
 impl GamingLayout {
@@ -103,6 +122,17 @@ mod tests {
         assert!(!layout.remappable().any(|b| b == ButtonId::LeftClick));
         assert!(layout.needs_host_mode(ButtonId::G7));
         assert!(!layout.needs_host_mode(ButtonId::Back));
+    }
+
+    #[test]
+    fn standard_buttons_are_what_the_os_hook_remaps() {
+        let layout = &STANDARD_BUTTONS;
+        assert_eq!(layout.button_for_g_number(3), Some(ButtonId::MiddleClick));
+        assert_eq!(layout.button_for_g_number(4), Some(ButtonId::Back));
+        assert_eq!(layout.button_for_g_number(5), Some(ButtonId::Forward));
+        assert_eq!(layout.button_for_g_number(6), None, "G6+ is model-specific");
+        assert!(layout.remappable().all(ButtonId::is_os_hook_button));
+        assert!(!layout.remappable().any(|b| layout.needs_host_mode(b)));
     }
 
     #[test]

@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use gpui::App;
-use openlogi_core::binding::GamingLayout;
+use openlogi_core::binding::{GamingLayout, STANDARD_BUTTONS};
 use openlogi_core::config::OnboardMemory;
 use openlogi_core::hid::{OnboardMode, OnboardState, ReportRate};
 
@@ -24,6 +24,18 @@ impl AppState {
     pub fn current_gaming_layout(&self) -> Option<&'static GamingLayout> {
         self.current_record()
             .and_then(|record| GamingLayout::for_model_key(&record.model_key))
+    }
+
+    /// The buttons the Buttons panel draws for a gaming mouse: its model's
+    /// layout, or the standard buttons for a model nobody has dumped.
+    #[must_use]
+    pub fn current_button_layout(&self) -> Option<&'static GamingLayout> {
+        self.current_gaming_layout().or_else(|| {
+            self.current_record()
+                .and_then(|record| record.capabilities)
+                .is_some_and(|capabilities| capabilities.no_button_diversion())
+                .then_some(&STANDARD_BUTTONS)
+        })
     }
 
     #[must_use]

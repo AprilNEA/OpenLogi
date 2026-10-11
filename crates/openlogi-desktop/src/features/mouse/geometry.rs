@@ -304,12 +304,35 @@ pub fn labels_from_hotspots(
 }
 
 /// Label positions for the synthetic fallback silhouette.
-pub fn default_labels(thumbwheel: bool, distribution: LabelDistribution) -> Vec<Label> {
+pub fn default_labels(
+    layout: Option<&GamingLayout>,
+    thumbwheel: bool,
+    distribution: LabelDistribution,
+) -> Vec<Label> {
     labels_from_hotspots(
-        &super::hotspots::default_hotspots(thumbwheel),
+        &fallback_hotspots(layout, thumbwheel),
         MOUSE_MODEL_SIZE.1,
         distribution,
     )
+}
+
+/// The fallback silhouette's hotspots for a device without an image. A
+/// G-series mouse keeps only the buttons its layout has: the generic DPI and
+/// gesture buttons are `0x1b04` controls it cannot capture.
+pub fn fallback_hotspots(layout: Option<&GamingLayout>, thumbwheel: bool) -> Vec<Hotspot> {
+    let mut hotspots = super::hotspots::default_hotspots(thumbwheel);
+    hotspots.retain(|hotspot| on_fallback(layout, hotspot));
+    hotspots
+}
+
+/// Whether the fallback silhouette shows `hotspot` for a device with `layout`.
+pub fn on_fallback(layout: Option<&GamingLayout>, hotspot: &Hotspot) -> bool {
+    layout.is_none_or(|layout| {
+        hotspot
+            .id
+            .button()
+            .is_some_and(|button| layout.remappable().any(|b| b == button))
+    })
 }
 
 /// Logitech's stable slot vocabulary → OpenLogi's visual control IDs. Intentionally
@@ -423,15 +446,58 @@ mod tests {
         assert!(hotspots.iter().any(|h| h.id == ButtonId::G7.into()));
     }
 
+    /// A gaming mouse without ReprogControls keeps only what the OS hook can
+    /// remap. The DPI toggle, the gesture button and the thumb wheel are
+    /// HID++-only controls: offering them would take a binding and drop it.
+    #[test]
+    fn an_undivertable_mouse_without_an_image_keeps_only_os_hook_targets() {
+        use openlogi_core::binding::STANDARD_BUTTONS;
+        let os_hook = [
+            ButtonId::MiddleClick.into(),
+            ButtonId::Back.into(),
+            ButtonId::Forward.into(),
+        ];
+        for layout in [
+            GamingLayout::for_model_key("0407f"),
+            Some(&STANDARD_BUTTONS),
+        ] {
+            let ids: Vec<_> = fallback_hotspots(layout, true)
+                .iter()
+                .map(|hotspot| hotspot.id)
+                .collect();
+            assert_eq!(ids, os_hook);
+        }
+        assert_eq!(fallback_hotspots(None, true), default_hotspots(true));
+    }
+
+    /// On an unverified model only G1–G5 are known, the standard HID buttons.
+    /// G6 and up are model-specific and must not be guessed.
+    #[test]
+    fn an_unverified_gaming_depot_marks_only_the_standard_buttons() {
+        use openlogi_core::binding::STANDARD_BUTTONS;
+        let asset = g502_asset();
+        let (w, h) = asset_dimensions_for_png(&asset, 540., 1000.);
+        let mut ids: Vec<_> = asset_hotspots_for_png(&asset, Some(&STANDARD_BUTTONS), w, h)
+            .iter()
+            .map(|hotspot| hotspot.id)
+            .collect();
+        ids.sort_by_key(|id| format!("{id:?}"));
+        assert_eq!(
+            ids,
+            [ButtonId::Back.into(), ButtonId::MiddleClick.into()],
+            "the fixture marks G1, G3, G7, G10 and G4"
+        );
+    }
+
     #[test]
     fn default_labels_include_capability_gated_thumbwheel() {
         assert!(
-            !default_labels(false, LabelDistribution::LeftOnly)
+            !default_labels(None, false, LabelDistribution::LeftOnly)
                 .iter()
                 .any(|label| label.id == MouseControlId::ThumbwheelRotation)
         );
         assert_eq!(
-            default_labels(true, LabelDistribution::LeftOnly)
+            default_labels(None, true, LabelDistribution::LeftOnly)
                 .iter()
                 .filter(|label| label.id == MouseControlId::ThumbwheelRotation)
                 .count(),

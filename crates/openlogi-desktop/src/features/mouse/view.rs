@@ -17,7 +17,7 @@ use openlogi_core::binding::{Action, ButtonId, GamingLayout, GestureDirection};
 
 use super::geometry::{
     LabelDistribution, asset_dimensions_for_png, asset_has_button_labels, asset_hotspots_for_png,
-    default_labels, labels_from_hotspots, side_view_width,
+    default_labels, labels_from_hotspots, on_fallback, side_view_width,
 };
 use super::hotspots::{Hotspot, MOUSE_MODEL_SIZE, MouseControlId, default_hotspots};
 use super::inspector::{ActionPickerContext, BindingInspectorData, binding_inspector};
@@ -88,9 +88,7 @@ impl<'a> MouseWorkspaceData<'a> {
             asset: state
                 .current_record()
                 .and_then(|record| record.asset.as_ref()),
-            layout: state
-                .current_record()
-                .and_then(|record| GamingLayout::for_model_key(&record.model_key)),
+            layout: state.current_button_layout(),
             active: state
                 .active_button()
                 .map(MouseControlId::from_active_button),
@@ -545,6 +543,7 @@ fn scaled_model(
         let scale = (target_h / MOUSE_MODEL_SIZE.1).min(max_w / MOUSE_MODEL_SIZE.0);
         let hotspots = default_hotspots(thumbwheel)
             .into_iter()
+            .filter(|hs| on_fallback(layout, hs))
             .map(|hs| Hotspot {
                 x: hs.x * scale,
                 y: hs.y * scale,
@@ -553,7 +552,7 @@ fn scaled_model(
                 ..hs
             })
             .collect();
-        let labels = default_labels(thumbwheel, label_distribution)
+        let labels = default_labels(layout, thumbwheel, label_distribution)
             .into_iter()
             .map(|l| Label {
                 y: l.y * scale,
