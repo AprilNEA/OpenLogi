@@ -94,7 +94,7 @@ impl Axis {
 const PAN_TILT_LEN: usize = 8;
 
 /// Read one axis out of a `CT_PANTILT_ABSOLUTE_CONTROL` payload.
-fn pan_tilt_half(buf: [u8; PAN_TILT_LEN], axis: Axis) -> i32 {
+fn pan_tilt_half(buf: &[u8; PAN_TILT_LEN], axis: Axis) -> i32 {
     let mut word = [0u8; 4];
     word.copy_from_slice(&buf[axis.offset()..axis.offset() + 4]);
     i32::from_le_bytes(word)
@@ -495,7 +495,7 @@ impl UsbDevice {
             Payload::U8 => i32::from(buf[0]),
             Payload::U32 => i32::try_from(u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]))
                 .unwrap_or(i32::MAX),
-            Payload::PanTilt(axis) => pan_tilt_half(buf, axis),
+            Payload::PanTilt(axis) => pan_tilt_half(&buf, axis),
             Payload::I16 => i32::from(i16::from_le_bytes([buf[0], buf[1]])),
             Payload::U16 => i32::from(u16::from_le_bytes([buf[0], buf[1]])),
         })
@@ -731,12 +731,12 @@ mod tests {
 
     #[test]
     fn pan_reads_the_first_word() {
-        assert_eq!(pan_tilt_half(PAN_TILT_SAMPLE, Axis::Pan), 1);
+        assert_eq!(pan_tilt_half(&PAN_TILT_SAMPLE, Axis::Pan), 1);
     }
 
     #[test]
     fn tilt_reads_the_second_word() {
-        assert_eq!(pan_tilt_half(PAN_TILT_SAMPLE, Axis::Tilt), 2);
+        assert_eq!(pan_tilt_half(&PAN_TILT_SAMPLE, Axis::Tilt), 2);
     }
 
     /// Both axes are signed: a camera centred at 0 reports negative pan for
@@ -747,8 +747,8 @@ mod tests {
         let mut buf = [0u8; PAN_TILT_LEN];
         buf[..4].copy_from_slice(&(-36000i32).to_le_bytes());
         buf[4..].copy_from_slice(&(-1i32).to_le_bytes());
-        assert_eq!(pan_tilt_half(buf, Axis::Pan), -36000);
-        assert_eq!(pan_tilt_half(buf, Axis::Tilt), -1);
+        assert_eq!(pan_tilt_half(&buf, Axis::Pan), -36000);
+        assert_eq!(pan_tilt_half(&buf, Axis::Tilt), -1);
     }
 
     /// The invariant behind the read-modify-write in `Device::set`.
@@ -756,9 +756,9 @@ mod tests {
     fn patching_pan_preserves_tilt() {
         let mut buf = PAN_TILT_SAMPLE;
         patch_pan_tilt(&mut buf, Axis::Pan, -7);
-        assert_eq!(pan_tilt_half(buf, Axis::Pan), -7);
+        assert_eq!(pan_tilt_half(&buf, Axis::Pan), -7);
         assert_eq!(
-            pan_tilt_half(buf, Axis::Tilt),
+            pan_tilt_half(&buf, Axis::Tilt),
             2,
             "tilt survives a pan write"
         );
@@ -768,9 +768,9 @@ mod tests {
     fn patching_tilt_preserves_pan() {
         let mut buf = PAN_TILT_SAMPLE;
         patch_pan_tilt(&mut buf, Axis::Tilt, i32::MIN);
-        assert_eq!(pan_tilt_half(buf, Axis::Tilt), i32::MIN);
+        assert_eq!(pan_tilt_half(&buf, Axis::Tilt), i32::MIN);
         assert_eq!(
-            pan_tilt_half(buf, Axis::Pan),
+            pan_tilt_half(&buf, Axis::Pan),
             1,
             "pan survives a tilt write"
         );
@@ -782,8 +782,8 @@ mod tests {
         for value in [i32::MIN, -1, 0, 1, i32::MAX] {
             patch_pan_tilt(&mut buf, Axis::Pan, value);
             patch_pan_tilt(&mut buf, Axis::Tilt, value);
-            assert_eq!(pan_tilt_half(buf, Axis::Pan), value);
-            assert_eq!(pan_tilt_half(buf, Axis::Tilt), value);
+            assert_eq!(pan_tilt_half(&buf, Axis::Pan), value);
+            assert_eq!(pan_tilt_half(&buf, Axis::Tilt), value);
         }
     }
 
