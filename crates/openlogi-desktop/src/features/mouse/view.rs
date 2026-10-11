@@ -66,10 +66,20 @@ const MODEL_HORIZONTAL_RESERVE: f32 =
 /// Floor for the model's available width on a narrow window.
 const MODEL_MIN_CONTENT_W: f32 = 200.;
 
+/// What a G-series mouse adds to the workspace.
+#[derive(Clone, Copy)]
+struct Gaming {
+    /// The buttons to draw: the model's own, or the standard ones.
+    layout: &'static GamingLayout,
+    /// G-Shift is an action on a model with its own layout, everywhere but
+    /// in the G-Shift layer itself.
+    offer_gshift: bool,
+}
+
 struct MouseWorkspaceData<'a> {
     device_key: Option<DeviceKey>,
     asset: Option<&'a ResolvedAsset>,
-    layout: Option<&'static GamingLayout>,
+    gaming: Option<Gaming>,
     active: Option<MouseControlId>,
     bindings: &'a BTreeMap<ButtonId, Action>,
     gesture_maps: &'a BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
@@ -78,7 +88,6 @@ struct MouseWorkspaceData<'a> {
     dpi_gestures: bool,
     editing_app: Option<String>,
     overridden: Option<&'a BTreeMap<ButtonId, Action>>,
-    offer_gshift: bool,
 }
 
 impl<'a> MouseWorkspaceData<'a> {
@@ -88,7 +97,10 @@ impl<'a> MouseWorkspaceData<'a> {
             asset: state
                 .current_record()
                 .and_then(|record| record.asset.as_ref()),
-            layout: state.current_button_layout(),
+            gaming: state.current_button_layout().map(|layout| Gaming {
+                layout,
+                offer_gshift: state.current_gaming_layout().is_some() && !state.editing_gshift(),
+            }),
             active: state
                 .active_button()
                 .map(MouseControlId::from_active_button),
@@ -115,7 +127,6 @@ impl<'a> MouseWorkspaceData<'a> {
                 })
             },
             overridden: state.editing_app_overrides(),
-            offer_gshift: state.current_gaming_layout().is_some() && !state.editing_gshift(),
         })
     }
 
@@ -126,7 +137,7 @@ impl<'a> MouseWorkspaceData<'a> {
         Self {
             device_key: None,
             asset: None,
-            layout: None,
+            gaming: None,
             active: None,
             bindings,
             gesture_maps,
@@ -135,7 +146,6 @@ impl<'a> MouseWorkspaceData<'a> {
             dpi_gestures: false,
             editing_app: None,
             overridden: None,
-            offer_gshift: false,
         }
     }
 }
@@ -324,7 +334,7 @@ impl Render for MouseModelView {
         let MouseWorkspaceData {
             device_key,
             asset,
-            layout,
+            gaming,
             active,
             bindings,
             gesture_maps,
@@ -333,7 +343,6 @@ impl Render for MouseModelView {
             dpi_gestures,
             editing_app,
             overridden,
-            offer_gshift,
         } = MouseWorkspaceData::read(cx)
             .unwrap_or_else(|| MouseWorkspaceData::empty(&empty_bindings, &empty_gesture_maps));
 
@@ -357,7 +366,7 @@ impl Render for MouseModelView {
             mouse_h,
             hotspots,
             labels,
-        } = model_layout(asset, layout, viewport_w, viewport_h, thumbwheel);
+        } = model_layout(asset, gaming, viewport_w, viewport_h, thumbwheel);
         let canvas_h = mouse_h;
 
         let highlight = self.hovered.or(active).or(self.selected);
@@ -411,7 +420,7 @@ impl Render for MouseModelView {
                 dpi_gestures,
                 editing_app: editing_app.as_deref(),
                 overridden,
-                extra_actions: held_actions(offer_gshift),
+                extra_actions: held_actions(gaming.is_some_and(|g| g.offer_gshift)),
             },
             ActionPickerContext {
                 open: self.action_picker_open,
@@ -478,11 +487,12 @@ struct ModelLayout {
 /// drops the label gutter so it remains centred.
 fn model_layout(
     asset: Option<&ResolvedAsset>,
-    layout: Option<&GamingLayout>,
+    gaming: Option<Gaming>,
     viewport_w: f32,
     viewport_h: f32,
     thumbwheel: bool,
 ) -> ModelLayout {
+    let layout = gaming.map(|gaming| gaming.layout);
     let target_h = (viewport_h - MODEL_VERTICAL_RESERVE).clamp(MODEL_MIN_H, MOUSE_MODEL_SIZE.1);
     let has_labels =
         asset.is_none_or(|asset| asset_has_button_labels(asset, layout)) && viewport_w >= 960.;
