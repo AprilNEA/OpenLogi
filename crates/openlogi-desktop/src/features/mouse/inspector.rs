@@ -876,6 +876,7 @@ mod tests {
         assert_eq!(
             supported,
             vec![
+                ButtonId::MiddleClick,
                 ButtonId::Back,
                 ButtonId::Forward,
                 ButtonId::DpiToggle,

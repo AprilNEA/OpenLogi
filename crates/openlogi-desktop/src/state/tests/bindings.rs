@@ -304,7 +304,6 @@ fn unsupported_controls_cannot_enter_gesture_mode_through_the_ui_state() {
     for button in [
         ButtonId::LeftClick,
         ButtonId::RightClick,
-        ButtonId::MiddleClick,
         ButtonId::WheelTiltLeft,
         ButtonId::WheelTiltRight,
         ButtonId::Thumbwheel,
@@ -320,7 +319,28 @@ fn unsupported_controls_cannot_enter_gesture_mode_through_the_ui_state() {
 }
 
 #[test]
-fn a_stored_middle_click_gesture_remains_editable_until_it_is_disabled() {
+fn middle_click_can_enter_gesture_mode_from_a_fresh_binding() {
+    let mut state = state_with_a_known_mouse();
+
+    let _ = state.commit_gesture_mode(ButtonId::MiddleClick, true);
+
+    assert!(
+        state
+            .config
+            .is_gesture_mode(KNOWN_MOUSE_KEY, ButtonId::MiddleClick)
+    );
+    assert_eq!(
+        state
+            .current_gesture_maps()
+            .get(&ButtonId::MiddleClick)
+            .and_then(|map| map.get(&GestureDirection::Click)),
+        Some(&Action::MiddleClick),
+        "a tap must retain native middle-click behavior"
+    );
+}
+
+#[test]
+fn middle_click_gesture_can_be_edited_disabled_and_reenabled() {
     let middle = BTreeMap::from([
         (GestureDirection::Click, Action::MiddleClick),
         (GestureDirection::Up, Action::Copy),
@@ -369,10 +389,17 @@ fn a_stored_middle_click_gesture_remains_editable_until_it_is_disabled() {
 
     let _ = state.commit_gesture_mode(ButtonId::MiddleClick, true);
     assert!(
-        !state
+        state
             .config
-            .is_gesture_mode(KNOWN_MOUSE_KEY, ButtonId::MiddleClick),
-        "once disabled, unsupported Middle Click gestures must not be re-enabled"
+            .is_gesture_mode(KNOWN_MOUSE_KEY, ButtonId::MiddleClick)
+    );
+    assert_eq!(
+        state
+            .current_gesture_maps()
+            .get(&ButtonId::MiddleClick)
+            .and_then(|map| map.get(&GestureDirection::Down)),
+        Some(&Action::Paste),
+        "re-enabling must restore the edited directions"
     );
 }
 

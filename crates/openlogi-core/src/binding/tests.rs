@@ -522,7 +522,7 @@ fn haptic_panel_defaults_to_opening_the_actions_ring() {
 }
 
 #[test]
-fn gesture_mode_excludes_primary_clicks_and_every_wheel_control() {
+fn gesture_mode_includes_middle_click_but_excludes_primary_clicks_and_wheel_motion() {
     let supported: Vec<_> = ButtonId::ALL
         .into_iter()
         .filter(|button| button.supports_gesture_mode())
@@ -531,6 +531,7 @@ fn gesture_mode_excludes_primary_clicks_and_every_wheel_control() {
     assert_eq!(
         supported,
         vec![
+            ButtonId::MiddleClick,
             ButtonId::Back,
             ButtonId::Forward,
             ButtonId::DpiToggle,

@@ -512,9 +512,7 @@ impl AppState {
         }
         // A stray edit on a button not in gesture mode must NOT silently
         // promote it (the gesture editor shouldn't be reachable in that
-        // state): no-op instead. Checking the stored mode rather than the
-        // current enablement policy keeps v0.8.0 Middle Click gesture maps
-        // editable until the user explicitly turns them off.
+        // state): no-op instead.
         if !is_gesture_mode {
             debug!(
                 ?button,
