@@ -5,6 +5,61 @@ use openlogi_hid::reprog_controls::BACK_CIDS;
 use super::*;
 
 #[test]
+fn a_new_route_does_not_rearm_an_existing_capture() {
+    let mut orch = orchestrator(Config::default());
+    let old = direct_inventory(Some("old"), [1, 2, 3, 4]);
+    let mut new = direct_inventory(Some("new"), [5, 6, 7, 8]);
+    new.receiver.product_id = 0xb042;
+    orch.refresh_inventory(std::slice::from_ref(&old), &[], false);
+    let before = orch.shared.capture_plans.borrow()[0].target.clone();
+    orch.refresh_inventory(&[old, new], &[], false);
+    let plans = orch.shared.capture_plans.borrow();
+    let retained = plans
+        .iter()
+        .find(|plan| plan.target.route == before.route)
+        .unwrap();
+    assert_eq!(
+        retained.target, before,
+        "discovery on another route must not send the existing capture into native teardown"
+    );
+}
+
+#[test]
+fn a_device_wake_does_not_rearm_other_routes_but_system_resume_does() {
+    for resume_first in [false, true] {
+        let mut orch = orchestrator(Config::default());
+        let old = direct_inventory(Some("old"), [1, 2, 3, 4]);
+        let mut other = direct_inventory(Some("other"), [5, 6, 7, 8]);
+        other.receiver.product_id = 0xb042;
+        let devices = [old, other];
+        orch.refresh_inventory(&devices, &[], false);
+        let before = orch.shared.capture_plans.borrow().clone();
+        orch.reapply_reconnected_on_next_refresh();
+        orch.refresh_inventory(&devices, &[], false);
+        assert_eq!(
+            orch.shared.capture_plans.borrow().as_ref(),
+            before.as_ref(),
+            "a session owns its wireless wake rearm; an identity-free notification must not cycle every capture"
+        );
+        if resume_first {
+            orch.reapply_volatile_on_next_refresh();
+            orch.reapply_reconnected_on_next_refresh();
+        } else {
+            orch.reapply_reconnected_on_next_refresh();
+            orch.reapply_volatile_on_next_refresh();
+        }
+        orch.refresh_inventory(&devices, &[], false);
+        let resumed = orch.shared.capture_plans.borrow();
+        for (old, new) in before.iter().zip(resumed.iter()) {
+            assert_ne!(
+                old.target.rearm_generation, new.target.rearm_generation,
+                "a system wake must retain its request to rearm every online route"
+            );
+        }
+    }
+}
+
+#[test]
 fn config_reload_publishes_scroll_preferences_without_restarting_the_hook() {
     let mut orch = orchestrator(Config::default());
     let preferences = Arc::clone(&orch.shared.scroll_preferences);

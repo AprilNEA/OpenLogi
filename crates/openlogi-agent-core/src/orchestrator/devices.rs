@@ -192,17 +192,6 @@ pub(super) fn reapply_targets(
         .collect()
 }
 
-/// Whether this refresh invalidated any online device's volatile control
-/// diversion. Receiver routes stay connected while a paired mouse sleeps, so
-/// route equality alone cannot tell capture sessions to re-arm on wake.
-pub(super) fn any_device_needs_capture_rearm(
-    prev: &[AgentDevice],
-    next: &[AgentDevice],
-    reapply_all: bool,
-) -> bool {
-    !reapply_targets(prev, next, reapply_all).is_empty()
-}
-
 /// How many explicit confirmation passes a first-sighted or wake-targeted
 /// device keeps re-applying its volatile settings after the initial write. A
 /// cold restart leaves a Bolt/Unifying mouse slow to enumerate — and a system

@@ -58,26 +58,22 @@ fn receiver_reconnect_requests_capture_rearm() {
     let prev = [dev("selected", 1, false), dev("other", 2, true)];
     let next = [dev("selected", 1, true), dev("other", 2, true)];
 
-    assert!(any_device_needs_capture_rearm(&prev, &next, false));
-    assert!(!any_device_needs_capture_rearm(
-        &[dev("other", 2, true)],
-        &[dev("other", 2, true)],
-        false
-    ));
+    assert_eq!(reapply_targets(&prev, &next, false), [0]);
+    assert!(reapply_targets(&[dev("other", 2, true)], &[dev("other", 2, true)], false).is_empty());
 }
 
 #[test]
 fn system_wake_requests_capture_rearm_for_online_devices() {
     let devices = [dev("selected", 1, true), dev("other", 2, true)];
 
-    assert!(any_device_needs_capture_rearm(&devices, &devices, true));
+    assert_eq!(reapply_targets(&devices, &devices, true), [0, 1]);
 }
 
 #[test]
 fn steady_inventory_does_not_cycle_capture() {
     let devices = [dev("selected", 1, true)];
 
-    assert!(!any_device_needs_capture_rearm(&devices, &devices, false));
+    assert!(reapply_targets(&devices, &devices, false).is_empty());
 }
 
 #[test]
