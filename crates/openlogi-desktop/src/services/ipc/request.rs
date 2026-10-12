@@ -189,6 +189,7 @@ impl Request for SetSmartShift {
 
 /// Apply a headset sidetone level now.
 pub struct SetSidetone {
+    pub key: DeviceKey,
     pub route: DeviceRoute,
     pub level: u8,
 }
@@ -202,8 +203,12 @@ impl Request for SetSidetone {
             .await
     }
 
-    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, _: &UpdateSender) {
-        log_rejection("sidetone", outcome);
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        let _ = updates.send(GuiUpdate::SidetoneWritten {
+            key: self.key,
+            level: self.level,
+            result: or_unavailable(outcome),
+        });
     }
 }
 

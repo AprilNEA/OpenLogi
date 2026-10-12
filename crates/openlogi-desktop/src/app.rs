@@ -176,7 +176,7 @@ impl DetailTab {
             Self::Pointer => tr!("device.pointer"),
             Self::Lighting | Self::Light => tr!("device.lighting"),
             Self::Camera => tr!("camera.camera"),
-            Self::Audio => "Audio".into(),
+            Self::Audio => tr!("audio.audio"),
             Self::Device => tr!("device.device"),
         }
     }
@@ -307,6 +307,7 @@ impl AppView {
                 // caches no localized text. A refused removal is a dialog,
                 // opened through `removal_obs`.
                 StateEvent::SmartShiftChanged(_)
+                | StateEvent::SidetoneChanged(_)
                 | StateEvent::DeviceRemovalFailed { .. }
                 | StateEvent::CameraPermissionChanged
                 | StateEvent::DiagnosticsChanged

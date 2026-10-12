@@ -930,12 +930,13 @@ fn audio_tab(audio_panel: &gpui::Entity<crate::features::audio::AudioPanel>) -> 
     tab_body(
         ContentWidth::Small,
         PanelCard::new(
-            "Audio",
+            tr!("audio.audio"),
             Icon::new(IconName::Settings),
             audio_panel.clone().into_any_element(),
         ),
     )
 }
+
 /// as head…tail instead of wrapping the details card; short HID++ keys pass
 /// through whole. The full key stays in the config file for copying.
 fn elided_key(key: &str) -> String {

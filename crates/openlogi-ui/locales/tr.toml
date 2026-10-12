@@ -626,3 +626,10 @@ triangle_key = "Üçgen tuşu"
 diamond_key = "Baklava tuşu"
 star_key = "Yıldız tuşu"
 control_key = "Denetim"
+
+[audio]
+audio = "Ses"
+sidetone = "Yan ton (Sidetone)"
+sidetone_description = "Kulaklıklarda mikrofon geri bildirimi"
+sidetone_read_failed = "Yan ton okunamadı"
+sidetone_retry = "Yeniden dene"

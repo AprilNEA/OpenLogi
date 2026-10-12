@@ -47,6 +47,8 @@ pub(crate) enum StateEvent {
     SmartShiftChanged(DeviceKey),
     /// The keyboard's Fn-lock read landed or changed.
     FnLockChanged(DeviceKey),
+    /// Headset sidetone read or write status landed or changed.
+    SidetoneChanged(DeviceKey),
     /// Device or standalone-light settings changed.
     LightingChanged(DeviceKey),
     /// Camera settings or activity changed.
@@ -79,6 +81,7 @@ impl StateEvent {
             | Self::DpiChanged(key)
             | Self::SmartShiftChanged(key)
             | Self::FnLockChanged(key)
+            | Self::SidetoneChanged(key)
             | Self::LightingChanged(key)
             | Self::DeviceConfigChanged(key) => Some(key),
             Self::AgentChanged
@@ -223,6 +226,7 @@ impl AppState {
             | StateEvent::DpiChanged(_)
             | StateEvent::SmartShiftChanged(_)
             | StateEvent::FnLockChanged(_)
+            | StateEvent::SidetoneChanged(_)
             | StateEvent::LightingChanged(_)
             | StateEvent::CameraChanged
             | StateEvent::CameraPermissionChanged

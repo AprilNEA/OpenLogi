@@ -626,3 +626,10 @@ triangle_key = "Tecla Triângulo"
 diamond_key = "Tecla Losango"
 star_key = "Tecla Estrela"
 control_key = "Controlo"
+
+[audio]
+audio = "Áudio"
+sidetone = "Retorno de voz (Sidetone)"
+sidetone_description = "Retorno do microfone nos auscultadores"
+sidetone_read_failed = "Não foi possível ler o retorno de voz"
+sidetone_retry = "Tentar novamente"

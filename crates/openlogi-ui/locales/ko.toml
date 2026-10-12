@@ -626,3 +626,10 @@ triangle_key = "삼각형 키"
 diamond_key = "마름모 키"
 star_key = "별 키"
 control_key = "컨트롤"
+
+[audio]
+audio = "오디오"
+sidetone = "사이드톤"
+sidetone_description = "이어컵의 마이크 피드백"
+sidetone_read_failed = "사이드톤을 읽을 수 없습니다"
+sidetone_retry = "다시 시도"

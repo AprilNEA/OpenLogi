@@ -626,3 +626,10 @@ triangle_key = "Клавіша «Трикутник»"
 diamond_key = "Клавіша «Ромб»"
 star_key = "Клавіша «Зірка»"
 control_key = "Елемент керування"
+
+[audio]
+audio = "Аудіо"
+sidetone = "Самопрослуховування"
+sidetone_description = "Зворотний зв'язок мікрофона в навушниках"
+sidetone_read_failed = "Не вдалося прочитати рівень самопрослуховування"
+sidetone_retry = "Повторити"

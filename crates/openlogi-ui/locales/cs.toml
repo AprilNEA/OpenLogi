@@ -626,3 +626,10 @@ triangle_key = "Klávesa trojúhelníku"
 diamond_key = "Klávesa kosočtverce"
 star_key = "Klávesa hvězdy"
 control_key = "Control"
+
+[audio]
+audio = "Zvuk"
+sidetone = "Sidetone"
+sidetone_description = "Zpětná vazba mikrofonu v náušnících"
+sidetone_read_failed = "Nepodařilo se načíst sidetone"
+sidetone_retry = "Zkusit znovu"

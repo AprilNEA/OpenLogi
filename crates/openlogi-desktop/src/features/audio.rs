@@ -2,19 +2,19 @@
 //!
 //! Managed completely through the agent over IPC, respecting process isolation.
 
-use gpui::{Context, IntoElement, ParentElement, Render, Styled, Subscription, Window, div};
+use gpui::{
+    AnyElement, App, Context, IntoElement, ParentElement, Render, Styled, Subscription, Window, div,
+};
 use gpui_component::{h_flex, slider::Slider, v_flex};
-use openlogi_core::hid::DeviceRoute;
 
-use crate::state::AppState;
+use crate::state::{AppState, DeviceKey, SidetoneLoad, StateEvent};
 use crate::ui::commit_slider::{CommitSlider, SliderRange};
-use crate::ui::theme::{self, Typography as _};
+use crate::ui::status::{retry_line, status_line};
+use crate::ui::theme::{self, Palette, Typography as _};
 
 pub struct AudioPanel {
     slider: CommitSlider<u8>,
     committed_level: u8,
-    active_route: Option<DeviceRoute>,
-    read_flight: u64,
     _state_obs: Subscription,
 }
 
@@ -28,63 +28,28 @@ impl AudioPanel {
             |_, _, cx| cx.notify(),
             |panel, level, cx| {
                 panel.committed_level = level;
-                if let Some(route) = panel.active_route.clone() {
-                    AppState::update(cx, |state, _cx| {
-                        state.set_sidetone(route, level);
-                    });
-                }
+                AppState::apply(cx, |state| state.commit_sidetone(level));
             },
         );
 
-        let state_obs = AppState::repaint_on(cx, |_| false);
+        let state_obs = AppState::repaint_on(cx, |e| matches!(e, StateEvent::SidetoneChanged(_)));
 
         Self {
             slider,
             committed_level: initial,
-            active_route: None,
-            read_flight: 0,
             _state_obs: state_obs,
         }
     }
 
-    fn sync_with_device(&mut self, cx: &mut Context<Self>) {
-        let current_route = AppState::try_read(cx)
-            .and_then(AppState::current_record)
-            .and_then(|r| r.route.clone());
-
-        if self.active_route != current_route {
-            self.active_route.clone_from(&current_route);
-            self.read_flight = self.read_flight.wrapping_add(1);
-            let flight = self.read_flight;
-            if let Some(route) = current_route {
-                let (tx, rx) = tokio::sync::oneshot::channel();
-                if let Some(state) = AppState::try_read(cx) {
-                    state.read_sidetone(route.clone(), tx);
-                }
-                cx.spawn(async move |panel, cx| {
-                    if let Ok(Ok(level)) = rx.await {
-                        let _ = panel.update(&mut *cx, |panel, cx| {
-                            if panel.read_flight == flight
-                                && panel.active_route.as_ref() == Some(&route)
-                            {
-                                panel.committed_level = level;
-                                cx.notify();
-                            }
-                        });
-                    }
-                })
-                .detach();
-            }
-        }
-    }
-}
-
-impl Render for AudioPanel {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.sync_with_device(cx);
-        let pal = theme::palette(cx);
-        self.slider.sync(self.committed_level, window, cx);
-        let shown_level = self.slider.shown(self.committed_level);
+    fn render_slider_content(
+        &mut self,
+        level: u8,
+        pal: Palette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.slider.sync(level, window, cx);
+        let shown_level = self.slider.shown(level);
 
         v_flex()
             .gap_4()
@@ -95,12 +60,12 @@ impl Render for AudioPanel {
                     .items_baseline()
                     .child(
                         v_flex()
-                            .child(div().text_body().child("Sidetone (Voice Loopback)"))
+                            .child(div().text_body().child(tr!("audio.sidetone")))
                             .child(
                                 div()
                                     .text_caption()
                                     .text_color(pal.text_muted)
-                                    .child("Microphone feedback in earcups"),
+                                    .child(tr!("audio.sidetone_description")),
                             ),
                     )
                     .child(
@@ -111,5 +76,46 @@ impl Render for AudioPanel {
                     ),
             )
             .child(Slider::new(self.slider.slider()).horizontal())
+            .into_any_element()
+    }
+}
+
+impl Render for AudioPanel {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let pal = theme::palette(cx);
+        let state = AppState::try_read(cx);
+        let sidetone_load = state
+            .as_ref()
+            .map(|s| s.current_sidetone_load())
+            .unwrap_or_default();
+        let current_key = state.as_ref().and_then(|s| {
+            s.current_record()
+                .map(crate::state::DeviceRecord::device_key)
+        });
+
+        match sidetone_load {
+            SidetoneLoad::Ready(level) => {
+                self.committed_level = *level;
+                self.render_slider_content(*level, pal, window, cx)
+            }
+            SidetoneLoad::Loading | SidetoneLoad::Unknown | SidetoneLoad::Unsupported(_) => {
+                status_line(tr!("audio.sidetone"), pal).into_any_element()
+            }
+            SidetoneLoad::Failed(_) => retry_line(
+                "sidetone-read-retry",
+                tr!("audio.sidetone_read_failed"),
+                pal,
+                retry_sidetone_closure(current_key),
+            )
+            .into_any_element(),
+        }
+    }
+}
+
+fn retry_sidetone_closure(key: Option<DeviceKey>) -> impl Fn(&mut App) + 'static {
+    move |cx| {
+        if key.is_some() {
+            AppState::apply(cx, AppState::retry_current_sidetone);
+        }
     }
 }

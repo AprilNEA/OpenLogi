@@ -106,6 +106,15 @@ pub enum GuiUpdate {
         /// The echoed state, or why the write did not land.
         result: Result<FnLockState, WriteError>,
     },
+    /// Result of writing headset sidetone level. Answers [`SetSidetone`].
+    SidetoneWritten {
+        /// The headset that was written.
+        key: DeviceKey,
+        /// The requested level that was attempted.
+        level: u8,
+        /// Acceptance or typed device failure.
+        result: Result<(), WriteError>,
+    },
     /// A pairing command could not be delivered, so no session will ever appear
     /// in the observed state to explain the silence. Reported locally rather
     /// than faked as a session the agent never had.

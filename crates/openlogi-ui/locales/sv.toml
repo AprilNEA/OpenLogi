@@ -626,3 +626,10 @@ triangle_key = "Triangel-tangent"
 diamond_key = "Romb-tangent"
 star_key = "Stjärn-tangent"
 control_key = "Kontroll"
+
+[audio]
+audio = "Ljud"
+sidetone = "Sidetone"
+sidetone_description = "Mikrofonåterkoppling i öronkåporna"
+sidetone_read_failed = "Kunde inte läsa sidetone"
+sidetone_retry = "Försök igen"

@@ -37,3 +37,6 @@ pub type SmartShiftLoad = Load<Arc<SmartShiftStatus>>;
 /// read shows what the keyboard holds right now — it can differ from the
 /// persisted `fn_lock` after the user pressed Fn+Esc on the keyboard.
 pub type FnLockLoad = Load<Arc<FnLockState>>;
+
+/// Per-headset sidetone (`0x0604`) level load state (0..=100%). See [`Load`].
+pub type SidetoneLoad = Load<Arc<u8>>;

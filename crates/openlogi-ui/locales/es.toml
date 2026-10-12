@@ -626,3 +626,10 @@ triangle_key = "Tecla Triángulo"
 diamond_key = "Tecla Rombo"
 star_key = "Tecla Estrella"
 control_key = "Control"
+
+[audio]
+audio = "Audio"
+sidetone = "Efecto local (Sidetone)"
+sidetone_description = "Retorno del micrófono en los auriculares"
+sidetone_read_failed = "No se pudo leer el efecto local"
+sidetone_retry = "Reintentar"

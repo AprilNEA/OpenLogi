@@ -626,3 +626,10 @@ triangle_key = "Kolmio-näppäin"
 diamond_key = "Vinoneliö-näppäin"
 star_key = "Tähti-näppäin"
 control_key = "Ohjain"
+
+[audio]
+audio = "Ääni"
+sidetone = "Sidetone"
+sidetone_description = "Mikrofonin palaute korvakupeissa"
+sidetone_read_failed = "Sidetone-tasoa ei voitu lukea"
+sidetone_retry = "Yritä uudelleen"

@@ -626,3 +626,10 @@ triangle_key = "Tasto Triangolo"
 diamond_key = "Tasto Rombo"
 star_key = "Tasto Stella"
 control_key = "Controllo"
+
+[audio]
+audio = "Audio"
+sidetone = "Sidetone"
+sidetone_description = "Ritorno del microfono nelle cuffie"
+sidetone_read_failed = "Impossibile leggere il sidetone"
+sidetone_retry = "Riprova"

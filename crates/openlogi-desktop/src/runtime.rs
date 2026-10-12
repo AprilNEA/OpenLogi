@@ -294,6 +294,14 @@ impl Runtime {
                     AppState::apply(cx, |state| state.apply_fn_lock_written(&key, result));
                 });
             }
+            ipc::GuiUpdate::SidetoneWritten { key, level, result } => {
+                cx.update(|cx| {
+                    AppState::apply(cx, |state| {
+                        state.apply_sidetone_written(&key, level, &result)
+                    });
+                });
+            }
+
             ipc::GuiUpdate::DeviceUnpaired {
                 record_key,
                 route,

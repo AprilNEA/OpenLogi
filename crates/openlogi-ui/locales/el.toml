@@ -626,3 +626,10 @@ triangle_key = "Πλήκτρο τριγώνου"
 diamond_key = "Πλήκτρο ρόμβου"
 star_key = "Πλήκτρο αστεριού"
 control_key = "Στοιχείο ελέγχου"
+
+[audio]
+audio = "Ήχος"
+sidetone = "Sidetone"
+sidetone_description = "Ανατροφοδότηση μικροφώνου στα ακουστικά"
+sidetone_read_failed = "Δεν ήταν δυνατή η ανάγνωση του sidetone"
+sidetone_retry = "Δοκιμάστε ξανά"

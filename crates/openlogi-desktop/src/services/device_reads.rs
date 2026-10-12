@@ -12,13 +12,16 @@ use swr_core::{
 use swr_gpui::Query;
 use tokio::sync::mpsc;
 
-use super::ipc::{Command, ReadDpi, ReadFnLock, ReadSmartShift};
-use crate::state::{AppState, DeviceKey, DpiLoad, FnLockLoad, Load, SmartShiftLoad, StateEvent};
+use super::ipc::{Command, ReadDpi, ReadFnLock, ReadSidetone, ReadSmartShift};
+use crate::state::{
+    AppState, DeviceKey, DpiLoad, FnLockLoad, Load, SidetoneLoad, SmartShiftLoad, StateEvent,
+};
 
 const ROOT: &str = "device-read";
 const DPI: &str = "dpi";
 const SMARTSHIFT: &str = "smartshift";
 const FN_LOCK: &str = "fn-lock";
+const SIDETONE: &str = "sidetone";
 
 /// Preserve the old budget: one initial attempt and two retries.
 const READ_RETRY_POLICY: RetryPolicy = RetryPolicy {
@@ -53,6 +56,7 @@ pub(crate) struct DeviceReads {
     dpi: BTreeMap<DeviceKey, DeviceRead<DpiInfo>>,
     smartshift: BTreeMap<DeviceKey, DeviceRead<SmartShiftStatus>>,
     fn_lock: BTreeMap<DeviceKey, DeviceRead<FnLockState>>,
+    sidetone: BTreeMap<DeviceKey, DeviceRead<u8>>,
 }
 
 impl DeviceReads {
@@ -275,6 +279,106 @@ impl DeviceReads {
         );
     }
 
+    /// Start the headset sidetone query unless the same route is already
+    /// subscribed.
+    pub(crate) fn ensure_sidetone(
+        &mut self,
+        key: DeviceKey,
+        route: DeviceRoute,
+        commands: mpsc::UnboundedSender<Command>,
+        cx: &mut Context<AppState>,
+    ) {
+        if self
+            .sidetone
+            .get(&key)
+            .is_some_and(|read| read.route == route)
+        {
+            return;
+        }
+        self.remove_sidetone(&key);
+        let Some((client, runtime)) = self.cache() else {
+            return;
+        };
+        let flight = self.take_flight();
+        let fetch_route = route.clone();
+        let fetcher = Retry::new(
+            runtime,
+            move |_| {
+                let commands = commands.clone();
+                let route = fetch_route.clone();
+                read_ipc(move |reply| ReadSidetone { route, reply }.into(), commands)
+            },
+            READ_RETRY_POLICY,
+        )
+        .retry_if(|error| !sidetone_error_is_permanent(error));
+        let handle = client.subscribe(
+            query_key(SIDETONE, &key),
+            fetcher,
+            QueryOptions::immutable(),
+        );
+        let query = Query::new(&client, handle, cx);
+        let load = project_load(query.read(cx), sidetone_error_is_permanent);
+        let observed_key = key.clone();
+        let observer = cx.observe(query.state(), move |state, query_state, cx| {
+            let load = project_load(query_state.read(cx), sidetone_error_is_permanent);
+            if state
+                .device_reads_mut()
+                .update_sidetone(&observed_key, flight, load)
+            {
+                cx.emit(StateEvent::SidetoneChanged(observed_key.clone()));
+            }
+        });
+        self.sidetone.insert(
+            key,
+            DeviceRead {
+                route,
+                flight,
+                load,
+                query,
+                _observer: observer,
+            },
+        );
+    }
+
+    /// Show `level` as `key`'s sidetone reading now. A user edit supersedes
+    /// a read in flight, so a pre-edit reading cannot land on top of it.
+    pub(crate) fn set_sidetone_ready(&mut self, key: &DeviceKey, level: u8) {
+        let value = Arc::new(level);
+        if let Some(client) = &self.client {
+            client.set::<_, Cached<u8>, WriteError>(query_key(SIDETONE, key), Some(value.clone()));
+        }
+        let flight = self.take_flight();
+        if let Some(read) = self.sidetone.get_mut(key) {
+            read.flight = flight;
+            read.load = Load::Ready(value);
+        }
+    }
+
+    /// Re-read `key`'s sidetone from the headset, keeping the last value on
+    /// screen while it answers.
+    pub(crate) fn refresh_sidetone(&mut self, key: &DeviceKey) {
+        if let Some(read) = self.sidetone.get_mut(key) {
+            read.query.revalidate();
+        }
+    }
+
+    /// Retry an exhausted sidetone query.
+    pub(crate) fn retry_sidetone(&mut self, key: &DeviceKey) {
+        let Some(read) = self.sidetone.get_mut(key) else {
+            return;
+        };
+        if !matches!(read.load, Load::Ready(_)) {
+            read.load = Load::Loading;
+        }
+        read.query.revalidate();
+    }
+
+    /// `key`'s sidetone load, or `None` while nothing has subscribed to it.
+    #[must_use]
+    pub(crate) fn sidetone_load(&self, key: &DeviceKey) -> Option<&SidetoneLoad> {
+        self.sidetone.get(key).map(|read| &read.load)
+    }
+
     /// Show `state` as `key`'s Fn-lock reading now. Used for the value the
     /// GUI just asked the keyboard to take and again for the value the
     /// keyboard echoed back. A local write supersedes a fetch still in
@@ -360,6 +464,7 @@ impl DeviceReads {
         self.remove_dpi(key);
         self.remove_smartshift(key);
         self.remove_fn_lock(key);
+        self.remove_sidetone(key);
     }
 
     pub(crate) fn remove_dpi(&mut self, key: &DeviceKey) {
@@ -383,6 +488,13 @@ impl DeviceReads {
         }
     }
 
+    fn remove_sidetone(&mut self, key: &DeviceKey) {
+        if let Some(read) = self.sidetone.remove(key) {
+            drop(read);
+            self.clear::<u8>(SIDETONE, key);
+        }
+    }
+
     /// Forget every query whose device is no longer present.
     pub(crate) fn retain_present(&mut self, present: impl Fn(&str) -> bool) {
         let removed: BTreeSet<_> = self
@@ -390,6 +502,7 @@ impl DeviceReads {
             .keys()
             .chain(self.smartshift.keys())
             .chain(self.fn_lock.keys())
+            .chain(self.sidetone.keys())
             .filter(|key| !present(key.as_str()))
             .cloned()
             .collect();
@@ -438,6 +551,26 @@ impl DeviceReads {
     fn update_fn_lock(&mut self, key: &DeviceKey, flight: u64, load: FnLockLoad) -> bool {
         let Some(read) = self
             .fn_lock
+            .get_mut(key)
+            .filter(|read| read.flight == flight)
+        else {
+            return false;
+        };
+        if read.load == load {
+            return false;
+        }
+        read.load = load;
+        true
+    }
+
+    pub(crate) fn update_sidetone(
+        &mut self,
+        key: &DeviceKey,
+        flight: u64,
+        load: SidetoneLoad,
+    ) -> bool {
+        let Some(read) = self
+            .sidetone
             .get_mut(key)
             .filter(|read| read.flight == flight)
         else {
@@ -519,6 +652,10 @@ fn smartshift_error_is_permanent(error: &WriteError) -> bool {
 }
 
 fn fn_lock_error_is_permanent(error: &WriteError) -> bool {
+    matches!(error, WriteError::FeatureUnsupported { .. })
+}
+
+fn sidetone_error_is_permanent(error: &WriteError) -> bool {
     matches!(error, WriteError::FeatureUnsupported { .. })
 }
 
