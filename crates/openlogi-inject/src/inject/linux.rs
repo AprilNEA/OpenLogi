@@ -19,6 +19,8 @@ use openlogi_core::scroll::ScrollDelta;
 
 use super::{HeldKey, KeyPhase, QuantizedScroll, ScrollQuantizer};
 
+mod niri;
+
 const HIGH_RES_UNITS_PER_TICK: f64 = 120.0;
 
 #[derive(Default)]
@@ -131,6 +133,9 @@ fn dispatch_media(key: MediaKey) {
 /// Dispatch a window-manager or power [`NativeAction`]. `action` is only
 /// used for its label in the "no Linux equivalent" debug log.
 fn dispatch_native(action: &Action, native: NativeAction) {
+    if niri::dispatch(native) {
+        return;
+    }
     let ctrl = KeyCode::KEY_LEFTCTRL;
     let alt = KeyCode::KEY_LEFTALT;
     match native {
@@ -146,7 +151,9 @@ fn dispatch_native(action: &Action, native: NativeAction) {
         // No tested desktop has a stock single-app window-exposé binding
         // (GNOME's Activities and KDE's Present Windows both show every
         // app), so this always skips rather than substitute the wrong scope.
-        NativeAction::AppExpose => {
+        NativeAction::AppExpose
+        | NativeAction::NiriFocusColumnLeft
+        | NativeAction::NiriFocusColumnRight => {
             tracing::debug!(
                 action = action.label(),
                 "no Linux equivalent — action skipped"

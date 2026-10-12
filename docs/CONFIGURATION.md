@@ -162,3 +162,47 @@ Top = { action = { CustomShortcut = "Cmd+Shift+P" }, icon = "Keyboard", label = 
 ```
 
 `ShowActionsRing` is rejected inside a ring slot to prevent recursive rings.
+
+## niri (Wayland)
+
+OpenLogi uses niri's IPC socket (`NIRI_SOCKET`, inherited from the graphical
+session) for compositor actions. No shortcut binding or shell script is needed.
+The built-in actions map as follows:
+
+| OpenLogi action | niri action |
+| --- | --- |
+| `MissionControl` | Toggle overview |
+| `PreviousDesktop` / `NextDesktop` | Focus workspace up / down |
+| `NiriFocusColumnLeft` / `NiriFocusColumnRight` | Focus column left / right |
+| `Screenshot` | Capture the focused screen to disk and clipboard |
+| `CaptureRegion` | Open the interactive screenshot selector |
+
+Choose **Switch Columns (niri)** in the thumb-wheel picker to navigate columns
+within the current workspace. This is distinct from the desktop/workspace
+preset. Bind the thumb button or haptic panel to **Mission Control** to toggle
+the overview, even if `Super+O` has been rebound in niri.
+
+For example, under your device's `bindings` table:
+
+```toml
+ThumbwheelScrollUp = "NiriFocusColumnLeft"
+ThumbwheelScrollDown = "NiriFocusColumnRight"
+HapticPanel = "MissionControl"
+```
+
+Existing custom shortcuts are preserved; select the native preset/actions to
+replace them. If IPC fails, OpenLogi logs the error instead of replaying a
+possibly unrelated keyboard shortcut. niri-only column actions do nothing on
+other desktops. niri has no equivalent for OpenLogi's single-application exposé,
+show-desktop, or application-launcher actions.
+
+Per-application profiles use niri's focused window `app_id`, including native
+Wayland windows. The agent subscribes to niri's window event stream, receives
+its initial state, and follows focus changes without periodic subprocesses.
+A lost connection clears the current application until a fresh subscription
+restores it. Empty or missing application IDs select the default profile.
+
+If a manually configured systemd user service cannot find niri, ensure its
+environment includes `NIRI_SOCKET` from the current session; restart the agent
+after importing it. Do not hard-code the socket path, which changes between
+sessions.

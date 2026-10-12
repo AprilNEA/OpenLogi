@@ -187,6 +187,7 @@ select_device_button_description = "Wybierz przycisk na urządzeniu, aby zmieni�
 remove_profile_description = "Spowoduje to usunięcie własnych przypisań przycisków w tym profilu. Domyślne przypisania pozostaną bez zmian."
 
 [pointer]
+niri_columns = "Switch Columns (niri)"
 mouse_button_profiles = "Profile przycisków myszy"
 mouse_profile_pointer = "Wskaźnik myszy"
 mouse_profile_focused = "Aktywna aplikacja"
@@ -258,6 +259,8 @@ wheel_resolution_other_connection = "To urządzenie obsługuje rozdzielczość k
 smartshift = "SmartShift"
 
 [actions]
+niri_focus_column_left = "Focus Column Left (niri)"
+niri_focus_column_right = "Focus Column Right (niri)"
 bind_control = "Przypisz %{name}"
 bind_control_in_app = "Przypisz %{name} w %{app}"
 unbound = "Nieprzypisane"

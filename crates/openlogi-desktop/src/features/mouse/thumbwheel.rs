@@ -21,6 +21,7 @@ pub(crate) enum ThumbwheelPreset {
     BrowserHistory,
     Tabs,
     Desktops,
+    NiriColumns,
     Tracks,
     Volume,
     VolumeReversed,
@@ -32,12 +33,13 @@ pub(crate) enum ThumbwheelPreset {
 }
 
 impl ThumbwheelPreset {
-    pub(crate) const ALL: [Self; 13] = [
+    pub(crate) const ALL: [Self; 14] = [
         Self::BackForward,
         Self::UndoRedo,
         Self::BrowserHistory,
         Self::Tabs,
         Self::Desktops,
+        Self::NiriColumns,
         Self::Tracks,
         Self::Volume,
         Self::VolumeReversed,
@@ -56,6 +58,7 @@ impl ThumbwheelPreset {
             Self::BrowserHistory => (Action::BrowserBack, Action::BrowserForward),
             Self::Tabs => (Action::PrevTab, Action::NextTab),
             Self::Desktops => (Action::PreviousDesktop, Action::NextDesktop),
+            Self::NiriColumns => (Action::NiriFocusColumnRight, Action::NiriFocusColumnLeft),
             Self::Tracks => (Action::PrevTrack, Action::NextTrack),
             Self::Volume => (Action::VolumeDown, Action::VolumeUp),
             Self::VolumeReversed => (Action::VolumeUp, Action::VolumeDown),
@@ -91,6 +94,7 @@ impl ThumbwheelPreset {
             Self::BrowserHistory => "pointer.browser_back_forward",
             Self::Tabs => "pointer.previous_next_tab",
             Self::Desktops => "pointer.previous_next_desktop",
+            Self::NiriColumns => "pointer.niri_columns",
             Self::Tracks => "pointer.previous_next_track",
             // `Self::Volume` is the intuitive pairing (rolling the wheel up
             // raises the volume — see `pair()` above), so it takes the label a
@@ -114,7 +118,7 @@ impl ThumbwheelPreset {
             Self::UndoRedo => "action-icons/redo-2.svg",
             Self::BrowserHistory => "action-icons/arrow-right.svg",
             Self::Tabs => "action-icons/chevron-right.svg",
-            Self::Desktops => "action-icons/square-arrow-right.svg",
+            Self::Desktops | Self::NiriColumns => "action-icons/square-arrow-right.svg",
             Self::Tracks => "action-icons/skip-forward.svg",
             Self::Volume | Self::VolumeReversed => "action-icons/volume-2.svg",
             Self::CycleDpi => "action-icons/gauge.svg",
@@ -138,6 +142,7 @@ mod tests {
             (Action::BrowserBack, Action::BrowserForward),
             (Action::PrevTab, Action::NextTab),
             (Action::PreviousDesktop, Action::NextDesktop),
+            (Action::NiriFocusColumnRight, Action::NiriFocusColumnLeft),
             (Action::PrevTrack, Action::NextTrack),
             (Action::VolumeDown, Action::VolumeUp),
             (Action::VolumeUp, Action::VolumeDown),

@@ -102,7 +102,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 35);
+    assert_eq!(PROTOCOL_VERSION, 36);
 }
 
 #[test]
@@ -690,4 +690,15 @@ fn standalone_light_dtos_commands_and_errors() {
         "0c05636f6c6f72",
     );
     assert_wire(&WriteError::AmbiguousRawDevice, "0d");
+}
+
+#[test]
+fn niri_actions_append_after_existing_actions() {
+    use openlogi_core::binding::Action;
+    assert_wire(
+        &Action::HoldShortcut("Super+O".parse().expect("valid chord")),
+        "341012",
+    );
+    assert_wire(&Action::NiriFocusColumnLeft, "35");
+    assert_wire(&Action::NiriFocusColumnRight, "36");
 }

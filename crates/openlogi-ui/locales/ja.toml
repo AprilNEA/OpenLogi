@@ -187,6 +187,7 @@ select_device_button_description = "動作を変更するボタンをデバイ�
 remove_profile_description = "このプロファイルのカスタムボタン割り当てを削除します。デフォルトの割り当てには影響しません。"
 
 [pointer]
+niri_columns = "Switch Columns (niri)"
 mouse_button_profiles = "マウスボタンのプロファイル"
 mouse_profile_pointer = "マウスポインター"
 mouse_profile_focused = "フォーカス中のアプリ"
@@ -258,6 +259,8 @@ wheel_resolution_other_connection = "別の接続方式ではホイール解像�
 smartshift = "SmartShift"
 
 [actions]
+niri_focus_column_left = "Focus Column Left (niri)"
+niri_focus_column_right = "Focus Column Right (niri)"
 bind_control = "%{name} を割り当て"
 bind_control_in_app = "%{app} で %{name} を割り当て"
 unbound = "未割り当て"

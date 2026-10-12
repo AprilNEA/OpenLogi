@@ -187,6 +187,7 @@ select_device_button_description = "동작을 변경할 버튼을 기기에서 �
 remove_profile_description = "이 프로필의 사용자 지정 버튼 할당을 삭제합니다. 기본 할당에는 영향을 주지 않습니다."
 
 [pointer]
+niri_columns = "Switch Columns (niri)"
 mouse_button_profiles = "마우스 버튼 프로필"
 mouse_profile_pointer = "마우스 포인터"
 mouse_profile_focused = "포커스된 앱"
@@ -258,6 +259,8 @@ wheel_resolution_other_connection = "다른 연결 방식에서는 휠 해상도
 smartshift = "SmartShift"
 
 [actions]
+niri_focus_column_left = "Focus Column Left (niri)"
+niri_focus_column_right = "Focus Column Right (niri)"
 bind_control = "%{name} 지정"
 bind_control_in_app = "%{app}에서 %{name} 지정"
 unbound = "할당되지 않음"

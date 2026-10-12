@@ -187,6 +187,7 @@ select_device_button_description = "Selecione um botão no dispositivo para alte
 remove_profile_description = "Isso exclui as atribuições personalizadas deste perfil. As atribuições padrão não serão afetadas."
 
 [pointer]
+niri_columns = "Switch Columns (niri)"
 mouse_button_profiles = "Perfis dos botões do mouse"
 mouse_profile_pointer = "Ponteiro do mouse"
 mouse_profile_focused = "Aplicativo em foco"
@@ -258,6 +259,8 @@ wheel_resolution_other_connection = "O dispositivo oferece resolução da roda n
 smartshift = "SmartShift"
 
 [actions]
+niri_focus_column_left = "Focus Column Left (niri)"
+niri_focus_column_right = "Focus Column Right (niri)"
 bind_control = "Atribuir %{name}"
 bind_control_in_app = "Atribuir %{name} em %{app}"
 unbound = "Não atribuído"
