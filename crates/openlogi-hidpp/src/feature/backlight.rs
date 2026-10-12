@@ -219,6 +219,14 @@ pub enum BacklightEvent {
     InfoChanged(BacklightInfoUpdate),
 }
 
+impl BacklightEvent {
+    /// Decodes one unsolicited backlight event payload.
+    #[must_use]
+    pub fn decode(function_id: u8, payload: &[u8; 16]) -> Option<Self> {
+        <Self as DecodeEvent>::decode(function_id, payload)
+    }
+}
+
 /// Payload of [`BacklightEvent::InfoChanged`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]

@@ -6,6 +6,7 @@
 
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
+use openlogi_core::hid::backlight::max_backlight_level;
 use openlogi_hid::{BacklightMode, BacklightState, BacklightStatus, DeviceRoute};
 
 use crate::cmd::diag::select_device;
@@ -85,7 +86,8 @@ pub async fn run(args: BacklightArgs) -> Result<()> {
     if enable {
         println!(
             "✓ backlight enabled (level {}/{})",
-            after.current_level, after.nb_levels
+            after.current_level,
+            max_backlight_level(after.nb_levels)
         );
     } else {
         println!("✓ backlight off — persisted to the keyboard, survives reconnect and power cycle");
@@ -106,7 +108,7 @@ fn print_state(label: &str, state: BacklightState) {
         mode_label(state.mode),
         status_label(state.status),
         state.current_level,
-        state.nb_levels,
+        max_backlight_level(state.nb_levels),
     );
 }
 

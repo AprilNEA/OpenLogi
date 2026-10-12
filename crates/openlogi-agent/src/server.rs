@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use futures::StreamExt as _;
 use openlogi_agent_core::action_ring::ActionRingManager;
+use openlogi_agent_core::backlight_overlay::BacklightOverlayManager;
 use openlogi_agent_core::event_monitor::SharedEventMonitor;
 use openlogi_agent_core::observable::ObservableState;
 use openlogi_agent_core::orchestrator::{Orchestrator, SharedHandles};
@@ -23,9 +24,10 @@ use openlogi_hid::{
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
-    ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus, ClientKind,
-    ConfigReloadError, Generation, Identity, MonitorEvent, Observation, PROTOCOL_VERSION,
-    PairingCommandError, PairingFailure, PairingUpdate, RingObservation,
+    ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus,
+    BacklightObservation, ClientKind, ConfigReloadError, Generation, Identity, MonitorEvent,
+    Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingUpdate,
+    RingObservation,
 };
 use succession::Compat;
 
@@ -52,6 +54,7 @@ pub struct AgentServer {
     pub action_ring: Arc<ActionRingManager>,
     pub dispatcher: ActionDispatcher,
     pub ring_haptics: RingHapticPlayer,
+    pub backlight_overlay: BacklightOverlayManager,
     /// Forwards each connection's [`ClientKind`] declaration to the
     /// dormancy gate.
     pub demand: tokio::sync::mpsc::UnboundedSender<ClientKind>,
@@ -60,6 +63,10 @@ pub struct AgentServer {
 impl AgentServer {
     /// Build a server and start the coalescing Actions Ring haptic worker.
     /// The second return is the demand channel the dormancy gate drains.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the IPC server owns the agent's independent runtime services"
+    )]
     pub fn new(
         orchestrator: Arc<Mutex<Orchestrator>>,
         shared: SharedHandles,
@@ -68,6 +75,7 @@ impl AgentServer {
         event_monitor: SharedEventMonitor,
         action_ring: Arc<ActionRingManager>,
         dispatcher: ActionDispatcher,
+        backlight_overlay: BacklightOverlayManager,
     ) -> (Self, tokio::sync::mpsc::UnboundedReceiver<ClientKind>) {
         let ring_haptics = RingHapticPlayer::spawn(shared.clone());
         let (demand, declarations) = tokio::sync::mpsc::unbounded_channel();
@@ -81,6 +89,7 @@ impl AgentServer {
                 action_ring,
                 dispatcher,
                 ring_haptics,
+                backlight_overlay,
                 demand,
             },
             declarations,
@@ -98,6 +107,10 @@ impl AgentServer {
 impl Agent for AgentServer {
     async fn protocol_version(self, _: Context) -> u32 {
         PROTOCOL_VERSION
+    }
+
+    async fn observe_backlight(self, _: Context, since: Generation) -> BacklightObservation {
+        self.backlight_overlay.observe(since).await
     }
 
     /// `Run::mint` is process-global, so the overlay supervisor hands its
