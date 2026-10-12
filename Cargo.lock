@@ -1936,6 +1936,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
+name = "ed25519-compact"
+version = "2.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1454db4f2edb7f0e8fe0c5b375b0c978fc63244cc9f010d160e417eb10139aa8"
+
+[[package]]
 name = "educe"
 version = "0.5.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3386,11 +3392,14 @@ checksum = "70a09e0bf58aede45b8e7eed6e8d5d6552381c431014d62b349b0133008737bd"
 
 [[package]]
 name = "gpui-updater-core"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "49f3ec64b674794b6b8b6fb36d40974d3506bd254212c3d5f65fcc9eac6542cb"
+checksum = "e79f73dd68bf12bc2c800192c340a3c577dc38e59255650e81b1678a6339c584"
 dependencies = [
+ "base64",
+ "ed25519-compact",
  "minisign-verify",
+ "roxmltree 0.20.0",
  "semver",
  "serde",
  "serde_json",
@@ -3402,12 +3411,27 @@ dependencies = [
 
 [[package]]
 name = "gpui-updater-pre"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "612f44d5b1006efa7d622a96570ce9265f251efd58f8d6b205291daeadc868f5"
+checksum = "c11ccca59c85b01241ea8a899cf49bad9e24fb8bbb02669e689eaa88daa76de7"
 dependencies = [
+ "futures",
  "gpui-pre",
  "gpui-updater-core",
+]
+
+[[package]]
+name = "gpui-updater-sparkle"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "05cd3fd0aff428e5524d263e71e00992100aae72a76af00188d28e3740c20e05"
+dependencies = [
+ "block2 0.6.2",
+ "gpui-updater-core",
+ "objc2 0.6.4",
+ "objc2-foundation 0.3.2",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
@@ -5705,6 +5729,7 @@ dependencies = [
  "gpui-pre",
  "gpui-pre-platform",
  "gpui-updater-pre",
+ "gpui-updater-sparkle",
  "image",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",

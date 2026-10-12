@@ -42,7 +42,11 @@ rust-i18n = "4"
 # The raw, un-negotiated system locale for the diagnostics report; locale
 # *negotiation* lives in openlogi-ui.
 sys-locale = "0.3.2"
-gpui-updater = { package = "gpui-updater-pre", version = "0.1" }
+gpui-updater = { package = "gpui-updater-pre", version = "0.2" }
+# Drives updates through the Sparkle.framework `xtask macos package` embeds in
+# the release bundle. Sparkle is loaded at run time, so this builds — and is
+# inert — on every platform and in an unbundled `cargo run`.
+gpui-updater-sparkle = "0.2"
 # Spawns the agent under its own macOS TCC identity (see ipc_client::spawn_agent).
 disclaim = "0.1"
 url = "2.5.8"

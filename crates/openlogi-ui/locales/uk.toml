@@ -423,6 +423,7 @@ checking_for_updates = "Перевірка наявності оновлень�
 update_version_available = "Доступна версія %{version}."
 update_downloading_percent = "Завантаження… %{percent}%"
 update_downloading_size = "Завантаження… %{size} МБ"
+update_downloading = "Завантаження…"
 installing = "Встановлення…"
 update_version_ready = "Версія %{version} готова."
 update_failed_message = "Не вдалося оновити: %{error}"
