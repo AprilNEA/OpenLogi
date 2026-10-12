@@ -62,7 +62,21 @@ pub struct DeviceIdentity {
 }
 
 impl DeviceIdentity {
-    /// Remove per-unit identifiers before this model snapshot is persisted.
+    /// Drop the serial number and unit id from this model snapshot before it
+    /// is persisted, leaving the identity body with model-level fields only.
+    ///
+    /// This does **not** make the saved file free of per-unit identifiers.
+    /// Settings are keyed by what a device *is*, so [`canonical_device_key`]
+    /// makes the entry key itself a `serial:` or `unit:` fragment whenever the
+    /// device reported one, whatever transport it was reached by. Only a
+    /// device with no usable identity falls back to a route-derived key such
+    /// as `receiver:{uid}:slot:{n}`. The entry's `links` table, keyed by
+    /// [`route_key`], also persists receiver UIDs. `raw:` routes retain an
+    /// OS-node- or serial-derived identity; `unknown:` routes retain the
+    /// device's serial number or unit id.
+    ///
+    /// [`canonical_device_key`]: crate::config::canonical_device_key
+    /// [`route_key`]: crate::device_order::DeviceStableId::route_key
     #[must_use]
     pub fn without_unit_identifiers(mut self) -> Self {
         if let Some(model) = &mut self.model_info {
@@ -188,11 +202,11 @@ pub struct DeviceConfig {
     /// button is a [`Binding::Single`] of its former `Click`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub disabled_gestures: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
-    /// Per-application binding overlays (P1.4). Keyed by bundle identifier
-    /// (e.g. `"com.microsoft.VSCode"` on macOS). When the foreground app's
-    /// id matches a key here, those bindings take precedence; anything not
-    /// listed falls through to `bindings`. Deliberately `Action`-valued (not
-    /// `Binding`): a per-app override replaces the whole button with one
+    /// Per-application binding overlays (P1.4). Keyed by the application
+    /// identifier defined by [`ForegroundApp::id`](crate::app::ForegroundApp::id).
+    /// When the foreground app's id matches a key here, these bindings take
+    /// precedence. Other buttons use `bindings`. Deliberately `Action`-valued
+    /// (not `Binding`): a per-app override replaces the whole button with one
     /// action, never a per-direction gesture overlay.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub per_app_bindings: BTreeMap<String, BTreeMap<ButtonId, Action>>,

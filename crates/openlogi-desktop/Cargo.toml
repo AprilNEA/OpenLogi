@@ -76,7 +76,7 @@ workspace = true
 openlogi-ipc = { path = "../openlogi-ipc", features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
 openlogi-device = { path = "../openlogi-device" }
-openlogi-fixture = { workspace = true }
+openlogi-fixture = { workspace = true, features = ["fs"] }
 tempfile = "3.27.0"
 tokio = { workspace = true, features = ["test-util"] }
 

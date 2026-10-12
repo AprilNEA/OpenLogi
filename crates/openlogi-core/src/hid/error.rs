@@ -136,6 +136,12 @@ pub enum HidppOperation {
     /// Read keyboard Fn-lock (fn inversion). Appended last — variant order is
     /// wire format.
     ReadFnLock,
+    /// Read the `0x2205` pointer-motion scaling. Appended last — variant order
+    /// is wire format.
+    ReadPointerScaling,
+    /// Write the `0x2205` pointer-motion scaling. Appended last — variant order
+    /// is wire format.
+    WritePointerScaling,
     /// Resolve, write, or verify the keyboard's host-platform mode. Appended last — variant order is wire format.
     WriteHostPlatform,
 }

@@ -31,13 +31,13 @@ use tracing::{debug, error, warn};
 
 use crate::{
     CursorPosition, EventDisposition, EventTapInfo, ForegroundApp, HookBackend, HookError,
-    HookEvent, TapLocation,
+    HookEvent, MouseEvent, TapLocation,
 };
 pub use foreground::ForegroundApplicationObserver;
 use foreground::observe_frontmost_application;
 pub(crate) use foreground::{frontmost_safari_pid, watch_frontmost_application_activations};
 use grant::{ProbeCue, can_filter_events};
-use translate::{translate, translate_key};
+use translate::{VERTICAL, translate, translate_key};
 use watchdog::{
     CALLBACK_POLL_INTERVAL, CallbackActivity, CallbackWatchdog, LIFECYCLE_POLL_INTERVAL,
     LifecycleDecision, LifecycleExitReason, LifecycleObservation, LifecycleWatchdog, PowerEpoch,
@@ -243,9 +243,10 @@ impl HookBackend for Backend {
             .collect()
     }
 
-    /// Read the frontmost application via `NSWorkspace`: its bundle identifier
-    /// (the profile-matching key) and its localized name (for the UI). Returns
-    /// `None` when no app is frontmost or it has no bundle identifier.
+    /// Read the frontmost application via `NSWorkspace`. Use its bundle
+    /// identifier for profile matching, or its executable path when no bundle
+    /// identifier is available. Use its localized name for the UI. Return `None`
+    /// when no app is frontmost or neither identifier is available.
     ///
     /// `NSWorkspace` is `AnyThread`, so this is sound on the watcher thread. The
     /// reads return owned `Retained` values (no leak by construction), but the
@@ -294,6 +295,44 @@ fn hooked_event_types() -> Vec<CGEventType> {
     ]
 }
 
+/// Whether this event is a mouse-wheel scroll software inversion applies to.
+///
+/// Trackpad scrolling is excluded by contract — the setting reverses one
+/// mouse, not the system direction — and so is any source the hook would not
+/// remap buttons for, so a second vendor's mouse is left alone.
+fn wheel_scroll_to_invert(event: &HookEvent) -> bool {
+    matches!(
+        event,
+        HookEvent::Mouse(MouseEvent::Scroll {
+            delta,
+            from_trackpad: false,
+            device,
+            ..
+        }) if delta.y() != 0.0 && crate::source_is_remappable(device.as_ref())
+    )
+}
+
+/// Negate the vertical scroll fields of `event`, in place.
+///
+/// Every field the reader might have used is negated, so the
+/// value that reaches the desktop is the device's own magnitude with its sign
+/// flipped. Re-synthesising the event from the normalised `delta_y` instead
+/// would have to choose a unit, and a hi-res wheel reports pixels in one field
+/// while a detented one reports lines in another — writing back the same
+/// fields sidesteps the choice entirely.
+fn invert_scroll_event(event: &CGEvent) {
+    for field in [VERTICAL.point, VERTICAL.fixed] {
+        let value = event.get_double_value_field(field);
+        if value != 0.0 {
+            event.set_double_value_field(field, -value);
+        }
+    }
+    let lines = event.get_integer_value_field(VERTICAL.line);
+    if lines != 0 {
+        event.set_integer_value_field(VERTICAL.line, -lines);
+    }
+}
+
 /// Invoke the user callback under `catch_unwind`, always failing open.
 fn run_tap_callback(
     cb: &dyn Fn(HookEvent) -> EventDisposition,
@@ -309,8 +348,17 @@ fn run_tap_callback(
         } else {
             return CallbackResult::Keep;
         };
+        // Decided before the callback consumes the event: a Logitech wheel
+        // scroll (never a trackpad) is the only thing software inversion may
+        // touch.
+        let invert = crate::scroll_inversion() && wheel_scroll_to_invert(&hook_event);
         match cb(hook_event) {
-            EventDisposition::PassThrough => CallbackResult::Keep,
+            EventDisposition::PassThrough => {
+                if invert {
+                    invert_scroll_event(event);
+                }
+                CallbackResult::Keep
+            }
             EventDisposition::Suppress => CallbackResult::Drop,
         }
     }));
@@ -568,14 +616,7 @@ fn service_tap(
         // Enabling is idempotent while the tap is already live. Only reached
         // while the live capability probe above still succeeds.
         tap.enable();
-        // Back to servicing the tap: the short stall budget applies again, so
-        // the fresh mark must be visible before `Armed` is — the watchdog would
-        // otherwise judge a slow probe that already returned against the
-        // pre-probe mark. The break paths above deliberately leave `Probing`
-        // published: the thread is still inside CoreGraphics for the
-        // synchronous teardown.
-        signals.mark_tap_progress();
-        signals.set_phase(TapPhase::Armed);
+        signals.mark_armed();
     }
 }
 
@@ -658,8 +699,7 @@ fn thread_main(
     }
     signals.mark_tap_progress();
     tap.enable();
-    signals.mark_tap_progress();
-    signals.set_phase(TapPhase::Armed);
+    signals.mark_armed();
 
     if rl_tx.send(run_loop.clone()).is_err() {
         debug!("hook parent dropped before run loop was ready; stopping");
@@ -676,6 +716,9 @@ fn thread_main(
     // observers go away when the tap does.
     let probe = ProbeCue::arm();
     service_tap(&tap, &signals, &tap_disabled, &probe);
+    // Every exit uses the short teardown budget, including a revoked grant
+    // or exhausted re-arm budget that leaves the loop in `Probing`.
+    signals.mark_armed();
 
     // Detach the tap from the event stream synchronously before unwinding,
     // so input recovers immediately rather than whenever CF happens to

@@ -19,12 +19,10 @@
 
 use std::ffi::c_void;
 use std::ptr::NonNull;
-use std::sync::mpsc;
-use std::time::Duration;
 
-use dispatch2::DispatchQueue;
-use objc2::MainThreadMarker;
 use objc2_core_foundation::{CFData, CFRetained, CFString, CFType};
+
+use super::main_thread::on_main;
 
 // HIToolbox and CarbonCore have no objc2 bindings: `objc2-carbon` skips
 // HIToolbox and `objc2-core-services` skips CarbonCore.
@@ -52,15 +50,9 @@ unsafe extern "C" {
     ) -> i32;
 }
 
-/// How long a worker thread waits for the main thread to read the layout
-/// before posting the key at its US position instead. The read itself takes
-/// well under a millisecond; this only bounds a main thread that is not
-/// running its run loop.
-const MAIN_THREAD_WAIT: Duration = Duration::from_millis(250);
-
 /// `kUCKeyActionDown`.
 const KEY_ACTION_DOWN: u16 = 0;
-/// `kUCKeyTranslateNoDeadKeysMask`: a dead key reports no character instead
+/// `kUCKeyTranslateNoDeadKeysMask`: a dead key reports its own accent instead
 /// of starting a composition.
 const NO_DEAD_KEYS: u32 = 1;
 /// `cmdKey` in the classic Event Manager modifier bits, shifted right by 8 as
@@ -124,21 +116,9 @@ fn typing_keys() -> impl Iterator<Item = u16> {
     (0x00..=0x32).chain([0x5d, 0x5e])
 }
 
-/// Read the active layout on the main thread. A worker thread asks the main
-/// queue and waits at most [`MAIN_THREAD_WAIT`].
+/// Read the active layout on the main thread.
 fn current_layout() -> Option<Layout> {
-    if MainThreadMarker::new().is_some() {
-        return read_current_layout();
-    }
-    let (reply, answer) = mpsc::sync_channel(1);
-    DispatchQueue::main().exec_async(move || {
-        // A reply after the wait gave up has nobody left to read it.
-        let _ = reply.send(read_current_layout());
-    });
-    answer.recv_timeout(MAIN_THREAD_WAIT).unwrap_or_else(|_| {
-        tracing::warn!("main thread did not read the keyboard layout in time");
-        None
-    })
+    on_main("keyboard layout", |_| read_current_layout()).flatten()
 }
 
 /// Must run on the main thread.

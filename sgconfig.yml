@@ -1,8 +1,13 @@
-# ast-grep project config. The rules are the single-source-of-truth guards:
-# each names the module that owns a decision and fails on the ingredients of
-# that decision anywhere else, so the second copy is a red CI job rather than a
-# review comment. Run them with `ast-grep scan` (CI job `ast-grep`, the prek
-# hook of the same name, `cargo xtask ci ast-grep`). Root AGENTS.md, "Single
-# source of truth", says when a rule is added.
+# Keep one project root so rules beside their owners retain repository-wide path selectors.
+# Placement and verification: .agents/rules/ci.md, "ast-grep rules".
 ruleDirs:
-  - .ast-grep/rules
+  - crates/openlogi-agent-core/.ast-grep/rules
+  - crates/openlogi-cli/.ast-grep/rules
+  - crates/openlogi-core/.ast-grep/rules
+  - crates/openlogi-desktop/.ast-grep/rules
+  - crates/openlogi-device/.ast-grep/rules
+  - crates/openlogi-fixture/.ast-grep/rules
+  - crates/openlogi-hook/.ast-grep/rules
+  - crates/openlogi-inject/.ast-grep/rules
+  - crates/openlogi-ipc/.ast-grep/rules
+  - xtask/.ast-grep/rules

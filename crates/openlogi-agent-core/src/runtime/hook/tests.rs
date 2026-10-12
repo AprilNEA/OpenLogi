@@ -269,7 +269,10 @@ fn mouse_press_uses_the_target_published_with_its_binding_not_frontmost_safari()
     };
     assert_eq!(
         press.target(),
-        ActionDispatchTarget::Pointer(PointerTarget::Desktop)
+        ActionDispatchTarget::Pointer {
+            target: PointerTarget::Desktop,
+            fallback_safari_pid: None,
+        }
     );
     assert_eq!(press.start_action(), Some(&Action::PreviousDesktop));
     // Pointer movement can restore the native binding before release. The
@@ -305,7 +308,7 @@ fn mouse_press_uses_the_target_published_with_its_binding_not_frontmost_safari()
             Some(&mouse),
             &hooks,
             &dispatcher,
-            || { ActionDispatchTarget::Keyboard }
+            || None
         ),
         EventDisposition::PassThrough
     );
@@ -326,6 +329,94 @@ fn mouse_press_uses_the_target_published_with_its_binding_not_frontmost_safari()
         EventDisposition::PassThrough
     );
     assert!(owner.shutdown());
+}
+
+#[test]
+fn queued_unidentified_pointer_action_retains_its_press_time_target() {
+    use super::super::button::ButtonRuntimeEvent;
+    use openlogi_hook::PointerTarget;
+    use std::cell::Cell;
+
+    let mouse = EventDevice {
+        vendor_id: Some(0x046d),
+        product_name: Some("Logitech MX Master 3".into()),
+        ..EventDevice::default()
+    };
+    let mut routes = Vec::new();
+    for (pressed_safari, later_safari, current_pointer) in [
+        (Some(417), None, PointerTarget::Unavailable),
+        (None, Some(518), PointerTarget::Unavailable),
+        (Some(417), Some(518), PointerTarget::Unavailable),
+        (Some(417), None, PointerTarget::Desktop),
+    ] {
+        let (dispatcher, mut owner, events) = test_dispatcher();
+        let hooks = Arc::new(RwLock::new(HookMaps {
+            bindings: BTreeMap::from([(ButtonId::Back, Action::BrowserBack.into())]),
+            pointer_target: Some(PointerTarget::Unavailable),
+            ..HookMaps::default()
+        }));
+        let focused_safari = Cell::new(pressed_safari);
+        assert_eq!(
+            handle_button(
+                ButtonId::Back,
+                true,
+                Some(&mouse),
+                &hooks,
+                &dispatcher,
+                || focused_safari.get(),
+            ),
+            EventDisposition::Suppress
+        );
+
+        focused_safari.set(later_safari);
+        let ButtonRuntimeEvent::Started(press) =
+            events.recv_timeout(Duration::from_secs(1)).expect("down")
+        else {
+            panic!("started");
+        };
+        let action = press.start_action().expect("browser binding");
+        let resolved = press.target().resolve_with(
+            action,
+            || current_pointer,
+            |_| panic!("an unidentified target has no window to check"),
+            || focused_safari.get(),
+        );
+        let mut navigation = (None, false);
+        if let Some(target) = resolved {
+            assert!(super::super::dispatch_browser_navigation(
+                action,
+                target,
+                |pid, forward| {
+                    assert!(!forward);
+                    navigation.0 = Some(pid);
+                    true
+                },
+                || navigation.1 = true,
+            ));
+        }
+        routes.push(navigation);
+        assert_eq!(
+            handle_button(
+                ButtonId::Back,
+                false,
+                Some(&mouse),
+                &hooks,
+                &dispatcher,
+                || panic!("release does not retarget"),
+            ),
+            EventDisposition::Suppress
+        );
+        assert!(owner.shutdown());
+    }
+    assert_eq!(
+        routes,
+        [
+            (Some(417), false),
+            (None, true),
+            (Some(417), false),
+            (None, false)
+        ]
+    );
 }
 
 #[test]
@@ -359,7 +450,7 @@ fn safari_target_never_relaxes_device_isolation() {
             for pressed in [true, false] {
                 assert_eq!(
                     handle_button(id, pressed, source.as_ref(), &hooks, &dispatcher, || {
-                        ActionDispatchTarget::SafariProcess(417)
+                        Some(417)
                     }),
                     EventDisposition::PassThrough
                 );

@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "name": "raw-battery",
+  "channel": "target",
+  "report_support": "long_only",
+  "exchanges": [
+    {
+      "request_match": "hidpp20",
+      "request": "11ff001000000000000000000000000000000000",
+      "response": "11ff001004050000000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff000010040000000000000000000000000000",
+      "response": "11ff000009000300000000000000000000000000",
+      "required": true
+    },
+    {
+      "request_match": "hidpp20",
+      "request": "11ff091000000000000000000000000000000000",
+      "response": "11ff09104b080000000000000000000000000000",
+      "required": true
+    }
+  ]
+}

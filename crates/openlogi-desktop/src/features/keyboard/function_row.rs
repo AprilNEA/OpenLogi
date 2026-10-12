@@ -33,6 +33,7 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled, Subscription, Window, canvas, div, hsla,
     point, prelude::FluentBuilder as _, px, rgb, svg,
 };
+use gpui_component::tooltip::Tooltip;
 use gpui_component::{Selectable as _, h_flex, input::InputState, v_flex};
 use openlogi_core::binding::{Action, WorkflowStep};
 
@@ -514,9 +515,15 @@ impl RenderOnce for KeyCallout {
         let binding = self.slot.binding;
         let binding_icon = self.slot.binding_icon;
         let highlighted = self.highlighted;
+        let full_label = self.slot.label.clone();
 
         v_flex()
             .id(("key-callout", idx))
+            // The bubble itself truncates the key name to one line (#1687 —
+            // a long translation, e.g. German's compound names, wrapped to
+            // several lines and overflowed into neighbouring callouts); the
+            // tooltip is where the untruncated name stays readable.
+            .tooltip(move |window, cx| Tooltip::new(full_label.clone()).build(window, cx))
             .absolute()
             .top(px(top))
             .left(px(left))
@@ -548,6 +555,9 @@ impl RenderOnce for KeyCallout {
             })
             .child(
                 div()
+                    .max_w(px(KEY_CALLOUT_W - 8.))
+                    .whitespace_nowrap()
+                    .text_ellipsis()
                     .text_caption()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(if highlighted {
@@ -943,6 +953,7 @@ fn panel_action_rows(
                     MenuRow::new(format!("panel-power-{idx}"))
                         .selected(selected)
                         .role(Role::MenuItem)
+                        .aria_label(*label)
                         .child(
                             h_flex()
                                 .items_center()

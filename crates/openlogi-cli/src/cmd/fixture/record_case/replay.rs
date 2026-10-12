@@ -1,11 +1,8 @@
 //! Sanitized route derivation and strict production-operation self-replay.
 
 use anyhow::{Result, bail};
-use openlogi_device::replay::{
-    ChannelConnection, NodePresence, OpenOutcome, RawWriterAvailability, ReceiverLinkState,
-    ReceiverSlot, ReceiverSlotState, ReplayBackend, ReplayChannel, ReplayNode, ReplayTopology,
-};
-use openlogi_device::{DeviceRoute, NodeId, NodeInfo};
+use openlogi_device::DeviceRoute;
+use openlogi_device::replay::{ReplayBackend, ReplayTopology};
 use openlogi_fixture::HidCassette;
 use openlogi_hid::recording::{HidCassetteAudit, SanitizedIdentityKind};
 
@@ -71,39 +68,12 @@ fn replay_topology(
     route: &DeviceRoute,
     cassette: &HidCassette,
 ) -> ReplayTopology {
-    let receiver_slots = match route {
-        DeviceRoute::Bolt { slot, .. } | DeviceRoute::Unifying { slot, .. } => {
-            vec![ReceiverSlot {
-                slot: *slot,
-                state: ReceiverSlotState::Paired(ReceiverLinkState::Online),
-            }]
-        }
-        DeviceRoute::Direct { .. } | DeviceRoute::RawHid { .. } => Vec::new(),
-    };
-    ReplayTopology {
-        nodes: vec![ReplayNode {
-            info: NodeInfo {
-                id: NodeId::from("openlogi-sanitized-replay-node".to_string()),
-                vendor_id: target.receiver_vendor_id,
-                product_id: target.receiver_product_id,
-                usage_page: 0xff00,
-                usage_id: 0x0001,
-                name: "OpenLogi sanitized replay node".to_string(),
-                manufacturer: Some("OpenLogi synthetic fixture".to_string()),
-                serial_number: None,
-            },
-            presence: NodePresence::Present,
-            open_outcome: OpenOutcome::Hidpp,
-            channel: Some(cassette.channel.clone()),
-            raw_writer: RawWriterAvailability::Unavailable,
-            receiver_slots,
-        }],
-        channels: vec![ReplayChannel {
-            id: cassette.channel.clone(),
-            connection: ChannelConnection::Connected,
-            report_support: cassette.report_support,
-        }],
-    }
+    ReplayTopology::for_device(
+        route,
+        target.receiver_vendor_id,
+        target.receiver_product_id,
+        cassette,
+    )
 }
 
 fn derive_replay_route(
@@ -164,7 +134,12 @@ fn unique_replacement(audit: &HidCassetteAudit, kind: SanitizedIdentityKind) -> 
 
 #[cfg(test)]
 mod tests {
-    use openlogi_device::write::FeatureEntry;
+    use openlogi_core::hid::{
+        SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold,
+    };
+    use openlogi_device::reprog_controls::CidFlags;
+    use openlogi_device::write::{FeatureEntry, ReprogControlEntry};
+    use openlogi_device::{Dpi, DpiCapabilities, DpiInfo};
     use openlogi_fixture::{
         CassetteExchange, FIXTURE_SCHEMA_VERSION, HidCassette, ReportSupport, RequestMatch,
     };
@@ -272,6 +247,263 @@ mod tests {
         };
         require_single_passing_candidate(vec![candidate.clone(), candidate])
             .expect_err("multiple passing candidates fail closed");
+    }
+
+    #[tokio::test]
+    async fn mx_master_4_dpi_read_expands_the_recorded_sensor_range() {
+        let Some((backend, route)) = mx_master_4_replay("dpi-info") else {
+            return;
+        };
+
+        let observed = FixtureOperation::DpiInfo.observe(&backend, &route).await;
+
+        // The recorded 0x00c8, 0xe032, 0x1f40 list encodes 200..=8000 in 50-DPI steps.
+        assert_eq!(
+            observed,
+            SemanticObservation::DpiInfo(Ok(DpiInfo {
+                current: Dpi::new(2000),
+                capabilities: DpiCapabilities::new((200..=8000).step_by(50).collect())
+                    .expect("reviewed sensor range is valid"),
+            }))
+        );
+        backend.require_complete().expect("DPI cassette consumed");
+    }
+
+    #[tokio::test]
+    async fn mx_master_4_control_read_preserves_separate_gesture_and_haptic_inputs() {
+        let Some((backend, route)) = mx_master_4_replay("reprogrammable-controls") else {
+            return;
+        };
+
+        let observed = FixtureOperation::ReprogrammableControls
+            .observe(&backend, &route)
+            .await;
+        let SemanticObservation::ReprogrammableControls(controls) = observed else {
+            panic!("expected a control-table observation, got {observed:?}");
+        };
+        let controls = controls.expect("recorded control table is readable");
+
+        assert_eq!(controls.len(), 9);
+        // Both recorded controls carry primary flags 0x31 and additional flags 0x05.
+        let flags = CidFlags::MOUSE
+            | CidFlags::REPROGRAMMABLE
+            | CidFlags::DIVERTABLE
+            | CidFlags::RAW_XY
+            | CidFlags::ANALYTICS_KEY_EVENTS;
+        for (cid, task_id) in [(0x00c3, 0x009c), (0x01a0, 0x0109)] {
+            assert_eq!(
+                controls.iter().find(|control| control.cid == cid).copied(),
+                Some(ReprogControlEntry {
+                    cid,
+                    task_id,
+                    flags,
+                })
+            );
+        }
+        backend
+            .require_complete()
+            .expect("control-table cassette consumed");
+    }
+
+    #[tokio::test]
+    async fn mx_anywhere_3s_dpi_read_replays_bluetooth_long_reports() {
+        let Some((backend, route)) = mx_anywhere_3s_replay("dpi-info") else {
+            return;
+        };
+
+        let observed = FixtureOperation::DpiInfo.observe(&backend, &route).await;
+
+        assert_eq!(
+            observed,
+            SemanticObservation::DpiInfo(Ok(DpiInfo {
+                current: Dpi::new(1000),
+                capabilities: DpiCapabilities::new((200..=8000).step_by(50).collect())
+                    .expect("reviewed sensor range is valid"),
+            }))
+        );
+        backend.require_complete().expect("DPI cassette consumed");
+    }
+
+    #[tokio::test]
+    async fn mx_anywhere_3s_control_read_preserves_physical_and_virtual_raw_xy_flags() {
+        let Some((backend, route)) = mx_anywhere_3s_replay("reprogrammable-controls") else {
+            return;
+        };
+
+        let observed = FixtureOperation::ReprogrammableControls
+            .observe(&backend, &route)
+            .await;
+        let SemanticObservation::ReprogrammableControls(controls) = observed else {
+            panic!("expected a control-table observation, got {observed:?}");
+        };
+        let controls = controls.expect("recorded control table is readable");
+
+        assert_eq!(controls.len(), 7);
+        for expected in [
+            ReprogControlEntry {
+                cid: 0x00c4,
+                task_id: 0x009d,
+                flags: CidFlags::MOUSE
+                    | CidFlags::REPROGRAMMABLE
+                    | CidFlags::DIVERTABLE
+                    | CidFlags::RAW_XY
+                    | CidFlags::ANALYTICS_KEY_EVENTS,
+            },
+            ReprogControlEntry {
+                cid: 0x00d7,
+                task_id: 0x00b4,
+                flags: CidFlags::DIVERTABLE
+                    | CidFlags::VIRTUAL_CONTROL
+                    | CidFlags::RAW_XY
+                    | CidFlags::FORCE_RAW_XY,
+            },
+        ] {
+            assert_eq!(
+                controls
+                    .iter()
+                    .find(|control| control.cid == expected.cid)
+                    .copied(),
+                Some(expected)
+            );
+        }
+        backend
+            .require_complete()
+            .expect("control-table cassette consumed");
+    }
+
+    #[tokio::test]
+    async fn mx_master_3s_smartshift_read_uses_legacy_feature_without_tunable_torque() {
+        let Some((backend, route)) = mx_master_3s_replay("smartshift-status") else {
+            return;
+        };
+
+        let observed = FixtureOperation::SmartshiftStatus
+            .observe(&backend, &route)
+            .await;
+
+        assert_eq!(
+            observed,
+            SemanticObservation::SmartshiftStatus(Ok(SmartShiftStatus {
+                mode: SmartShiftMode::Ratchet,
+                auto_disengage: SmartShiftAutoDisengage::Threshold(
+                    SmartShiftThreshold::try_new(10).expect("reviewed threshold is valid"),
+                ),
+                tunable_torque: None,
+            }))
+        );
+        backend
+            .require_complete()
+            .expect("legacy SmartShift cassette consumed");
+    }
+
+    #[tokio::test]
+    async fn mx_master_3s_control_read_preserves_gesture_and_virtual_raw_xy_flags() {
+        let Some((backend, route)) = mx_master_3s_replay("reprogrammable-controls") else {
+            return;
+        };
+
+        let observed = FixtureOperation::ReprogrammableControls
+            .observe(&backend, &route)
+            .await;
+        let SemanticObservation::ReprogrammableControls(controls) = observed else {
+            panic!("expected a control-table observation, got {observed:?}");
+        };
+        let controls = controls.expect("recorded control table is readable");
+
+        assert_eq!(controls.len(), 8);
+        for expected in [
+            ReprogControlEntry {
+                cid: 0x00c3,
+                task_id: 0x00a9,
+                flags: CidFlags::MOUSE
+                    | CidFlags::REPROGRAMMABLE
+                    | CidFlags::DIVERTABLE
+                    | CidFlags::RAW_XY
+                    | CidFlags::ANALYTICS_KEY_EVENTS,
+            },
+            ReprogControlEntry {
+                cid: 0x00d7,
+                task_id: 0x00b4,
+                flags: CidFlags::DIVERTABLE
+                    | CidFlags::VIRTUAL_CONTROL
+                    | CidFlags::RAW_XY
+                    | CidFlags::FORCE_RAW_XY,
+            },
+        ] {
+            assert_eq!(
+                controls
+                    .iter()
+                    .find(|control| control.cid == expected.cid)
+                    .copied(),
+                Some(expected)
+            );
+        }
+        backend
+            .require_complete()
+            .expect("control-table cassette consumed");
+    }
+
+    fn mx_master_4_replay(case: &str) -> Option<(ReplayBackend, DeviceRoute)> {
+        corpus_replay(
+            "mx-master-4-001",
+            case,
+            target(
+                DeviceRoute::Bolt {
+                    receiver_uid: "OL-BOLT-UID-0001".to_string(),
+                    slot: 2,
+                },
+                0xc548,
+            ),
+        )
+    }
+
+    fn mx_anywhere_3s_replay(case: &str) -> Option<(ReplayBackend, DeviceRoute)> {
+        corpus_replay(
+            "mx-anywhere-3s-001",
+            case,
+            target(
+                DeviceRoute::Direct {
+                    vendor_id: 0x046d,
+                    product_id: 0xb037,
+                },
+                0xb037,
+            ),
+        )
+    }
+
+    fn mx_master_3s_replay(case: &str) -> Option<(ReplayBackend, DeviceRoute)> {
+        corpus_replay(
+            "mx-master-3s-001",
+            case,
+            target(
+                DeviceRoute::Direct {
+                    vendor_id: 0x046d,
+                    product_id: 0xb034,
+                },
+                0xb034,
+            ),
+        )
+    }
+
+    fn corpus_replay(
+        specimen: &str,
+        case: &str,
+        target: TargetCandidate,
+    ) -> Option<(ReplayBackend, DeviceRoute)> {
+        let corpus = openlogi_fixture::fs::repository_corpus().expect("valid corpus")?;
+        let fixture = corpus
+            .iter()
+            .find(|fixture| fixture.manifest().id == specimen)
+            .expect("recorded specimen is present");
+        let cassette = fixture
+            .cassettes()
+            .iter()
+            .find(|cassette| cassette.name == case)
+            .expect("recorded case is present");
+        let (backend, route) =
+            ReplayBackend::from_profile(fixture.profile(), cassette).expect("valid replay target");
+        assert_eq!(route, target.route);
+        Some((backend, target.route))
     }
 
     #[tokio::test]

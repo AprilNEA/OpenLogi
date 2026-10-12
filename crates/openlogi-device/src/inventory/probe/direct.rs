@@ -44,8 +44,9 @@ pub(super) async fn probe_direct(
 ) -> NodeProbe {
     let id = CacheKey::Direct(info.id.clone());
     let cached = pass.cache.get(&id);
-    // A direct device is always "present" (its HID node is the candidate), so
-    // treat it as online: reuse the cached probe while fresh, otherwise probe.
+    // A direct device's HID node is present (it is the candidate), so probe it
+    // as online: reuse the cached probe while fresh, otherwise probe. Whether
+    // the device behind it is linked is the probe's answer, not this call's.
     let (probe, outcome) = probe_or_reuse(
         &channel,
         DIRECT_DEVICE_INDEX,
@@ -73,7 +74,10 @@ pub(super) async fn probe_direct(
     let capabilities = probe.capabilities;
     let walk_succeeded = capabilities.is_some();
     let caps = capabilities.unwrap_or_default();
-    let is_peripheral = probe.battery.is_some() || caps.buttons || caps.pointer || caps.lighting;
+    // An unlinked answer came from a battery feature too: a headset dongle
+    // whose headset is off.
+    let is_peripheral =
+        probe.battery.is_some() || probe.unlinked || caps.buttons || caps.pointer || caps.lighting;
     // A walk that never completed says nothing about what this node is: the
     // discriminator below would read "no battery, no config feature" off an
     // empty probe and reject a real mouse as a receiver's secondary interface.
@@ -128,7 +132,9 @@ pub(super) async fn probe_direct(
             // hint — but kind is just identity now; the UI gates on the
             // capabilities below, so a misread kind can't hide the panels (#127).
             kind: resolve_device_kind(probe.kind, DeviceKind::Unknown),
-            online: true,
+            // The HID node is present, but for a headset dongle that says
+            // nothing about the headset: its battery feature does.
+            online: !probe.unlinked,
             battery: probe.battery,
             model_info: probe.model_info,
             capabilities,

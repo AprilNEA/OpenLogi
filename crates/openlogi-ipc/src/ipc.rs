@@ -63,13 +63,14 @@ pub use succession::Identity;
 ///      the macOS dormancy gate.
 /// v30: `Agent::read_wheel` and `Agent::read_backlight` appended.
 /// v31: `Capabilities::dpi_gestures` appended.
-/// v32: Agent::read_fn_lock, Agent::set_fn_lock and
-///      HidppOperation::ReadFnLock appended.
-/// v33: Agent::unpair_device appended.
-/// v34: KeyCombo gains the Super modifier bit (Super, Win, Meta).
-/// v35: AppSettings::enforce_native_keyboard_platform and
-///      HidppOperation::WriteHostPlatform appended.
-pub const PROTOCOL_VERSION: u32 = 35;
+/// v32: `Agent::read_fn_lock`, `Agent::set_fn_lock` and
+///      `HidppOperation::ReadFnLock` appended.
+/// v33: `Agent::unpair_device` appended.
+/// v34: `KeyCombo` gains the Super modifier bit (`Super`, `Win`, `Meta`).
+/// v35: `HidppOperation::{ReadPointerScaling, WritePointerScaling}` appended.
+/// v36: `AppSettings::enforce_native_keyboard_platform` and
+///      `HidppOperation::WriteHostPlatform` appended.
+pub const PROTOCOL_VERSION: u32 = 36;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -151,13 +152,10 @@ pub struct AgentSnapshot {
 /// The application the agent currently resolves per-app profiles against, and
 /// the ones it recently saw in front.
 ///
-/// `recent` is here because a client cannot produce these identifiers itself.
-/// They come from four incompatible namespaces — macOS bundle ids, X11
-/// `WM_CLASS`, Wayland `app_id`, Windows executable paths — and only the agent
-/// holds the one that its matcher will actually compare. Enumerating installed
-/// applications in the GUI would produce plausible strings that miss. A client
-/// offering "make a profile for…" therefore picks from this list rather than
-/// from the host.
+/// `recent` carries identifiers defined by [`ForegroundApp::id`] that the agent
+/// observed in front. These are the exact keys the matcher compares, so a client
+/// can create a profile without guessing an installed application's runtime
+/// identifier.
 ///
 /// It also answers the case [`Self::current`] cannot: while a client's own
 /// window is in front, *it* is the foreground application, so the app the user

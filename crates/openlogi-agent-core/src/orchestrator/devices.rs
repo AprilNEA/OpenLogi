@@ -212,32 +212,48 @@ pub(super) fn any_device_needs_capture_rearm(
 /// intervals; any intervening authoritative reconciliation satisfies one.
 pub(super) const VOLATILE_REAPPLY_CONFIRM_RETRIES: u8 = 4;
 
+/// The shorter confirmation budget for a link re-establishment (a device nap
+/// ending in an offline→online transition or a `0x1d4b` reconnect broadcast).
+/// The device was already booted, so it needs no boot-race ladder — but its
+/// single re-apply races the link still stabilizing, and drowsy firmware can
+/// ACK a write yet drop it, leaving the wrong sensor DPI live until the *next*
+/// nap. One confirming pass closes that hole without per-nap churn.
+pub(super) const RECONNECT_REAPPLY_CONFIRM_RETRIES: u8 = 1;
+
 /// Plan this refresh's volatile-settings writes: the [`reapply_targets`] set
-/// plus a bounded run of confirming re-applies for devices first sighted
-/// recently or targeted by a system wake, and the follow-up keys (with
-/// remaining retry counts) to confirm next refresh. Reconnects
-/// (offline→online) re-apply once — the device was already booted, so it
-/// needs no boot-race retry.
+/// plus a bounded run of confirming re-applies, and the follow-up keys (with
+/// remaining retry counts) to confirm next refresh. `forced` re-applies to
+/// every online device carrying the caller's confirm budget (system wake
+/// keeps the boot ladder, a device reconnect the single link-race confirm);
+/// first sightings always queue the full boot ladder, and plain
+/// offline→online reconnects queue the link-race confirm.
 pub(super) fn plan_reapply(
     prev: &[AgentDevice],
     next: &[AgentDevice],
     followup: &HashMap<String, u8>,
-    reapply_all: bool,
+    forced: Option<u8>,
 ) -> (Vec<usize>, HashMap<String, u8>) {
-    let mut targets = reapply_targets(prev, next, reapply_all);
+    let mut targets = reapply_targets(prev, next, forced.is_some());
     let mut next_followup: HashMap<String, u8> = targets
         .iter()
-        .filter(|&&idx| {
-            reapply_all || {
-                let id = stable_id(&next[idx]);
-                !prev.iter().any(|p| stable_id(p) == id)
-            }
-        })
-        .map(|&idx| {
-            (
-                next[idx].config_key.clone(),
-                VOLATILE_REAPPLY_CONFIRM_RETRIES,
-            )
+        .filter_map(|&idx| {
+            let id = stable_id(&next[idx]);
+            let new_identity = !prev.iter().any(|p| stable_id(p) == id);
+            let budget = if new_identity {
+                VOLATILE_REAPPLY_CONFIRM_RETRIES
+            } else if let Some(forced) = forced {
+                forced
+            } else {
+                RECONNECT_REAPPLY_CONFIRM_RETRIES
+            };
+            // A new trigger can land mid-run (a reconnect while the boot
+            // confirmations are still draining) — keep the larger of the
+            // fresh budget and what this pass would have drained to.
+            let carried = followup
+                .get(&next[idx].config_key)
+                .map_or(0, |remaining| remaining.saturating_sub(1));
+            let budget = budget.max(carried);
+            (budget > 0).then(|| (next[idx].config_key.clone(), budget))
         })
         .collect();
     for (idx, dev) in next.iter().enumerate() {

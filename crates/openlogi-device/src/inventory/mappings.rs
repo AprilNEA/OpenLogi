@@ -2,6 +2,7 @@
 //! (Bolt and Unifying pairing registers and the `0x0005` marketing type),
 //! battery level/status, and serial-number normalisation. No I/O.
 
+use hidpp::feature::adc_measurement::AdcChargingStatus as HidppAdcChargingStatus;
 use hidpp::feature::battery_status::LegacyBatteryStatus as HidppLegacyBatteryStatus;
 use hidpp::feature::battery_voltage::VoltageChargingStatus as HidppVoltageChargingStatus;
 use hidpp::feature::device_type_and_name::DeviceType as HidppDeviceType;
@@ -153,13 +154,27 @@ pub(crate) fn map_voltage_battery_status(status: HidppVoltageChargingStatus) -> 
     }
 }
 
-/// Estimate a charge percentage from a `0x1001` battery voltage reading.
+/// Map a `0x1F20` ADC-measurement charging status to our [`BatteryStatus`].
+pub(crate) fn map_adc_battery_status(status: HidppAdcChargingStatus) -> BatteryStatus {
+    match status {
+        HidppAdcChargingStatus::Discharging => BatteryStatus::Discharging,
+        HidppAdcChargingStatus::Charging => BatteryStatus::Charging,
+        HidppAdcChargingStatus::Full => BatteryStatus::Full,
+        _ => BatteryStatus::Unknown,
+    }
+}
+
+/// Estimate a charge percentage from a `0x1001` or `0x1F20` battery voltage
+/// reading.
 ///
-/// The feature reports millivolt, not percent, so the discharge curve is ours
+/// Both features report millivolt, not percent, so the discharge curve is ours
 /// to model. The thresholds and linear interpolation between them are
 /// reverse-engineered, matching Solaar's `estimate_battery_level_percentage`
 /// table for the single-cell Li-Po batteries these devices carry; libratbag
-/// carries an equivalent mapping.
+/// carries an equivalent mapping, and Solaar applies the same table to
+/// `0x1F20`. The Linux kernel's `0x1F20` table reads the same voltage ~15
+/// points higher mid-range; HeadsetControl's G733 calibration sits with
+/// Solaar's.
 pub(crate) fn voltage_battery_percentage(voltage_mv: u16) -> u8 {
     /// Solaar's measured (millivolt, percent) discharge curve, descending.
     const CURVE: [(u16, u8); 13] = [

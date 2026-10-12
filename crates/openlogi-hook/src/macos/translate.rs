@@ -199,13 +199,13 @@ pub(super) fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEven
 /// delta. An app reads whichever it prefers, so any transform must touch all
 /// three.
 #[derive(Clone, Copy)]
-struct ScrollAxisFields {
-    line: CGEventField,
-    fixed: CGEventField,
-    point: CGEventField,
+pub(super) struct ScrollAxisFields {
+    pub(super) line: CGEventField,
+    pub(super) fixed: CGEventField,
+    pub(super) point: CGEventField,
 }
 
-const VERTICAL: ScrollAxisFields = ScrollAxisFields {
+pub(super) const VERTICAL: ScrollAxisFields = ScrollAxisFields {
     line: EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_1,
     fixed: EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_1,
     point: EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_1,

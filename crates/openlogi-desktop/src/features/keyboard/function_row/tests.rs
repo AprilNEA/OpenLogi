@@ -61,6 +61,7 @@ fn fallback_key_positions_cover_the_full_top_row() {
 /// F1–F3, so the first marked key is F4's backlight control (#711).
 #[test]
 fn control_markers_become_control_slots_in_reading_order() {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     rust_i18n::set_locale("en");
     let asset = asset_with_controls(&[
         (0x00e2, 27.9, 13.8),
@@ -101,6 +102,7 @@ fn control_markers_become_control_slots_in_reading_order() {
 /// still a key, named by its number.
 #[test]
 fn control_slots_read_row_by_row_and_name_unknown_controls_by_number() {
+    let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
     rust_i18n::set_locale("en");
     let asset = asset_with_controls(&[
         (0x0118, 93.6, 25.3),

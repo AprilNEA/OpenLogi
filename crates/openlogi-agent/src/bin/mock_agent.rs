@@ -233,7 +233,13 @@ fn default_to_dev_profile() {
 /// Accept loop — the mock's copy of `server::run` (kept verbatim rather than
 /// making the production loop generic over its service impl for a dev tool).
 async fn serve(server: MockAgent) -> std::io::Result<()> {
-    let listener = transport::bind()?;
+    serve_on(transport::bind()?, server).await
+}
+
+async fn serve_on(
+    listener: interprocess::local_socket::tokio::Listener,
+    server: MockAgent,
+) -> std::io::Result<()> {
     info!(
         profile = std::env::var(openlogi_core::env::PROFILE).unwrap_or_default(),
         "mock agent listening"

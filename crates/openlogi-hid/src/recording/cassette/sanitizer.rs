@@ -59,8 +59,12 @@ impl ProtocolSanitizer {
     }
 }
 
-pub(super) fn unassociated_rejection(observation: &ChannelObservation) -> CassetteRejectionReason {
-    match observation {
+/// The rejection an unassociated observation earns, or `None` when it is
+/// evidence about no HID++ exchange at all and the cassette may ignore it.
+pub(super) fn unassociated_rejection(
+    observation: &ChannelObservation,
+) -> Option<CassetteRejectionReason> {
+    Some(match observation {
         ChannelObservation::OutgoingReport { report, .. } => {
             if is_pairing_identity_traffic(report.as_bytes()) {
                 CassetteRejectionReason::PairingTraffic
@@ -78,11 +82,15 @@ pub(super) fn unassociated_rejection(observation: &ChannelObservation) -> Casset
         ChannelObservation::MalformedIncomingReport { .. } => {
             CassetteRejectionReason::MalformedIncomingReport
         }
+        // Another protocol's report on the same node (Logitech DJ next to
+        // HID++ on a Unifying receiver) never enters the cassette, so it
+        // cannot leak identity or break replay.
+        ChannelObservation::ForeignIncomingReport { .. } => return None,
         ChannelObservation::RequestOutcome { .. } => {
             CassetteRejectionReason::UnsupportedObservation
         }
         _ => CassetteRejectionReason::UnsupportedObservation,
-    }
+    })
 }
 
 fn map_protocol_error(error: &ProtocolIdentityError) -> CassetteRejectionReason {

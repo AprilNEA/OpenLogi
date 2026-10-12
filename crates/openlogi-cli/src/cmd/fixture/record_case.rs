@@ -21,6 +21,8 @@ use openlogi_ipc::client::{self, ConnectError};
 use super::target_selection::{self, FixtureTarget};
 
 mod audit;
+#[cfg(test)]
+mod corpus_tests;
 mod replay;
 
 pub(super) const DEFAULT_RECORDING_CAPACITY: usize = 8_192;

@@ -156,6 +156,14 @@ impl WatchdogSignals {
         self.phase.store(phase as u8, Ordering::Release);
     }
 
+    /// Publish fresh progress before the short watchdog budget applies.
+    pub fn mark_armed(&self) {
+        // The watchdog reads phase before progress. Publishing `Armed` first
+        // could charge a completed probe against its old progress mark.
+        self.mark_tap_progress();
+        self.set_phase(TapPhase::Armed);
+    }
+
     pub fn request_stop(&self) {
         self.stop_requested.store(true, Ordering::Release);
     }
@@ -610,6 +618,98 @@ mod tests {
                 TAP_PROBE_BUDGET
             )
         );
+    }
+
+    #[test]
+    fn a_probe_return_between_watchdog_polls_refreshes_the_stall() {
+        let signals = WatchdogSignals {
+            origin: Instant::now().checked_sub(Duration::from_secs(2)).unwrap(),
+            ..WatchdogSignals::default()
+        };
+        let mut watchdog = LifecycleWatchdog::default();
+        assert_eq!(
+            watchdog.evaluate(
+                Duration::ZERO,
+                observation(TapPhase::Armed, false, signals.tap_progress_at())
+            ),
+            LifecycleDecision::Continue
+        );
+        signals.set_phase(TapPhase::Probing);
+        let probe_returned = signals.now();
+        signals.mark_armed();
+
+        // No poll saw `Probing`, so the fresh mark must distinguish this
+        // return from an armed tap that stalled for the whole interval.
+        assert_eq!(
+            watchdog.evaluate(
+                probe_returned,
+                observation(signals.phase(), false, signals.tap_progress_at())
+            ),
+            LifecycleDecision::Continue
+        );
+    }
+
+    #[test]
+    fn probe_teardown_keeps_the_short_budget_with_or_without_a_stop() {
+        for (stop_requested, reason) in [
+            (false, LifecycleExitReason::TapThreadStalled),
+            (true, LifecycleExitReason::StopTimedOut),
+        ] {
+            let signals = WatchdogSignals {
+                origin: Instant::now().checked_sub(Duration::from_secs(2)).unwrap(),
+                ..WatchdogSignals::default()
+            };
+            signals.set_phase(TapPhase::Probing);
+            if stop_requested {
+                signals.request_stop();
+            }
+            let probing = observation(
+                signals.phase(),
+                signals.stop_requested(),
+                signals.tap_progress_at(),
+            );
+            signals.mark_armed();
+            let teardown = observation(
+                signals.phase(),
+                signals.stop_requested(),
+                signals.tap_progress_at(),
+            );
+            let probe_returned = teardown.tap_progress_at;
+            let probe_duration = Duration::from_millis(1_600);
+            let mut watchdog = LifecycleWatchdog::default();
+            assert_eq!(
+                watchdog.evaluate(probe_returned.checked_sub(probe_duration).unwrap(), probing),
+                LifecycleDecision::Continue
+            );
+            assert_eq!(
+                watched(&mut watchdog, probe_returned, probing),
+                LifecycleDecision::Continue
+            );
+            assert_eq!(
+                watchdog.evaluate(probe_returned, teardown),
+                LifecycleDecision::Continue,
+                "a completed probe must not consume the teardown budget"
+            );
+            let deadline = probe_returned + TAP_SHUTDOWN_BUDGET;
+            assert_eq!(
+                watched(
+                    &mut watchdog,
+                    deadline.checked_sub(LIFECYCLE_POLL_INTERVAL).unwrap(),
+                    teardown
+                ),
+                LifecycleDecision::Continue
+            );
+            let stalled = if stop_requested {
+                probe_duration + TAP_SHUTDOWN_BUDGET
+            } else {
+                TAP_SHUTDOWN_BUDGET
+            };
+            assert_eq!(
+                watched(&mut watchdog, deadline, teardown),
+                exit(reason, TAP_SHUTDOWN_BUDGET, stalled),
+                "teardown must not retain the probe budget"
+            );
+        }
     }
 
     #[test]

@@ -8,7 +8,7 @@ paths:
   - ".editorconfig"
   - "rust-toolchain.toml"
   - "prek.toml"
-  - ".ast-grep/**"
+  - "**/.ast-grep/**"
   - "sgconfig.yml"
 ---
 
@@ -147,7 +147,7 @@ warning that host clippy `-D warnings` does not surface still fails CI.
 |---|---|---|
 | `rustfmt` | `cargo fmt --all -- --check` | any |
 | `typos` | `typos --config .config/typos.toml .` | any (needs `typos`; included in the devenv shell) |
-| `ast-grep` | `ast-grep scan` | any (needs `ast-grep`; included in the devenv shell). The single-source-of-truth guards in `.ast-grep/rules/`, configured by `sgconfig.yml` |
+| `ast-grep` | `ast-grep scan` | any (needs `ast-grep`; included in the devenv shell). The single-source-of-truth guards stored with their owners and registered in root `sgconfig.yml` |
 | `publish closure` | `cargo xtask release check-publish` | any |
 | `shell` | `git ls-files -z \| xargs -0 shfmt -f` piped into `xargs shellcheck` and `xargs shfmt -d` | any (needs `shellcheck` + `shfmt`; both are in the devenv shell) |
 | `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` | **Linux** is the CI job. Host clippy on macOS/Windows compiles a different `cfg` |
@@ -166,6 +166,19 @@ CI always sets `CARGO_TERM_COLOR=always`, `CARGO_INCREMENTAL=0`, and
 job deliberately skips sccache setup. `rust-cache` stores only Cargo registry/git
 inputs (`cache-targets: false`); sccache owns compiler outputs. PRs read the
 default branch's sccache objects but do not write their isolated merge-ref cache.
+
+The `fmt` job selects all workspace test jobs with the path filter in `ci.yml`. Source, fixture, test-resource, dependency, toolchain, and CI changes run those jobs; pure Markdown and unrelated design assets skip them. The workflow still reports each skipped job, so required checks do not remain pending. PRs use the full PR diff; pushes use the full pushed range. Local test commands always run, regardless of changed paths.
+
+### ast-grep rules
+
+Load the [ast-grep skill](../skills/ast-grep/SKILL.md) for structural searches, rewrites, and rule authoring. The following constraints govern OpenLogi guards:
+
+- Store each rule in the owning crate's `.ast-grep/rules/`, or `xtask/.ast-grep/rules/` for an xtask owner. Cross-crate guards live with the owner, even when they inspect other crates.
+- Register each rule directory in the root `sgconfig.yml`. Keep one project config. Rule `files` and `ignores` selectors are relative to that project root, not the YAML file.
+- Preserve unique rule IDs and name the owner in the diagnostic. For the consolidation trigger, follow [Single source of truth](../../AGENTS.md#single-source-of-truth).
+- Choose traversal depth for the intended relationship. Use `stopBy: end` only when the rule must search all ancestors or descendants.
+- Run `ast-grep scan` from the repository root after a rule or config change. The current tree must pass. Verify that the prohibited copy fails, the owner passes, and unrelated code passes. Use the pre-consolidation commit or a temporary fixture tree. Include a consumer in another crate when the guard applies across crates; `ast-grep test` snippets alone do not prove path selectors.
+- When moving rules, compare rule IDs and contents before and after. Confirm that `ast-grep scan --inspect summary` loads every rule, then repeat the path checks above. Keep rule-directory ownership in `.github/CODEOWNERS`.
 
 ### MSRV trap
 
@@ -196,7 +209,7 @@ only on macOS CI (`cargo test -p openlogi-desktop i18n`).
 | Diff | Run |
 |---|---|
 | anything Rust | the local-gate tier above; the pre-push hook always runs full-workspace Clippy and non-GUI rustdoc; `ast-grep` (the prek hook runs it over the staged files at commit) |
-| `.ast-grep/**`, `sgconfig.yml` | `ast-grep` — a new rule must flag nothing on the current tree and must flag the copy it was written against (check out the commit before the consolidation) |
+| `**/.ast-grep/**`, `sgconfig.yml` | Follow [ast-grep rules](#ast-grep-rules): full scan plus prohibited-copy, owner, and path checks |
 | crate publish flags, workspace path dependencies, `release-plz.toml` | `publish-closure` |
 | any `*.sh`, any file with a shell shebang, `.editorconfig` | `shell` (the prek hooks run the same two tools at commit) |
 | `#[cfg(target_os = …)]`, hook/inject/hid/camera platform files | `clippy-windows` proxy + the linux-musl recipe; say so if you cannot |

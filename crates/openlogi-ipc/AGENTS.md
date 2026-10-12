@@ -33,7 +33,7 @@ flight under a deadline that outlasts the hold (`Observer::state` /
 `Observer::action_ring`, then `next()`; the thread a client loop runs on is
 `openlogi_core::worker`'s). Consumers never compare `PROTOCOL_VERSION`, call
 `declare_client`, `observe` or `observe_action_ring`, compare generations, or open
-the transport themselves — the `.ast-grep/rules/ipc-*.yml` guards fail the
+the transport themselves — this crate's `.ast-grep/rules/ipc-*.yml` guards fail the
 `ast-grep` CI job on any of that outside this crate. A new decision every client
 must share goes here, with its guard, not into the first client that needs it.
 `testing::in_memory_agent` (feature `test-support`) is the scripted agent for

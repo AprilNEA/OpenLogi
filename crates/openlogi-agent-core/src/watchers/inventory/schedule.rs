@@ -55,17 +55,22 @@ pub(super) enum ReconcileTrigger {
 }
 
 impl ReconcileTrigger {
-    /// Whether this trigger means device RAM may have reset even when the
-    /// authoritative snapshot keeps the same route and online state.
-    pub(super) fn reapplies_volatile_settings(self) -> bool {
-        matches!(
-            self,
+    /// The confirmation policy requested by this inventory trigger.
+    pub(super) fn reapply_reason(self) -> Option<super::ReapplyReason> {
+        use super::ReapplyReason;
+        match self {
+            Self::HidEvent(HidppEventSource::WirelessDeviceStatus) => {
+                Some(ReapplyReason::Reconnect)
+            }
             Self::Hotplug
-                | Self::SystemResume
-                | Self::HidEvent(
-                    HidppEventSource::ReceiverConnection | HidppEventSource::WirelessDeviceStatus
-                )
-        )
+            | Self::SystemResume
+            | Self::HidEvent(HidppEventSource::ReceiverConnection) => Some(ReapplyReason::Volatile),
+            Self::Initial
+            | Self::RepairRetry
+            | Self::SettingsConfirmation
+            | Self::RecoveryScan
+            | Self::HidEvent(_) => None,
+        }
     }
 }
 
@@ -235,20 +240,23 @@ mod tests {
 
     #[test]
     fn reconnect_triggers_reapply_but_battery_events_do_not() {
-        assert!(ReconcileTrigger::Hotplug.reapplies_volatile_settings());
+        assert!(ReconcileTrigger::Hotplug.reapply_reason().is_some());
         assert!(
             ReconcileTrigger::HidEvent(HidppEventSource::ReceiverConnection)
-                .reapplies_volatile_settings()
+                .reapply_reason()
+                .is_some()
         );
         assert!(
             ReconcileTrigger::HidEvent(HidppEventSource::WirelessDeviceStatus)
-                .reapplies_volatile_settings()
+                .reapply_reason()
+                .is_some()
         );
         assert!(
-            !ReconcileTrigger::HidEvent(HidppEventSource::UnifiedBattery)
-                .reapplies_volatile_settings()
+            ReconcileTrigger::HidEvent(HidppEventSource::UnifiedBattery)
+                .reapply_reason()
+                .is_none()
         );
-        assert!(!ReconcileTrigger::RecoveryScan.reapplies_volatile_settings());
+        assert!(ReconcileTrigger::RecoveryScan.reapply_reason().is_none());
     }
 
     #[test]

@@ -2,10 +2,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use hidpp::channel::HidppChannel;
-use openlogi_core::device::{BatteryInfo, BatteryStatus};
+use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus};
 
 use super::events::{EventFeatureIndices, EventSubscriptionHandle};
-use super::features::{BatteryProbe, ProbedFeatures, probe_features, read_battery};
+use super::features::{BatteryProbe, BatteryRead, ProbedFeatures, probe_features, read_battery};
 use crate::backend::NodeId;
 
 /// How long a device's probe is reused before a fresh read.
@@ -57,41 +57,75 @@ pub(super) struct Cached {
     pub(super) probed_at: Instant,
 }
 
-/// The legacy `0x1000` battery feature (MX2S-era mice) reports `discharge_level
-/// = 0` while charging — the firmware can't gauge charge under load, so the GUI
-/// would show a misleading "Charging · 0%". Carry the last-known percentage
-/// forward for the charge so the reading stays trackable.
+/// Carry the last-known percentage through a charge for battery sources that
+/// cannot gauge charge under load, so the reading stays trackable.
 ///
-/// A *frozen* pre-charge value, not a live charging %, because no device exposes
-/// that on `0x1000`. Only kicks in for the charging-and-zero sentinel; a genuine
-/// 0% while discharging (status != Charging) is untouched. Cold edge: app
-/// started while already charging has no prior, so it shows 0% until the first
-/// discharge read.
+/// - The legacy `0x1000` feature (MX2S-era mice) reports `discharge_level = 0`
+///   while charging, which the GUI would show as a misleading "Charging · 0%".
+///   Only that charging-and-zero sentinel is held; a genuine 0% while
+///   discharging is untouched.
+/// - The voltage sources `0x1001` and `0x1F20` report millivolt, and the
+///   charge current lifts that reading: a G733 at an estimated 65% on battery
+///   reads 96% seconds after being plugged in. Every charging reading is held.
+///   Charge complete (`Full`) reads live again.
+///
+/// A *frozen* pre-charge value, not a live charging %, because none of these
+/// sources exposes one. Cold edge: a device first seen while already charging
+/// has no prior. `0x1000` then shows its own 0%, and a voltage source reports
+/// the same 0% with an unknown level, the "charging, no reading" state, until
+/// the first discharge read.
 fn hold_percentage_while_charging(
     fresh: BatteryInfo,
     prev: Option<&BatteryInfo>,
     probe: BatteryProbe,
 ) -> BatteryInfo {
-    // Scoped to the legacy 0x1000 quirk: a 0x1004 device that legitimately
-    // reports 0% while charging must surface that, not a stale prior reading.
-    if !matches!(probe, BatteryProbe::Legacy(_)) {
-        return fresh;
-    }
     let charging = matches!(
         fresh.status,
         BatteryStatus::Charging | BatteryStatus::ChargingSlow
     );
-    if charging
-        && fresh.percentage == 0
-        && let Some(p) = prev.filter(|p| p.percentage > 0)
-    {
-        return BatteryInfo {
-            percentage: p.percentage,
-            level: p.level,
-            status: fresh.status,
-        };
+    if !charging {
+        return fresh;
     }
-    fresh
+    let held = |p: &BatteryInfo| BatteryInfo {
+        percentage: p.percentage,
+        level: p.level,
+        status: fresh.status,
+    };
+    match (probe, prev) {
+        (BatteryProbe::Legacy(_), Some(p)) if fresh.percentage == 0 && p.percentage > 0 => held(p),
+        (BatteryProbe::Voltage(_) | BatteryProbe::Adc(_), Some(p)) => held(p),
+        (BatteryProbe::Voltage(_) | BatteryProbe::Adc(_), None) => BatteryInfo {
+            percentage: 0,
+            level: BatteryLevel::Unknown,
+            status: fresh.status,
+        },
+        // A `0x1004` device that legitimately reports 0% while charging must
+        // surface that, not a stale prior reading.
+        _ => fresh,
+    }
+}
+
+/// A failed battery read cannot overturn a previously confirmed link state.
+async fn refresh_battery(
+    channel: &Arc<HidppChannel>,
+    index: u8,
+    probe: BatteryProbe,
+    previous: Option<&ProbedFeatures>,
+) -> (Option<BatteryInfo>, bool) {
+    match read_battery(channel, index, probe).await {
+        BatteryRead::Reading(battery) => (
+            Some(hold_percentage_while_charging(
+                battery,
+                previous.and_then(|known| known.battery.as_ref()),
+                probe,
+            )),
+            false,
+        ),
+        BatteryRead::Unlinked => (None, true),
+        BatteryRead::Unavailable => previous.map_or((None, false), |known| {
+            (known.battery.clone(), known.unlinked)
+        }),
+    }
 }
 
 /// What a probed device contributes to the cache this tick. The key lets stale
@@ -145,12 +179,9 @@ pub(super) async fn probe_or_reuse(
     }
     if online && cached.is_none_or(|c| is_stale(c, now)) {
         let (mut fresh, battery, events) = probe_features(channel, index, subscriptions).await;
-        if let (Some(reading), Some(probe)) = (fresh.battery.take(), battery) {
-            fresh.battery = Some(hold_percentage_while_charging(
-                reading,
-                cached.and_then(|c| c.probe.battery.as_ref()),
-                probe,
-            ));
+        if let Some(probe) = battery {
+            (fresh.battery, fresh.unlinked) =
+                refresh_battery(channel, index, probe, cached.map(|known| &known.probe)).await;
         }
         // `capabilities` is `Some` exactly when the feature-table walk succeeded;
         // only then is the probe worth caching.
@@ -202,16 +233,15 @@ pub(super) async fn probe_or_reuse(
             // Cache hit: the immutable data is reused as-is, but the battery is
             // volatile (#153) — re-read just it through the memoized feature
             // index and fold the reading back into the cache. A failed read
-            // (asleep, mid-host-switch) keeps the last-known value.
+            // (asleep, mid-host-switch) keeps the last-known value; an
+            // unlinked answer clears it.
             if online
                 && let Some(probe) = c.battery
                 && let Some(key) = id.clone()
-                && let Some(battery) = read_battery(channel, index, probe).await
             {
-                let battery =
-                    hold_percentage_while_charging(battery, c.probe.battery.as_ref(), probe);
                 let mut entry = c.clone();
-                entry.probe.battery = Some(battery);
+                (entry.probe.battery, entry.probe.unlinked) =
+                    refresh_battery(channel, index, probe, Some(&c.probe)).await;
                 return (entry.probe.clone(), CacheOutcome::Update(key, entry));
             }
             (c.probe.clone(), seen(id))
@@ -305,6 +335,55 @@ mod hold_tests {
         let cold =
             hold_percentage_while_charging(battery(0, BatteryStatus::Charging), None, legacy);
         assert_eq!(cold.percentage, 0);
+    }
+
+    #[test]
+    fn voltage_estimates_hold_the_last_reading_while_charging() {
+        for probe in [BatteryProbe::Voltage(0), BatteryProbe::Adc(0)] {
+            // G733: 3890 mV on battery estimates 65%; plugged in, the charge
+            // current lifts the reading to 4134 mV, which would estimate 96%.
+            let held = hold_percentage_while_charging(
+                battery(96, BatteryStatus::Charging),
+                Some(&battery(65, BatteryStatus::Discharging)),
+                probe,
+            );
+            assert_eq!(held.percentage, 65, "{probe:?}");
+            assert_eq!(held.status, BatteryStatus::Charging, "{probe:?}");
+
+            // A held reading carries forward across charging polls.
+            let still = hold_percentage_while_charging(
+                battery(97, BatteryStatus::ChargingSlow),
+                Some(&held),
+                probe,
+            );
+            assert_eq!(still.percentage, 65, "{probe:?}");
+            assert_eq!(still.status, BatteryStatus::ChargingSlow, "{probe:?}");
+
+            // Charge complete and unplugged read the voltage live again.
+            let full = hold_percentage_while_charging(
+                battery(100, BatteryStatus::Full),
+                Some(&still),
+                probe,
+            );
+            assert_eq!(full.percentage, 100, "{probe:?}");
+            let unplugged = hold_percentage_while_charging(
+                battery(66, BatteryStatus::Discharging),
+                Some(&still),
+                probe,
+            );
+            assert_eq!(unplugged.percentage, 66, "{probe:?}");
+        }
+    }
+
+    #[test]
+    fn voltage_estimate_charging_from_cold_start_has_no_reading() {
+        for probe in [BatteryProbe::Voltage(0), BatteryProbe::Adc(0)] {
+            let cold =
+                hold_percentage_while_charging(battery(96, BatteryStatus::Charging), None, probe);
+            assert_eq!(cold.percentage, 0, "{probe:?}");
+            assert_eq!(cold.level, BatteryLevel::Unknown, "{probe:?}");
+            assert_eq!(cold.status, BatteryStatus::Charging, "{probe:?}");
+        }
     }
 
     #[test]
