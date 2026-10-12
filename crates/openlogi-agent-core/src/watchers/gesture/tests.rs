@@ -6,6 +6,8 @@ use openlogi_core::binding::{Action, Binding, ButtonId, GestureDirection};
 use openlogi_core::config::{ThumbwheelSensitivity, VerticalScrollSensitivity};
 use openlogi_hid::{CaptureChannelSlot, DeviceRoute};
 
+mod reconnect;
+
 fn route() -> DeviceRoute {
     DeviceRoute::Direct {
         vendor_id: 0x046d,
@@ -109,7 +111,7 @@ async fn retry_deadline_is_not_postponed_by_ready_input() {
 fn suspended_device_io_disables_retry_deadlines() {
     let retry_at = Instant::now() + RETRY_DELAY;
     let slots = HashMap::from([(
-        physical_key(),
+        CaptureKey::for_target(&plan().target),
         GestureSlot::recovering(None, Some(retry_at)),
     )]);
 
@@ -133,7 +135,7 @@ async fn exclusive_receiver_access_disables_expired_recovery_deadlines() {
         .await;
     let restart_at = Instant::now();
     let slots = HashMap::from([(
-        physical_key(),
+        CaptureKey::for_target(&plan().target),
         GestureSlot::recovering(None, Some(restart_at)),
     )]);
 
@@ -209,7 +211,7 @@ async fn recovery_manager_waits_for_control_events_and_shutdown_between_retries(
 #[tokio::test]
 async fn input_accepted_during_restoration_precedes_session_done() {
     let id = session_id(7);
-    let key = physical_key();
+    let key = CaptureKey::for_target(&plan().target);
     let (events, mut event_rx) = mpsc::unbounded_channel();
     let (session_tx, session_rx) = mpsc::unbounded_channel();
     let listener_sink = session_tx.clone();
@@ -219,7 +221,7 @@ async fn input_accepted_during_restoration_precedes_session_done() {
         forward_task,
         events,
         SessionDone {
-            physical_key: key.clone(),
+            key: key.clone(),
             session: id.clone(),
             pending_restore: None,
         },
@@ -235,7 +237,7 @@ async fn input_accepted_during_restoration_precedes_session_done() {
 
     match event_rx.recv().await {
         Some(SessionEvent::Input(input)) => {
-            assert_eq!(input.physical_key, key);
+            assert_eq!(input.key, key);
             assert_eq!(input.session, id);
             assert_eq!(input.input, CapturedInput::ButtonPulse(ButtonId::DpiToggle));
         }

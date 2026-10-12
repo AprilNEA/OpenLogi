@@ -116,7 +116,7 @@ pub enum RestoreOutcome<P> {
     /// Every control was restored on a publication that remained current.
     Restored,
     /// Restoration is incomplete. The caller must retain this token and retry
-    /// it before arming a successor for the same physical device.
+    /// it before arming a successor on the same route.
     RestorePending(PendingRestore<P>),
 }
 
