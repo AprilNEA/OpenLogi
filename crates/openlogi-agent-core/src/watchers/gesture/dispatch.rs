@@ -166,7 +166,7 @@ impl InputDispatcher {
             self.zooms.expire(
                 Instant::now(),
                 app.as_ref().map(|app| app.id.as_str()),
-                openlogi_hook::Hook::has_accessibility(),
+                self.outputs.accessibility_granted(),
                 openlogi_inject::zoom_process_id(),
             );
         }
@@ -311,7 +311,7 @@ impl InputDispatcher {
         if matches!(action, Action::ZoomIn | Action::ZoomOut) {
             let app = openlogi_hook::frontmost_application();
             let foreground_pid = openlogi_inject::zoom_process_id();
-            if !openlogi_hook::Hook::has_accessibility() {
+            if !self.outputs.accessibility_granted() {
                 self.zooms.cancel_all();
                 return;
             }

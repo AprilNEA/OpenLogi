@@ -131,6 +131,23 @@ mod tests {
     }
 
     #[test]
+    fn zoom_focus_requirement_matches_its_platform_output() {
+        for action in [Action::ZoomIn, Action::ZoomOut] {
+            assert_eq!(
+                pointer_action_allowed(&action, BROWSER, BROWSER, || false),
+                cfg!(target_os = "macos")
+            );
+            assert!(pointer_action_allowed(&action, BROWSER, BROWSER, || true));
+            assert!(!pointer_action_allowed(
+                &action,
+                BROWSER,
+                OTHER_WINDOW,
+                || true
+            ));
+        }
+    }
+
+    #[test]
     fn stale_context_drops_even_target_independent_actions() {
         for (captured, current) in [
             (BROWSER, PointerTarget::Desktop),

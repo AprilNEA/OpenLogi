@@ -52,6 +52,8 @@ pub struct GestureOutputs {
     actions: ActionDispatcher,
     scroll: ScrollInputHandle,
     hook_maps: SharedHookMaps,
+    #[cfg(target_os = "macos")]
+    observable: Arc<crate::observable::ObservableState>,
 }
 
 impl GestureOutputs {
@@ -61,12 +63,23 @@ impl GestureOutputs {
         actions: ActionDispatcher,
         scroll: ScrollInputHandle,
         hook_maps: SharedHookMaps,
+        observable: Arc<crate::observable::ObservableState>,
     ) -> Self {
+        #[cfg(not(target_os = "macos"))]
+        let _ = observable;
         Self {
             actions,
             scroll,
             hook_maps,
+            #[cfg(target_os = "macos")]
+            observable,
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn accessibility_granted(&self) -> bool {
+        self.observable
+            .read(|snapshot| snapshot.status.accessibility_granted)
     }
 
     fn cancel_session(&self, session: &HidppSessionId) {
