@@ -5,7 +5,9 @@ use hidpp::channel::HidppChannel;
 use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus};
 
 use super::events::{EventFeatureIndices, EventSubscriptionHandle};
-use super::features::{BatteryProbe, BatteryRead, ProbedFeatures, probe_features, read_battery};
+use super::features::{
+    BatteryProbe, BatteryRead, ProbedFeatures, ProbedProtocol, probe_features, read_battery,
+};
 use crate::backend::NodeId;
 
 /// How long a device's probe is reused before a fresh read.
@@ -50,7 +52,7 @@ pub(super) struct Cached {
     /// Which battery feature this device exposes and its runtime index, captured
     /// by the full probe. Lets cache hits re-read the volatile battery in one
     /// round-trip — no `Device::new` ping, no table walk. `None` when the device
-    /// exposes neither `0x1004` nor the legacy `0x1000`.
+    /// exposes no battery source [`BatteryProbe`] knows.
     pub(super) battery: Option<BatteryProbe>,
     /// Event-capable feature indexes found by the same immutable table walk.
     pub(super) events: EventFeatureIndices,
@@ -63,7 +65,8 @@ pub(super) struct Cached {
 /// - The legacy `0x1000` feature (MX2S-era mice) reports `discharge_level = 0`
 ///   while charging, which the GUI would show as a misleading "Charging · 0%".
 ///   Only that charging-and-zero sentinel is held; a genuine 0% while
-///   discharging is untouched.
+///   discharging is untouched. The HID++ 1.0 `0x07` register sends the same
+///   sentinel as a charging report without a level.
 /// - The voltage sources `0x1001` and `0x1F20` report millivolt, and the
 ///   charge current lifts that reading: a G733 at an estimated 65% on battery
 ///   reads 96% seconds after being plugged in. Every charging reading is held.
@@ -92,7 +95,11 @@ fn hold_percentage_while_charging(
         status: fresh.status,
     };
     match (probe, prev) {
-        (BatteryProbe::Legacy(_), Some(p)) if fresh.percentage == 0 && p.percentage > 0 => held(p),
+        (BatteryProbe::Legacy(_) | BatteryProbe::StatusRegister, Some(p))
+            if fresh.percentage == 0 && p.percentage > 0 =>
+        {
+            held(p)
+        }
         (BatteryProbe::Voltage(_) | BatteryProbe::Adc(_), Some(p)) => held(p),
         (BatteryProbe::Voltage(_) | BatteryProbe::Adc(_), None) => BatteryInfo {
             percentage: 0,
@@ -183,9 +190,8 @@ pub(super) async fn probe_or_reuse(
             (fresh.battery, fresh.unlinked) =
                 refresh_battery(channel, index, probe, cached.map(|known| &known.probe)).await;
         }
-        // `capabilities` is `Some` exactly when the feature-table walk succeeded;
-        // only then is the probe worth caching.
-        if fresh.capabilities.is_some() {
+        // Only a completed probe is worth caching.
+        if fresh.completed() {
             if let Some(c) = cached {
                 backfill_identity(&mut fresh, &c.probe);
             }
@@ -259,8 +265,8 @@ pub(super) async fn probe_or_reuse(
 /// feature vanish. A probe whose capability reads all succeeded is returned
 /// untouched, including one that legitimately lost a capability.
 pub(super) fn keep_known_capabilities(fresh: &mut ProbedFeatures, cached: &ProbedFeatures) {
-    if fresh.capabilities_incomplete && cached.capabilities.is_some() {
-        fresh.capabilities.clone_from(&cached.capabilities);
+    if fresh.capabilities_incomplete && matches!(cached.protocol, ProbedProtocol::Hidpp20(_)) {
+        fresh.protocol = cached.protocol;
     }
 }
 
@@ -309,32 +315,34 @@ mod hold_tests {
 
     #[test]
     fn charging_zero_holds_last_known_percentage() {
-        let legacy = BatteryProbe::Legacy(0);
-        let held = hold_percentage_while_charging(
-            battery(0, BatteryStatus::Charging),
-            Some(&battery(85, BatteryStatus::Discharging)),
-            legacy,
-        );
-        assert_eq!(held.percentage, 85);
-        assert_eq!(held.status, BatteryStatus::Charging);
+        // `0x1000` and the HID++ 1.0 `0x07` register share the sentinel.
+        for probe in [BatteryProbe::Legacy(0), BatteryProbe::StatusRegister] {
+            let held = hold_percentage_while_charging(
+                battery(0, BatteryStatus::Charging),
+                Some(&battery(85, BatteryStatus::Discharging)),
+                probe,
+            );
+            assert_eq!(held.percentage, 85, "{probe:?}");
+            assert_eq!(held.status, BatteryStatus::Charging);
 
-        let discharging = hold_percentage_while_charging(
-            battery(0, BatteryStatus::Discharging),
-            Some(&battery(85, BatteryStatus::Discharging)),
-            legacy,
-        );
-        assert_eq!(discharging.percentage, 0);
+            let discharging = hold_percentage_while_charging(
+                battery(0, BatteryStatus::Discharging),
+                Some(&battery(85, BatteryStatus::Discharging)),
+                probe,
+            );
+            assert_eq!(discharging.percentage, 0, "{probe:?}");
 
-        let live = hold_percentage_while_charging(
-            battery(40, BatteryStatus::Charging),
-            Some(&battery(85, BatteryStatus::Discharging)),
-            legacy,
-        );
-        assert_eq!(live.percentage, 40);
+            let live = hold_percentage_while_charging(
+                battery(40, BatteryStatus::Charging),
+                Some(&battery(85, BatteryStatus::Discharging)),
+                probe,
+            );
+            assert_eq!(live.percentage, 40, "{probe:?}");
 
-        let cold =
-            hold_percentage_while_charging(battery(0, BatteryStatus::Charging), None, legacy);
-        assert_eq!(cold.percentage, 0);
+            let cold =
+                hold_percentage_while_charging(battery(0, BatteryStatus::Charging), None, probe);
+            assert_eq!(cold.percentage, 0, "{probe:?}");
+        }
     }
 
     #[test]

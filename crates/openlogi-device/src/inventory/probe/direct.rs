@@ -71,7 +71,7 @@ pub(super) async fn probe_direct(
     // trustworthy: without it (the device never answered) a rejection below
     // would be indistinguishable from a transient glitch, so the node is
     // settled as a failed probe and its last inventory replayed.
-    let capabilities = probe.capabilities;
+    let capabilities = probe.capabilities();
     let walk_succeeded = capabilities.is_some();
     let caps = capabilities.unwrap_or_default();
     // An unlinked answer came from a battery feature too: a headset dongle

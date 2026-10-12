@@ -351,12 +351,13 @@ pub(in crate::inventory) async fn probe_unifying_slot(
 
     // HID++ 2.0's marketing name is the same identity we need for display and
     // avoids another receiver-register round trip. Keep the legacy codename
-    // read only for a completed feature walk that did not expose a name; never
-    // put it in front of the feature probe, where one missing receiver ACK can
-    // otherwise starve a healthy Lightspeed mouse forever.
+    // read only for a completed probe that did not expose a name — a HID++ 1.0
+    // device never does; never put it in front of the feature probe, where one
+    // missing receiver ACK can otherwise starve a healthy Lightspeed mouse
+    // forever.
     let codename = if let Some(name) = probe.marketing_name.clone() {
         Some(name)
-    } else if probe.capabilities.is_some() {
+    } else if probe.completed() {
         read_codename(channel, slot).await
     } else {
         None
@@ -403,6 +404,7 @@ pub(in crate::inventory) fn assemble_unifying_device(
     probe: ProbedFeatures,
     online: bool,
 ) -> PairedDevice {
+    let capabilities = probe.capabilities();
     PairedDevice {
         slot,
         codename,
@@ -411,7 +413,7 @@ pub(in crate::inventory) fn assemble_unifying_device(
         online,
         battery: probe.battery,
         model_info: probe.model_info,
-        capabilities: probe.capabilities,
+        capabilities,
     }
 }
 

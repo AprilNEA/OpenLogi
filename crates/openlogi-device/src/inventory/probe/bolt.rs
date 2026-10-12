@@ -245,6 +245,7 @@ async fn walk_bolt_slot(
         );
     }
 
+    let capabilities = probe.capabilities();
     let device = PairedDevice {
         slot,
         codename: identity.codename.clone(),
@@ -255,7 +256,7 @@ async fn walk_bolt_slot(
         online,
         battery: probe.battery,
         model_info: probe.model_info,
-        capabilities: probe.capabilities,
+        capabilities,
     };
     (device, outcome)
 }

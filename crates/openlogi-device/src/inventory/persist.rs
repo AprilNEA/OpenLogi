@@ -36,7 +36,8 @@ use super::features::{BatteryProbe, ProbedFeatures};
 /// v2 dropped the `UnifyingSlot` key (slot-keyed, so not re-pair-safe).
 /// v3 adds event-capable feature indexes discovered by the immutable walk.
 /// v4 adds the `0x1F20` ADC-measurement event index.
-const SCHEMA_VERSION: u32 = 4;
+/// v5 folds `capabilities` into `protocol`, which also records HID++ 1.0.
+const SCHEMA_VERSION: u32 = 5;
 
 impl ProbeCacheError {
     /// Report why a store could not keep a snapshot.
