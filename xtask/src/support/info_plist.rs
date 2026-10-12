@@ -36,22 +36,40 @@ pub(crate) fn stamp_bundle_version(info_plist: &Path, version: &str) -> Result<(
 
 /// Read one string value from an `Info.plist`; `None` when the key is absent.
 pub(crate) fn read_plist_string(info_plist: &Path, key: &str) -> Result<Option<String>> {
+    Ok(read_plist_value(info_plist, key)?
+        .as_ref()
+        .and_then(Value::as_string)
+        .map(str::to_owned))
+}
+
+/// Read one value of any type from an `Info.plist`; `None` when the key is
+/// absent.
+pub(crate) fn read_plist_value(info_plist: &Path, key: &str) -> Result<Option<Value>> {
     let plist = Value::from_file(info_plist)
         .with_context(|| format!("could not read {}", info_plist.display()))?;
     let dict = plist
         .as_dictionary()
         .with_context(|| format!("{} is not a plist dictionary", info_plist.display()))?;
-    Ok(dict.get(key).and_then(Value::as_string).map(str::to_owned))
+    Ok(dict.get(key).cloned())
 }
 
 pub(crate) fn stamp_plist_strings(info_plist: &Path, entries: &[(&str, &str)]) -> Result<()> {
+    let entries: Vec<_> = entries
+        .iter()
+        .map(|(key, value)| (*key, Value::String((*value).to_string())))
+        .collect();
+    stamp_plist_values(info_plist, &entries)
+}
+
+/// Stamp values of any type — strings, booleans — into an `Info.plist`.
+pub(crate) fn stamp_plist_values(info_plist: &Path, entries: &[(&str, Value)]) -> Result<()> {
     let mut plist = Value::from_file(info_plist)
         .with_context(|| format!("could not read {}", info_plist.display()))?;
     let dict = plist
         .as_dictionary_mut()
         .with_context(|| format!("{} is not a plist dictionary", info_plist.display()))?;
     for (key, value) in entries {
-        dict.insert((*key).into(), Value::String((*value).to_string()));
+        dict.insert((*key).into(), value.clone());
     }
     plist
         .to_file_xml(info_plist)
