@@ -141,6 +141,14 @@ async fn route_migration_preserves_restore_without_blocking_new_transport() {
         .find_map(GestureSlot::session)
         .expect("an absent Bluetooth route must not block capture on Bolt");
     assert_eq!(successor.target().route, bolt);
+    assert!(
+        state.deadline(*requests.borrow(), true, &second).is_none(),
+        "an inactive route must not schedule cleanup retries while this mouse uses another transport"
+    );
+    assert!(
+        state.deadline(*requests.borrow(), true, &first).is_some(),
+        "returning publication must make cleanup eligible before another reconcile"
+    );
 
     // The Bolt attempt has no published channel in this fixture. Its normal
     // failure provides ordered completion without manufacturing private state.
@@ -181,6 +189,30 @@ async fn route_migration_preserves_restore_without_blocking_new_transport() {
         .set_channel_connection(CHANNEL, ChannelConnection::Connected)
         .unwrap();
     enumerator.enumerate().await.unwrap();
+    plans_tx.send(second.clone()).unwrap();
+    state.expedite_pending_restores();
+    let lease = access.try_acquire_for_session().unwrap();
+    retry_pending_restores(
+        &mut state.slots,
+        &channels.access.registry,
+        Instant::now(),
+        &second,
+    )
+    .await;
+    drop(lease);
+    assert!(state.deadline(*requests.borrow(), true, &second).is_none());
+    assert_eq!(
+        backend
+            .channel_completion(CHANNEL)
+            .unwrap()
+            .written_reports
+            .iter()
+            .filter(|report| report[2] == 2 && report[3] >> 4 == 3)
+            .count(),
+        1,
+        "even an available old channel must stay dormant while another route is wanted"
+    );
+    plans_tx.send(returned.clone()).unwrap();
     let rearmed = backend
         .hold_next_response(
             CHANNEL,
@@ -238,6 +270,136 @@ fn capture_plan(route: DeviceRoute) -> DeviceCapturePlan {
         Binding::Single(Action::MissionControl),
     );
     crate::capture_plan::plan_for_device(&config, physical_key(), "mouse-a", route, None, 0, true)
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Follow a real armed capture through migration while its old publication stays present"
+)]
+async fn route_migration_defers_teardown_on_a_still_published_channel() {
+    let node = NodeId::from("migrating-node".to_owned());
+    let mut fixture = cassette();
+    let last_setup = fixture
+        .exchanges
+        .iter()
+        .position(|exchange| exchange.request == [0x10, 0xff, 0, 0, 0x1d, 0x4b, 0])
+        .unwrap();
+    let mut restore = fixture
+        .exchanges
+        .iter()
+        .find(|exchange| {
+            exchange.request.len() == 20 && exchange.request[2] == 2 && exchange.request[6] == 0x22
+        })
+        .unwrap()
+        .clone();
+    restore.required = false;
+    fixture.exchanges.truncate(last_setup + 1);
+    fixture.exchanges.push(restore);
+    let backend = Arc::new(ReplayBackend::new(topology(node), vec![fixture]).unwrap());
+    let registry = ChannelRegistry::default();
+    let mut enumerator = Enumerator::with_backend(backend.clone()).with_registry(registry.clone());
+    enumerator.enumerate().await.unwrap();
+    let armed = backend
+        .hold_next_response(
+            CHANNEL,
+            RequestMatch::Hidpp20,
+            &[0x10, 0xff, 0, 0, 0x1d, 0x4b, 0],
+        )
+        .unwrap();
+    let (_signal, device_io) = openlogi_hid::device_io_channel();
+    let access = ReceiverAccess::default();
+    let device_access = DeviceAccess {
+        channel: CaptureChannelSlot::default(),
+        registry,
+        receiver_access: access.clone(),
+        device_io,
+    };
+    let (ring, _ring_rx) = mpsc::unbounded_channel();
+    let mut actions =
+        crate::runtime::ActionRuntime::new(Arc::default(), device_access.clone(), ring).unwrap();
+    let mut scroll = ScrollRuntime::spawn(Arc::new(ScrollPreferences::new(
+        false,
+        VerticalScrollSensitivity::default(),
+    )))
+    .unwrap();
+    let mut state = GestureManagerState::new(GestureOutputs::new(
+        actions.dispatcher(),
+        scroll.input(),
+        Arc::default(),
+    ));
+    let (events, mut event_rx) = mpsc::unbounded_channel();
+    let channels = SessionChannels {
+        events,
+        access: device_access,
+    };
+    let first = Arc::new(vec![capture_plan(DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: PRODUCT_ID,
+    })]);
+    let (plans_tx, plans) = watch::channel(first.clone());
+    let requests = access.subscribe_requests();
+    state
+        .reconcile(*requests.borrow(), true, &first, &channels)
+        .await;
+    armed.request_written().await;
+    let second = Arc::new(vec![capture_plan(DeviceRoute::Bolt {
+        receiver_uid: "fixture-receiver".to_owned(),
+        slot: 2,
+    })]);
+    plans_tx.send(second.clone()).unwrap();
+    state
+        .reconcile(*requests.borrow(), true, &second, &channels)
+        .await;
+    armed.release();
+    let done = event_rx.recv().await.unwrap();
+    assert!(
+        matches!(&done, SessionEvent::Done(done) if done.pending_restore.is_some()),
+        "migration must hand back deferred cleanup, even when the old channel remains published"
+    );
+    state.handle_session_event(done, true, &requests, &plans);
+    state
+        .reconcile(*requests.borrow(), true, &second, &channels)
+        .await;
+    assert_eq!(
+        backend
+            .channel_completion(CHANNEL)
+            .unwrap()
+            .written_reports
+            .iter()
+            .filter(|report| report[2] == 2 && report[3] >> 4 == 3)
+            .count(),
+        1,
+        "migration must not wait for writes on a transport the mouse has left"
+    );
+    state.handle_session_event(event_rx.recv().await.unwrap(), true, &requests, &plans);
+
+    // Returning to the same channel (the receiver never unplugged) must still
+    // permit its original debt to be restored before any successor uses it.
+    let lease = access.try_acquire_for_session().unwrap();
+    state.expedite_pending_restores();
+    retry_pending_restores(
+        &mut state.slots,
+        &channels.access.registry,
+        Instant::now(),
+        &first,
+    )
+    .await;
+    drop(lease);
+    assert!(!state.has_pending_restores());
+    let completion = backend.channel_completion(CHANNEL).unwrap();
+    assert_eq!(
+        completion
+            .written_reports
+            .iter()
+            .filter(|report| report[2] == 2 && report[3] >> 4 == 3)
+            .map(|report| report[6])
+            .collect::<Vec<_>>(),
+        [0x23, 0x22]
+    );
+    backend.require_complete().unwrap();
+    scroll.shutdown();
+    actions.shutdown();
 }
 
 #[tokio::test]
@@ -301,9 +463,12 @@ async fn rapid_route_switch_waits_for_done_and_ignores_stale_completion() {
         state
             .reconcile(*requests.borrow(), true, &new, &channels)
             .await;
-        stopped
-            .try_recv()
-            .expect("migration must retire the original epoch");
+        assert_eq!(
+            stopped
+                .try_recv()
+                .expect("migration must retire the original epoch"),
+            openlogi_hid::CaptureShutdown::Moved
+        );
 
         let bounced = Arc::new(vec![old_plan]);
         plans_tx.send(bounced.clone()).unwrap();

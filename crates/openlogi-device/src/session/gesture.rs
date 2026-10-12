@@ -33,8 +33,8 @@ use tracing::info;
 use crate::SharedChannel;
 use crate::channel::route::DeviceRoute;
 
-pub use super::capture::CaptureHost;
 use super::capture::{ArmedCapture, Liveness, run_capture};
+pub use super::capture::{CaptureHost, CaptureShutdown};
 use accum::CaptureAccum;
 pub(crate) use arm::enumerate_controls;
 use arm::{ArmedControls, ArmedThumbwheel, arm_controls};

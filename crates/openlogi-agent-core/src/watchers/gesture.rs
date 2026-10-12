@@ -128,6 +128,16 @@ impl CaptureKey {
     fn matches(&self, target: &CaptureTarget) -> bool {
         self.physical_key == target.physical_key && self.route == target.route
     }
+
+    /// Do not spend HID++ time on a transport this mouse has left while its
+    /// published plan names another route. Keep the debt dormant until that
+    /// route is wanted again, or no current plan remains (including shutdown).
+    fn restore_eligible(&self, published: &[DeviceCapturePlan]) -> bool {
+        published
+            .iter()
+            .find(|plan| plan.target.physical_key == self.physical_key)
+            .is_none_or(|plan| self.matches(&plan.target))
+    }
 }
 
 struct CapturedEvent {
@@ -230,7 +240,12 @@ fn reconcile_session(
     wanted: Option<(&CaptureTarget, &DispatchPlan)>,
     dispatcher: &mut InputDispatcher,
 ) {
-    if session.reconcile(wanted) == ReconcileAction::DispatchChanged {
+    let action = if wanted.is_some_and(|(target, _)| target.route != session.target().route) {
+        session.retire_for_migration()
+    } else {
+        session.reconcile(wanted)
+    };
+    if action == ReconcileAction::DispatchChanged {
         dispatcher.cancel_session(session.id());
         let config_key = session.dispatch().config_key.clone();
         session.rekey(&config_key);
@@ -253,7 +268,7 @@ fn reconcile_published_session(
         let plans = capture_plans.borrow();
         let wanted = plans
             .iter()
-            .find(|plan| key.matches(&plan.target))
+            .find(|plan| plan.target.physical_key == key.physical_key)
             .map(|plan| (&plan.target, &plan.dispatch));
         reconcile_session(session, wanted, dispatcher);
     }
@@ -275,13 +290,16 @@ async fn retry_pending_restores(
     slots: &mut HashMap<CaptureKey, GestureSlot>,
     registry: &openlogi_hid::ChannelRegistry,
     now: Instant,
+    published: &[DeviceCapturePlan],
 ) {
     let keys: Vec<_> = slots
         .iter()
-        .filter(|(_, slot)| {
-            slot.recovery()
-                .and_then(|recovery| recovery.pending_restore.as_ref())
-                .is_some_and(|pending| pending.retry_at <= now)
+        .filter(|(key, slot)| {
+            key.restore_eligible(published)
+                && slot
+                    .recovery()
+                    .and_then(|recovery| recovery.pending_restore.as_ref())
+                    .is_some_and(|pending| pending.retry_at <= now)
         })
         .map(|(key, _)| key.clone())
         .collect();
@@ -309,13 +327,15 @@ fn next_deadline(
     requests: ReceiverRequestState,
     device_io_allowed: bool,
     slots: &HashMap<CaptureKey, GestureSlot>,
+    published: &[DeviceCapturePlan],
 ) -> Option<Instant> {
     if requests.any() || !device_io_allowed {
         return None;
     }
     slots
-        .values()
-        .filter_map(GestureSlot::recovery)
+        .iter()
+        .filter(|(key, _)| key.restore_eligible(published))
+        .filter_map(|(_, slot)| slot.recovery())
         .filter_map(|recovery| recovery.next_deadline(|pending| pending.retry_at))
         .min()
 }
@@ -329,8 +349,13 @@ impl GestureManagerState {
         }
     }
 
-    fn deadline(&self, requests: ReceiverRequestState, device_io_allowed: bool) -> Option<Instant> {
-        next_deadline(requests, device_io_allowed, &self.slots)
+    fn deadline(
+        &self,
+        requests: ReceiverRequestState,
+        device_io_allowed: bool,
+        published: &[DeviceCapturePlan],
+    ) -> Option<Instant> {
+        next_deadline(requests, device_io_allowed, &self.slots, published)
     }
 
     fn expedite_pending_restores(&mut self) {
@@ -379,7 +404,7 @@ impl GestureManagerState {
             };
             let wanted = wanted
                 .iter()
-                .find(|plan| key.matches(&plan.target))
+                .find(|plan| plan.target.physical_key == key.physical_key)
                 .map(|plan| (&plan.target, &plan.dispatch));
             reconcile_session(session, wanted, &mut self.input_dispatcher);
         }
@@ -395,10 +420,12 @@ impl GestureManagerState {
 
         // Firmware ownership outlives the desired plan. Keep the strong lease
         // through successor spawning so restore→rearm is uninterrupted.
-        let due_restore = self.slots.values().any(|slot| {
-            slot.recovery()
-                .and_then(|recovery| recovery.pending_restore.as_ref())
-                .is_some_and(|pending| pending.retry_at <= now)
+        let due_restore = self.slots.iter().any(|(key, slot)| {
+            key.restore_eligible(published)
+                && slot
+                    .recovery()
+                    .and_then(|recovery| recovery.pending_restore.as_ref())
+                    .is_some_and(|pending| pending.retry_at <= now)
         });
         let restore_lease = if due_restore {
             acquire_session_lease(receiver_access, &mut self.lease)
@@ -406,7 +433,8 @@ impl GestureManagerState {
             None
         };
         if restore_lease.is_some() {
-            retry_pending_restores(&mut self.slots, &channels.access.registry, now).await;
+            retry_pending_restores(&mut self.slots, &channels.access.registry, now, published)
+                .await;
         }
 
         for plan in wanted {
@@ -551,8 +579,13 @@ async fn drain_for_shutdown(
         if let Some(_lease) =
             acquire_session_lease(&channels.access.receiver_access, &mut state.lease)
         {
-            retry_pending_restores(&mut state.slots, &channels.access.registry, Instant::now())
-                .await;
+            retry_pending_restores(
+                &mut state.slots,
+                &channels.access.registry,
+                Instant::now(),
+                &[],
+            )
+            .await;
         }
         if state.has_pending_restores() {
             tokio::time::sleep(RETRY_DELAY).await;
@@ -589,8 +622,13 @@ impl CaptureManager for GestureManager {
             .handle_session_event(event, device_io_allowed, receiver_requests, published)
     }
 
-    fn deadline(&self, requests: ReceiverRequestState, device_io_allowed: bool) -> Option<Instant> {
-        self.state.deadline(requests, device_io_allowed)
+    fn deadline(
+        &self,
+        requests: ReceiverRequestState,
+        device_io_allowed: bool,
+        published: &Self::Published,
+    ) -> Option<Instant> {
+        self.state.deadline(requests, device_io_allowed, published)
     }
 
     fn has_pending_restores(&self) -> bool {

@@ -116,11 +116,11 @@ fn suspended_device_io_disables_retry_deadlines() {
     )]);
 
     assert_eq!(
-        next_deadline(ReceiverRequestState::default(), true, &slots),
+        next_deadline(ReceiverRequestState::default(), true, &slots, &[]),
         Some(retry_at),
     );
     assert_eq!(
-        next_deadline(ReceiverRequestState::default(), false, &slots),
+        next_deadline(ReceiverRequestState::default(), false, &slots, &[]),
         None,
         "capture retries must stay dormant until visible resume",
     );
@@ -139,10 +139,10 @@ async fn exclusive_receiver_access_disables_expired_recovery_deadlines() {
         GestureSlot::recovering(None, Some(restart_at)),
     )]);
 
-    assert_eq!(next_deadline(*requests.borrow(), true, &slots), None);
+    assert_eq!(next_deadline(*requests.borrow(), true, &slots, &[]), None);
     drop(exclusive);
     assert_eq!(
-        next_deadline(*requests.borrow(), true, &slots),
+        next_deadline(*requests.borrow(), true, &slots, &[]),
         Some(restart_at),
         "release makes the retry actionable without adding another backoff"
     );

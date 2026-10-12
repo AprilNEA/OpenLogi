@@ -117,6 +117,8 @@ pub(crate) enum CaptureStop {
     Shutdown,
     /// Inventory removed or replaced the channel that armed capture.
     ChannelChanged,
+    /// The input owner selected another transport for the same physical device.
+    Moved,
 }
 
 /// What a capture session writes to hand its controls back: every diverted
@@ -205,6 +207,12 @@ pub(crate) async fn restore_after_stop(
         return CaptureSessionOutcome::Restored;
     };
     match stop {
+        // A receiver can remain plugged in through the entire move. Its
+        // original channel is still valid when the device returns, so cleanup
+        // must not require replacement of that connection.
+        CaptureStop::Moved => {
+            CaptureSessionOutcome::RestorePending(pending.allow_current_channel())
+        }
         CaptureStop::Shutdown => pending.allow_current_channel().retry(registry).await,
         CaptureStop::ChannelChanged => pending.retry(registry).await,
     }

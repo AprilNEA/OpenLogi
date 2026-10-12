@@ -497,6 +497,7 @@ impl CaptureManager for KeyboardManager {
         &self,
         requests: ReceiverRequestState,
         device_io_allowed: bool,
+        _published: &Self::Published,
     ) -> Option<tokio::time::Instant> {
         self.state.deadline(requests, device_io_allowed)
     }

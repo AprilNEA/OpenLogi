@@ -7,6 +7,7 @@
 //! authoritative until its asynchronous teardown reports completion, and a
 //! running epoch is mutually exclusive with post-session recovery.
 
+use openlogi_hid::CaptureShutdown;
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 
@@ -36,7 +37,7 @@ pub(super) enum CompletionAction {
 }
 
 enum SessionPhase {
-    Active(oneshot::Sender<()>),
+    Active(oneshot::Sender<CaptureShutdown>),
     Draining,
 }
 
@@ -164,7 +165,7 @@ impl<Target, Dispatch> CaptureSession<Target, Dispatch> {
         id: HidppSessionId,
         target: Target,
         dispatch: Dispatch,
-        stop: oneshot::Sender<()>,
+        stop: oneshot::Sender<CaptureShutdown>,
     ) -> Self {
         Self {
             id,
@@ -180,7 +181,6 @@ impl<Target, Dispatch> CaptureSession<Target, Dispatch> {
     }
 
     /// Hardware capture identity that decides whether rearming is required.
-    #[cfg(test)]
     pub(super) fn target(&self) -> &Target {
         &self.target
     }
@@ -218,6 +218,21 @@ impl<Target, Dispatch> CaptureSession<Target, Dispatch> {
             CompletionAction::Ignore
         }
     }
+
+    fn retire(&mut self, request: CaptureShutdown) -> ReconcileAction {
+        let SessionPhase::Active(stop) = std::mem::replace(&mut self.phase, SessionPhase::Draining)
+        else {
+            return ReconcileAction::None;
+        };
+        let _ = stop.send(request);
+        ReconcileAction::Retiring
+    }
+
+    /// End a physical device's old route without waiting for firmware writes
+    /// on that inactive link. The task returns its cleanup token in ordered Done.
+    pub(super) fn retire_for_migration(&mut self) -> ReconcileAction {
+        self.retire(CaptureShutdown::Moved)
+    }
 }
 
 impl<Target: PartialEq, Dispatch: Clone + PartialEq> CaptureSession<Target, Dispatch> {
@@ -237,12 +252,7 @@ impl<Target: PartialEq, Dispatch: Clone + PartialEq> CaptureSession<Target, Disp
             self.dispatch.clone_from(dispatch);
             return ReconcileAction::DispatchChanged;
         }
-        let SessionPhase::Active(stop) = std::mem::replace(&mut self.phase, SessionPhase::Draining)
-        else {
-            return ReconcileAction::None;
-        };
-        let _ = stop.send(());
-        ReconcileAction::Retiring
+        self.retire(CaptureShutdown::Restore)
     }
 }
 
