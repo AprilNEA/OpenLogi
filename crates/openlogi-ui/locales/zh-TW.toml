@@ -187,6 +187,7 @@ select_device_button_description = "選擇裝置上的按鍵以變更其功能�
 remove_profile_description = "這會刪除此設定檔的自訂按鍵指派，不會影響預設指派。"
 
 [pointer]
+niri_columns = "切換視窗欄（niri）"
 mouse_button_profiles = "滑鼠按鍵設定檔"
 mouse_profile_pointer = "滑鼠指標"
 mouse_profile_focused = "焦點應用程式"
@@ -258,6 +259,8 @@ wheel_resolution_other_connection = "此裝置使用另一種連線時支援滾�
 smartshift = "SmartShift"
 
 [actions]
+niri_focus_column_left = "切換到左側視窗欄（niri）"
+niri_focus_column_right = "切換到右側視窗欄（niri）"
 bind_control = "設定 %{name}"
 bind_control_in_app = "在 %{app} 中設定 %{name}"
 unbound = "未設定"

@@ -252,6 +252,9 @@ fn combo(shortcut: Shortcut) -> KeyCombo {
 /// Screen is an Apple menu item, reachable only by its chord.
 fn dispatch_native(native: NativeAction) {
     match native {
+        NativeAction::NiriFocusColumnLeft | NativeAction::NiriFocusColumnRight => {
+            tracing::debug!("niri action is only supported on a niri session");
+        }
         NativeAction::MissionControl => mission_control(),
         NativeAction::AppExpose => app_expose(),
         NativeAction::PreviousDesktop => previous_desktop(),

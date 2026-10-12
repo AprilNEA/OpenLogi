@@ -5870,6 +5870,7 @@ dependencies = [
  "opener",
  "openlogi-core",
  "serde",
+ "serde_json",
  "shellexpand",
  "tracing",
  "tracing-subscriber",

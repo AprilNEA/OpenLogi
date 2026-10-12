@@ -25,6 +25,8 @@ workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 zbus = "5"
 
 [target.'cfg(target_os = "macos")'.dependencies]

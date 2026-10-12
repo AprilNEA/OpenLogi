@@ -187,6 +187,7 @@ select_device_button_description = "Select a button on the device to change what
 remove_profile_description = "This deletes the custom button bindings in this profile. Default bindings are not affected."
 
 [pointer]
+niri_columns = "Switch Columns (niri)"
 mouse_button_profiles = "Mouse button profiles"
 mouse_profile_pointer = "Mouse pointer"
 mouse_profile_focused = "Focused application"
@@ -258,6 +259,8 @@ wheel_resolution_other_connection = "This device supports wheel resolution on it
 smartshift = "SmartShift"
 
 [actions]
+niri_focus_column_left = "Focus Column Left (niri)"
+niri_focus_column_right = "Focus Column Right (niri)"
 bind_control = "Bind %{name}"
 bind_control_in_app = "Bind %{name} in %{app}"
 unbound = "Unbound"

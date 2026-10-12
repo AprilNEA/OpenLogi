@@ -187,6 +187,7 @@ select_device_button_description = "Выберыце кнопку на прыл�
 remove_profile_description = "Гэта выдаляе карыстальніцкія прывязкі кнопак у гэтым профілі. Прадвызначаныя прывязкі застаюцца ў сіле."
 
 [pointer]
+niri_columns = "Switch Columns (niri)"
 mouse_button_profiles = "Профілі кнопак мышы"
 mouse_profile_pointer = "Указальнік мышы"
 mouse_profile_focused = "Праграма ў фокусе"
@@ -258,6 +259,8 @@ wheel_resolution_other_connection = "Гэта прылада падтрымлі�
 smartshift = "SmartShift"
 
 [actions]
+niri_focus_column_left = "Focus Column Left (niri)"
+niri_focus_column_right = "Focus Column Right (niri)"
 bind_control = "Прывязаць %{name}"
 bind_control_in_app = "Прывязаць %{name} у %{app}"
 unbound = "Не прывязана"

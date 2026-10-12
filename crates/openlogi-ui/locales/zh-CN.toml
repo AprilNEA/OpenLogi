@@ -187,6 +187,7 @@ select_device_button_description = "在设备上选择一个按键以更改其�
 remove_profile_description = "这会删除此配置文件中的自定义按键绑定，不影响默认绑定。"
 
 [pointer]
+niri_columns = "切换窗口列（niri）"
 mouse_button_profiles = "鼠标按键配置文件"
 mouse_profile_pointer = "鼠标指针"
 mouse_profile_focused = "焦点应用程序"
@@ -258,6 +259,8 @@ wheel_resolution_other_connection = "此设备通过其他连接时支持滚轮�
 smartshift = "SmartShift"
 
 [actions]
+niri_focus_column_left = "切换到左侧窗口列（niri）"
+niri_focus_column_right = "切换到右侧窗口列（niri）"
 bind_control = "绑定 %{name}"
 bind_control_in_app = "在 %{app} 中绑定 %{name}"
 unbound = "未绑定"

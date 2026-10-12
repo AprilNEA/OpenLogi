@@ -119,6 +119,9 @@ fn press_shortcut(shortcut: Shortcut) {
 /// synthesis (see the comment below) and is skipped.
 fn dispatch_native(native: NativeAction) {
     match native {
+        NativeAction::NiriFocusColumnLeft | NativeAction::NiriFocusColumnRight => {
+            tracing::debug!("niri action is only supported on a niri session");
+        }
         NativeAction::MissionControl | NativeAction::AppExpose => post_key(VK_TAB, &[VK_LWIN]),
         NativeAction::PreviousDesktop => post_key(VK_LEFT, &[VK_LWIN, VK_CONTROL]),
         NativeAction::NextDesktop => post_key(VK_RIGHT, &[VK_LWIN, VK_CONTROL]),

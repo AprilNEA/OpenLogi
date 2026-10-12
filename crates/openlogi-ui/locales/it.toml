@@ -187,6 +187,7 @@ select_device_button_description = "Seleziona un pulsante sul dispositivo per ca
 remove_profile_description = "Elimina le associazioni personalizzate di questo profilo. Quelle predefinite non verranno modificate."
 
 [pointer]
+niri_columns = "Switch Columns (niri)"
 mouse_button_profiles = "Profili dei pulsanti del mouse"
 mouse_profile_pointer = "Puntatore del mouse"
 mouse_profile_focused = "Applicazione con il focus"
@@ -258,6 +259,8 @@ wheel_resolution_other_connection = "Il dispositivo supporta la risoluzione dell
 smartshift = "SmartShift"
 
 [actions]
+niri_focus_column_left = "Focus Column Left (niri)"
+niri_focus_column_right = "Focus Column Right (niri)"
 bind_control = "Associa %{name}"
 bind_control_in_app = "Associa %{name} in %{app}"
 unbound = "Non associato"

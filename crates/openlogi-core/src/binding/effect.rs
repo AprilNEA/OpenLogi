@@ -171,6 +171,10 @@ pub enum MediaKey {
 /// OS has no equivalent at all, a debug-logged no-op.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum NativeAction {
+    /// Focus the column to the left in niri.
+    NiriFocusColumnLeft,
+    /// Focus the column to the right in niri.
+    NiriFocusColumnRight,
     /// Show all windows across spaces (macOS Mission Control).
     MissionControl,
     /// Show all windows of the frontmost app (macOS App Exposé).
@@ -241,6 +245,8 @@ impl Action {
             Action::PrevTab => Effect::Shortcut(Shortcut::PrevTab),
             Action::ReloadPage => Effect::Shortcut(Shortcut::ReloadPage),
 
+            Action::NiriFocusColumnLeft => Effect::Native(NativeAction::NiriFocusColumnLeft),
+            Action::NiriFocusColumnRight => Effect::Native(NativeAction::NiriFocusColumnRight),
             Action::MissionControl => Effect::Native(NativeAction::MissionControl),
             Action::AppExpose => Effect::Native(NativeAction::AppExpose),
             Action::PreviousDesktop => Effect::Native(NativeAction::PreviousDesktop),

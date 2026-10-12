@@ -324,3 +324,29 @@ fn fallback_model_only_adds_thumbwheel_when_capability_is_measured() {
         1
     );
 }
+
+#[gpui::test]
+fn niri_column_action_can_be_selected_from_the_inspector(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    cx.update(gpui_component::init);
+    install_app_state(cx);
+    let (view, cx) = cx.add_window_view(MouseModelView::new);
+    cx.simulate_resize(size(px(1200.), px(1000.)));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    click_picker_control(cx, "label-card-Button(Forward)");
+    click_picker_control(cx, "inspector-current-action");
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            view.action_search
+                .update(cx, |input, cx| input.set_value("niri", window, cx));
+        });
+        window.draw(cx).clear(cx);
+    });
+    click_picker_control(cx, "inspector-action-NiriFocusColumnLeft");
+    assert_forward_binding(cx, &Action::NiriFocusColumnLeft);
+    view.read_with(cx, |view, _| assert!(!view.action_picker_open));
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}

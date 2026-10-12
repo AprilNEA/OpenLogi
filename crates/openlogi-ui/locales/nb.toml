@@ -187,6 +187,7 @@ select_device_button_description = "Velg en knapp på enheten for å endre funks
 remove_profile_description = "Dette sletter profilens egendefinerte knappetilordninger. Standardtilordninger påvirkes ikke."
 
 [pointer]
+niri_columns = "Switch Columns (niri)"
 mouse_button_profiles = "Profiler for museknapper"
 mouse_profile_pointer = "Musepeker"
 mouse_profile_focused = "App med fokus"
@@ -258,6 +259,8 @@ wheel_resolution_other_connection = "Enheten støtter hjuloppløsning via den an
 smartshift = "SmartShift"
 
 [actions]
+niri_focus_column_left = "Focus Column Left (niri)"
+niri_focus_column_right = "Focus Column Right (niri)"
 bind_control = "Tilordne %{name}"
 bind_control_in_app = "Tilordne %{name} i %{app}"
 unbound = "Ikke tildelt"

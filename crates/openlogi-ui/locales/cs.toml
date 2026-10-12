@@ -187,6 +187,7 @@ select_device_button_description = "Vyberte tlačítko na zařízení a změňte
 remove_profile_description = "Odstraní vlastní přiřazení tlačítek v tomto profilu. Výchozí přiřazení se nezmění."
 
 [pointer]
+niri_columns = "Switch Columns (niri)"
 mouse_button_profiles = "Profily tlačítek myši"
 mouse_profile_pointer = "Ukazatel myši"
 mouse_profile_focused = "Aktivní aplikace"
@@ -258,6 +259,8 @@ wheel_resolution_other_connection = "Zařízení podporuje rozlišení kolečka 
 smartshift = "SmartShift"
 
 [actions]
+niri_focus_column_left = "Focus Column Left (niri)"
+niri_focus_column_right = "Focus Column Right (niri)"
 bind_control = "Přiřadit %{name}"
 bind_control_in_app = "Přiřadit %{name} v aplikaci %{app}"
 unbound = "Nepřiřazeno"

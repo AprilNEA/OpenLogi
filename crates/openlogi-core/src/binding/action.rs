@@ -187,6 +187,10 @@ pub enum Action {
     /// cancellation and shutdown. Dispatchers without a release context must
     /// degrade this action to a balanced tap rather than leave keys held.
     HoldShortcut(KeyCombo),
+    /// Focus the column to the left in niri, independently of key bindings.
+    NiriFocusColumnLeft,
+    /// Focus the column to the right in niri, independently of key bindings.
+    NiriFocusColumnRight,
 }
 
 /// One step in a [`Action::Workflow`]. A workflow is a `Vec<WorkflowStep>`
@@ -263,6 +267,8 @@ macro_rules! for_each_unit_action {
             NextDesktop "Next Desktop" "actions.next_desktop" Navigation NextDesktop,
             ShowDesktop "Show Desktop" "actions.show_desktop" Navigation Monitor,
             LaunchpadShow "Launchpad" "actions.launchpad" Navigation Applications,
+            NiriFocusColumnLeft "Focus Column Left (niri)" "actions.niri_focus_column_left" Navigation ArrowLeft,
+            NiriFocusColumnRight "Focus Column Right (niri)" "actions.niri_focus_column_right" Navigation ArrowRight,
             // System
             None "Do Nothing" "pointer.do_nothing" System Ban,
             LockScreen "Lock Screen" "actions.lock_screen" System Lock,

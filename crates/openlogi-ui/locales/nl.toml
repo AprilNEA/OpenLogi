@@ -187,6 +187,7 @@ select_device_button_description = "Selecteer een knop op het apparaat om de fun
 remove_profile_description = "Hiermee verwijder je de eigen knoptoewijzingen in dit profiel. Standaardtoewijzingen blijven behouden."
 
 [pointer]
+niri_columns = "Switch Columns (niri)"
 mouse_button_profiles = "Muisknopprofielen"
 mouse_profile_pointer = "Muisaanwijzer"
 mouse_profile_focused = "App met focus"
@@ -258,6 +259,8 @@ wheel_resolution_other_connection = "Dit apparaat ondersteunt wielresolutie via 
 smartshift = "SmartShift"
 
 [actions]
+niri_focus_column_left = "Focus Column Left (niri)"
+niri_focus_column_right = "Focus Column Right (niri)"
 bind_control = "%{name} toewijzen"
 bind_control_in_app = "%{name} toewijzen in %{app}"
 unbound = "Niet toegewezen"

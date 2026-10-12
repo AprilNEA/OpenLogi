@@ -356,6 +356,8 @@ fn persisted_action_variant_names_are_stable() {
         "MouseForward",
         "MuteVolume",
         "NewTab",
+        "NiriFocusColumnLeft",
+        "NiriFocusColumnRight",
         "NextDesktop",
         "NextTab",
         "NextTrack",
