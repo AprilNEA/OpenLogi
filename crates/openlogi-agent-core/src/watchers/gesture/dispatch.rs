@@ -1,6 +1,8 @@
 //! Resolve captured HID++ inputs against the active per-device plan.
 
 mod wheel;
+#[cfg(any(target_os = "macos", test))]
+mod zoom;
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -16,6 +18,12 @@ use super::GestureOutputs;
 use crate::capture_plan::DispatchPlan;
 use crate::runtime::hook::SharedHookMaps;
 use crate::runtime::{HidppSessionId, PressToken};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum WheelAdmission {
+    Active,
+    Draining,
+}
 
 /// Effective thumb-wheel configuration whose continuity is tied to one
 /// dispatch plan. A binding or sensitivity update clears accumulated state
@@ -100,6 +108,8 @@ pub(super) struct InputDispatcher {
     outputs: GestureOutputs,
     wheels: SessionWheels,
     gesture_presses: GesturePresses,
+    #[cfg(target_os = "macos")]
+    zooms: zoom::Sessions,
 }
 
 impl InputDispatcher {
@@ -110,6 +120,8 @@ impl InputDispatcher {
             outputs,
             wheels: SessionWheels::default(),
             gesture_presses: GesturePresses::default(),
+            #[cfg(target_os = "macos")]
+            zooms: zoom::Sessions::default(),
         }
     }
 
@@ -132,7 +144,53 @@ impl InputDispatcher {
     pub(super) fn cancel_session(&mut self, session: &HidppSessionId) {
         self.outputs.cancel_session(session);
         self.wheels.cancel_session(session);
+        #[cfg(target_os = "macos")]
+        self.zooms.cancel(session);
         self.gesture_presses.cancel_session(session);
+    }
+
+    pub(super) fn zoom_deadline(&self) -> Option<Instant> {
+        #[cfg(target_os = "macos")]
+        return self.zooms.deadline();
+        #[cfg(not(target_os = "macos"))]
+        None
+    }
+
+    pub(super) fn expire_zoom(&mut self) {
+        #[cfg(target_os = "macos")]
+        {
+            if self.zooms.deadline().is_none() {
+                return;
+            }
+            let app = openlogi_hook::frontmost_application();
+            self.zooms.expire(
+                Instant::now(),
+                app.as_ref().map(|app| app.id.as_str()),
+                openlogi_hook::Hook::has_accessibility(),
+                openlogi_inject::zoom_process_id(),
+            );
+        }
+    }
+
+    pub(super) fn pause_zoom(&mut self) {
+        #[cfg(target_os = "macos")]
+        self.zooms.pause();
+    }
+
+    pub(super) fn resume_zoom(&mut self) {
+        #[cfg(target_os = "macos")]
+        self.zooms.resume();
+    }
+    pub(super) fn cancel_zoom_session(&mut self, session: &HidppSessionId) {
+        #[cfg(target_os = "macos")]
+        self.zooms.cancel(session);
+        #[cfg(not(target_os = "macos"))]
+        let _ = session;
+    }
+
+    pub(super) fn shutdown_zoom(&mut self) {
+        #[cfg(target_os = "macos")]
+        self.zooms.shutdown();
     }
 
     /// Route one captured input from `session` to its bound action or
@@ -142,6 +200,7 @@ impl InputDispatcher {
         session: &HidppSessionId,
         plan: &DispatchPlan,
         input: CapturedInput,
+        admission: WheelAdmission,
     ) {
         let key = session.device_key();
         if self.record_thumbwheel_direction(key, input) {
@@ -218,7 +277,8 @@ impl InputDispatcher {
             CapturedInput::Scroll {
                 increments,
                 resolution,
-            } => self.dispatch_wheel(session, plan, increments, resolution),
+                status,
+            } => self.dispatch_wheel(session, plan, increments, resolution, status, admission),
             CapturedInput::ThumbwheelDirection { .. } => {
                 unreachable!("thumb-wheel direction reports return before dispatch")
             }
@@ -231,7 +291,15 @@ impl InputDispatcher {
         plan: &DispatchPlan,
         increments: i16,
         resolution: WheelResolution,
+        status: openlogi_hid::thumbwheel::RotationStatus,
+        admission: WheelAdmission,
     ) {
+        #[cfg(target_os = "macos")]
+        if increments == 0 && status == openlogi_hid::thumbwheel::RotationStatus::Stop {
+            self.zooms.stop(session, Instant::now());
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = (status, admission);
         let Some(rotation) = WheelRotation::from_increments(increments) else {
             return;
         };
@@ -239,6 +307,55 @@ impl InputDispatcher {
         let button = rotation.button();
         let configuration = WheelConfiguration::for_plan(plan);
         let action = configuration.action(rotation);
+        #[cfg(target_os = "macos")]
+        if matches!(action, Action::ZoomIn | Action::ZoomOut) {
+            let app = openlogi_hook::frontmost_application();
+            let foreground_pid = openlogi_inject::zoom_process_id();
+            if !openlogi_hook::Hook::has_accessibility() {
+                self.zooms.cancel_all();
+                return;
+            }
+            if let (Some(app), Some((x, y))) = (app, openlogi_inject::cursor_location()) {
+                let (process_id, window_id) = match plan.pointer_target {
+                    Some(openlogi_hook::PointerTarget::Window {
+                        process_id,
+                        window_id,
+                    }) => (Some(process_id), Some(window_id)),
+                    _ => (foreground_pid, None),
+                };
+                if self.zooms.motion(
+                    session,
+                    zoom::Motion {
+                        action,
+                        sensitivity: configuration.sensitivity,
+                        magnitude: f64::from(i32::from(increments).abs()),
+                        target: zoom::Target {
+                            app_id: app.id,
+                            pointer: plan.pointer_target,
+                            foreground_pid,
+                        },
+                        context: openlogi_inject::ZoomContext {
+                            x,
+                            y,
+                            process_id,
+                            window_id,
+                        },
+                        now: Instant::now(),
+                        admission,
+                    },
+                ) {
+                    if status == openlogi_hid::thumbwheel::RotationStatus::Stop {
+                        self.zooms.stop(session, Instant::now());
+                    }
+                    return;
+                }
+            } else {
+                self.zooms.cancel(session);
+                return;
+            }
+        }
+        #[cfg(target_os = "macos")]
+        self.zooms.cancel(session);
         let wheels = self.wheels.for_session(session);
         match wheels.advance(
             rotation,

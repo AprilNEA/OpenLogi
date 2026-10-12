@@ -33,7 +33,7 @@ use std::fmt::Write;
 
 use bincode::Options;
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{ActionRingIcon, ActionRingSlot, KeyCombo};
+use openlogi_core::binding::{Action, ActionRingIcon, ActionRingSlot, KeyCombo};
 use openlogi_core::config::{Lighting, ScrollResolution};
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, DeviceInventory, DeviceKind,
@@ -820,4 +820,13 @@ fn report_rate_dtos_and_errors() {
         },
         "fbe803037dfbf401fbe803",
     );
+}
+
+#[test]
+fn appended_zoom_actions_and_icons() {
+    assert_wire(&Action::HoldShortcut("Ctrl+A".parse().unwrap()), "340404");
+    assert_wire(&Action::ZoomIn, "35");
+    assert_wire(&Action::ZoomOut, "36");
+    assert_wire(&ActionRingIcon::ZoomIn, "36");
+    assert_wire(&ActionRingIcon::ZoomOut, "37");
 }

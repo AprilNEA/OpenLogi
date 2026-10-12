@@ -96,7 +96,7 @@ pub use succession::Identity;
 ///      `Capabilities::backlight` appended — the keyboard backlight set from
 ///      the settings app; `WriteError::HapticsUnavailable` appended — a
 ///      haptic play is refused before it is sent while the device reports a
-///      non-zero `0x19b0` haptic status.
+///      non-zero `0x19b0` haptic status; zoom actions and zoom ring icons appended.
 pub const PROTOCOL_VERSION: u32 = 36;
 
 /// Environment variable through which the agent hands a supervised helper the

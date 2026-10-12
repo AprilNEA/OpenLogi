@@ -15,6 +15,7 @@ use openlogi_core::binding::{
 use openlogi_core::config::FunctionKey;
 
 use super::{HeldKey, HeldModifiers, KeyPhase};
+pub(crate) mod zoom;
 
 /// Shared resolver for private ApplicationServices and SkyLight SPI.
 #[expect(
@@ -240,6 +241,8 @@ fn combo(shortcut: Shortcut) -> KeyCombo {
         Shortcut::NextTab => "Ctrl+Tab",
         Shortcut::PrevTab => "Ctrl+Shift+Tab",
         Shortcut::ReloadPage => "Cmd+R",
+        Shortcut::ZoomIn => "Cmd+=",
+        Shortcut::ZoomOut => "Cmd+-",
     };
     super::parse_shortcut(text)
 }
@@ -267,6 +270,8 @@ fn dispatch_native(native: NativeAction) {
         // synthesised power key), so ask powermanagement directly. `pmset
         // sleepnow` works for the console user without privileges.
         NativeAction::Sleep => sleep_system(),
+        NativeAction::ZoomIn => zoom::execute_tap(0.1),
+        NativeAction::ZoomOut => zoom::execute_tap(-0.1),
     }
 }
 

@@ -1,6 +1,6 @@
 //! A platform-neutral synthesis IR.
 //!
-//! [`Action`] has one variant per user-facing behaviour (52 of them), but the
+//! [`Action`] has one variant per user-facing behaviour (54 of them), but the
 //! three `openlogi-inject` backends don't care about most of that
 //! granularity — they care about *mechanism*: "press this chord", "click
 //! this mouse button", "fire this media key", "there is no portable way to
@@ -135,6 +135,10 @@ pub enum Shortcut {
     PrevTab,
     /// Reload the current page.
     ReloadPage,
+    /// Zoom the frontmost view in.
+    ZoomIn,
+    /// Zoom the frontmost view out.
+    ZoomOut,
 }
 
 impl Shortcut {
@@ -197,6 +201,10 @@ pub enum NativeAction {
     CaptureRegion,
     /// Put the computer to sleep.
     Sleep,
+    /// Native magnification with a shortcut fallback on hosts without gestures.
+    ZoomIn,
+    /// Reverse native magnification.
+    ZoomOut,
 }
 
 /// A power-user scripting escape hatch, borrowed from the originating
@@ -253,6 +261,8 @@ impl Action {
             Action::NextDesktop => Effect::Native(NativeAction::NextDesktop),
             Action::ShowDesktop => Effect::Native(NativeAction::ShowDesktop),
             Action::LaunchpadShow => Effect::Native(NativeAction::LaunchpadShow),
+            Action::ZoomIn => Effect::Native(NativeAction::ZoomIn),
+            Action::ZoomOut => Effect::Native(NativeAction::ZoomOut),
 
             Action::LockScreen => Effect::Native(NativeAction::LockScreen),
             Action::Screenshot => Effect::Native(NativeAction::Screenshot),
@@ -289,5 +299,22 @@ impl Action {
             Action::RunShellCommand(cmd) => Effect::Script(Script::ShellCommand(cmd)),
             Action::Workflow(steps) => Effect::Script(Script::Workflow(steps)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zoom_actions_select_native_output_in_the_shared_ir() {
+        assert_eq!(
+            Action::ZoomIn.effect(),
+            Effect::Native(NativeAction::ZoomIn)
+        );
+        assert_eq!(
+            Action::ZoomOut.effect(),
+            Effect::Native(NativeAction::ZoomOut)
+        );
     }
 }

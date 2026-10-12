@@ -34,7 +34,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 use tracing::{debug, warn};
 
-use self::dispatch::InputDispatcher;
+use self::dispatch::{InputDispatcher, WheelAdmission};
 use super::capture_manager::{self, CaptureManager, ManagerInputs, PendingRestore};
 use super::capture_session::{CaptureRecovery, CaptureSession, CaptureSlot, ReconcileAction};
 use super::retry::RETRY_DELAY;
@@ -208,10 +208,14 @@ fn reconcile_session(
     wanted: Option<(&CaptureTarget, &DispatchPlan)>,
     dispatcher: &mut InputDispatcher,
 ) {
-    if session.reconcile(wanted) == ReconcileAction::DispatchChanged {
-        dispatcher.cancel_session(session.id());
-        let config_key = session.dispatch().config_key.clone();
-        session.rekey(&config_key);
+    match session.reconcile(wanted) {
+        ReconcileAction::DispatchChanged => {
+            dispatcher.cancel_session(session.id());
+            let config_key = session.dispatch().config_key.clone();
+            session.rekey(&config_key);
+        }
+        ReconcileAction::Retiring => dispatcher.cancel_zoom_session(session.id()),
+        ReconcileAction::None => {}
     }
 }
 
@@ -308,7 +312,12 @@ impl GestureManagerState {
     }
 
     fn deadline(&self, requests: ReceiverRequestState, device_io_allowed: bool) -> Option<Instant> {
-        next_deadline(requests, device_io_allowed, &self.slots)
+        let recovery = next_deadline(requests, device_io_allowed, &self.slots);
+        let zoom = device_io_allowed
+            .then(|| self.input_dispatcher.zoom_deadline())
+            .flatten()
+            .map(tokio::time::Instant::from_std);
+        recovery.into_iter().chain(zoom).min()
     }
 
     fn expedite_pending_restores(&mut self) {
@@ -420,6 +429,11 @@ impl GestureManagerState {
         receiver_requests: &watch::Receiver<ReceiverRequestState>,
         capture_plans: &watch::Receiver<Arc<Vec<DeviceCapturePlan>>>,
     ) -> bool {
+        if device_io_allowed {
+            self.input_dispatcher.resume_zoom();
+        } else {
+            self.input_dispatcher.pause_zoom();
+        }
         match event {
             SessionEvent::Input(event) => {
                 let key = &event.physical_key;
@@ -438,7 +452,14 @@ impl GestureManagerState {
                 let live = self.slots.get(key).and_then(GestureSlot::session);
                 let dispatch_context = dispatch_context_for(&event.session, live);
                 if let Some((session, plan)) = dispatch_context {
-                    self.input_dispatcher.dispatch(session, plan, event.input);
+                    let admission =
+                        if device_io_allowed && live.is_some_and(RunningSession::is_active) {
+                            WheelAdmission::Active
+                        } else {
+                            WheelAdmission::Draining
+                        };
+                    self.input_dispatcher
+                        .dispatch(session, plan, event.input, admission);
                 } else {
                     self.input_dispatcher.cancel_session(&event.session);
                     debug!(
@@ -495,6 +516,7 @@ async fn drain_for_shutdown(
     capture_plans: &watch::Receiver<Arc<Vec<DeviceCapturePlan>>>,
     channels: &SessionChannels,
 ) {
+    state.input_dispatcher.shutdown_zoom();
     for session in state
         .slots
         .values_mut()
@@ -550,7 +572,13 @@ impl CaptureManager for GestureManager {
     type Published = Arc<Vec<DeviceCapturePlan>>;
     type Event = SessionEvent;
 
+    fn pause_input(&mut self) {
+        self.state.input_dispatcher.pause_zoom();
+    }
+
     async fn reconcile(&mut self, requests: ReceiverRequestState, published: &Self::Published) {
+        self.state.input_dispatcher.resume_zoom();
+        self.state.input_dispatcher.expire_zoom();
         self.state
             .reconcile(requests, true, published, &self.channels)
             .await;

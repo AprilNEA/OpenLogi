@@ -103,6 +103,8 @@ fn combo(shortcut: Shortcut) -> Result<KeyCombo, u16> {
         Shortcut::NextTab => "Ctrl+Tab",
         Shortcut::PrevTab => "Ctrl+Shift+Tab",
         Shortcut::ReloadPage => "Ctrl+R",
+        Shortcut::ZoomIn => "Ctrl+=",
+        Shortcut::ZoomOut => "Ctrl+-",
     };
     Ok(super::parse_shortcut(text))
 }
@@ -133,6 +135,8 @@ fn dispatch_native(native: NativeAction) {
         // Suspending reliably needs `SetSuspendState` (powrprof.dll), which
         // hibernates instead when hibernation is enabled — no clean win from
         // a background agent, so the action is skipped on Windows for now.
+        NativeAction::ZoomIn => press_combo(&combo(Shortcut::ZoomIn)),
+        NativeAction::ZoomOut => press_combo(&combo(Shortcut::ZoomOut)),
         NativeAction::Sleep => {
             tracing::debug!("Sleep has no Windows synthesis yet — action skipped");
         }

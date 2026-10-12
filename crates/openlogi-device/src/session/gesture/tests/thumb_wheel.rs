@@ -39,7 +39,8 @@ fn a_rolling_report_is_a_roll_even_when_it_flags_a_tap() {
         ),
         Some(CapturedInput::Scroll {
             increments: -3,
-            resolution: TRACED_RES
+            resolution: TRACED_RES,
+            status: thumbwheel::RotationStatus::Active,
         })
     );
 }
@@ -55,7 +56,11 @@ fn the_release_that_ends_a_roll_is_not_a_tap() {
             RotationStatus::Active,
             TRACED_RES
         ),
-        None
+        Some(CapturedInput::Scroll {
+            increments: 0,
+            resolution: TRACED_RES,
+            status: thumbwheel::RotationStatus::Stop,
+        })
     );
 }
 
@@ -103,7 +108,8 @@ fn rotation_alone_still_marks_a_roll() {
         ),
         Some(CapturedInput::Scroll {
             increments: 4,
-            resolution: TRACED_RES
+            resolution: TRACED_RES,
+            status: thumbwheel::RotationStatus::Inactive,
         })
     );
 }
