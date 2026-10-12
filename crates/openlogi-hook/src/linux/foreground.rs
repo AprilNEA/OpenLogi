@@ -3,7 +3,7 @@
 //!
 //! No Linux display server answers this the same way, so one
 //! [`FrontmostSource`] is selected per process: the wlroots foreign-toplevel
-//! protocol or the GNOME Shell extension on Wayland, X11 everywhere else, and a
+//! protocol, niri IPC, or the GNOME Shell extension on Wayland, X11 everywhere else, and a
 //! source that always answers `None` when nothing is reachable. That one
 //! source moves between the idle snapshot read and the observer worker; its
 //! transport is never duplicated.
@@ -21,6 +21,7 @@ use tracing::{debug, error};
 use crate::ForegroundApp;
 
 mod gnome_shell;
+mod niri;
 mod stop;
 mod wlr_foreign_toplevel;
 pub(super) mod x11;
@@ -132,13 +133,17 @@ fn x11_candidate() -> Option<Box<dyn FrontmostSource>> {
     X11Source::connect().map(|s| Box::new(s) as Box<dyn FrontmostSource>)
 }
 
-/// Wayland-native frontmost backends, in priority order: the wlroots
+/// Wayland-native frontmost backends, in priority order: niri IPC, the wlroots
 /// foreign-toplevel protocol (sway, Hyprland, river, …) and the GNOME Shell
 /// D-Bus extension (Mutter). AT-SPI remains a future fallback. Compositors that
 /// support none of these fall through to the X11/XWayland path (which resolves
 /// XWayland windows, `None` for native Wayland apps).
 fn wayland_candidates() -> Vec<Candidate> {
-    vec![wlr_foreign_toplevel::candidate, gnome_shell::candidate]
+    vec![
+        niri::candidate,
+        wlr_foreign_toplevel::candidate,
+        gnome_shell::candidate,
+    ]
 }
 
 /// Pick the frontmost backend for this session, trying each candidate in order

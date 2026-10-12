@@ -195,3 +195,14 @@ replace them. If IPC fails, OpenLogi logs the error instead of replaying a
 possibly unrelated keyboard shortcut. niri-only column actions do nothing on
 other desktops. niri has no equivalent for OpenLogi's single-application exposé,
 show-desktop, or application-launcher actions.
+
+Per-application profiles use niri's focused window `app_id`, including native
+Wayland windows. The agent subscribes to niri's window event stream, receives
+its initial state, and follows focus changes without periodic subprocesses.
+A lost connection clears the current application until a fresh subscription
+restores it. Empty or missing application IDs select the default profile.
+
+If a manually configured systemd user service cannot find niri, ensure its
+environment includes `NIRI_SOCKET` from the current session; restart the agent
+after importing it. Do not hard-code the socket path, which changes between
+sessions.

@@ -18,6 +18,8 @@ tracing = { workspace = true }
 evdev = { workspace = true }
 futures-lite = { workspace = true }
 libc = "0.2"
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 wayland-client = "0.31"
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 x11rb = "0.13"
@@ -25,6 +27,7 @@ zbus = "5"
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 ctrlc = "3"
+tempfile = "3.27.0"
 
 # CGEventTap stays on core-graphics/core-foundation (the freeze-hazard run-loop
 # machinery). The frontmost-app read uses objc2 (NSWorkspace) so no raw `objc`.
