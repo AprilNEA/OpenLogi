@@ -47,12 +47,10 @@ fn hid_dock_swipe_attaches_balanced_phases_for_both_scroll_directions() {
             copy_hid.is_some()
         );
         if !class_available || !setter_available || copy_hid.is_none() {
-            assert!(
-                NSProcessInfo::processInfo()
-                    .operatingSystemVersion()
-                    .majorVersion
-                    < 27,
-                "macOS 27 requires the HID swipe APIs"
+            assert_eq!(
+                *DOCK_SWIPE_LAYOUT,
+                DockSwipeLayout::Fields,
+                "the HID-event layout requires the HID swipe APIs"
             );
             eprintln!("HID swipe assertions skipped: private APIs unavailable on this older macOS");
             return;

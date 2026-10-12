@@ -230,15 +230,32 @@ impl Backend for Native {
     }
 }
 
-fn swipe_events(direction: Direction) -> Option<[CFRetained<CGEvent>; 2]> {
+/// The Dock swipe event layout this macOS reads. The one owner of that
+/// version split, for one-shot and live swipes alike.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DockSwipeLayout {
+    /// Private type-30 event fields, through macOS 26.
+    Fields,
+    /// An `IOHIDEvent` attached to the event, from macOS 27 (#1703).
+    HidEvent,
+}
+
+static DOCK_SWIPE_LAYOUT: LazyLock<DockSwipeLayout> = LazyLock::new(|| {
     if NSProcessInfo::processInfo()
         .operatingSystemVersion()
         .majorVersion
         >= 27
     {
-        hid_swipe_events(direction, natural_scrolling())
+        DockSwipeLayout::HidEvent
     } else {
-        field_swipe_events(direction)
+        DockSwipeLayout::Fields
+    }
+});
+
+fn swipe_events(direction: Direction) -> Option<[CFRetained<CGEvent>; 2]> {
+    match *DOCK_SWIPE_LAYOUT {
+        DockSwipeLayout::HidEvent => hid_swipe_events(direction, natural_scrolling()),
+        DockSwipeLayout::Fields => field_swipe_events(direction),
     }
 }
 
@@ -360,16 +377,6 @@ fn dock_swipe_hid_event(class: &AnyClass, phase: u32, sign: f64) -> Option<Retai
     Some(hid)
 }
 
-/// Live Dock swipes use the type-30 field layout verified interactively
-/// through macOS 26 (OpenLogi PR #1389, Mac Mouse Fix). Later releases keep
-/// the one-shot switch until a live layout is verified there.
-static LIVE_SWIPE_SUPPORTED: LazyLock<bool> = LazyLock::new(|| {
-    objc2_foundation::NSProcessInfo::processInfo()
-        .operatingSystemVersion()
-        .majorVersion
-        < 27
-});
-
 /// Post one frame of a live Space transition; see
 /// [`crate::post_space_swipe`].
 /// The one-shot switch's lease, held by a live transition from its Began
@@ -378,7 +385,10 @@ static LIVE_SWIPE_SUPPORTED: LazyLock<bool> = LazyLock::new(|| {
 static LIVE_LEASE: Mutex<Option<Lease<'static>>> = Mutex::new(None);
 
 pub(in crate::inject) fn post_space_swipe(progress: f64, phase: SpaceSwipePhase) -> bool {
-    if !*LIVE_SWIPE_SUPPORTED {
+    // Live frames are verified only in the field layout (#1389, Mac Mouse
+    // Fix); the HID-event layout keeps the one-shot switch until they are
+    // verified there.
+    if *DOCK_SWIPE_LAYOUT != DockSwipeLayout::Fields {
         return false;
     }
     let mut lease = LIVE_LEASE.lock().unwrap_or_else(PoisonError::into_inner);
