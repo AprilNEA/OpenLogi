@@ -14,7 +14,7 @@ use super::restore::{PendingRestore, RestoreOutcome, RestorePlan, SessionFailure
 use crate::backend::BackendError;
 use crate::reprog_controls::{self, ReprogControlsV4};
 use crate::thumbwheel::Thumbwheel;
-use crate::{ChannelRegistry, IoSuspended, SharedChannel};
+use crate::{ChannelRegistry, DeviceRoute, IoSuspended, SharedChannel};
 
 /// Shared slot holding the active capture session's open channel, so bounded
 /// hardware writes can reuse it instead of opening a second connection.
@@ -117,6 +117,8 @@ pub(crate) enum CaptureStop {
     Shutdown,
     /// Inventory removed or replaced the channel that armed capture.
     ChannelChanged,
+    /// The paired slot went offline while its USB receiver remains current.
+    ReceiverSlotGone,
     /// The input owner selected another transport for the same physical device.
     Moved,
 }
@@ -210,7 +212,7 @@ pub(crate) async fn restore_after_stop(
         // A receiver can remain plugged in through the entire move. Its
         // original channel is still valid when the device returns, so cleanup
         // must not require replacement of that connection.
-        CaptureStop::Moved => {
+        CaptureStop::Moved | CaptureStop::ReceiverSlotGone => {
             CaptureSessionOutcome::RestorePending(pending.allow_current_channel())
         }
         CaptureStop::Shutdown => pending.allow_current_channel().retry(registry).await,
@@ -226,6 +228,13 @@ pub(crate) fn stop_for_current_publication(
 ) -> CaptureStop {
     if registry.is_current(retired) {
         CaptureStop::Shutdown
+    } else if matches!(
+        retired.route(),
+        DeviceRoute::Bolt { .. } | DeviceRoute::Unifying { .. }
+    ) && registry.lookup(retired.route()).is_none()
+        && registry.contains_transport(retired)
+    {
+        CaptureStop::ReceiverSlotGone
     } else {
         CaptureStop::ChannelChanged
     }
@@ -241,7 +250,7 @@ pub(crate) async fn wait_for_channel_change(
     let mut changes = registry.subscribe();
     loop {
         if !registry.is_current(retired) {
-            return CaptureStop::ChannelChanged;
+            return stop_for_current_publication(registry, retired);
         }
         if changes.changed().await.is_err() {
             // The borrowed registry owns the sender, so this is unreachable;

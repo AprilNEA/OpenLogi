@@ -25,6 +25,21 @@ fn a_new_route_does_not_rearm_an_existing_capture() {
 }
 
 #[test]
+fn settings_reapply_after_a_node_change_does_not_rearm_other_captures() {
+    let mut orch = orchestrator(Config::default());
+    let inventory = direct_inventory(Some("old"), [1, 2, 3, 4]);
+    orch.refresh_inventory(std::slice::from_ref(&inventory), &[], false);
+    let before = orch.shared.capture_plans.borrow().clone();
+    orch.reapply_volatile_on_next_refresh();
+    orch.refresh_inventory(std::slice::from_ref(&inventory), &[], false);
+    assert_eq!(
+        orch.shared.capture_plans.borrow().as_ref(),
+        before.as_ref(),
+        "general settings reapply must not retire an unrelated capture on node changes"
+    );
+}
+
+#[test]
 fn a_device_wake_does_not_rearm_other_routes_but_system_resume_does() {
     for resume_first in [false, true] {
         let mut orch = orchestrator(Config::default());
@@ -42,11 +57,11 @@ fn a_device_wake_does_not_rearm_other_routes_but_system_resume_does() {
             "a session owns its wireless wake rearm; an identity-free notification must not cycle every capture"
         );
         if resume_first {
-            orch.reapply_volatile_on_next_refresh();
+            orch.reapply_after_system_resume();
             orch.reapply_reconnected_on_next_refresh();
         } else {
             orch.reapply_reconnected_on_next_refresh();
-            orch.reapply_volatile_on_next_refresh();
+            orch.reapply_after_system_resume();
         }
         orch.refresh_inventory(&devices, &[], false);
         let resumed = orch.shared.capture_plans.borrow();

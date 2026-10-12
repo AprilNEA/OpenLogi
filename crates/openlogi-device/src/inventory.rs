@@ -119,6 +119,7 @@ fn routes_for_inventories(inventories: &[DeviceInventory]) -> Vec<DeviceRoute> {
             inventory
                 .paired
                 .iter()
+                .filter(|paired| paired.online)
                 .filter_map(|paired| DeviceRoute::for_slot(inventory, paired.slot))
         })
         .collect()
@@ -594,9 +595,11 @@ impl Enumerator {
                     .map_or_else(Vec::new, |inventory| {
                         routes_for_inventories(std::slice::from_ref(inventory))
                     });
-                if routes.is_empty() {
+                if settled.inventory.is_none() {
                     registry.remove_node(&node);
                 } else {
+                    // A healthy receiver may have no online slots. Keep its
+                    // USB transport published while withdrawing those routes.
                     registry.replace_node(node.clone(), routes, channel);
                 }
             }

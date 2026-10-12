@@ -148,6 +148,15 @@ impl<Node, Channel> Registry<Node, Channel> {
         // carries no registry state and means only "read the SSOT again".
         self.changes.send_modify(|()| {});
     }
+
+    fn contains_channel(&self, channel: &Channel) -> bool {
+        self.state.read().is_ok_and(|state| {
+            state
+                .publications
+                .iter()
+                .any(|publication| (self.same_channel)(&publication.channel, channel))
+        })
+    }
 }
 
 impl<Node: Eq, Channel> Registry<Node, Channel> {
@@ -272,6 +281,12 @@ impl ChannelRegistry {
         self.inner.any_current(|route, channel| {
             shared.matches(route) && Arc::ptr_eq(channel, shared.channel())
         })
+    }
+
+    /// Whether inventory still publishes the underlying transport, even when
+    /// every paired device on that receiver is offline and has no live route.
+    pub(crate) fn contains_transport(&self, shared: &SharedChannel) -> bool {
+        self.inner.contains_channel(shared.channel())
     }
 }
 

@@ -777,14 +777,19 @@ impl Orchestrator {
         debug!(generation, "device route(s) require capture re-arm");
     }
 
-    /// Force a volatile-settings re-apply for every online device on the next
-    /// inventory refresh. Called on a detected system wake: the devices were
-    /// likely power-cycled during the sleep, but the first post-wake snapshot
-    /// can look identical to the last pre-sleep one (same set, same routes,
-    /// already online), so the per-device transition triggers never fire.
+    /// Reapply settings with the full confirmation budget after a node change
+    /// or recovery. Capture follows its own route and listener transitions;
+    /// a general settings request must not cycle unrelated capture epochs.
     pub fn reapply_volatile_on_next_refresh(&mut self) {
-        self.forced_capture_rearm = true;
         self.force_reapply(VOLATILE_REAPPLY_CONFIRM_RETRIES);
+    }
+
+    /// After system resume, reapply settings and rearm every online capture.
+    /// Devices may have lost volatile diversion even when the snapshot looks
+    /// identical; retain this intent until an authoritative refresh arrives.
+    pub fn reapply_after_system_resume(&mut self) {
+        self.forced_capture_rearm = true;
+        self.reapply_volatile_on_next_refresh();
     }
 
     /// Force a volatile-settings re-apply on the next inventory refresh

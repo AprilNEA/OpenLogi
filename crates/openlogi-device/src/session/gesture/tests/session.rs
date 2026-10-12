@@ -1,6 +1,7 @@
 //! The capture session lifecycle: arming, restore through a replacement channel, rollback, and teardown order.
 
 use super::*;
+use crate::session::capture_restore::restore_after_stop;
 
 #[tokio::test]
 async fn alternate_gesture_control_arming_respects_mode_and_capabilities() {
@@ -307,6 +308,78 @@ async fn failed_setup_rollback_returns_its_restore_capability() {
         pending.is_some(),
         "a failed compensating write must not discard firmware ownership"
     );
+}
+
+#[tokio::test]
+async fn an_offline_receiver_slot_restores_on_return_to_the_same_usb_channel() {
+    let route = DeviceRoute::Bolt {
+        receiver_uid: "receiver-a".into(),
+        slot: 2,
+    };
+    let sibling = DeviceRoute::Bolt {
+        receiver_uid: "receiver-a".into(),
+        slot: 3,
+    };
+    let (raw, handle) =
+        ScriptedRawHidChannel::with_dynamic_responder(|request| Some(request.to_vec()));
+    let channel = scripted_channel(raw).await;
+    let registry = ChannelRegistry::default();
+    let node = NodeId::from("receiver-node".to_owned());
+    registry.replace_node(
+        node.clone(),
+        [route.clone(), sibling.clone()],
+        channel.clone(),
+    );
+    let shared = SharedChannel::new(channel.clone(), route.clone());
+    let pending = PendingCaptureRestore::new(
+        &shared,
+        ReprogRestore::new(
+            0x22,
+            vec![ArmedReporting::pointer(
+                reprog_controls::GESTURE_BUTTON_CID,
+                reporting(false, None),
+            )],
+        ),
+        None,
+    );
+    registry.replace_node(node.clone(), [sibling.clone()], channel.clone());
+    let before = handle.written_reports().len();
+    let pending = match restore_after_stop(
+        stop_for_current_publication(&registry, &shared),
+        pending,
+        &registry,
+    )
+    .await
+    {
+        CaptureSessionOutcome::RestorePending(pending) => pending,
+        CaptureSessionOutcome::Restored => {
+            panic!("the inactive slot still owes native restoration")
+        }
+    };
+    assert_eq!(
+        handle.written_reports().len(),
+        before,
+        "no restoration writes on an inactive slot"
+    );
+    registry.replace_node(node.clone(), [], channel.clone());
+    assert!(
+        registry.contains_transport(&shared),
+        "an all-offline receiver still owns its USB channel"
+    );
+    let pending = match pending.retry(&registry).await {
+        CaptureSessionOutcome::RestorePending(pending) => pending,
+        CaptureSessionOutcome::Restored => panic!("an offline slot cannot finish its restore"),
+    };
+    assert_eq!(handle.written_reports().len(), before);
+    registry.replace_node(node, [route, sibling], channel);
+    assert!(
+        matches!(
+            pending.retry(&registry).await,
+            CaptureSessionOutcome::Restored
+        ),
+        "the receiver never unplugged; returning to its original USB channel must release the old debt"
+    );
+    assert_eq!(handle.written_reports().len(), before + 1);
 }
 
 #[tokio::test]
