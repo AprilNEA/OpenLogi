@@ -4,6 +4,45 @@ Durable "why we did it this way" records that are not obvious from the code.
 Add a dated entry when a non-obvious architectural or dependency decision is
 made or revisited.
 
+## 2026-10: macOS updates go through Sparkle, which never polls
+
+The built-in engine replaces the running bundle in place, so a standard user
+whose copy sits in an `/Applications` they cannot write to gets a permission
+error instead of an update, and there is no install on quit. Sparkle asks for
+administrator rights there and installs on quit. The signed macOS bundle now
+embeds Sparkle 2 (through `gpui-updater-sparkle`, loaded at run time) and the
+engine stays the fallback everywhere else.
+
+- **The privacy promise outranks Sparkle's defaults.** Updates are opt-in and
+  OpenLogi does not poll. The bundle ships `SUEnableAutomaticChecks = NO` and
+  the app switches the schedule off should the user defaults turn it on; the
+  one launch check is OpenLogi's own, behind **Check for updates**, and opens
+  no window. `SUAllowsAutomaticUpdates = YES` is what lets **Automatic updates**
+  work without the schedule: Sparkle's settings otherwise tie automatic
+  downloads to automatic checks (`SPUUpdaterSettings.m`). The config owns the
+  preference and Sparkle's `automaticallyDownloadsUpdates` mirrors it; a change
+  made with the checkbox in Sparkle's update window is adopted back.
+- **One feed per architecture, not a universal build.** The release ships an
+  arm64 and an x86_64 DMG from a build matrix; `SUFeedURL` points each bundle
+  at `appcast-<arch>.xml`, which keeps the matrix and the DMGs as they are. A
+  universal bundle would allow one feed but doubles every binary in the
+  download and changes what the release builds.
+- **Signed on Linux, in Rust.** `release appcast` signs in the publish job with
+  `ed25519-compact`, checked against signatures Sparkle's own `sign_update`
+  made, instead of running Sparkle's macOS-only tools there. It refuses a
+  private key that does not match the public key the bundles embed.
+- **`CFBundleVersion` is the crate version.** Sparkle compares the appcast's
+  `sparkle:version` against it, and cargo-bundle writes the build's UTC
+  timestamp there, which would rank above every release. xtask stamps the
+  crate version, as it already did for the helpers, and refuses a Sparkle
+  bundle without it. Bundles from before Sparkle keep their timestamps, but
+  they update through the engine, which compares the version compiled into
+  the binary.
+- **Kept: `latest.json` and the DMG minisigs.** Bundles from before Sparkle read
+  only the manifest, and they reach a Sparkle bundle through it.
+- **Rejected: Sparkle's XPC services.** OpenLogi is not sandboxed, so they never
+  run; xtask removes them rather than sign and ship them.
+
 ## 2026-09: Grant probes run on notification, with a heartbeat backstop
 
 The hook re-checked the Accessibility grant between every 500 ms run-loop
