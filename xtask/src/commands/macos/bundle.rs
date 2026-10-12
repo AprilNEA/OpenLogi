@@ -137,6 +137,7 @@ fn build_bundle(
     embed::embed_cli(&release_dir, &app)?;
     embed::verify_bundle_binaries(&app, channel)?;
     info_plist::stamp_privacy_usage_descriptions(&app)?;
+    info_plist::stamp_launch_services_keys(&app)?;
     match feed {
         Some(feed) => sparkle::embed(&root, &app, feed)?,
         None => println!(

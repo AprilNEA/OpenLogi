@@ -18,8 +18,8 @@ pub(crate) const BASE_URL_ENV: &str = "OPENLOGI_UPDATE_BASE_URL";
 /// embeds it; the appcast step checks its signing key against it.
 pub(crate) const SPARKLE_PUBLIC_KEY_ENV: &str = "OPENLOGI_SPARKLE_PUBLIC_ED_KEY";
 
-/// `LSMinimumSystemVersion` of the shipped bundle (cargo-bundle's
-/// `osx_minimum_system_version`), which every feed advertises.
+/// `LSMinimumSystemVersion` of the shipped bundle: `macos package` stamps it
+/// (`support::info_plist`), `actool` targets it, and every feed advertises it.
 pub(crate) const MACOS_MINIMUM_OS_VERSION: &str = "13.0";
 
 /// A macOS release architecture, spelled as the DMG names and feeds spell it.
