@@ -85,7 +85,13 @@ fn main() -> Result<()> {
                     }) {
                         Ok(handle) => {
                             if let Err(error) = handle
-                                .update(cx, |_, window, _| placement.show(window))
+                                .update(cx, |_, window, cx| {
+                                    // Native placement resizes the window inside this
+                                    // update, where GPUI's own resize/move callbacks
+                                    // cannot borrow the app. Resync its viewport and
+                                    // scale, or it keeps rendering at the bootstrap size.
+                                    placement.show(window).map(|()| window.bounds_changed(cx))
+                                })
                                 .and_then(std::convert::identity)
                             {
                                 warn!(%error, "could not position Actions Ring window");
