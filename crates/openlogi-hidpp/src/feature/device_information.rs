@@ -26,6 +26,22 @@ fn packed_bcd_u16(bcd: u16) -> Option<u16> {
     Some(high * 100 + low)
 }
 
+/// The largest value four decimal digits hold.
+const FOUR_DIGIT_MAX: u16 = 9999;
+
+/// Decodes a four-digit version field, `getFwInfo`'s version (bytes 4 and 5)
+/// or build (bytes 6 and 7).
+///
+/// The spec sends packed BCD, but some firmware sends the number in binary: a
+/// G502 LIGHTSPEED's Softdevice reports build `0x00a9`. Logi Options+ accepts
+/// both. Its `Feature0003FirmwareInfo::convertToBCDIfNeeded` keeps a field
+/// whose four nibbles are all decimal digits, and otherwise reads the field as
+/// a binary number capped at 9999. This does the same, so a binary build of
+/// `0x00a9` decodes as 169 instead of failing the whole entity.
+fn four_digit_field(field: u16) -> u16 {
+    packed_bcd_u16(field).unwrap_or_else(|| field.min(FOUR_DIGIT_MAX))
+}
+
 /// Implements the `DeviceInformation` / `0x0003` feature.
 #[derive(Clone, Feature)]
 #[creatable(id = 0x0003, version = 0)]
@@ -193,20 +209,23 @@ pub struct DeviceEntityFirmwareInfo {
 
     /// The firmware number.
     ///
-    /// This is represented in packed BCD format in the protocol itself, but
-    /// decoding is handled by this implementation automatically.
+    /// The protocol sends packed BCD, which this implementation decodes. A
+    /// field that is not BCD is read as binary instead, capped at 9999, as
+    /// Logi Options+ does.
     pub firmware_number: u8,
 
     /// The firmware revision.
     ///
-    /// This is represented in packed BCD format in the protocol itself, but
-    /// decoding is handled by this implementation automatically.
+    /// The protocol sends packed BCD, which this implementation decodes. A
+    /// field that is not BCD is read as binary instead, capped at 9999, as
+    /// Logi Options+ does.
     pub revision: u8,
 
     /// The firmware build.
     ///
-    /// This is represented in packed BCD format in the protocol itself, but
-    /// decoding is handled by this implementation automatically.
+    /// The protocol sends packed BCD, which this implementation decodes. A
+    /// field that is not BCD is read as binary instead, capped at 9999, as
+    /// Logi Options+ does.
     pub build: u16,
 
     /// Whether the entity is the responding and active one.
@@ -226,14 +245,21 @@ pub struct DeviceEntityFirmwareInfo {
 
 impl DeviceEntityFirmwareInfo {
     fn from_payload(payload: &[u8; 16]) -> Result<Self, Hidpp20Error> {
+        // The version is one four-digit field, as Options+ reads it: number
+        // and revision are its high and low two digits. A binary version is
+        // split the same way, so `0x010a` (266) reads as 02.66.
+        let version = four_digit_field(u16::from_be_bytes([payload[4], payload[5]]));
+        let firmware_number =
+            u8::try_from(version / 100).map_err(|_| Hidpp20Error::UnsupportedResponse)?;
+        let revision =
+            u8::try_from(version % 100).map_err(|_| Hidpp20Error::UnsupportedResponse)?;
         Ok(Self {
             entity_type: DeviceEntityType::from(payload[0]),
             firmware_prefix: String::from_utf8(payload[1..=3].to_vec())
                 .map_err(|_| Hidpp20Error::UnsupportedResponse)?,
-            firmware_number: packed_bcd_u8(payload[4]).ok_or(Hidpp20Error::UnsupportedResponse)?,
-            revision: packed_bcd_u8(payload[5]).ok_or(Hidpp20Error::UnsupportedResponse)?,
-            build: packed_bcd_u16(u16::from_be_bytes([payload[6], payload[7]]))
-                .ok_or(Hidpp20Error::UnsupportedResponse)?,
+            firmware_number,
+            revision,
+            build: four_digit_field(u16::from_be_bytes([payload[6], payload[7]])),
             active: payload[8] & 1 != 0,
             transport_pid: u16::from_be_bytes([payload[9], payload[10]]),
             extra_version: [

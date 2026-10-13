@@ -766,16 +766,16 @@ const DEVICE_INFO_INDEX: u8 = 0x03;
 /// `ErrorType::Busy`, the refusal the scripted mouse answers entity 3 with.
 const BUSY: u8 = 0x08;
 /// How many firmware entities the scripted mouse declares.
-const ENTITY_COUNT: u8 = 4;
+const ENTITY_COUNT: u8 = 5;
 
-/// A wired G502 LIGHTSPEED, plus one invented entity.
+/// A wired G502 LIGHTSPEED, plus two invented entities.
 ///
 /// Entities 0..=2 are what the real mouse reports: a bootloader, the running
-/// main application, and a Softdevice radio stack whose build field is not
-/// valid BCD, so this parser cannot decode it. Entity 3 is added to cover the
-/// other entity-local failure — firmware that refuses the read outright rather
-/// than answering with a record that will not parse.
-fn mouse_with_an_unparseable_radio_stack(request: &[u8]) -> Option<Vec<u8>> {
+/// main application, and a Softdevice radio stack whose build field is binary
+/// rather than BCD. Entities 3 and 4 cover the two entity-local failures: a
+/// record that will not parse (a prefix that is not UTF-8), and firmware that
+/// refuses the read outright.
+fn g502_plus_two_failing_entities(request: &[u8]) -> Option<Vec<u8>> {
     if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
         return None;
     }
@@ -808,10 +808,15 @@ fn mouse_with_an_unparseable_radio_stack(request: &[u8]) -> Option<Vec<u8>> {
                 1 => payload[..11].copy_from_slice(&[
                     0x00, b'M', b'P', b'M', 0x17, 0x00, 0x00, 0x08, 0x01, 0xc0, 0x8d,
                 ]),
-                // Softdevice whose build reads 0x00a9 — not packed BCD, so
-                // get_fw_info answers UnsupportedResponse.
+                // Softdevice whose build reads 0x00a9 — binary, not packed
+                // BCD. It decodes as build 169, as Options+ reads it.
                 2 => payload[..11].copy_from_slice(&[
                     0x05, b'R', b'Q', b'M', 0x00, 0x00, 0x00, 0xa9, 0x00, 0x00, 0x00,
+                ]),
+                // A prefix that is not UTF-8: get_fw_info answers
+                // UnsupportedResponse.
+                3 => payload[..11].copy_from_slice(&[
+                    0x05, 0xff, 0xfe, 0xfd, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
                 ]),
                 _ => return Some(feature_error(request, BUSY)),
             }
@@ -842,12 +847,11 @@ async fn scripted_device_info_channel(channel: ScriptedRawHidChannel) -> Arc<Hid
 
 #[tokio::test]
 async fn an_entity_the_device_cannot_describe_does_not_stop_the_dump() {
-    // Both entity-local shapes: a record that will not decode (entity 2) and a
-    // read the firmware refuses (entity 3). Neither says anything about the
+    // Both entity-local shapes: a record that will not decode (entity 3) and a
+    // read the firmware refuses (entity 4). Neither says anything about the
     // route, so the remaining entities are still read and the declared count
     // still matches what the device claimed.
-    let (raw, handle) =
-        ScriptedRawHidChannel::with_responder(mouse_with_an_unparseable_radio_stack);
+    let (raw, handle) = ScriptedRawHidChannel::with_responder(g502_plus_two_failing_entities);
     let channel = scripted_device_info_channel(raw).await;
 
     let entities = dump_firmware_entities_on_channel(&channel, 1)
@@ -864,22 +868,30 @@ async fn an_entity_the_device_cannot_describe_does_not_stop_the_dump() {
     assert_eq!(info.transport_pid, 0xc08d);
     assert!(info.active);
 
-    assert!(
-        matches!(
-            entities[2],
-            FirmwareEntity::Unreadable {
-                index: 2,
-                error: WriteError::UnsupportedResponse { .. }
-            }
-        ),
-        "a record that will not decode is reported, not dropped: {:?}",
-        entities[2]
-    );
+    // The Softdevice's binary build is read as a number, not refused.
+    let FirmwareEntity::Readable { info, .. } = &entities[2] else {
+        panic!("entity 2 parses: {:?}", entities[2]);
+    };
+    assert_eq!(info.kind, DeviceEntityType::Softdevice);
+    assert_eq!(info.prefix, "RQM");
+    assert_eq!((info.number, info.revision, info.build), (0, 0, 169));
+
     assert!(
         matches!(
             entities[3],
             FirmwareEntity::Unreadable {
                 index: 3,
+                error: WriteError::UnsupportedResponse { .. }
+            }
+        ),
+        "a record that will not decode is reported, not dropped: {:?}",
+        entities[3]
+    );
+    assert!(
+        matches!(
+            entities[4],
+            FirmwareEntity::Unreadable {
+                index: 4,
                 error: WriteError::HidppFeature {
                     kind: HidppFeatureErrorKind::Busy,
                     ..
@@ -887,12 +899,12 @@ async fn an_entity_the_device_cannot_describe_does_not_stop_the_dump() {
             }
         ),
         "a refused read is reported, not dropped: {:?}",
-        entities[3]
+        entities[4]
     );
 
     let written = handle.written_reports();
     assert!(
-        written.iter().any(|report| is_fw_info_for(report, 3)),
+        written.iter().any(|report| is_fw_info_for(report, 4)),
         "every declared entity is asked about"
     );
 }
@@ -902,10 +914,10 @@ async fn a_channel_failure_aborts_the_dump_instead_of_blaming_the_firmware() {
     // The node goes away while entity 1 is being read. Continuing would spend
     // a timeout per remaining entity and then print malformed-firmware rows
     // for what is really a disconnect, so the whole dump fails instead.
-    let (raw, handle) = ScriptedRawHidChannel::with_failing_writes(
-        mouse_with_an_unparseable_radio_stack,
-        |request| is_fw_info_for(request, 1),
-    );
+    let (raw, handle) =
+        ScriptedRawHidChannel::with_failing_writes(g502_plus_two_failing_entities, |request| {
+            is_fw_info_for(request, 1)
+        });
     let channel = scripted_device_info_channel(raw).await;
 
     let error = dump_firmware_entities_on_channel(&channel, 1)
