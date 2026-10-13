@@ -4,10 +4,41 @@ use std::assert_matches;
 
 use super::event::{ExtendedDpiEvent, decode_event};
 use super::types::{
-    DpiCalibrationCorrection, DpiDirection, DpiRange, Lod, parse_dpi_list, parse_dpi_ranges,
-    parse_lod_list, terminated_word_len,
+    DpiCalibrationCorrection, DpiDirection, DpiRange, Lod, SensorCapabilities, SetDpiParameters,
+    parse_dpi_list, parse_dpi_ranges, parse_lod_list, terminated_word_len,
 };
 use crate::protocol::v20::{ErrorType, Hidpp20Error};
+
+#[test]
+fn set_parameters_carry_y_and_lod_only_for_advertised_capabilities() {
+    let cases = [
+        (SensorCapabilities::empty(), 0, Lod::NotSupported),
+        (SensorCapabilities::DPI_Y, 1600, Lod::NotSupported),
+        (SensorCapabilities::LOD, 0, Lod::High),
+        (
+            SensorCapabilities::DPI_Y | SensorCapabilities::LOD,
+            1600,
+            Lod::High,
+        ),
+        // Calibration and profile support say nothing about Y or LOD.
+        (
+            SensorCapabilities::CALIBRATION | SensorCapabilities::PROFILE,
+            0,
+            Lod::NotSupported,
+        ),
+    ];
+    for (capabilities, dpi_y, lod) in cases {
+        assert_eq!(
+            SetDpiParameters::for_sensor(capabilities, 1200, 1600, Lod::High),
+            SetDpiParameters {
+                dpi_x: 1200,
+                dpi_y,
+                lod,
+            },
+            "{capabilities:?}"
+        );
+    }
+}
 
 #[test]
 fn parses_fixed_dpi_ranges_pws_example() {

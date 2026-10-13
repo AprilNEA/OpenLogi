@@ -49,6 +49,11 @@ impl ExtendedDpiFeature {
     }
 
     /// Retrieves the capabilities and DPI-level count of `sensor_index`.
+    ///
+    /// A reply echoing a different sensor yields
+    /// [`Hidpp20Error::UnsupportedResponse`]: these bits decide which fields a
+    /// [`SetDpiParameters`] write may carry, so they must belong to the sensor
+    /// being written.
     pub async fn get_sensor_capabilities(
         &self,
         sensor_index: u8,
@@ -58,6 +63,9 @@ impl ExtendedDpiFeature {
             .call(1, [sensor_index, 0, 0])
             .await?
             .extend_payload();
+        if payload[0] != sensor_index {
+            return Err(Hidpp20Error::UnsupportedResponse);
+        }
         Ok(SensorCapabilitiesInfo {
             sensor_index: payload[0],
             dpi_level_count: payload[1],
@@ -160,7 +168,9 @@ impl ExtendedDpiFeature {
 
     /// Sets the DPI and lift-off distance of `sensor_index`.
     ///
-    /// `params.dpi_y` must be `0` when the sensor has no independent Y axis.
+    /// `params.dpi_y` must be `0` when the sensor has no independent Y axis and
+    /// `params.lod` [`Lod::NotSupported`] when it has no lift-off control;
+    /// [`SetDpiParameters::for_sensor`] builds parameters that satisfy both.
     pub async fn set_sensor_dpi_parameters(
         &self,
         sensor_index: u8,
