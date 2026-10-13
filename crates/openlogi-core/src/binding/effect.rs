@@ -201,7 +201,7 @@ pub enum NativeAction {
     CaptureRegion,
     /// Put the computer to sleep.
     Sleep,
-    /// Native magnification with a shortcut fallback on hosts without gestures.
+    /// Platform zoom: magnification on macOS, Control-wheel on Windows/Linux.
     ZoomIn,
     /// Reverse native magnification.
     ZoomOut,
@@ -261,14 +261,8 @@ impl Action {
             Action::NextDesktop => Effect::Native(NativeAction::NextDesktop),
             Action::ShowDesktop => Effect::Native(NativeAction::ShowDesktop),
             Action::LaunchpadShow => Effect::Native(NativeAction::LaunchpadShow),
-            #[cfg(target_os = "macos")]
             Action::ZoomIn => Effect::Native(NativeAction::ZoomIn),
-            #[cfg(target_os = "macos")]
             Action::ZoomOut => Effect::Native(NativeAction::ZoomOut),
-            #[cfg(not(target_os = "macos"))]
-            Action::ZoomIn => Effect::Shortcut(Shortcut::ZoomIn),
-            #[cfg(not(target_os = "macos"))]
-            Action::ZoomOut => Effect::Shortcut(Shortcut::ZoomOut),
 
             Action::LockScreen => Effect::Native(NativeAction::LockScreen),
             Action::Screenshot => Effect::Native(NativeAction::Screenshot),
@@ -313,17 +307,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[cfg(not(target_os = "macos"))]
-    fn shortcut_zoom_is_classified_as_keyboard_output() {
-        assert_eq!(Action::ZoomIn.effect(), Effect::Shortcut(Shortcut::ZoomIn));
-        assert_eq!(
-            Action::ZoomOut.effect(),
-            Effect::Shortcut(Shortcut::ZoomOut)
-        );
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
     fn zoom_actions_select_native_output_in_the_shared_ir() {
         assert_eq!(
             Action::ZoomIn.effect(),

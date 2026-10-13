@@ -78,6 +78,9 @@ fn pointer_action_allowed(
         | Effect::Text(_)
         | Effect::Script(_)
         | Effect::Native(NativeAction::AppExpose) => true,
+        // Control-wheel carries keyboard modifier state even though its
+        // platform output is native. macOS magnification does not.
+        Effect::Native(NativeAction::ZoomIn | NativeAction::ZoomOut) => !cfg!(target_os = "macos"),
         Effect::None
         | Effect::Click(_)
         | Effect::Scroll { .. }
