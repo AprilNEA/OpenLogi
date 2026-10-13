@@ -285,3 +285,92 @@ fn keeps_clamp_event_with_unknown_source() {
         );
     }
 }
+
+/// The reply a reader gets when the device answers function `function`
+/// with `reply`.
+fn read_with<T, F>(
+    function: u8,
+    read: impl FnOnce(super::IlluminationFeature) -> F,
+    reply: impl FnOnce(crate::protocol::v20::MessageHeader) -> crate::protocol::v20::Message,
+) -> Result<T, Hidpp20Error>
+where
+    F: Future<Output = Result<T, Hidpp20Error>>,
+{
+    use std::sync::Arc;
+
+    use crate::channel::mock::{MockRawHidChannel, channel_with_reader};
+    use crate::feature::CreatableFeature;
+    use crate::nibble::U4;
+    use crate::protocol::v20::MessageHeader;
+
+    futures::executor::block_on(async {
+        let (raw, handle) = MockRawHidChannel::new();
+        let channel = Arc::new(channel_with_reader(raw).await);
+        let mut pending = Box::pin(read(super::IlluminationFeature::new(channel, 3, 8)));
+        assert!(futures::poll!(pending.as_mut()).is_pending());
+        let header = MessageHeader {
+            device_index: 3,
+            feature_index: 8,
+            function_id: U4::from_lo(function),
+            software_id: U4::from_lo(1),
+        };
+        handle.send_incoming(reply(header).into()).await;
+        pending.await
+    })
+}
+
+#[test]
+fn info_and_level_reads_refuse_a_short_reply() {
+    use super::{
+        FN_GET_BRIGHTNESS, FN_GET_BRIGHTNESS_INFO, FN_GET_BRIGHTNESS_LEVELS,
+        FN_GET_COLOR_TEMPERATURE_INFO, FN_GET_COLOR_TEMPERATURE_LEVELS, IlluminationFeature,
+    };
+    use crate::protocol::v20::Message;
+
+    // A short reply that, zero-filled, would decode as a real answer: a
+    // linear-levels range with min 100, or a linear level page.
+    let short = |header| Message::Short(header, [0b0000_0010, 0, 100]);
+    let mut long_info = [0; 16];
+    long_info[..8].copy_from_slice(&[0b0000_0010, 0, 100, 0x03, 0xe8, 0, 10, 5]);
+
+    for function in [FN_GET_BRIGHTNESS_INFO, FN_GET_COLOR_TEMPERATURE_INFO] {
+        let info = |f: IlluminationFeature| async move {
+            if function == FN_GET_BRIGHTNESS_INFO {
+                f.get_brightness_info().await
+            } else {
+                f.get_color_temperature_info().await
+            }
+        };
+        assert_matches!(
+            read_with(function, info, short),
+            Err(Hidpp20Error::UnsupportedResponse)
+        );
+        let parsed = read_with(function, info, |header| Message::Long(header, long_info)).unwrap();
+        assert_eq!((parsed.min, parsed.max, parsed.max_levels), (100, 1000, 5));
+    }
+
+    for function in [FN_GET_BRIGHTNESS_LEVELS, FN_GET_COLOR_TEMPERATURE_LEVELS] {
+        let levels = |f: IlluminationFeature| async move {
+            if function == FN_GET_BRIGHTNESS_LEVELS {
+                f.get_brightness_levels(0).await
+            } else {
+                f.get_color_temperature_levels(0).await
+            }
+        };
+        let short_linear = |header| Message::Short(header, [1, 0, 0]);
+        assert_matches!(
+            read_with(function, levels, short_linear),
+            Err(Hidpp20Error::UnsupportedResponse)
+        );
+    }
+
+    // A value fits a short reply and is still read from one.
+    let brightness = |f: IlluminationFeature| async move { f.get_brightness().await };
+    assert_eq!(
+        read_with(FN_GET_BRIGHTNESS, brightness, |header| {
+            Message::Short(header, [0x01, 0x2c, 0])
+        })
+        .unwrap(),
+        300
+    );
+}
