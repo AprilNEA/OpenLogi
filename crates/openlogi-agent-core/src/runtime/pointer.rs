@@ -50,13 +50,20 @@ impl ActionDispatchTarget {
     }
 }
 
+/// Whether the live pointer still identifies the target that chose a binding.
+/// Shared by queued actions and continuous native zoom; unavailable targets
+/// preserve focused fallback only while they remain unavailable.
+pub(crate) fn pointer_target_matches(captured: PointerTarget, current: PointerTarget) -> bool {
+    captured == current && captured != PointerTarget::Unsupported
+}
+
 fn pointer_action_allowed(
     action: &Action,
     captured: PointerTarget,
     current: PointerTarget,
     is_focused: impl FnOnce() -> bool,
 ) -> bool {
-    if captured != current || captured == PointerTarget::Unsupported {
+    if !pointer_target_matches(captured, current) {
         return false;
     }
     // Still unidentified: the binding came from the focused profile, so it

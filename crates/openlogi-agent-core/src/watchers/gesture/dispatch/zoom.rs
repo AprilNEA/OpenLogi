@@ -54,6 +54,7 @@ pub(super) struct Motion<'a> {
     pub(super) sensitivity: ThumbwheelSensitivity,
     pub(super) magnitude: f64,
     pub(super) target: Target,
+    pub(super) current_pointer: openlogi_hook::PointerTarget,
     pub(super) context: ZoomContext,
     pub(super) now: Instant,
     pub(super) admission: super::WheelAdmission,
@@ -161,6 +162,7 @@ impl<O: Output> Sessions<O> {
             sensitivity,
             magnitude,
             target,
+            current_pointer,
             context,
             now,
             admission,
@@ -169,6 +171,12 @@ impl<O: Output> Sessions<O> {
             self.cancel(session);
             return false;
         };
+        if target.pointer.is_some_and(|captured| {
+            !crate::runtime::pointer_target_matches(captured, current_pointer)
+        }) {
+            self.cancel(session);
+            return true;
+        }
         if admission == super::WheelAdmission::Draining {
             self.cancel(session);
             return true;
@@ -308,6 +316,7 @@ mod tests {
                 sensitivity: ThumbwheelSensitivity::DEFAULT,
                 magnitude,
                 target: target("app-a"),
+                current_pointer: openlogi_hook::PointerTarget::Unavailable,
                 context: context(),
                 now,
                 admission: super::super::WheelAdmission::Active,
@@ -451,6 +460,7 @@ mod tests {
                 sensitivity,
                 magnitude: 1.0,
                 target: new_target,
+                current_pointer: openlogi_hook::PointerTarget::Unavailable,
                 context: context(),
                 now,
                 admission: super::super::WheelAdmission::Active,
@@ -510,6 +520,7 @@ mod tests {
                 sensitivity: ThumbwheelSensitivity::DEFAULT,
                 magnitude: 1.0,
                 target: target("app-a"),
+                current_pointer: openlogi_hook::PointerTarget::Unavailable,
                 context: context(),
                 now,
                 admission: super::super::WheelAdmission::Draining,
@@ -517,5 +528,50 @@ mod tests {
         );
         assert_eq!(events(), [(ZoomPhase::Cancelled, 0.0)]);
         assert!(sessions.deadline().is_none());
+    }
+    #[test]
+    fn live_pointer_mismatch_rejects_start_and_cancels_without_changing_the_old_plan() {
+        use openlogi_hook::PointerTarget;
+        let captured = PointerTarget::Window {
+            process_id: 42,
+            window_id: 7,
+        };
+        for current in [
+            PointerTarget::Window {
+                process_id: 42,
+                window_id: 9,
+            },
+            PointerTarget::Window {
+                process_id: 43,
+                window_id: 7,
+            },
+            PointerTarget::Desktop,
+            PointerTarget::Unavailable,
+        ] {
+            events();
+            let now = Instant::now();
+            let id = HidppSessionId::with_epoch("mouse-a", 1);
+            let mut sessions = Sessions::<Recorder>::default();
+            let report = |current_pointer| Motion {
+                action: &Action::ZoomIn,
+                sensitivity: ThumbwheelSensitivity::DEFAULT,
+                magnitude: 1.0,
+                target: Target {
+                    pointer: Some(captured),
+                    ..target("app-a")
+                },
+                current_pointer,
+                context: context(),
+                now,
+                admission: super::super::WheelAdmission::Active,
+            };
+            assert!(sessions.motion(&id, report(current)));
+            assert!(events().is_empty(), "stale binding must not begin zoom");
+            assert!(sessions.motion(&id, report(captured)));
+            assert!(!events().is_empty(), "matching target must begin zoom");
+            assert!(sessions.motion(&id, report(current)));
+            assert_eq!(events(), [(ZoomPhase::Cancelled, 0.0)]);
+            assert!(sessions.deadline().is_none());
+        }
     }
 }

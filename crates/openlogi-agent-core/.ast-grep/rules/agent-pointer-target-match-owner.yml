@@ -1,0 +1,16 @@
+# Owner: runtime::pointer::pointer_target_matches is the identity admission rule
+# for queued pointer actions and continuous native zoom.
+id: agent-pointer-target-match-owner
+language: rust
+severity: error
+message: Use runtime::pointer_target_matches to admit a captured pointer target.
+files:
+  - crates/openlogi-agent-core/src/**/*.rs
+ignores:
+  - crates/openlogi-agent-core/src/runtime/pointer.rs
+rule:
+  all:
+    - kind: binary_expression
+    - any:
+        - pattern: $CAPTURED == $CURRENT && $CAPTURED != PointerTarget::Unsupported
+        - pattern: $CAPTURED != $CURRENT || $CAPTURED == PointerTarget::Unsupported

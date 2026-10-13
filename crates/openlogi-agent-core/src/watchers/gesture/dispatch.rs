@@ -358,6 +358,11 @@ impl InputDispatcher {
                             pointer: plan.pointer_target,
                             foreground_pid,
                         },
+                        current_pointer: plan
+                            .pointer_target
+                            .map_or(openlogi_hook::PointerTarget::Unavailable, |_| {
+                                openlogi_hook::pointer_context().target
+                            }),
                         context: openlogi_inject::ZoomContext {
                             x,
                             y,
