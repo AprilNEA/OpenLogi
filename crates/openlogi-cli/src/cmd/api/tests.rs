@@ -284,6 +284,43 @@ async fn dpi_validates_supported_values_before_writing_and_checks_readback() {
 }
 
 #[tokio::test]
+async fn agent_side_dpi_rejections_use_the_same_codes_as_local_checks() {
+    for (error, code) in [
+        (
+            WriteError::DpiUnsupported {
+                requested: Dpi::from(1200),
+            },
+            "invalid_value",
+        ),
+        (
+            WriteError::DpiNotApplied {
+                requested: Dpi::from(1200),
+                actual: Dpi::from(400),
+            },
+            "readback_mismatch",
+        ),
+    ] {
+        let result = run_script(
+            snapshot(),
+            ApiCommand::Dpi {
+                device: route().to_string(),
+                set: Some(1200),
+            },
+            vec![
+                dpi_read(400),
+                Box::new(move |request| {
+                    assert!(matches!(request, AgentRequest::SetDpi { .. }));
+                    AgentResponse::SetDpi(Err(error))
+                }),
+            ],
+        )
+        .await;
+        assert_eq!(result["ok"], false);
+        assert_eq!(result["error"]["code"], code);
+    }
+}
+
+#[tokio::test]
 async fn smartshift_preserves_unspecified_fields_and_reads_back() {
     let before = SmartShiftStatus {
         mode: SmartShiftMode::Ratchet,

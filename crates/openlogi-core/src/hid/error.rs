@@ -7,6 +7,8 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use super::dpi::Dpi;
+
 /// Error returned by HID++ read/write operations.
 ///
 /// Serializable + Clone so it can cross the agent↔GUI IPC unchanged: the GUI
@@ -96,6 +98,24 @@ pub enum WriteError {
     /// Multiple raw HID nodes matched one physical route.
     #[error("multiple raw HID devices matched the route")]
     AmbiguousRawDevice,
+    /// A DPI write asked for a value the device does not report as supported.
+    ///
+    /// Nothing was written: the device layer checks the device-reported list
+    /// first rather than leaving the firmware to clamp, ignore or reject it.
+    #[error("DPI {requested} is not one of the device-reported supported values")]
+    DpiUnsupported {
+        /// The rejected DPI.
+        requested: Dpi,
+    },
+    /// The device acknowledged a DPI write but reads back a different value,
+    /// including after one re-write.
+    #[error("device reports DPI {actual} after a write of {requested}")]
+    DpiNotApplied {
+        /// The DPI that was written.
+        requested: Dpi,
+        /// The DPI the device reports afterwards.
+        actual: Dpi,
+    },
 }
 
 /// HID++ operation being performed when a device write/read failed.

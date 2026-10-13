@@ -690,4 +690,17 @@ fn standalone_light_dtos_commands_and_errors() {
         "0c05636f6c6f72",
     );
     assert_wire(&WriteError::AmbiguousRawDevice, "0d");
+    assert_wire(
+        &WriteError::DpiUnsupported {
+            requested: Dpi::new(1000),
+        },
+        "0efbe803",
+    );
+    assert_wire(
+        &WriteError::DpiNotApplied {
+            requested: Dpi::new(1600),
+            actual: Dpi::new(800),
+        },
+        "0ffb4006fb2003",
+    );
 }

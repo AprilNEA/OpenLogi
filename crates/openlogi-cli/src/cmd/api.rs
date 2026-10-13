@@ -287,6 +287,10 @@ impl From<WriteError> for ApiError {
             WriteError::AgentUnavailable => "agent_unavailable",
             WriteError::RequestTimedOut { .. } => "timeout",
             WriteError::AmbiguousRawDevice => "ambiguous_device",
+            // The agent's own checks report what `dpi` checks for itself, so
+            // a caller sees one code whichever side caught it.
+            WriteError::DpiUnsupported { .. } => "invalid_value",
+            WriteError::DpiNotApplied { .. } => "readback_mismatch",
             _ => "device_error",
         };
         Self::new(code, error.to_string())

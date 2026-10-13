@@ -278,6 +278,11 @@ pub async fn set_dpi(
 /// The DPI write itself, on an already-open channel at HID++ `index`. Shared by
 /// [`set_dpi`] (which opens a fresh channel) and [`set_dpi_on`]
 /// (which reuses one).
+///
+/// Fails with [`WriteError::DpiUnsupported`], without writing, when `dpi` is
+/// not in the device-reported supported list, and with
+/// [`WriteError::DpiNotApplied`] when the device still reads back a different
+/// value after one re-write.
 pub(super) async fn set_dpi_on_channel(
     channel: &Arc<hidpp::channel::HidppChannel>,
     index: u8,
@@ -287,26 +292,36 @@ pub(super) async fn set_dpi_on_channel(
         .await
         .map_err(|_| WriteError::DeviceUnreachable { index })?;
     let feature = DpiFeature::open(&mut device).await?;
-    feature
-        .set_dpi(dpi)
-        .await
-        .map_err(|e| classify_hidpp_error(e, HidppOperation::WriteDpi, feature.id()))?;
+    let feature_hex = feature.id();
+    let write_error = |e| classify_hidpp_error(e, HidppOperation::WriteDpi, feature_hex);
+    // Only a value the device itself reports is ever written. Every caller
+    // reaches this with a value from somewhere else — a config file, another
+    // device's settings, an IPC client — and firmware handed an unsupported
+    // DPI may clamp it, ignore it or reject it, none of which the caller asked
+    // for.
+    let supported = DpiCapabilities::new(feature.supported_dpi().await.map_err(write_error)?)?;
+    if !supported.contains(dpi) {
+        return Err(WriteError::DpiUnsupported { requested: dpi });
+    }
+    feature.set_dpi(dpi).await.map_err(write_error)?;
     // Read back to confirm the firmware accepted the value. A mismatch is a
-    // silent failure mode that's otherwise invisible — devices in low-power
-    // states or with unsupported DPI ranges can ACK the write yet keep the old
-    // value. A single re-write disambiguates the two: firmware still drowsy
-    // from a link re-establishment usually takes the second write, while a
-    // value the device clamps deterministically comes back unchanged again.
-    // Either way this returns Ok because the request reached the device.
-    if let Ok(actual) = feature.current_dpi().await {
-        if actual == dpi {
-            debug!(index, %dpi, "wrote DPI (verified)");
-        } else if feature.set_dpi(dpi).await.is_ok()
-            && feature
-                .current_dpi()
-                .await
-                .is_ok_and(|retried| retried == dpi)
-        {
+    // silent failure mode that's otherwise invisible — a device in a low-power
+    // state can ACK the write yet keep the old value. A single re-write
+    // disambiguates: firmware still drowsy from a link re-establishment
+    // usually takes the second write, and a device that keeps a different
+    // value after that has not applied the request, which the caller is told.
+    // A failed read-back leaves the acknowledged write standing.
+    let Ok(actual) = feature.current_dpi().await else {
+        debug!(index, %dpi, "wrote DPI (read-back skipped)");
+        return Ok(());
+    };
+    if actual == dpi {
+        debug!(index, %dpi, "wrote DPI (verified)");
+        return Ok(());
+    }
+    feature.set_dpi(dpi).await.map_err(write_error)?;
+    match feature.current_dpi().await {
+        Ok(retried) if retried == dpi => {
             tracing::info!(
                 index,
                 %dpi,
@@ -314,19 +329,17 @@ pub(super) async fn set_dpi_on_channel(
                 "DPI write landed on retry — first write was ACKed but dropped \
                  (device likely mid link re-establishment)"
             );
-        } else {
-            tracing::warn!(
-                index,
-                requested = %dpi,
-                %actual,
-                "DPI write accepted but device reports a different value — \
-                 likely out of the device's supported range"
-            );
+            Ok(())
         }
-    } else {
-        debug!(index, %dpi, "wrote DPI (read-back skipped)");
+        Ok(retried) => Err(WriteError::DpiNotApplied {
+            requested: dpi,
+            actual: retried,
+        }),
+        Err(_) => {
+            debug!(index, %dpi, "re-wrote DPI (read-back skipped)");
+            Ok(())
+        }
     }
-    Ok(())
 }
 
 /// Write DPI on an already-open [`SharedChannel`] — the fast path that skips

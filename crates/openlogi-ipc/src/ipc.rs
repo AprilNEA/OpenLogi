@@ -69,7 +69,9 @@ pub use succession::Identity;
 /// v34: `KeyCombo` gains the Super modifier bit (`Super`, `Win`, `Meta`).
 /// v35: `HidppOperation::{ReadPointerScaling, WritePointerScaling}` appended.
 /// v36: `Action::TapKeyHoldingModifiers` appended for switcher-style output
-///      that holds the modifiers and taps the ordinary key once.
+///      that holds the modifiers and taps the ordinary key once;
+///      `WriteError::{DpiUnsupported, DpiNotApplied}` appended — `set_dpi`
+///      rejects unsupported values and reports a write the device kept.
 pub const PROTOCOL_VERSION: u32 = 36;
 
 /// Environment variable through which the agent hands a supervised helper the
