@@ -71,16 +71,26 @@ impl RgbEffectsFeature {
 
     /// Retrieves cluster-level information for `cluster_index` (`getInfo` cluster
     /// mode).
+    ///
+    /// The reply must be long and must echo `cluster_index` in byte 0; a short
+    /// reply (which would zero-fill the fields) or the info of another cluster
+    /// is refused with [`Hidpp20Error::UnsupportedResponse`].
     pub async fn get_cluster_info(
         &self,
         cluster_index: u8,
     ) -> Result<RgbClusterInfo, Hidpp20Error> {
-        let payload = self
+        let v20::Message::Long(_, payload) = self
             .endpoint
             .call(0, [cluster_index, ALL_EFFECTS, TYPE_GENERAL_INFO])
             .await?
-            .extend_payload();
-        Ok(RgbClusterInfo::from_payload(&payload))
+        else {
+            return Err(Hidpp20Error::UnsupportedResponse);
+        };
+        let info = RgbClusterInfo::from_payload(&payload);
+        if info.cluster_index != cluster_index {
+            return Err(Hidpp20Error::UnsupportedResponse);
+        }
+        Ok(info)
     }
 
     /// Retrieves effect-level information for an effect of a cluster (`getInfo`

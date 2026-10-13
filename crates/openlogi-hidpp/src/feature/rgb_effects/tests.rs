@@ -305,3 +305,77 @@ fn keeps_cluster_changed_event_with_unknown_power_mode() {
         assert_eq!(cluster_index, 1);
     }
 }
+
+/// Answers one `getInfo` cluster-mode request for `cluster_index` with
+/// `reply` and returns the wrapper's result.
+fn cluster_info_reply(
+    cluster_index: u8,
+    reply: crate::protocol::v20::Message,
+) -> Result<RgbClusterInfo, crate::protocol::v20::Hidpp20Error> {
+    use std::sync::Arc;
+
+    use super::RgbEffectsFeature;
+    use crate::channel::mock::{MockRawHidChannel, channel_with_reader};
+    use crate::feature::CreatableFeature;
+
+    futures::executor::block_on(async {
+        let (raw, handle) = MockRawHidChannel::new();
+        let channel = Arc::new(channel_with_reader(raw).await);
+        let feature = RgbEffectsFeature::new(channel, 3, 8);
+        handle.queue_response(reply.into());
+        feature.get_cluster_info(cluster_index).await
+    })
+}
+
+fn cluster_info_header() -> crate::protocol::v20::MessageHeader {
+    crate::protocol::v20::MessageHeader {
+        device_index: 3,
+        feature_index: 8,
+        function_id: crate::nibble::U4::from_lo(0),
+        software_id: crate::nibble::U4::from_lo(1),
+    }
+}
+
+/// A long cluster-info payload for `cluster_index` with five effects.
+fn cluster_info_payload(cluster_index: u8) -> [u8; 16] {
+    let mut payload = [0; 16];
+    payload[0] = cluster_index;
+    payload[2..4].copy_from_slice(&0x0001u16.to_be_bytes());
+    payload[4] = 5;
+    payload
+}
+
+#[test]
+fn cluster_info_reads_the_requested_cluster() {
+    use crate::protocol::v20::Message;
+
+    let info = cluster_info_reply(
+        1,
+        Message::Long(cluster_info_header(), cluster_info_payload(1)),
+    )
+    .expect("matching long reply");
+    assert_eq!(info.cluster_index, 1);
+    assert_eq!(info.effects_number, 5);
+}
+
+#[test]
+fn cluster_info_refuses_the_info_of_another_cluster() {
+    // Options+ GetRgbClusterInfo compares byte 0 with the requested index and
+    // fails with a protocol error otherwise.
+    use crate::protocol::v20::{Hidpp20Error, Message};
+
+    let reply = cluster_info_reply(
+        1,
+        Message::Long(cluster_info_header(), cluster_info_payload(0)),
+    );
+    assert!(matches!(reply, Err(Hidpp20Error::UnsupportedResponse)));
+}
+
+#[test]
+fn cluster_info_refuses_a_short_reply() {
+    // A short reply would zero-fill the effect count and persistency.
+    use crate::protocol::v20::{Hidpp20Error, Message};
+
+    let reply = cluster_info_reply(1, Message::Short(cluster_info_header(), [1, 0x00, 0x00]));
+    assert!(matches!(reply, Err(Hidpp20Error::UnsupportedResponse)));
+}

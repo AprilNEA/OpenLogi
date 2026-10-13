@@ -43,29 +43,7 @@ impl DeviceFriendlyNameFeature {
     /// A convenience wrapper implementing this functionality is provided as
     /// [`Self::get_whole_friendly_name`].
     pub async fn get_friendly_name(&self, index: u8) -> Result<[u8; 15], Hidpp20Error> {
-        let payload = self
-            .endpoint
-            .call(1, [index, 0x00, 0x00])
-            .await?
-            .extend_payload();
-
-        Ok([
-            payload[1],
-            payload[2],
-            payload[3],
-            payload[4],
-            payload[5],
-            payload[6],
-            payload[7],
-            payload[8],
-            payload[9],
-            payload[10],
-            payload[11],
-            payload[12],
-            payload[13],
-            payload[14],
-            payload[15],
-        ])
+        self.read_name_chunk(1, index).await
     }
 
     /// Retrieves the whole friendly name of the device by first calling
@@ -101,29 +79,29 @@ impl DeviceFriendlyNameFeature {
     /// A convenience wrapper implementing this functionality is provided as
     /// [`Self::get_whole_default_friendly_name`].
     pub async fn get_default_friendly_name(&self, index: u8) -> Result<[u8; 15], Hidpp20Error> {
+        self.read_name_chunk(2, index).await
+    }
+
+    /// Reads one 15-byte name chunk at `index` with `function` (1: friendly
+    /// name, 2: default name). Byte 0 of the reply echoes the char index; a
+    /// mismatch is logged and the chunk is still returned, as Options+ does,
+    /// since a firmware that echoes wrongly would otherwise lose its name.
+    async fn read_name_chunk(&self, function: u8, index: u8) -> Result<[u8; 15], Hidpp20Error> {
         let payload = self
             .endpoint
-            .call(2, [index, 0x00, 0x00])
+            .call(function, [index, 0x00, 0x00])
             .await?
             .extend_payload();
-
-        Ok([
-            payload[1],
-            payload[2],
-            payload[3],
-            payload[4],
-            payload[5],
-            payload[6],
-            payload[7],
-            payload[8],
-            payload[9],
-            payload[10],
-            payload[11],
-            payload[12],
-            payload[13],
-            payload[14],
-            payload[15],
-        ])
+        let echoed = payload[0];
+        if echoed != index {
+            warn!(
+                function,
+                index, echoed, "name read echoed another char index"
+            );
+        }
+        let mut chunk = [0; NAME_CHUNK_LEN];
+        chunk.copy_from_slice(&payload[1..=NAME_CHUNK_LEN]);
+        Ok(chunk)
     }
 
     /// Retrieves the whole default friendly name of the device by first calling
@@ -336,5 +314,47 @@ mod tests {
             .collect();
         assert_eq!(offsets, [0, 15]);
         assert_eq!(written, 25);
+    }
+
+    /// Answers one name-chunk read with `reply` and returns the chunk.
+    fn read_chunk(function: u8, index: u8, reply_head: &[u8]) -> [u8; NAME_CHUNK_LEN] {
+        futures::executor::block_on(async {
+            let (raw, handle) = MockRawHidChannel::new();
+            let channel = Arc::new(channel_with_reader(raw).await);
+            let feature = DeviceFriendlyNameFeature::new(channel, DEVICE_INDEX, FEATURE_INDEX);
+            handle.queue_response(reply(function, reply_head).into());
+            let chunk = if function == 1 {
+                feature.get_friendly_name(index).await
+            } else {
+                feature.get_default_friendly_name(index).await
+            };
+            let sent: Vec<u8> = handle
+                .written_reports()
+                .iter()
+                .map(|report| report[4])
+                .collect();
+            assert_eq!(sent, [index], "the request carries the char index");
+            chunk.unwrap()
+        })
+    }
+
+    #[test]
+    fn reads_the_name_bytes_after_the_echoed_index() {
+        let mut head = vec![15];
+        head.extend_from_slice(b"Master 3S");
+        assert_eq!(read_chunk(1, 15, &head), padded(b"Master 3S").as_slice());
+        let mut head = vec![0];
+        head.extend_from_slice(b"MX Keys");
+        assert_eq!(read_chunk(2, 0, &head), padded(b"MX Keys").as_slice());
+    }
+
+    #[test]
+    fn keeps_a_name_chunk_whose_echo_differs() {
+        // Options+ only logs a mismatched char index and keeps the chunk;
+        // refusing it would lose the name of a firmware that echoes wrongly.
+        let mut head = vec![0];
+        head.extend_from_slice(b"Desk mouse");
+        assert_eq!(read_chunk(1, 15, &head), padded(b"Desk mouse").as_slice());
+        assert_eq!(read_chunk(2, 15, &head), padded(b"Desk mouse").as_slice());
     }
 }
