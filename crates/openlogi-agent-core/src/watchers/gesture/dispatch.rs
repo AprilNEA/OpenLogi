@@ -323,7 +323,7 @@ impl InputDispatcher {
             } else if increments == 0 {
                 self.wheels
                     .for_session(session)
-                    .prepare_zoom_report(status, now);
+                    .prepare_zoom_report(status, 0, now);
             }
         }
         let Some(rotation) = WheelRotation::from_increments(increments) else {
@@ -339,7 +339,7 @@ impl InputDispatcher {
                 || !self
                     .wheels
                     .for_session(session)
-                    .prepare_zoom_report(status, now))
+                    .prepare_zoom_report(status, increments, now))
         {
             return;
         }

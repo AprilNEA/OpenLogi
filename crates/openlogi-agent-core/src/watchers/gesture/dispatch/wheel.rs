@@ -45,9 +45,10 @@ impl WheelAccumulators {
     pub(super) fn prepare_zoom_report(
         &mut self,
         status: openlogi_hid::thumbwheel::RotationStatus,
+        increments: i16,
         now: Instant,
     ) -> bool {
-        self.zoom.prepare(status, now)
+        self.zoom.prepare(status, increments, now)
     }
 
     /// Advance the state belonging to `rotation`'s physical direction.

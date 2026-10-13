@@ -728,7 +728,7 @@ fn phased_zoom_report(
     phase: openlogi_hid::thumbwheel::RotationStatus,
     now: Instant,
 ) -> WheelOutput {
-    if wheel.prepare_zoom_report(phase, now) {
+    if wheel.prepare_zoom_report(phase, increments, now) {
         zoom_report(wheel, increments, ThumbwheelSensitivity::DEFAULT, now)
     } else {
         WheelOutput::Idle
@@ -776,9 +776,9 @@ fn zoom_missing_start_and_end_phases_are_repaired() {
         phased_zoom_report(&mut wheel, 4, Active, now),
         WheelOutput::Idle
     );
-    // Inactive after Active is repaired to deferred End, never movement.
+    // A zero Inactive report after Active is repaired to deferred End.
     assert_eq!(
-        phased_zoom_report(&mut wheel, 100, Inactive, now),
+        phased_zoom_report(&mut wheel, 0, Inactive, now),
         WheelOutput::Idle
     );
     assert_eq!(
@@ -858,7 +858,7 @@ fn zoom_repaired_start_keeps_raw_active_for_the_next_comparison() {
         WheelOutput::Idle
     );
     assert_eq!(
-        phased_zoom_report(&mut wheel, 100, Inactive, now),
+        phased_zoom_report(&mut wheel, 0, Inactive, now),
         WheelOutput::Idle
     );
     // Raw Inactive followed by Active repairs into a continuing Start.
@@ -946,4 +946,49 @@ fn zoom_cancellation_clears_raw_history_and_pending_end() {
             WheelOutput::FireAction(1)
         );
     }
+}
+
+#[test]
+fn zoom_rotation_without_phase_still_recognizes_and_fires_both_directions() {
+    use openlogi_hid::thumbwheel::RotationStatus::Inactive;
+    let now = Instant::now();
+    for sign in [-1, 1] {
+        let mut wheel = WheelAccumulators::default();
+        for expected in [
+            WheelOutput::Idle,
+            WheelOutput::Idle,
+            WheelOutput::FireAction(1),
+            WheelOutput::FireAction(1),
+        ] {
+            assert_eq!(
+                phased_zoom_report(&mut wheel, 100 * sign, Inactive, now),
+                expected
+            );
+        }
+        assert_eq!(
+            phased_zoom_report(&mut wheel, 0, Inactive, now),
+            WheelOutput::Idle
+        );
+    }
+}
+
+#[test]
+fn zoom_unphased_movement_continues_after_a_pending_end() {
+    use openlogi_hid::thumbwheel::RotationStatus::{Active, Inactive, Start, Stop};
+    let now = Instant::now();
+    let mut wheel = WheelAccumulators::default();
+    for (count, phase) in [(0, Start), (100, Active), (4, Active), (0, Stop)] {
+        assert_eq!(
+            phased_zoom_report(&mut wheel, count, phase, now),
+            WheelOutput::Idle
+        );
+    }
+    assert_eq!(
+        phased_zoom_report(&mut wheel, 1, Inactive, now + Duration::from_millis(10)),
+        WheelOutput::FireAction(1)
+    );
+    assert_eq!(
+        phased_zoom_report(&mut wheel, 100, Inactive, now + Duration::from_millis(20)),
+        WheelOutput::FireAction(1)
+    );
 }

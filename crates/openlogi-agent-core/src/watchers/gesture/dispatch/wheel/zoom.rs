@@ -41,11 +41,24 @@ mod response {
     impl Response {
         /// Repair raw phases and lazily deliver the deferred end. This never
         /// emits output; only admitted progress reaches the response below.
-        pub(in super::super) fn prepare(&mut self, phase: RotationStatus, now: Instant) -> bool {
+        pub(in super::super) fn prepare(
+            &mut self,
+            phase: RotationStatus,
+            increments: i16,
+            now: Instant,
+        ) -> bool {
             if self.pending_end.is_some_and(|deadline| now >= deadline) {
                 self.state = None;
                 self.pending_end = None;
             }
+            // Some supported firmware supplies rotation but no phase. Infer
+            // progress from that movement without turning zero reports into it.
+            let unphased_motion = phase == RotationStatus::Inactive && increments != 0;
+            let phase = if unphased_motion {
+                RotationStatus::Active
+            } else {
+                phase
+            };
             let previous = self.previous_phase.unwrap_or(RotationStatus::Inactive);
             if matches!(
                 (previous, phase),
@@ -57,6 +70,9 @@ mod response {
             }
             self.previous_phase = Some(phase);
             let mapped = match (previous, phase) {
+                (_, RotationStatus::Active) if unphased_motion && self.pending_end.is_some() => {
+                    RotationStatus::Start
+                }
                 (RotationStatus::Inactive, RotationStatus::Active) => RotationStatus::Start,
                 (RotationStatus::Active, RotationStatus::Inactive) => RotationStatus::Stop,
                 (_, phase) => phase,
