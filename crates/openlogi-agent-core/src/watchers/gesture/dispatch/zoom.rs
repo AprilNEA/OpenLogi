@@ -1,5 +1,7 @@
 //! Continuous thumb-wheel zoom, scoped to exact capture-session incarnations.
 
+pub(super) mod worker;
+
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
@@ -107,12 +109,14 @@ impl<O: Output> Sessions<O> {
         self.active.clear();
     }
 
+    #[cfg(test)]
     pub(super) fn pause(&mut self) {
         if self.admission != Admission::Shutdown {
             self.admission = Admission::Paused;
         }
         self.cancel_all();
     }
+    #[cfg(test)]
     pub(super) fn resume(&mut self) {
         if self.admission == Admission::Paused {
             self.admission = Admission::Accepting;

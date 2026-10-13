@@ -82,6 +82,17 @@ impl GestureOutputs {
             .read(|snapshot| snapshot.status.accessibility_granted)
     }
 
+    #[cfg(target_os = "macos")]
+    fn foreground_app_id(&self) -> Option<String> {
+        self.observable.read(|snapshot| {
+            snapshot
+                .foreground
+                .current
+                .as_ref()
+                .map(|app| app.id.clone())
+        })
+    }
+
     fn cancel_session(&self, session: &HidppSessionId) {
         self.actions.cancel_hidpp_session(session);
         self.scroll.cancel_hidpp_session(session);
@@ -325,12 +336,7 @@ impl GestureManagerState {
     }
 
     fn deadline(&self, requests: ReceiverRequestState, device_io_allowed: bool) -> Option<Instant> {
-        let recovery = next_deadline(requests, device_io_allowed, &self.slots);
-        let zoom = device_io_allowed
-            .then(|| self.input_dispatcher.zoom_deadline())
-            .flatten()
-            .map(tokio::time::Instant::from_std);
-        recovery.into_iter().chain(zoom).min()
+        next_deadline(requests, device_io_allowed, &self.slots)
     }
 
     fn expedite_pending_restores(&mut self) {
@@ -591,7 +597,6 @@ impl CaptureManager for GestureManager {
 
     async fn reconcile(&mut self, requests: ReceiverRequestState, published: &Self::Published) {
         self.state.input_dispatcher.resume_zoom();
-        self.state.input_dispatcher.expire_zoom();
         self.state
             .reconcile(requests, true, published, &self.channels)
             .await;
