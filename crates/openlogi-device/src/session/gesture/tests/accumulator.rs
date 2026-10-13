@@ -853,3 +853,61 @@ fn volume_motion_repeats_and_reverses_with_one_pair_of_physical_edges() {
     );
     assert!(rx.try_recv().is_err(), "recognized release never clicks");
 }
+
+#[test]
+fn reconnect_reset_preserves_gesture_timing_and_retires_old_edges() {
+    use openlogi_core::binding::Action;
+    use std::time::{Duration, Instant};
+    for (direction, action, dx, dy) in [
+        (GestureDirection::Up, Action::VolumeUp, 0, -100),
+        (GestureDirection::Right, Action::NextDesktop, 100, 0),
+    ] {
+        let policy = GesturePolicy::for_bindings(&BTreeMap::from([(direction, action)]));
+        let mut acc =
+            CaptureAccum::with_policies(BTreeMap::from([(ButtonId::GestureButton, policy)]));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let now = Instant::now();
+        acc.on_event_at(now, press(), GESTURE, &[], &[], &[], &tx);
+        assert_eq!(
+            rx.try_recv(),
+            Ok(CapturedInput::ButtonDown(ButtonId::GestureButton))
+        );
+        acc.reset_input_state();
+        acc.on_event_at(now, press(), GESTURE, &[], &[], &[], &tx);
+        assert_eq!(
+            rx.try_recv(),
+            Ok(CapturedInput::ButtonDown(ButtonId::GestureButton)),
+            "a reconnected hold has a fresh edge"
+        );
+        for _ in 0..3 {
+            acc.on_event_at(
+                now,
+                RawControlEvent::RawXy { dx, dy },
+                GESTURE,
+                &[],
+                &[],
+                &[],
+                &tx,
+            );
+        }
+        assert_eq!(
+            rx.try_recv(),
+            Ok(CapturedInput::Gesture(ButtonId::GestureButton, direction))
+        );
+        for _ in 0..2 {
+            acc.on_event_at(
+                now + Duration::from_millis(1),
+                RawControlEvent::RawXy { dx, dy },
+                GESTURE,
+                &[],
+                &[],
+                &[],
+                &tx,
+            );
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "reconnect must retain the configured post-action delay"
+        );
+    }
+}

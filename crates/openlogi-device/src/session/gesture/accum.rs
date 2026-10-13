@@ -98,6 +98,12 @@ fn captured_gesture_button(cid: u16, gesture_button_cids: &[(u16, ButtonId)]) ->
 }
 
 impl CaptureAccum {
+    /// Retire physical input history when capture reconnects.
+    pub(super) fn reset_input_state(&mut self) {
+        let policies = std::mem::take(&mut self.policies);
+        *self = Self::with_policies(policies);
+    }
+
     pub(super) fn with_policies(policies: BTreeMap<ButtonId, GesturePolicy>) -> Self {
         Self {
             policies,

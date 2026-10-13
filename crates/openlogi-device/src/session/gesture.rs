@@ -285,7 +285,10 @@ impl ArmedCapture for GestureCapture {
     }
 
     fn reset_input_state(&self) {
-        *self.accum.lock().unwrap_or_else(PoisonError::into_inner) = CaptureAccum::default();
+        self.accum
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .reset_input_state();
         // A power cycle ends any roll in progress; carrying it over would
         // swallow the first tap after the reconnect.
         *self
