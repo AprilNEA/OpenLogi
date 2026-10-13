@@ -94,8 +94,8 @@ pub(crate) struct WriteTicket<'a, B, L> {
 /// A lease that knows whether it continues an earlier claim on the same
 /// connection.
 pub(crate) trait Claim {
-    /// Whether `self` continues `earlier`'s claim rather than one taken from
-    /// another device on the same connection.
+    /// Whether `self` continues `earlier`'s claim rather than one taken on
+    /// another device behind the same connection.
     fn continues(&self, earlier: &Self) -> bool;
 }
 
@@ -111,8 +111,9 @@ impl<B: PartialEq, L: Claim> WriteTicket<'_, B, L> {
     /// first knows the flags from before the claim. A lease through another
     /// connection replaces it, because another device now answers on the
     /// route, or the same one after a replug dropped its volatile state. So
-    /// does a fresh claim on another device behind the same connection, such
-    /// as one paired to the receiver slot since.
+    /// does a write to another device behind the same connection, such as
+    /// one paired to the receiver slot since, even when it found control
+    /// already held: that device is the one to hand back now.
     ///
     /// Nothing else voids a lease. Inventory snapshots trail the channel a
     /// write goes through, so dropping a route's lease when a snapshot shows
@@ -156,14 +157,14 @@ mod tests {
         }
     }
 
-    /// A test lease: the flags it recorded, and the device a fresh claim
-    /// identified (`None` for a write that found control held).
+    /// A test lease: the flags it recorded, and the unit ID of the device
+    /// the write reached (`None` for one without `0x0003`).
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     struct Lease(u8, Option<u8>);
 
     impl Claim for Lease {
         fn continues(&self, earlier: &Self) -> bool {
-            self.1.is_none() || self.1 == earlier.1
+            self.1 == earlier.1
         }
     }
 
@@ -183,7 +184,7 @@ mod tests {
     async fn keeps_the_first_lease_per_connection_and_replaces_another_connection() {
         let leases = Leases::default();
         record(&leases, 1, 1, Lease(0x82, Some(7)));
-        record(&leases, 1, 1, Lease(0x83, None));
+        record(&leases, 1, 1, Lease(0x83, Some(7)));
         record(&leases, 1, 1, Lease(0x84, Some(7)));
         record(&leases, 2, 1, Lease(0x84, None));
         record(&leases, 2, 2, Lease(0x85, None));
@@ -200,13 +201,14 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_fresh_claim_on_another_device_replaces_the_lease() {
+    async fn a_write_to_another_device_replaces_the_lease() {
         // Device 7 left the receiver slot and device 9 was paired to it: the
-        // connection is the receiver's, unchanged, but 9's claim is its own.
+        // connection is the receiver's, unchanged, but 9's lease is its own,
+        // whether its first write claimed or found control already held.
         let leases = Leases::default();
         record(&leases, 1, 1, Lease(0x82, Some(7)));
         record(&leases, 1, 1, Lease(0x80, Some(9)));
-        record(&leases, 1, 1, Lease(0x81, None));
+        record(&leases, 1, 1, Lease(0x81, Some(9)));
 
         let closed = leases.close(Instant::now()).await;
         assert_eq!(closed, [(route(1), 1, Lease(0x80, Some(9)))]);
