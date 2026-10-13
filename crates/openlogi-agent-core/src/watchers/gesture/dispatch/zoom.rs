@@ -251,16 +251,8 @@ fn smooth(history: &mut VecDeque<f64>, delta: f64) -> f64 {
     history.iter().sum::<f64>() / f64::from(u32::try_from(history.len()).unwrap_or(4))
 }
 
-// OpenLogi's existing slider has default14 rather than the reference's signed
-// speed0. Piecewise interpolation preserves that default and both endpoints.
 fn slider_speed(sensitivity: ThumbwheelSensitivity) -> f64 {
-    let value = f64::from(sensitivity.into_inner());
-    let default = f64::from(ThumbwheelSensitivity::DEFAULT.into_inner());
-    if value <= default {
-        (value - default) / (default - f64::from(ThumbwheelSensitivity::MIN.into_inner()))
-    } else {
-        (value - default) / (f64::from(ThumbwheelSensitivity::MAX.into_inner()) - default)
-    }
+    super::wheel::zoom_speed(sensitivity)
 }
 
 #[cfg(test)]

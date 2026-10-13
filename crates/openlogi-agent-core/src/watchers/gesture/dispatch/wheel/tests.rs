@@ -433,3 +433,291 @@ fn stale_custom_progress_decays() {
         WheelOutput::FireAction(1)
     );
 }
+
+fn zoom_report(
+    wheel: &mut WheelAccumulators,
+    increments: i16,
+    sensitivity: ThumbwheelSensitivity,
+    now: Instant,
+) -> WheelOutput {
+    let Some(rotation) = WheelRotation::from_increments(increments) else {
+        return WheelOutput::Idle;
+    };
+    wheel.advance_zoom(rotation, sensitivity, now)
+}
+
+#[test]
+fn zoom_recognition_discards_first_report_and_requires_strict_threshold() {
+    let mut wheel = WheelAccumulators::default();
+    let now = Instant::now();
+    let sensitivity = ThumbwheelSensitivity::DEFAULT;
+    assert_eq!(
+        zoom_report(&mut wheel, 100, sensitivity, now),
+        WheelOutput::Idle
+    );
+    // Default threshold is six. Six unit reports must not fire.
+    for _ in 0..6 {
+        assert_eq!(
+            zoom_report(&mut wheel, 1, sensitivity, now),
+            WheelOutput::Idle
+        );
+    }
+    assert_eq!(
+        zoom_report(&mut wheel, 1, sensitivity, now),
+        WheelOutput::FireAction(1)
+    );
+}
+
+#[test]
+fn zoom_nonlinear_truncation_applies_per_report_in_each_direction() {
+    let now = Instant::now();
+    for sign in [-1, 1] {
+        let mut wheel = WheelAccumulators::default();
+        let sensitivity = ThumbwheelSensitivity::DEFAULT;
+        assert_eq!(
+            zoom_report(&mut wheel, sign, sensitivity, now),
+            WheelOutput::Idle
+        );
+        // |3|^1.4 truncates to four; |2|^1.4 truncates to two. Their
+        // six total must stay below the strict boundary, unlike grouped input.
+        assert_eq!(
+            zoom_report(&mut wheel, 3 * sign, sensitivity, now),
+            WheelOutput::Idle
+        );
+        assert_eq!(
+            zoom_report(&mut wheel, 2 * sign, sensitivity, now),
+            WheelOutput::Idle
+        );
+        assert_eq!(
+            zoom_report(&mut wheel, sign, sensitivity, now),
+            WheelOutput::FireAction(1)
+        );
+        let mut grouped = WheelAccumulators::default();
+        assert_eq!(
+            zoom_report(&mut grouped, sign, sensitivity, now),
+            WheelOutput::Idle
+        );
+        assert_eq!(
+            zoom_report(&mut grouped, 5 * sign, sensitivity, now),
+            WheelOutput::FireAction(1)
+        );
+    }
+}
+
+#[test]
+fn zoom_large_reports_fire_once_discard_overshoot_and_have_no_cooldown() {
+    let mut wheel = WheelAccumulators::default();
+    let now = Instant::now();
+    let sensitivity = ThumbwheelSensitivity::DEFAULT;
+    assert_eq!(
+        zoom_report(&mut wheel, i16::MIN, sensitivity, now),
+        WheelOutput::Idle
+    );
+    assert_eq!(
+        zoom_report(&mut wheel, i16::MIN, sensitivity, now),
+        WheelOutput::FireAction(1)
+    );
+    assert_eq!(
+        zoom_report(&mut wheel, -1, sensitivity, now),
+        WheelOutput::Idle
+    );
+    assert_eq!(
+        zoom_report(&mut wheel, -100, sensitivity, now),
+        WheelOutput::FireAction(1)
+    );
+    assert_eq!(
+        zoom_report(&mut wheel, -100, sensitivity, now),
+        WheelOutput::FireAction(1)
+    );
+}
+
+#[test]
+fn zoom_reversal_cancels_signed_progress_before_firing() {
+    let mut wheel = WheelAccumulators::default();
+    let now = Instant::now();
+    let sensitivity = ThumbwheelSensitivity::DEFAULT;
+    assert_eq!(
+        zoom_report(&mut wheel, 1, sensitivity, now),
+        WheelOutput::Idle
+    );
+    assert_eq!(
+        zoom_report(&mut wheel, 4, sensitivity, now),
+        WheelOutput::Idle
+    ); // +6
+    assert_eq!(
+        zoom_report(&mut wheel, -4, sensitivity, now),
+        WheelOutput::Idle
+    ); // 0
+    assert_eq!(
+        zoom_report(&mut wheel, -4, sensitivity, now),
+        WheelOutput::Idle
+    ); // -6
+    assert_eq!(
+        zoom_report(&mut wheel, -1, sensitivity, now),
+        WheelOutput::FireAction(1)
+    );
+}
+
+#[test]
+fn zoom_slider_normalization_preserves_default_and_endpoints() {
+    let now = Instant::now();
+    for (sensitivity, threshold) in [
+        (ThumbwheelSensitivity::MIN, 10),
+        (ThumbwheelSensitivity::DEFAULT, 6),
+        (ThumbwheelSensitivity::MAX, 2),
+        (ThumbwheelSensitivity::from_rounded(57.0), 4),
+    ] {
+        let mut wheel = WheelAccumulators::default();
+        assert_eq!(
+            zoom_report(&mut wheel, 100, sensitivity, now),
+            WheelOutput::Idle
+        );
+        for _ in 0..threshold {
+            assert_eq!(
+                zoom_report(&mut wheel, 1, sensitivity, now),
+                WheelOutput::Idle
+            );
+        }
+        assert_eq!(
+            zoom_report(&mut wheel, 1, sensitivity, now),
+            WheelOutput::FireAction(1)
+        );
+    }
+}
+
+#[test]
+fn zoom_inactivity_resets_only_beyond_five_hundred_milliseconds() {
+    let now = Instant::now();
+    let sensitivity = ThumbwheelSensitivity::DEFAULT;
+    for (gap, expected) in [(500, WheelOutput::FireAction(1)), (501, WheelOutput::Idle)] {
+        let mut wheel = WheelAccumulators::default();
+        assert_eq!(
+            zoom_report(&mut wheel, 1, sensitivity, now),
+            WheelOutput::Idle
+        );
+        assert_eq!(
+            zoom_report(&mut wheel, 4, sensitivity, now),
+            WheelOutput::Idle
+        );
+        assert_eq!(
+            zoom_report(&mut wheel, 1, sensitivity, now + Duration::from_millis(gap)),
+            expected
+        );
+    }
+}
+
+#[test]
+fn zoom_zero_stop_reports_never_fire_or_refresh_inactivity() {
+    let mut wheel = WheelAccumulators::default();
+    let now = Instant::now();
+    let sensitivity = ThumbwheelSensitivity::DEFAULT;
+    assert_eq!(
+        zoom_report(&mut wheel, 1, sensitivity, now),
+        WheelOutput::Idle
+    );
+    assert_eq!(
+        zoom_report(&mut wheel, 4, sensitivity, now),
+        WheelOutput::Idle
+    );
+    for offset in [100, 300, 500] {
+        assert_eq!(
+            zoom_report(
+                &mut wheel,
+                0,
+                sensitivity,
+                now + Duration::from_millis(offset)
+            ),
+            WheelOutput::Idle
+        );
+    }
+    assert_eq!(
+        zoom_report(&mut wheel, 1, sensitivity, now + Duration::from_millis(501)),
+        WheelOutput::Idle
+    );
+}
+
+#[test]
+fn zoom_sensitivity_changes_discard_recognition_and_displacement() {
+    let mut wheel = WheelAccumulators::default();
+    let now = Instant::now();
+    let default = ThumbwheelSensitivity::DEFAULT;
+    let high = ThumbwheelSensitivity::MAX;
+    assert_eq!(zoom_report(&mut wheel, 1, default, now), WheelOutput::Idle);
+    assert_eq!(zoom_report(&mut wheel, 4, default, now), WheelOutput::Idle);
+    assert_eq!(zoom_report(&mut wheel, 100, high, now), WheelOutput::Idle);
+    assert_eq!(zoom_report(&mut wheel, 2, high, now), WheelOutput::Idle);
+    assert_eq!(
+        zoom_report(&mut wheel, 1, high, now),
+        WheelOutput::FireAction(1)
+    );
+}
+
+#[test]
+fn zoom_lifecycle_clear_and_mixed_binding_restart_recognition() {
+    let mut wheel = WheelAccumulators::default();
+    let now = Instant::now();
+    let sensitivity = ThumbwheelSensitivity::DEFAULT;
+    for interrupted_by_binding in [false, true] {
+        assert_eq!(
+            zoom_report(&mut wheel, 1, sensitivity, now),
+            WheelOutput::Idle
+        );
+        assert_eq!(
+            zoom_report(&mut wheel, 4, sensitivity, now),
+            WheelOutput::Idle
+        );
+        if interrupted_by_binding {
+            assert_eq!(
+                wheel.advance(
+                    WheelRotation::from_increments(-1).unwrap(),
+                    &Action::None,
+                    unscaled(sensitivity),
+                    now,
+                ),
+                WheelOutput::Idle
+            );
+        } else {
+            wheel.clear_zoom();
+        }
+        assert_eq!(
+            zoom_report(&mut wheel, 100, sensitivity, now),
+            WheelOutput::Idle
+        );
+        wheel.clear_zoom();
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn zoom_configured_actions_share_physical_progress_even_when_bindings_are_reversed() {
+    let now = Instant::now();
+    let scale = unscaled(ThumbwheelSensitivity::DEFAULT);
+    for (up_action, down_action) in [
+        (Action::ZoomIn, Action::ZoomOut),
+        (Action::ZoomOut, Action::ZoomIn),
+    ] {
+        let mut wheel = WheelAccumulators::default();
+        for (increments, expected) in [
+            (1, WheelOutput::Idle),
+            (4, WheelOutput::Idle),
+            (-4, WheelOutput::Idle),
+            (-4, WheelOutput::Idle),
+            (-1, WheelOutput::FireAction(1)),
+        ] {
+            let action = if increments > 0 {
+                &up_action
+            } else {
+                &down_action
+            };
+            assert_eq!(
+                wheel.advance(
+                    WheelRotation::from_increments(increments).unwrap(),
+                    action,
+                    scale,
+                    now
+                ),
+                expected
+            );
+        }
+    }
+}

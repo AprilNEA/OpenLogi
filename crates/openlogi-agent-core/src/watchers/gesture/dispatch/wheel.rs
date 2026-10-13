@@ -1,10 +1,15 @@
 //! Thumb-wheel binding state for one captured session's input dispatcher.
 //!
-//! Each physical rotation direction owns an independent state machine. Within
-//! one direction, continuous scrolling and discrete actions are mutually
-//! exclusive states; suppressed input clears either. Changing the effective
+//! Ordinary bindings own independent state per physical direction. Non-Mac Zoom
+//! shares signed progress across both directions. Continuous scrolling and
+//! discrete actions are mutually exclusive; suppressed input clears either. Changing the effective
 //! binding or sensitivity discards progress and cooldown from the previous
 //! configuration.
+
+mod zoom;
+
+#[cfg(any(target_os = "macos", test))]
+pub(super) use zoom::speed as zoom_speed;
 
 use std::time::{Duration, Instant};
 
@@ -24,12 +29,14 @@ const ACTION_COOLDOWN: Duration = Duration::from_millis(200);
 /// Bound synchronous action dispatch for one captured event.
 const MAX_REPEATS_PER_EVENT: i32 = 20;
 
-/// Per-direction wheel state. Reversing the physical wheel must not cancel
-/// progress already earned in the other direction.
+/// Ordinary binding progress is per direction; non-Mac Zoom progress is signed
+/// and shared so physical reversals cancel outstanding Zoom displacement.
 #[derive(Default)]
 pub(super) struct WheelAccumulators {
     up: WheelDirection,
     down: WheelDirection,
+    #[cfg(any(not(target_os = "macos"), test))]
+    zoom: zoom::Response,
 }
 
 impl WheelAccumulators {
@@ -41,11 +48,48 @@ impl WheelAccumulators {
         scale: ScrollScale,
         now: Instant,
     ) -> WheelOutput {
+        #[cfg(not(target_os = "macos"))]
+        if matches!(action, Action::ZoomIn | Action::ZoomOut) {
+            return self.advance_zoom(rotation, scale.sensitivity, now);
+        }
+        #[cfg(any(not(target_os = "macos"), test))]
+        self.clear_zoom();
         let direction = match rotation.direction {
             PhysicalDirection::Up => &mut self.up,
             PhysicalDirection::Down => &mut self.down,
         };
         direction.advance(action, rotation.magnitude, scale, now)
+    }
+
+    /// Share physical signed displacement without deriving output from its sign.
+    /// The caller fires the action configured for the report's direction.
+    #[cfg(any(not(target_os = "macos"), test))]
+    fn advance_zoom(
+        &mut self,
+        rotation: WheelRotation,
+        sensitivity: ThumbwheelSensitivity,
+        now: Instant,
+    ) -> WheelOutput {
+        // Crossing to Zoom also ends ordinary binding progress for this direction.
+        match rotation.direction {
+            PhysicalDirection::Up => self.up.state = WheelState::Idle,
+            PhysicalDirection::Down => self.down.state = WheelState::Idle,
+        }
+        let increments = match rotation.direction {
+            PhysicalDirection::Up => rotation.magnitude,
+            PhysicalDirection::Down => -rotation.magnitude,
+        };
+        if self.zoom.advance(increments, sensitivity, now) {
+            WheelOutput::FireAction(1)
+        } else {
+            WheelOutput::Idle
+        }
+    }
+
+    /// Discard recognition and displacement at a lifecycle boundary.
+    #[cfg(any(not(target_os = "macos"), test))]
+    pub(super) fn clear_zoom(&mut self) {
+        self.zoom = zoom::Response::default();
     }
 }
 

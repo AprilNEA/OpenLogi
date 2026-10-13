@@ -1,0 +1,24 @@
+# Owner: dispatch::wheel::zoom owns signed acceleration and slider normalization
+# for both platform consumers. Keep the ingredients private to the owner.
+id: agent-wheel-zoom-response-owner
+language: rust
+severity: error
+message: Use dispatch::wheel::zoom for Zoom speed and discrete response; do not duplicate its acceleration or sensitivity normalization.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-agent-core/src/watchers/gesture/dispatch/wheel/zoom.rs
+rule:
+  any:
+    - pattern: $VALUE.powf(1.4)
+    - all:
+        - kind: function_item
+        - has:
+            pattern: ThumbwheelSensitivity::DEFAULT.into_inner()
+            stopBy: end
+        - has:
+            pattern: ThumbwheelSensitivity::MIN.into_inner()
+            stopBy: end
+        - has:
+            pattern: ThumbwheelSensitivity::MAX.into_inner()
+            stopBy: end

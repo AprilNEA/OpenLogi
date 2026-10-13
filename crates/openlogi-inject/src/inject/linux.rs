@@ -178,9 +178,64 @@ fn dispatch_native(action: &Action, native: NativeAction) {
         }
         // logind Suspend() via the system bus.
         NativeAction::Sleep => sleep_system(),
-        NativeAction::ZoomIn => press_combo(&combo(Shortcut::ZoomIn)),
-        NativeAction::ZoomOut => press_combo(&combo(Shortcut::ZoomOut)),
+        NativeAction::ZoomIn => post_zoom(1),
+        NativeAction::ZoomOut => post_zoom(-1),
     }
+}
+
+/// Serialize the complete pulse with held-chord transitions and with every
+/// other writer of the existing virtual device. Physical keyboard ownership
+/// belongs to its separate evdev device; we release only this virtual device.
+fn post_zoom(direction: i8) {
+    let output = super::HELD_OUTPUT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(device) = &*VIRTUAL_INPUT else {
+        tracing::debug!("uinput action device unavailable — zoom skipped");
+        return;
+    };
+    let Ok(mut device) = device.lock() else {
+        tracing::warn!("uinput action device mutex poisoned");
+        return;
+    };
+    if let Err(error) = zoom_pulse(
+        output.owners.contains_key(&HeldKey::Control),
+        direction,
+        |events| device.emit(events),
+    ) {
+        tracing::warn!(%error, "Linux Control-wheel zoom injection failed");
+    }
+}
+
+fn zoom_pulse(
+    control_held: bool,
+    direction: i8,
+    mut inject: impl FnMut(&[InputEvent]) -> io::Result<()>,
+) -> io::Result<()> {
+    // A discrete zoom tick never consumes the fractional scroll accumulator.
+    let wheel = scroll_events(
+        &mut ScrollOutput::default(),
+        ScrollDelta::wheel_ticks(0.0, f64::from(direction)),
+    );
+    if control_held {
+        return inject(&wheel);
+    }
+    let result = inject(&held_key_events(&[KeyCode::KEY_LEFTCTRL], KeyPhase::Down))
+        .and_then(|()| inject(&wheel));
+    // uinput can fail after a partial write, including its SYN_REPORT. Attempt
+    // release even when the down frame failed, because acceptance is unknown.
+    let release = held_key_events(&[KeyCode::KEY_LEFTCTRL], KeyPhase::Up);
+    let mut cleanup = inject(&release);
+    for _ in 0..2 {
+        if cleanup.is_ok() {
+            break;
+        }
+        cleanup = inject(&release);
+    }
+    if let Err(error) = &cleanup {
+        tracing::error!(%error, "uinput rejected Control release after zoom cleanup retries");
+    }
+    result.and(cleanup)
 }
 
 /// Press `mods`+`key` under GNOME; log the existing "no Linux equivalent"
@@ -363,6 +418,10 @@ fn rel_ev(axis: RelativeAxisCode, value: i32) -> InputEvent {
 /// release, which matches what the kernel `uinput` docs show and avoids
 /// toolkits treating a zero-duration event as invalid.
 fn press_key(mods: &[KeyCode], key: KeyCode) {
+    // Keep transient chords from releasing a modifier inside a zoom pulse.
+    let _output = super::HELD_OUTPUT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     emit(&key_phase_events(mods, key, KeyPhase::Down));
     emit(&key_phase_events(mods, key, KeyPhase::Up));
 }
@@ -771,6 +830,75 @@ mod tests {
         key_phase_events, modifiers_to_keycodes, rel_ev, scroll_events, syn,
     };
     use crate::inject::KeyPhase;
+
+    fn record_zoom(
+        control_held: bool,
+        direction: i8,
+        rejected: &[usize],
+    ) -> (std::io::Result<()>, Vec<Vec<evdev::InputEvent>>) {
+        let mut frames = Vec::new();
+        let result = super::zoom_pulse(control_held, direction, |events| {
+            let reject = rejected.contains(&frames.len());
+            frames.push(events.to_vec());
+            if reject {
+                Err(std::io::Error::other("synthetic injection failure"))
+            } else {
+                Ok(())
+            }
+        });
+        (result, frames)
+    }
+
+    #[test]
+    fn zoom_pulse_balances_control_and_encodes_both_wheel_axes() {
+        for direction in [1, -1] {
+            let wheel = vec![
+                rel_ev(
+                    RelativeAxisCode::REL_WHEEL_HI_RES,
+                    i32::from(direction) * 120,
+                ),
+                rel_ev(RelativeAxisCode::REL_WHEEL, i32::from(direction)),
+                syn(),
+            ];
+            let (result, frames) = record_zoom(false, direction, &[]);
+            result.unwrap();
+            assert_eq!(
+                frames,
+                vec![
+                    vec![key_ev(KeyCode::KEY_LEFTCTRL, 1), syn()],
+                    wheel.clone(),
+                    vec![key_ev(KeyCode::KEY_LEFTCTRL, 0), syn()],
+                ]
+            );
+            let (result, frames) = record_zoom(true, direction, &[]);
+            result.unwrap();
+            assert_eq!(frames, vec![wheel]);
+        }
+        assert_eq!(combo(Shortcut::ZoomIn).rendered_label(), "Ctrl+=");
+        assert_eq!(combo(Shortcut::ZoomOut).rendered_label(), "Ctrl+-");
+    }
+
+    #[test]
+    fn zoom_pulse_cleans_up_partial_failures_and_retries_release() {
+        let release = vec![key_ev(KeyCode::KEY_LEFTCTRL, 0), syn()];
+        for rejected in [0, 1] {
+            let (result, frames) = record_zoom(false, 1, &[rejected]);
+            assert_eq!(
+                result.unwrap_err().to_string(),
+                "synthetic injection failure"
+            );
+            assert_eq!(frames.last(), Some(&release));
+        }
+        let (result, frames) = record_zoom(false, 1, &[2]);
+        result.unwrap();
+        assert_eq!(&frames[2..], &[release.clone(), release.clone()]);
+        let (result, frames) = record_zoom(false, 1, &[2, 3, 4]);
+        result.unwrap_err();
+        assert_eq!(&frames[2..], &[release.clone(), release.clone(), release]);
+        let (result, frames) = record_zoom(true, 1, &[0]);
+        result.unwrap_err();
+        assert_eq!(frames.len(), 1);
+    }
 
     #[test]
     fn held_chord_edges_use_inverse_key_order() {

@@ -99,6 +99,20 @@ impl SessionWheels {
     fn cancel_session(&mut self, session: &HidppSessionId) {
         self.0.remove(session);
     }
+
+    #[cfg(not(target_os = "macos"))]
+    fn cancel_zoom_session(&mut self, session: &HidppSessionId) {
+        if let Some(wheel) = self.0.get_mut(session) {
+            wheel.clear_zoom();
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn clear_zoom(&mut self) {
+        for wheel in self.0.values_mut() {
+            wheel.clear_zoom();
+        }
+    }
 }
 
 /// Input routing plus the per-session state retained between
@@ -180,13 +194,11 @@ impl InputDispatcher {
         }
     }
 
-    #[cfg_attr(
-        not(target_os = "macos"),
-        expect(clippy::unused_self, reason = "native zoom state exists only on macOS")
-    )]
     pub(super) fn pause_zoom(&mut self) {
         #[cfg(target_os = "macos")]
         self.zooms.pause();
+        #[cfg(not(target_os = "macos"))]
+        self.wheels.clear_zoom();
     }
 
     #[cfg_attr(
@@ -197,24 +209,18 @@ impl InputDispatcher {
         #[cfg(target_os = "macos")]
         self.zooms.resume();
     }
-    #[cfg_attr(
-        not(target_os = "macos"),
-        expect(clippy::unused_self, reason = "native zoom state exists only on macOS")
-    )]
     pub(super) fn cancel_zoom_session(&mut self, session: &HidppSessionId) {
         #[cfg(target_os = "macos")]
         self.zooms.cancel(session);
         #[cfg(not(target_os = "macos"))]
-        let _ = session;
+        self.wheels.cancel_zoom_session(session);
     }
 
-    #[cfg_attr(
-        not(target_os = "macos"),
-        expect(clippy::unused_self, reason = "native zoom state exists only on macOS")
-    )]
     pub(super) fn shutdown_zoom(&mut self) {
         #[cfg(target_os = "macos")]
         self.zooms.shutdown();
+        #[cfg(not(target_os = "macos"))]
+        self.wheels.clear_zoom();
     }
 
     /// Route one captured input from `session` to its bound action or
@@ -323,7 +329,12 @@ impl InputDispatcher {
             self.zooms.stop(session, Instant::now());
         }
         #[cfg(not(target_os = "macos"))]
-        let _ = (status, admission);
+        {
+            let _ = status;
+            if admission == WheelAdmission::Draining {
+                self.wheels.cancel_zoom_session(session);
+            }
+        }
         let Some(rotation) = WheelRotation::from_increments(increments) else {
             return;
         };
@@ -331,6 +342,12 @@ impl InputDispatcher {
         let button = rotation.button();
         let configuration = WheelConfiguration::for_plan(plan);
         let action = configuration.action(rotation);
+        #[cfg(not(target_os = "macos"))]
+        if admission == WheelAdmission::Draining
+            && matches!(action, Action::ZoomIn | Action::ZoomOut)
+        {
+            return;
+        }
         #[cfg(target_os = "macos")]
         if matches!(action, Action::ZoomIn | Action::ZoomOut) {
             let app = openlogi_hook::frontmost_application();
