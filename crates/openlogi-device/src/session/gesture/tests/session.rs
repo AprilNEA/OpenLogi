@@ -376,7 +376,7 @@ async fn channel_change_takes_teardown_precedence_over_ready_shutdown() {
 
 /// A mouse with only `0x2150` (index 3) whose `getThumbwheelStatus` reports
 /// `status`; `setThumbwheelReporting` writes are echoed.
-fn thumbwheel_device(
+pub(super) fn thumbwheel_device(
     status: [u8; 2],
 ) -> (ScriptedRawHidChannel, crate::replay::ReplayChannelHandle) {
     ScriptedRawHidChannel::with_dynamic_responder(move |request| {

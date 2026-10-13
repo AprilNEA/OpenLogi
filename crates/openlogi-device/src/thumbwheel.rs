@@ -89,7 +89,8 @@ impl RotationStatus {
     /// reports something else has said nothing about a roll, and the caller
     /// still has the report's own `rotation` to go on. Claiming a roll here
     /// instead would let one unrecognised value make the tap permanently
-    /// undeliverable.
+    /// undeliverable. Logi Options+ maps an unrecognised value to the same
+    /// state as `Inactive` too (`devio_feature_2150::convert`).
     #[must_use]
     fn from_byte(byte: u8) -> Self {
         match byte {
@@ -105,6 +106,13 @@ impl RotationStatus {
     #[must_use]
     pub fn is_rolling(self) -> bool {
         !matches!(self, Self::Inactive)
+    }
+
+    /// Whether the roll this report belongs to is still under way after it:
+    /// the roll began or continued here, and its `Stop` is still to come.
+    #[must_use]
+    pub fn leaves_roll_open(self) -> bool {
+        matches!(self, Self::Start | Self::Active)
     }
 }
 
