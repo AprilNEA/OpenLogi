@@ -43,7 +43,8 @@ const SW_ID: u8 = 0x0a;
 const FN_SET_KEY_RANGE: u8 = 0x3;
 const FN_FRAME_END: u8 = 0x5;
 // Fixed bytes of the "set key range" payload: a mode flag (byte 5) and the
-// per-frame entry count (byte 7), which is also the chunk size below.
+// most entries one frame carries, which is also the chunk size below. Bytes
+// 6..8 hold each frame's own big-endian entry count.
 const SET_RANGE_MODE: u8 = 0x01;
 const KEYS_PER_FRAME: u8 = 0x0e;
 
@@ -509,7 +510,9 @@ pub(super) fn per_key_reports(
         rep[2] = feature_index;
         rep[3] = (FN_SET_KEY_RANGE << 4) | SW_ID;
         rep[5] = SET_RANGE_MODE;
-        rep[7] = KEYS_PER_FRAME;
+        // Only the last frame is short (233 keys = 16 × 14 + 9). Declaring 14
+        // there would hand the firmware five zeroed entries as real ones.
+        rep[7] = u8::try_from(chunk.len()).unwrap_or(KEYS_PER_FRAME);
         for (i, &key) in chunk.iter().enumerate() {
             let off = 8 + i * 4;
             rep[off] = key;

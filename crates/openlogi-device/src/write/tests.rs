@@ -158,7 +158,17 @@ fn per_key_lighting_builds_only_very_long_frames_then_one_long_commit() {
     assert!(frames.iter().all(|report| report[2] == 0x27));
     assert!(frames.iter().all(|report| report[3] == 0x3a));
     assert!(frames.iter().all(|report| report[5] == 0x01));
-    assert!(frames.iter().all(|report| report[7] == 0x0e));
+    // Bytes 6..8 are the big-endian count of entries the frame carries: 14
+    // per full frame, and 9 in the last one (233 keys = 16 × 14 + 9).
+    let (tail, full) = frames.split_last().expect("per-key lighting emits frames");
+    assert!(full.iter().all(|report| report[6..8] == [0, 0x0e]));
+    assert_eq!(tail[6..8], [0, 0x09]);
+    assert!(
+        tail[8 + 9 * 4..].iter().all(|byte| *byte == 0),
+        "nothing follows the nine declared entries"
+    );
+    let declared: usize = frames.iter().map(|report| usize::from(report[7])).sum();
+    assert_eq!(declared, 0xe9);
 
     let entries: Vec<_> = frames
         .iter()
