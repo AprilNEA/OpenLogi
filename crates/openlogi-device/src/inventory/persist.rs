@@ -36,7 +36,8 @@ use super::features::{BatteryProbe, ProbedFeatures};
 /// v2 dropped the `UnifyingSlot` key (slot-keyed, so not re-pair-safe).
 /// v3 adds event-capable feature indexes discovered by the immutable walk.
 /// v4 adds the `0x1F20` ADC-measurement event index.
-const SCHEMA_VERSION: u32 = 4;
+/// v5 adds the legacy `0x1000` and voltage `0x1001` battery event indexes.
+const SCHEMA_VERSION: u32 = 5;
 
 impl ProbeCacheError {
     /// Report why a store could not keep a snapshot.
@@ -241,6 +242,8 @@ mod tests {
                 events: EventFeatureIndices {
                     wireless_status: Some(7),
                     unified_battery: Some(9),
+                    battery_status: Some(12),
+                    battery_voltage: Some(13),
                     adc_measurement: Some(11),
                 },
                 probed_at: Instant::now(),
@@ -279,6 +282,8 @@ mod tests {
             EventFeatureIndices {
                 wireless_status: Some(7),
                 unified_battery: Some(9),
+                battery_status: Some(12),
+                battery_voltage: Some(13),
                 adc_measurement: Some(11),
             },
             "event feature indexes are immutable and kept"

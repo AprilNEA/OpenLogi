@@ -7,9 +7,11 @@
 //! at all. Unlike its siblings the feature reports no percentage — callers
 //! estimate one from the voltage (see `openlogi-hid`'s mappings).
 //!
-//! Only `getBatteryInfo` (function `0`) is implemented; the broadcast event
-//! isn't needed to display a charge reading — the same scope `BatteryStatus`
-//! (`0x1000`) keeps.
+//! Only `getBatteryInfo` (function `0`) is implemented. The device also
+//! broadcasts event `0` when its voltage or charging state changes;
+//! [`BatteryVoltageFeature::is_status_broadcast`] recognises it so a listener
+//! can re-read the battery instead of waiting for a poll — the same scope
+//! `BatteryStatus` (`0x1000`) keeps.
 //!
 //! The wire layout is not in a public Logitech spec: the voltage as a
 //! big-endian millivolt `u16` followed by one flags byte was
@@ -32,6 +34,19 @@ pub struct BatteryVoltageFeature {
 }
 
 impl BatteryVoltageFeature {
+    /// Whether an unsolicited report on this feature's index is its
+    /// battery-voltage broadcast (event `0`; the Linux driver's
+    /// `EVENT_BATTERY_VOLTAGE_STATUS_BROADCAST`).
+    ///
+    /// Deliberately independent of the payload, like
+    /// `BatteryStatusFeature::is_status_broadcast`: a listener that only needs
+    /// to know *that* the reading changed re-reads it with
+    /// [`Self::get_battery_info`].
+    #[must_use]
+    pub const fn is_status_broadcast(function_id: u8) -> bool {
+        function_id == 0
+    }
+
     /// Reads the measured battery voltage and charging state (function `0`,
     /// `getBatteryInfo`).
     pub async fn get_battery_info(&self) -> Result<VoltageBatteryInfo, Hidpp20Error> {

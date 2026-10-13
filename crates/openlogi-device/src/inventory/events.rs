@@ -11,6 +11,8 @@ use std::sync::{Arc, PoisonError, RwLock};
 
 use hidpp::channel::{HidppChannel, HidppMessage, MessageListenerGuard};
 use hidpp::feature::adc_measurement::AdcMeasurementFeature;
+use hidpp::feature::battery_status::BatteryStatusFeature;
+use hidpp::feature::battery_voltage::BatteryVoltageFeature;
 use hidpp::feature::unified_battery::BatteryEvent;
 use hidpp::feature::wireless_device_status::WirelessDeviceStatusEvent;
 use hidpp::protocol::{v10, v20};
@@ -32,6 +34,12 @@ pub enum HidppEventSource {
     WirelessDeviceStatus,
     /// A device's event-capable `UnifiedBattery` feature reported a change.
     UnifiedBattery,
+    /// A device's legacy `BatteryStatus` (`0x1000`) feature broadcast a new
+    /// level or charging status.
+    BatteryStatus,
+    /// A device's `BatteryVoltage` (`0x1001`) feature broadcast a new voltage
+    /// or charging state.
+    BatteryVoltage,
     /// A device's `AdcMeasurement` feature broadcast a reading or a link
     /// change — a headset dongle's headset switching on or off.
     AdcMeasurement,
@@ -123,13 +131,15 @@ pub(crate) fn observed_event_channel() -> (EventNotifier, EventReceiver, EventOb
 /// Runtime feature indexes whose unsolicited events affect inventory.
 ///
 /// Stored with the immutable feature-table cache because these indexes are
-/// discovered by the same walk. Unified battery and `0x1F20` ADC measurement
-/// have battery events; legacy `0x1000` and voltage `0x1001` remain
-/// recovery-scan reads.
+/// discovered by the same walk. Every battery source the probe reads —
+/// unified `0x1004`, legacy `0x1000`, voltage `0x1001` and `0x1F20` ADC
+/// measurement — broadcasts its changes, so each has an index here.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct EventFeatureIndices {
     pub(super) wireless_status: Option<u8>,
     pub(super) unified_battery: Option<u8>,
+    pub(super) battery_status: Option<u8>,
+    pub(super) battery_voltage: Option<u8>,
     pub(super) adc_measurement: Option<u8>,
 }
 
@@ -143,6 +153,8 @@ impl EventFeatureIndices {
             match id {
                 0x1d4b => indices.wireless_status = Some(index),
                 0x1004 => indices.unified_battery = Some(index),
+                0x1000 => indices.battery_status = Some(index),
+                0x1001 => indices.battery_voltage = Some(index),
                 0x1f20 => indices.adc_measurement = Some(index),
                 _ => {}
             }
@@ -167,8 +179,19 @@ impl EventFeatureIndices {
         {
             return Some(HidppEventSource::UnifiedBattery);
         }
-        // Unlike the two above, not gated on decoding the payload: an
-        // unknown flags value still announces a link change.
+        // Unlike the two above, the rest are not gated on decoding the
+        // payload: the reconciliation re-reads the battery, and an unknown
+        // status or flags value still announces a change.
+        if self.battery_status == Some(header.feature_index)
+            && BatteryStatusFeature::is_status_broadcast(function_id)
+        {
+            return Some(HidppEventSource::BatteryStatus);
+        }
+        if self.battery_voltage == Some(header.feature_index)
+            && BatteryVoltageFeature::is_status_broadcast(function_id)
+        {
+            return Some(HidppEventSource::BatteryVoltage);
+        }
         if self.adc_measurement == Some(header.feature_index)
             && AdcMeasurementFeature::is_status_broadcast(function_id)
         {
@@ -341,6 +364,8 @@ mod tests {
             EventFeatureIndices {
                 wireless_status: Some(2),
                 unified_battery: Some(3),
+                battery_status: None,
+                battery_voltage: None,
                 adc_measurement: None,
             }
         );
@@ -374,6 +399,8 @@ mod tests {
             features: EventFeatureIndices {
                 wireless_status: Some(5),
                 unified_battery: None,
+                battery_status: None,
+                battery_voltage: None,
                 adc_measurement: None,
             },
         });
@@ -403,6 +430,8 @@ mod tests {
             features: EventFeatureIndices {
                 wireless_status: Some(5),
                 unified_battery: Some(7),
+                battery_status: None,
+                battery_voltage: None,
                 adc_measurement: None,
             },
         });
@@ -461,6 +490,8 @@ mod tests {
             features: EventFeatureIndices {
                 wireless_status: None,
                 unified_battery: None,
+                battery_status: None,
+                battery_voltage: None,
                 adc_measurement: Some(8),
             },
         });
@@ -499,6 +530,84 @@ mod tests {
         assert_eq!(state.decode(event(0, 0xd, [0x10, 0x4a, 0x01]), false), None);
         // Only event `0` is the status broadcast.
         assert_eq!(state.decode(event(1, 0, [0x10, 0x4a, 0x01]), false), None);
+    }
+
+    #[test]
+    fn legacy_and_voltage_battery_indexes_are_table_positions() {
+        // An MX Master 2S-shaped table: 0x1000 instead of 0x1004.
+        let legacy =
+            EventFeatureIndices::from_feature_ids(&[0x0001, 0x0003, 0x0005, 0x1000, 0x1d4b]);
+        assert_eq!(legacy.battery_status, Some(4));
+        assert_eq!(legacy.battery_voltage, None);
+        assert_eq!(legacy.unified_battery, None);
+        // A G-series-shaped table: 0x1001 and no other battery source.
+        let voltage = EventFeatureIndices::from_feature_ids(&[0x0001, 0x0003, 0x1001, 0x8070]);
+        assert_eq!(voltage.battery_voltage, Some(3));
+        assert_eq!(voltage.battery_status, None);
+    }
+
+    #[test]
+    fn legacy_and_voltage_battery_broadcasts_request_reconciliation() {
+        let state = state(None);
+        state.devices.write().unwrap().push(DeviceEvents {
+            device_index: 1,
+            features: EventFeatureIndices {
+                battery_status: Some(4),
+                battery_voltage: Some(6),
+                ..EventFeatureIndices::default()
+            },
+        });
+        let event = |feature_index: u8, function_id: u8, software_id: u8, bytes: [u8; 3]| {
+            let mut payload = [0; 16];
+            payload[..3].copy_from_slice(&bytes);
+            v20::Message::Long(
+                v20::MessageHeader {
+                    device_index: 1,
+                    feature_index,
+                    function_id: U4::from_lo(function_id),
+                    software_id: U4::from_lo(software_id),
+                },
+                payload,
+            )
+            .into()
+        };
+
+        // 0x1000: level 50 %, next 20 %, discharging; then a status value
+        // (`0x09`) the crate does not know, which still announces a change.
+        for bytes in [[50, 20, 0x00], [0, 0, 0x09]] {
+            assert_eq!(
+                state.decode(event(4, 0, 0, bytes), false),
+                Some(HidppEventSource::BatteryStatus),
+                "{bytes:02x?}"
+            );
+        }
+        // 0x1001: 3.9 V while charging (flags bit 7).
+        assert_eq!(
+            state.decode(event(6, 0, 0, [0x0f, 0x3c, 0x80]), false),
+            Some(HidppEventSource::BatteryVoltage)
+        );
+        for (feature_index, source) in [(4, "0x1000"), (6, "0x1001")] {
+            // The reply to our own read is matched to its request, and a reply
+            // carries a software id: neither is a broadcast.
+            assert_eq!(
+                state.decode(event(feature_index, 0, 0, [50, 20, 0]), true),
+                None,
+                "{source}"
+            );
+            assert_eq!(
+                state.decode(event(feature_index, 0, 0xd, [50, 20, 0]), false),
+                None,
+                "{source}"
+            );
+            // Only event `0` is the status broadcast.
+            assert_eq!(
+                state.decode(event(feature_index, 1, 0, [50, 20, 0]), false),
+                None,
+                "{source}"
+            );
+        }
+        // Another feature's index on the same device is not a battery event.
+        assert_eq!(state.decode(event(5, 0, 0, [50, 20, 0]), false), None);
     }
 
     #[test]
