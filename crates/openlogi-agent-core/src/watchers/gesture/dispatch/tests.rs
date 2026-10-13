@@ -2,6 +2,63 @@ use openlogi_hid::thumbwheel::WheelResolution;
 
 use super::wheel::{ScrollScale, WheelOutput, WheelRotation};
 use super::*;
+use openlogi_core::binding::GestureDirection;
+use std::collections::BTreeMap;
+
+#[test]
+fn volume_progress_belongs_to_one_press_and_capture_session() {
+    let first = HidppSessionId::with_epoch("mouse-a", 7);
+    let replacement = HidppSessionId::with_epoch("mouse-a", 8);
+    let bindings = BTreeMap::from([
+        (GestureDirection::Up, Action::VolumeUp),
+        (GestureDirection::Down, Action::VolumeDown),
+    ]);
+    let mut presses = GesturePresses::default();
+    presses.start(
+        &first,
+        ButtonId::Back,
+        PressToken::hook_for_test(1, ButtonId::Back),
+    );
+    let press = presses.get_mut(&first, ButtonId::Back).unwrap();
+    press.volume = VolumeGesture::begin(GestureDirection::Up, &bindings);
+    assert_eq!(press.volume.as_mut().unwrap().advance(0, -49), None);
+
+    presses.start(
+        &replacement,
+        ButtonId::Back,
+        PressToken::hook_for_test(2, ButtonId::Back),
+    );
+    assert!(
+        presses
+            .get_mut(&replacement, ButtonId::Back)
+            .unwrap()
+            .volume
+            .is_none()
+    );
+    presses.cancel_session(&first);
+    assert!(presses.get_mut(&first, ButtonId::Back).is_none());
+    assert!(presses.get_mut(&replacement, ButtonId::Back).is_some());
+
+    presses
+        .get_mut(&replacement, ButtonId::Back)
+        .unwrap()
+        .volume = VolumeGesture::begin(GestureDirection::Down, &bindings);
+    presses.start(
+        &replacement,
+        ButtonId::Back,
+        PressToken::hook_for_test(3, ButtonId::Back),
+    );
+    assert!(
+        presses
+            .get_mut(&replacement, ButtonId::Back)
+            .unwrap()
+            .volume
+            .is_none(),
+        "re-press discards the previous volume hold"
+    );
+    presses.end(&replacement, ButtonId::Back);
+    assert!(presses.get_mut(&replacement, ButtonId::Back).is_none());
+}
 
 fn rotation(magnitude: i32) -> WheelRotation {
     let increments = i16::try_from(magnitude).expect("test magnitude fits in i16");

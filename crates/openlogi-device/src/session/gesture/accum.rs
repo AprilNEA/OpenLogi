@@ -241,6 +241,16 @@ impl CaptureAccum {
             *skip_first_raw_xy = false;
             return;
         }
+        if swipe.is_committed() {
+            if dx != 0 || dy != 0 {
+                let _ = sink.send(CapturedInput::GestureMotion {
+                    button: *button,
+                    dx,
+                    dy,
+                });
+            }
+            return;
+        }
         // Commit the instant a clean direction emerges (mid-swipe, once per hold);
         // the accumulator gates on hold duration internally and drops travel that
         // arrives outside a hold.

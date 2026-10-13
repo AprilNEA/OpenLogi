@@ -109,6 +109,14 @@ impl SwipeAccumulator {
         self.held_since.is_some()
     }
 
+    /// Whether this hold already committed its one-shot swipe. Capture paths
+    /// may forward later motion for action-specific continuation while keeping
+    /// the committed latch intact, so release can never also produce a click.
+    #[must_use]
+    pub fn is_committed(&self) -> bool {
+        self.is_holding() && self.fired
+    }
+
     /// Feed a pointer-move / raw-XY delta into the current hold. Returns
     /// `Some(direction)` exactly once per hold — the instant travel commits, and
     /// only after the hold passes [`GESTURE_HOLD_FOR_SWIPE`] — and `None` while

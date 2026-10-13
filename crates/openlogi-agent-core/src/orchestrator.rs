@@ -679,12 +679,15 @@ impl Orchestrator {
     /// DPI-cycle index, so running it on every steady reconciliation
     /// would snap DPI back to `preset[0]` (and burn three `RwLock` writes)
     /// for nothing.
+    /// Returns whether the selected OS-hook source changed identity, route, or
+    /// availability. The host must cancel its old hook presses on that transition:
+    /// a disconnected mouse cannot deliver the release that ends a volume hold.
     pub fn refresh_inventory(
         &mut self,
         inventories: &[DeviceInventory],
         standalone: &[StandaloneDevice],
         hid_open_failures: bool,
-    ) {
+    ) -> bool {
         // Even an empty snapshot is a *completed* enumeration — the watcher
         // skips failed ticks — so the device set is now known either way (and
         // a recovered backend upgrades `Unavailable` back to live data).
@@ -704,6 +707,14 @@ impl Orchestrator {
         // transitions are observable.
         let forced = self.forced_reapply_budget.take();
         let next_current = pick_current(&devices, self.config.selected_device());
+        let hook_source = |devices: &[AgentDevice], current: usize| {
+            devices
+                .get(current)
+                .filter(|device| device.online)
+                .map(|device| (device.config_key.clone(), device.route.clone()))
+        };
+        let cancel_hook_presses =
+            hook_source(&self.devices, self.current) != hook_source(&devices, next_current);
         let rearm_capture =
             any_device_needs_capture_rearm(&self.devices, &devices, forced.is_some());
         let followup = std::mem::take(&mut self.reapply_followup);
@@ -737,11 +748,12 @@ impl Orchestrator {
             // also lands through this republish.
             self.devices = devices;
             self.publish_device_runtime();
-            return;
+            return cancel_hook_presses;
         }
         self.devices = devices;
         self.current = next_current;
         self.rebuild();
+        cancel_hook_presses
     }
 
     /// Whether volatile-setting writes still need a delayed inventory pass to

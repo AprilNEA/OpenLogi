@@ -11,7 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use openlogi_core::binding::{
-    Action, Binding, ButtonId, GestureDirection, SwipeAccumulator, default_binding,
+    Action, Binding, ButtonId, GestureDirection, SwipeAccumulator, VolumeGesture, default_binding,
 };
 use openlogi_core::config::KeyTrigger;
 use openlogi_hook::{
@@ -80,6 +80,7 @@ struct GestureHold {
     button: ButtonId,
     started_at: Instant,
     press: PressToken,
+    volume: Option<VolumeGesture>,
 }
 
 enum HoldAdmission {
@@ -122,6 +123,7 @@ impl HoldState {
             button,
             started_at: Instant::now(),
             press,
+            volume: None,
         });
         self.swipe.begin();
     }
@@ -134,6 +136,25 @@ impl HoldState {
         self.swipe
             .accumulate(dx, dy)
             .map(|dir| (held.press.clone(), held.button, dir))
+    }
+
+    fn continue_volume(&mut self, dx: i32, dy: i32) -> Option<(PressToken, Action, u8)> {
+        let held = self.current.as_mut()?;
+        let (action, steps) = held.volume.as_mut()?.advance(dx, dy)?;
+        Some((held.press.clone(), action, steps))
+    }
+
+    fn start_volume(
+        &mut self,
+        press: &PressToken,
+        direction: GestureDirection,
+        bindings: &BTreeMap<GestureDirection, Action>,
+    ) {
+        if let Some(held) = self.current.as_mut()
+            && held.press == *press
+        {
+            held.volume = VolumeGesture::begin(direction, bindings);
+        }
     }
 
     /// End the hold for `button`, returning its exact token and whether it was a
@@ -367,17 +388,30 @@ fn handle_moved(
     hooks: &SharedHookMaps,
     dispatcher: &ActionDispatcher,
 ) -> EventDisposition {
+    if let Some((press, action, steps)) =
+        HOLD.with_borrow_mut(|h| h.continue_volume(delta_x, delta_y))
+    {
+        for _ in 0..steps {
+            if !dispatcher.try_dispatch_while_pressed(&press, &action) {
+                break;
+            }
+        }
+        return EventDisposition::PassThrough;
+    }
     let commit = HOLD.with_borrow_mut(|h| h.accumulate(delta_x, delta_y));
-    if let Some((press, button, dir)) = commit {
-        let action = hooks.try_read().ok().map(|m| {
-            m.gestures
-                .get(&button)
-                .and_then(|dirs| dirs.get(&dir).cloned())
-                .unwrap_or_else(|| resolve_gesture_click(&m.gestures, button))
-        });
-        if let Some(action) = action {
-            info!(button = %button, ?dir, action = %action.label(), "gesture swipe → executing bound action");
-            dispatcher.try_dispatch_while_pressed(&press, &action);
+    if let Some((press, button, dir)) = commit
+        && let Ok(maps) = hooks.try_read()
+    {
+        let action = maps
+            .gestures
+            .get(&button)
+            .and_then(|dirs| dirs.get(&dir).cloned())
+            .unwrap_or_else(|| resolve_gesture_click(&maps.gestures, button));
+        info!(button = %button, ?dir, action = %action.label(), "gesture swipe → executing bound action");
+        if dispatcher.try_dispatch_while_pressed(&press, &action)
+            && let Some(bindings) = maps.gestures.get(&button)
+        {
+            HOLD.with_borrow_mut(|h| h.start_volume(&press, dir, bindings));
         }
     }
     EventDisposition::PassThrough

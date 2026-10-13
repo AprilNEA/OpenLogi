@@ -5,7 +5,7 @@ mod wheel;
 use std::collections::HashMap;
 use std::time::Instant;
 
-use openlogi_core::binding::{Action, Binding, ButtonId, default_binding};
+use openlogi_core::binding::{Action, Binding, ButtonId, VolumeGesture, default_binding};
 use openlogi_core::config::ThumbwheelSensitivity;
 use openlogi_hid::CapturedInput;
 use openlogi_hid::thumbwheel::WheelResolution;
@@ -56,16 +56,27 @@ impl WheelConfiguration {
 /// authority on whether the token is still active.
 #[derive(Default)]
 struct GesturePresses {
-    tokens: HashMap<(HidppSessionId, ButtonId), PressToken>,
+    tokens: HashMap<(HidppSessionId, ButtonId), GesturePress>,
+}
+
+struct GesturePress {
+    token: PressToken,
+    volume: Option<VolumeGesture>,
 }
 
 impl GesturePresses {
     fn start(&mut self, session: &HidppSessionId, button: ButtonId, press: PressToken) {
-        self.tokens.insert((session.clone(), button), press);
+        self.tokens.insert(
+            (session.clone(), button),
+            GesturePress {
+                token: press,
+                volume: None,
+            },
+        );
     }
 
-    fn get(&self, session: &HidppSessionId, button: ButtonId) -> Option<&PressToken> {
-        self.tokens.get(&(session.clone(), button))
+    fn get_mut(&mut self, session: &HidppSessionId, button: ButtonId) -> Option<&mut GesturePress> {
+        self.tokens.get_mut(&(session.clone(), button))
     }
 
     fn end(&mut self, session: &HidppSessionId, button: ButtonId) {
@@ -149,26 +160,47 @@ impl InputDispatcher {
         }
         match input {
             CapturedInput::Gesture(button, direction) => {
-                let Some(press) = self.gesture_presses.get(session, button) else {
+                let Some(press) = self.gesture_presses.get_mut(session, button) else {
                     debug!(key, %button, ?direction, "gesture from a canceled button lifecycle — ignored");
                     return;
                 };
-                if let Some(action) = plan
+                let bindings = plan
                     .gesture_bindings
                     .get(&button)
-                    .or_else(|| plan.side_gesture_bindings.get(&button))
-                    .and_then(|map| map.get(&direction))
+                    .or_else(|| plan.side_gesture_bindings.get(&button));
+                if let Some(bindings) = bindings
+                    && let Some(action) = bindings.get(&direction)
                 {
                     debug!(key, %button, ?direction, action = %action.label(), "gesture → action");
-                    if !self
+                    if self
                         .outputs
                         .actions
-                        .try_dispatch_while_pressed(press, action)
+                        .try_dispatch_while_pressed(&press.token, action)
                     {
+                        press.volume = VolumeGesture::begin(direction, bindings);
+                    } else {
                         debug!(key, %button, ?direction, "gesture press no longer active — ignored");
                     }
                 } else {
                     debug!(key, %button, ?direction, "gesture with no binding — ignored");
+                }
+            }
+            CapturedInput::GestureMotion { button, dx, dy } => {
+                let Some(press) = self.gesture_presses.get_mut(session, button) else {
+                    return;
+                };
+                if let Some(volume) = press.volume.as_mut()
+                    && let Some((action, steps)) = volume.advance(i32::from(dx), i32::from(dy))
+                {
+                    for _ in 0..steps {
+                        if !self
+                            .outputs
+                            .actions
+                            .try_dispatch_while_pressed(&press.token, &action)
+                        {
+                            break;
+                        }
+                    }
                 }
             }
             CapturedInput::ButtonDown(button) => {

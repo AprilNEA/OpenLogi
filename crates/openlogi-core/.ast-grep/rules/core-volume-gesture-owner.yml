@@ -1,0 +1,34 @@
+# Owners: binding::SwipeAccumulator commits the first swipe; binding::VolumeGesture
+# converts subsequent motion to volume steps. Both input paths consume those
+# decisions instead of independently applying the shared movement threshold.
+id: core-volume-gesture-owner
+language: rust
+severity: error
+message: Use openlogi_core::binding::SwipeAccumulator and VolumeGesture for gesture thresholds and repeated volume steps; do not rederive them in consumers.
+note: |
+  The OS hook and HID dispatcher must agree on step distance, direction reversal,
+  and bounded repeat counts. Test motion may use the threshold as an oracle.
+files:
+  - crates/**/*.rs
+  - xtask/**/*.rs
+ignores:
+  - crates/openlogi-core/src/binding/swipe.rs
+  - crates/openlogi-core/src/binding/volume_gesture.rs
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  all:
+    - any:
+        - kind: binary_expression
+        - kind: compound_assignment_expr
+    - has:
+        kind: identifier
+        regex: '^GESTURE_SWIPE_THRESHOLD$'
+        stopBy: end
+    - not:
+        inside:
+          kind: mod_item
+          stopBy: end
+          has:
+            field: name
+            regex: '^tests$'
