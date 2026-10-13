@@ -25,6 +25,7 @@ use tracing::warn;
 
 pub use config::ConfigPersistence;
 pub(crate) use device_key::DeviceKey;
+pub(crate) use device_session::ObservedConnection;
 pub use devices::DeviceRecord;
 pub(crate) use easy_switch::HostRenameRefusal;
 pub(crate) use events::{StateEvent, StateEvents};
