@@ -44,6 +44,7 @@ struct FakeEnvironment {
     processed: mpsc::Sender<()>,
     observed_app: Arc<Mutex<Option<String>>>,
     live_app: String,
+    reads_before_gate: usize,
 }
 impl Environment for FakeEnvironment {
     type Gesture = Recorder;
@@ -58,7 +59,9 @@ impl Environment for FakeEnvironment {
     }
     fn context(&mut self, _: Option<PointerTarget>) -> Option<LiveContext> {
         EVENTS.with_borrow_mut(|sender| *sender = Some(self.events.clone()));
-        if let Some(gate) = self.gate.take() {
+        if self.reads_before_gate > 0 {
+            self.reads_before_gate -= 1;
+        } else if let Some(gate) = self.gate.take() {
             gate.entered.send(()).unwrap();
             gate.released.recv().unwrap();
         }
@@ -111,6 +114,7 @@ fn environment() -> (
             processed,
             observed_app: Arc::new(Mutex::new(Some("app-a".into()))),
             live_app: "app-a".into(),
+            reads_before_gate: 0,
         },
         recorded,
         wait,
@@ -407,4 +411,117 @@ fn cached_focus_change_during_a_blocked_lookup_invalidates_its_result() {
     wait(&processed);
     assert!(events.try_iter().next().is_none());
     finish(&mut worker);
+}
+
+#[tokio::test]
+async fn normal_shutdown_waits_for_active_gesture_cleanup_after_a_blocked_lookup() {
+    let (mut environment, events, entered, release, _) = environment();
+    environment.reads_before_gate = 1;
+    let now = environment.now();
+    let mut worker = Worker::spawn_with(environment).unwrap();
+    worker.motion(&session(1), input(now));
+    assert_eq!(event(&events).0, ZoomPhase::Began);
+    assert_eq!(event(&events).0, ZoomPhase::Changed);
+    worker.motion(&session(1), input(now));
+    wait(&entered);
+
+    let mut cleanup = Box::pin(worker.shutdown_and_wait());
+    let mut second_cleanup = Box::pin(worker.shutdown_and_wait());
+    assert!(
+        futures_lite::future::poll_once(cleanup.as_mut())
+            .await
+            .is_none()
+    );
+    assert!(
+        futures_lite::future::poll_once(second_cleanup.as_mut())
+            .await
+            .is_none()
+    );
+    assert!(
+        events.try_iter().next().is_none(),
+        "the blocked lookup still owns an active gesture"
+    );
+
+    // Dropping one waiter must not erase or acknowledge the ongoing teardown.
+    drop(second_cleanup);
+    let later_cleanup = worker.shutdown_and_wait();
+    release.send(()).unwrap();
+    cleanup.await;
+    later_cleanup.await;
+    let cancelled = events.try_recv().unwrap();
+    assert_eq!(cancelled.0, ZoomPhase::Cancelled);
+    assert!(cancelled.1.abs() < f64::EPSILON);
+    assert!(
+        events.try_iter().next().is_none(),
+        "no late Changed or duplicate terminal frame"
+    );
+    finish(&mut worker);
+    worker.shutdown_and_wait().await;
+}
+
+#[tokio::test]
+async fn watcher_acknowledges_shutdown_only_after_native_terminal_cleanup() {
+    use crate::watchers::shutdown::{ManagerCompletion, StopOutcome, WatcherHandle};
+
+    let (mut environment, events, entered, release, _) = environment();
+    environment.reads_before_gate = 1;
+    let now = environment.now();
+    let mut worker = Worker::spawn_with(environment).unwrap();
+    worker.motion(&session(1), input(now));
+    assert_eq!(event(&events).0, ZoomPhase::Began);
+    assert_eq!(event(&events).0, ZoomPhase::Changed);
+    worker.motion(&session(1), input(now));
+    wait(&entered);
+    let (started, requested) = tokio::sync::oneshot::channel();
+    let watcher = WatcherHandle::spawn("openlogi-test-zoom-cleanup", move |stop| async move {
+        stop.await.unwrap();
+        let cleanup = worker.shutdown_and_wait();
+        started.send(()).unwrap();
+        cleanup.await;
+        ManagerCompletion::Graceful
+    });
+    let mut teardown = Box::pin(watcher.stop_and_wait("test Zoom cleanup"));
+    assert!(
+        futures_lite::future::poll_once(teardown.as_mut())
+            .await
+            .is_none()
+    );
+    requested.await.unwrap();
+    assert!(
+        futures_lite::future::poll_once(teardown.as_mut())
+            .await
+            .is_none()
+    );
+    assert!(events.try_iter().next().is_none());
+
+    release.send(()).unwrap();
+    assert_eq!(teardown.await, StopOutcome::Stopped);
+    assert_eq!(events.try_recv().unwrap().0, ZoomPhase::Cancelled);
+    assert!(events.try_iter().next().is_none());
+}
+
+#[tokio::test]
+async fn ended_worker_without_a_thread_handle_has_idempotent_shutdown_waits() {
+    let (mut environment, _, _, _, _) = environment();
+    environment.gate = None;
+    let mut worker = Worker::spawn_with(environment).unwrap();
+    worker.shutdown_and_wait().await;
+    worker.thread.take().unwrap().join().unwrap();
+    worker.shutdown_and_wait().await;
+    worker.shutdown_and_wait().await;
+}
+
+#[tokio::test]
+async fn missing_cleanup_acknowledgement_remains_subject_to_the_outer_deadline() {
+    let (sender, completion) = watch::channel(WorkerCompletion::Running);
+    drop(sender);
+    let mut cleanup = Box::pin(wait_for_cleanup(completion));
+    assert!(
+        futures_lite::future::poll_once(cleanup.as_mut())
+            .await
+            .is_none()
+    );
+    tokio::time::timeout(Duration::ZERO, cleanup)
+        .await
+        .unwrap_err();
 }

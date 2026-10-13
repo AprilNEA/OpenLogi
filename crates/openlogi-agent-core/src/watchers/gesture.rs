@@ -535,7 +535,7 @@ async fn drain_for_shutdown(
     capture_plans: &watch::Receiver<Arc<Vec<DeviceCapturePlan>>>,
     channels: &SessionChannels,
 ) {
-    state.input_dispatcher.shutdown_zoom();
+    let zoom_cleanup = state.input_dispatcher.shutdown_zoom();
     for session in state
         .slots
         .values_mut()
@@ -578,6 +578,7 @@ async fn drain_for_shutdown(
             state.expedite_pending_restores();
         }
     }
+    zoom_cleanup.await;
 }
 
 /// The gesture manager as the shared loop drives it: many slots, one weak

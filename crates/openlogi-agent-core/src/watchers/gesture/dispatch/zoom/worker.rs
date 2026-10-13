@@ -8,6 +8,8 @@ use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use tokio::sync::watch;
+
 use openlogi_hook::PointerTarget;
 use openlogi_inject::ZoomContext;
 
@@ -17,6 +19,12 @@ use crate::runtime::HidppSessionId;
 
 const CAPACITY: usize = 32;
 const CANCEL_POLL: Duration = Duration::from_millis(25);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WorkerCompletion {
+    Running,
+    Cleaned,
+}
 
 /// Report-time binding snapshot, never resolved again against a later plan.
 pub(in super::super) struct Input {
@@ -135,13 +143,15 @@ impl Environment for NativeEnvironment {
 
 /// The manager's single non-blocking producer. Revocation is out of band, so
 /// cancellation cannot be lost behind a full queue or a blocked context read.
-/// Dropping the owner requests cleanup but never joins on the capture thread.
+/// Normal watcher teardown awaits the cleanup acknowledgement. Drop only
+/// requests cleanup, so input-path cancellation never waits for native I/O.
 pub(in super::super) struct Worker {
     commands: mpsc::SyncSender<Command>,
     leases: HashMap<HidppSessionId, Arc<Lease>>,
     admission: Admission,
     shutdown: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+    completion: watch::Receiver<WorkerCompletion>,
 }
 
 impl Worker {
@@ -156,15 +166,21 @@ impl Worker {
         let (commands, receiver) = mpsc::sync_channel(CAPACITY);
         let shutdown = Arc::new(AtomicBool::new(false));
         let worker_shutdown = Arc::clone(&shutdown);
+        let (completed, completion) = watch::channel(WorkerCompletion::Running);
         let thread = thread::Builder::new()
             .name("openlogi-native-zoom".into())
-            .spawn(move || run(&receiver, &worker_shutdown, &mut environment))?;
+            .spawn(move || {
+                run(&receiver, &worker_shutdown, &mut environment);
+                drop(environment);
+                completed.send_replace(WorkerCompletion::Cleaned);
+            })?;
         Ok(Self {
             commands,
             leases: HashMap::new(),
             admission: Admission::Accepting,
             shutdown,
             thread: Some(thread),
+            completion,
         })
     }
 
@@ -247,6 +263,16 @@ impl Worker {
         self.cancel_all();
     }
 
+    /// Revoke immediately, then return an independent completion wait so the
+    /// manager can restore firmware without borrowing this producer. Repeated
+    /// waits observe the same barrier, even if an earlier wait was dropped.
+    pub(in super::super) fn shutdown_and_wait(
+        &mut self,
+    ) -> impl std::future::Future<Output = ()> + use<> {
+        self.shutdown();
+        wait_for_cleanup(self.completion.clone())
+    }
+
     fn wake(&self) {
         let _ = self.commands.try_send(Command::Wake);
     }
@@ -262,6 +288,19 @@ impl Worker {
             }
             Err(mpsc::TrySendError::Disconnected(_)) => self.shutdown(),
         }
+    }
+}
+
+async fn wait_for_cleanup(mut completion: watch::Receiver<WorkerCompletion>) {
+    if completion
+        .wait_for(|state| *state == WorkerCompletion::Cleaned)
+        .await
+        .is_err()
+    {
+        tracing::warn!("native Zoom worker ended without confirming terminal cleanup");
+        // No independent timeout: replacement cannot report a clean stop, and
+        // the process lifecycle alone bounds an unconfirmed terminal exit.
+        std::future::pending::<()>().await;
     }
 }
 

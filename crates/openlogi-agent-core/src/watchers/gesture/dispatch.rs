@@ -197,13 +197,20 @@ impl InputDispatcher {
         self.wheels.cancel_zoom_session(session);
     }
 
-    pub(super) fn shutdown_zoom(&mut self) {
+    pub(super) fn shutdown_zoom(&mut self) -> impl std::future::Future<Output = ()> + use<> {
         #[cfg(target_os = "macos")]
-        if let Some(zooms) = &mut self.zooms {
-            zooms.shutdown();
-        }
+        let cleanup = self
+            .zooms
+            .as_mut()
+            .map(zoom::worker::Worker::shutdown_and_wait);
         #[cfg(not(target_os = "macos"))]
         self.wheels.clear_zoom();
+        async move {
+            #[cfg(target_os = "macos")]
+            if let Some(cleanup) = cleanup {
+                cleanup.await;
+            }
+        }
     }
 
     /// Route one captured input from `session` to its bound action or
