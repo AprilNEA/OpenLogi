@@ -260,6 +260,43 @@ async fn rgb_per_key_without_an_effect_engine_never_claims() {
 }
 
 #[tokio::test]
+async fn rgb_per_key_retirement_stops_the_frame_between_requests() {
+    for engine in [true, false] {
+        let current = Arc::new(AtomicBool::new(true));
+        let retire = Arc::clone(&current);
+        let respond = partial(false);
+        let (shared, handle) = device(move |request| {
+            if is_paint(request) {
+                retire.store(false, Ordering::Release);
+            }
+            let mut reply = respond(request)?;
+            if !engine && request[2] == 0 && request[3] >> 4 == 0 && request[4..6] == [0x80, 0x71] {
+                reply[4] = 0;
+            }
+            Some(reply)
+        })
+        .await;
+        let error = write()
+            .apply_on(&shared, || false, || current.load(Ordering::Acquire))
+            .await
+            .unwrap_err();
+        assert_eq!(error, WriteError::DeviceNotFound);
+        let reports = handle.written_reports();
+        assert_eq!(reports.iter().filter(|r| is_paint(r)).count(), 1);
+        assert!(
+            !reports.iter().any(|r| is_frame_end(r)),
+            "no request after retirement, engine={engine}"
+        );
+        let claims: &[&[u8]] = if engine { &[&CLAIM] } else { &[] };
+        assert_eq!(
+            control_writes(&reports),
+            claims,
+            "no cleanup through a retired channel"
+        );
+    }
+}
+
+#[tokio::test]
 async fn rgb_partial_engine_without_per_key_falls_back_before_claiming() {
     let respond = partial(false);
     let (shared, handle) = device(move |request| {

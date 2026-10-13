@@ -252,10 +252,13 @@ impl LightingWrite {
             blue: b,
         };
         match engine {
-            None => scope.read(target.paint(index, color)).await.map(|()| None),
+            None => scope
+                .read(target.paint(index, color, scope))
+                .await
+                .map(|()| None),
             Some(engine) => engine
                 .apply_per_key(index, self.color, scope, async || {
-                    target.paint(index, color).await
+                    target.paint(index, color, scope).await
                 })
                 .await
                 .map(Some),
@@ -505,16 +508,26 @@ impl PerKeyV2Target {
         Ok(Self { feature, zones })
     }
 
-    /// Paint every present zone `color`, then commit the frame.
-    async fn paint(&self, index: u8, color: Rgb) -> Result<(), WriteError> {
+    /// Paint every present zone `color`, then commit the frame. `scope` is
+    /// checked before each request, so a retired channel, suspended host I/O,
+    /// cancellation or the deadline stops the frame between requests without
+    /// cutting one off in flight.
+    async fn paint(
+        &self,
+        index: u8,
+        color: Rgb,
+        scope: &WriteScope<impl Fn() -> bool, impl Fn() -> bool>,
+    ) -> Result<(), WriteError> {
         // One request carries at most MAX_SINGLE_VALUE_ZONES ids and silently
         // ignores the rest, so the chunking is the caller's job.
         for chunk in self.zones.chunks(MAX_SINGLE_VALUE_ZONES) {
+            scope.check()?;
             self.feature
                 .set_rgb_zones_single_value(color, chunk)
                 .await
                 .map_err(classify_per_key_v2_error)?;
         }
+        scope.check()?;
         self.feature
             .frame_end(FramePersistence::Volatile, 0, 0)
             .await

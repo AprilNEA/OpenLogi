@@ -282,3 +282,38 @@ fn forced_reapply_requests_coalesce_to_the_larger_budget() {
         );
     }
 }
+
+#[test]
+fn departed_routes_name_routes_their_online_device_left() {
+    let unit = |unit_id, online| AgentDevice {
+        unit_id,
+        ..dev("kb", 1, online)
+    };
+    let route = |slot| DeviceRoute::Bolt {
+        receiver_uid: "AA00".to_string(),
+        slot,
+    };
+    // Steady, and coming online: nothing left.
+    assert!(departed_routes(&[unit([1; 4], true)], &[unit([1; 4], true)]).is_empty());
+    assert!(departed_routes(&[unit([1; 4], false)], &[unit([1; 4], true)]).is_empty());
+    // Offline, removed, re-paired as another unit, or moved slots: left.
+    assert_eq!(
+        departed_routes(&[unit([1; 4], true)], &[unit([1; 4], false)]),
+        [&route(1)]
+    );
+    assert_eq!(departed_routes(&[unit([1; 4], true)], &[]), [&route(1)]);
+    assert_eq!(
+        departed_routes(&[unit([1; 4], true)], &[unit([2; 4], true)]),
+        [&route(1)]
+    );
+    assert_eq!(
+        departed_routes(&[dev("kb", 1, true)], &[dev("kb", 2, true)]),
+        [&route(1)]
+    );
+    // A routeless device has nothing to leave.
+    let routeless = AgentDevice {
+        route: None,
+        ..dev("kb", 1, true)
+    };
+    assert!(departed_routes(&[routeless], &[]).is_empty());
+}
