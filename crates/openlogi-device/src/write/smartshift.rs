@@ -386,6 +386,10 @@ pub async fn toggle_smartshift(
 ///
 /// Retries once on the same transient errors as [`set_smartshift_on_channel`] —
 /// a ModeShift binding can race concurrent HID++ traffic the same way (#485).
+/// The target is decided once, from the first read. A retried write re-sends
+/// it rather than toggling again: the first write may have landed even when
+/// its reply did not confirm it, and a second read-and-flip would turn the
+/// mode back.
 pub(super) async fn toggle_smartshift_on_channel(
     channel: &Arc<HidppChannel>,
     index: u8,
@@ -393,8 +397,28 @@ pub(super) async fn toggle_smartshift_on_channel(
     let mut device = Device::new(Arc::clone(channel), index)
         .await
         .map_err(|_| WriteError::DeviceUnreachable { index })?;
-    match toggle_once(&mut device, index).await {
-        Ok(mode) => Ok(mode),
+    let (smartshift, target) = retry_transient_toggle(index, async || {
+        let smartshift = SmartShift::open(&mut device).await?;
+        let status = smartshift.status().await?;
+        let target = SmartShiftStatus {
+            mode: status.mode.flipped(),
+            tunable_torque: None,
+            ..status
+        };
+        Ok((smartshift, target))
+    })
+    .await?;
+    retry_transient_toggle(index, async || smartshift.set_status(target).await).await?;
+    debug!(index, next = ?target.mode, "wrote SmartShift mode");
+    Ok(target.mode)
+}
+
+/// Run one step of the toggle, and once more after a transient error.
+async fn retry_transient_toggle<T>(
+    index: u8,
+    mut step: impl AsyncFnMut() -> Result<T, WriteError>,
+) -> Result<T, WriteError> {
+    match step().await {
         Err(err) if is_transient_smartshift_error(&err) => {
             debug!(
                 index,
@@ -402,25 +426,10 @@ pub(super) async fn toggle_smartshift_on_channel(
                 "SmartShift toggle hit a transient error; retrying once"
             );
             tokio::time::sleep(TRANSIENT_RETRY_DELAY).await;
-            toggle_once(&mut device, index).await
+            step().await
         }
-        Err(err) => Err(err),
+        result => result,
     }
-}
-
-async fn toggle_once(device: &mut Device, index: u8) -> Result<SmartShiftMode, WriteError> {
-    let smartshift = SmartShift::open(device).await?;
-    let status = smartshift.status().await?;
-    let next = status.mode.flipped();
-    smartshift
-        .set_status(SmartShiftStatus {
-            mode: next,
-            tunable_torque: None,
-            ..status
-        })
-        .await?;
-    debug!(index, ?next, "wrote SmartShift mode");
-    Ok(next)
 }
 
 /// Write a full SmartShift configuration to `route`. The values are volatile

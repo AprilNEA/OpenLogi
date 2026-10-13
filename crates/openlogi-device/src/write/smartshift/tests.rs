@@ -194,6 +194,33 @@ async fn toggle_leaves_the_torque_to_the_device() -> Result<(), WriteError> {
 }
 
 #[tokio::test]
+async fn a_toggle_retry_resends_its_target_instead_of_toggling_back() {
+    // The firmware takes the new mode but settles every write on its own
+    // threshold, so the reply never confirms the 10 the toggle kept.
+    let harness = Harness::new(Wheel {
+        firmware: |w| w.auto_disengage = 20,
+        ..Wheel::new(SmartShiftEnhancedCapabilities::empty(), 50)
+    })
+    .await;
+
+    let result = toggle_smartshift_on(&harness.shared).await;
+
+    assert!(
+        matches!(
+            result,
+            Err(WriteError::UnsupportedResponse {
+                operation: HidppOperation::WriteSmartShift,
+                feature_hex: 0x2111,
+            })
+        ),
+        "unexpected result: {result:?}"
+    );
+    // A re-read after the first write would flip free/20 back to ratchet.
+    assert_eq!(harness.writes(), [[FREE, 10, 0], [FREE, 10, 0]]);
+    assert_eq!(harness.wheel().mode, SmartShiftMode::Free);
+}
+
+#[tokio::test]
 async fn sensitivity_write_leaves_the_torque_to_the_device() -> Result<(), WriteError> {
     let harness = Harness::new(Wheel::new(SmartShiftEnhancedCapabilities::empty(), 50)).await;
     let mut device = Device::new(
