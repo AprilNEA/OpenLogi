@@ -13,10 +13,12 @@ use crate::reprog_controls::{self, ReprogControlsV4};
 use crate::session::capture::open_device;
 use crate::session::capture_restore::{
     ArmedReporting, CaptureError, CaptureSessionFailure, PendingCaptureRestore, ReprogRestore,
-    divert_change,
+    ThumbwheelRestore, divert_change,
 };
 use crate::session::restore::rollback_start;
-use crate::thumbwheel::{self, Thumbwheel, ThumbwheelInfo, WheelDirection, WheelResolution};
+use crate::thumbwheel::{
+    self, ReportingMode, Thumbwheel, ThumbwheelInfo, WheelDirection, WheelResolution,
+};
 use crate::{ChannelRegistry, SharedChannel};
 
 /// The set of controls a session has diverted, kept so they can be handed back
@@ -46,6 +48,7 @@ pub(super) struct ArmedControls {
 pub(super) struct ArmedThumbwheel {
     pub(super) wheel: Thumbwheel,
     info: Option<ThumbwheelInfo>,
+    restore: ThumbwheelRestore,
 }
 
 impl ArmedThumbwheel {
@@ -88,11 +91,7 @@ impl ArmedControls {
         } = self;
         let reprog =
             reprog.and_then(|controls| ReprogRestore::new(controls.feature_index(), reporting));
-        PendingCaptureRestore::new(
-            retired,
-            reprog,
-            thumb.as_ref().map(|thumb| thumb.wheel.feature_index()),
-        )
+        PendingCaptureRestore::new(retired, reprog, thumb.as_ref().map(|thumb| thumb.restore))
     }
 
     /// Reapply volatile diversion after a wireless reconnect broadcast.
@@ -250,9 +249,22 @@ pub(super) async fn arm_controls_into(
         if wheel_info.is_some_and(|info| !info.supports_single_tap) {
             debug!("thumb wheel reports no single tap — click not capturable");
         }
+        // Read before the first divert: teardown hands back the native
+        // inversion found here (see `ThumbwheelRestore::new`).
+        let original = match tw.get_status().await {
+            Ok(status) => Some(status),
+            Err(e) => {
+                warn!(error = ?e, "thumb wheel getStatus failed; restore will use the default sign");
+                None
+            }
+        };
+        if original.is_some_and(|status| status.mode == ReportingMode::Diverted) {
+            debug!("thumb wheel was already diverted before arming");
+        }
         // Store ownership before the write: a transport error cannot prove
         // whether firmware applied diversion, so rollback must cover it too.
         armed.thumb = Some(ArmedThumbwheel {
+            restore: ThumbwheelRestore::new(tw.feature_index(), original),
             wheel: tw,
             info: wheel_info,
         });

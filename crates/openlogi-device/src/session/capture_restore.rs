@@ -13,7 +13,7 @@ use thiserror::Error;
 use super::restore::{PendingRestore, RestoreOutcome, RestorePlan, SessionFailure};
 use crate::backend::BackendError;
 use crate::reprog_controls::{self, ReprogControlsV4};
-use crate::thumbwheel::Thumbwheel;
+use crate::thumbwheel::{self, Thumbwheel, ThumbwheelStatus, WheelDirection};
 use crate::{ChannelRegistry, IoSuspended, SharedChannel};
 
 /// Shared slot holding the active capture session's open channel, so bounded
@@ -111,6 +111,26 @@ impl ReprogRestore {
     }
 }
 
+/// The thumb wheel a capture session diverted, and the native rotation sign
+/// to hand back with native reporting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ThumbwheelRestore {
+    feature_index: u8,
+    native_direction: WheelDirection,
+}
+
+impl ThumbwheelRestore {
+    /// Teardown always selects native reporting, with the sign
+    /// [`thumbwheel::native_direction_to_restore`] derives from the status read
+    /// before arming.
+    pub(crate) fn new(feature_index: u8, original: Option<ThumbwheelStatus>) -> Self {
+        Self {
+            feature_index,
+            native_direction: thumbwheel::native_direction_to_restore(original),
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum CaptureStop {
     /// The owner deliberately requested teardown.
@@ -125,7 +145,7 @@ pub(crate) enum CaptureStop {
 /// One untimed attempt per control; a failed one leaves the whole plan owed.
 pub struct CaptureRestorePlan {
     reprog: Option<ReprogRestore>,
-    thumb_index: Option<u8>,
+    thumb: Option<ThumbwheelRestore>,
 }
 
 impl fmt::Debug for CaptureRestorePlan {
@@ -138,7 +158,7 @@ impl fmt::Debug for CaptureRestorePlan {
                     .as_ref()
                     .map_or(0, |reprog| reprog.controls.len()),
             )
-            .field("has_thumbwheel", &self.thumb_index.is_some())
+            .field("has_thumbwheel", &self.thumb.is_some())
             .finish()
     }
 }
@@ -155,9 +175,12 @@ impl RestorePlan for CaptureRestorePlan {
                 restored &= restore_reporting(&controls, reporting, "captured control").await;
             }
         }
-        if let Some(feature_index) = self.thumb_index {
-            let thumbwheel = Thumbwheel::new(channel, device_index, feature_index);
-            restored &= restore_result(thumbwheel.undivert().await, "thumb wheel");
+        if let Some(thumb) = self.thumb {
+            let thumbwheel = Thumbwheel::new(channel, device_index, thumb.feature_index);
+            restored &= restore_result(
+                thumbwheel.undivert(thumb.native_direction).await,
+                "thumb wheel",
+            );
         }
         restored
     }
@@ -180,18 +203,12 @@ impl PendingCaptureRestore {
     pub(crate) fn new(
         retired: &SharedChannel,
         reprog: Option<ReprogRestore>,
-        thumb_index: Option<u8>,
+        thumb: Option<ThumbwheelRestore>,
     ) -> Option<Self> {
-        if reprog.is_none() && thumb_index.is_none() {
+        if reprog.is_none() && thumb.is_none() {
             return None;
         }
-        Some(Self::owing(
-            retired,
-            CaptureRestorePlan {
-                reprog,
-                thumb_index,
-            },
-        ))
+        Some(Self::owing(retired, CaptureRestorePlan { reprog, thumb }))
     }
 }
 
