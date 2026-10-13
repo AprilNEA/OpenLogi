@@ -248,6 +248,9 @@ fn quick_tap_is_a_click_even_while_the_cursor_moves() {
     let mut acc = CaptureAccum::default();
 
     handle_reprog(&mut acc, press(), GESTURE, &[], &[], &tx);
+    // Past the stale report, so the travel below reaches the accumulator and
+    // only the hold-time gate stands between it and a swipe.
+    stale_report(&mut acc, &tx);
     handle_reprog(
         &mut acc,
         RawControlEvent::RawXy { dx: 120, dy: 5 },
