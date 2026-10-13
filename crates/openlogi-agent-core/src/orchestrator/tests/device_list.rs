@@ -87,6 +87,128 @@ fn bolt_inventory(unit_id: [u8; 4]) -> DeviceInventory {
     }
 }
 
+fn easyswitch_bolt_inventory(
+    serial: Option<&str>,
+    unit_id: [u8; 4],
+    online_slot: Option<u8>,
+) -> DeviceInventory {
+    DeviceInventory {
+        receiver: ReceiverInfo {
+            name: "Bolt Receiver".to_string(),
+            vendor_id: 0x046d,
+            product_id: 0xc548,
+            unique_id: Some("82839805".to_string()),
+        },
+        paired: (1..=3)
+            .map(|slot| PairedDevice {
+                slot,
+                codename: Some("MX Master 3S".to_string()),
+                wpid: None,
+                kind: DeviceKind::Mouse,
+                online: online_slot == Some(slot),
+                battery: None,
+                model_info: Some(DeviceModelInfo {
+                    entity_count: 1,
+                    serial_number: serial.map(str::to_string),
+                    unit_id,
+                    transports: DeviceTransports::default(),
+                    model_ids: [0xb034, 0, 0],
+                    extended_model_id: 2,
+                }),
+                capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn build_devices_folds_easyswitch_slots_to_the_online_device() {
+    let devices = build_devices(
+        &Config::default(),
+        &[easyswitch_bolt_inventory(
+            Some("2412LZ51UZH8"),
+            [0x6b, 0xe9, 0xd3, 0x00],
+            Some(2),
+        )],
+        &[],
+    );
+    assert_eq!(devices.len(), 1);
+    assert_eq!(devices[0].config_key, "serial:2412lz51uzh8");
+    assert!(devices[0].online);
+    assert_eq!(devices[0].slot, 2);
+}
+
+#[test]
+fn build_devices_folds_all_offline_easyswitch_slots_to_lowest_slot() {
+    let devices = build_devices(
+        &Config::default(),
+        &[easyswitch_bolt_inventory(
+            Some("2412LZ51UZH8"),
+            [0x6b, 0xe9, 0xd3, 0x00],
+            None,
+        )],
+        &[],
+    );
+    assert_eq!(devices.len(), 1);
+    assert!(!devices[0].online);
+    assert_eq!(devices[0].slot, 1);
+}
+
+#[test]
+fn build_devices_all_offline_easyswitch_prefers_linked_route() {
+    let mut config = Config::default();
+    let mut device = DeviceConfig::default();
+    device.links.insert(
+        "receiver:82839805:slot:3".to_string(),
+        LinkConfig::default(),
+    );
+    config
+        .devices
+        .insert("serial:2412lz51uzh8".to_string(), device);
+
+    let devices = build_devices(
+        &config,
+        &[easyswitch_bolt_inventory(
+            Some("2412LZ51UZH8"),
+            [0x6b, 0xe9, 0xd3, 0x00],
+            None,
+        )],
+        &[],
+    );
+    assert_eq!(devices.len(), 1);
+    assert_eq!(devices[0].slot, 3);
+}
+
+#[test]
+fn build_devices_keeps_easyswitch_slots_with_different_serials() {
+    let mut inventory = easyswitch_bolt_inventory(Some("AAAA"), [1, 0, 0, 0], Some(1));
+    inventory.paired[1]
+        .model_info
+        .as_mut()
+        .unwrap()
+        .serial_number = Some("BBBB".into());
+    inventory.paired[1].model_info.as_mut().unwrap().unit_id = [2, 0, 0, 0];
+    inventory.paired[2]
+        .model_info
+        .as_mut()
+        .unwrap()
+        .serial_number = Some("CCCC".into());
+    inventory.paired[2].model_info.as_mut().unwrap().unit_id = [3, 0, 0, 0];
+
+    let devices = build_devices(&Config::default(), &[inventory], &[]);
+    assert_eq!(devices.len(), 3);
+}
+
+#[test]
+fn build_devices_keeps_zero_unit_offline_bolt_slots_route_keyed() {
+    let devices = build_devices(
+        &Config::default(),
+        &[easyswitch_bolt_inventory(None, [0; 4], None)],
+        &[],
+    );
+    assert_eq!(devices.len(), 3);
+}
+
 #[test]
 fn build_devices_still_finds_settings_left_under_a_pre_upgrade_receiver_key() {
     // The agent autostarts at login and never adopts a route — only the GUI

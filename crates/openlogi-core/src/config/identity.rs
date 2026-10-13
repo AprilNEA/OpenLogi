@@ -2,8 +2,11 @@
 //!
 //! A device's entry is keyed by what it *is* — its unit id or serial — so
 //! settings follow the device when it moves between a receiver and a cable.
-//! When the device is asleep its identity is unreadable and only the route is
-//! known, so the entry's `links` table doubles as a route index.
+//! When a probe reports no physical identity (empty serial / all-zero unit),
+//! only the route is known and the entry's `links` table doubles as a route
+//! index. Offline Easy-Switch siblings often still carry a cached identity;
+//! callers should pass [`crate::device_order::DeviceIdentity::resolve_hint`]
+//! so those siblings share one config key (#1560).
 
 #[cfg(test)]
 use crate::binding::{Action, ButtonId};
