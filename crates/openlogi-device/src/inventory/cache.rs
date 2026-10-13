@@ -71,9 +71,9 @@ pub(super) struct Cached {
 ///
 /// A *frozen* pre-charge value, not a live charging %, because none of these
 /// sources exposes one. Cold edge: a device first seen while already charging
-/// has no prior. `0x1000` then shows its own 0%, and a voltage source reports
-/// the same 0% with an unknown level, the "charging, no reading" state, until
-/// the first discharge read.
+/// has no prior. `0x1000` and a voltage source then both report 0% with an
+/// unknown level, the "charging, no reading" state, until the first discharge
+/// read.
 fn hold_percentage_while_charging(
     fresh: BatteryInfo,
     prev: Option<&BatteryInfo>,

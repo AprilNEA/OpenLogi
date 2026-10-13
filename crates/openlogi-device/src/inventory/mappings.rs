@@ -11,7 +11,7 @@ use hidpp::feature::unified_battery::{
 };
 use hidpp::receiver::bolt::DeviceKind as BoltDeviceKind;
 use hidpp::receiver::unifying::DeviceKind as UnifyingDeviceKind;
-use openlogi_core::device::{BatteryLevel, BatteryStatus, DeviceKind};
+use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus, DeviceKind};
 
 /// Trim NUL padding and whitespace from a `DeviceInformation` serial; an
 /// all-padding serial collapses to `None`.
@@ -211,6 +211,40 @@ pub(crate) fn voltage_battery_percentage(voltage_mv: u16) -> u8 {
     }
     // Below the curve's floor: empty.
     0
+}
+
+/// Build a [`BatteryInfo`] from a legacy `0x1000` reading.
+///
+/// The discharge level is a reading only while the device runs on battery.
+/// In every other state the firmware reports `0`, meaning unknown. That is
+/// how the Linux HID++ driver reads the feature
+/// (`hidpp20_batterylevel_map_status_capacity`), and it sets charge complete
+/// to 100 %. Here charge complete reads 100 % / [`BatteryLevel::Full`]. Any
+/// other off-battery state that reports `0` keeps the `0` but gets a
+/// [`BatteryLevel::Unknown`] level: the "charging, no reading" shape a voltage
+/// source gives on a cold start, rather than a critically empty battery.
+pub(crate) fn legacy_battery_info(
+    discharge_level: u8,
+    status: HidppLegacyBatteryStatus,
+) -> BatteryInfo {
+    let status = map_legacy_battery_status(status);
+    let (percentage, level) = match status {
+        BatteryStatus::Full => (100, BatteryLevel::Full),
+        BatteryStatus::Discharging => (
+            discharge_level,
+            legacy_battery_level_from_percentage(discharge_level),
+        ),
+        _ if discharge_level == 0 => (0, BatteryLevel::Unknown),
+        _ => (
+            discharge_level,
+            legacy_battery_level_from_percentage(discharge_level),
+        ),
+    };
+    BatteryInfo {
+        percentage,
+        level,
+        status,
+    }
 }
 
 /// Derive a coarse [`BatteryLevel`] from a discharge percentage. The legacy

@@ -47,6 +47,10 @@ impl BatteryStatusFeature {
 pub struct LegacyBatteryInfo {
     /// Current battery charge as a percentage (`0`–`100`). Logitech firmware
     /// reports this in coarse steps rather than a continuous value.
+    ///
+    /// A reading only while [`status`](Self::status) is
+    /// [`LegacyBatteryStatus::Discharging`]. In every other state the firmware
+    /// reports `0`, meaning unknown, as the Linux HID++ driver reads it.
     pub discharge_level: u8,
 
     /// The next lower discharge step the firmware will report — a hint at the

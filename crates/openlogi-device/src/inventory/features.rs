@@ -26,8 +26,8 @@ use crate::reprog_controls::DPI_MODE_SHIFT_CIDS;
 
 use super::events::{EventFeatureIndices, EventSubscriptionHandle};
 use super::mappings::{
-    legacy_battery_level_from_percentage, map_adc_battery_status, map_battery_level,
-    map_battery_status, map_device_type, map_legacy_battery_status, map_voltage_battery_status,
+    legacy_battery_info, legacy_battery_level_from_percentage, map_adc_battery_status,
+    map_battery_level, map_battery_status, map_device_type, map_voltage_battery_status,
     normalize_serial_number, voltage_battery_percentage,
 };
 
@@ -123,11 +123,7 @@ pub(super) async fn read_battery(
                 .get_battery_level_status()
                 .await
                 .ok()
-                .map(|info| BatteryInfo {
-                    percentage: info.discharge_level,
-                    level: legacy_battery_level_from_percentage(info.discharge_level),
-                    status: map_legacy_battery_status(info.status),
-                })
+                .map(|info| legacy_battery_info(info.discharge_level, info.status))
         }
         BatteryProbe::Voltage(feature_index) => {
             let feature = BatteryVoltageFeature::new(Arc::clone(channel), slot, feature_index);
@@ -399,7 +395,7 @@ mod tests {
         unified_battery::UnifiedBatteryFeature,
     };
 
-    use openlogi_core::device::{BatteryLevel, BatteryStatus};
+    use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus};
 
     use super::{
         BatteryProbe, BatteryRead, ProbedFeatures, battery_feature_index, probe_features,
@@ -591,6 +587,56 @@ mod tests {
             adc_battery([0x08, 0, 0], true).await,
             BatteryRead::Unavailable
         );
+    }
+
+    /// Reads the battery through a scripted `0x1000` at feature index 2 whose
+    /// `getBatteryLevelStatus` answers `[discharge_level, next_level, status]`.
+    async fn legacy_battery(wire: [u8; 3]) -> BatteryInfo {
+        let (raw, _) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+            assert_eq!(
+                (request[2], request[3] >> 4),
+                (2, 0),
+                "unexpected request: {request:02x?}"
+            );
+            let mut response = vec![0; 20];
+            response[..4].copy_from_slice(&request[..4]);
+            response[0] = 0x11;
+            response[4..7].copy_from_slice(&wire);
+            Some(response)
+        });
+        let channel = scripted_channel(raw).await;
+        let BatteryRead::Reading(battery) =
+            read_battery(&channel, 0xff, BatteryProbe::Legacy(2)).await
+        else {
+            panic!("expected a reading");
+        };
+        battery
+    }
+
+    #[tokio::test]
+    async fn legacy_battery_reads_the_level_while_discharging() {
+        let battery = legacy_battery([50, 20, 0]).await;
+        assert_eq!(battery.percentage, 50);
+        assert_eq!(battery.level, BatteryLevel::Good);
+        assert_eq!(battery.status, BatteryStatus::Discharging);
+    }
+
+    #[tokio::test]
+    async fn legacy_charge_complete_reads_full_not_the_unknown_zero() {
+        // Off battery the firmware reports level 0, meaning unknown.
+        let battery = legacy_battery([0, 0, 3]).await;
+        assert_eq!(battery.percentage, 100);
+        assert_eq!(battery.level, BatteryLevel::Full);
+        assert_eq!(battery.status, BatteryStatus::Full);
+    }
+
+    #[tokio::test]
+    async fn legacy_charging_zero_is_no_reading_not_critical() {
+        for status in [1, 2, 4] {
+            let battery = legacy_battery([0, 0, status]).await;
+            assert_eq!(battery.percentage, 0, "status {status}");
+            assert_eq!(battery.level, BatteryLevel::Unknown, "status {status}");
+        }
     }
 
     #[test]
