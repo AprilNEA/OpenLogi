@@ -67,7 +67,7 @@ stdout cannot provide a JSON envelope.
 | `status` | `agent_version`, `inventory`, `accessibility_granted`, `input_monitoring_granted`, `hook_installed`, `hid_open_failures`, `launch_at_login` |
 | `devices` | `inventory`, `devices`: array of `id`, `name`, `kind`, `online`, `battery`, `capabilities`, `light_capabilities` |
 | `dpi` | `device`, `persistence`, `current` (integer), `supported` (array of integers) |
-| `smartshift` | `device`, `persistence`, `mode` (`free` or `ratchet`), `auto_disengage` (integer), `tunable_torque` (integer or null) |
+| `smartshift` | `device`, `persistence`, `mode` (`free` or `ratchet`), `auto_disengage` (integer), `tunable_torque` (1–100, percent of the wheel's maximum force, or null) |
 | `fn-lock` | `device`, `persistence`, `fn_lock`, `default_fn_lock` |
 
 `inventory` is `scanning`, `ready`, or `unavailable`. Only `ready` with an empty

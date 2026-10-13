@@ -284,3 +284,37 @@ async fn reapply_fails_without_writing_when_capabilities_cannot_be_read() {
     assert!(harness.writes().is_empty());
     assert_eq!(harness.wheel().torque, 75);
 }
+
+#[tokio::test]
+async fn status_read_reports_a_zero_torque_byte_as_absent() -> Result<(), WriteError> {
+    let harness = Harness::new(Wheel::new(SmartShiftEnhancedCapabilities::empty(), 0)).await;
+
+    let status = get_smartshift_status_on(&harness.shared).await?;
+
+    assert_eq!(status.tunable_torque, None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn status_read_rejects_a_torque_above_one_hundred_percent() {
+    let harness = Harness::new(Wheel::new(
+        SmartShiftEnhancedCapabilities::TUNABLE_TORQUE,
+        200,
+    ))
+    .await;
+
+    let err = get_smartshift_status_on(&harness.shared)
+        .await
+        .expect_err("an undefined torque level must not be dropped silently");
+
+    assert!(
+        matches!(
+            err,
+            WriteError::UnsupportedResponse {
+                operation: HidppOperation::ReadSmartShift,
+                feature_hex: 0x2111,
+            }
+        ),
+        "unexpected error: {err:?}"
+    );
+}

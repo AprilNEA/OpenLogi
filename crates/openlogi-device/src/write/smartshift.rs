@@ -80,6 +80,21 @@ fn decode_auto_disengage(
     })
 }
 
+/// Decode the `0x2111` status reply's torque byte: `0` carries no torque
+/// level, `1..=100` is a percentage of the maximum force, and anything above
+/// is not a level the firmware defines.
+fn decode_tunable_torque(value: u8) -> Result<Option<TunableTorque>, WriteError> {
+    if value == 0 {
+        return Ok(None);
+    }
+    TunableTorque::try_from(value)
+        .map(Some)
+        .map_err(|_| WriteError::UnsupportedResponse {
+            operation: HidppOperation::ReadSmartShift,
+            feature_hex: SmartShiftEnhancedFeature::ID,
+        })
+}
+
 /// Map the fork's `0x2110` [`WheelMode`] onto OpenLogi's [`SmartShiftMode`].
 /// A future `#[non_exhaustive]` variant maps to [`SmartShiftMode::Ratchet`],
 /// the "safe" clicky default OpenLogi uses elsewhere. (Reserved wire bytes
@@ -154,7 +169,7 @@ impl SmartShift {
                         status.auto_disengage,
                         SmartShiftEnhancedFeature::ID,
                     )?,
-                    tunable_torque: TunableTorque::try_from(status.current_tunable_torque).ok(),
+                    tunable_torque: decode_tunable_torque(status.current_tunable_torque)?,
                 })
             }
             Self::Legacy(feature) => {
