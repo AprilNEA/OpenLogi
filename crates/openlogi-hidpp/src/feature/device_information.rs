@@ -1,7 +1,10 @@
 //! Implements the `DeviceInformation` feature (ID `0x0003`) that provides some
 //! general information about the device.
 
-use num_enum::{IntoPrimitive, TryFromPrimitive};
+#[cfg(test)]
+mod tests;
+
+use num_enum::{FromPrimitive, IntoPrimitive};
 use openlogi_hidpp_derive::Feature;
 
 use crate::{feature::FeatureEndpoint, nibble::U4, protocol::v20::Hidpp20Error};
@@ -62,26 +65,7 @@ impl DeviceInformationFeature {
             .call(1, [entity_index, 0x00, 0x00])
             .await?
             .extend_payload();
-
-        Ok(DeviceEntityFirmwareInfo {
-            entity_type: DeviceEntityType::try_from(payload[0])
-                .map_err(|_| Hidpp20Error::UnsupportedResponse)?,
-            firmware_prefix: String::from_utf8(payload[1..=3].to_vec())
-                .map_err(|_| Hidpp20Error::UnsupportedResponse)?,
-            firmware_number: packed_bcd_u8(payload[4]).ok_or(Hidpp20Error::UnsupportedResponse)?,
-            revision: packed_bcd_u8(payload[5]).ok_or(Hidpp20Error::UnsupportedResponse)?,
-            build: packed_bcd_u16(u16::from_be_bytes([payload[6], payload[7]]))
-                .ok_or(Hidpp20Error::UnsupportedResponse)?,
-            active: payload[8] & 1 != 0,
-            transport_pid: u16::from_be_bytes([payload[9], payload[10]]),
-            extra_version: [
-                payload[11],
-                payload[12],
-                payload[13],
-                payload[14],
-                payload[15],
-            ],
-        })
+        DeviceEntityFirmwareInfo::from_payload(&payload)
     }
 
     /// Retrieves the serial number of the device.
@@ -240,8 +224,35 @@ pub struct DeviceEntityFirmwareInfo {
     pub extra_version: [u8; 5],
 }
 
+impl DeviceEntityFirmwareInfo {
+    fn from_payload(payload: &[u8; 16]) -> Result<Self, Hidpp20Error> {
+        Ok(Self {
+            entity_type: DeviceEntityType::from(payload[0]),
+            firmware_prefix: String::from_utf8(payload[1..=3].to_vec())
+                .map_err(|_| Hidpp20Error::UnsupportedResponse)?,
+            firmware_number: packed_bcd_u8(payload[4]).ok_or(Hidpp20Error::UnsupportedResponse)?,
+            revision: packed_bcd_u8(payload[5]).ok_or(Hidpp20Error::UnsupportedResponse)?,
+            build: packed_bcd_u16(u16::from_be_bytes([payload[6], payload[7]]))
+                .ok_or(Hidpp20Error::UnsupportedResponse)?,
+            active: payload[8] & 1 != 0,
+            transport_pid: u16::from_be_bytes([payload[9], payload[10]]),
+            extra_version: [
+                payload[11],
+                payload[12],
+                payload[13],
+                payload[14],
+                payload[15],
+            ],
+        })
+    }
+}
+
 /// Represents the type of a device entity.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, IntoPrimitive, TryFromPrimitive)]
+///
+/// Logitech's 2012 HID++ 2.0 draft defines 0 to 2 and groups 3 to 15 as
+/// "other". This crate names the types it knows; any other value decodes as
+/// [`Self::Other`] instead of failing the whole entity.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, IntoPrimitive, FromPrimitive)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 #[repr(u8)]
@@ -266,4 +277,7 @@ pub enum DeviceEntityType {
     RgbCustomEffect = 8,
     /// Motor drive entity.
     MotorDrive = 9,
+    /// An entity type without a name here, holding the type byte as reported.
+    #[num_enum(catch_all)]
+    Other(u8),
 }
