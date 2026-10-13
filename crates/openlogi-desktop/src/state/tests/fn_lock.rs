@@ -109,7 +109,7 @@ fn the_keyboards_answer_repaints_the_device_tab_either_way() {
     let key = state.current_record().expect("keyboard").device_key();
     let echoed = FnLockState {
         fn_lock: true,
-        default_fn_lock: false,
+        default_fn_lock: Some(false),
     };
 
     assert_eq!(

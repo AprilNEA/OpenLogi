@@ -194,12 +194,75 @@ impl FnInversionWithDefaultStateFeature {
     }
 }
 
+/// Implements the original `FnInversion` / `0x40a0`.
+///
+/// The oldest of the three Fn-inversion features: one global state, with no
+/// default state and no host slots. This layout is reverse-engineered from
+/// Logi Options+ 2.8 (`devio::Feature40A0FnInversion`), not read from a spec:
+/// function 0 answers the state in the low nibble of byte 0, and function 1
+/// takes the state as its only argument byte and answers no state.
+#[derive(Clone, Feature)]
+#[creatable(id = 0x40a0, version = 0)]
+pub struct FnInversionFeature {
+    /// The endpoint this feature talks to.
+    endpoint: FeatureEndpoint,
+}
+
+impl FnInversionFeature {
+    /// Retrieves the global Fn inversion state.
+    ///
+    /// Only the low nibble of byte 0 is the state; Options+ masks off the
+    /// rest the same way. A low nibble other than 0 or 1 is refused, where
+    /// Options+ would read it as off.
+    pub async fn get_global_fn_inversion(&self) -> Result<FnInversionState, Hidpp20Error> {
+        let payload = self.endpoint.call(0, [0; 3]).await?.extend_payload();
+        legacy_fn_inversion_state(payload[0])
+    }
+
+    /// Sets the global Fn inversion state.
+    ///
+    /// The reply carries no state, so a caller that needs to know what the
+    /// keyboard stored reads it back with [`Self::get_global_fn_inversion`].
+    pub async fn set_global_fn_inversion(
+        &self,
+        state: FnInversionState,
+    ) -> Result<(), Hidpp20Error> {
+        self.endpoint.call(1, [u8::from(state), 0, 0]).await?;
+        Ok(())
+    }
+}
+
+/// The `0x40a0` state in the low nibble of `byte`.
+fn legacy_fn_inversion_state(byte: u8) -> Result<FnInversionState, Hidpp20Error> {
+    FnInversionState::try_from(byte & 0x0f).map_err(|_| Hidpp20Error::UnsupportedResponse)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        FnInversionInfo, FnInversionState, GlobalFnInversion, set_multi_host_fn_inversion_args,
+        FnInversionInfo, FnInversionState, GlobalFnInversion, legacy_fn_inversion_state,
+        set_multi_host_fn_inversion_args,
     };
-    use crate::feature::hosts_info::HostIndex;
+    use crate::{feature::hosts_info::HostIndex, protocol::v20::Hidpp20Error};
+
+    #[test]
+    fn legacy_state_is_the_low_nibble_of_byte_zero() {
+        use std::assert_matches;
+
+        assert_matches!(legacy_fn_inversion_state(0x00), Ok(FnInversionState::Off));
+        assert_matches!(legacy_fn_inversion_state(0x01), Ok(FnInversionState::On));
+        // The high nibble is not the state; Options+ masks it off too.
+        assert_matches!(legacy_fn_inversion_state(0xf0), Ok(FnInversionState::Off));
+        assert_matches!(legacy_fn_inversion_state(0x31), Ok(FnInversionState::On));
+        // An undefined state is an error, not "off".
+        for byte in [0x02, 0x0f, 0xf2] {
+            assert_matches!(
+                legacy_fn_inversion_state(byte),
+                Err(Hidpp20Error::UnsupportedResponse),
+                "byte {byte:#04x}"
+            );
+        }
+    }
 
     #[test]
     fn parses_fn_inversion_info() {

@@ -988,7 +988,7 @@ async fn fn_lock_addresses_the_current_host_slot_read_from_hosts_info() -> Resul
         state,
         FnLockState {
             fn_lock: false,
-            default_fn_lock: false,
+            default_fn_lock: Some(false),
         }
     );
     let get = handle
@@ -1079,6 +1079,101 @@ async fn fn_lock_write_does_not_guess_the_host_when_hosts_info_is_unreadable() {
         .await
         .expect("a read addresses the current host directly");
     assert!(!state.fn_lock);
+}
+
+/// A keyboard with only the original `0x40a0` (at index 0x0c), whose state
+/// reads as inversion OFF. Its `set` answers no state, as Options+ expects.
+fn legacy_keyboard_response(request: &[u8]) -> Option<Vec<u8>> {
+    if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
+        return None;
+    }
+    let feature_index = request[2];
+    let function = request[3] >> 4;
+    let mut payload = [0u8; 3];
+    match (feature_index, function) {
+        (0x00, 0x01) => payload[0] = 4,
+        (0x00, 0x00) => {
+            let feature_id = u16::from_be_bytes([request[4], request[5]]);
+            payload[0] = u8::from(feature_id == 0x40a0) * 0x0c;
+        }
+        // getGlobalFnInversion: inversion OFF in the low nibble; the high
+        // nibble is not the state.
+        (0x0c, 0x00) => payload[0] = 0x50,
+        (0x0c, 0x01) => {}
+        _ => return None,
+    }
+    let mut response = vec![0u8; 7];
+    response[0] = 0x10;
+    response[1..4].copy_from_slice(&request[1..4]);
+    response[4..].copy_from_slice(&payload);
+    Some(response)
+}
+
+#[tokio::test]
+async fn fn_lock_on_a_legacy_keyboard_uses_0x40a0_and_reads_back_its_writes() {
+    let (raw, handle) = ScriptedRawHidChannel::with_responder(legacy_keyboard_response);
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(
+        channel,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc31c,
+        },
+    );
+    let calls = |function: u8| {
+        handle
+            .written_reports()
+            .into_iter()
+            .filter(|report| report[2] == 0x0c && report[3] >> 4 == function)
+            .count()
+    };
+
+    // Inversion OFF reads as Fn-lock on; 0x40a0 has no default to report.
+    let state = get_fn_lock_on(&shared)
+        .await
+        .expect("0x40a0 is the last fallback");
+    assert_eq!(
+        state,
+        FnLockState {
+            fn_lock: true,
+            default_fn_lock: None,
+        }
+    );
+    assert_eq!((calls(0), calls(1)), (1, 0));
+
+    // Its reply carries no state, so the write is confirmed by a read.
+    let written = set_fn_lock_on(&shared, true)
+        .await
+        .expect("the keyboard reads back what was written");
+    assert_eq!(written, state);
+    assert_eq!((calls(0), calls(1)), (2, 1));
+    let set = handle
+        .written_reports()
+        .into_iter()
+        .find(|report| report[2] == 0x0c && report[3] >> 4 == 0x01)
+        .expect("a setGlobalFnInversion write");
+    // Fn-lock on is inversion OFF (0), the only argument byte.
+    assert_eq!(&set[4..7], &[0, 0, 0]);
+
+    // A keyboard that reads back the old state did not take the write.
+    let error = set_fn_lock_on(&shared, false)
+        .await
+        .expect_err("a read-back that disagrees with the write is not a success");
+    assert_eq!(
+        error,
+        WriteError::UnsupportedResponse {
+            operation: HidppOperation::WriteFnLock,
+            feature_hex: 0x40a0,
+        }
+    );
+    let sets: Vec<_> = handle
+        .written_reports()
+        .into_iter()
+        .filter(|report| report[2] == 0x0c && report[3] >> 4 == 0x01)
+        .collect();
+    assert_eq!(sets.len(), 2);
+    assert_eq!(sets[1][4], 1, "Fn-lock off is inversion ON");
+    assert_eq!(calls(0), 3);
 }
 
 /// A single-host keyboard (`0x40a2` only) whose firmware echoes inversion ON

@@ -134,8 +134,9 @@ pub struct Capabilities {
     /// both diversion and raw-XY reporting for hold-and-swipe gestures.
     #[serde(default)]
     pub dpi_gestures: bool,
-    /// Keyboard Fn-lock can be read and written — HID++ `0x40a2` or `0x40a3`
-    /// fn inversion. Appended: crosses the IPC and the persisted identity.
+    /// Keyboard Fn-lock can be read and written — HID++ `0x40a0`, `0x40a2` or
+    /// `0x40a3` fn inversion. Appended: crosses the IPC and the persisted
+    /// identity.
     #[serde(default)]
     pub fn_lock: bool,
 }
@@ -161,7 +162,7 @@ impl Capabilities {
             haptic_feedback: ids.contains(&0x19b0),
             haptic_panel: false,
             dpi_gestures: false,
-            fn_lock: ids.contains(&0x40a2) || ids.contains(&0x40a3),
+            fn_lock: ids.contains(&0x40a0) || ids.contains(&0x40a2) || ids.contains(&0x40a3),
         }
     }
 
@@ -699,9 +700,10 @@ mod tests {
         }
         // Backlight (0x198x) stays out — the panel cannot drive it.
         assert!(!Capabilities::from_feature_ids(&[0x0001, 0x1982]).lighting);
-        // Either fn-inversion feature gives the keyboard an Fn-lock control.
+        // Any fn-inversion feature gives the keyboard an Fn-lock control.
         assert!(Capabilities::from_feature_ids(&[0x0001, 0x40a3]).fn_lock);
         assert!(Capabilities::from_feature_ids(&[0x0001, 0x40a2]).fn_lock);
+        assert!(Capabilities::from_feature_ids(&[0x0001, 0x40a0]).fn_lock);
         assert!(!Capabilities::from_feature_ids(&[0x0001, 0x1982]).fn_lock);
     }
 

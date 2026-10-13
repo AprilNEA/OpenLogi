@@ -635,9 +635,15 @@ fn semantic_read_payloads() {
 
     let fn_lock: Result<FnLockState, WriteError> = Ok(FnLockState {
         fn_lock: true,
-        default_fn_lock: false,
+        default_fn_lock: Some(false),
     });
-    assert_wire(&fn_lock, "000100");
+    assert_wire(&fn_lock, "00010100");
+    // A `0x40a0` keyboard reports no default.
+    let legacy: Result<FnLockState, WriteError> = Ok(FnLockState {
+        fn_lock: true,
+        default_fn_lock: None,
+    });
+    assert_wire(&legacy, "000100");
 }
 
 #[test]

@@ -77,7 +77,9 @@ pub use succession::Identity;
 ///      `BatteryInfo::percentage` became `Option<u8>` — `None` when the
 ///      device reports only a level (a `0x1004` without the state-of-charge
 ///      capability) or has no reading yet; `PairedDevice::settings_revision`
-///      appended — it moves when the device reports a setting changed on it.
+///      appended — it moves when the device reports a setting changed on it;
+///      `FnLockState::default_fn_lock` became `Option<bool>` — `None` for a
+///      `0x40a0` keyboard, which reports no default.
 pub const PROTOCOL_VERSION: u32 = 36;
 
 /// Environment variable through which the agent hands a supervised helper the

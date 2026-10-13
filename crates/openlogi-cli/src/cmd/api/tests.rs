@@ -455,7 +455,7 @@ async fn read_only_settings_never_send_writes() {
             assert!(matches!(request, AgentRequest::ReadFnLock { .. }));
             AgentResponse::ReadFnLock(Ok(FnLockState {
                 fn_lock: false,
-                default_fn_lock: true,
+                default_fn_lock: Some(true),
             }))
         })],
     )
@@ -511,7 +511,7 @@ async fn fn_lock_uses_explicit_state_and_returns_firmware_echo() {
                 assert_eq!(fn_lock, enabled);
                 AgentResponse::SetFnLock(Ok(FnLockState {
                     fn_lock: observed,
-                    default_fn_lock: false,
+                    default_fn_lock: Some(false),
                 }))
             })],
         )

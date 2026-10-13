@@ -92,7 +92,7 @@ impl AppState {
             FnLockLoad::Unknown
             | FnLockLoad::Loading
             | FnLockLoad::Failed(_)
-            | FnLockLoad::Unsupported(_) => false,
+            | FnLockLoad::Unsupported(_) => None,
         };
         self.pointer.reads.set_fn_lock_ready(
             &device_key,

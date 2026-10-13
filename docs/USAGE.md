@@ -68,7 +68,7 @@ stdout cannot provide a JSON envelope.
 | `devices` | `inventory`, `devices`: array of `id`, `name`, `kind`, `online`, `battery`, `capabilities`, `light_capabilities` |
 | `dpi` | `device`, `persistence`, `current` (integer), `supported` (array of integers) |
 | `smartshift` | `device`, `persistence`, `mode` (`free` or `ratchet`), `auto_disengage` (integer), `tunable_torque` (1–100, percent of the wheel's maximum force, or null) |
-| `fn-lock` | `device`, `persistence`, `fn_lock`, `default_fn_lock` |
+| `fn-lock` | `device`, `persistence`, `fn_lock`, `default_fn_lock` (boolean, or null when the keyboard reports no firmware default) |
 
 `inventory` is `scanning`, `ready`, or `unavailable`. Only `ready` with an empty
 device array means enumeration completed and found no peripherals. Device
