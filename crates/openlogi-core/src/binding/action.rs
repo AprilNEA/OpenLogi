@@ -200,7 +200,9 @@ pub enum Action {
     ///
     /// Lifecycle-aware runtimes emit the modifier down edges plus one tap of
     /// the ordinary key when the press starts, and the modifier up edges for
-    /// every terminal outcome. Dispatchers without a release context degrade
+    /// every terminal outcome. The tap is skipped while another held chord
+    /// keeps that same key down, so the other hold is never released early.
+    /// Dispatchers without a release context degrade
     /// this to a balanced tap of the whole chord, exactly as they do for
     /// [`Action::HoldShortcut`].
     TapKeyHoldingModifiers(KeyCombo),
@@ -216,7 +218,8 @@ pub enum HeldKeys {
     /// ([`Action::HoldShortcut`]).
     WholeChord,
     /// The modifiers stay down and the ordinary key is tapped once as the
-    /// hold starts ([`Action::TapKeyHoldingModifiers`]).
+    /// hold starts, unless another hold already keeps that key down
+    /// ([`Action::TapKeyHoldingModifiers`]).
     ModifiersOnly,
 }
 

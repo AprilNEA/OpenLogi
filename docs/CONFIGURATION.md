@@ -149,7 +149,9 @@ one window forward and leaves the switcher on screen until the button is
 released, where `HoldShortcut` would hold Tab down too and let key repeat walk
 the switcher to its last window, and `CustomShortcut` would release Cmd at once
 and dismiss it. The same shape covers ``Cmd+` ``, `Alt+Tab`, and an IDE's
-`Ctrl+Tab`. A chord with no modifier degrades to a plain tap of its key.
+`Ctrl+Tab`. A chord with no modifier degrades to a plain tap of its key. If
+another button is already holding the same key through `HoldShortcut`, the tap
+is skipped and only the modifiers go down, so that button keeps its key held.
 
 A `{ short = ..., long = ... }` binding waits for the button's outcome instead
 of firing on press. Releasing before 500 ms fires `short`; keeping the button
