@@ -231,8 +231,9 @@ pub(crate) fn legacy_battery_level_from_percentage(percentage: u8) -> BatteryLev
 #[cfg(test)]
 mod tests {
     use super::{
-        BatteryLevel, DeviceKind, UnifyingDeviceKind, legacy_battery_level_from_percentage,
-        map_unifying_kind, resolve_device_kind, voltage_battery_percentage,
+        BatteryLevel, BatteryStatus, DeviceKind, HidppVoltageChargingStatus, UnifyingDeviceKind,
+        legacy_battery_level_from_percentage, map_unifying_kind, map_voltage_battery_status,
+        resolve_device_kind, voltage_battery_percentage,
     };
 
     #[test]
@@ -301,6 +302,18 @@ mod tests {
         assert_eq!(voltage_battery_percentage(4186), 100);
         assert_eq!(voltage_battery_percentage(3500), 0);
         assert_eq!(voltage_battery_percentage(3200), 0);
+    }
+
+    #[test]
+    fn an_undefined_voltage_status_is_unknown_not_full() {
+        assert_eq!(
+            map_voltage_battery_status(HidppVoltageChargingStatus::Unknown),
+            BatteryStatus::Unknown
+        );
+        assert_eq!(
+            map_voltage_battery_status(HidppVoltageChargingStatus::Full),
+            BatteryStatus::Full
+        );
     }
 
     #[test]
