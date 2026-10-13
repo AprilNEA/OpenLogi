@@ -37,7 +37,7 @@ use openlogi_hook::Hook;
 use tarpc::context::Context;
 use tarpc::server::{BaseChannel, Channel as _};
 use tokio::sync::Mutex;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// Shared handle to the agent's state, cloned per connection (and per request).
 #[derive(Clone)]
@@ -472,6 +472,11 @@ async fn play_within_budget(
         .await
         {
             Ok(Ok(())) => return true,
+            Ok(Err(error)) if !is_worth_retrying(&error) => {
+                // Nothing was sent, and every hover asks again: no warning.
+                debug!(%error, interaction, "Actions Ring haptic skipped");
+                return false;
+            }
             Ok(Err(error)) => {
                 let superseded = rx.has_changed().unwrap_or(true);
                 if attempt == 3 || superseded {
@@ -485,6 +490,13 @@ async fn play_within_budget(
         }
     }
     false
+}
+
+/// Whether a failed play can succeed on a retry. A waveform the device does
+/// not advertise is refused before anything is sent, so retrying it would
+/// only spend the budget the next interaction is waiting on.
+fn is_worth_retrying(error: &WriteError) -> bool {
+    !matches!(error, WriteError::HapticWaveformUnsupported { .. })
 }
 
 /// A wall-clock allowance shared by every attempt at one interaction.
@@ -640,7 +652,7 @@ pub async fn run(server: AgentServer) {
 
 #[cfg(test)]
 mod tests {
-    use super::{ARM_BUDGET, Budget, PLAY_BUDGET};
+    use super::{ARM_BUDGET, Budget, PLAY_BUDGET, WriteError, is_worth_retrying};
     use std::time::{Duration, Instant};
 
     /// Attempts share one allowance, so the second gets what the first left —
@@ -675,5 +687,15 @@ mod tests {
     fn the_budgets_stay_within_a_ring_session() {
         assert!(ARM_BUDGET < PLAY_BUDGET);
         assert!(ARM_BUDGET + PLAY_BUDGET < Duration::from_secs(15));
+    }
+
+    #[test]
+    fn an_unadvertised_waveform_is_not_retried_but_a_lost_reply_is() {
+        assert!(!is_worth_retrying(&WriteError::HapticWaveformUnsupported {
+            waveform: 1
+        }));
+        assert!(is_worth_retrying(&WriteError::DeviceUnreachable {
+            index: 1
+        }));
     }
 }

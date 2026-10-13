@@ -24,6 +24,16 @@ bitflags::bitflags! {
     }
 }
 
+impl SupportedWaveforms {
+    /// Whether the device advertises `waveform`: bit *N* of the mask is
+    /// waveform ID *N*, which is how Logi Options+ 2.8 decodes it too.
+    #[must_use]
+    pub fn supports(self, waveform: HapticWaveform) -> bool {
+        1u32.checked_shl(u32::from(u8::from(waveform)))
+            .is_some_and(|bit| self.bits() & bit != 0)
+    }
+}
+
 bitflags::bitflags! {
     /// The first byte of the haptic configuration.
     ///
@@ -120,6 +130,9 @@ pub struct HapticFeedbackFeature {
 
 impl HapticFeedbackFeature {
     /// Read the device's supported waveform mask.
+    ///
+    /// A reply too short to hold the mask reads as advertising nothing:
+    /// Logi Options+ zero-pads it to eight bytes before decoding, too.
     pub async fn get_capabilities(&self) -> Result<HapticCapabilities, Hidpp20Error> {
         let payload = self.endpoint.call(0, [0; 3]).await?.extend_payload();
         Ok(HapticCapabilities {
@@ -190,6 +203,23 @@ mod tests {
         let mask = SupportedWaveforms::from_bits_retain((1 << 4) | (1 << 31));
         assert!(mask.contains(SupportedWaveforms::SUBTLE_COLLISION));
         assert_eq!(mask.bits(), (1 << 4) | (1 << 31));
+    }
+
+    #[test]
+    fn a_waveform_is_supported_exactly_when_its_id_bit_is_set() {
+        let only_collision = SupportedWaveforms::from_bits_retain(1 << 4);
+        assert!(only_collision.supports(HapticWaveform::SubtleCollision));
+        assert!(!only_collision.supports(HapticWaveform::DampStateChange));
+
+        let only_damp = SupportedWaveforms::from_bits_retain(1 << 1);
+        assert!(only_damp.supports(HapticWaveform::DampStateChange));
+        assert!(!only_damp.supports(HapticWaveform::SubtleCollision));
+
+        // Bits for waveforms this crate does not name grant nothing named.
+        let others = SupportedWaveforms::from_bits_retain(!((1 << 1) | (1 << 4)));
+        assert!(!others.supports(HapticWaveform::DampStateChange));
+        assert!(!others.supports(HapticWaveform::SubtleCollision));
+        assert!(!SupportedWaveforms::empty().supports(HapticWaveform::SubtleCollision));
     }
 
     #[test]

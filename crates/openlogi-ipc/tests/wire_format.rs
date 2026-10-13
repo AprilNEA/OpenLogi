@@ -723,4 +723,8 @@ fn standalone_light_dtos_commands_and_errors() {
         },
         "0ffb4006fb2003",
     );
+    assert_wire(
+        &WriteError::HapticWaveformUnsupported { waveform: 1 },
+        "1001",
+    );
 }

@@ -116,6 +116,15 @@ pub enum WriteError {
         /// The DPI the device reports afterwards.
         actual: Dpi,
     },
+    /// A haptic play asked for a waveform the device does not advertise.
+    ///
+    /// Nothing was sent: the device layer checks the `0x19b0` capability mask
+    /// first, as Logi Options+ does, so a retry cannot succeed.
+    #[error("device does not advertise haptic waveform {waveform}")]
+    HapticWaveformUnsupported {
+        /// The waveform ID that was refused.
+        waveform: u8,
+    },
 }
 
 /// HID++ operation being performed when a device write/read failed.

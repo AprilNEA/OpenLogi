@@ -279,9 +279,9 @@ async fn smartshift(
 impl From<WriteError> for ApiError {
     fn from(error: WriteError) -> Self {
         let code = match &error {
-            WriteError::FeatureUnsupported { .. } | WriteError::LightUnsupported { .. } => {
-                "unsupported_feature"
-            }
+            WriteError::FeatureUnsupported { .. }
+            | WriteError::LightUnsupported { .. }
+            | WriteError::HapticWaveformUnsupported { .. } => "unsupported_feature",
             WriteError::DeviceNotFound => "device_not_found",
             WriteError::DeviceUnreachable { .. } => "device_offline",
             WriteError::AgentUnavailable => "agent_unavailable",
