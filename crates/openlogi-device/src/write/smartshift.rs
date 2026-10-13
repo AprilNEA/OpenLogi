@@ -80,6 +80,20 @@ fn decode_auto_disengage(
     })
 }
 
+/// A SmartShift write whose reply did not carry the fields it wrote is
+/// reported as an unsupported response: the device answered, but not with
+/// the state it was asked for.
+fn confirm_write(confirmed: bool, feature_hex: u16) -> Result<(), WriteError> {
+    if confirmed {
+        Ok(())
+    } else {
+        Err(WriteError::UnsupportedResponse {
+            operation: HidppOperation::WriteSmartShift,
+            feature_hex,
+        })
+    }
+}
+
 /// Decode the `0x2111` status reply's torque byte: `0` carries no torque
 /// level, `1..=100` is a percentage of the maximum force, and anything above
 /// is not a level the firmware defines.
@@ -196,42 +210,62 @@ impl SmartShift {
     /// [`SmartShiftEnhancedCapabilities::TUNABLE_TORQUE`]; callers that do not
     /// mean to change the torque pass `None` rather than echoing the value
     /// they read back.
+    ///
+    /// Both features answer with the status after the write, and the write
+    /// counts only when that status carries every field it wrote: a device
+    /// that kept another mode or threshold, or ignored the torque, is a
+    /// failed write rather than a confirmed one. Fields left unwritten are
+    /// not compared.
     async fn set_status(&self, status: SmartShiftStatus) -> Result<(), WriteError> {
         let SmartShiftStatus {
             mode,
             auto_disengage,
             tunable_torque,
         } = status;
+        let wheel_mode = smartshift_to_wheel(mode);
         let auto_disengage = NonZeroU8::from(auto_disengage);
         match self {
             Self::Enhanced(feature) => {
                 let tunable_torque = writable_torque(feature, tunable_torque).await?;
-                feature
+                let applied = feature
                     .set_ratchet_control_mode(SmartShiftEnhancedStatusChange {
-                        wheel_mode: Some(smartshift_to_wheel(mode)),
+                        wheel_mode: Some(wheel_mode),
                         auto_disengage: Some(auto_disengage),
                         tunable_torque,
                     })
                     .await
-                    .map(|_| ())
                     .map_err(|e| {
                         classify_hidpp_error(
                             e,
                             HidppOperation::WriteSmartShift,
                             SmartShiftEnhancedFeature::ID,
                         )
-                    })
-            }
-            Self::Legacy(feature) => feature
-                .set_ratchet_control_mode(
-                    Some(smartshift_to_wheel(mode)),
-                    Some(auto_disengage),
-                    None,
+                    })?;
+                confirm_write(
+                    applied.wheel_mode == wheel_mode
+                        && applied.auto_disengage == auto_disengage.get()
+                        && tunable_torque
+                            .is_none_or(|torque| applied.current_tunable_torque == torque.get()),
+                    SmartShiftEnhancedFeature::ID,
                 )
-                .await
-                .map_err(|e| {
-                    classify_hidpp_error(e, HidppOperation::WriteSmartShift, SmartShiftFeature::ID)
-                }),
+            }
+            Self::Legacy(feature) => {
+                let applied = feature
+                    .set_ratchet_control_mode(Some(wheel_mode), Some(auto_disengage), None)
+                    .await
+                    .map_err(|e| {
+                        classify_hidpp_error(
+                            e,
+                            HidppOperation::WriteSmartShift,
+                            SmartShiftFeature::ID,
+                        )
+                    })?;
+                confirm_write(
+                    applied.wheel_mode == wheel_mode
+                        && applied.auto_disengage == auto_disengage.get(),
+                    SmartShiftFeature::ID,
+                )
+            }
         }
     }
 

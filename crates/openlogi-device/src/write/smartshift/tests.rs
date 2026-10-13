@@ -19,6 +19,11 @@ struct Wheel {
     auto_disengage: u8,
     torque: u8,
     fail_capabilities: bool,
+    /// Answer as a `0x2110` legacy wheel instead of `0x2111`.
+    legacy: bool,
+    /// Applied after each `setRatchetControlMode`, before the reply: how
+    /// the firmware settles the requested state.
+    firmware: fn(&mut Wheel),
 }
 
 impl Wheel {
@@ -29,6 +34,17 @@ impl Wheel {
             auto_disengage: 10,
             torque,
             fail_capabilities: false,
+            legacy: false,
+            firmware: |_| {},
+        }
+    }
+
+    /// A `0x2110` wheel; its third status byte is the threshold default.
+    fn legacy() -> Self {
+        Self {
+            legacy: true,
+            torque: 0x0a,
+            ..Self::new(SmartShiftEnhancedCapabilities::empty(), 0)
         }
     }
 
@@ -36,38 +52,50 @@ impl Wheel {
         [u8::from(self.mode), self.auto_disengage, self.torque]
     }
 
+    /// The function numbers of the getter and the setter.
+    fn functions(self) -> (u8, u8) {
+        if self.legacy {
+            (0, 1)
+        } else {
+            (1, SET_RATCHET_CONTROL_MODE)
+        }
+    }
+
     /// Answer one request, applying a `setRatchetControlMode` the way the
     /// firmware does: a zero parameter leaves that field unchanged.
     fn respond(&mut self, request: &[u8]) -> Option<Vec<u8>> {
         let function = request[3] >> 4;
+        let (get, set) = self.functions();
+        let feature = if self.legacy { 0x2110 } else { 0x2111 };
         let mut payload = [0u8; 16];
         match (request[2], function) {
             (0x00, 0x01) => payload[0] = 4,
             (0x00, 0x00) => {
                 let feature_id = u16::from_be_bytes([request[4], request[5]]);
-                payload[0] = if feature_id == 0x2111 {
+                payload[0] = if feature_id == feature {
                     SMARTSHIFT_INDEX
                 } else {
                     0
                 };
             }
-            (SMARTSHIFT_INDEX, GET_CAPABILITIES) if self.fail_capabilities => {
+            (SMARTSHIFT_INDEX, GET_CAPABILITIES) if !self.legacy && self.fail_capabilities => {
                 return Some(feature_error(request, INVALID_FUNCTION_ID));
             }
-            (SMARTSHIFT_INDEX, GET_CAPABILITIES) => {
+            (SMARTSHIFT_INDEX, GET_CAPABILITIES) if !self.legacy => {
                 payload[..4].copy_from_slice(&[self.capabilities.bits(), 0x1e, 50, 0x40]);
             }
-            (SMARTSHIFT_INDEX, 1) => payload[..3].copy_from_slice(&self.status()),
-            (SMARTSHIFT_INDEX, SET_RATCHET_CONTROL_MODE) => {
+            (SMARTSHIFT_INDEX, f) if f == get => payload[..3].copy_from_slice(&self.status()),
+            (SMARTSHIFT_INDEX, f) if f == set => {
                 if let Ok(mode) = SmartShiftMode::try_from(request[4]) {
                     self.mode = mode;
                 }
                 if request[5] != 0 {
                     self.auto_disengage = request[5];
                 }
-                if request[6] != 0 {
+                if !self.legacy && request[6] != 0 {
                     self.torque = request[6];
                 }
+                (self.firmware)(self);
                 payload[..3].copy_from_slice(&self.status());
             }
             _ => return None,
@@ -127,7 +155,7 @@ impl Harness {
 
     /// The parameter bytes of every `setRatchetControlMode` request.
     fn writes(&self) -> Vec<[u8; 3]> {
-        self.requests_to(SET_RATCHET_CONTROL_MODE)
+        self.requests_to(self.wheel().functions().1)
     }
 
     fn capability_reads(&self) -> usize {
@@ -317,4 +345,74 @@ async fn status_read_rejects_a_torque_above_one_hundred_percent() {
         ),
         "unexpected error: {err:?}"
     );
+}
+
+/// Write `status` to a wheel whose firmware settles each write with
+/// `firmware`, returning the result and the writes sent.
+async fn write_through(
+    wheel: Wheel,
+    firmware: fn(&mut Wheel),
+    status: SmartShiftStatus,
+) -> (Result<(), WriteError>, Vec<[u8; 3]>) {
+    let harness = Harness::new(Wheel { firmware, ..wheel }).await;
+    let result = set_smartshift_on(&harness.shared, status).await;
+    (result, harness.writes())
+}
+
+fn refused(result: &Result<(), WriteError>, feature: u16) {
+    assert!(
+        matches!(
+            result,
+            Err(WriteError::UnsupportedResponse {
+                operation: HidppOperation::WriteSmartShift,
+                feature_hex,
+            }) if *feature_hex == feature
+        ),
+        "unexpected result: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_write_fails_when_the_reply_shows_another_state() {
+    let free = SmartShiftStatus {
+        mode: SmartShiftMode::Free,
+        auto_disengage: threshold(30),
+        tunable_torque: Some(torque(40)),
+    };
+    let enhanced = Wheel::new(SmartShiftEnhancedCapabilities::TUNABLE_TORQUE, 75);
+
+    // The firmware keeps ratchet mode; the one transient retry fails alike.
+    let (result, writes) =
+        write_through(enhanced, |w| w.mode = SmartShiftMode::Ratchet, free).await;
+    refused(&result, 0x2111);
+    assert_eq!(writes, [[FREE, 30, 40], [FREE, 30, 40]]);
+
+    // It ignores the torque it advertised as tunable.
+    let (result, _) = write_through(enhanced, |w| w.torque = 75, free).await;
+    refused(&result, 0x2111);
+
+    // It clamps the threshold on a legacy wheel.
+    let (result, writes) = write_through(Wheel::legacy(), |w| w.auto_disengage = 20, free).await;
+    refused(&result, 0x2110);
+    assert_eq!(writes, [[FREE, 30, 0], [FREE, 30, 0]]);
+}
+
+#[tokio::test]
+async fn a_write_holds_when_the_reply_carries_what_it_wrote() -> Result<(), WriteError> {
+    let free = SmartShiftStatus {
+        mode: SmartShiftMode::Free,
+        auto_disengage: threshold(30),
+        tunable_torque: Some(torque(40)),
+    };
+    let (result, writes) = write_through(Wheel::legacy(), |_| {}, free).await;
+    result?;
+    assert_eq!(writes, [[FREE, 30, 0]]);
+
+    // Without the capability the torque is not written, so a reply carrying
+    // another torque byte is no mismatch.
+    let plain = Wheel::new(SmartShiftEnhancedCapabilities::empty(), 50);
+    let (result, writes) = write_through(plain, |w| w.torque = 51, free).await;
+    result?;
+    assert_eq!(writes, [[FREE, 30, 0]]);
+    Ok(())
 }
