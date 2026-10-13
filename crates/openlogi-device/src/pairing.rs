@@ -27,7 +27,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use hidpp::{
     channel::{HidppChannel, HidppMessage},
-    receiver::{self, Receiver},
+    receiver::{self, NotificationFlags, Receiver},
 };
 use tokio::sync::mpsc;
 use tracing::{debug, trace};
@@ -48,8 +48,8 @@ mod registers;
 
 use notification::{Notification, decode, parse_notification, subscribe};
 use registers::{
-    BOLT_DISCOVERY, BOLT_PAIRING, NOTIFICATION_FLAGS, NOTIFICATIONS, UNIFYING_PAIRING,
-    write_long_register, write_register,
+    BOLT_DISCOVERY, BOLT_PAIRING, PAIRING_NOTIFICATIONS, UNIFYING_PAIRING, read_notification_flags,
+    write_long_register, write_notification_flags, write_register,
 };
 
 /// HID++ device index addressing the receiver itself (not a paired device).
@@ -345,13 +345,29 @@ pub async fn run_pairing(
     } = &receiver;
     let (listener, mut notifications) = subscribe(channel);
 
-    let result = run_session(channel, *family, &mut commands, &mut notifications, &events).await;
+    let original = read_notification_flags(channel).await;
+    let result = match &original {
+        Ok(original) => {
+            run_session(
+                channel,
+                *family,
+                *original,
+                &mut commands,
+                &mut notifications,
+                &events,
+            )
+            .await
+        }
+        Err(e) => Err(e.clone()),
+    };
 
     drop(listener);
-    // Best-effort restore: clear notification flags we set.
-    let _ = channel
-        .write_register(RECEIVER_INDEX, NOTIFICATIONS, [0, 0, 0])
-        .await;
+    // Best-effort restore of the flags found before the session: inventory
+    // owns WIRELESS and other host software sets bits of its own, so pairing
+    // hands back exactly what it read. A failed read wrote nothing.
+    if let Ok(original) = original {
+        let _ = write_notification_flags(channel, original).await;
+    }
     // The register phase is released with the receiver, after that write.
     drop(receiver);
 
@@ -362,15 +378,26 @@ pub async fn run_pairing(
 }
 
 /// Runs the core flow and phase-correct cancellation on every unsuccessful exit.
+/// `notifications_found` is the receiver's flag word before the session; the
+/// caller restores it.
 async fn run_session(
     channel: &HidppChannel,
     family: ReceiverFamily,
+    notifications_found: NotificationFlags,
     commands: &mut mpsc::UnboundedReceiver<PairingCommand>,
     notifications: &mut mpsc::UnboundedReceiver<HidppMessage>,
     events: &mpsc::UnboundedSender<PairingEvent>,
 ) -> Result<(), PairingError> {
     let mut state = SessionState::from(family);
-    let result = drive(channel, &mut state, commands, notifications, events).await;
+    let result = drive(
+        channel,
+        &mut state,
+        notifications_found,
+        commands,
+        notifications,
+        events,
+    )
+    .await;
     if result.is_err() {
         cancel(channel, &state).await;
     }
@@ -381,11 +408,12 @@ async fn run_session(
 async fn drive(
     channel: &HidppChannel,
     state: &mut SessionState,
+    notifications_found: NotificationFlags,
     commands: &mut mpsc::UnboundedReceiver<PairingCommand>,
     notifications: &mut mpsc::UnboundedReceiver<HidppMessage>,
     events: &mpsc::UnboundedSender<PairingEvent>,
 ) -> Result<(), PairingError> {
-    write_register(channel, NOTIFICATIONS, NOTIFICATION_FLAGS).await?;
+    write_notification_flags(channel, notifications_found | PAIRING_NOTIFICATIONS).await?;
     state.open(channel).await?;
     let _ = events.send(PairingEvent::Searching);
 

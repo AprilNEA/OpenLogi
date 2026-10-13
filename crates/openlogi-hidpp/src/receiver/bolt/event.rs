@@ -163,14 +163,14 @@ fn passkey(payload: &[u8; 17]) -> Option<&str> {
 ///
 /// You can listen to these events using [`super::Receiver::listen`]. Only
 /// enabled notifications as indicated by
-/// [`super::Receiver::get_notification_state`] are emitted.
+/// [`super::Receiver::get_notification_flags`] are emitted.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 pub enum Event {
     /// Is emitted whenever a device connects to or disconnects from the
     /// receiver, but only if
-    /// [`NotificationState::wireless_notifications`](super::NotificationState::wireless_notifications)
+    /// [`NotificationFlags::WIRELESS`](crate::receiver::NotificationFlags::WIRELESS)
     /// is enabled.
     ///
     /// Can be triggered for all paired devices using

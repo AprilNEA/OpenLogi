@@ -7,8 +7,11 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use futures_concurrency::future::Join as _;
 use hidpp::{
     channel::HidppChannel,
-    receiver::bolt::{
-        DeviceConnection as BoltDeviceConnection, Event as BoltEvent, Receiver as BoltReceiver,
+    receiver::{
+        NotificationFlags,
+        bolt::{
+            DeviceConnection as BoltDeviceConnection, Event as BoltEvent, Receiver as BoltReceiver,
+        },
     },
 };
 use openlogi_core::device::{DeviceInventory, DeviceKind, PairedDevice, ReceiverInfo};
@@ -269,10 +272,12 @@ async fn drain_device_arrival(
     // snapshot. Drop the guard before slot probes so a later transition cannot
     // be lost behind unrelated feature reads.
     let _receiver_snapshot = subscriptions.map(EventSubscriptionHandle::begin_receiver_snapshot);
-    match bolt.get_notification_state().await {
-        Ok(mut state) if !state.wireless_notifications => {
-            state.wireless_notifications = true;
-            if let Err(error) = bolt.set_notification_state(state).await {
+    match bolt.get_notification_flags().await {
+        Ok(flags) if !flags.contains(NotificationFlags::WIRELESS) => {
+            if let Err(error) = bolt
+                .set_notification_flags(flags | NotificationFlags::WIRELESS)
+                .await
+            {
                 debug!(?error, "enable Bolt wireless notifications failed");
             }
         }

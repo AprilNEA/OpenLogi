@@ -138,6 +138,7 @@ async fn queued_discovery_notifications_after_selection_do_not_emit_device_found
             run_session(
                 &channel,
                 ReceiverFamily::Bolt,
+                NotificationFlags::empty(),
                 &mut commands,
                 &mut notifications,
                 &event_tx,
@@ -187,6 +188,7 @@ async fn unifying_session_rejects_bolt_pair_command_before_writing_it() {
         run_session(
             &channel,
             ReceiverFamily::Unifying,
+            NotificationFlags::empty(),
             &mut commands,
             &mut notifications,
             &event_tx,
@@ -206,7 +208,7 @@ async fn unifying_session_rejects_bolt_pair_command_before_writing_it() {
                 SHORT_REPORT_ID,
                 RECEIVER_INDEX,
                 u8::from(MessageType::SetRegister),
-                NOTIFICATIONS,
+                0x00, // notification-flags register
                 0x00,
                 0x09,
                 0x00,
@@ -285,6 +287,7 @@ async fn malformed_passkey_after_pair_cancels_bolt_pairing() {
             run_session(
                 &channel,
                 ReceiverFamily::Bolt,
+                NotificationFlags::empty(),
                 &mut commands,
                 &mut notifications,
                 &event_tx,
@@ -352,6 +355,7 @@ async fn failed_bolt_pair_write_cancels_bolt_pairing() {
         run_session(
             &channel,
             ReceiverFamily::Bolt,
+            NotificationFlags::empty(),
             &mut commands,
             &mut notifications,
             &event_tx,
