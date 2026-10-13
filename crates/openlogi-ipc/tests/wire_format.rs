@@ -442,6 +442,15 @@ fn device_inventory() {
     // `Light` was appended after `Unknown`; preserve every existing kind's
     // bincode discriminant.
     assert_wire(&DeviceKind::Light, "0d");
+    // A level-only battery (no state-of-charge gauge) carries no percentage.
+    assert_wire(
+        &BatteryInfo {
+            percentage: None,
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Discharging,
+        },
+        "000200",
+    );
     let inventory = vec![DeviceInventory {
         receiver: ReceiverInfo {
             name: "Bolt Receiver".into(),
@@ -456,7 +465,7 @@ fn device_inventory() {
             kind: DeviceKind::Mouse,
             online: true,
             battery: Some(BatteryInfo {
-                percentage: 80,
+                percentage: Some(80),
                 level: BatteryLevel::Good,
                 status: BatteryStatus::Discharging,
             }),
@@ -489,7 +498,7 @@ fn device_inventory() {
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b000010150020001030106323134304c5a0102030400010100fb34b0fb8240000b0101010000010101010100",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b0101010000010101010100",
     );
 }
 

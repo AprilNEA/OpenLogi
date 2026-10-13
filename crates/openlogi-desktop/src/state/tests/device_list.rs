@@ -118,13 +118,7 @@ fn canonical_profile_projects_identity_routes_capabilities_and_battery() {
         receiver_mouse.capabilities,
         profile.inventories[0].paired[0].capabilities
     );
-    assert_eq!(
-        receiver_mouse
-            .battery
-            .as_ref()
-            .map(|battery| battery.percentage),
-        Some(80)
-    );
+    assert_eq!(percentage_of(receiver_mouse.battery.as_ref()), Some(80));
 
     let offline_mouse = state
         .devices()
@@ -148,10 +142,7 @@ fn canonical_profile_projects_identity_routes_capabilities_and_battery() {
         keyboard.capabilities,
         profile.inventories[0].paired[2].capabilities
     );
-    assert_eq!(
-        keyboard.battery.as_ref().map(|battery| battery.percentage),
-        Some(100)
-    );
+    assert_eq!(percentage_of(keyboard.battery.as_ref()), Some(100));
 
     let direct = profile_device(&state, [79, 76, 68, 3]);
     assert_eq!(direct.config_key, "unit:4f4c4403");
@@ -166,10 +157,7 @@ fn canonical_profile_projects_identity_routes_capabilities_and_battery() {
         direct.capabilities,
         profile.inventories[1].paired[0].capabilities
     );
-    assert_eq!(
-        direct.battery.as_ref().map(|battery| battery.percentage),
-        Some(55)
-    );
+    assert_eq!(percentage_of(direct.battery.as_ref()), Some(55));
 
     let light = profile_device(&state, [79, 76, 68, 4]);
     assert_eq!(light.config_key, "unit:4f4c4404");
@@ -409,10 +397,7 @@ fn a_battery_only_change_reaches_the_device_list() {
         inventories: &[inventory_with_battery(unit_id, 50)],
         ..Sources::in_memory(Config::ephemeral(), &resolver, commands)
     });
-    assert_eq!(
-        state.devices()[0].battery.as_ref().map(|b| b.percentage),
-        Some(50)
-    );
+    assert_eq!(percentage_of(state.devices()[0].battery.as_ref()), Some(50));
 
     let changed =
         state.refresh_inventories(&[inventory_with_battery(unit_id, 40)], &[], &resolver, &[]);
@@ -423,7 +408,7 @@ fn a_battery_only_change_reaches_the_device_list() {
         "a battery change is a change"
     );
     assert_eq!(
-        state.devices()[0].battery.as_ref().map(|b| b.percentage),
+        percentage_of(state.devices()[0].battery.as_ref()),
         Some(40),
         "the fresh reading must replace the stale one"
     );
@@ -449,10 +434,15 @@ fn an_identical_snapshot_is_still_a_no_op() {
     );
 }
 
+/// The percentage of an optional battery reading, if it has one.
+fn percentage_of(battery: Option<&BatteryInfo>) -> Option<u8> {
+    battery.and_then(|battery| battery.percentage)
+}
+
 fn inventory_with_battery(unit_id: [u8; 4], percentage: u8) -> DeviceInventory {
     let mut inventory = direct_inventory(unit_id);
     inventory.paired[0].battery = Some(BatteryInfo {
-        percentage,
+        percentage: Some(percentage),
         level: BatteryLevel::Good,
         status: BatteryStatus::Discharging,
     });

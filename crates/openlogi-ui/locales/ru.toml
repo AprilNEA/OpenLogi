@@ -118,6 +118,7 @@ last_known_battery = "Последний известный уровень за�
 low_battery = "Низкий уровень заряда"
 charging = "Заряжается"
 full = "Полный заряд"
+battery_good = "Хороший заряд"
 battery_error = "Ошибка батареи"
 bolt_receiver = "Приёмник Bolt"
 unifying_receiver = "Приёмник Unifying"

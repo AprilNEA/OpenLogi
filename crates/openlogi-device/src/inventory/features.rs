@@ -89,7 +89,13 @@ pub(super) enum BatteryRead {
 /// report it as a voltage via `0x1F20` instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) enum BatteryProbe {
-    Unified(u8),
+    /// `0x1004` at `index`. `state_of_charge` is the device's capability bit
+    /// for a percentage: without it the status reply's percentage byte is not a
+    /// reading (always zero) and the device reports only a coarse level.
+    Unified {
+        index: u8,
+        state_of_charge: bool,
+    },
     Legacy(u8),
     Voltage(u8),
     Adc(u8),
@@ -105,14 +111,17 @@ pub(super) async fn read_battery(
     probe: BatteryProbe,
 ) -> BatteryRead {
     let reading = match probe {
-        BatteryProbe::Unified(feature_index) => {
-            let feature = UnifiedBatteryFeature::new(Arc::clone(channel), slot, feature_index);
+        BatteryProbe::Unified {
+            index,
+            state_of_charge,
+        } => {
+            let feature = UnifiedBatteryFeature::new(Arc::clone(channel), slot, index);
             feature
                 .get_battery_info()
                 .await
                 .ok()
                 .map(|info| BatteryInfo {
-                    percentage: info.charging_percentage,
+                    percentage: state_of_charge.then_some(info.charging_percentage),
                     level: map_battery_level(info.level),
                     status: map_battery_status(info.status),
                 })
@@ -130,7 +139,7 @@ pub(super) async fn read_battery(
             feature.get_battery_info().await.ok().map(|info| {
                 let percentage = voltage_battery_percentage(info.voltage_mv);
                 BatteryInfo {
-                    percentage,
+                    percentage: Some(percentage),
                     // The firmware's own critical marker outranks our
                     // estimated bucket.
                     level: if info.critical {
@@ -148,7 +157,7 @@ pub(super) async fn read_battery(
                 Ok(AdcMeasurement::Linked { voltage_mv, status }) => {
                     let percentage = voltage_battery_percentage(voltage_mv);
                     Some(BatteryInfo {
-                        percentage,
+                        percentage: Some(percentage),
                         level: legacy_battery_level_from_percentage(percentage),
                         status: map_adc_battery_status(status),
                     })
@@ -166,6 +175,10 @@ pub(super) async fn read_battery(
 /// voltage-only `0x1001` and `0x1F20` (which report no percentage, so a direct
 /// source always outranks them). The table is 1-based (index 0 is the implicit root
 /// feature, which enumeration omits).
+///
+/// The table alone cannot say whether a `0x1004` reports a percentage, so a
+/// unified source comes back assuming it does; [`probe_features`] then reads the
+/// capability.
 pub(super) fn battery_feature_index(ids: impl IntoIterator<Item = u16>) -> Option<BatteryProbe> {
     // A feature table holds at most `u8::MAX` entries (its count is a u8), so a
     // 1-based index always fits.
@@ -179,7 +192,10 @@ pub(super) fn battery_feature_index(ids: impl IntoIterator<Item = u16>) -> Optio
             break;
         };
         if id == UnifiedBatteryFeature::ID {
-            return Some(BatteryProbe::Unified(index));
+            return Some(BatteryProbe::Unified {
+                index,
+                state_of_charge: true,
+            });
         }
         if id == BatteryStatusFeature::ID && legacy.is_none() {
             legacy = Some(BatteryProbe::Legacy(index));
@@ -280,6 +296,9 @@ pub(super) async fn probe_features(
             .is_err();
     }
 
+    let (battery_probe, state_of_charge_unknown) =
+        resolve_state_of_charge(channel, slot, battery_probe).await;
+    capabilities_incomplete |= state_of_charge_unknown;
     let mut identity_incomplete = false;
     let model_info = match device.get_feature::<DeviceInformationFeature>() {
         Some(feature) => match feature.get_device_info().await {
@@ -338,6 +357,40 @@ pub(super) async fn probe_features(
         battery_probe,
         event_features,
     )
+}
+
+/// Read whether a `0x1004` battery gauges its state of charge, and return the
+/// probe with that answer. Other probes pass through unchanged.
+///
+/// The capability is fixed per device, so it is read once at probe time and
+/// memoized with the probe rather than on every battery read. The flag is
+/// `true` when the read failed: the probe then keeps the assumed percentage
+/// for this read, and the caller marks the probe incomplete so that guess is
+/// not memoized and the next reconciliation re-probes.
+async fn resolve_state_of_charge(
+    channel: &Arc<HidppChannel>,
+    slot: u8,
+    probe: Option<BatteryProbe>,
+) -> (Option<BatteryProbe>, bool) {
+    let Some(BatteryProbe::Unified { index, .. }) = probe else {
+        return (probe, false);
+    };
+    match UnifiedBatteryFeature::new(Arc::clone(channel), slot, index)
+        .get_battery_capabilities()
+        .await
+    {
+        Ok(caps) => (
+            Some(BatteryProbe::Unified {
+                index,
+                state_of_charge: caps.percentage,
+            }),
+            false,
+        ),
+        Err(e) => {
+            debug!(slot, error = ?e, "UnifiedBattery capability read failed");
+            (probe, true)
+        }
+    }
 }
 
 /// Fill in the capabilities the feature table alone can't answer, each of which
@@ -477,15 +530,110 @@ mod tests {
         }
     }
 
+    /// A `0x1004` source as the feature table alone describes it, before the
+    /// probe reads its capability.
+    const fn unified(index: u8) -> BatteryProbe {
+        BatteryProbe::Unified {
+            index,
+            state_of_charge: true,
+        }
+    }
+
+    /// `0x1004` capability flags: bit 0 rechargeable, bit 1 state of charge.
+    const RECHARGEABLE: u8 = 1;
+    const STATE_OF_CHARGE: u8 = 1 << 1;
+
+    /// Probe a device whose only battery source is a `0x1004` at index 2, then
+    /// read the battery through the probe the way the cache does. `flags` is
+    /// the capability reply's flags byte (`None` fails the read); `status` is
+    /// the `getStatus` reply's percentage, level and charging bytes.
+    async fn unified_probe(
+        flags: Option<u8>,
+        status: [u8; 3],
+    ) -> (ProbedFeatures, Option<BatteryProbe>, Option<BatteryInfo>) {
+        let features = [0x0001, UnifiedBatteryFeature::ID];
+        let (raw, _) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+            let mut response = vec![0; 20];
+            response[..4].copy_from_slice(&request[..4]);
+            response[0] = 0x11;
+            match (request[2], request[3] >> 4) {
+                (0, 1) => response[4] = 4,
+                (0, 0) => response[4] = 1,
+                (1, 0) => response[4] = u8::try_from(features.len()).unwrap(),
+                (1, 1) => response[4..6]
+                    .copy_from_slice(&features[usize::from(request[4]) - 1].to_be_bytes()),
+                (2, 0) => {
+                    let Some(flags) = flags else {
+                        return Some(feature_error(request, 0x08));
+                    };
+                    response[4] = 0x0f;
+                    response[5] = flags;
+                }
+                (2, 1) => response[4..7].copy_from_slice(&status),
+                _ => panic!("unexpected request: {request:02x?}"),
+            }
+            Some(response)
+        });
+        let channel = scripted_channel(raw).await;
+        let (probe, battery_probe, _) = probe_features(&channel, 0xff, None).await;
+        let battery = match battery_probe {
+            Some(battery_probe) => match read_battery(&channel, 0xff, battery_probe).await {
+                BatteryRead::Reading(info) => Some(info),
+                _ => None,
+            },
+            None => None,
+        };
+        (probe, battery_probe, battery)
+    }
+
+    #[tokio::test]
+    async fn a_unified_battery_without_state_of_charge_reports_only_its_level() {
+        // Level "good", discharging; the percentage byte is zero because the
+        // device has no gauge, not because the battery is empty.
+        let (probe, battery_probe, battery) = unified_probe(Some(RECHARGEABLE), [0, 0x04, 0]).await;
+        assert_eq!(
+            battery_probe,
+            Some(BatteryProbe::Unified {
+                index: 2,
+                state_of_charge: false,
+            })
+        );
+        assert!(!probe.capabilities_incomplete);
+        let battery = battery.expect("a level-only reading");
+        assert_eq!(battery.percentage, None);
+        assert_eq!(battery.level, BatteryLevel::Good);
+        assert_eq!(battery.status, BatteryStatus::Discharging);
+    }
+
+    #[tokio::test]
+    async fn a_unified_battery_with_state_of_charge_reports_its_percentage() {
+        let (probe, battery_probe, battery) =
+            unified_probe(Some(RECHARGEABLE | STATE_OF_CHARGE), [67, 0x04, 0]).await;
+        assert_eq!(battery_probe, Some(unified(2)));
+        assert!(!probe.capabilities_incomplete);
+        assert_eq!(battery.expect("a reading").percentage, Some(67));
+    }
+
+    #[tokio::test]
+    async fn a_failed_capability_read_keeps_the_percentage_and_reprobes() {
+        let (probe, battery_probe, battery) = unified_probe(None, [67, 0x04, 0]).await;
+        assert_eq!(battery_probe, Some(unified(2)));
+        assert!(
+            probe.capabilities_incomplete,
+            "an assumed capability must not be memoized"
+        );
+        assert_eq!(battery.expect("a reading").percentage, Some(67));
+    }
+
     #[test]
     fn battery_index_is_one_based_in_the_enumerated_table() {
         // `enumerate_features` omits the root feature (index 0), so the first
         // enumerated entry sits at runtime index 1.
         let table = [0x0001, UnifiedBatteryFeature::ID, 0x2201];
-        assert_eq!(battery_feature_index(table), Some(BatteryProbe::Unified(2)));
+        assert_eq!(battery_feature_index(table), Some(unified(2)));
         assert_eq!(
             battery_feature_index([UnifiedBatteryFeature::ID]),
-            Some(BatteryProbe::Unified(1)),
+            Some(unified(1)),
             "first entry maps to index 1, not 0"
         );
     }
@@ -499,7 +647,7 @@ mod tests {
     #[test]
     fn unified_battery_is_preferred_over_legacy() {
         let table = [BatteryStatusFeature::ID, 0x0001, UnifiedBatteryFeature::ID];
-        assert_eq!(battery_feature_index(table), Some(BatteryProbe::Unified(3)));
+        assert_eq!(battery_feature_index(table), Some(unified(3)));
     }
 
     #[test]
@@ -514,7 +662,7 @@ mod tests {
         let table = [BatteryVoltageFeature::ID, BatteryStatusFeature::ID];
         assert_eq!(battery_feature_index(table), Some(BatteryProbe::Legacy(2)));
         let table = [BatteryVoltageFeature::ID, UnifiedBatteryFeature::ID];
-        assert_eq!(battery_feature_index(table), Some(BatteryProbe::Unified(2)));
+        assert_eq!(battery_feature_index(table), Some(unified(2)));
     }
 
     #[test]
@@ -556,7 +704,7 @@ mod tests {
         let BatteryRead::Reading(battery) = adc_battery([0x0f, 0x41, 0x01], false).await else {
             panic!("expected a reading");
         };
-        assert_eq!(battery.percentage, 67);
+        assert_eq!(battery.percentage, Some(67));
         assert_eq!(battery.level, BatteryLevel::Good);
         assert_eq!(battery.status, BatteryStatus::Discharging);
 
@@ -616,7 +764,7 @@ mod tests {
     #[tokio::test]
     async fn legacy_battery_reads_the_level_while_discharging() {
         let battery = legacy_battery([50, 20, 0]).await;
-        assert_eq!(battery.percentage, 50);
+        assert_eq!(battery.percentage, Some(50));
         assert_eq!(battery.level, BatteryLevel::Good);
         assert_eq!(battery.status, BatteryStatus::Discharging);
     }
@@ -625,7 +773,7 @@ mod tests {
     async fn legacy_charge_complete_reads_full_not_the_unknown_zero() {
         // Off battery the firmware reports level 0, meaning unknown.
         let battery = legacy_battery([0, 0, 3]).await;
-        assert_eq!(battery.percentage, 100);
+        assert_eq!(battery.percentage, Some(100));
         assert_eq!(battery.level, BatteryLevel::Full);
         assert_eq!(battery.status, BatteryStatus::Full);
     }
@@ -634,7 +782,7 @@ mod tests {
     async fn legacy_charging_zero_is_no_reading_not_critical() {
         for status in [1, 2, 4] {
             let battery = legacy_battery([0, 0, status]).await;
-            assert_eq!(battery.percentage, 0, "status {status}");
+            assert_eq!(battery.percentage, None, "status {status}");
             assert_eq!(battery.level, BatteryLevel::Unknown, "status {status}");
         }
     }
@@ -642,7 +790,7 @@ mod tests {
     #[test]
     fn adc_battery_ranks_below_every_other_source() {
         for (other, expected) in [
-            (UnifiedBatteryFeature::ID, BatteryProbe::Unified(2)),
+            (UnifiedBatteryFeature::ID, unified(2)),
             (BatteryStatusFeature::ID, BatteryProbe::Legacy(2)),
             (BatteryVoltageFeature::ID, BatteryProbe::Voltage(2)),
         ] {

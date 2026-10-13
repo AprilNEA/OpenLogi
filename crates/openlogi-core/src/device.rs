@@ -225,8 +225,14 @@ pub enum BatteryStatus {
 /// Battery snapshot for one paired device, as last polled over HID++.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BatteryInfo {
-    /// Reported charge percentage (`0..=100`).
-    pub percentage: u8,
+    /// Reported charge percentage (`0..=100`), or `None` when the reading
+    /// carries no percentage.
+    ///
+    /// `None` is not an empty battery. Some devices only report a coarse
+    /// [`level`](Self::level), such as a `0x1004` device without the
+    /// state-of-charge capability. Others have no reading yet, such as a
+    /// device first seen while it charges. Read `level` in that case.
+    pub percentage: Option<u8>,
     /// Coarse bucket for UI that doesn't want the raw percentage.
     pub level: BatteryLevel,
     /// Charging state at poll time.
@@ -503,7 +509,7 @@ mod tests {
                 kind: DeviceKind::Mouse,
                 online: true,
                 battery: Some(BatteryInfo {
-                    percentage: battery_percentage,
+                    percentage: Some(battery_percentage),
                     level: BatteryLevel::Good,
                     status: BatteryStatus::Discharging,
                 }),

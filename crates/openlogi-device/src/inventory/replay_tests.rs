@@ -421,7 +421,7 @@ async fn battery_node_reading(
 /// listed under `product_id`.
 async fn battery_node_state(enumerator: &mut Enumerator, product_id: u16) -> (bool, Option<u8>) {
     let (online, battery) = battery_node_reading(enumerator, product_id).await;
-    (online, battery.map(|battery| battery.percentage))
+    (online, battery.and_then(|battery| battery.percentage))
 }
 
 /// Enumerate once and return the headset's `(online, battery percentage)`.
@@ -634,9 +634,15 @@ async fn battery_broadcast_refresh(
     (before, after)
 }
 
-/// The `(percentage, status)` of a reading, for the assertions below.
+/// The `(percentage, status)` of a reading, for the assertions below. These
+/// 0x1000/0x1001 readings always carry a percentage.
 fn charge(battery: Option<BatteryInfo>) -> Option<(u8, BatteryStatus)> {
-    battery.map(|battery| (battery.percentage, battery.status))
+    battery.map(|battery| {
+        let percentage = battery
+            .percentage
+            .expect("a 0x1000/0x1001 reading carries a percentage");
+        (percentage, battery.status)
+    })
 }
 
 #[tokio::test]

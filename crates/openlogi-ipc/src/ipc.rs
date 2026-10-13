@@ -73,7 +73,10 @@ pub use succession::Identity;
 /// v36: `Action::TapKeyHoldingModifiers` appended for switcher-style output
 ///      that holds the modifiers and taps the ordinary key once;
 ///      `WriteError::{DpiUnsupported, DpiNotApplied}` appended — `set_dpi`
-///      rejects unsupported values and reports a write the device kept.
+///      rejects unsupported values and reports a write the device kept;
+///      `BatteryInfo::percentage` became `Option<u8>` — `None` when the
+///      device reports only a level (a `0x1004` without the state-of-charge
+///      capability) or has no reading yet.
 pub const PROTOCOL_VERSION: u32 = 36;
 
 /// Environment variable through which the agent hands a supervised helper the

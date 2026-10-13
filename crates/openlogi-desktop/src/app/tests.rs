@@ -105,8 +105,9 @@ fn main_window_renders_profile_confirmation_dialogs(cx: &mut gpui::TestAppContex
 }
 
 /// "Charging" replaces the bogus percentage only when charging *and* the
-/// reading is still 0% (cold start, no cached pre-charge value). A non-zero
-/// charge or a real 0% while discharging keeps the number.
+/// reading is still 0% or absent with no level (cold start, no cached
+/// pre-charge value). A non-zero charge, a real 0% while discharging, or a
+/// level-only reading keeps something to show.
 #[test]
 fn charging_without_reading_suppresses_percentage() {
     let b = |percentage, status| BatteryInfo {
@@ -114,19 +115,32 @@ fn charging_without_reading_suppresses_percentage() {
         level: BatteryLevel::Good,
         status,
     };
-    assert!(battery_charging_no_reading(&b(0, BatteryStatus::Charging)));
     assert!(battery_charging_no_reading(&b(
-        0,
+        Some(0),
+        BatteryStatus::Charging
+    )));
+    assert!(battery_charging_no_reading(&b(
+        Some(0),
         BatteryStatus::ChargingSlow
     )));
     assert!(!battery_charging_no_reading(&b(
-        40,
+        Some(40),
         BatteryStatus::Charging
     )));
     assert!(!battery_charging_no_reading(&b(
-        0,
+        Some(0),
         BatteryStatus::Discharging
     )));
+    // A level-only device that is charging still has its level to show.
+    assert!(!battery_charging_no_reading(&b(
+        None,
+        BatteryStatus::Charging
+    )));
+    assert!(battery_charging_no_reading(&BatteryInfo {
+        percentage: None,
+        level: BatteryLevel::Unknown,
+        status: BatteryStatus::Charging,
+    }));
 }
 
 #[test]
@@ -138,16 +152,21 @@ fn low_discharging_battery_needs_attention() {
     };
 
     assert!(battery_needs_attention(&battery(
-        20,
+        Some(20),
         BatteryStatus::Discharging
     )));
     assert!(!battery_needs_attention(&battery(
-        21,
+        Some(21),
         BatteryStatus::Discharging
     )));
     assert!(!battery_needs_attention(&battery(
-        20,
+        Some(20),
         BatteryStatus::Charging
+    )));
+    // A device without a percentage is judged by its level.
+    assert!(battery_needs_attention(&battery(
+        None,
+        BatteryStatus::Discharging
     )));
 }
 

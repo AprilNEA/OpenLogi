@@ -85,8 +85,11 @@ contain hardware identity information: keep them local and redact before sharing
 
 `name`, `battery`, and measured `capabilities` may be null; null does not mean
 zero charge or an unsupported feature. Battery objects contain `percentage`,
-`level`, and `status` (for example `charging` or `discharging`). Capabilities
-are the agent's measured feature flags, not guesses based on device kind.
+`level`, and `status` (for example `charging` or `discharging`). `percentage`
+is null when the device has no state-of-charge gauge and reports only a level,
+or when the reading carries no charge figure; read `level` in that case.
+Capabilities are the agent's measured feature flags, not guesses based on
+device kind.
 Not every readable setting has an inventory flag; a setting read can return
 `unsupported_feature`. Standalone lights are listed with their light capability
 descriptor and null battery. Cameras are not part of this agent inventory API.

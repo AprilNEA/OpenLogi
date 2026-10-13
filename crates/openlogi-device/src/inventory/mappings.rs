@@ -220,7 +220,7 @@ pub(crate) fn voltage_battery_percentage(voltage_mv: u16) -> u8 {
 /// how the Linux HID++ driver reads the feature
 /// (`hidpp20_batterylevel_map_status_capacity`), and it sets charge complete
 /// to 100 %. Here charge complete reads 100 % / [`BatteryLevel::Full`]. Any
-/// other off-battery state that reports `0` keeps the `0` but gets a
+/// other off-battery state that reports `0` has no percentage and a
 /// [`BatteryLevel::Unknown`] level: the "charging, no reading" shape a voltage
 /// source gives on a cold start, rather than a critically empty battery.
 pub(crate) fn legacy_battery_info(
@@ -229,14 +229,14 @@ pub(crate) fn legacy_battery_info(
 ) -> BatteryInfo {
     let status = map_legacy_battery_status(status);
     let (percentage, level) = match status {
-        BatteryStatus::Full => (100, BatteryLevel::Full),
+        BatteryStatus::Full => (Some(100), BatteryLevel::Full),
         BatteryStatus::Discharging => (
-            discharge_level,
+            Some(discharge_level),
             legacy_battery_level_from_percentage(discharge_level),
         ),
-        _ if discharge_level == 0 => (0, BatteryLevel::Unknown),
+        _ if discharge_level == 0 => (None, BatteryLevel::Unknown),
         _ => (
-            discharge_level,
+            Some(discharge_level),
             legacy_battery_level_from_percentage(discharge_level),
         ),
     };
