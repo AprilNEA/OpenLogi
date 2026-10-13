@@ -74,10 +74,37 @@ fn is_frame_end(request: &[u8]) -> bool {
     request[2] == 7 && request[3] >> 4 == 7
 }
 
-fn lease(control: u8) -> RgbControlLease {
+/// The unit ID [`response`] reports through `0x0003`.
+const UNIT: [u8; 4] = [0xa1, 0xb2, 0xc3, 0xd4];
+
+fn lease(control: u8, device: Option<[u8; 4]>) -> RgbControlLease {
     RgbControlLease {
         control: SwControlFlags::from_bits_retain(control),
         events: EventsNotificationFlags::from_bits_retain(PREVIOUS[2]),
+        device,
+    }
+}
+
+fn is_unit_id_read(request: &[u8]) -> bool {
+    request[2] == 9 && request[3] >> 4 == 0
+}
+
+/// `respond`, but the device reports `unit` as its unit ID, or has no
+/// `0x0003` at all with `None`.
+fn unit(
+    respond: impl Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync + 'static,
+    unit: Option<[u8; 4]>,
+) -> impl Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync + 'static {
+    move |request| {
+        let mut reply = respond(request)?;
+        match unit {
+            None if request[2] == 0 && request[3] >> 4 == 0 && request[4..6] == [0, 3] => {
+                reply[4] = 0;
+            }
+            Some(unit) if is_unit_id_read(request) => reply[5..9].copy_from_slice(&unit),
+            _ => {}
+        }
+        Some(reply)
     }
 }
 
@@ -151,7 +178,7 @@ async fn rgb_per_key_paints_under_a_compensated_claim_with_a_static_base() {
             .apply_on(&shared, || false, || true)
             .await
             .unwrap();
-        assert_eq!(lease, Some(self::lease(PREVIOUS[1])));
+        assert_eq!(lease, Some(self::lease(PREVIOUS[1], Some(UNIT))));
         let reports = handle.written_reports();
         assert_eq!(control_writes(&reports), [CLAIM.as_slice()]);
         let claim = reports.iter().position(|r| is_control(r, CLAIM)).unwrap();
@@ -195,7 +222,7 @@ async fn rgb_per_key_paints_under_a_compensated_claim_with_a_static_base() {
 async fn rgb_per_key_under_held_control_paints_once() {
     let (shared, handle) = device(held(partial(false))).await;
     let lease = write().apply_on(&shared, || false, || true).await.unwrap();
-    assert_eq!(lease, Some(self::lease(CLAIM[1])));
+    assert_eq!(lease, Some(self::lease(CLAIM[1], None)));
     let reports = handle.written_reports();
     assert_eq!(control_writes(&reports), [CLAIM.as_slice()]);
     assert_eq!(reports.iter().filter(|r| is_paint(r)).count(), 1);
@@ -335,8 +362,13 @@ async fn rgb_release_clears_only_cluster_control_and_keeps_the_events() {
             .await
             .unwrap()
             .unwrap();
-        let before = if already_held { CLAIM[1] } else { PREVIOUS[1] };
-        assert_eq!(lease, self::lease(before));
+        // Only a claim taken from the firmware identifies the device.
+        let expected = if already_held {
+            self::lease(CLAIM[1], None)
+        } else {
+            self::lease(PREVIOUS[1], Some(UNIT))
+        };
+        assert_eq!(lease, expected);
 
         release_rgb_control(&shared, lease, || true).await.unwrap();
         let reports = handle.written_reports();
@@ -498,8 +530,13 @@ fn response(request: &[u8]) -> Option<Vec<u8>> {
             reply[4] = match &request[4..6] {
                 [0x80, 0x71] => 8,
                 [0x80, 0x81] => 7,
+                [0x00, 0x03] => 9,
                 _ => 0,
             }
+        }
+        (9, 0) => {
+            reply[4] = 1;
+            reply[5..9].copy_from_slice(&UNIT);
         }
         (8, 0) => {
             reply[4..7].copy_from_slice(&request[4..7]);
@@ -536,4 +573,86 @@ fn response(request: &[u8]) -> Option<Vec<u8>> {
         _ => return None,
     }
     Some(reply)
+}
+
+#[tokio::test]
+async fn rgb_release_leaves_another_device_on_the_route_alone() {
+    // The claim identified UNIT; since then another device was paired to the
+    // receiver slot, behind the same connection.
+    let (shared, handle) = device(unit(response, Some([1, 2, 3, 4]))).await;
+    let error = release_rgb_control(&shared, lease(PREVIOUS[1], Some(UNIT)), || true)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error, WriteError::DeviceNotFound);
+    let reports = handle.written_reports();
+    assert_eq!(reports.iter().filter(|r| is_unit_id_read(r)).count(), 1);
+    assert!(
+        control_writes(&reports).is_empty(),
+        "control is never handed back on a device the lease did not claim"
+    );
+}
+
+#[tokio::test]
+async fn rgb_held_writes_skip_the_identity_read_and_continue_the_claim() {
+    let (shared, handle) = device(held(response)).await;
+    let lease = write()
+        .apply_on(&shared, || false, || true)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(handle.written_reports().iter().all(|r| !is_unit_id_read(r)));
+    assert!(lease.continues(&self::lease(PREVIOUS[1], Some(UNIT))));
+    assert!(lease.continues(&self::lease(PREVIOUS[1], None)));
+    let fresh = self::lease(PREVIOUS[1], Some([1, 2, 3, 4]));
+    assert!(!fresh.continues(&self::lease(PREVIOUS[1], Some(UNIT))));
+    assert!(fresh.continues(&fresh));
+}
+
+#[tokio::test]
+async fn rgb_without_device_information_claims_and_releases_unchecked() {
+    let (shared, handle) = device(unit(response, None)).await;
+    let lease = write()
+        .apply_on(&shared, || false, || true)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(lease, self::lease(PREVIOUS[1], None));
+
+    release_rgb_control(&shared, lease, || true).await.unwrap();
+    assert_eq!(
+        control_writes(&handle.written_reports()),
+        [CLAIM.as_slice(), PREVIOUS.as_slice()]
+    );
+}
+
+#[tokio::test]
+async fn rgb_unreadable_unit_id_fails_before_claiming() {
+    let (shared, handle) = device(|request: &[u8]| {
+        if is_unit_id_read(request) {
+            return Some(feature_error(request, 0x05));
+        }
+        response(request)
+    })
+    .await;
+    let error = write()
+        .apply_on(&shared, || false, || true)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            WriteError::HidppFeature {
+                operation: HidppOperation::Lighting,
+                feature_hex: 0x0003,
+                ..
+            }
+        ),
+        "unexpected error: {error:?}"
+    );
+    let reports = handle.written_reports();
+    assert!(control_writes(&reports).is_empty(), "nothing was claimed");
+    assert!(reports.iter().all(|r| !is_effect(r)));
 }

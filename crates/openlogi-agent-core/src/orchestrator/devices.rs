@@ -192,30 +192,6 @@ pub(super) fn reapply_targets(
         .collect()
 }
 
-/// Routes whose online device is gone from them after this refresh: it went
-/// offline, moved, or another device now answers there. State the agent left
-/// on a device through such a route, like the `0x8071` lease, no longer
-/// describes what is there. The device's own serial or unit id is compared,
-/// not its [`stable_id`]: a receiver slot keeps its stable id when another
-/// device is paired into it.
-pub(super) fn departed_routes<'a>(
-    prev: &'a [AgentDevice],
-    next: &[AgentDevice],
-) -> Vec<&'a DeviceRoute> {
-    let identity =
-        |dev: &AgentDevice| DeviceIdentity::from_parts(dev.serial.as_deref(), dev.unit_id);
-    prev.iter()
-        .filter(|dev| dev.online)
-        .filter_map(|dev| dev.route.as_ref().map(|route| (identity(dev), route)))
-        .filter(|(id, route)| {
-            !next
-                .iter()
-                .any(|dev| dev.online && dev.route.as_ref() == Some(*route) && identity(dev) == *id)
-        })
-        .map(|(_, route)| route)
-        .collect()
-}
-
 /// Whether this refresh invalidated any online device's volatile control
 /// diversion. Receiver routes stay connected while a paired mouse sleeps, so
 /// route equality alone cannot tell capture sessions to re-arm on wake.

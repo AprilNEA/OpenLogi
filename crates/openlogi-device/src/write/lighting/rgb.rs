@@ -6,6 +6,8 @@ use std::sync::Arc;
 
 use hidpp::channel::{ChannelError, HidppChannel};
 use hidpp::device::Device;
+use hidpp::feature::CreatableFeature;
+use hidpp::feature::device_information::DeviceInformationFeature;
 use hidpp::feature::rgb_effects::{
     CLUSTER_EFFECT_PARAM_COUNT, EventsNotificationFlags, PowerModeTarget, RgbEffectsFeature,
     RgbPersistence, SwControlFlags,
@@ -33,15 +35,33 @@ mod tests;
 /// through [`release_rgb_control`](super::release_rgb_control): G HUB and
 /// Solaar both return LED control to the firmware on exit. Disconnects and
 /// crashes cannot send it; the firmware drops volatile state on power loss.
+///
+/// A claim that took control from the firmware also records the unit ID the
+/// device reported (`0x0003`), so a release can tell the claimed device from
+/// another one paired to the same receiver slot since.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RgbControlLease {
     control: SwControlFlags,
     events: EventsNotificationFlags,
+    device: Option<[u8; 4]>,
+}
+
+impl RgbControlLease {
+    /// Whether this lease, from a later write through the same connection,
+    /// continues `earlier`'s claim. Only a write that took control from the
+    /// firmware reads the unit ID, so one that found control held carries
+    /// none and continues the recorded claim. A fresh claim on another
+    /// device does not: that device's flags replace the recorded ones.
+    #[must_use]
+    pub fn continues(&self, earlier: &Self) -> bool {
+        self.device.is_none() || self.device == earlier.device
+    }
 }
 
 /// The `0x8071` effect engine and the Static effect each cluster offers,
 /// read before any mutation.
 pub(super) struct RgbEngine {
+    channel: Arc<HidppChannel>,
     feature: Arc<RgbEffectsFeature>,
     statics: Vec<(u8, u8)>,
     complete: bool,
@@ -64,6 +84,7 @@ pub(super) async fn probe(
     };
     let (statics, complete) = discover(&feature, scope).await?;
     Ok(Some(RgbEngine {
+        channel: Arc::clone(channel),
         feature,
         statics,
         complete,
@@ -158,6 +179,14 @@ impl RgbEngine {
             .await?;
         scope.check()?;
         let fresh = !previous.control.contains(SwControlFlags::ALL_CLUSTERS);
+        // Still read-only: identify the device before taking it from the
+        // firmware, so a failed read leaves nothing to roll back.
+        let device = if fresh {
+            scope.read(unit_id(&self.channel, index)).await?
+        } else {
+            None
+        };
+        scope.check()?;
 
         // Recovery is owed from BEFORE sending the claim: losing its reply does
         // not mean firmware ignored it. The owner retains this future until all
@@ -201,6 +230,7 @@ impl RgbEngine {
         Ok(RgbControlLease {
             control: previous.control,
             events: previous.events,
+            device,
         })
     }
 }
@@ -210,12 +240,28 @@ impl RgbEngine {
 /// before the claim. A lease taken while an earlier process still held
 /// control, such as an agent that never handed it back, therefore still
 /// releases it.
+///
+/// A lease that recorded a unit ID is released only to the device that
+/// still reports it. Another device on the route, such as one paired to the
+/// same receiver slot since, is not one this lease claimed; it is left alone
+/// with [`WriteError::DeviceNotFound`].
 pub(super) async fn release(
     channel: &Arc<HidppChannel>,
     index: u8,
     lease: RgbControlLease,
     scope: &WriteScope<impl Fn() -> bool, impl Fn() -> bool>,
 ) -> Result<(), WriteError> {
+    if let Some(claimed) = lease.device {
+        let current = scope.read(unit_id(channel, index)).await?;
+        if current != Some(claimed) {
+            debug!(
+                index,
+                "another device answers on the route; leaving its RGB control"
+            );
+            return Err(WriteError::DeviceNotFound);
+        }
+        scope.check()?;
+    }
     let feature = scope.read(open(channel, index)).await?;
     scope.check()?;
     feature
@@ -233,10 +279,39 @@ async fn open(
     channel: &Arc<HidppChannel>,
     index: u8,
 ) -> Result<Arc<RgbEffectsFeature>, WriteError> {
-    let mut device = Device::new(Arc::clone(channel), index)
+    open_feature::<RgbEffectsFeature>(&mut device(channel, index).await?).await
+}
+
+async fn device(channel: &Arc<HidppChannel>, index: u8) -> Result<Device, WriteError> {
+    Device::new(Arc::clone(channel), index)
         .await
-        .map_err(|_| WriteError::DeviceUnreachable { index })?;
-    open_feature::<RgbEffectsFeature>(&mut device).await
+        .map_err(|_| WriteError::DeviceUnreachable { index })
+}
+
+/// The unit ID the device at `index` reports through `0x0003`, which tells
+/// two devices on one receiver slot apart. `None` when the device has no
+/// `DeviceInformation` feature.
+async fn unit_id(channel: &Arc<HidppChannel>, index: u8) -> Result<Option<[u8; 4]>, WriteError> {
+    let feature =
+        match open_feature::<DeviceInformationFeature>(&mut device(channel, index).await?).await {
+            Ok(feature) => feature,
+            Err(WriteError::FeatureUnsupported { .. }) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+    let info = feature
+        .get_device_info()
+        .await
+        .map_err(|error| match error {
+            Hidpp20Error::Channel(ChannelError::Timeout) => WriteError::RequestTimedOut {
+                operation: HidppOperation::Lighting,
+            },
+            other => classify_hidpp_error(
+                other,
+                HidppOperation::Lighting,
+                DeviceInformationFeature::ID,
+            ),
+        })?;
+    Ok(Some(info.unit_id))
 }
 
 /// Each cluster's Static effect `(cluster, effect index)`, and whether every

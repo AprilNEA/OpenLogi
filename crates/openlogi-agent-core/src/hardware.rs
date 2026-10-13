@@ -107,12 +107,6 @@ pub(crate) async fn release_session_rgb_control(access: &DeviceAccess) {
     }
 }
 
-/// Void the `0x8071` lease `route` holds: the device it was taken on left the
-/// route, so the flags it recorded describe nothing that is there now.
-pub(crate) fn forget_rgb_control(route: &DeviceRoute) {
-    rgb_control::SESSION.forget(route);
-}
-
 fn choose_authoritative<T>(
     capture: Option<T>,
     capture_is_current: impl FnOnce(&T) -> bool,
@@ -286,7 +280,9 @@ impl DeviceOp {
     /// went through, under the same route lock, receiver lease and I/O gate as
     /// [`Self::lighting`]. A connection that has closed or stopped being the
     /// route's publication means a replug or another device: the lease
-    /// describes nothing there, so nothing is sent.
+    /// describes nothing there, so nothing is sent. Behind an unchanged
+    /// connection, such as a receiver slot paired to another device since,
+    /// the release checks the unit ID its claim recorded.
     fn release_rgb_control(
         self,
         connection: WeakSharedChannel,

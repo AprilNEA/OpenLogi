@@ -52,8 +52,8 @@ mod devices;
 use devices::reapply_targets;
 use devices::{
     RECONNECT_REAPPLY_CONFIRM_RETRIES, VOLATILE_REAPPLY_CONFIRM_RETRIES,
-    any_device_needs_capture_rearm, build_devices, configured_wheel_mode, departed_routes,
-    host_switch_links, is_hidpp_device, pick_current, plan_reapply, stable_id,
+    any_device_needs_capture_rearm, build_devices, configured_wheel_mode, host_switch_links,
+    is_hidpp_device, pick_current, plan_reapply, stable_id,
 };
 
 /// The minimal per-device facts the agent needs: the config key (binding /
@@ -704,11 +704,6 @@ impl Orchestrator {
         };
         self.publish_inventory();
         let devices = build_devices(&self.config, inventories, standalone);
-        // A lease is owed only to the device it was taken on. Voided before
-        // this refresh's re-apply, so a device that came back records afresh.
-        for route in departed_routes(&self.devices, &devices) {
-            crate::hardware::forget_rgb_control(route);
-        }
         // Volatile settings (lighting colour, sensor DPI, SmartShift, native
         // wheel mode) live in device RAM and reset on a power cycle. Every
         // reconnect shape re-applies the persisted values (#189): a first
