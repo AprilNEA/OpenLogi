@@ -29,6 +29,13 @@ pub(crate) fn feature_error(request: &[u8], error: u8) -> Vec<u8> {
     response
 }
 
+/// A HID++ 1.0 error response to `request`: sub id `0x8f`, then the request's
+/// sub id and address, and the error code. A HID++ 1.0 device reads HID++
+/// 2.0's protocol ping as sub id `0x00`, so this answers that ping too.
+pub(crate) fn register_error(request: &[u8], error: u8) -> Vec<u8> {
+    vec![0x10, request[1], 0x8f, request[2], request[3], error, 0x00]
+}
+
 /// A live channel over `raw`.
 pub(crate) async fn scripted_channel(raw: impl RawHidChannel) -> Arc<HidppChannel> {
     Arc::new(

@@ -11,6 +11,9 @@ use hidpp::feature::unified_battery::{
 };
 use hidpp::receiver::bolt::DeviceKind as BoltDeviceKind;
 use hidpp::receiver::unifying::DeviceKind as UnifyingDeviceKind;
+use hidpp::register::battery::{
+    ChargingState as HidppRegisterChargingState, StatusLevel as HidppStatusLevel,
+};
 use openlogi_core::device::{BatteryInfo, BatteryLevel, BatteryStatus, DeviceKind};
 
 /// Trim NUL padding and whitespace from a `DeviceInformation` serial; an
@@ -164,6 +167,57 @@ pub(crate) fn map_adc_battery_status(status: HidppAdcChargingStatus) -> BatteryS
     }
 }
 
+/// Map a HID++ 1.0 battery register's charging state to our [`BatteryStatus`].
+fn map_register_charging(state: HidppRegisterChargingState) -> BatteryStatus {
+    match state {
+        HidppRegisterChargingState::Discharging => BatteryStatus::Discharging,
+        HidppRegisterChargingState::Recharging => BatteryStatus::Charging,
+        HidppRegisterChargingState::Full => BatteryStatus::Full,
+        _ => BatteryStatus::Unknown,
+    }
+}
+
+/// Build a [`BatteryInfo`] from a HID++ 1.0 battery register's reading, given
+/// the percentage and level it stands for.
+///
+/// Charge complete reads 100 % / [`BatteryLevel::Full`] whatever charge the
+/// register sent alongside it, as [`legacy_battery_info`] reads it for
+/// `0x1000`.
+pub(crate) fn register_battery_info(
+    percentage: u8,
+    level: BatteryLevel,
+    charging: HidppRegisterChargingState,
+) -> BatteryInfo {
+    let status = map_register_charging(charging);
+    let (percentage, level) = if status == BatteryStatus::Full {
+        (100, BatteryLevel::Full)
+    } else {
+        (percentage, level)
+    };
+    BatteryInfo {
+        percentage,
+        level,
+        status,
+    }
+}
+
+/// A stand-in percentage and our [`BatteryLevel`] for a HID++ 1.0 `0x07`
+/// level, which carries no percentage of its own.
+///
+/// The stand-ins are Solaar's `BatteryLevelApproximation` values; each sits in
+/// the [`legacy_battery_level_from_percentage`] bucket of the same level. A
+/// missing level reads as `0`, which a charging device shows as "charging, no
+/// reading".
+pub(crate) fn map_status_register_level(level: Option<HidppStatusLevel>) -> (u8, BatteryLevel) {
+    match level {
+        Some(HidppStatusLevel::Full) => (90, BatteryLevel::Full),
+        Some(HidppStatusLevel::Good) => (50, BatteryLevel::Good),
+        Some(HidppStatusLevel::Low) => (20, BatteryLevel::Low),
+        Some(HidppStatusLevel::Critical) => (5, BatteryLevel::Critical),
+        _ => (0, BatteryLevel::Unknown),
+    }
+}
+
 /// Estimate a charge percentage from a `0x1001` or `0x1F20` battery voltage
 /// reading.
 ///
@@ -265,10 +319,59 @@ pub(crate) fn legacy_battery_level_from_percentage(percentage: u8) -> BatteryLev
 #[cfg(test)]
 mod tests {
     use super::{
-        BatteryLevel, BatteryStatus, DeviceKind, HidppVoltageChargingStatus, UnifyingDeviceKind,
-        legacy_battery_level_from_percentage, map_unifying_kind, map_voltage_battery_status,
-        resolve_device_kind, voltage_battery_percentage,
+        BatteryInfo, BatteryLevel, BatteryStatus, DeviceKind, HidppRegisterChargingState,
+        HidppStatusLevel, HidppVoltageChargingStatus, UnifyingDeviceKind,
+        legacy_battery_level_from_percentage, map_status_register_level, map_unifying_kind,
+        map_voltage_battery_status, register_battery_info, resolve_device_kind,
+        voltage_battery_percentage,
     };
+
+    #[test]
+    fn register_charge_complete_reads_full_whatever_charge_it_sent() {
+        let (good, good_level) = map_status_register_level(Some(HidppStatusLevel::Good));
+        for (percentage, level) in [(good, good_level), (95, BatteryLevel::Full)] {
+            assert_eq!(
+                register_battery_info(percentage, level, HidppRegisterChargingState::Full),
+                BatteryInfo {
+                    percentage: 100,
+                    level: BatteryLevel::Full,
+                    status: BatteryStatus::Full,
+                },
+                "{percentage}% / {level:?}"
+            );
+        }
+        assert_eq!(
+            register_battery_info(
+                20,
+                BatteryLevel::Low,
+                HidppRegisterChargingState::Recharging
+            ),
+            BatteryInfo {
+                percentage: 20,
+                level: BatteryLevel::Low,
+                status: BatteryStatus::Charging,
+            },
+            "only charge complete is overridden"
+        );
+    }
+
+    #[test]
+    fn status_register_stand_ins_bucket_back_to_their_level() {
+        for level in [
+            HidppStatusLevel::Critical,
+            HidppStatusLevel::Low,
+            HidppStatusLevel::Good,
+            HidppStatusLevel::Full,
+        ] {
+            let (percentage, mapped) = map_status_register_level(Some(level));
+            assert_eq!(
+                legacy_battery_level_from_percentage(percentage),
+                mapped,
+                "{level:?} stands in as {percentage}%"
+            );
+        }
+        assert_eq!(map_status_register_level(None), (0, BatteryLevel::Unknown));
+    }
 
     #[test]
     fn probe_overrides_a_misreporting_register() {
