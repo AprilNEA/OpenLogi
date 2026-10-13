@@ -5,7 +5,7 @@ use openlogi_hidpp_derive::Feature;
 
 use crate::{
     feature::{FeatureEndpoint, hosts_info::HostIndex},
-    protocol::v20::Hidpp20Error,
+    protocol::v20::{self, Hidpp20Error},
 };
 
 bitflags::bitflags! {
@@ -61,31 +61,36 @@ pub struct FnInversionMultiHostFeature {
 
 impl FnInversionMultiHostFeature {
     /// Retrieves global Fn inversion for `host`.
+    ///
+    /// The four-field reply does not fit a short report, so a short reply is
+    /// refused rather than zero-filled into a capability byte of 0.
     pub async fn get_global_fn_inversion(
         &self,
         host: HostIndex,
     ) -> Result<FnInversionInfo, Hidpp20Error> {
-        let payload = self
-            .endpoint
-            .call(0, [u8::from(host), 0, 0])
-            .await?
-            .extend_payload();
+        let v20::Message::Long(_, payload) = self.endpoint.call(0, [u8::from(host), 0, 0]).await?
+        else {
+            return Err(Hidpp20Error::UnsupportedResponse);
+        };
         FnInversionInfo::from_payload(payload)
     }
 
     /// Sets global Fn inversion for `host`.
     ///
-    /// The setting is stored by the device for the selected host slot.
+    /// The setting is stored by the device for the selected host slot. Like
+    /// [`Self::get_global_fn_inversion`], a short reply is refused.
     pub async fn set_global_fn_inversion(
         &self,
         host: HostIndex,
         state: FnInversionState,
     ) -> Result<FnInversionInfo, Hidpp20Error> {
-        let payload = self
+        let v20::Message::Long(_, payload) = self
             .endpoint
             .call(1, set_multi_host_fn_inversion_args(host, state))
             .await?
-            .extend_payload();
+        else {
+            return Err(Hidpp20Error::UnsupportedResponse);
+        };
         FnInversionInfo::from_payload(payload)
     }
 }
@@ -202,5 +207,118 @@ mod tests {
             set_multi_host_fn_inversion_args(HostIndex::Slot(2), FnInversionState::On),
             [2, 1, 0]
         );
+    }
+
+    /// What a call gets when the device answers function `function` with
+    /// `reply`.
+    fn call_with<T, F>(
+        function: u8,
+        call: impl FnOnce(super::FnInversionMultiHostFeature) -> F,
+        reply: impl FnOnce(crate::protocol::v20::MessageHeader) -> crate::protocol::v20::Message,
+    ) -> Result<T, crate::protocol::v20::Hidpp20Error>
+    where
+        F: Future<Output = Result<T, crate::protocol::v20::Hidpp20Error>>,
+    {
+        use std::sync::Arc;
+
+        use crate::channel::mock::{MockRawHidChannel, channel_with_reader};
+        use crate::feature::CreatableFeature;
+        use crate::nibble::U4;
+        use crate::protocol::v20::MessageHeader;
+
+        futures::executor::block_on(async {
+            let (raw, handle) = MockRawHidChannel::new();
+            let channel = Arc::new(channel_with_reader(raw).await);
+            let mut pending =
+                Box::pin(call(super::FnInversionMultiHostFeature::new(channel, 3, 9)));
+            assert!(futures::poll!(pending.as_mut()).is_pending());
+            let header = MessageHeader {
+                device_index: 3,
+                feature_index: 9,
+                function_id: U4::from_lo(function),
+                software_id: U4::from_lo(1),
+            };
+            handle.send_incoming(reply(header).into()).await;
+            pending.await
+        })
+    }
+
+    #[test]
+    fn multi_host_reads_and_writes_refuse_a_short_reply() {
+        use std::assert_matches;
+
+        use super::{FnInversionCapabilities, FnInversionMultiHostFeature};
+        use crate::protocol::v20::{Hidpp20Error, Message};
+
+        // Zero-filled, this short reply would decode as host 1, state On,
+        // default Off and no MANUAL_FN_LOCK capability.
+        let short = |header| Message::Short(header, [1, 1, 0]);
+        let mut long = [0; 16];
+        long[..4].copy_from_slice(&[1, 1, 0, 1]);
+
+        let get = |f: FnInversionMultiHostFeature| async move {
+            f.get_global_fn_inversion(HostIndex::Slot(1)).await
+        };
+        let set = |f: FnInversionMultiHostFeature| async move {
+            f.set_global_fn_inversion(HostIndex::Slot(1), FnInversionState::On)
+                .await
+        };
+
+        assert_matches!(
+            call_with(0, get, short),
+            Err(Hidpp20Error::UnsupportedResponse)
+        );
+        assert_matches!(
+            call_with(1, set, short),
+            Err(Hidpp20Error::UnsupportedResponse)
+        );
+
+        for (function, info) in [
+            (0, call_with(0, get, |header| Message::Long(header, long))),
+            (1, call_with(1, set, |header| Message::Long(header, long))),
+        ] {
+            let info = info.unwrap_or_else(|err| panic!("function {function}: {err:?}"));
+            assert_eq!(info.host_index, HostIndex::Slot(1));
+            assert_eq!(info.state, FnInversionState::On);
+            assert!(
+                info.capabilities
+                    .contains(FnInversionCapabilities::MANUAL_FN_LOCK)
+            );
+        }
+    }
+
+    #[test]
+    fn single_host_reads_accept_a_short_reply() {
+        use super::FnInversionWithDefaultStateFeature;
+        use crate::protocol::v20::Message;
+
+        // 0x40A2's two fields fit a short report, which stays valid.
+        let global = futures::executor::block_on(async {
+            use std::sync::Arc;
+
+            use crate::channel::mock::{MockRawHidChannel, channel_with_reader};
+            use crate::feature::CreatableFeature;
+            use crate::nibble::U4;
+            use crate::protocol::v20::MessageHeader;
+
+            let (raw, handle) = MockRawHidChannel::new();
+            let channel = Arc::new(channel_with_reader(raw).await);
+            let feature = FnInversionWithDefaultStateFeature::new(channel, 3, 9);
+            let mut pending = Box::pin(feature.get_global_fn_inversion());
+            assert!(futures::poll!(pending.as_mut()).is_pending());
+            let header = MessageHeader {
+                device_index: 3,
+                feature_index: 9,
+                function_id: U4::from_lo(0),
+                software_id: U4::from_lo(1),
+            };
+            handle
+                .send_incoming(Message::Short(header, [1, 0, 0]).into())
+                .await;
+            pending.await
+        })
+        .unwrap();
+        assert_eq!(global.state, FnInversionState::On);
+        assert_eq!(global.default_state, FnInversionState::Off);
     }
 }
