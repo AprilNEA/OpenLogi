@@ -1091,3 +1091,135 @@ async fn fn_lock_write_that_the_keyboard_does_not_echo_fails() {
     assert_eq!(sets.len(), 1);
     assert_eq!(sets[0][4], 0);
 }
+
+/// Zones a scripted `0x8070` keyboard reports, in index order: each zone's raw
+/// location and the raw effect ids of its own effect list.
+type ScriptedZones = &'static [(u16, &'static [u16])];
+
+const COLOR_LED_EFFECTS_INDEX: u8 = 0x09;
+
+/// A `0x8070` keyboard answering `getInfo`, `getZoneInfo`,
+/// `getZoneEffectInfo` and `setZoneEffect` from `zones`. A request for a zone
+/// or effect it does not have gets no reply.
+fn color_led_effects_device(
+    zones: ScriptedZones,
+) -> impl Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync + 'static {
+    move |request| {
+        if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
+            return None;
+        }
+        let mut payload = [0u8; 16];
+        let long = match (request[2], request[3] >> 4) {
+            (0x00, 0x01) => {
+                payload[0] = 4;
+                false
+            }
+            (0x00, 0x00) => {
+                if u16::from_be_bytes([request[4], request[5]]) == 0x8070 {
+                    payload[0] = COLOR_LED_EFFECTS_INDEX;
+                }
+                false
+            }
+            (COLOR_LED_EFFECTS_INDEX, 0x00) => {
+                payload[0] = u8::try_from(zones.len()).expect("scripted zone count fits a byte");
+                true
+            }
+            (COLOR_LED_EFFECTS_INDEX, 0x01) => {
+                let (location, effects) = zones.get(usize::from(request[4]))?;
+                payload[0] = request[4];
+                payload[1..3].copy_from_slice(&location.to_be_bytes());
+                payload[3] =
+                    u8::try_from(effects.len()).expect("scripted effect count fits a byte");
+                true
+            }
+            (COLOR_LED_EFFECTS_INDEX, 0x02) => {
+                let (_, effects) = zones.get(usize::from(request[4]))?;
+                let effect_id = effects.get(usize::from(request[5]))?;
+                payload[0] = request[4];
+                payload[1] = request[5];
+                payload[2..4].copy_from_slice(&effect_id.to_be_bytes());
+                true
+            }
+            (COLOR_LED_EFFECTS_INDEX, 0x03) => true,
+            _ => return None,
+        };
+        let mut response = vec![0u8; if long { 20 } else { 7 }];
+        response[0] = if long { 0x11 } else { 0x10 };
+        response[1..4].copy_from_slice(&request[1..4]);
+        let payload_len = response.len() - 4;
+        response[4..].copy_from_slice(&payload[..payload_len]);
+        Some(response)
+    }
+}
+
+/// Every `setZoneEffect` the keyboard received, as `(zone, effect index)`.
+fn zone_effect_writes(handle: &crate::replay::ReplayChannelHandle) -> Vec<(u8, u8)> {
+    handle
+        .written_reports()
+        .into_iter()
+        .filter(|report| {
+            report.len() == 20 && report[2] == COLOR_LED_EFFECTS_INDEX && report[3] >> 4 == 0x03
+        })
+        .map(|report| {
+            assert_eq!(
+                report[6..9],
+                [0x11, 0x22, 0x33],
+                "fixed colour params are RGB"
+            );
+            assert_eq!(report[16], 0, "the colour is applied volatilely");
+            (report[4], report[5])
+        })
+        .collect()
+}
+
+async fn color_led_effects_shared(
+    zones: ScriptedZones,
+) -> (SharedChannel, crate::replay::ReplayChannelHandle) {
+    let (raw, handle) =
+        ScriptedRawHidChannel::with_dynamic_responder(color_led_effects_device(zones));
+    let shared = SharedChannel::new(
+        scripted_channel(raw).await,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc33f,
+        },
+    );
+    (shared, handle)
+}
+
+#[tokio::test]
+async fn a_fixed_colour_targets_each_zones_own_fixed_effect() -> Result<(), WriteError> {
+    // Zone 0 lists the fixed colour third; zone 1 after an effect id this
+    // crate does not model; zone 2 has none, so it is left alone; zone 3 has a
+    // location the parser rejects, so it keeps the legacy index 1.
+    const ZONES: ScriptedZones = &[
+        (0x0001, &[0x0000, 0x0004, 0x0001]),
+        (0x0006, &[0x0063, 0x0004, 0x0001]),
+        (0x0002, &[0x0003]),
+        (0x0042, &[0x0001, 0x0004]),
+    ];
+    let (shared, handle) = color_led_effects_shared(ZONES).await;
+
+    set_keyboard_color_with_on(&shared, LightingMethod::Effects, 0x11, 0x22, 0x33).await?;
+
+    assert_eq!(zone_effect_writes(&handle), [(0, 2), (1, 2), (3, 1)]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_keyboard_whose_zones_offer_no_fixed_colour_is_not_written() {
+    const ZONES: ScriptedZones = &[(0x0001, &[0x0003, 0x0004]), (0x0002, &[0x0000])];
+    let (shared, handle) = color_led_effects_shared(ZONES).await;
+
+    let result =
+        set_keyboard_color_with_on(&shared, LightingMethod::Effects, 0x11, 0x22, 0x33).await;
+
+    assert_eq!(
+        result,
+        Err(WriteError::FeatureUnsupported {
+            feature_hex: 0x8070
+        }),
+        "Auto falls through to the next path on this error"
+    );
+    assert!(zone_effect_writes(&handle).is_empty());
+}
