@@ -20,4 +20,5 @@ pub(super) struct DeviceSession {
     pub(super) inventory_misses: u8,
     pub(super) smartshift: SmartShiftDeviceState,
     pub(super) light: LightDeviceState,
+    pub(super) sidetone: Option<u8>,
 }

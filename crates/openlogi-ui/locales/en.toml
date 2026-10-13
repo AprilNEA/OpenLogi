@@ -626,3 +626,10 @@ triangle_key = "Triangle Key"
 diamond_key = "Diamond Key"
 star_key = "Star Key"
 control_key = "Control"
+
+[audio]
+audio = "Audio"
+sidetone = "Sidetone"
+sidetone_description = "Microphone feedback in earcups"
+sidetone_read_failed = "Couldn't read sidetone"
+sidetone_retry = "Retry"

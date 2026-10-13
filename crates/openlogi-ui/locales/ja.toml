@@ -626,3 +626,10 @@ triangle_key = "三角キー"
 diamond_key = "ひし形キー"
 star_key = "星キー"
 control_key = "コントロール"
+
+[audio]
+audio = "オーディオ"
+sidetone = "サイドトーン"
+sidetone_description = "イヤーカップでのマイク音声フィードバック"
+sidetone_read_failed = "サイドトーンを読み取れませんでした"
+sidetone_retry = "再試行"

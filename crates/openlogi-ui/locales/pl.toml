@@ -626,3 +626,10 @@ triangle_key = "Klawisz trójkąta"
 diamond_key = "Klawisz rombu"
 star_key = "Klawisz gwiazdy"
 control_key = "Element sterujący"
+
+[audio]
+audio = "Dźwięk"
+sidetone = "Sidetone"
+sidetone_description = "Słyszalność własnego głosu w słuchawkach"
+sidetone_read_failed = "Nie udało się odczytać poziomu sidetone"
+sidetone_retry = "Ponów"

@@ -61,9 +61,9 @@ use request::LinkLost;
 #[cfg(all(target_os = "macos", debug_assertions))]
 pub use request::PollEventMonitor;
 pub use request::{
-    CancelPairing, Command, PairDevice, ReadDpi, ReadFnLock, ReadSmartShift, ReloadConfig,
-    RequestAccessibilityPrompt, SetDpi, SetFnLock, SetLight, SetLightManualPower, SetLighting,
-    SetSmartShift, StartPairing, UnpairDevice,
+    CancelPairing, Command, PairDevice, ReadDpi, ReadFnLock, ReadSidetone, ReadSmartShift,
+    ReloadConfig, RequestAccessibilityPrompt, SetDpi, SetFnLock, SetLight, SetLightManualPower,
+    SetLighting, SetSidetone, SetSmartShift, StartPairing, UnpairDevice,
 };
 
 /// How long to wait before retrying a connect that failed. This is a retry
@@ -105,6 +105,15 @@ pub enum GuiUpdate {
         key: DeviceKey,
         /// The echoed state, or why the write did not land.
         result: Result<FnLockState, WriteError>,
+    },
+    /// Result of writing headset sidetone level. Answers [`SetSidetone`].
+    SidetoneWritten {
+        /// The headset that was written.
+        key: DeviceKey,
+        /// The requested level that was attempted.
+        level: u8,
+        /// Acceptance or typed device failure.
+        result: Result<(), WriteError>,
     },
     /// A pairing command could not be delivered, so no session will ever appear
     /// in the observed state to explain the silence. Reported locally rather

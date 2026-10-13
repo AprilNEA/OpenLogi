@@ -138,6 +138,10 @@ pub struct Capabilities {
     /// fn inversion. Appended: crosses the IPC and the persisted identity.
     #[serde(default)]
     pub fn_lock: bool,
+    /// Headset audio sidetone can be read and written — HID++ `0x0604`.
+    /// Appended: crosses IPC and persisted identity.
+    #[serde(default)]
+    pub sidetone: bool,
 }
 
 impl Capabilities {
@@ -162,6 +166,7 @@ impl Capabilities {
             haptic_panel: false,
             dpi_gestures: false,
             fn_lock: ids.contains(&0x40a2) || ids.contains(&0x40a3),
+            sidetone: ids.contains(&0x0604),
         }
     }
 
@@ -531,6 +536,7 @@ mod tests {
                     haptic_panel: false,
                     dpi_gestures: false,
                     fn_lock: false,
+                    sidetone: false,
                 }),
             }],
         }
@@ -643,6 +649,7 @@ mod tests {
                 haptic_panel: false,
                 dpi_gestures: false,
                 fn_lock: false,
+                sidetone: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
@@ -661,6 +668,7 @@ mod tests {
                 haptic_panel: false,
                 dpi_gestures: false,
                 fn_lock: false,
+                sidetone: false,
             }
         );
         // No driving features → nothing offered.

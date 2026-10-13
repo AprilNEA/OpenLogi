@@ -55,6 +55,7 @@ mod fn_lock;
 mod lighting;
 mod profile_scope;
 mod reload;
+mod sidetone;
 mod smartshift;
 mod transient_identity;
 mod wheel_resolution;

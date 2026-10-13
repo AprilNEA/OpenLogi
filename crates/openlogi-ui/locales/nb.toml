@@ -626,3 +626,10 @@ triangle_key = "Trekant-tast"
 diamond_key = "Rombe-tast"
 star_key = "Stjerne-tast"
 control_key = "Kontroll"
+
+[audio]
+audio = "Lyd"
+sidetone = "Sidetone"
+sidetone_description = "Mikrofontilbakemelding i øreklokkene"
+sidetone_read_failed = "Kunne ikke lese sidetone"
+sidetone_retry = "Prøv igjen"

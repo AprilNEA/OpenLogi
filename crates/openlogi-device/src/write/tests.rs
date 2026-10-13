@@ -1081,3 +1081,48 @@ async fn fn_lock_write_that_the_keyboard_does_not_echo_fails() {
     assert_eq!(sets.len(), 1);
     assert_eq!(sets[0][4], 0);
 }
+
+#[tokio::test]
+async fn read_battery_raw_formats_centurion_soc() {
+    fn centurion_battery_responder(request: &[u8]) -> Option<Vec<u8>> {
+        if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
+            return None;
+        }
+        let feature_index = request[2];
+        let function = request[3] >> 4;
+        let mut response = vec![0u8; 20];
+        response[0] = 0x11;
+        response[1..4].copy_from_slice(&request[1..4]);
+        match (feature_index, function) {
+            (0x00, 0x01) => response[4] = 4,
+            (0x00, 0x00) => {
+                let feature_id = u16::from_be_bytes([request[4], request[5]]);
+                response[4] = u8::from(feature_id == 0x0104) * 0x04;
+            }
+            (0x04, 0x00) => {
+                // 0x0104 getBatteryInfo: [percentage, duplicate_percentage, status]
+                response[4] = 78;
+                response[5] = 78;
+                response[6] = 1; // Recharging
+            }
+            _ => return None,
+        }
+        Some(response)
+    }
+
+    let (raw, _) = ScriptedRawHidChannel::with_responder(centurion_battery_responder);
+    let channel = scripted_channel(raw).await;
+    let shared = SharedChannel::new(
+        channel,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0x0af7,
+        },
+    );
+
+    let mut device = Device::new(shared.channel().clone(), 0xff).await.unwrap();
+    let text = diagnostics::read_battery_raw_on_device(&mut device)
+        .await
+        .expect("centurion battery raw read succeeds");
+    assert!(text.contains("0x0104 CenturionBatterySoc: percentage=78 status=Recharging"));
+}

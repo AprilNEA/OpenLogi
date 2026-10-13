@@ -29,7 +29,7 @@ pub use devices::DeviceRecord;
 pub(crate) use events::{StateEvent, StateEvents};
 pub use light::LightCommandStatus;
 pub(crate) use load::Load;
-pub use load::{DpiLoad, FnLockLoad, SmartShiftLoad};
+pub use load::{DpiLoad, FnLockLoad, SidetoneLoad, SmartShiftLoad};
 
 /// Result of confirming a SmartShift write by reading the value back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +78,7 @@ mod load;
 mod pointer;
 mod scroll;
 mod settings;
+mod sidetone;
 mod smartshift;
 
 #[cfg(test)]
@@ -218,6 +219,7 @@ impl AppState {
             state.load_current_smartshift(cx);
             state.confirm_current_smartshift(cx);
             state.load_current_fn_lock(cx);
+            state.load_current_sidetone(cx);
         });
     }
 
@@ -303,6 +305,7 @@ impl AppState {
         }
         true
     }
+
     /// Persist the in-memory config and — only if the write actually landed —
     /// have the agent reload it. `what` names the setting for the failure log.
     ///

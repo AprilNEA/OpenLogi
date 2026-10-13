@@ -626,3 +626,10 @@ triangle_key = "Touche Triangle"
 diamond_key = "Touche Losange"
 star_key = "Touche Étoile"
 control_key = "Commande"
+
+[audio]
+audio = "Audio"
+sidetone = "Effet local (Sidetone)"
+sidetone_description = "Retour du microphone dans le casque"
+sidetone_read_failed = "Impossible de lire l'effet local"
+sidetone_retry = "Réessayer"

@@ -626,3 +626,10 @@ triangle_key = "Driehoek-toets"
 diamond_key = "Ruit-toets"
 star_key = "Ster-toets"
 control_key = "Bediening"
+
+[audio]
+audio = "Audio"
+sidetone = "Sidetone"
+sidetone_description = "Microfoonfeedback in oorschelpen"
+sidetone_read_failed = "Kon sidetone niet lezen"
+sidetone_retry = "Opnieuw proberen"

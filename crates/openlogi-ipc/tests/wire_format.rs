@@ -102,7 +102,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 35);
+    assert_eq!(PROTOCOL_VERSION, 37);
 }
 
 #[test]
@@ -256,6 +256,25 @@ fn semantic_read_requests() {
             },
         },
         "1e0008463030444341464501",
+    );
+    assert_wire(
+        &AgentRequest::ReadSidetone {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+        },
+        "1f0008463030444341464501",
+    );
+    assert_wire(
+        &AgentRequest::SetSidetone {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+            level: 50,
+        },
+        "20000846303044434146450132",
     );
 }
 
@@ -480,12 +499,13 @@ fn device_inventory() {
                 haptic_panel: true,
                 dpi_gestures: true,
                 fn_lock: false,
+                sidetone: false,
             }),
         }],
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b000010150020001030106323134304c5a0102030400010100fb34b0fb8240000b0101010000010101010100",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b000010150020001030106323134304c5a0102030400010100fb34b0fb8240000b010101000001010101010000",
     );
 }
 

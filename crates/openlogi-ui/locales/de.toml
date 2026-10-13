@@ -626,3 +626,10 @@ triangle_key = "Dreieck-Taste"
 diamond_key = "Raute-Taste"
 star_key = "Stern-Taste"
 control_key = "Steuerelement"
+
+[audio]
+audio = "Audio"
+sidetone = "Nebenton (Sidetone)"
+sidetone_description = "Mikrofon-Rückmeldung in den Ohrmuscheln"
+sidetone_read_failed = "Nebenton konnte nicht gelesen werden"
+sidetone_retry = "Erneut versuchen"

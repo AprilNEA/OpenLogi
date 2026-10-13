@@ -318,6 +318,19 @@ impl Agent for TestAgent {
             0x40a3,
         )
     }
+
+    async fn read_sidetone(self, _: TarpcContext, _route: DeviceRoute) -> Result<u8, WriteError> {
+        unreachable!("profile capture must not read sidetone")
+    }
+
+    async fn set_sidetone(
+        self,
+        _: TarpcContext,
+        _route: DeviceRoute,
+        _level: u8,
+    ) -> Result<(), WriteError> {
+        unreachable!("profile capture must not write sidetone")
+    }
 }
 
 /// The client end of an in-process agent, past the handshake `connect_as`

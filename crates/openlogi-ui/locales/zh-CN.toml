@@ -626,3 +626,10 @@ triangle_key = "三角形键"
 diamond_key = "菱形键"
 star_key = "星形键"
 control_key = "控件"
+
+[audio]
+audio = "音频"
+sidetone = "侧音"
+sidetone_description = "耳机中的麦克风声音反馈"
+sidetone_read_failed = "无法读取侧音"
+sidetone_retry = "重试"
