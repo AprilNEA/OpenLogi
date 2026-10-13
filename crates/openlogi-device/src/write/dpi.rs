@@ -116,24 +116,18 @@ impl DpiFeature {
             Self::Adjustable(feature) => feature.set_sensor_dpi(SENSOR, dpi).await,
             Self::Extended(feature) => {
                 // `setSensorDpiParameters` writes DPI X, DPI Y and lift-off
-                // distance in one packet with no "leave unchanged" encoding, so
-                // read the current parameters first and put back what we are
-                // not asked to change. Writing a bare `lod` would silently
-                // retune the sensor's lift-off height.
+                // distance in one packet with no "leave unchanged" encoding.
+                // Which of Y and LOD the packet may carry is the sensor's
+                // capability bits, not a guess from the values a parameters
+                // read returns. The current LOD is put back so the write does
+                // not retune the lift-off height, and an independent Y axis is
+                // kept locked to X — the UI exposes a single DPI.
+                let capabilities = feature.get_sensor_capabilities(SENSOR).await?.capabilities;
                 let current = feature.get_sensor_dpi_parameters(SENSOR).await?;
                 feature
                     .set_sensor_dpi_parameters(
                         SENSOR,
-                        SetDpiParameters {
-                            dpi_x: dpi,
-                            // The spec has the host send 0 for dpiY when the
-                            // sensor has no independent Y axis, and reports 0
-                            // on read in exactly that case. When it does have
-                            // one, keep the axes locked together — the UI
-                            // exposes a single DPI.
-                            dpi_y: if current.dpi_y == 0 { 0 } else { dpi },
-                            lod: current.lod,
-                        },
+                        SetDpiParameters::for_sensor(capabilities, dpi, dpi, current.lod),
                     )
                     .await
             }
@@ -345,3 +339,6 @@ pub async fn set_dpi_on(shared: &SharedChannel, dpi: Dpi) -> Result<(), WriteErr
 pub async fn get_dpi_info_on(shared: &SharedChannel) -> Result<DpiInfo, WriteError> {
     get_dpi_info_on_channel(shared.channel(), shared.device_index()).await
 }
+
+#[cfg(test)]
+mod tests;

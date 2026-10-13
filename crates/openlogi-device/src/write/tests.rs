@@ -1,5 +1,5 @@
 use super::*;
-use hidpp::feature::extended_dpi::{DpiRange, Lod};
+use hidpp::feature::extended_dpi::{DpiRange, Lod, SensorCapabilities};
 use hidpp::feature::per_key_lighting::FramePersistence;
 use hidpp::feature::smartshift::WheelMode;
 
@@ -362,10 +362,11 @@ async fn dpi_reads_and_writes_work_on_a_device_with_only_extended_dpi() -> Resul
         .find(|report| report.len() == 20 && report[2] == 0x05 && report[3] >> 4 == 0x06)
         .expect("a DPI write must reach the device");
     assert_eq!(u16::from_be_bytes([write[5], write[6]]), 1200);
-    // No independent Y axis on this sensor, so the spec has the host send 0.
+    // The sensor does not advertise an independent Y axis, so the spec has
+    // the host send 0.
     assert_eq!(u16::from_be_bytes([write[7], write[8]]), 0);
-    // Lift-off distance is read back and rewritten unchanged — the packet has
-    // no "leave alone" encoding, so writing a bare 0 would retune the sensor.
+    // It does advertise lift-off control, so the LOD is read back and
+    // rewritten unchanged — the packet has no "leave alone" encoding.
     assert_eq!(write[9], u8::from(Lod::Medium));
     Ok(())
 }
@@ -584,6 +585,13 @@ fn extended_dpi_scripted_response(request: &[u8]) -> Option<Vec<u8>> {
         // getSensorCount.
         (0x05, 0x00) => {
             payload[0] = 1;
+            false
+        }
+        // getSensorCapabilities: echo the sensor, no DPI levels, lift-off
+        // distance control but no independent Y axis.
+        (0x05, 0x01) => {
+            payload[0] = request[4];
+            payload[2] = SensorCapabilities::LOD.bits();
             false
         }
         // getSensorDpiRanges: echo (sensorIdx, direction, page), then 400 with
