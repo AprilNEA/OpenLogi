@@ -4,10 +4,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use openlogi_core::color::Rgb;
 
 use crate::channel::scripted::{ScriptedRawHidChannel, feature_error, scripted_channel};
+use crate::write::lighting::rgb::RgbControlLease;
 use crate::write::{
     HidppFeatureErrorKind, HidppOperation, LightingMethod, LightingWrite, WriteError,
+    release_rgb_control,
 };
 use crate::{DeviceRoute, SharedChannel};
+use hidpp::feature::rgb_effects::{EventsNotificationFlags, SwControlFlags};
 
 fn write() -> LightingWrite {
     LightingWrite {
@@ -63,6 +66,51 @@ fn assert_no_fallback(reports: &[Vec<u8>]) {
     );
 }
 
+fn is_paint(request: &[u8]) -> bool {
+    request[2] == 7 && request[3] >> 4 == 6
+}
+
+fn is_frame_end(request: &[u8]) -> bool {
+    request[2] == 7 && request[3] >> 4 == 7
+}
+
+fn lease(control: u8) -> RgbControlLease {
+    RgbControlLease {
+        control: SwControlFlags::from_bits_retain(control),
+        events: EventsNotificationFlags::from_bits_retain(PREVIOUS[2]),
+    }
+}
+
+/// Cluster 1 offers no Static effect, so `0x8071` alone cannot colour the
+/// device; with `empty`, the device reports no clusters at all.
+fn partial(empty: bool) -> impl Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync + 'static {
+    move |request| {
+        let mut reply = response(request)?;
+        if request[2] == 8 && request[3] >> 4 == 0 {
+            if empty && request[4..6] == [0xff, 0xff] {
+                reply[6] = 0;
+            }
+            if !empty && request[4..6] == [1, 0] {
+                reply[6..8].copy_from_slice(&2u16.to_be_bytes());
+            }
+        }
+        Some(reply)
+    }
+}
+
+/// `respond`, but the device already reports cluster control as held.
+fn held(
+    respond: impl Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync + 'static,
+) -> impl Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync + 'static {
+    move |request| {
+        let mut reply = respond(request)?;
+        if request[2] == 8 && request[3] >> 4 == 5 && request[4] == 0 {
+            reply[5] |= 1;
+        }
+        Some(reply)
+    }
+}
+
 #[tokio::test]
 async fn rgb_success_preflights_every_cluster_and_keeps_software_control() {
     let (shared, handle) = device(response).await;
@@ -92,38 +140,193 @@ async fn rgb_success_preflights_every_cluster_and_keeps_software_control() {
 }
 
 #[tokio::test]
-async fn rgb_partial_support_and_empty_device_fall_back_without_claiming() {
-    for empty in [false, true] {
-        let (shared, handle) = device(move |request| {
-            let mut reply = response(request)?;
-            if request[2] == 8 && request[3] >> 4 == 0 {
-                if empty && request[4..6] == [0xff, 0xff] {
-                    reply[6] = 0;
-                }
-                if !empty && request[4..6] == [1, 0] {
-                    reply[6..8].copy_from_slice(&2u16.to_be_bytes());
-                }
-            }
-            Some(reply)
-        })
-        .await;
-        write().apply_on(&shared, || false, || true).await.unwrap();
+async fn rgb_per_key_paints_under_a_compensated_claim_with_a_static_base() {
+    for (method, empty) in [
+        (LightingMethod::Auto, false),
+        (LightingMethod::Auto, true),
+        (LightingMethod::PerKeyV2, false),
+    ] {
+        let (shared, handle) = device(partial(empty)).await;
+        let lease = LightingWrite { method, ..write() }
+            .apply_on(&shared, || false, || true)
+            .await
+            .unwrap();
+        assert_eq!(lease, Some(self::lease(PREVIOUS[1])));
         let reports = handle.written_reports();
-        assert!(control_writes(&reports).is_empty());
-        assert!(reports.iter().all(|r| !is_effect(r)));
-        let paints: Vec<_> = reports
+        assert_eq!(control_writes(&reports), [CLAIM.as_slice()]);
+        let claim = reports.iter().position(|r| is_control(r, CLAIM)).unwrap();
+        let last_read = reports
             .iter()
-            .filter(|r| r[2] == 7 && r[3] >> 4 == 6)
-            .collect();
-        assert_eq!(paints.len(), 1);
-        assert_eq!(&paints[0][4..9], &[0x17, 0x82, 0xc4, 1, 4]);
+            .rposition(|r| r[3] >> 4 == 0 && matches!(r[2], 7 | 8))
+            .unwrap();
         assert!(
-            reports
-                .iter()
-                .any(|r| r[2] == 7 && r[3] >> 4 == 7 && r[4..7] == [0, 0, 0]),
+            last_read < claim,
+            "zone and cluster discovery precede the claim"
+        );
+
+        // The Static base goes only on the cluster that offers it.
+        let effects: Vec<_> = reports.iter().filter(|r| is_effect(r)).collect();
+        let expected: &[[u8; 5]] = if empty {
+            &[]
+        } else {
+            &[[0, 1, 0x17, 0x82, 0xc4]]
+        };
+        assert_eq!(
+            effects.iter().map(|r| &r[4..9]).collect::<Vec<_>>(),
+            expected.iter().map(<[u8; 5]>::as_slice).collect::<Vec<_>>()
+        );
+
+        // A fresh claim replays the first frame once.
+        let paints: Vec<_> = reports.iter().filter(|r| is_paint(r)).collect();
+        assert_eq!(paints.len(), 2);
+        assert!(paints.iter().all(|r| r[4..9] == [0x17, 0x82, 0xc4, 1, 4]));
+        let frame_ends: Vec<_> = reports.iter().filter(|r| is_frame_end(r)).collect();
+        assert_eq!(frame_ends.len(), 2);
+        assert!(
+            frame_ends.iter().all(|r| r[4..7] == [0, 0, 0]),
             "0x8081 frameEnd uses persistence 0 for RAM only"
         );
+        let first_paint = reports.iter().position(|r| is_paint(r)).unwrap();
+        assert!(claim < first_paint, "per-key frames follow the claim");
     }
+}
+
+#[tokio::test]
+async fn rgb_per_key_under_held_control_paints_once() {
+    let (shared, handle) = device(held(partial(false))).await;
+    let lease = write().apply_on(&shared, || false, || true).await.unwrap();
+    assert_eq!(lease, Some(self::lease(CLAIM[1])));
+    let reports = handle.written_reports();
+    assert_eq!(control_writes(&reports), [CLAIM.as_slice()]);
+    assert_eq!(reports.iter().filter(|r| is_paint(r)).count(), 1);
+    assert_eq!(reports.iter().filter(|r| is_frame_end(r)).count(), 1);
+}
+
+#[tokio::test]
+async fn rgb_per_key_failure_restores_the_snapshot() {
+    let respond = partial(false);
+    let (shared, handle) = device(move |request| {
+        if is_paint(request) {
+            return Some(feature_error(request, 9));
+        }
+        respond(request)
+    })
+    .await;
+    let error = write()
+        .apply_on(&shared, || false, || true)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            WriteError::HidppFeature {
+                feature_hex: 0x8081,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    let reports = handle.written_reports();
+    assert_eq!(
+        control_writes(&reports),
+        [CLAIM.as_slice(), PREVIOUS.as_slice()]
+    );
+    assert!(
+        reports
+            .iter()
+            .all(|r| !(r[2] == 0 && r[4..6] == [0x80, 0x80])),
+        "a failure after the claim must not fall back to 0x8080"
+    );
+}
+
+#[tokio::test]
+async fn rgb_per_key_without_an_effect_engine_never_claims() {
+    let (shared, handle) = device(|request| {
+        let mut reply = response(request)?;
+        if request[2] == 0 && request[3] >> 4 == 0 && request[4..6] == [0x80, 0x71] {
+            reply[4] = 0;
+        }
+        Some(reply)
+    })
+    .await;
+    let lease = write().apply_on(&shared, || false, || true).await.unwrap();
+    assert_eq!(lease, None);
+    let reports = handle.written_reports();
+    assert!(
+        reports.iter().all(|r| r[2] != 8),
+        "no 0x8071 request at all"
+    );
+    assert_eq!(reports.iter().filter(|r| is_paint(r)).count(), 1);
+}
+
+#[tokio::test]
+async fn rgb_partial_engine_without_per_key_falls_back_before_claiming() {
+    let respond = partial(false);
+    let (shared, handle) = device(move |request| {
+        let mut reply = respond(request)?;
+        if request[2] == 0 && request[3] >> 4 == 0 && request[4..6] == [0x80, 0x81] {
+            reply[4] = 0;
+        }
+        Some(reply)
+    })
+    .await;
+    let error = write()
+        .apply_on(&shared, || false, || true)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error,
+        WriteError::FeatureUnsupported {
+            feature_hex: 0x8080
+        }
+    );
+    let reports = handle.written_reports();
+    assert!(control_writes(&reports).is_empty());
+    assert!(reports.iter().all(|r| !is_effect(r)));
+}
+
+#[tokio::test]
+async fn rgb_release_clears_only_cluster_control_and_keeps_the_events() {
+    for already_held in [false, true] {
+        let (shared, handle) = if already_held {
+            device(held(response)).await
+        } else {
+            device(response).await
+        };
+        let lease = write()
+            .apply_on(&shared, || false, || true)
+            .await
+            .unwrap()
+            .unwrap();
+        let before = if already_held { CLAIM[1] } else { PREVIOUS[1] };
+        assert_eq!(lease, self::lease(before));
+
+        release_rgb_control(&shared, lease, || true).await.unwrap();
+        let reports = handle.written_reports();
+        assert_eq!(
+            control_writes(&reports),
+            [CLAIM.as_slice(), PREVIOUS.as_slice()],
+            "a lease taken over a stale claim still hands the clusters back"
+        );
+    }
+}
+
+#[tokio::test]
+async fn rgb_release_never_writes_through_a_retired_channel() {
+    let (shared, handle) = device(response).await;
+    let lease = write()
+        .apply_on(&shared, || false, || true)
+        .await
+        .unwrap()
+        .unwrap();
+    let error = release_rgb_control(&shared, lease, || false)
+        .await
+        .unwrap_err();
+    assert_eq!(error, WriteError::DeviceNotFound);
+    assert_eq!(
+        control_writes(&handle.written_reports()),
+        [CLAIM.as_slice()]
+    );
 }
 
 #[tokio::test]

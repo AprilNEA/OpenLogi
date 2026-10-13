@@ -166,6 +166,7 @@ pub async fn set_keyboard_color_with_on(
         }
         .apply_on(&channel, || cancel.is_cancelled(), || gate.allows_io())
         .await
+        .map(drop)
     })?
     .finish()
     .await

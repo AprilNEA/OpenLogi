@@ -34,6 +34,7 @@ use crate::receiver_access::ReceiverAccess;
 mod context;
 mod fn_lock;
 mod light;
+mod rgb_control;
 
 pub use context::HardwareContext;
 pub(crate) use fn_lock::{FnLockOrder, FnLockTicket};
@@ -43,6 +44,11 @@ pub(crate) use fn_lock::{FnLockOrder, FnLockTicket};
 /// this background thread forever; a write to a live device completes in well
 /// under a second.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Upper bound on handing `0x8071` software control back while the agent
+/// exits. One release is two requests; the budget only matters when a device
+/// stopped answering or a lighting write still holds the route lock.
+const RGB_RELEASE_BUDGET: Duration = Duration::from_secs(2);
 
 /// Select the only Agent-authoritative channel for `route`.
 fn authoritative_channel(
@@ -60,6 +66,35 @@ fn authoritative_channel(
         || registry.lookup(route),
     )
     .ok_or(WriteError::DeviceNotFound)
+}
+
+/// Hand every `0x8071` lease this session's lighting writes took back to the
+/// firmware, as G HUB and Solaar do on exit, so the device returns to its
+/// onboard effect and another host can take it. Releases run in parallel
+/// within [`RGB_RELEASE_BUDGET`]; an absent device or failed release is
+/// logged, never allowed to hold up the exit.
+pub(crate) async fn release_session_rgb_control(access: &DeviceAccess) {
+    let jobs: Vec<_> = rgb_control::SESSION
+        .take()
+        .into_iter()
+        .filter_map(
+            |(route, lease)| match access.op(&route).release_rgb_control(lease) {
+                Ok(job) => Some((route, job)),
+                Err(error) => {
+                    warn!(%route, ?error, "could not start the RGB control release");
+                    None
+                }
+            },
+        )
+        .collect();
+    let deadline = tokio::time::Instant::now() + RGB_RELEASE_BUDGET;
+    for (route, job) in jobs {
+        match tokio::time::timeout_at(deadline, job.wait()).await {
+            Ok(Ok(())) => debug!(%route, "returned RGB control to the firmware"),
+            Ok(Err(error)) => debug!(%route, ?error, "RGB control release skipped"),
+            Err(_) => warn!(%route, "RGB control release exceeded the exit budget"),
+        }
+    }
 }
 
 fn choose_authoritative<T>(
@@ -183,6 +218,9 @@ impl DeviceOp {
     /// Own the whole lighting transaction outside the requester runtime. The
     /// worker leases and resolves AFTER obtaining its lighting route lock and
     /// retains that lease through any RGB rollback after requester cancellation.
+    /// A write that leaves `0x8071` software control held records its lease,
+    /// which [`crate::orchestrator::SharedHandles::release_rgb_control`] hands
+    /// back when the agent leaves.
     pub fn lighting(
         self,
         lighting: &Lighting,
@@ -209,13 +247,47 @@ impl DeviceOp {
                 return Err(WriteError::DeviceNotFound);
             }
             let channel = authoritative_channel(Some(&capture), &registry, &route)?;
-            write
+            let lease = write
                 .apply_on(
                     &channel,
                     || cancel.is_cancelled(),
                     || device_io.allows_io() && registry.is_current(&channel),
                 )
+                .await?;
+            if let Some(lease) = lease {
+                rgb_control::SESSION.record(&route, lease);
+            }
+            Ok(())
+        })
+    }
+
+    /// Return `lease` to the firmware under the same route lock, receiver
+    /// lease and channel checks as [`Self::lighting`].
+    fn release_rgb_control(
+        self,
+        lease: openlogi_hid::write::RgbControlLease,
+    ) -> Result<openlogi_hid::lighting::LightingJob, WriteError> {
+        let DeviceAccess {
+            channel: capture,
+            registry,
+            receiver_access,
+            device_io,
+        } = self.access;
+        let route = self.route.clone();
+        openlogi_hid::lighting::LightingJob::spawn(&self.route, move |_| async move {
+            let _lease = tokio::time::timeout(WRITE_TIMEOUT, receiver_access.acquire_for_io())
                 .await
+                .map_err(|_| WriteError::RequestTimedOut {
+                    operation: HidppOperation::Lighting,
+                })?;
+            if !device_io.allows_io() {
+                return Err(WriteError::DeviceNotFound);
+            }
+            let channel = authoritative_channel(Some(&capture), &registry, &route)?;
+            openlogi_hid::write::release_rgb_control(&channel, lease, || {
+                device_io.allows_io() && registry.is_current(&channel)
+            })
+            .await
         })
     }
 

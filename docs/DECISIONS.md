@@ -4,6 +4,43 @@ Durable "why we did it this way" records that are not obvious from the code.
 Add a dated entry when a non-obvious architectural or dependency decision is
 made or revisited.
 
+## 2026-10: RGB software control is held per session and handed back on exit
+
+A volatile `0x8071` effect shows only while the host holds software control,
+so a successful write keeps it. The agent used to keep it forever, which left
+a keyboard frozen on the last colour after OpenLogi quit, with no other host
+able to take it until a power cycle.
+
+- **Hand it back on a final exit.** Tray quit, uninstall, and SIGTERM return
+  cluster control to the firmware before the HID++ fleet stops, so lighting
+  goes back to the onboard effect. G HUB behaves this way, and Solaar's RGB
+  control restores firmware control on close to match it. It is also the rule
+  this agent already follows for diversion: leave the device in its native
+  state. Logi Options+ is no reference here: it builds the `0x8070`/`0x8071`
+  wrappers but never drives them, and claims only `0x1300` for the
+  precision-mode DPI LED.
+- **Not on a handover or replacement.** The successor repaints on arrival, so
+  releasing would only flash the onboard effect, and the successor's own
+  final exit still hands control back. A disconnect or crash cannot send
+  anything; the firmware drops volatile state on power loss.
+- **Clear only the bit that was set.** The release clears `ALL_CLUSTERS` and
+  keeps the other control and event flags from before the session's first
+  claim. Restoring that snapshot verbatim would leave control held forever
+  after an agent that never released it, which every earlier build was.
+- **The standalone CLI keeps the colour.** Leaving a colour set is the point
+  of `openlogi diag lighting`, so only the agent's exit consumes the leases.
+- **Lighting off is not a release.** It writes black under the same control;
+  releasing there would light the onboard effect instead.
+- **`0x8081` per-key frames go under the same claim.** While the firmware
+  owns a cluster it draws its own effect over host frames. On a device with an
+  `0x8071` engine a per-key write therefore claims (with rollback), sets
+  Static as the base on every cluster that offers it, paints, and replays the
+  first frame after a fresh claim, as Solaar does. A device with only `0x8081`
+  has no engine to take over and is written as before.
+
+Verified against scripted devices only; the repository has no `0x8071` or
+`0x8081` capture yet.
+
 ## 2026-10: macOS updates go through Sparkle, which never polls
 
 The built-in engine replaces the running bundle in place, so a standard user

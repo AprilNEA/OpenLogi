@@ -28,6 +28,8 @@ use super::{HidppOperation, WriteError, classify_hidpp_error, open_feature, with
 
 mod rgb;
 
+pub use rgb::RgbControlLease;
+
 /// HID++ `PerKeyLighting` (`0x8080`) — streams each key's colour individually.
 /// Its feature *index* varies per device, so it's resolved at runtime.
 const PER_KEY_LIGHTING_FEATURE: u16 = 0x8080;
@@ -120,6 +122,7 @@ pub async fn set_keyboard_color_with(
     }
     .apply(backend, route, || false, || true)
     .await
+    .map(drop)
 }
 
 /// One complete solid-colour transaction, including RGB ownership rollback.
@@ -140,7 +143,7 @@ impl LightingWrite {
         route: &DeviceRoute,
         cancelled: impl Fn() -> bool,
         available: impl Fn() -> bool,
-    ) -> Result<(), WriteError> {
+    ) -> Result<Option<RgbControlLease>, WriteError> {
         with_route(backend, route, |channel| async move {
             let shared = SharedChannel::new(channel, route.clone());
             self.apply_on(&shared, cancelled, available).await
@@ -158,12 +161,17 @@ impl LightingWrite {
     /// before cancellation/deadline errors trigger rollback. Its response and
     /// the rollback response each have the channel's own bounded wait. A native
     /// write that never completes cannot safely release ownership on a timer.
+    ///
+    /// Returns the `0x8071` software control the write left held, if any. A
+    /// long-lived host keeps the first lease per device and hands it back with
+    /// [`release_rgb_control`] when it leaves; a standalone command leaves the
+    /// colour in place.
     pub async fn apply_on(
         self,
         shared: &SharedChannel,
         cancelled: impl Fn() -> bool,
         available: impl Fn() -> bool,
-    ) -> Result<(), WriteError> {
+    ) -> Result<Option<RgbControlLease>, WriteError> {
         let scope = WriteScope {
             deadline: tokio::time::Instant::now() + Duration::from_secs(5),
             cancelled,
@@ -174,15 +182,22 @@ impl LightingWrite {
         let (r, g, b) = self.color.components();
         match self.method {
             LightingMethod::PerKey => {
-                return scope.read(set_color_per_key(channel, index, r, g, b)).await;
+                return scope
+                    .read(set_color_per_key(channel, index, r, g, b))
+                    .await
+                    .map(|()| None);
             }
             LightingMethod::PerKeyV2 => {
-                return scope
-                    .read(set_color_per_key_v2(channel, index, r, g, b))
+                let engine = rgb::probe(channel, index, &scope).await?;
+                return self
+                    .per_key_v2(channel, index, engine.as_ref(), &scope)
                     .await;
             }
             LightingMethod::Effects => {
-                return scope.read(set_color_effects(channel, index, r, g, b)).await;
+                return scope
+                    .read(set_color_effects(channel, index, r, g, b))
+                    .await
+                    .map(|()| None);
             }
             LightingMethod::Auto => {}
         }
@@ -192,28 +207,79 @@ impl LightingWrite {
             {
                 debug!("no 0x8070 fixed colour — trying 0x8071 RGB effects");
             }
-            other => return other,
+            other => return other.map(|()| None),
         }
-        match rgb::apply(channel, index, self.color, &scope).await {
-            Err(WriteError::FeatureUnsupported {
-                feature_hex: 0x8071,
-            }) => {
-                debug!("no supported 0x8071 static effect — trying per-key paths");
-            }
-            other => return other,
+        // Every probe precedes the first claim, so an unusable effect engine
+        // falls back without mutating the device.
+        let engine = rgb::probe(channel, index, &scope).await?;
+        if let Some(engine) = engine.as_ref().filter(|engine| engine.is_complete()) {
+            return engine.apply(index, self.color, &scope).await.map(Some);
         }
-        match scope
-            .read(set_color_per_key_v2(channel, index, r, g, b))
+        debug!("no supported 0x8071 static effect — trying per-key paths");
+        match self
+            .per_key_v2(channel, index, engine.as_ref(), &scope)
             .await
         {
             Err(WriteError::FeatureUnsupported { feature_hex })
                 if feature_hex == PerKeyLightingFeature::ID =>
             {
-                scope.read(set_color_per_key(channel, index, r, g, b)).await
+                scope
+                    .read(set_color_per_key(channel, index, r, g, b))
+                    .await
+                    .map(|()| None)
             }
             other => other,
         }
     }
+
+    /// Paint through `0x8081`. With an `0x8071` effect engine the frame goes
+    /// under its software control, since the firmware otherwise draws its own
+    /// effect over host frames; without one there is nothing to claim. Zone
+    /// discovery precedes the claim, so a device without usable zones still
+    /// falls back without mutation.
+    async fn per_key_v2(
+        self,
+        channel: &Arc<HidppChannel>,
+        index: u8,
+        engine: Option<&rgb::RgbEngine>,
+        scope: &WriteScope<impl Fn() -> bool, impl Fn() -> bool>,
+    ) -> Result<Option<RgbControlLease>, WriteError> {
+        let target = scope.read(PerKeyV2Target::open(channel, index)).await?;
+        let (r, g, b) = self.color.components();
+        let color = Rgb {
+            red: r,
+            green: g,
+            blue: b,
+        };
+        match engine {
+            None => scope.read(target.paint(index, color)).await.map(|()| None),
+            Some(engine) => engine
+                .apply_per_key(index, self.color, scope, async || {
+                    target.paint(index, color).await
+                })
+                .await
+                .map(Some),
+        }
+    }
+}
+
+/// Hand `lease` back to the firmware on `shared`, as a long-lived host does
+/// when it leaves. `available` must reject retired publications and suspended
+/// host I/O. Bounded by the same five-second read deadline as a write.
+///
+/// The owner MUST poll to completion and hold the route's lighting lock, as
+/// for [`LightingWrite::apply_on`].
+pub async fn release_rgb_control(
+    shared: &SharedChannel,
+    lease: RgbControlLease,
+    available: impl Fn() -> bool,
+) -> Result<(), WriteError> {
+    let scope = WriteScope {
+        deadline: tokio::time::Instant::now() + Duration::from_secs(5),
+        cancelled: || false,
+        available,
+    };
+    rgb::release(shared.channel(), shared.device_index(), lease, &scope).await
 }
 
 struct WriteScope<C, A> {
@@ -400,9 +466,8 @@ fn classify_lighting_error(error: Hidpp20Error) -> WriteError {
     classify_hidpp_error(error, HidppOperation::Lighting, ColorLedEffectsFeature::ID)
 }
 
-/// Set a solid colour via `PerKeyLighting2` (`0x8081`): paint every zone the
-/// device reports as present, then commit the frame. `FeatureUnsupported` when
-/// the device exposes no `0x8081` or reports no zones.
+/// A solid colour via `PerKeyLighting2` (`0x8081`): every zone the device
+/// reports as present, painted and then committed as one frame.
 ///
 /// `0x8081` supersedes `0x8080`. It addresses *zones* rather than HID key
 /// usages and answers each request, so unlike the raw `0x8080` stream a write
@@ -413,56 +478,55 @@ fn classify_lighting_error(error: Hidpp20Error) -> WriteError {
 /// Committed volatilely for the same reason as the `0x8070` path: the colour
 /// shows live without a flash write on every colour pick, and the agent
 /// re-applies the saved colour on device arrival.
-async fn set_color_per_key_v2(
-    channel: &Arc<HidppChannel>,
-    index: u8,
-    r: u8,
-    g: u8,
-    b: u8,
-) -> Result<(), WriteError> {
-    let mut device = Device::new(Arc::clone(channel), index)
-        .await
-        .map_err(|_| WriteError::DeviceUnreachable { index })?;
-    let feature = open_feature::<PerKeyLightingFeature>(&mut device).await?;
+struct PerKeyV2Target {
+    feature: Arc<PerKeyLightingFeature>,
+    zones: Vec<u8>,
+}
 
-    let zones = present_zones(&feature).await?;
-    if zones.is_empty() {
-        // The device announces 0x8081 but claims no zones, so there is nothing
-        // to paint — and that won't change on retry. Reported as unsupported so
-        // `Auto` falls through to the 0x8080 stream.
-        debug!(index, "0x8081 reported no present zones");
-        return Err(WriteError::FeatureUnsupported {
-            feature_hex: PerKeyLightingFeature::ID,
-        });
+impl PerKeyV2Target {
+    /// Open `0x8081` and read its present zones without mutating anything.
+    /// `FeatureUnsupported` when the device exposes no `0x8081` or reports no
+    /// zones.
+    async fn open(channel: &Arc<HidppChannel>, index: u8) -> Result<Self, WriteError> {
+        let mut device = Device::new(Arc::clone(channel), index)
+            .await
+            .map_err(|_| WriteError::DeviceUnreachable { index })?;
+        let feature = open_feature::<PerKeyLightingFeature>(&mut device).await?;
+        let zones = present_zones(&feature).await?;
+        if zones.is_empty() {
+            // The device announces 0x8081 but claims no zones, so there is
+            // nothing to paint — and that won't change on retry. Reported as
+            // unsupported so `Auto` falls through to the 0x8080 stream.
+            debug!(index, "0x8081 reported no present zones");
+            return Err(WriteError::FeatureUnsupported {
+                feature_hex: PerKeyLightingFeature::ID,
+            });
+        }
+        Ok(Self { feature, zones })
     }
 
-    let color = Rgb {
-        red: r,
-        green: g,
-        blue: b,
-    };
-    // One request carries at most MAX_SINGLE_VALUE_ZONES ids and silently
-    // ignores the rest, so the chunking is the caller's job.
-    for chunk in zones.chunks(MAX_SINGLE_VALUE_ZONES) {
-        feature
-            .set_rgb_zones_single_value(color, chunk)
+    /// Paint every present zone `color`, then commit the frame.
+    async fn paint(&self, index: u8, color: Rgb) -> Result<(), WriteError> {
+        // One request carries at most MAX_SINGLE_VALUE_ZONES ids and silently
+        // ignores the rest, so the chunking is the caller's job.
+        for chunk in self.zones.chunks(MAX_SINGLE_VALUE_ZONES) {
+            self.feature
+                .set_rgb_zones_single_value(color, chunk)
+                .await
+                .map_err(classify_per_key_v2_error)?;
+        }
+        self.feature
+            .frame_end(FramePersistence::Volatile, 0, 0)
             .await
             .map_err(classify_per_key_v2_error)?;
+        debug!(
+            index,
+            zone_count = self.zones.len(),
+            ?color,
+            "set keyboard colour via typed 0x8081"
+        );
+        Ok(())
     }
-    feature
-        .frame_end(FramePersistence::Volatile, 0, 0)
-        .await
-        .map_err(classify_per_key_v2_error)?;
-
-    debug!(
-        index,
-        zone_count = zones.len(),
-        r,
-        g,
-        b,
-        "set keyboard colour via typed 0x8081"
-    );
-    Ok(())
 }
 
 /// Every zone id `0x8081` reports as present, read across all three presence
@@ -694,4 +758,5 @@ pub async fn set_keyboard_color_with_on(
     }
     .apply_on(shared, || false, || shared.channel().is_connected())
     .await
+    .map(drop)
 }
