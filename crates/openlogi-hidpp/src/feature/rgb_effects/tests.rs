@@ -51,6 +51,79 @@ fn restoring_control_rejects_late_claim_and_different_notification_flags() {
     });
 }
 
+fn nv_config_header() -> crate::protocol::v20::MessageHeader {
+    crate::protocol::v20::MessageHeader {
+        device_index: 3,
+        feature_index: 8,
+        function_id: crate::nibble::U4::from_lo(3),
+        software_id: crate::nibble::U4::from_lo(1),
+    }
+}
+
+#[test]
+fn nv_config_write_hands_back_every_parameter_it_read() {
+    use std::sync::Arc;
+
+    use super::RgbEffectsFeature;
+    use crate::channel::mock::{MockRawHidChannel, channel_with_reader};
+    use crate::feature::CreatableFeature;
+    use crate::protocol::v20::Message;
+
+    futures::executor::block_on(async {
+        let (raw, handle) = MockRawHidChannel::new();
+        let channel = Arc::new(channel_with_reader(raw).await);
+        let feature = RgbEffectsFeature::new(channel, 3, 8);
+
+        let mut read = Box::pin(feature.get_nv_config(RgbNvCapabilities::BOOT_UP_EFFECT));
+        assert!(futures::poll!(read.as_mut()).is_pending());
+        let mut reply = [0u8; 16];
+        reply[..10].copy_from_slice(&[0, 0x00, 0x01, 1, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
+        handle
+            .send_incoming(Message::Long(nv_config_header(), reply).into())
+            .await;
+        let mut config = read.await.unwrap();
+        assert_eq!(config.params, [0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
+
+        config.state = 2;
+        let mut write = Box::pin(feature.set_nv_config(&config));
+        assert!(futures::poll!(write.as_mut()).is_pending());
+        handle
+            .send_incoming(Message::Long(nv_config_header(), reply).into())
+            .await;
+        write.await.unwrap();
+
+        let written = handle.written_reports();
+        let request = written.last().expect("setNvConfig was sent");
+        assert_eq!(
+            &request[4..14],
+            &[1, 0x00, 0x01, 2, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66],
+            "only the state changes; parameters 3..=6 are not zeroed"
+        );
+    });
+}
+
+#[test]
+fn nv_config_rejects_a_short_reply() {
+    use std::sync::Arc;
+
+    use super::RgbEffectsFeature;
+    use crate::channel::mock::{MockRawHidChannel, channel_with_reader};
+    use crate::feature::CreatableFeature;
+    use crate::protocol::v20::{Hidpp20Error, Message};
+
+    futures::executor::block_on(async {
+        let (raw, handle) = MockRawHidChannel::new();
+        let channel = Arc::new(channel_with_reader(raw).await);
+        let feature = RgbEffectsFeature::new(channel, 3, 8);
+        let mut read = Box::pin(feature.get_nv_config(RgbNvCapabilities::BOOT_UP_EFFECT));
+        assert!(futures::poll!(read.as_mut()).is_pending());
+        handle
+            .send_incoming(Message::Short(nv_config_header(), [0, 0x00, 0x01]).into())
+            .await;
+        assert!(matches!(read.await, Err(Hidpp20Error::UnsupportedResponse)));
+    });
+}
+
 #[test]
 fn parses_device_info() {
     let mut payload = [0; 16];
