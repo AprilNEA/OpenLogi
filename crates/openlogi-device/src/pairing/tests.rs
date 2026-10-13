@@ -487,49 +487,58 @@ async fn unifying_reports_searching_only_once_the_receiver_confirms_the_lock() {
     let (event_tx, mut events) = mpsc::unbounded_channel();
     let started = tokio::time::Instant::now();
 
-    let exchange = async {
-        for _ in 0..2 {
-            written_reports
-                .recv()
-                .await
-                .expect("notification setup and lock-open writes");
-        }
-        // The lock-open write is acknowledged; the receiver has not said the
-        // lock is open yet, so the UI must not be told to start searching.
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        assert!(
-            events.try_recv().is_err(),
-            "an acknowledged lock-open write alone must not report Searching"
-        );
-        notification_tx
-            .send(unifying_lock(true, 0))
-            .expect("lock-open notification");
-        assert!(matches!(events.recv().await, Some(PairingEvent::Searching)));
-        // Past the confirmation window: once confirmed, the session is
-        // pairing and that window no longer applies.
-        tokio::time::sleep_until(started + LOCK_CONFIRMATION_TIMEOUT + Duration::from_millis(500))
+    // `event_tx` outlives the session, so a session that fails before
+    // reporting would leave `events.recv()` waiting forever. Bound the whole
+    // exchange so a regression fails instead of hanging.
+    tokio::time::timeout(LOCK_CONFIRMATION_TIMEOUT * 5, async {
+        let exchange = async {
+            for _ in 0..2 {
+                written_reports
+                    .recv()
+                    .await
+                    .expect("notification setup and lock-open writes");
+            }
+            // The lock-open write is acknowledged; the receiver has not said the
+            // lock is open yet, so the UI must not be told to start searching.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            assert!(
+                events.try_recv().is_err(),
+                "an acknowledged lock-open write alone must not report Searching"
+            );
+            notification_tx
+                .send(unifying_lock(true, 0))
+                .expect("lock-open notification");
+            assert!(matches!(events.recv().await, Some(PairingEvent::Searching)));
+            // Past the confirmation window: once confirmed, the session is
+            // pairing and that window no longer applies.
+            tokio::time::sleep_until(
+                started + LOCK_CONFIRMATION_TIMEOUT + Duration::from_millis(500),
+            )
             .await;
-        notification_tx
-            .send(device_connection(2, true))
-            .expect("device connection");
-    };
+            notification_tx
+                .send(device_connection(2, true))
+                .expect("device connection");
+        };
 
-    let (result, ()) = tokio::join!(
-        run_session(
-            &channel,
-            ReceiverFamily::Unifying,
-            NotificationFlags::empty(),
-            &mut commands,
-            &mut notifications,
-            &event_tx,
-        ),
-        exchange,
-    );
-    result.expect("a connection after the lock opened pairs the device");
-    assert!(matches!(
-        events.recv().await,
-        Some(PairingEvent::Paired { slot: 2 })
-    ));
+        let (result, ()) = tokio::join!(
+            run_session(
+                &channel,
+                ReceiverFamily::Unifying,
+                NotificationFlags::empty(),
+                &mut commands,
+                &mut notifications,
+                &event_tx,
+            ),
+            exchange,
+        );
+        result.expect("a connection after the lock opened pairs the device");
+        assert!(matches!(
+            events.recv().await,
+            Some(PairingEvent::Paired { slot: 2 })
+        ));
+    })
+    .await
+    .expect("the pairing exchange did not finish");
 }
 
 #[tokio::test]
