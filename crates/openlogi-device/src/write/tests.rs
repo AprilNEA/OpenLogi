@@ -7,7 +7,7 @@ use crate::SharedChannel;
 use crate::channel::scripted::{ScriptedRawHidChannel, feature_error, scripted_channel};
 use crate::write::diagnostics::dump_firmware_entities_on_channel;
 use crate::write::dpi::expand_dpi_ranges;
-use crate::write::lighting::{collect_present_zones, per_key_reports};
+use crate::write::lighting::{collect_present_zones, per_key_commit, per_key_frames};
 use crate::write::smartshift::{
     is_missing_enhanced, is_transient_smartshift_error, smartshift_to_wheel,
     status_matches_desired, wheel_mode_to_smartshift,
@@ -146,10 +146,7 @@ fn status_match_preserves_absent_torque() {
 
 #[test]
 fn per_key_lighting_builds_only_very_long_frames_then_one_long_commit() {
-    let reports = per_key_reports(0x03, 0x27, 0x11, 0x22, 0x33);
-    let (commit, frames) = reports
-        .split_last()
-        .expect("per-key lighting must emit a commit");
+    let frames = per_key_frames(0x03, 0x27, 0x11, 0x22, 0x33);
 
     assert_eq!(frames.len(), 17);
     assert!(frames.iter().all(|report| report.len() == 64));
@@ -181,9 +178,17 @@ fn per_key_lighting_builds_only_very_long_frames_then_one_long_commit() {
         assert_eq!(entry, (key, 0x11, 0x22, 0x33));
     }
 
-    assert_eq!(commit.len(), 20);
-    assert_eq!(&commit[..4], &[0x11, 0x03, 0x27, 0x5a]);
-    assert!(commit[4..].iter().all(|byte| *byte == 0));
+    // The commit is function 5 with an empty payload, sent as a 20-byte
+    // request so its reply can be awaited.
+    let commit = per_key_commit(0x03, 0x27);
+    assert!(matches!(commit, hidpp::protocol::v20::Message::Long(..)));
+    let header = commit.header();
+    assert_eq!((header.device_index, header.feature_index), (0x03, 0x27));
+    assert_eq!(
+        (header.function_id.to_lo(), header.software_id.to_lo()),
+        (0x5, 0xa)
+    );
+    assert!(commit.extend_payload().iter().all(|byte| *byte == 0));
 }
 
 #[tokio::test]
@@ -561,7 +566,10 @@ fn scripted_response(request: &[u8]) -> Option<Vec<u8>> {
             ]);
             true
         }
-        // Raw per-key frame commit expects no reply.
+        // 0x8080 frameEnd is acknowledged like any HID++2.0 request.
+        (0x07, 0x05) => true,
+        // Anything else gets no reply. The 0x12 per-key frames never reach
+        // here: the filter above admits only 0x10/0x11 requests.
         _ => return None,
     };
 
@@ -1250,4 +1258,128 @@ async fn a_keyboard_whose_zones_offer_no_fixed_colour_is_not_written() {
         "Auto falls through to the next path on this error"
     );
     assert!(zone_effect_writes(&handle).is_empty());
+}
+
+/// `true` for the 20-byte `0x8080` frameEnd sent to the scripted keyboard,
+/// whose `0x8080` sits at feature index `0x07`.
+fn is_per_key_commit(report: &[u8]) -> bool {
+    report.len() == 20 && report[0] == 0x11 && report[2] == 0x07 && report[3] >> 4 == 0x05
+}
+
+/// The first key id of the third `0x12` frame; each frame carries 14 keys.
+const THIRD_PER_KEY_FRAME_FIRST_KEY: u8 = 2 * 14;
+
+/// [`scripted_response`], with the third `0x12` per-key frame rejected as an
+/// invalid argument.
+fn per_key_frame_rejected_response(request: &[u8]) -> Option<Vec<u8>> {
+    if request.first() == Some(&0x12) && request.get(8) == Some(&THIRD_PER_KEY_FRAME_FIRST_KEY) {
+        return Some(feature_error(request, 0x02));
+    }
+    scripted_response(request)
+}
+
+/// [`scripted_response`], with the `0x8080` frameEnd answered busy.
+fn per_key_commit_busy_response(request: &[u8]) -> Option<Vec<u8>> {
+    if is_per_key_commit(request) {
+        return Some(feature_error(request, 0x08));
+    }
+    scripted_response(request)
+}
+
+#[tokio::test]
+async fn a_rejected_per_key_frame_fails_the_write_before_the_commit() {
+    // The 0x12 frames were written fire-and-forget, so a frame the keyboard
+    // rejected was committed anyway and the write reported success.
+    let (raw, handle) = ScriptedRawHidChannel::with_responder(per_key_frame_rejected_response);
+    let shared = SharedChannel::new(
+        scripted_channel(raw).await,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc339,
+        },
+    );
+
+    let result =
+        set_keyboard_color_with_on(&shared, LightingMethod::PerKey, 0x11, 0x22, 0x33).await;
+
+    assert_eq!(
+        result,
+        Err(WriteError::HidppFeature {
+            operation: HidppOperation::Lighting,
+            feature_hex: 0x8080,
+            kind: HidppFeatureErrorKind::InvalidArgument,
+        })
+    );
+    assert!(
+        !handle
+            .written_reports()
+            .iter()
+            .any(|report| is_per_key_commit(report)),
+        "a rejected frame must not be committed"
+    );
+}
+
+#[tokio::test]
+async fn a_rejected_per_key_commit_fails_the_write() {
+    // The frameEnd was written raw too, so its reply was never read.
+    let (raw, _handle) = ScriptedRawHidChannel::with_responder(per_key_commit_busy_response);
+    let shared = SharedChannel::new(
+        scripted_channel(raw).await,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc339,
+        },
+    );
+
+    let result =
+        set_keyboard_color_with_on(&shared, LightingMethod::PerKey, 0x11, 0x22, 0x33).await;
+
+    assert_eq!(
+        result,
+        Err(WriteError::HidppFeature {
+            operation: HidppOperation::Lighting,
+            feature_hex: 0x8080,
+            kind: HidppFeatureErrorKind::Busy,
+        })
+    );
+}
+
+#[tokio::test]
+async fn per_key_frames_are_fenced_before_their_one_commit() -> Result<(), WriteError> {
+    // Errors for the 0x12 frames arrive asynchronously. A round trip after the
+    // last frame proves the device has answered every earlier frame, so the
+    // commit is only sent once no frame can still report an error.
+    let (raw, handle) = ScriptedRawHidChannel::with_responder(scripted_response);
+    let shared = SharedChannel::new(
+        scripted_channel(raw).await,
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xc339,
+        },
+    );
+
+    set_keyboard_color_with_on(&shared, LightingMethod::PerKey, 0x11, 0x22, 0x33).await?;
+
+    let written = handle.written_reports();
+    let last_frame = written
+        .iter()
+        .rposition(|report| report.first() == Some(&0x12))
+        .expect("the frames were streamed");
+    let is_root_ping = |report: &Vec<u8>| {
+        matches!(report.first(), Some(0x10 | 0x11)) && report[2] == 0x00 && report[3] >> 4 == 0x01
+    };
+    let fence = written[last_frame..]
+        .iter()
+        .position(is_root_ping)
+        .map(|offset| last_frame + offset)
+        .expect("a root ping follows the last frame");
+    let commits: Vec<usize> = written
+        .iter()
+        .enumerate()
+        .filter(|(_, report)| is_per_key_commit(report))
+        .map(|(position, _)| position)
+        .collect();
+    assert_eq!(commits.len(), 1, "exactly one frameEnd");
+    assert!(commits[0] > fence, "the frameEnd follows the fence");
+    Ok(())
 }

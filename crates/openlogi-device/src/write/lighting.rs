@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use hidpp::{
@@ -13,8 +13,10 @@ use hidpp::{
             FramePersistence, MAX_SINGLE_VALUE_ZONES, PerKeyLightingFeature, Rgb,
             ZONE_PRESENCE_PAGE_LEN, ZonePresencePage,
         },
+        root::RootFeature,
     },
-    protocol::v20::Hidpp20Error,
+    nibble::U4,
+    protocol::v20::{self, Hidpp20Error},
 };
 use tracing::debug;
 
@@ -35,11 +37,10 @@ const PER_KEY_LIGHTING_FEATURE: u16 = 0x8080;
 /// replaying its stored effect). Preferred for a solid colour for that reason.
 const COLOR_LED_EFFECTS_FEATURE: u16 = 0x8070;
 
-// HID++ 2.0 report ids: 0x12 is the 64-byte "very long" report that streams a
-// batch of (keyID, R, G, B) entries; 0x11 is the 20-byte "long" report used both
-// to commit a per-key frame and to carry a single `ColorLedEffects` request.
+// HID++ 2.0 report id 0x12 is the 64-byte "very long" report that streams a
+// batch of (keyID, R, G, B) entries. The frame commit is an ordinary 20-byte
+// request and goes through `send_v20`.
 const REPORT_SET_KEYS: u8 = 0x12;
-const REPORT_LONG: u8 = 0x11;
 // Function byte = `function_id << 4 | software_id`. Software id 0xa just tags our
 // requests; for 0x8080: function 0x3 streams a key range, 0x5 commits the frame.
 const SW_ID: u8 = 0x0a;
@@ -522,6 +523,16 @@ fn classify_per_key_v2_error(error: hidpp::protocol::v20::Hidpp20Error) -> Write
 /// Set a solid colour via `PerKeyLighting` (`0x8080`): stream every key's colour
 /// in 64-byte `0x12` frames, then commit. `FeatureUnsupported` when the device
 /// exposes no `0x8080`.
+///
+/// The frames are written raw: which report id the device answers a 64-byte
+/// request with is not established (g810-led never reads a reply), so there is
+/// no success reply to wait for. A HID++ feature error names its request in
+/// the header, so errors addressed to the frames are collected while they
+/// stream. A root ping after the last frame fences them: the device answers
+/// in order, so once the ping returns, any error for an earlier frame has been
+/// read. A rejected frame fails the write before the commit. The commit is a
+/// 20-byte request that awaits its own reply, as Logi Options+'s `FlushLEDS`
+/// does.
 async fn set_color_per_key(
     channel: &Arc<HidppChannel>,
     device_index: u8,
@@ -535,7 +546,21 @@ async fn set_color_per_key(
             feature_hex: PER_KEY_LIGHTING_FEATURE,
         })?;
 
-    for report in per_key_reports(device_index, feature_index, r, g, b) {
+    let frame = per_key_header(device_index, feature_index, FN_SET_KEY_RANGE);
+    let frame_error: Arc<Mutex<Option<Hidpp20Error>>> = Arc::default();
+    let _frame_errors = {
+        let frame_error = Arc::clone(&frame_error);
+        channel.add_msg_listener_guarded(move |message, _| {
+            if let Some(error) = v20::Message::from(message).feature_error_for(frame) {
+                frame_error
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .get_or_insert(error);
+            }
+        })
+    };
+
+    for report in per_key_frames(device_index, feature_index, r, g, b) {
         let written = channel
             .write_raw_report(&report)
             .await
@@ -547,6 +572,29 @@ async fn set_color_per_key(
             )));
         }
     }
+
+    RootFeature::new(Arc::clone(channel), device_index, 0)
+        .ping(0)
+        .await
+        .map_err(classify_per_key_error)?;
+    let rejected = frame_error
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take();
+    if let Some(error) = rejected {
+        debug!(
+            device_index,
+            feature_index,
+            ?error,
+            "0x8080 rejected a frame; not committing"
+        );
+        return Err(classify_per_key_error(error));
+    }
+
+    channel
+        .send_v20(per_key_commit(device_index, feature_index))
+        .await
+        .map_err(classify_per_key_error)?;
     debug!(
         device_index,
         feature_index, r, g, b, "set keyboard colour via 0x8080"
@@ -554,7 +602,8 @@ async fn set_color_per_key(
     Ok(())
 }
 
-pub(super) fn per_key_reports(
+/// The 64-byte `0x12` frames that set every key to `(r, g, b)`.
+pub(super) fn per_key_frames(
     device_index: u8,
     feature_index: u8,
     r: u8,
@@ -564,8 +613,7 @@ pub(super) fn per_key_reports(
     let mut reports = Vec::new();
     // Each 64-byte `0x12` "set group keys" packet carries up to 14
     // `(keyID, R, G, B)` entries; keyIDs are HID usage codes. Cover the whole
-    // keyboard usage range (incl. modifiers at `0xe0..`) so every key lights,
-    // then commit the frame.
+    // keyboard usage range (incl. modifiers at `0xe0..`) so every key lights.
     let key_ids: Vec<u8> = (0x00u8..=0xe8).collect();
     for chunk in key_ids.chunks(KEYS_PER_FRAME as usize) {
         let mut rep = vec![0u8; 64];
@@ -586,13 +634,29 @@ pub(super) fn per_key_reports(
         }
         reports.push(rep);
     }
-    let mut commit = vec![0u8; 20];
-    commit[0] = REPORT_LONG;
-    commit[1] = device_index;
-    commit[2] = feature_index;
-    commit[3] = (FN_FRAME_END << 4) | SW_ID;
-    reports.push(commit);
     reports
+}
+
+/// The `0x8080` frameEnd request that commits the streamed frames.
+pub(super) fn per_key_commit(device_index: u8, feature_index: u8) -> v20::Message {
+    v20::Message::Long(
+        per_key_header(device_index, feature_index, FN_FRAME_END),
+        [0; 16],
+    )
+}
+
+fn per_key_header(device_index: u8, feature_index: u8, function: u8) -> v20::MessageHeader {
+    v20::MessageHeader {
+        device_index,
+        feature_index,
+        function_id: U4::from_lo(function),
+        software_id: U4::from_lo(SW_ID),
+    }
+}
+
+/// Classify a HID++ error from the `PerKeyLighting` request path.
+fn classify_per_key_error(error: Hidpp20Error) -> WriteError {
+    classify_hidpp_error(error, HidppOperation::Lighting, PER_KEY_LIGHTING_FEATURE)
 }
 
 fn classify_raw_lighting_error(error: ChannelError) -> WriteError {
