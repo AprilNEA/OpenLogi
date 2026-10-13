@@ -262,3 +262,25 @@ fn runtime_selection_tracks_online_transition_without_device_set_change() {
     );
     assert_eq!(orchestrator.current_key(), Some(other_key));
 }
+
+#[test]
+fn inventory_cancels_hook_presses_only_when_the_selected_source_changes() {
+    let mut orchestrator = orchestrator(Config::default());
+    let online = direct_inventory_state(0xb023, None, [1, 0, 0, 0], true);
+    let offline = direct_inventory_state(0xb023, None, [1, 0, 0, 0], false);
+    let moved = direct_inventory_state(0xb034, None, [1, 0, 0, 0], true);
+    assert!(orchestrator.refresh_inventory(std::slice::from_ref(&online), &[], false));
+    assert!(!orchestrator.refresh_inventory(std::slice::from_ref(&online), &[], false));
+    assert!(orchestrator.refresh_inventory(std::slice::from_ref(&offline), &[], false));
+    assert!(!orchestrator.refresh_inventory(&[offline], &[], false));
+    assert!(orchestrator.refresh_inventory(&[online], &[], false));
+    assert!(
+        orchestrator.refresh_inventory(&[moved], &[], false),
+        "a new route cannot inherit a held button"
+    );
+    assert!(
+        orchestrator.refresh_inventory(&[], &[], false),
+        "disappearance ends the old source"
+    );
+    assert!(!orchestrator.refresh_inventory(&[], &[], false));
+}

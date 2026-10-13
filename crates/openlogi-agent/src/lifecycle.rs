@@ -392,6 +392,7 @@ impl Running {
             WatcherEvent::Lost(Watcher::Inventory) => {
                 warn!("inventory watcher channel closed — marking enumeration unavailable");
                 self.orchestrator.lock().await.mark_inventory_unavailable();
+                self.cancel_inventory_hook_presses();
             }
             WatcherEvent::Lost(Watcher::Camera) => {
                 #[cfg(target_os = "macos")]
@@ -418,7 +419,11 @@ impl Running {
                 hid_open_failures,
             } => {
                 let mut orchestrator = self.orchestrator.lock().await;
-                orchestrator.refresh_inventory(&inventories, &standalone, hid_open_failures);
+                let cancel_hooks =
+                    orchestrator.refresh_inventory(&inventories, &standalone, hid_open_failures);
+                if cancel_hooks {
+                    self.cancel_inventory_hook_presses();
+                }
                 let confirm_settings = orchestrator.needs_reapply_confirmation();
                 drop(orchestrator);
                 if confirm_settings {
@@ -427,10 +432,13 @@ impl Running {
             }
             InventoryEvent::Unavailable => {
                 self.orchestrator.lock().await.mark_inventory_unavailable();
+                self.cancel_inventory_hook_presses();
             }
             // Devices likely power-cycled during the sleep; the next snapshot
             // re-applies their volatile settings (#189).
             InventoryEvent::SystemWake => {
+                // A release during sleep may never reach the retained OS hook.
+                self.cancel_inventory_hook_presses();
                 self.orchestrator
                     .lock()
                     .await
@@ -440,12 +448,22 @@ impl Running {
             // it on the next snapshot even if no reconciliation ever saw it
             // offline.
             InventoryEvent::DeviceWake => {
+                // This reconnect signal has no device identity. The OS hook's
+                // unattributed hold is ambiguous even if the snapshot is unchanged.
+                self.cancel_inventory_hook_presses();
                 self.orchestrator
                     .lock()
                     .await
                     .reapply_reconnected_on_next_refresh();
             }
         }
+    }
+
+    /// A lost source cannot provide the matching Up. Cancel its accepted tokens
+    /// before later unattributed pointer motion can continue a volume gesture.
+    fn cancel_inventory_hook_presses(&self) {
+        self.inputs.dispatcher.cancel_hook_buttons();
+        self.inputs.scroll_input.cancel_hooks();
     }
 
     /// Publish one foreground-app change and cancel button lifecycles whose

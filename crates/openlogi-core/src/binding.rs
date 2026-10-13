@@ -21,6 +21,7 @@ mod gesture;
 mod key_combo;
 mod swipe;
 mod value;
+mod volume_gesture;
 
 #[cfg(test)]
 mod tests;
@@ -43,3 +44,4 @@ pub use swipe::{
     detect_swipe,
 };
 pub use value::{Binding, LONG_PRESS_THRESHOLD, LongPressBinding};
+pub use volume_gesture::VolumeGesture;

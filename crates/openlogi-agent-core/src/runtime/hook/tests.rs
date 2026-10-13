@@ -57,6 +57,152 @@ fn test_dispatcher() -> (
     (dispatcher, owner, received)
 }
 
+fn volume_gesture_hooks() -> SharedHookMaps {
+    Arc::new(RwLock::new(HookMaps {
+        gestures: BTreeMap::from([(
+            ButtonId::Back,
+            BTreeMap::from([
+                (GestureDirection::Up, Action::VolumeUp),
+                (GestureDirection::Down, Action::VolumeDown),
+                (GestureDirection::Left, Action::None),
+                (GestureDirection::Right, Action::None),
+                (GestureDirection::Click, Action::PreviousDesktop),
+            ]),
+        )]),
+        ..HookMaps::default()
+    }))
+}
+
+#[test]
+fn volume_gesture_repeats_and_reverses_during_one_hold() {
+    use super::super::button::ButtonRuntimeEvent;
+
+    let (dispatcher, mut owner, events) = test_dispatcher();
+    let hooks = volume_gesture_hooks();
+    let mouse = EventDevice {
+        vendor_id: Some(0x046d),
+        product_name: Some("Logitech MX Vertical".into()),
+        ..EventDevice::default()
+    };
+    assert_eq!(
+        handle_button(
+            ButtonId::Back,
+            true,
+            Some(&mouse),
+            &hooks,
+            &dispatcher,
+            || None
+        ),
+        EventDisposition::Suppress
+    );
+    HOLD.with_borrow_mut(|hold| hold.swipe.backdate_hold_for_test());
+    for (dx, dy) in [(0, -50), (0, -50), (0, 50), (50, 0), (0, 0)] {
+        handle_moved(dx, dy, &hooks, &dispatcher);
+    }
+    assert_eq!(
+        handle_button(
+            ButtonId::Back,
+            false,
+            Some(&mouse),
+            &hooks,
+            &dispatcher,
+            || None
+        ),
+        EventDisposition::Suppress
+    );
+    let mut actions = Vec::new();
+    loop {
+        match events
+            .recv_timeout(Duration::from_secs(1))
+            .expect("button event")
+        {
+            ButtonRuntimeEvent::Triggered { action, .. } => actions.push(action),
+            ButtonRuntimeEvent::Ended { .. } => break,
+            ButtonRuntimeEvent::Started(_) => {}
+        }
+    }
+    assert!(owner.shutdown());
+    assert_eq!(
+        actions,
+        [Action::VolumeUp, Action::VolumeUp, Action::VolumeDown]
+    );
+}
+
+#[test]
+fn canceled_volume_hold_ignores_motion_and_repress_restores_plain_click() {
+    use super::super::button::ButtonRuntimeEvent;
+
+    let (dispatcher, mut owner, events) = test_dispatcher();
+    let hooks = volume_gesture_hooks();
+    let mouse = EventDevice {
+        vendor_id: Some(0x046d),
+        ..EventDevice::default()
+    };
+    handle_button(
+        ButtonId::Back,
+        true,
+        Some(&mouse),
+        &hooks,
+        &dispatcher,
+        || None,
+    );
+    HOLD.with_borrow_mut(|hold| hold.swipe.backdate_hold_for_test());
+    handle_moved(0, -50, &hooks, &dispatcher);
+    assert!(matches!(
+        events.recv_timeout(Duration::from_secs(1)).unwrap(),
+        ButtonRuntimeEvent::Started(_)
+    ));
+    assert!(matches!(
+        events.recv_timeout(Duration::from_secs(1)).unwrap(),
+        ButtonRuntimeEvent::Triggered {
+            action: Action::VolumeUp,
+            ..
+        }
+    ));
+
+    // Inventory loss cancels the source's accepted token even if no physical
+    // release arrives and the callback's thread-local hold still exists.
+    dispatcher.cancel_hook_buttons();
+    assert!(matches!(
+        events.recv_timeout(Duration::from_secs(1)).unwrap(),
+        ButtonRuntimeEvent::Ended { .. }
+    ));
+    handle_moved(0, -100, &hooks, &dispatcher);
+    handle_button(
+        ButtonId::Back,
+        true,
+        Some(&mouse),
+        &hooks,
+        &dispatcher,
+        || None,
+    );
+    // The fresh down is an ordered worker barrier after the stale motion.
+    assert!(matches!(
+        events.recv_timeout(Duration::from_secs(1)).unwrap(),
+        ButtonRuntimeEvent::Started(_)
+    ));
+    handle_button(
+        ButtonId::Back,
+        false,
+        Some(&mouse),
+        &hooks,
+        &dispatcher,
+        || None,
+    );
+    assert!(matches!(
+        events.recv_timeout(Duration::from_secs(1)).unwrap(),
+        ButtonRuntimeEvent::Triggered {
+            action: Action::PreviousDesktop,
+            ..
+        }
+    ));
+    assert!(matches!(
+        events.recv_timeout(Duration::from_secs(1)).unwrap(),
+        ButtonRuntimeEvent::Ended { .. }
+    ));
+    assert!(owner.shutdown());
+}
+
 // The mid-swipe gate itself is unit-tested on `SwipeAccumulator` in
 // `openlogi-core`; these cover only what `HoldState` adds on top — tagging a
 // commit with the exact press and held button, and matching the release.

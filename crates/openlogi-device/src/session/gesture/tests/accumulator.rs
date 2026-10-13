@@ -76,6 +76,86 @@ fn release() -> RawControlEvent {
     RawControlEvent::DivertedButtons([0, 0, 0, 0])
 }
 
+#[test]
+fn committed_side_gesture_preserves_subsequent_motion() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+    let cid = reprog_controls::BACK_CIDS[0];
+    let buttons = [(cid, ButtonId::Back)];
+    acc.on_event(
+        RawControlEvent::DivertedButtons([cid, 0, 0, 0]),
+        &[],
+        &[],
+        &buttons,
+        &[],
+        &tx,
+    );
+    acc.backdate_hold_for_test();
+    acc.on_event(
+        RawControlEvent::RawXy { dx: 0, dy: -50 },
+        &[],
+        &[],
+        &buttons,
+        &[],
+        &tx,
+    );
+    assert_eq!(rx.try_recv(), Ok(CapturedInput::ButtonDown(ButtonId::Back)));
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::Gesture(ButtonId::Back, GestureDirection::Up))
+    );
+    acc.on_event(
+        RawControlEvent::RawXy { dx: 0, dy: 50 },
+        &[],
+        &[],
+        &buttons,
+        &[],
+        &tx,
+    );
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::GestureMotion {
+            button: ButtonId::Back,
+            dx: 0,
+            dy: 50
+        }),
+        "a committed hold must retain motion for volume adjustment",
+    );
+    acc.on_event(release(), &[], &[], &buttons, &[], &tx);
+    assert_eq!(rx.try_recv(), Ok(CapturedInput::ButtonUp(ButtonId::Back)));
+    acc.on_event(
+        RawControlEvent::RawXy { dx: 0, dy: -100 },
+        &[],
+        &[],
+        &buttons,
+        &[],
+        &tx,
+    );
+    assert_eq!(
+        rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty),
+        "release suppresses click and stray motion"
+    );
+    acc.on_event(
+        RawControlEvent::DivertedButtons([cid, 0, 0, 0]),
+        &[],
+        &[],
+        &buttons,
+        &[],
+        &tx,
+    );
+    acc.on_event(release(), &[], &[], &buttons, &[], &tx);
+    assert_eq!(rx.try_recv(), Ok(CapturedInput::ButtonDown(ButtonId::Back)));
+    assert_eq!(
+        rx.try_recv(),
+        Ok(CapturedInput::Gesture(
+            ButtonId::Back,
+            GestureDirection::Click
+        ))
+    );
+    assert_eq!(rx.try_recv(), Ok(CapturedInput::ButtonUp(ButtonId::Back)));
+}
+
 /// Read the next completed gesture while leaving lifecycle assertions to the
 /// dedicated edge tests below.
 fn next_gesture(

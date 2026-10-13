@@ -82,6 +82,17 @@ pub enum CapturedInput {
     /// An instantaneous firmware-reported tap with no observable hold
     /// duration, such as the thumb-wheel touch sensor.
     ButtonPulse(ButtonId),
+    /// Raw motion after a held source has committed its first swipe. The agent
+    /// may continue a volume gesture; other actions remain one-shot. This is an
+    /// internal capture event, not part of the serialized IPC contract.
+    GestureMotion {
+        /// The held source whose initial swipe already committed.
+        button: ButtonId,
+        /// Horizontal raw-XY travel since the preceding report.
+        dx: i16,
+        /// Vertical raw-XY travel since the preceding report.
+        dy: i16,
+    },
 }
 
 /// HID++-divertable standard buttons: the `0x1b04` control ID and the

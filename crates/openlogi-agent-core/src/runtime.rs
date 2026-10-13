@@ -10,6 +10,9 @@ pub mod hook;
 mod pointer;
 pub mod scroll;
 
+#[cfg(test)]
+pub(crate) mod testing;
+
 use std::collections::HashMap;
 use std::io;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
