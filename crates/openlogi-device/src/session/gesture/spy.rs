@@ -88,6 +88,8 @@ enum ArmedMode {
         rate_index: Option<u8>,
         host: HostMode,
         captured: Vec<(u8, ButtonId)>,
+        original_mode: OnboardMode,
+        original_mapping: Vec<u8>,
     },
     Profile(u8),
 }
@@ -106,9 +108,16 @@ impl ArmedOnboard {
 
     pub(super) fn restore(&self) -> Option<SpyRestore> {
         match &self.mode {
-            ArmedMode::Host { spy_index, .. } => Some(SpyRestore {
+            ArmedMode::Host {
+                spy_index,
+                original_mode,
+                original_mapping,
+                ..
+            } => Some(SpyRestore {
                 onboard_index: self.onboard_index,
                 spy_index: *spy_index,
+                original_mode: *original_mode,
+                original_mapping: original_mapping.clone(),
             }),
             ArmedMode::Profile(_) => None,
         }
@@ -199,7 +208,16 @@ pub(super) async fn arm_onboard(
                 .get_feature(ReportRateFeature::ID)
                 .await?
                 .map(|info| info.index);
+            let spy = MouseButtonSpyFeature::new(Arc::clone(chan), device_index, spy_info.index);
+            let count = spy.get_button_count().await?;
+            validate_slot_count(count, host.slots.len())?;
+            let onboard =
+                OnboardProfilesFeature::new(Arc::clone(chan), device_index, onboard_info.index);
+            let original_mode = onboard.get_mode().await?;
+            let original_mapping = spy.get_mapping(count).await?;
             ArmedMode::Host {
+                original_mode,
+                original_mapping,
                 spy_index: spy_info.index,
                 rate_index,
                 captured: host.captured().collect(),
@@ -220,6 +238,7 @@ pub(super) async fn arm_onboard(
             rate_index,
             host,
             captured,
+            ..
         } => {
             state
                 .apply_host(&onboard, *spy_index, *rate_index, host)
@@ -235,6 +254,8 @@ pub(super) async fn arm_onboard(
 pub(crate) struct SpyRestore {
     onboard_index: u8,
     spy_index: u8,
+    original_mode: OnboardMode,
+    original_mapping: Vec<u8>,
 }
 
 impl SpyRestore {
@@ -245,14 +266,28 @@ impl SpyRestore {
         if let Err(error) = spy.stop_spy().await {
             debug!(?error, "stopping 0x8110 spy failed");
         }
-        match onboard.set_mode(OnboardMode::Onboard).await {
+        let mapping_restored = match spy.set_mapping(&self.original_mapping).await {
             Ok(()) => true,
+            Err(error) => {
+                warn!(?error, "restoring G-series button mapping failed");
+                false
+            }
+        };
+        match onboard.set_mode(self.original_mode).await {
+            Ok(()) => mapping_restored,
             Err(error) => {
                 warn!(?error, "leaving G-series host mode failed");
                 false
             }
         }
     }
+}
+
+fn validate_slot_count(reported: u8, expected: usize) -> Result<(), Hidpp20Error> {
+    if reported == 0 || usize::from(reported) != expected {
+        return Err(Hidpp20Error::UnsupportedResponse);
+    }
+    Ok(())
 }
 
 pub(super) fn decode_mask(msg: &v20::Message, device_index: u8, spy_index: u8) -> Option<u16> {
@@ -335,6 +370,79 @@ mod tests {
             ],
             report_rate: None,
         }
+    }
+
+    #[tokio::test]
+    async fn host_capture_restores_original_mapping_even_when_start_fails() {
+        use crate::channel::scripted::{ScriptedRawHidChannel, scripted_channel};
+        use std::sync::Mutex;
+        for fail_start in [false, true] {
+            let original = vec![1, 2, 3, 5, 4, 6];
+            let state = Arc::new(Mutex::new((1u8, original.clone())));
+            let wire_state = Arc::clone(&state);
+            let (raw, _) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+                let mut reply = vec![0; 20];
+                reply[..4].copy_from_slice(&request[..4]);
+                reply[0] = 0x11;
+                let mut state = wire_state.lock().unwrap();
+                match (request[2], request[3] >> 4) {
+                    (0, 1) => reply[4] = 4,
+                    (0, 0) => {
+                        reply[4] = match u16::from_be_bytes([request[4], request[5]]) {
+                            0x8100 => 9,
+                            0x8110 => 10,
+                            _ => 0,
+                        }
+                    }
+                    (9, 2) => reply[4] = state.0,
+                    (9, 1) => state.0 = request[4],
+                    (10, 0) => reply[4] = 6,
+                    (10, 3) => reply[4..10].copy_from_slice(&state.1),
+                    (10, 4) => state.1.copy_from_slice(&request[4..10]),
+                    (10, 1) if fail_start => {
+                        reply[2] = 0xff;
+                        reply[3] = 10;
+                        reply[4] = request[3];
+                        reply[5] = 2;
+                    }
+                    (10, 1 | 2) => {}
+                    _ => panic!("unexpected request {request:02x?}"),
+                }
+                Some(reply)
+            });
+            let channel = scripted_channel(raw).await;
+            let device = Device::new(Arc::clone(&channel), 1).await.unwrap();
+            let target = OnboardTarget::Host(HostMode {
+                slots: vec![
+                    (ButtonId::LeftClick, false),
+                    (ButtonId::RightClick, false),
+                    (ButtonId::MiddleClick, false),
+                    (ButtonId::Back, true),
+                    (ButtonId::Forward, true),
+                    (ButtonId::DpiToggle, true),
+                ],
+                report_rate: None,
+            });
+            let mut armed = None;
+            let result = arm_onboard(&device, &channel, 1, &target, &mut armed).await;
+            if fail_start {
+                result.unwrap_err();
+            } else {
+                result.unwrap();
+            }
+            assert_eq!(*state.lock().unwrap(), (2, vec![1, 2, 3, 0, 0, 0]));
+            let restore = armed.unwrap().restore().unwrap();
+            assert!(restore.restore_on(&channel, 1).await);
+            assert_eq!(*state.lock().unwrap(), (1, original));
+        }
+    }
+
+    #[test]
+    fn mismatched_layout_is_rejected_before_host_mode_writes() {
+        validate_slot_count(6, 6).unwrap();
+        validate_slot_count(11, 11).unwrap();
+        validate_slot_count(6, 11).unwrap_err();
+        validate_slot_count(0, 0).unwrap_err();
     }
 
     #[test]

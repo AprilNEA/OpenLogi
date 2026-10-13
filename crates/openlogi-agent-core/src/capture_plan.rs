@@ -102,7 +102,7 @@ impl DeviceCapturePlan {
                         .slots
                         .iter()
                         .map(|&button| {
-                            let captured = layout.needs_host_mode(button)
+                            let captured = layout.host_silent.contains(&button)
                                 || (shift
                                     && !keeps_gestures(button)
                                     && layout.remappable().any(|b| b == button))
@@ -338,6 +338,56 @@ mod tests {
             Some(OnboardTarget::Host(host)) => Some(host.slots.clone()),
             _ => None,
         }
+    }
+
+    #[test]
+    fn g603_side_rebinding_uses_device_reports_and_keeps_primary_clicks_native() {
+        let layout = GamingLayout::for_model_key("0b01c");
+        let mut cfg = Config::default();
+        cfg.set_binding(
+            "g603",
+            ButtonId::Back,
+            Binding::Single(Action::MissionControl),
+        );
+        cfg.set_binding(
+            "g603",
+            ButtonId::Forward,
+            Binding::Single(Action::LaunchpadShow),
+        );
+        let plan = plan_for_device(&cfg, "g603", route(), None, 0, true).with_onboard(&cfg, layout);
+        let slots = host_slots(&plan).expect("G603 side bindings need device-owned spy capture");
+        assert!(slots.contains(&(ButtonId::Back, true)));
+        assert!(slots.contains(&(ButtonId::Forward, true)));
+        assert!(slots.contains(&(ButtonId::LeftClick, false)));
+        assert!(slots.contains(&(ButtonId::RightClick, false)));
+        assert!(slots.contains(&(ButtonId::MiddleClick, false)));
+        assert!(
+            slots.contains(&(ButtonId::DpiToggle, true)),
+            "host mode must retain a working DPI button"
+        );
+
+        cfg.app_settings.capture_mouse_events = false;
+        let disabled =
+            plan_for_device(&cfg, "g603", route(), None, 0, true).with_onboard(&cfg, layout);
+        assert_eq!(disabled.target.spec.onboard, None);
+        cfg.app_settings.capture_mouse_events = true;
+
+        cfg.set_binding(
+            "g603",
+            ButtonId::Back,
+            Binding::Single(default_binding(ButtonId::Back)),
+        );
+        cfg.set_binding(
+            "g603",
+            ButtonId::Forward,
+            Binding::Single(default_binding(ButtonId::Forward)),
+        );
+        let native =
+            plan_for_device(&cfg, "g603", route(), None, 0, true).with_onboard(&cfg, layout);
+        assert_eq!(
+            native.target.spec.onboard, None,
+            "default bindings restore onboard behavior"
+        );
     }
 
     #[test]

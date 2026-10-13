@@ -382,7 +382,8 @@ impl Config {
         }
         let layout = layout?;
         let customized = |button: &ButtonId, binding: &Binding| {
-            layout.needs_host_mode(*button)
+            (self.app_settings.capture_mouse_events || !button.is_os_hook_button())
+                && layout.needs_host_mode(*button)
                 && (!matches!(binding, Binding::Single(_))
                     || binding.click_action() != default_binding(*button))
         };

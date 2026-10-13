@@ -315,6 +315,7 @@ async fn host_rearm_reports_a_spy_that_did_not_start() {
                         _ => 0,
                     };
                 }
+                (SPY, 0) | (ONBOARD, 2) => response[4] = 1,
                 (SPY, START_SPY) if spy_fails.load(std::sync::atomic::Ordering::Relaxed) => {
                     response[2] = 0xff;
                     response[3] = SPY;
