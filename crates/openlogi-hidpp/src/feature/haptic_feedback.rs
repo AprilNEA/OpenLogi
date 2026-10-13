@@ -144,15 +144,25 @@ impl HapticFeedbackFeature {
     ///
     /// `flags` replaces the whole byte: edit the value from
     /// [`Self::get_configuration`] so power-save and unnamed bits survive.
+    ///
+    /// Returns the configuration the device reports after the write. The
+    /// reply has the `getHapticConfig` layout and carries the device's
+    /// state, not an echo of the request: firmware may normalize the
+    /// intensity or refuse a flag. Logi Options+ adopts this reply as its
+    /// haptic state (reverse-engineered from its `setHapticConfig`, which
+    /// resolves the same `HapticConfigResponse` as the getter). Callers
+    /// check the fields they rely on.
     pub async fn set_configuration(
         &self,
         flags: HapticConfigFlags,
         intensity: HapticIntensity,
-    ) -> Result<(), Hidpp20Error> {
-        self.endpoint
+    ) -> Result<HapticConfiguration, Hidpp20Error> {
+        let payload = self
+            .endpoint
             .call(2, [flags.bits(), intensity.get(), 0])
-            .await?;
-        Ok(())
+            .await?
+            .extend_payload();
+        HapticConfiguration::from_payload(&payload)
     }
 
     /// Play one typed haptic waveform immediately.
@@ -196,6 +206,56 @@ mod tests {
         );
         assert_eq!(config.intensity.get(), 60);
         assert_eq!((config.level_step, config.level_count), (3, 4));
+    }
+
+    /// What `set_configuration` returns when the device answers the write
+    /// with `reply`.
+    fn set_with_reply(reply: [u8; 3]) -> Result<HapticConfiguration, Hidpp20Error> {
+        use std::sync::Arc;
+
+        use crate::channel::mock::{MockRawHidChannel, channel_with_reader};
+        use crate::feature::CreatableFeature;
+        use crate::nibble::U4;
+        use crate::protocol::v20::{Message, MessageHeader};
+
+        futures::executor::block_on(async {
+            let (raw, handle) = MockRawHidChannel::new();
+            let channel = Arc::new(channel_with_reader(raw).await);
+            let feature = HapticFeedbackFeature::new(channel, 3, 0x0b);
+            let intensity = HapticIntensity::new(63).unwrap();
+            let mut write = Box::pin(
+                feature.set_configuration(HapticConfigFlags::from_bits_retain(0x83), intensity),
+            );
+            assert!(futures::poll!(write.as_mut()).is_pending());
+            let header = MessageHeader {
+                device_index: 3,
+                feature_index: 0x0b,
+                function_id: U4::from_lo(2),
+                software_id: U4::from_lo(1),
+            };
+            handle
+                .send_incoming(Message::Short(header, reply).into())
+                .await;
+            let result = write.await;
+            let written = handle.written_reports();
+            let request = written.last().expect("setHapticConfig was sent");
+            assert_eq!(&request[4..7], &[0x83, 63, 0]);
+            result
+        })
+    }
+
+    #[test]
+    fn set_configuration_returns_the_state_the_device_reports() {
+        // The firmware kept the engine off and rounded the intensity.
+        let applied = set_with_reply([0x82, 60, 0x34]).unwrap();
+        assert!(!applied.flags.contains(HapticConfigFlags::ENABLED));
+        assert_eq!(applied.flags.bits(), 0x82);
+        assert_eq!(applied.intensity.get(), 60);
+        assert_eq!((applied.level_step, applied.level_count), (3, 4));
+        assert!(matches!(
+            set_with_reply([0x83, 101, 0]),
+            Err(Hidpp20Error::UnsupportedResponse)
+        ));
     }
 
     #[test]

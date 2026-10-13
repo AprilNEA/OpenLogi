@@ -124,6 +124,13 @@ fn clear_cached_location() {
 /// *different device* re-paired into the same receiver slot, so each session
 /// starts by overwriting the entry with a freshly-proven location, and the
 /// per-hover plays then reuse it for the session's lifetime.
+///
+/// The repair counts only once the device's reply to the write reports the
+/// enable flag. The reply is the device's state after the write, so a
+/// device that kept the engine off answers without it, and reporting that
+/// as a repair would leave the session playing into a disabled engine. The
+/// rest of the reply is the firmware's to settle: a normalized intensity or
+/// a changed power-save bit is accepted, as Logi Options+ adopts the reply.
 pub async fn ensure_haptics_armed_on(shared: &SharedChannel) -> Result<bool, WriteError> {
     let channel = shared.channel();
     let index = shared.device_index();
@@ -136,13 +143,20 @@ pub async fn ensure_haptics_armed_on(shared: &SharedChannel) -> Result<bool, Wri
     if config.flags.contains(HapticConfigFlags::ENABLED) || config.intensity.get() == 0 {
         return Ok(false);
     }
-    feature
+    let applied = feature
         .set_configuration(config.flags | HapticConfigFlags::ENABLED, config.intensity)
         .await
         .map_err(|error| {
             clear_cached_location();
             classify_hidpp_error(error, HidppOperation::PlayHaptic, HapticFeedbackFeature::ID)
         })?;
+    if !applied.flags.contains(HapticConfigFlags::ENABLED) {
+        clear_cached_location();
+        return Err(WriteError::UnsupportedResponse {
+            operation: HidppOperation::PlayHaptic,
+            feature_hex: HapticFeedbackFeature::ID,
+        });
+    }
     Ok(true)
 }
 
@@ -191,6 +205,7 @@ pub async fn play_haptic(
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use std::sync::Mutex as StdMutex;
 
     use super::*;
@@ -210,9 +225,11 @@ mod tests {
         )
     }
 
-    /// A haptic device that stores whatever `setConfiguration` sends.
+    /// A haptic device that stores what `setConfiguration` sends, lets
+    /// `firmware` adjust it, and answers with the result.
     fn stateful_haptics(
         initial: [u8; 3],
+        firmware: fn(&mut [u8; 3]),
     ) -> (ScriptedRawHidChannel, crate::replay::ReplayChannelHandle) {
         let state = StdMutex::new(initial);
         ScriptedRawHidChannel::with_dynamic_responder(move |request| {
@@ -231,6 +248,7 @@ mod tests {
                 (HAPTIC_INDEX, 0x02) => {
                     let mut current = state.lock().expect("haptic state");
                     current[..2].copy_from_slice(&request[4..6]);
+                    firmware(&mut current);
                     payload = *current;
                 }
                 _ => return None,
@@ -241,8 +259,14 @@ mod tests {
         })
     }
 
-    async fn arm(initial: [u8; 3]) -> (bool, Vec<[u8; 3]>) {
-        let (raw, handle) = stateful_haptics(initial);
+    /// Arm a device holding `initial` whose firmware applies `firmware` to
+    /// each write. Returns the result, the `setConfiguration` payloads, and
+    /// whether the feature location is still cached afterwards.
+    async fn arm_with(
+        initial: [u8; 3],
+        firmware: fn(&mut [u8; 3]),
+    ) -> (Result<bool, WriteError>, Vec<[u8; 3]>, bool) {
+        let (raw, handle) = stateful_haptics(initial, firmware);
         let shared = SharedChannel::new(
             scripted_channel(raw).await,
             DeviceRoute::Direct {
@@ -250,15 +274,20 @@ mod tests {
                 product_id: 0xb042,
             },
         );
-        let repaired = ensure_haptics_armed_on(&shared)
-            .await
-            .expect("the scripted device answers every haptic call");
+        let result = ensure_haptics_armed_on(&shared).await;
         let writes = handle
             .written_reports()
             .into_iter()
             .filter(|report| report[2] == HAPTIC_INDEX && report[3] >> 4 == 0x02)
             .map(|report| [report[4], report[5], report[6]])
             .collect();
+        let cached = cached_feature(shared.channel(), shared.device_index()).is_some();
+        (result, writes, cached)
+    }
+
+    async fn arm(initial: [u8; 3]) -> (bool, Vec<[u8; 3]>) {
+        let (result, writes, _) = arm_with(initial, |_| {}).await;
+        let repaired = result.expect("the scripted device answers every haptic call");
         (repaired, writes)
     }
 
@@ -276,6 +305,40 @@ mod tests {
         // Zero is the user's "off"; it is never replaced by a guessed level.
         assert_eq!(arm([0x00, 0, 0x34]).await, (false, vec![]));
         assert_eq!(arm([0x03, 40, 0x34]).await, (false, vec![]));
+    }
+
+    #[tokio::test]
+    async fn arming_fails_when_the_reply_shows_the_engine_still_off() {
+        let _slot = CACHE_SLOT.lock().await;
+        // The firmware keeps the engine disabled whatever is written.
+        let (result, writes, cached) = arm_with([0x82, 60, 0x34], |state| state[0] &= !0x01).await;
+        assert_matches!(
+            result,
+            Err(WriteError::UnsupportedResponse {
+                operation: HidppOperation::PlayHaptic,
+                feature_hex: HapticFeedbackFeature::ID,
+            })
+        );
+        assert_eq!(writes, vec![[0x83, 60, 0]], "the repair was attempted once");
+        assert!(!cached, "a refused repair leaves no cached location behind");
+    }
+
+    #[tokio::test]
+    async fn arming_accepts_a_firmware_normalized_intensity() {
+        let _slot = CACHE_SLOT.lock().await;
+        // The firmware rounds the intensity to its level step and clears
+        // power save; the engine is on, so the repair holds.
+        let (result, writes, cached) = arm_with([0x82, 63, 0x34], |state| {
+            state[1] = 60;
+            state[0] &= !0x02;
+        })
+        .await;
+        assert_matches!(result, Ok(true));
+        assert_eq!(writes, vec![[0x83, 63, 0]]);
+        assert!(
+            cached,
+            "a confirmed repair keeps the location for the plays"
+        );
     }
 
     /// Holds [`CACHE_SLOT`]: every check below reads the shared cache slot.
