@@ -465,6 +465,34 @@ async fn read_only_settings_never_send_writes() {
 }
 
 #[tokio::test]
+async fn a_keyboard_without_a_default_reports_default_fn_lock_as_null() {
+    // A 0x40a0 keyboard reports its state but no default.
+    let fn_lock = run_script(
+        snapshot(),
+        ApiCommand::FnLock {
+            device: route().to_string(),
+            set: None,
+        },
+        vec![Box::new(|request| {
+            assert!(matches!(request, AgentRequest::ReadFnLock { .. }));
+            AgentResponse::ReadFnLock(Ok(FnLockState {
+                fn_lock: true,
+                default_fn_lock: None,
+            }))
+        })],
+    )
+    .await;
+    let data = fn_lock["data"]
+        .as_object()
+        .expect("fn-lock data is an object");
+    assert_eq!(data.get("fn_lock"), Some(&serde_json::Value::Bool(true)));
+    assert_eq!(
+        data.get("default_fn_lock"),
+        Some(&serde_json::Value::Null),
+        "the field stays in the output as null, not dropped or made false"
+    );
+}
+#[tokio::test]
 async fn device_write_failure_is_not_retried_or_reported_as_success() {
     let result = run_script(
         snapshot(),
