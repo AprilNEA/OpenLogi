@@ -256,8 +256,9 @@ pub fn decode_notification(msg: &v10::Message) -> Option<Event> {
         kind: DeviceKind::from(payload[1] & 0x0f),
         // Device-info high nibble: bit 6 = link not established, bit 5 = link
         // encrypted, bit 4 = software present (same layout as Bolt; Solaar
-        // decodes both receivers with one mask table).
-        encrypted: payload[1] & (1 << 5) != 0,
+        // decodes both receivers with one mask table). A Bolt protocol byte
+        // also means encrypted.
+        encrypted: crate::receiver::connection_encrypted(payload[0], payload[1]),
         online: payload[1] & (1 << 6) == 0,
         wpid: u16::from_le_bytes([payload[2], payload[3]]),
     }))
@@ -449,6 +450,25 @@ mod tests {
 
         assert!(connection(1 << 5).encrypted);
         assert!(!connection(1 << 4).encrypted);
+    }
+
+    #[test]
+    fn a_bolt_protocol_byte_means_an_encrypted_link() {
+        // Byte 3 is the link protocol: 0x04 is a Unifying (eQuad step 4 DJ)
+        // link and keeps bit 5 as the only source, while 0x10 is Bolt and is
+        // encrypted even with bit 5 clear.
+        let connection = |protocol: u8, status: u8| {
+            let mut payload = [0u8; 17];
+            payload[0] = protocol;
+            payload[1] = status;
+            match decode_notification(&notification(1, 0x41, payload)) {
+                Some(Event::DeviceConnection(connection)) => connection,
+                other => panic!("expected a device connection, got {other:?}"),
+            }
+        };
+        assert!(!connection(0x04, 0x02).encrypted);
+        assert!(connection(0x04, (1 << 5) | 0x02).encrypted);
+        assert!(connection(0x10, 0x02).encrypted);
     }
 
     #[test]

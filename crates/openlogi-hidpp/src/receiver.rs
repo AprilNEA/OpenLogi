@@ -27,6 +27,20 @@ pub const RECEIVER_DEVICE_INDEX: u8 = 0xff;
 /// HID++ 1.0 receiver register holding [`NotificationFlags`].
 const NOTIFICATIONS_REGISTER: u8 = 0x00;
 
+/// The protocol byte (byte 3 of a `0x41` device-connection notification) of
+/// a Logi Bolt link.
+const BOLT_PROTOCOL: u8 = 0x10;
+
+/// Whether a `0x41` device-connection notification reports an encrypted link.
+///
+/// Bit 5 of the device-info byte is the link encryption flag. A link whose
+/// protocol byte is Bolt is encrypted even when that bit is clear: Solaar's
+/// `notification_information`, which decodes every Unifying-style receiver,
+/// uses `data[0] & 0x20 or address == 0x10`.
+pub(crate) const fn connection_encrypted(protocol: u8, device_info: u8) -> bool {
+    device_info & (1 << 5) != 0 || protocol == BOLT_PROTOCOL
+}
+
 bitflags::bitflags! {
     /// Which notifications a Bolt or Unifying receiver sends: register `0x00`,
     /// a 24-bit big-endian word.
