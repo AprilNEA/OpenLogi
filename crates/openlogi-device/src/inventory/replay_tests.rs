@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use openlogi_core::device::{BatteryInfo, BatteryStatus};
 use openlogi_fixture::RequestMatch;
 use tokio::sync::mpsc;
 
@@ -401,19 +402,26 @@ async fn malformed_response_is_released_only_after_the_request_barrier() {
         .expect("malformed response cassette consumed");
 }
 
-/// Enumerate once and return the `(online, battery percentage)` of the node
+/// Enumerate once and return the `(online, battery reading)` of the node
 /// listed under `product_id`.
-async fn battery_node_state(enumerator: &mut Enumerator, product_id: u16) -> (bool, Option<u8>) {
+async fn battery_node_reading(
+    enumerator: &mut Enumerator,
+    product_id: u16,
+) -> (bool, Option<BatteryInfo>) {
     let inventories = enumerator.enumerate().await.expect("node probe succeeds");
     let node = inventories
         .iter()
         .find(|inventory| inventory.receiver.product_id == product_id)
         .unwrap_or_else(|| panic!("node {product_id:#06x} listed: {inventories:#?}"));
     let device = &node.paired[0];
-    (
-        device.online,
-        device.battery.as_ref().map(|battery| battery.percentage),
-    )
+    (device.online, device.battery.clone())
+}
+
+/// Enumerate once and return the `(online, battery percentage)` of the node
+/// listed under `product_id`.
+async fn battery_node_state(enumerator: &mut Enumerator, product_id: u16) -> (bool, Option<u8>) {
+    let (online, battery) = battery_node_reading(enumerator, product_id).await;
+    (online, battery.map(|battery| battery.percentage))
 }
 
 /// Enumerate once and return the headset's `(online, battery percentage)`.
@@ -586,7 +594,7 @@ async fn battery_broadcast_refresh(
     answers: [Vec<u8>; 2],
     broadcast: [u8; 3],
     source: HidppEventSource,
-) -> (Option<u8>, Option<u8>) {
+) -> (Option<BatteryInfo>, Option<BatteryInfo>) {
     const PRODUCT_ID: u16 = 0xc08b;
     let fixture = battery_only_fixture(feature_id, PRODUCT_ID, "G502 HERO", &answers);
     let backend = Arc::new(
@@ -602,7 +610,7 @@ async fn battery_broadcast_refresh(
     let (notifier, mut events, observed) = observed_event_channel();
     let mut enumerator = Enumerator::with_backend(backend.clone()).with_event_notifier(notifier);
     enumerator.timeouts.arrival_drain = Duration::ZERO;
-    let (online, before) = battery_node_state(&mut enumerator, PRODUCT_ID).await;
+    let (online, before) = battery_node_reading(&mut enumerator, PRODUCT_ID).await;
     assert!(online, "{feature_id:#06x} node listed online");
 
     let mut report = vec![0x11, 0xff, 0x02, 0x00];
@@ -619,11 +627,16 @@ async fn battery_broadcast_refresh(
         .expect("the broadcast must be recognised as a reconciliation request");
     assert_eq!(events.try_recv(), Ok(source));
 
-    let (_, after) = battery_node_state(&mut enumerator, PRODUCT_ID).await;
+    let (_, after) = battery_node_reading(&mut enumerator, PRODUCT_ID).await;
     backend
         .require_complete()
         .expect("every scripted battery exchange consumed");
     (before, after)
+}
+
+/// The `(percentage, status)` of a reading, for the assertions below.
+fn charge(battery: Option<BatteryInfo>) -> Option<(u8, BatteryStatus)> {
+    battery.map(|battery| (battery.percentage, battery.status))
 }
 
 #[tokio::test]
@@ -640,7 +653,59 @@ async fn legacy_battery_broadcast_requests_reconciliation_to_a_fresh_reading() {
         HidppEventSource::BatteryStatus,
     )
     .await;
-    assert_eq!((before, after), (Some(50), Some(20)));
+    assert_eq!(
+        (charge(before), charge(after)),
+        (
+            Some((50, BatteryStatus::Discharging)),
+            Some((20, BatteryStatus::Discharging))
+        )
+    );
+}
+
+#[tokio::test]
+async fn legacy_battery_broadcast_reports_a_charging_change() {
+    // Plugged in: only the status byte moves to 1 (recharging), so the
+    // reconciliation must surface "charging" with the same 50 %.
+    let (before, after) = battery_broadcast_refresh(
+        0x1000,
+        [
+            short(0xff, 0x02, 0x00, [50, 20, 0x00]),
+            short(0xff, 0x02, 0x00, [50, 20, 0x01]),
+        ],
+        [50, 20, 0x01],
+        HidppEventSource::BatteryStatus,
+    )
+    .await;
+    assert_eq!(
+        (charge(before), charge(after)),
+        (
+            Some((50, BatteryStatus::Discharging)),
+            Some((50, BatteryStatus::Charging))
+        )
+    );
+}
+
+#[tokio::test]
+async fn legacy_battery_broadcast_reports_charging_while_holding_the_percentage() {
+    // Plugged in, and the firmware stops gauging: 0 % while recharging. The
+    // pre-charge 50 % is held, but the status must still change.
+    let (before, after) = battery_broadcast_refresh(
+        0x1000,
+        [
+            short(0xff, 0x02, 0x00, [50, 20, 0x00]),
+            short(0xff, 0x02, 0x00, [0, 0, 0x01]),
+        ],
+        [0, 0, 0x01],
+        HidppEventSource::BatteryStatus,
+    )
+    .await;
+    assert_eq!(
+        (charge(before), charge(after)),
+        (
+            Some((50, BatteryStatus::Discharging)),
+            Some((50, BatteryStatus::Charging))
+        )
+    );
 }
 
 #[tokio::test]
@@ -655,7 +720,30 @@ async fn voltage_battery_broadcast_requests_reconciliation_to_a_fresh_reading() 
     )
     .await;
     assert!(
-        matches!((before, after), (Some(before), Some(after)) if after > before),
+        matches!(
+            (charge(before.clone()), charge(after.clone())),
+            (
+                Some((before, BatteryStatus::Discharging)),
+                Some((after, BatteryStatus::Discharging))
+            ) if after > before
+        ),
         "{before:?} -> {after:?}"
     );
+}
+
+#[tokio::test]
+async fn voltage_battery_broadcast_reports_charging_while_holding_the_percentage() {
+    // Plugged in: flags bit 7 (external power), status 0 (charging). A
+    // voltage under charge is no gauge, so the pre-charge estimate is held,
+    // but the status must still change.
+    let (before, after) = battery_broadcast_refresh(
+        0x1001,
+        [voltage_reading(3700, 0x00), voltage_reading(3900, 0x80)],
+        [0x0f, 0x3c, 0x80],
+        HidppEventSource::BatteryVoltage,
+    )
+    .await;
+    let (percentage, status) = charge(before).expect("a reading before the broadcast");
+    assert_eq!(status, BatteryStatus::Discharging);
+    assert_eq!(charge(after), Some((percentage, BatteryStatus::Charging)));
 }
