@@ -14,8 +14,10 @@ use crate::{
 
 /// Implements the `HiResWheel` / `0x2121` feature.
 ///
-/// The analytics part of the feature is not implemented here as its data
-/// structure lacks any documentation.
+/// The analytics part of the feature (`getAnalyticsData`) is not implemented
+/// here as its data structure lacks any documentation. The mode fields this
+/// wrapper does not interpret are still carried through every mode write; see
+/// [`WheelMode`].
 #[derive(Feature)]
 #[creatable(id = 0x2121, version = 0)]
 pub struct HiResWheelFeature {
@@ -64,49 +66,21 @@ impl HiResWheelFeature {
     /// Retrieves the current mode of the hi-res wheel.
     pub async fn get_wheel_mode(&self) -> Result<WheelMode, Hidpp20Error> {
         let payload = self.endpoint.call(1, [0; 3]).await?.extend_payload();
-
-        Ok(WheelMode {
-            inverted: payload[0] & (1 << 2) != 0,
-            resolution: WheelResolution::try_from((payload[0] & (1 << 1)) >> 1)
-                .map_err(|_| Hidpp20Error::UnsupportedResponse)?,
-            target: WheelEventTarget::try_from(payload[0] & 1)
-                .map_err(|_| Hidpp20Error::UnsupportedResponse)?,
-        })
+        WheelMode::from_payload(&payload)
     }
 
-    /// Sets the mode of the hi-res wheel.
+    /// Writes `mode` and returns the device's echo of the applied mode.
     ///
-    /// Setting the bit to control analytics collection is not supported in this
-    /// feature implementation as the analytics data structure is completely
-    /// undocumented.\
-    /// If this is implemented in the future, a new implementation will do so to
-    /// not break this one.
-    pub async fn set_wheel_mode(
-        &self,
-        target: WheelEventTarget,
-        resolution: WheelResolution,
-        inverted: bool,
-    ) -> Result<WheelMode, Hidpp20Error> {
-        let mut mode_byte = 0u8;
-        if inverted {
-            mode_byte |= 1 << 2;
-        }
-        mode_byte |= u8::from(resolution) << 1;
-        mode_byte |= u8::from(target);
-
+    /// `setWheelMode` replaces the whole three-byte mode, so `mode` must come
+    /// from [`Self::get_wheel_mode`] (only the public fields edited): the
+    /// firmware-owned fields it carries are written back unchanged.
+    pub async fn set_wheel_mode(&self, mode: WheelMode) -> Result<WheelMode, Hidpp20Error> {
         let payload = self
             .endpoint
-            .call(2, [mode_byte, 0x00, 0x00])
+            .call(2, mode.to_request())
             .await?
             .extend_payload();
-
-        Ok(WheelMode {
-            inverted: payload[0] & (1 << 2) != 0,
-            resolution: WheelResolution::try_from((payload[0] & (1 << 1)) >> 1)
-                .map_err(|_| Hidpp20Error::UnsupportedResponse)?,
-            target: WheelEventTarget::try_from(payload[0] & 1)
-                .map_err(|_| Hidpp20Error::UnsupportedResponse)?,
-        })
+        WheelMode::from_payload(&payload)
     }
 
     /// Retrieves the current state of the ratchet switch.
@@ -147,6 +121,10 @@ pub struct WheelCapabilities {
 
 /// Represents the wheel mode as reported by
 /// [`HiResWheelFeature::get_wheel_mode`].
+///
+/// Only obtainable from the device, so a value handed back to
+/// [`HiResWheelFeature::set_wheel_mode`] always carries the firmware's current
+/// copy of the fields this type does not interpret.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
@@ -160,6 +138,54 @@ pub struct WheelMode {
 
     /// The target of wheel movement reports (native or diverted).
     pub target: WheelEventTarget,
+
+    /// Mode state outside the three documented bits, preserved verbatim.
+    extension: WheelModeExtension,
+}
+
+/// The `0x2121` mode fields this crate does not interpret.
+///
+/// Reverse-engineered, not from a spec: Logi Options+ 2.8 (`devio::Feature2121HiResWheel`
+/// `GetWheelMode` / `SetWheelMode`) reads and writes an analytics flag in byte 0
+/// bit 3 and two further bytes it names priority and rate. Their legal values
+/// are unknown, so they are only ever echoed back to the firmware.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+struct WheelModeExtension {
+    /// Byte 0 with the three documented bits (target, resolution, invert) cleared.
+    flags: u8,
+    /// Bytes 1 and 2.
+    bytes: [u8; 2],
+}
+
+impl WheelMode {
+    const TARGET: u8 = 1;
+    const RESOLUTION: u8 = 1 << 1;
+    const INVERTED: u8 = 1 << 2;
+    const DOCUMENTED: u8 = Self::TARGET | Self::RESOLUTION | Self::INVERTED;
+
+    fn from_payload(payload: &[u8; 16]) -> Result<Self, Hidpp20Error> {
+        Ok(Self {
+            inverted: payload[0] & Self::INVERTED != 0,
+            resolution: WheelResolution::try_from((payload[0] & Self::RESOLUTION) >> 1)
+                .map_err(|_| Hidpp20Error::UnsupportedResponse)?,
+            target: WheelEventTarget::try_from(payload[0] & Self::TARGET)
+                .map_err(|_| Hidpp20Error::UnsupportedResponse)?,
+            extension: WheelModeExtension {
+                flags: payload[0] & !Self::DOCUMENTED,
+                bytes: [payload[1], payload[2]],
+            },
+        })
+    }
+
+    fn to_request(self) -> [u8; 3] {
+        let mut flags = self.extension.flags | u8::from(self.target);
+        flags |= u8::from(self.resolution) << 1;
+        if self.inverted {
+            flags |= Self::INVERTED;
+        }
+        [flags, self.extension.bytes[0], self.extension.bytes[1]]
+    }
 }
 
 /// Represents the resolution of the hi-res wheel.
@@ -226,4 +252,53 @@ pub struct WheelMovementData {
     /// The vertical movement delta. Moving away from the user produces positive
     /// values.
     pub delta_vertical: i16,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WheelEventTarget, WheelMode, WheelResolution};
+
+    fn payload(mode: [u8; 3]) -> [u8; 16] {
+        let mut payload = [0; 16];
+        payload[..3].copy_from_slice(&mode);
+        payload
+    }
+
+    #[test]
+    fn decodes_documented_bits_and_round_trips_extension_fields() {
+        // Diverted, high resolution, inverted, analytics (bit 3) + bit 7 set.
+        let wire = [0b1000_1111, 0x05, 0x07];
+        let mode = WheelMode::from_payload(&payload(wire)).unwrap();
+
+        assert!(mode.inverted);
+        assert_eq!(mode.resolution, WheelResolution::High);
+        assert_eq!(mode.target, WheelEventTarget::Diverted);
+        assert_eq!(mode.to_request(), wire);
+    }
+
+    #[test]
+    fn editing_documented_fields_leaves_extension_fields_untouched() {
+        let mut mode = WheelMode::from_payload(&payload([0b0000_1000, 0x05, 0x07])).unwrap();
+        mode.inverted = true;
+        mode.resolution = WheelResolution::High;
+        mode.target = WheelEventTarget::Diverted;
+
+        assert_eq!(mode.to_request(), [0b0000_1111, 0x05, 0x07]);
+
+        mode.inverted = false;
+        mode.resolution = WheelResolution::Low;
+        mode.target = WheelEventTarget::Native;
+        assert_eq!(mode.to_request(), [0b0000_1000, 0x05, 0x07]);
+    }
+
+    #[test]
+    fn every_documented_mode_round_trips_with_a_zero_extension() {
+        for byte in 0..=0b111 {
+            let mode = WheelMode::from_payload(&payload([byte, 0, 0])).unwrap();
+            assert_eq!(mode.inverted, byte & 0b100 != 0);
+            assert_eq!(mode.resolution == WheelResolution::High, byte & 0b010 != 0);
+            assert_eq!(mode.target == WheelEventTarget::Diverted, byte & 0b001 != 0);
+            assert_eq!(mode.to_request(), [byte, 0, 0]);
+        }
+    }
 }
