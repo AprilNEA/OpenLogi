@@ -1,0 +1,15 @@
+# Owner: GesturePolicy::for_bindings applies the host custom-gesture timing.
+# Capture plans and input consumers carry that decision; they do not rebuild
+# direction durations from action enums.
+id: core-gesture-timing-owner
+language: rust
+severity: error
+message: Custom gesture action timing belongs to openlogi_core::binding::GesturePolicy::for_bindings; consume that policy instead of constructing direction durations here.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-core/src/binding/swipe.rs
+  - "**/tests.rs"
+  - "**/tests/**"
+rule:
+  pattern: $POLICY.set_duration($$$)

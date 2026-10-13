@@ -23,10 +23,11 @@
 mod accum;
 mod arm;
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use hidpp::protocol::v20;
-use openlogi_core::binding::{ButtonId, GestureDirection};
+use openlogi_core::binding::{ButtonId, GestureDirection, GesturePolicy};
 use tokio::sync::mpsc;
 use tracing::info;
 
@@ -135,6 +136,8 @@ pub const GESTURE_SOURCE_BUTTONS: [(u16, ButtonId); 3] = [
 /// Which of one device's controls a capture session should divert.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CaptureSpec {
+    /// Effective runtime response policies for the armed gesture buttons.
+    pub gesture_policies: BTreeMap<ButtonId, GesturePolicy>,
     /// Divert the thumb wheel over `0x2150` (rotation rebind / sensitivity /
     /// click bound).
     pub capture_thumbwheel: bool,
@@ -181,7 +184,12 @@ pub async fn run_capture_session(
     if let Some(direction) = armed.thumbwheel_direction() {
         let _ = host.sink.send(direction);
     }
-    Ok(run_capture(shared, GestureCapture::new(armed), host).await)
+    Ok(run_capture(
+        shared,
+        GestureCapture::new(armed, spec.gesture_policies),
+        host,
+    )
+    .await)
 }
 
 /// Gesture capture as [`run_capture`] drives it: the armed controls, and the
@@ -197,10 +205,10 @@ struct GestureCapture {
 }
 
 impl GestureCapture {
-    fn new(armed: ArmedControls) -> Self {
+    fn new(armed: ArmedControls, policies: BTreeMap<ButtonId, GesturePolicy>) -> Self {
         Self {
             armed,
-            accum: Arc::default(),
+            accum: Arc::new(Mutex::new(CaptureAccum::with_policies(policies))),
             thumb_status: Arc::new(Mutex::new(RotationStatus::Inactive)),
         }
     }
