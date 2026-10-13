@@ -271,11 +271,11 @@ fn connection_icon_matches_route() {
         ..DeviceTransports::default()
     };
     assert_eq!(
-        connection_icon_path(Some(&bolt), None),
+        connection_icon_path(Some(&bolt), None, None),
         "action-icons/bolt.svg"
     );
     assert_eq!(
-        connection_icon_path(Some(&uni), None),
+        connection_icon_path(Some(&uni), None, None),
         "action-icons/unifying.svg"
     );
     // The matching USB PID selects the cable icon.
@@ -286,7 +286,8 @@ fn connection_icon_matches_route() {
     assert_eq!(
         connection_icon_path(
             Some(&direct_wired_pid),
-            Some(&model_with_pids(wired, &[0xb019]))
+            Some(&model_with_pids(wired, &[0xb019])),
+            None
         ),
         "action-icons/usb.svg"
     );
@@ -303,7 +304,8 @@ fn connection_icon_matches_route() {
     assert_eq!(
         connection_icon_path(
             Some(&direct_equad_pid),
-            Some(&model_with_pids(equad_only, &[0xb01a]))
+            Some(&model_with_pids(equad_only, &[0xb01a])),
+            None
         ),
         "action-icons/usb.svg"
     );
@@ -315,7 +317,8 @@ fn connection_icon_matches_route() {
     assert_eq!(
         connection_icon_path(
             Some(&direct_unknown_pid),
-            Some(&model_with_pids(DeviceTransports::default(), &[]))
+            Some(&model_with_pids(DeviceTransports::default(), &[])),
+            None
         ),
         "action-icons/bluetooth.svg"
     );
@@ -324,26 +327,28 @@ fn connection_icon_matches_route() {
     assert_eq!(
         connection_icon_path(
             Some(&direct_unknown_pid),
-            Some(&model_with_pids(bt, &[0xb019]))
+            Some(&model_with_pids(bt, &[0xb019])),
+            None
         ),
         "action-icons/bluetooth.svg"
     );
     assert_eq!(
         connection_icon_path(
             Some(&direct_unknown_pid),
-            Some(&model_with_pids(btle, &[0xb01b]))
+            Some(&model_with_pids(btle, &[0xb01b])),
+            None
         ),
         "action-icons/bluetooth.svg"
     );
     // Unknown transports (no 0x0003 snapshot) keep the old default.
     assert_eq!(
-        connection_icon_path(Some(&direct_unknown_pid), None),
+        connection_icon_path(Some(&direct_unknown_pid), None, None),
         "action-icons/bluetooth.svg"
     );
     // No route and no model information means the default icon.
     assert_eq!(
-        connection_icon_path(None, None),
-        "action-icons/bluetooth.svg"
+        connection_icon_path(None, None, None),
+        "action-icons/circle-dot.svg"
     );
 }
 
@@ -384,7 +389,11 @@ fn connection_icon_preserves_saved_wired_device_without_live_route() {
     assert!(!record.online);
     assert!(record.route.is_none());
     assert_eq!(
-        connection_icon_path(record.route.as_ref(), record.model_info.as_ref()),
+        connection_icon_path(
+            record.route.as_ref(),
+            record.model_info.as_ref(),
+            state.offline_connection(record)
+        ),
         "action-icons/usb.svg",
         "a saved wired-only keyboard must not acquire a Bluetooth icon while offline"
     );
@@ -414,15 +423,412 @@ fn connection_icon_follows_live_route_on_multi_transport_device() {
         product_id: 0xb38a,
     };
     assert_eq!(
-        connection_icon_path(Some(&usb_direct), Some(&model)),
+        connection_icon_path(Some(&usb_direct), Some(&model), None),
         "action-icons/usb.svg",
         "plugged in over USB must show the USB glyph even though the same \
          device also supports Bluetooth/BTLE"
     );
     assert_eq!(
-        connection_icon_path(Some(&btle_direct), Some(&model)),
+        connection_icon_path(Some(&btle_direct), Some(&model), None),
         "action-icons/bluetooth.svg",
         "the same device connected over BTLE must show the Bluetooth glyph"
+    );
+}
+
+#[test]
+fn disconnected_gaming_keyboards_keep_the_observed_usb_icon() {
+    use openlogi_core::config::Config;
+    use openlogi_core::device::{PairedDevice, ReceiverInfo};
+
+    use crate::services::assets::AssetResolver;
+    use crate::state::{AppState, Sources};
+
+    for (name, pids) in [
+        ("G915 X LS", [0xb38a, 0x40b5, 0xc356]),
+        ("G515 LS TKL", [0xb389, 0x40b4, 0xc355]),
+    ] {
+        let mut model = model_with_pids(
+            DeviceTransports {
+                usb: true,
+                equad: true,
+                btle: true,
+                bluetooth: false,
+            },
+            &pids,
+        );
+        model.unit_id = [1, 2, 3, 4];
+        let inventory = openlogi_core::device::DeviceInventory {
+            receiver: ReceiverInfo {
+                name: name.into(),
+                vendor_id: 0x046d,
+                product_id: pids[2],
+                unique_id: None,
+            },
+            paired: vec![PairedDevice {
+                slot: openlogi_core::hid::DIRECT_DEVICE_INDEX,
+                codename: Some(name.into()),
+                wpid: None,
+                kind: DeviceKind::Keyboard,
+                online: true,
+                battery: None,
+                model_info: Some(model),
+                capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Keyboard)),
+            }],
+        };
+        let resolver = AssetResolver::new();
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = AppState::new(Sources {
+            inventories: std::slice::from_ref(&inventory),
+            ..Sources::in_memory(Config::ephemeral(), &resolver, commands)
+        });
+        let record = state.current_record().expect("connected keyboard");
+        assert!(record.online);
+        assert_eq!(
+            connection_icon_path(
+                record.route.as_ref(),
+                record.model_info.as_ref(),
+                state.offline_connection(record)
+            ),
+            "action-icons/usb.svg"
+        );
+
+        let _ = state.refresh_inventories(&[], &[], &resolver, &[]);
+        let record = state.current_record().expect("saved disconnected keyboard");
+        assert!(!record.online);
+        assert!(
+            record.route.is_none(),
+            "offline writes must remain disabled"
+        );
+        assert_eq!(
+            connection_icon_path(
+                record.route.as_ref(),
+                record.model_info.as_ref(),
+                state.offline_connection(record)
+            ),
+            "action-icons/usb.svg",
+            "{name} must not acquire a Bluetooth icon when its USB node disappears"
+        );
+    }
+}
+
+#[test]
+fn disconnected_multi_transport_keyboard_without_history_is_unknown() {
+    let model = model_with_pids(
+        DeviceTransports {
+            usb: true,
+            equad: true,
+            btle: true,
+            bluetooth: false,
+        },
+        &[0xb38a, 0x40b5, 0xc356],
+    );
+    assert_eq!(
+        connection_icon_path(None, Some(&model), None),
+        "action-icons/circle-dot.svg"
+    );
+}
+
+#[test]
+fn disconnected_keyboard_icon_uses_only_unambiguous_saved_links() {
+    use openlogi_core::config::{Config, DeviceIdentity};
+    use openlogi_core::device_order::PhysicalDeviceKey;
+
+    use crate::services::assets::AssetResolver;
+    use crate::state::{AppState, Sources};
+
+    let cases: &[(&[&str], &str)] = &[
+        (&["direct:046d:c355"], "action-icons/usb.svg"),
+        (&["direct:046d:b389"], "action-icons/bluetooth.svg"),
+        (
+            &["direct:046d:c355", "direct:046d:b389"],
+            "action-icons/circle-dot.svg",
+        ),
+        (&["direct:046d:ffff"], "action-icons/circle-dot.svg"),
+        (&["direct:invalid:c355"], "action-icons/circle-dot.svg"),
+        (&["direct:046d:c355:extra"], "action-icons/circle-dot.svg"),
+    ];
+    for (links, expected) in cases {
+        let mut config = Config::ephemeral();
+        let key = PhysicalDeviceKey::parse("unit:01020304").expect("synthetic identity");
+        config.set_device_identity(
+            key.as_str(),
+            DeviceIdentity {
+                display_name: "G515 LS TKL".into(),
+                model_info: Some(model_with_pids(
+                    DeviceTransports {
+                        usb: true,
+                        equad: true,
+                        btle: true,
+                        bluetooth: false,
+                    },
+                    &[0xb389, 0x40b4, 0xc355],
+                )),
+                codename: None,
+                kind: DeviceKind::Keyboard,
+                capabilities: Capabilities::presumed_from_kind(DeviceKind::Keyboard),
+                light_capabilities: None,
+                driver_id: None,
+                registry_model_id: None,
+            },
+        );
+        for link in *links {
+            config.adopt_route(&key, link, None);
+        }
+        let resolver = AssetResolver::new();
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let state = AppState::new(Sources::in_memory(config, &resolver, commands));
+        let record = state
+            .current_record()
+            .expect("saved keyboard after restart");
+        assert!(!record.online);
+        assert!(record.route.is_none());
+        assert_eq!(
+            connection_icon_path(
+                record.route.as_ref(),
+                record.model_info.as_ref(),
+                state.offline_connection(record),
+            ),
+            *expected,
+            "saved links: {links:?}"
+        );
+    }
+}
+
+#[test]
+fn live_bluetooth_icon_does_not_use_a_saved_usb_transport() {
+    use openlogi_core::device::ModelTransport;
+
+    let model = model_with_pids(
+        DeviceTransports {
+            usb: true,
+            equad: true,
+            btle: true,
+            bluetooth: false,
+        },
+        &[0xb389, 0x40b4, 0xc355],
+    );
+    let route = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xb389,
+    };
+    assert_eq!(
+        connection_icon_path(
+            Some(&route),
+            Some(&model),
+            Some(crate::state::ObservedConnection::Direct(
+                ModelTransport::Usb
+            ))
+        ),
+        "action-icons/bluetooth.svg"
+    );
+}
+
+fn keyboard_inventory_for_mode(
+    model: &DeviceModelInfo,
+    transport: openlogi_core::device::ModelTransport,
+    product_id: u16,
+) -> openlogi_core::device::DeviceInventory {
+    use openlogi_core::device::{DeviceInventory, ModelTransport, PairedDevice, ReceiverInfo};
+
+    let receiver = transport == ModelTransport::Equad;
+    DeviceInventory {
+        receiver: ReceiverInfo {
+            name: "Synthetic mode-switch keyboard".into(),
+            vendor_id: 0x046d,
+            product_id: if receiver { 0xc52b } else { product_id },
+            unique_id: receiver.then(|| "synthetic-receiver".into()),
+        },
+        paired: vec![PairedDevice {
+            slot: if receiver {
+                1
+            } else {
+                openlogi_core::hid::DIRECT_DEVICE_INDEX
+            },
+            codename: Some("Synthetic mode-switch keyboard".into()),
+            wpid: receiver.then_some(product_id),
+            kind: DeviceKind::Keyboard,
+            online: true,
+            battery: None,
+            model_info: Some(model.clone()),
+            capabilities: Some(Capabilities {
+                buttons: true,
+                ..Capabilities::default()
+            }),
+        }],
+    }
+}
+
+fn assert_keyboard_profile(state: &crate::state::AppState, key: &str, icon: &str) {
+    use openlogi_core::binding::{Action, ButtonId};
+
+    assert_eq!(state.devices().len(), 1, "one gallery card");
+    assert_eq!(state.config_summary().1, 1, "one saved device profile");
+    let record = state.current_record().expect("selected keyboard");
+    assert_eq!(record.record_key(), key);
+    assert_eq!(record.display_name, "My keyboard");
+    assert_eq!(
+        state.button_bindings().get(&ButtonId::control(0x00c0)),
+        Some(&Action::Screenshot)
+    );
+    assert_eq!(
+        connection_icon_path(
+            record.route.as_ref(),
+            record.model_info.as_ref(),
+            state.offline_connection(record)
+        ),
+        icon,
+    );
+}
+
+fn assert_keyboard_modes(
+    observations: &[(Vec<openlogi_core::device::DeviceInventory>, &'static str)],
+    offline_icon: Option<&str>,
+) {
+    use openlogi_core::binding::{Action, ButtonId};
+    use openlogi_core::config::Config;
+
+    use crate::services::assets::AssetResolver;
+    use crate::state::{AppState, Sources, StateEvent};
+
+    let resolver = AssetResolver::new();
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::new(Sources::in_memory(Config::ephemeral(), &resolver, commands));
+    let mut original_key = None;
+    for (inventory, icon) in observations.iter().chain(observations.iter()) {
+        let before = state
+            .current_record()
+            .and_then(|record| record.route.clone());
+        let events = state.refresh_inventories(inventory, &[], &resolver, &[]);
+        let record = state.current_record().expect("mode-switch keyboard");
+        let key = record.record_key();
+        if before.as_ref() != record.route.as_ref() {
+            assert!(
+                events.contains(&StateEvent::InventoryChanged),
+                "a route change must repaint"
+            );
+        }
+        if original_key.is_none() {
+            original_key = Some(key.clone());
+            let _ = state.commit_device_custom_name(&key, "My keyboard");
+            let _ = state.commit_binding(ButtonId::control(0x00c0), Action::Screenshot);
+        }
+        assert_keyboard_profile(&state, original_key.as_deref().unwrap(), icon);
+    }
+    if let Some(icon) = offline_icon {
+        let _ = state.refresh_inventories(&[], &[], &resolver, &[]);
+        let record = state.current_record().expect("saved keyboard");
+        assert!(!record.online);
+        assert!(
+            record.route.is_none(),
+            "history must not restore a writable route"
+        );
+        assert_keyboard_profile(&state, original_key.as_deref().unwrap(), icon);
+    }
+}
+
+#[test]
+fn keyboard_mode_switches_keep_one_profile_and_update_the_icon() {
+    use openlogi_core::device::ModelTransport;
+
+    let slots = [
+        (
+            1,
+            ModelTransport::Bluetooth,
+            0xb701,
+            "action-icons/bluetooth.svg",
+        ),
+        (
+            2,
+            ModelTransport::Btle,
+            0xb702,
+            "action-icons/bluetooth.svg",
+        ),
+        (
+            4,
+            ModelTransport::Equad,
+            0x4070,
+            "action-icons/unifying.svg",
+        ),
+        (8, ModelTransport::Usb, 0xc370, "action-icons/usb.svg"),
+    ];
+    // HID++ packs at most three enabled transport slots. Exercise every valid
+    // combination, with both serial-backed and unit-only physical identities.
+    for mask in (1u8..16).filter(|mask| mask.count_ones() <= 3) {
+        let active_slots: Vec<_> = slots.iter().filter(|(bit, ..)| mask & bit != 0).collect();
+        let pids: Vec<_> = active_slots.iter().map(|(_, _, pid, _)| *pid).collect();
+        for serial in [None, Some("synthetic-keyboard-serial")] {
+            let mut model = model_with_pids(
+                DeviceTransports {
+                    bluetooth: mask & 1 != 0,
+                    btle: mask & 2 != 0,
+                    equad: mask & 4 != 0,
+                    usb: mask & 8 != 0,
+                },
+                &pids,
+            );
+            model.unit_id = [1, 2, 3, 4];
+            model.serial_number = serial.map(str::to_string);
+            let observations: Vec<_> = active_slots
+                .iter()
+                .map(|(_, transport, pid, icon)| {
+                    (
+                        vec![keyboard_inventory_for_mode(&model, *transport, *pid)],
+                        *icon,
+                    )
+                })
+                .collect();
+            let (_, _, _, last_icon) = active_slots.last().unwrap();
+            let has_direct_link = active_slots
+                .iter()
+                .any(|(_, transport, ..)| *transport != ModelTransport::Equad);
+            assert_keyboard_modes(&observations, has_direct_link.then_some(*last_icon));
+        }
+    }
+}
+
+#[test]
+fn keyboard_bolt_and_bluetooth_switch_does_not_duplicate_the_profile() {
+    use openlogi_core::device::ModelTransport;
+
+    let mut model = model_with_pids(
+        DeviceTransports {
+            btle: true,
+            usb: true,
+            ..DeviceTransports::default()
+        },
+        &[0xb702, 0xc370],
+    );
+    model.unit_id = [1, 2, 3, 4];
+    let usb = keyboard_inventory_for_mode(&model, ModelTransport::Usb, 0xc370);
+    let bluetooth = keyboard_inventory_for_mode(&model, ModelTransport::Btle, 0xb702);
+    let mut bolt = bluetooth.clone();
+    bolt.receiver.product_id = 0xc548;
+    bolt.receiver.unique_id = Some("synthetic-bolt-receiver".into());
+    bolt.paired[0].slot = 1;
+    bolt.paired[0].wpid = Some(0xb702);
+    let mut sleeping_bolt = bolt.clone();
+    sleeping_bolt.paired[0].online = false;
+    sleeping_bolt.paired[0].model_info = None;
+    sleeping_bolt.paired[0].capabilities = None;
+    assert_keyboard_modes(
+        &[
+            (vec![usb.clone()], "action-icons/usb.svg"),
+            (vec![bolt.clone()], "action-icons/bolt.svg"),
+            (
+                vec![sleeping_bolt, bluetooth.clone()],
+                "action-icons/bluetooth.svg",
+            ),
+            (vec![usb.clone()], "action-icons/usb.svg"),
+        ],
+        Some("action-icons/usb.svg"),
+    );
+    assert_keyboard_modes(
+        &[
+            (vec![usb], "action-icons/usb.svg"),
+            (vec![bluetooth], "action-icons/bluetooth.svg"),
+            (vec![bolt], "action-icons/bolt.svg"),
+        ],
+        Some("action-icons/bolt.svg"),
     );
 }
 
