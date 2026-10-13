@@ -825,8 +825,12 @@ fn report_rate_dtos_and_errors() {
 #[test]
 fn appended_zoom_actions_and_icons() {
     assert_wire(&Action::HoldShortcut("Ctrl+A".parse().unwrap()), "340404");
-    assert_wire(&Action::ZoomIn, "35");
-    assert_wire(&Action::ZoomOut, "36");
+    assert_wire(
+        &Action::TapKeyHoldingModifiers("Ctrl+A".parse().unwrap()),
+        "350404",
+    );
+    assert_wire(&Action::ZoomIn, "36");
+    assert_wire(&Action::ZoomOut, "37");
     assert_wire(&ActionRingIcon::ZoomIn, "36");
     assert_wire(&ActionRingIcon::ZoomOut, "37");
 }
