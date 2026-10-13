@@ -347,9 +347,7 @@ impl DeviceReads {
         if let Some(client) = &self.client {
             client.set::<_, Cached<u8>, WriteError>(query_key(SIDETONE, key), Some(value.clone()));
         }
-        let flight = self.take_flight();
         if let Some(read) = self.sidetone.get_mut(key) {
-            read.flight = flight;
             read.load = Load::Ready(value);
         }
     }

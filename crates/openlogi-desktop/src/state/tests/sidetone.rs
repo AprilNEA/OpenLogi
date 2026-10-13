@@ -158,13 +158,13 @@ fn stale_sidetone_flight_cannot_overwrite_newer_edit(cx: &mut gpui::TestAppConte
             let _ = state.commit_sidetone(80);
             assert_eq!(state.current_sidetone_shown(), Some(80));
 
-            // Simulating late arrival of read callback with an older flight (flight 0)
-            let old_flight = 0;
+            // Simulating late arrival of read callback with an invalid / superseded flight
+            let stale_flight = 999;
             let accepted =
                 state
                     .pointer
                     .reads
-                    .update_sidetone(&key, old_flight, Load::Ready(Arc::new(20)));
+                    .update_sidetone(&key, stale_flight, Load::Ready(Arc::new(20)));
             assert!(
                 !accepted,
                 "late read callback must be rejected by flight check"
