@@ -29,8 +29,8 @@ use crate::reprog_controls::DPI_MODE_SHIFT_CIDS;
 use super::events::{EventFeatureIndices, EventSubscriptionHandle};
 use super::mappings::{
     legacy_battery_info, legacy_battery_level_from_percentage, map_adc_battery_status,
-    map_battery_level, map_battery_status, map_device_type, map_register_charging,
-    map_status_register_level, map_voltage_battery_status, normalize_serial_number,
+    map_battery_level, map_battery_status, map_device_type, map_status_register_level,
+    map_voltage_battery_status, normalize_serial_number, register_battery_info,
     voltage_battery_percentage,
 };
 
@@ -207,19 +207,14 @@ pub(super) async fn read_battery(
             .ok()
             .map(|reading| {
                 let (percentage, level) = map_status_register_level(reading.level);
-                BatteryInfo {
-                    percentage,
-                    level,
-                    status: map_register_charging(reading.charging),
-                }
+                register_battery_info(percentage, level, reading.charging)
             }),
         BatteryProbe::ChargeRegister => register_battery::read_charge(channel, slot)
             .await
             .ok()
-            .map(|reading| BatteryInfo {
-                percentage: reading.percentage,
-                level: legacy_battery_level_from_percentage(reading.percentage),
-                status: map_register_charging(reading.charging),
+            .map(|reading| {
+                let level = legacy_battery_level_from_percentage(reading.percentage);
+                register_battery_info(reading.percentage, level, reading.charging)
             }),
     };
     reading.map_or(BatteryRead::Unavailable, BatteryRead::Reading)

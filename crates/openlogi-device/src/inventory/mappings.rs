@@ -168,12 +168,36 @@ pub(crate) fn map_adc_battery_status(status: HidppAdcChargingStatus) -> BatteryS
 }
 
 /// Map a HID++ 1.0 battery register's charging state to our [`BatteryStatus`].
-pub(crate) fn map_register_charging(state: HidppRegisterChargingState) -> BatteryStatus {
+fn map_register_charging(state: HidppRegisterChargingState) -> BatteryStatus {
     match state {
         HidppRegisterChargingState::Discharging => BatteryStatus::Discharging,
         HidppRegisterChargingState::Recharging => BatteryStatus::Charging,
         HidppRegisterChargingState::Full => BatteryStatus::Full,
         _ => BatteryStatus::Unknown,
+    }
+}
+
+/// Build a [`BatteryInfo`] from a HID++ 1.0 battery register's reading, given
+/// the percentage and level it stands for.
+///
+/// Charge complete reads 100 % / [`BatteryLevel::Full`] whatever charge the
+/// register sent alongside it, as [`legacy_battery_info`] reads it for
+/// `0x1000`.
+pub(crate) fn register_battery_info(
+    percentage: u8,
+    level: BatteryLevel,
+    charging: HidppRegisterChargingState,
+) -> BatteryInfo {
+    let status = map_register_charging(charging);
+    let (percentage, level) = if status == BatteryStatus::Full {
+        (100, BatteryLevel::Full)
+    } else {
+        (percentage, level)
+    };
+    BatteryInfo {
+        percentage,
+        level,
+        status,
     }
 }
 
@@ -295,11 +319,41 @@ pub(crate) fn legacy_battery_level_from_percentage(percentage: u8) -> BatteryLev
 #[cfg(test)]
 mod tests {
     use super::{
-        BatteryLevel, BatteryStatus, DeviceKind, HidppStatusLevel, HidppVoltageChargingStatus,
-        UnifyingDeviceKind, legacy_battery_level_from_percentage, map_status_register_level,
-        map_unifying_kind, map_voltage_battery_status, resolve_device_kind,
+        BatteryInfo, BatteryLevel, BatteryStatus, DeviceKind, HidppRegisterChargingState,
+        HidppStatusLevel, HidppVoltageChargingStatus, UnifyingDeviceKind,
+        legacy_battery_level_from_percentage, map_status_register_level, map_unifying_kind,
+        map_voltage_battery_status, register_battery_info, resolve_device_kind,
         voltage_battery_percentage,
     };
+
+    #[test]
+    fn register_charge_complete_reads_full_whatever_charge_it_sent() {
+        let (good, good_level) = map_status_register_level(Some(HidppStatusLevel::Good));
+        for (percentage, level) in [(good, good_level), (95, BatteryLevel::Full)] {
+            assert_eq!(
+                register_battery_info(percentage, level, HidppRegisterChargingState::Full),
+                BatteryInfo {
+                    percentage: 100,
+                    level: BatteryLevel::Full,
+                    status: BatteryStatus::Full,
+                },
+                "{percentage}% / {level:?}"
+            );
+        }
+        assert_eq!(
+            register_battery_info(
+                20,
+                BatteryLevel::Low,
+                HidppRegisterChargingState::Recharging
+            ),
+            BatteryInfo {
+                percentage: 20,
+                level: BatteryLevel::Low,
+                status: BatteryStatus::Charging,
+            },
+            "only charge complete is overridden"
+        );
+    }
 
     #[test]
     fn status_register_stand_ins_bucket_back_to_their_level() {
