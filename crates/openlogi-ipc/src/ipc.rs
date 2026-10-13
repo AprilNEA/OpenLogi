@@ -23,8 +23,10 @@ use openlogi_core::hid::{
 use serde::{Deserialize, Serialize};
 pub use succession::Identity;
 
-/// Wire-protocol version. Bumped only on a breaking change to the types below —
-/// independent of the crate version. The GUI checks it via
+/// Wire-protocol version. Bumped on a breaking change to the types below, at
+/// most once per release: a change made while this is already above the latest
+/// release's value joins that unreleased version (`crates/openlogi-ipc/AGENTS.md`).
+/// Independent of the crate version. The GUI checks it via
 /// [`Agent::protocol_version`] on connect and refuses to drive a mismatch
 /// (transient only: both binaries ship in one `.app` and update atomically).
 ///

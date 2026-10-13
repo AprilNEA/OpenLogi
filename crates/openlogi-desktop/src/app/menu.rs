@@ -116,13 +116,17 @@ pub fn rebuild(cx: &mut App) {
     cx.set_menus(menus(cx));
 }
 
-/// Run a manual update check and open Settings → Updates where its status is
-/// rendered. Shared by the app menu and agent tray IPC commands.
+/// Run a manual update check and show its progress: Sparkle in its own window,
+/// the built-in engine on Settings → Updates. Shared by the app menu, agent
+/// tray IPC commands and deep links.
 pub fn check_for_updates(cx: &mut App) {
-    if let Some(updater) = crate::platform::updater::shared(cx) {
+    let updater = crate::platform::updater::shared(cx);
+    if let Some(updater) = &updater {
         updater.update(cx, gpui_updater::Updater::check);
     }
-    crate::windows::settings::open_at(crate::windows::settings::SettingsPage::Updates, cx);
+    if !updater.is_some_and(|updater| updater.read(cx).is_driver_backed()) {
+        crate::windows::settings::open_at(crate::windows::settings::SettingsPage::Updates, cx);
+    }
 }
 
 fn menus(cx: &App) -> Vec<Menu> {
