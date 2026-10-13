@@ -192,10 +192,13 @@ impl IlluminationFeature {
     }
 
     /// Shared `set<Control>Levels` writer.
+    ///
+    /// A non-linear table longer than one request goes out page by page. The
+    /// first rejected page stops the write, leaving the earlier pages applied.
     async fn write_levels(&self, function: u8, levels: &SetLevels) -> Result<(), Hidpp20Error> {
-        self.endpoint
-            .call_long(function, levels.to_payload()?)
-            .await?;
+        for payload in levels.to_payloads()? {
+            self.endpoint.call_long(function, payload).await?;
+        }
         Ok(())
     }
 }
