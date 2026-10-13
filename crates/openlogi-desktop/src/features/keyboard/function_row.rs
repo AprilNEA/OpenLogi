@@ -953,6 +953,7 @@ fn panel_action_rows(
                     MenuRow::new(format!("panel-power-{idx}"))
                         .selected(selected)
                         .role(Role::MenuItem)
+                        .aria_label(*label)
                         .child(
                             h_flex()
                                 .items_center()

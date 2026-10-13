@@ -103,9 +103,10 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         Action::ScrollDown | Action::PreviousDpiPreset => "action-icons/chevrons-down.svg",
         Action::HorizontalScrollLeft => "action-icons/chevrons-left.svg",
         Action::HorizontalScrollRight => "action-icons/chevrons-right.svg",
-        Action::CustomShortcut(_) | Action::HoldShortcut(_) | Action::TypeText(_) => {
-            "action-icons/keyboard.svg"
-        }
+        Action::CustomShortcut(_)
+        | Action::HoldShortcut(_)
+        | Action::TapKeyHoldingModifiers(_)
+        | Action::TypeText(_) => "action-icons/keyboard.svg",
         Action::RunAppleScript(_) | Action::RunShellCommand(_) => "action-icons/terminal.svg",
     }
 }

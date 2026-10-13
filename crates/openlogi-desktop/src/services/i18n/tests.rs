@@ -1,6 +1,9 @@
-use openlogi_core::binding::{Action, ActionRingIcon, ButtonId, GestureDirection, KNOWN_CONTROLS};
+use openlogi_core::binding::{
+    Action, ActionRingIcon, ButtonId, GestureDirection, KNOWN_CONTROLS, KeyCombo,
+};
 
 use crate::features::mouse::thumbwheel::ThumbwheelPreset;
+use crate::ui::action::localized_action_label;
 
 /// Typed dynamic keys are the part catalog parity cannot inspect: a typo in
 /// one of these methods compiles and renders the key at runtime. Resolve every
@@ -53,6 +56,26 @@ fn typed_translation_keys_resolve() {
             "no catalog key for {preset:?}"
         );
     }
+}
+
+/// Recorded chord actions carry a payload, so the typed-key sweep above cannot
+/// reach their keys. Render the real labels in a translated locale instead: a
+/// mistyped key or placeholder name would leave the key or a raw `%{…}` behind.
+#[test]
+fn chord_action_labels_resolve() {
+    let _locale = super::LOCALE_LOCK.lock();
+    let chord = |text: &str| -> KeyCombo { text.parse().expect("test shortcut must be valid") };
+    let label = |action: Action| localized_action_label(&action).to_string();
+
+    rust_i18n::set_locale("zh-CN");
+    let hold = label(Action::HoldShortcut(chord("Cmd+Tab")));
+    let switcher = label(Action::TapKeyHoldingModifiers(chord("Cmd+Tab")));
+    let bare_key = label(Action::TapKeyHoldingModifiers(chord("F5")));
+    rust_i18n::set_locale("en");
+
+    assert_eq!(hold, "按住 Cmd+Tab");
+    assert_eq!(switcher, "按住 Cmd，点按 Tab");
+    assert_eq!(bare_key, "点按 F5");
 }
 
 /// Czech must resolve in the actual desktop backend, including the pairing

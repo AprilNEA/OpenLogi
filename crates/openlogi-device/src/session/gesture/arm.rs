@@ -189,7 +189,10 @@ pub(super) async fn arm_controls_into(
         // Divert each gesture-mode source; a source not listed stays native
         // (an idle HID++ control must not be captured-and-dropped).
         for &cid in &spec.divert_gesture_sources {
-            if controls.iter().any(|c| c.cid == cid && c.supports_raw_xy()) {
+            if controls
+                .iter()
+                .any(|c| c.cid == cid && c.is_divertable() && c.supports_raw_xy())
+            {
                 arm_reprog_control(&rc, cid, true, &mut armed.reporting).await?;
                 armed.gesture_cids.push(cid);
             }
@@ -290,7 +293,7 @@ async fn arm_reprog_control(
     let change = divert_change(original, raw_xy);
     // Record ownership before the write: a transport error does not prove the
     // firmware rejected the command, so rollback must cover this CID too.
-    reporting.push(ArmedReporting { cid, original });
+    reporting.push(ArmedReporting::pointer(cid, original));
     rc.set_cid_reporting_full(cid, change).await?;
     Ok(())
 }

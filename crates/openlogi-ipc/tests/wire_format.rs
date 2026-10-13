@@ -103,7 +103,19 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// that makes that visible in the same diff.
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 36);
+    assert_eq!(PROTOCOL_VERSION, 37);
+}
+
+/// Preserve upstream action indices when combining independently extended enums.
+#[test]
+fn switcher_and_gaming_action_variant_order() {
+    use openlogi_core::binding::Action;
+    let combo: KeyCombo = "Cmd+Tab".parse().expect("valid switcher shortcut");
+    assert_wire(&Action::TapKeyHoldingModifiers(combo), "35012b");
+    assert_wire(&Action::NextDpiPreset, "36");
+    assert_wire(&Action::PreviousDpiPreset, "37");
+    assert_wire(&Action::DpiShift, "38");
+    assert_wire(&Action::GShift, "39");
 }
 
 #[test]

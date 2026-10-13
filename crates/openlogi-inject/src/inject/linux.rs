@@ -134,15 +134,31 @@ fn dispatch_native(action: &Action, native: NativeAction) {
     let ctrl = KeyCode::KEY_LEFTCTRL;
     let alt = KeyCode::KEY_LEFTALT;
     match native {
-        // No universal Linux equivalent; the compositor shortcut varies.
-        NativeAction::MissionControl
-        | NativeAction::AppExpose
-        | NativeAction::ShowDesktop
-        | NativeAction::LaunchpadShow => {
+        // GNOME's overlay key toggles the Activities overview on a bare tap;
+        // no other tested desktop binds Super alone the same way (KDE opens
+        // KRunner), so this only fires under GNOME. Activities shows every
+        // window across every app, not just the frontmost app's — that is
+        // MissionControl's contract, not AppExpose's, so AppExpose must not
+        // share this arm without its own promised single-app scope.
+        NativeAction::MissionControl => {
+            gnome_key_or_skip(action, &[], KeyCode::KEY_LEFTMETA);
+        }
+        // No tested desktop has a stock single-app window-exposé binding
+        // (GNOME's Activities and KDE's Present Windows both show every
+        // app), so this always skips rather than substitute the wrong scope.
+        NativeAction::AppExpose => {
             tracing::debug!(
                 action = action.label(),
                 "no Linux equivalent — action skipped"
             );
+        }
+        // GNOME's default "Show desktop" keybinding.
+        NativeAction::ShowDesktop => {
+            gnome_key_or_skip(action, &[KeyCode::KEY_LEFTMETA], KeyCode::KEY_D);
+        }
+        // GNOME's default "Show Applications" keybinding.
+        NativeAction::LaunchpadShow => {
+            gnome_key_or_skip(action, &[KeyCode::KEY_LEFTMETA], KeyCode::KEY_A);
         }
         // Ctrl+Alt+←/→ is the default in GNOME and KDE.
         NativeAction::PreviousDesktop => press_key(&[ctrl, alt], KeyCode::KEY_LEFT),
@@ -163,16 +179,42 @@ fn dispatch_native(action: &Action, native: NativeAction) {
     }
 }
 
+/// Press `mods`+`key` under GNOME; log the existing "no Linux equivalent"
+/// skip everywhere else, since Super-based bindings vary by desktop.
+fn gnome_key_or_skip(action: &Action, mods: &[KeyCode], key: KeyCode) {
+    if is_gnome() {
+        press_key(mods, key);
+    } else {
+        tracing::debug!(
+            action = action.label(),
+            "no Linux equivalent — action skipped"
+        );
+    }
+}
+
+fn is_gnome() -> bool {
+    desktop_is_gnome(std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default())
+}
+
+/// The pure half of [`is_gnome`], taking the desktop string directly instead
+/// of reading it from the process environment — so tests can drive it
+/// without `std::env::set_var`, which cannot be scoped to just this test:
+/// the process environment is process-wide, and a private test-only mutex
+/// only serializes callers that take it, not every other reader (including
+/// `is_gnome` itself, called from unrelated code running concurrently).
+fn desktop_is_gnome(current_desktop: impl AsRef<str>) -> bool {
+    current_desktop.as_ref().to_lowercase().contains("gnome")
+}
+
 /// Synthesise one scroll tick in direction `(dx, dy)`. Unit direction
 /// (-1/0/1) scaled by the fixed relative-axis magnitude the four
 /// `Scroll*`/`HorizontalScroll*` actions have always used.
 fn dispatch_scroll(dx: i8, dy: i8) {
-    if dy != 0 {
-        scroll(RelativeAxisCode::REL_WHEEL, i32::from(dy) * 3);
-    }
-    if dx != 0 {
-        scroll(RelativeAxisCode::REL_HWHEEL, i32::from(dx) * 3);
-    }
+    post_scroll(action_scroll(dx, dy));
+}
+
+fn action_scroll(dx: i8, dy: i8) -> ScrollDelta {
+    ScrollDelta::wheel_ticks(f64::from(dx) * 3.0, f64::from(dy) * 3.0)
 }
 
 /// Not implemented yet: unicode text has no uinput encoding without a keymap.
@@ -340,11 +382,6 @@ fn click(button: KeyCode) {
     emit(&[key_ev(button, 0), syn()]);
 }
 
-/// Inject a single relative-axis delta followed by `SYN_REPORT`.
-fn scroll(axis: RelativeAxisCode, value: i32) {
-    emit(&[rel_ev(axis, value), syn()]);
-}
-
 pub(super) fn post_scroll(delta: ScrollDelta) {
     let ScrollDelta::WheelTicks { .. } = delta else {
         tracing::debug!("pixel scroll output is unsupported on Linux");
@@ -354,12 +391,20 @@ pub(super) fn post_scroll(delta: ScrollDelta) {
         tracing::warn!("Linux scroll quantizer mutex poisoned");
         return;
     };
+    let events = scroll_events(&mut output, delta);
+    drop(output);
+    if !events.is_empty() {
+        emit(&events);
+    }
+}
+
+/// One `SYN_REPORT` frame carrying `delta` on the hi-res and legacy axes, or
+/// nothing while the quantizers hold less than one unit.
+fn scroll_events(output: &mut ScrollOutput, delta: ScrollDelta) -> Vec<InputEvent> {
     let high_resolution = output
         .high_resolution
         .quantize(delta, HIGH_RES_UNITS_PER_TICK);
     let legacy = output.legacy.quantize(delta, 1.0);
-    drop(output);
-
     let mut events = Vec::with_capacity(5);
     push_scroll_axes(
         &mut events,
@@ -375,8 +420,8 @@ pub(super) fn post_scroll(delta: ScrollDelta) {
     );
     if !events.is_empty() {
         events.push(syn());
-        emit(&events);
     }
+    events
 }
 
 fn push_scroll_axes(
@@ -703,12 +748,12 @@ fn try_mpris_command(command: &str) -> Option<()> {
 
 #[cfg(test)]
 mod tests {
-    use evdev::KeyCode;
+    use evdev::{KeyCode, RelativeAxisCode};
     use openlogi_core::binding::{KeyCombo, Shortcut};
 
     use super::{
-        capture_region_mods, combo, hid_usage_to_linux, key_ev, key_phase_events,
-        modifiers_to_keycodes, syn,
+        ScrollOutput, action_scroll, capture_region_mods, combo, hid_usage_to_linux, key_ev,
+        key_phase_events, modifiers_to_keycodes, rel_ev, scroll_events, syn,
     };
     use crate::inject::KeyPhase;
 
@@ -733,6 +778,32 @@ mod tests {
                 syn(),
             ]
         );
+    }
+
+    /// libinput reads only the hi-res axes of a device that has them, so a
+    /// scroll action without them does nothing.
+    #[test]
+    fn scroll_actions_send_hi_res_and_legacy_axes_in_one_frame() {
+        let (wheel, wheel_hi) = (
+            RelativeAxisCode::REL_WHEEL,
+            RelativeAxisCode::REL_WHEEL_HI_RES,
+        );
+        let (hwheel, hwheel_hi) = (
+            RelativeAxisCode::REL_HWHEEL,
+            RelativeAxisCode::REL_HWHEEL_HI_RES,
+        );
+        for (dx, dy, hi_res, legacy, sign) in [
+            (0, 1, wheel_hi, wheel, 1),
+            (0, -1, wheel_hi, wheel, -1),
+            (1, 0, hwheel_hi, hwheel, 1),
+            (-1, 0, hwheel_hi, hwheel, -1),
+        ] {
+            assert_eq!(
+                scroll_events(&mut ScrollOutput::default(), action_scroll(dx, dy)),
+                vec![rel_ev(hi_res, sign * 360), rel_ev(legacy, sign * 3), syn()],
+                "scroll ({dx}, {dy})"
+            );
+        }
     }
 
     #[test]
@@ -780,6 +851,23 @@ mod tests {
             assert!(
                 hid_usage_to_linux(key).is_some(),
                 "{shortcut:?} table entry has no Linux keycode mapping"
+            );
+        }
+    }
+
+    #[test]
+    fn gnome_detection_matches_on_current_desktop_case_insensitively() {
+        for (value, expected) in [
+            ("GNOME", true),
+            ("ubuntu:GNOME", true),
+            ("gnome-classic", true),
+            ("KDE", false),
+            ("", false),
+        ] {
+            assert_eq!(
+                super::desktop_is_gnome(value),
+                expected,
+                "XDG_CURRENT_DESKTOP={value:?}"
             );
         }
     }
