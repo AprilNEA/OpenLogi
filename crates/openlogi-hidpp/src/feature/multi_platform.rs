@@ -1,5 +1,8 @@
 //! Implements `MultiPlatform` (feature `0x4531`).
 
+#[cfg(test)]
+mod tests;
+
 use num_enum::TryFromPrimitive;
 use openlogi_hidpp_derive::Feature;
 
@@ -22,27 +25,34 @@ bitflags::bitflags! {
 
 bitflags::bitflags! {
     /// Operating systems covered by a platform descriptor.
+    ///
+    /// The values are the big-endian `u16` read from descriptor bytes 2-3.
+    /// Logitech's documentation lists the OSes from the high bit down as
+    /// webOS, iOS, macOS, Android, Chrome, Linux, Windows Embedded, Windows
+    /// and Tizen, so a real Windows descriptor is `0x0100` and Tizen is
+    /// `0x0001`. Solaar's x4531 table and the Linux HID++ 0x4531 patch use
+    /// the same values.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     #[cfg_attr(feature = "serde", derive(serde::Serialize))]
     pub struct OsMask: u16 {
-        /// Microsoft Windows.
-        const WINDOWS = 1 << 0;
-        /// Windows Embedded.
-        const WINDOWS_EMBEDDED = 1 << 1;
-        /// Linux.
-        const LINUX = 1 << 2;
-        /// ChromeOS.
-        const CHROME = 1 << 3;
-        /// Android.
-        const ANDROID = 1 << 4;
-        /// macOS.
-        const MACOS = 1 << 5;
-        /// iOS.
-        const IOS = 1 << 6;
-        /// webOS.
-        const WEBOS = 1 << 7;
         /// Tizen.
-        const TIZEN = 1 << 8;
+        const TIZEN = 1 << 0;
+        /// Microsoft Windows.
+        const WINDOWS = 1 << 8;
+        /// Windows Embedded.
+        const WINDOWS_EMBEDDED = 1 << 9;
+        /// Linux.
+        const LINUX = 1 << 10;
+        /// ChromeOS.
+        const CHROME = 1 << 11;
+        /// Android.
+        const ANDROID = 1 << 12;
+        /// macOS.
+        const MACOS = 1 << 13;
+        /// iOS.
+        const IOS = 1 << 14;
+        /// webOS.
+        const WEBOS = 1 << 15;
     }
 }
 
@@ -102,6 +112,20 @@ pub struct PlatformDescriptor {
     pub to_revision: u8,
 }
 
+impl PlatformDescriptor {
+    fn from_payload(payload: &[u8; 16]) -> Self {
+        Self {
+            platform_index: payload[0],
+            descriptor_index: payload[1],
+            os_mask: OsMask::from_bits_retain(u16::from_be_bytes([payload[2], payload[3]])),
+            from_version: payload[4],
+            from_revision: payload[5],
+            to_version: payload[6],
+            to_revision: payload[7],
+        }
+    }
+}
+
 /// Platform selection for a host slot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
@@ -155,15 +179,7 @@ impl MultiPlatformFeature {
             .call(1, [descriptor_index, 0, 0])
             .await?
             .extend_payload();
-        Ok(PlatformDescriptor {
-            platform_index: payload[0],
-            descriptor_index: payload[1],
-            os_mask: OsMask::from_bits_retain(u16::from_be_bytes([payload[2], payload[3]])),
-            from_version: payload[4],
-            from_revision: payload[5],
-            to_version: payload[6],
-            to_revision: payload[7],
-        })
+        Ok(PlatformDescriptor::from_payload(&payload))
     }
 
     /// Retrieves the platform selected for `host`.
