@@ -13,9 +13,11 @@
 //! `Option`) fails here instead of silently corrupting frames across an
 //! agent/GUI version skew.
 //!
-//! If a test fails because you *intended* a wire change: bump
-//! `PROTOCOL_VERSION`, update [`protocol_version_is_pinned`], and replace the
-//! golden with the actual hex from the assertion message.
+//! If a test fails because you *intended* a wire change, replace the golden
+//! with the actual hex from the assertion message. `PROTOCOL_VERSION` moves
+//! once per release: bump it and [`protocol_version_is_pinned`] only while it
+//! still equals the latest release's value. Otherwise the change joins the
+//! unreleased version (`crates/openlogi-ipc/AGENTS.md`).
 
 #![expect(
     clippy::tests_outside_test_module,
@@ -72,7 +74,8 @@ where
     let hex = wire_bytes(value);
     assert_eq!(
         hex, golden,
-        "wire encoding changed — if intentional, bump PROTOCOL_VERSION and regenerate this golden"
+        "wire encoding changed — if intentional, regenerate this golden and keep PROTOCOL_VERSION \
+         above the latest release's (crates/openlogi-ipc/AGENTS.md)"
     );
     let bytes = (0..hex.len())
         .step_by(2)
@@ -98,8 +101,9 @@ fn representative_smartshift_status() -> SmartShiftStatus {
     }
 }
 
-/// Any golden regeneration must come with a version bump — this is the test
-/// that makes that visible in the same diff.
+/// Pins the version, so the bump that a release's first wire change makes shows
+/// in the same diff as its goldens. Later changes before that release join the
+/// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
     assert_eq!(PROTOCOL_VERSION, 36);
