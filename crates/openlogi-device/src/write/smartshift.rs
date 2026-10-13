@@ -8,7 +8,10 @@ use hidpp::{
     feature::{
         CreatableFeature,
         smartshift::{SmartShiftFeature, WheelMode},
-        smartshift_enhanced::{SmartShiftEnhancedFeature, SmartShiftEnhancedStatusChange},
+        smartshift_enhanced::{
+            SmartShiftEnhancedCapabilities, SmartShiftEnhancedFeature,
+            SmartShiftEnhancedStatusChange,
+        },
     },
 };
 use tracing::debug;
@@ -173,8 +176,11 @@ impl SmartShift {
     /// Write a full desired status — wheel mode plus the auto-disengage
     /// threshold and (Enhanced only) tunable torque.
     ///
-    /// A missing tunable-torque level is sent as HID++'s zero "preserve"
-    /// sentinel, which lets legacy/unsupported devices accept mode changes.
+    /// A `None` torque is sent as HID++'s zero "do not change" sentinel. A
+    /// requested torque is written only when the device advertises
+    /// [`SmartShiftEnhancedCapabilities::TUNABLE_TORQUE`]; callers that do not
+    /// mean to change the torque pass `None` rather than echoing the value
+    /// they read back.
     async fn set_status(&self, status: SmartShiftStatus) -> Result<(), WriteError> {
         let SmartShiftStatus {
             mode,
@@ -183,21 +189,24 @@ impl SmartShift {
         } = status;
         let auto_disengage = NonZeroU8::from(auto_disengage);
         match self {
-            Self::Enhanced(feature) => feature
-                .set_ratchet_control_mode(SmartShiftEnhancedStatusChange {
-                    wheel_mode: Some(smartshift_to_wheel(mode)),
-                    auto_disengage: Some(auto_disengage),
-                    tunable_torque: tunable_torque.map(NonZeroU8::from),
-                })
-                .await
-                .map(|_| ())
-                .map_err(|e| {
-                    classify_hidpp_error(
-                        e,
-                        HidppOperation::WriteSmartShift,
-                        SmartShiftEnhancedFeature::ID,
-                    )
-                }),
+            Self::Enhanced(feature) => {
+                let tunable_torque = writable_torque(feature, tunable_torque).await?;
+                feature
+                    .set_ratchet_control_mode(SmartShiftEnhancedStatusChange {
+                        wheel_mode: Some(smartshift_to_wheel(mode)),
+                        auto_disengage: Some(auto_disengage),
+                        tunable_torque,
+                    })
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| {
+                        classify_hidpp_error(
+                            e,
+                            HidppOperation::WriteSmartShift,
+                            SmartShiftEnhancedFeature::ID,
+                        )
+                    })
+            }
             Self::Legacy(feature) => feature
                 .set_ratchet_control_mode(
                     Some(smartshift_to_wheel(mode)),
@@ -212,35 +221,49 @@ impl SmartShift {
     }
 
     /// Write a new auto-disengage `sensitivity`, preserving the current mode
-    /// (and, on Enhanced, the tunable torque). Reads the current status first
-    /// so every preserved field is written back explicitly.
+    /// and leaving the tunable torque untouched.
     async fn set_sensitivity(&self, value: SmartShiftAutoDisengage) -> Result<(), WriteError> {
         let current = self.status().await?;
-        let wire_value = NonZeroU8::from(value);
-        match self {
-            Self::Enhanced(feature) => feature
-                .set_ratchet_control_mode(SmartShiftEnhancedStatusChange {
-                    wheel_mode: Some(smartshift_to_wheel(current.mode)),
-                    auto_disengage: Some(wire_value),
-                    tunable_torque: current.tunable_torque.map(NonZeroU8::from),
-                })
-                .await
-                .map(|_| ())
-                .map_err(|e| {
-                    classify_hidpp_error(
-                        e,
-                        HidppOperation::WriteSmartShift,
-                        SmartShiftEnhancedFeature::ID,
-                    )
-                }),
-            Self::Legacy(_) => {
-                self.set_status(SmartShiftStatus {
-                    auto_disengage: value,
-                    ..current
-                })
-                .await
-            }
-        }
+        self.set_status(SmartShiftStatus {
+            auto_disengage: value,
+            tunable_torque: None,
+            ..current
+        })
+        .await
+    }
+}
+
+/// The tunable torque to put on the wire for a requested `torque`.
+///
+/// The status reply's torque byte is not a capability claim — only the
+/// `0x2111` capabilities bit is, and both Options+ and Solaar gate their
+/// torque control on it. Without the bit the torque is sent as the zero
+/// "do not change" sentinel so the mode and threshold still apply.
+async fn writable_torque(
+    feature: &SmartShiftEnhancedFeature,
+    torque: Option<TunableTorque>,
+) -> Result<Option<NonZeroU8>, WriteError> {
+    let Some(torque) = torque else {
+        return Ok(None);
+    };
+    let info = feature.get_capabilities().await.map_err(|e| {
+        classify_hidpp_error(
+            e,
+            HidppOperation::ReadSmartShift,
+            SmartShiftEnhancedFeature::ID,
+        )
+    })?;
+    if info
+        .capabilities
+        .contains(SmartShiftEnhancedCapabilities::TUNABLE_TORQUE)
+    {
+        Ok(Some(NonZeroU8::from(torque)))
+    } else {
+        debug!(
+            %torque,
+            "device does not advertise tunable torque; leaving it unchanged"
+        );
+        Ok(None)
     }
 }
 
@@ -343,6 +366,7 @@ async fn toggle_once(device: &mut Device, index: u8) -> Result<SmartShiftMode, W
     smartshift
         .set_status(SmartShiftStatus {
             mode: next,
+            tunable_torque: None,
             ..status
         })
         .await?;
@@ -353,6 +377,10 @@ async fn toggle_once(device: &mut Device, index: u8) -> Result<SmartShiftMode, W
 /// Write a full SmartShift configuration to `route`. The values are volatile
 /// device state and should be re-applied after reconnect. Callers that mean to
 /// change one field should read the current [`SmartShiftStatus`] and update it.
+///
+/// The tunable torque is written only when it differs from the device's
+/// current level and the device advertises tunable torque; otherwise the
+/// device keeps its own value.
 ///
 /// `FeatureUnsupported` when the device exposes neither HID++ `0x2111`
 /// (MX Master 3 / 3S) nor the older `0x2110` (MX Master 2S).
@@ -384,9 +412,8 @@ pub(super) async fn set_smartshift_on_channel(
         .await
         .map_err(|_| WriteError::DeviceUnreachable { index })?;
     let smartshift = SmartShift::open(&mut device).await?;
-    if let Ok(current) = smartshift.status().await
-        && status_matches_desired(current, desired)
-    {
+    let current = smartshift.status().await.ok();
+    if current.is_some_and(|current| status_matches_desired(current, desired)) {
         debug!(
             index,
             status = ?desired,
@@ -394,7 +421,13 @@ pub(super) async fn set_smartshift_on_channel(
         );
         return Ok(());
     }
-    match smartshift.set_status(desired).await {
+    let write = SmartShiftStatus {
+        tunable_torque: desired
+            .tunable_torque
+            .filter(|torque| current.is_none_or(|current| current.tunable_torque != Some(*torque))),
+        ..desired
+    };
+    match smartshift.set_status(write).await {
         Ok(()) => {
             debug!(
                 index,
@@ -413,7 +446,7 @@ pub(super) async fn set_smartshift_on_channel(
             // Re-open: the first attempt may have bound the wrong feature index
             // after a mis-delivered root.get_feature response.
             let smartshift = SmartShift::open(&mut device).await?;
-            smartshift.set_status(desired).await?;
+            smartshift.set_status(write).await?;
             debug!(
                 index,
                 status = ?desired,
@@ -445,3 +478,6 @@ pub async fn set_smartshift_on(
 ) -> Result<(), WriteError> {
     set_smartshift_on_channel(shared.channel(), shared.device_index(), status).await
 }
+
+#[cfg(test)]
+mod tests;
