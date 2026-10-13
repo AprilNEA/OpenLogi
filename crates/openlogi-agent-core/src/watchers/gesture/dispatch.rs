@@ -149,6 +149,10 @@ impl InputDispatcher {
         self.gesture_presses.cancel_session(session);
     }
 
+    #[cfg_attr(
+        not(target_os = "macos"),
+        expect(clippy::unused_self, reason = "native zoom state exists only on macOS")
+    )]
     pub(super) fn zoom_deadline(&self) -> Option<Instant> {
         #[cfg(target_os = "macos")]
         return self.zooms.deadline();
@@ -156,6 +160,10 @@ impl InputDispatcher {
         None
     }
 
+    #[cfg_attr(
+        not(target_os = "macos"),
+        expect(clippy::unused_self, reason = "native zoom state exists only on macOS")
+    )]
     pub(super) fn expire_zoom(&mut self) {
         #[cfg(target_os = "macos")]
         {
@@ -172,15 +180,27 @@ impl InputDispatcher {
         }
     }
 
+    #[cfg_attr(
+        not(target_os = "macos"),
+        expect(clippy::unused_self, reason = "native zoom state exists only on macOS")
+    )]
     pub(super) fn pause_zoom(&mut self) {
         #[cfg(target_os = "macos")]
         self.zooms.pause();
     }
 
+    #[cfg_attr(
+        not(target_os = "macos"),
+        expect(clippy::unused_self, reason = "native zoom state exists only on macOS")
+    )]
     pub(super) fn resume_zoom(&mut self) {
         #[cfg(target_os = "macos")]
         self.zooms.resume();
     }
+    #[cfg_attr(
+        not(target_os = "macos"),
+        expect(clippy::unused_self, reason = "native zoom state exists only on macOS")
+    )]
     pub(super) fn cancel_zoom_session(&mut self, session: &HidppSessionId) {
         #[cfg(target_os = "macos")]
         self.zooms.cancel(session);
@@ -188,6 +208,10 @@ impl InputDispatcher {
         let _ = session;
     }
 
+    #[cfg_attr(
+        not(target_os = "macos"),
+        expect(clippy::unused_self, reason = "native zoom state exists only on macOS")
+    )]
     pub(super) fn shutdown_zoom(&mut self) {
         #[cfg(target_os = "macos")]
         self.zooms.shutdown();

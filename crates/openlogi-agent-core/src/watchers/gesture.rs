@@ -66,7 +66,7 @@ impl GestureOutputs {
         observable: Arc<crate::observable::ObservableState>,
     ) -> Self {
         #[cfg(not(target_os = "macos"))]
-        let _ = observable;
+        drop(observable);
         Self {
             actions,
             scroll,
