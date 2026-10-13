@@ -5,7 +5,7 @@ use hidpp::{
     device::Device,
     feature::{
         CreatableFeature,
-        haptic_feedback::{HapticFeedbackFeature, HapticIntensity, HapticWaveform},
+        haptic_feedback::{HapticConfigFlags, HapticFeedbackFeature, HapticWaveform},
     },
 };
 
@@ -109,12 +109,15 @@ fn clear_cached_location() {
     }
 }
 
-/// Ensure the firmware haptic engine is armed: enabled, with a non-zero
-/// intensity. Returns `true` when a repair write was needed.
+/// Ensure the firmware haptic engine is armed: the enable flag set. Returns
+/// `true` when a repair write was needed.
 ///
 /// Nothing else in the stack ever asserts this state — devices historically
-/// inherited it from Logi Options+, and some power transitions clear it, after
-/// which `play` calls are accepted but produce no physical feedback. Callers
+/// inherited it from Logi Options+, and some power transitions clear the
+/// enable flag, after which `play` calls are accepted but produce no physical
+/// feedback. The repair sets that flag only: intensity, power save, and
+/// unnamed bits are the user's (Options+ writes them) and are written back as
+/// read. A zero intensity is the user's "off" and is left alone. Callers
 /// arm once per Actions Ring session, before the first hover — which is why
 /// this deliberately bypasses the cached location and re-resolves the
 /// feature: the cache key (channel identity + device index) cannot see a
@@ -130,16 +133,11 @@ pub async fn ensure_haptics_armed_on(shared: &SharedChannel) -> Result<bool, Wri
         clear_cached_location();
         classify_hidpp_error(error, HidppOperation::PlayHaptic, HapticFeedbackFeature::ID)
     })?;
-    let intensity = if config.intensity.get() == 0 {
-        HapticIntensity::new(25).unwrap_or(config.intensity)
-    } else {
-        config.intensity
-    };
-    if config.enabled && intensity == config.intensity {
+    if config.flags.contains(HapticConfigFlags::ENABLED) || config.intensity.get() == 0 {
         return Ok(false);
     }
     feature
-        .set_configuration(true, intensity)
+        .set_configuration(config.flags | HapticConfigFlags::ENABLED, config.intensity)
         .await
         .map_err(|error| {
             clear_cached_location();
@@ -193,10 +191,17 @@ pub async fn play_haptic(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::channel::scripted::ScriptedRawHidChannel;
+    use std::sync::Mutex as StdMutex;
 
-    async fn scripted_channel() -> Arc<HidppChannel> {
+    use super::*;
+    use crate::channel::scripted::{ScriptedRawHidChannel, scripted_channel};
+
+    /// Serializes the tests that touch the one process-wide cache slot.
+    static CACHE_SLOT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    const HAPTIC_INDEX: u8 = 0x0b;
+
+    async fn silent_channel() -> Arc<HidppChannel> {
         let (raw, _reports) = ScriptedRawHidChannel::with_responder(|_| None);
         Arc::new(
             HidppChannel::from_raw_channel(raw)
@@ -205,11 +210,79 @@ mod tests {
         )
     }
 
-    /// These tests share the one process-wide cache slot, so they must not run
-    /// concurrently with each other; a single test keeps them serialized.
+    /// A haptic device that stores whatever `setConfiguration` sends.
+    fn stateful_haptics(
+        initial: [u8; 3],
+    ) -> (ScriptedRawHidChannel, crate::replay::ReplayChannelHandle) {
+        let state = StdMutex::new(initial);
+        ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+            if request.len() < 7 || request[0] != 0x10 {
+                return None;
+            }
+            let mut payload = [0u8; 3];
+            match (request[2], request[3] >> 4) {
+                (0x00, 0x01) => payload[0] = 4,
+                (0x00, 0x00) => {
+                    if u16::from_be_bytes([request[4], request[5]]) == HapticFeedbackFeature::ID {
+                        payload[0] = HAPTIC_INDEX;
+                    }
+                }
+                (HAPTIC_INDEX, 0x01) => payload = *state.lock().expect("haptic state"),
+                (HAPTIC_INDEX, 0x02) => {
+                    let mut current = state.lock().expect("haptic state");
+                    current[..2].copy_from_slice(&request[4..6]);
+                    payload = *current;
+                }
+                _ => return None,
+            }
+            let mut response = request[..4].to_vec();
+            response.extend_from_slice(&payload);
+            Some(response)
+        })
+    }
+
+    async fn arm(initial: [u8; 3]) -> (bool, Vec<[u8; 3]>) {
+        let (raw, handle) = stateful_haptics(initial);
+        let shared = SharedChannel::new(
+            scripted_channel(raw).await,
+            DeviceRoute::Direct {
+                vendor_id: 0x046d,
+                product_id: 0xb042,
+            },
+        );
+        let repaired = ensure_haptics_armed_on(&shared)
+            .await
+            .expect("the scripted device answers every haptic call");
+        let writes = handle
+            .written_reports()
+            .into_iter()
+            .filter(|report| report[2] == HAPTIC_INDEX && report[3] >> 4 == 0x02)
+            .map(|report| [report[4], report[5], report[6]])
+            .collect();
+        (repaired, writes)
+    }
+
+    #[tokio::test]
+    async fn arming_sets_only_the_enable_bit() {
+        let _slot = CACHE_SLOT.lock().await;
+        // Disabled with power save on (Options+ sets byte 0 bit 1) and an
+        // unnamed bit: arming keeps both and the user's intensity.
+        assert_eq!(arm([0x82, 60, 0x34]).await, (true, vec![[0x83, 60, 0]]));
+    }
+
+    #[tokio::test]
+    async fn arming_leaves_a_zero_intensity_and_an_armed_engine_alone() {
+        let _slot = CACHE_SLOT.lock().await;
+        // Zero is the user's "off"; it is never replaced by a guessed level.
+        assert_eq!(arm([0x00, 0, 0x34]).await, (false, vec![]));
+        assert_eq!(arm([0x03, 40, 0x34]).await, (false, vec![]));
+    }
+
+    /// Holds [`CACHE_SLOT`]: every check below reads the shared cache slot.
     #[tokio::test]
     async fn the_cache_matches_exactly_the_channel_it_was_stored_for() {
-        let channel = scripted_channel().await;
+        let _slot = CACHE_SLOT.lock().await;
+        let channel = silent_channel().await;
         store_cached_location(&channel, 2, 7);
         assert!(
             cached_feature(&channel, 2).is_some(),
@@ -220,7 +293,7 @@ mod tests {
             "another device index is a miss"
         );
 
-        let other = scripted_channel().await;
+        let other = silent_channel().await;
         assert!(
             cached_feature(&other, 2).is_none(),
             "another channel is a miss — identity, not address, decides"
@@ -231,7 +304,7 @@ mod tests {
         // including a fresh channel that might reuse the allocation, which
         // the surviving Weak makes impossible.
         drop(channel);
-        let replacement = scripted_channel().await;
+        let replacement = silent_channel().await;
         assert!(
             cached_feature(&replacement, 2).is_none(),
             "a dead entry must not match any later channel"

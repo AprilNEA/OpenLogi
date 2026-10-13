@@ -24,6 +24,22 @@ bitflags::bitflags! {
     }
 }
 
+bitflags::bitflags! {
+    /// The first byte of the haptic configuration.
+    ///
+    /// Unknown bits are retained: a write built from a read hands every bit
+    /// this crate does not name back to the firmware unchanged.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+    pub struct HapticConfigFlags: u8 {
+        /// Firmware haptic playback is enabled.
+        const ENABLED = 1 << 0;
+        /// Battery-saving haptics. Logi Options+ sets this bit from its own
+        /// power-save setting, independently of [`Self::ENABLED`].
+        const POWER_SAVE = 1 << 1;
+    }
+}
+
 /// A haptic waveform ID accepted by `playWaveform`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, IntoPrimitive, TryFromPrimitive)]
 #[repr(u8)]
@@ -62,14 +78,28 @@ impl HapticIntensity {
 /// Device-wide haptic configuration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct HapticConfiguration {
-    /// Whether firmware haptic playback is enabled.
-    pub enabled: bool,
+    /// Enable, power-save, and any unnamed bits, as the device reported them.
+    pub flags: HapticConfigFlags,
     /// Current intensity percentage.
     pub intensity: HapticIntensity,
     /// Number of discrete levels advertised by the firmware.
     pub level_count: u8,
     /// Percentage step between discrete levels.
     pub level_step: u8,
+}
+
+impl HapticConfiguration {
+    fn from_payload(payload: &[u8]) -> Result<Self, Hidpp20Error> {
+        let [flags, intensity, levels, ..] = *payload else {
+            return Err(Hidpp20Error::UnsupportedResponse);
+        };
+        Ok(Self {
+            flags: HapticConfigFlags::from_bits_retain(flags),
+            intensity: HapticIntensity::new(intensity).ok_or(Hidpp20Error::UnsupportedResponse)?,
+            level_step: levels >> 4,
+            level_count: levels & 0x0f,
+        })
+    }
 }
 
 /// Haptic capabilities reported by the device.
@@ -104,33 +134,23 @@ impl HapticFeedbackFeature {
         })
     }
 
-    /// Read whether haptics are enabled and their current intensity.
+    /// Read the haptic flags and current intensity.
     pub async fn get_configuration(&self) -> Result<HapticConfiguration, Hidpp20Error> {
         let payload = self.endpoint.call(1, [0; 3]).await?.extend_payload();
-        let enabled = match payload[0] {
-            0 => false,
-            1 => true,
-            _ => return Err(Hidpp20Error::UnsupportedResponse),
-        };
-        let Some(intensity) = HapticIntensity::new(payload[1]) else {
-            return Err(Hidpp20Error::UnsupportedResponse);
-        };
-        Ok(HapticConfiguration {
-            enabled,
-            intensity,
-            level_step: payload[2] >> 4,
-            level_count: payload[2] & 0x0f,
-        })
+        HapticConfiguration::from_payload(&payload)
     }
 
-    /// Write the device-wide haptic enabled state and intensity.
+    /// Write the device-wide haptic flags and intensity.
+    ///
+    /// `flags` replaces the whole byte: edit the value from
+    /// [`Self::get_configuration`] so power-save and unnamed bits survive.
     pub async fn set_configuration(
         &self,
-        enabled: bool,
+        flags: HapticConfigFlags,
         intensity: HapticIntensity,
     ) -> Result<(), Hidpp20Error> {
         self.endpoint
-            .call(2, [u8::from(enabled), intensity.get(), 0])
+            .call(2, [flags.bits(), intensity.get(), 0])
             .await?;
         Ok(())
     }
@@ -160,5 +180,29 @@ mod tests {
         let mask = SupportedWaveforms::from_bits_retain((1 << 4) | (1 << 31));
         assert!(mask.contains(SupportedWaveforms::SUBTLE_COLLISION));
         assert_eq!(mask.bits(), (1 << 4) | (1 << 31));
+    }
+
+    #[test]
+    fn configuration_keeps_power_save_and_unnamed_flag_bits() {
+        // Power save without enable, as Options+ writes it, plus an unnamed bit.
+        let config = HapticConfiguration::from_payload(&[0x82, 60, 0x34]).unwrap();
+        assert!(!config.flags.contains(HapticConfigFlags::ENABLED));
+        assert!(config.flags.contains(HapticConfigFlags::POWER_SAVE));
+        assert_eq!(config.flags.bits(), 0x82);
+        assert_eq!(
+            (config.flags | HapticConfigFlags::ENABLED).bits(),
+            0x83,
+            "enabling must leave power save and the unnamed bit in place"
+        );
+        assert_eq!(config.intensity.get(), 60);
+        assert_eq!((config.level_step, config.level_count), (3, 4));
+    }
+
+    #[test]
+    fn configuration_rejects_out_of_range_intensity() {
+        assert!(matches!(
+            HapticConfiguration::from_payload(&[0x01, 101, 0]),
+            Err(Hidpp20Error::UnsupportedResponse)
+        ));
     }
 }
