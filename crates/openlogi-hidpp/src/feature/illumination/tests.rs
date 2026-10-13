@@ -324,6 +324,7 @@ fn info_and_level_reads_refuse_a_short_reply() {
     use super::{
         FN_GET_BRIGHTNESS, FN_GET_BRIGHTNESS_INFO, FN_GET_BRIGHTNESS_LEVELS,
         FN_GET_COLOR_TEMPERATURE_INFO, FN_GET_COLOR_TEMPERATURE_LEVELS, IlluminationFeature,
+        LevelConfig,
     };
     use crate::protocol::v20::Message;
 
@@ -361,6 +362,21 @@ fn info_and_level_reads_refuse_a_short_reply() {
         assert_matches!(
             read_with(function, levels, short_linear),
             Err(Hidpp20Error::UnsupportedResponse)
+        );
+        // A long page still decodes: three of six non-linear levels from 1.
+        let mut page = [0; 16];
+        page[0] = 3 << 5;
+        page[1] = (1 << 4) | 6;
+        page[2..4].copy_from_slice(&200u16.to_be_bytes());
+        page[4..6].copy_from_slice(&400u16.to_be_bytes());
+        page[6..8].copy_from_slice(&800u16.to_be_bytes());
+        assert_eq!(
+            read_with(function, levels, |header| Message::Long(header, page)).unwrap(),
+            LevelConfig::NonLinear {
+                start_index: 1,
+                level_count: 6,
+                values: vec![200, 400, 800],
+            }
         );
     }
 
