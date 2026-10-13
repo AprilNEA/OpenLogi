@@ -399,6 +399,17 @@ pub struct PairedDevice {
     /// table. `None` for devices we couldn't probe (offline / unreachable);
     /// the GUI then falls back to [`Capabilities::presumed_from_kind`].
     pub capabilities: Option<Capabilities>,
+    /// Moves each time the device itself reports changing a setting — the
+    /// user toggling Fn lock on the keyboard, or a DPI button changing the
+    /// sensor — so a client re-reads that device's settings rather than keep
+    /// showing what it read before. Opaque: only a difference from the
+    /// previous snapshot of the same route means anything, and it restarts
+    /// when the agent reopens the device's channel.
+    ///
+    /// Appended. `default` keeps device fixtures recorded before it loading;
+    /// the IPC encoding is positional and always carries it.
+    #[serde(default)]
+    pub settings_revision: u64,
 }
 
 /// Address of a standalone raw-HID interface.
@@ -538,6 +549,7 @@ mod tests {
                     dpi_gestures: false,
                     fn_lock: false,
                 }),
+                settings_revision: 0,
             }],
         }
     }

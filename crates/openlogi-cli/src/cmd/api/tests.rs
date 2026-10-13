@@ -46,6 +46,7 @@ fn snapshot() -> AgentSnapshot {
                 battery: None,
                 model_info: None,
                 capabilities: None,
+                settings_revision: 0,
             }],
         }],
         standalone: Vec::new(),

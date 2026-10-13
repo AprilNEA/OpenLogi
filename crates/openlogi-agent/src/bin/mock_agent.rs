@@ -593,6 +593,7 @@ impl State {
             }),
             model_info: None,
             capabilities: Some(Capabilities::default()),
+            settings_revision: 0,
         });
         self.profile
             .settings

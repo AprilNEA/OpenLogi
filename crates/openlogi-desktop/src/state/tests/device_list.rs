@@ -31,6 +31,7 @@ fn receiver_inventory() -> DeviceInventory {
                 extended_model_id: 2,
             }),
             capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
+            settings_revision: 0,
         }],
     }
 }

@@ -46,6 +46,7 @@ pub(super) fn direct_fixture(open_outcome: OpenOutcome, probe_count: usize) -> D
                 pointer: true,
                 ..Capabilities::default()
             }),
+            settings_revision: 0,
         }],
     };
     let mut exchanges = Vec::new();
@@ -172,6 +173,65 @@ pub(super) fn battery_only_fixture(
     }
 }
 
+/// A battery-powered keyboard or mouse: `FeatureSet`, the legacy `0x1000`
+/// battery at index 2, and one settings feature (`feature_id`, such as
+/// `0x40a3` or `0x2202`) at index 3 that the inventory probe lists but never
+/// reads. The battery answers 50 % to each of `battery_reads` reads: the
+/// first rides the full probe, each later one a cache-hit re-read.
+pub(super) fn setting_fixture(
+    feature_id: u16,
+    product_id: u16,
+    name: &str,
+    battery_reads: usize,
+) -> HeadsetFixture {
+    let node_id = NodeId::from("scenario-settings-node".to_string());
+    let [feature_high, feature_low] = feature_id.to_be_bytes();
+    let mut exchanges = vec![
+        h20(
+            short(0xff, 0x00, 0x10, [0, 0, 0]),
+            short(0xff, 0x00, 0x10, [4, 0, 0]),
+        ),
+        h20(
+            short(0xff, 0x00, 0x00, [0x00, 0x01, 0]),
+            short(0xff, 0x00, 0x00, [0x01, 0, 0]),
+        ),
+        h20(
+            short(0xff, 0x01, 0x00, [0, 0, 0]),
+            short(0xff, 0x01, 0x00, [3, 0, 0]),
+        ),
+        h20(
+            short(0xff, 0x01, 0x10, [1, 0, 0]),
+            short(0xff, 0x01, 0x10, [0x00, 0x01, 0]),
+        ),
+        h20(
+            short(0xff, 0x01, 0x10, [2, 0, 0]),
+            short(0xff, 0x01, 0x10, [0x10, 0x00, 0]),
+        ),
+        h20(
+            short(0xff, 0x01, 0x10, [3, 0, 0]),
+            short(0xff, 0x01, 0x10, [feature_high, feature_low, 0]),
+        ),
+    ];
+    exchanges.extend((0..battery_reads).map(|_| {
+        h20(
+            short(0xff, 0x02, 0x00, [0, 0, 0]),
+            short(0xff, 0x02, 0x00, [50, 20, 0x00]),
+        )
+    }));
+    HeadsetFixture {
+        node: ReplayNode {
+            info: node_info(node_id, product_id, name),
+            presence: NodePresence::Present,
+            open_outcome: OpenOutcome::Hidpp,
+            channel: Some(HEADSET_CHANNEL.to_string()),
+            raw_writer: RawWriterAvailability::Unavailable,
+            receiver_slots: Vec::new(),
+        },
+        channel: replay_channel(HEADSET_CHANNEL),
+        cassette: cassette("scenario-settings-probes", HEADSET_CHANNEL, exchanges),
+    }
+}
+
 /// A linked `getAdcMeasurement` answer.
 pub(super) fn adc_reading(voltage_mv: u16, flags: u8) -> Vec<u8> {
     let [high, low] = voltage_mv.to_be_bytes();
@@ -233,6 +293,7 @@ pub(super) fn bolt_fixture(tag: &str, slots: &[BoltSlot], pass_count: usize) -> 
                     battery: None,
                     model_info: None,
                     capabilities: None,
+                    settings_revision: 0,
                 })
                 .collect(),
         },

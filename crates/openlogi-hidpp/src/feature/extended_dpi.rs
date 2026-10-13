@@ -55,6 +55,21 @@ pub struct ExtendedDpiFeature {
 }
 
 impl ExtendedDpiFeature {
+    /// Whether an unsolicited report with `function_id` is the device's
+    /// DPI-parameters broadcast (event `0`, decoded as
+    /// [`ExtendedDpiEvent::ParametersChanged`]), sent when the sensor's DPI
+    /// changes on the device — a DPI button, say.
+    ///
+    /// Deliberately independent of the payload, like
+    /// `BatteryStatusFeature::is_status_broadcast`: a listener that only needs
+    /// to know *that* the DPI changed re-reads it with
+    /// [`Self::get_sensor_dpi_parameters`]. A calibration result (event `1`)
+    /// changes no setting and is not one.
+    #[must_use]
+    pub const fn is_parameters_broadcast(function_id: u8) -> bool {
+        function_id == 0
+    }
+
     /// Retrieves the number of motion sensors the device exposes.
     pub async fn get_sensor_count(&self) -> Result<u8, Hidpp20Error> {
         Ok(self.endpoint.call(0, [0; 3]).await?.extend_payload()[0])

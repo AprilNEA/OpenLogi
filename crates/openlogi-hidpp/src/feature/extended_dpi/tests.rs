@@ -553,3 +553,20 @@ fn parameters_decode_from_a_reply_for_their_sensor() {
         (SENSOR, 800, 1000, Lod::NotSupported)
     );
 }
+
+#[test]
+fn parameters_broadcast_is_exactly_the_parameters_changed_event() {
+    use super::ExtendedDpiFeature;
+
+    for function in 0..=0x0f {
+        let changed = matches!(
+            decode_event(function, &[0; 16]),
+            Some(ExtendedDpiEvent::ParametersChanged(_))
+        );
+        assert_eq!(
+            ExtendedDpiFeature::is_parameters_broadcast(function),
+            changed,
+            "function {function}"
+        );
+    }
+}

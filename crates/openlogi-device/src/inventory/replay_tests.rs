@@ -11,7 +11,8 @@ use super::events::{HidppEventSource, observed_event_channel};
 use super::replay_test_support::{
     BOLT_CHANNEL, BOLT_UID, BoltSlot, DIRECT_CHANNEL, HEADSET_CHANNEL, HEADSET_PRODUCT_ID,
     adc_error, adc_reading, battery_only_fixture, bolt_fixture, connection_notification,
-    direct_fixture, headset_fixture, malformed_dpi_fixture, short, voltage_reading,
+    direct_fixture, headset_fixture, malformed_dpi_fixture, setting_fixture, short,
+    voltage_reading,
 };
 use crate::replay::{ChannelConnection, NodePresence, OpenOutcome, ReplayBackend, ReplayTopology};
 use crate::{ChannelRegistry, get_dpi};
@@ -752,4 +753,90 @@ async fn voltage_battery_broadcast_reports_charging_while_holding_the_percentage
     let (percentage, status) = charge(before).expect("a reading before the broadcast");
     assert_eq!(status, BatteryStatus::Discharging);
     assert_eq!(charge(after), Some((percentage, BatteryStatus::Charging)));
+}
+
+/// Probe a [`setting_fixture`] node carrying `feature_id` (at index 3), emit
+/// that feature's long `broadcast` (function, then payload) on its channel,
+/// and return the node's settings revision before and after the
+/// reconciliation it requests.
+async fn setting_broadcast_revisions(
+    feature_id: u16,
+    broadcast: [u8; 4],
+    source: HidppEventSource,
+) -> (u64, u64) {
+    const PRODUCT_ID: u16 = 0xb369;
+    // One battery read rides the probe, one the reconciliation.
+    let fixture = setting_fixture(feature_id, PRODUCT_ID, "Settings Test Device", 2);
+    let backend = Arc::new(
+        ReplayBackend::new(
+            ReplayTopology {
+                nodes: vec![fixture.node],
+                channels: vec![fixture.channel],
+            },
+            vec![fixture.cassette],
+        )
+        .expect("valid settings replay"),
+    );
+    let (notifier, mut events, observed) = observed_event_channel();
+    let mut enumerator = Enumerator::with_backend(backend.clone()).with_event_notifier(notifier);
+    enumerator.timeouts.arrival_drain = Duration::ZERO;
+    let revision = async |enumerator: &mut Enumerator| {
+        let inventories = enumerator.enumerate().await.expect("node probe succeeds");
+        let node = inventories
+            .iter()
+            .find(|inventory| inventory.receiver.product_id == PRODUCT_ID)
+            .unwrap_or_else(|| panic!("node listed: {inventories:#?}"));
+        node.paired[0].settings_revision
+    };
+    let before = revision(&mut enumerator).await;
+
+    let [function, payload @ ..] = broadcast;
+    let mut report = vec![0x11, 0xff, 0x03, function << 4];
+    report.extend_from_slice(&payload);
+    report.extend_from_slice(&[0; 13]);
+    assert_eq!(
+        backend
+            .emit_channel_report(HEADSET_CHANNEL, &report)
+            .expect("known channel"),
+        1
+    );
+    tokio::time::timeout(Duration::from_secs(2), observed.wait_for(1))
+        .await
+        .expect("the broadcast must be recognised as a reconciliation request");
+    assert_eq!(events.try_recv(), Ok(source));
+
+    let after = revision(&mut enumerator).await;
+    backend
+        .require_complete()
+        .expect("the feature walk is the whole script");
+    (before, after)
+}
+
+#[tokio::test]
+async fn fn_lock_toggled_on_the_keyboard_moves_its_settings_revision() {
+    // Fn+Esc on an MX Keys: 0x40a3 reports the new state unsolicited. The
+    // payload is not decoded — the revision only says a re-read is due.
+    assert_eq!(
+        setting_broadcast_revisions(
+            0x40a3,
+            [0x00, 0x00, 0x01, 0x00],
+            HidppEventSource::FnInversion
+        )
+        .await,
+        (0, 1)
+    );
+}
+
+#[tokio::test]
+async fn a_dpi_button_moves_the_mouses_settings_revision() {
+    // 0x2202 event 0: sensor 0 now at 1600 DPI.
+    assert_eq!(
+        setting_broadcast_revisions(
+            0x2202,
+            [0x00, 0x00, 0x06, 0x40],
+            HidppEventSource::ExtendedDpi
+        )
+        .await,
+        (0, 1)
+    );
 }

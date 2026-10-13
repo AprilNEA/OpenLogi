@@ -33,3 +33,7 @@ owns the layer. `crates/openlogi-hid/AGENTS.md` points back here.
   bounded repair, and channel retirement/reopen ordering — run the inventory/watcher
   tests and cover event bursts or loss, partial failure, and recovery, not just clean
   enumeration.
+  Setting broadcasts (`0x40a2`/`0x40a3` Fn inversion, `0x2202` DPI) also bump the
+  device's `PairedDevice::settings_revision`, before the re-enumeration they request,
+  so clients re-read the setting. The revision is per channel and survives re-probes;
+  it must never trigger replaying persisted settings onto the device.

@@ -60,6 +60,20 @@ pub struct FnInversionMultiHostFeature {
 }
 
 impl FnInversionMultiHostFeature {
+    /// Whether an unsolicited `message` on this feature's index announces a
+    /// Fn-inversion change, such as the user toggling Fn lock with Fn+Esc.
+    ///
+    /// Reverse-engineered, not from the spec: Logi Options+ 2.8
+    /// (`Feature40A3FnInversion::onFeatureReport`) decodes every unsolicited
+    /// report on `0x40a3` as the four [`Self::get_global_fn_inversion`] fields
+    /// without looking at the function id, and refuses one shorter than four
+    /// bytes. A short report cannot carry those fields, so only a long one
+    /// counts. The payload is not decoded: a listener re-reads the state.
+    #[must_use]
+    pub const fn is_state_broadcast(message: &v20::Message) -> bool {
+        matches!(message, v20::Message::Long(..))
+    }
+
     /// Retrieves global Fn inversion for `host`.
     ///
     /// The four-field reply does not fit a short report, so a short reply is
@@ -147,6 +161,19 @@ pub struct FnInversionWithDefaultStateFeature {
 }
 
 impl FnInversionWithDefaultStateFeature {
+    /// Whether an unsolicited report with `function_id` announces a
+    /// Fn-inversion change, such as the user toggling Fn lock with Fn+Esc.
+    ///
+    /// Reverse-engineered, not from the spec: Logi Options+ 2.8
+    /// (`Feature40A2FnInversion::onUnexpectedResponse`) turns an unsolicited
+    /// function-1 report — the [`Self::set_global_fn_inversion`] id — into a
+    /// setting change. The payload is not decoded: a listener re-reads the
+    /// state.
+    #[must_use]
+    pub const fn is_state_broadcast(function_id: u8) -> bool {
+        function_id == 1
+    }
+
     /// Retrieves the global Fn inversion state and its default.
     pub async fn get_global_fn_inversion(&self) -> Result<GlobalFnInversion, Hidpp20Error> {
         let payload = self.endpoint.call(0, [0; 3]).await?.extend_payload();
@@ -207,6 +234,47 @@ mod tests {
             set_multi_host_fn_inversion_args(HostIndex::Slot(2), FnInversionState::On),
             [2, 1, 0]
         );
+    }
+
+    #[test]
+    fn multi_host_state_broadcast_is_any_long_report() {
+        use super::FnInversionMultiHostFeature;
+        use crate::nibble::U4;
+        use crate::protocol::v20::{Message, MessageHeader};
+
+        let header = |function| MessageHeader {
+            device_index: 1,
+            feature_index: 9,
+            function_id: U4::from_lo(function),
+            software_id: U4::from_lo(0),
+        };
+        // Options+ does not look at the function id, so neither do we.
+        for function in [0, 1, 2, 0x0f] {
+            assert!(
+                FnInversionMultiHostFeature::is_state_broadcast(&Message::Long(
+                    header(function),
+                    [0; 16]
+                )),
+                "function {function}"
+            );
+        }
+        // Too short for the four fields Options+ requires.
+        assert!(!FnInversionMultiHostFeature::is_state_broadcast(
+            &Message::Short(header(0), [1, 1, 0])
+        ));
+    }
+
+    #[test]
+    fn single_host_state_broadcast_is_function_one() {
+        use super::FnInversionWithDefaultStateFeature;
+
+        assert!(FnInversionWithDefaultStateFeature::is_state_broadcast(1));
+        for function in [0, 2, 0x0f] {
+            assert!(
+                !FnInversionWithDefaultStateFeature::is_state_broadcast(function),
+                "function {function}"
+            );
+        }
     }
 
     /// What a call gets when the device answers function `function` with

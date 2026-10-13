@@ -256,6 +256,7 @@ async fn walk_bolt_slot(
         battery: probe.battery,
         model_info: probe.model_info,
         capabilities: probe.capabilities,
+        settings_revision: pass.settings_revision(slot),
     };
     (device, outcome)
 }

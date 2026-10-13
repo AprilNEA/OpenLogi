@@ -76,7 +76,8 @@ pub use succession::Identity;
 ///      rejects unsupported values and reports a write the device kept;
 ///      `BatteryInfo::percentage` became `Option<u8>` — `None` when the
 ///      device reports only a level (a `0x1004` without the state-of-charge
-///      capability) or has no reading yet.
+///      capability) or has no reading yet; `PairedDevice::settings_revision`
+///      appended — it moves when the device reports a setting changed on it.
 pub const PROTOCOL_VERSION: u32 = 36;
 
 /// Environment variable through which the agent hands a supervised helper the

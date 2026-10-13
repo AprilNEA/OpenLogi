@@ -393,6 +393,7 @@ fn record(kind: DeviceKind, capabilities: Option<Capabilities>) -> DeviceRecord 
         slot: 1,
         online: true,
         battery: None,
+        settings_revision: 0,
     }
 }
 

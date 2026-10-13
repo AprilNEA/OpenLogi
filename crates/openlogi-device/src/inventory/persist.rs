@@ -38,7 +38,9 @@ use super::features::{BatteryProbe, ProbedFeatures};
 /// v4 adds the `0x1F20` ADC-measurement event index.
 /// v5 adds the legacy `0x1000` and voltage `0x1001` battery event indexes.
 /// v6 records whether a `0x1004` battery reports a percentage.
-const SCHEMA_VERSION: u32 = 6;
+/// v7 adds the Fn-inversion `0x40a2`/`0x40a3` and extended-DPI `0x2202`
+/// event indexes.
+const SCHEMA_VERSION: u32 = 7;
 
 impl ProbeCacheError {
     /// Report why a store could not keep a snapshot.
@@ -249,6 +251,9 @@ mod tests {
                     battery_status: Some(12),
                     battery_voltage: Some(13),
                     adc_measurement: Some(11),
+                    fn_inversion: None,
+                    fn_inversion_multi_host: None,
+                    extended_dpi: None,
                 },
                 probed_at: Instant::now(),
             },
@@ -292,6 +297,9 @@ mod tests {
                 battery_status: Some(12),
                 battery_voltage: Some(13),
                 adc_measurement: Some(11),
+                fn_inversion: None,
+                fn_inversion_multi_host: None,
+                extended_dpi: None,
             },
             "event feature indexes are immutable and kept"
         );

@@ -26,6 +26,7 @@ fn paired_device_no_model_info(slot: u8, wpid: Option<u16>) -> PairedDevice {
         battery: None,
         model_info: None,
         capabilities: None,
+        settings_revision: 0,
     }
 }
 
@@ -58,6 +59,7 @@ fn direct_inventory(model_info: DeviceModelInfo) -> DeviceInventory {
             battery: None,
             model_info: Some(model_info),
             capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
+            settings_revision: 0,
         }],
     }
 }
@@ -89,6 +91,7 @@ fn receiver_inventory() -> DeviceInventory {
                 extended_model_id: 2,
             }),
             capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
+            settings_revision: 0,
         }],
     }
 }
@@ -121,6 +124,7 @@ fn cabled_inventory() -> DeviceInventory {
                 extended_model_id: 2,
             }),
             capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
+            settings_revision: 0,
         }],
     }
 }
@@ -173,6 +177,7 @@ fn online_record(key: &str) -> DeviceRecord {
         slot: 1,
         online: true,
         battery: None,
+        settings_revision: 0,
     }
 }
 
