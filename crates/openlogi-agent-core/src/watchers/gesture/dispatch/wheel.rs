@@ -40,6 +40,16 @@ pub(super) struct WheelAccumulators {
 }
 
 impl WheelAccumulators {
+    /// Admit only progress after raw phase repair and deferred-end handling.
+    #[cfg(any(not(target_os = "macos"), test))]
+    pub(super) fn prepare_zoom_report(
+        &mut self,
+        status: openlogi_hid::thumbwheel::RotationStatus,
+        now: Instant,
+    ) -> bool {
+        self.zoom.prepare(status, now)
+    }
+
     /// Advance the state belonging to `rotation`'s physical direction.
     pub(super) fn advance(
         &mut self,

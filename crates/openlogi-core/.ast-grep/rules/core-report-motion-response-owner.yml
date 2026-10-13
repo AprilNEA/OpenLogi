@@ -1,0 +1,11 @@
+# Owner: binding::motion owns the per-report power response shared by capture paths.
+id: core-report-motion-response-owner
+language: rust
+severity: error
+message: Use openlogi_core::binding::accelerate_report_delta for per-report movement response.
+files:
+  - crates/**/*.rs
+ignores:
+  - crates/openlogi-core/src/binding/motion.rs
+rule:
+  pattern: $VALUE.powf(1.4)

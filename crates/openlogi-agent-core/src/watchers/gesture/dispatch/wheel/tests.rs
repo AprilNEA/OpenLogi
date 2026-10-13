@@ -607,7 +607,7 @@ fn zoom_inactivity_resets_only_beyond_five_hundred_milliseconds() {
 }
 
 #[test]
-fn zoom_zero_stop_reports_never_fire_or_refresh_inactivity() {
+fn zoom_zero_progress_never_fires_or_refreshes_inactivity() {
     let mut wheel = WheelAccumulators::default();
     let now = Instant::now();
     let sensitivity = ThumbwheelSensitivity::DEFAULT;
@@ -719,5 +719,231 @@ fn zoom_configured_actions_share_physical_progress_even_when_bindings_are_revers
                 expected
             );
         }
+    }
+}
+
+fn phased_zoom_report(
+    wheel: &mut WheelAccumulators,
+    increments: i16,
+    phase: openlogi_hid::thumbwheel::RotationStatus,
+    now: Instant,
+) -> WheelOutput {
+    if wheel.prepare_zoom_report(phase, now) {
+        zoom_report(wheel, increments, ThumbwheelSensitivity::DEFAULT, now)
+    } else {
+        WheelOutput::Idle
+    }
+}
+
+#[test]
+fn zoom_start_then_recognition_are_distinct_from_action_progress() {
+    use openlogi_hid::thumbwheel::RotationStatus::{Active, Start, Stop};
+    let now = Instant::now();
+    for start_count in [0, 100] {
+        let mut wheel = WheelAccumulators::default();
+        for (count, phase) in [(start_count, Start), (100, Start), (100, Active)] {
+            assert_eq!(
+                phased_zoom_report(&mut wheel, count, phase, now),
+                WheelOutput::Idle
+            );
+        }
+        assert_eq!(
+            phased_zoom_report(&mut wheel, 100, Active, now),
+            WheelOutput::FireAction(1)
+        );
+        assert_eq!(
+            phased_zoom_report(&mut wheel, 100, Stop, now),
+            WheelOutput::Idle
+        );
+    }
+}
+
+#[test]
+fn zoom_missing_start_and_end_phases_are_repaired() {
+    use openlogi_hid::thumbwheel::RotationStatus::{Active, Inactive, Start};
+    let mut wheel = WheelAccumulators::default();
+    let now = Instant::now();
+    // First Active is repaired to Start; the next report recognizes.
+    assert_eq!(
+        phased_zoom_report(&mut wheel, 100, Active, now),
+        WheelOutput::Idle
+    );
+    assert_eq!(
+        phased_zoom_report(&mut wheel, 100, Active, now),
+        WheelOutput::Idle
+    );
+    assert_eq!(
+        phased_zoom_report(&mut wheel, 4, Active, now),
+        WheelOutput::Idle
+    );
+    // Inactive after Active is repaired to deferred End, never movement.
+    assert_eq!(
+        phased_zoom_report(&mut wheel, 100, Inactive, now),
+        WheelOutput::Idle
+    );
+    assert_eq!(
+        phased_zoom_report(&mut wheel, 1, Start, now + Duration::from_millis(10)),
+        WheelOutput::FireAction(1)
+    );
+}
+
+#[test]
+fn zoom_deferred_end_preserves_progress_only_before_its_deadline() {
+    use openlogi_hid::thumbwheel::RotationStatus::{Active, Start, Stop};
+    let now = Instant::now();
+    for (gap, expected) in [(499, WheelOutput::FireAction(1)), (500, WheelOutput::Idle)] {
+        let mut wheel = WheelAccumulators::default();
+        for (increments, phase) in [(100, Start), (100, Active), (4, Active), (0, Stop)] {
+            assert_eq!(
+                phased_zoom_report(&mut wheel, increments, phase, now),
+                WheelOutput::Idle
+            );
+        }
+        // Duplicate stop does not extend the original deferred end.
+        assert_eq!(
+            phased_zoom_report(&mut wheel, 100, Stop, now + Duration::from_millis(100)),
+            WheelOutput::Idle
+        );
+        assert_eq!(
+            phased_zoom_report(&mut wheel, 1, Start, now + Duration::from_millis(gap)),
+            expected
+        );
+    }
+}
+
+#[test]
+fn zoom_fresh_start_and_lifecycle_clear_do_not_inherit_progress() {
+    use openlogi_hid::thumbwheel::RotationStatus::{Active, Start, Stop};
+    let mut wheel = WheelAccumulators::default();
+    let now = Instant::now();
+    for (increments, phase) in [
+        (100, Start),
+        (100, Active),
+        (4, Active),
+        (1, Start),
+        (1, Active),
+        (0, Stop),
+    ] {
+        assert_eq!(
+            phased_zoom_report(&mut wheel, increments, phase, now),
+            WheelOutput::Idle
+        );
+    }
+    wheel.clear_zoom();
+    assert_eq!(
+        phased_zoom_report(&mut wheel, 100, Start, now),
+        WheelOutput::Idle
+    );
+    assert_eq!(
+        phased_zoom_report(&mut wheel, 100, Active, now),
+        WheelOutput::Idle
+    );
+}
+
+#[test]
+fn zoom_repaired_start_keeps_raw_active_for_the_next_comparison() {
+    use openlogi_hid::thumbwheel::RotationStatus::{Active, Inactive, Start};
+    let mut wheel = WheelAccumulators::default();
+    let now = Instant::now();
+    // Repaired Active is still raw Active. A real Start after it is fresh,
+    // rather than a duplicate of the repaired Start.
+    for phase in [Active, Start, Active] {
+        assert_eq!(
+            phased_zoom_report(&mut wheel, 100, phase, now),
+            WheelOutput::Idle
+        );
+    }
+    assert_eq!(
+        phased_zoom_report(&mut wheel, 4, Active, now),
+        WheelOutput::Idle
+    );
+    assert_eq!(
+        phased_zoom_report(&mut wheel, 100, Inactive, now),
+        WheelOutput::Idle
+    );
+    // Raw Inactive followed by Active repairs into a continuing Start.
+    assert_eq!(
+        phased_zoom_report(&mut wheel, 1, Active, now + Duration::from_millis(1)),
+        WheelOutput::FireAction(1)
+    );
+}
+
+#[test]
+fn zoom_zero_start_cancels_end_without_recognizing_or_losing_progress() {
+    use openlogi_hid::thumbwheel::RotationStatus::{Active, Start, Stop};
+    let mut wheel = WheelAccumulators::default();
+    let now = Instant::now();
+    for (count, phase) in [(0, Start), (100, Active), (4, Active), (0, Stop)] {
+        assert_eq!(
+            phased_zoom_report(&mut wheel, count, phase, now),
+            WheelOutput::Idle
+        );
+    }
+    let resumed = now + Duration::from_millis(499);
+    assert_eq!(
+        phased_zoom_report(&mut wheel, 0, Start, resumed),
+        WheelOutput::Idle
+    );
+    assert_eq!(
+        phased_zoom_report(&mut wheel, 100, Start, resumed),
+        WheelOutput::Idle
+    );
+    // The canceled end would have expired here. Exact inactivity is still valid.
+    assert_eq!(
+        phased_zoom_report(&mut wheel, 1, Active, now + Duration::from_millis(500)),
+        WheelOutput::FireAction(1)
+    );
+}
+
+#[test]
+fn zoom_deferred_end_retires_progress_on_active_at_the_exact_deadline() {
+    use openlogi_hid::thumbwheel::RotationStatus::{Active, Start, Stop};
+    let mut wheel = WheelAccumulators::default();
+    let now = Instant::now();
+    for (count, phase) in [(0, Start), (100, Active), (4, Active), (100, Stop)] {
+        assert_eq!(
+            phased_zoom_report(&mut wheel, count, phase, now),
+            WheelOutput::Idle
+        );
+    }
+    let deadline = now + Duration::from_millis(500);
+    // Unlike ordinary inactivity at exactly 500 ms, deferred End retires now.
+    assert_eq!(
+        phased_zoom_report(&mut wheel, 100, Active, deadline),
+        WheelOutput::Idle
+    );
+    assert_eq!(
+        phased_zoom_report(&mut wheel, 100, Active, deadline),
+        WheelOutput::FireAction(1)
+    );
+}
+
+#[test]
+fn zoom_cancellation_clears_raw_history_and_pending_end() {
+    use openlogi_hid::thumbwheel::RotationStatus::{Active, Start, Stop};
+    let now = Instant::now();
+    for last_phase in [Start, Stop] {
+        let mut wheel = WheelAccumulators::default();
+        for phase in [Start, Active, Active, last_phase] {
+            phased_zoom_report(&mut wheel, 4, phase, now);
+        }
+        wheel.clear_zoom();
+        let resumed = now + Duration::from_millis(1);
+        // First Active repairs to Start after cancellation, regardless of the
+        // former raw phase or a pending End.
+        for _ in 0..2 {
+            assert_eq!(
+                phased_zoom_report(&mut wheel, 100, Active, resumed),
+                WheelOutput::Idle
+            );
+        }
+        assert_eq!(
+            phased_zoom_report(&mut wheel, 4, Active, resumed),
+            WheelOutput::Idle
+        );
+        assert_eq!(
+            phased_zoom_report(&mut wheel, 1, Active, now + Duration::from_millis(500)),
+            WheelOutput::FireAction(1)
+        );
     }
 }

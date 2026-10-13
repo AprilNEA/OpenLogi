@@ -18,6 +18,7 @@ mod response {
     use std::time::{Duration, Instant};
 
     use openlogi_core::config::ThumbwheelSensitivity;
+    use openlogi_hid::thumbwheel::RotationStatus;
 
     const INACTIVITY: Duration = Duration::from_millis(500);
 
@@ -26,6 +27,9 @@ mod response {
     #[derive(Default)]
     pub(in super::super) struct Response {
         state: Option<Progress>,
+        // Preserve the received phase, including when repair changes admission.
+        previous_phase: Option<RotationStatus>,
+        pending_end: Option<Instant>,
     }
 
     struct Progress {
@@ -35,6 +39,47 @@ mod response {
     }
 
     impl Response {
+        /// Repair raw phases and lazily deliver the deferred end. This never
+        /// emits output; only admitted progress reaches the response below.
+        pub(in super::super) fn prepare(&mut self, phase: RotationStatus, now: Instant) -> bool {
+            if self.pending_end.is_some_and(|deadline| now >= deadline) {
+                self.state = None;
+                self.pending_end = None;
+            }
+            let previous = self.previous_phase.unwrap_or(RotationStatus::Inactive);
+            if matches!(
+                (previous, phase),
+                (RotationStatus::Start, RotationStatus::Start)
+                    | (RotationStatus::Stop, RotationStatus::Stop)
+            ) {
+                // Suppression retains raw history and the original end deadline.
+                return false;
+            }
+            self.previous_phase = Some(phase);
+            let mapped = match (previous, phase) {
+                (RotationStatus::Inactive, RotationStatus::Active) => RotationStatus::Start,
+                (RotationStatus::Active, RotationStatus::Inactive) => RotationStatus::Stop,
+                (_, phase) => phase,
+            };
+            match mapped {
+                RotationStatus::Start => {
+                    if self.pending_end.take().is_some() {
+                        // A new start before deferred END continues as progress.
+                        true
+                    } else {
+                        self.state = None;
+                        false
+                    }
+                }
+                RotationStatus::Active => true,
+                RotationStatus::Stop => {
+                    self.pending_end = Some(now + INACTIVITY);
+                    false
+                }
+                RotationStatus::Inactive => false,
+            }
+        }
+
         /// Recognition consumes the first nonzero report; subsequent reports
         /// produce at most one discrete pulse and discard its overshoot.
         pub(in super::super) fn advance(
@@ -69,12 +114,8 @@ mod response {
         }
     }
 
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "per-report truncation is the response contract; i16 input bounds the result"
-    )]
     fn accelerated(increments: i32) -> i64 {
-        (f64::from(increments.abs()).powf(1.4) * f64::from(increments.signum())) as i64
+        i64::from(openlogi_core::binding::accelerate_report_delta(increments))
     }
 
     #[expect(

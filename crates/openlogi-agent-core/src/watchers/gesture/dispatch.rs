@@ -318,9 +318,12 @@ impl InputDispatcher {
         }
         #[cfg(not(target_os = "macos"))]
         {
-            let _ = status;
             if admission == WheelAdmission::Draining {
                 self.wheels.cancel_zoom_session(session);
+            } else if increments == 0 {
+                self.wheels
+                    .for_session(session)
+                    .prepare_zoom_report(status, now);
             }
         }
         let Some(rotation) = WheelRotation::from_increments(increments) else {
@@ -331,8 +334,12 @@ impl InputDispatcher {
         let configuration = WheelConfiguration::for_plan(plan);
         let action = configuration.action(rotation);
         #[cfg(not(target_os = "macos"))]
-        if admission == WheelAdmission::Draining
-            && matches!(action, Action::ZoomIn | Action::ZoomOut)
+        if matches!(action, Action::ZoomIn | Action::ZoomOut)
+            && (admission == WheelAdmission::Draining
+                || !self
+                    .wheels
+                    .for_session(session)
+                    .prepare_zoom_report(status, now))
         {
             return;
         }
