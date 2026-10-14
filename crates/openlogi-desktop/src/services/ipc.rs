@@ -129,6 +129,8 @@ pub enum GuiUpdate {
         /// The connection the write went out on; an answer is stale once the
         /// keyboard moves, like [`Self::ReportRateWritten`]'s.
         route: DeviceRoute,
+        /// Which change this answers: [`SetBacklight::write`].
+        write: u64,
         /// The read-back, or why the write did not land.
         result: Result<BacklightState, WriteError>,
     },

@@ -199,6 +199,9 @@ pub struct SetBacklight {
     pub route: DeviceRoute,
     pub change: BacklightChange,
     pub key: DeviceKey,
+    /// The number the device-read service gave this change, returned with
+    /// the answer so it is matched to the change it answers.
+    pub write: u64,
 }
 
 impl Request for SetBacklight {
@@ -214,6 +217,7 @@ impl Request for SetBacklight {
         let _ = updates.send(GuiUpdate::BacklightWritten {
             key: self.key,
             route: self.route,
+            write: self.write,
             result: or_unavailable(outcome),
         });
     }

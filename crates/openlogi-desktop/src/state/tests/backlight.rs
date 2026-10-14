@@ -89,6 +89,20 @@ fn writes(commands: Vec<Command>) -> Vec<Command> {
         .collect()
 }
 
+/// The backlight changes among the queued commands, with the numbers they
+/// were sent under, oldest first.
+fn sent(
+    receiver: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
+) -> Vec<(BacklightChange, u64)> {
+    writes(drain(receiver))
+        .into_iter()
+        .filter_map(|command| match command {
+            Command::SetBacklight(SetBacklight { change, write, .. }) => Some((change, write)),
+            _ => None,
+        })
+        .collect()
+}
+
 fn backlight_reads(commands: &[Command]) -> usize {
     commands
         .iter()
@@ -137,11 +151,12 @@ fn written(
     cx: &mut gpui::TestAppContext,
     key: &DeviceKey,
     route: &DeviceRoute,
+    write: u64,
     result: Result<BacklightState, WriteError>,
 ) -> StateEvents {
     cx.update(|cx| {
         AppState::update(cx, |state, _| {
-            state.apply_backlight_written(key, route, result)
+            state.apply_backlight_written(key, route, write, result)
         })
     })
 }
@@ -210,6 +225,7 @@ fn a_change_shows_at_once_and_writes_the_keyboard_without_touching_the_config(
             route: written_route,
             change,
             key: written_key,
+            write: _,
         }),
     ] = commands.as_slice()
     else {
@@ -276,7 +292,9 @@ fn the_read_back_replaces_the_prediction_and_a_refusal_re_reads(cx: &mut gpui::T
     let (state, mut receiver) = keyboard_state(true);
     let (key, route) = installed_and_read(cx, &mut receiver, state, lit());
     let _ = commit(cx, BacklightChange::Automatic(false));
-    drain(&mut receiver);
+    let [(_, first)] = sent(&mut receiver)[..] else {
+        panic!("one change sent");
+    };
 
     // The keyboard answers with what it really holds.
     let read_back = BacklightState {
@@ -286,14 +304,18 @@ fn the_read_back_replaces_the_prediction_and_a_refusal_re_reads(cx: &mut gpui::T
         ..lit()
     };
     assert_eq!(
-        written(cx, &key, &route, Ok(read_back)),
+        written(cx, &key, &route, first, Ok(read_back)),
         [StateEvent::BacklightChanged(key.clone())]
     );
     assert_eq!(current_load(cx), Load::Ready(Arc::new(read_back)));
 
     // A refusal asks the keyboard again rather than leave a guess on screen.
+    let _ = commit(cx, BacklightChange::Level(1));
+    let [(_, second)] = sent(&mut receiver)[..] else {
+        panic!("one change sent");
+    };
     assert_eq!(
-        written(cx, &key, &route, Err(WriteError::AgentUnavailable)),
+        written(cx, &key, &route, second, Err(WriteError::AgentUnavailable)),
         [StateEvent::BacklightChanged(key)]
     );
     cx.run_until_parked();
@@ -309,12 +331,12 @@ fn an_answer_no_read_is_on_is_dropped() {
 
     assert!(
         state
-            .apply_backlight_written(&key, &route, Ok(lit()))
+            .apply_backlight_written(&key, &route, 1, Ok(lit()))
             .is_empty()
     );
     assert!(
         state
-            .apply_backlight_written(&key, &route, Err(WriteError::AgentUnavailable))
+            .apply_backlight_written(&key, &route, 1, Err(WriteError::AgentUnavailable))
             .is_empty()
     );
 }
@@ -327,12 +349,13 @@ fn a_write_answered_after_a_route_change_is_dropped(cx: &mut gpui::TestAppContex
     let (state, mut receiver) = keyboard_state(true);
     let (key, cable) = installed_and_read(cx, &mut receiver, state, lit());
     let _ = commit(cx, BacklightChange::Level(4));
-    assert!(
-        drain(&mut receiver)
-            .iter()
-            .any(|command| matches!(command, Command::SetBacklight(write) if write.route == cable)),
-        "the change is written over the cable"
-    );
+    let commands = drain(&mut receiver);
+    let Some(write) = commands.iter().find_map(|command| match command {
+        Command::SetBacklight(write) if write.route == cable => Some(write.write),
+        _ => None,
+    }) else {
+        panic!("the change is written over the cable");
+    };
 
     let moved = cx.update(|cx| {
         let moved = AppState::update(cx, |state, _| {
@@ -371,11 +394,12 @@ fn a_write_answered_after_a_route_change_is_dropped(cx: &mut gpui::TestAppContex
             cx,
             &key,
             &cable,
+            write,
             Ok(lit().changed(BacklightChange::Level(4)))
         )
         .is_empty()
     );
-    assert!(written(cx, &key, &cable, Err(WriteError::AgentUnavailable)).is_empty());
+    assert!(written(cx, &key, &cable, write, Err(WriteError::AgentUnavailable)).is_empty());
     cx.run_until_parked();
     assert_eq!(current_load(cx), Load::Ready(Arc::new(receiver_reading)));
     assert_eq!(
@@ -411,5 +435,109 @@ fn a_change_the_keyboard_reports_re_reads_the_backlight(cx: &mut gpui::TestAppCo
     };
     assert_eq!(answer_backlight_read(&mut receiver, dimmed), route);
     cx.run_until_parked();
+    assert_eq!(current_load(cx), Load::Ready(Arc::new(dimmed)));
+}
+
+/// Two quick level clicks: the first one's answer arrives while the second is
+/// still being written. The panel keeps showing the second, so a third click
+/// back to the first level is a change to write, not a click on what is
+/// already shown.
+#[gpui::test]
+fn an_earlier_answer_keeps_a_later_click_shown_and_the_next_one_written(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (state, mut receiver) = keyboard_state(true);
+    let (key, route) = installed_and_read(cx, &mut receiver, state, lit());
+    let at = |level| lit().changed(BacklightChange::Level(level));
+    let _ = commit(cx, BacklightChange::Level(3));
+    let _ = commit(cx, BacklightChange::Level(4));
+    let [(_, three), (_, four)] = sent(&mut receiver)[..] else {
+        panic!("both clicks are written");
+    };
+
+    let _ = written(cx, &key, &route, three, Ok(at(3)));
+    assert_eq!(
+        current_load(cx),
+        Load::Ready(Arc::new(at(3).changed(BacklightChange::Level(4))))
+    );
+
+    let _ = commit(cx, BacklightChange::Level(3));
+    let [(BacklightChange::Level(3), back)] = sent(&mut receiver)[..] else {
+        panic!("the click back to level 3 is written");
+    };
+    let _ = written(cx, &key, &route, four, Ok(at(4)));
+    assert_eq!(
+        current_load(cx),
+        Load::Ready(Arc::new(at(4).changed(BacklightChange::Level(3))))
+    );
+    let _ = written(cx, &key, &route, back, Ok(at(3)));
+    assert_eq!(current_load(cx), Load::Ready(Arc::new(at(3))));
+}
+
+/// The agent answers changes in the order they were sent; one that arrives
+/// after a newer change's answer anyway says nothing new and is dropped.
+#[gpui::test]
+fn an_answer_older_than_one_already_taken_is_dropped(cx: &mut gpui::TestAppContext) {
+    let (state, mut receiver) = keyboard_state(true);
+    let (key, route) = installed_and_read(cx, &mut receiver, state, lit());
+    let at = |level| lit().changed(BacklightChange::Level(level));
+    let _ = commit(cx, BacklightChange::Level(3));
+    let _ = commit(cx, BacklightChange::Level(4));
+    let [(_, three), (_, four)] = sent(&mut receiver)[..] else {
+        panic!("both clicks are written");
+    };
+
+    let _ = written(cx, &key, &route, four, Ok(at(4)));
+    assert!(written(cx, &key, &route, three, Ok(at(3))).is_empty());
+    assert!(written(cx, &key, &route, three, Err(WriteError::AgentUnavailable)).is_empty());
+    cx.run_until_parked();
+    assert_eq!(current_load(cx), Load::Ready(Arc::new(at(4))));
+    assert_eq!(backlight_reads(&drain(&mut receiver)), 0);
+}
+
+/// A re-read the keyboard's own broadcast started can answer with a reading
+/// taken before an unanswered change landed. The change stays shown until
+/// its own answer arrives.
+#[gpui::test]
+fn a_re_read_while_a_change_is_unanswered_keeps_the_change_shown(cx: &mut gpui::TestAppContext) {
+    let (state, mut receiver) = keyboard_state(true);
+    let (key, route) = installed_and_read(cx, &mut receiver, state, lit());
+    let raised = lit().changed(BacklightChange::Level(4));
+    let _ = commit(cx, BacklightChange::Level(4));
+    let [(_, four)] = sent(&mut receiver)[..] else {
+        panic!("the click is written");
+    };
+
+    cx.update(|cx| {
+        AppState::update(cx, |state, _| {
+            let resolver = AssetResolver::new();
+            let mut changed = keyboard_inventory(true);
+            changed.paired[0].settings_revision = 1;
+            let _ = state.refresh_inventories(&[changed], &[], &resolver, &[]);
+        });
+    });
+    cx.run_until_parked();
+    assert_eq!(answer_backlight_read(&mut receiver, lit()), route);
+    cx.run_until_parked();
+    assert_eq!(current_load(cx), Load::Ready(Arc::new(raised)));
+
+    let _ = written(cx, &key, &route, four, Ok(raised));
+    assert_eq!(current_load(cx), Load::Ready(Arc::new(raised)));
+}
+
+/// The answer to a change is what the keyboard holds, even when that is not
+/// what the change asked for — its battery saving may have dimmed it since.
+/// An answered change is no longer applied over it.
+#[gpui::test]
+fn the_answer_to_a_change_shows_what_the_keyboard_holds(cx: &mut gpui::TestAppContext) {
+    let (state, mut receiver) = keyboard_state(true);
+    let (key, route) = installed_and_read(cx, &mut receiver, state, lit());
+    let _ = commit(cx, BacklightChange::Level(4));
+    let [(_, four)] = sent(&mut receiver)[..] else {
+        panic!("the click is written");
+    };
+
+    let dimmed = lit().changed(BacklightChange::Level(1));
+    let _ = written(cx, &key, &route, four, Ok(dimmed));
     assert_eq!(current_load(cx), Load::Ready(Arc::new(dimmed)));
 }

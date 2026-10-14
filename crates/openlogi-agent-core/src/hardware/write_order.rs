@@ -10,15 +10,21 @@
 //! writes only if it is still the newest request once the device's earlier
 //! writes have finished.
 //!
+//! A keyboard's backlight needs every write, not just the newest: each change
+//! is a read-modify-write of its own field, so a battery-saving click followed
+//! by a level click must both land, in that order, and two of them running at
+//! once could each read the old config and write back over the other.
+//! [`WriteTicket::in_order`] runs every ticket, strictly in request order.
+//!
 //! One [`WriteOrder`] orders one setting: Fn-lock and report-rate writes do
-//! not wait for each other.
+//! not wait for each other. A setting uses one of the two disciplines.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use openlogi_hid::DeviceRoute;
-use tokio::sync::MutexGuard;
+use tokio::sync::{MutexGuard, Notify};
 
 /// One setting's write queues, one per device route.
 #[derive(Clone, Default)]
@@ -28,9 +34,50 @@ pub(crate) struct WriteOrder(Arc<Mutex<HashMap<String, Arc<Queue>>>>);
 struct Queue {
     latest: AtomicU64,
     turn: tokio::sync::Mutex<()>,
+    /// Which tickets are done, for [`WriteTicket::in_order`].
+    finished: Mutex<Finished>,
+    /// Woken whenever a ticket finishes.
+    advanced: Notify,
 }
 
-/// One requested write, numbered in request order.
+/// Every ticket up to `through` is done, as are the later `early` ones,
+/// which finished (were dropped) before an earlier ticket did.
+#[derive(Default)]
+struct Finished {
+    through: u64,
+    early: BTreeSet<u64>,
+}
+
+impl Queue {
+    fn finish(&self, number: u64) {
+        {
+            // Two integers and a set of them: a panic mid-update leaves at
+            // worst a ticket counted late, never a turn handed out twice.
+            let mut finished = self.finished.lock().unwrap_or_else(PoisonError::into_inner);
+            if number == finished.through + 1 {
+                finished.through = number;
+                loop {
+                    let next = finished.through + 1;
+                    if !finished.early.remove(&next) {
+                        break;
+                    }
+                    finished.through = next;
+                }
+            } else {
+                finished.early.insert(number);
+            }
+        }
+        self.advanced.notify_waiters();
+    }
+
+    fn is_turn_of(&self, number: u64) -> bool {
+        let finished = self.finished.lock().unwrap_or_else(PoisonError::into_inner);
+        finished.through + 1 >= number
+    }
+}
+
+/// One requested write, numbered in request order. Dropping it — once its
+/// write ran, or when the request gave up before — lets the next one go.
 pub(crate) struct WriteTicket {
     queue: Arc<Queue>,
     number: u64,
@@ -76,6 +123,34 @@ impl WriteTicket {
             Some(_turn) => write().await,
             None => superseded().await,
         }
+    }
+
+    /// Run `write` once every write requested before this one has finished,
+    /// even when newer writes were requested meanwhile: unlike
+    /// [`Self::write_or`], no write is skipped. The next ticket's write
+    /// starts when this one returns.
+    pub(crate) async fn in_order<T, Write>(self, write: impl FnOnce() -> Write) -> T
+    where
+        Write: Future<Output = T>,
+    {
+        loop {
+            let advanced = self.queue.advanced.notified();
+            let mut advanced = std::pin::pin!(advanced);
+            // Registered before the check, so a ticket finishing between the
+            // check and the wait still wakes this one.
+            advanced.as_mut().enable();
+            if self.queue.is_turn_of(self.number) {
+                break;
+            }
+            advanced.await;
+        }
+        write().await
+    }
+}
+
+impl Drop for WriteTicket {
+    fn drop(&mut self) {
+        self.queue.finish(self.number);
     }
 }
 
@@ -187,5 +262,57 @@ mod tests {
         reapplying.await.expect("reapply joins");
         picking.await.expect("pick joins");
         assert_eq!(*writes.lock().unwrap(), [1000, 2000]);
+    }
+
+    /// Three quick backlight changes, spawned newest first, still all run —
+    /// none is skipped as superseded — oldest first and one at a time.
+    #[tokio::test]
+    async fn in_order_runs_every_write_one_at_a_time_in_request_order() {
+        let backlight = WriteOrder::default();
+        let tickets: Vec<_> = (0..3).map(|_| backlight.request(&route(1))).collect();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut writes = Vec::new();
+        for (index, ticket) in tickets.into_iter().enumerate().rev() {
+            let log = Arc::clone(&log);
+            writes.push(tokio::spawn(ticket.in_order(move || async move {
+                log.lock().unwrap().push(format!("start {index}"));
+                tokio::task::yield_now().await;
+                log.lock().unwrap().push(format!("end {index}"));
+            })));
+        }
+        for write in writes {
+            write.await.expect("write joins");
+        }
+        assert_eq!(
+            *log.lock().unwrap(),
+            ["start 0", "end 0", "start 1", "end 1", "start 2", "end 2"]
+        );
+    }
+
+    /// A request that gave up — cancelled, or refused before its turn —
+    /// drops its ticket. The writes behind it still run, even when it gave up
+    /// before an earlier write had finished.
+    #[tokio::test]
+    async fn a_dropped_ticket_does_not_hold_up_the_writes_behind_it() {
+        let backlight = WriteOrder::default();
+        let first = backlight.request(&route(1));
+        let abandoned = backlight.request(&route(1));
+        let last = backlight.request(&route(1));
+        drop(abandoned);
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        let last_ran = Arc::clone(&ran);
+        let waiting = tokio::spawn(last.in_order(move || async move {
+            last_ran.lock().unwrap().push(3);
+        }));
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished(), "the last write waits for the first");
+        first
+            .in_order(|| async { ran.lock().unwrap().push(1) })
+            .await;
+        tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
+            .await
+            .expect("the dropped ticket does not block the last write")
+            .expect("the last write joins");
+        assert_eq!(*ran.lock().unwrap(), [1, 3]);
     }
 }

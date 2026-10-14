@@ -301,10 +301,15 @@ impl Runtime {
                     });
                 });
             }
-            ipc::GuiUpdate::BacklightWritten { key, route, result } => {
+            ipc::GuiUpdate::BacklightWritten {
+                key,
+                route,
+                write,
+                result,
+            } => {
                 cx.update(|cx| {
                     AppState::apply(cx, |state| {
-                        state.apply_backlight_written(&key, &route, result)
+                        state.apply_backlight_written(&key, &route, write, result)
                     });
                 });
             }

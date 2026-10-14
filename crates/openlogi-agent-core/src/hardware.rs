@@ -263,6 +263,37 @@ impl DeviceOp {
         .map_err(|_| WriteError::RequestTimedOut { operation: op })?
     }
 
+    /// [`Self::run`] for a write that must land after every earlier write of
+    /// the same setting and must not be skipped (see
+    /// [`WriteTicket::in_order`]): wait for those writes, then lease the
+    /// receiver, resolve the channel and give `write` the whole
+    /// `WRITE_TIMEOUT`.
+    ///
+    /// The wait comes before the lease. The lease is a fair `RwLock`, so
+    /// waiting while holding it could deadlock: a queued pairing session
+    /// would block the earlier write's lease, which waits for this one.
+    pub(crate) async fn run_in_order<W, WriteFut, T>(
+        self,
+        op: HidppOperation,
+        ticket: WriteTicket,
+        write: W,
+    ) -> Result<T, WriteError>
+    where
+        W: FnOnce(SharedChannel) -> WriteFut,
+        WriteFut: Future<Output = Result<T, WriteError>>,
+    {
+        if !self.access.device_io.allows_io() {
+            return Err(WriteError::DeviceNotFound);
+        }
+        ticket
+            .in_order(|| async {
+                let _lease = self.access.receiver_access.acquire_for_io().await;
+                let shared = self.resolve()?;
+                timed(op, write(shared)).await
+            })
+            .await
+    }
+
     /// Own the whole lighting transaction outside the requester runtime. The
     /// worker leases and resolves AFTER obtaining its lighting route lock and
     /// retains that lease through any RGB rollback after requester cancellation.
@@ -1083,6 +1114,29 @@ mod tests {
             pick.write_or(|| async { true }, || async { false }).await,
             "the pick is still the newest report-rate write"
         );
+    }
+
+    /// A backlight change to a keyboard that cannot be resolved fails, and
+    /// its turn passes on: the change requested after it still runs.
+    #[tokio::test]
+    async fn an_in_order_write_that_cannot_resolve_passes_its_turn_on() {
+        let capture: CaptureChannelSlot = std::sync::Arc::new(RwLock::new(None));
+        let registry = ChannelRegistry::default();
+        let receiver_access = ReceiverAccess::default();
+        let (_device_io_signal, device_io) = device_io_channel();
+        let route = unresolvable_route();
+        let backlight = WriteOrder::default();
+        let first = backlight.request(&route);
+        let next = backlight.request(&route);
+        let failed = device_op(&capture, &registry, &receiver_access, &device_io, &route)
+            .run_in_order(HidppOperation::WriteBacklight, first, |_| async {
+                Ok::<_, WriteError>(())
+            })
+            .await;
+        assert!(matches!(failed, Err(WriteError::DeviceNotFound)));
+        let ran =
+            tokio::time::timeout(Duration::from_secs(1), next.in_order(|| async { true })).await;
+        assert_eq!(ran.ok(), Some(true), "the next change gets its turn");
     }
 
     /// A reconnect write to a mouse that stopped answering holds the turn

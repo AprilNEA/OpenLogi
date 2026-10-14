@@ -25,7 +25,7 @@ use openlogi_core::device_order::{DeviceIdentity, PhysicalDeviceKey};
 use openlogi_hid::{
     BacklightChange, BacklightState, CaptureChannelSlot, ChannelPool, ChannelRegistry,
     DeviceIoGate, DeviceRoute, FnLockState, HidppOperation, HostOs, ReportRate, ReportRateInfo,
-    SharedChannel, WriteError, is_reserved_keyboard_control,
+    WriteError, is_reserved_keyboard_control,
 };
 use openlogi_ipc::InventoryHealth;
 use tokio::sync::watch;
@@ -244,18 +244,20 @@ impl SharedHandles {
     /// what it reads back. Every change is applied, one at a time in request
     /// order: each rewrites the whole configuration it read, so two that
     /// overlapped would undo one another, and a newer change to another
-    /// control does not make an older one moot.
+    /// control does not make an older one moot. Waiting for the earlier
+    /// changes does not count against the write's deadline.
     pub async fn set_backlight(
         &self,
         route: &DeviceRoute,
         change: BacklightChange,
     ) -> Result<BacklightState, WriteError> {
         let ticket = self.backlight_order.request(route);
-        let write = move |c: SharedChannel| async move {
-            openlogi_hid::update_backlight_on(&c, change).await
-        };
         self.device(route)
-            .run_in_turn(HidppOperation::WriteBacklight, &ticket, write, write)
+            .run_in_order(
+                HidppOperation::WriteBacklight,
+                ticket,
+                move |c| async move { openlogi_hid::update_backlight_on(&c, change).await },
+            )
             .await
     }
 

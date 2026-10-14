@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use gpui::{Context, Subscription};
 use openlogi_core::hid::{
-    BacklightState, DeviceRoute, DpiInfo, FnLockState, ReportRateInfo, SmartShiftStatus, WriteError,
+    BacklightChange, BacklightState, DeviceRoute, DpiInfo, FnLockState, ReportRateInfo,
+    SmartShiftStatus, WriteError,
 };
 use swr_core::{
     MaybeSend, MaybeSync, QueryHandle, QueryOptions, QueryState, Retry, RetryPolicy, Runtime,
@@ -64,6 +65,41 @@ pub(crate) struct DeviceReads {
     fn_lock: BTreeMap<DeviceKey, DeviceRead<FnLockState>>,
     report_rate: BTreeMap<DeviceKey, DeviceRead<ReportRateInfo>>,
     backlight: BTreeMap<DeviceKey, DeviceRead<BacklightState>>,
+    /// The backlight changes sent per keyboard, for the read on the route
+    /// they went out on; cleared with that read.
+    backlight_writes: BTreeMap<DeviceKey, BacklightWrites>,
+    next_backlight_write: u64,
+}
+
+/// The backlight changes sent to one keyboard that have not been answered
+/// yet, and the newest one that has. The agent applies them one at a time in
+/// the order they were sent, so the answer to one also covers every earlier
+/// change, and none of the later ones.
+#[derive(Default)]
+struct BacklightWrites {
+    /// Oldest first.
+    pending: Vec<(u64, BacklightChange)>,
+    answered: u64,
+}
+
+impl BacklightWrites {
+    /// `state` as the keyboard will hold it once the unanswered changes land.
+    /// Each change sets one control, so applying again one that `state`
+    /// already holds changes nothing: a reading taken after some of them
+    /// landed shows the same as one taken before.
+    fn shown(&self, state: Arc<BacklightState>) -> Arc<BacklightState> {
+        if self.pending.is_empty() {
+            return state;
+        }
+        let shown = self.pending.iter().fold(*state, |shown, &(_, change)| {
+            if shown.accepts(change) {
+                shown.changed(change)
+            } else {
+                shown
+            }
+        });
+        Arc::new(shown)
+    }
 }
 
 impl DeviceReads {
@@ -454,8 +490,8 @@ impl DeviceReads {
     }
 
     /// Start the backlight query unless the same keyboard route is already
-    /// subscribed. A change answers through [`Self::set_backlight_ready`], or
-    /// [`Self::refresh_backlight`] when the keyboard refused it.
+    /// subscribed. A change goes out through [`Self::begin_backlight_write`]
+    /// and is answered through [`Self::finish_backlight_write`].
     pub(crate) fn ensure_backlight(
         &mut self,
         key: DeviceKey,
@@ -516,51 +552,88 @@ impl DeviceReads {
         );
     }
 
-    /// Show `state` as `key`'s backlight now: the change the GUI just asked
-    /// for, then what the keyboard read back. A local write supersedes a fetch
-    /// still in flight. Like [`Self::set_report_rate_ready`], only the read
-    /// subscribed on `route` — the connection `state` was read on — takes it.
-    /// Returns whether one did.
-    pub(crate) fn set_backlight_ready(
+    /// Show `shown` — what is shown now with `change` applied — as `key`'s
+    /// backlight while `change` is written, and number the write. A local
+    /// write supersedes a fetch still in flight. `None` when no read is
+    /// subscribed on `route`, the connection the change goes out on: there is
+    /// then nothing to show it on or to match its answer to.
+    ///
+    /// Until its answer arrives, `change` stays applied over every reading
+    /// that comes in — the answer to an earlier change, or a re-read after
+    /// the keyboard reported a change of its own — so a quick second click is
+    /// neither hidden nor taken for a click on what is already shown.
+    pub(crate) fn begin_backlight_write(
         &mut self,
         key: &DeviceKey,
         route: &DeviceRoute,
-        state: BacklightState,
-    ) -> bool {
-        let Some(read) = self.backlight_on(key, route) else {
-            return false;
-        };
-        let value = Arc::new(state);
+        change: BacklightChange,
+        shown: BacklightState,
+    ) -> Option<u64> {
+        let read = self
+            .backlight
+            .get_mut(key)
+            .filter(|read| read.route == *route)?;
+        let value = Arc::new(shown);
         read.load = Load::Ready(value.clone());
+        self.next_backlight_write += 1;
+        let write = self.next_backlight_write;
+        self.backlight_writes
+            .entry(key.clone())
+            .or_default()
+            .pending
+            .push((write, change));
         if let Some(client) = &self.client {
             client.set::<_, Cached<BacklightState>, WriteError>(
                 query_key(BACKLIGHT, key),
                 Some(value),
             );
         }
-        true
+        Some(write)
     }
 
-    /// Re-read `key`'s backlight from the keyboard, keeping the last value on
-    /// screen while it answers — when the read is still on `route`, the
-    /// connection a refused change went out on. Returns whether it was.
-    pub(crate) fn refresh_backlight(&mut self, key: &DeviceKey, route: &DeviceRoute) -> bool {
-        let Some(read) = self.backlight_on(key, route) else {
-            return false;
-        };
-        read.query.revalidate();
-        true
-    }
-
-    /// `key`'s backlight read, if it is subscribed on `route`.
-    fn backlight_on(
+    /// The keyboard's answer to change `write`, which went out on `route`:
+    /// its `read_back`, shown with the changes sent after `write` still
+    /// applied, or — `None`, when it refused or could not be reached — a
+    /// re-read, with the last value on screen while it answers.
+    ///
+    /// Like [`Self::set_report_rate_ready`], only the read subscribed on
+    /// `route` takes the answer, and an answer older than one already taken
+    /// is dropped: it says nothing the newer one did not. Returns whether
+    /// the answer was taken.
+    pub(crate) fn finish_backlight_write(
         &mut self,
         key: &DeviceKey,
         route: &DeviceRoute,
-    ) -> Option<&mut DeviceRead<BacklightState>> {
-        self.backlight
+        write: u64,
+        read_back: Option<BacklightState>,
+    ) -> bool {
+        let Some(read) = self
+            .backlight
             .get_mut(key)
             .filter(|read| read.route == *route)
+        else {
+            return false;
+        };
+        let writes = self.backlight_writes.entry(key.clone()).or_default();
+        if write <= writes.answered {
+            return false;
+        }
+        writes.answered = write;
+        writes.pending.retain(|&(pending, _)| pending > write);
+        match read_back {
+            Some(state) => {
+                let value = Arc::new(state);
+                read.load = Load::Ready(writes.shown(value.clone()));
+                if let Some(client) = &self.client {
+                    client.set::<_, Cached<BacklightState>, WriteError>(
+                        query_key(BACKLIGHT, key),
+                        Some(value),
+                    );
+                }
+            }
+            None => read.query.revalidate(),
+        }
+        true
     }
 
     /// Retry an exhausted backlight query.
@@ -692,6 +765,7 @@ impl DeviceReads {
     }
 
     fn remove_backlight(&mut self, key: &DeviceKey) {
+        self.backlight_writes.remove(key);
         if let Some(read) = self.backlight.remove(key) {
             drop(read);
             self.clear::<BacklightState>(BACKLIGHT, key);
@@ -791,6 +865,10 @@ impl DeviceReads {
             .filter(|read| read.flight == flight)
         else {
             return false;
+        };
+        let load = match (load, self.backlight_writes.get(key)) {
+            (Load::Ready(state), Some(writes)) => Load::Ready(writes.shown(state)),
+            (load, _) => load,
         };
         if read.load == load {
             return false;
