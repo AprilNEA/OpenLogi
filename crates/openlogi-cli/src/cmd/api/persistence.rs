@@ -31,7 +31,8 @@ impl Save {
             | ApiCommand::FnLock {
                 device,
                 set: Some(_),
-            } => device,
+            }
+            | ApiCommand::OsLayout { device, .. } => device,
             ApiCommand::Smartshift(args)
                 if args.mode.is_some() || args.auto_disengage.is_some() =>
             {
@@ -118,6 +119,10 @@ impl Save {
 
     pub(super) fn fn_lock(&mut self, value: bool) {
         self.config.set_fn_lock(&self.key, value);
+    }
+
+    pub(super) fn keep_os_layout(&mut self, keep: bool) {
+        self.config.set_keep_os_layout(&self.key, keep);
     }
 
     pub(super) fn smartshift(&mut self, state: SmartShiftStatus) -> Result<(), ApiError> {

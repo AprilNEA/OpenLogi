@@ -110,6 +110,9 @@ Common device fields are:
   including the Windows `exe:<filename>` fallback
 - `lighting`, `smartshift`, standalone `light`, and camera controls / profiles
 - `host_switch_targets` and `fn_lock` for compatible keyboards
+- `keep_os_layout` for keyboards whose key layout software can set (HID++
+  `0x4531`): absent or `true` keeps the layout on the host OS, as Logi Options+
+  does; `false` leaves the keyboard's layout to its own shortcuts
 - `identity` and `disabled_gestures`, which are application-managed metadata
 
 `[keyboard.bindings]` contains global key triggers such as `f1` or

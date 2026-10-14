@@ -23,11 +23,12 @@ use std::time::Duration;
 
 use openlogi_core::config::Lighting;
 use openlogi_hid::{
-    CaptureChannelSlot, ChannelRegistry, DeviceIoGate, DeviceRoute, Dpi, HidppOperation,
-    ScrollResolution, SharedChannel, SmartShiftStatus, WeakSharedChannel, WriteError,
+    CaptureChannelSlot, ChannelRegistry, DeviceIoGate, DeviceRoute, Dpi, HidppOperation, HostOs,
+    OsLayoutOutcome, ScrollResolution, SharedChannel, SmartShiftStatus, WeakSharedChannel,
+    WriteError,
 };
 use tokio::time::error::Elapsed;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::receiver_access::ReceiverAccess;
 
@@ -464,6 +465,28 @@ pub(crate) fn write_fn_lock_in_background(op: DeviceOp, ticket: FnLockTicket, on
                     );
                 } else {
                     debug!(index, on, "Fn-lock write superseded by a newer one");
+                }
+            });
+        },
+    );
+}
+
+/// Spawn an OS thread that keeps `op`'s keyboard on `host`'s `0x4531`
+/// platform via [`openlogi_hid::keep_os_layout_on`], which writes only when
+/// the current Easy-Switch slot holds another platform. Returns immediately;
+/// failures (incl. a keyboard whose read-back disagrees with the write) are
+/// logged.
+pub(crate) fn keep_os_layout_in_background(op: DeviceOp, host: HostOs) {
+    let index = op.route.device_index();
+    op.spawn_write(
+        "OS layout write",
+        move |c| async move { openlogi_hid::keep_os_layout_on(&c, host).await },
+        move |result| {
+            log_outcome(index, "OS layout write", result, |outcome| {
+                if let OsLayoutOutcome::Switched { from, to } = outcome {
+                    info!(index, ?from, to, "keyboard layout switched to the host OS");
+                } else {
+                    debug!(index, ?outcome, "keyboard layout left as it is");
                 }
             });
         },

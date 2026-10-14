@@ -324,6 +324,7 @@ fn action_ring_types() {
     assert_wire(&HidppOperation::ReadFnLock, "0f");
     assert_wire(&HidppOperation::ReadPointerScaling, "10");
     assert_wire(&HidppOperation::WritePointerScaling, "11");
+    assert_wire(&HidppOperation::WriteOsLayout, "12");
 }
 
 #[test]
@@ -493,13 +494,14 @@ fn device_inventory() {
                 haptic_panel: true,
                 dpi_gestures: true,
                 fn_lock: false,
+                os_layout: true,
             }),
             settings_revision: 7,
         }],
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b010101000001010101010007",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b01010100000101010101000107",
     );
 }
 

@@ -39,6 +39,7 @@ openlogi api smartshift --device "$DEVICE_ID" --mode free
 openlogi api smartshift --device "$DEVICE_ID" --mode ratchet --auto-disengage 255
 openlogi api fn-lock --device "$DEVICE_ID"
 openlogi api fn-lock --device "$DEVICE_ID" --set on
+openlogi api os-layout --device "$DEVICE_ID" --set off --save
 ```
 
 ### Output and compatibility
@@ -69,6 +70,7 @@ stdout cannot provide a JSON envelope.
 | `dpi` | `device`, `persistence`, `current` (integer), `supported` (array of integers) |
 | `smartshift` | `device`, `persistence`, `mode` (`free` or `ratchet`), `auto_disengage` (integer), `tunable_torque` (1–100, percent of the wheel's maximum force, or null) |
 | `fn-lock` | `device`, `persistence`, `fn_lock`, `default_fn_lock` (boolean, or null when the keyboard reports no firmware default) |
+| `os-layout` | `device`, `persistence`, `keep_os_layout` (boolean) |
 
 `inventory` is `scanning`, `ready`, or `unavailable`. Only `ready` with an empty
 device array means enumeration completed and found no peripherals. Device
@@ -97,7 +99,7 @@ The response excludes pairing passkeys, application history, and model serials.
 
 ### Immediate control and saved preferences
 
-All three setting commands read only unless a setting flag is supplied. Without
+The DPI, SmartShift, and Fn-lock commands read only unless a setting flag is supplied. Without
 `--save`, writes return `persistence: "not_saved"`: they do not modify
 `config.toml` or request a config reload. Saved preferences may be reapplied on
 reconnect, wake, or later configuration changes; firmware may retain some values.
@@ -110,6 +112,15 @@ Saving edits only the selected setting, preserving unrelated preferences and
 comments. A per-link override of that setting is refused with `link_override`
 rather than silently saving a default that the override would supersede.
 There is no profile-switch API yet.
+
+`os-layout` changes an agent setting rather than the device, so it requires
+both `--set` and `--save`; without `--save` it fails with `invalid_value`. The
+agent applies the saved value after the reload. `on`, the default for keyboards
+that allow it, sets the keyboard's key layout (HID++ `0x4531`) to the host OS
+when the keyboard connects, when the setting turns on, and after the keyboard
+reports that a layout shortcut switched it. `off` leaves the keyboard's layout
+as it is; it does not restore an earlier layout. A keyboard whose measured
+capabilities lack `os_layout` returns `unsupported_feature`.
 
 Hardware writes, file persistence, and reload are separate steps, not an atomic
 transaction. The config revision is checked under a writer lock; concurrent edits

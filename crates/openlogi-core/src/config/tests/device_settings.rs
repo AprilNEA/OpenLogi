@@ -1,4 +1,4 @@
-//! Per-device settings: DPI and its presets, SmartShift, scroll inversion and resolution, and the stored bindings.
+//! Per-device settings: DPI and its presets, SmartShift, scroll inversion and resolution, keeping the OS layout, and the stored bindings.
 
 use super::*;
 
@@ -50,6 +50,29 @@ fn default_invert_scroll_is_omitted_from_toml() {
         !body.contains("invert_scroll"),
         "default invert_scroll should be omitted: {body}"
     );
+}
+
+#[test]
+fn keep_os_layout_defaults_on_and_roundtrips_per_device() {
+    let mut cfg = Config::default();
+    // On for any device until the user turns it off, as in Logi Options+.
+    assert!(cfg.keep_os_layout("2b042"));
+    cfg.set_keep_os_layout("2b042", false);
+    let body = toml::to_string_pretty(&cfg).expect("serialize");
+    assert!(body.contains("keep_os_layout = false"), "{body}");
+    let restored = write_and_read(&cfg);
+    assert!(!restored.keep_os_layout("2b042"));
+    assert!(restored.keep_os_layout("absent"));
+    cfg.set_keep_os_layout("2b042", true);
+    assert!(write_and_read(&cfg).keep_os_layout("2b042"));
+}
+
+#[test]
+fn unset_keep_os_layout_is_omitted_from_toml() {
+    let mut cfg = Config::default();
+    cfg.set_invert_scroll("2b042", true);
+    let body = toml::to_string_pretty(&cfg).expect("serialize");
+    assert!(!body.contains("keep_os_layout"), "{body}");
 }
 
 #[test]
