@@ -27,7 +27,7 @@ use tarpc::context;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
-use super::{GuiUpdate, UnpairFailure};
+use super::{GuiUpdate, UnpairFailure, UnpairIntent};
 use crate::state::DeviceKey;
 
 /// The GPUI-bound update stream a request may deliver through.
@@ -430,14 +430,13 @@ impl Request for CancelPairing {
     }
 }
 
-/// Remove a forgotten device's pairing from its receiver, answered as
-/// [`GuiUpdate::DeviceUnpaired`] so the card goes only once the receiver has
-/// let the device go.
+/// Remove one pairing from its receiver, answered as
+/// [`GuiUpdate::DeviceUnpaired`] so local state changes only once the
+/// receiver has let the pairing go.
 pub struct UnpairDevice {
     pub route: DeviceRoute,
-    pub record_key: String,
-    /// Where the device's settings live, dropped once the receiver lets go.
-    pub config_key: Option<String>,
+    /// What the pairing's removal is for.
+    pub intent: UnpairIntent,
 }
 
 impl Request for UnpairDevice {
@@ -456,9 +455,8 @@ impl Request for UnpairDevice {
             Err(Unavailable) => Err(UnpairFailure::AgentUnreachable),
         };
         let _ = updates.send(GuiUpdate::DeviceUnpaired {
-            record_key: self.record_key,
             route: self.route,
-            config_key: self.config_key,
+            intent: self.intent,
             result,
         });
     }

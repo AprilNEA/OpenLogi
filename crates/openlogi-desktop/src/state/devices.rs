@@ -91,6 +91,11 @@ pub struct DeviceRecord {
     ///
     /// [`PairedDevice::settings_revision`]: openlogi_core::device::PairedDevice::settings_revision
     pub settings_revision: u64,
+    /// Other slots on this record's receiver that pair the same physical
+    /// device and are offline: leftovers from pairing it again, folded into
+    /// this card by [`collapse_duplicate_pairings`] and offered for removal.
+    /// Ordered by slot. Empty for everything else.
+    pub(crate) stale_pairings: Vec<DeviceRoute>,
 }
 
 impl DeviceRecord {
@@ -242,9 +247,11 @@ pub(super) fn build_device_list(
                 online: paired.online,
                 battery: paired.battery.clone(),
                 settings_revision: paired.settings_revision,
+                stale_pairings: Vec::new(),
             });
         }
     }
+    collapse_duplicate_pairings(&mut list);
     append_standalone(&mut list, standalone, resolver, config);
     #[cfg(debug_assertions)]
     if std::env::var_os("OPENLOGI_DEMO_KEYBOARD").is_some() {
@@ -273,6 +280,71 @@ pub(super) fn build_device_list(
     apply_custom_names(&mut list, config);
     sort_device_list(&mut list);
     list
+}
+
+/// Fold the offline slots that pair one physical device to the same receiver
+/// into a single card.
+///
+/// A receiver keeps a pairing until it is told to drop it, so pairing a
+/// device to it again leaves the old slot behind — answering with the same
+/// unit id, and with the same serial from the probe cache. Shown as is, one
+/// keyboard becomes three cards. The card that stays is the online slot, else
+/// the slot whose key is the device's own identity (the one that owns its
+/// settings), else the lowest slot; the other offline slots become its
+/// [`DeviceRecord::stale_pairings`]. An online duplicate is never folded: a
+/// live link is not a leftover. Slots on different receivers stay separate
+/// cards, since a second receiver can be a deliberate Easy-Switch host.
+fn collapse_duplicate_pairings(list: &mut Vec<DeviceRecord>) {
+    let mut groups: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
+    for (index, record) in list.iter().enumerate() {
+        let Some(
+            DeviceRoute::Bolt { receiver_uid, .. } | DeviceRoute::Unifying { receiver_uid, .. },
+        ) = &record.route
+        else {
+            continue;
+        };
+        let Some(identity) =
+            RouteIdentity::from_parts(record.serial_number.as_deref(), record.unit_id).config_key()
+        else {
+            continue;
+        };
+        groups
+            .entry((receiver_uid.to_ascii_lowercase(), identity))
+            .or_default()
+            .push(index);
+    }
+    let mut folded = HashSet::new();
+    for ((_, identity), members) in groups {
+        let Some(&keeper) = members.iter().max_by_key(|&&index| {
+            let record = &list[index];
+            (
+                record.online,
+                record.config_key == identity,
+                std::cmp::Reverse(record.slot),
+            )
+        }) else {
+            continue;
+        };
+        let mut stale: Vec<usize> = members
+            .into_iter()
+            .filter(|&index| index != keeper && !list[index].online)
+            .collect();
+        if stale.is_empty() {
+            continue;
+        }
+        stale.sort_by_key(|&index| list[index].slot);
+        list[keeper].stale_pairings = stale
+            .iter()
+            .filter_map(|&index| list[index].route.clone())
+            .collect();
+        folded.extend(stale);
+    }
+    let mut index = 0;
+    list.retain(|_| {
+        let keep = !folded.contains(&index);
+        index += 1;
+        keep
+    });
 }
 
 fn apply_custom_names(list: &mut [DeviceRecord], config: &Config) {
@@ -332,6 +404,7 @@ fn camera_record(camera: &Camera, resolver: &AssetResolver) -> DeviceRecord {
         online: true,
         battery: None,
         settings_revision: 0,
+        stale_pairings: Vec::new(),
     }
 }
 
@@ -410,6 +483,7 @@ fn append_standalone(
             online: device.online,
             battery: None,
             settings_revision: 0,
+            stale_pairings: Vec::new(),
         });
     }
 }
@@ -609,6 +683,7 @@ fn offline_record(
         online: false,
         battery: None,
         settings_revision: 0,
+        stale_pairings: Vec::new(),
     }
 }
 
@@ -672,6 +747,7 @@ pub(super) fn adopt_transient_record(known: &DeviceRecord, live: DeviceRecord) -
         online: live.online,
         battery: live.battery.or_else(|| known.battery.clone()),
         settings_revision: live.settings_revision,
+        stale_pairings: live.stale_pairings,
     }
 }
 
@@ -764,6 +840,7 @@ fn demo_keyboard() -> DeviceRecord {
         online: true,
         battery: None,
         settings_revision: 0,
+        stale_pairings: Vec::new(),
     }
 }
 

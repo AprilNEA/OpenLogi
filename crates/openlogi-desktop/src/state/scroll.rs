@@ -196,6 +196,7 @@ mod tests {
                 online: true,
                 battery: None,
                 settings_revision: 0,
+                stale_pairings: Vec::new(),
             };
             // #974 moved the record list and its selection into one store, so
             // the fixture installs both together.

@@ -110,16 +110,33 @@ pub enum GuiUpdate {
     /// in the observed state to explain the silence. Reported locally rather
     /// than faked as a session the agent never had.
     PairingUndeliverable(PairingFailure),
-    /// Whether the receiver let a forgotten device go. Answers
-    /// [`UnpairDevice`].
+    /// Whether the receiver let a pairing go. Answers [`UnpairDevice`].
     DeviceUnpaired {
-        /// The record the user asked to forget.
-        record_key: String,
         /// The pairing the receiver was asked to drop.
         route: DeviceRoute,
+        /// What the removal was for.
+        intent: UnpairIntent,
+        result: Result<(), UnpairFailure>,
+    },
+}
+
+/// Why the GUI asked a receiver to drop a pairing, which decides what the
+/// answer changes locally.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UnpairIntent {
+    /// The user forgot the device: its card and settings go once the
+    /// receiver lets it go.
+    Forget {
+        /// The record the user asked to forget.
+        record_key: String,
         /// Where its settings live.
         config_key: Option<String>,
-        result: Result<(), UnpairFailure>,
+    },
+    /// A leftover slot of a device that stays: nothing local changes, the
+    /// next inventory simply no longer lists the slot.
+    StalePairing {
+        /// The device's display name, for a failure message.
+        name: String,
     },
 }
 
