@@ -54,6 +54,26 @@ pub(super) enum ReconcileTrigger {
     RecoveryScan,
 }
 
+impl ReconcileTrigger {
+    /// The confirmation policy requested by this inventory trigger.
+    pub(super) fn reapply_reason(self) -> Option<super::ReapplyReason> {
+        use super::ReapplyReason;
+        match self {
+            Self::HidEvent(HidppEventSource::WirelessDeviceStatus) => {
+                Some(ReapplyReason::Reconnect)
+            }
+            Self::Hotplug
+            | Self::SystemResume
+            | Self::HidEvent(HidppEventSource::ReceiverConnection) => Some(ReapplyReason::Volatile),
+            Self::Initial
+            | Self::RepairRetry
+            | Self::SettingsConfirmation
+            | Self::RecoveryScan
+            | Self::HidEvent(_) => None,
+        }
+    }
+}
+
 /// A deadline owned by the inventory worker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum DeadlinePurpose {
@@ -216,6 +236,27 @@ mod tests {
         );
 
         assert_eq!(schedule.recovery_due, event_time + RECOVERY_SCAN_PERIOD);
+    }
+
+    #[test]
+    fn reconnect_triggers_reapply_but_battery_events_do_not() {
+        assert!(ReconcileTrigger::Hotplug.reapply_reason().is_some());
+        assert!(
+            ReconcileTrigger::HidEvent(HidppEventSource::ReceiverConnection)
+                .reapply_reason()
+                .is_some()
+        );
+        assert!(
+            ReconcileTrigger::HidEvent(HidppEventSource::WirelessDeviceStatus)
+                .reapply_reason()
+                .is_some()
+        );
+        assert!(
+            ReconcileTrigger::HidEvent(HidppEventSource::UnifiedBattery)
+                .reapply_reason()
+                .is_none()
+        );
+        assert!(ReconcileTrigger::RecoveryScan.reapply_reason().is_none());
     }
 
     #[test]
