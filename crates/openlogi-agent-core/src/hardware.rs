@@ -529,7 +529,14 @@ impl VolatileMouseSettings {
 /// on the one OS thread spawned here. Takes `op` by reference (unlike every
 /// other function here) because it only ever reads its fields — it never
 /// hands the operation itself to [`DeviceOp::run`] or [`DeviceOp::detach`].
-pub fn reapply_mouse_volatile_in_background(op: &DeviceOp, settings: VolatileMouseSettings) {
+pub fn reapply_mouse_volatile_in_background(
+    op: &DeviceOp,
+    settings: VolatileMouseSettings,
+    invalidate_dpi: impl Fn() + Send + 'static,
+) {
+    if settings.dpi.is_some() {
+        invalidate_dpi();
+    }
     let VolatileMouseSettings {
         wheel,
         dpi,
@@ -567,6 +574,9 @@ pub fn reapply_mouse_volatile_in_background(op: &DeviceOp, settings: VolatileMou
                     openlogi_hid::set_dpi_on(&shared, dpi).await
                 })
                 .await;
+                // A timeout can still have changed the sensor. Forget any
+                // cached action value acquired while this write was in flight.
+                invalidate_dpi();
                 log_outcome(index, "DPI write", result, |()| {
                     debug!(index, %dpi, "DPI written to device");
                 });

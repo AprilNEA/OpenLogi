@@ -328,3 +328,31 @@ fn dpi_restore_uses_the_active_route_override() {
     let cycles = orch.shared.dpi_cycle.read().unwrap();
     assert_eq!(cycles.current("mouse"), Some(Dpi::new(1600)));
 }
+
+#[test]
+fn reconnect_reapply_invalidates_a_selected_dpi_preset() {
+    let mut config = Config::default();
+    config.set_dpi("mouse", Dpi::new(800));
+    config.devices.get_mut("mouse").unwrap().dpi_presets =
+        vec![Dpi::new(400), Dpi::new(800), Dpi::new(1600)];
+    let mut orch = orchestrator(config);
+    orch.devices = vec![dev("mouse", 1, true)];
+    orch.rebuild();
+    orch.shared
+        .dpi_cycle
+        .write()
+        .unwrap()
+        .state_for(Some("mouse"))
+        .unwrap()
+        .set(2);
+    // Ordinary publication must retain the action-selected speed.
+    orch.publish_device_runtime();
+    assert_eq!(
+        orch.shared.dpi_cycle.read().unwrap().current("mouse"),
+        Some(Dpi::new(1600))
+    );
+    // A same-route reconnect replays 800, so 1600 is no longer a sensor reading.
+    orch.reapply_volatile_settings(&orch.devices[0]);
+    orch.publish_device_runtime();
+    assert_eq!(orch.shared.dpi_cycle.read().unwrap().current("mouse"), None);
+}
