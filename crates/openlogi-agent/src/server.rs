@@ -288,12 +288,7 @@ impl Agent for AgentServer {
         route: DeviceRoute,
         rate: ReportRate,
     ) -> Result<ReportRateInfo, WriteError> {
-        self.shared
-            .device(&route)
-            .run(HidppOperation::WriteReportRate, |c| async move {
-                openlogi_hid::set_report_rate_on(&c, rate).await
-            })
-            .await
+        self.shared.set_report_rate(&route, rate).await
     }
 
     async fn next_pairing(self, _: Context) -> Option<PairingUpdate> {

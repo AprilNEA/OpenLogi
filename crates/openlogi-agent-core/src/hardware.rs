@@ -35,12 +35,12 @@ use tracing::{debug, info, warn};
 use crate::receiver_access::ReceiverAccess;
 
 mod context;
-mod fn_lock;
 mod light;
 mod rgb_control;
+mod write_order;
 
 pub use context::HardwareContext;
-pub(crate) use fn_lock::{FnLockOrder, FnLockTicket};
+pub(crate) use write_order::{WriteOrder, WriteTicket};
 
 /// Upper bound on a single HID++ write. `hidpp` has no request timeout of its
 /// own, so without this an asleep / unresponsive device would hang (and leak)
@@ -446,15 +446,17 @@ pub fn toggle_smartshift_in_background(op: DeviceOp) {
 /// keyboard was requested after `ticket`. Returns immediately; failures (incl.
 /// keyboards that expose neither `0x40a3` nor `0x40a2` fn inversion, and a
 /// keyboard whose read-back disagrees with the write) are logged.
-pub(crate) fn write_fn_lock_in_background(op: DeviceOp, ticket: FnLockTicket, on: bool) {
+pub(crate) fn write_fn_lock_in_background(op: DeviceOp, ticket: WriteTicket, on: bool) {
     let index = op.route.device_index();
     op.spawn_write(
         "Fn-lock write",
         move |c| async move {
-            let Some(_turn) = ticket.turn().await else {
-                return Ok(None);
-            };
-            openlogi_hid::set_fn_lock_on(&c, on).await.map(Some)
+            ticket
+                .write_or(
+                    || async { openlogi_hid::set_fn_lock_on(&c, on).await.map(Some) },
+                    || async { Ok(None) },
+                )
+                .await
         },
         move |result| {
             log_outcome(index, "Fn-lock write", result, |state| {
@@ -569,7 +571,17 @@ impl VolatileMouseSettings {
 /// on the one OS thread spawned here. Takes `op` by reference (unlike every
 /// other function here) because it only ever reads its fields — it never
 /// hands the operation itself to [`DeviceOp::run`] or [`DeviceOp::detach`].
-pub fn reapply_mouse_volatile_in_background(op: &DeviceOp, settings: VolatileMouseSettings) {
+///
+/// The report rate is the one setting here the GUI also writes on its own, so
+/// its write is numbered in `report_rate_order` now, as the reapply is
+/// scheduled: a pick the user makes before the reapply reaches the mouse is
+/// newer, and the reapply then leaves the rate to it rather than writing the
+/// configured one over it.
+pub(crate) fn reapply_mouse_volatile_in_background(
+    op: &DeviceOp,
+    settings: VolatileMouseSettings,
+    report_rate_order: &WriteOrder,
+) {
     let VolatileMouseSettings {
         wheel,
         dpi,
@@ -583,6 +595,9 @@ pub fn reapply_mouse_volatile_in_background(op: &DeviceOp, settings: VolatileMou
             return;
         }
     };
+    // Numbered only once the reapply will run: a ticket that never writes
+    // would still supersede a pick already waiting for its turn.
+    let report_rate = report_rate.map(|rate| (rate, report_rate_order.request(&op.route)));
     let receiver_access = op.access.receiver_access.clone();
     let device_io = op.access.device_io.clone();
     let index = op.route.device_index();
@@ -612,13 +627,26 @@ pub fn reapply_mouse_volatile_in_background(op: &DeviceOp, settings: VolatileMou
                     debug!(index, %dpi, "DPI written to device");
                 });
             }
-            if let Some(rate) = report_rate {
+            if let Some((rate, ticket)) = report_rate {
                 let result = tokio::time::timeout(WRITE_TIMEOUT, async {
-                    openlogi_hid::set_report_rate_on(&shared, rate).await
+                    ticket
+                        .write_or(
+                            || async {
+                                openlogi_hid::set_report_rate_on(&shared, rate)
+                                    .await
+                                    .map(Some)
+                            },
+                            || async { Ok(None) },
+                        )
+                        .await
                 })
                 .await;
                 log_outcome(index, "report-rate write", result, |info| {
-                    debug!(index, rate = %info.current, "report rate written to device");
+                    if let Some(info) = info {
+                        debug!(index, rate = %info.current, "report rate written to device");
+                    } else {
+                        debug!(index, %rate, "report-rate reapply superseded by a newer write");
+                    }
                 });
             }
             if let Some(ss) = smartshift {
@@ -951,6 +979,34 @@ mod tests {
         assert!(
             !called.load(Ordering::SeqCst),
             "f must not run when the route can't be resolved"
+        );
+    }
+
+    /// A reapply that cannot reach the mouse numbers no report-rate write:
+    /// a ticket that never writes would still make a pick already waiting
+    /// for its turn read the mouse instead of writing the user's rate.
+    #[tokio::test]
+    async fn a_reapply_that_cannot_resolve_leaves_a_waiting_pick_its_turn() {
+        let capture: CaptureChannelSlot = std::sync::Arc::new(RwLock::new(None));
+        let registry = ChannelRegistry::default();
+        let receiver_access = ReceiverAccess::default();
+        let (_device_io_signal, device_io) = device_io_channel();
+        let route = unresolvable_route();
+        let rates = WriteOrder::default();
+        let pick = rates.request(&route);
+
+        reapply_mouse_volatile_in_background(
+            &device_op(&capture, &registry, &receiver_access, &device_io, &route),
+            VolatileMouseSettings {
+                report_rate: Some(ReportRate::new(1000)),
+                ..VolatileMouseSettings::default()
+            },
+            &rates,
+        );
+
+        assert!(
+            pick.write_or(|| async { true }, || async { false }).await,
+            "the pick is still the newest report-rate write"
         );
     }
 

@@ -12,8 +12,10 @@
 //! answer is the mouse's read-back, so the selected rate is never a guess
 //! about a write still in flight: the pick shows at once, then the read-back
 //! replaces it, or a refusal sends the query back to the mouse for the truth.
+//! The answer names the connection it was read on and is dropped once the
+//! mouse has moved to another one, whose reading is its own.
 
-use openlogi_core::hid::{ReportRate, ReportRateInfo, WriteError};
+use openlogi_core::hid::{DeviceRoute, ReportRate, ReportRateInfo, WriteError};
 use tracing::{debug, warn};
 
 use super::device_key::DeviceKey;
@@ -86,6 +88,7 @@ impl AppState {
         };
         self.pointer.reads.set_report_rate_ready(
             &device_key,
+            &route,
             ReportRateInfo {
                 current: rate,
                 supported,
@@ -102,17 +105,31 @@ impl AppState {
     /// The mouse's answer to a [`Self::commit_report_rate`] write: show the
     /// read-back, or — when the mouse refused or could not be reached — ask it
     /// again so the optimistic value does not stand in for its own.
+    ///
+    /// `route` is the connection the write went out on. A mouse that has
+    /// since moved — receiver to cable, say — keeps its key but offers that
+    /// connection's rates, so only a read still subscribed on `route` takes
+    /// the answer; otherwise it is dropped and the new connection's own read
+    /// stands.
     pub fn apply_report_rate_written(
         &mut self,
         key: &DeviceKey,
+        route: &DeviceRoute,
         result: Result<ReportRateInfo, WriteError>,
     ) -> StateEvents {
-        match result {
-            Ok(info) => self.pointer.reads.set_report_rate_ready(key, info),
+        let landed = match result {
+            Ok(info) => self.pointer.reads.set_report_rate_ready(key, route, info),
             Err(error) => {
-                warn!(%error, key = %key, "report-rate write did not land — re-reading the mouse");
-                self.pointer.reads.refresh_report_rate(key);
+                let refreshed = self.pointer.reads.refresh_report_rate(key, route);
+                if refreshed {
+                    warn!(%error, key = %key, "report-rate write did not land — re-reading the mouse");
+                }
+                refreshed
             }
+        };
+        if !landed {
+            debug!(key = %key, "report-rate answer for a connection no read is on — dropping it");
+            return StateEvents::none();
         }
         StateEvent::ReportRateChanged(key.clone()).into()
     }

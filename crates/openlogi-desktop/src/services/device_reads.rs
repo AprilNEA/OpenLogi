@@ -10,7 +10,8 @@ use openlogi_core::hid::{
     DeviceRoute, DpiInfo, FnLockState, ReportRateInfo, SmartShiftStatus, WriteError,
 };
 use swr_core::{
-    MaybeSend, MaybeSync, QueryOptions, QueryState, Retry, RetryPolicy, Runtime, SwrClient,
+    MaybeSend, MaybeSync, QueryHandle, QueryOptions, QueryState, Retry, RetryPolicy, Runtime,
+    SwrClient,
 };
 use swr_gpui::Query;
 use tokio::sync::mpsc;
@@ -97,6 +98,7 @@ impl DeviceReads {
         )
         .retry_if(|error| !dpi_error_is_permanent(error));
         let handle = client.subscribe(query_key(DPI, &key), fetcher, QueryOptions::immutable());
+        read_through(&client, DPI, &key, &handle);
         let query = Query::new(&client, handle, cx);
         let load = project_load(query.read(cx), dpi_error_is_permanent);
         let observed_key = key.clone();
@@ -167,11 +169,7 @@ impl DeviceReads {
         let previous = self.smartshift.remove(&key);
         let had_previous = previous.is_some();
         drop(previous);
-        if preserve_data {
-            // A confirming read keeps the optimistic write visible as stale
-            // data while invalidation starts the replacement query.
-            client.invalidate(query_key(SMARTSHIFT, &key));
-        } else if had_previous {
+        if had_previous && !preserve_data {
             self.clear::<SmartShiftStatus>(SMARTSHIFT, &key);
         }
         let flight = self.take_flight();
@@ -194,6 +192,15 @@ impl DeviceReads {
             fetcher,
             QueryOptions::immutable(),
         );
+        if preserve_data {
+            // A confirming read keeps the optimistic write visible as stale
+            // data while invalidation starts the replacement query. A read
+            // already in flight may predate the write, so it is discarded
+            // rather than waited for.
+            client.invalidate(query_key(SMARTSHIFT, &key));
+        } else {
+            read_through(&client, SMARTSHIFT, &key, &handle);
+        }
         let query = Query::new(&client, handle, cx);
         let load = project_load(query.read(cx), smartshift_error_is_permanent);
         let observed_key = key.clone();
@@ -258,6 +265,7 @@ impl DeviceReads {
         )
         .retry_if(|error| !fn_lock_error_is_permanent(error));
         let handle = client.subscribe(query_key(FN_LOCK, &key), fetcher, QueryOptions::immutable());
+        read_through(&client, FN_LOCK, &key, &handle);
         let query = Query::new(&client, handle, cx);
         let load = project_load(query.read(cx), fn_lock_error_is_permanent);
         let observed_key = key.clone();
@@ -349,6 +357,7 @@ impl DeviceReads {
             fetcher,
             QueryOptions::immutable(),
         );
+        read_through(&client, REPORT_RATE, &key, &handle);
         let query = Query::new(&client, handle, cx);
         let load = project_load(query.read(cx), report_rate_error_is_permanent);
         let observed_key = key.clone();
@@ -377,25 +386,51 @@ impl DeviceReads {
     /// asked for, then what the mouse read back. Like
     /// [`Self::set_fn_lock_ready`], a local write supersedes a fetch still in
     /// flight.
-    pub(crate) fn set_report_rate_ready(&mut self, key: &DeviceKey, info: ReportRateInfo) {
+    ///
+    /// `route` is the connection `info` was read on. The cache entry is keyed
+    /// by the mouse alone, so a write answered over a connection the mouse has
+    /// since left would list the wrong connection's rates: only the read
+    /// subscribed on `route` takes it. Returns whether one did.
+    pub(crate) fn set_report_rate_ready(
+        &mut self,
+        key: &DeviceKey,
+        route: &DeviceRoute,
+        info: ReportRateInfo,
+    ) -> bool {
+        let Some(read) = self.report_rate_on(key, route) else {
+            return false;
+        };
         let value = Arc::new(info);
+        read.load = Load::Ready(value.clone());
         if let Some(client) = &self.client {
             client.set::<_, Cached<ReportRateInfo>, WriteError>(
                 query_key(REPORT_RATE, key),
-                Some(value.clone()),
+                Some(value),
             );
         }
-        if let Some(read) = self.report_rate.get_mut(key) {
-            read.load = Load::Ready(value);
-        }
+        true
     }
 
     /// Re-read `key`'s report rate from the mouse, keeping the last value on
-    /// screen while it answers.
-    pub(crate) fn refresh_report_rate(&mut self, key: &DeviceKey) {
-        if let Some(read) = self.report_rate.get_mut(key) {
-            read.query.revalidate();
-        }
+    /// screen while it answers — when the read is still on `route`, the
+    /// connection a refused write went out on. Returns whether it was.
+    pub(crate) fn refresh_report_rate(&mut self, key: &DeviceKey, route: &DeviceRoute) -> bool {
+        let Some(read) = self.report_rate_on(key, route) else {
+            return false;
+        };
+        read.query.revalidate();
+        true
+    }
+
+    /// `key`'s report-rate read, if it is subscribed on `route`.
+    fn report_rate_on(
+        &mut self,
+        key: &DeviceKey,
+        route: &DeviceRoute,
+    ) -> Option<&mut DeviceRead<ReportRateInfo>> {
+        self.report_rate
+            .get_mut(key)
+            .filter(|read| read.route == *route)
     }
 
     /// Retry an exhausted report-rate query.
@@ -427,7 +462,9 @@ impl DeviceReads {
             read.query.revalidate();
         }
         self.refresh_fn_lock(key);
-        self.refresh_report_rate(key);
+        if let Some(read) = self.report_rate.get_mut(key) {
+            read.query.revalidate();
+        }
     }
 
     /// `key`'s Fn-lock load, or `None` while nothing has subscribed to it.
@@ -550,10 +587,12 @@ impl DeviceReads {
         let Some(client) = &self.client else {
             return;
         };
-        // Drop subscribers before this call. `set(None)` fences the old flight;
-        // invalidation then leaves the empty entry stale for the next route.
+        // `set(None)` fences the old flight: whatever it answers is dropped.
+        // The next subscription reads afresh through [`read_through`].
+        // Invalidating here would refetch at once with the dropped read's
+        // fetcher — and so over the route the device just left — because a
+        // dropped `Query` unsubscribes only when its watcher task next runs.
         client.set::<_, Cached<T>, WriteError>(query_key(kind, key), None);
-        client.invalidate(query_key(kind, key));
     }
 
     fn take_flight(&mut self) -> u64 {
@@ -621,6 +660,28 @@ impl DeviceReads {
 
 fn query_key(kind: &'static str, key: &DeviceKey) -> (&'static str, &'static str, String) {
     (ROOT, kind, key.to_string())
+}
+
+/// Have a just-made subscription read the device now, through its own
+/// fetcher and so over its own route.
+///
+/// A subscription is made for a device new to this window, one back from
+/// absence, or one on a new route. A fresh entry starts that read on its own;
+/// an entry [`DeviceReads::clear`] emptied, or one holding a write's
+/// optimistic value, does not, because these queries are immutable. Only now
+/// that subscribing has made this fetcher the entry's — fetchers are
+/// last-wins — does invalidating read over `route` rather than the last one.
+fn read_through<T>(
+    client: &SwrClient,
+    kind: &'static str,
+    key: &DeviceKey,
+    handle: &QueryHandle<Cached<T>, WriteError>,
+) where
+    T: MaybeSend + MaybeSync + 'static,
+{
+    if !handle.snapshot().is_validating {
+        client.invalidate(query_key(kind, key));
+    }
 }
 
 async fn read_ipc<T>(

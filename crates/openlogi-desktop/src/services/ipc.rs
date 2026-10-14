@@ -111,6 +111,9 @@ pub enum GuiUpdate {
     ReportRateWritten {
         /// The mouse that was written.
         key: DeviceKey,
+        /// The connection the write went out on. The rate list belongs to
+        /// that connection, so an answer is stale once the mouse moves.
+        route: DeviceRoute,
         /// The read-back, or why the write did not land.
         result: Result<ReportRateInfo, WriteError>,
     },

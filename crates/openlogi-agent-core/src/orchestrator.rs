@@ -24,7 +24,7 @@ use openlogi_core::device::{
 use openlogi_core::device_order::{DeviceIdentity, PhysicalDeviceKey};
 use openlogi_hid::{
     CaptureChannelSlot, ChannelPool, ChannelRegistry, DeviceIoGate, DeviceRoute, FnLockState,
-    HidppOperation, HostOs, WriteError, is_reserved_keyboard_control,
+    HidppOperation, HostOs, ReportRate, ReportRateInfo, WriteError, is_reserved_keyboard_control,
 };
 use openlogi_ipc::InventoryHealth;
 use tokio::sync::watch;
@@ -35,7 +35,7 @@ use crate::capture_plan::{
     DeviceCapturePlan, SharedCapturePlans, hidpp_side_gesture_maps_for, plan_for_device,
 };
 use crate::hardware::{
-    DeviceAccess, DeviceOp, FnLockOrder, HardwareContext, KeptOsLayouts, VolatileMouseSettings,
+    DeviceAccess, DeviceOp, HardwareContext, KeptOsLayouts, VolatileMouseSettings, WriteOrder,
 };
 use crate::observable::ObservableState;
 use crate::receiver_access::ReceiverAccess;
@@ -131,7 +131,10 @@ pub struct SharedHandles {
     /// Keyboard → pointing-device routes resolved from `config.toml`.
     pub host_switch_links: HostSwitchLinks,
     /// Orders every path's Fn-lock writes per keyboard.
-    fn_lock_order: FnLockOrder,
+    fn_lock_order: WriteOrder,
+    /// Orders the GUI's report-rate writes and the reconnect reapply's per
+    /// mouse.
+    report_rate_order: WriteOrder,
     /// The running inventory watcher's refresh handle, published at arming;
     /// `None` while no watcher runs.
     inventory_refresh: Arc<RwLock<Option<InventoryRefresh>>>,
@@ -202,10 +205,35 @@ impl SharedHandles {
         let ticket = self.fn_lock_order.request(route);
         self.keyboard_device(route)
             .run(HidppOperation::WriteFnLock, |c| async move {
-                match ticket.turn().await {
-                    Some(_turn) => openlogi_hid::set_fn_lock_on(&c, fn_lock).await,
-                    None => openlogi_hid::get_fn_lock_on(&c).await,
-                }
+                ticket
+                    .write_or(
+                        || openlogi_hid::set_fn_lock_on(&c, fn_lock),
+                        || openlogi_hid::get_fn_lock_on(&c),
+                    )
+                    .await
+            })
+            .await
+    }
+
+    /// Write `rate` to the mouse at `route` and return what it reads back.
+    /// When a newer report-rate write for the mouse is requested before this
+    /// one gets its turn, this one reads the mouse instead of writing a rate
+    /// that is about to be replaced. A reconnect reapply numbers its write
+    /// when it is scheduled, so it never lands over a pick made after that.
+    pub async fn set_report_rate(
+        &self,
+        route: &DeviceRoute,
+        rate: ReportRate,
+    ) -> Result<ReportRateInfo, WriteError> {
+        let ticket = self.report_rate_order.request(route);
+        self.device(route)
+            .run(HidppOperation::WriteReportRate, |c| async move {
+                ticket
+                    .write_or(
+                        || openlogi_hid::set_report_rate_on(&c, rate),
+                        || openlogi_hid::get_report_rate_info_on(&c),
+                    )
+                    .await
             })
             .await
     }
@@ -352,7 +380,8 @@ impl Orchestrator {
             capture_rearm_generation: Arc::new(AtomicU64::new(0)),
             receiver_access: ReceiverAccess::default(),
             host_switch_links,
-            fn_lock_order: FnLockOrder::default(),
+            fn_lock_order: WriteOrder::default(),
+            report_rate_order: WriteOrder::default(),
             inventory_refresh: Arc::new(RwLock::new(None)),
         };
         let orch = Self {
@@ -842,6 +871,7 @@ impl Orchestrator {
             crate::hardware::reapply_mouse_volatile_in_background(
                 &self.shared.device(&route),
                 settings,
+                &self.shared.report_rate_order,
             );
         }
         // A disabled entry is re-applied too: it writes black, and a device

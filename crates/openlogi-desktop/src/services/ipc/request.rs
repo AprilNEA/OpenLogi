@@ -187,6 +187,7 @@ impl Request for SetReportRate {
     fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
         let _ = updates.send(GuiUpdate::ReportRateWritten {
             key: self.key,
+            route: self.route,
             result: or_unavailable(outcome),
         });
     }
