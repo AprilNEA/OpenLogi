@@ -63,6 +63,7 @@ mod language;
 // where it has content. `SettingsPage::index` tracks the shift.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod permissions;
+mod receivers;
 mod updates;
 
 /// Which sidebar page the window opens to. Maps to the page order in
@@ -85,9 +86,9 @@ impl SettingsPage {
             // there (see the `mod permissions` cfg).
             Self::About => {
                 if cfg!(any(target_os = "macos", target_os = "linux")) {
-                    5
+                    6
                 } else {
-                    4
+                    5
                 }
             }
         }
@@ -430,6 +431,9 @@ impl Render for SettingsView {
         }
         let pal = theme::palette(cx);
         let view = cx.entity();
+        let receivers = AppState::try_read(cx)
+            .map(|state| state.receivers().to_vec())
+            .unwrap_or_default();
         // Only surface the Camera permission when a webcam is actually present,
         // so people without a Logitech camera are never asked for camera access.
         // Gated to the platforms that register the permission page below (macOS
@@ -471,6 +475,7 @@ impl Render for SettingsView {
                 self.asset_source_select.clone(),
                 self.asset_cache_desc.clone(),
             ))
+            .page(receivers::receivers_page(&receivers))
             .page(about::about_page(view, self.copied));
         // Surfaces competing macOS event taps (a pointer-lag cause) and, in debug
         // builds, the full tap list and a live event monitor. Appended after
