@@ -365,8 +365,13 @@ struct ScrollingFacts {
     /// support still renders, checked and disabled — so these are two named
     /// fields, not a sum type.
     inverted: bool,
-    /// Whether the current link reports HID++ inversion support.
+    /// Whether the current link reports HID++ inversion support — native or
+    /// software (see `inversion_is_software`).
     inversion_supported: bool,
+    /// Whether `inversion_supported` is true only because OpenLogi reverses
+    /// the wheel itself as it captures it (the device's own firmware has no
+    /// invert bit). Meaningless when `inversion_supported` is false.
+    inversion_is_software: bool,
     resolution: Option<openlogi_core::config::ScrollResolution>,
     hires: HiresWheel,
 }
@@ -383,6 +388,18 @@ enum HiresWheel {
     Nowhere,
 }
 
+/// Explains the scrolling card's inversion toggle for the three cases a
+/// device can be in — and the middle one has to say so: a device whose
+/// firmware has no invert bit is reversed by OpenLogi's own capture layer,
+/// which is a different guarantee from the device doing it itself.
+fn inversion_description(supported: bool, is_software: bool) -> gpui::SharedString {
+    match (supported, is_software) {
+        (false, _) => tr!("pointer.scroll_inversion_unsupported"),
+        (true, false) => tr!("pointer.scroll_direction_description"),
+        (true, true) => tr!("pointer.scroll_direction_software_description"),
+    }
+}
+
 /// Scrolling card: per-device native inversion and wheel-resolution controls.
 /// Pure config — no hardware read — so it is a plain settings block rather than
 /// an `Entity` panel like DPI / SmartShift.
@@ -390,11 +407,13 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
     let ScrollingFacts {
         inverted,
         inversion_supported,
+        inversion_is_software,
         resolution,
         hires,
     } = AppState::try_read(cx).map_or_else(ScrollingFacts::default, |state| ScrollingFacts {
         inverted: state.current_invert_scroll(),
-        inversion_supported: state.current_scroll_inversion_supported(),
+        inversion_supported: state.current_scroll_inversion_available(),
+        inversion_is_software: state.current_scroll_inversion_is_software(),
         resolution: state.current_scroll_resolution(),
         hires: if state.current_hires_wheel_supported() {
             HiresWheel::Here
@@ -404,11 +423,7 @@ fn scrolling_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
             HiresWheel::Nowhere
         },
     });
-    let inversion_description = if inversion_supported {
-        tr!("pointer.scroll_direction_description")
-    } else {
-        tr!("pointer.scroll_inversion_unsupported")
-    };
+    let inversion_description = inversion_description(inversion_supported, inversion_is_software);
     let inversion_row = h_flex()
         .justify_between()
         .items_center()
@@ -638,40 +653,37 @@ fn device_tab(cx: &mut Context<AppView>) -> impl IntoElement {
     )
 }
 
-/// What the Fn-lock row knows: whether the keyboard has the control and
-/// which state to show (the keyboard's own reading once it lands, else the
-/// persisted preference — see `AppState::current_fn_lock_shown`).
+/// What the keyboard card knows: whether the keyboard has an Fn-lock control
+/// and which state to show (the keyboard's own reading once it lands, else the
+/// persisted preference — see `AppState::current_fn_lock_shown`), and whether
+/// its key layout can be kept on the host OS and is.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-struct FnLockFacts {
-    supported: bool,
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "four independent facts the card renders, not a state machine"
+)]
+struct KeyboardFacts {
+    fn_lock_supported: bool,
     fn_lock: bool,
+    os_layout_supported: bool,
+    keep_os_layout: bool,
 }
 
-/// Keyboard card: the Fn-lock toggle. Written to `config.toml` and pushed to
-/// the keyboard by the agent; the state shown is the keyboard's own reading
-/// once it lands, so a change made on the keyboard (Fn+Esc) is visible too.
-fn keyboard_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
-    let facts = AppState::try_read(cx).map_or_else(FnLockFacts::default, |state| FnLockFacts {
-        supported: state.current_fn_lock_supported(),
-        fn_lock: state.current_fn_lock_shown(),
-    });
-    let description = if facts.supported {
-        tr!("device.fn_lock_description")
-    } else {
-        tr!("device.fn_lock_unsupported")
-    };
-    let row = h_flex()
+/// One keyboard setting: a title and a caption on the left, its toggle on the
+/// right.
+fn keyboard_toggle_row(
+    pal: Palette,
+    title: gpui::SharedString,
+    description: gpui::SharedString,
+    toggle: Toggle,
+) -> impl IntoElement {
+    h_flex()
         .justify_between()
         .items_center()
         .gap_4()
         .child(
             v_flex()
-                .child(
-                    div()
-                        .text_body()
-                        .text_color(pal.text_primary)
-                        .child(tr!("device.fn_lock")),
-                )
+                .child(div().text_body().text_color(pal.text_primary).child(title))
                 .child(
                     div()
                         .text_caption()
@@ -679,19 +691,59 @@ fn keyboard_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
                         .child(description),
                 ),
         )
-        .child(
-            Toggle::new("fn-lock-toggle")
-                .selected(facts.fn_lock)
-                .disabled(!facts.supported)
-                .label((!facts.supported).then(|| tr!("common.unavailable")))
-                .on_change(|fn_lock, _window, cx| {
-                    AppState::apply(cx, |state| state.commit_fn_lock(*fn_lock));
-                }),
-        );
+        .child(toggle)
+}
+
+/// Keyboard card: the Fn-lock and keep-OS-layout toggles. Fn lock is written
+/// to `config.toml` and pushed to the keyboard by the agent; the state shown
+/// is the keyboard's own reading once it lands, so a change made on the
+/// keyboard (Fn+Esc) is visible too. Keep OS layout is an agent setting: the
+/// agent sets the host OS's layout and restores it after a layout shortcut.
+fn keyboard_card(pal: Palette, cx: &mut Context<AppView>) -> impl IntoElement {
+    let facts = AppState::try_read(cx).map_or_else(KeyboardFacts::default, |state| KeyboardFacts {
+        fn_lock_supported: state.current_fn_lock_supported(),
+        fn_lock: state.current_fn_lock_shown(),
+        os_layout_supported: state.current_os_layout_supported(),
+        keep_os_layout: state.current_keep_os_layout(),
+    });
+    let fn_lock_description = if facts.fn_lock_supported {
+        tr!("device.fn_lock_description")
+    } else {
+        tr!("device.fn_lock_unsupported")
+    };
+    let fn_lock_row = keyboard_toggle_row(
+        pal,
+        tr!("device.fn_lock"),
+        fn_lock_description,
+        Toggle::new("fn-lock-toggle")
+            .selected(facts.fn_lock)
+            .disabled(!facts.fn_lock_supported)
+            .label((!facts.fn_lock_supported).then(|| tr!("common.unavailable")))
+            .on_change(|fn_lock, _window, cx| {
+                AppState::apply(cx, |state| state.commit_fn_lock(*fn_lock));
+            }),
+    );
+    let os_layout_description = if facts.os_layout_supported {
+        tr!("device.keep_os_layout_description")
+    } else {
+        tr!("device.keep_os_layout_unsupported")
+    };
+    let os_layout_row = keyboard_toggle_row(
+        pal,
+        tr!("device.keep_os_layout"),
+        os_layout_description,
+        Toggle::new("keep-os-layout-toggle")
+            .selected(facts.os_layout_supported && facts.keep_os_layout)
+            .disabled(!facts.os_layout_supported)
+            .label((!facts.os_layout_supported).then(|| tr!("common.unavailable")))
+            .on_change(|keep, _window, cx| {
+                AppState::apply(cx, |state| state.commit_keep_os_layout(*keep));
+            }),
+    );
     PanelCard::new(
         tr!("device.keys"),
         Icon::empty().path("action-icons/keyboard.svg"),
-        row,
+        v_flex().gap_4().child(fn_lock_row).child(os_layout_row),
     )
 }
 

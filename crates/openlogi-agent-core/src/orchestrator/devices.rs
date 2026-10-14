@@ -81,6 +81,7 @@ pub(super) fn build_devices(
                 kind: paired.kind,
                 light_capabilities: None,
                 online: paired.online,
+                settings_revision: paired.settings_revision,
             });
         }
     }
@@ -109,6 +110,8 @@ pub(super) fn build_devices(
             kind: device.kind,
             light_capabilities: device.light_capabilities,
             online: device.online,
+            // A standalone device reports no device-side setting changes.
+            settings_revision: 0,
         });
     }
     // Order by the same canonical key the GUI carousel uses, so the
@@ -192,6 +195,68 @@ pub(super) fn reapply_targets(
         .collect()
 }
 
+/// Indices into `next` of online devices whose settings revision moved since
+/// `prev`: the device reported a setting changed on it. A device is matched by
+/// [`stable_id`] and must keep its route, as the revision restarts when the
+/// device's channel is reopened.
+pub(super) fn settings_moved(prev: &[AgentDevice], next: &[AgentDevice]) -> Vec<usize> {
+    next.iter()
+        .enumerate()
+        .filter(|(_, dev)| dev.online && dev.route.is_some())
+        .filter(|(_, dev)| {
+            let id = stable_id(dev);
+            prev.iter().find(|p| stable_id(p) == id).is_some_and(|p| {
+                p.online && p.route == dev.route && p.settings_revision != dev.settings_revision
+            })
+        })
+        .map(|(idx, _)| idx)
+        .collect()
+}
+
+/// Indices into `next` of online devices that report the `os_layout`
+/// capability on a route that was already online without it, such as a Bolt
+/// keyboard whose feature walk failed until after its reconnect reapply. A
+/// device that just came online or changed route is reapplied instead.
+pub(super) fn os_layout_appeared(prev: &[AgentDevice], next: &[AgentDevice]) -> Vec<usize> {
+    let has_os_layout = |dev: &AgentDevice| dev.capabilities.is_some_and(|caps| caps.os_layout);
+    next.iter()
+        .enumerate()
+        .filter(|(_, dev)| dev.online && dev.route.is_some() && has_os_layout(dev))
+        .filter(|(_, dev)| {
+            let id = stable_id(dev);
+            prev.iter()
+                .find(|p| stable_id(p) == id)
+                .is_some_and(|p| p.online && p.route == dev.route && !has_os_layout(p))
+        })
+        .map(|(idx, _)| idx)
+        .collect()
+}
+
+/// Whether `config` keeps the key layout of the device under `key` on the
+/// host OS, whatever the device supports: enabled, with the setting on.
+pub(super) fn config_keeps_os_layout(config: &Config, key: &str) -> bool {
+    config.device_enabled(key) && config.keep_os_layout(key)
+}
+
+/// Whether `config` keeps `dev`'s key layout on the host OS: a keyboard whose
+/// platform software can set, enabled, with the setting on.
+pub(super) fn keeps_os_layout(config: &Config, dev: &AgentDevice) -> bool {
+    dev.capabilities.is_some_and(|caps| caps.os_layout)
+        && config_keeps_os_layout(config, &dev.config_key)
+}
+
+/// The devices whose "keep OS layout" takes effect going from `previous` to
+/// `config`: the setting turned on, or its device re-enabled.
+pub(super) fn newly_kept_os_layouts<'a>(
+    previous: &'a Config,
+    config: &'a Config,
+    devices: &'a [AgentDevice],
+) -> impl Iterator<Item = &'a AgentDevice> {
+    devices
+        .iter()
+        .filter(|dev| keeps_os_layout(config, dev) && !keeps_os_layout(previous, dev))
+}
+
 /// Whether this refresh invalidated any online device's volatile control
 /// diversion. Receiver routes stay connected while a paired mouse sleeps, so
 /// route equality alone cannot tell capture sessions to re-arm on wake.
@@ -212,32 +277,48 @@ pub(super) fn any_device_needs_capture_rearm(
 /// intervals; any intervening authoritative reconciliation satisfies one.
 pub(super) const VOLATILE_REAPPLY_CONFIRM_RETRIES: u8 = 4;
 
+/// The shorter confirmation budget for a link re-establishment (a device nap
+/// ending in an offline→online transition or a `0x1d4b` reconnect broadcast).
+/// The device was already booted, so it needs no boot-race ladder — but its
+/// single re-apply races the link still stabilizing, and drowsy firmware can
+/// ACK a write yet drop it, leaving the wrong sensor DPI live until the *next*
+/// nap. One confirming pass closes that hole without per-nap churn.
+pub(super) const RECONNECT_REAPPLY_CONFIRM_RETRIES: u8 = 1;
+
 /// Plan this refresh's volatile-settings writes: the [`reapply_targets`] set
-/// plus a bounded run of confirming re-applies for devices first sighted
-/// recently or targeted by a system wake, and the follow-up keys (with
-/// remaining retry counts) to confirm next refresh. Reconnects
-/// (offline→online) re-apply once — the device was already booted, so it
-/// needs no boot-race retry.
+/// plus a bounded run of confirming re-applies, and the follow-up keys (with
+/// remaining retry counts) to confirm next refresh. `forced` re-applies to
+/// every online device carrying the caller's confirm budget (system wake
+/// keeps the boot ladder, a device reconnect the single link-race confirm);
+/// first sightings always queue the full boot ladder, and plain
+/// offline→online reconnects queue the link-race confirm.
 pub(super) fn plan_reapply(
     prev: &[AgentDevice],
     next: &[AgentDevice],
     followup: &HashMap<String, u8>,
-    reapply_all: bool,
+    forced: Option<u8>,
 ) -> (Vec<usize>, HashMap<String, u8>) {
-    let mut targets = reapply_targets(prev, next, reapply_all);
+    let mut targets = reapply_targets(prev, next, forced.is_some());
     let mut next_followup: HashMap<String, u8> = targets
         .iter()
-        .filter(|&&idx| {
-            reapply_all || {
-                let id = stable_id(&next[idx]);
-                !prev.iter().any(|p| stable_id(p) == id)
-            }
-        })
-        .map(|&idx| {
-            (
-                next[idx].config_key.clone(),
-                VOLATILE_REAPPLY_CONFIRM_RETRIES,
-            )
+        .filter_map(|&idx| {
+            let id = stable_id(&next[idx]);
+            let new_identity = !prev.iter().any(|p| stable_id(p) == id);
+            let budget = if new_identity {
+                VOLATILE_REAPPLY_CONFIRM_RETRIES
+            } else if let Some(forced) = forced {
+                forced
+            } else {
+                RECONNECT_REAPPLY_CONFIRM_RETRIES
+            };
+            // A new trigger can land mid-run (a reconnect while the boot
+            // confirmations are still draining) — keep the larger of the
+            // fresh budget and what this pass would have drained to.
+            let carried = followup
+                .get(&next[idx].config_key)
+                .map_or(0, |remaining| remaining.saturating_sub(1));
+            let budget = budget.max(carried);
+            (budget > 0).then(|| (next[idx].config_key.clone(), budget))
         })
         .collect();
     for (idx, dev) in next.iter().enumerate() {

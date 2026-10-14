@@ -36,7 +36,8 @@ use std::thread;
 
 use evdev::uinput::VirtualDevice;
 use evdev::{
-    AbsoluteAxisCode, AttributeSetRef, Device, EventSummary, KeyCode, PropType, RelativeAxisCode,
+    AbsoluteAxisCode, AttributeSetRef, Device, EventSummary, EventType, InputEvent, KeyCode,
+    PropType, RelativeAxisCode,
 };
 use tracing::{debug, error, warn};
 use x11rb::protocol::xproto::ConnectionExt as _;
@@ -425,6 +426,28 @@ fn translate(event: &evdev::InputEvent, hires_scroll: bool) -> Option<MouseEvent
     }
 }
 
+/// Negate a vertical wheel event when software scroll inversion is on.
+///
+/// Applied at re-emission, on the original event, so the value written back is
+/// in the same evdev units the device produced — no conversion, no rounding.
+/// Both wheel axes carry vertical motion (`REL_WHEEL_HI_RES` on a hi-res
+/// wheel, `REL_WHEEL` otherwise); on a hi-res wheel the `REL_WHEEL`
+/// companion is negated as it is released, so both stay in agreement. Horizontal scrolling is left
+/// alone: the setting reverses the wheel, not the thumb wheel.
+fn invert_wheel(event: InputEvent, inverted: bool) -> InputEvent {
+    if !inverted {
+        return event;
+    }
+    match event.destructure() {
+        EventSummary::RelativeAxis(
+            _,
+            axis @ (RelativeAxisCode::REL_WHEEL | RelativeAxisCode::REL_WHEEL_HI_RES),
+            value,
+        ) => InputEvent::new(EventType::RELATIVE.0, axis.0, value.saturating_neg()),
+        _ => event,
+    }
+}
+
 fn key_to_button(key: KeyCode) -> Option<ButtonId> {
     match key {
         KeyCode::BTN_LEFT => Some(ButtonId::LeftClick),
@@ -478,8 +501,10 @@ impl LowResCompanions {
     }
 
     /// Move the companions whose hi-res event was forwarded into `pending` and
-    /// reset for the next report.
-    fn release_into(&mut self, pending: &mut Vec<evdev::InputEvent>) {
+    /// reset for the next report. `inverted` applies software scroll inversion
+    /// to the low-res vertical companion too, so it agrees with its hi-res
+    /// event for clients that read the discrete axis.
+    fn release_into(&mut self, pending: &mut Vec<evdev::InputEvent>, inverted: bool) {
         for event in self.held.drain(..) {
             let forwarded = match RelativeAxisCode(event.code()) {
                 RelativeAxisCode::REL_WHEEL => self.vertical_forwarded,
@@ -487,7 +512,7 @@ impl LowResCompanions {
                 _ => false,
             };
             if forwarded {
-                pending.push(event);
+                pending.push(invert_wheel(event, inverted));
             }
         }
         self.vertical_forwarded = false;
@@ -527,6 +552,9 @@ fn device_thread(
     // Events that will be re-injected at the next SYN_REPORT.
     let mut pending: Vec<evdev::InputEvent> = Vec::new();
     let mut companions = LowResCompanions::default();
+    // Software scroll inversion, read once per report so a hi-res event and its
+    // low-res companion never disagree if the setting flips mid-report.
+    let mut report_inverted: Option<bool> = None;
 
     debug!("hook started on {}", path.display());
 
@@ -551,7 +579,10 @@ fn device_thread(
                 // Flush the report. `emit()` appends its own SYN_REPORT, so the
                 // incoming sync event is dropped rather than re-emitted — pushing
                 // it would send a redundant second SYN_REPORT.
-                companions.release_into(&mut pending);
+                let inverted = report_inverted
+                    .take()
+                    .unwrap_or_else(crate::scroll_inversion);
+                companions.release_into(&mut pending, inverted);
                 if !pending.is_empty() {
                     if let Err(e) = virtual_device.emit(&pending) {
                         // The physical device is grabbed, so these pass-through
@@ -585,7 +616,10 @@ fn device_thread(
                     companions.hires_forwarded(axis);
                 }
                 match disposition {
-                    EventDisposition::PassThrough => pending.push(event),
+                    EventDisposition::PassThrough => {
+                        let inverted = *report_inverted.get_or_insert_with(crate::scroll_inversion);
+                        pending.push(invert_wheel(event, inverted));
+                    }
                     EventDisposition::Suppress => {}
                 }
             }
@@ -811,7 +845,7 @@ mod tests {
         let mut pending = Vec::new();
         companions.hold(rel(RelativeAxisCode::REL_WHEEL, -1));
         companions.hires_forwarded(RelativeAxisCode::REL_WHEEL_HI_RES);
-        companions.release_into(&mut pending);
+        companions.release_into(&mut pending, false);
         assert_eq!(pending_codes(&pending), [RelativeAxisCode::REL_WHEEL.0]);
     }
 
@@ -820,7 +854,7 @@ mod tests {
         let mut companions = LowResCompanions::default();
         let mut pending = Vec::new();
         companions.hold(rel(RelativeAxisCode::REL_WHEEL, -1));
-        companions.release_into(&mut pending);
+        companions.release_into(&mut pending, false);
         assert!(pending.is_empty());
     }
 
@@ -831,7 +865,7 @@ mod tests {
         companions.hold(rel(RelativeAxisCode::REL_WHEEL, 1));
         companions.hold(rel(RelativeAxisCode::REL_HWHEEL, 1));
         companions.hires_forwarded(RelativeAxisCode::REL_HWHEEL_HI_RES);
-        companions.release_into(&mut pending);
+        companions.release_into(&mut pending, false);
         assert_eq!(pending_codes(&pending), [RelativeAxisCode::REL_HWHEEL.0]);
     }
 
@@ -840,9 +874,9 @@ mod tests {
         let mut companions = LowResCompanions::default();
         let mut pending = Vec::new();
         companions.hires_forwarded(RelativeAxisCode::REL_WHEEL_HI_RES);
-        companions.release_into(&mut pending);
+        companions.release_into(&mut pending, false);
         companions.hold(rel(RelativeAxisCode::REL_WHEEL, 1));
-        companions.release_into(&mut pending);
+        companions.release_into(&mut pending, false);
         assert!(pending.is_empty());
     }
 
@@ -1058,5 +1092,80 @@ mod tests {
         let mut caps = Caps::mouse();
         caps.abs = Some([AbsoluteAxisCode::ABS_MISC].into_iter().collect());
         assert!(caps.is_hookable());
+    }
+}
+
+#[cfg(test)]
+mod scroll_inversion_tests {
+    use super::*;
+
+    fn rel(axis: RelativeAxisCode, value: i32) -> InputEvent {
+        InputEvent::new(EventType::RELATIVE.0, axis.0, value)
+    }
+
+    fn value_of(event: InputEvent) -> i32 {
+        event.value()
+    }
+
+    /// Both wheel axes are negated: a hi-res wheel reports `REL_WHEEL_HI_RES`
+    /// and a detented one `REL_WHEEL`, and the Signature M650 this was
+    /// verified against advertises both.
+    #[test]
+    fn inversion_negates_either_vertical_wheel_axis() {
+        for axis in [
+            RelativeAxisCode::REL_WHEEL,
+            RelativeAxisCode::REL_WHEEL_HI_RES,
+        ] {
+            assert_eq!(value_of(invert_wheel(rel(axis, 120), true)), -120);
+            assert_eq!(value_of(invert_wheel(rel(axis, -1), true)), 1);
+        }
+    }
+
+    /// Off is a pass-through, byte for byte — the setting must cost nothing
+    /// when it is not in use.
+    #[test]
+    fn inversion_off_leaves_the_wheel_alone() {
+        let event = rel(RelativeAxisCode::REL_WHEEL, 120);
+        assert_eq!(value_of(invert_wheel(event, false)), 120);
+    }
+
+    /// The setting reverses the wheel, not the thumb wheel or the pointer.
+    #[test]
+    fn inversion_leaves_horizontal_and_pointer_axes_alone() {
+        for axis in [
+            RelativeAxisCode::REL_HWHEEL,
+            RelativeAxisCode::REL_HWHEEL_HI_RES,
+            RelativeAxisCode::REL_X,
+            RelativeAxisCode::REL_Y,
+        ] {
+            assert_eq!(value_of(invert_wheel(rel(axis, 7), true)), 7);
+        }
+    }
+
+    /// A forwarded low-res companion is negated with its hi-res event, so a
+    /// client reading the discrete axis scrolls the same way as one reading
+    /// the hi-res axis.
+    #[test]
+    fn inversion_negates_the_released_low_res_companion() {
+        let mut companions = LowResCompanions::default();
+        companions.hold(rel(RelativeAxisCode::REL_WHEEL, 1));
+        companions.hires_forwarded(RelativeAxisCode::REL_WHEEL_HI_RES);
+        let mut pending = Vec::new();
+        companions.release_into(&mut pending, true);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(value_of(pending[0]), -1);
+    }
+
+    /// `i32::MIN` has no positive counterpart; saturating keeps the scroll
+    /// pinned at the extreme instead of wrapping it back to the same sign.
+    #[test]
+    fn inversion_saturates_instead_of_wrapping() {
+        assert_eq!(
+            value_of(invert_wheel(
+                rel(RelativeAxisCode::REL_WHEEL, i32::MIN),
+                true
+            )),
+            i32::MAX
+        );
     }
 }

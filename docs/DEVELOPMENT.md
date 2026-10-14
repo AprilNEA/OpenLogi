@@ -330,6 +330,11 @@ Environment overrides:
   fully offline build (default: fetched on demand at first launch).
 - `OPENLOGI_SIGN_IDENTITY=<identity>` — codesign the `.app` and `.dmg` with the
   given Developer ID.
+- `OPENLOGI_SPARKLE_PUBLIC_ED_KEY=<base64>` — embed Sparkle.framework and update
+  through it (see Release updater publishing). Without it the bundle updates
+  through the built-in engine.
+- `OPENLOGI_UPDATE_BASE_URL=<url>` — update host of the embedded Sparkle feed;
+  required with `OPENLOGI_SPARKLE_PUBLIC_ED_KEY`.
 - `OPENLOGI_DMG_BACKGROUND_URL=<url>` — override the branded DMG background
   TIFF URL (default: `https://assets.openlogi.org/dmg/dmg-background.tiff`).
 
@@ -426,6 +431,36 @@ asset carries a minisign signature that verifies against that key, plus a
 matching SHA-256. A build without the key embedded (local/dev) fails closed —
 the update check errors rather than installing an unverified artifact.
 
+### macOS: Sparkle
+
+The signed macOS release bundle embeds
+[Sparkle](https://sparkle-project.org) and updates through it instead
+(`platform::updater` in `openlogi-desktop`). Each architecture ships its own
+DMG, so each reads its own feed:
+
+```text
+${OPENLOGI_UPDATE_BASE_URL}/channels/stable/appcast-arm64.xml
+${OPENLOGI_UPDATE_BASE_URL}/channels/stable/appcast-x86_64.xml
+```
+
+Each feed carries one item: that architecture's notarized, stapled DMG with an
+EdDSA (`sparkle:edSignature`) signature over the exact file, and the release
+notes as Markdown. The bundle trusts only the key in its `SUPublicEDKey`, and
+`SUVerifyUpdateBeforeExtraction` makes Sparkle check that signature before it
+unpacks anything.
+
+Updates stay opt-in. The bundle ships `SUEnableAutomaticChecks = NO`, so
+Sparkle never schedules a check or asks to; the app runs the one launch check
+itself when **Check for updates** is on, without a window. With **Automatic
+updates** also on, a found update downloads in the background and installs on
+quit or through **Restart to Update**. "Check for Updates…" opens Sparkle's
+update window. A bundle without Sparkle (Windows, Linux, local builds) and a
+Sparkle that fails to load fall back to the engine and `latest.json`.
+
+`latest.json` and the DMG minisigs keep being published: bundles from before
+Sparkle read only that manifest, and they update into a Sparkle bundle through
+it.
+
 Configure the R2/update settings in one 1Password item referenced by the GitHub
 secret `OP_R2_SECRET_ITEM`. The item must contain:
 
@@ -438,13 +473,35 @@ secret `OP_R2_SECRET_ITEM`. The item must contain:
   publish job to sign release artifacts before `latest.json` is generated. It
   is stored base64 (not raw) so its two lines survive 1Password's paste
   handling; the workflow decodes it, mirroring the GitHub App key.
+- `OPENLOGI_SPARKLE_PUBLIC_ED_KEY` — Sparkle's base64 EdDSA public key, stamped
+  into the macOS bundle as `SUPublicEDKey`.
+- `OPENLOGI_SPARKLE_PRIVATE_ED_KEY` — the matching base64 private key (the
+  32-byte seed), used only in the publish job to sign the DMGs into the
+  appcasts. `release appcast` refuses a private key that does not belong to the
+  public key above.
 - `CLOUDFLARE_R2_ACCOUNT_ID` — Cloudflare account ID used for the S3 endpoint.
 - `CLOUDFLARE_R2_BUCKET` — bucket name.
 - `CLOUDFLARE_R2_ACCESS_KEY_ID` — R2 S3 access key.
 - `CLOUDFLARE_R2_SECRET_ACCESS_KEY` — R2 S3 secret key.
 
 The workflow uploads immutable artifacts under `/releases/<tag>/` and only the
-channel manifest under `/channels/stable/latest.json` is mutable.
+channel files under `/channels/stable/` — `latest.json` and the two appcasts —
+are mutable. They are uploaded after the artifacts they point at.
+
+Generate the Sparkle key pair once, with the `generate_keys` tool from the
+[Sparkle release](https://github.com/sparkle-project/Sparkle/releases) xtask
+embeds:
+
+```sh
+./bin/generate_keys --account openlogi         # prints the public key
+./bin/generate_keys --account openlogi -x sparkle-private.key
+# store the file's contents as OPENLOGI_SPARKLE_PRIVATE_ED_KEY, then delete it
+```
+
+The key cannot be replaced casually: every installed bundle trusts only the one
+it shipped with. Rotating it means shipping a bundle with the new key that is
+still signed with the old one, or relying on Sparkle's fallback to the DMG's
+Developer ID signature.
 
 After a complete Linux release is published, the workflow dispatches
 `publish-openlogi-installer` with the tag to `openlogi-org/get`. That repository
@@ -464,6 +521,22 @@ cargo run -p xtask -- release latest-json \
   --base-url https://updates.openlogi.org \
   --output dist/latest.json
 ```
+
+and so are the appcasts, after the DMGs are stapled (stapling rewrites them).
+The private key is read only from the environment:
+
+```sh
+OPENLOGI_SPARKLE_PRIVATE_ED_KEY=… cargo run -p xtask -- release appcast \
+  --dist dist \
+  --tag v0.2.0 \
+  --base-url https://updates.openlogi.org \
+  --public-key "$OPENLOGI_SPARKLE_PUBLIC_ED_KEY" \
+  --release-notes .release/RELEASE_NOTES.md \
+  --output-dir .release/appcast
+```
+
+The stable feed takes `MAJOR.MINOR.PATCH` releases only: Sparkle's version
+comparator stops at the first `-`, so it would read `1.2.0-rc.1` as `1.2.0`.
 
 ## Crowdin translation sync
 

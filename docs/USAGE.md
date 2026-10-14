@@ -41,6 +41,7 @@ openlogi api smartshift --device "$DEVICE_ID" --mode free
 openlogi api smartshift --device "$DEVICE_ID" --mode ratchet --auto-disengage 255
 openlogi api fn-lock --device "$DEVICE_ID"
 openlogi api fn-lock --device "$DEVICE_ID" --set on
+openlogi api os-layout --device "$DEVICE_ID" --set off --save
 ```
 
 ### Output and compatibility
@@ -69,8 +70,9 @@ stdout cannot provide a JSON envelope.
 | `status` | `agent_version`, `inventory`, `accessibility_granted`, `input_monitoring_granted`, `hook_installed`, `hid_open_failures`, `launch_at_login` |
 | `devices` | `inventory`, `devices`: array of `id`, `name`, `kind`, `online`, `battery`, `capabilities`, `light_capabilities` |
 | `dpi` | `device`, `persistence`, `current` (integer), `supported` (array of integers) |
-| `smartshift` | `device`, `persistence`, `mode` (`free` or `ratchet`), `auto_disengage` (integer), `tunable_torque` (integer or null) |
-| `fn-lock` | `device`, `persistence`, `fn_lock`, `default_fn_lock` |
+| `smartshift` | `device`, `persistence`, `mode` (`free` or `ratchet`), `auto_disengage` (integer), `tunable_torque` (1–100, percent of the wheel's maximum force, or null) |
+| `fn-lock` | `device`, `persistence`, `fn_lock`, `default_fn_lock` (boolean, or null when the keyboard reports no firmware default) |
+| `os-layout` | `device`, `persistence`, `keep_os_layout` (boolean) |
 
 `inventory` is `scanning`, `ready`, or `unavailable`. Only `ready` with an empty
 device array means enumeration completed and found no peripherals. Device
@@ -87,8 +89,11 @@ contain hardware identity information: keep them local and redact before sharing
 
 `name`, `battery`, and measured `capabilities` may be null; null does not mean
 zero charge or an unsupported feature. Battery objects contain `percentage`,
-`level`, and `status` (for example `charging` or `discharging`). Capabilities
-are the agent's measured feature flags, not guesses based on device kind.
+`level`, and `status` (for example `charging` or `discharging`). `percentage`
+is null when the device has no state-of-charge gauge and reports only a level,
+or when the reading carries no charge figure; read `level` in that case.
+Capabilities are the agent's measured feature flags, not guesses based on
+device kind.
 Not every readable setting has an inventory flag; a setting read can return
 `unsupported_feature`. Standalone lights are listed with their light capability
 descriptor and null battery. Cameras are not part of this agent inventory API.
@@ -96,7 +101,7 @@ The response excludes pairing passkeys, application history, and model serials.
 
 ### Immediate control and saved preferences
 
-All three setting commands read only unless a setting flag is supplied. Without
+The DPI, SmartShift, and Fn-lock commands read only unless a setting flag is supplied. Without
 `--save`, writes return `persistence: "not_saved"`: they do not modify
 `config.toml` or request a config reload. Saved preferences may be reapplied on
 reconnect, wake, or later configuration changes; firmware may retain some values.
@@ -109,6 +114,15 @@ Saving edits only the selected setting, preserving unrelated preferences and
 comments. A per-link override of that setting is refused with `link_override`
 rather than silently saving a default that the override would supersede.
 There is no profile-switch API yet.
+
+`os-layout` changes an agent setting rather than the device, so it requires
+both `--set` and `--save`; without `--save` it fails with `invalid_value`. The
+agent applies the saved value after the reload. `on`, the default for keyboards
+that allow it, sets the keyboard's key layout (HID++ `0x4531`) to the host OS
+when the keyboard connects, when the setting turns on, and after the keyboard
+reports that a layout shortcut switched it. `off` leaves the keyboard's layout
+as it is; it does not restore an earlier layout. A keyboard whose measured
+capabilities lack `os_layout` returns `unsupported_feature`.
 
 Hardware writes, file persistence, and reload are separate steps, not an atomic
 transaction. The config revision is checked under a writer lock; concurrent edits

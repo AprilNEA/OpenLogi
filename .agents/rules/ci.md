@@ -116,7 +116,8 @@ backstop, not a substitute for running the gate yourself after a rebase.
 4. If cfg-gated files changed (any `#[cfg(target_os = …)]` block, in any crate):
    cross-lint or hand-audit against master — macOS-green proves nothing there; see
    `.agents/rules/cross-platform.md`.
-5. If wire types changed: `PROTOCOL_VERSION` bumped and
+5. If wire types changed: `PROTOCOL_VERSION` above the latest release's (moved once
+   per release, not once per change) and
    `cargo test -p openlogi-ipc --test wire_format` green — see
    `crates/openlogi-ipc/AGENTS.md`.
 6. If locales changed: every `crates/openlogi-ui/locales/*.toml` carries the same keys

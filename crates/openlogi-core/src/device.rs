@@ -134,10 +134,16 @@ pub struct Capabilities {
     /// both diversion and raw-XY reporting for hold-and-swipe gestures.
     #[serde(default)]
     pub dpi_gestures: bool,
-    /// Keyboard Fn-lock can be read and written — HID++ `0x40a2` or `0x40a3`
-    /// fn inversion. Appended: crosses the IPC and the persisted identity.
+    /// Keyboard Fn-lock can be read and written — HID++ `0x40a0`, `0x40a2` or
+    /// `0x40a3` fn inversion. Appended: crosses the IPC and the persisted
+    /// identity.
     #[serde(default)]
     pub fn_lock: bool,
+    /// The keyboard's key layout can be kept on the host OS — HID++ `0x4531
+    /// MultiPlatform`, when the probe also reads that it lets software set the
+    /// platform. Appended: crosses the IPC and the persisted identity.
+    #[serde(default)]
+    pub os_layout: bool,
 }
 
 impl Capabilities {
@@ -161,7 +167,10 @@ impl Capabilities {
             haptic_feedback: ids.contains(&0x19b0),
             haptic_panel: false,
             dpi_gestures: false,
-            fn_lock: ids.contains(&0x40a2) || ids.contains(&0x40a3),
+            fn_lock: ids.contains(&0x40a0) || ids.contains(&0x40a2) || ids.contains(&0x40a3),
+            // The probe clears it unless the keyboard lets software set the
+            // platform; the feature table alone cannot say.
+            os_layout: ids.contains(&0x4531),
         }
     }
 
@@ -225,8 +234,14 @@ pub enum BatteryStatus {
 /// Battery snapshot for one paired device, as last polled over HID++.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BatteryInfo {
-    /// Reported charge percentage (`0..=100`).
-    pub percentage: u8,
+    /// Reported charge percentage (`0..=100`), or `None` when the reading
+    /// carries no percentage.
+    ///
+    /// `None` is not an empty battery. Some devices only report a coarse
+    /// [`level`](Self::level), such as a `0x1004` device without the
+    /// state-of-charge capability. Others have no reading yet, such as a
+    /// device first seen while it charges. Read `level` in that case.
+    pub percentage: Option<u8>,
     /// Coarse bucket for UI that doesn't want the raw percentage.
     pub level: BatteryLevel,
     /// Charging state at poll time.
@@ -393,6 +408,17 @@ pub struct PairedDevice {
     /// table. `None` for devices we couldn't probe (offline / unreachable);
     /// the GUI then falls back to [`Capabilities::presumed_from_kind`].
     pub capabilities: Option<Capabilities>,
+    /// Moves each time the device itself reports changing a setting — the
+    /// user toggling Fn lock on the keyboard, or a DPI button changing the
+    /// sensor — so a client re-reads that device's settings rather than keep
+    /// showing what it read before. Opaque: only a difference from the
+    /// previous snapshot of the same route means anything, and it restarts
+    /// when the agent reopens the device's channel.
+    ///
+    /// Appended. `default` keeps device fixtures recorded before it loading;
+    /// the IPC encoding is positional and always carries it.
+    #[serde(default)]
+    pub settings_revision: u64,
 }
 
 /// Address of a standalone raw-HID interface.
@@ -503,7 +529,7 @@ mod tests {
                 kind: DeviceKind::Mouse,
                 online: true,
                 battery: Some(BatteryInfo {
-                    percentage: battery_percentage,
+                    percentage: Some(battery_percentage),
                     level: BatteryLevel::Good,
                     status: BatteryStatus::Discharging,
                 }),
@@ -531,7 +557,9 @@ mod tests {
                     haptic_panel: false,
                     dpi_gestures: false,
                     fn_lock: false,
+                    os_layout: false,
                 }),
+                settings_revision: 0,
             }],
         }
     }
@@ -643,6 +671,7 @@ mod tests {
                 haptic_panel: false,
                 dpi_gestures: false,
                 fn_lock: false,
+                os_layout: false,
             }
         );
         assert!(!Capabilities::from_feature_ids(&[0x0003, 0x1b04]).thumbwheel);
@@ -661,6 +690,7 @@ mod tests {
                 haptic_panel: false,
                 dpi_gestures: false,
                 fn_lock: false,
+                os_layout: false,
             }
         );
         // No driving features → nothing offered.
@@ -668,6 +698,9 @@ mod tests {
             Capabilities::from_feature_ids(&[0x0000, 0x0003]),
             Capabilities::default()
         );
+        // 0x4531 offers the OS layout until the probe reads it cannot be set.
+        assert!(Capabilities::from_feature_ids(&[0x0001, 0x4531]).os_layout);
+        assert!(!Capabilities::from_feature_ids(&[0x0001, 0x40a3]).os_layout);
     }
 
     #[test]
@@ -681,9 +714,10 @@ mod tests {
         }
         // Backlight (0x198x) stays out — the panel cannot drive it.
         assert!(!Capabilities::from_feature_ids(&[0x0001, 0x1982]).lighting);
-        // Either fn-inversion feature gives the keyboard an Fn-lock control.
+        // Any fn-inversion feature gives the keyboard an Fn-lock control.
         assert!(Capabilities::from_feature_ids(&[0x0001, 0x40a3]).fn_lock);
         assert!(Capabilities::from_feature_ids(&[0x0001, 0x40a2]).fn_lock);
+        assert!(Capabilities::from_feature_ids(&[0x0001, 0x40a0]).fn_lock);
         assert!(!Capabilities::from_feature_ids(&[0x0001, 0x1982]).fn_lock);
     }
 

@@ -13,9 +13,11 @@
 //! `Option`) fails here instead of silently corrupting frames across an
 //! agent/GUI version skew.
 //!
-//! If a test fails because you *intended* a wire change: bump
-//! `PROTOCOL_VERSION`, update [`protocol_version_is_pinned`], and replace the
-//! golden with the actual hex from the assertion message.
+//! If a test fails because you *intended* a wire change, replace the golden
+//! with the actual hex from the assertion message. `PROTOCOL_VERSION` moves
+//! once per release: bump it and [`protocol_version_is_pinned`] only while it
+//! still equals the latest release's value. Otherwise the change joins the
+//! unreleased version (`crates/openlogi-ipc/AGENTS.md`).
 
 #![expect(
     clippy::tests_outside_test_module,
@@ -72,7 +74,8 @@ where
     let hex = wire_bytes(value);
     assert_eq!(
         hex, golden,
-        "wire encoding changed — if intentional, bump PROTOCOL_VERSION and regenerate this golden"
+        "wire encoding changed — if intentional, regenerate this golden and keep PROTOCOL_VERSION \
+         above the latest release's (crates/openlogi-ipc/AGENTS.md)"
     );
     let bytes = (0..hex.len())
         .step_by(2)
@@ -98,8 +101,9 @@ fn representative_smartshift_status() -> SmartShiftStatus {
     }
 }
 
-/// Any golden regeneration must come with a version bump — this is the test
-/// that makes that visible in the same diff.
+/// Pins the version, so the bump that a release's first wire change makes shows
+/// in the same diff as its goldens. Later changes before that release join the
+/// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
     assert_eq!(PROTOCOL_VERSION, 36);
@@ -320,6 +324,7 @@ fn action_ring_types() {
     assert_wire(&HidppOperation::ReadFnLock, "0f");
     assert_wire(&HidppOperation::ReadPointerScaling, "10");
     assert_wire(&HidppOperation::WritePointerScaling, "11");
+    assert_wire(&HidppOperation::WriteOsLayout, "12");
 }
 
 #[test]
@@ -438,6 +443,15 @@ fn device_inventory() {
     // `Light` was appended after `Unknown`; preserve every existing kind's
     // bincode discriminant.
     assert_wire(&DeviceKind::Light, "0d");
+    // A level-only battery (no state-of-charge gauge) carries no percentage.
+    assert_wire(
+        &BatteryInfo {
+            percentage: None,
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Discharging,
+        },
+        "000200",
+    );
     let inventory = vec![DeviceInventory {
         receiver: ReceiverInfo {
             name: "Bolt Receiver".into(),
@@ -452,7 +466,7 @@ fn device_inventory() {
             kind: DeviceKind::Mouse,
             online: true,
             battery: Some(BatteryInfo {
-                percentage: 80,
+                percentage: Some(80),
                 level: BatteryLevel::Good,
                 status: BatteryStatus::Discharging,
             }),
@@ -480,12 +494,14 @@ fn device_inventory() {
                 haptic_panel: true,
                 dpi_gestures: true,
                 fn_lock: false,
+                os_layout: true,
             }),
+            settings_revision: 7,
         }],
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b000010150020001030106323134304c5a0102030400010100fb34b0fb8240000b0101010000010101010100",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b01010100000101010101000107",
     );
 }
 
@@ -629,9 +645,15 @@ fn semantic_read_payloads() {
 
     let fn_lock: Result<FnLockState, WriteError> = Ok(FnLockState {
         fn_lock: true,
-        default_fn_lock: false,
+        default_fn_lock: Some(false),
     });
-    assert_wire(&fn_lock, "000100");
+    assert_wire(&fn_lock, "00010100");
+    // A `0x40a0` keyboard reports no default.
+    let legacy: Result<FnLockState, WriteError> = Ok(FnLockState {
+        fn_lock: true,
+        default_fn_lock: None,
+    });
+    assert_wire(&legacy, "000100");
 }
 
 #[test]
@@ -698,4 +720,21 @@ fn standalone_light_dtos_commands_and_errors() {
         "0c05636f6c6f72",
     );
     assert_wire(&WriteError::AmbiguousRawDevice, "0d");
+    assert_wire(
+        &WriteError::DpiUnsupported {
+            requested: Dpi::new(1000),
+        },
+        "0efbe803",
+    );
+    assert_wire(
+        &WriteError::DpiNotApplied {
+            requested: Dpi::new(1600),
+            actual: Dpi::new(800),
+        },
+        "0ffb4006fb2003",
+    );
+    assert_wire(
+        &WriteError::HapticWaveformUnsupported { waveform: 1 },
+        "1001",
+    );
 }

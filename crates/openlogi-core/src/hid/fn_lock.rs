@@ -1,7 +1,7 @@
 //! Keyboard Fn-lock read-back state — pure data, no I/O.
 //!
-//! The HID++ `0x40a2` / `0x40a3` reads and writes that produce this state
-//! remain in `openlogi-device`.
+//! The HID++ `0x40a0` / `0x40a2` / `0x40a3` reads and writes that produce
+//! this state remain in `openlogi-device`.
 
 use serde::{Deserialize, Serialize};
 
@@ -17,6 +17,7 @@ pub struct FnLockState {
     /// function; `false` when the printed function comes first.
     pub fn_lock: bool,
     /// The firmware default for this host, before any software or Fn+Esc
-    /// change.
-    pub default_fn_lock: bool,
+    /// change. `None` when the keyboard does not report one: the original
+    /// `0x40a0` feature carries only the current state.
+    pub default_fn_lock: Option<bool>,
 }

@@ -7,6 +7,8 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use super::dpi::Dpi;
+
 /// Error returned by HID++ read/write operations.
 ///
 /// Serializable + Clone so it can cross the agent↔GUI IPC unchanged: the GUI
@@ -96,6 +98,33 @@ pub enum WriteError {
     /// Multiple raw HID nodes matched one physical route.
     #[error("multiple raw HID devices matched the route")]
     AmbiguousRawDevice,
+    /// A DPI write asked for a value the device does not report as supported.
+    ///
+    /// Nothing was written: the device layer checks the device-reported list
+    /// first rather than leaving the firmware to clamp, ignore or reject it.
+    #[error("DPI {requested} is not one of the device-reported supported values")]
+    DpiUnsupported {
+        /// The rejected DPI.
+        requested: Dpi,
+    },
+    /// The device acknowledged a DPI write but reads back a different value,
+    /// including after one re-write.
+    #[error("device reports DPI {actual} after a write of {requested}")]
+    DpiNotApplied {
+        /// The DPI that was written.
+        requested: Dpi,
+        /// The DPI the device reports afterwards.
+        actual: Dpi,
+    },
+    /// A haptic play asked for a waveform the device does not advertise.
+    ///
+    /// Nothing was sent: the device layer checks the `0x19b0` capability mask
+    /// first, as Logi Options+ does, so a retry cannot succeed.
+    #[error("device does not advertise haptic waveform {waveform}")]
+    HapticWaveformUnsupported {
+        /// The waveform ID that was refused.
+        waveform: u8,
+    },
 }
 
 /// HID++ operation being performed when a device write/read failed.
@@ -142,6 +171,10 @@ pub enum HidppOperation {
     /// Write the `0x2205` pointer-motion scaling. Appended last — variant order
     /// is wire format.
     WritePointerScaling,
+    /// Keep a keyboard's `0x4531` platform on the host OS: read the platform
+    /// table and the current host's platform, and write it when it differs.
+    /// Appended last — variant order is wire format.
+    WriteOsLayout,
 }
 
 /// HID++ feature error kind in a serializable wire-safe form.

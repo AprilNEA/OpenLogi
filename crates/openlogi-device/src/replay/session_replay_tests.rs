@@ -324,12 +324,14 @@ async fn bolt_pairing_replay_cancels_discovery_and_restores_notifications() {
     assert_eq!(
         completion.written_reports,
         vec![
+            receiver_notification_flags_read(),
             receiver_notification_flags_write([0x00, 0x09, 0x00]),
             bolt_discovery_write([30, 0x01, 0x00]),
             bolt_discovery_write([30, 0x02, 0x00]),
-            receiver_notification_flags_write([0x00, 0x00, 0x00]),
+            receiver_notification_flags_write([0x00, 0x01, 0x00]),
         ],
-        "cancel while searching must stop Bolt discovery before restoring notification flags"
+        "cancel while searching must stop Bolt discovery before restoring the notification \
+         flags found before pairing (inventory's WIRELESS stays on)"
     );
     assert_eq!(completion.channel_open_count, 1);
     assert_eq!(
@@ -420,17 +422,28 @@ fn capture_cassette(
 }
 
 fn bolt_pairing_cancel_cassette() -> HidCassette {
+    // Inventory keeps WIRELESS on; pairing adds SOFTWARE_PRESENT only.
+    let mut flags_read = receiver_notification_flags_read();
+    flags_read[5] = 0x01;
     cassette(
         "Bolt discovery cancellation",
         PAIRING_CHANNEL,
-        [
-            receiver_notification_flags_write([0x00, 0x09, 0x00]),
-            bolt_discovery_write([30, 0x01, 0x00]),
-            bolt_discovery_write([30, 0x02, 0x00]),
-            receiver_notification_flags_write([0x00, 0x00, 0x00]),
-        ]
-        .into_iter()
-        .map(exact_echo_exchange)
+        std::iter::once(CassetteExchange {
+            request_match: RequestMatch::Exact,
+            request: receiver_notification_flags_read(),
+            response: Some(flags_read),
+            required: true,
+        })
+        .chain(
+            [
+                receiver_notification_flags_write([0x00, 0x09, 0x00]),
+                bolt_discovery_write([30, 0x01, 0x00]),
+                bolt_discovery_write([30, 0x02, 0x00]),
+                receiver_notification_flags_write([0x00, 0x01, 0x00]),
+            ]
+            .into_iter()
+            .map(exact_echo_exchange),
+        )
         .collect(),
     )
 }
@@ -531,6 +544,10 @@ fn reprog_reporting_change_payload(cid: u16, flags: u8) -> [u8; 16] {
 
 fn receiver_notification_flags_write(flags: [u8; 3]) -> Vec<u8> {
     hidpp10_register_write(0x00, flags)
+}
+
+fn receiver_notification_flags_read() -> Vec<u8> {
+    vec![0x10, 0xff, 0x81, 0x00, 0x00, 0x00, 0x00]
 }
 
 fn bolt_discovery_write(payload: [u8; 3]) -> Vec<u8> {

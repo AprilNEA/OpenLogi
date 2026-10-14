@@ -239,6 +239,8 @@ jobs:
           OPENLOGI_UPDATE_BASE_URL: ${{ secrets.OP_R2_SECRET_ITEM }}/OPENLOGI_UPDATE_BASE_URL
           OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY: ${{ secrets.OP_R2_SECRET_ITEM }}/OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY
           OPENLOGI_UPDATE_MINISIGN_SECRET_KEY: ${{ secrets.OP_R2_SECRET_ITEM }}/OPENLOGI_UPDATE_MINISIGN_SECRET_KEY
+          OPENLOGI_SPARKLE_PUBLIC_ED_KEY: ${{ secrets.OP_R2_SECRET_ITEM }}/OPENLOGI_SPARKLE_PUBLIC_ED_KEY
+          OPENLOGI_SPARKLE_PRIVATE_ED_KEY: ${{ secrets.OP_R2_SECRET_ITEM }}/OPENLOGI_SPARKLE_PRIVATE_ED_KEY
           R2_ACCOUNT_ID: ${{ secrets.OP_R2_SECRET_ITEM }}/CLOUDFLARE_R2_ACCOUNT_ID
           R2_BUCKET: ${{ secrets.OP_R2_SECRET_ITEM }}/CLOUDFLARE_R2_BUCKET
           R2_ACCESS_KEY_ID: ${{ secrets.OP_R2_SECRET_ITEM }}/CLOUDFLARE_R2_ACCESS_KEY_ID
@@ -249,6 +251,8 @@ jobs:
           OPENLOGI_UPDATE_BASE_URL: ${{ steps.r2_config.outputs.OPENLOGI_UPDATE_BASE_URL }}
           OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY: ${{ steps.r2_config.outputs.OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY }}
           OPENLOGI_UPDATE_MINISIGN_SECRET_KEY: ${{ steps.r2_config.outputs.OPENLOGI_UPDATE_MINISIGN_SECRET_KEY }}
+          OPENLOGI_SPARKLE_PUBLIC_ED_KEY: ${{ steps.r2_config.outputs.OPENLOGI_SPARKLE_PUBLIC_ED_KEY }}
+          OPENLOGI_SPARKLE_PRIVATE_ED_KEY: ${{ steps.r2_config.outputs.OPENLOGI_SPARKLE_PRIVATE_ED_KEY }}
           R2_ACCOUNT_ID: ${{ steps.r2_config.outputs.R2_ACCOUNT_ID }}
           R2_BUCKET: ${{ steps.r2_config.outputs.R2_BUCKET }}
           R2_ACCESS_KEY_ID: ${{ steps.r2_config.outputs.R2_ACCESS_KEY_ID }}
@@ -258,6 +262,8 @@ jobs:
           : "${OPENLOGI_UPDATE_BASE_URL:?Configure OPENLOGI_UPDATE_BASE_URL in the R2 1Password item}"
           : "${OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY:?Configure OPENLOGI_UPDATE_MINISIGN_PUBLIC_KEY in the R2 1Password item}"
           : "${OPENLOGI_UPDATE_MINISIGN_SECRET_KEY:?Configure OPENLOGI_UPDATE_MINISIGN_SECRET_KEY in the R2 1Password item}"
+          : "${OPENLOGI_SPARKLE_PUBLIC_ED_KEY:?Configure OPENLOGI_SPARKLE_PUBLIC_ED_KEY in the R2 1Password item}"
+          : "${OPENLOGI_SPARKLE_PRIVATE_ED_KEY:?Configure OPENLOGI_SPARKLE_PRIVATE_ED_KEY in the R2 1Password item}"
           : "${R2_ACCOUNT_ID:?Configure CLOUDFLARE_R2_ACCOUNT_ID in the R2 1Password item}"
           : "${R2_BUCKET:?Configure CLOUDFLARE_R2_BUCKET in the R2 1Password item}"
           : "${R2_ACCESS_KEY_ID:?Configure CLOUDFLARE_R2_ACCESS_KEY_ID in the R2 1Password item}"
@@ -315,6 +321,25 @@ jobs:
             --include-windows \
             --output dist/latest.json
 
+      # After the build legs stapled the DMGs: stapling rewrites the file, and
+      # the EdDSA signature must cover the bytes users download. The feeds stay
+      # outside dist, which is uploaded as release assets. xtask reads the
+      # private key from the environment only, and refuses one that does not
+      # match the public key the bundles embed.
+      - name: Generate Sparkle appcasts
+        env:
+          OPENLOGI_UPDATE_BASE_URL: ${{ steps.r2_config.outputs.OPENLOGI_UPDATE_BASE_URL }}
+          OPENLOGI_SPARKLE_PUBLIC_ED_KEY: ${{ steps.r2_config.outputs.OPENLOGI_SPARKLE_PUBLIC_ED_KEY }}
+          OPENLOGI_SPARKLE_PRIVATE_ED_KEY: ${{ steps.r2_config.outputs.OPENLOGI_SPARKLE_PRIVATE_ED_KEY }}
+        run: |
+          set -euo pipefail
+          cargo run -p xtask -- release appcast \
+            --dist dist \
+            --tag "$GITHUB_REF_NAME" \
+            --base-url "$OPENLOGI_UPDATE_BASE_URL" \
+            --release-notes .release/RELEASE_NOTES.md \
+            --output-dir .release/appcast
+
       - name: Upload static updater assets to R2
         env:
           AWS_ACCESS_KEY_ID: ${{ steps.r2_config.outputs.R2_ACCESS_KEY_ID }}
@@ -345,6 +370,18 @@ jobs:
 
           aws s3 cp dist/latest.json "$channel_manifest" \
             --content-type "application/json" \
+            --cache-control "no-cache" \
+            --endpoint-url "$endpoint"
+
+          # Bundles that embed Sparkle read one feed per architecture; older
+          # bundles keep reading latest.json above, and update into a Sparkle
+          # one through it. Like latest.json, the feeds go up only after the
+          # DMGs they point at.
+          aws s3 cp .release/appcast/ "s3://${R2_BUCKET}/channels/stable/" \
+            --recursive \
+            --exclude "*" \
+            --include "appcast-*.xml" \
+            --content-type "application/xml" \
             --cache-control "no-cache" \
             --endpoint-url "$endpoint"
 

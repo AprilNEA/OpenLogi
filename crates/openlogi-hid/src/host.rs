@@ -188,6 +188,7 @@ pub async fn set_keyboard_color_with(
             || gate.allows_io(),
         )
         .await
+        .map(drop)
     })?
     .finish()
     .await

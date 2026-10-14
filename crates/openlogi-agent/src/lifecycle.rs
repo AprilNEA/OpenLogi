@@ -436,6 +436,15 @@ impl Running {
                     .await
                     .reapply_volatile_on_next_refresh();
             }
+            // A device broadcast its own reconnection (`0x1d4b`): reconfigure
+            // it on the next snapshot even if no reconciliation ever saw it
+            // offline.
+            InventoryEvent::DeviceWake => {
+                self.orchestrator
+                    .lock()
+                    .await
+                    .reapply_reconnected_on_next_refresh();
+            }
         }
     }
 
@@ -606,6 +615,10 @@ impl Running {
 
     /// Leave for good: nobody wants the agent until asked again, so the next
     /// start in this login is a GUI demand, never a respawn to re-arm.
+    ///
+    /// Hands `0x8071` RGB control back first, as G HUB and Solaar do on exit,
+    /// while inventory still publishes the channels it needs. A handover or
+    /// replacement keeps it: the successor repaints on arrival.
     async fn shut_down(
         &mut self,
         reason: &str,
@@ -613,6 +626,7 @@ impl Running {
     ) -> ! {
         #[cfg(target_os = "macos")]
         armed_session::clear();
+        self.shared.release_rgb_control().await;
         self.leave(reason, tray_guard).await
     }
 
