@@ -228,6 +228,41 @@ impl DeviceOp {
         timed(op, f(shared)).await
     }
 
+    /// [`Self::run`] for a write ordered by `ticket`: lease the receiver,
+    /// wait for the device's earlier writes of the same setting, then resolve
+    /// the channel and give `write` — or `superseded`, when a newer write was
+    /// requested meanwhile — the whole `WRITE_TIMEOUT`.
+    ///
+    /// The wait is not part of the deadline: a pick queued behind a reconnect
+    /// write to a mouse that stopped answering still gets its full budget once
+    /// that write gives up. Resolving after the wait keeps [`Self::run`]'s
+    /// rule of never queueing on an already-resolved channel.
+    pub(crate) async fn run_in_turn<W, WriteFut, S, SupersededFut, T>(
+        self,
+        op: HidppOperation,
+        ticket: &WriteTicket,
+        write: W,
+        superseded: S,
+    ) -> Result<T, WriteError>
+    where
+        W: FnOnce(SharedChannel) -> WriteFut,
+        WriteFut: Future<Output = Result<T, WriteError>>,
+        S: FnOnce(SharedChannel) -> SupersededFut,
+        SupersededFut: Future<Output = Result<T, WriteError>>,
+    {
+        if !self.access.device_io.allows_io() {
+            return Err(WriteError::DeviceNotFound);
+        }
+        let _lease = self.access.receiver_access.acquire_for_io().await;
+        within_turn(
+            ticket,
+            || async { write(self.resolve()?).await },
+            || async { superseded(self.resolve()?).await },
+        )
+        .await
+        .map_err(|_| WriteError::RequestTimedOut { operation: op })?
+    }
+
     /// Own the whole lighting transaction outside the requester runtime. The
     /// worker leases and resolves AFTER obtaining its lighting route lock and
     /// retains that lease through any RGB rollback after requester cancellation.
@@ -359,6 +394,26 @@ impl DeviceOp {
         F: FnOnce(SharedChannel) -> Fut + Send + 'static,
         Fut: Future<Output = Result<T, WriteError>>,
     {
+        self.spawn_timed_write(
+            label,
+            move |shared| tokio::time::timeout(WRITE_TIMEOUT, f(shared)),
+            log,
+        );
+    }
+
+    /// [`Self::spawn_write`] for a write that bounds its own device I/O, as
+    /// `tokio::time::timeout` would: one that first waits its turn behind
+    /// the device's earlier writes (see [`within_turn`]) must not spend its
+    /// deadline on that wait.
+    fn spawn_timed_write<F, Fut, T>(
+        self,
+        label: &'static str,
+        f: F,
+        log: impl FnOnce(Result<Result<T, WriteError>, Elapsed>) + Send + 'static,
+    ) where
+        F: FnOnce(SharedChannel) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<Result<T, WriteError>, Elapsed>>,
+    {
         let shared = match self.resolve() {
             Ok(shared) => shared,
             Err(reason) => {
@@ -380,7 +435,7 @@ impl DeviceOp {
                 if !device_io.allows_io() {
                     return None;
                 }
-                Some(tokio::time::timeout(WRITE_TIMEOUT, f(shared)).await)
+                Some(f(shared).await)
             });
             if let Some(result) = result {
                 log(result);
@@ -409,6 +464,29 @@ fn log_outcome<T>(
         Ok(Err(error)) => warn!(index, ?error, "{what} failed"),
         Err(_) => warn!(index, "{what} timed out (device asleep/unresponsive)"),
     }
+}
+
+/// Wait for `ticket`'s turn, then give whichever of `write` and `superseded`
+/// runs the whole `WRITE_TIMEOUT`. Every ordered write goes through here: the
+/// turn is held only while that bounded I/O runs, so the wait behind earlier
+/// writes is bounded by their deadlines without eating this one's.
+async fn within_turn<T, W, WriteFut, S, SupersededFut>(
+    ticket: &WriteTicket,
+    write: W,
+    superseded: S,
+) -> Result<T, Elapsed>
+where
+    W: FnOnce() -> WriteFut,
+    WriteFut: Future<Output = T>,
+    S: FnOnce() -> SupersededFut,
+    SupersededFut: Future<Output = T>,
+{
+    ticket
+        .write_or(
+            || tokio::time::timeout(WRITE_TIMEOUT, write()),
+            || tokio::time::timeout(WRITE_TIMEOUT, superseded()),
+        )
+        .await
 }
 
 /// Build the one-shot current-thread runtime every background write spawns
@@ -448,15 +526,15 @@ pub fn toggle_smartshift_in_background(op: DeviceOp) {
 /// keyboard whose read-back disagrees with the write) are logged.
 pub(crate) fn write_fn_lock_in_background(op: DeviceOp, ticket: WriteTicket, on: bool) {
     let index = op.route.device_index();
-    op.spawn_write(
+    op.spawn_timed_write(
         "Fn-lock write",
         move |c| async move {
-            ticket
-                .write_or(
-                    || async { openlogi_hid::set_fn_lock_on(&c, on).await.map(Some) },
-                    || async { Ok(None) },
-                )
-                .await
+            within_turn(
+                &ticket,
+                || async { openlogi_hid::set_fn_lock_on(&c, on).await.map(Some) },
+                || async { Ok(None) },
+            )
+            .await
         },
         move |result| {
             log_outcome(index, "Fn-lock write", result, |state| {
@@ -628,18 +706,15 @@ pub(crate) fn reapply_mouse_volatile_in_background(
                 });
             }
             if let Some((rate, ticket)) = report_rate {
-                let result = tokio::time::timeout(WRITE_TIMEOUT, async {
-                    ticket
-                        .write_or(
-                            || async {
-                                openlogi_hid::set_report_rate_on(&shared, rate)
-                                    .await
-                                    .map(Some)
-                            },
-                            || async { Ok(None) },
-                        )
-                        .await
-                })
+                let result = within_turn(
+                    &ticket,
+                    || async {
+                        openlogi_hid::set_report_rate_on(&shared, rate)
+                            .await
+                            .map(Some)
+                    },
+                    || async { Ok(None) },
+                )
                 .await;
                 log_outcome(index, "report-rate write", result, |info| {
                     if let Some(info) = info {
@@ -1007,6 +1082,46 @@ mod tests {
         assert!(
             pick.write_or(|| async { true }, || async { false }).await,
             "the pick is still the newest report-rate write"
+        );
+    }
+
+    /// A reconnect write to a mouse that stopped answering holds the turn
+    /// until its deadline. The pick queued behind it still gets the whole
+    /// deadline once its turn comes, rather than what the wait left over.
+    #[tokio::test(start_paused = true)]
+    async fn a_write_queued_behind_a_stalled_one_keeps_its_whole_deadline() {
+        let rates = WriteOrder::default();
+        let route = unresolvable_route();
+        let stalled = rates.request(&route);
+        let (started, has_started) = tokio::sync::oneshot::channel();
+        let reapply = tokio::spawn(async move {
+            within_turn(
+                &stalled,
+                || async move {
+                    let _ = started.send(());
+                    std::future::pending::<()>().await;
+                },
+                || async {},
+            )
+            .await
+        });
+        has_started.await.expect("the stalled write holds the turn");
+
+        let pick = rates.request(&route);
+        let picked = within_turn(
+            &pick,
+            || async {
+                tokio::time::sleep(WRITE_TIMEOUT / 2).await;
+                2000
+            },
+            || async { 0 },
+        )
+        .await;
+
+        assert_eq!(picked.ok(), Some(2000));
+        assert!(
+            reapply.await.expect("reapply joins").is_err(),
+            "the stalled write gave up at its own deadline"
         );
     }
 

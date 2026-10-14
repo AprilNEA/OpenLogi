@@ -196,7 +196,8 @@ impl SharedHandles {
     /// Write `fn_lock` to the keyboard at `route` and return its echo. When a
     /// newer Fn-lock write for the keyboard is requested before this one gets
     /// its turn, this one reads the keyboard instead of writing a value that
-    /// is about to be replaced.
+    /// is about to be replaced. Waiting for the turn does not count against
+    /// the write's deadline.
     pub async fn set_fn_lock(
         &self,
         route: &DeviceRoute,
@@ -204,14 +205,12 @@ impl SharedHandles {
     ) -> Result<FnLockState, WriteError> {
         let ticket = self.fn_lock_order.request(route);
         self.keyboard_device(route)
-            .run(HidppOperation::WriteFnLock, |c| async move {
-                ticket
-                    .write_or(
-                        || openlogi_hid::set_fn_lock_on(&c, fn_lock),
-                        || openlogi_hid::get_fn_lock_on(&c),
-                    )
-                    .await
-            })
+            .run_in_turn(
+                HidppOperation::WriteFnLock,
+                &ticket,
+                |c| async move { openlogi_hid::set_fn_lock_on(&c, fn_lock).await },
+                |c| async move { openlogi_hid::get_fn_lock_on(&c).await },
+            )
             .await
     }
 
@@ -219,7 +218,9 @@ impl SharedHandles {
     /// When a newer report-rate write for the mouse is requested before this
     /// one gets its turn, this one reads the mouse instead of writing a rate
     /// that is about to be replaced. A reconnect reapply numbers its write
-    /// when it is scheduled, so it never lands over a pick made after that.
+    /// when it is scheduled, so it never lands over a pick made after that,
+    /// and a pick queued behind a reapply still gets the whole deadline once
+    /// its turn comes.
     pub async fn set_report_rate(
         &self,
         route: &DeviceRoute,
@@ -227,14 +228,12 @@ impl SharedHandles {
     ) -> Result<ReportRateInfo, WriteError> {
         let ticket = self.report_rate_order.request(route);
         self.device(route)
-            .run(HidppOperation::WriteReportRate, |c| async move {
-                ticket
-                    .write_or(
-                        || openlogi_hid::set_report_rate_on(&c, rate),
-                        || openlogi_hid::get_report_rate_info_on(&c),
-                    )
-                    .await
-            })
+            .run_in_turn(
+                HidppOperation::WriteReportRate,
+                &ticket,
+                |c| async move { openlogi_hid::set_report_rate_on(&c, rate).await },
+                |c| async move { openlogi_hid::get_report_rate_info_on(&c).await },
+            )
             .await
     }
 
