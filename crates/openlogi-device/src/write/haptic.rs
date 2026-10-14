@@ -1,4 +1,5 @@
 use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
 
 use hidpp::{
     channel::HidppChannel,
@@ -19,6 +20,16 @@ use crate::channel::route::DeviceRoute;
 
 use super::{HidppOperation, WriteError, classify_hidpp_error, with_route};
 
+/// How long the advisory haptic-status read may take.
+///
+/// It follows a capabilities read the device has just answered, so a device
+/// that serves function 3 answers well inside this. Without its own deadline,
+/// a device that never answers would hold the open for the channel's 5 s
+/// response timeout. That is past the agent's 1 s arming and 2 s play
+/// budgets, so the play would be cancelled before falling back, and no
+/// location would ever be cached.
+const STATUS_READ_TIMEOUT: Duration = Duration::from_millis(250);
+
 /// The haptic feature on one device, the waveforms it advertises, and
 /// whether it reports that it can play.
 struct Haptics {
@@ -29,7 +40,7 @@ struct Haptics {
     /// The function-0 capability mask.
     waveforms: SupportedWaveforms,
     /// The function-3 haptic status, or `None` when the device did not
-    /// answer it.
+    /// answer it within [`STATUS_READ_TIMEOUT`].
     status: Option<HapticStatus>,
 }
 
@@ -72,11 +83,18 @@ async fn open_haptics(
     // Advisory: a device that does not answer function 3 plays as before.
     // Logi Options+ starts from a zero status and refuses only after the
     // device reports a non-zero one.
-    let status = feature
-        .get_haptic_status()
-        .await
-        .inspect_err(|error| debug!(%error, "haptic status unreadable; playing without it"))
-        .ok();
+    let status = match tokio::time::timeout(STATUS_READ_TIMEOUT, feature.get_haptic_status()).await
+    {
+        Ok(Ok(status)) => Some(status),
+        Ok(Err(error)) => {
+            debug!(%error, "haptic status unreadable; playing without it");
+            None
+        }
+        Err(_) => {
+            debug!(timeout = ?STATUS_READ_TIMEOUT, "haptic status read timed out; playing without it");
+            None
+        }
+    };
     Ok(Haptics {
         feature,
         feature_index: info.index,
@@ -328,25 +346,44 @@ mod tests {
         firmware: fn(&mut [u8; 3]),
         waveforms: u32,
     ) -> (ScriptedRawHidChannel, crate::replay::ReplayChannelHandle) {
-        haptics_reporting(initial, firmware, waveforms, Some(0))
+        haptics_reporting(initial, firmware, waveforms, StatusReply::Status(0))
     }
 
-    /// [`stateful_haptics`] whose `getHapticInfo` reports `status`, or, for
-    /// `None`, answers it with an invalid-function error.
+    /// How a scripted device answers `getHapticInfo`.
+    #[derive(Clone, Copy)]
+    enum StatusReply {
+        /// Reports this status byte.
+        Status(u8),
+        /// Answers with an invalid-function error.
+        Error,
+        /// Never answers.
+        Silent,
+    }
+
+    /// [`stateful_haptics`] whose `getHapticInfo` answers as `status` says.
     fn haptics_reporting(
         initial: [u8; 3],
         firmware: fn(&mut [u8; 3]),
         waveforms: u32,
-        status: Option<u8>,
+        status: StatusReply,
     ) -> (ScriptedRawHidChannel, crate::replay::ReplayChannelHandle) {
         let state = StdMutex::new(initial);
         ScriptedRawHidChannel::with_dynamic_responder(move |request| {
             if request.len() < 7 || request[0] != 0x10 {
                 return None;
             }
-            if (request[2], request[3] >> 4) == (HAPTIC_INDEX, 0x03) && status.is_none() {
-                // A HID++ 2.0 error: InvalidFunctionId (7).
-                return Some(vec![0x10, request[1], 0xff, request[2], request[3], 7, 0]);
+            if (request[2], request[3] >> 4) == (HAPTIC_INDEX, 0x03) {
+                let raw = match status {
+                    StatusReply::Status(raw) => raw,
+                    // A HID++ 2.0 error: InvalidFunctionId (7).
+                    StatusReply::Error => {
+                        return Some(vec![0x10, request[1], 0xff, request[2], request[3], 7, 0]);
+                    }
+                    StatusReply::Silent => return None,
+                };
+                let mut response = request[..4].to_vec();
+                response.extend_from_slice(&[raw, 0, 0]);
+                return Some(response);
             }
             if (request[2], request[3] >> 4) == (HAPTIC_INDEX, 0x00) {
                 // getCapabilities: a long reply, the mask in bytes 4..8.
@@ -371,7 +408,6 @@ mod tests {
                     firmware(&mut current);
                     payload = *current;
                 }
-                (HAPTIC_INDEX, 0x03) => payload[0] = status.unwrap_or_default(),
                 (HAPTIC_INDEX, 0x04) => {}
                 _ => return None,
             }
@@ -616,7 +652,12 @@ mod tests {
     async fn a_non_zero_status_refuses_every_play_before_it_is_sent() {
         let _slot = CACHE_SLOT.lock().await;
         clear_cached_location();
-        let (raw, handle) = haptics_reporting([0x03, 40, 0x34], |_| {}, RING_WAVEFORMS, Some(2));
+        let (raw, handle) = haptics_reporting(
+            [0x03, 40, 0x34],
+            |_| {},
+            RING_WAVEFORMS,
+            StatusReply::Status(2),
+        );
         let shared = shared_channel(raw).await;
 
         // A fresh open reads the status and refuses without a play request.
@@ -662,7 +703,12 @@ mod tests {
 
         // A session that starts while the device reports it cannot play
         // refuses its plays.
-        let (raw, handle) = haptics_reporting([0x03, 40, 0x34], |_| {}, RING_WAVEFORMS, Some(1));
+        let (raw, handle) = haptics_reporting(
+            [0x03, 40, 0x34],
+            |_| {},
+            RING_WAVEFORMS,
+            StatusReply::Status(1),
+        );
         let shared = shared_channel(raw).await;
         assert_matches!(ensure_haptics_armed_on(&shared).await, Ok(false));
         assert_matches!(
@@ -677,7 +723,8 @@ mod tests {
     async fn a_device_that_does_not_answer_the_status_still_plays() {
         let _slot = CACHE_SLOT.lock().await;
         clear_cached_location();
-        let (raw, handle) = haptics_reporting([0x03, 40, 0x34], |_| {}, RING_WAVEFORMS, None);
+        let (raw, handle) =
+            haptics_reporting([0x03, 40, 0x34], |_| {}, RING_WAVEFORMS, StatusReply::Error);
         let shared = shared_channel(raw).await;
         assert_matches!(
             play_haptic_on(&shared, HapticWaveform::SubtleCollision).await,
@@ -685,6 +732,52 @@ mod tests {
         );
         assert_eq!(status_reads(&handle), 1, "the status was asked for");
         assert_eq!(plays(&handle), vec![4]);
+        clear_cached_location();
+    }
+
+    /// The HID++ response timeout runs on the wall clock, so with tokio's
+    /// clock paused only [`STATUS_READ_TIMEOUT`] can end the silent read
+    /// quickly: without it the open would wait the channel's full 5 s. The
+    /// paused clock still advances by the deadline itself, which bounds it.
+    #[tokio::test(start_paused = true)]
+    async fn a_status_that_never_arrives_stops_neither_arming_nor_play() {
+        let _slot = CACHE_SLOT.lock().await;
+        clear_cached_location();
+        let (raw, handle) = haptics_reporting(
+            [0x03, 40, 0x34],
+            |_| {},
+            RING_WAVEFORMS,
+            StatusReply::Silent,
+        );
+        let shared = shared_channel(raw).await;
+        let started = std::time::Instant::now();
+        let started_paused = tokio::time::Instant::now();
+        assert_matches!(ensure_haptics_armed_on(&shared).await, Ok(false));
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "arming does not wait for the channel's response timeout, took {:?}",
+            started.elapsed()
+        );
+        assert!(
+            started_paused.elapsed() < Duration::from_millis(500),
+            "the status deadline leaves most of the agent's 1 s arming budget, took {:?}",
+            started_paused.elapsed()
+        );
+        assert_eq!(status_reads(&handle), 1, "arming asked for the status");
+        assert_matches!(
+            play_haptic_on(&shared, HapticWaveform::SubtleCollision).await,
+            Ok(())
+        );
+        assert_matches!(
+            play_haptic_on(&shared, HapticWaveform::SubtleCollision).await,
+            Ok(())
+        );
+        assert_eq!(
+            status_reads(&handle),
+            1,
+            "the plays reuse the location cached despite the missing status"
+        );
+        assert_eq!(plays(&handle), vec![4, 4]);
         clear_cached_location();
     }
 }
