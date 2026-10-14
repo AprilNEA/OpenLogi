@@ -107,7 +107,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 37);
+    assert_eq!(PROTOCOL_VERSION, 36);
 }
 
 /// Preserve upstream action indices when combining independently extended enums.
@@ -455,6 +455,15 @@ fn device_inventory() {
     // `Light` was appended after `Unknown`; preserve every existing kind's
     // bincode discriminant.
     assert_wire(&DeviceKind::Light, "0d");
+    // A level-only battery (no state-of-charge gauge) carries no percentage.
+    assert_wire(
+        &BatteryInfo {
+            percentage: None,
+            level: BatteryLevel::Good,
+            status: BatteryStatus::Discharging,
+        },
+        "000200",
+    );
     let inventory = vec![DeviceInventory {
         receiver: ReceiverInfo {
             name: "Bolt Receiver".into(),
@@ -469,7 +478,7 @@ fn device_inventory() {
             kind: DeviceKind::Mouse,
             online: true,
             battery: Some(BatteryInfo {
-                percentage: 80,
+                percentage: Some(80),
                 level: BatteryLevel::Good,
                 status: BatteryStatus::Discharging,
             }),
@@ -501,11 +510,12 @@ fn device_inventory() {
                 onboard_profiles: false,
                 button_spy: false,
             }),
+            settings_revision: 7,
         }],
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b000010150020001030106323134304c5a0102030400010100fb34b0fb8240000b0101010000010101010100000000",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b010101000001010101010000000007",
     );
 }
 
@@ -663,9 +673,15 @@ fn semantic_read_payloads() {
 
     let fn_lock: Result<FnLockState, WriteError> = Ok(FnLockState {
         fn_lock: true,
-        default_fn_lock: false,
+        default_fn_lock: Some(false),
     });
-    assert_wire(&fn_lock, "000100");
+    assert_wire(&fn_lock, "00010100");
+    // A `0x40a0` keyboard reports no default.
+    let legacy: Result<FnLockState, WriteError> = Ok(FnLockState {
+        fn_lock: true,
+        default_fn_lock: None,
+    });
+    assert_wire(&legacy, "000100");
 }
 
 #[test]
@@ -732,4 +748,21 @@ fn standalone_light_dtos_commands_and_errors() {
         "0c05636f6c6f72",
     );
     assert_wire(&WriteError::AmbiguousRawDevice, "0d");
+    assert_wire(
+        &WriteError::DpiUnsupported {
+            requested: Dpi::new(1000),
+        },
+        "0efbe803",
+    );
+    assert_wire(
+        &WriteError::DpiNotApplied {
+            requested: Dpi::new(1600),
+            actual: Dpi::new(800),
+        },
+        "0ffb4006fb2003",
+    );
+    assert_wire(
+        &WriteError::HapticWaveformUnsupported { waveform: 1 },
+        "1001",
+    );
 }

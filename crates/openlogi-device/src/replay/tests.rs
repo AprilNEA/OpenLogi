@@ -358,7 +358,7 @@ fn profile_validator_rejects_duplicate_identities_and_invalid_ranges() {
 
     let mut invalid_battery = direct_probe_fixture().profile;
     invalid_battery.inventories[0].paired[0].battery = Some(BatteryInfo {
-        percentage: 101,
+        percentage: Some(101),
         level: BatteryLevel::Full,
         status: BatteryStatus::Full,
     });
@@ -704,6 +704,7 @@ fn direct_probe_fixture() -> SyntheticFixture {
                     pointer: true,
                     ..Capabilities::default()
                 }),
+                settings_revision: 0,
             }],
         }],
         standalone: Vec::new(),
@@ -779,6 +780,7 @@ fn receiver_dpi_fixture() -> SyntheticFixture {
                     pointer: true,
                     ..Capabilities::default()
                 }),
+                settings_revision: 0,
             }],
         }],
         standalone: Vec::new(),

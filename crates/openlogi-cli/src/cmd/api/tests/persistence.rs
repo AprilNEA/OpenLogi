@@ -255,7 +255,7 @@ async fn saves_fn_lock_to_the_existing_legacy_entry() {
                 assert!(!fn_lock);
                 AgentResponse::SetFnLock(Ok(FnLockState {
                     fn_lock: false,
-                    default_fn_lock: true,
+                    default_fn_lock: Some(true),
                 }))
             }),
             Box::new(|request| {
@@ -302,7 +302,7 @@ async fn lost_reload_acknowledgement_keeps_the_saved_preference() {
                     assert!(fn_lock);
                     AgentResponse::SetFnLock(Ok(FnLockState {
                         fn_lock: true,
-                        default_fn_lock: false,
+                        default_fn_lock: Some(false),
                     }))
                 }
                 AgentRequest::ReloadConfig {} => {

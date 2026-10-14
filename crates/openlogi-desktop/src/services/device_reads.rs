@@ -373,6 +373,20 @@ impl DeviceReads {
         }
     }
 
+    /// Re-read `key`'s settings after the device reported changing one
+    /// itself, keeping the shown values while it answers. Covers the settings
+    /// such a report can concern — DPI and Fn lock (see
+    /// [`PairedDevice::settings_revision`]); a read nothing subscribed to
+    /// stays unsubscribed.
+    ///
+    /// [`PairedDevice::settings_revision`]: openlogi_core::device::PairedDevice::settings_revision
+    pub(crate) fn revalidate_device_settings(&mut self, key: &DeviceKey) {
+        if let Some(read) = self.dpi.get_mut(key) {
+            read.query.revalidate();
+        }
+        self.refresh_fn_lock(key);
+    }
+
     /// `key`'s Fn-lock load, or `None` while nothing has subscribed to it.
     #[must_use]
     pub(crate) fn fn_lock_load(&self, key: &DeviceKey) -> Option<&FnLockLoad> {

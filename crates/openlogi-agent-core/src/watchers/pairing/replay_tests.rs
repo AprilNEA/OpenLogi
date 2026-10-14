@@ -34,7 +34,7 @@ async fn injected_pairing_waits_for_receiver_cleanup_before_terminal_failure() {
         .hold_next_response(
             CHANNEL,
             RequestMatch::Exact,
-            &receiver_notification_flags_write([0, 0, 0]),
+            &receiver_notification_flags_write(FLAGS_BEFORE_PAIRING),
         )
         .expect("notification cleanup response can be held");
     let (_device_io_signal, device_io) = device_io_channel();
@@ -88,11 +88,13 @@ async fn injected_pairing_waits_for_receiver_cleanup_before_terminal_failure() {
     assert_eq!(
         completion.written_reports,
         vec![
+            receiver_notification_flags_read(),
             receiver_notification_flags_write([0, 0x09, 0]),
             bolt_discovery_write([30, 0x01, 0]),
             bolt_discovery_write([30, 0x02, 0]),
-            receiver_notification_flags_write([0, 0, 0]),
-        ]
+            receiver_notification_flags_write(FLAGS_BEFORE_PAIRING),
+        ],
+        "cleanup restores the flags found before pairing, not zero"
     );
     assert_eq!(completion.channel_open_count, 1);
     assert_eq!(
@@ -135,21 +137,39 @@ fn bolt_topology(node_id: NodeId) -> ReplayTopology {
 }
 
 fn bolt_pairing_cancel_cassette() -> HidCassette {
+    let mut flags_read = receiver_notification_flags_read();
+    flags_read[4..7].copy_from_slice(&FLAGS_BEFORE_PAIRING);
     HidCassette {
         schema_version: FIXTURE_SCHEMA_VERSION,
         name: "agent Bolt pairing cancellation".to_string(),
         channel: CHANNEL.to_string(),
         report_support: ReportSupport::ShortAndLong,
-        exchanges: [
-            receiver_notification_flags_write([0, 0x09, 0]),
-            bolt_discovery_write([30, 0x01, 0]),
-            bolt_discovery_write([30, 0x02, 0]),
-            receiver_notification_flags_write([0, 0, 0]),
-        ]
-        .into_iter()
-        .map(exact_echo)
+        exchanges: std::iter::once(CassetteExchange {
+            request_match: RequestMatch::Exact,
+            request: receiver_notification_flags_read(),
+            response: Some(flags_read),
+            required: true,
+        })
+        .chain(
+            [
+                receiver_notification_flags_write([0, 0x09, 0]),
+                bolt_discovery_write([30, 0x01, 0]),
+                bolt_discovery_write([30, 0x02, 0]),
+                receiver_notification_flags_write(FLAGS_BEFORE_PAIRING),
+            ]
+            .into_iter()
+            .map(exact_echo),
+        )
         .collect(),
     }
+}
+
+/// Inventory keeps WIRELESS on; pairing adds SOFTWARE_PRESENT and must hand
+/// back exactly this.
+const FLAGS_BEFORE_PAIRING: [u8; 3] = [0, 0x01, 0];
+
+fn receiver_notification_flags_read() -> Vec<u8> {
+    vec![0x10, 0xff, 0x81, 0x00, 0, 0, 0]
 }
 
 fn receiver_notification_flags_write(flags: [u8; 3]) -> Vec<u8> {

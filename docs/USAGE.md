@@ -67,8 +67,8 @@ stdout cannot provide a JSON envelope.
 | `status` | `agent_version`, `inventory`, `accessibility_granted`, `input_monitoring_granted`, `hook_installed`, `hid_open_failures`, `launch_at_login` |
 | `devices` | `inventory`, `devices`: array of `id`, `name`, `kind`, `online`, `battery`, `capabilities`, `light_capabilities` |
 | `dpi` | `device`, `persistence`, `current` (integer), `supported` (array of integers) |
-| `smartshift` | `device`, `persistence`, `mode` (`free` or `ratchet`), `auto_disengage` (integer), `tunable_torque` (integer or null) |
-| `fn-lock` | `device`, `persistence`, `fn_lock`, `default_fn_lock` |
+| `smartshift` | `device`, `persistence`, `mode` (`free` or `ratchet`), `auto_disengage` (integer), `tunable_torque` (1–100, percent of the wheel's maximum force, or null) |
+| `fn-lock` | `device`, `persistence`, `fn_lock`, `default_fn_lock` (boolean, or null when the keyboard reports no firmware default) |
 
 `inventory` is `scanning`, `ready`, or `unavailable`. Only `ready` with an empty
 device array means enumeration completed and found no peripherals. Device
@@ -85,8 +85,11 @@ contain hardware identity information: keep them local and redact before sharing
 
 `name`, `battery`, and measured `capabilities` may be null; null does not mean
 zero charge or an unsupported feature. Battery objects contain `percentage`,
-`level`, and `status` (for example `charging` or `discharging`). Capabilities
-are the agent's measured feature flags, not guesses based on device kind.
+`level`, and `status` (for example `charging` or `discharging`). `percentage`
+is null when the device has no state-of-charge gauge and reports only a level,
+or when the reading carries no charge figure; read `level` in that case.
+Capabilities are the agent's measured feature flags, not guesses based on
+device kind.
 Not every readable setting has an inventory flag; a setting read can return
 `unsupported_feature`. Standalone lights are listed with their light capability
 descriptor and null battery. Cameras are not part of this agent inventory API.

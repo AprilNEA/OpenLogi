@@ -173,6 +173,15 @@ impl SharedHandles {
         self.keyboard_access().op(route)
     }
 
+    /// Return the `0x8071` software control this session's lighting writes
+    /// took to the firmware. The agent calls this once on a terminal exit,
+    /// while inventory still publishes its channels. A handover or replacement
+    /// skips it: the successor repaints on arrival, and its own exit hands
+    /// control back.
+    pub async fn release_rgb_control(&self) {
+        crate::hardware::release_session_rgb_control(&self.device_access()).await;
+    }
+
     /// Write `fn_lock` to the keyboard at `route` and return its echo. When a
     /// newer Fn-lock write for the keyboard is requested before this one gets
     /// its turn, this one reads the keyboard instead of writing a value that

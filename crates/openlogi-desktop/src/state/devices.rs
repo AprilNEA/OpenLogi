@@ -85,6 +85,12 @@ pub struct DeviceRecord {
     pub slot: u8,
     pub online: bool,
     pub battery: Option<BatteryInfo>,
+    /// The agent's [`PairedDevice::settings_revision`]: a move between two
+    /// snapshots of one route means the device changed a setting itself.
+    /// `0` for a record with no HID++ device behind it.
+    ///
+    /// [`PairedDevice::settings_revision`]: openlogi_core::device::PairedDevice::settings_revision
+    pub settings_revision: u64,
 }
 
 impl DeviceRecord {
@@ -235,6 +241,7 @@ pub(super) fn build_device_list(
                 slot: paired.slot,
                 online: paired.online,
                 battery: paired.battery.clone(),
+                settings_revision: paired.settings_revision,
             });
         }
     }
@@ -324,6 +331,7 @@ fn camera_record(camera: &Camera, resolver: &AssetResolver) -> DeviceRecord {
         slot: 0,
         online: true,
         battery: None,
+        settings_revision: 0,
     }
 }
 
@@ -401,6 +409,7 @@ fn append_standalone(
             slot: openlogi_core::hid::DIRECT_DEVICE_INDEX,
             online: device.online,
             battery: None,
+            settings_revision: 0,
         });
     }
 }
@@ -599,6 +608,7 @@ fn offline_record(
         slot: 0,
         online: false,
         battery: None,
+        settings_revision: 0,
     }
 }
 
@@ -661,6 +671,7 @@ pub(super) fn adopt_transient_record(known: &DeviceRecord, live: DeviceRecord) -
         slot: live.slot,
         online: live.online,
         battery: live.battery.or_else(|| known.battery.clone()),
+        settings_revision: live.settings_revision,
     }
 }
 
@@ -752,6 +763,7 @@ fn demo_keyboard() -> DeviceRecord {
         slot: 0,
         online: true,
         battery: None,
+        settings_revision: 0,
     }
 }
 

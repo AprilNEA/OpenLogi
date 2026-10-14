@@ -288,6 +288,7 @@ mod tests {
                 battery: None,
                 model_info: None,
                 capabilities: None,
+                settings_revision: 0,
             }],
         }
     }

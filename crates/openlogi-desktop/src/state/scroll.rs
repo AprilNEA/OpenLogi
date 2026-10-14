@@ -195,6 +195,7 @@ mod tests {
                 slot: 1,
                 online: true,
                 battery: None,
+                settings_revision: 0,
             };
             // #974 moved the record list and its selection into one store, so
             // the fixture installs both together.

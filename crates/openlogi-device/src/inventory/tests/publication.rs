@@ -46,6 +46,7 @@ fn settled_direct_inventory_publishes_one_direct_route() {
             battery: None,
             model_info: None,
             capabilities: None,
+            settings_revision: 0,
         }],
     }];
 

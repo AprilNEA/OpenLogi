@@ -394,28 +394,32 @@ impl ComponentGallery {
             v_flex()
                 .gap_3()
                 .child(BatteryIndicator::summary(&battery(
-                    78,
+                    Some(78),
                     BatteryLevel::Good,
                     BatteryStatus::Discharging,
                 )))
                 .child(BatteryIndicator::status(
-                    &battery(100, BatteryLevel::Full, BatteryStatus::Full),
+                    &battery(Some(100), BatteryLevel::Full, BatteryStatus::Full),
                     true,
                 ))
                 .child(BatteryIndicator::status(
-                    &battery(42, BatteryLevel::Good, BatteryStatus::Charging),
+                    &battery(Some(42), BatteryLevel::Good, BatteryStatus::Charging),
                     true,
                 ))
                 .child(BatteryIndicator::status(
-                    &battery(0, BatteryLevel::Unknown, BatteryStatus::Charging),
+                    &battery(Some(0), BatteryLevel::Unknown, BatteryStatus::Charging),
                     true,
                 ))
                 .child(BatteryIndicator::status(
-                    &battery(14, BatteryLevel::Low, BatteryStatus::Discharging),
+                    &battery(Some(14), BatteryLevel::Low, BatteryStatus::Discharging),
                     false,
                 ))
+                .child(BatteryIndicator::status(
+                    &battery(None, BatteryLevel::Good, BatteryStatus::Discharging),
+                    true,
+                ))
                 .child(BatteryIndicator::summary(&battery(
-                    35,
+                    Some(35),
                     BatteryLevel::Unknown,
                     BatteryStatus::Error,
                 ))),

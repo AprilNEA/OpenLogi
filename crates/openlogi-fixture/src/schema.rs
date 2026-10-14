@@ -441,7 +441,7 @@ fn validate_battery(
     receiver: &str,
     slot: u8,
 ) -> Result<(), FixtureError> {
-    if battery.is_some_and(|battery| battery.percentage > 100) {
+    if battery.is_some_and(|battery| battery.percentage.is_some_and(|p| p > 100)) {
         Err(FixtureError::invalid(
             "device profile",
             format!("slot {slot} on {receiver} has battery percentage above 100"),

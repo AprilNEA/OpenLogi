@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use openlogi_core::device::{BatteryInfo, BatteryStatus};
 use openlogi_fixture::RequestMatch;
 use tokio::sync::mpsc;
 
@@ -8,9 +9,10 @@ use super::Enumerator;
 use super::cache::{CACHE_MISS_GRACE, CacheKey, REFRESH_INTERVAL};
 use super::events::{HidppEventSource, observed_event_channel};
 use super::replay_test_support::{
-    BOLT_CHANNEL, BOLT_UID, BoltSlot, DIRECT_CHANNEL, HEADSET_CHANNEL, adc_error, adc_reading,
-    bolt_fixture, connection_notification, direct_fixture, headset_fixture, malformed_dpi_fixture,
-    short,
+    BOLT_CHANNEL, BOLT_UID, BoltSlot, DIRECT_CHANNEL, HEADSET_CHANNEL, HEADSET_PRODUCT_ID,
+    adc_error, adc_reading, battery_only_fixture, bolt_fixture, connection_notification,
+    direct_fixture, headset_fixture, malformed_dpi_fixture, setting_fixture, short,
+    voltage_reading,
 };
 use crate::replay::{ChannelConnection, NodePresence, OpenOutcome, ReplayBackend, ReplayTopology};
 use crate::{ChannelRegistry, get_dpi};
@@ -401,21 +403,31 @@ async fn malformed_response_is_released_only_after_the_request_barrier() {
         .expect("malformed response cassette consumed");
 }
 
+/// Enumerate once and return the `(online, battery reading)` of the node
+/// listed under `product_id`.
+async fn battery_node_reading(
+    enumerator: &mut Enumerator,
+    product_id: u16,
+) -> (bool, Option<BatteryInfo>) {
+    let inventories = enumerator.enumerate().await.expect("node probe succeeds");
+    let node = inventories
+        .iter()
+        .find(|inventory| inventory.receiver.product_id == product_id)
+        .unwrap_or_else(|| panic!("node {product_id:#06x} listed: {inventories:#?}"));
+    let device = &node.paired[0];
+    (device.online, device.battery.clone())
+}
+
+/// Enumerate once and return the `(online, battery percentage)` of the node
+/// listed under `product_id`.
+async fn battery_node_state(enumerator: &mut Enumerator, product_id: u16) -> (bool, Option<u8>) {
+    let (online, battery) = battery_node_reading(enumerator, product_id).await;
+    (online, battery.and_then(|battery| battery.percentage))
+}
+
 /// Enumerate once and return the headset's `(online, battery percentage)`.
 async fn headset_state(enumerator: &mut Enumerator) -> (bool, Option<u8>) {
-    let inventories = enumerator
-        .enumerate()
-        .await
-        .expect("headset probe succeeds");
-    let headset = inventories
-        .iter()
-        .find(|inventory| inventory.receiver.product_id == 0x0ab5)
-        .unwrap_or_else(|| panic!("headset listed: {inventories:#?}"));
-    let device = &headset.paired[0];
-    (
-        device.online,
-        device.battery.as_ref().map(|battery| battery.percentage),
-    )
+    battery_node_state(enumerator, HEADSET_PRODUCT_ID).await
 }
 
 #[tokio::test]
@@ -573,4 +585,258 @@ async fn headset_switch_off_broadcast_requests_reconciliation_to_offline() {
     backend
         .require_complete()
         .expect("every scripted headset exchange consumed");
+}
+
+/// Probe a node whose only battery source is `feature_id` (at index 2), emit
+/// that feature's event-`0` broadcast carrying `broadcast`, and return the
+/// battery percentage before and after the reconciliation it requests.
+async fn battery_broadcast_refresh(
+    feature_id: u16,
+    answers: [Vec<u8>; 2],
+    broadcast: [u8; 3],
+    source: HidppEventSource,
+) -> (Option<BatteryInfo>, Option<BatteryInfo>) {
+    const PRODUCT_ID: u16 = 0xc08b;
+    let fixture = battery_only_fixture(feature_id, PRODUCT_ID, "G502 HERO", &answers);
+    let backend = Arc::new(
+        ReplayBackend::new(
+            ReplayTopology {
+                nodes: vec![fixture.node],
+                channels: vec![fixture.channel],
+            },
+            vec![fixture.cassette],
+        )
+        .expect("valid battery replay"),
+    );
+    let (notifier, mut events, observed) = observed_event_channel();
+    let mut enumerator = Enumerator::with_backend(backend.clone()).with_event_notifier(notifier);
+    enumerator.timeouts.arrival_drain = Duration::ZERO;
+    let (online, before) = battery_node_reading(&mut enumerator, PRODUCT_ID).await;
+    assert!(online, "{feature_id:#06x} node listed online");
+
+    let mut report = vec![0x11, 0xff, 0x02, 0x00];
+    report.extend_from_slice(&broadcast);
+    report.extend_from_slice(&[0; 13]);
+    assert_eq!(
+        backend
+            .emit_channel_report(HEADSET_CHANNEL, &report)
+            .expect("known channel"),
+        1
+    );
+    tokio::time::timeout(Duration::from_secs(2), observed.wait_for(1))
+        .await
+        .expect("the broadcast must be recognised as a reconciliation request");
+    assert_eq!(events.try_recv(), Ok(source));
+
+    let (_, after) = battery_node_reading(&mut enumerator, PRODUCT_ID).await;
+    backend
+        .require_complete()
+        .expect("every scripted battery exchange consumed");
+    (before, after)
+}
+
+/// The `(percentage, status)` of a reading, for the assertions below. These
+/// 0x1000/0x1001 readings always carry a percentage.
+fn charge(battery: Option<BatteryInfo>) -> Option<(u8, BatteryStatus)> {
+    battery.map(|battery| {
+        let percentage = battery
+            .percentage
+            .expect("a 0x1000/0x1001 reading carries a percentage");
+        (percentage, battery.status)
+    })
+}
+
+#[tokio::test]
+async fn legacy_battery_broadcast_requests_reconciliation_to_a_fresh_reading() {
+    // 0x1000 `getBatteryLevelStatus`: level 50 %, next 20 %, discharging; the
+    // broadcast reports the drop to 20 %, which the reconciliation re-reads.
+    let (before, after) = battery_broadcast_refresh(
+        0x1000,
+        [
+            short(0xff, 0x02, 0x00, [50, 20, 0x00]),
+            short(0xff, 0x02, 0x00, [20, 5, 0x00]),
+        ],
+        [20, 5, 0x00],
+        HidppEventSource::BatteryStatus,
+    )
+    .await;
+    assert_eq!(
+        (charge(before), charge(after)),
+        (
+            Some((50, BatteryStatus::Discharging)),
+            Some((20, BatteryStatus::Discharging))
+        )
+    );
+}
+
+#[tokio::test]
+async fn legacy_battery_broadcast_reports_a_charging_change() {
+    // Plugged in: only the status byte moves to 1 (recharging), so the
+    // reconciliation must surface "charging" with the same 50 %.
+    let (before, after) = battery_broadcast_refresh(
+        0x1000,
+        [
+            short(0xff, 0x02, 0x00, [50, 20, 0x00]),
+            short(0xff, 0x02, 0x00, [50, 20, 0x01]),
+        ],
+        [50, 20, 0x01],
+        HidppEventSource::BatteryStatus,
+    )
+    .await;
+    assert_eq!(
+        (charge(before), charge(after)),
+        (
+            Some((50, BatteryStatus::Discharging)),
+            Some((50, BatteryStatus::Charging))
+        )
+    );
+}
+
+#[tokio::test]
+async fn legacy_battery_broadcast_reports_charging_while_holding_the_percentage() {
+    // Plugged in, and the firmware stops gauging: 0 % while recharging. The
+    // pre-charge 50 % is held, but the status must still change.
+    let (before, after) = battery_broadcast_refresh(
+        0x1000,
+        [
+            short(0xff, 0x02, 0x00, [50, 20, 0x00]),
+            short(0xff, 0x02, 0x00, [0, 0, 0x01]),
+        ],
+        [0, 0, 0x01],
+        HidppEventSource::BatteryStatus,
+    )
+    .await;
+    assert_eq!(
+        (charge(before), charge(after)),
+        (
+            Some((50, BatteryStatus::Discharging)),
+            Some((50, BatteryStatus::Charging))
+        )
+    );
+}
+
+#[tokio::test]
+async fn voltage_battery_broadcast_requests_reconciliation_to_a_fresh_reading() {
+    // 0x1001 `getBatteryInfo`: 3.70 V on battery, then 4.10 V after the
+    // broadcast; the percentage is estimated from the voltage.
+    let (before, after) = battery_broadcast_refresh(
+        0x1001,
+        [voltage_reading(3700, 0x00), voltage_reading(4100, 0x00)],
+        [0x10, 0x04, 0x00],
+        HidppEventSource::BatteryVoltage,
+    )
+    .await;
+    assert!(
+        matches!(
+            (charge(before.clone()), charge(after.clone())),
+            (
+                Some((before, BatteryStatus::Discharging)),
+                Some((after, BatteryStatus::Discharging))
+            ) if after > before
+        ),
+        "{before:?} -> {after:?}"
+    );
+}
+
+#[tokio::test]
+async fn voltage_battery_broadcast_reports_charging_while_holding_the_percentage() {
+    // Plugged in: flags bit 7 (external power), status 0 (charging). A
+    // voltage under charge is no gauge, so the pre-charge estimate is held,
+    // but the status must still change.
+    let (before, after) = battery_broadcast_refresh(
+        0x1001,
+        [voltage_reading(3700, 0x00), voltage_reading(3900, 0x80)],
+        [0x0f, 0x3c, 0x80],
+        HidppEventSource::BatteryVoltage,
+    )
+    .await;
+    let (percentage, status) = charge(before).expect("a reading before the broadcast");
+    assert_eq!(status, BatteryStatus::Discharging);
+    assert_eq!(charge(after), Some((percentage, BatteryStatus::Charging)));
+}
+
+/// Probe a [`setting_fixture`] node carrying `feature_id` (at index 3), emit
+/// that feature's long `broadcast` (function, then payload) on its channel,
+/// and return the node's settings revision before and after the
+/// reconciliation it requests.
+async fn setting_broadcast_revisions(
+    feature_id: u16,
+    broadcast: [u8; 4],
+    source: HidppEventSource,
+) -> (u64, u64) {
+    const PRODUCT_ID: u16 = 0xb369;
+    // One battery read rides the probe, one the reconciliation.
+    let fixture = setting_fixture(feature_id, PRODUCT_ID, "Settings Test Device", 2);
+    let backend = Arc::new(
+        ReplayBackend::new(
+            ReplayTopology {
+                nodes: vec![fixture.node],
+                channels: vec![fixture.channel],
+            },
+            vec![fixture.cassette],
+        )
+        .expect("valid settings replay"),
+    );
+    let (notifier, mut events, observed) = observed_event_channel();
+    let mut enumerator = Enumerator::with_backend(backend.clone()).with_event_notifier(notifier);
+    enumerator.timeouts.arrival_drain = Duration::ZERO;
+    let revision = async |enumerator: &mut Enumerator| {
+        let inventories = enumerator.enumerate().await.expect("node probe succeeds");
+        let node = inventories
+            .iter()
+            .find(|inventory| inventory.receiver.product_id == PRODUCT_ID)
+            .unwrap_or_else(|| panic!("node listed: {inventories:#?}"));
+        node.paired[0].settings_revision
+    };
+    let before = revision(&mut enumerator).await;
+
+    let [function, payload @ ..] = broadcast;
+    let mut report = vec![0x11, 0xff, 0x03, function << 4];
+    report.extend_from_slice(&payload);
+    report.extend_from_slice(&[0; 13]);
+    assert_eq!(
+        backend
+            .emit_channel_report(HEADSET_CHANNEL, &report)
+            .expect("known channel"),
+        1
+    );
+    tokio::time::timeout(Duration::from_secs(2), observed.wait_for(1))
+        .await
+        .expect("the broadcast must be recognised as a reconciliation request");
+    assert_eq!(events.try_recv(), Ok(source));
+
+    let after = revision(&mut enumerator).await;
+    backend
+        .require_complete()
+        .expect("the feature walk is the whole script");
+    (before, after)
+}
+
+#[tokio::test]
+async fn fn_lock_toggled_on_the_keyboard_moves_its_settings_revision() {
+    // Fn+Esc on an MX Keys: 0x40a3 reports the new state unsolicited. The
+    // payload is not decoded — the revision only says a re-read is due.
+    assert_eq!(
+        setting_broadcast_revisions(
+            0x40a3,
+            [0x00, 0x00, 0x01, 0x00],
+            HidppEventSource::FnInversion
+        )
+        .await,
+        (0, 1)
+    );
+}
+
+#[tokio::test]
+async fn a_dpi_button_moves_the_mouses_settings_revision() {
+    // 0x2202 event 0: sensor 0 now at 1600 DPI.
+    assert_eq!(
+        setting_broadcast_revisions(
+            0x2202,
+            [0x00, 0x00, 0x06, 0x40],
+            HidppEventSource::ExtendedDpi
+        )
+        .await,
+        (0, 1)
+    );
 }

@@ -351,6 +351,7 @@ mod tests {
             battery: None,
             model_info: None,
             capabilities: Some(Capabilities::default()),
+            settings_revision: 0,
         }
     }
 }

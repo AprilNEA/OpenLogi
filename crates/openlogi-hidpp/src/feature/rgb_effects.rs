@@ -35,7 +35,7 @@ pub use types::{
 use self::types::{ALL_CLUSTERS, ALL_EFFECTS, GetOrSet, be16};
 use crate::{
     feature::{EventSource, FeatureEndpoint},
-    protocol::v20::Hidpp20Error,
+    protocol::v20::{self, Hidpp20Error},
 };
 
 /// `typeOfInfo` value selecting general info in `getInfo`.
@@ -71,16 +71,26 @@ impl RgbEffectsFeature {
 
     /// Retrieves cluster-level information for `cluster_index` (`getInfo` cluster
     /// mode).
+    ///
+    /// The reply must be long and must echo `cluster_index` in byte 0; a short
+    /// reply (which would zero-fill the fields) or the info of another cluster
+    /// is refused with [`Hidpp20Error::UnsupportedResponse`].
     pub async fn get_cluster_info(
         &self,
         cluster_index: u8,
     ) -> Result<RgbClusterInfo, Hidpp20Error> {
-        let payload = self
+        let v20::Message::Long(_, payload) = self
             .endpoint
             .call(0, [cluster_index, ALL_EFFECTS, TYPE_GENERAL_INFO])
             .await?
-            .extend_payload();
-        Ok(RgbClusterInfo::from_payload(&payload))
+        else {
+            return Err(Hidpp20Error::UnsupportedResponse);
+        };
+        let info = RgbClusterInfo::from_payload(&payload);
+        if info.cluster_index != cluster_index {
+            return Err(Hidpp20Error::UnsupportedResponse);
+        }
+        Ok(info)
     }
 
     /// Retrieves effect-level information for an effect of a cluster (`getInfo`
@@ -162,35 +172,40 @@ impl RgbEffectsFeature {
     }
 
     /// Reads one non-volatile configuration `capability`.
+    ///
+    /// The reply must be long: its six parameters are what
+    /// [`Self::set_nv_config`] writes back.
     pub async fn get_nv_config(
         &self,
         capability: RgbNvCapabilities,
     ) -> Result<RgbNvConfig, Hidpp20Error> {
         let [cap_hi, cap_lo] = capability.bits().to_be_bytes();
-        let payload = self
+        let v20::Message::Long(_, payload) = self
             .endpoint
             .call(3, [GetOrSet::Get.into(), cap_hi, cap_lo])
             .await?
-            .extend_payload();
+        else {
+            return Err(Hidpp20Error::UnsupportedResponse);
+        };
+        let mut params = [0; 6];
+        params.copy_from_slice(&payload[4..10]);
         Ok(RgbNvConfig {
             capability: RgbNvCapabilities::from_bits_retain(be16(&payload, 1)),
             state: payload[3],
-            param1: payload[4],
-            param2: payload[5],
+            params,
         })
     }
 
     /// Writes one non-volatile configuration entry (to EEPROM).
-    pub async fn set_nv_config(
-        &self,
-        capability: RgbNvCapabilities,
-        state: u8,
-        param1: u8,
-        param2: u8,
-    ) -> Result<(), Hidpp20Error> {
-        let [cap_hi, cap_lo] = capability.bits().to_be_bytes();
+    ///
+    /// Outside this crate `config` can only come from [`Self::get_nv_config`]:
+    /// edit the fields to change, and every other parameter is written back
+    /// as read.
+    pub async fn set_nv_config(&self, config: &RgbNvConfig) -> Result<(), Hidpp20Error> {
+        let [cap_hi, cap_lo] = config.capability.bits().to_be_bytes();
         let mut args = [0; 16];
-        args[..6].copy_from_slice(&[GetOrSet::Set.into(), cap_hi, cap_lo, state, param1, param2]);
+        args[..4].copy_from_slice(&[GetOrSet::Set.into(), cap_hi, cap_lo, config.state]);
+        args[4..10].copy_from_slice(&config.params);
         self.endpoint.call_long(3, args).await?;
         Ok(())
     }

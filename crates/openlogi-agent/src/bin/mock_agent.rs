@@ -587,12 +587,13 @@ impl State {
             kind: DeviceKind::Keyboard,
             online: true,
             battery: Some(BatteryInfo {
-                percentage: 90,
+                percentage: Some(90),
                 level: BatteryLevel::Full,
                 status: BatteryStatus::Discharging,
             }),
             model_info: None,
             capabilities: Some(Capabilities::default()),
+            settings_revision: 0,
         });
         self.profile
             .settings
@@ -638,7 +639,7 @@ fn draining_battery(elapsed: Duration) -> BatteryInfo {
     let drained = u8::try_from(elapsed.as_secs() / 60 % 61).unwrap_or(0);
     let percentage = 80 - drained;
     BatteryInfo {
-        percentage,
+        percentage: Some(percentage),
         level: match percentage {
             0..=10 => BatteryLevel::Critical,
             11..=25 => BatteryLevel::Low,

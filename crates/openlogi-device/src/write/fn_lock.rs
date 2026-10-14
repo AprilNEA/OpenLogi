@@ -1,8 +1,10 @@
 //! HID++ keyboard Fn-lock reads and writes — fn inversion `0x40a3`
-//! (multi-host), with the single-host `0x40a2` as fallback.
+//! (multi-host), with the single-host `0x40a2` and then the original `0x40a0`
+//! as fallbacks.
 //!
-//! Both features expose one `fnInversionState` byte with the meaning the
-//! specifications give it: **inversion on** means a bare F-key performs its
+//! All three expose one `fnInversionState` with the meaning the `0x40a2` /
+//! `0x40a3` specifications give it (for `0x40a0`, reverse-engineered from
+//! Logi Options+): **inversion on** means a bare F-key performs its
 //! printed media/shortcut function and Fn+F-key produces the F-key;
 //! **inversion off** means a bare F-key is the F-key and Fn+F-key the
 //! function. OpenLogi's `fn_lock` setting is the F-keys-first state, so
@@ -26,7 +28,8 @@ use hidpp::{
     feature::{
         CreatableFeature as _,
         fn_inversion::{
-            FnInversionMultiHostFeature, FnInversionState, FnInversionWithDefaultStateFeature,
+            FnInversionFeature, FnInversionMultiHostFeature, FnInversionState,
+            FnInversionWithDefaultStateFeature,
         },
         hosts_info::{HostIndex, HostsInfoFeature},
     },
@@ -40,13 +43,13 @@ use openlogi_core::hid::FnLockState;
 
 use super::{HidppOperation, WriteError, classify_hidpp_error, open_feature, with_route};
 
-/// Whether a failure to open the `0x40a3` multi-host feature should trigger
-/// the `0x40a2` single-host fallback. Only a missing-`0x40a3` feature
-/// qualifies; transport and protocol errors propagate unchanged.
-fn is_missing_multi_host(err: &WriteError) -> bool {
+/// Whether a failure to open the fn-inversion feature `feature` should move
+/// on to the next, older one. Only that feature being missing qualifies;
+/// transport and protocol errors propagate unchanged.
+fn is_missing(err: &WriteError, feature: u16) -> bool {
     matches!(
         err,
-        WriteError::FeatureUnsupported { feature_hex } if *feature_hex == 0x40a3
+        WriteError::FeatureUnsupported { feature_hex } if *feature_hex == feature
     )
 }
 
@@ -67,7 +70,7 @@ fn fn_lock_for(inversion: FnInversionState) -> bool {
 
 /// Whichever fn-inversion feature the keyboard exposes, normalised onto one
 /// getter/setter. Multi-host boards (Easy-Switch) carry `0x40a3`; single-host
-/// boards carry `0x40a2`.
+/// boards carry `0x40a2`, and older ones only the original `0x40a0`.
 enum FnInversion {
     /// `0x40a3 FnInversionForMultiHostDevices`, addressed at the slot the
     /// keyboard is talking to.
@@ -77,13 +80,16 @@ enum FnInversion {
     },
     /// `0x40a2 FnInversionWithDefaultState`.
     SingleHost(Arc<FnInversionWithDefaultStateFeature>),
+    /// `0x40a0 FnInversion`: the current state only, with no default and no
+    /// write echo.
+    Legacy(Arc<FnInversionFeature>),
 }
 
 impl FnInversion {
-    /// Open whichever fn-inversion feature the device exposes. Tries `0x40a3`
-    /// first; on a missing-`0x40a3` error (and only that), retries with
-    /// `0x40a2`. `addressing` decides how a multi-host keyboard is addressed
-    /// — see [`HostAddressing`].
+    /// Open whichever fn-inversion feature the device exposes: `0x40a3`, then
+    /// `0x40a2`, then `0x40a0`, moving on only when the previous one is
+    /// missing. `addressing` decides how a multi-host keyboard is addressed —
+    /// see [`HostAddressing`].
     async fn open(device: &mut Device, addressing: HostAddressing) -> Result<Self, WriteError> {
         match open_feature::<FnInversionMultiHostFeature>(device).await {
             Ok(feature) => {
@@ -95,9 +101,14 @@ impl FnInversion {
                 };
                 Ok(Self::MultiHost { feature, host })
             }
-            Err(err) if is_missing_multi_host(&err) => {
-                let feature = open_feature::<FnInversionWithDefaultStateFeature>(device).await?;
-                Ok(Self::SingleHost(feature))
+            Err(err) if is_missing(&err, 0x40a3) => {
+                match open_feature::<FnInversionWithDefaultStateFeature>(device).await {
+                    Ok(feature) => Ok(Self::SingleHost(feature)),
+                    Err(err) if is_missing(&err, 0x40a2) => Ok(Self::Legacy(
+                        open_feature::<FnInversionFeature>(device).await?,
+                    )),
+                    Err(err) => Err(err),
+                }
             }
             Err(err) => Err(err),
         }
@@ -107,31 +118,42 @@ impl FnInversion {
         match self {
             Self::MultiHost { .. } => 0x40a3,
             Self::SingleHost(_) => 0x40a2,
+            Self::Legacy(_) => 0x40a0,
         }
     }
 
     async fn get(&self) -> Result<FnLockState, WriteError> {
+        self.read(HidppOperation::ReadFnLock).await
+    }
+
+    /// Read the state, failing as `operation`.
+    async fn read(&self, operation: HidppOperation) -> Result<FnLockState, WriteError> {
+        let classify = |e| classify_hidpp_error(e, operation, self.feature_hex());
         let (state, default_state) = match self {
             Self::MultiHost { feature, host } => {
-                let info = feature.get_global_fn_inversion(*host).await.map_err(|e| {
-                    classify_hidpp_error(e, HidppOperation::ReadFnLock, self.feature_hex())
-                })?;
-                (info.state, info.default_state)
+                let info = feature
+                    .get_global_fn_inversion(*host)
+                    .await
+                    .map_err(classify)?;
+                (info.state, Some(info.default_state))
             }
             Self::SingleHost(feature) => {
-                let global = feature.get_global_fn_inversion().await.map_err(|e| {
-                    classify_hidpp_error(e, HidppOperation::ReadFnLock, self.feature_hex())
-                })?;
-                (global.state, global.default_state)
+                let global = feature.get_global_fn_inversion().await.map_err(classify)?;
+                (global.state, Some(global.default_state))
             }
+            Self::Legacy(feature) => (
+                feature.get_global_fn_inversion().await.map_err(classify)?,
+                None,
+            ),
         };
         Ok(FnLockState {
             fn_lock: fn_lock_for(state),
-            default_fn_lock: fn_lock_for(default_state),
+            default_fn_lock: default_state.map(fn_lock_for),
         })
     }
 
-    /// Write the inversion state and return what the keyboard echoes back.
+    /// Write the inversion state and return what the keyboard echoes back —
+    /// or, for `0x40a0`, whose reply carries no state, what it reads back.
     async fn set(&self, state: FnInversionState) -> Result<FnLockState, WriteError> {
         let (state, default_state) = match self {
             Self::MultiHost { feature, host } => {
@@ -149,10 +171,16 @@ impl FnInversion {
                 })?;
                 (global.state, global.default_state)
             }
+            Self::Legacy(feature) => {
+                feature.set_global_fn_inversion(state).await.map_err(|e| {
+                    classify_hidpp_error(e, HidppOperation::WriteFnLock, self.feature_hex())
+                })?;
+                return self.read(HidppOperation::WriteFnLock).await;
+            }
         };
         Ok(FnLockState {
             fn_lock: fn_lock_for(state),
-            default_fn_lock: fn_lock_for(default_state),
+            default_fn_lock: Some(fn_lock_for(default_state)),
         })
     }
 }
@@ -261,9 +289,10 @@ pub(super) async fn set_fn_lock_on_channel(
     .await?;
     let echoed = fn_inversion.set(inversion_for(on)).await?;
     if echoed.fn_lock != on {
-        // The echo is the firmware's word on what it stored; a mismatch is
-        // the MX Keys S 0xFF bug, or a keyboard that only pretends to take
-        // the write. Surface it rather than log a success nothing observed.
+        // The echo (on 0x40a0, the read-back) is the firmware's word on what
+        // it stored; a mismatch is the MX Keys S 0xFF bug, or a keyboard that
+        // only pretends to take the write. Surface it rather than log a
+        // success nothing observed.
         return Err(WriteError::UnsupportedResponse {
             operation: HidppOperation::WriteFnLock,
             feature_hex: fn_inversion.feature_hex(),

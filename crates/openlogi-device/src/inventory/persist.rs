@@ -36,7 +36,11 @@ use super::features::{BatteryProbe, ProbedFeatures};
 /// v2 dropped the `UnifyingSlot` key (slot-keyed, so not re-pair-safe).
 /// v3 adds event-capable feature indexes discovered by the immutable walk.
 /// v4 adds the `0x1F20` ADC-measurement event index.
-const SCHEMA_VERSION: u32 = 4;
+/// v5 adds the legacy `0x1000` and voltage `0x1001` battery event indexes.
+/// v6 records whether a `0x1004` battery reports a percentage.
+/// v7 adds the Fn-inversion `0x40a2`/`0x40a3` and extended-DPI `0x2202`
+/// event indexes.
+const SCHEMA_VERSION: u32 = 7;
 
 impl ProbeCacheError {
     /// Report why a store could not keep a snapshot.
@@ -231,17 +235,25 @@ mod tests {
                     model_info: Some(model.clone()),
                     // A live reading at snapshot time.
                     battery: Some(BatteryInfo {
-                        percentage: 55,
+                        percentage: Some(55),
                         level: BatteryLevel::Good,
                         status: BatteryStatus::Discharging,
                     }),
                     ..Default::default()
                 },
-                battery: Some(BatteryProbe::Unified(9)),
+                battery: Some(BatteryProbe::Unified {
+                    index: 9,
+                    state_of_charge: true,
+                }),
                 events: EventFeatureIndices {
                     wireless_status: Some(7),
                     unified_battery: Some(9),
+                    battery_status: Some(12),
+                    battery_voltage: Some(13),
                     adc_measurement: Some(11),
+                    fn_inversion: None,
+                    fn_inversion_multi_host: None,
+                    extended_dpi: None,
                 },
                 probed_at: Instant::now(),
             },
@@ -271,7 +283,10 @@ mod tests {
         assert_eq!(bolt.probe.model_info.as_ref(), Some(&model));
         assert_eq!(
             bolt.battery,
-            Some(BatteryProbe::Unified(9)),
+            Some(BatteryProbe::Unified {
+                index: 9,
+                state_of_charge: true,
+            }),
             "the battery *feature index* is immutable and kept"
         );
         assert_eq!(
@@ -279,7 +294,12 @@ mod tests {
             EventFeatureIndices {
                 wireless_status: Some(7),
                 unified_battery: Some(9),
+                battery_status: Some(12),
+                battery_voltage: Some(13),
                 adc_measurement: Some(11),
+                fn_inversion: None,
+                fn_inversion_multi_host: None,
+                extended_dpi: None,
             },
             "event feature indexes are immutable and kept"
         );

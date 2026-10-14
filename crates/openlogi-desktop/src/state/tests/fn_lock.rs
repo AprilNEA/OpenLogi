@@ -20,6 +20,7 @@ fn keyboard_inventory(fn_lock: bool) -> DeviceInventory {
             kind: DeviceKind::Keyboard,
             online: true,
             battery: None,
+            settings_revision: 0,
             model_info: Some(DeviceModelInfo {
                 entity_count: 1,
                 serial_number: None,
@@ -108,7 +109,7 @@ fn the_keyboards_answer_repaints_the_device_tab_either_way() {
     let key = state.current_record().expect("keyboard").device_key();
     let echoed = FnLockState {
         fn_lock: true,
-        default_fn_lock: false,
+        default_fn_lock: Some(false),
     };
 
     assert_eq!(
@@ -118,5 +119,67 @@ fn the_keyboards_answer_repaints_the_device_tab_either_way() {
     assert_eq!(
         state.apply_fn_lock_written(&key, Err(WriteError::AgentUnavailable)),
         [StateEvent::FnLockChanged(key)]
+    );
+}
+
+#[test]
+fn a_fn_lock_toggled_on_the_keyboard_marks_it_for_a_re_read() {
+    use crate::state::inventory::settings_moved;
+
+    let resolver = AssetResolver::new();
+    let (mut state, _receiver) = keyboard_state(true);
+    let before = state.devices().to_vec();
+    let key = before[0].device_key();
+    let mut toggled = keyboard_inventory(true);
+    toggled.paired[0].settings_revision = 1;
+
+    let events = state.refresh_inventories(&[toggled.clone()], &[], &resolver, &[]);
+
+    // The revision alone is a change worth a refresh: the shown Fn lock is
+    // no longer known to be the keyboard's.
+    assert_eq!(events, [StateEvent::InventoryChanged]);
+    assert_eq!(state.devices()[0].settings_revision, 1);
+    assert_eq!(settings_moved(&before, state.devices()), [key]);
+    // The same snapshot again changes nothing.
+    assert!(
+        state
+            .refresh_inventories(&[toggled], &[], &resolver, &[])
+            .is_empty()
+    );
+}
+
+#[test]
+fn only_a_device_still_on_its_route_is_re_read_for_a_moved_revision() {
+    use crate::state::inventory::settings_moved;
+
+    let (state, _receiver) = keyboard_state(true);
+    let old = state.devices().to_vec();
+    let moved = |edit: fn(&mut DeviceRecord)| {
+        let mut new = old.clone();
+        edit(&mut new[0]);
+        settings_moved(&old, &new)
+    };
+
+    assert!(moved(|_| {}).is_empty(), "nothing changed");
+    assert_eq!(
+        moved(|record| record.settings_revision += 1),
+        [old[0].device_key()]
+    );
+    // Another route counts from its own channel, and the reroute path
+    // drops the device's reads instead.
+    assert!(
+        moved(|record| {
+            record.settings_revision += 1;
+            record.route = None;
+        })
+        .is_empty()
+    );
+    // A device that was not in the previous snapshot has nothing to re-read.
+    assert!(
+        moved(|record| {
+            record.settings_revision += 1;
+            record.config_key.push_str("-other");
+        })
+        .is_empty()
     );
 }

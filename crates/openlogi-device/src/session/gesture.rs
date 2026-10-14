@@ -48,7 +48,7 @@ pub use super::capture_restore::{
     PendingCaptureRestore,
 };
 use crate::reprog_controls::{self, ReprogControlsV4};
-use crate::thumbwheel::{self, WheelResolution};
+use crate::thumbwheel::{self, RotationStatus, WheelResolution};
 
 /// One input captured from the active device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -201,6 +201,9 @@ struct GestureCapture {
     /// handler by shared reference.
     accum: Arc<Mutex<CaptureAccum>>,
     spy_edges: Arc<Mutex<SpyEdges>>,
+    /// The status of the last thumb-wheel report, for [`thumbwheel_input`].
+    /// Behind a `Mutex` for the same reason as `accum`.
+    thumb_status: Arc<Mutex<RotationStatus>>,
 }
 
 impl GestureCapture {
@@ -209,6 +212,7 @@ impl GestureCapture {
             armed,
             accum: Arc::default(),
             spy_edges: Arc::default(),
+            thumb_status: Arc::new(Mutex::new(RotationStatus::Inactive)),
         }
     }
 }
@@ -242,6 +246,7 @@ impl ArmedCapture for GestureCapture {
     ) -> impl Fn(&v20::Message) + Send + Sync + 'static {
         let armed = &self.armed;
         let accum = Arc::clone(&self.accum);
+        let thumb_status = Arc::clone(&self.thumb_status);
         let reprog_index = armed.reprog.as_ref().map(ReprogControlsV4::feature_index);
         let gesture_cids = armed.gesture_cids.clone();
         let gesture_button_set = armed.gesture_button_cids.clone();
@@ -289,9 +294,14 @@ impl ArmedCapture for GestureCapture {
             }
             if let Some(idx) = thumb_index
                 && let Some(event) = thumbwheel::decode_event(msg, device_index, idx)
-                && let Some(input) = thumbwheel_input(event, thumb_resolution)
             {
-                let _ = sink.send(input);
+                let previous = std::mem::replace(
+                    &mut *thumb_status.lock().unwrap_or_else(PoisonError::into_inner),
+                    event.rotation_status,
+                );
+                if let Some(input) = thumbwheel_input(event, previous, thumb_resolution) {
+                    let _ = sink.send(input);
+                }
             }
         }
     }
@@ -302,6 +312,12 @@ impl ArmedCapture for GestureCapture {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .interrupt();
+        // A power cycle ends any roll in progress; carrying it over would
+        // swallow the first tap after the reconnect.
+        *self
+            .thumb_status
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = RotationStatus::Inactive;
     }
 
     async fn rearm(&self) -> bool {
@@ -326,8 +342,17 @@ impl ArmedCapture for GestureCapture {
 /// through it: both are direct statements that this report is part of a roll,
 /// and taking either keeps the roll recognised on a wheel whose firmware
 /// leaves byte 4 at zero.
+///
+/// `previous` is the status of the report before this one. A report with no
+/// rotation that follows a roll still open (`Start` or `Active`) ends that
+/// roll even when its own status says `Inactive`: the firmware did not report
+/// the roll's `Stop`, and this report is the release in its place, tap bit
+/// included. Logi Options+ reads the same sequence as a `Stop`
+/// (`devio_feature_2150::convert`, "Inconsistent transition from ACTIVE to
+/// INACTIVE. Consider this a STOP.").
 fn thumbwheel_input(
     event: thumbwheel::ThumbwheelEvent,
+    previous: RotationStatus,
     resolution: WheelResolution,
 ) -> Option<CapturedInput> {
     if event.rotation != 0 {
@@ -336,7 +361,7 @@ fn thumbwheel_input(
             resolution,
         });
     }
-    if event.rotation_status.is_rolling() {
+    if event.rotation_status.is_rolling() || previous.leaves_roll_open() {
         return None;
     }
     event

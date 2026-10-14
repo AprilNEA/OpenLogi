@@ -24,7 +24,7 @@ use std::time::Duration;
 use openlogi_core::config::Lighting;
 use openlogi_hid::{
     CaptureChannelSlot, ChannelRegistry, DeviceIoGate, DeviceRoute, Dpi, HidppOperation,
-    ScrollResolution, SharedChannel, SmartShiftStatus, WriteError,
+    ScrollResolution, SharedChannel, SmartShiftStatus, WeakSharedChannel, WriteError,
 };
 use tokio::time::error::Elapsed;
 use tracing::{debug, warn};
@@ -34,6 +34,7 @@ use crate::receiver_access::ReceiverAccess;
 
 mod context;
 mod light;
+mod rgb_control;
 mod write_order;
 
 pub use context::HardwareContext;
@@ -44,6 +45,16 @@ pub(crate) use write_order::{WriteOrder, WriteTicket};
 /// this background thread forever; a write to a live device completes in well
 /// under a second.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Upper bound on waiting, at exit, for lighting writes already running to
+/// record the `0x8071` control they take. A write is a handful of requests;
+/// the budget only matters when a device stopped answering.
+const RGB_SETTLE_BUDGET: Duration = Duration::from_secs(2);
+
+/// Upper bound on handing `0x8071` software control back while the agent
+/// exits. One release is two requests; the budget only matters when a device
+/// stopped answering.
+const RGB_RELEASE_BUDGET: Duration = Duration::from_secs(2);
 
 /// Select the only Agent-authoritative channel for `route`.
 fn authoritative_channel(
@@ -61,6 +72,40 @@ fn authoritative_channel(
         || registry.lookup(route),
     )
     .ok_or(WriteError::DeviceNotFound)
+}
+
+/// Hand every `0x8071` lease this session's lighting writes took back to the
+/// firmware, as G HUB and Solaar do on exit, so the device returns to its
+/// onboard effect and another host can take it. New lighting writes are
+/// refused first, and the ones already running get [`RGB_SETTLE_BUDGET`] to
+/// record their leases, so a write that claims during the exit is still
+/// handed back. Releases then run in parallel within [`RGB_RELEASE_BUDGET`];
+/// an absent device or failed release is logged, never allowed to hold up
+/// the exit.
+pub(crate) async fn release_session_rgb_control(access: &DeviceAccess) {
+    let settle = tokio::time::Instant::now() + RGB_SETTLE_BUDGET;
+    let jobs: Vec<_> = rgb_control::SESSION
+        .close(settle)
+        .await
+        .into_iter()
+        .filter_map(|(route, connection, lease)| {
+            match access.op(&route).release_rgb_control(connection, lease) {
+                Ok(job) => Some((route, job)),
+                Err(error) => {
+                    warn!(%route, ?error, "could not start the RGB control release");
+                    None
+                }
+            }
+        })
+        .collect();
+    let deadline = tokio::time::Instant::now() + RGB_RELEASE_BUDGET;
+    for (route, job) in jobs {
+        match tokio::time::timeout_at(deadline, job.wait()).await {
+            Ok(Ok(())) => debug!(%route, "returned RGB control to the firmware"),
+            Ok(Err(error)) => debug!(%route, ?error, "RGB control release skipped"),
+            Err(_) => warn!(%route, "RGB control release exceeded the exit budget"),
+        }
+    }
 }
 
 fn choose_authoritative<T>(
@@ -184,10 +229,18 @@ impl DeviceOp {
     /// Own the whole lighting transaction outside the requester runtime. The
     /// worker leases and resolves AFTER obtaining its lighting route lock and
     /// retains that lease through any RGB rollback after requester cancellation.
+    /// A write that leaves `0x8071` software control held records its lease,
+    /// bound to the connection it went through, which
+    /// [`crate::orchestrator::SharedHandles::release_rgb_control`] hands back
+    /// when the agent leaves. Once that release has started, a new write is
+    /// refused as [`WriteError::DeviceNotFound`].
     pub fn lighting(
         self,
         lighting: &Lighting,
     ) -> Result<openlogi_hid::lighting::LightingJob, WriteError> {
+        let ticket = rgb_control::SESSION
+            .admit()
+            .ok_or(WriteError::DeviceNotFound)?;
         let DeviceAccess {
             channel: capture,
             registry,
@@ -210,13 +263,55 @@ impl DeviceOp {
                 return Err(WriteError::DeviceNotFound);
             }
             let channel = authoritative_channel(Some(&capture), &registry, &route)?;
-            write
+            let lease = write
                 .apply_on(
                     &channel,
                     || cancel.is_cancelled(),
                     || device_io.allows_io() && registry.is_current(&channel),
                 )
+                .await?;
+            if let Some(lease) = lease {
+                ticket.record(&route, channel.downgrade(), lease);
+            }
+            Ok(())
+        })
+    }
+
+    /// Return `lease` to the firmware through `connection`, the one the claim
+    /// went through, under the same route lock, receiver lease and I/O gate as
+    /// [`Self::lighting`]. A connection that has closed or stopped being the
+    /// route's publication means a replug or another device: the lease
+    /// describes nothing there, so nothing is sent. Behind an unchanged
+    /// connection, such as a receiver slot paired to another device since,
+    /// the release checks the unit ID its claim recorded.
+    fn release_rgb_control(
+        self,
+        connection: WeakSharedChannel,
+        lease: openlogi_hid::write::RgbControlLease,
+    ) -> Result<openlogi_hid::lighting::LightingJob, WriteError> {
+        let DeviceAccess {
+            registry,
+            receiver_access,
+            device_io,
+            ..
+        } = self.access;
+        openlogi_hid::lighting::LightingJob::spawn(&self.route, move |_| async move {
+            let _lease = tokio::time::timeout(WRITE_TIMEOUT, receiver_access.acquire_for_io())
                 .await
+                .map_err(|_| WriteError::RequestTimedOut {
+                    operation: HidppOperation::Lighting,
+                })?;
+            if !device_io.allows_io() {
+                return Err(WriteError::DeviceNotFound);
+            }
+            let channel = connection
+                .upgrade()
+                .filter(|channel| registry.is_current(channel))
+                .ok_or(WriteError::DeviceNotFound)?;
+            openlogi_hid::write::release_rgb_control(&channel, lease, || {
+                device_io.allows_io() && registry.is_current(&channel)
+            })
+            .await
         })
     }
 
