@@ -284,13 +284,13 @@ async fn run_diverted_host_switch(
         // A press does not retire the channel: teardown may write through it
         // for as long as inventory still publishes it.
         HostSwitchStop::Pressed(_) => registry.is_current(shared),
-        HostSwitchStop::Shutdown => true,
+        HostSwitchStop::Shutdown | HostSwitchStop::KeyboardOffline => true,
         HostSwitchStop::ChannelChanged => false,
     };
     if reuse_armed_channel {
         pending = pending.allow_current_channel();
     }
-    if !device_io.allows_io() {
+    if matches!(stop, HostSwitchStop::KeyboardOffline) || !device_io.allows_io() {
         return Ok(HostSwitchSessionOutcome::RestorePending {
             requested_host,
             restore: pending,
@@ -416,9 +416,9 @@ enum HostSwitchStop {
     /// Teardown was requested while inventory still published the channel
     /// that armed the session.
     Shutdown,
-    /// The channel that armed the session must not be written through again:
-    /// inventory removed or replaced it, or the owner reported the keyboard
-    /// lost.
+    /// The keyboard went offline without retiring its receiver transport.
+    KeyboardOffline,
+    /// Inventory removed or replaced the transport that armed the session.
     ChannelChanged,
 }
 
@@ -426,7 +426,7 @@ impl HostSwitchStop {
     fn requested_host(self) -> Option<u8> {
         match self {
             Self::Pressed(host) => Some(host),
-            Self::Shutdown | Self::ChannelChanged => None,
+            Self::Shutdown | Self::KeyboardOffline | Self::ChannelChanged => None,
         }
     }
 
@@ -455,7 +455,13 @@ async fn monitor_host_switch(
             Some(HostSwitchStopReason::Graceful) => {
                 return HostSwitchStop::for_current_publication(registry, shared);
             }
-            Some(HostSwitchStopReason::DeviceLost) => return HostSwitchStop::ChannelChanged,
+            Some(HostSwitchStopReason::DeviceLost) => {
+                return if registry.is_current(shared) {
+                    HostSwitchStop::KeyboardOffline
+                } else {
+                    HostSwitchStop::ChannelChanged
+                };
+            }
             None if shutdown.has_changed().is_err() => return HostSwitchStop::ChannelChanged,
             None => {}
         }

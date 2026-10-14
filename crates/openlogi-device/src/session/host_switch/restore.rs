@@ -235,6 +235,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sleeping_keyboard_restores_on_the_same_receiver_after_waking() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let route = DeviceRoute::Bolt {
+            receiver_uid: "sleeping-keyboard".into(),
+            slot: 1,
+        };
+        let registry = ChannelRegistry::default();
+        let awake = Arc::new(AtomicBool::new(false));
+        let responding = awake.clone();
+        let (raw, writes) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+            if request[2] == 0x22
+                && request[3] >> 4 == 3
+                && request[6] & 1 == 0
+                && !responding.load(Ordering::SeqCst)
+            {
+                Some(feature_error(request, 0x08))
+            } else {
+                capture_keyboard(request, false)
+            }
+        });
+        let channel = scripted_channel(raw).await;
+        registry.replace_node(
+            NodeId::from("sleeping-keyboard-receiver".to_owned()),
+            [route.clone()],
+            channel.clone(),
+        );
+        let pool = crate::ChannelPool::with_backend(
+            crate::channel::scripted::ScriptedBackend::new(Vec::new()),
+        );
+        let (stop, stopped) = tokio::sync::watch::channel(None);
+        stop.send_replace(Some(HostSwitchStopReason::DeviceLost));
+        let (_signal, gate) = crate::device_io_channel();
+        let outcome = run_host_switch_session(route.clone(), stopped, &registry, gate, &[], &pool)
+            .await
+            .unwrap();
+        let HostSwitchSessionOutcome::RestorePending {
+            requested_host,
+            restore,
+        } = outcome
+        else {
+            panic!("sleep must retain the firmware restoration debt");
+        };
+        assert_eq!(requested_host, None);
+        assert!(
+            writes
+                .written_reports()
+                .iter()
+                .all(|request| request[2] != 0x22 || request[3] >> 4 != 3 || request[6] & 1 != 0),
+            "offline teardown must not write host-control restoration"
+        );
+        let restore = match restore.retry(&registry).await {
+            HostSwitchRestoreOutcome::RestorePending(restore) => restore,
+            HostSwitchRestoreOutcome::Restored => {
+                panic!("sleeping keyboard cannot acknowledge restoration")
+            }
+        };
+        awake.store(true, Ordering::SeqCst);
+        assert!(Arc::ptr_eq(
+            registry.lookup(&route).unwrap().channel(),
+            &channel
+        ));
+        assert!(
+            matches!(
+                restore.retry(&registry).await,
+                HostSwitchRestoreOutcome::Restored
+            ),
+            "waking must permit restoring through the still-current receiver"
+        );
+        assert!(
+            writes
+                .written_reports()
+                .iter()
+                .any(|request| request[2] == 0x22 && request[3] >> 4 == 3 && request[6] & 1 == 0),
+            "waking must restore native host controls before rearming"
+        );
+        let (stop, stopped) = tokio::sync::watch::channel(None);
+        stop.send_replace(Some(HostSwitchStopReason::Graceful));
+        let (_signal, gate) = crate::device_io_channel();
+        assert!(
+            matches!(
+                run_host_switch_session(route, stopped, &registry, gate, &[], &pool)
+                    .await
+                    .unwrap(),
+                HostSwitchSessionOutcome::Restored {
+                    requested_host: None
+                }
+            ),
+            "a successor must arm and shut down without a stranded restore"
+        );
+    }
+
+    #[tokio::test]
     async fn retirement_before_listener_subscription_is_observed_without_another_event() {
         let route = DeviceRoute::Direct {
             vendor_id: 0x046d,
@@ -291,7 +384,7 @@ mod tests {
             ),
             (
                 Some(HostSwitchStopReason::DeviceLost),
-                HostSwitchStop::ChannelChanged,
+                HostSwitchStop::KeyboardOffline,
             ),
             // A dropped stop sender is a lost owner, not a graceful request.
             (None, HostSwitchStop::ChannelChanged),
