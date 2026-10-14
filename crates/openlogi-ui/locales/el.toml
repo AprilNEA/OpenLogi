@@ -107,7 +107,6 @@ fn_lock_unsupported = "Αυτό το πληκτρολόγιο δεν διαθέ�
 connection = "Σύνδεση"
 slot = "Θέση"
 receiver_slot_number = "Θέση %{number}"
-channel = "Κανάλι"
 device_key = "Κλειδί συσκευής"
 serial = "Σειριακός αριθμός"
 connected = "Συνδεδεμένη"

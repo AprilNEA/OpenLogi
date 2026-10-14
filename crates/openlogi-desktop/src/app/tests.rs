@@ -598,3 +598,31 @@ fn unprobed_unknown_device_shows_only_device_tab() {
 }
 
 mod corpus;
+
+/// A receiver-paired card names its slot, as a slot rather than the
+/// device's Easy-Switch channel; a direct device has no slot to name.
+#[test]
+fn receiver_slot_is_named_only_for_receiver_routes() {
+    use super::widgets::{connection_summary, receiver_slot_label};
+    use crate::services::i18n::LOCALE_LOCK;
+
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    let mut bolt = record(DeviceKind::Keyboard, None);
+    bolt.route = Some(DeviceRoute::Bolt {
+        receiver_uid: "OL-BOLT-UID-0001".to_string(),
+        slot: 4,
+    });
+    bolt.slot = 4;
+    assert_eq!(receiver_slot_label(&bolt).as_deref(), Some("Slot 4"));
+    assert_eq!(connection_summary(&bolt), "Bolt receiver · Slot 4");
+
+    let mut direct = record(DeviceKind::Mouse, None);
+    direct.route = Some(DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xc083,
+    });
+    direct.slot = 0xff;
+    assert_eq!(receiver_slot_label(&direct), None);
+    assert_eq!(connection_summary(&direct), "Direct connection");
+}

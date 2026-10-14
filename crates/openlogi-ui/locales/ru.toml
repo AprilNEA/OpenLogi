@@ -107,7 +107,6 @@ fn_lock_unsupported = "Эта клавиатура не поддерживает
 connection = "Подключение"
 slot = "Слот"
 receiver_slot_number = "Слот %{number}"
-channel = "Канал"
 device_key = "Ключ устройства"
 serial = "Серийный номер"
 connected = "Подключено"

@@ -17,9 +17,8 @@ use gpui_component::{
 };
 use openlogi_core::config::ScrollResolution;
 use openlogi_core::device::DeviceKind;
-use openlogi_core::hid::DeviceRoute;
 
-use super::widgets::{back_button, kind_label, route_label, sidebar_action, status_badge};
+use super::widgets::{back_button, connection_summary, kind_label, sidebar_action, status_badge};
 use super::{AppView, DetailTab};
 use crate::app::menu::open_config_folder;
 use crate::features::action_ring::ActionRingPanel;
@@ -901,15 +900,9 @@ fn device_description_list(record: DeviceRecord) -> impl IntoElement {
     let connection = if is_camera {
         tr!("device.usb").to_string()
     } else {
-        route_label(record.route.as_ref())
+        connection_summary(&record)
     };
     let mut items = vec![DescriptionItem::new(tr!("device.connection")).value(connection)];
-    if matches!(
-        record.route,
-        Some(DeviceRoute::Bolt { .. } | DeviceRoute::Unifying { .. })
-    ) {
-        items.push(DescriptionItem::new(tr!("device.channel")).value(record.slot.to_string()));
-    }
     items
         .push(DescriptionItem::new(tr!("device.device_key")).value(elided_key(&record.config_key)));
     if let Some(serial) = record.serial_number {

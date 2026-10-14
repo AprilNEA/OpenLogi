@@ -107,7 +107,6 @@ fn_lock_unsupported = "このキーボードには Fn ロックの制御があ�
 connection = "接続"
 slot = "スロット"
 receiver_slot_number = "スロット %{number}"
-channel = "チャンネル"
 device_key = "デバイスキー"
 serial = "シリアル"
 connected = "接続済み"

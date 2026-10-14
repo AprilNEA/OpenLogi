@@ -107,7 +107,6 @@ fn_lock_unsupported = "Ця клавіатура не підтримує Fn Lock
 connection = "Підключення"
 slot = "Слот"
 receiver_slot_number = "Слот %{number}"
-channel = "Канал"
 device_key = "Ключ пристрою"
 serial = "Серійний номер"
 connected = "Підключено"
