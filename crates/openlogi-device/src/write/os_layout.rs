@@ -93,6 +93,9 @@ pub enum OsLayoutOutcome {
     NotSettable,
     /// No platform descriptor covers the host OS.
     NoMatchingPlatform,
+    /// The caller withdrew the write before it was sent: the setting was
+    /// turned off, or the device disabled, while the job waited.
+    Withdrawn,
 }
 
 /// The part of a platform descriptor the selection reads, with each end of
@@ -159,18 +162,28 @@ fn select_platform(candidates: impl IntoIterator<Item = Candidate>, host: HostOs
 /// already-open [`SharedChannel`]. A slot already on it is left alone; a
 /// write the keyboard does not read back surfaces as
 /// [`WriteError::UnsupportedResponse`].
+///
+/// `still_wanted` is asked before the first request and again just before the
+/// write. When it says no, nothing more is sent and the outcome is
+/// [`OsLayoutOutcome::Withdrawn`], so a job that waited for the receiver does
+/// not override a preference the user turned off in the meantime.
 pub async fn keep_os_layout_on(
     shared: &SharedChannel,
     host: HostOs,
+    still_wanted: impl Fn() -> bool,
 ) -> Result<OsLayoutOutcome, WriteError> {
-    keep_os_layout_on_channel(shared.channel(), shared.device_index(), host).await
+    keep_os_layout_on_channel(shared.channel(), shared.device_index(), host, still_wanted).await
 }
 
 async fn keep_os_layout_on_channel(
     channel: &Arc<HidppChannel>,
     index: u8,
     host: HostOs,
+    still_wanted: impl Fn() -> bool,
 ) -> Result<OsLayoutOutcome, WriteError> {
+    if !still_wanted() {
+        return Ok(OsLayoutOutcome::Withdrawn);
+    }
     let classify =
         |e| classify_hidpp_error(e, HidppOperation::WriteOsLayout, MultiPlatformFeature::ID);
     let mut device = Device::new(Arc::clone(channel), index)
@@ -211,6 +224,9 @@ async fn keep_os_layout_on_channel(
         return Ok(OsLayoutOutcome::AlreadySet {
             platform_index: target,
         });
+    }
+    if !still_wanted() {
+        return Ok(OsLayoutOutcome::Withdrawn);
     }
     feature
         .set_host_platform(slot, target)

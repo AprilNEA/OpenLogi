@@ -213,12 +213,36 @@ pub(super) fn settings_moved(prev: &[AgentDevice], next: &[AgentDevice]) -> Vec<
         .collect()
 }
 
+/// Indices into `next` of online devices that report the `os_layout`
+/// capability on a route that was already online without it, such as a Bolt
+/// keyboard whose feature walk failed until after its reconnect reapply. A
+/// device that just came online or changed route is reapplied instead.
+pub(super) fn os_layout_appeared(prev: &[AgentDevice], next: &[AgentDevice]) -> Vec<usize> {
+    let has_os_layout = |dev: &AgentDevice| dev.capabilities.is_some_and(|caps| caps.os_layout);
+    next.iter()
+        .enumerate()
+        .filter(|(_, dev)| dev.online && dev.route.is_some() && has_os_layout(dev))
+        .filter(|(_, dev)| {
+            let id = stable_id(dev);
+            prev.iter()
+                .find(|p| stable_id(p) == id)
+                .is_some_and(|p| p.online && p.route == dev.route && !has_os_layout(p))
+        })
+        .map(|(idx, _)| idx)
+        .collect()
+}
+
+/// Whether `config` keeps the key layout of the device under `key` on the
+/// host OS, whatever the device supports: enabled, with the setting on.
+pub(super) fn config_keeps_os_layout(config: &Config, key: &str) -> bool {
+    config.device_enabled(key) && config.keep_os_layout(key)
+}
+
 /// Whether `config` keeps `dev`'s key layout on the host OS: a keyboard whose
 /// platform software can set, enabled, with the setting on.
 pub(super) fn keeps_os_layout(config: &Config, dev: &AgentDevice) -> bool {
     dev.capabilities.is_some_and(|caps| caps.os_layout)
-        && config.device_enabled(&dev.config_key)
-        && config.keep_os_layout(&dev.config_key)
+        && config_keeps_os_layout(config, &dev.config_key)
 }
 
 /// The devices whose "keep OS layout" takes effect going from `previous` to

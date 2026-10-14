@@ -17,8 +17,10 @@
 //! at the cadence these fire at (≤ once per slider release / button press)
 //! and avoids holding a long-lived async runtime alongside GPUI's executor.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::future::Future;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use openlogi_core::config::Lighting;
@@ -471,16 +473,53 @@ pub(crate) fn write_fn_lock_in_background(op: DeviceOp, ticket: FnLockTicket, on
     );
 }
 
+/// The devices, by config key, whose "keep OS layout" is in effect as of the
+/// latest config. The orchestrator adds a device when it queues a layout
+/// write and drops it when a reload turns the setting off or disables the
+/// device. A queued write can wait behind pairing or a host switch, so it
+/// asks this set when it starts and again just before it writes, and does
+/// not land after the user opted out.
+#[derive(Debug, Default)]
+pub(crate) struct KeptOsLayouts(Mutex<HashSet<String>>);
+
+impl KeptOsLayouts {
+    /// Record that `key`'s layout is kept.
+    pub(crate) fn keep(&self, key: &str) {
+        self.lock().insert(key.to_owned());
+    }
+
+    /// Drop every device for which `still_kept` says no.
+    pub(crate) fn retain(&self, still_kept: impl Fn(&str) -> bool) {
+        self.lock().retain(|key| still_kept(key));
+    }
+
+    /// Whether `key`'s layout is kept.
+    pub(crate) fn contains(&self, key: &str) -> bool {
+        self.lock().contains(key)
+    }
+
+    fn lock(&self) -> MutexGuard<'_, HashSet<String>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
 /// Spawn an OS thread that keeps `op`'s keyboard on `host`'s `0x4531`
 /// platform via [`openlogi_hid::keep_os_layout_on`], which writes only when
-/// the current Easy-Switch slot holds another platform. Returns immediately;
-/// failures (incl. a keyboard whose read-back disagrees with the write) are
-/// logged.
-pub(crate) fn keep_os_layout_in_background(op: DeviceOp, host: HostOs) {
+/// the current Easy-Switch slot holds another platform. The write is
+/// withdrawn once `kept` no longer holds `key`. Returns immediately; failures
+/// (incl. a keyboard whose read-back disagrees with the write) are logged.
+pub(crate) fn keep_os_layout_in_background(
+    op: DeviceOp,
+    host: HostOs,
+    kept: Arc<KeptOsLayouts>,
+    key: String,
+) {
     let index = op.route.device_index();
     op.spawn_write(
         "OS layout write",
-        move |c| async move { openlogi_hid::keep_os_layout_on(&c, host).await },
+        move |c| async move {
+            openlogi_hid::keep_os_layout_on(&c, host, || kept.contains(&key)).await
+        },
         move |result| {
             log_outcome(index, "OS layout write", result, |outcome| {
                 if let OsLayoutOutcome::Switched { from, to } = outcome {

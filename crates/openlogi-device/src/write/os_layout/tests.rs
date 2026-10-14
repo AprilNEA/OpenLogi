@@ -116,6 +116,8 @@ struct Keyboard {
     takes_writes: bool,
     /// Every `setHostPlatform` request, as `[host, platform, reserved]`.
     writes: Vec<[u8; 3]>,
+    /// How many requests reached the keyboard.
+    requests: usize,
 }
 
 impl Keyboard {
@@ -133,10 +135,12 @@ impl Keyboard {
             platforms: [0; 3],
             takes_writes: true,
             writes: Vec::new(),
+            requests: 0,
         }
     }
 
     fn respond(&mut self, request: &[u8]) -> Option<Vec<u8>> {
+        self.requests += 1;
         if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
             return None;
         }
@@ -206,7 +210,7 @@ async fn switches_the_current_slot_to_the_host_platform_and_reads_it_back() {
     }));
     let shared = keyboard_channel(&keyboard).await;
 
-    let outcome = keep_os_layout_on(&shared, MACOS)
+    let outcome = keep_os_layout_on(&shared, MACOS, || true)
         .await
         .expect("the keyboard takes the write");
 
@@ -229,7 +233,7 @@ async fn leaves_a_slot_already_on_the_host_platform_alone() {
     keyboard.lock().expect("keyboard lock").platforms[1] = 1;
     let shared = keyboard_channel(&keyboard).await;
 
-    let outcome = keep_os_layout_on(&shared, MACOS)
+    let outcome = keep_os_layout_on(&shared, MACOS, || true)
         .await
         .expect("nothing to write");
 
@@ -244,7 +248,9 @@ async fn does_not_write_a_keyboard_that_does_not_advertise_software_set() {
         MultiPlatformCapabilities::OS_DETECTION.bits();
     let shared = keyboard_channel(&keyboard).await;
 
-    let outcome = keep_os_layout_on(&shared, MACOS).await.expect("no write");
+    let outcome = keep_os_layout_on(&shared, MACOS, || true)
+        .await
+        .expect("no write");
 
     assert_eq!(outcome, OsLayoutOutcome::NotSettable);
     assert!(keyboard.lock().expect("keyboard lock").writes.is_empty());
@@ -256,7 +262,9 @@ async fn does_not_write_a_slot_outside_the_host_count() {
     keyboard.lock().expect("keyboard lock").host_count = 1;
     let shared = keyboard_channel(&keyboard).await;
 
-    let outcome = keep_os_layout_on(&shared, MACOS).await.expect("no write");
+    let outcome = keep_os_layout_on(&shared, MACOS, || true)
+        .await
+        .expect("no write");
 
     assert_eq!(outcome, OsLayoutOutcome::NotSettable);
     assert!(keyboard.lock().expect("keyboard lock").writes.is_empty());
@@ -271,7 +279,9 @@ async fn does_not_write_when_no_descriptor_covers_the_host() {
         version: None,
     };
 
-    let outcome = keep_os_layout_on(&shared, linux).await.expect("no write");
+    let outcome = keep_os_layout_on(&shared, linux, || true)
+        .await
+        .expect("no write");
 
     assert_eq!(outcome, OsLayoutOutcome::NoMatchingPlatform);
     assert!(keyboard.lock().expect("keyboard lock").writes.is_empty());
@@ -283,7 +293,9 @@ async fn does_not_write_a_platform_outside_the_platform_count() {
     keyboard.lock().expect("keyboard lock").platform_count = 1;
     let shared = keyboard_channel(&keyboard).await;
 
-    let outcome = keep_os_layout_on(&shared, MACOS).await.expect("no write");
+    let outcome = keep_os_layout_on(&shared, MACOS, || true)
+        .await
+        .expect("no write");
 
     assert_eq!(outcome, OsLayoutOutcome::NoMatchingPlatform);
     assert!(keyboard.lock().expect("keyboard lock").writes.is_empty());
@@ -295,7 +307,7 @@ async fn a_write_the_keyboard_does_not_read_back_is_an_error() {
     keyboard.lock().expect("keyboard lock").takes_writes = false;
     let shared = keyboard_channel(&keyboard).await;
 
-    let error = keep_os_layout_on(&shared, MACOS)
+    let error = keep_os_layout_on(&shared, MACOS, || true)
         .await
         .expect_err("the slot still holds Windows");
 
@@ -307,4 +319,39 @@ async fn a_write_the_keyboard_does_not_read_back_is_an_error() {
         }
     );
     assert_eq!(keyboard.lock().expect("keyboard lock").writes, [[1, 1, 0]]);
+}
+
+#[tokio::test]
+async fn a_write_withdrawn_before_it_starts_sends_nothing() {
+    let keyboard = Arc::new(Mutex::new(Keyboard::new()));
+    let shared = keyboard_channel(&keyboard).await;
+    let asked = std::sync::atomic::AtomicUsize::new(0);
+    let outcome = keep_os_layout_on(&shared, MACOS, || {
+        asked.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        false
+    })
+    .await
+    .expect("nothing to write");
+    assert_eq!(outcome, OsLayoutOutcome::Withdrawn);
+    // Asked once, before any request.
+    assert_eq!(asked.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(keyboard.lock().expect("keyboard lock").requests, 0);
+}
+
+#[tokio::test]
+async fn a_write_withdrawn_after_the_reads_is_not_sent() {
+    let keyboard = Arc::new(Mutex::new(Keyboard::new()));
+    let shared = keyboard_channel(&keyboard).await;
+    // Wanted when the job starts, withdrawn by the time it would write.
+    let asked = std::sync::atomic::AtomicUsize::new(0);
+    let outcome = keep_os_layout_on(&shared, MACOS, || {
+        asked.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0
+    })
+    .await
+    .expect("nothing to write");
+    assert_eq!(outcome, OsLayoutOutcome::Withdrawn);
+    assert_eq!(asked.load(std::sync::atomic::Ordering::Relaxed), 2);
+    let keyboard = keyboard.lock().expect("keyboard lock");
+    assert!(keyboard.writes.is_empty());
+    assert_eq!(keyboard.platforms, [0, 0, 0]);
 }

@@ -97,3 +97,88 @@ fn build_devices_carries_the_settings_revision() {
     let devices = build_devices(&Config::default(), &[inventory], &[]);
     assert_eq!(devices[0].settings_revision, 5);
 }
+
+/// `kbd(slot, true, 0)` with `capabilities`.
+fn kbd_with(slot: u8, online: bool, capabilities: Option<Capabilities>) -> AgentDevice {
+    AgentDevice {
+        capabilities,
+        ..kbd(slot, online, 0)
+    }
+}
+
+#[test]
+fn os_layout_support_found_on_an_online_route_is_checked() {
+    let layout = Some(Capabilities {
+        os_layout: true,
+        ..Capabilities::default()
+    });
+    let without = Some(Capabilities::default());
+    // Unknown capabilities (a failed feature walk) or a walk without the
+    // feature, then the feature: check.
+    assert_eq!(
+        os_layout_appeared(&[kbd_with(1, true, None)], &[kbd_with(1, true, layout)]),
+        vec![0]
+    );
+    assert_eq!(
+        os_layout_appeared(&[kbd_with(1, true, without)], &[kbd_with(1, true, layout)]),
+        vec![0]
+    );
+    // Already known, still unknown, offline, a first sighting, a device that
+    // just came online and a new route are not: a reapply covers those.
+    assert!(
+        os_layout_appeared(&[kbd_with(1, true, layout)], &[kbd_with(1, true, layout)]).is_empty()
+    );
+    assert!(os_layout_appeared(&[kbd_with(1, true, None)], &[kbd_with(1, true, None)]).is_empty());
+    assert!(
+        os_layout_appeared(&[kbd_with(1, true, None)], &[kbd_with(1, false, layout)]).is_empty()
+    );
+    assert!(os_layout_appeared(&[], &[kbd_with(1, true, layout)]).is_empty());
+    assert!(
+        os_layout_appeared(&[kbd_with(1, false, None)], &[kbd_with(1, true, layout)]).is_empty()
+    );
+    assert!(
+        os_layout_appeared(&[kbd_with(1, true, None)], &[kbd_with(2, true, layout)]).is_empty()
+    );
+}
+
+#[test]
+fn a_reload_withdraws_queued_layout_writes_the_user_opted_out_of() {
+    let mut orch = orchestrator(Config::default());
+    let kept = Arc::clone(&orch.kept_os_layouts);
+    for key in ["kbd", "disabled", "other"] {
+        kept.keep(key);
+    }
+    let mut config = Config::default();
+    config.set_keep_os_layout("kbd", false);
+    config.set_device_enabled("disabled", false);
+    orch.reload_config(config);
+    assert!(!kept.contains("kbd"));
+    assert!(!kept.contains("disabled"));
+    assert!(kept.contains("other"));
+}
+
+#[test]
+fn a_refresh_checks_a_keyboard_whose_layout_support_shows_up_late() {
+    let mut orch = orchestrator(Config::default());
+    // A walk that failed: online, capabilities unknown.
+    let mut inventory = direct_inventory(Some("serial-1"), [1, 2, 3, 4]);
+    inventory.paired[0].kind = DeviceKind::Keyboard;
+    inventory.paired[0].capabilities = None;
+    orch.refresh_inventory(std::slice::from_ref(&inventory), &[], false);
+    for _ in 0..VOLATILE_REAPPLY_CONFIRM_RETRIES {
+        orch.refresh_inventory(std::slice::from_ref(&inventory), &[], false);
+    }
+    assert!(
+        !orch.needs_reapply_confirmation(),
+        "sanity: no reapply left"
+    );
+    let key = orch.devices[0].config_key.clone();
+    assert!(!orch.kept_os_layouts.contains(&key));
+    // A later walk finds `0x4531` on the same, still-online route.
+    inventory.paired[0].capabilities = Some(Capabilities {
+        os_layout: true,
+        ..Capabilities::default()
+    });
+    orch.refresh_inventory(std::slice::from_ref(&inventory), &[], false);
+    assert!(orch.kept_os_layouts.contains(&key));
+}

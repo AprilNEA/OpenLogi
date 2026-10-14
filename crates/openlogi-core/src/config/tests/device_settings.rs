@@ -236,3 +236,20 @@ fn a_control_named_under_two_spellings_is_rejected() {
     let config: Config = toml::from_str(&mixed).expect("distinct controls load");
     assert_eq!(config.stored_bindings("unit:1").len(), 2);
 }
+
+#[test]
+fn a_keep_os_layout_opt_out_survives_route_adoption() {
+    // The CLI can save to a route-keyed entry; the app later adopts that
+    // route into the keyboard's identity-keyed entry. The opt-out must come
+    // along, or the default turns the layout write back on.
+    let route = "receiver:82839805:slot:1";
+    let mut config = Config::default();
+    config.set_keep_os_layout(route, false);
+    let canonical = crate::device_order::PhysicalDeviceKey::parse("unit:6be9d300").expect("valid");
+    assert!(config.adopt_route(&canonical, route, None));
+    assert!(
+        !config.devices.contains_key(route),
+        "sanity: the route entry folded"
+    );
+    assert!(!config.keep_os_layout("unit:6be9d300"));
+}
