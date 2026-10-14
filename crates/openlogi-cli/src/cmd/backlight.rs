@@ -41,8 +41,8 @@ pub enum BacklightAction {
     /// Turn the backlight back on, restoring the mode and brightness level the
     /// keyboard still has stored.
     On,
-    /// Let the ambient-light sensor choose the brightness (`on`), or hold a
-    /// level (`off`): the last one software set, or the one shown now.
+    /// Let the ambient-light sensor choose the brightness (`on`), or hold the
+    /// brightness the keyboard shows now (`off`).
     Auto {
         #[arg(value_enum)]
         set: Switch,

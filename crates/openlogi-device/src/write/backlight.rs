@@ -110,7 +110,27 @@ fn state_from(config: &BacklightConfig, info: &BacklightInfo, version: u8) -> Ba
     }
 }
 
-/// The `setBacklightConfig` request that applies `change` to `config`.
+/// The level `change` makes the keyboard hold, when software chooses it.
+///
+/// [`BacklightChange::Level`] names its own. [`BacklightChange::Automatic`]
+/// `(false)` freezes the level the keyboard shows now, so turning the sensor
+/// off changes nothing visible and never guesses at the stored level, which
+/// may be a deliberate `0`. Below feature version 3 software does not choose
+/// the level, so the stored one is written back as read and not checked.
+fn held_level(
+    change: BacklightChange,
+    info: &BacklightInfo,
+    controls: BacklightControls,
+) -> Option<u8> {
+    match change {
+        BacklightChange::Level(level) => Some(level),
+        BacklightChange::Automatic(false) if controls.level => Some(info.current_level),
+        _ => None,
+    }
+}
+
+/// The `setBacklightConfig` request that applies `change` to `config`,
+/// holding `held` (see [`held_level`]).
 ///
 /// Everything `change` does not touch is written back as read: the effect
 /// (sent as "do not change"), the level, the fade-out durations and the
@@ -119,8 +139,8 @@ fn state_from(config: &BacklightConfig, info: &BacklightInfo, version: u8) -> Ba
 /// write; see [`update_backlight`].
 fn request_for(
     config: &BacklightConfig,
-    info: &BacklightInfo,
     change: BacklightChange,
+    held: Option<u8>,
 ) -> SetBacklightConfig {
     let mut request = SetBacklightConfig {
         enabled: config.enabled,
@@ -138,25 +158,20 @@ fn request_for(
     match change {
         BacklightChange::Enabled(enabled) => request.enabled = enabled,
         BacklightChange::Automatic(true) => request.mode = FirmwareMode::Automatic,
-        BacklightChange::Automatic(false) => {
+        BacklightChange::Automatic(false) | BacklightChange::Level(_) => {
             request.mode = FirmwareMode::PermanentManual;
-            // Hold the last level software set; a keyboard that never had
-            // one holds what the sensor shows now instead of going dark.
-            if request.current_level == 0 {
-                request.current_level = info.current_level;
+            if let Some(level) = held {
+                request.current_level = level;
             }
-        }
-        BacklightChange::Level(level) => {
-            request.mode = FirmwareMode::PermanentManual;
-            request.current_level = level;
         }
         BacklightChange::PowerSave(on) => request.options.set(BacklightOptions::PWR_SAVE, on),
     }
     request
 }
 
-/// Whether the configuration read back after a write carries `change`.
-fn carries(config: &BacklightConfig, change: BacklightChange) -> bool {
+/// Whether the configuration read back after a write carries `change`,
+/// holding `held`.
+fn carries(config: &BacklightConfig, change: BacklightChange, held: Option<u8>) -> bool {
     let mode = mode_from_firmware(config.mode);
     match change {
         BacklightChange::Enabled(enabled) => config.enabled == enabled,
@@ -166,9 +181,9 @@ fn carries(config: &BacklightConfig, change: BacklightChange) -> bool {
                 BacklightMode::Automatic | BacklightMode::TemporaryManual
             )
         }
-        BacklightChange::Automatic(false) => mode == BacklightMode::PermanentManual,
-        BacklightChange::Level(level) => {
-            mode == BacklightMode::PermanentManual && config.current_level == level
+        BacklightChange::Automatic(false) | BacklightChange::Level(_) => {
+            mode == BacklightMode::PermanentManual
+                && held.is_none_or(|level| config.current_level == level)
         }
         BacklightChange::PowerSave(on) => config.options.contains(BacklightOptions::PWR_SAVE) == on,
     }
@@ -265,18 +280,20 @@ async fn update_backlight_on_channel(
         .map_err(|_| WriteError::DeviceUnreachable { index })?;
     let (feature, version) = open_feature_with_version::<BacklightFeature>(&mut device).await?;
     let (config, info) = read_raw(&feature).await?;
-    if !state_from(&config, &info, version).accepts(change) {
+    let before = state_from(&config, &info, version);
+    if !before.accepts(change) {
         return Err(WriteError::BacklightChangeUnsupported { change });
     }
+    let held = held_level(change, &info, before.controls);
     feature
-        .set_backlight_config(request_for(&config, &info, change))
+        .set_backlight_config(request_for(&config, change, held))
         .await
         .map_err(|e| {
             classify_hidpp_error(e, HidppOperation::WriteBacklight, BacklightFeature::ID)
         })?;
     debug!(index, %change, "wrote backlight config");
     let (config, info) = read_raw(&feature).await?;
-    if !carries(&config, change) {
+    if !carries(&config, change, held) {
         return Err(WriteError::BacklightNotApplied { change });
     }
     Ok(state_from(&config, &info, version))
@@ -488,21 +505,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn turning_the_sensor_off_holds_the_last_level_software_set() -> Result<(), WriteError> {
-        let (state, writes) =
-            update(Keyboard::v3().level(6), BacklightChange::Automatic(false)).await;
-        assert_eq!(state?.mode, BacklightMode::PermanentManual);
-        assert_eq!(writes, vec![written(1, PERMANENT, 6)]);
+    async fn turning_the_sensor_off_freezes_the_level_shown_now() -> Result<(), WriteError> {
+        // Whatever level is stored — one software set, or a deliberate 0 —
+        // the keyboard keeps showing what the sensor chose.
+        for stored in [6, 0] {
+            let keyboard = Keyboard::v3().level(stored);
+            let (state, writes) = update(keyboard, BacklightChange::Automatic(false)).await;
+            assert_eq!(
+                state?.mode,
+                BacklightMode::PermanentManual,
+                "stored {stored}"
+            );
+            assert_eq!(
+                writes,
+                vec![written(1, PERMANENT, SHOWN_LEVEL)],
+                "stored {stored}"
+            );
+        }
         Ok(())
     }
 
     #[tokio::test]
-    async fn turning_the_sensor_off_without_a_stored_level_holds_the_one_shown()
+    async fn before_version_3_turning_the_sensor_off_keeps_the_stored_level()
     -> Result<(), WriteError> {
-        let (state, writes) =
-            update(Keyboard::v3().level(0), BacklightChange::Automatic(false)).await;
-        state?;
-        assert_eq!(writes, vec![written(1, PERMANENT, SHOWN_LEVEL)]);
+        // Software does not choose the level there, so the stored one goes
+        // back as read and a keyboard that ignores the byte still succeeds.
+        let keyboard = Keyboard {
+            version: 2,
+            ignores_level: true,
+            ..Keyboard::v3().level(6)
+        };
+        let (state, writes) = update(keyboard, BacklightChange::Automatic(false)).await;
+        assert_eq!(state?.mode, BacklightMode::PermanentManual);
+        assert_eq!(writes, vec![written(1, PERMANENT, 6)]);
         Ok(())
     }
 
@@ -558,19 +593,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_level_the_keyboard_did_not_keep_is_reported() {
+    async fn a_held_level_the_keyboard_did_not_keep_is_reported() {
         let keyboard = Keyboard {
             ignores_level: true,
-            ..Keyboard::v3()
+            ..Keyboard::v3().level(6)
         };
-        let (state, writes) = update(keyboard, BacklightChange::Level(2)).await;
-        assert!(matches!(
-            state,
-            Err(WriteError::BacklightNotApplied {
-                change: BacklightChange::Level(2)
-            })
-        ));
-        assert_eq!(writes.len(), 1);
+        for change in [BacklightChange::Level(2), BacklightChange::Automatic(false)] {
+            let (state, writes) = update(keyboard, change).await;
+            assert!(
+                matches!(state, Err(WriteError::BacklightNotApplied { change: c }) if c == change),
+                "{change}: {state:?}"
+            );
+            assert_eq!(writes.len(), 1, "{change}");
+        }
     }
 
     #[test]

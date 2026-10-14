@@ -124,9 +124,8 @@ impl BacklightControls {
 pub enum BacklightChange {
     /// Turn the backlight system on or off.
     Enabled(bool),
-    /// Let the ambient-light sensor choose the level (`true`), or hold a level
-    /// (`false`): the last level software set, or the level shown now when
-    /// software never set one.
+    /// Let the ambient-light sensor choose the level (`true`), or hold the
+    /// level the keyboard shows now (`false`), so nothing visibly changes.
     Automatic(bool),
     /// Hold this level, `0` (off) up to [`BacklightState::nb_levels`] minus
     /// one. Leaves automatic mode.
