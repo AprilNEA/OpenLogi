@@ -110,6 +110,9 @@ Common device fields are:
   including the Windows `exe:<filename>` fallback
 - `lighting`, `smartshift`, standalone `light`, and camera controls / profiles
 - `host_switch_targets` and `fn_lock` for compatible keyboards
+- `keep_os_layout` for keyboards whose key layout software can set (HID++
+  `0x4531`): absent or `true` keeps the layout on the host OS, as Logi Options+
+  does; `false` leaves the keyboard's layout to its own shortcuts
 - `identity` and `disabled_gestures`, which are application-managed metadata
 
 `[keyboard.bindings]` contains global key triggers such as `f1` or
@@ -125,6 +128,7 @@ Payload actions use a one-key inline table:
 ```toml
 Back = { CustomShortcut = "Cmd+Shift+P" }
 Forward = { HoldShortcut = "Ctrl+Space" }
+GestureButton = { TapKeyHoldingModifiers = "Cmd+Tab" }
 MiddleClick = { OpenApplication = { path = "~/Downloads", display_name = "Downloads" } }
 DpiToggle = { short = "ShowDesktop", long = "MissionControl" }
 ```
@@ -140,6 +144,17 @@ Super.
 the chord down until the originating physical button is released, and also
 releases it if capture is interrupted, the binding becomes invalid, or the
 agent shuts down. Use it for push-to-talk and other hold-to-activate controls.
+
+`TapKeyHoldingModifiers` splits the chord: the modifiers are held for the same
+lifetime as `HoldShortcut`, while the ordinary key is tapped exactly once when
+the press starts. That is what an application switcher needs. `Cmd+Tab` steps
+one window forward and leaves the switcher on screen until the button is
+released, where `HoldShortcut` would hold Tab down too and let key repeat walk
+the switcher to its last window, and `CustomShortcut` would release Cmd at once
+and dismiss it. The same shape covers ``Cmd+` ``, `Alt+Tab`, and an IDE's
+`Ctrl+Tab`. A chord with no modifier degrades to a plain tap of its key. If
+another button is already holding the same key through `HoldShortcut`, the tap
+is skipped and only the modifiers go down, so that button keeps its key held.
 
 A `{ short = ..., long = ... }` binding waits for the button's outcome instead
 of firing on press. Releasing before 500 ms fires `short`; keeping the button

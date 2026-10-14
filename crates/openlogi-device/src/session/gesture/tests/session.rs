@@ -446,3 +446,93 @@ async fn channel_change_takes_teardown_precedence_over_ready_shutdown() {
         CaptureStop::ChannelChanged
     ));
 }
+
+/// A mouse with only `0x2150` (index 3) whose `getThumbwheelStatus` reports
+/// `status`; `setThumbwheelReporting` writes are echoed.
+pub(super) fn thumbwheel_device(
+    status: [u8; 2],
+) -> (ScriptedRawHidChannel, crate::replay::ReplayChannelHandle) {
+    ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+        let mut response = vec![0; 20];
+        response[..4].copy_from_slice(&request[..4]);
+        response[0] = 0x11;
+        match (request[2], request[3] >> 4) {
+            (0, 1) => response[4] = 4,
+            (0, 0) => {
+                if u16::from_be_bytes([request[4], request[5]]) == crate::thumbwheel::FEATURE_ID {
+                    response[4] = 3;
+                }
+            }
+            // getThumbwheelInfo: native 20, diverted 120, default_dir 1.
+            (3, 0) => response[4..9].copy_from_slice(&[0, 20, 0, 120, 1]),
+            (3, 1) => response[4..6].copy_from_slice(&status),
+            (3, 2) => return Some(request.to_vec()),
+            _ => panic!("unexpected capture request: {request:02x?}"),
+        }
+        Some(response)
+    })
+}
+
+/// Arm the thumb wheel, then hand it back through the capture restore path,
+/// returning every `setThumbwheelReporting` payload in order.
+async fn arm_then_restore_thumbwheel(status: [u8; 2]) -> Vec<[u8; 2]> {
+    let route = DeviceRoute::Direct {
+        vendor_id: 0x046d,
+        product_id: 0xb034,
+    };
+    let (raw, handle) = thumbwheel_device(status);
+    let channel = scripted_channel(raw).await;
+    let registry = ChannelRegistry::default();
+    registry.replace_node(
+        NodeId::from("mouse-node".to_owned()),
+        [route.clone()],
+        channel.clone(),
+    );
+    let shared = SharedChannel::new(channel.clone(), route);
+    let device = Device::new(channel.clone(), 0xff).await.unwrap();
+    let spec = CaptureSpec {
+        capture_thumbwheel: true,
+        ..CaptureSpec::default()
+    };
+    let mut armed = ArmedControls::default();
+    arm_controls_into(&device, &channel, 0xff, &spec, &mut armed)
+        .await
+        .unwrap();
+    let pending = armed
+        .into_pending(&shared)
+        .expect("a diverted thumb wheel must be owed a restore");
+    assert!(matches!(
+        pending.allow_current_channel().retry(&registry).await,
+        CaptureSessionOutcome::Restored
+    ));
+    handle
+        .written_reports()
+        .into_iter()
+        .filter(|report| report[2] == 3 && report[3] >> 4 == 2)
+        .map(|report| [report[4], report[5]])
+        .collect()
+}
+
+#[tokio::test]
+async fn thumbwheel_restore_keeps_the_native_inversion_found_before_capture() {
+    // Native + inverted before capture: divert (default_dir 1 → no sign flip),
+    // then hand back native reporting with the user's inversion intact.
+    assert_eq!(
+        arm_then_restore_thumbwheel([0x00, 0x01]).await,
+        vec![[0x01, 0x00], [0x00, 0x01]]
+    );
+    assert_eq!(
+        arm_then_restore_thumbwheel([0x00, 0x00]).await,
+        vec![[0x01, 0x00], [0x00, 0x00]]
+    );
+}
+
+#[tokio::test]
+async fn thumbwheel_left_diverted_is_restored_native_without_its_diverted_sign() {
+    // Already diverted (a session that never tore down): its invert byte is
+    // that owner's sign normalisation, so it must not become native inversion.
+    assert_eq!(
+        arm_then_restore_thumbwheel([0x01, 0x01]).await,
+        vec![[0x01, 0x00], [0x00, 0x00]]
+    );
+}

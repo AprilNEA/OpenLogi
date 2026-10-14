@@ -255,7 +255,7 @@ async fn saves_fn_lock_to_the_existing_legacy_entry() {
                 assert!(!fn_lock);
                 AgentResponse::SetFnLock(Ok(FnLockState {
                     fn_lock: false,
-                    default_fn_lock: true,
+                    default_fn_lock: Some(true),
                 }))
             }),
             Box::new(|request| {
@@ -274,6 +274,87 @@ async fn saves_fn_lock_to_the_existing_legacy_entry() {
         Some(400.into())
     );
     assert_eq!(config.devices.len(), 1);
+}
+
+fn os_layout_command(set: Switch) -> ApiCommand {
+    ApiCommand::OsLayout {
+        device: route().to_string(),
+        set,
+    }
+}
+
+/// [`identified_snapshot`] with measured capabilities.
+fn measured_snapshot(os_layout: bool) -> AgentSnapshot {
+    let mut snapshot = identified_snapshot();
+    snapshot.inventory[0].paired[0].capabilities = Some(openlogi_core::device::Capabilities {
+        os_layout,
+        ..openlogi_core::device::Capabilities::default()
+    });
+    snapshot
+}
+
+#[tokio::test]
+async fn saves_keep_os_layout_and_reloads_without_a_device_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(CONFIG_FILE);
+    let result = run_script_at(
+        measured_snapshot(true),
+        os_layout_command(Switch::Off),
+        vec![Box::new(|request| {
+            assert!(matches!(request, AgentRequest::ReloadConfig {}));
+            AgentResponse::ReloadConfig(Ok(()))
+        })],
+        Some(&path),
+    )
+    .await;
+    assert_eq!(result["data"]["persistence"], "saved");
+    assert_eq!(result["data"]["keep_os_layout"], false);
+    assert!(
+        !Config::load_from_path(&path)
+            .unwrap()
+            .keep_os_layout("unit:12345678")
+    );
+}
+
+#[tokio::test]
+async fn os_layout_needs_save_and_a_keyboard_that_allows_it() {
+    let unsaved = run_script(
+        measured_snapshot(true),
+        os_layout_command(Switch::On),
+        vec![],
+    )
+    .await;
+    assert_eq!(unsaved["error"]["code"], "invalid_value");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(CONFIG_FILE);
+    let unsupported = run_script_at(
+        measured_snapshot(false),
+        os_layout_command(Switch::On),
+        vec![],
+        Some(&path),
+    )
+    .await;
+    assert_eq!(unsupported["error"]["code"], "unsupported_feature");
+    assert!(!path.exists());
+}
+
+#[tokio::test]
+async fn unmeasured_capabilities_do_not_refuse_os_layout() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(CONFIG_FILE);
+    let result = run_script_at(
+        identified_snapshot(),
+        os_layout_command(Switch::On),
+        vec![Box::new(|request| {
+            assert!(matches!(request, AgentRequest::ReloadConfig {}));
+            AgentResponse::ReloadConfig(Ok(()))
+        })],
+        Some(&path),
+    )
+    .await;
+    assert_eq!(result["data"]["persistence"], "saved");
+    let config = Config::load_from_path(&path).unwrap();
+    assert_eq!(config.devices["unit:12345678"].keep_os_layout, Some(true));
 }
 
 #[test]
@@ -302,7 +383,7 @@ async fn lost_reload_acknowledgement_keeps_the_saved_preference() {
                     assert!(fn_lock);
                     AgentResponse::SetFnLock(Ok(FnLockState {
                         fn_lock: true,
-                        default_fn_lock: false,
+                        default_fn_lock: Some(false),
                     }))
                 }
                 AgentRequest::ReloadConfig {} => {

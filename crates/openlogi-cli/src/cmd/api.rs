@@ -57,6 +57,16 @@ pub enum ApiCommand {
         #[arg(long, value_enum)]
         set: Option<Switch>,
     },
+    /// Keep a keyboard on the host OS's key layout (requires --save).
+    OsLayout {
+        /// Exact opaque ID returned by `api devices`.
+        #[arg(long)]
+        device: String,
+        /// On sets the host OS's layout when the keyboard connects and after it
+        /// switches layout; off leaves the keyboard's layout alone.
+        #[arg(long, value_enum)]
+        set: Switch,
+    },
 }
 
 /// A partial SmartShift update; omitted fields are read from the device.
@@ -94,9 +104,9 @@ impl From<WheelMode> for SmartShiftMode {
 /// An explicit state rather than a read/modify/write toggle.
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum Switch {
-    /// Enable Fn lock.
+    /// Turn the setting on.
     On,
-    /// Disable Fn lock.
+    /// Turn the setting off.
     Off,
 }
 
@@ -123,6 +133,17 @@ pub async fn run(args: ApiArgs) -> Result<ExitCode> {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
+    })
+}
+
+/// Whether the agent measured the device at `route` and found that software
+/// cannot set its key layout. Unmeasured capabilities are not a refusal.
+fn measured_without_os_layout(snapshot: &AgentSnapshot, route: &DeviceRoute) -> bool {
+    snapshot.inventory.iter().any(|inventory| {
+        inventory.paired.iter().any(|paired| {
+            DeviceRoute::for_slot(inventory, paired.slot).as_ref() == Some(route)
+                && paired.capabilities.is_some_and(|caps| !caps.os_layout)
+        })
     })
 }
 
@@ -189,6 +210,30 @@ async fn execute(
                 "persistence": "not_saved",
                 "fn_lock": state.fn_lock,
                 "default_fn_lock": state.default_fn_lock,
+            }))
+        }
+        ApiCommand::OsLayout { device, set } => {
+            let route = select_device(&snapshot, &device)?;
+            // An agent setting, not a device state: the agent writes the
+            // layout when it reloads the saved configuration.
+            let Some(save) = save.as_mut() else {
+                return Err(ApiError::new(
+                    "invalid_value",
+                    "os-layout changes an agent setting; add --save",
+                ));
+            };
+            if measured_without_os_layout(&snapshot, &route) {
+                return Err(ApiError::new(
+                    "unsupported_feature",
+                    "the keyboard does not let software set its key layout",
+                ));
+            }
+            let keep = matches!(set, Switch::On);
+            save.keep_os_layout(keep);
+            Ok(json!({
+                "device": device,
+                "persistence": "not_saved",
+                "keep_os_layout": keep,
             }))
         }
     }?;
@@ -279,14 +324,18 @@ async fn smartshift(
 impl From<WriteError> for ApiError {
     fn from(error: WriteError) -> Self {
         let code = match &error {
-            WriteError::FeatureUnsupported { .. } | WriteError::LightUnsupported { .. } => {
-                "unsupported_feature"
-            }
+            WriteError::FeatureUnsupported { .. }
+            | WriteError::LightUnsupported { .. }
+            | WriteError::HapticWaveformUnsupported { .. } => "unsupported_feature",
             WriteError::DeviceNotFound => "device_not_found",
             WriteError::DeviceUnreachable { .. } => "device_offline",
             WriteError::AgentUnavailable => "agent_unavailable",
             WriteError::RequestTimedOut { .. } => "timeout",
             WriteError::AmbiguousRawDevice => "ambiguous_device",
+            // The agent's own checks report what `dpi` checks for itself, so
+            // a caller sees one code whichever side caught it.
+            WriteError::DpiUnsupported { .. } => "invalid_value",
+            WriteError::DpiNotApplied { .. } => "readback_mismatch",
             _ => "device_error",
         };
         Self::new(code, error.to_string())

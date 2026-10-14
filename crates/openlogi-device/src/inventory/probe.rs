@@ -205,6 +205,16 @@ pub(super) struct PassContext<'a> {
     pub(super) timeouts: &'a ProbeTimeouts,
 }
 
+impl PassContext<'_> {
+    /// The settings revision this pass publishes for `device_index`: what the
+    /// channel's event listener counted, or `0` for a pass without one.
+    pub(super) fn settings_revision(&self, device_index: u8) -> u64 {
+        self.subscriptions.map_or(0, |subscriptions| {
+            subscriptions.settings_revision(device_index)
+        })
+    }
+}
+
 /// One node probe's verdict about its own trustworthiness. An enum on
 /// purpose: the old `healthy`/`complete` bool pair could also express
 /// "couldn't check, but the check is complete", which no probe path means —

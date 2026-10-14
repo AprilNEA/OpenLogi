@@ -42,7 +42,11 @@ rust-i18n = "4"
 # The raw, un-negotiated system locale for the diagnostics report; locale
 # *negotiation* lives in openlogi-ui.
 sys-locale = "0.3.2"
-gpui-updater = { package = "gpui-updater-pre", version = "0.1" }
+gpui-updater = { package = "gpui-updater-pre", version = "0.2" }
+# Drives updates through the Sparkle.framework `xtask macos package` embeds in
+# the release bundle. Sparkle is loaded at run time, so this builds — and is
+# inert — on every platform and in an unbundled `cargo run`.
+gpui-updater-sparkle = "0.2"
 # Spawns the agent under its own macOS TCC identity (see ipc_client::spawn_agent).
 disclaim = "0.1"
 url = "2.5.8"
@@ -92,9 +96,9 @@ OpenLogi talks to Logitech HID++ mice and keyboards directly — no \
 cloud account, no telemetry, no auto-update poller. Plain TOML config, \
 single binary; device renders are fetched on demand on first launch.
 """
-osx_minimum_system_version = "13.0"
-# Deep-link scheme for the release app. The dev build is hand-bundled, so its
-# dev/Info.plist declares the same scheme separately — keep the two in sync.
-osx_url_schemes = ["openlogi"]
 icon = ["icon/AppIcon.icns"]
 resources = ["assets/**/*"]
+# No macOS keys: cargo-bundle 0.11 reads them only as flat `osx_*` keys and
+# 0.12 only from a `[package.metadata.bundle.osx]` table, rejecting the other
+# spelling. `xtask macos package` stamps the minimum macOS version and the
+# `openlogi://` URL type itself (`support::info_plist`).

@@ -296,6 +296,23 @@ impl Config {
             .fn_lock = Some(fn_lock);
     }
 
+    /// Whether the agent keeps `device_key`'s key layout on the host OS. On
+    /// unless the user turned it off, as in Logi Options+.
+    #[must_use]
+    pub fn keep_os_layout(&self, device_key: &str) -> bool {
+        self.devices
+            .get(device_key)
+            .and_then(|d| d.keep_os_layout)
+            .unwrap_or(true)
+    }
+    /// Record whether the agent keeps `device_key`'s key layout on the host
+    /// OS.
+    pub fn set_keep_os_layout(&mut self, device_key: &str, keep: bool) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .keep_os_layout = Some(keep);
+    }
     /// Record the SmartShift wheel config for `device_key`, so the agent can
     /// re-apply it when the device reconnects (#189).
     pub fn set_smartshift(&mut self, device_key: &str, smartshift: SmartShift) {

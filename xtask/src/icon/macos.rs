@@ -15,6 +15,7 @@ use xshell::{Shell, cmd};
 use super::{AppIcon, IconPipeline};
 use crate::support::fs::{ensure_dir, ensure_file, repo_root};
 use crate::support::info_plist::{read_plist_string, stamp_plist_strings};
+use crate::support::update_feed;
 use crate::support::xcode;
 
 /// `OpenLogi.app`'s icons: the one it wears, and the alternates it can switch
@@ -46,9 +47,8 @@ pub(crate) const ICON_NAME: &str = "AppIcon";
 /// The compiled asset catalog, as `actool` always names it.
 const CATALOG: &str = "Assets.car";
 
-/// Deployment target handed to `actool`; mirrors `osx_minimum_system_version`
-/// in `openlogi-desktop/Cargo.toml`.
-const MINIMUM_MACOS: &str = "13.0";
+/// Deployment target handed to `actool`: the bundle's `LSMinimumSystemVersion`.
+const MINIMUM_MACOS: &str = update_feed::MACOS_MINIMUM_OS_VERSION;
 
 impl IconPipeline for AppBundle {
     fn compile(&self) -> Result<()> {

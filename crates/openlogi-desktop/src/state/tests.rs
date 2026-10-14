@@ -53,6 +53,7 @@ mod device_names;
 mod dpi;
 mod fn_lock;
 mod lighting;
+mod os_layout;
 mod profile_scope;
 mod reload;
 mod smartshift;
@@ -90,6 +91,7 @@ fn direct_inventory(unit_id: [u8; 4]) -> DeviceInventory {
                 extended_model_id: 2,
             }),
             capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Mouse)),
+            settings_revision: 0,
         }],
     }
 }

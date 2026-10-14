@@ -1676,41 +1676,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "darling"
-version = "0.20.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc7f46116c46ff9ab3eb1597a45688b6715c6e628b5c133e288e709a29bcb4ee"
-dependencies = [
- "darling_core",
- "darling_macro",
-]
-
-[[package]]
-name = "darling_core"
-version = "0.20.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d00b9596d185e565c2207a0b01f8bd1a135483d02d9b7b0a54b11da8d53412e"
-dependencies = [
- "fnv",
- "ident_case",
- "proc-macro2",
- "quote",
- "strsim",
- "syn 2.0.117",
-]
-
-[[package]]
-name = "darling_macro"
-version = "0.20.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc34b93ccb385b40dc71c6fceac4b2ad23662c7eeb248cf10d529b7e055b6ead"
-dependencies = [
- "darling_core",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
 name = "data-url"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1723,37 +1688,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
 dependencies = [
  "powerfmt",
-]
-
-[[package]]
-name = "derive_builder"
-version = "0.20.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "507dfb09ea8b7fa618fcf76e953f4f5e192547945816d5358edffe39f6f94947"
-dependencies = [
- "derive_builder_macro",
-]
-
-[[package]]
-name = "derive_builder_core"
-version = "0.20.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d5bcf7b024d6835cfb3d473887cd966994907effbe9227e8c8219824d06c4e8"
-dependencies = [
- "darling",
- "proc-macro2",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
-name = "derive_builder_macro"
-version = "0.20.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab63b0e2bf4d5928aff72e83a7dace85d7bba5fe12dcc3c5a572d78caffd3f3c"
-dependencies = [
- "derive_builder_core",
- "syn 2.0.117",
 ]
 
 [[package]]
@@ -1934,6 +1868,12 @@ name = "dyn-clone"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
+
+[[package]]
+name = "ed25519-compact"
+version = "2.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1454db4f2edb7f0e8fe0c5b375b0c978fc63244cc9f010d160e417eb10139aa8"
 
 [[package]]
 name = "educe"
@@ -3386,11 +3326,14 @@ checksum = "70a09e0bf58aede45b8e7eed6e8d5d6552381c431014d62b349b0133008737bd"
 
 [[package]]
 name = "gpui-updater-core"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "49f3ec64b674794b6b8b6fb36d40974d3506bd254212c3d5f65fcc9eac6542cb"
+checksum = "e79f73dd68bf12bc2c800192c340a3c577dc38e59255650e81b1678a6339c584"
 dependencies = [
+ "base64",
+ "ed25519-compact",
  "minisign-verify",
+ "roxmltree 0.20.0",
  "semver",
  "serde",
  "serde_json",
@@ -3402,12 +3345,27 @@ dependencies = [
 
 [[package]]
 name = "gpui-updater-pre"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "612f44d5b1006efa7d622a96570ce9265f251efd58f8d6b205291daeadc868f5"
+checksum = "c11ccca59c85b01241ea8a899cf49bad9e24fb8bbb02669e689eaa88daa76de7"
 dependencies = [
+ "futures",
  "gpui-pre",
  "gpui-updater-core",
+]
+
+[[package]]
+name = "gpui-updater-sparkle"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "05cd3fd0aff428e5524d263e71e00992100aae72a76af00188d28e3740c20e05"
+dependencies = [
+ "block2 0.6.2",
+ "gpui-updater-core",
+ "objc2 0.6.4",
+ "objc2-foundation 0.3.2",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
@@ -3838,12 +3796,6 @@ name = "id-arena"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d3067d79b975e8844ca9eb072e16b31c3c1c36928edf9c6789548c524d0d954"
-
-[[package]]
-name = "ident_case"
-version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39"
 
 [[package]]
 name = "idna"
@@ -5705,6 +5657,7 @@ dependencies = [
  "gpui-pre",
  "gpui-pre-platform",
  "gpui-updater-pre",
+ "gpui-updater-sparkle",
  "image",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
@@ -5798,7 +5751,6 @@ dependencies = [
  "async-channel",
  "async-trait",
  "bitflags 2.13.1",
- "derive_builder",
  "derive_more",
  "futures",
  "futures-timer",
@@ -7094,9 +7046,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.45"
+version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
+checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "log",
  "once_cell",
@@ -10519,12 +10471,15 @@ version = "0.8.13"
 dependencies = [
  "anyhow",
  "appicon",
+ "base64",
  "clap",
  "comfy-table",
+ "ed25519-compact",
  "fs-err",
  "openlogi-core",
  "path-absolutize",
  "plist",
+ "roxmltree 0.20.0",
  "serde",
  "serde_json",
  "sha2_hasher",

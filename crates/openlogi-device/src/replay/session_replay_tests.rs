@@ -109,6 +109,120 @@ async fn keyboard_capture_replay_restores_original_reporting_on_normal_shutdown(
     );
 }
 
+/// A failed feature lookup is not evidence that wake reports are unsupported.
+/// End the epoch and restore its controls so the supervisor can retry instead
+/// of leaving a live session that cannot recover after the device's next nap.
+#[tokio::test]
+async fn capture_replay_failed_wake_discovery_restores_before_retry() {
+    for keyboard in [false, true] {
+        for timeout in [false, true] {
+            let (cid, control_flags, armed_flags, restored_flags) = if keyboard {
+                (
+                    KEYBOARD_CID,
+                    KEYBOARD_CONTROL_FLAGS,
+                    KEYBOARD_ARMED_FLAGS,
+                    KEYBOARD_RESTORED_FLAGS,
+                )
+            } else {
+                (
+                    GESTURE_CID,
+                    GESTURE_CONTROL_FLAGS,
+                    GESTURE_ARMED_FLAGS,
+                    GESTURE_RESTORED_FLAGS,
+                )
+            };
+            let mut cassette = capture_cassette(
+                "failed capture wake discovery",
+                cid,
+                control_flags,
+                armed_flags,
+                restored_flags,
+            );
+            let lookup = cassette
+                .exchanges
+                .iter_mut()
+                .find(|exchange| exchange.request == root_feature_lookup_request(0x1d4b))
+                .expect("capture probes the wake feature");
+            lookup.response = if timeout {
+                None
+            } else {
+                Some(crate::channel::scripted::feature_error(
+                    &lookup.request,
+                    0x09,
+                ))
+            };
+            let replay = ArmedReplay::enumerate(cassette).await;
+            let (sink, _captured) = mpsc::unbounded_channel();
+            let (_shutdown, host) = replay.host(sink);
+            replay.wireless_lookup.release();
+            let capture = async {
+                if keyboard {
+                    run_keyboard_capture_session(
+                        replay.route.clone(),
+                        BTreeMap::from([(cid, ButtonId::control(cid))]),
+                        host,
+                    )
+                    .await
+                } else {
+                    run_capture_session(
+                        replay.route.clone(),
+                        CaptureSpec {
+                            divert_gesture_sources: vec![cid],
+                            ..CaptureSpec::default()
+                        },
+                        host,
+                    )
+                    .await
+                }
+            };
+            let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), capture)
+                .await
+                .expect("failed wake discovery must end capture without a shutdown request");
+            replay.assert_restored(outcome, cid, armed_flags, restored_flags);
+        }
+    }
+}
+
+#[tokio::test]
+async fn capture_replay_without_wake_feature_stays_active_until_shutdown() {
+    let replay = ArmedReplay::enumerate(capture_cassette(
+        "capture without a wake feature",
+        GESTURE_CID,
+        GESTURE_CONTROL_FLAGS,
+        GESTURE_ARMED_FLAGS,
+        GESTURE_RESTORED_FLAGS,
+    ))
+    .await;
+    let (sink, _captured) = mpsc::unbounded_channel();
+    let (shutdown, host) = replay.host(sink);
+    replay.wireless_lookup.release();
+    let capture = run_capture_session(
+        replay.route.clone(),
+        CaptureSpec {
+            divert_gesture_sources: vec![GESTURE_CID],
+            ..CaptureSpec::default()
+        },
+        host,
+    );
+    tokio::pin!(capture);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut capture)
+            .await
+            .is_err(),
+        "a successful unsupported-feature response must not cause a restart loop"
+    );
+    assert!(replay.wireless_lookup.is_request_written());
+    shutdown
+        .send(CaptureShutdown::Restore)
+        .expect("capture remains active");
+    replay.assert_restored(
+        capture.await,
+        GESTURE_CID,
+        GESTURE_ARMED_FLAGS,
+        GESTURE_RESTORED_FLAGS,
+    );
+}
+
 /// One replayed direct device, enumerated the production way, whose `0x1d4b`
 /// lookup is held so a capture session can be observed between arming and
 /// monitoring.
@@ -324,12 +438,14 @@ async fn bolt_pairing_replay_cancels_discovery_and_restores_notifications() {
     assert_eq!(
         completion.written_reports,
         vec![
+            receiver_notification_flags_read(),
             receiver_notification_flags_write([0x00, 0x09, 0x00]),
             bolt_discovery_write([30, 0x01, 0x00]),
             bolt_discovery_write([30, 0x02, 0x00]),
-            receiver_notification_flags_write([0x00, 0x00, 0x00]),
+            receiver_notification_flags_write([0x00, 0x01, 0x00]),
         ],
-        "cancel while searching must stop Bolt discovery before restoring notification flags"
+        "cancel while searching must stop Bolt discovery before restoring the notification \
+         flags found before pairing (inventory's WIRELESS stays on)"
     );
     assert_eq!(completion.channel_open_count, 1);
     assert_eq!(
@@ -420,17 +536,28 @@ fn capture_cassette(
 }
 
 fn bolt_pairing_cancel_cassette() -> HidCassette {
+    // Inventory keeps WIRELESS on; pairing adds SOFTWARE_PRESENT only.
+    let mut flags_read = receiver_notification_flags_read();
+    flags_read[5] = 0x01;
     cassette(
         "Bolt discovery cancellation",
         PAIRING_CHANNEL,
-        [
-            receiver_notification_flags_write([0x00, 0x09, 0x00]),
-            bolt_discovery_write([30, 0x01, 0x00]),
-            bolt_discovery_write([30, 0x02, 0x00]),
-            receiver_notification_flags_write([0x00, 0x00, 0x00]),
-        ]
-        .into_iter()
-        .map(exact_echo_exchange)
+        std::iter::once(CassetteExchange {
+            request_match: RequestMatch::Exact,
+            request: receiver_notification_flags_read(),
+            response: Some(flags_read),
+            required: true,
+        })
+        .chain(
+            [
+                receiver_notification_flags_write([0x00, 0x09, 0x00]),
+                bolt_discovery_write([30, 0x01, 0x00]),
+                bolt_discovery_write([30, 0x02, 0x00]),
+                receiver_notification_flags_write([0x00, 0x01, 0x00]),
+            ]
+            .into_iter()
+            .map(exact_echo_exchange),
+        )
         .collect(),
     )
 }
@@ -531,6 +658,10 @@ fn reprog_reporting_change_payload(cid: u16, flags: u8) -> [u8; 16] {
 
 fn receiver_notification_flags_write(flags: [u8; 3]) -> Vec<u8> {
     hidpp10_register_write(0x00, flags)
+}
+
+fn receiver_notification_flags_read() -> Vec<u8> {
+    vec![0x10, 0xff, 0x81, 0x00, 0x00, 0x00, 0x00]
 }
 
 fn bolt_discovery_write(payload: [u8; 3]) -> Vec<u8> {

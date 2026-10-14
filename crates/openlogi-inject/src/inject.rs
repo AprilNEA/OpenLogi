@@ -13,7 +13,7 @@ use std::sync::{LazyLock, Mutex, PoisonError};
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use openlogi_core::binding::KeyboardUsage;
-use openlogi_core::binding::{Action, KeyCombo};
+use openlogi_core::binding::{Action, HeldKeys, KeyCombo};
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use openlogi_core::binding::{Script, WorkflowStep};
 use openlogi_core::scroll::ScrollDelta;
@@ -70,6 +70,11 @@ enum HeldKey {
 struct HoldTransition {
     up: Vec<HeldKey>,
     down: Vec<HeldKey>,
+    /// The ordinary key a starting [`HeldKeys::ModifiersOnly`] hold taps once,
+    /// posted after `down`. `None` when the hold taps nothing, including when
+    /// another hold already owns that key: its up edge would release the other
+    /// hold's key early.
+    tap: Option<HeldKey>,
 }
 
 #[cfg(target_os = "macos")]
@@ -115,11 +120,14 @@ struct HeldOutput {
 impl HeldOutput {
     fn transition(
         &mut self,
-        released: Option<&KeyCombo>,
-        pressed: Option<&KeyCombo>,
+        released: Option<(&KeyCombo, HeldKeys)>,
+        pressed: Option<(&KeyCombo, HeldKeys)>,
     ) -> HoldTransition {
-        let released = released.map_or_else(Vec::new, held_keys);
-        let pressed = pressed.map_or_else(Vec::new, held_keys);
+        let tapped = pressed.and_then(|(combo, keys)| {
+            (keys == HeldKeys::ModifiersOnly).then(|| HeldKey::Key(combo.key()))
+        });
+        let released = released.map_or_else(Vec::new, |(combo, keys)| held_keys(combo, keys));
+        let pressed = pressed.map_or_else(Vec::new, |(combo, keys)| held_keys(combo, keys));
         let before = self.owners.clone();
 
         for key in &released {
@@ -144,6 +152,9 @@ impl HeldOutput {
                 .into_iter()
                 .filter(|key| !before.contains_key(key) && self.owners.contains_key(key))
                 .collect(),
+            // A modifiers-only hold never owns its ordinary key, so an owner
+            // here is another hold keeping that key down. Leave it alone.
+            tap: tapped.filter(|key| !self.owners.contains_key(key)),
         }
     }
 
@@ -167,7 +178,7 @@ static HELD_OUTPUT: LazyLock<Mutex<HeldOutput>> =
     LazyLock::new(|| Mutex::new(HeldOutput::default()));
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-fn held_keys(combo: &KeyCombo) -> Vec<HeldKey> {
+fn held_keys(combo: &KeyCombo, held: HeldKeys) -> Vec<HeldKey> {
     let mut keys = Vec::with_capacity(4);
     #[cfg(target_os = "macos")]
     if combo.has_command() || combo.has_super() {
@@ -191,7 +202,9 @@ fn held_keys(combo: &KeyCombo) -> Vec<HeldKey> {
     if combo.has_super() {
         keys.push(HeldKey::Super);
     }
-    keys.push(HeldKey::Key(combo.key()));
+    if held == HeldKeys::WholeChord {
+        keys.push(HeldKey::Key(combo.key()));
+    }
     keys
 }
 
@@ -331,37 +344,53 @@ pub fn execute(action: &Action) {
 #[must_use = "dropping the held chord immediately releases its synthetic output"]
 pub struct HeldChord {
     combo: KeyCombo,
+    keys: HeldKeys,
 }
 
 impl HeldChord {
     /// Replace this held chord without releasing physical keys shared by both.
-    pub fn replace(&mut self, combo: &KeyCombo) {
+    ///
+    /// A replacement is a fresh hold of `combo`, so a
+    /// [`HeldKeys::ModifiersOnly`] replacement taps its ordinary key the same
+    /// way the original press did.
+    pub fn replace(&mut self, combo: &KeyCombo, keys: HeldKeys) {
         let old = std::mem::replace(&mut self.combo, combo.clone());
-        hold_transition(Some(&old), Some(&self.combo));
+        let old_keys = std::mem::replace(&mut self.keys, keys);
+        hold_transition(Some((&old, old_keys)), Some((&self.combo, self.keys)));
     }
 }
 
 impl Drop for HeldChord {
     fn drop(&mut self) {
-        hold_transition(Some(&self.combo), None);
+        hold_transition(Some((&self.combo, self.keys)), None);
     }
 }
 
 /// Synthesise the down edge of `combo` and return its release owner.
 ///
+/// `keys` selects which of the chord's keys stay down: [`HeldKeys::WholeChord`]
+/// holds the ordinary key with the modifiers, while
+/// [`HeldKeys::ModifiersOnly`] taps it once here and holds only the modifiers.
+/// The tap is skipped while another held chord keeps that ordinary key down,
+/// because its up edge would release the other chord's key early.
+///
 /// Keep the returned [`HeldChord`] until the physical press ends. Prefer
 /// [`execute`] when the caller does not own a matching terminal event.
-pub fn press_hold(combo: &KeyCombo) -> HeldChord {
+pub fn press_hold(combo: &KeyCombo, keys: HeldKeys) -> HeldChord {
     // Construct the owner before posting the edge so unwinding from the
     // platform backend still balances any ownership transition it completed.
     let held = HeldChord {
         combo: combo.clone(),
+        keys,
     };
-    hold_transition(None, Some(&held.combo));
+    hold_transition(None, Some((&held.combo, held.keys)));
     held
 }
 
-fn hold_transition(released: Option<&KeyCombo>, pressed: Option<&KeyCombo>) {
+fn hold_transition(
+    released: Option<(&KeyCombo, HeldKeys)>,
+    pressed: Option<(&KeyCombo, HeldKeys)>,
+) {
     cfg_select! {
         target_os = "macos" => {
             let mut output = HELD_OUTPUT.lock().unwrap_or_else(PoisonError::into_inner);
@@ -374,18 +403,34 @@ fn hold_transition(released: Option<&KeyCombo>, pressed: Option<&KeyCombo>) {
             let modifiers = macos::hold_keys(&transition.up, KeyPhase::Up, modifiers);
             let modifiers = macos::hold_keys(&transition.down, KeyPhase::Down, modifiers);
             debug_assert_eq!(modifiers, output.modifiers());
+            // The tap rides on the modifiers just posted, and owns nothing:
+            // its own down/up pair cancel out, leaving the cursor where the
+            // held state already is.
+            if let Some(key) = transition.tap {
+                let tapped = macos::hold_keys(&[key], KeyPhase::Down, modifiers);
+                let tapped = macos::hold_keys(&[key], KeyPhase::Up, tapped);
+                debug_assert_eq!(tapped, output.modifiers());
+            }
         }
         target_os = "linux" => {
             let mut output = HELD_OUTPUT.lock().unwrap_or_else(PoisonError::into_inner);
             let transition = output.transition(released, pressed);
             linux::hold_keys(&transition.up, KeyPhase::Up);
             linux::hold_keys(&transition.down, KeyPhase::Down);
+            if let Some(key) = transition.tap {
+                linux::hold_keys(&[key], KeyPhase::Down);
+                linux::hold_keys(&[key], KeyPhase::Up);
+            }
         }
         target_os = "windows" => {
             let mut output = HELD_OUTPUT.lock().unwrap_or_else(PoisonError::into_inner);
             let transition = output.transition(released, pressed);
             windows::hold_keys(&transition.up, KeyPhase::Up);
             windows::hold_keys(&transition.down, KeyPhase::Down);
+            if let Some(key) = transition.tap {
+                windows::hold_keys(&[key], KeyPhase::Down);
+                windows::hold_keys(&[key], KeyPhase::Up);
+            }
         }
         _ => {
             tracing::warn!(
@@ -595,7 +640,7 @@ mod tests {
     use openlogi_core::scroll::ScrollDelta;
 
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-    use openlogi_core::binding::KeyCombo;
+    use openlogi_core::binding::{HeldKeys, KeyCombo};
 
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     use super::{HeldKey, HeldOutput, HoldTransition};
@@ -639,31 +684,35 @@ mod tests {
         let mut output = HeldOutput::default();
 
         assert_eq!(
-            output.transition(None, Some(&control_a)),
+            output.transition(None, Some((&control_a, HeldKeys::WholeChord))),
             HoldTransition {
                 up: vec![],
                 down: vec![HeldKey::Control, HeldKey::Key(control_a.key())],
+                tap: None,
             }
         );
         assert_eq!(
-            output.transition(None, Some(&control_b)),
+            output.transition(None, Some((&control_b, HeldKeys::WholeChord))),
             HoldTransition {
                 up: vec![],
                 down: vec![HeldKey::Key(control_b.key())],
+                tap: None,
             }
         );
         assert_eq!(
-            output.transition(Some(&control_a), None),
+            output.transition(Some((&control_a, HeldKeys::WholeChord)), None),
             HoldTransition {
                 up: vec![HeldKey::Key(control_a.key())],
                 down: vec![],
+                tap: None,
             }
         );
         assert_eq!(
-            output.transition(Some(&control_b), None),
+            output.transition(Some((&control_b, HeldKeys::WholeChord)), None),
             HoldTransition {
                 up: vec![HeldKey::Control, HeldKey::Key(control_b.key())],
                 down: vec![],
+                tap: None,
             }
         );
     }
@@ -675,19 +724,21 @@ mod tests {
         let control_b = combo("Ctrl+B");
         let mut output = HeldOutput::default();
 
-        output.transition(None, Some(&command_a));
+        output.transition(None, Some((&command_a, HeldKeys::WholeChord)));
         assert_eq!(
-            output.transition(None, Some(&control_b)),
+            output.transition(None, Some((&control_b, HeldKeys::WholeChord))),
             HoldTransition {
                 up: vec![],
                 down: vec![HeldKey::Key(control_b.key())],
+                tap: None,
             }
         );
         assert_eq!(
-            output.transition(Some(&command_a), None),
+            output.transition(Some((&command_a, HeldKeys::WholeChord)), None),
             HoldTransition {
                 up: vec![HeldKey::Key(command_a.key())],
                 down: vec![],
+                tap: None,
             }
         );
     }
@@ -699,19 +750,21 @@ mod tests {
         let control_b = combo("Ctrl+B");
         let mut output = HeldOutput::default();
 
-        output.transition(None, Some(&command_a));
+        output.transition(None, Some((&command_a, HeldKeys::WholeChord)));
         assert_eq!(
-            output.transition(None, Some(&control_b)),
+            output.transition(None, Some((&control_b, HeldKeys::WholeChord))),
             HoldTransition {
                 up: vec![],
                 down: vec![HeldKey::Control, HeldKey::Key(control_b.key())],
+                tap: None,
             }
         );
         assert_eq!(
-            output.transition(Some(&command_a), None),
+            output.transition(Some((&command_a, HeldKeys::WholeChord)), None),
             HoldTransition {
                 up: vec![HeldKey::Command, HeldKey::Key(command_a.key())],
                 down: vec![],
+                tap: None,
             }
         );
     }
@@ -724,31 +777,35 @@ mod tests {
         let mut output = HeldOutput::default();
 
         assert_eq!(
-            output.transition(None, Some(&super_a)),
+            output.transition(None, Some((&super_a, HeldKeys::WholeChord))),
             HoldTransition {
                 up: vec![],
                 down: vec![HeldKey::Command, HeldKey::Key(super_a.key())],
+                tap: None,
             }
         );
         assert_eq!(
-            output.transition(None, Some(&command_b)),
+            output.transition(None, Some((&command_b, HeldKeys::WholeChord))),
             HoldTransition {
                 up: vec![],
                 down: vec![HeldKey::Key(command_b.key())],
+                tap: None,
             }
         );
         assert_eq!(
-            output.transition(Some(&super_a), None),
+            output.transition(Some((&super_a, HeldKeys::WholeChord)), None),
             HoldTransition {
                 up: vec![HeldKey::Key(super_a.key())],
                 down: vec![],
+                tap: None,
             }
         );
         assert_eq!(
-            output.transition(Some(&command_b), None),
+            output.transition(Some((&command_b, HeldKeys::WholeChord)), None),
             HoldTransition {
                 up: vec![HeldKey::Command, HeldKey::Key(command_b.key())],
                 down: vec![],
+                tap: None,
             }
         );
     }
@@ -758,7 +815,7 @@ mod tests {
     fn super_plus_command_owns_the_physical_key_once() {
         let chord = combo("Cmd+Super+A");
         assert_eq!(
-            super::held_keys(&chord),
+            super::held_keys(&chord, HeldKeys::WholeChord),
             vec![HeldKey::Command, HeldKey::Key(chord.key())]
         );
     }
@@ -771,24 +828,27 @@ mod tests {
         let mut output = HeldOutput::default();
 
         assert_eq!(
-            output.transition(None, Some(&super_a)),
+            output.transition(None, Some((&super_a, HeldKeys::WholeChord))),
             HoldTransition {
                 up: vec![],
                 down: vec![HeldKey::Super, HeldKey::Key(super_a.key())],
+                tap: None,
             }
         );
         assert_eq!(
-            output.transition(None, Some(&command_b)),
+            output.transition(None, Some((&command_b, HeldKeys::WholeChord))),
             HoldTransition {
                 up: vec![],
                 down: vec![HeldKey::Control, HeldKey::Key(command_b.key())],
+                tap: None,
             }
         );
         assert_eq!(
-            output.transition(Some(&super_a), None),
+            output.transition(Some((&super_a, HeldKeys::WholeChord)), None),
             HoldTransition {
                 up: vec![HeldKey::Super, HeldKey::Key(super_a.key())],
                 down: vec![],
+                tap: None,
             }
         );
     }
@@ -800,26 +860,185 @@ mod tests {
         let command_b = combo("Cmd+B");
         let mut output = HeldOutput::default();
 
-        output.transition(None, Some(&command_a));
+        output.transition(None, Some((&command_a, HeldKeys::WholeChord)));
         assert_eq!(
-            output.transition(None, Some(&command_b)),
+            output.transition(None, Some((&command_b, HeldKeys::WholeChord))),
             HoldTransition {
                 up: vec![],
                 down: vec![HeldKey::Key(command_b.key())],
+                tap: None,
             }
         );
         assert_eq!(
-            output.transition(Some(&command_a), None),
+            output.transition(Some((&command_a, HeldKeys::WholeChord)), None),
             HoldTransition {
                 up: vec![HeldKey::Key(command_a.key())],
                 down: vec![],
+                tap: None,
             }
         );
         assert_eq!(
-            output.transition(Some(&command_b), None),
+            output.transition(Some((&command_b, HeldKeys::WholeChord)), None),
             HoldTransition {
                 up: vec![HeldKey::Command, HeldKey::Key(command_b.key())],
                 down: vec![],
+                tap: None,
+            }
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn a_modifiers_only_hold_never_owns_its_ordinary_key() {
+        let control_tab = combo("Ctrl+Tab");
+        let mut output = HeldOutput::default();
+
+        // The ordinary key is absent from both edges: it is tapped once as the
+        // hold starts, not held, so it never enters the ownership map.
+        assert_eq!(
+            output.transition(None, Some((&control_tab, HeldKeys::ModifiersOnly))),
+            HoldTransition {
+                up: vec![],
+                down: vec![HeldKey::Control],
+                tap: Some(HeldKey::Key(control_tab.key())),
+            }
+        );
+        assert_eq!(
+            output.transition(Some((&control_tab, HeldKeys::ModifiersOnly)), None),
+            HoldTransition {
+                up: vec![HeldKey::Control],
+                down: vec![],
+                tap: None,
+            }
+        );
+    }
+
+    /// A whole-chord hold of the same chord must keep holding the ordinary
+    /// key: this is the difference the two actions exist to express.
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn a_whole_chord_hold_of_the_same_chord_still_owns_its_ordinary_key() {
+        let control_tab = combo("Ctrl+Tab");
+        let mut output = HeldOutput::default();
+
+        assert_eq!(
+            output.transition(None, Some((&control_tab, HeldKeys::WholeChord))),
+            HoldTransition {
+                up: vec![],
+                down: vec![HeldKey::Control, HeldKey::Key(control_tab.key())],
+                tap: None,
+            }
+        );
+    }
+
+    /// Two buttons, one ordinary key: a whole-chord hold keeps Tab down, so a
+    /// modifiers-only hold that starts meanwhile must not tap it. The tap's up
+    /// edge would release Tab under the first hold, which still owns it until
+    /// its own release.
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn a_modifiers_only_hold_skips_its_tap_while_another_hold_owns_the_key() {
+        let shift_tab = combo("Shift+Tab");
+        let alt_tab = combo("Alt+Tab");
+        let tab = HeldKey::Key(alt_tab.key());
+        let mut output = HeldOutput::default();
+
+        output.transition(None, Some((&shift_tab, HeldKeys::WholeChord)));
+        assert_eq!(
+            output.transition(None, Some((&alt_tab, HeldKeys::ModifiersOnly))),
+            HoldTransition {
+                up: vec![],
+                down: vec![HeldKey::Alt],
+                tap: None,
+            }
+        );
+        assert_eq!(
+            output.transition(Some((&alt_tab, HeldKeys::ModifiersOnly)), None),
+            HoldTransition {
+                up: vec![HeldKey::Alt],
+                down: vec![],
+                tap: None,
+            }
+        );
+        assert_eq!(
+            output.transition(Some((&shift_tab, HeldKeys::WholeChord)), None),
+            HoldTransition {
+                up: vec![HeldKey::Shift, tab],
+                down: vec![],
+                tap: None,
+            }
+        );
+        // With the owner gone, the next modifiers-only hold taps again.
+        assert_eq!(
+            output.transition(None, Some((&alt_tab, HeldKeys::ModifiersOnly))),
+            HoldTransition {
+                up: vec![],
+                down: vec![HeldKey::Alt],
+                tap: Some(tab),
+            }
+        );
+    }
+
+    /// The skip is about ownership, not about another hold merely existing:
+    /// a modifiers-only hold owns no ordinary key, so a second one still taps,
+    /// and a whole-chord hold that starts meanwhile still presses and owns Tab.
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn a_modifiers_only_hold_never_blocks_another_hold_of_the_same_key() {
+        let alt_tab = combo("Alt+Tab");
+        let shift_tab = combo("Shift+Tab");
+        let tab = HeldKey::Key(alt_tab.key());
+        let mut output = HeldOutput::default();
+
+        output.transition(None, Some((&alt_tab, HeldKeys::ModifiersOnly)));
+        assert_eq!(
+            output.transition(None, Some((&shift_tab, HeldKeys::ModifiersOnly))),
+            HoldTransition {
+                up: vec![],
+                down: vec![HeldKey::Shift],
+                tap: Some(tab),
+            }
+        );
+        output.transition(Some((&shift_tab, HeldKeys::ModifiersOnly)), None);
+        assert_eq!(
+            output.transition(None, Some((&shift_tab, HeldKeys::WholeChord))),
+            HoldTransition {
+                up: vec![],
+                down: vec![HeldKey::Shift, tab],
+                tap: None,
+            }
+        );
+        assert_eq!(
+            output.transition(Some((&shift_tab, HeldKeys::WholeChord)), None),
+            HoldTransition {
+                up: vec![HeldKey::Shift, tab],
+                down: vec![],
+                tap: None,
+            }
+        );
+    }
+
+    /// A press whose whole-chord hold is replaced by a modifiers-only one of
+    /// the same key releases the key first, so the replacement owns no
+    /// conflict and taps as a fresh hold does.
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn replacing_a_whole_chord_hold_frees_the_key_for_the_tap() {
+        let shift_tab = combo("Shift+Tab");
+        let alt_tab = combo("Alt+Tab");
+        let tab = HeldKey::Key(alt_tab.key());
+        let mut output = HeldOutput::default();
+
+        output.transition(None, Some((&shift_tab, HeldKeys::WholeChord)));
+        assert_eq!(
+            output.transition(
+                Some((&shift_tab, HeldKeys::WholeChord)),
+                Some((&alt_tab, HeldKeys::ModifiersOnly))
+            ),
+            HoldTransition {
+                up: vec![HeldKey::Shift, tab],
+                down: vec![HeldKey::Alt],
+                tap: Some(tab),
             }
         );
     }
@@ -831,12 +1050,16 @@ mod tests {
         let new = combo("Ctrl+B");
         let mut output = HeldOutput::default();
 
-        output.transition(None, Some(&old));
+        output.transition(None, Some((&old, HeldKeys::WholeChord)));
         assert_eq!(
-            output.transition(Some(&old), Some(&new)),
+            output.transition(
+                Some((&old, HeldKeys::WholeChord)),
+                Some((&new, HeldKeys::WholeChord))
+            ),
             HoldTransition {
                 up: vec![HeldKey::Key(old.key())],
                 down: vec![HeldKey::Key(new.key())],
+                tap: None,
             }
         );
     }

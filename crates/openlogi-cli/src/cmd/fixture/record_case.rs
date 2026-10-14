@@ -635,6 +635,7 @@ mod tests {
                     battery: None,
                     model_info: None,
                     capabilities: None,
+                    settings_revision: 0,
                 },
                 PairedDevice {
                     slot: 1,
@@ -645,6 +646,7 @@ mod tests {
                     battery: None,
                     model_info: None,
                     capabilities: None,
+                    settings_revision: 0,
                 },
                 PairedDevice {
                     slot: openlogi_device::DIRECT_DEVICE_INDEX,
@@ -655,6 +657,7 @@ mod tests {
                     battery: None,
                     model_info: None,
                     capabilities: None,
+                    settings_revision: 0,
                 },
             ],
         }];

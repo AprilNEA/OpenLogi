@@ -152,6 +152,8 @@ pub(super) trait ArmedCapture {
 /// A normal stop restores every control before returning; transport
 /// replacement or loss may return [`CaptureSessionOutcome::RestorePending`]
 /// for the caller to retry on the current inventory channel.
+/// Failed wake-feature discovery also ends the epoch through this teardown,
+/// allowing the supervisor to retry without leaving capture unable to rearm.
 pub(super) async fn run_capture<A: ArmedCapture>(
     shared: SharedChannel,
     armed: A,
@@ -159,7 +161,7 @@ pub(super) async fn run_capture<A: ArmedCapture>(
 ) -> CaptureSessionOutcome {
     let CaptureHost {
         sink,
-        shutdown,
+        mut shutdown,
         channel_slot,
         registry,
         device_io,
@@ -200,27 +202,44 @@ pub(super) async fn run_capture<A: ArmedCapture>(
     // reconfigure. Re-arm on every broadcast, or the captured controls
     // silently revert to their native functions after the first nap.
     let root = RootFeature::new(Arc::clone(&chan), device_index, 0);
-    let wireless = root
-        .get_feature(WirelessDeviceStatusFeature::ID)
-        .await
-        .ok()
-        .flatten()
-        .map(|info| WirelessDeviceStatusFeature::new(Arc::clone(&chan), device_index, info.index));
-    armed.log_active(device_index, wireless.is_some());
-    let stop = monitor(
-        CaptureMonitor {
-            armed: &armed,
-            root: &root,
-            device_index,
-            registry,
-            shared: &shared,
-            activity: activity.as_deref(),
-        },
-        wireless,
-        shutdown,
-        device_io,
-    )
-    .await;
+    let stop = match root.get_feature(WirelessDeviceStatusFeature::ID).await {
+        Ok(info) => {
+            let wireless = info.map(|info| {
+                WirelessDeviceStatusFeature::new(Arc::clone(&chan), device_index, info.index)
+            });
+            armed.log_active(device_index, wireless.is_some());
+            monitor(
+                CaptureMonitor {
+                    armed: &armed,
+                    root: &root,
+                    device_index,
+                    registry,
+                    shared: &shared,
+                    activity: activity.as_deref(),
+                },
+                wireless,
+                shutdown,
+                device_io,
+            )
+            .await
+        }
+        Err(error) => {
+            // Only a successful lookup can establish that wake reports are
+            // unsupported. A transient failure must retire this epoch so its
+            // supervisor retries discovery before trusting capture again.
+            warn!(
+                ?error,
+                index = device_index,
+                capture = A::NAME,
+                "wake feature discovery failed — restarting capture"
+            );
+            if matches!(shutdown.try_recv(), Ok(CaptureShutdown::Moved)) {
+                CaptureStop::Moved
+            } else {
+                stop_for_current_publication(registry, &shared)
+            }
+        }
+    };
 
     // The slot is one last-writer-wins cell shared by every session, so a
     // sibling may have published its own channel after ours. Clear it only

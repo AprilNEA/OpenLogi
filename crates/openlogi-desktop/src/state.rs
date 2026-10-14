@@ -75,6 +75,7 @@ mod inventory;
 mod light;
 mod lighting;
 mod load;
+mod os_layout;
 mod pointer;
 mod scroll;
 mod settings;

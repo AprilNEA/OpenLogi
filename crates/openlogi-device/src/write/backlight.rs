@@ -137,42 +137,170 @@ pub async fn set_backlight_enabled(
 ) -> Result<BacklightState, WriteError> {
     let index = route.device_index();
     with_route(backend, route, move |channel| async move {
-        let mut device = Device::new(Arc::clone(&channel), index)
-            .await
-            .map_err(|_| WriteError::DeviceUnreachable { index })?;
-        let feature = open_feature::<BacklightFeature>(&mut device).await?;
-
-        let current = feature.get_backlight_config().await.map_err(|e| {
-            classify_hidpp_error(e, HidppOperation::ReadBacklight, BacklightFeature::ID)
-        })?;
-
-        feature
-            .set_backlight_config(SetBacklightConfig {
-                enabled,
-                options: current.options,
-                mode: mode_to_firmware(mode_from_firmware(current.mode)),
-                // `None` sends the 0xff "do not change" sentinel, keeping
-                // whichever effect the device already runs.
-                effect: None,
-                current_level: current.current_level,
-                duration_hands_out: current.duration_hands_out,
-                duration_hands_in: current.duration_hands_in,
-                duration_powered: current.duration_powered,
-            })
-            .await
-            .map_err(|e| {
-                classify_hidpp_error(e, HidppOperation::WriteBacklight, BacklightFeature::ID)
-            })?;
-
-        debug!(index, enabled, "wrote backlight enable");
-        read_state(&feature).await
+        set_backlight_enabled_on_channel(&channel, index, enabled).await
     })
     .await
+}
+
+async fn set_backlight_enabled_on_channel(
+    channel: &Arc<HidppChannel>,
+    index: u8,
+    enabled: bool,
+) -> Result<BacklightState, WriteError> {
+    let mut device = Device::new(Arc::clone(channel), index)
+        .await
+        .map_err(|_| WriteError::DeviceUnreachable { index })?;
+    let feature = open_feature::<BacklightFeature>(&mut device).await?;
+    let current = feature.get_backlight_config().await.map_err(|e| {
+        classify_hidpp_error(e, HidppOperation::ReadBacklight, BacklightFeature::ID)
+    })?;
+    feature
+        .set_backlight_config(SetBacklightConfig {
+            enabled,
+            options: current.options,
+            mode: mode_to_firmware(mode_from_firmware(current.mode)),
+            // `None` sends the 0xff "do not change" sentinel, keeping
+            // whichever effect the device already runs.
+            effect: None,
+            current_level: current.current_level,
+            duration_hands_out: current.duration_hands_out,
+            duration_hands_in: current.duration_hands_in,
+            duration_powered: current.duration_powered,
+            duration_not_powered: current.duration_not_powered,
+        })
+        .await
+        .map_err(|e| {
+            classify_hidpp_error(e, HidppOperation::WriteBacklight, BacklightFeature::ID)
+        })?;
+    debug!(index, enabled, "wrote backlight enable");
+    read_state(&feature).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    use crate::channel::scripted::{ScriptedRawHidChannel, scripted_channel};
+
+    const BACKLIGHT_INDEX: u8 = 0x08;
+
+    /// A `0x1982` keyboard whose config reply carries all four fade-out
+    /// durations (bytes 6..14). `setBacklightConfig` stores what it is sent,
+    /// mapping request bytes 4..12 onto those four durations as Options+ does.
+    fn stateful_backlight(
+        config: [u8; 16],
+        short_config_reply: bool,
+    ) -> (ScriptedRawHidChannel, crate::replay::ReplayChannelHandle) {
+        let state = Mutex::new(config);
+        ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+            if request.len() < 7 || !matches!(request[0], 0x10 | 0x11) {
+                return None;
+            }
+            let mut payload = [0u8; 16];
+            let long = match (request[2], request[3] >> 4) {
+                (0x00, 0x01) => {
+                    payload[0] = 4;
+                    false
+                }
+                (0x00, 0x00) => {
+                    if u16::from_be_bytes([request[4], request[5]]) == BacklightFeature::ID {
+                        payload[0] = BACKLIGHT_INDEX;
+                    }
+                    false
+                }
+                (BACKLIGHT_INDEX, 0x00) => {
+                    payload = *state.lock().expect("backlight state");
+                    !short_config_reply
+                }
+                (BACKLIGHT_INDEX, 0x01) => {
+                    let mut current = state.lock().expect("backlight state");
+                    current[0] = request[4];
+                    current[1] = request[5];
+                    current[5] = request[7];
+                    current[6..14].copy_from_slice(&request[8..16]);
+                    true
+                }
+                (BACKLIGHT_INDEX, 0x02) => {
+                    payload[..4].copy_from_slice(&[
+                        8,
+                        4,
+                        u8::from(FirmwareStatus::AlsAutomatic),
+                        u8::from(hidpp::feature::backlight::BacklightEffect::Static),
+                    ]);
+                    true
+                }
+                _ => return None,
+            };
+            let mut response = vec![0u8; if long { 20 } else { 7 }];
+            response[0] = if long { 0x11 } else { 0x10 };
+            response[1..4].copy_from_slice(&request[1..4]);
+            let payload_len = response.len() - 4;
+            response[4..].copy_from_slice(&payload[..payload_len]);
+            Some(response)
+        })
+    }
+
+    /// Enabled, automatic mode, level 4, durations 0x0001 / 0x0002 / 0x0003
+    /// and a non-zero fourth duration 0x0405.
+    fn config_with_four_durations() -> [u8; 16] {
+        let mut config = [0u8; 16];
+        config[0] = 1;
+        config[1] = u8::from(FirmwareMode::Automatic) << 3;
+        config[5] = 4;
+        config[6..14].copy_from_slice(&[0x01, 0, 0x02, 0, 0x03, 0, 0x05, 0x04]);
+        config
+    }
+
+    fn config_writes(handle: &crate::replay::ReplayChannelHandle) -> Vec<Vec<u8>> {
+        handle
+            .written_reports()
+            .into_iter()
+            .filter(|report| {
+                report.len() >= 16 && report[2] == BACKLIGHT_INDEX && report[3] >> 4 == 0x01
+            })
+            .map(|report| report[4..16].to_vec())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn toggling_keeps_the_fourth_fade_out_duration() -> Result<(), WriteError> {
+        let (raw, handle) = stateful_backlight(config_with_four_durations(), false);
+        let channel = scripted_channel(raw).await;
+        let state = set_backlight_enabled_on_channel(&channel, 0xff, false).await?;
+        assert!(!state.enabled);
+        assert_eq!(
+            config_writes(&handle),
+            vec![vec![
+                0,
+                u8::from(FirmwareMode::Automatic) << 3,
+                0xff,
+                4,
+                0x01,
+                0,
+                0x02,
+                0,
+                0x03,
+                0,
+                // Bytes 10..12: the fourth duration, written back as read.
+                0x05,
+                0x04,
+            ]],
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_short_config_reply_is_never_written_back() {
+        // A three-byte reply would zero-fill the level and every duration.
+        let (raw, handle) = stateful_backlight(config_with_four_durations(), true);
+        let channel = scripted_channel(raw).await;
+        assert!(matches!(
+            set_backlight_enabled_on_channel(&channel, 0xff, false).await,
+            Err(WriteError::UnsupportedResponse { .. })
+        ));
+        assert!(config_writes(&handle).is_empty());
+    }
 
     #[test]
     fn firmware_modes_round_trip_through_openlogi_modes() {

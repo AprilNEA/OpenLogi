@@ -14,7 +14,7 @@ use openlogi_core::brand::{HELP_URL, RELEASES_URL, REPO_URL};
 use url::Url;
 
 use crate::state::AppState;
-use crate::ui::battery::battery_charging_no_reading;
+use crate::ui::battery::value_label;
 
 /// Keymap context installed on the main application surface.
 pub(crate) const APP_KEY_CONTEXT: &str = "OpenLogi";
@@ -116,13 +116,17 @@ pub fn rebuild(cx: &mut App) {
     cx.set_menus(menus(cx));
 }
 
-/// Run a manual update check and open Settings → Updates where its status is
-/// rendered. Shared by the app menu and agent tray IPC commands.
+/// Run a manual update check and show its progress: Sparkle in its own window,
+/// the built-in engine on Settings → Updates. Shared by the app menu, agent
+/// tray IPC commands and deep links.
 pub fn check_for_updates(cx: &mut App) {
-    if let Some(updater) = crate::platform::updater::shared(cx) {
+    let updater = crate::platform::updater::shared(cx);
+    if let Some(updater) = &updater {
         updater.update(cx, gpui_updater::Updater::check);
     }
-    crate::windows::settings::open_at(crate::windows::settings::SettingsPage::Updates, cx);
+    if !updater.is_some_and(|updater| updater.read(cx).is_driver_backed()) {
+        crate::windows::settings::open_at(crate::windows::settings::SettingsPage::Updates, cx);
+    }
 }
 
 fn menus(cx: &App) -> Vec<Menu> {
@@ -238,10 +242,7 @@ fn device_menu_items(cx: &App) -> Vec<MenuItem> {
         Some(state) if !state.devices().is_empty() => {
             for record in state.devices() {
                 let title = match &record.battery {
-                    Some(battery) if battery_charging_no_reading(battery) => {
-                        format!("{} · {}", record.display_name, tr!("device.charging"))
-                    }
-                    Some(battery) => format!("{} · {}%", record.display_name, battery.percentage),
+                    Some(battery) => format!("{} · {}", record.display_name, value_label(battery)),
                     None => record.display_name.clone(),
                 };
                 items.push(MenuItem::action(title, gpui::NoAction).disabled(true));
