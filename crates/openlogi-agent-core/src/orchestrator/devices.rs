@@ -27,7 +27,8 @@ pub(super) fn configured_wheel_mode(config: &Config, dev: &AgentDevice) -> Optio
         .flatten();
     let inverted = capabilities
         .scroll_inversion
-        .then(|| device.is_some_and(|d| d.effective_invert_scroll(&route_key)));
+        .then(|| device.and_then(|d| d.configured_invert_scroll(&route_key)))
+        .flatten();
     WheelModeChange::new(resolution, inverted)
 }
 
