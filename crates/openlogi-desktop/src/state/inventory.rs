@@ -10,7 +10,7 @@ use tracing::debug;
 
 use crate::services::assets::AssetResolver;
 use crate::services::assets::sync::{AssetTarget, model_key};
-use crate::services::ipc::{UnpairDevice, UnpairFailure};
+use crate::services::ipc::{UnpairDevice, UnpairFailure, UnpairIntent};
 use crate::state::devices::{
     DeviceRecord, adopt_transient_record, build_device_list, direct_key_prefix,
     fold_by_inventory_key, record_wire_pid, sort_device_list,
@@ -126,8 +126,18 @@ impl AppState {
         // both being swallowed here. Structural comparison also makes the
         // guard immune to new fields, which is what an allowlist can never
         // be.
+        // A receiver's slots can change while every card stays the same — a
+        // receiver plugged in with nothing on it, or a leftover pairing
+        // already gone from the list — so they are compared on their own.
+        let receivers = super::receivers::build_receivers(inventories, &merged_list);
+        let receivers_changed = receivers != self.receivers;
+        self.receivers = receivers;
         if merged_list == self.devices.records {
-            return StateEvents::none();
+            return if receivers_changed {
+                StateEvent::InventoryChanged.into()
+            } else {
+                StateEvents::none()
+            };
         }
 
         let previous_key = self.current_record().map(DeviceRecord::inventory_key);
@@ -195,6 +205,10 @@ impl AppState {
         let mut by_key = fold_by_inventory_key(new_list);
         let mut adopted = self.adopt_transient_records(&mut by_key);
         let mut merged = Vec::with_capacity(by_key.len().max(self.devices.records.len()));
+        let folded_routes: Vec<DeviceRoute> = by_key
+            .values()
+            .flat_map(|record| record.stale_pairings.iter().cloned())
+            .collect();
 
         for previous in &self.devices.records {
             let inv = previous.inventory_key();
@@ -208,6 +222,18 @@ impl AppState {
             if let Some(record) = adopted.remove(&inv) {
                 clear_inventory_misses(&mut self.devices.sessions, &key);
                 merged.push(record);
+                continue;
+            }
+
+            // A slot the snapshot folded into another card as a leftover
+            // pairing is not missing; grace-keeping it would bring back the
+            // duplicate card the fold removed.
+            if previous
+                .route
+                .as_ref()
+                .is_some_and(|route| folded_routes.contains(route))
+            {
+                clear_inventory_misses(&mut self.devices.sessions, &key);
                 continue;
             }
 
@@ -436,8 +462,10 @@ impl super::AppState {
         let name = record.display_name.clone();
         if self.send_ipc(UnpairDevice {
             route,
-            record_key: record_key.to_string(),
-            config_key,
+            intent: UnpairIntent::Forget {
+                record_key: record_key.to_string(),
+                config_key,
+            },
         }) {
             StateEvents::none()
         } else {
@@ -446,6 +474,71 @@ impl super::AppState {
                 failure: UnpairFailure::AgentUnreachable,
             }
             .into()
+        }
+    }
+
+    /// Ask the receiver to drop every leftover slot folded into
+    /// `record_key`'s card ([`DeviceRecord::stale_pairings`]). The device, its
+    /// card, and its settings stay; once the receiver lets a slot go, the
+    /// agent's next inventory stops listing it.
+    pub(crate) fn remove_stale_pairings(&mut self, record_key: &str) -> StateEvents {
+        let Some(record) = self
+            .devices
+            .records
+            .iter()
+            .find(|record| record.record_key() == record_key)
+        else {
+            return StateEvents::none();
+        };
+        let name = record.display_name.clone();
+        let routes = record.stale_pairings.clone();
+        for route in routes {
+            let events = self.remove_stale_pairing(route, &name);
+            if !events.is_empty() {
+                return events;
+            }
+        }
+        StateEvents::none()
+    }
+
+    /// Ask the receiver to drop one leftover slot of the device named `name`
+    /// — the Receivers page's per-slot action. Nothing local changes; the
+    /// agent's next inventory stops listing the slot.
+    pub(crate) fn remove_stale_pairing(&mut self, route: DeviceRoute, name: &str) -> StateEvents {
+        let sent = self.send_ipc(UnpairDevice {
+            route,
+            intent: UnpairIntent::StalePairing {
+                name: name.to_string(),
+            },
+        });
+        if sent {
+            StateEvents::none()
+        } else {
+            StateEvent::StalePairingRemovalFailed {
+                name: name.to_string(),
+                failure: UnpairFailure::AgentUnreachable,
+            }
+            .into()
+        }
+    }
+
+    /// The receiver's answer to an [`UnpairDevice`], dispatched on what the
+    /// removal was for.
+    pub(crate) fn apply_unpaired(
+        &mut self,
+        route: &DeviceRoute,
+        intent: UnpairIntent,
+        result: Result<(), UnpairFailure>,
+    ) -> StateEvents {
+        match intent {
+            UnpairIntent::Forget {
+                record_key,
+                config_key,
+            } => self.apply_device_unpaired(&record_key, route, config_key.as_deref(), result),
+            UnpairIntent::StalePairing { name } => match result {
+                Ok(()) => StateEvents::none(),
+                Err(failure) => StateEvent::StalePairingRemovalFailed { name, failure }.into(),
+            },
         }
     }
 

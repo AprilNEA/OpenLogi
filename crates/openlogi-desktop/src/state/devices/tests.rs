@@ -178,6 +178,7 @@ fn online_record(key: &str) -> DeviceRecord {
         online: true,
         battery: None,
         settings_revision: 0,
+        stale_pairings: Vec::new(),
     }
 }
 

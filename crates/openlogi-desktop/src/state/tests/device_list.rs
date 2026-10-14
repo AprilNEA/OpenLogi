@@ -569,7 +569,7 @@ fn forget_target(state: &mut AppState) -> (String, String) {
 /// one is unpaired first and its card goes only once the receiver agrees.
 #[test]
 fn forgetting_a_receiver_device_unpairs_it_before_dropping_the_card() {
-    use crate::services::ipc::{Command, UnpairDevice};
+    use crate::services::ipc::{Command, UnpairDevice, UnpairIntent};
 
     let (mut state, mut commands) = state_with_an_offline_receiver_mouse();
     let (record_key, config_key) = forget_target(&mut state);
@@ -581,8 +581,11 @@ fn forgetting_a_receiver_device_unpairs_it_before_dropping_the_card() {
     assert_eq!(state.devices().len(), 1, "the card waits for the receiver");
     let Ok(Command::UnpairDevice(UnpairDevice {
         route: sent_route,
-        record_key: sent_key,
-        config_key: sent_config,
+        intent:
+            UnpairIntent::Forget {
+                record_key: sent_key,
+                config_key: sent_config,
+            },
     })) = commands.try_recv()
     else {
         panic!("forgetting a receiver device must ask the agent to unpair it");
@@ -681,4 +684,316 @@ fn a_device_seen_on_the_unpaired_slot_still_goes() {
     );
     assert!(state.devices().is_empty());
     assert!(!state.config.devices.contains_key(&config_key));
+}
+
+/// The MX Mechanical a Bolt receiver paired three times, shaped like a real
+/// receiver's report with synthetic identities: one unit id and serial in
+/// every listed slot, online only in the slot given.
+fn keyboard_pairings(slots: &[u8], online_slot: Option<u8>) -> DeviceInventory {
+    DeviceInventory {
+        receiver: ReceiverInfo {
+            name: "Bolt Receiver".to_string(),
+            vendor_id: 0x046d,
+            product_id: 0xc548,
+            unique_id: Some("OL-BOLT-UID-0002".to_string()),
+        },
+        paired: slots
+            .iter()
+            .map(|&slot| PairedDevice {
+                slot,
+                codename: Some("MX MCHNCL".to_string()),
+                wpid: Some(0xb366),
+                kind: DeviceKind::Keyboard,
+                online: online_slot == Some(slot),
+                battery: None,
+                model_info: Some(DeviceModelInfo {
+                    entity_count: 1,
+                    serial_number: Some("OLKB00000001".to_string()),
+                    unit_id: [0x4f, 0x4c, 0x4b, 0x01],
+                    transports: DeviceTransports::default(),
+                    model_ids: [0xb366, 0, 0],
+                    extended_model_id: 0,
+                }),
+                capabilities: Some(Capabilities::presumed_from_kind(DeviceKind::Keyboard)),
+                settings_revision: 0,
+            })
+            .collect(),
+    }
+}
+
+fn bolt_slot(slot: u8) -> DeviceRoute {
+    DeviceRoute::Bolt {
+        receiver_uid: "OL-BOLT-UID-0002".to_string(),
+        slot,
+    }
+}
+
+fn state_with(
+    inventories: &[DeviceInventory],
+) -> (
+    AppState,
+    tokio::sync::mpsc::UnboundedReceiver<crate::services::ipc::Command>,
+) {
+    let (commands, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let state = AppState::new(Sources {
+        inventories,
+        ..Sources::in_memory(Config::ephemeral(), &AssetResolver::new(), commands)
+    });
+    (state, receiver)
+}
+
+/// One keyboard in three slots of one receiver is one card, on the live slot,
+/// carrying the two leftover slots for cleanup.
+#[test]
+fn leftover_pairings_of_one_device_fold_into_its_live_card() {
+    let (state, _commands) = state_with(&[keyboard_pairings(&[2, 3, 4], Some(4))]);
+
+    let [card] = state.devices() else {
+        panic!("one keyboard must be one card: {:?}", state.devices());
+    };
+    assert!(card.online);
+    assert_eq!(card.route, Some(bolt_slot(4)));
+    assert_eq!(card.stale_pairings, [bolt_slot(2), bolt_slot(3)]);
+}
+
+/// Asleep, the keyboard is still one card — on the slot that owns its
+/// settings, so its panels keep reading the same entry.
+#[test]
+fn an_asleep_device_stays_one_card_on_the_slot_owning_its_settings() {
+    let resolver = AssetResolver::new();
+    let (mut state, _commands) = state_with(&[keyboard_pairings(&[2, 3, 4], Some(4))]);
+    let config_key = state.devices()[0].config_key.clone();
+
+    let _ = state.refresh_inventories(&[keyboard_pairings(&[2, 3, 4], None)], &[], &resolver, &[]);
+
+    let [card] = state.devices() else {
+        panic!(
+            "an asleep keyboard must stay one card: {:?}",
+            state.devices()
+        );
+    };
+    assert!(!card.online);
+    assert_eq!(card.route, Some(bolt_slot(4)));
+    assert_eq!(card.config_key, config_key);
+    assert_eq!(card.stale_pairings, [bolt_slot(2), bolt_slot(3)]);
+}
+
+/// A card shown for a slot that the next snapshot folds as a leftover is not
+/// a missing device, so the miss grace must not keep it beside the live card.
+#[test]
+fn a_slot_folded_as_a_leftover_is_not_grace_kept() {
+    let resolver = AssetResolver::new();
+    let (mut state, _commands) = state_with(&[keyboard_pairings(&[2], Some(2))]);
+
+    let _ = state.refresh_inventories(&[keyboard_pairings(&[2, 4], Some(4))], &[], &resolver, &[]);
+
+    let [card] = state.devices() else {
+        panic!(
+            "the old slot must not linger as a card: {:?}",
+            state.devices()
+        );
+    };
+    assert_eq!(card.route, Some(bolt_slot(4)));
+    assert_eq!(card.stale_pairings, [bolt_slot(2)]);
+}
+
+/// The same device on two receivers may be two Easy-Switch hosts on purpose:
+/// neither is a leftover of the other.
+#[test]
+fn pairings_on_different_receivers_are_not_leftovers() {
+    let mut other = keyboard_pairings(&[1], None);
+    other.receiver.unique_id = Some("0000000000000001".to_string());
+    let (state, _commands) = state_with(&[keyboard_pairings(&[4], Some(4)), other]);
+
+    assert_eq!(state.devices().len(), 2);
+    assert!(
+        state
+            .devices()
+            .iter()
+            .all(|card| card.stale_pairings.is_empty())
+    );
+}
+
+/// Removing the leftovers unpairs exactly those slots and nothing else: the
+/// device, its card, and its settings stay.
+#[test]
+fn removing_leftover_pairings_unpairs_only_the_leftover_slots() {
+    use crate::services::ipc::{Command, UnpairDevice, UnpairIntent};
+
+    let (mut state, mut commands) = state_with(&[keyboard_pairings(&[2, 3, 4], Some(4))]);
+    let record_key = state.devices()[0].record_key();
+    let name = state.devices()[0].display_name.clone();
+    while commands.try_recv().is_ok() {}
+
+    assert!(state.remove_stale_pairings(&record_key).is_empty());
+
+    let mut sent = Vec::new();
+    while let Ok(command) = commands.try_recv() {
+        let Command::UnpairDevice(UnpairDevice { route, intent }) = command else {
+            continue;
+        };
+        assert_eq!(intent, UnpairIntent::StalePairing { name: name.clone() });
+        sent.push(route);
+    }
+    assert_eq!(sent, [bolt_slot(2), bolt_slot(3)]);
+
+    let config_key = state.devices()[0].config_key.clone();
+    assert!(
+        state
+            .apply_unpaired(
+                &bolt_slot(2),
+                UnpairIntent::StalePairing { name: name.clone() },
+                Ok(())
+            )
+            .is_empty()
+    );
+    assert_eq!(state.devices().len(), 1);
+    assert!(state.config.devices.contains_key(&config_key));
+}
+
+/// A receiver that keeps a leftover slot says why, and the device stays.
+#[test]
+fn a_refused_leftover_removal_says_why() {
+    use crate::services::ipc::{UnpairFailure, UnpairIntent};
+    use openlogi_ipc::PairingFailure;
+
+    let (mut state, _commands) = state_with(&[keyboard_pairings(&[2, 4], Some(4))]);
+    let name = state.devices()[0].display_name.clone();
+    let failure = UnpairFailure::Refused(PairingFailure::ReceiverBusy);
+
+    assert_eq!(
+        state.apply_unpaired(
+            &bolt_slot(2),
+            UnpairIntent::StalePairing { name: name.clone() },
+            Err(failure.clone())
+        ),
+        [StateEvent::StalePairingRemovalFailed { name, failure }]
+    );
+    assert_eq!(state.devices().len(), 1);
+}
+
+/// The Receivers page lists all six Bolt slots: the live one as the device,
+/// the folded leftovers as old pairings of it, and the rest as empty.
+#[test]
+fn a_bolt_receiver_lists_every_slot_with_its_leftovers_marked() {
+    use crate::state::SlotOccupant;
+
+    let (state, _commands) = state_with(&[keyboard_pairings(&[2, 3, 4], Some(4))]);
+    let name = state.devices()[0].display_name.clone();
+
+    let [receiver] = state.receivers() else {
+        panic!("one receiver: {:?}", state.receivers());
+    };
+    assert_eq!(receiver.capacity, Some(6));
+    assert_eq!(receiver.used(), 3);
+    let occupants: Vec<_> = receiver
+        .slots
+        .iter()
+        .map(|slot| (slot.slot, slot.occupant.clone()))
+        .collect();
+    let old = |slot| SlotOccupant::OldPairing {
+        name: name.clone(),
+        route: bolt_slot(slot),
+    };
+    assert_eq!(
+        occupants,
+        [
+            (1, SlotOccupant::Empty),
+            (2, old(2)),
+            (3, old(3)),
+            (
+                4,
+                SlotOccupant::Device {
+                    name: name.clone(),
+                    online: true
+                }
+            ),
+            (5, SlotOccupant::Empty),
+            (6, SlotOccupant::Empty),
+        ]
+    );
+}
+
+/// A direct device's inventory has no receiver behind it and no slots.
+#[test]
+fn a_direct_device_is_not_a_receiver() {
+    let mut direct = keyboard_pairings(&[0xff], Some(0xff));
+    direct.receiver.unique_id = None;
+    direct.receiver.product_id = 0xb366;
+    let (state, _commands) = state_with(&[direct]);
+
+    assert_eq!(state.devices().len(), 1);
+    assert!(state.receivers().is_empty());
+}
+
+/// A receiver whose capacity is not recorded lists only what it reported.
+#[test]
+fn a_receiver_of_unknown_capacity_lists_only_occupied_slots() {
+    let mut lightspeed = keyboard_pairings(&[1], Some(1));
+    lightspeed.receiver.product_id = 0xc53a;
+    let (state, _commands) = state_with(&[lightspeed]);
+
+    let [receiver] = state.receivers() else {
+        panic!("one receiver: {:?}", state.receivers());
+    };
+    assert_eq!(receiver.capacity, None);
+    assert_eq!(
+        receiver
+            .slots
+            .iter()
+            .map(|slot| slot.slot)
+            .collect::<Vec<_>>(),
+        [1]
+    );
+}
+
+/// A receiver plugged in with nothing paired changes no card, but its slots
+/// still have to reach the page.
+#[test]
+fn an_empty_receiver_appearing_is_an_inventory_change() {
+    let resolver = AssetResolver::new();
+    let (mut state, _commands) = state_with(&[]);
+    let empty = keyboard_pairings(&[], None);
+
+    let events = state.refresh_inventories(&[empty], &[], &resolver, &[]);
+
+    assert_eq!(events, [StateEvent::InventoryChanged]);
+    let [receiver] = state.receivers() else {
+        panic!("one receiver: {:?}", state.receivers());
+    };
+    assert_eq!(receiver.used(), 0);
+    assert_eq!(receiver.slots.len(), 6);
+}
+
+/// One leftover slot removed from the Receivers page unpairs that slot only,
+/// as a leftover — the device and its settings stay.
+#[test]
+fn removing_one_leftover_slot_unpairs_only_that_slot() {
+    use crate::services::ipc::{Command, UnpairDevice, UnpairIntent};
+
+    let (mut state, mut commands) = state_with(&[keyboard_pairings(&[2, 3, 4], Some(4))]);
+    while commands.try_recv().is_ok() {}
+
+    assert!(
+        state
+            .remove_stale_pairing(bolt_slot(3), "MX Mechanical")
+            .is_empty()
+    );
+
+    let sent: Vec<_> = std::iter::from_fn(|| commands.try_recv().ok())
+        .filter_map(|command| match command {
+            Command::UnpairDevice(UnpairDevice { route, intent }) => Some((route, intent)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        sent,
+        [(
+            bolt_slot(3),
+            UnpairIntent::StalePairing {
+                name: "MX Mechanical".to_string()
+            }
+        )]
+    );
+    assert_eq!(state.devices().len(), 1);
 }

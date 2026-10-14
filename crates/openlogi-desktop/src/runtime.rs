@@ -295,20 +295,12 @@ impl Runtime {
                 });
             }
             ipc::GuiUpdate::DeviceUnpaired {
-                record_key,
                 route,
-                config_key,
+                intent,
                 result,
             } => {
                 cx.update(|cx| {
-                    AppState::apply(cx, |state| {
-                        state.apply_device_unpaired(
-                            &record_key,
-                            &route,
-                            config_key.as_deref(),
-                            result,
-                        )
-                    });
+                    AppState::apply(cx, |state| state.apply_unpaired(&route, intent, result));
                 });
             }
         }

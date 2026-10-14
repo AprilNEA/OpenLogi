@@ -209,17 +209,26 @@ pub struct AppView {
     active_tab: DetailTab,
 }
 
-/// Open the dialog that says why a device the user asked to forget stayed.
+/// Open the dialog that says why a pairing the user asked to remove stayed —
+/// a forgotten device's, or a leftover slot's.
 fn explain_refused_removals(
     state: &Entity<AppState>,
     window: &mut Window,
     cx: &mut Context<AppView>,
 ) -> Subscription {
-    cx.subscribe_in(state, window, |_, _, event: &StateEvent, window, cx| {
-        if let StateEvent::DeviceRemovalFailed { name, failure } = event {
-            home::open_removal_failed(window, cx, name, failure);
-        }
-    })
+    cx.subscribe_in(
+        state,
+        window,
+        |_, _, event: &StateEvent, window, cx| match event {
+            StateEvent::DeviceRemovalFailed { name, failure } => {
+                home::open_removal_failed(window, cx, name, failure);
+            }
+            StateEvent::StalePairingRemovalFailed { name, failure } => {
+                home::open_stale_pairing_removal_failed(window, cx, name, failure);
+            }
+            _ => {}
+        },
+    )
 }
 
 impl Focusable for AppView {
@@ -300,6 +309,7 @@ impl AppView {
                 // opened through `removal_obs`.
                 StateEvent::SmartShiftChanged(_)
                 | StateEvent::DeviceRemovalFailed { .. }
+                | StateEvent::StalePairingRemovalFailed { .. }
                 | StateEvent::CameraPermissionChanged
                 | StateEvent::DiagnosticsChanged
                 | StateEvent::LanguageChanged => false,
