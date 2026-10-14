@@ -41,7 +41,7 @@ use crate::observable::ObservableState;
 use crate::receiver_access::ReceiverAccess;
 use crate::runtime::hook::{HookMaps, SharedHookMaps};
 use crate::runtime::scroll::ScrollPreferences;
-use crate::watchers::host_switch::{HostSwitchLink, HostSwitchLinks};
+use crate::watchers::host_switch::{HostSwitchLinks, HostSwitchPublication};
 use crate::watchers::inventory::InventoryRefresh;
 use crate::watchers::keyboard::{KeyboardSpec, SharedKeyboardSpec};
 use crate::{DpiCycleState, DpiCycles};
@@ -122,7 +122,7 @@ pub struct SharedHandles {
     /// Receiver access shared by HID++ sessions and pairing. Pairing/host
     /// transitions are exclusive; capture sessions share under read leases.
     pub receiver_access: ReceiverAccess,
-    /// Keyboard → pointing-device routes resolved from `config.toml`.
+    /// Configured host-switch links with active and offline keyboard routes.
     pub host_switch_links: HostSwitchLinks,
     /// Orders every path's Fn-lock writes per keyboard.
     fn_lock_order: FnLockOrder,
@@ -277,7 +277,7 @@ pub struct Orchestrator {
     /// `shared`, keeping the orchestrator's single-writer contract structural.
     capture_plans_tx: watch::Sender<Arc<Vec<DeviceCapturePlan>>>,
     keyboard_spec_tx: watch::Sender<Option<Arc<KeyboardSpec>>>,
-    host_switch_links_tx: watch::Sender<Arc<Vec<HostSwitchLink>>>,
+    host_switch_links_tx: watch::Sender<Arc<HostSwitchPublication>>,
     shared: SharedHandles,
     /// The state the GUI observes. Every mutator below that changes one of its
     /// facts republishes here, so the cell cannot go stale behind a new code
@@ -322,7 +322,8 @@ impl Orchestrator {
     ) -> Self {
         let (capture_plans_tx, capture_plans) = watch::channel(Arc::new(Vec::new()));
         let (keyboard_spec_tx, keyboard_spec) = watch::channel(None);
-        let (host_switch_links_tx, host_switch_links) = watch::channel(Arc::new(Vec::new()));
+        let (host_switch_links_tx, host_switch_links) =
+            watch::channel(Arc::new(HostSwitchPublication::default()));
         let shared = SharedHandles {
             device_io: hardware.device_io(),
             channel_pool: hardware.channel_pool(),

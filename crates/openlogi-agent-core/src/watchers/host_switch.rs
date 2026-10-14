@@ -25,10 +25,30 @@ pub struct HostSwitchLink {
     pub keyboard: DeviceRoute,
     /// Pointing devices that follow the keyboard.
     pub targets: Vec<DeviceRoute>,
+    /// Config entry that produced this link, retained across inventory changes.
+    pub config: HostSwitchConfig,
 }
 
-/// Read-only, lossless, coalescing view of resolved links.
-pub type HostSwitchLinks = watch::Receiver<std::sync::Arc<Vec<HostSwitchLink>>>;
+/// Config identity of a host-switch link, including target order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostSwitchConfig {
+    /// Keyboard config key.
+    pub keyboard_key: String,
+    /// Configured target keys.
+    pub target_keys: Vec<String>,
+}
+
+/// Resolved links and configured keyboards missing from current inventory.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct HostSwitchPublication {
+    /// Links whose keyboard is online and can be armed.
+    pub active: Vec<HostSwitchLink>,
+    /// Still-configured links whose keyboard is offline or absent.
+    pub offline: Vec<HostSwitchConfig>,
+}
+
+/// Read-only, lossless, coalescing view of resolved links and offline intent.
+pub type HostSwitchLinks = watch::Receiver<std::sync::Arc<HostSwitchPublication>>;
 
 struct HostSwitchManagerContext {
     links: HostSwitchLinks,
@@ -75,24 +95,24 @@ impl SessionEpoch {
     }
 }
 
-enum SessionPhase {
-    Active(oneshot::Sender<HostSwitchStopReason>),
-    Draining,
-}
-
 struct RunningSession {
     link: HostSwitchLink,
     epoch: SessionEpoch,
-    phase: SessionPhase,
+    stop: watch::Sender<Option<HostSwitchStopReason>>,
 }
 
 impl RunningSession {
     fn stop(&mut self, reason: HostSwitchStopReason) {
-        let SessionPhase::Active(stop) = std::mem::replace(&mut self.phase, SessionPhase::Draining)
-        else {
-            return;
-        };
-        let _ = stop.send(reason);
+        self.stop.send_if_modified(|current| {
+            if *current == Some(HostSwitchStopReason::Graceful)
+                || (*current == Some(HostSwitchStopReason::DeviceLost)
+                    && reason == HostSwitchStopReason::DeviceLost)
+            {
+                return false;
+            }
+            *current = Some(reason);
+            true
+        });
     }
 }
 
@@ -257,13 +277,23 @@ impl HostSwitchManagerState {
             .min()
     }
 
-    fn stop_sessions(&mut self, wanted: &[HostSwitchLink], terminal: bool) {
+    fn stop_sessions(
+        &mut self,
+        wanted: &[HostSwitchLink],
+        offline: &[HostSwitchConfig],
+        terminal: bool,
+    ) {
         for slot in &mut self.slots {
             let HostSwitchSlot::Running(session) = slot else {
                 continue;
             };
             if terminal || !wanted.contains(&session.link) {
-                session.stop(HostSwitchStopReason::Graceful);
+                let reason = if !terminal && offline.contains(&session.link.config) {
+                    HostSwitchStopReason::DeviceLost
+                } else {
+                    HostSwitchStopReason::Graceful
+                };
+                session.stop(reason);
             }
         }
     }
@@ -457,17 +487,22 @@ async fn manage(context: HostSwitchManagerContext) -> ManagerCompletion {
         let requests = *receiver_requests.borrow_and_update();
         let published = std::sync::Arc::clone(&links.borrow_and_update());
         let io_allowed = device_io.allows_io();
-        state.reconcile_transition(&published, terminal);
+        state.reconcile_transition(&published.active, terminal);
         let wanted = if terminal || requests.any() || state.transition.is_some() {
             &[][..]
         } else {
-            published.as_slice()
+            published.active.as_slice()
         };
         if io_allowed || terminal {
-            state.stop_sessions(wanted, terminal);
+            let offline = if requests.any() || state.transition.is_some() {
+                &[][..]
+            } else {
+                published.offline.as_slice()
+            };
+            state.stop_sessions(wanted, offline, terminal);
         }
         if io_allowed {
-            state.reconcile_recoveries(&published, requests, &services, terminal);
+            state.reconcile_recoveries(&published.active, requests, &services, terminal);
             if !terminal && state.transition.is_none() {
                 state.spawn_successors(wanted, &services);
             }
@@ -490,7 +525,7 @@ async fn manage(context: HostSwitchManagerContext) -> ManagerCompletion {
             }
             Some(event) = event_rx.recv() => {
                 let published = links.borrow().clone();
-                handle_manager_event(&mut state, event, &published, terminal);
+                handle_manager_event(&mut state, event, &published.active, terminal);
             }
             result = links.changed() => {
                 if result.is_err() {
@@ -546,7 +581,7 @@ fn spawn_session(
     receiver_lease: crate::receiver_access::SessionReceiverLease,
     services: &SessionServices,
 ) -> RunningSession {
-    let (stop, stop_rx) = oneshot::channel();
+    let (stop, stop_rx) = watch::channel(None);
     let session_link = link.clone();
     let registry = services.registry.clone();
     let device_io = services.device_io.clone();
@@ -602,11 +637,7 @@ fn spawn_session(
             result: task.await,
         }));
     });
-    RunningSession {
-        link,
-        epoch,
-        phase: SessionPhase::Active(stop),
-    }
+    RunningSession { link, epoch, stop }
 }
 
 fn maybe_spawn_transition(
@@ -645,7 +676,7 @@ async fn run_transition(
     let _lease = receiver_access
         .acquire_exclusive(ExclusiveAccessReason::HostTransition)
         .await;
-    if !device_io.allows_io() || !links.borrow().contains(&intent.link) {
+    if !device_io.allows_io() || !links.borrow().active.contains(&intent.link) {
         return;
     }
     match switch_linked_hosts(
@@ -683,6 +714,7 @@ async fn wait_for_departure(links: &mut HostSwitchLinks, keyboard: &DeviceRoute)
     loop {
         let departed = !links
             .borrow_and_update()
+            .active
             .iter()
             .any(|link| link.keyboard == *keyboard);
         if departed {
@@ -717,26 +749,203 @@ mod tests {
         HostSwitchLink {
             keyboard: route(1),
             targets: vec![route(target)],
+            config: HostSwitchConfig {
+                keyboard_key: "keyboard".into(),
+                target_keys: vec![format!("mouse-{target}")],
+            },
         }
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one inventory/config lifecycle proves publication and stop reason together"
+    )]
+    #[test]
+    fn inventory_loss_preserves_departure_but_config_removal_cancels() {
+        use openlogi_core::config::Config;
+        use openlogi_core::device::{
+            DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports, PairedDevice,
+            ReceiverInfo,
+        };
+
+        fn inventory(keyboard_online: bool) -> DeviceInventory {
+            let paired = [
+                (1, DeviceKind::Keyboard, keyboard_online),
+                (2, DeviceKind::Mouse, true),
+            ]
+            .into_iter()
+            .map(|(slot, kind, online)| PairedDevice {
+                slot,
+                codename: None,
+                wpid: None,
+                kind,
+                online,
+                battery: None,
+                model_info: Some(DeviceModelInfo {
+                    entity_count: 1,
+                    serial_number: None,
+                    unit_id: [slot, 0, 0, 0],
+                    transports: DeviceTransports::default(),
+                    model_ids: [0xb034, 0, 0],
+                    extended_model_id: 2,
+                }),
+                capabilities: None,
+                settings_revision: 0,
+            })
+            .collect();
+            DeviceInventory {
+                receiver: ReceiverInfo {
+                    name: "Bolt".into(),
+                    vendor_id: 0x046d,
+                    product_id: 0xc548,
+                    unique_id: Some("AA00".into()),
+                },
+                paired,
+            }
+        }
+
+        fn armed(
+            link: HostSwitchLink,
+        ) -> (
+            HostSwitchManagerState,
+            watch::Receiver<Option<HostSwitchStopReason>>,
+        ) {
+            let (stop, rx) = watch::channel(None);
+            let mut manager = HostSwitchManagerState::new();
+            manager.slots.push(HostSwitchSlot::Running(RunningSession {
+                link,
+                epoch: SessionEpoch(1),
+                stop,
+            }));
+            (manager, rx)
+        }
+
+        let mut config = Config::default();
+        config
+            .devices
+            .entry("unit:01000000".into())
+            .or_default()
+            .host_switch_targets = vec!["unit:02000000".into()];
+        let mut orchestrator = crate::orchestrator::Orchestrator::new(
+            config.clone(),
+            std::sync::Arc::new(crate::observable::ObservableState::new("test".into())),
+        );
+        orchestrator.refresh_inventory(&[inventory(true)], &[], false);
+        let links = orchestrator.shared().host_switch_links;
+        let original = links.borrow().active[0].clone();
+
+        orchestrator.refresh_inventory(&[inventory(false)], &[], false);
+        let offline = links.borrow().clone();
+        assert!(offline.active.is_empty());
+        assert_eq!(offline.offline, vec![original.config.clone()]);
+        let (mut manager, mut stop) = armed(original.clone());
+        manager.stop_sessions(&offline.active, &offline.offline, false);
+        assert_eq!(
+            *stop.borrow_and_update(),
+            Some(HostSwitchStopReason::DeviceLost)
+        );
+
+        // Entire keyboard node may vanish instead of reporting an offline slot.
+        orchestrator.refresh_inventory(&[], &[], false);
+        let absent = links.borrow().clone();
+        let (mut manager, mut stop) = armed(original.clone());
+        manager.stop_sessions(&absent.active, &absent.offline, false);
+        assert_eq!(
+            *stop.borrow_and_update(),
+            Some(HostSwitchStopReason::DeviceLost)
+        );
+
+        let mut changed_config = config.clone();
+        changed_config
+            .devices
+            .get_mut("unit:01000000")
+            .unwrap()
+            .host_switch_targets = vec!["another-mouse".into()];
+        orchestrator.reload_config(changed_config);
+        let changed = links.borrow().clone();
+        assert_ne!(changed.offline, offline.offline);
+        let (mut manager, mut stop) = armed(original.clone());
+        manager.stop_sessions(&changed.active, &changed.offline, false);
+        assert_eq!(
+            *stop.borrow_and_update(),
+            Some(HostSwitchStopReason::Graceful)
+        );
+        manager.stop_sessions(&changed.active, &changed.offline, false);
+        assert_eq!(
+            *stop.borrow_and_update(),
+            Some(HostSwitchStopReason::Graceful)
+        );
+        manager.stop_sessions(&offline.active, &offline.offline, false);
+        assert_eq!(
+            *stop.borrow_and_update(),
+            Some(HostSwitchStopReason::Graceful)
+        );
+
+        // Inventory removal and config reload coalesce before manager wakes.
+        orchestrator.reload_config(Config::default());
+        let removed = links.borrow().clone();
+        assert!(removed.active.is_empty());
+        assert!(removed.offline.is_empty());
+        let (mut manager, mut stop) = armed(original.clone());
+        manager.stop_sessions(&removed.active, &removed.offline, false);
+        assert_eq!(
+            *stop.borrow_and_update(),
+            Some(HostSwitchStopReason::Graceful)
+        );
+        let (mut manager, mut stop) = armed(original.clone());
+        manager.stop_sessions(&offline.active, &offline.offline, false);
+        assert_eq!(
+            *stop.borrow_and_update(),
+            Some(HostSwitchStopReason::DeviceLost)
+        );
+        manager.stop_sessions(&removed.active, &removed.offline, false);
+        assert_eq!(
+            *stop.borrow_and_update(),
+            Some(HostSwitchStopReason::Graceful)
+        );
+
+        orchestrator.reload_config(config);
+        orchestrator.refresh_inventory(&[inventory(true)], &[], false);
+        assert_eq!(links.borrow().active, vec![original.clone()]);
+
+        let (mut manager, mut stop) = armed(original.clone());
+        manager.stop_sessions(&offline.active, &offline.offline, true);
+        assert_eq!(
+            *stop.borrow_and_update(),
+            Some(HostSwitchStopReason::Graceful)
+        );
+        let (mut manager, mut stop) = armed(original);
+        manager.stop_sessions(&offline.active, &offline.offline, false);
+        manager.stop_sessions(&offline.active, &offline.offline, true);
+        assert_eq!(
+            *stop.borrow_and_update(),
+            Some(HostSwitchStopReason::Graceful)
+        );
+
+        let (mut manager, mut stop) = armed(link(2));
+        manager.stop_sessions(&[], &[], false);
+        assert_eq!(
+            *stop.borrow_and_update(),
+            Some(HostSwitchStopReason::Graceful)
+        );
     }
 
     #[test]
     fn target_change_drains_old_session_before_successor_can_arm() {
-        let (stop, mut stop_rx) = oneshot::channel();
+        let (stop, mut stop_rx) = watch::channel(None);
         let mut state = HostSwitchManagerState::new();
         state.slots.push(HostSwitchSlot::Running(RunningSession {
             link: link(2),
             epoch: SessionEpoch(1),
-            phase: SessionPhase::Active(stop),
+            stop,
         }));
 
-        state.stop_sessions(&[link(3)], false);
+        state.stop_sessions(&[link(3)], &[], false);
 
         assert_eq!(
-            stop_rx
-                .try_recv()
-                .expect("old session should begin draining"),
-            HostSwitchStopReason::Graceful,
+            *stop_rx.borrow_and_update(),
+            Some(HostSwitchStopReason::Graceful),
+            "old session should begin draining"
         );
         assert!(state.slots.iter().any(|slot| slot.keyboard() == &route(1)));
     }
@@ -851,7 +1060,10 @@ mod tests {
         let registry = ChannelRegistry::default();
         let (_signal, gate) = openlogi_hid::device_io_channel();
         let (events, mut received) = mpsc::unbounded_channel();
-        let (_links_tx, links) = watch::channel(std::sync::Arc::new(vec![link(2)]));
+        let (_links_tx, links) = watch::channel(std::sync::Arc::new(HostSwitchPublication {
+            active: vec![link(2)],
+            offline: Vec::new(),
+        }));
         let services = SessionServices {
             links,
             channel_pool: openlogi_hid::channel_pool(),
@@ -897,11 +1109,11 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn departure_publication_finishes_wait_without_advancing_time() {
         let keyboard = route(1);
-        let active = HostSwitchLink {
-            keyboard: keyboard.clone(),
-            targets: vec![route(2)],
-        };
-        let (links, mut published) = watch::channel(std::sync::Arc::new(vec![active]));
+        let active = link(2);
+        let (links, mut published) = watch::channel(std::sync::Arc::new(HostSwitchPublication {
+            active: vec![active],
+            offline: Vec::new(),
+        }));
         let started = Instant::now();
         let waiting = tokio::spawn(async move {
             wait_for_departure(&mut published, &keyboard).await;
@@ -909,7 +1121,7 @@ mod tests {
         });
         tokio::task::yield_now().await;
 
-        links.send_replace(std::sync::Arc::new(Vec::new()));
+        links.send_replace(std::sync::Arc::new(HostSwitchPublication::default()));
         tokio::task::yield_now().await;
 
         assert_eq!(

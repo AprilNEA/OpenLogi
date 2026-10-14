@@ -166,8 +166,8 @@ mod tests {
             let channel = scripted_channel(raw).await;
             let retired = Arc::downgrade(&channel);
             registry.replace_node(node.clone(), [route.clone()], channel);
-            let (stop, stopped) = tokio::sync::oneshot::channel();
-            stop.send(HostSwitchStopReason::Graceful).unwrap();
+            let (stop, stopped) = tokio::sync::watch::channel(None);
+            stop.send_replace(Some(HostSwitchStopReason::Graceful));
             let (_signal, gate) = crate::device_io_channel();
 
             let outcome = tokio::time::timeout(
@@ -243,7 +243,7 @@ mod tests {
         let registry = ChannelRegistry::default();
         let (raw, _) = ScriptedRawHidChannel::with_responder(|_| None);
         let retired = SharedChannel::new(scripted_channel(raw).await, route);
-        let (_stop, stopped) = tokio::sync::oneshot::channel();
+        let (_stop, stopped) = tokio::sync::watch::channel(None);
         let (_presses, mut presses) = tokio::sync::mpsc::unbounded_channel();
         let (_signal, gate) = crate::device_io_channel();
         let result = tokio::time::timeout(
@@ -296,16 +296,18 @@ mod tests {
             // A dropped stop sender is a lost owner, not a graceful request.
             (None, HostSwitchStop::ChannelChanged),
         ] {
-            let (stop, stopped) = tokio::sync::oneshot::channel();
+            let (stop, stopped) = tokio::sync::watch::channel(None);
             match reason {
-                Some(reason) => stop.send(reason).unwrap(),
+                Some(reason) => {
+                    stop.send_replace(Some(reason));
+                }
                 None => drop(stop),
             }
             let (_press, presses) = tokio::sync::mpsc::unbounded_channel();
             assert_eq!(monitored(stopped, presses).await, expected, "{reason:?}");
         }
 
-        let (_stop, stopped) = tokio::sync::oneshot::channel();
+        let (_stop, stopped) = tokio::sync::watch::channel(None);
         let (press, presses) = tokio::sync::mpsc::unbounded_channel();
         press.send(2).unwrap();
         assert_eq!(

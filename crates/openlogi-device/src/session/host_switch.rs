@@ -19,7 +19,7 @@ use hidpp::{
 };
 use thiserror::Error;
 use tokio::{
-    sync::{mpsc, oneshot},
+    sync::{mpsc, watch},
     time::timeout,
 };
 use tracing::{debug, info};
@@ -119,7 +119,7 @@ impl From<IoSuspended> for HostSwitchError {
 /// restoration outcome; the caller must finish restoration before switching.
 pub async fn run_host_switch_session(
     keyboard: DeviceRoute,
-    shutdown: oneshot::Receiver<HostSwitchStopReason>,
+    shutdown: watch::Receiver<Option<HostSwitchStopReason>>,
     registry: &ChannelRegistry,
     device_io: DeviceIoGate,
     targets: &[DeviceRoute],
@@ -143,7 +143,7 @@ pub async fn run_host_switch_session(
     .await?
     .filter(|feature| feature.version >= 2)
     {
-        let mut shutdown = Some(shutdown);
+        let mut shutdown = shutdown;
         let (departure_tx, mut departures) = mpsc::unbounded_channel();
         let listener = channel.add_msg_listener_guarded(move |raw, matched| {
             if !matched {
@@ -168,7 +168,7 @@ pub async fn run_host_switch_session(
         {
             // Departure already moved the keyboard. Only target routes may be
             // queried or written, even if inventory retired the keyboard.
-            if !native_shutdown_requested(&mut shutdown) {
+            if !native_shutdown_requested(&shutdown) {
                 device_io.ensure_allowed().map_err(HostSwitchError::from)?;
                 switch_target_hosts(
                     &keyboard,
@@ -177,6 +177,7 @@ pub async fn run_host_switch_session(
                     &channel,
                     channel_pool,
                     Some(registry),
+                    Some((&mut shutdown, &device_io)),
                 )
                 .await;
                 drop(listener);
@@ -200,7 +201,7 @@ pub async fn run_host_switch_session(
 
 async fn run_diverted_host_switch(
     keyboard: &DeviceRoute,
-    shutdown: oneshot::Receiver<HostSwitchStopReason>,
+    shutdown: watch::Receiver<Option<HostSwitchStopReason>>,
     shared: &SharedChannel,
     controls: ReprogControlsV4,
     registry: &ChannelRegistry,
@@ -307,25 +308,12 @@ fn native_departure_host(hosts: [u8; 2], state: ChangeHostInfo) -> Option<u8> {
         .then_some(target)
 }
 
-fn native_shutdown_requested(
-    shutdown: &mut Option<oneshot::Receiver<HostSwitchStopReason>>,
-) -> bool {
-    match shutdown.as_mut().map(oneshot::Receiver::try_recv) {
-        Some(Ok(HostSwitchStopReason::Graceful) | Err(oneshot::error::TryRecvError::Closed)) => {
-            true
-        }
-        Some(Ok(HostSwitchStopReason::DeviceLost)) => {
-            // Device loss cannot cancel a queued native departure. Consuming
-            // this reason must not later look like an abandoned owner.
-            *shutdown = None;
-            false
-        }
-        Some(Err(oneshot::error::TryRecvError::Empty)) | None => false,
-    }
+fn native_shutdown_requested(shutdown: &watch::Receiver<Option<HostSwitchStopReason>>) -> bool {
+    *shutdown.borrow() == Some(HostSwitchStopReason::Graceful) || shutdown.has_changed().is_err()
 }
 
 async fn monitor_native_departure(
-    shutdown: &mut Option<oneshot::Receiver<HostSwitchStopReason>>,
+    shutdown: &mut watch::Receiver<Option<HostSwitchStopReason>>,
     departures: &mut mpsc::UnboundedReceiver<[u8; 2]>,
     registry: &ChannelRegistry,
     shared: &SharedChannel,
@@ -361,16 +349,11 @@ async fn monitor_native_departure(
                     return None;
                 }
             }
-            reason = async {
-                match shutdown.as_mut() {
-                    Some(receiver) => receiver.await,
-                    None => std::future::pending().await,
+            changed = shutdown.changed() => {
+                if changed.is_err() {
+                    return None;
                 }
-            } => {
-                match reason {
-                    Ok(HostSwitchStopReason::DeviceLost) => *shutdown = None,
-                    Ok(HostSwitchStopReason::Graceful) | Err(_) => return None,
-                }
+                let _ = shutdown.borrow_and_update();
             }
             allowed = device_io.changed() => {
                 allowed?;
@@ -413,7 +396,7 @@ impl HostSwitchStop {
 }
 
 async fn monitor_host_switch(
-    mut shutdown: oneshot::Receiver<HostSwitchStopReason>,
+    mut shutdown: watch::Receiver<Option<HostSwitchStopReason>>,
     presses: &mut mpsc::UnboundedReceiver<u8>,
     registry: &ChannelRegistry,
     shared: &SharedChannel,
@@ -421,6 +404,15 @@ async fn monitor_host_switch(
 ) -> HostSwitchStop {
     let mut registry_changes = registry.subscribe();
     loop {
+        let stop = *shutdown.borrow_and_update();
+        match stop {
+            Some(HostSwitchStopReason::Graceful) => {
+                return HostSwitchStop::for_current_publication(registry, shared);
+            }
+            Some(HostSwitchStopReason::DeviceLost) => return HostSwitchStop::ChannelChanged,
+            None if shutdown.has_changed().is_err() => return HostSwitchStop::ChannelChanged,
+            None => {}
+        }
         if !registry.is_current(shared) {
             info!(route = %shared.route(), "inventory replaced or removed host-switch channel");
             return HostSwitchStop::ChannelChanged;
@@ -433,13 +425,10 @@ async fn monitor_host_switch(
                     return HostSwitchStop::ChannelChanged;
                 }
             }
-            reason = &mut shutdown => {
-                return match reason.unwrap_or(HostSwitchStopReason::DeviceLost) {
-                    HostSwitchStopReason::Graceful => {
-                        HostSwitchStop::for_current_publication(registry, shared)
-                    }
-                    HostSwitchStopReason::DeviceLost => HostSwitchStop::ChannelChanged,
-                };
+            changed = shutdown.changed() => {
+                if changed.is_err() {
+                    return HostSwitchStop::ChannelChanged;
+                }
             }
             host = presses.recv() => {
                 return match host {
@@ -475,7 +464,7 @@ pub async fn switch_linked_hosts(
     // the keyboard leaves this host its channel can no longer command a mouse
     // sharing the same receiver.
     let keyboard_change = prepare_host_change_on(&channel, keyboard.device_index(), host).await?;
-    switch_target_hosts(keyboard, targets, host, &channel, channel_pool, None).await;
+    switch_target_hosts(keyboard, targets, host, &channel, channel_pool, None, None).await;
     let changed = apply_host_change(keyboard_change).await?;
     if changed {
         debug!(host, route = %keyboard, "keyboard host switched");
@@ -490,26 +479,84 @@ async fn switch_target_hosts(
     keyboard_channel: &Arc<HidppChannel>,
     channel_pool: &ChannelPool,
     registry: Option<&ChannelRegistry>,
+    mut native: Option<(
+        &mut watch::Receiver<Option<HostSwitchStopReason>>,
+        &DeviceIoGate,
+    )>,
 ) {
     for target in targets {
-        match prepare_host_change(
+        if native.as_mut().is_some_and(|(shutdown, gate)| {
+            native_shutdown_requested(shutdown) || !gate.allows_io()
+        }) {
+            break;
+        }
+        let preparation = prepare_host_change(
             target,
             host,
             keyboard,
             keyboard_channel,
             channel_pool,
             registry,
-        )
-        .await
-        {
+        );
+        let prepared = if let Some((shutdown, gate)) = native.as_mut() {
+            tokio::select! {
+                biased;
+                () = native_forwarding_stopped(shutdown, gate) => break,
+                prepared = preparation => prepared,
+            }
+        } else {
+            preparation.await
+        };
+        if native.as_mut().is_some_and(|(shutdown, gate)| {
+            native_shutdown_requested(shutdown) || !gate.allows_io()
+        }) {
+            break;
+        }
+        match prepared {
             Ok(change) => {
-                if let Err(error) = apply_host_change(change).await {
+                let write = apply_host_change(change);
+                let result = if let Some((shutdown, gate)) = native.as_mut() {
+                    tokio::select! {
+                        biased;
+                        () = native_forwarding_stopped(shutdown, gate) => break,
+                        result = write => result,
+                    }
+                } else {
+                    write.await
+                };
+                if let Err(error) = result {
                     debug!(%error, route = %target, host, "linked device host switch failed");
                 }
             }
             Err(error) => {
                 debug!(%error, route = %target, host, "linked device host switch preparation failed");
             }
+        }
+    }
+}
+
+async fn native_forwarding_stopped(
+    shutdown: &mut watch::Receiver<Option<HostSwitchStopReason>>,
+    device_io: &DeviceIoGate,
+) {
+    let mut gate = device_io.clone();
+    let mut watching_gate = true;
+    loop {
+        if native_shutdown_requested(shutdown) || !gate.allows_io() {
+            return;
+        }
+        tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+                let _ = shutdown.borrow_and_update();
+            }
+            allowed = gate.changed(), if watching_gate => match allowed {
+                Some(false) => return,
+                Some(true) => {},
+                None => watching_gate = false,
+            },
         }
     }
 }

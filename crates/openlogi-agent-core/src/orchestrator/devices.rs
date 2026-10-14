@@ -11,7 +11,7 @@ use openlogi_hid::{DIRECT_DEVICE_INDEX, DeviceRoute};
 
 use super::AgentDevice;
 use crate::hardware::WheelModeChange;
-use crate::watchers::host_switch::HostSwitchLink;
+use crate::watchers::host_switch::{HostSwitchConfig, HostSwitchLink, HostSwitchPublication};
 
 /// Resolve the two independently-gated HiResWheel settings for one device
 /// into the change that applies them. A setting the device cannot take, or
@@ -123,29 +123,43 @@ pub(super) fn build_devices(
     devices
 }
 
-pub(super) fn host_switch_links(config: &Config, devices: &[AgentDevice]) -> Vec<HostSwitchLink> {
-    config
-        .devices
-        .iter()
-        .filter_map(|(keyboard_key, settings)| {
-            let keyboard = devices
-                .iter()
-                .find(|device| device.config_key == *keyboard_key && device.online)?
-                .route
-                .clone()?;
-            let targets = settings
-                .host_switch_targets
-                .iter()
-                .filter_map(|target_key| {
-                    devices
-                        .iter()
-                        .find(|device| device.config_key == *target_key)
-                        .and_then(|device| device.route.clone())
-                })
-                .collect::<Vec<_>>();
-            (!targets.is_empty()).then_some(HostSwitchLink { keyboard, targets })
-        })
-        .collect()
+pub(super) fn host_switch_links(config: &Config, devices: &[AgentDevice]) -> HostSwitchPublication {
+    let mut publication = HostSwitchPublication::default();
+    for (keyboard_key, settings) in &config.devices {
+        if settings.host_switch_targets.is_empty() {
+            continue;
+        }
+        let identity = HostSwitchConfig {
+            keyboard_key: keyboard_key.clone(),
+            target_keys: settings.host_switch_targets.clone(),
+        };
+        let keyboard = devices
+            .iter()
+            .find(|device| device.config_key == *keyboard_key && device.online)
+            .and_then(|device| device.route.clone());
+        let Some(keyboard) = keyboard else {
+            publication.offline.push(identity);
+            continue;
+        };
+        let targets = settings
+            .host_switch_targets
+            .iter()
+            .filter_map(|target_key| {
+                devices
+                    .iter()
+                    .find(|device| device.config_key == *target_key)
+                    .and_then(|device| device.route.clone())
+            })
+            .collect::<Vec<_>>();
+        if !targets.is_empty() {
+            publication.active.push(HostSwitchLink {
+                keyboard,
+                targets,
+                config: identity,
+            });
+        }
+    }
+    publication
 }
 
 /// The canonical identity of one device: what the GUI carousel orders by, what
