@@ -186,10 +186,18 @@ pub struct AssetResolver {
 }
 
 impl AssetResolver {
-    /// Independent resolver for isolated test and native QA fixture worlds.
+    /// Resolver without machine asset inputs for test and native QA fixtures.
     #[cfg(all(target_os = "macos", any(test, feature = "native-ui-qa")))]
     pub(crate) fn fixture() -> Self {
-        Self::new()
+        // Fixture worlds do not start asset sync. Keep the normal write target,
+        // but never discover or read the user's cache or the application bundle.
+        Self {
+            read_roots: Vec::new(),
+            write_root: user_cache_root(),
+            has_bundle: false,
+            index: None,
+            resolved: RefCell::default(),
+        }
     }
 
     pub fn new() -> Self {

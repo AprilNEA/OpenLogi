@@ -521,6 +521,22 @@ fn a_gesture_button_offers_wheel_hold_and_leaves_gestures_for_it(cx: &mut TestAp
         "the gesture inspector offers the switch too"
     );
 
+    cx.update(|_, cx| {
+        AppState::apply(cx, |state| {
+            state.set_editing_app(Some("com.apple.Safari".into()))
+        });
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(in_gesture_mode(cx, ButtonId::Back));
+    assert!(
+        cx.debug_bounds("inspector-wheel-hold-row").is_none(),
+        "an inherited app gesture map cannot edit device-wide wheel-hold"
+    );
+    cx.update(|_, cx| {
+        AppState::apply(cx, |state| state.set_editing_app(None));
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
     click_picker_control(cx, "inspector-wheel-hold-row-control");
 
     assert!(holds_the_wheel(cx, ButtonId::Back));

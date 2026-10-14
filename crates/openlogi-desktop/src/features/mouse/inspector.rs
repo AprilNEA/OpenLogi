@@ -344,9 +344,8 @@ fn gesture_inspector(
     let direction = data.gesture_direction.unwrap_or(GestureDirection::Click);
     // Gesture mode never holds the wheel, so the switch here is off and only
     // turning it on is useful, which needs measured raw wheel.
-    let offer_wheel_hold = data.editing_app.is_none()
-        && button.supports_wheel_hold()
-        && data.virtual_thumbwheel;
+    let offer_wheel_hold =
+        data.editing_app.is_none() && button.supports_wheel_hold() && data.virtual_thumbwheel;
     let current = gesture_action(gesture_map, button, direction);
     let observer = picker.view.clone();
     let on_pick: PickFn = Rc::new(move |action, _window, cx| {
@@ -967,6 +966,7 @@ mod tests {
             wheel_hold,
             editing_app: None,
             overridden: None,
+            gesture_overridden: None,
         }
     }
 

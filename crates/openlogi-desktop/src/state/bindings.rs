@@ -32,8 +32,8 @@ pub(super) struct BindingState {
     /// Effective per-direction gesture bindings for the selected editor profile.
     gesture_bindings: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
     /// Buttons whose hold turns the main wheel into a virtual thumb wheel.
-    /// Device-global like the gesture maps: a per-app entry holds one
-    /// `Action`, so wheel-hold lives only in the global profile.
+    /// Wheel-hold lives only in the global profile; an app-specific single
+    /// action or gesture map replaces it for that application.
     wheel_hold_buttons: BTreeSet<ButtonId>,
     /// Global keyboard F-key bindings (Esc + F1-F19).
     keyboard_bindings: BTreeMap<KeyTrigger, Action>,
@@ -544,9 +544,8 @@ impl AppState {
         else {
             return events;
         };
-        // Same backstop as `commit_gesture_mode`: a per-app entry holds one
-        // `Action`, so writing here would change every app instead of the one
-        // on screen.
+        // Wheel-hold stays device-global, so writing here would change every
+        // app instead of the one on screen.
         if self.editing_app().is_some() {
             debug!(?button, "wheel-hold is not editable in a per-app profile");
             return events;
